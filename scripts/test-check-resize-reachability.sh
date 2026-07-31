@@ -10,7 +10,16 @@
 #   * the call site still exists but only in a `*_tests.rs` file;
 #   * the call site still exists but only under a `tests/` directory;
 #   * the caller exists and nothing composes it (the trait-override failure);
-#   * an anchor file was renamed away, which must fail rather than pass vacuously.
+#   * an anchor file was renamed away, which must fail rather than pass vacuously;
+#   * `0ppk-3`'s reconciler spawn is deleted from `become_leader`;
+#   * `list_nonterminal_resize` loses its only production caller, which is the
+#     state main was in before `0ppk-3` — a durable read with no reader.
+#
+# It also pins the inverse, which is what the guard got WRONG: production code
+# that merely SITS AFTER a `#[cfg(test)]` attribute — on a struct field, or
+# after a closed test module — is still production code. The first-marker
+# heuristic reported "ZERO production callers" about a call the guard's own
+# anchor check found in the same file in the same run.
 #
 # Run from anywhere:
 #
@@ -28,6 +37,7 @@ SCRATCH="$REPO_ROOT/.resize-reachability-guard-selftest"
 STATE=server/src/server/state/mod.rs
 BRIDGE=server/src/task_run_resize_bootstrap.rs
 SEAM=server/crates/djinn-agent/src/actors/slot/supervisor_runner.rs
+RECONCILE=server/src/task_run_resize_reconcile.rs
 
 cleanup() {
     rm -rf -- "$SCRATCH" 2>/dev/null || true
@@ -65,6 +75,59 @@ fn agent_context() {
         resize_admission: Some(self.inner.resize_admission.clone()),
     }
 }
+pub async fn become_leader(&self) {
+    crate::task_run_resize_reconcile::spawn(self.clone());
+}
+EOF
+}
+
+# The composition root as it ACTUALLY looks: a `#[cfg(test)]` attribute on a
+# struct field near the top, and a closed `#[cfg(test)] mod tests { }` block,
+# both ABOVE the production call site. Every line below them is production.
+write_state_with_test_markers_above_the_call_site() {
+    mkdir -p -- "$SCRATCH/$(dirname "$STATE")"
+    cat >"$SCRATCH/$STATE" <<'EOF'
+// Composition root fixture, with test markers above the call site.
+struct Inner {
+    #[cfg(test)]
+    pub image_controller: RwLock<Option<Arc<ImageController>>>,
+    pub resize_admission: Arc<TaskRunResizeAdmissionBridge>,
+}
+fn new_inner() {
+    let resize_admission =
+        Arc::new(TaskRunResizeAdmissionBridge::from_env(db.clone()));
+}
+#[cfg(test)]
+mod early_tests {
+    #[test]
+    fn t() {
+        crate::task_run_resize_reconcile::spawn(fake);
+    }
+}
+fn agent_context() {
+    AgentContext {
+        resize_admission: Some(self.inner.resize_admission.clone()),
+    }
+}
+pub async fn become_leader(&self) {
+    crate::task_run_resize_reconcile::spawn(self.clone());
+}
+EOF
+}
+
+write_reconcile() {
+    mkdir -p -- "$SCRATCH/$(dirname "$RECONCILE")"
+    cat >"$SCRATCH/$RECONCILE" <<'EOF'
+// Reconciler fixture: the durable read the external reconciler is FOR.
+use djinn_db::BuildPodPermitRepository;
+
+impl TaskRunResizeReconciler {
+    async fn run_pass(&self) {
+        let rows = self.permits.list_nonterminal_resize().await;
+    }
+}
+
+pub fn spawn(state: AppState) {}
 EOF
 }
 
@@ -118,6 +181,7 @@ fixture() {
     write_state
     write_bridge
     write_seam
+    write_reconcile
 }
 
 run_guard() {
@@ -242,6 +306,57 @@ mv "$SCRATCH/.tmp" "$SCRATCH/$SEAM"
 expect_fail_naming \
     "dropping record_dispatch_started fails on the dispatch-site anchor" \
     "record_dispatch_started"
+
+# 10. THE 0ppk-3 NAMED MUTATION: delete the reconciler spawn from become_leader.
+#     A worker death would then strand its Pod forever, and nothing else in the
+#     process would ever notice.
+fixture
+grep -v 'task_run_resize_reconcile::spawn(self.clone())' "$SCRATCH/$STATE" >"$SCRATCH/.tmp"
+mv "$SCRATCH/.tmp" "$SCRATCH/$STATE"
+expect_fail_naming \
+    "deleting the reconciler spawn fails, naming the symbol" \
+    "task_run_resize_reconcile::spawn has ZERO production callers"
+
+# 11. `list_nonterminal_resize` loses its only production caller. This is
+#     VERBATIM the state main was in before 0ppk-3: a durable read written for a
+#     reconciler that did not exist, with zero callers anywhere but one
+#     repository test.
+fixture
+grep -v 'list_nonterminal_resize' "$SCRATCH/$RECONCILE" >"$SCRATCH/.tmp"
+mv "$SCRATCH/.tmp" "$SCRATCH/$RECONCILE"
+expect_fail_naming \
+    "a nonterminal-resize scan nobody calls does not count" \
+    "BuildPodPermitRepository::list_nonterminal_resize has ZERO production callers"
+
+# 12. The reconciler module exists and calls the scan, but nothing arms it from
+#     become_leader. Reachable-looking code behind a loop nobody spawns.
+fixture
+grep -v 'task_run_resize_reconcile::spawn(self.clone())' "$SCRATCH/$STATE" >"$SCRATCH/.tmp"
+mv "$SCRATCH/.tmp" "$SCRATCH/$STATE"
+printf 'crate::task_run_resize_reconcile::spawn(other);\n' >>"$SCRATCH/$STATE"
+expect_fail_naming \
+    "a reconciler armed from anywhere but become_leader fails the anchor" \
+    "task_run_resize_reconcile::spawn"
+
+# 13. THE GUARD'S OWN BUG: production code after a `#[cfg(test)]` attribute is
+#     still production code. `server/src/server/state/mod.rs` carries a
+#     `#[cfg(test)]` on a STRUCT FIELD 1800 lines above `become_leader`, and a
+#     first-marker heuristic reported "ZERO production callers" about a call the
+#     guard's own ANCHOR check found in that same file in that same run.
+fixture
+write_state_with_test_markers_above_the_call_site
+expect_pass "production code after a #[cfg(test)] block is still production"
+
+# 14. And the tracker has not simply stopped looking at test code: with ONLY the
+#     in-test call site left, the guard must still fail. Case 13 would pass
+#     vacuously if the scanner had been widened to count test callers too.
+fixture
+write_state_with_test_markers_above_the_call_site
+grep -v 'task_run_resize_reconcile::spawn(self.clone())' "$SCRATCH/$STATE" >"$SCRATCH/.tmp"
+mv "$SCRATCH/.tmp" "$SCRATCH/$STATE"
+expect_fail_naming \
+    "a spawn that survives only inside a #[cfg(test)] mod does not count" \
+    "task_run_resize_reconcile::spawn has ZERO production callers"
 
 printf '\n%s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] || exit 1

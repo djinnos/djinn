@@ -50,11 +50,20 @@ ROOT=${GUARD_ROOT:-$REPO_ROOT}
 cd "$ROOT"
 
 # symbol|extended-regex for a call site|file must also mention this token
+#
+# `0ppk-3` added the last two. Before it, `list_nonterminal_resize` had ZERO
+# callers of ANY kind outside one repository test — the read the whole external
+# reconciler exists to perform, merged and unreachable — and
+# `task_run_resize_reconcile::spawn` is the seam that makes a dead worker's
+# stranded Pod somebody's problem at all. Both are exactly the shape this guard
+# exists to catch.
 GUARDED_SYMBOLS="
 TaskRunResizeBootstrap::bootstrap|\.bootstrap\(|TaskRunResizeBootstrap
 DispatchGate::admit|\.admit\(|DispatchGate
 BuildPodPermitRepository::acquire|\.acquire\(|BuildPodPermitRepository
 BuildPodPermitRepository::capture_resize_identity|\.capture_resize_identity\(|BuildPodPermitRepository
+BuildPodPermitRepository::list_nonterminal_resize|\.list_nonterminal_resize\(|BuildPodPermitRepository
+task_run_resize_reconcile::spawn|task_run_resize_reconcile::spawn\(|become_leader
 "
 
 # file|extended-regex|why this anchor exists
@@ -65,19 +74,39 @@ server/crates/djinn-agent/src/actors/slot/supervisor_runner.rs|acquire_build_pod
 server/crates/djinn-agent/src/actors/slot/supervisor_runner.rs|bind_build_pod_permit_job_uid\(|the dispatch seam must bind the Job UID the runtime just created
 server/crates/djinn-agent/src/actors/slot/supervisor_runner.rs|admit_task_run_dispatch\(|the dispatch seam must gate stdio attach on the birth downsize
 server/crates/djinn-agent/src/actors/slot/supervisor_runner.rs|record_dispatch_started\(|the dispatch site must report itself so the gate's absence is observable
+server/src/server/state/mod.rs|task_run_resize_reconcile::spawn\(self\.clone\(\)\)|the resize reconciler must be armed from become_leader, or a worker death strands its Pod forever
 "
 
 status=0
 
 # Emit `path:line:text` for every PRODUCTION line of every Rust source file.
 #
-# `#[cfg(test)]` truncation is per-file and deliberately unconditional: the
-# repository convention is one test module at the bottom of a file (or an
-# adjacent `*_tests.rs`), so everything from that marker onwards is test code.
-# Erring toward truncating too much makes this guard fail closed — a real
-# production call site hidden below a `#[cfg(test)]` marker reads as "no caller"
-# and the guard complains, which is the safe direction for a guard whose entire
-# purpose is to refuse to believe that something is reachable.
+# TEST CODE IS TRACKED STRUCTURALLY, NOT BY FIRST MARKER.
+#
+# This used to truncate the whole file from the first `#[cfg(test)]` line
+# onwards, on the theory that the repository convention is one test module at
+# the bottom of a file. That theory is wrong twice over, and `0ppk-3` hit both:
+#
+#   1. `#[cfg(test)]` is an ordinary item attribute. `server/src/server/state/
+#      mod.rs` carries one at line 342 — on a STRUCT FIELD inside `Inner`, 1800
+#      lines above `become_leader` — so first-marker truncation hid every
+#      production call site in the composition root. The guard reported
+#      "task_run_resize_reconcile::spawn has ZERO production callers" in the
+#      same run in which its own anchor check FOUND that exact call, in that
+#      exact file. A guard that contradicts itself teaches people to delete it.
+#   2. A `#[cfg(test)] mod tests { .. }` is not always last. Production code
+#      after one is still production code.
+#
+# So the tracker counts braces, exactly as `scripts/check-test-global-metrics.sh`
+# does for the same reason (PR #2867 found its health-probe reader sitting after
+# a `#[cfg(test)]` block in its own file). A test attribute arms the tracker; if
+# the item it attaches to opens a block, everything to the matching close brace
+# is test code and nothing after it is. An attribute on a field, a variant or a
+# match arm attaches to no block and suppresses nothing.
+#
+# Braces are counted with double-quoted literals and `//` comments stripped, so
+# neither a brace inside a string nor one in a trailing comment can unbalance
+# the tracker.
 production_lines() {
     find server -name '*.rs' -type f \
         -not -path '*/target/*' \
@@ -89,9 +118,78 @@ production_lines() {
         -not -name 'test_runtime.rs' \
         -print0 |
         xargs -0 -r awk '
-            FNR == 1 { skip = 0 }
-            /^[[:space:]]*#\[cfg\(test\)\][[:space:]]*$/ { skip = 1 }
-            skip == 0 { print FILENAME ":" FNR ":" $0 }
+            function strip(line,    i, n, c, out, in_str) {
+                n = length(line); i = 1; out = ""; in_str = 0
+                while (i <= n) {
+                    c = substr(line, i, 1)
+                    if (in_str) {
+                        if (c == "\\") { i += 2; continue }
+                        if (c == "\"") { in_str = 0 }
+                        i++
+                        continue
+                    }
+                    if (c == "\"") { in_str = 1; i++; continue }
+                    if (c == "/" && substr(line, i + 1, 1) == "/") { break }
+                    out = out c
+                    i++
+                }
+                return out
+            }
+            function braces(s,    i, n, c, d) {
+                n = length(s); d = 0
+                for (i = 1; i <= n; i++) {
+                    c = substr(s, i, 1)
+                    if (c == "{") d++
+                    else if (c == "}") d--
+                }
+                return d
+            }
+            FNR == 1 { depth = 0; armed = 0; waiting = 0 }
+            {
+                s = strip($0)
+
+                # Inside a test block: consume to the matching close brace.
+                if (depth > 0) {
+                    depth += braces(s)
+                    if (depth < 0) depth = 0
+                    next
+                }
+
+                # An item that a test attribute introduced, whose opening brace
+                # has not arrived yet (a multi-line `fn` signature).
+                if (waiting == 1) {
+                    d = braces(s)
+                    if (d > 0) { depth = d; waiting = 0; next }
+                    if (s ~ /;[ \t]*$/) { waiting = 0 }
+                    next
+                }
+
+                if (armed == 1) {
+                    # Further attributes, or a blank/doc gap, before the item.
+                    if (s ~ /^[ \t]*#\[/ || s ~ /^[ \t]*$/) next
+                    if (s ~ /^[ \t]*(pub([ \t]*\([^)]*\))?[ \t]+)?(default[ \t]+)?(async[ \t]+)?(unsafe[ \t]+)?(extern[ \t]+"[^"]*"[ \t]+)?(fn|mod|impl|struct|enum|trait|union|use|const|static|type|macro_rules!)[ \t!(]/) {
+                        armed = 0
+                        d = braces(s)
+                        # `#[cfg(test)] mod tests;` opens no block HERE — the
+                        # module is a separate file, already excluded by name.
+                        if (d > 0) { depth = d; next }
+                        if (s ~ /;[ \t]*$/) next
+                        waiting = 1
+                        next
+                    }
+                    # The attribute was on a field, a variant or a match arm.
+                    # It governs that one line and nothing after it.
+                    armed = 0
+                    next
+                }
+
+                if (s ~ /^[ \t]*#\[(cfg\(test\)|test|tokio::test|rstest)/) {
+                    armed = 1
+                    next
+                }
+
+                print FILENAME ":" FNR ":" $0
+            }
         '
 }
 

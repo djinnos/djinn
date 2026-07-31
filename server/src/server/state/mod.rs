@@ -1582,6 +1582,26 @@ impl AppState {
         &self.inner.cancel
     }
 
+    /// The process-wide durable CPU lease authority (`build_leases`).
+    ///
+    /// Handed out rather than reconstructed because the cap, the arming latch
+    /// and the recovery snapshot live on THIS instance: a second
+    /// `BuildLeaseService` over the same pool would be unarmed and would refuse
+    /// every operation.
+    pub fn build_lease(&self) -> Arc<djinn_coordinator::build_lease::BuildLeaseService> {
+        Arc::clone(&self.inner.build_lease)
+    }
+
+    /// Proposal `3i92`'s fail-safe drop, as composed for this process.
+    ///
+    /// The `release_lease` handler reaches it through the agent context; the
+    /// `0ppk-3` reconciler reaches it here, so a worker's terminal path and the
+    /// reconciler that speaks for a dead worker share one apiserver surface and
+    /// one retry schedule.
+    pub fn resize_drop(&self) -> Arc<crate::task_run_resize_drop::TaskRunResizeDropBridge> {
+        Arc::clone(&self.inner.resize_drop)
+    }
+
     pub fn events(&self) -> &broadcast::Sender<DjinnEventEnvelope> {
         &self.inner.events
     }
@@ -2118,6 +2138,20 @@ impl AppState {
         // ordering is deliberate -- gating the WIRING instead of the ACTION is
         // how a feature ends up shipped and permanently unreachable.
         crate::scip_index_watcher::spawn(self.clone());
+
+        // Proposal 3i92 / epic 0ppk: the externally owned resize reconciler.
+        // Leader-only because it PATCHes and DELETEs Pods, moves
+        // `build_pod_permits` lifecycle rows and releases `build_leases` rows —
+        // a standby doing that concurrently would give one stranded Pod two
+        // drivers.
+        //
+        // `release_lease` is only ever sent by a worker that survived, so a Pod
+        // that dies mid-invocation strands its own drop inside itself. This is
+        // the only thing that can ever finish it. Wired UNCONDITIONALLY for the
+        // same reason as `scip_index_watcher` directly above: whether a tick
+        // acts is decided per tick by `DJINN_RESIZE_RECONCILE`, and gating the
+        // WIRING instead would ship a reconciler that can never run.
+        crate::task_run_resize_reconcile::spawn(self.clone());
 
         // Periodic `git gc` over every project's mirror + working clone. Both
         // fetch with `--prune` but never reclaim the objects behind deleted
