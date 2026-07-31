@@ -661,6 +661,40 @@ jobs:
       - name: Check no include! of hand-written source
         if: needs.preflight.outputs.size == 'true'
         run: ./scripts/check-include-macro.sh
+      # Also a GATE, and for the same reason: complying costs the same keystrokes
+      # as violating (`render_isolated` instead of `render`), so there is nothing
+      # to escape to and no marker is offered.
+      #
+      # It scans the DIFF rather than the whole tree, which the include! guard
+      # above deliberately does not — the difference is that ~150 pre-existing
+      # reads exist and many sit in tests that hand work to `tokio::spawn`,
+      # where the conversion is a judgement call rather than a mechanical edit.
+      # Gating the whole tree would be a migration order. Note also that this
+      # workspace's nextest lane CANNOT observe the bug being prevented: nextest
+      # gives each test its own process, so the collision only ever appears
+      # under `cargo test` in the developer loop (measured: 21/40 runs failing
+      # under `cargo test`, 0/15 under `cargo nextest run`, same commit). That
+      # is precisely why a source-level gate is the only thing that can catch
+      # it at merge time.
+      - name: Self-test global-metrics-in-tests guard
+        if: needs.preflight.outputs.size == 'true'
+        run: ./scripts/test-check-test-global-metrics.sh
+      - name: Check tests do not read the process-global metrics registry
+        if: needs.preflight.outputs.size == 'true'
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -eu
+          if [ -z "$BASE_SHA" ]; then
+            git fetch --no-tags --depth=1 origin main >/dev/null 2>&1 || true
+            BASE_SHA="$(git rev-parse --verify origin/main 2>/dev/null || true)"
+          fi
+          if [ -z "$BASE_SHA" ]; then
+            echo "::warning::Could not determine a base SHA (event=$EVENT_NAME); falling back to a whole-tree report."
+            ./scripts/check-test-global-metrics.sh --all || true
+            exit 0
+          fi
+          ./scripts/check-test-global-metrics.sh "$BASE_SHA"
       # rustfmt is NOT in server/rust-toolchain.toml's `components`, and that
       # file's own comment records why that matters: rustup syncs to exactly
       # what is listed. So `rustup toolchain install` above does not guarantee

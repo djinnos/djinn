@@ -2522,8 +2522,6 @@ mod tests {
 
     #[tokio::test]
     async fn record_live_metrics_publishes_synthetic_cooldown_and_inflight_state() {
-        djinn_telemetry::init().unwrap();
-
         let db = crate::test_helpers::create_test_db();
         let (events_tx, _events_rx) = broadcast::channel(16);
         let cancel = CancellationToken::new();
@@ -2601,9 +2599,14 @@ mod tests {
             tracker.insert("pr-b".to_owned(), AutoMergeFastPathState::Reopen);
         }
 
-        actor.record_live_metrics();
-
-        let rendered = djinn_telemetry::render().unwrap();
+        // `record_live_metrics` is synchronous, so scoping it to a private
+        // recorder captures every emission and nothing else. All three series
+        // below are GAUGES on the process-global registry that
+        // `djinn_telemetry::render()` reads: any sibling test that records a
+        // live tick or a PR-poller decision overwrites them outright, so the
+        // absolute assertions here were assertions about whichever test wrote
+        // last (#2824).
+        let (_, rendered) = djinn_telemetry::render_isolated(|| actor.record_live_metrics());
         assert_eq!(
             rendered_metric_sample(&rendered, "djinn_dispatch_cooldowns_active"),
             "djinn_dispatch_cooldowns_active 2"
