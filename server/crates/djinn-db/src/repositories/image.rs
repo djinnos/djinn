@@ -16,6 +16,9 @@ use sqlx::Row;
 
 use crate::Result;
 use crate::database::Database;
+use crate::launcher_compatibility::{
+    InventoryFault, InventoryProvenance, LegacyDigestInventory, PreProtocolDigest,
+};
 
 /// Image build lifecycle states (mirror `ProjectImageStatus`).
 pub struct ImageStatus;
@@ -499,7 +502,154 @@ impl ImageRepository {
         }
         Ok(out)
     }
+
+    /// Resolve the deployment's **signed** pre-protocol digest inventory against
+    /// the catalog rows that actually need it.
+    ///
+    /// This is the accessor the operational cutover (`eeky`) loads the legacy
+    /// allowlist through. It differs from
+    /// [`LegacyDigestInventory::from_signed_document`] in exactly one way, and
+    /// the difference is the point: **an unsigned inventory is not an
+    /// inventory.** [`LegacyDigestInventory::Unconfigured`] is a legitimate
+    /// *dispatch-time* state (see the `launcher_compatibility` module docs — it
+    /// keeps an already-built catalog from being stranded by a missing config
+    /// file), but it can never authorize a mode flip: a cutover that proceeds
+    /// on an unconfigured inventory has proven nothing about which artifacts
+    /// are compatible. So [`LegacyAllowlistDefect::Unsigned`] refuses it here
+    /// while dispatch keeps its unarmed behaviour.
+    ///
+    /// # There is no `signed: true` to read
+    ///
+    /// [`SignedLegacyAllowlist`] carries no signature, no `signed` flag and no
+    /// `verified` boolean, deliberately. The only way to obtain one is to hand
+    /// this method a [`LegacyDigestInventory::Verified`], and the only way to
+    /// obtain *that* is
+    /// [`LegacyDigestInventory::from_signed_document`](crate::LegacyDigestInventory::from_signed_document)
+    /// completing an Ed25519 verification over the document's exact bytes. A
+    /// test that asserts "the allowlist has a non-empty signature field" cannot
+    /// be written against this type at all, which is the intended shape: the
+    /// assertion available is that a tampered document does not produce a value.
+    ///
+    /// # Errors
+    ///
+    /// * [`LegacyAllowlistDefect::Unsigned`] — no inventory configured.
+    /// * [`LegacyAllowlistDefect::Unusable`] — configured but its provenance,
+    ///   signature, schema or digest entries did not validate.
+    /// * [`LegacyAllowlistDefect::Uninventoried`] — the catalog holds
+    ///   dispatch-eligible no-handshake images the signed document does not
+    ///   vouch for. Those would be refused at admission, so the cutover is
+    ///   blocked before it pauses anything.
+    /// * [`LegacyAllowlistDefect::Storage`] — the catalog could not be read.
+    ///   Never reported as an empty catalog.
+    pub async fn signed_legacy_digest_allowlist(
+        &self,
+        inventory: &LegacyDigestInventory,
+    ) -> std::result::Result<SignedLegacyAllowlist, LegacyAllowlistDefect> {
+        let (provenance, digests) = match inventory {
+            LegacyDigestInventory::Unconfigured => {
+                return Err(LegacyAllowlistDefect::Unsigned);
+            }
+            LegacyDigestInventory::Unusable(fault) => {
+                return Err(LegacyAllowlistDefect::Unusable(fault.clone()));
+            }
+            LegacyDigestInventory::Verified {
+                provenance,
+                digests,
+            } => (provenance.clone(), digests.clone()),
+        };
+
+        let candidates = self
+            .legacy_pre_protocol_digests()
+            .await
+            .map_err(|error| LegacyAllowlistDefect::Storage(error.to_string()))?;
+
+        let mut inventoried = Vec::new();
+        let mut uninventoried = Vec::new();
+        for candidate in candidates {
+            // Parse rather than string-compare. `legacy_pre_protocol_digests`
+            // returns the raw column on purpose, so a row holding a mutable tag
+            // is visible here — and lands in `uninventoried`, never silently
+            // dropped.
+            match PreProtocolDigest::parse(&candidate.registry_digest) {
+                Ok(digest) if digests.contains(&digest) => inventoried.push(candidate),
+                Ok(_) | Err(_) => uninventoried.push(candidate),
+            }
+        }
+        if !uninventoried.is_empty() {
+            return Err(LegacyAllowlistDefect::Uninventoried(uninventoried));
+        }
+
+        Ok(SignedLegacyAllowlist {
+            provenance,
+            digests,
+            inventoried,
+        })
+    }
 }
+
+/// A signature-verified pre-protocol allowlist that covers every no-handshake
+/// row the catalog can still dispatch.
+///
+/// Constructible only through
+/// [`ImageRepository::signed_legacy_digest_allowlist`], so holding one is
+/// itself the proof — there is no field to assert on instead.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SignedLegacyAllowlist {
+    /// Who issued the verified document, for the cutover record.
+    pub provenance: InventoryProvenance,
+    /// Every digest the signed document vouches for. Immutable by construction:
+    /// [`PreProtocolDigest`] only parses `sha256:` + 64 lowercase hex.
+    pub digests: std::collections::BTreeSet<PreProtocolDigest>,
+    /// The catalog rows this allowlist covers, in `images.id` order.
+    pub inventoried: Vec<PreProtocolImage>,
+}
+
+/// Why a deployment's legacy allowlist may not authorize a cutover.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LegacyAllowlistDefect {
+    /// No inventory is configured. Unarmed is a dispatch state, never a
+    /// cutover authorization.
+    Unsigned,
+    /// The configured inventory failed its own provenance/signature/schema
+    /// validation. Carried verbatim so the operator sees which check refused.
+    Unusable(InventoryFault),
+    /// Dispatch-eligible no-handshake rows the signed document does not cover.
+    Uninventoried(Vec<PreProtocolImage>),
+    /// The catalog could not be read. Never an empty catalog.
+    Storage(String),
+}
+
+impl std::fmt::Display for LegacyAllowlistDefect {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unsigned => write!(
+                formatter,
+                "no signed pre-protocol digest inventory is configured; an unsigned allowlist \
+                 never authorizes a launcher authority cutover"
+            ),
+            Self::Unusable(fault) => write!(
+                formatter,
+                "the configured pre-protocol digest inventory is unusable: {fault}"
+            ),
+            Self::Uninventoried(images) => write!(
+                formatter,
+                "{} dispatch-eligible no-handshake catalog image(s) are not vouched for by the \
+                 signed inventory: {}",
+                images.len(),
+                images
+                    .iter()
+                    .map(|image| format!("{} ({})", image.image_id, image.registry_digest))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            Self::Storage(error) => {
+                write!(formatter, "the image catalog could not be read: {error}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for LegacyAllowlistDefect {}
 
 #[cfg(test)]
 mod tests {
