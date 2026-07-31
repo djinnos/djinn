@@ -512,13 +512,13 @@ impl AppState {
                         "server AppState",
                     ),
                 ),
-                // The process's own rendered lease, from the SAME `KubernetesConfig`
-                // the manifests are rendered from. The per-Pod ceiling it is clamped
-                // against comes from the write-once permit row, never from here —
-                // see `resize_authorization::clamp`.
-                i64::from(djinn_k8s::launcher::launcher_leased_millicores(
-                    &djinn_k8s::KubernetesConfig::from_env(),
-                )),
+                // No CPU quantity is passed from here on purpose. `0ppk-1a`
+                // handed this process's rendered `launcher_leased_millicores`
+                // in and the clamp `min`'d the per-Pod ceiling against it,
+                // which held every per-project-`cpu_limit`-override Pod below
+                // its own rendered lease (`gvix`). The lift target is now the
+                // write-once permit row's `admitted_cpu_millicores` alone —
+                // see `resize_authorization`'s header.
                 Arc::new(djinn_coordinator::resize_lift::ResizeLift::from_env(
                     Arc::clone(&permits),
                 )),
