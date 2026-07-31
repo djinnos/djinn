@@ -313,16 +313,16 @@ async fn a_task_run_naming_another_invocation_is_denied_with_zero_kubernetes_cal
         )
         .await;
     assert_eq!(
+        fixture.sink.calls(),
+        0,
+        "ZERO Kubernetes calls: the denial must land before any Pod is named"
+    );
+    assert_eq!(
         refused,
         LeaseResult::DegradedUnleased {
             reason: DegradedUnleasedReason::NotTheInvocationOwner
         },
         "a task run naming another task run's invocation must be denied"
-    );
-    assert_eq!(
-        fixture.sink.calls(),
-        0,
-        "ZERO Kubernetes calls: the denial must land before any Pod is named"
     );
     assert!(
         fixture.sink.intents().is_empty(),
@@ -434,11 +434,17 @@ async fn a_configured_lift_above_the_stored_ceiling_clamps_to_the_ceiling() {
             LauncherAuthorityProtocol::ResizeV2,
         )
         .await;
-    assert!(
-        CONFIGURED_LEASED > ADMITTED_CEILING,
-        "precondition: the configured lift must exceed the stored ceiling, or \
-         this test cannot distinguish a clamp from a passthrough"
-    );
+    // The precondition that makes this test able to tell a clamp from a
+    // passthrough. A `const` block so it is checked at COMPILE time: editing
+    // either constant into agreement should fail the build, not produce a test
+    // that still passes while asserting nothing.
+    const {
+        assert!(
+            CONFIGURED_LEASED > ADMITTED_CEILING,
+            "the configured lift must exceed the stored ceiling, or this test \
+             cannot distinguish a clamp from a passthrough"
+        );
+    }
 
     let token = fixture
         .granted(OWNER_TASK, OWNER_RUN, OWNER_INVOCATION)
@@ -450,13 +456,13 @@ async fn a_configured_lift_above_the_stored_ceiling_clamps_to_the_ceiling() {
     let intents = fixture.sink.intents();
     assert_eq!(intents.len(), 1);
     assert_eq!(
-        intents[0].target_millicores, ADMITTED_CEILING,
-        "the target must be min(configured 4000m, admitted 2500m)"
-    );
-    assert_eq!(
         fixture.sink.intents_above_ceiling(),
         0,
         "ZERO PATCH intents above the stored ceiling"
+    );
+    assert_eq!(
+        intents[0].target_millicores, ADMITTED_CEILING,
+        "the target must be min(configured 4000m, admitted 2500m)"
     );
 }
 
