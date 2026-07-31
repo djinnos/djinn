@@ -7,6 +7,7 @@
 
 pub mod build_resources;
 pub mod config;
+pub mod cutover_preflight;
 pub mod env_config;
 pub mod graph_warmer;
 pub mod graph_warmer_candidates;
