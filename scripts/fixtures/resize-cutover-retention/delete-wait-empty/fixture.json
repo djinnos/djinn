@@ -1,0 +1,13 @@
+{
+  "asset": "wait-empty",
+  "expect": "reject",
+  "why": "The drain observation deleted from the launcher. `cgroup.kill` is asynchronous; without `wait_empty` nothing ever observes that the leaf actually emptied, and `remove` races the kernel.",
+  "operations": [
+    {
+      "op": "replace",
+      "path": "server/crates/djinn-cgroup-launcher/src/lib.rs",
+      "find": "    pub fn wait_empty(&mut self, leaf: &Leaf) -> Result<(), Error> {\n        let events = self.fs.read_leaf(leaf.fd, \"cgroup.events\")?;\n        if populated_zero(&events)? {\n            Ok(())\n        } else {\n            Err(Error::StillPopulated)\n        }\n    }\n",
+      "with": ""
+    }
+  ]
+}

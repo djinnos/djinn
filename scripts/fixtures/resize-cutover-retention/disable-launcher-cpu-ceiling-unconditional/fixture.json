@@ -1,0 +1,13 @@
+{
+  "asset": "launcher-cpu-ceiling-stays-conditional",
+  "expect": "reject",
+  "why": "AC10. The leaf-v1 arm removed, so the launcher sidecar's `resources.limits.cpu` renders UNCONDITIONALLY. Under leaf-v1 the launcher owns the leaf's own `cpu.max`, so a container limit here is an ancestor clamp over every invocation leaf: 7deu measured a leaf whose `cpu.max` read four cores while the process burned a quarter of one, with the leaf's own `nr_throttled` at 0 throughout. A `cpu.max` read-back would have reported the ceiling and said nothing.",
+  "operations": [
+    {
+      "op": "replace",
+      "path": "server/crates/djinn-k8s/src/launcher.rs",
+      "find": "    if protocol.launcher_owns_leaf_quota() {\n        return Ok(None);\n    }\n",
+      "with": ""
+    }
+  ]
+}

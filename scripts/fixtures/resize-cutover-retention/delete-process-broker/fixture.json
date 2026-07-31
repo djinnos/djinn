@@ -1,0 +1,8 @@
+{
+  "asset": "process-broker",
+  "expect": "reject",
+  "why": "The worker-side broker deleted. Without `ProcessHandle`/`CgroupLauncherClient` there is no seam through which an unprivileged worker reaches the privileged launcher, and no fenced lift.",
+  "operations": [
+    { "op": "delete", "path": "server/crates/djinn-agent/src/process_broker.rs" }
+  ]
+}

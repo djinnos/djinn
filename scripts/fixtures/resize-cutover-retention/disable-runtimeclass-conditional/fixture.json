@@ -1,0 +1,13 @@
+{
+  "asset": "runtimeclass-and-node-assets",
+  "expect": "reject",
+  "why": "AC9, mutation three: the RuntimeClass template rendered conditionally with a default of disabled. Stated precisely, because the naive reading of that phrase is already true of this chart and must not be broken. `cgroupWritable.runtimeClass.enabled` defaults to FALSE on purpose — arming the writable-cgroup class before the nodes pass conformance leaves task-run Pods unschedulable, so the chart ships it off and the operator turns it on. What must not happen is a SECOND condition the operator has no switch for: the class then never renders no matter what they set, and the file, the template and `helm template` all still look healthy. The gate pins the guard to exactly the one operator-facing condition, so any extra conjunct reads as a retirement.",
+  "operations": [
+    {
+      "op": "replace",
+      "path": "deploy/helm/djinn/templates/runtimeclass-cgroup-writable.yaml",
+      "find": "{{- if .Values.cgroupWritable.runtimeClass.enabled }}\n",
+      "with": "{{- if and .Values.cgroupWritable.runtimeClass.enabled .Values.cgroupWritable.runtimeClass.legacyOptIn }}\n"
+    }
+  ]
+}

@@ -105,3 +105,114 @@ jobs:
       - name: Tear the cluster down
         if: always() && github.event.inputs.keep_on_failure != 'true'
         run: scripts/kind/setup-resize-kind-cluster.sh down
+
+  # -------------------------------------------------------------------------
+  # Task 1j64: 40+ lift/drop cycles, and the no-retirement gate's fixture
+  # self-test.
+  #
+  # A SEPARATE cluster from the job above, with its own name, registry and
+  # port: the two jobs run concurrently on the same `workflow_dispatch`, and a
+  # shared name would mean one job's teardown deleting the other's cluster
+  # mid-run. It invokes the same setup script rather than forking it.
+  #
+  # The gate itself needs no cluster and is ALSO invoked, on every PR, by
+  # `the_no_retirement_gate_passes_and_its_self_test_is_green` in
+  # server/tests/task_run_resize_cycles.rs — that is the always-on lane AC11
+  # asks for. The step here is the fixture self-test's dedicated home.
+  # -------------------------------------------------------------------------
+  resize-cycles:
+    name: Repeated lift/drop cycle invariants
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    # 40 cycles is 80 status-confirmed resizes plus a cluster, an image build
+    # and a chart install. Budgeted long deliberately; the teardown step below
+    # runs even when this cap is hit.
+    timeout-minutes: 90
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: "0"
+      CARGO_BUILD_BUILD_DIR: target
+      RUSTC_WRAPPER: ""
+      RUSTFLAGS: "-D warnings"
+      SQLX_OFFLINE: "true"
+      DJINN_RESIZE_HARNESS_K8S_VERSION: ${{ github.event.inputs.k8s_version || '1.35.0' }}
+      # Isolated from every sibling harness: djinn-resize-pcod/5067 above,
+      # djinn-kueue-c1/5061 and djinn-kueue-b2b/5055 elsewhere in this
+      # repository. `guard_the_harness_is_disjoint_and_reuses_the_shared_script`
+      # fails on any collision, on every PR.
+      CYCLES_CLUSTER: djinn-resize-1j64
+      CYCLES_REGISTRY: djinn-resize-1j64-registry
+      CYCLES_REG_PORT: "5071"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install kind, helm and crictl-capable tooling
+        run: |
+          set -euo pipefail
+          curl -fsSLo /tmp/kind https://kind.sigs.k8s.io/dl/v0.32.0/kind-linux-amd64
+          chmod +x /tmp/kind
+          sudo mv /tmp/kind /usr/local/bin/kind
+          curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+          kind version
+          kubectl version --client
+          helm version
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # `save-if: false` is mandatory: every cache family in this repository has
+      # exactly one writer, declared in quality-gate.yml and enforced by
+      # scripts/ci-cache-policy.test.mjs.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: server
+          save-if: false
+          shared-key: server-test
+          cache-on-failure: true
+          cache-all-crates: true
+
+      # The no-retirement gate's fixtures, through the gate's own shell entry
+      # point. Cheap, and a red gate makes the cluster pointless.
+      - name: No-retirement gate self-test
+        run: |
+          set -euo pipefail
+          node --test scripts/test-resize-cutover-retention.mjs
+          ./scripts/check-resize-cutover-retention.sh
+
+      # The hermetic half. A guard failure here is the same failure a PR sees,
+      # and there is no point paying for a cluster if the wiring is wrong.
+      - name: Hermetic guards
+        working-directory: server
+        run: cargo test -p djinn-server --test task_run_resize_cycles
+
+      - name: Free space before the cluster
+        run: df -h /
+
+      - name: Bring up the disposable cluster
+        run: |
+          scripts/kind/setup-resize-kind-cluster.sh up \
+            --cluster-name "${CYCLES_CLUSTER}" \
+            --registry-name "${CYCLES_REGISTRY}" \
+            --registry-port "${CYCLES_REG_PORT}" \
+            --context "kind-${CYCLES_CLUSTER}" \
+            --k8s-version "${DJINN_RESIZE_HARNESS_K8S_VERSION}" \
+            ${{ github.event.inputs.keep_on_failure == 'true' && '--keep-on-failure' || '' }}
+
+      - name: Forty lift/drop cycles
+        working-directory: server
+        env:
+          DJINN_TEST_RESIZE_CYCLES: "1"
+        run: |
+          cargo test -p djinn-server --test task_run_resize_cycles -- \
+            --ignored --test-threads=1 --nocapture
+
+      # Pass or fail, cluster AND registry. The script's own EXIT trap covers a
+      # failure inside `up`; this covers a failure inside the suite, which the
+      # script never sees.
+      - name: Tear the cluster down
+        if: always() && github.event.inputs.keep_on_failure != 'true'
+        run: |
+          scripts/kind/setup-resize-kind-cluster.sh down \
+            --cluster-name "${CYCLES_CLUSTER}" \
+            --registry-name "${CYCLES_REGISTRY}" \
+            --registry-port "${CYCLES_REG_PORT}" \
+            --context "kind-${CYCLES_CLUSTER}"
