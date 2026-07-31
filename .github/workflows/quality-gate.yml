@@ -1937,7 +1937,19 @@ jobs:
         if: steps.shard.outputs.active == 'true'
         env:
           NEXTEST_PROFILE: ${{ github.event_name == 'pull_request' && 'pull-request' || github.event_name == 'merge_group' && 'merge-group' || 'full-validation' }}
-          RUST_MIN_STACK: "8388608"
+          # NOTE: there is deliberately NO `RUST_MIN_STACK` here. One used to be
+          # (`8388608`, added in 1b4641fc0 "eliminate coordinator shard
+          # stack-overflow failures"), and it masked a real defect for eleven
+          # days: `CoordinatorActor::run`'s nested `async fn` chain consumed
+          # 2,210,352 bytes — 105% of tokio's 2 MiB worker stack — in a debug
+          # build, and the worst-case path through the actor reached 3.6 MiB.
+          # Production has no equivalent override (`server/src/main.rs` builds
+          # `new_multi_thread()` with the default 2 MiB stacks), so the override
+          # bought CI a green tick on a configuration production never ran.
+          # The chain is now structurally bounded — see
+          # `djinn-coordinator/src/poll_stack.rs` — so CI and local runs see the
+          # same 2 MiB budget. Do not re-add it: raising the stack here hides
+          # exactly the regression this gate exists to catch.
         run: |
           set -uo pipefail
           started_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)

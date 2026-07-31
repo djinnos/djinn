@@ -75,26 +75,30 @@ impl CoordinatorActor {
                     );
                     // Record `unknown` for existing snapshot.
                     let pr_number = pull_number as i64;
-                    self.record_ci_snapshot_unavailable(&task.id, &task.short_id, pr_number)
-                        .await;
+                    poll_stack::boxed(|| {
+                        self.record_ci_snapshot_unavailable(&task.id, &task.short_id, pr_number)
+                    })
+                    .await;
                     continue;
                 }
             };
 
             // ── Record CI snapshot (sole writer for GitHub-derived fields) ──
             let pr_number_i64 = pull_number as i64;
-            self.record_ci_snapshot(
-                &task.id,
-                &task.short_id,
-                pr_number_i64,
-                &pr.head.sha,
-                &pr.base.ref_name,
-                pull_number,
-                gh_client,
-                &owner,
-                &repo,
-                &checks,
-            )
+            poll_stack::boxed(|| {
+                self.record_ci_snapshot(
+                    &task.id,
+                    &task.short_id,
+                    pr_number_i64,
+                    &pr.head.sha,
+                    &pr.base.ref_name,
+                    pull_number,
+                    gh_client,
+                    &owner,
+                    &repo,
+                    &checks,
+                )
+            })
             .await;
 
             let current_sha = pr.head.sha.clone();
@@ -106,18 +110,21 @@ impl CoordinatorActor {
                     pr = pull_number,
                     "PR poller: PR merged → closing task"
                 );
-                let durable_review = self.durable_pr_review_verdict(pr_url).await;
+                let durable_review =
+                    poll_stack::boxed(|| self.durable_pr_review_verdict(pr_url)).await;
                 let (review, merge_queue) = merged_review_outcome(
                     durable_review.as_deref(),
                     self.delegated_to_github.contains_key(&task.id),
                 );
-                self.apply_pr_merge(
-                    &task.id,
-                    pr_url,
-                    pr.merge_commit_sha.as_deref(),
-                    Some(review),
-                    merge_queue,
-                )
+                poll_stack::boxed(|| {
+                    self.apply_pr_merge(
+                        &task.id,
+                        pr_url,
+                        pr.merge_commit_sha.as_deref(),
+                        Some(review),
+                        merge_queue,
+                    )
+                })
                 .await;
                 self.pr_status_cache.remove(&task.id);
                 self.review_stuck_sha_first_seen.remove(&task.id);
@@ -134,11 +141,13 @@ impl CoordinatorActor {
                     pr = pull_number,
                     "PR poller: PR closed without merge → force-closing task"
                 );
-                self.apply_pr_transition(
-                    &task.id,
-                    TransitionAction::ForceClose,
-                    Some("PR was closed without merging"),
-                )
+                poll_stack::boxed(|| {
+                    self.apply_pr_transition(
+                        &task.id,
+                        TransitionAction::ForceClose,
+                        Some("PR was closed without merging"),
+                    )
+                })
                 .await;
                 self.pr_status_cache.remove(&task.id);
                 self.review_stuck_sha_first_seen.remove(&task.id);
@@ -198,8 +207,10 @@ impl CoordinatorActor {
                 };
 
                 // Attach feedback + handle escalation threshold.
-                self.attach_pr_review_feedback(&task.id, &task.short_id, feedback)
-                    .await;
+                poll_stack::boxed(|| {
+                    self.attach_pr_review_feedback(&task.id, &task.short_id, feedback)
+                })
+                .await;
 
                 // Evaluate CI in the same tick so changes-requested AND
                 // failing required checks surface together. Use
@@ -243,16 +254,18 @@ impl CoordinatorActor {
                         // (the reviewer's request is the primary driver).
                         let snap_blocking_names: Vec<String> =
                             blocking.iter().map(|cr| cr.name.clone()).collect();
-                        self.persist_ci_snapshot(
-                            &task.id,
-                            pull_number,
-                            &current_sha,
-                            CiStatus::Failing,
-                            snap_blocking_names,
-                            None,
-                            0,
-                            None,
-                        )
+                        poll_stack::boxed(|| {
+                            self.persist_ci_snapshot(
+                                &task.id,
+                                pull_number,
+                                &current_sha,
+                                CiStatus::Failing,
+                                snap_blocking_names,
+                                None,
+                                0,
+                                None,
+                            )
+                        })
                         .await;
                         tracing::info!(
                             task_id = %task.short_id,
@@ -265,16 +278,18 @@ impl CoordinatorActor {
                     // driven reopen below still spawns a worker — give it the
                     // advisory list as context rather than nothing.
                     if !blocking.is_empty() || !advisory.is_empty() {
-                        self.log_ci_failure_comment(
-                            &task.id,
-                            &blocking,
-                            &advisory,
-                            pr_url,
-                            &current_sha,
-                            gh_client,
-                            &owner,
-                            &repo,
-                        )
+                        poll_stack::boxed(|| {
+                            self.log_ci_failure_comment(
+                                &task.id,
+                                &blocking,
+                                &advisory,
+                                pr_url,
+                                &current_sha,
+                                gh_client,
+                                &owner,
+                                &repo,
+                            )
+                        })
                         .await;
                     }
                 }
@@ -283,20 +298,24 @@ impl CoordinatorActor {
                 // level so the live submit-work guard can detect no-progress
                 // resubmissions across task runs after a PR reviewer requests
                 // changes.
-                self.record_pr_rejection_fingerprint(&task.id).await;
+                poll_stack::boxed(|| self.record_pr_rejection_fingerprint(&task.id)).await;
 
-                self.record_pr_outcome_facts(
-                    pr_url,
-                    Some("rejected"),
-                    None,
-                    Some("review_rejected"),
-                )
+                poll_stack::boxed(|| {
+                    self.record_pr_outcome_facts(
+                        pr_url,
+                        Some("rejected"),
+                        None,
+                        Some("review_rejected"),
+                    )
+                })
                 .await;
-                self.apply_pr_transition(
-                    &task.id,
-                    TransitionAction::PrChangesRequested,
-                    Some("Reviewer requested changes on PR"),
-                )
+                poll_stack::boxed(|| {
+                    self.apply_pr_transition(
+                        &task.id,
+                        TransitionAction::PrChangesRequested,
+                        Some("Reviewer requested changes on PR"),
+                    )
+                })
                 .await;
                 self.pr_status_cache.remove(&task.id);
                 self.review_stuck_sha_first_seen.remove(&task.id);
@@ -379,16 +398,18 @@ impl CoordinatorActor {
                 // fast path (`poll_pr_draft_tasks`).
                 self.pr_status_cache
                     .insert(task.id.clone(), current_sha.clone());
-                self.persist_ci_snapshot(
-                    &task.id,
-                    pull_number,
-                    &current_sha,
-                    CiStatus::Passing,
-                    vec![],
-                    None,
-                    0,
-                    None,
-                )
+                poll_stack::boxed(|| {
+                    self.persist_ci_snapshot(
+                        &task.id,
+                        pull_number,
+                        &current_sha,
+                        CiStatus::Passing,
+                        vec![],
+                        None,
+                        0,
+                        None,
+                    )
+                })
                 .await;
             } else if (sha_changed || !self.pr_status_cache.contains_key(&task.id))
                 && !checks.check_runs.is_empty()
@@ -443,29 +464,33 @@ impl CoordinatorActor {
                     self.pr_status_cache
                         .insert(task.id.clone(), current_sha.clone());
                     // All required checks passed (or only advisory failed).
-                    self.persist_ci_snapshot(
-                        &task.id,
-                        pull_number,
-                        &current_sha,
-                        CiStatus::Passing,
-                        vec![],
-                        None,
-                        0,
-                        None,
-                    )
+                    poll_stack::boxed(|| {
+                        self.persist_ci_snapshot(
+                            &task.id,
+                            pull_number,
+                            &current_sha,
+                            CiStatus::Passing,
+                            vec![],
+                            None,
+                            0,
+                            None,
+                        )
+                    })
                     .await;
                 } else {
                     // Checks still running — persist pending status.
-                    self.persist_ci_snapshot(
-                        &task.id,
-                        pull_number,
-                        &current_sha,
-                        CiStatus::Pending,
-                        vec![],
-                        None,
-                        0,
-                        None,
-                    )
+                    poll_stack::boxed(|| {
+                        self.persist_ci_snapshot(
+                            &task.id,
+                            pull_number,
+                            &current_sha,
+                            CiStatus::Pending,
+                            vec![],
+                            None,
+                            0,
+                            None,
+                        )
+                    })
                     .await;
                 }
             }
@@ -499,12 +524,14 @@ impl CoordinatorActor {
                 let reason = self
                     .build_pr_conflict_reason(&task.short_id, &task.project_id)
                     .await;
-                self.apply_pr_transition(&task.id, TransitionAction::PrConflict, Some(&reason))
-                    .await;
+                poll_stack::boxed(|| {
+                    self.apply_pr_transition(&task.id, TransitionAction::PrConflict, Some(&reason))
+                })
+                .await;
                 // Reactive auto-blocker: if exactly one racing same-epic sibling
                 // is landing on main, make this task WAIT for it (beside the
                 // reopen above) instead of looping on the moving main.
-                self.add_conflict_blocker_for_sibling(&task).await;
+                poll_stack::boxed(|| self.add_conflict_blocker_for_sibling(&task)).await;
                 self.pr_status_cache.remove(&task.id);
                 self.review_stuck_sha_first_seen.remove(&task.id);
                 self.merge_fail_count.remove(&task.id);
@@ -524,14 +551,16 @@ impl CoordinatorActor {
             if has_reviews && !has_approved {
                 // Merge-gating reviews exist but none APPROVED (and no CHANGES_REQUESTED
                 // handled above). Wait for approval.
-                self.maybe_re_request_review(
-                    &task.id,
-                    &task.short_id,
-                    gh_client,
-                    &owner,
-                    &repo,
-                    pull_number,
-                )
+                poll_stack::boxed(|| {
+                    self.maybe_re_request_review(
+                        &task.id,
+                        &task.short_id,
+                        gh_client,
+                        &owner,
+                        &repo,
+                        pull_number,
+                    )
+                })
                 .await;
                 continue;
             }
@@ -755,18 +784,20 @@ impl CoordinatorActor {
                 .get(&task.id)
                 .is_some_and(|sha| sha == &current_sha);
             if pr.auto_merge.is_some() || delegated_for_current_sha {
-                self.observe_auto_merge_state(
-                    gh_client,
-                    &task.id,
-                    &task.short_id,
-                    pr_url,
-                    &owner,
-                    &repo,
-                    pull_number,
-                    &pr.node_id,
-                    has_approved,
-                    &current_sha,
-                )
+                poll_stack::boxed(|| {
+                    self.observe_auto_merge_state(
+                        gh_client,
+                        &task.id,
+                        &task.short_id,
+                        pr_url,
+                        &owner,
+                        &repo,
+                        pull_number,
+                        &pr.node_id,
+                        has_approved,
+                        &current_sha,
+                    )
+                })
                 .await;
                 continue;
             }
@@ -832,13 +863,15 @@ impl CoordinatorActor {
                         sha = merge_commit_sha.as_deref().unwrap_or("<unknown>"),
                         "PR poller: merge succeeded → closing task"
                     );
-                    self.apply_pr_merge(
-                        &task.id,
-                        pr_url,
-                        merge_commit_sha.as_deref(),
-                        Some(delegated_review_verdict(has_approved)),
-                        "not_applicable",
-                    )
+                    poll_stack::boxed(|| {
+                        self.apply_pr_merge(
+                            &task.id,
+                            pr_url,
+                            merge_commit_sha.as_deref(),
+                            Some(delegated_review_verdict(has_approved)),
+                            "not_applicable",
+                        )
+                    })
                     .await;
                     self.pr_status_cache.remove(&task.id);
                     self.review_stuck_sha_first_seen.remove(&task.id);
@@ -870,12 +903,14 @@ impl CoordinatorActor {
                                 // fetched. Preserve this authoritative decision
                                 // now through the unique PR-to-attempt association;
                                 // apply_pr_merge will add `passed` to that run.
-                                self.record_pr_outcome_facts(
-                                    pr_url,
-                                    Some(delegated_review_verdict(has_approved)),
-                                    None,
-                                    None,
-                                )
+                                poll_stack::boxed(|| {
+                                    self.record_pr_outcome_facts(
+                                        pr_url,
+                                        Some(delegated_review_verdict(has_approved)),
+                                        None,
+                                        None,
+                                    )
+                                })
                                 .await;
                                 self.merge_fail_count.remove(&task.id);
                             }
@@ -900,12 +935,14 @@ impl CoordinatorActor {
                                 // Adoption is the same delegated lifecycle
                                 // boundary as enqueue: retain the review outcome
                                 // before a later merged poll loses this snapshot.
-                                self.record_pr_outcome_facts(
-                                    pr_url,
-                                    Some(delegated_review_verdict(has_approved)),
-                                    None,
-                                    None,
-                                )
+                                poll_stack::boxed(|| {
+                                    self.record_pr_outcome_facts(
+                                        pr_url,
+                                        Some(delegated_review_verdict(has_approved)),
+                                        None,
+                                        None,
+                                    )
+                                })
                                 .await;
                                 self.merge_fail_count.remove(&task.id);
                             }
@@ -997,8 +1034,10 @@ impl CoordinatorActor {
                                  protection), not something a code change can fix — escalating for \
                                  intervention instead of retrying forever."
                             );
-                            self.escalate_to_planner_or_terminally_fail(&task, &reason)
-                                .await;
+                            poll_stack::boxed(|| {
+                                self.escalate_to_planner_or_terminally_fail(&task, &reason)
+                            })
+                            .await;
                             self.pr_status_cache.remove(&task.id);
                             self.review_stuck_sha_first_seen.remove(&task.id);
                             self.merge_fail_count.remove(&task.id);

@@ -146,6 +146,7 @@ mod evidence_lifecycle_state;
 pub mod handle;
 mod health;
 pub mod messages;
+pub(crate) mod poll_stack;
 pub mod pr_poller;
 mod recover_terminal_linked_spike_evidence;
 mod reentrance;
