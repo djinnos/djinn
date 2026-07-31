@@ -19,6 +19,7 @@ pub mod server;
 pub mod server_memory;
 pub mod sse;
 pub mod task_run_resize_bootstrap;
+pub mod task_run_resize_rollout;
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_helpers;
