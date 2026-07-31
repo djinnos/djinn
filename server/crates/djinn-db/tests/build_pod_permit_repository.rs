@@ -238,11 +238,27 @@ async fn resize_identity_is_write_once_and_lifecycle_is_uid_fenced() {
         "a rejected malformed capture must not enter the resize lifecycle"
     );
 
+    // Migration 168: the lifecycle may only be entered by CLAIMING an
+    // invocation, so the `birth_confirmed -> lift_applying` edge goes through
+    // `begin_resize_invocation` rather than the generic transition.
+    const INVOCATION: &str = "invocation-a";
+    let claimed = repo
+        .begin_resize_invocation(
+            "resize",
+            &permit.permit_id,
+            permit.fencing_token,
+            "pod-uid",
+            INVOCATION,
+        )
+        .await
+        .unwrap();
+    let TransitionBuildPodResizeLifecycleResult::Transitioned(row) = claimed else {
+        panic!("the first invocation must win the claim, got {claimed:?}");
+    };
+    assert_eq!(row.state, BuildPodPermitState::LiftApplying);
+    assert_eq!(row.resize_invocation_id.as_deref(), Some(INVOCATION));
+
     for (from, to) in [
-        (
-            BuildPodPermitState::BirthConfirmed,
-            BuildPodPermitState::LiftApplying,
-        ),
         (
             BuildPodPermitState::LiftApplying,
             BuildPodPermitState::Lifted,
@@ -270,6 +286,7 @@ async fn resize_identity_is_write_once_and_lifecycle_is_uid_fenced() {
                 &permit.permit_id,
                 permit.fencing_token,
                 "pod-uid",
+                Some(INVOCATION),
                 from,
                 to,
             )
@@ -296,6 +313,7 @@ async fn resize_identity_is_write_once_and_lifecycle_is_uid_fenced() {
             &permit.permit_id,
             permit.fencing_token,
             "pod-uid",
+            Some(INVOCATION),
             BuildPodPermitState::Lifted,
             BuildPodPermitState::DropRequired
         )
@@ -314,6 +332,7 @@ async fn resize_identity_is_write_once_and_lifecycle_is_uid_fenced() {
             &permit.permit_id,
             permit.fencing_token + 1,
             "pod-uid",
+            Some(INVOCATION),
             BuildPodPermitState::Quarantined,
             BuildPodPermitState::DropRequired
         )
@@ -327,6 +346,7 @@ async fn resize_identity_is_write_once_and_lifecycle_is_uid_fenced() {
             &permit.permit_id,
             permit.fencing_token,
             "stale-uid",
+            Some(INVOCATION),
             BuildPodPermitState::Quarantined,
             BuildPodPermitState::DropRequired
         )
@@ -478,4 +498,288 @@ async fn non_positive_limits_and_missing_pool_fail_closed() {
         .await
         .unwrap();
     assert!(repo.global_pool_is_readable().await.is_err());
+}
+
+/// Seed one permit at `birth_confirmed` with a captured identity.
+async fn birth_confirmed(db: &Database, task_run_id: &str, pod_uid: &str) -> (String, i64) {
+    let repo = BuildPodPermitRepository::new(db.clone());
+    let permit = match repo.acquire(task_run_id, 16).await {
+        AcquireBuildPodPermitResult::Acquired { row, .. } => row,
+        outcome => panic!("unexpected outcome: {outcome:?}"),
+    };
+    assert!(matches!(
+        repo.bind_or_refresh_job_uid(
+            task_run_id,
+            &permit.permit_id,
+            permit.fencing_token,
+            &format!("job-{pod_uid}")
+        )
+        .await
+        .unwrap(),
+        BindBuildPodPermitResult::Bound(_)
+    ));
+    let identity = BuildPodResizeIdentity {
+        pod_namespace: "ns".into(),
+        pod_name: format!("pod-{pod_uid}"),
+        pod_uid: pod_uid.into(),
+        launcher_container_name: "cgroup-launcher".into(),
+        launcher_container_id: "containerd://launcher".into(),
+        image_digest: "sha256:abc".into(),
+        observed_launcher_protocol: "resize-v2".into(),
+        effective_launcher_protocol: "resize-v2".into(),
+        admitted_cpu_millicores: 4000,
+    };
+    assert!(matches!(
+        repo.capture_resize_identity(
+            task_run_id,
+            &permit.permit_id,
+            permit.fencing_token,
+            &identity
+        )
+        .await
+        .unwrap(),
+        CaptureBuildPodResizeIdentityResult::Captured(_)
+    ));
+    (permit.permit_id, permit.fencing_token)
+}
+
+/// AC1. The invocation half of the fence exists, is written only on the edge
+/// that starts a lift, and REJECTS a transition presented with a stale
+/// invocation id — leaving the row byte-identical.
+///
+/// NAMED FAILING MUTATION: delete
+/// `AND resize_invocation_id IS NOT DISTINCT FROM $6` from
+/// `transition_resize_lifecycle`'s predicate, leaving the `pod_uid` fence in
+/// place. The stale transition below then succeeds and this test fails.
+///
+/// Against REAL Postgres, deliberately: the compare-and-swap, migration 164's
+/// transition trigger and migration 168's invocation write-window are Postgres
+/// behaviours. A fake repository would assert this test's opinion of them.
+#[tokio::test]
+async fn a_stale_invocation_id_is_rejected_and_leaves_the_row_unchanged() {
+    let db = Database::ephemeral().await.unwrap();
+    seed_runs(&db, &["fence-run"]).await;
+    let repo = BuildPodPermitRepository::new(db.clone());
+    let (permit_id, fence) = birth_confirmed(&db, "fence-run", "pod-fence").await;
+
+    // Invocation A claims the lifecycle.
+    let claimed = repo
+        .begin_resize_invocation("fence-run", &permit_id, fence, "pod-fence", "invocation-a")
+        .await
+        .unwrap();
+    let TransitionBuildPodResizeLifecycleResult::Transitioned(row) = claimed else {
+        panic!("the claim must succeed, got {claimed:?}");
+    };
+    assert_eq!(row.resize_invocation_id.as_deref(), Some("invocation-a"));
+    let before = repo.active("fence-run").await.unwrap().unwrap();
+
+    // Invocation B presents a legal edge on the right Pod under the right
+    // permit and fencing token. ONLY the invocation is wrong.
+    let stale = repo
+        .transition_resize_lifecycle(
+            "fence-run",
+            &permit_id,
+            fence,
+            "pod-fence",
+            Some("invocation-b"),
+            BuildPodPermitState::LiftApplying,
+            BuildPodPermitState::Lifted,
+        )
+        .await
+        .unwrap();
+    assert!(
+        matches!(stale, TransitionBuildPodResizeLifecycleResult::Rejected),
+        "a stale invocation must be rejected even with a matching Pod UID: {stale:?}"
+    );
+    assert_eq!(
+        repo.active("fence-run").await.unwrap().unwrap(),
+        before,
+        "a rejected transition must leave the row byte-identical"
+    );
+
+    // `None` is a fence value, not "do not check": a caller claiming the row
+    // carries no invocation must lose against a row that carries one.
+    let unfenced = repo
+        .transition_resize_lifecycle(
+            "fence-run",
+            &permit_id,
+            fence,
+            "pod-fence",
+            None,
+            BuildPodPermitState::LiftApplying,
+            BuildPodPermitState::Lifted,
+        )
+        .await
+        .unwrap();
+    assert!(
+        matches!(unfenced, TransitionBuildPodResizeLifecycleResult::Rejected),
+        "an absent invocation must not match a claimed row: {unfenced:?}"
+    );
+
+    // The owner still wins.
+    assert!(matches!(
+        repo.transition_resize_lifecycle(
+            "fence-run",
+            &permit_id,
+            fence,
+            "pod-fence",
+            Some("invocation-a"),
+            BuildPodPermitState::LiftApplying,
+            BuildPodPermitState::Lifted,
+        )
+        .await
+        .unwrap(),
+        TransitionBuildPodResizeLifecycleResult::Transitioned(_)
+    ));
+}
+
+/// AC2. Two invocations of ONE task run CAN be in flight simultaneously —
+/// nothing in `djinn_agent::process`'s `'invocation: loop` serializes them, the
+/// runner is `Arc`-shared behind `&self`, and its journal keeps a `HashSet` of
+/// live invocation ids precisely because more than one can be live. A single-row
+/// lifecycle cannot represent two simultaneous lifts, so the second claimant
+/// must FAIL CLOSED.
+///
+/// Both claims race against real Postgres through a `Barrier`. Exactly one wins.
+///
+/// NAMED FAILING MUTATION: remove `AND state = 'birth_confirmed'` from
+/// `begin_resize_invocation`'s predicate — the guard the answer rests on — and
+/// both claims succeed, so the row ends up carrying the loser's invocation id
+/// and this test fails.
+#[tokio::test]
+async fn only_one_of_two_concurrent_invocations_can_claim_the_lifecycle() {
+    let db = Database::ephemeral().await.unwrap();
+    seed_runs(&db, &["concurrent-run"]).await;
+    let (permit_id, fence) = birth_confirmed(&db, "concurrent-run", "pod-concurrent").await;
+
+    let repo = Arc::new(BuildPodPermitRepository::new(db.clone()));
+    let barrier = Arc::new(Barrier::new(2));
+    let mut handles = Vec::new();
+    for invocation in ["invocation-a", "invocation-b"] {
+        let repo = Arc::clone(&repo);
+        let barrier = Arc::clone(&barrier);
+        let permit_id = permit_id.clone();
+        handles.push(tokio::spawn(async move {
+            barrier.wait().await;
+            (
+                invocation,
+                repo.begin_resize_invocation(
+                    "concurrent-run",
+                    &permit_id,
+                    fence,
+                    "pod-concurrent",
+                    invocation,
+                )
+                .await
+                .unwrap(),
+            )
+        }));
+    }
+    let mut winners = Vec::new();
+    let mut losers = Vec::new();
+    for handle in handles {
+        match handle.await.unwrap() {
+            (id, TransitionBuildPodResizeLifecycleResult::Transitioned(_)) => winners.push(id),
+            (id, TransitionBuildPodResizeLifecycleResult::Rejected) => losers.push(id),
+        }
+    }
+    assert_eq!(
+        winners.len(),
+        1,
+        "exactly one invocation may own a single-row lifecycle; won: {winners:?}"
+    );
+    assert_eq!(losers.len(), 1, "the second claimant must fail closed");
+
+    let row = repo.active("concurrent-run").await.unwrap().unwrap();
+    assert_eq!(row.state, BuildPodPermitState::LiftApplying);
+    assert_eq!(
+        row.resize_invocation_id.as_deref(),
+        Some(winners[0]),
+        "the row must carry the WINNER's invocation, never the loser's"
+    );
+}
+
+/// The write window is exactly one edge: `birth_confirmed -> lift_applying`.
+/// Migration 168's trigger refuses to let any other transition re-key the row,
+/// so a drop or a quarantine cannot silently change ownership underneath a
+/// caller that is mid-sequence.
+#[tokio::test]
+async fn the_invocation_id_may_only_change_on_entry_to_lift_applying() {
+    let db = Database::ephemeral().await.unwrap();
+    seed_runs(&db, &["window-run"]).await;
+    let repo = BuildPodPermitRepository::new(db.clone());
+    let (permit_id, fence) = birth_confirmed(&db, "window-run", "pod-window").await;
+    repo.begin_resize_invocation("window-run", &permit_id, fence, "pod-window", "invocation-a")
+        .await
+        .unwrap();
+
+    // The trigger, not the repository, is the authority. Reach past the
+    // repository's own predicate and try to re-key on a non-lift edge.
+    let direct = sqlx::query(
+        "UPDATE build_pod_permits SET state = 'lifted', resize_invocation_id = 'invocation-b' \
+         WHERE task_run_id = 'window-run'",
+    )
+    .execute(db.pool())
+    .await;
+    let error = direct.expect_err("the trigger must refuse a re-key off the lift edge");
+    assert!(
+        error
+            .to_string()
+            .contains("resize invocation id may only change on entry to lift_applying"),
+        "unexpected error: {error}"
+    );
+    assert_eq!(
+        repo.active("window-run")
+            .await
+            .unwrap()
+            .unwrap()
+            .resize_invocation_id
+            .as_deref(),
+        Some("invocation-a")
+    );
+
+    // And the next invocation DOES get to re-key, once the previous one's drop
+    // has returned the row to `birth_confirmed`. Without that the lifecycle
+    // could serve exactly one invocation per task run, ever.
+    for (from, to) in [
+        (
+            BuildPodPermitState::LiftApplying,
+            BuildPodPermitState::Lifted,
+        ),
+        (
+            BuildPodPermitState::Lifted,
+            BuildPodPermitState::DropRequired,
+        ),
+        (
+            BuildPodPermitState::DropRequired,
+            BuildPodPermitState::DropApplying,
+        ),
+        (
+            BuildPodPermitState::DropApplying,
+            BuildPodPermitState::BirthConfirmed,
+        ),
+    ] {
+        assert!(matches!(
+            repo.transition_resize_lifecycle(
+                "window-run",
+                &permit_id,
+                fence,
+                "pod-window",
+                Some("invocation-a"),
+                from,
+                to,
+            )
+            .await
+            .unwrap(),
+            TransitionBuildPodResizeLifecycleResult::Transitioned(_)
+        ));
+    }
+    let second = repo
+        .begin_resize_invocation("window-run", &permit_id, fence, "pod-window", "invocation-b")
+        .await
+        .unwrap();
+    let TransitionBuildPodResizeLifecycleResult::Transitioned(row) = second else {
+        panic!("the next invocation must be able to claim, got {second:?}");
+    };
+    assert_eq!(row.resize_invocation_id.as_deref(), Some("invocation-b"));
 }

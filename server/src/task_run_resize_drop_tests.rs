@@ -284,10 +284,10 @@ async fn lift(
         .await
         .expect("lift the launcher");
     assert_eq!(
-        cluster.launcher_status_cpu().as_deref(),
-        Some("4"),
+        status_millicores(cluster),
+        Some(LIFTED_MILLICORES),
         "NON-VACUITY: the launcher must actually be lifted before a drop is \
-         asked to bring it back down; the apiserver canonicalises 4000m to 4"
+         asked to bring it back down"
     );
     match permits
         .transition_resize_lifecycle(
@@ -305,6 +305,19 @@ async fn lift(
         TransitionBuildPodResizeLifecycleResult::Transitioned(_) => {}
         other => panic!("unexpected lifted outcome: {other:?}"),
     }
+}
+
+/// The launcher's **init-container** status limit, in millicores.
+///
+/// Millicores, never the Quantity string: the apiserver canonicalises `4000m`
+/// to `4`, and #2861 watched a string comparison report
+/// `never reported 2000m; last observed Some(2000)`.
+fn status_millicores(cluster: &StoredTaskRunPod) -> Option<u64> {
+    cluster.launcher_status_cpu().map(|raw| {
+        djinn_k8s::pod_resize::CpuLimit::parse(&raw)
+            .expect("the launcher reports a parseable quantity")
+            .millis()
+    })
 }
 
 async fn state_of(permits: &BuildPodPermitRepository, task_run_id: &str) -> BuildPodPermitState {
@@ -518,8 +531,8 @@ async fn a_lift_applying_row_left_by_a_dead_process_still_reaches_drop_required(
 async fn a_confirmed_drop_is_read_back_from_init_container_status_in_millicores() {
     let fixture = Fixture::lifted("confirm").await;
     assert_eq!(
-        fixture.cluster.launcher_status_cpu().as_deref(),
-        Some("4"),
+        status_millicores(&fixture.cluster),
+        Some(LIFTED_MILLICORES),
         "the launcher must start this test holding the LIFTED ceiling"
     );
 
@@ -535,17 +548,11 @@ async fn a_confirmed_drop_is_read_back_from_init_container_status_in_millicores(
         }
     );
     // THE ENFORCED FACT, not the label: what the launcher's own init-container
-    // status reports, parsed as millicores because the apiserver canonicalises.
-    let observed = djinn_k8s::pod_resize::CpuLimit::parse(
-        &fixture
-            .cluster
-            .launcher_status_cpu()
-            .expect("launcher reports a limit"),
-    )
-    .expect("a parseable quantity");
+    // status reports, in millicores because the apiserver canonicalises `4000m`
+    // to `4` and a string comparison would report a false mismatch.
     assert_eq!(
-        observed.millis(),
-        BIRTH_CPU_MILLICORES,
+        status_millicores(&fixture.cluster),
+        Some(BIRTH_CPU_MILLICORES),
         "the launcher must actually be back at its birth limit"
     );
     assert_eq!(
@@ -921,8 +928,8 @@ async fn a_terminal_from_a_stale_invocation_is_fenced_and_changes_nothing() {
         "a fenced terminal issues no PATCH"
     );
     assert_eq!(
-        fixture.cluster.launcher_status_cpu().as_deref(),
-        Some("4"),
+        status_millicores(&fixture.cluster),
+        Some(LIFTED_MILLICORES),
         "the live invocation keeps its lifted ceiling"
     );
 }
