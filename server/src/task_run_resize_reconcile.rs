@@ -855,7 +855,10 @@ where
     loop {
         tokio::select! {
             () = cancel.cancelled() => break,
-            _ = ticker.tick() => tick().await,
+            _ = ticker.tick() => {
+                tick().await;
+                break;
+            }
         }
     }
 }

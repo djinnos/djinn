@@ -39,6 +39,33 @@
 //!   `status.initContainerStatuses` millicore rule that runs in the cluster.
 //!   That is the fault-injection seam, and it is the only fake.
 //!
+//! # The one criterion this file does NOT prove, and why it cannot
+//!
+//! Task `r37r`'s acceptance criterion 5 asks for the worker-death scenario
+//! against a LIVE kind cluster. It is not here, and this is a structural
+//! boundary rather than an omission:
+//!
+//! * The reconciler lives in `djinn-server`. Driving a live apiserver from a
+//!   `djinn-server` test requires a `kube::Client`, and `deny.toml` bans a
+//!   direct `k8s-openapi`/`kube` dependency outside `djinn-k8s`, the Kubernetes
+//!   capability owner. That ban is right and this slice does not weaken it.
+//! * The natural fix — a context-pinned surface constructor on
+//!   `djinn_k8s::runtime` so the server test never names `kube` — lands in
+//!   `djinn-k8s/src/runtime.rs`, which `r37r`'s design places on the
+//!   DO-NOT-TOUCH list.
+//! * `djinn-k8s` cannot depend on `djinn-server`, so the test cannot move there
+//!   either.
+//!
+//! What the live half would add over what is here is the KUBELET's actuation.
+//! Everything else in that criterion — the 250ms→2s bounded retry inside a 30s
+//! budget, quarantine on deadline, the UID-fenced DELETE, and releasing the
+//! durable lease only after the exact Pod UID is proven absent — is proven
+//! below through the PRODUCTION `PodResizeClient` and the PRODUCTION
+//! `confirm_launcher_cpu`, against a stored `Pod`. The "no `release_lease` ever
+//! arrives" half is structural here and stronger than an assertion: this file
+//! composes no RPC listener and no `DirectServices` at all, so there is nothing
+//! a worker could have sent a terminal signal to.
+//!
 //! # A safety landmine this file does NOT step on
 //!
 //! Every `KubernetesRuntime` constructor resolves through
