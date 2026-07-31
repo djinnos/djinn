@@ -98,12 +98,20 @@ pub const VOLUME_OWNERSHIP_ON_ROOT_MISMATCH: &str = "fsgroup-on-root-mismatch";
 /// short bursts, so the launcher receives everything the worker does not use.
 /// Node-level fairness is set by the pod's total request, which is unchanged.
 pub const LAUNCHER_CPU_REQUEST: &str = "50m";
+/// [`LAUNCHER_CPU_REQUEST`] in millicores, for the numeric comparison in
+/// [`RenderValidationError::LauncherCpuCeilingBelowRequest`]. The two are
+/// asserted to agree by `launcher_tests::the_launcher_cpu_request_constants_agree`,
+/// so this is a spelling of the same value, not a second source of truth.
+pub const LAUNCHER_CPU_REQUEST_MILLICORES: u32 = 50;
 /// Launcher sidecar memory **request**: also the broker's steady footprint.
 /// The build's peak lives in the limit, not the request — the same
 /// request-is-steady/limit-is-peak shape the worker container already uses.
 pub const LAUNCHER_MEMORY_REQUEST: &str = "64Mi";
 
-// NOTE (task 7deu, defect 1): there is deliberately NO `LAUNCHER_CPU_LIMIT`.
+// NOTE (task 7deu, defect 1): there is deliberately NO unconditional
+// `LAUNCHER_CPU_LIMIT`, and under `leaf-v1` there is no launcher CPU limit at
+// all. Task 4wx3 added one for `resize-v2` ONLY; the history below is why that
+// conditionality is the whole point.
 //
 // This constant used to be "250m", matching goxi's normative resource matrix.
 // It was the single reason the whole feature was a no-op. Under `nsdelegate` the
@@ -117,11 +125,22 @@ pub const LAUNCHER_MEMORY_REQUEST: &str = "64Mi";
 // blind. With the limit removed, the same pod reported `nr_throttled 40/40` on
 // the unleased leaf and 1.995 cores of measured post-lift throughput.
 //
-// The ceiling did not disappear, it moved to where the work is: the invocation
-// leaf's own `cpu.max`, unleased at [`LAUNCHER_UNLEASED_MILLICORES`] and lifted
-// to [`launcher_leased_millicores`]. Removing a container CPU limit also makes
-// the kubelet leave the POD cgroup's `cpu.max` unset, which is required — a pod
-// ceiling would reintroduce exactly the ancestor clamp this removes.
+// Under `leaf-v1` the ceiling did not disappear, it moved to where the work is:
+// the invocation leaf's own `cpu.max`, unleased at
+// [`LAUNCHER_UNLEASED_MILLICORES`] and lifted to [`launcher_leased_millicores`].
+// Removing a container CPU limit also makes the kubelet leave the POD cgroup's
+// `cpu.max` unset, which is required — a pod ceiling would reintroduce exactly
+// the ancestor clamp this removes.
+//
+// Under `resize-v2` the arithmetic inverts, because
+// [`LauncherAuthorityProtocol::launcher_owns_leaf_quota`] is FALSE: the launcher
+// never writes a leaf `cpu.max`, not even `max`. There is therefore no leaf
+// ceiling for a container limit to clamp *below* — the container limit IS the
+// ceiling, and pod resize is what moves it. Rendering it unconditionally would
+// reinstate the measurement above verbatim, which is why
+// [`apply_launcher_cpu_ceiling`] gates on the protocol and why the leaf-v1 arm
+// of `launcher_tests::the_launcher_cpu_ceiling_is_rendered_only_under_resize_v2`
+// asserts the ABSENCE of the key rather than a value.
 
 /// Volume name for the worker↔launcher IPC surface (broker control socket +
 /// worker-private launcher credential). Memory-backed emptyDir, mounted into the
@@ -422,7 +441,7 @@ pub fn launcher_sidecar_container(
             // Sourced from the pod's own declared CPU limit so a brokered build
             // picks exactly the parallelism an unbrokered one would.
             env_var(
-                "DJINN_LAUNCHER_LEASED_MILLICORES",
+                LEASED_MILLICORES_ENV,
                 &launcher_leased_millicores(config).to_string(),
             ),
             // The worker-written, launcher-read-only git config the trust anchor
@@ -450,9 +469,16 @@ pub fn launcher_sidecar_container(
                     Quantity(LAUNCHER_MEMORY_REQUEST.to_string()),
                 ),
             ])),
-            // NO CPU LIMIT — see the note where `LAUNCHER_CPU_LIMIT` used to be.
-            // A limit here becomes an ancestor clamp on every invocation leaf and
-            // silently caps every build at the launcher's own quota.
+            // NO CPU LIMIT HERE — see the note where `LAUNCHER_CPU_LIMIT` used
+            // to be. Under leaf-v1 a limit here becomes an ancestor clamp on
+            // every invocation leaf and silently caps every build at the
+            // launcher's own quota.
+            //
+            // This builder is a pure function of the config and cannot know the
+            // authority protocol, which is a property of the resolved catalog
+            // image. The resize-v2 ceiling is therefore applied at the same
+            // post-render seam that writes [`AUTHORITY_PROTOCOL_ENV`] — see
+            // [`apply_launcher_cpu_ceiling`]. leaf-v1 keeps this shape exactly.
             //
             // The MEMORY limit is the worker's, not a sidecar's: when the
             // launcher is armed every command runs in this container's cgroup,
@@ -472,10 +498,10 @@ pub fn launcher_sidecar_container(
 
 // Rendered CPU quantities live beside this module and are re-exported here,
 // so `crate::launcher::*` remains the single import path.
-use crate::launcher_cpu::parse_cpu_millicores;
 pub use crate::launcher_cpu::{
-    launcher_leased_millicores, retune_launcher_lease, warm_job_millicores,
+    LEASED_MILLICORES_ENV, launcher_leased_millicores, retune_launcher_lease, warm_job_millicores,
 };
+use crate::launcher_cpu::{parse_cpu_millicores, rendered_lease_millicores};
 
 /// Fail-closed render/startup validation for an enforcement task-run.
 ///
@@ -538,6 +564,26 @@ pub enum RenderValidationError {
         container: &'static str,
         env: &'static str,
     },
+    #[error(
+        "the resolved authority protocol is {protocol}, but the rendered `{container}` sidecar \
+         carries no usable {env} value (found: {found}). Under resize-v2 the launcher never writes \
+         a leaf `cpu.max`, so the sidecar's own CPU limit is the ONLY ceiling a brokered build has \
+         and there is nothing left to derive it from. Refused rather than rendering a sidecar \
+         whose builds are bounded only by the node."
+    )]
+    UnresolvableLauncherCpuCeiling {
+        protocol: LauncherAuthorityProtocol,
+        container: &'static str,
+        env: &'static str,
+        found: String,
+    },
+    #[error(
+        "the resize-v2 launcher CPU ceiling {ceiling}m is below the sidecar's own CPU request \
+         {request}. Kubernetes rejects a container whose limit is under its request, so this \
+         renders a Pod that never admits at all rather than a build that merely runs slowly — \
+         refused here, while the number is still a number."
+    )]
+    LauncherCpuCeilingBelowRequest { ceiling: u32, request: &'static str },
 }
 
 /// Decide the protocol a Job must render, from what the resolved catalog image
@@ -580,6 +626,12 @@ pub fn render_authority_protocol(
 /// function of the config — the same split `build_resources::apply_resolved_resources`
 /// already uses for per-project resource overrides.
 ///
+/// It also applies the protocol-conditional launcher CPU ceiling
+/// ([`apply_launcher_cpu_ceiling`]), because that is a second thing the
+/// resolved protocol — and only the resolved protocol — decides about the
+/// sidecar. Keeping the two in one function means a render can never carry the
+/// `resize-v2` env with a `leaf-v1` resource shape, or the reverse.
+///
 /// Fail-closed: in `required` mode a Job with no `cgroup-launcher` container is
 /// an error, not a silent skip. Under `disabled` mode there is no sidecar and no
 /// broker, so there is nothing to agree about and this is a no-op.
@@ -610,7 +662,11 @@ pub fn apply_launcher_authority_protocol(
                 .find(|container| container.name == LAUNCHER_CONTAINER_NAME)
         })
         .ok_or_else(missing)?;
+    // Resolve the ceiling BEFORE mutating anything, so a refusal leaves the
+    // caller's Job exactly as it found it.
+    let ceiling = resolve_launcher_cpu_ceiling(sidecar, protocol)?;
     set_env(sidecar, AUTHORITY_PROTOCOL_ENV, protocol.as_wire());
+    apply_launcher_cpu_ceiling(sidecar, ceiling);
 
     // The worker asserts the SAME value to the broker at READY. Setting it on
     // the sidecar alone would make every armed pod fail its own handshake as
@@ -635,6 +691,79 @@ fn set_env(container: &mut Container, name: &str, value: &str) {
             existing.value_from = None;
         }
         None => env.push(env_var(name, value)),
+    }
+}
+
+/// The launcher sidecar's `limits.cpu`, in millicores, for `protocol` — or
+/// [`None`] when the protocol must render no CPU limit at all.
+///
+/// * **leaf-v1 → `None`.** The launcher owns the leaf's `cpu.max`
+///   ([`LauncherAuthorityProtocol::launcher_owns_leaf_quota`]), so a container
+///   limit here is an ancestor clamp that silently caps every build at the
+///   launcher's own quota. That is task 7deu's defect 1, measured; see the note
+///   where `LAUNCHER_CPU_LIMIT` used to be. This arm exists so that regression
+///   cannot return through the resize-v2 door.
+/// * **resize-v2 → the lease ceiling.** The launcher writes no leaf quota under
+///   this protocol, so nothing else bounds a brokered build; pod resize moves
+///   this limit, and this limit is what it moves.
+///
+/// The value is read back off the rendered sidecar rather than recomputed from
+/// the config, because `build_resources::apply_resolved_resources` runs first
+/// and may have re-pointed the lease at a per-project `cpu_limit` override — see
+/// [`crate::launcher_cpu::rendered_lease_millicores`].
+fn resolve_launcher_cpu_ceiling(
+    sidecar: &Container,
+    protocol: LauncherAuthorityProtocol,
+) -> Result<Option<u32>, RenderValidationError> {
+    if protocol.launcher_owns_leaf_quota() {
+        return Ok(None);
+    }
+    let ceiling = rendered_lease_millicores(sidecar).map_err(|found| {
+        RenderValidationError::UnresolvableLauncherCpuCeiling {
+            protocol,
+            container: LAUNCHER_CONTAINER_NAME,
+            env: LEASED_MILLICORES_ENV,
+            found,
+        }
+    })?;
+    // A limit under the container's own request is not a slow pod, it is a Pod
+    // the apiserver rejects. Catch it here, where the number is still a number
+    // and the failure names the ceiling.
+    if ceiling < LAUNCHER_CPU_REQUEST_MILLICORES {
+        return Err(RenderValidationError::LauncherCpuCeilingBelowRequest {
+            ceiling,
+            request: LAUNCHER_CPU_REQUEST,
+        });
+    }
+    Ok(Some(ceiling))
+}
+
+/// Write (or clear) the launcher sidecar's `limits.cpu`.
+///
+/// Clearing on the [`None`] arm keeps re-application total rather than additive:
+/// applying leaf-v1 over a previously resize-v2 render must leave no stale
+/// clamp behind. The clear never *creates* an empty `resources`/`limits` map, so
+/// the leaf-v1 manifest is byte-identical to one this function never touched.
+/// `requests` and `limits.memory` are not addressed on either arm.
+fn apply_launcher_cpu_ceiling(sidecar: &mut Container, ceiling: Option<u32>) {
+    match ceiling {
+        Some(millicores) => {
+            sidecar
+                .resources
+                .get_or_insert_with(ResourceRequirements::default)
+                .limits
+                .get_or_insert_with(BTreeMap::new)
+                .insert("cpu".to_string(), Quantity(format!("{millicores}m")));
+        }
+        None => {
+            if let Some(limits) = sidecar
+                .resources
+                .as_mut()
+                .and_then(|resources| resources.limits.as_mut())
+            {
+                limits.remove("cpu");
+            }
+        }
     }
 }
 
