@@ -280,9 +280,14 @@ impl Fixture {
 /// What a negative fixture is allowed to change relative to the live render.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Intent {
-    /// One fingerprint entry removed. RBAC rules are fingerprinted by CONTENT,
-    /// so a single-element edit of one rule reads as exactly one removal.
+    /// One fingerprint entry removed, and nothing added. The `pods/resize` rule
+    /// is gone.
     Removed(String),
+    /// Exactly one rule replaced by exactly one other, both under this prefix:
+    /// RBAC rules are fingerprinted by CONTENT, so editing one element of one
+    /// rule removes the old canonical form and adds the new one, and touches
+    /// nothing else in the render.
+    RuleRewritten(String),
     /// Entries added, all beneath this fingerprint prefix, and nothing else
     /// changed or removed anywhere.
     AddedUnder(String),
@@ -445,6 +450,17 @@ fn assert_single_mutation(mutated: &[Value], intent: &Intent) {
                 removed[0]
             );
         }
+        Intent::RuleRewritten(path) => {
+            assert!(changed.is_empty(), "changed paths: {changed:?}");
+            assert_eq!(removed.len(), 1, "removed paths: {removed:?}");
+            assert_eq!(added.len(), 1, "added paths: {added:?}");
+            assert!(
+                removed[0].starts_with(path) && added[0].starts_with(path),
+                "the rewrite left {path:?}: removed {:?}, added {:?}",
+                removed[0],
+                added[0]
+            );
+        }
         Intent::AddedUnder(prefix) => {
             assert!(changed.is_empty(), "changed paths: {changed:?}");
             assert!(removed.is_empty(), "removed paths: {removed:?}");
@@ -484,8 +500,8 @@ fn negative_fixtures() -> Vec<(&'static str, Vec<Value>, Intent)> {
     let binding = with_taskrun_rolebinding(&mut bound);
 
     // A field mutation rewrites the rule's canonical fingerprint wholesale, so
-    // the guard sees it as one removal under the Role's rules — which is
-    // precisely "one rule, and nothing else, is different".
+    // the guard sees one rule leave and one arrive under the Role's rules —
+    // which is precisely "one rule, and nothing else, is different".
     let rules_prefix = format!("Role/{role}/rules[");
     vec![
         (
@@ -496,17 +512,17 @@ fn negative_fixtures() -> Vec<(&'static str, Vec<Value>, Intent)> {
         (
             "verb patch -> get",
             verb,
-            Intent::Removed(rules_prefix.clone()),
+            Intent::RuleRewritten(rules_prefix.clone()),
         ),
         (
             "apiGroup \"\" -> apps",
             group,
-            Intent::Removed(rules_prefix.clone()),
+            Intent::RuleRewritten(rules_prefix.clone()),
         ),
         (
             "resource pods/resize -> pods",
             resource,
-            Intent::Removed(rules_prefix),
+            Intent::RuleRewritten(rules_prefix),
         ),
         (
             "RoleBinding naming the taskrun ServiceAccount",
@@ -617,7 +633,7 @@ fn a_cluster_wide_pods_resize_grant_is_refused() {
 fn an_absent_launcher_ceiling_fails_under_resize_v2_and_passes_under_leaf_v1() {
     let mut refused = Fixture::clean(LauncherAuthorityProtocol::ResizeV2);
     set_ceiling(&mut refused.job, None);
-    refused.expect_blocked(DefectClass::LauncherCpuCeiling, "only ceiling");
+    refused.expect_blocked(DefectClass::LauncherCpuCeiling, "ONLY ceiling");
 
     let mut required_pass = Fixture::clean(LauncherAuthorityProtocol::LeafV1);
     set_ceiling(&mut required_pass.job, None);
@@ -1170,6 +1186,8 @@ fn an_unobservable_drain_fence_is_a_defect() {
     live.expect_blocked(DefectClass::DrainFence, "live task-run Pod(s)");
 }
 
+// SOURCE-GATE BOUNDARY: everything below necessarily names the banned words.
+
 /// **AC8, source gate.** The drain-fence proofs construct a REAL Postgres
 /// database and no `Fake`/`Mock`/`Stub` repository appears anywhere above.
 ///
@@ -1182,10 +1200,11 @@ fn the_drain_fence_proofs_use_a_real_pg_pool_and_no_fake_repository() {
         repo_root().join("server/crates/djinn-k8s/tests/cutover_preflight.rs"),
     )
     .expect("this test file is readable");
-    // Split off this test's own body, which necessarily names the banned words.
+    // Split off this test and its doc comment, which necessarily name the
+    // banned words.
     let body = source
-        .split_once("fn the_drain_fence_proofs_use_a_real_pg_pool")
-        .expect("this test exists")
+        .split_once("// SOURCE-GATE BOUNDARY")
+        .expect("the source-gate boundary marker exists")
         .0;
     for required in [
         "Database::ephemeral()",
@@ -1316,6 +1335,9 @@ fn the_cutover_preflight_lane_is_wired_and_cannot_silently_skip() {
         "DJINN_CUTOVER_EXPECTED_PROOFS",
         "azure/setup-helm@v4",
         "postgres:16",
+        // Without a database URL the driver reports the drain fence
+        // UNOBSERVABLE, and the suite's clean case is never a genuine exit 0.
+        "DJINN_DATABASE_URL:",
     ] {
         assert!(
             job.contains(required),
@@ -1323,6 +1345,22 @@ fn the_cutover_preflight_lane_is_wired_and_cannot_silently_skip() {
              merged, green and never executed"
         );
     }
+
+    // A lane that runs is not a lane that BLOCKS. `deploy/preflight/tests/
+    // cutover-preflight.sh`'s exit code is only a contract if the aggregating
+    // `quality-gate` job fails on it.
+    let aggregator = workflow
+        .split_once("\n  quality-gate:\n")
+        .expect("the aggregating quality-gate job exists")
+        .1;
+    assert!(
+        aggregator.contains("      - cutover-preflight\n"),
+        "the aggregating quality-gate job must `needs: cutover-preflight`"
+    );
+    assert!(
+        aggregator.contains("check cutover-preflight \"$CUTOVER_PREFLIGHT\""),
+        "the aggregating quality-gate job must fail closed on the cutover-preflight lane"
+    );
 
     let declared: usize = workflow
         .split_once("DJINN_CUTOVER_EXPECTED_PROOFS: \"")

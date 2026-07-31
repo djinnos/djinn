@@ -913,6 +913,128 @@ jobs:
         run: bash -c "$CI_RUNNER_DISK_PREFLIGHT"
       - name: Test deploy render-gate contract
         run: bash scripts/test-deploy-contracts.sh deploy/preflight/tests
+  cutover-preflight:
+    name: Cutover Preflight
+    needs: preflight
+    # Same routing as `deploy-render-gate`: this contract's inputs are the chart
+    # and the djinn-k8s crate, and every path that can change either lands in
+    # the router's `rustCore` lane or fails closed into `unknown`.
+    if: needs.preflight.outputs.clippy == 'true' && github.event_name != 'push'
+    runs-on: ubuntu-latest
+    # The deploy contract builds one binary and shells out to helm; the Rust
+    # proofs need a migrated Postgres template. 30 leaves margin for a cold
+    # djinn-k8s chain without hiding a hang.
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: server
+    env:
+      SQLX_OFFLINE: "true"
+      # Number of `#[ignore]`d proofs `tests/cutover_preflight.rs` declares.
+      #
+      # Those proofs are ignored because they need `helm` (for the live chart
+      # render every fixture is derived from) and a real Postgres (for the drain
+      # fence) — neither of which the ordinary sharded lane has. An `#[ignore]`
+      # nobody runs is precisely the "merged, green, unreachable" defect this
+      # task exists to remove, so the run below fails if fewer than this many
+      # actually execute, and the suite's always-on
+      # `the_cutover_preflight_lane_is_wired_and_cannot_silently_skip` reads
+      # this file back and fails if this declaration, the job, or the
+      # `--run-ignored all` invocation disappears.
+      DJINN_CUTOVER_EXPECTED_PROOFS: "17"
+      # The drain-fence proofs open template-cloned per-test databases here.
+      DJINN_TEST_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5433/postgres
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: djinn
+        ports:
+          - 5433:5432
+        options: --health-cmd="pg_isready -U postgres" --health-interval=5s --health-timeout=3s --health-retries=20
+    steps:
+      - uses: actions/checkout@v4
+      # Pinned to the same v3.12.3 deploy-render-gate installs — two lanes
+      # rendering the same chart on different helm majors is a contract that
+      # means nothing.
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.12.3
+      - run: rustup toolchain install
+        working-directory: server
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: server
+          shared-key: server-test
+          cache-on-failure: true
+          cache-all-crates: true
+          save-if: false
+        id: rust-cache
+      - name: Log cache family and restore status
+        run: |-
+          echo "cache-family=server-test"
+          echo "shared-key=server-test"
+          echo "runner-os=${{ runner.os }}"
+          echo "rustc=$(rustc --version || echo 'unknown')"
+          echo "cache-hit=${{ steps.rust-cache.outputs.cache-hit }}"
+          echo "::notice::cache-family=server-test shared-key=server-test cache-hit=${{ steps.rust-cache.outputs.cache-hit }}"
+      - name: Runner disk headroom preflight
+        # Body/thresholds: CI_RUNNER_DISK_PREFLIGHT at the top of this file.
+        run: bash -c "$CI_RUNNER_DISK_PREFLIGHT"
+      - name: Apply migrations
+        env:
+          DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5433/djinn
+        run: |
+          until pg_isready -h 127.0.0.1 -p 5433 -U postgres >/dev/null 2>&1; do sleep 1; done
+          SQLX_OFFLINE=true \
+            DJINN_MIGRATE_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5433/djinn \
+            DJINN_MIGRATE_OPERATOR_USER_ID=00000000-0000-7000-8000-000000000002 \
+            DJINN_MIGRATE_OPERATOR_GITHUB_ID=9000000002 \
+            DJINN_MIGRATE_OPERATOR_LOGIN=djinn-ci-migration-operator \
+            cargo test -p djinn-db --test apply_migrations -- --ignored --nocapture
+      - name: Build Postgres test template
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h 127.0.0.1 -p 5433 -U postgres -d postgres -v ON_ERROR_STOP=1 -c "DROP DATABASE IF EXISTS djinn_test_template"
+          psql -h 127.0.0.1 -p 5433 -U postgres -d postgres -v ON_ERROR_STOP=1 -c "CREATE DATABASE djinn_test_template"
+          SQLX_OFFLINE=true DJINN_TEST_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5433/postgres cargo test -p djinn-db --test setup_test_template -- --ignored
+          psql -h 127.0.0.1 -p 5433 -U postgres -d postgres -v ON_ERROR_STOP=1 -c "UPDATE pg_database SET datistemplate = TRUE WHERE datname = 'djinn_test_template'"
+      - uses: taiki-e/install-action@nextest
+      - name: Prove the cutover preflight against a live render and real Postgres
+        run: |
+          set -euo pipefail
+          # `--run-ignored all` runs the ignored proofs ALONGSIDE the always-on
+          # guards, so the wiring guard and the source gates are covered by the
+          # same invocation. The executed count is compared against the
+          # declaration above: a lane that quietly runs zero proofs must fail
+          # rather than look green.
+          cargo nextest run -p djinn-k8s --test cutover_preflight \
+            --run-ignored all --no-fail-fast --message-format libtest-json \
+            > "$RUNNER_TEMP/cutover.json" 2> "$RUNNER_TEMP/cutover.log" || {
+            cat "$RUNNER_TEMP/cutover.log"
+            exit 1
+          }
+          cat "$RUNNER_TEMP/cutover.log"
+          executed=$(grep -c '"type": *"test", *"event": *"ok"' "$RUNNER_TEMP/cutover.json" || true)
+          echo "::notice::cutover-preflight proofs executed=$executed expected>=$DJINN_CUTOVER_EXPECTED_PROOFS"
+          if [ "$executed" -lt "$DJINN_CUTOVER_EXPECTED_PROOFS" ]; then
+            echo "::error title=Cutover preflight proofs did not run::executed $executed, expected at least $DJINN_CUTOVER_EXPECTED_PROOFS. An ignored proof nobody runs is the exact defect this lane exists to prevent."
+            exit 1
+          fi
+        env:
+          NEXTEST_EXPERIMENTAL_LIBTEST_JSON: "1"
+      - name: Test the deploy-time cutover preflight driver
+        # The exit code of deploy/preflight/cutover-preflight.sh is the whole
+        # contract, and this suite is what asserts it. DJINN_DATABASE_URL is
+        # supplied so the drain fence is READ rather than reported unobservable,
+        # which is the only configuration in which a clean verdict is a genuine
+        # exit 0.
+        working-directory: ${{ github.workspace }}
+        env:
+          DJINN_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5433/djinn
+        run: bash deploy/preflight/tests/cutover-preflight.sh
   launcher-kernel-boundary:
     name: Launcher Kernel Boundary
     needs: preflight
@@ -2301,6 +2423,7 @@ jobs:
       - server-guards
       - server-clippy
       - deploy-render-gate
+      - cutover-preflight
       - server-aarch64-check
       - nextest-plan
       - server-test
@@ -2325,6 +2448,10 @@ jobs:
           CLIPPY: ${{ needs.preflight.outputs.clippy }}:${{ needs.server-clippy.result }}
           # Routed by the same output as clippy — see the job's own comment.
           RENDER_GATE: ${{ needs.preflight.outputs.clippy }}:${{ needs.deploy-render-gate.result }}
+          # Routed by the same output as clippy — see the job's own comment.
+          # Present here so `deploy/preflight/cutover-preflight.sh`'s exit code
+          # is a merge-blocking contract rather than a lane nobody reads.
+          CUTOVER_PREFLIGHT: ${{ needs.preflight.outputs.clippy }}:${{ needs.cutover-preflight.result }}
           AARCH64: ${{ needs.preflight.outputs.aarch64 }}:${{ needs.server-aarch64-check.result }}
           SERVER_TEST_PLAN: ${{ needs.preflight.outputs.serverTest }}:${{ needs.nextest-plan.result }}
           SERVER_TEST_SHARDS: ${{ needs.preflight.outputs.serverTest }}:${{ needs.server-test.result }}
@@ -2345,7 +2472,8 @@ jobs:
             echo "lane $lane selected=$selected result=$result"; return 1
           }
           check server-guards "$GUARDS"; check clippy "$CLIPPY"
-          check deploy-render-gate "$RENDER_GATE"; check aarch64 "$AARCH64"
+          check deploy-render-gate "$RENDER_GATE"; check cutover-preflight "$CUTOVER_PREFLIGHT"
+          check aarch64 "$AARCH64"
           check server-test-plan "$SERVER_TEST_PLAN"; check server-test-shards "$SERVER_TEST_SHARDS"; check server-test-timing "$SERVER_TEST_TIMING"
           check sqlx-freshness "$SQLX"; check memory-eval "$MEMORY"
           check local-dev-contracts "$TILT_CONTRACTS"; check qa-smoke "$QA_SMOKE"; check ui "$UI"
