@@ -36,13 +36,13 @@
 //!
 //! WHY THE LIVE HALF DRIVES `kubectl` AND NOT `kube::Client`
 //! ---------------------------------------------------------
-//! Because `kube::Client` does not currently work in this workspace's test
-//! binaries at all, and finding that out is itself one of this task's results.
+//! Originally, because `kube::Client` did not work in this workspace's test
+//! binaries at all — finding that out was one of this task's results.
 //!
 //! `workspace-hack` unifies `rustls` 0.23 with BOTH the `ring` and the
-//! `aws-lc-rs` providers enabled, and nothing in `server/crates` ever calls
-//! `CryptoProvider::install_default()`. The first TLS handshake therefore
-//! panics:
+//! `aws-lc-rs` providers enabled, and at the time nothing in a test binary
+//! called `CryptoProvider::install_default()`. The first TLS handshake
+//! therefore panicked:
 //!
 //! ```text
 //! Could not automatically determine the process-level CryptoProvider from
@@ -50,21 +50,26 @@
 //! ```
 //!
 //! MEASURED 2026-07-30: `DJINN_TEST_KIND=1 cargo test -p djinn-k8s --test
-//! kind_smoke -- --ignored` panics exactly there, against a live kind cluster,
-//! before its first API call. The file 6knv points at as the pattern to mirror
-//! is not merely un-run by CI — it is UNRUNNABLE, and has been silently so.
-//! That is the "harness that could not execute" failure class, found again.
+//! kind_smoke -- --ignored` panicked exactly there, against a live kind
+//! cluster, before its first API call. The file 6knv points at as the pattern
+//! to mirror was not merely un-run by CI — it was UNRUNNABLE, and had been
+//! silently so. That is the "harness that could not execute" failure class,
+//! found again.
 //!
-//! Fixing it means either installing a provider (a new dev-dependency, hence
-//! `cargo hakari generate`, hence editing `workspace-hack` — shared files this
-//! task must not touch while other agents are in the same crates) or narrowing
-//! the feature unification. Either is a real change with a real blast radius
-//! and belongs in its own PR. So this harness takes the route that needs
-//! neither: every live assertion below reads or writes through
-//! `kubectl --context kind-djinn-kueue-harness`, which is the same pinned-context
-//! discipline `deploy/kueue/zero-capture-gate.sh` and `deploy/kueue/preflight.sh`
-//! already use, and which cannot silently start targeting a cluster this
-//! harness did not create.
+//! RESOLVED 2026-07-31 by task `d2ae`: `tests/support/mod.rs` installs the
+//! `ring` provider explicitly, `kind_smoke.rs` uses it, and a `kube::Client`
+//! now builds in a djinn-k8s test binary. No dev-dependency was needed —
+//! `djinn-k8s` already carries a dev-only `rustls`, so `workspace-hack` and
+//! `cargo hakari generate` stayed untouched.
+//!
+//! This file still drives `kubectl` anyway, and deliberately: the reason that
+//! survives is pinned-context discipline, not the provider. Every live
+//! assertion below reads or writes through
+//! `kubectl --context kind-djinn-kueue-harness`, the same discipline
+//! `deploy/kueue/zero-capture-gate.sh` and `deploy/kueue/preflight.sh` already
+//! use, and which cannot silently start targeting a cluster this harness did
+//! not create. A future rewrite onto `kube::Client` is now possible but must
+//! carry an equivalent guard — see `kind_smoke.rs`'s loopback check.
 //!
 //! The objects still come from the REAL renderer: `build_task_run_job` produces
 //! the Job, it is serialized and handed to the API server unmodified, and what
