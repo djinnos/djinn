@@ -215,6 +215,28 @@ pub trait SlotToolDispatcher: Send + Sync + 'static {
         rendered: &str,
         preview_chars: usize,
     ) -> String;
+    /// Tell the host that `rendered` — a result it produced and that the
+    /// dispatch path already returned — has just been replaced by an
+    /// externalized stub, so `rendered` will never reach the model.
+    ///
+    /// The host records per-call bookkeeping while it produces a result; the
+    /// worker read-coverage record is the one that matters, because a later
+    /// edit is gated on it. That record is written inside the tool handler,
+    /// which cannot see the turn-level budget applied here, so without this
+    /// notification the host would keep vouching for a payload the model never
+    /// received. Hosts that keep no such bookkeeping do nothing.
+    ///
+    /// Called once per externalized result, after the stub has replaced the
+    /// content and before the results become transcript blocks.
+    ///
+    /// Deliberately has **no default implementation**: a silent default would
+    /// let a new host reintroduce that lie without a compile error.
+    fn note_result_externalized<'a>(
+        &'a self,
+        tool_name: &'a str,
+        rendered: &'a str,
+        worktree_path: &'a std::path::Path,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
     /// Durably preserve inline results before compaction mutates them.
     ///
     /// This additive seam defaults to a no-op so existing host dispatchers stay

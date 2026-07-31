@@ -79,6 +79,7 @@ pub(crate) use file_mode::call_set_file_mode;
 pub(crate) use task_admin::call_task_kill_session;
 pub(crate) use workspace::{
     call_apply_patch, call_code_search, call_edit, call_read, call_shell, call_write,
+    downgrade_externalized_read_coverage,
 };
 
 // Re-export task_epic functions used by the local fallback dispatch.

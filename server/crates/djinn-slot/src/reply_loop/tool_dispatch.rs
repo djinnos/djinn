@@ -528,7 +528,7 @@ pub(super) async fn collect_tool_results(
     // largest shrinking tool-result candidates until the projected inline-char
     // total fits the configured budget or no candidate can shrink below the
     // configured preview floor.
-    super::turn_budget::apply_turn_inline_budget_pass(&mut collected, ctx);
+    super::turn_budget::apply_turn_inline_budget_pass(&mut collected, ctx).await;
     collected
         .into_iter()
         .map(CollectedToolResult::into_content_block)

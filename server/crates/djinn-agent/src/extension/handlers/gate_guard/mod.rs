@@ -185,6 +185,7 @@ mod tests {
     }
 
     mod edit_tests;
+    mod externalized_read_tests;
     mod patch_tests;
     mod write_tests;
 }
