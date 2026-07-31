@@ -511,6 +511,10 @@ fn guard_the_source_admits_no_forbidden_shortcut() {
     );
     // Assembled from halves for the same reason the status token above is: a
     // gate that spelled its own forbidden strings would always find them.
+    //
+    // Code only, and hoisted out of the loop: the module docs must stay free to
+    // name a burner while explaining why it is forbidden.
+    let suite_code = rust_code(source);
     for (head, tail) in [
         ("while :", "; do"),
         ("dd if=", "/dev/zero"),
@@ -520,7 +524,7 @@ fn guard_the_source_admits_no_forbidden_shortcut() {
     ] {
         let burner = format!("{head}{tail}");
         assert!(
-            !rust_code(&source).contains(burner.as_str()),
+            !suite_code.contains(burner.as_str()),
             "the suite contains the synthetic burner `{burner}`; the measured workload is the probe's brokered `sha256sum` and nothing else"
         );
     }
