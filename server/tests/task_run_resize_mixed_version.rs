@@ -2445,7 +2445,11 @@ impl TaskRunPodPlane for DrainedPodPlane {
         Ok(())
     }
 
-    async fn resize_launcher_cpu(&self, _task_run_id: &str, _millicores: u64) -> Result<(), String> {
+    async fn resize_launcher_cpu(
+        &self,
+        _task_run_id: &str,
+        _millicores: u64,
+    ) -> Result<(), String> {
         self.resizes.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
@@ -2592,7 +2596,12 @@ async fn seed_catalog_image(db: &Database, class: ImageClass) -> Image {
     // reason to make a fixture live on that edge.
     let id = format!("img-{}", uuid::Uuid::now_v7().simple());
     images
-        .create(&id, &format!("resize-matrix-{}", class.as_str()), None, "{}")
+        .create(
+            &id,
+            &format!("resize-matrix-{}", class.as_str()),
+            None,
+            "{}",
+        )
         .await
         .expect("seed a catalog image");
     images
@@ -2604,7 +2613,11 @@ async fn seed_catalog_image(db: &Database, class: ImageClass) -> Image {
         )
         .await
         .expect("mark the seeded image ready");
-    images.get(&id).await.expect("read it back").expect("it exists")
+    images
+        .get(&id)
+        .await
+        .expect("read it back")
+        .expect("it exists")
 }
 
 /// Walk the driver to the point where the drain proof is the next step, and
@@ -2874,7 +2887,11 @@ async fn neither_flip_proceeds_with_a_live_permit_row() {
             "{label}: the flip must advance the epoch, got {flipped} from {epoch}",
         );
         assert_eq!(
-            (pods.creations(), pods.resizes(), rollout.dispatches_admitted_while_paused()),
+            (
+                pods.creations(),
+                pods.resizes(),
+                rollout.dispatches_admitted_while_paused()
+            ),
             (0, 0, 0),
             "{label}: the cutover must create no Pod and issue no pods/resize PATCH",
         );
@@ -3200,7 +3217,9 @@ fn the_cutover_preflight_gates_the_flip_and_one_defect_class_refuses_it() {
         ))
         .expect("a cleared gate must let the driver flip");
     assert!(
-        rollout.journal().contains(&RolloutStep::AuthorityModeFlipped),
+        rollout
+            .journal()
+            .contains(&RolloutStep::AuthorityModeFlipped),
         "the flip must be journalled: {:?}",
         rollout.journal(),
     );
@@ -3297,7 +3316,11 @@ fn the_cutover_preflight_gates_the_flip_and_one_defect_class_refuses_it() {
     assert_eq!(rows[0].pod_uid.as_deref(), Some(pod_uid.as_str()));
 
     assert_eq!(
-        (pods.creations(), rollback_pods.creations(), fence_pods.creations()),
+        (
+            pods.creations(),
+            rollback_pods.creations(),
+            fence_pods.creations()
+        ),
         (0, 0, 0),
         "no cutover in this test may materialise a Pod",
     );
@@ -3460,7 +3483,9 @@ fn a_live_pod_on_the_cluster_blocks_the_flip() {
         "neither the gate nor the driver may let this flip through",
     );
     assert!(
-        !rollout.journal().contains(&RolloutStep::AuthorityModeFlipped),
+        !rollout
+            .journal()
+            .contains(&RolloutStep::AuthorityModeFlipped),
         "a blocked cutover must never journal a flip: {:?}",
         rollout.journal(),
     );
