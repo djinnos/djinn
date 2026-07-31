@@ -48,10 +48,17 @@ use crate::resize_authorization::{PodResizeApplier, ResizeAuthority};
 use crate::resize_lift::{LauncherResizeSurface, ResizeLift};
 
 const CONFIGURED_CAP: i64 = 9;
-/// `DJINN_LAUNCHER_LEASED_MILLICORES` as the default render sets it.
-const CONFIGURED_LEASED: i64 = 4_000;
+/// `DJINN_LAUNCHER_LEASED_MILLICORES` as the DEPLOYMENT DEFAULT render sets it.
+///
+/// `gvix` removed this from the lift's inputs entirely — no CPU quantity
+/// reaches `ResizeAuthority` from process configuration any more. It survives
+/// as the number the per-Pod ceilings below are placed on either side of, which
+/// is what makes "the Pod's own admitted value" distinguishable from "the
+/// fleet-wide default" in the assertions.
+const DEPLOYMENT_DEFAULT_LEASED: u64 = 4_000;
 /// What the fixture Pod was admitted with. Deliberately BELOW
-/// [`CONFIGURED_LEASED`] so the clamp has something to bite on.
+/// [`DEPLOYMENT_DEFAULT_LEASED`] so a target taken from the default would be a
+/// visibly different number.
 const ADMITTED_CEILING: u64 = 2_500;
 /// `djinn_server::task_run_resize_bootstrap::BIRTH_CPU_MILLICORES`. Restated
 /// rather than imported because `djinn-server` depends on this crate, not the
@@ -174,7 +181,6 @@ impl Fixture {
             Arc::clone(&leases),
             Arc::clone(&permits),
             lift,
-            CONFIGURED_LEASED,
             Arc::clone(&applier) as Arc<dyn PodResizeApplier>,
         ));
         let service = Arc::new(
@@ -829,20 +835,23 @@ async fn twenty_lift_cycles_leave_requests_qos_and_the_container_untouched() {
     );
 }
 
-// ── AC6 / AC7: the clamp is the effective bound, and the CEILING comes from
+// ── AC6 / AC7: the admitted ceiling is the effective bound, and it comes from
 //              the write-once row ──────────────────────────────────────────
 
 /// **ACCEPTANCE CRITERION 6, cluster-free half.**
 ///
-/// The process is configured to lift to 4000m; the Pod was admitted at 2500m.
-/// The value that ends up in `status.initContainerStatuses` must be the
-/// CEILING, and **zero PATCH bodies** may carry a value above it — measured on
+/// The deployment default is 4000m; this Pod was admitted at 2500m. The value
+/// that ends up in `status.initContainerStatuses` must be that Pod's OWN
+/// ceiling, and **zero PATCH bodies** may carry a value above it — measured on
 /// the bodies actually sent, parsed back through `CpuLimit` so the apiserver's
 /// canonicalisation cannot disguise an above-ceiling request.
 ///
-/// NAMED FAILING MUTATION: delete the `.min(ceiling)` in
-/// `resize_authorization::clamp` and the above-ceiling body counter becomes 1
-/// (a 4000m body against a 2500m ceiling).
+/// NAMED FAILING MUTATION: substitute the deployment default for
+/// `identity.admitted_cpu_millicores` in `resize_authorization::resolve_target`
+/// and the above-ceiling body counter becomes 1 (a 4000m body against a 2500m
+/// ceiling). The clamp that would otherwise catch such a body has moved to
+/// `resize_lift::clamp_to_admitted_ceiling`, whose own mutation is
+/// `an_intent_above_its_own_ceiling_still_patches_at_the_ceiling`.
 ///
 /// LIVE-CLUSTER GAP, stated rather than papered over: the criterion also asks
 /// for a companion control that issues the same oversubscribed value DIRECTLY
@@ -853,9 +862,9 @@ async fn twenty_lift_cycles_leave_requests_qos_and_the_container_untouched() {
 async fn the_clamp_is_the_effective_bound_measured_on_the_patch_bodies() {
     const {
         assert!(
-            CONFIGURED_LEASED as u64 > ADMITTED_CEILING,
-            "the configured lift must exceed the admitted ceiling, or this test \
-             cannot distinguish a clamp from a passthrough"
+            DEPLOYMENT_DEFAULT_LEASED > ADMITTED_CEILING,
+            "the deployment default must exceed the admitted ceiling, or this \
+             test cannot distinguish the two sources"
         );
     }
     let fixture = Fixture::armed(healthy_pod(), NO_WAIT).await;
@@ -880,39 +889,48 @@ async fn the_clamp_is_the_effective_bound_measured_on_the_patch_bodies() {
     );
 }
 
-/// **ACCEPTANCE CRITERION 7 — the ceiling's PROVENANCE.**
+/// **ACCEPTANCE CRITERION 7, both halves — and `gvix`'s criterion 1.**
 ///
 /// A Pod rendered with a per-project `build_resources.task.cpu_limit` override
-/// is admitted with a launcher ceiling ABOVE the deployment default. The bound
-/// the lift is clamped against must be that Pod's own captured value, not the
-/// process's `launcher_leased_millicores`.
+/// is admitted with a launcher ceiling ABOVE the deployment default. Two things
+/// must hold, and `0ppk-1a` only delivered the first:
 ///
-/// NAMED FAILING MUTATION: recompute the ceiling in `resize_authorization::clamp`
-/// from the process's configured value instead of
-/// `identity.admitted_cpu_millicores`, and `intent.admitted_cpu_millicores` here
-/// reads 4000 instead of 8000 — this fails. (The clamped *target* is 4000 either
-/// way, which is exactly why this assertion is on the carried ceiling: it is the
-/// only place the two implementations differ.)
+/// * **PROVENANCE.** The bound must be that Pod's own captured value, not the
+///   process's `launcher_leased_millicores`.
+/// * **BEHAVIOUR.** The launcher must actually END UP at 8000m. The override
+///   raised the lease the Pod's own launcher hands out; a lift that stopped at
+///   the 4000m default would strand half the CPU the project configured —
+///   7deu's ancestor clamp, re-entered through the override door.
 ///
-/// HONEST LIMIT, and it is a real one: with the shipped
-/// `min(configured, admitted)` clamp, an override Pod admitted at 8000m still
-/// lifts only to the deployment default of 4000m — it does NOT lift to its own
-/// rendered lease. Satisfying that literally requires the target to be
-/// `admitted` rather than `min(configured, admitted)`, which would contradict
-/// criterion 6's premise that a lift can be "configured ABOVE the captured
-/// ceiling". See the PR body; the clamp is left exactly as `0ppk-1a` shipped it
-/// rather than redesigned here.
+/// The second half is asserted on `status.initContainerStatuses` — the only
+/// field that confirms a resize — and on the PATCH bodies actually sent, in
+/// MILLICORES. String comparison would not do: `#2861` observed the apiserver
+/// canonicalise `2000m` to `2`.
+///
+/// NAMED FAILING MUTATIONS, either of which must break this test:
+/// * Substitute the deployment default for `identity.admitted_cpu_millicores`
+///   in `resize_authorization::resolve_target` — the carried bound reads 4000.
+/// * Restore `0ppk-1a`'s clamp, `ceiling.min(deployment_default)` — the target,
+///   the PATCH bodies and the confirmed status all read 4000 against an 8000m
+///   ceiling.
 #[tokio::test]
-async fn the_ceiling_comes_from_the_write_once_row_not_the_deployment_default() {
+async fn an_override_pod_lifts_to_its_own_admitted_ceiling() {
     const OVERRIDE_CEILING: u64 = 8_000;
     const {
         assert!(
-            OVERRIDE_CEILING > CONFIGURED_LEASED as u64,
+            OVERRIDE_CEILING > DEPLOYMENT_DEFAULT_LEASED,
             "the per-project override must RAISE the Pod's ceiling above the \
              deployment default, or there is no provenance to distinguish"
         );
     }
     let fixture = Fixture::armed(pod_admitted_at(OVERRIDE_CEILING), NO_WAIT).await;
+    assert_eq!(
+        fixture.pod.launcher_status_cpu().as_deref(),
+        Some(format!("{BIRTH_MILLICORES}m").as_str()),
+        "precondition: the launcher sits at its birth limit, so reaching 8000m \
+         is something the lift had to DO"
+    );
+
     let result = fixture.lift().await;
     assert!(matches!(result, LeaseResult::Status(_)), "{result:?}");
 
@@ -925,8 +943,117 @@ async fn the_ceiling_comes_from_the_write_once_row_not_the_deployment_default() 
          means the ceiling was recomputed from the deployment default, which \
          clamps every per-project-override Pod below its own rendered lease"
     );
+    assert_eq!(
+        intents[0].target_millicores,
+        i64::try_from(OVERRIDE_CEILING).unwrap(),
+        "AND THE TARGET IS THAT CEILING. Reading 4000 here is `0ppk-1a`'s \
+         min() against the deployment default coming back — the AC6/AC7 \
+         contradiction `gvix` exists to resolve"
+    );
+    assert_eq!(
+        fixture.pod.patched_cpu_millicores(),
+        vec![OVERRIDE_CEILING],
+        "the PATCH body sent to the apiserver carries the override, in \
+         millicores"
+    );
+    assert_eq!(
+        fixture.pod.launcher_status_cpu().as_deref(),
+        Some(format!("{OVERRIDE_CEILING}m").as_str()),
+        "and the launcher's INIT-container status — the only field that \
+         confirms a resize — must have MOVED from {BIRTH_MILLICORES}m to \
+         {OVERRIDE_CEILING}m, not to the 4000m default"
+    );
+    assert_eq!(
+        fixture.permit_state().await,
+        BuildPodPermitState::Lifted,
+        "a confirmed lift advances the durable lifecycle to `lifted`"
+    );
+}
+
+/// **`0ppk-1a` ACCEPTANCE CRITERION 2, relocated to the site that sends the
+/// PATCH.**
+///
+/// `gvix` removed the deployment default from the target derivation, so
+/// `resize_authorization` can no longer produce an over-ceiling target at all.
+/// That must not mean the over-ceiling protection stopped being tested — so it
+/// is exercised where it now lives: an intent is built BY HAND carrying a
+/// target above its own `admitted_cpu_millicores` and handed straight to the
+/// real [`ResizeLift`]. [`PodResizeIntent`] is a `pub` struct of `pub` fields,
+/// so this is not a hypothetical caller.
+///
+/// Zero PATCH bodies above the ceiling, measured on the bodies actually sent
+/// and parsed back through `CpuLimit`.
+///
+/// NAMED FAILING MUTATION: replace the `.min(...)` in
+/// `resize_lift::clamp_to_admitted_ceiling` with `intent.target_millicores`,
+/// and the above-ceiling body counter becomes 1 — a 9999m body against a 2500m
+/// ceiling.
+#[tokio::test]
+async fn an_intent_above_its_own_ceiling_still_patches_at_the_ceiling() {
+    const OVER_CEILING: i64 = 9_999;
+    const {
+        assert!(
+            OVER_CEILING as u64 > ADMITTED_CEILING,
+            "the hand-built target must exceed the ceiling, or the clamp has \
+             nothing to bite on"
+        );
+    }
+    let fixture = Fixture::armed(healthy_pod(), NO_WAIT).await;
+    let permit = fixture
+        .permits
+        .active(RUN)
+        .await
+        .expect("the permit is readable")
+        .expect("the permit exists");
+    let identity = permit
+        .resize_identity
+        .clone()
+        .expect("the fixture captured a resize identity");
+    assert_eq!(
+        permit.state,
+        BuildPodPermitState::BirthConfirmed,
+        "precondition: the lift starts from birth_confirmed"
+    );
+
+    // Every coordinate is the durable permit's; only the target is forged.
+    let intent = crate::resize_authorization::PodResizeIntent {
+        task_run_id: RUN.into(),
+        invocation_id: INVOCATION.into(),
+        permit_id: permit.permit_id.clone(),
+        fencing_token: permit.fencing_token,
+        permit_state: permit.state,
+        pod_namespace: identity.pod_namespace.clone(),
+        pod_name: identity.pod_name.clone(),
+        pod_uid: identity.pod_uid.clone(),
+        launcher_container_name: identity.launcher_container_name.clone(),
+        launcher_container_id: identity.launcher_container_id.clone(),
+        effective_launcher_protocol: identity
+            .effective_launcher_protocol
+            .parse()
+            .expect("the fixture renders a known protocol"),
+        target_millicores: OVER_CEILING,
+        admitted_cpu_millicores: identity.admitted_cpu_millicores,
+    };
+
+    let applied = fixture.applier.inner.apply(&intent).await;
     assert!(
-        intents[0].target_millicores <= intents[0].admitted_cpu_millicores,
-        "and the target never exceeds the bound it was clamped against"
+        applied.is_ok(),
+        "the clamped lift still confirms: {applied:?}"
+    );
+
+    let bodies = fixture.pod.patched_cpu_millicores();
+    assert!(!bodies.is_empty(), "the lift must actually have patched");
+    assert_eq!(
+        bodies
+            .iter()
+            .filter(|millis| **millis > ADMITTED_CEILING)
+            .count(),
+        0,
+        "ZERO PATCH bodies above the admitted ceiling; observed {bodies:?}"
+    );
+    assert_eq!(
+        fixture.pod.launcher_status_cpu().as_deref(),
+        Some(format!("{ADMITTED_CEILING}m").as_str()),
+        "and the launcher ends up holding the CEILING, not the forged 9999m"
     );
 }

@@ -39,14 +39,24 @@ use crate::resize_authorization::{
 /// participates in an authorization assertion.
 const CONFIGURED_CAP: i64 = 9;
 
-/// `DJINN_LAUNCHER_LEASED_MILLICORES` as the default render sets it.
-const CONFIGURED_LEASED: i64 = 4_000;
+/// `DJINN_LAUNCHER_LEASED_MILLICORES` as the DEPLOYMENT DEFAULT render sets it.
+///
+/// No longer an input to the authority — `gvix` deleted that parameter — but
+/// still the number the per-Pod assertions below are meaningful *against*: a
+/// ceiling on either side of it is what tells "the Pod's own admitted value"
+/// apart from "the fleet-wide default".
+const DEPLOYMENT_DEFAULT_LEASED: i64 = 4_000;
 
 /// The ceiling `g8jk-3` captured from the STORED Pod. Deliberately BELOW
-/// [`CONFIGURED_LEASED`] — a mutating webhook shrank what was rendered — so the
-/// clamp has something to bite on and an unclamped target is a different number
-/// rather than a coincidence.
+/// [`DEPLOYMENT_DEFAULT_LEASED`] — a mutating webhook shrank what was rendered.
 const ADMITTED_CEILING: i64 = 2_500;
+
+/// A Pod whose per-project `build_resources.task.cpu_limit` override raised its
+/// rendered launcher lease ABOVE the deployment default. `retune_launcher_lease`
+/// re-points `DJINN_LAUNCHER_LEASED_MILLICORES` at the override and
+/// `resolve_launcher_cpu_ceiling` reads it back off the rendered sidecar, so
+/// this is the ceiling such a Pod is admitted with.
+const OVERRIDE_CEILING: i64 = 8_000;
 
 const OWNER_RUN: &str = "01983f00-0000-7000-8000-00000000a001";
 const OWNER_TASK: &str = "01983f00-0000-7000-8000-00000000b001";
@@ -159,7 +169,6 @@ impl Fixture {
             Arc::clone(&leases),
             Arc::clone(&permits),
             lift,
-            CONFIGURED_LEASED,
             Arc::clone(&applier) as Arc<dyn crate::resize_authorization::PodResizeApplier>,
         ));
 
@@ -414,18 +423,19 @@ async fn a_mismatched_fencing_token_is_denied_with_zero_kubernetes_calls() {
     assert_eq!(fixture.applier.calls(), 0, "ZERO Kubernetes calls");
 }
 
-// ─── AC2: the ceiling clamp ─────────────────────────────────────────────────
+// ─── AC2 / gvix: the target is the Pod's OWN admitted ceiling ───────────────
 
-/// **ACCEPTANCE CRITERION 2.**
+/// **`0ppk-1a` ACCEPTANCE CRITERION 2** — a Pod a webhook shrank below the
+/// deployment default lifts to what it was actually admitted with, and no
+/// intent may ask for more than the ceiling it is bounded by.
 ///
-/// The process is configured to lift to 4000m; the Pod was admitted at 2500m.
-/// The target must be the stored ceiling, and NO intent may ask for more than
-/// the ceiling it was clamped against.
-///
-/// NON-VACUITY (run, do not assume): delete `.min(ceiling)` in
-/// `resize_authorization::clamp` and `intents_above_ceiling()` becomes 1.
+/// NON-VACUITY (run, do not assume): substitute the deployment default for
+/// `identity.admitted_cpu_millicores` in `resize_authorization::resolve_target`
+/// — the mutation `gvix`'s criterion 3 names — and the target here reads 4000
+/// against a 2500m ceiling, so both assertions fail and
+/// `intents_above_ceiling()` becomes 1.
 #[tokio::test]
-async fn a_configured_lift_above_the_stored_ceiling_clamps_to_the_ceiling() {
+async fn a_pod_admitted_below_the_deployment_default_lifts_to_its_admitted_ceiling() {
     let fixture = Fixture::armed().await;
     fixture
         .seed_permit(
@@ -434,15 +444,15 @@ async fn a_configured_lift_above_the_stored_ceiling_clamps_to_the_ceiling() {
             LauncherAuthorityProtocol::ResizeV2,
         )
         .await;
-    // The precondition that makes this test able to tell a clamp from a
-    // passthrough. A `const` block so it is checked at COMPILE time: editing
-    // either constant into agreement should fail the build, not produce a test
-    // that still passes while asserting nothing.
+    // The precondition that makes this test able to tell the Pod's own value
+    // from the fleet-wide one. A `const` block so it is checked at COMPILE
+    // time: editing either constant into agreement should fail the build, not
+    // produce a test that still passes while asserting nothing.
     const {
         assert!(
-            CONFIGURED_LEASED > ADMITTED_CEILING,
-            "the configured lift must exceed the stored ceiling, or this test \
-             cannot distinguish a clamp from a passthrough"
+            DEPLOYMENT_DEFAULT_LEASED > ADMITTED_CEILING,
+            "the deployment default must exceed this Pod's admitted ceiling, or \
+             this test cannot distinguish the two sources"
         );
     }
 
@@ -462,18 +472,49 @@ async fn a_configured_lift_above_the_stored_ceiling_clamps_to_the_ceiling() {
     );
     assert_eq!(
         intents[0].target_millicores, ADMITTED_CEILING,
-        "the target must be min(configured 4000m, admitted 2500m)"
+        "the target must be this Pod's admitted 2500m, not the 4000m default"
     );
 }
 
-/// The clamp is a `min`, not a constant: a ceiling ABOVE the configured lift
-/// must leave the configured value alone. Without this, hard-coding
-/// `target = ceiling` would pass the test above.
+/// **`gvix` ACCEPTANCE CRITERION 1 — the defect this task exists to fix.**
+///
+/// A Pod whose per-project `build_resources.task.cpu_limit` override raised its
+/// rendered launcher lease to 8000m must lift to **8000m**, not to the 4000m
+/// deployment default. `retune_launcher_lease` re-points the sidecar's
+/// `DJINN_LAUNCHER_LEASED_MILLICORES` at the override and
+/// `resolve_launcher_cpu_ceiling` reads the ceiling back off the *rendered*
+/// sidecar, so the launcher inside such a Pod will hand out leases up to 8000m.
+/// A lift that stopped at 4000m would leave half the CPU the project paid for
+/// unreachable — the 7deu ancestor clamp, re-entered through the override door.
+///
+/// This test is the inverse of `0ppk-1a`'s
+/// `a_ceiling_above_the_configured_lift_does_not_raise_the_target`, which
+/// asserted 4000m here. That assertion was the defect: `0ppk`'s AC6 asked for
+/// `min(configured, admitted)` and its AC7 asked for `admitted`, and the `0vku`
+/// agent implemented AC6 and reported AC7's behavioural half unmet rather than
+/// quietly redesigning the clamp. This is the resolution.
+///
+/// NON-VACUITY (run, do not assume): restore the `min()` clamp — reinstate
+/// `ResizeAuthority`'s `configured_leased_millicores` and make the target
+/// `configured.min(ceiling)`, or simply write
+/// `ceiling.min(DEPLOYMENT_DEFAULT_LEASED)` in `resolve_target` — and this
+/// reads 4000 instead of 8000.
 #[tokio::test]
-async fn a_ceiling_above_the_configured_lift_does_not_raise_the_target() {
+async fn an_override_pod_lifts_to_its_own_ceiling_not_the_deployment_default() {
+    const {
+        assert!(
+            OVERRIDE_CEILING > DEPLOYMENT_DEFAULT_LEASED,
+            "the override must RAISE the Pod's ceiling above the deployment \
+             default, or there is nothing here to distinguish"
+        );
+    }
     let fixture = Fixture::armed().await;
     fixture
-        .seed_permit(OWNER_RUN, 16_000, LauncherAuthorityProtocol::ResizeV2)
+        .seed_permit(
+            OWNER_RUN,
+            OVERRIDE_CEILING,
+            LauncherAuthorityProtocol::ResizeV2,
+        )
         .await;
     let token = fixture
         .granted(OWNER_TASK, OWNER_RUN, OWNER_INVOCATION)
@@ -485,8 +526,14 @@ async fn a_ceiling_above_the_configured_lift_does_not_raise_the_target() {
     let intents = fixture.applier.intents();
     assert_eq!(intents.len(), 1);
     assert_eq!(
-        intents[0].target_millicores, CONFIGURED_LEASED,
-        "a generous ceiling must not lift the process above what it configured"
+        intents[0].admitted_cpu_millicores, OVERRIDE_CEILING,
+        "precondition: the bound is the Pod's OWN captured ceiling"
+    );
+    assert_eq!(
+        intents[0].target_millicores, OVERRIDE_CEILING,
+        "an override Pod admitted at 8000m must REACH 8000m. Reading 4000 here \
+         is the min() clamp against the deployment default coming back, and it \
+         strands every override Pod below its own rendered lease"
     );
     assert_eq!(fixture.applier.intents_above_ceiling(), 0);
 }

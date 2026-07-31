@@ -24,6 +24,11 @@
 //!    `status.initContainerStatuses` is populated asynchronously, so a single
 //!    immediate confirming GET usually reads stale. The bounded confirmation
 //!    poll lives here, because the deadline has to have exactly one owner.
+//! 5. **No ceiling.** It sends whatever millicores it is handed. The bound —
+//!    the ceiling the Pod was actually admitted with — is applied to the value
+//!    about to go on the wire by [`clamp_to_admitted_ceiling`], so no caller
+//!    that can build a [`PodResizeIntent`] can talk it into an over-ceiling
+//!    PATCH.
 //!
 //! What it *does* get right is reused verbatim and never re-derived here:
 //! `Patch::Strategic` (because `initContainers` carries `patchMergeKey: name`,
@@ -394,15 +399,7 @@ impl ResizeLift {
         surface: &Arc<dyn LauncherResizeSurface>,
         intent: &PodResizeIntent,
     ) -> Result<(), ResizeApplyFailure> {
-        let target = u64::try_from(intent.target_millicores).map_err(|_| {
-            ResizeApplyFailure::new(
-                DegradedUnleasedReason::CeilingUnusable,
-                format!(
-                    "clamped target {}m is not a CPU quantity",
-                    intent.target_millicores
-                ),
-            )
-        })?;
+        let target = clamp_to_admitted_ceiling(intent)?;
 
         let deadline = tokio::time::Instant::now() + self.budget;
         let mut waited = false;
@@ -526,6 +523,64 @@ impl PodResizeApplier for ResizeLift {
             }
         }
     }
+}
+
+/// THE LAST FENCE BEFORE THE WIRE: the millicores one PATCH body may carry.
+///
+/// `min(intent.target_millicores, intent.admitted_cpu_millicores)`, refusing
+/// anything that is not a positive CPU quantity. Every PATCH this module issues
+/// goes through it, so "zero PATCH bodies above the admitted ceiling" is a
+/// property of the code that sends them rather than of the code that derived
+/// the target.
+///
+/// # Why the clamp lives here and not only in `resize_authorization`
+///
+/// `0ppk-1a` clamped while *deriving* the target, as
+/// `min(configured_leased_millicores, admitted)`. `gvix` deleted that first
+/// term — a deployment-wide default has no business bounding a per-Pod lift, and
+/// it held every per-project-override Pod below its own rendered lease. But
+/// deleting it must not delete the safety property with it, and a clamp that
+/// sits in the derivation only ever constrains the one caller that derives.
+/// [`PodResizeIntent`] is a `pub` struct of `pub` fields; anything that builds
+/// one — a future reconciler, a test, a second authority — reaches
+/// `resize_launcher_cpu` through here. So the bound is enforced against the
+/// value that is about to be sent, next to the call that sends it.
+///
+/// NAMED FAILING MUTATION for `0ppk-1a`'s acceptance criterion 2: replace the
+/// `.min(ceiling)` below with `intent.target_millicores` and
+/// `an_intent_above_its_own_ceiling_still_patches_at_the_ceiling` observes a
+/// PATCH body above the ceiling.
+///
+/// # Errors
+///
+/// [`ResizeApplyFailure`] with [`DegradedUnleasedReason::CeilingUnusable`] when
+/// the ceiling or the clamped target is not a positive millicore count. A
+/// non-positive quantity is refused rather than sent: `0m` is a rejected PATCH
+/// at best and an unbounded one at worst, and either way it is not a lift.
+pub fn clamp_to_admitted_ceiling(intent: &PodResizeIntent) -> Result<u64, ResizeApplyFailure> {
+    let unusable =
+        |detail: String| ResizeApplyFailure::new(DegradedUnleasedReason::CeilingUnusable, detail);
+    if intent.admitted_cpu_millicores <= 0 {
+        return Err(unusable(format!(
+            "permit carries admitted ceiling {}m, which is not a CPU quantity",
+            intent.admitted_cpu_millicores
+        )));
+    }
+    let clamped = intent.target_millicores.min(intent.admitted_cpu_millicores);
+    if clamped != intent.target_millicores {
+        tracing::warn!(
+            task_run_id = %intent.task_run_id,
+            pod_uid = %intent.pod_uid,
+            requested_millicores = intent.target_millicores,
+            admitted_cpu_millicores = intent.admitted_cpu_millicores,
+            "resize lift: target exceeded the admitted ceiling and was clamped \
+             before the PATCH"
+        );
+    }
+    u64::try_from(clamped)
+        .ok()
+        .filter(|millicores| *millicores > 0)
+        .ok_or_else(|| unusable(format!("clamped target {clamped}m is not a CPU quantity")))
 }
 
 /// Whether waiting could still change this answer.

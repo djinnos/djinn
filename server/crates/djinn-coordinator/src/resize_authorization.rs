@@ -34,15 +34,34 @@
 //! owner. A caller that names another task run's invocation is refused at step
 //! 4, before any permit is read and long before any Kubernetes call could exist.
 //!
-//! # The clamp
+//! # The target is the Pod's OWN admitted ceiling
 //!
-//! The target is `min(configured_leased_millicores, admitted_cpu_millicores)`.
-//! The ceiling is the value `g8jk-3` captured from the **stored** Pod after
-//! admission, so it already includes whatever a mutating webhook did to the
-//! render. Lifting above it would ask the kubelet for CPU the Pod was never
-//! admitted for; the clamp is what makes a misconfigured
-//! `DJINN_LAUNCHER_LEASED_MILLICORES` a slow build rather than a rejected or
-//! evicted Pod.
+//! `target = admitted_cpu_millicores`. That value is what `g8jk-3` captured
+//! from the **stored** Pod after admission — the launcher sidecar's rendered
+//! `limits.cpu`, which `djinn_k8s::launcher_cpu::rendered_lease_millicores`
+//! reads back off the sidecar rather than recomputing from config precisely
+//! because `build_resources::apply_resolved_resources` may already have
+//! re-pointed it at a per-project `build_resources.task.cpu_limit` override.
+//! Lifting to it therefore restores the limit the apiserver already admitted,
+//! and it already reflects both the override and whatever a mutating webhook
+//! did to the render.
+//!
+//! `0ppk-1a` shipped `min(configured_leased_millicores, admitted)`, where the
+//! first term was **this process's** `DJINN_LAUNCHER_LEASED_MILLICORES` — a
+//! deployment-wide default. That second term is the only per-Pod one, and
+//! taking a `min` against a fleet-wide number reproduced the exact defect
+//! `rendered_lease_millicores` exists to prevent: a Pod admitted at 8000m
+//! through a per-project override lifted only to the 4000m default, below the
+//! lease its own launcher grants. `gvix` removed the deployment default from
+//! this computation entirely — there is no longer a second input to plumb, so
+//! the regression cannot return through a one-line edit.
+//!
+//! The safety half is unchanged and did not move here: a target above the
+//! admitted ceiling must never reach the apiserver. It is now enforced where
+//! the PATCH is actually issued — see
+//! [`crate::resize_lift::clamp_to_admitted_ceiling`] — because
+//! [`PodResizeIntent`]'s fields are `pub` and this function is not the only
+//! way one can be built in a future caller.
 //!
 //! # Where this is reachable from, and where it deliberately is not
 //!
@@ -133,11 +152,14 @@ pub struct PodResizeIntent {
     /// a different one is a hard failure — exactly one authority governs an
     /// admitted Pod.
     pub effective_launcher_protocol: LauncherAuthorityProtocol,
-    /// Already clamped to the stored ceiling. See [`ResizeAuthority::authorize`].
+    /// The CPU the launcher is lifted to: this Pod's own admitted ceiling. See
+    /// [`ResizeAuthority::authorize`].
     pub target_millicores: i64,
-    /// The ceiling this target was clamped against, carried for the assertion
-    /// that `target_millicores <= admitted_cpu_millicores` can be made on the
-    /// intent itself rather than on a value a test had to re-derive.
+    /// The ceiling this target is bounded by, carried so the assertion
+    /// `target_millicores <= admitted_cpu_millicores` can be made on the intent
+    /// itself rather than on a value a test had to re-derive — and so
+    /// [`crate::resize_lift::clamp_to_admitted_ceiling`] has a bound to enforce
+    /// at the PATCH site without re-reading the durable row.
     pub admitted_cpu_millicores: i64,
 }
 
@@ -375,28 +397,30 @@ pub struct ResizeAuthority {
     leases: Arc<BuildLeaseRepository>,
     permits: Arc<BuildPodPermitRepository>,
     lift: Arc<dyn InvocationLiftAuthority>,
-    /// `DJINN_LAUNCHER_LEASED_MILLICORES` as this process rendered it —
-    /// `djinn_k8s::launcher_cpu::launcher_leased_millicores(config)`. Passed as
-    /// a plain number rather than a `KubernetesConfig` so this module has no
-    /// Kubernetes dependency at all, in either direction.
-    configured_leased_millicores: i64,
     applier: Arc<dyn PodResizeApplier>,
 }
 
 impl ResizeAuthority {
+    /// # A deployment-wide CPU number is deliberately NOT a parameter here
+    ///
+    /// `0ppk-1a` took `configured_leased_millicores` — this process's rendered
+    /// `DJINN_LAUNCHER_LEASED_MILLICORES` — and `min`'d the per-Pod ceiling
+    /// against it. `gvix` deleted the parameter rather than merely stopping the
+    /// `min`, because a value that is still plumbed in is one edit away from
+    /// clamping a per-project-override Pod below its own rendered lease again.
+    /// Every CPU quantity this authority reasons about now comes from the
+    /// write-once permit row. See this module's header.
     #[must_use]
     pub fn new(
         leases: Arc<BuildLeaseRepository>,
         permits: Arc<BuildPodPermitRepository>,
         lift: Arc<dyn InvocationLiftAuthority>,
-        configured_leased_millicores: i64,
         applier: Arc<dyn PodResizeApplier>,
     ) -> Self {
         Self {
             leases,
             permits,
             lift,
-            configured_leased_millicores,
             applier,
         }
     }
@@ -415,7 +439,7 @@ impl ResizeAuthority {
     ///    refuse unless the caller's claim matches, in full.
     /// 5. Resolve the permit from the **durable owner's** task-run id.
     /// 6. Require a captured write-once resize identity on a resizable protocol.
-    /// 7. Clamp the target to the stored ceiling and emit the intent.
+    /// 7. Take the target from the stored ceiling and emit the intent.
     ///
     /// It deliberately performs **no** Kubernetes call. Applying the authorized
     /// intent is [`Self::fold_into_grant`]'s job, so that an apply failure is a
@@ -517,14 +541,13 @@ impl ResizeAuthority {
             ));
         };
 
-        match clamp(
+        match resolve_target(
             &owner.task_run_id,
             &owner.invocation_id,
             &permit_id,
             permit_fence,
             permit_state,
             &identity,
-            self.configured_leased_millicores,
         ) {
             Ok(intent) => ResizeAuthorizationOutcome::Authorized(Box::new(intent)),
             Err(refusal) => Self::refuse(refusal),
@@ -627,19 +650,17 @@ fn durable_owner(row: &BuildLeaseRow) -> Option<TaskInvocationLeaseIdentity> {
     })
 }
 
-/// The clamp: `min(configured, admitted)`, on a resizable protocol only.
+/// The target: this Pod's own admitted ceiling, on a resizable protocol only.
 ///
 /// Split out as a free function so the ceiling arithmetic is testable without a
-/// database, and so acceptance criterion 2's mutation ("remove the clamp") is a
-/// one-line edit at a single site rather than something that could be half-done.
-fn clamp(
+/// database, and so there is exactly ONE place a CPU quantity enters an intent.
+fn resolve_target(
     task_run_id: &str,
     invocation_id: &str,
     permit_id: &str,
     fencing_token: i64,
     permit_state: BuildPodPermitState,
     identity: &BuildPodResizeIdentity,
-    configured_leased_millicores: i64,
 ) -> Result<PodResizeIntent, ResizeRefusal> {
     // `leaf-v1` renders no launcher `limits.cpu` at all, so a container limit
     // there would be an ancestor clamp over every process in the Pod. Parsing
@@ -655,14 +676,21 @@ fn clamp(
         ));
     }
     let ceiling = identity.admitted_cpu_millicores;
-    if ceiling <= 0 || configured_leased_millicores <= 0 {
+    if ceiling <= 0 {
         return Err(ResizeRefusal::uncertain(
             DegradedUnleasedReason::CeilingUnusable,
         ));
     }
-    // THE CLAMP. Removing the `.min(ceiling)` here is acceptance criterion 2's
-    // stated mutation, and it must make `intents_above_ceiling()` report 1.
-    let target_millicores = configured_leased_millicores.min(ceiling);
+    // THE TARGET IS THE CEILING. Not `min(deployment_default, ceiling)` — see
+    // this module's header. The Pod's launcher was admitted holding exactly
+    // this limit and `0ppk-1b`'s birth downsize took it away; the lift puts it
+    // back, and there is no second quantity in scope that could hold it lower.
+    //
+    // The over-ceiling protection is NOT weakened by this: it now lives at the
+    // PATCH site (`resize_lift::clamp_to_admitted_ceiling`), where it bounds
+    // whatever target an intent actually carries rather than only the one this
+    // function derives.
+    let target_millicores = ceiling;
     Ok(PodResizeIntent {
         task_run_id: task_run_id.to_owned(),
         invocation_id: invocation_id.to_owned(),
