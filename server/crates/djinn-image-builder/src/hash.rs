@@ -10,15 +10,20 @@
 //!    `retrigger_image_build` call.
 //! 3. The agent-worker helper-image reference. A worker rebuild flows
 //!    through here — another gap today's devcontainer-hash scheme has.
+//! 4. The declared launcher authority protocol, whenever it is not the
+//!    default. See [`compute_environment_hash`] for why the default is
+//!    excluded rather than mixed in unconditionally.
 //!
 //! The hash is sha256 of the concatenated inputs, lowercase hex. It's
 //! intentionally 64 chars so log output is readable (cf. the image tag
 //! format `djinn-project-<id>:<hash>`).
 
+use djinn_launcher_protocol::LauncherAuthorityProtocol;
 use sha2::{Digest, Sha256};
 
 use djinn_stack::environment::EnvironmentConfig;
 
+use crate::dockerfile::DEFAULT_LAUNCHER_PROTOCOL;
 use crate::scripts::{SCRIPTS, ScriptFile};
 
 /// Return the sha256 of the script bundle — the concatenation of every
@@ -44,10 +49,34 @@ fn compute_bundle_sha(scripts: &[ScriptFile]) -> String {
 /// responsible for threading in a reference that represents the actual
 /// worker binary that will ship in the image (e.g. the SHA-pinned tag
 /// Tilt publishes to the cluster-local registry).
+///
+/// # The launcher authority protocol is an input
+///
+/// `launcher_protocol` is the declaration the artifact will carry. Mixing it in
+/// is what makes a protocol change *unable* to resolve to a cached image: the
+/// image tag is `djinn-project-<id>:<hash-prefix>`, so `leaf-v1` and
+/// `resize-v2` builds of an otherwise identical config live at different tags,
+/// and a flip re-triggers a build instead of leaving the old launcher in place
+/// under a catalog row claiming the new protocol.
+///
+/// Prefer [`crate::BuildContext::environment_hash`], which passes the
+/// declaration that was actually emitted into the Dockerfile.
+///
+/// # Why the default is excluded from the pre-image
+///
+/// [`DEFAULT_LAUNCHER_PROTOCOL`] contributes *nothing*, so the pre-image for a
+/// deployment that configures no protocol is byte-identical to the pre-image
+/// before the protocol became configurable. Mixing it in unconditionally would
+/// change every hash in every existing deployment and force a fleet-wide
+/// rebuild on upgrade for a change that alters no image. Only a deviation from
+/// the default perturbs the hash — which is exactly the case that must not
+/// reuse a cached artifact. `the_default_protocol_hashes_to_the_pre_change_preimage`
+/// pins this.
 pub fn compute_environment_hash(
     config: &EnvironmentConfig,
     agent_worker_ref: &str,
     build_version: &str,
+    launcher_protocol: LauncherAuthorityProtocol,
 ) -> String {
     let script_sha = compute_script_bundle_sha();
     let config_json = canonical_json(config);
@@ -136,6 +165,11 @@ pub fn compute_environment_hash(
     hasher.update(agent_worker_ref.as_bytes());
     hasher.update([0u8]);
     hasher.update(build_version.as_bytes());
+    if launcher_protocol != DEFAULT_LAUNCHER_PROTOCOL {
+        hasher.update([0u8]);
+        hasher.update(b"launcher-authority-protocol\0");
+        hasher.update(launcher_protocol.as_wire().as_bytes());
+    }
     hex_lower(&hasher.finalize())
 }
 
@@ -173,8 +207,18 @@ mod tests {
     #[test]
     fn hash_is_deterministic_for_same_inputs() {
         let c = cfg();
-        let a = compute_environment_hash(&c, "djinn/agent-worker:sha-abc", "0.6.57");
-        let b = compute_environment_hash(&c, "djinn/agent-worker:sha-abc", "0.6.57");
+        let a = compute_environment_hash(
+            &c,
+            "djinn/agent-worker:sha-abc",
+            "0.6.57",
+            DEFAULT_LAUNCHER_PROTOCOL,
+        );
+        let b = compute_environment_hash(
+            &c,
+            "djinn/agent-worker:sha-abc",
+            "0.6.57",
+            DEFAULT_LAUNCHER_PROTOCOL,
+        );
         assert_eq!(a, b);
         assert_eq!(a.len(), 64);
     }
@@ -182,17 +226,37 @@ mod tests {
     #[test]
     fn hash_changes_when_config_changes() {
         let mut c = cfg();
-        let a = compute_environment_hash(&c, "djinn/agent-worker:sha-abc", "0.6.57");
+        let a = compute_environment_hash(
+            &c,
+            "djinn/agent-worker:sha-abc",
+            "0.6.57",
+            DEFAULT_LAUNCHER_PROTOCOL,
+        );
         c.env.insert("RUST_LOG".into(), "info".into());
-        let b = compute_environment_hash(&c, "djinn/agent-worker:sha-abc", "0.6.57");
+        let b = compute_environment_hash(
+            &c,
+            "djinn/agent-worker:sha-abc",
+            "0.6.57",
+            DEFAULT_LAUNCHER_PROTOCOL,
+        );
         assert_ne!(a, b);
     }
 
     #[test]
     fn hash_changes_when_worker_ref_changes() {
         let c = cfg();
-        let a = compute_environment_hash(&c, "djinn/agent-worker:sha-abc", "0.6.57");
-        let b = compute_environment_hash(&c, "djinn/agent-worker:sha-def", "0.6.57");
+        let a = compute_environment_hash(
+            &c,
+            "djinn/agent-worker:sha-abc",
+            "0.6.57",
+            DEFAULT_LAUNCHER_PROTOCOL,
+        );
+        let b = compute_environment_hash(
+            &c,
+            "djinn/agent-worker:sha-def",
+            "0.6.57",
+            DEFAULT_LAUNCHER_PROTOCOL,
+        );
         assert_ne!(a, b);
     }
 
@@ -202,9 +266,98 @@ mod tests {
         // prompts/tools propagate — even when the worker-image tag is unchanged
         // (e.g. `:latest`).
         let c = cfg();
-        let a = compute_environment_hash(&c, "djinn/agent-runtime:latest", "0.6.56");
-        let b = compute_environment_hash(&c, "djinn/agent-runtime:latest", "0.6.57");
+        let a = compute_environment_hash(
+            &c,
+            "djinn/agent-runtime:latest",
+            "0.6.56",
+            DEFAULT_LAUNCHER_PROTOCOL,
+        );
+        let b = compute_environment_hash(
+            &c,
+            "djinn/agent-runtime:latest",
+            "0.6.57",
+            DEFAULT_LAUNCHER_PROTOCOL,
+        );
         assert_ne!(a, b);
+    }
+
+    /// **A protocol change cannot resolve to a cached image.** The controller
+    /// skips the build when the stored `config_hash` still equals the computed
+    /// one, and derives the image tag from that hash — so if the declaration
+    /// did not move the hash, flipping a deployment to `resize-v2` would leave
+    /// every project on the artifact its old launcher built, with the catalog
+    /// eventually claiming the new protocol over it.
+    ///
+    /// MUTATION: drop the `launcher_protocol` block from
+    /// `compute_environment_hash` (or hash `DEFAULT_LAUNCHER_PROTOCOL` in both
+    /// arms). Both `assert_ne!`s below fail.
+    #[test]
+    fn hash_changes_when_the_declared_protocol_changes() {
+        let c = cfg();
+        let leaf = compute_environment_hash(
+            &c,
+            "djinn/agent-worker:sha-abc",
+            "0.6.57",
+            LauncherAuthorityProtocol::LeafV1,
+        );
+        let resize = compute_environment_hash(
+            &c,
+            "djinn/agent-worker:sha-abc",
+            "0.6.57",
+            LauncherAuthorityProtocol::ResizeV2,
+        );
+        assert_ne!(
+            leaf, resize,
+            "a protocol flip must invalidate the cached image; identical hashes mean the \
+             controller never rebuilds and the tag never moves"
+        );
+
+        // …and the same must hold for every pair the type admits, so adding a
+        // third protocol cannot quietly collide with an existing one.
+        let mut seen = std::collections::BTreeSet::new();
+        for protocol in LauncherAuthorityProtocol::ALL {
+            let hash =
+                compute_environment_hash(&c, "djinn/agent-worker:sha-abc", "0.6.57", protocol);
+            assert!(
+                seen.insert(hash),
+                "{protocol} shares an environment hash with another protocol"
+            );
+        }
+    }
+
+    /// **The default is a no-op for every existing deployment.** Reconstructs
+    /// the pre-image `compute_environment_hash` had *before* the protocol
+    /// became an input, from this test's own bytes, and asserts the default
+    /// still hashes to exactly that. If it did not, upgrading a deployment that
+    /// configures nothing would invalidate every catalog image and rebuild the
+    /// whole fleet for a change that alters no artifact.
+    ///
+    /// MUTATION: hash the protocol unconditionally (delete the `if
+    /// launcher_protocol != DEFAULT_LAUNCHER_PROTOCOL` guard). This fails.
+    /// A deliberate salt bump also fails it, which is correct: the pre-image is
+    /// exactly what a salt bump changes, so it must be restated here on purpose.
+    #[test]
+    fn the_default_protocol_hashes_to_the_pre_change_preimage() {
+        let c = cfg();
+        let worker = "djinn/agent-worker:sha-abc";
+        let version = "0.6.57";
+
+        let mut legacy = Sha256::new();
+        legacy.update(b"env-config/v11\0");
+        legacy.update(canonical_json(&c).as_bytes());
+        legacy.update([0u8]);
+        legacy.update(compute_script_bundle_sha().as_bytes());
+        legacy.update([0u8]);
+        legacy.update(worker.as_bytes());
+        legacy.update([0u8]);
+        legacy.update(version.as_bytes());
+
+        assert_eq!(
+            compute_environment_hash(&c, worker, version, DEFAULT_LAUNCHER_PROTOCOL),
+            hex_lower(&legacy.finalize()),
+            "configuring no protocol must not perturb the hash of a single existing image"
+        );
+        assert_eq!(DEFAULT_LAUNCHER_PROTOCOL, LauncherAuthorityProtocol::LeafV1);
     }
 
     #[test]

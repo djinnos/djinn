@@ -7,13 +7,18 @@
 //!
 //! # What it assembles
 //!
+//! The assembly itself lives in [`djinn_k8s::cutover_preflight_driver`], not in
+//! this file, because `djinn-server`'s authority-cutover driver runs the same
+//! preflight before it flips the authority mode and must not assemble a
+//! *different* one. What that module gathers:
+//!
 //! * **The Helm surface** — the `pods/resize` Role rule, the task-run
 //!   ServiceAccount and every RoleBinding — comes from a LIVE `helm template`
 //!   render, converted to JSON and passed as `argv[1]`.
 //!   `deploy/preflight/cutover-preflight.sh` produces it.
 //! * **The Rust surface** — `automountServiceAccountToken`, the projected token
-//!   audience and the launcher sidecar's CPU ceiling — is rendered here, in
-//!   process, by the same [`djinn_k8s::job::build_task_run_job`] +
+//!   audience and the launcher sidecar's CPU ceiling — is rendered in process by
+//!   the same [`djinn_k8s::job::build_task_run_job`] +
 //!   [`djinn_k8s::launcher::apply_launcher_authority_protocol`] pair dispatch
 //!   uses. Helm never sees those fields, so a Helm-only preflight would declare
 //!   a credential boundary it had not looked at.
@@ -23,10 +28,10 @@
 //!   database was unreachable" and "nothing is in flight" are the two answers a
 //!   cutover must never confuse.
 //! * **The signed legacy-digest inventory** is resolved by
-//!   [`LegacyDigestInventory::from_env`] — the production resolver, with its
-//!   own fail-closed `Unusable` arm. It is deliberately NOT taken from the
-//!   observation bundle: a file that could declare itself verified is not an
-//!   inventory.
+//!   [`djinn_db::launcher_compatibility::LegacyDigestInventory::from_env`] — the
+//!   production resolver, with its own fail-closed `Unusable` arm. It is
+//!   deliberately NOT taken from the observation bundle: a file that could
+//!   declare itself verified is not an inventory.
 //! * **Catalog images and live birth observations** come from the JSON bundle
 //!   at `DJINN_CUTOVER_OBSERVATIONS`. These are cluster/registry facts a render
 //!   cannot contain. An absent bundle means an empty catalog and no births —
@@ -54,66 +59,15 @@
 //!   `1` so a harness error is never read as a clean or a blocked verdict.
 
 use std::process::ExitCode;
-use std::str::FromStr;
 
-use djinn_cgroup_launcher::LauncherAuthorityProtocol;
-use djinn_db::launcher_compatibility::LegacyDigestInventory;
-use djinn_db::{BuildPodPermitRepository, Database, DatabaseConnectConfig, PostgresDatabaseConfig};
-use djinn_k8s::config::KubernetesConfig;
-use djinn_k8s::cutover_preflight::{
-    BirthObservation, CatalogImage, CutoverPreflightInput, DrainFenceObservation,
-    observe_drain_fence, run, summarize,
+use djinn_k8s::cutover_preflight_driver::{
+    DrainFenceSource, PreflightSources, RenderedCutoverPreflight, authority_mode_from_env,
 };
-use djinn_k8s::job::build_task_run_job;
-use djinn_k8s::launcher::apply_launcher_authority_protocol;
-use k8s_openapi::api::core::v1::Pod;
-use serde::Deserialize;
-use serde_json::Value;
-
-/// Cluster/registry observations a render cannot contain.
-#[derive(Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Observations {
-    #[serde(default)]
-    catalog: Vec<WireCatalogImage>,
-    #[serde(default)]
-    births: Vec<WireBirth>,
-    #[serde(default)]
-    live_task_run_pods: Vec<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct WireCatalogImage {
-    pull_ref: String,
-    /// `"leaf-v1"`, `"resize-v2"`, or absent for a pre-handshake image.
-    #[serde(default)]
-    declared: Option<String>,
-    #[serde(default)]
-    digest: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct WireBirth {
-    pod: Pod,
-    target_cpu: String,
-}
-
-/// Placeholders for the task-run Job render.
-///
-/// None of the three participate in any property this preflight judges: the
-/// credential boundary and the launcher ceiling are functions of the config and
-/// the authority protocol, not of which task run happens to be dispatching.
-/// Naming them here rather than reading them from somewhere makes the render
-/// reproducible, which is what lets the wrapper's fixture diff be exact.
-const PREFLIGHT_PROJECT: &str = "cutover-preflight";
-const PREFLIGHT_SECRET: &str = "cutover-preflight-secret";
-const PREFLIGHT_IMAGE: &str = "ghcr.io/djinnos/cutover-preflight:preflight";
 
 #[allow(clippy::print_stdout, clippy::print_stderr)]
-fn main() -> ExitCode {
-    match drive() {
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> ExitCode {
+    match drive().await {
         Ok(true) => ExitCode::SUCCESS,
         Ok(false) => ExitCode::FAILURE,
         Err(message) => {
@@ -124,7 +78,7 @@ fn main() -> ExitCode {
 }
 
 #[allow(clippy::print_stdout, clippy::print_stderr)]
-fn drive() -> Result<bool, String> {
+async fn drive() -> Result<bool, String> {
     let path = std::env::args().nth(1).ok_or_else(|| {
         "usage: cutover-preflight <rendered-manifests.json>  (the wrapper \
          deploy/preflight/cutover-preflight.sh produces the file)"
@@ -140,218 +94,33 @@ fn drive() -> Result<bool, String> {
         return Ok(true);
     }
 
-    let manifests = load_manifests(&path)?;
-    let mode = authority_mode()?;
-    let observations = load_observations()?;
+    let mode = authority_mode_from_env()?;
+    let preflight = RenderedCutoverPreflight::load(
+        &PreflightSources::from_env(path),
+        DrainFenceSource::from_database_url_env(),
+    )?;
+    // This binary reads no apiserver of its own; the Pod half of the fence comes
+    // from the observation bundle. `djinn-server`'s cutover driver enumerates it
+    // live and passes it here instead.
+    let judgement = preflight.judge(mode, &[]).await?;
+    let summary = &judgement.summary;
 
-    let config = KubernetesConfig::from_env();
-    // `build_task_run_job` asserts this pairing. It is `render-gate`'s subject,
-    // not this one's, so refuse to evaluate rather than panic in a deploy step.
-    if config.cgroup_launcher_mode.renders_sidecar() && !config.task_run_cgroup_writable_enabled {
-        return Err(
-            "the rendered config arms the cgroup launcher without the task-run RuntimeClass; \
-             deploy/preflight/render-gate.sh is the gate for that pairing and refuses it already"
-                .to_string(),
+    if judgement.is_clear() {
+        println!(
+            "cutover-preflight: CLEAR {summary} evaluated={}",
+            judgement.evaluated_classes().join(",")
         );
+        return Ok(true);
     }
-    let mut job = build_task_run_job(
-        &config,
-        &uuid::Uuid::nil(),
-        PREFLIGHT_PROJECT,
-        PREFLIGHT_SECRET,
-        PREFLIGHT_IMAGE,
-        &[],
-        None,
-        false,
-        None,
+
+    eprintln!("cutover-preflight: BLOCKED {summary}");
+    for defect in judgement.blocking_defects() {
+        eprintln!("cutover-preflight: DEFECT {defect}");
+    }
+    eprintln!(
+        "cutover-preflight: BLOCKED classes={} defects={}",
+        judgement.blocking_classes().join(","),
+        judgement.blocking_defects().len()
     );
-    // The same post-render seam dispatch uses. Its refusals ARE ceiling
-    // defects, so they are folded into the report instead of aborting: an
-    // operator needs every blocking reason in one run, not the first one.
-    let applied = apply_launcher_authority_protocol(&mut job, config.cgroup_launcher_mode, mode);
-
-    // The production resolver, not the bundle: an inventory that could be
-    // handed to the gate by the thing being gated is not an inventory.
-    let inventory = LegacyDigestInventory::from_env();
-    let catalog = observations
-        .catalog
-        .into_iter()
-        .map(|image| {
-            let declared = match image.declared.as_deref() {
-                None => None,
-                Some(raw) => Some(
-                    LauncherAuthorityProtocol::from_str(raw)
-                        .map_err(|error| format!("catalog image {:?}: {error}", image.pull_ref))?,
-                ),
-            };
-            Ok(CatalogImage {
-                pull_ref: image.pull_ref,
-                declared,
-                digest: image.digest,
-            })
-        })
-        .collect::<Result<Vec<_>, String>>()?;
-    let births: Vec<BirthObservation> = observations
-        .births
-        .into_iter()
-        .map(|birth| BirthObservation {
-            pod: birth.pod,
-            target_cpu: birth.target_cpu,
-        })
-        .collect();
-    let drain = drain_fence(observations.live_task_run_pods);
-
-    let input = CutoverPreflightInput {
-        manifests: &manifests,
-        task_run_job: &job,
-        authority_mode: mode,
-        catalog: &catalog,
-        legacy_digest_inventory: &inventory,
-        births: &births,
-        drain: &drain,
-    };
-    let summary = summarize(&input);
-
-    let mut blocked = false;
-    if let Err(error) = applied {
-        // Emitted with the same class prefix the validator uses, so the shell
-        // contract asserts one vocabulary rather than two.
-        eprintln!(
-            "cutover-preflight: DEFECT launcher-cpu-ceiling the dispatch render refused to apply \
-             the {mode} authority protocol: RenderValidationError::{error:?}: {error}"
-        );
-        blocked = true;
-    }
-    match run(&input) {
-        Ok(report) if !blocked => {
-            println!(
-                "cutover-preflight: CLEAR {summary} evaluated={}",
-                report
-                    .evaluated()
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join(",")
-            );
-            Ok(true)
-        }
-        Ok(_) => {
-            eprintln!("cutover-preflight: BLOCKED {summary} classes=launcher-cpu-ceiling");
-            Ok(false)
-        }
-        Err(refusal) => {
-            eprintln!("cutover-preflight: BLOCKED {summary}");
-            for defect in refusal.defects() {
-                eprintln!(
-                    "cutover-preflight: DEFECT {} {}",
-                    defect.class(),
-                    defect.detail()
-                );
-            }
-            let mut classes: Vec<String> =
-                refusal.classes().iter().map(ToString::to_string).collect();
-            if blocked {
-                classes.push("launcher-cpu-ceiling".to_string());
-                classes.sort();
-                classes.dedup();
-            }
-            eprintln!(
-                "cutover-preflight: BLOCKED classes={} defects={}",
-                classes.join(","),
-                refusal.defects().len()
-            );
-            Ok(false)
-        }
-    }
-}
-
-/// The render, as a flat list of documents.
-///
-/// JSON rather than YAML because `serde_yaml` is a dev-dependency of this
-/// crate; the wrapper converts with the same `python3`/PyYAML pair
-/// `render-gate.sh` already requires. A single document, a JSON array, and a
-/// `{"items": [...]}` list are all accepted, because all three are shapes
-/// `helm template` output legitimately reduces to.
-fn load_manifests(path: &str) -> Result<Vec<Value>, String> {
-    let raw = std::fs::read_to_string(path)
-        .map_err(|error| format!("cannot read rendered manifests {path}: {error}"))?;
-    let parsed: Value = serde_json::from_str(&raw)
-        .map_err(|error| format!("rendered manifests {path} are not valid JSON: {error}"))?;
-    let documents = match parsed {
-        Value::Array(documents) => documents,
-        Value::Object(ref map) if map.contains_key("items") => map["items"]
-            .as_array()
-            .cloned()
-            .ok_or_else(|| format!("{path}: `items` is not an array"))?,
-        other => vec![other],
-    };
-    if documents.is_empty() {
-        return Err(format!(
-            "{path} contains no documents; an empty render would pass every render-derived check \
-             vacuously"
-        ));
-    }
-    Ok(documents)
-}
-
-/// The protocol the deployment is being flipped to. Fail-closed on a malformed
-/// value; absent means the pre-cutover status quo, which is `leaf-v1`.
-fn authority_mode() -> Result<LauncherAuthorityProtocol, String> {
-    match std::env::var("DJINN_CUTOVER_AUTHORITY_MODE") {
-        Err(_) => Ok(LauncherAuthorityProtocol::LeafV1),
-        Ok(raw) if raw.trim().is_empty() => Ok(LauncherAuthorityProtocol::LeafV1),
-        Ok(raw) => LauncherAuthorityProtocol::from_str(raw.trim())
-            .map_err(|error| format!("DJINN_CUTOVER_AUTHORITY_MODE: {error}")),
-    }
-}
-
-fn load_observations() -> Result<Observations, String> {
-    let Ok(path) = std::env::var("DJINN_CUTOVER_OBSERVATIONS") else {
-        return Ok(Observations::default());
-    };
-    if path.trim().is_empty() {
-        return Ok(Observations::default());
-    }
-    let raw = std::fs::read_to_string(&path)
-        .map_err(|error| format!("cannot read observations {path}: {error}"))?;
-    serde_json::from_str(&raw).map_err(|error| format!("observations {path} are invalid: {error}"))
-}
-
-/// Read the durable half of the drain fence with the production query, or
-/// report it unobservable. Never reports an empty fence it did not read.
-fn drain_fence(live_task_run_pods: Vec<String>) -> DrainFenceObservation {
-    let Ok(url) = std::env::var("DJINN_DATABASE_URL") else {
-        return DrainFenceObservation::unobservable(
-            "DJINN_DATABASE_URL is not set, so the nonterminal resize/lease rows could not be read",
-        );
-    };
-    let runtime = match tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-    {
-        Ok(runtime) => runtime,
-        Err(error) => {
-            return DrainFenceObservation::unobservable(format!("no tokio runtime: {error}"));
-        }
-    };
-    // The pool is built INSIDE `block_on`. `PgPool` spawns its own reaper task
-    // at construction, so `sqlx` panics with "this functionality requires a
-    // Tokio context" if it is created outside a runtime — and a panic in a
-    // deploy gate is an exit 101 that reads as neither a clean nor a blocked
-    // verdict. Caught by `deploy/preflight/tests/cutover-preflight.sh` the
-    // first time the lane ran it with a real `DJINN_DATABASE_URL`.
-    runtime.block_on(async move {
-        let database = match Database::open_with_config(DatabaseConnectConfig::Postgres(
-            PostgresDatabaseConfig { url },
-        )) {
-            Ok(database) => database,
-            Err(error) => {
-                return DrainFenceObservation::unobservable(format!(
-                    "cannot open DJINN_DATABASE_URL: {error}"
-                ));
-            }
-        };
-        let permits = BuildPodPermitRepository::new(database);
-        observe_drain_fence(&permits, live_task_run_pods).await
-    })
+    Ok(false)
 }

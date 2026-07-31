@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use djinn_db::launcher_compatibility::PreProtocolDigest;
 use djinn_db::{Database, ImageRepository, ProjectRepository, launcher_compatibility};
 use djinn_image_builder::dockerfile::{
-    AgentWorkerImage, DECLARED_LAUNCHER_PROTOCOL, LAUNCHER_PROTOCOL_ENV, LAUNCHER_PROTOCOL_LABEL,
+    AgentWorkerImage, DEFAULT_LAUNCHER_PROTOCOL, LAUNCHER_PROTOCOL_ENV, LAUNCHER_PROTOCOL_LABEL,
     generate_dockerfile,
 };
 use djinn_launcher_protocol::LauncherAuthorityProtocol;
@@ -64,11 +64,11 @@ fn every_generated_image_declares_its_protocol_in_build_metadata() {
     ] {
         let config: djinn_stack::environment::EnvironmentConfig =
             serde_json::from_str(config_json).unwrap_or_else(|e| panic!("{name}: {e}"));
-        let dockerfile = generate_dockerfile(&config, &worker)
+        let dockerfile = generate_dockerfile(&config, &worker, DEFAULT_LAUNCHER_PROTOCOL)
             .unwrap_or_else(|e| panic!("{name} must generate: {e}"))
             .dockerfile;
 
-        let declared = DECLARED_LAUNCHER_PROTOCOL.as_wire();
+        let declared = DEFAULT_LAUNCHER_PROTOCOL.as_wire();
         assert!(
             dockerfile.contains(&format!("LABEL {LAUNCHER_PROTOCOL_LABEL}=\"{declared}\"")),
             "{name}: the artifact must carry the protocol LABEL, got:\n{dockerfile}"
@@ -78,7 +78,7 @@ fn every_generated_image_declares_its_protocol_in_build_metadata() {
             "{name}: the artifact must carry the protocol env var, got:\n{dockerfile}"
         );
         assert!(
-            LauncherAuthorityProtocol::ALL.contains(&DECLARED_LAUNCHER_PROTOCOL),
+            LauncherAuthorityProtocol::ALL.contains(&DEFAULT_LAUNCHER_PROTOCOL),
             "{name}: the declaration must be one of the canonical wire forms"
         );
     }
@@ -129,7 +129,7 @@ async fn a_newly_cataloged_artifact_declares_a_protocol_and_pins_a_digest() {
             "new",
             "reg/djinn-image-new:contenthash",
             Some(&digest),
-            Some(DECLARED_LAUNCHER_PROTOCOL),
+            Some(DEFAULT_LAUNCHER_PROTOCOL),
         )
         .await
         .unwrap();
@@ -138,14 +138,14 @@ async fn a_newly_cataloged_artifact_declares_a_protocol_and_pins_a_digest() {
     let row = images.get("new").await.unwrap().expect("row");
     assert_eq!(
         row.declared_launcher_protocol().unwrap(),
-        Some(DECLARED_LAUNCHER_PROTOCOL)
+        Some(DEFAULT_LAUNCHER_PROTOCOL)
     );
     assert_eq!(row.registry_digest.as_deref(), Some(digest.as_str()));
 
     // The inventory is EMPTY and the artifact still dispatches: a declaring
     // image is admitted on its own declaration, never on an allowlist entry.
     // (Migration 167 seeds the authority singleton at `leaf-v1`, which is what
-    // `DECLARED_LAUNCHER_PROTOCOL` is, so no flip is needed here.)
+    // `DEFAULT_LAUNCHER_PROTOCOL` is, so no flip is needed here.)
     let resolved = ProjectRepository::new(db.clone(), djinn_core::events::EventBus::noop())
         .with_legacy_digest_inventory(launcher_compatibility::LegacyDigestInventory::verified(
             "ops",
@@ -156,10 +156,7 @@ async fn a_newly_cataloged_artifact_declares_a_protocol_and_pins_a_digest() {
         .await
         .unwrap()
         .expect("project resolves");
-    assert_eq!(
-        resolved.authority_protocol,
-        Some(DECLARED_LAUNCHER_PROTOCOL)
-    );
+    assert_eq!(resolved.authority_protocol, Some(DEFAULT_LAUNCHER_PROTOCOL));
 
     // And a declaring artifact can never be written without a digest, so a new
     // build cannot fall into the legacy population by accident.
@@ -169,7 +166,7 @@ async fn a_newly_cataloged_artifact_declares_a_protocol_and_pins_a_digest() {
             "bad",
             "reg/djinn-image-bad:contenthash",
             None,
-            Some(DECLARED_LAUNCHER_PROTOCOL),
+            Some(DEFAULT_LAUNCHER_PROTOCOL),
         )
         .await
         .expect_err("a declaring build with no digest must be refused");
@@ -194,7 +191,7 @@ async fn the_inventory_candidate_set_is_exactly_the_ready_undeclared_digest_pinn
         (
             "c-declaring",
             Some("sha256:cc"),
-            Some(DECLARED_LAUNCHER_PROTOCOL),
+            Some(DEFAULT_LAUNCHER_PROTOCOL),
         ),
     ] {
         images.create(id, id, None, "{}").await.unwrap();

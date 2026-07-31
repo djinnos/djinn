@@ -8,7 +8,9 @@
 
 use std::collections::BTreeMap;
 
-use djinn_image_builder::{AgentWorkerImage, BuildContext, generate_dockerfile};
+use djinn_image_builder::{
+    AgentWorkerImage, BuildContext, DEFAULT_LAUNCHER_PROTOCOL, generate_dockerfile,
+};
 use djinn_image_controller::ImageControllerConfig;
 use djinn_image_controller::build_job::{
     BuildSubject, COMPONENT_IMAGE_BUILD, LABEL_BUILD, LABEL_COMPONENT, LABEL_IMAGE_HASH,
@@ -21,8 +23,12 @@ use djinn_stack::environment::EnvironmentConfig;
 fn test_build_context() -> BuildContext {
     let mut cfg = EnvironmentConfig::empty();
     cfg.schema_version = djinn_stack::environment::SCHEMA_VERSION;
-    generate_dockerfile(&cfg, &AgentWorkerImage::new("djinn/agent-runtime", "dev"))
-        .expect("generate")
+    generate_dockerfile(
+        &cfg,
+        &AgentWorkerImage::new("djinn/agent-runtime", "dev"),
+        DEFAULT_LAUNCHER_PROTOCOL,
+    )
+    .expect("generate")
 }
 
 #[test]
@@ -36,7 +42,8 @@ fn build_job_labels_and_envs_match_plan() {
         "1a2b3c4d5e6f",
         &tag,
         &ctx,
-    );
+    )
+    .unwrap();
 
     let labels = job.metadata.labels.as_ref().expect("labels present");
     assert_eq!(labels.get(LABEL_COMPONENT).unwrap(), COMPONENT_IMAGE_BUILD);
@@ -136,7 +143,8 @@ fn image_build_job_does_not_opt_into_kueue_build_object_admission() {
                 "1a2b3c4d5e6f",
                 "registry.example/djinn-project-proj-kueue-contract:1a2b3c4d5e6f",
                 &context,
-            );
+            )
+            .unwrap();
             let flags = format!("kueue.enabled={enabled} kueue.armed={armed}");
 
             for (location, labels) in [

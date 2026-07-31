@@ -2,6 +2,7 @@
 
 pub mod admin;
 pub mod allocator;
+pub mod authority_cutover;
 pub mod codex_keepalive;
 pub mod db;
 pub mod error;

@@ -29,6 +29,12 @@ doctest = false
 name = "export-usage-schema"
 path = "src/bin/export_usage_schema.rs"
 
+# The operator entry point for proposal 3i92's launcher-authority cutover.
+# `deploy/cutover/authority-cutover.sh` builds and execs it.
+[[bin]]
+name = "authority-cutover"
+path = "src/bin/authority_cutover.rs"
+
 [features]
 default = []
 qdrant = ["djinn-db/qdrant"]
