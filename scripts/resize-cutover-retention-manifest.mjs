@@ -42,8 +42,10 @@
 // Exit codes: 0 = every asset retained, 1 = a retirement was detected,
 // 2 = the gate could not run (its own subject is missing).
 
+import { spawnSync } from 'node:child_process';
 import { readFileSync, existsSync, statSync } from 'node:fs';
-import { join, extname } from 'node:path';
+import { join, extname, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 // ---------------------------------------------------------------------------
 // Paths, spelled once.
@@ -499,6 +501,74 @@ function everyInput() {
     return [...paths].sort();
 }
 
+// ---------------------------------------------------------------------------
+// Production scoping for `reachability`.
+//
+// A `reachability` check asserts that something in PRODUCTION still calls the
+// asset — that is the word its own header uses, and it is the whole difference
+// between this and a `content` check. But it was matching the entire file, so
+// a call moved into a `#[cfg(test)] mod tests` satisfied it. The mutation is
+// exact: delete the production `child.wait_empty()` teardown in
+// `djinn-agent/src/process.rs` and add one inside that file's test module at
+// line 1865, and UNREACHABLE never fires while no shipped code waits for the
+// drain.
+//
+// Test scope is resolved by scripts/lib/rust-source-scan.awk — the same
+// scanner the shell and Python guards use — rather than by a fourth private
+// `#[cfg(test)]` heuristic. It is asked for every line that IS test context
+// (`scope=test` with a match-anything pattern) and those lines are blanked.
+// Line COUNT is preserved so the regexes and any reported offsets still line
+// up, and so a multi-line pattern cannot silently start matching across a
+// removed span.
+//
+// Truncating at the first `#[cfg(test)]` would have been the easy version and
+// is exactly the defect that made `scripts/check-resize-reachability.sh` verify
+// reachability against the first 8% of a 4147-line file.
+// ---------------------------------------------------------------------------
+
+// Resolved from THIS FILE's location, deliberately unlike `--root`: the tree
+// being evaluated may be a throwaway fixture, but the scanner is always the one
+// shipped next to this engine.
+const SCAN_AWK = join(dirname(fileURLToPath(import.meta.url)), 'lib', 'rust-source-scan.awk');
+
+function testLineNumbers(full) {
+    const result = spawnSync(
+        'awk',
+        ['-f', SCAN_AWK, '-v', 'strings=blank', '-v', 'scope=test', full],
+        { encoding: 'utf8', env: { ...process.env, RS_PATTERN: '.' } },
+    );
+    if (result.error || result.status !== 0) {
+        // A scanner that cannot run must never read as "everything is
+        // production" OR as "everything is test": both are silent verdicts.
+        throw new Error(
+            `resize-cutover-retention: source scanner failed for ${full}: `
+            + `${result.error?.message ?? result.stderr?.trim() ?? `exit ${result.status}`}`,
+        );
+    }
+    const lines = new Set();
+    for (const hit of result.stdout.split('\n')) {
+        if (!hit) continue;
+        const n = Number(hit.split(':')[1]);
+        if (Number.isInteger(n)) lines.add(n);
+    }
+    return lines;
+}
+
+function productionCode(full, path, code) {
+    if (extname(path) !== '.rs' || !existsSync(SCAN_AWK)) {
+        if (extname(path) === '.rs') {
+            throw new Error(`resize-cutover-retention: shared source scanner is missing: ${SCAN_AWK}`);
+        }
+        return code;
+    }
+    const testLines = testLineNumbers(full);
+    if (testLines.size === 0) return code;
+    return code
+        .split('\n')
+        .map((line, index) => (testLines.has(index + 1) ? '' : line))
+        .join('\n');
+}
+
 function readSource(root, path) {
     const full = join(root, path);
     if (!existsSync(full)) {
@@ -509,7 +579,8 @@ function readSource(root, path) {
         return { empty: true };
     }
     const raw = readFileSync(full, 'utf8');
-    return { raw, code: stripComments(raw, path) };
+    const code = stripComments(raw, path);
+    return { raw, code, production: productionCode(full, path, code) };
 }
 
 export function evaluate(root) {
@@ -556,9 +627,12 @@ export function evaluate(root) {
                 problems.push(`UNREACHABLE: ${check.path} is gone, so nothing calls into this asset from there.`);
                 continue;
             }
-            if (!check.pattern.test(source.code)) {
+            if (!check.pattern.test(source.production)) {
+                const testOnly = check.pattern.test(source.code);
                 problems.push(
-                    `UNREACHABLE: ${check.path} no longer matches /${check.pattern.source}/. Presence without a caller is retirement with extra steps. Why it is guarded: ${check.why}.`,
+                    testOnly
+                        ? `UNREACHABLE: ${check.path} matches /${check.pattern.source}/ only inside test code. A call site under \`#[cfg(test)]\` proves the API compiles, not that anything shipped calls it. Why it is guarded: ${check.why}.`
+                        : `UNREACHABLE: ${check.path} no longer matches /${check.pattern.source}/. Presence without a caller is retirement with extra steps. Why it is guarded: ${check.why}.`,
                 );
             }
         }
