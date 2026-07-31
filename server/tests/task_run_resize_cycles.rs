@@ -120,6 +120,9 @@ const SIBLING_REGISTRY_PORTS: &[&str] = &["5000", "5001", "5051", "5053", "5055"
 const SETUP_SCRIPT: &str = "scripts/kind/setup-resize-kind-cluster.sh";
 const WORKFLOW: &str = ".github/workflows/resize-kind.yml";
 const THIS_FILE: &str = "server/tests/task_run_resize_cycles.rs";
+/// pcod's suite. Read, never edited: it owns the production-path proof and the
+/// misleading-status fixture this suite defers to for the live half of AC6.
+const PCOD_SUITE: &str = "server/tests/task_run_resize_kind.rs";
 const RETENTION_GATE: &str = "scripts/check-resize-cutover-retention.sh";
 const RETENTION_SELFTEST: &str = "scripts/test-resize-cutover-retention.mjs";
 const PROBE_BUILD_SCRIPT: &str = "server/crates/djinn-k8s/tests/fixtures/governor-probe/build.sh";
@@ -411,6 +414,33 @@ fn guard_confirmation_never_reads_container_statuses() {
     assert!(
         source.contains("confirm_launcher_cpu("),
         "confirmation must go through the PRODUCTION reader, which reads status.initContainerStatuses[name=cgroup-launcher] and nothing else"
+    );
+}
+
+/// AC6's second mutation, live half — asserted here rather than duplicated.
+///
+/// The misleading-status fixture already exists in `pcod`'s suite: a hermetic
+/// proof that the production reader refuses a Pod whose only `cgroup-launcher`
+/// entry is a REGULAR container, and a live one that applies exactly that Pod to
+/// the cluster. Rebuilding either here would be a second copy of the same
+/// evidence, so this suite DEFERS to them — and a deferral to a proof nobody
+/// checks still exists is an assumption. This guard checks.
+#[test]
+fn guard_the_misleading_status_fixture_still_exists_and_is_run() {
+    let sibling = read_repo_file(PCOD_SUITE);
+    for proof in [
+        "the_misleading_container_status_is_not_confirmation",
+        "live_the_absent_init_status_is_not_confirmed",
+    ] {
+        assert!(
+            sibling.contains(proof),
+            "{PCOD_SUITE} no longer carries `{proof}`. This suite's confirmation reads defer to it for the live half of AC6; if it moved, point this guard at its new home rather than deleting the guard."
+        );
+    }
+    let workflow = read_repo_file(WORKFLOW);
+    assert!(
+        workflow.contains("task_run_resize_kind"),
+        "the live misleading-status fixture is no longer invoked by any lane"
     );
 }
 
