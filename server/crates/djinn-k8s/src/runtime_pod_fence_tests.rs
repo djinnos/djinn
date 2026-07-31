@@ -64,6 +64,15 @@ fn fence_config() -> KubernetesConfig {
     config
 }
 
+/// Armed: the Job renders `suspend: true` plus the `queue-name` label, so the
+/// fake captures a Kueue `Workload` for it and there is an admission — and an
+/// EVICTION — to model at all. `03z3`'s subject.
+fn armed_fence_config() -> KubernetesConfig {
+    let mut config = KubernetesConfig::for_testing();
+    config.kueue_armed = true;
+    config
+}
+
 fn runtime_on(cluster: &Arc<FakeCluster>, config: KubernetesConfig) -> KubernetesRuntime {
     KubernetesRuntime {
         client: cluster.client(),
@@ -157,6 +166,29 @@ where
     tokio::time::timeout(WATCH_BUDGET, watch)
         .await
         .map(|joined| joined.expect("the infra-death watch task panicked"))
+}
+
+/// Let the running watch take `polls` more turns of its loop.
+///
+/// Time is paused, so this costs no wall clock. Each iteration sleeps slightly
+/// PAST [`INFRA_DEATH_POLL_INTERVAL`]: with the test task parked the runtime
+/// goes idle and tokio auto-advances the clock to the watch's own deadline
+/// first, which is the only way a paused test can make the watch observe
+/// anything after its initial binding poll. Yielding instead would keep a task
+/// runnable forever, the clock would never advance, and the watch would sit at
+/// its sleep for the whole test — passing every "did not resolve" assertion
+/// without ever having looked at the cluster.
+async fn let_the_watch_poll(cluster: &Arc<FakeCluster>, polls: usize) {
+    let before = pod_list_calls(cluster);
+    for _ in 0..polls {
+        tokio::time::sleep(INFRA_DEATH_POLL_INTERVAL + Duration::from_secs(1)).await;
+    }
+    assert!(
+        pod_list_calls(cluster) >= before + polls,
+        "the watch must have polled {polls} more times ({before} -> {}); a test that asserts \
+         'it did not resolve' while the watch is parked asserts nothing",
+        pod_list_calls(cluster),
+    );
 }
 
 /// Every DELETE the fake apiserver observed against `job_name`, with the body
@@ -455,6 +487,215 @@ async fn a_completed_job_whose_pod_was_ttl_gcd_is_neither_a_death_nor_reaped() {
 }
 
 // ---------------------------------------------------------------------------
+// `03z3` — a Kueue eviction is RECOVERABLE and must not be reaped
+// ---------------------------------------------------------------------------
+
+/// Seed an ARMED task-run and drive it to admitted-and-running: the Job is
+/// created suspended with a captured Workload, and only the modelled admission
+/// gives it a Pod. Returns the Job name.
+async fn seed_admitted_taskrun(cluster: &Arc<FakeCluster>, config: &KubernetesConfig) -> String {
+    let job_name = seed_running_taskrun(cluster, config).await;
+    assert_eq!(
+        cluster.pod_count(),
+        0,
+        "an armed task-run Job is created SUSPENDED, so Kueue owns whether it ever pods",
+    );
+    cluster.unsuspend(&job_name);
+    assert_eq!(
+        cluster.pod_count(),
+        1,
+        "admission must materialise exactly one worker Pod to fence on",
+    );
+    job_name
+}
+
+/// Start the watch and let it bind its fence to the admitted Pod.
+fn watch_of(runtime: KubernetesRuntime, job_name: &str) -> tokio::task::JoinHandle<String> {
+    let handle = run_handle(job_name);
+    tokio::spawn(async move { runtime.watch_infra_death(&handle).await })
+}
+
+/// AC1. A Kueue eviction followed by a re-admission leaves the run ALIVE.
+///
+/// The two load-bearing assertions are that the watch has NOT resolved (the
+/// dispatch runner terminalises the run the instant it does) and that the Job is
+/// still on the API server (a reaped Job can never be re-admitted, and a retry
+/// mints a fresh task-run id so nothing ever adopts the old one back).
+///
+/// Non-vacuity, both directions:
+/// * restore the unconditional foreground delete — drop the `classify_absent_pod`
+///   match and reap on every absence — and the watch resolves during the
+///   eviction, so `is_finished` fails and the Job is gone;
+/// * make the watch never poll (it sits parked at its sleep) and
+///   [`let_the_watch_poll`] fails instead, so "did not resolve" cannot pass by
+///   the watch not having looked.
+#[tokio::test(start_paused = true)]
+async fn a_kueue_eviction_then_re_admission_leaves_the_task_run_alive() {
+    let cluster = FakeCluster::new();
+    let config = armed_fence_config();
+    let job_name = seed_admitted_taskrun(&cluster, &config).await;
+    let watch = watch_of(runtime_on(&cluster, config), &job_name);
+    await_fence_binding(&cluster).await;
+
+    let evicted_uid = cluster.evict(&job_name, "ClusterQueueStopped");
+    let_the_watch_poll(&cluster, 2).await;
+    assert!(
+        !watch.is_finished(),
+        "an evicted run is recoverable: the watch must not terminalise it, and it resolved. \
+         Surviving Jobs: {:?}",
+        cluster.job_names(),
+    );
+    assert_eq!(
+        cluster.job_names(),
+        vec![job_name.clone()],
+        "the evicted Job must survive — deleting it is what makes the eviction unrecoverable",
+    );
+
+    let readmitted_uid = cluster.readmit(&job_name);
+    assert_ne!(
+        evicted_uid, readmitted_uid,
+        "fixture invariant: re-admission mints a Pod with a NEW immutable uid",
+    );
+    let_the_watch_poll(&cluster, 3).await;
+
+    assert!(
+        !watch.is_finished(),
+        "the re-admitted run must still be alive: its new Pod is running and its terminal report \
+         will ride the stream",
+    );
+    assert_eq!(cluster.job_names(), vec![job_name.clone()]);
+    assert!(
+        job_delete_calls(&cluster, &job_name).is_empty(),
+        "no Job DELETE may be issued across an eviction; observed {:?}",
+        job_delete_calls(&cluster, &job_name),
+    );
+    watch.abort();
+}
+
+/// AC3, and the sample that actually happens on a cluster.
+///
+/// Measured live on 2026-07-31: after the queue is released, `spec.suspend` is
+/// back to `false` and a new Pod exists within ~1 SECOND, against a 15 second
+/// poll. So the poll that matters usually lands *after* re-admission, where the
+/// Job is unsuspended and the fenced Pod is gone — bit-for-bit the state fbiy-A1
+/// reaps on. Here the watch never observes the suspension at all.
+///
+/// What holds the reap off is the Workload's `Evicted` condition, which Kueue
+/// leaves behind flipped to `False`. Make
+/// [`crate::runtime_eviction::workload_eviction_record`] status-sensitive — read
+/// only `Evicted == True`, as `classify_workload_admission` correctly does for a
+/// different question — and this test fails while the previous one still passes.
+#[tokio::test(start_paused = true)]
+async fn a_re_admission_the_watch_never_saw_suspended_still_leaves_the_run_alive() {
+    let cluster = FakeCluster::new();
+    let config = armed_fence_config();
+    let job_name = seed_admitted_taskrun(&cluster, &config).await;
+    let watch = watch_of(runtime_on(&cluster, config), &job_name);
+    await_fence_binding(&cluster).await;
+
+    // Both transitions between two polls: the watch sees only the end state.
+    let evicted_uid = cluster.evict(&job_name, "ClusterQueueStopped");
+    let readmitted_uid = cluster.readmit(&job_name);
+    assert_ne!(evicted_uid, readmitted_uid);
+    assert_eq!(
+        cluster
+            .job(&job_name)
+            .and_then(|job| job.pointer("/spec/suspend").and_then(Value::as_bool)),
+        Some(false),
+        "the case under test is the one where `spec.suspend` has ALREADY gone back to false, so \
+         the Job-level signal is exhausted before the watch ever looks",
+    );
+
+    let_the_watch_poll(&cluster, 3).await;
+
+    assert!(
+        !watch.is_finished(),
+        "the only evidence left is Kueue's own Evicted record, and it must be enough",
+    );
+    assert_eq!(cluster.job_names(), vec![job_name.clone()]);
+    assert!(job_delete_calls(&cluster, &job_name).is_empty());
+    watch.abort();
+}
+
+/// The Job-level half of the distinguisher, with no Workload in existence.
+///
+/// `spec.suspend` is not merely a faster path to the same answer: it is the only
+/// answer available when the Workload cannot be read (a cluster with no Kueue,
+/// an operator's own `kubectl patch suspend=true`, an RBAC gap). A suspended Job
+/// is nonterminal but NOT owed a Pod, so its missing Pod is not evidence of
+/// anything.
+///
+/// Non-vacuity: drop the `job_is_suspended` arm from `classify_absent_pod` and
+/// this test fails — there is no Workload here to fall back on, because the
+/// disarmed renderer stamps no `queue-name` label and the fake captures nothing.
+#[tokio::test(start_paused = true)]
+async fn a_suspended_job_with_no_workload_at_all_is_not_reaped() {
+    let cluster = FakeCluster::new();
+    let config = fence_config();
+    let job_name = seed_running_taskrun(&cluster, &config).await;
+    let watch = watch_of(runtime_on(&cluster, config), &job_name);
+    await_fence_binding(&cluster).await;
+
+    cluster.evict(&job_name, "ClusterQueueStopped");
+    assert!(
+        cluster.workload_names().is_empty(),
+        "fixture invariant: a disarmed Job carries no queue-name label, so Kueue captures no \
+         Workload and `spec.suspend` is the only evidence there is",
+    );
+
+    let_the_watch_poll(&cluster, 3).await;
+    assert!(!watch.is_finished(), "a suspended Job is not owed a Pod");
+    assert_eq!(cluster.job_names(), vec![job_name.clone()]);
+    assert!(job_delete_calls(&cluster, &job_name).is_empty());
+    watch.abort();
+}
+
+/// AC2 under Kueue. The narrowing must not disarm the containment for a Job
+/// whose Workload was never evicted.
+///
+/// Same armed topology as the eviction tests — a captured Workload, a real
+/// admission — but the Pod is force-deleted rather than evicted, so the Workload
+/// carries no `Evicted` condition and `spec.suspend` is false. That is an
+/// UNEXPLAINED absence, and it must still terminalise and reap.
+///
+/// Non-vacuity: hold on every absence (return `Recoverable` unconditionally from
+/// `classify_absent_pod`) and this test fails on the surviving Job, while
+/// `a_force_deleted_worker_pod_terminalises_the_run_and_reaps_its_job` covers
+/// the same claim with no Kueue in the picture at all.
+#[tokio::test(start_paused = true)]
+async fn a_force_delete_under_a_never_evicted_workload_still_reaps() {
+    let cluster = FakeCluster::new();
+    let config = armed_fence_config();
+    let job_name = seed_admitted_taskrun(&cluster, &config).await;
+    let runtime = runtime_on(&cluster, config);
+
+    let mut destroyed_uid = String::new();
+    let reason = watch_after_fence_binding(&cluster, runtime, &job_name, |cluster| {
+        let (destroyed, replacement) = cluster.force_delete_pod_of(&job_name);
+        assert!(
+            replacement.is_some_and(|uid| uid != destroyed),
+            "fixture invariant: an UNSUSPENDED Job's controller replaces a destroyed Pod",
+        );
+        destroyed_uid = destroyed;
+    })
+    .await
+    .expect(
+        "a force-deleted Pod under an admitted, never-evicted Workload is still an abandoned run",
+    );
+
+    assert!(
+        reason.contains(&destroyed_uid),
+        "the death reason must name the destroyed Pod; got {reason}",
+    );
+    assert!(
+        cluster.job_names().is_empty(),
+        "the abandoned Job must still be reaped, or it holds its Kueue quota forever; still \
+         present: {:?}",
+        cluster.job_names(),
+    );
+}
+
+// ---------------------------------------------------------------------------
 // AC3 — the build lease refuses the replacement UID, in real PostgreSQL
 // ---------------------------------------------------------------------------
 
@@ -564,5 +805,69 @@ async fn every_lift_presented_with_the_replacement_pod_uid_is_rejected() {
         row.bound_pod_uid.as_deref(),
         Some(original),
         "no rejected lift may have moved the durable Pod binding"
+    );
+}
+
+/// `03z3` AC4. Surviving an eviction must not buy recovery with containment.
+///
+/// The uid here is not a literal: it is the one the modelled re-admission
+/// actually minted, so this asserts about the same object the previous tests let
+/// the run keep living beside. A run that recovers is still a run whose build
+/// lease is bound to the Pod it launched, and the Pod that came back is not that
+/// Pod.
+///
+/// Non-vacuity: allow the new uid — drop the pod-uid comparison from `bind`, or
+/// present `readmitted` as the original — and the `expect_err` fails.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_lift_from_the_re_admitted_pod_is_still_rejected() {
+    let cluster = FakeCluster::new();
+    let config = armed_fence_config();
+    let job_name = seed_admitted_taskrun(&cluster, &config).await;
+    let original = cluster
+        .pod_uids()
+        .first()
+        .expect("the admitted run has a Pod")
+        .clone();
+    cluster.evict(&job_name, "ClusterQueueStopped");
+    let readmitted = cluster.readmit(&job_name);
+    assert_ne!(original, readmitted);
+
+    let db = Database::open_in_memory().expect("real Postgres test database");
+    let repository = BuildLeaseRepository::new(db);
+    let key = invocation_key();
+    repository
+        .queue(&queue_input())
+        .await
+        .expect("queue the invocation lease");
+    let token = match repository
+        .grant_next(1, "2026-07-30T00:00:00.000Z", None)
+        .await
+        .expect("grant the queued lease")
+    {
+        GrantNextBuildLeaseResult::Granted(row) => {
+            row.fencing_token.expect("a granted lease carries a token")
+        }
+        other => panic!("expected a grant, got {other:?}"),
+    };
+    repository
+        .bind(&key, token, &original, None)
+        .await
+        .expect("bind the lease to the Pod the run launched before the eviction");
+
+    let rejected = repository
+        .bind(&key, token, &readmitted, None)
+        .await
+        .expect_err("the Pod Kueue re-admitted is not the Pod this lease is bound to");
+    assert_pod_uid_mismatch(rejected, "lift from the re-admitted Pod");
+
+    let row = repository
+        .get(&key)
+        .await
+        .expect("read the durable lease row")
+        .expect("the lease row exists");
+    assert_eq!(
+        row.bound_pod_uid.as_deref(),
+        Some(original.as_str()),
+        "recovery must not move the durable Pod binding",
     );
 }

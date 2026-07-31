@@ -10,7 +10,8 @@
 //!   so it cannot show that `suspend: true` is what holds the Pod back rather
 //!   than the renderer merely writing a key nobody reads.
 //!
-//! The fake models exactly two pieces of Kubernetes behaviour beyond storage:
+//! The fake models exactly three pieces of behaviour beyond storage — two of
+//! them the Job controller's, one of them Kueue's:
 //!
 //! 1. the Job controller's rule that a Job creates Pods only while it is *not*
 //!    suspended. That rule is the entire point of the Kueue cutover, so it is
@@ -19,7 +20,15 @@
 //!    gets a *replacement* Pod, with a fresh `metadata.uid`. That is what
 //!    `runtime_pod_fence_tests` fences against — and it is honest to model here
 //!    because it is Job-controller behaviour, not Kueue behaviour. It is not a
-//!    substitute for the live-cluster proof.
+//!    substitute for the live-cluster proof;
+//! 3. Kueue's eviction lifecycle — [`FakeCluster::evict`] and
+//!    [`FakeCluster::readmit`] — added by `03z3`. Every field and every ordering
+//!    in those two is a transcription of `kubectl -o json` against the live
+//!    armed cluster on 2026-07-31, precisely because `03z3` exists to fix a
+//!    defect that a *modelled* Kueue would have got wrong: the fake's Job
+//!    controller mints a replacement Pod, and a real cluster with
+//!    `backoffLimit: 0` does not. The live proof is still
+//!    `tests/kueue_disruption_conformance.rs`, not this.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -63,6 +72,11 @@ pub(super) struct ClusterState {
     /// Pod objects the modelled Job controller has materialised, each with its
     /// own immutable `metadata.uid`.
     pub(super) pods: Vec<Value>,
+    /// Kueue `Workload` objects, one per Job carrying a queue-name label. Only
+    /// `metadata.ownerReferences` and `status.conditions` are modelled: they are
+    /// what [`crate::runtime_eviction`] reads, and inventing the rest would be
+    /// inventing behaviour.
+    pub(super) workloads: Vec<Value>,
     pub(super) calls: Vec<ApiCall>,
 }
 
@@ -112,6 +126,23 @@ impl FakeCluster {
         let mut names: Vec<String> = self.state.lock().unwrap().secrets.keys().cloned().collect();
         names.sort();
         names
+    }
+
+    /// Every stored Workload's name, so a test can assert there is NO Workload
+    /// backing the behaviour it is measuring.
+    pub(super) fn workload_names(&self) -> Vec<String> {
+        self.state
+            .lock()
+            .unwrap()
+            .workloads
+            .iter()
+            .filter_map(|workload| {
+                workload
+                    .pointer("/metadata/name")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+            .collect()
     }
 
     pub(super) fn pod_count(&self) -> usize {
@@ -217,6 +248,144 @@ impl FakeCluster {
             spec.insert("suspend".into(), Value::Bool(false));
         }
         self.reconcile_job_controller(&mut state, job_name);
+    }
+
+    /// Kueue capturing a Job that carries a `queue-name` label: a `Workload`
+    /// appears, owned by the Job, with no `Evicted` condition on it.
+    ///
+    /// Shape transcribed from `kubectl get workloads.kueue.x-k8s.io -o json`
+    /// against the live armed cluster (Kubernetes 1.31 / Kueue 0.19.0,
+    /// 2026-07-31), including the `job-<name>-<hash>` naming.
+    fn capture_workload(&self, state: &mut ClusterState, job_name: &str, job: &Value) {
+        if job
+            .pointer("/metadata/labels")
+            .and_then(|labels| labels.get(crate::config::LABEL_KUEUE_QUEUE_NAME))
+            .is_none()
+        {
+            return;
+        }
+        let job_uid = job
+            .pointer("/metadata/uid")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        state.workloads.push(json!({
+            "apiVersion": "kueue.x-k8s.io/v1beta1",
+            "kind": "Workload",
+            "metadata": {
+                "name": format!("job-{job_name}-1aa22"),
+                "namespace": "djinn",
+                "uid": self.next_uid(),
+                "ownerReferences": [{
+                    "apiVersion": "batch/v1",
+                    "kind": "Job",
+                    "name": job_name,
+                    "uid": job_uid,
+                    "controller": true,
+                }],
+            },
+            "status": {"conditions": [
+                {"type": "QuotaReserved", "status": "True", "reason": "QuotaReserved",
+                 "message": "Quota reserved in ClusterQueue djinn-kueue"},
+                {"type": "Admitted", "status": "True", "reason": "Admitted",
+                 "message": "The workload is admitted"},
+            ]},
+        }));
+    }
+
+    fn workload_conditions_of<'a>(
+        state: &'a mut ClusterState,
+        job_name: &str,
+    ) -> Option<&'a mut Value> {
+        state
+            .workloads
+            .iter_mut()
+            .find(|workload| {
+                workload
+                    .pointer("/metadata/ownerReferences/0/name")
+                    .and_then(Value::as_str)
+                    == Some(job_name)
+            })
+            .map(|workload| &mut workload["status"]["conditions"])
+    }
+
+    /// A Kueue EVICTION, as measured on the live armed cluster: Kueue
+    /// re-suspends the Job, the Job controller deletes its Pod, and NOTHING
+    /// replaces it (a suspended Job pods nothing). The Workload keeps existing
+    /// and gains `Evicted: True`.
+    ///
+    /// Returns the evicted Pod's uid. The ORDER is the measured one — `suspend`
+    /// is true from t+0s while the Pod took 34s to go — so a watch that samples
+    /// mid-eviction sees a suspended Job, which is half of what
+    /// [`crate::runtime_eviction::classify_absent_pod`] reads.
+    pub(super) fn evict(&self, job_name: &str, reason: &str) -> String {
+        let mut state = self.state.lock().unwrap();
+        if let Some(job) = state.jobs.get_mut(job_name)
+            && let Some(spec) = job.get_mut("spec").and_then(Value::as_object_mut)
+        {
+            spec.insert("suspend".into(), Value::Bool(true));
+        }
+        let index = Self::owned_pod_index(&state, job_name).expect("the Job has a Pod to evict");
+        let evicted = state.pods.remove(index);
+        if let Some(conditions) = Self::workload_conditions_of(&mut state, job_name) {
+            *conditions = json!([
+                {"type": "QuotaReserved", "status": "False", "reason": "Inadmissible",
+                 "message": "ClusterQueue djinn-kueue is inactive"},
+                {"type": "Evicted", "status": "True", "reason": reason,
+                 "message": "The ClusterQueue is stopped"},
+                {"type": "Admitted", "status": "False", "reason": "NoReservation",
+                 "message": "The workload has no reservation"},
+            ]);
+        }
+        // The Job controller must NOT replace an evicted Pod, and this asserts
+        // the fixture keeps that property rather than assuming it.
+        self.reconcile_job_controller(&mut state, job_name);
+        assert!(
+            Self::owned_pod_index(&state, job_name).is_none(),
+            "fixture invariant: a SUSPENDED Job materialises no Pod, so an eviction leaves none",
+        );
+        evicted
+            .pointer("/metadata/uid")
+            .and_then(Value::as_str)
+            .expect("stored Pod has a uid")
+            .to_string()
+    }
+
+    /// Kueue RE-ADMITTING the evicted Workload once capacity returns: `suspend`
+    /// goes back to false, the Job controller makes a NEW Pod with a NEW uid,
+    /// and the `Evicted` condition stays behind flipped to `False`.
+    ///
+    /// That last part is the measured fact this whole task turns on: at
+    /// `2026-07-31T12:47:59Z`, ~1s after the queue was released, the re-admitted
+    /// Workload still carried `Evicted / False / QuotaReserved / "Previously:
+    /// The ClusterQueue is stopped"`.
+    ///
+    /// Returns the re-admitted Pod's uid.
+    pub(super) fn readmit(&self, job_name: &str) -> String {
+        {
+            let mut state = self.state.lock().unwrap();
+            if let Some(conditions) = Self::workload_conditions_of(&mut state, job_name) {
+                *conditions = json!([
+                    {"type": "QuotaReserved", "status": "True", "reason": "QuotaReserved",
+                     "message": "Quota reserved in ClusterQueue djinn-kueue"},
+                    {"type": "Evicted", "status": "False", "reason": "QuotaReserved",
+                     "message": "Previously: The ClusterQueue is stopped"},
+                    {"type": "Admitted", "status": "True", "reason": "Admitted",
+                     "message": "The workload is admitted"},
+                    {"type": "Requeued", "status": "True", "reason": "ClusterQueueRestarted",
+                     "message": "The ClusterQueue was restarted after being stopped"},
+                ]);
+            }
+        }
+        self.unsuspend(job_name);
+        let state = self.state.lock().unwrap();
+        let index =
+            Self::owned_pod_index(&state, job_name).expect("re-admission materialises a new Pod");
+        state.pods[index]
+            .pointer("/metadata/uid")
+            .and_then(Value::as_str)
+            .expect("stored Pod has a uid")
+            .to_string()
     }
 
     /// `kubectl delete pod --force --grace-period=0`: the Pod object vanishes
@@ -334,9 +503,28 @@ impl FakeCluster {
         let is_job = path.contains("/jobs");
         let is_secret = path.contains("/secrets");
         let is_pod = path.contains("/pods");
+        let is_workload = path.contains("/workloads");
         // `.../jobs` on a create, `.../jobs/<name>` on a get/patch.
         let trailing = path.rsplit('/').next().unwrap_or_default().to_string();
         let named = !(trailing == "jobs" || trailing == "secrets" || trailing == "pods");
+
+        // A cluster with no Kueue CRD 404s this path, which is the fixture's
+        // default: `workloads` is empty unless a Job was captured, but the LIST
+        // still answers 200 with no items, exactly as an armed cluster with no
+        // Workload for this Job does. The 404 case has its own coverage in
+        // `runtime_eviction_tests`, against the error value rather than a fake.
+        if is_workload && method == "GET" {
+            let state = self.state.lock().unwrap();
+            return (
+                200,
+                json!({
+                    "apiVersion": "kueue.x-k8s.io/v1beta1",
+                    "kind": "WorkloadList",
+                    "metadata": {"resourceVersion": "1"},
+                    "items": state.workloads.clone(),
+                }),
+            );
+        }
 
         if is_pod && method == "GET" && !named {
             let state = self.state.lock().unwrap();
@@ -379,6 +567,13 @@ impl FakeCluster {
                         != Some(trailing.as_str())
                 });
             }
+            // Kueue garbage-collects a Workload whose owning Job is gone.
+            state.workloads.retain(|workload| {
+                workload
+                    .pointer("/metadata/ownerReferences/0/name")
+                    .and_then(Value::as_str)
+                    != Some(trailing.as_str())
+            });
             return (200, job);
         }
 
@@ -409,6 +604,7 @@ impl FakeCluster {
                 }
                 job["metadata"]["uid"] = Value::String(self.next_uid());
                 state.jobs.insert(name.clone(), job.clone());
+                self.capture_workload(&mut state, &name, &job);
                 self.reconcile_job_controller(&mut state, &name);
                 (201, job)
             }
