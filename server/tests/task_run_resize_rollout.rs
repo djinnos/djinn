@@ -723,7 +723,11 @@ async fn the_admission_pause_is_proven_by_a_refused_dispatch() {
         1,
         "a paused dispatch attempt must create no Pod; the assertion is the count, not the row"
     );
-    assert_eq!(rollout.dispatches_admitted_while_paused(), 0);
+    assert_eq!(
+        rollout.dispatches_admitted_while_paused(),
+        0,
+        "no Pod may be created between the pause and the resume"
+    );
 }
 
 /// **The mutation, run.** A pause that writes the row and wires no refusal is
@@ -1058,6 +1062,7 @@ async fn rollback_is_blocked_and_leaves_admission_paused() {
             !rollout.journal().contains(&RolloutStep::AdmissionResumed),
             "{case}: admission must not have been resumed"
         );
+        assert_eq!(rollout.dispatches_admitted_while_paused(), 0, "{case}");
     }
 }
 
@@ -1166,6 +1171,7 @@ async fn the_flip_cannot_precede_the_drain_and_the_resume_cannot_precede_the_fli
         0,
         "nothing has ever been dispatched here: even the pause probe was refused"
     );
+    assert_eq!(rollout.dispatches_admitted_while_paused(), 0);
 
     // In order, both succeed.
     assert_eq!(rollout.flip_authority_mode(0, RESIZE).await, Ok(1));
@@ -1455,6 +1461,20 @@ fn no_blanket_launcher_cpu_clamp_is_reintroduced_and_nothing_is_retired() {
             "{rendering:?} would mean this module renders a container spec"
         );
     }
+
+    // Outbound HTTP goes through the capability owner. `scripts/check-http-boundary.sh`
+    // enforces this repository-wide; asserting it here too means a reviewer sees
+    // the constraint beside the code it constrains rather than only in CI.
+    for forbidden in [concat!("reqwest", "::"), concat!("hyper", "::")] {
+        assert!(
+            !driver.contains(forbidden),
+            "{forbidden:?}: outbound HTTP must go through djinn_provider::http_util"
+        );
+    }
+    assert!(
+        driver.contains("djinn_provider::http_util::HttpClient"),
+        "the registry probe must use the capability owner's client"
+    );
 
     // The `resize-v2`-only condition on the ceiling render is intact.
     let launcher = read("server/crates/djinn-k8s/src/launcher.rs");

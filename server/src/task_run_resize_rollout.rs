@@ -596,14 +596,26 @@ impl ResizeRollout {
             .clone()
     }
 
-    /// How many dispatch attempts were admitted while admission was paused.
+    /// How many Pods were created after the pause step ran and before the
+    /// resume step did.
     ///
-    /// Structurally zero while [`Self::attempt_dispatch`] consults the pause
-    /// predicate first; non-zero the moment that consultation is deleted, with
-    /// or without anyone remembering to write an assertion about it.
+    /// This exists so the pause's absence is **observable** rather than merely
+    /// assertable. Between [`RolloutStep::AdmissionPaused`] and
+    /// [`RolloutStep::AdmissionResumed`] the invariant is that no dispatch
+    /// creates a Pod; while [`Self::attempt_dispatch`] consults the pause
+    /// predicate first the counter is structurally zero, and it becomes
+    /// non-zero on the first admitted dispatch whether or not anyone remembered
+    /// to write an assertion about ordering.
     #[must_use]
     pub fn dispatches_admitted_while_paused(&self) -> u64 {
         self.dispatches_admitted_while_paused.load(Ordering::SeqCst)
+    }
+
+    /// Is the cutover between its pause and its resume?
+    fn inside_the_pause_window(&self) -> bool {
+        let journal = self.journal.lock().expect("rollout journal poisoned");
+        journal.contains(&RolloutStep::AdmissionPaused)
+            && !journal.contains(&RolloutStep::AdmissionResumed)
     }
 
     /// Refuse `step` unless its prerequisites have run and it has not.
@@ -1109,6 +1121,16 @@ impl ResizeRollout {
         if let Err(error) = self.pods.create_task_run_pod(task_run_id, &image.id).await {
             return DispatchOutcome::PodPlaneRefused(error);
         }
+        if self.inside_the_pause_window() {
+            // A Pod exists, and the cutover believes admission is paused. Record
+            // it here rather than trusting a later assertion to notice.
+            self.dispatches_admitted_while_paused
+                .fetch_add(1, Ordering::SeqCst);
+            warn!(
+                task_run_id,
+                "task_run_resize_rollout: a Pod was created between the pause and the resume"
+            );
+        }
 
         let authority = verdict.authority();
         if authority.launcher_owns_leaf_quota() {
@@ -1130,29 +1152,6 @@ impl ResizeRollout {
             authority,
             resized: true,
         }
-    }
-
-    /// Dispatch, recording the invariant violation if admission was paused and
-    /// a Pod was nevertheless created.
-    ///
-    /// Used by callers that want the counter to move: the counter exists so the
-    /// pause's absence is observable rather than merely assertable.
-    pub async fn attempt_dispatch_observed(
-        &self,
-        task_run_id: &str,
-        image: &Image,
-    ) -> DispatchOutcome {
-        let paused = self.admission.dispatch_is_paused().await.unwrap_or(false);
-        let outcome = self.attempt_dispatch(task_run_id, image).await;
-        if paused && matches!(outcome, DispatchOutcome::Dispatched { .. }) {
-            self.dispatches_admitted_while_paused
-                .fetch_add(1, Ordering::SeqCst);
-            warn!(
-                task_run_id,
-                "task_run_resize_rollout: a dispatch was admitted while admission was paused"
-            );
-        }
-        outcome
     }
 
     /// Read the authority singleton, mapping both "absent" and "unreadable" to
@@ -1391,25 +1390,43 @@ impl ResizeRollout {
     }
 }
 
-/// A registry probe over plain HTTP(S), speaking the OCI distribution manifest
-/// API.
+/// A registry probe speaking the OCI distribution manifest API.
 ///
 /// `GET /v2/<repository>/manifests/<reference>` with the manifest media types
-/// the registry needs to see in `Accept`. The response *body* is what gets
-/// hashed — not a header the registry supplies — so a registry that reports one
-/// digest and serves another does not pass.
+/// the registry needs to see in `Accept`. The response **body** is what gets
+/// hashed — not the `Docker-Content-Digest` header the registry supplies — so a
+/// registry that reports one digest and serves another does not pass.
+///
+/// Outbound HTTP goes through [`djinn_provider::http_util::HttpClient`], the
+/// capability owner. This module names no HTTP client type of its own: the
+/// capability-boundary guard forbids it, and the guard is right — a second
+/// client here would have its own timeout, its own TLS configuration and its
+/// own idea of what a failed request means.
 pub struct HttpRegistryProbe {
     base_url: String,
-    client: reqwest::Client,
+    client: djinn_provider::http_util::HttpClient,
 }
+
+/// How long a single manifest read may take.
+///
+/// A cutover blocked on an unreachable registry must report that promptly; the
+/// alternative is an operator watching a paused deployment while a socket hangs.
+const REGISTRY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 impl HttpRegistryProbe {
     /// Bind to a registry base URL, e.g. `http://registry:5000`.
+    ///
+    /// # Panics
+    ///
+    /// Never in practice: the only failure mode of the underlying client
+    /// builder is a malformed TLS configuration, which is a process-wide
+    /// condition rather than a per-probe one.
     #[must_use]
     pub fn new(base_url: impl Into<String>) -> Self {
         Self {
             base_url: base_url.into().trim_end_matches('/').to_owned(),
-            client: reqwest::Client::new(),
+            client: djinn_provider::http_util::HttpClient::new(REGISTRY_TIMEOUT)
+                .expect("the HTTP client builder only fails on a malformed TLS configuration"),
         }
     }
 }
@@ -1425,22 +1442,17 @@ const MANIFEST_ACCEPT: &str = "application/vnd.oci.image.manifest.v1+json, \
 impl RegistryProbe for HttpRegistryProbe {
     async fn fetch_manifest(&self, repository: &str, reference: &str) -> Result<Vec<u8>, String> {
         let url = format!("{}/v2/{repository}/manifests/{reference}", self.base_url);
-        let response = self
-            .client
+        let operation = format!("GET {url}");
+        self.client
             .get(&url)
-            .header(reqwest::header::ACCEPT, MANIFEST_ACCEPT)
-            .send()
+            .header("Accept", MANIFEST_ACCEPT)
+            .send(&operation)
             .await
-            .map_err(|error| format!("GET {url}: {error}"))?;
-        let status = response.status();
-        if !status.is_success() {
-            return Err(format!("GET {url}: {status}"));
-        }
-        response
-            .bytes()
+            .map_err(|error| error.to_string())?
+            .bytes(&operation)
             .await
             .map(|bytes| bytes.to_vec())
-            .map_err(|error| format!("GET {url}: reading the manifest body: {error}"))
+            .map_err(|error| error.to_string())
     }
 }
 
