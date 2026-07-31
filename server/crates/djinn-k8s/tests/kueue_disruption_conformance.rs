@@ -38,8 +38,16 @@
 //!    no `Failed` condition, Workload `Evicted` but not `Finished` — exactly
 //!    `job_failed_reason() == None && !job_completed_cleanly()`. Releasing the
 //!    queue re-admits the same Workload with a NEW Pod UID, so the eviction is
-//!    recoverable, the Job is owed a Pod, and the containment deletes it. That
-//!    is the live subject AC2 needed.
+//!    RECOVERABLE — and the containment deleted the Job anyway. That was filed
+//!    as `03z3`, a P0 blocker on arming Kueue anywhere, and fixed by narrowing
+//!    the arm to an absence nothing in observable cluster state explains
+//!    (`crate::runtime_eviction`). The test that used to assert the reap here is
+//!    replaced by [`live_a_kueue_eviction_and_re_admission_leaves_the_task_run_alive`],
+//!    which asserts the opposite, plus the two fields it turns on. Measured
+//!    2026-07-31: the Job reads `suspend: true` from t+0s of the eviction while
+//!    the Pod took 34s to go, and the re-admitted Workload STILL carries its
+//!    `Evicted` condition, flipped to `False` with message
+//!    `Previously: The ClusterQueue is stopped`.
 //! 4. **`kube::Client` panics on construction here.** `workspace-hack` unifies
 //!    rustls with both `ring` and `aws-lc-rs`, and it panics for `http://` as
 //!    readily as `https://`, so there is no TLS-free route around it.
@@ -381,31 +389,36 @@ fn live_force_deleting_an_admitted_pod_records_the_permitted_disjunction() {
 }
 
 // ===========================================================================
-// AC2 — the replacement UID, and the REAL watch that refuses it
+// `03z3` — an eviction is RECOVERABLE, and the watch must let it recover
 // ===========================================================================
 
-/// The live subject AC2 needs, produced by the only thing that produces it.
+/// **This test replaces the one that codified the defect.**
 ///
-/// A force-deleted Pod mints no replacement (finding 2). A Kueue EVICTION does:
-/// it re-suspends the Job, deletes the Pod, and — when capacity returns —
-/// re-admits the same Workload and the Job controller creates a NEW Pod with a
-/// DIFFERENT `metadata.uid` under the very same labels. That is the object
-/// `fenced_worker_pod` must refuse to adopt, and this drives the REAL
-/// `SessionRuntime::watch_infra_death` at it rather than a copy of its logic.
+/// `fbiy-B2` measured that A1's containment arm is reached on a live cluster
+/// almost exclusively BY EVICTION (finding 3 above: a force-delete goes
+/// `Failed` in ~5s under `backoffLimit: 0` and resolves through the pre-existing
+/// arm, so it never reaches A1's at all). The test that used to live here
+/// asserted the consequence — the watch resolves, the Job is reaped — and that
+/// consequence is wrong: releasing the queue re-admits the same Workload and the
+/// run can still finish, so reaping there converts a recoverable task-run into a
+/// destroyed one. `03z3` is that defect; this is its live proof.
 ///
-/// Three assertions, each of which fails on a different removal:
+/// Four assertions, each failing on a different regression:
 ///
-/// 1. the watch RESOLVES — reverting A1's Pod-absent-plus-Job-nonterminal arm
-///    makes it hang until the timeout, because the evicted Job is neither
-///    `Failed` nor `Complete` and the pre-existing arms have nothing to say;
-/// 2. the reason names the ORIGINAL Pod UID — removing the UID comparison from
-///    `fenced_worker_pod` makes the watch adopt the re-admitted Pod, see it
-///    healthy, and never resolve at all;
-/// 3. the Job is GONE from the live API server — a reap that builds
-///    `DeleteParams` and never sends them leaves it there.
+/// 1. the watch does NOT resolve — restore the unconditional foreground delete
+///    and it resolves inside the eviction window, which is how the dispatch
+///    runner terminalises a run;
+/// 2. the Job is STILL on the API server — a reaped Job can never be re-admitted
+///    and no retry ever adopts it (a retry mints a fresh task-run id);
+/// 3. Kueue re-admitted it and a NEW Pod is Running — so this measured a
+///    recovery rather than a cluster that quietly stayed broken;
+/// 4. AC3's distinguisher is asserted as a FIELD READ, in both phases: the Job
+///    reads `suspend: true` during the eviction, and the Workload still carries
+///    its `Evicted` condition after re-admission — which is the one the watch
+///    can still see at the sample a 15s poll actually takes.
 #[test]
 #[ignore]
-fn live_a_kueue_eviction_produces_the_replacement_uid_the_watch_refuses() {
+fn live_a_kueue_eviction_and_re_admission_leaves_the_task_run_alive() {
     if !live_tests_enabled() {
         return;
     }
@@ -422,6 +435,12 @@ fn live_a_kueue_eviction_produces_the_replacement_uid_the_watch_refuses() {
         workload_condition(&context, &job_name, "Admitted"),
         "the run must be admitted before eviction can mean anything; workloads: {}",
         workload_summary(&context),
+    );
+    assert_eq!(
+        workload_condition_entry(&context, &job_name, "Evicted"),
+        None,
+        "an admitted Workload that was never evicted carries no Evicted condition at all — that \
+         is what makes its later presence evidence rather than decoration",
     );
 
     let handle = RunHandle {
@@ -440,9 +459,10 @@ fn live_a_kueue_eviction_produces_the_replacement_uid_the_watch_refuses() {
         .enable_all()
         .build()
         .expect("build a tokio runtime for the live watch");
-    let reason = tokio_runtime.block_on({
+    let (resolved, observed) = tokio_runtime.block_on({
         let context = context.clone();
         let task_run_id = task_run_id.clone();
+        let job_name = job_name.clone();
         let bound_uid = bound_uid.clone();
         let config = config.clone();
         async move {
@@ -456,71 +476,189 @@ fn live_a_kueue_eviction_produces_the_replacement_uid_the_watch_refuses() {
                 // NOW. A watch disrupted before it has ever observed a Pod has
                 // nothing to be fenced to and would pass trivially.
                 std::thread::sleep(Duration::from_secs(20));
-                evict_and_release(&context, &task_run_id, &bound_uid);
+                evict_capturing_the_distinguisher(&context, &task_run_id, &job_name, &bound_uid)
             });
-            let reason =
-                tokio::time::timeout(Duration::from_secs(300), runtime.watch_infra_death(&handle))
+            // The watch must still be RUNNING when this elapses. The budget is
+            // deliberately far past the whole eviction: measured 2026-07-31, the
+            // drain took ~34s and the re-admission ~1s after release, against a
+            // 15s poll — so this leaves the watch several polls on each side,
+            // including the post-re-admission samples that are the destructive
+            // ones.
+            let resolved =
+                tokio::time::timeout(Duration::from_secs(150), runtime.watch_infra_death(&handle))
                     .await;
-            let _ = evicting.await;
-            reason
+            let observed = evicting.await.expect("the eviction driver panicked");
+            (resolved, observed)
         }
     });
     // Whatever happened, do not leave the queue stopped for the next test.
     set_stop_policy(&context, "None");
 
-    let reason = reason.unwrap_or_else(|_| {
+    eprintln!("03z3 live eviction observation: {observed:?}");
+
+    // 1. The watch never resolved. `Elapsed` is the pass.
+    if let Ok(reason) = resolved {
         panic!(
-            "the infra-death watch never resolved across a Kueue eviction. The evicted Job is \
-             suspended, NOT Failed and NOT Complete, so only fbiy-A1's \
-             Pod-absent-plus-Job-nonterminal arm can resolve it. Job still present: {}; \
+            "a routine Kueue eviction terminalised a RECOVERABLE task-run: the infra-death watch \
+             resolved with {reason:?}. Job still present: {}; workloads: {}",
+            job_exists(&context, &job_name),
+            workload_summary(&context),
+        );
+    }
+
+    // 2. The Job survived, so the run is still the one Kueue re-admitted.
+    assert!(
+        job_exists(&context, &job_name),
+        "the evicted Job must survive: deleting it is precisely what makes a recoverable \
+         eviction unrecoverable. Workloads: {}",
+        workload_summary(&context),
+    );
+
+    // 3. The recovery is real, not a cluster that stayed broken quietly.
+    let recovered: BTreeSet<String> = pods_of(&context, &task_run_id)
+        .into_iter()
+        .filter(|(_, uid, phase)| !uid.is_empty() && *uid != bound_uid && phase == "Running")
+        .map(|(_, uid, _)| uid)
+        .collect();
+    assert!(
+        !recovered.is_empty(),
+        "Kueue must have re-admitted the Workload and the Job controller must have created a NEW \
+         Pod; pods now: {:?}, workloads: {}",
+        pods_of(&context, &task_run_id),
+        workload_summary(&context),
+    );
+    assert!(
+        workload_condition(&context, &job_name, "Admitted"),
+        "the re-admitted Workload must be Admitted again; workloads: {}",
+        workload_summary(&context),
+    );
+
+    // 4. AC3: the distinguisher, asserted as a field read in both phases.
+    assert!(
+        observed.suspended_during,
+        "Kueue re-suspends an evicted Job — `spec.suspend` is the Job-level half of the \
+         distinguisher and it was never observed true: {observed:?}",
+    );
+    let (during_status, during_reason) = observed
+        .evicted_during
+        .clone()
+        .expect("an evicted Workload carries an Evicted condition");
+    assert_eq!(
+        during_status, "True",
+        "during the eviction the Workload's Evicted condition is True (reason {during_reason})",
+    );
+    let (after_status, after_reason) = observed.evicted_after_readmission.clone().expect(
+        "THE FIELD THIS FIX TURNS ON: Kueue leaves the Evicted condition behind after \
+             re-admission. Without it, a poll landing after the release sees an unsuspended Job \
+             with its fenced Pod gone — bit for bit the state fbiy-A1 reaps on — and nothing to \
+             tell it apart from abandonment",
+    );
+    assert!(
+        !observed.suspended_after_readmission,
+        "the re-admitted Job is unsuspended ({observed:?}), which is exactly why `spec.suspend` \
+         alone cannot carry this and the Workload's record has to",
+    );
+    eprintln!(
+        "03z3 AC3 distinguisher: Evicted during = ({during_status}, {during_reason}); after \
+         re-admission = ({after_status}, {after_reason}); job suspend during = {}, after = {}",
+        observed.suspended_during, observed.suspended_after_readmission,
+    );
+    assert_eq!(
+        observed.pods_usage_during, 0,
+        "RECORDED and asserted: an evicted Workload holds NO ClusterQueue quota, which is why \
+         holding the reap off does not strand the capacity the reap exists to release",
+    );
+
+    delete_job(&context, &job_name);
+}
+
+/// AC2, live: the narrowing must not have disarmed a genuine Pod loss.
+///
+/// On this cluster a force-delete resolves through the PRE-EXISTING
+/// `job_failed_reason` arm rather than A1's (finding 2), and that is the point:
+/// whichever arm answers, the run must still terminalise rather than hang. A fix
+/// that held on every absence — the obvious way to make the eviction test pass —
+/// fails here, because nothing else would ever resolve this watch.
+#[test]
+#[ignore]
+fn live_a_force_deleted_pod_still_terminalises_the_run() {
+    if !live_tests_enabled() {
+        return;
+    }
+    install_crypto_provider();
+    let context = harness_context();
+    clear_task_run_jobs(&context);
+    repair_cluster_queue_for_admission(&context);
+    ensure_workload_image_on_the_node();
+    let config = config_for(&context, WORKLOAD_IMAGE);
+
+    let (task_run_id, job_name) = launch_task_run(&context, &config);
+    let (pod_name, bound_uid) = await_running_pod(&context, &task_run_id);
+    assert_eq!(
+        workload_condition_entry(&context, &job_name, "Evicted"),
+        None,
+        "this run is being force-deleted, not evicted: its Workload must carry no Evicted record",
+    );
+
+    let handle = RunHandle {
+        task_run_id: task_run_id.clone(),
+        container_id: None,
+        pod_ref: Some(job_name.clone()),
+        started_at: SystemClock::new().now(),
+    };
+    let tokio_runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .enable_all()
+        .build()
+        .expect("build a tokio runtime for the live watch");
+    let resolved = tokio_runtime.block_on({
+        let context = context.clone();
+        let config = config.clone();
+        async move {
+            let runtime = KubernetesRuntime::from_client(
+                kube_client(&context).await,
+                config,
+                std::sync::Arc::new(ConnectionRegistry::new()),
+            );
+            let destroying = tokio::task::spawn_blocking(move || {
+                std::thread::sleep(Duration::from_secs(20));
+                let deleted = Command::new("kubectl")
+                    .args([
+                        "--context",
+                        &context,
+                        "-n",
+                        NAMESPACE,
+                        "delete",
+                        "pod",
+                        &pod_name,
+                        "--grace-period=0",
+                        "--force",
+                    ])
+                    .output()
+                    .expect("kubectl is on PATH");
+                assert!(
+                    deleted.status.success(),
+                    "force-deleting {pod_name} failed: {}",
+                    stderr(&deleted),
+                );
+            });
+            let resolved =
+                tokio::time::timeout(Duration::from_secs(180), runtime.watch_infra_death(&handle))
+                    .await;
+            let _ = destroying.await;
+            resolved
+        }
+    });
+
+    let reason = resolved.unwrap_or_else(|_| {
+        panic!(
+            "a force-deleted worker Pod must still terminalise its run. Job present: {}; \
              workloads: {}",
             job_exists(&context, &job_name),
             workload_summary(&context),
         )
     });
-    eprintln!("AC2 live death reason: {reason}");
-
-    assert!(
-        reason.contains(&bound_uid),
-        "the run stays bound to the Pod UID it launched — the watch must name it rather than \
-         adopt whatever Pod the re-admission created. bound_uid={bound_uid}, reason: {reason}",
-    );
-
-    // The replacement, when the re-admission got one in front of a poll. This is
-    // RECORDED rather than required, because the watch may legitimately resolve
-    // inside the eviction window before Kueue re-admits — both orderings are
-    // correct behaviour and asserting one produces a flaky test.
-    let observed_uids: BTreeSet<String> = pods_of(&context, &task_run_id)
-        .into_iter()
-        .map(|(_, uid, _)| uid)
-        .filter(|uid| !uid.is_empty() && *uid != bound_uid)
-        .collect();
-    let refused_by_name = reason.contains("refused to adopt replacement Pod UID(s)");
-    eprintln!(
-        "AC2 RECORDED: replacement Pod UIDs seen after re-admission = {observed_uids:?}; \
-         the watch reported them refused by name = {refused_by_name}"
-    );
-    for uid in &observed_uids {
-        assert_ne!(
-            uid, &bound_uid,
-            "a replacement Pod must carry a different immutable UID",
-        );
-    }
-
-    // The reap, observed on the API server rather than in a log line.
-    let mut reaped = false;
-    for _ in 0..AWAIT_TICKS {
-        if !job_exists(&context, &job_name) {
-            reaped = true;
-            break;
-        }
-        std::thread::sleep(TICK);
-    }
-    assert!(
-        reaped,
-        "reconciliation must foreground-delete the old Job so it stops holding quota before the \
-         task-run is retried; {job_name} is still on the API server",
-    );
+    eprintln!("03z3 AC2 live death reason (bound uid {bound_uid}): {reason}");
 
     delete_job(&context, &job_name);
 }
