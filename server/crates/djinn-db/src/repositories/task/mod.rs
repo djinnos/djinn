@@ -13,6 +13,7 @@ mod activity;
 mod blockers;
 mod board_health;
 mod board_health_dispatch_gate;
+mod board_health_kueue_admission;
 mod board_health_stalled_epics;
 mod ci;
 mod generation;

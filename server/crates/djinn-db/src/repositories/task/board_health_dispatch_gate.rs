@@ -111,12 +111,28 @@
 //! The blind spot the cutover OPENED is that Kueue's ClusterQueue now decides
 //! build capacity, and a Job it has not admitted is queued by Kueue with no row
 //! in any relation this section reads. That is why
-//! `kueue_clusterqueue_admission` is listed in [`UNEVALUATED_GATES`] rather
+//! `kueue_clusterqueue_admission` was listed in [`UNEVALUATED_GATES`] rather
 //! than left for an operator to infer from a healthy-looking `build_capacity`.
+//!
+//! # Closing that blind spot (ecrz)
+//!
+//! It is no longer true that Kueue's decision leaves no row. Migration 165's
+//! `kueue_workload_admission` is a durable projection of what Kueue decided,
+//! written by the leader's Workload reflector, and
+//! [`super::board_health_kueue_admission`] now reads it into a `kueue_admission`
+//! block beside `build_capacity`. `kueue_clusterqueue_admission` therefore moves
+//! between `evaluated_gates` and `unevaluated_gates` at runtime instead of
+//! sitting unconditionally in the latter — but ONLY when the projection holds
+//! rows. Read that module for why an empty relation is deliberately not treated
+//! as an evaluation: it is what a healthy unarmed cluster and a dead reflector
+//! both look like from Postgres, and this section does not emit verdicts it
+//! cannot justify.
 
 use std::collections::HashMap;
 
 use sqlx::Row;
+
+use super::board_health_kueue_admission::{KUEUE_GATE, KueueGateOutcome};
 
 /// Gates the stranded-ready section evaluates from durable state.
 ///
@@ -143,13 +159,11 @@ pub(super) const EVALUATED_GATES: &[&str] = &[
 /// ladder is not listed here because it is process-local state on the leader
 /// and leaves no durable row to enumerate against; when it refuses, the reason
 /// arrives on the persisted denial record instead (`build_admission_denial`).
+///
+/// `kueue_clusterqueue_admission` is deliberately NOT in this list any more: it
+/// is added to whichever list the projection read justifies, per call. See
+/// [`super::board_health_kueue_admission`].
 pub(super) const UNEVALUATED_GATES: &[&str] = &[
-    // The Kueue cutover moved build capacity to a ClusterQueue. A Job Kueue has
-    // not admitted is SUSPENDED by Kueue and leaves no row in any relation this
-    // section reads, so a healthy `build_capacity` block now says strictly less
-    // than it used to. Naming the gap is the only honest option available from
-    // a Postgres read.
-    "kueue_clusterqueue_admission",
     "per_user_lane_concurrency_cap",
     "per_user_model_concurrency_cap",
     "slot_pool_capacity",
@@ -769,9 +783,11 @@ pub(super) fn dispatch_gate_json(
     last_dispatched_role: Option<String>,
     cooldown_until: Option<String>,
     lease: LeaseGateOutcome,
+    kueue: KueueGateOutcome,
     mut reasons: Vec<&'static str>,
 ) -> serde_json::Value {
     reasons.extend(lease.reasons);
+    reasons.extend(kueue.reasons);
 
     let mut evaluated_gates: Vec<&'static str> = EVALUATED_GATES
         .iter()
@@ -779,6 +795,11 @@ pub(super) fn dispatch_gate_json(
         .filter(|gate| lease.evaluated || *gate != "build_lease_admission")
         .filter(|gate| lease.denial_evaluated || *gate != "build_admission_denial")
         .collect();
+    // The one gate whose evaluated/unevaluated status is decided per call: it
+    // depends on whether the projection had anything to say at all.
+    if kueue.evaluated {
+        evaluated_gates.push(KUEUE_GATE);
+    }
     evaluated_gates.sort_unstable();
 
     let mut unevaluated_gates: Vec<&'static str> = UNEVALUATED_GATES.to_vec();
@@ -787,6 +808,9 @@ pub(super) fn dispatch_gate_json(
     }
     if !lease.denial_evaluated {
         unevaluated_gates.push("build_admission_denial");
+    }
+    if !kueue.evaluated {
+        unevaluated_gates.push(KUEUE_GATE);
     }
     unevaluated_gates.sort_unstable();
 
@@ -808,6 +832,8 @@ pub(super) fn dispatch_gate_json(
         "build_lease":          lease.build_lease,
         "build_capacity":       lease.build_capacity,
         "build_admission_denial": lease.build_admission_denial,
+        "kueue_admission":      kueue.kueue_admission,
+        "kueue_workload":       kueue.kueue_workload,
         "gate_verdict":         gate_verdict,
         "reasons":              reasons,
         "coverage": serde_json::json!({
@@ -816,18 +842,22 @@ pub(super) fn dispatch_gate_json(
             "unevaluated_gates": unevaluated_gates,
             "build_lease_unevaluated_detail": lease.unevaluated_detail,
             "build_admission_denial_unevaluated_detail": lease.denial_unevaluated_detail,
+            "kueue_admission_unevaluated_detail": kueue.unevaluated_detail,
             "note": "`reasons` covers only `evaluated_gates`. An empty `reasons` \
                      yields `unexplained`, which means no evaluated gate fired — \
                      NOT that the dispatcher had no reason. `build_capacity` speaks \
-                     for the LEASE ledger alone, and since the Kueue cutover a Job \
-                     can sit suspended behind a ClusterQueue quota that leaves no \
-                     row in any relation read here, so a healthy `build_capacity` \
-                     is not evidence that dispatch is possible. \
+                     for the LEASE ledger alone; what Kueue decided is a separate \
+                     authority and is reported in `kueue_admission`, read from the \
+                     migration-165 projection. \
                      `build_admission_denial` is the dispatcher's OWN recorded \
                      `DenialCause` (#2661, migration 161) — the only field here \
                      that is a decision rather than a re-derivation of one — but \
                      the process that wrote it was deleted by the cutover, so a \
-                     `null` there is the steady state rather than an all-clear.",
+                     `null` there is the steady state rather than an all-clear. \
+                     `kueue_clusterqueue_admission` appears in `evaluated_gates` \
+                     only while the projection holds rows; while it is empty an \
+                     unarmed cluster and a stopped reflector are indistinguishable \
+                     from here, so the gate stays unevaluated.",
         }),
         // Retained for backward compatibility with the initial board_health
         // contract.

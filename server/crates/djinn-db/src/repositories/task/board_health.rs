@@ -314,6 +314,12 @@ pub(super) async fn stranded_ready_section(pool: &sqlx::PgPool) -> serde_json::V
     // report a lease/capacity fact instead of an independent guess.
     let lease_ledger = super::board_health_dispatch_gate::load_lease_ledger(pool).await;
 
+    // Kueue's OWN admission decision, from the migration-165 projection. Loaded
+    // once for the whole section for the same reason as the lease ledger, and
+    // cheap in the shipped default: an empty relation costs one aggregate and
+    // short-circuits before the detail queries run.
+    let kueue_projection = super::board_health_kueue_admission::load_kueue_projection(pool).await;
+
     let stranded_sql = r#"SELECT t.id, t.short_id, t.title, t.status, t.updated_at, t.owner,
                   t.epic_id, t.issue_type, t.project_id, t.created_by_user_id,
                   e.short_id AS epic_short_id,
@@ -514,6 +520,7 @@ pub(super) async fn stranded_ready_section(pool: &sqlx::PgPool) -> serde_json::V
                 row.get::<Option<String>, _>("last_dispatched_role"),
                 cooldown_until,
                 super::board_health_dispatch_gate::lease_gate(&lease_ledger, &task_id),
+                super::board_health_kueue_admission::kueue_gate(&kueue_projection, &task_id),
                 reasons,
             );
 

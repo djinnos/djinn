@@ -64,6 +64,16 @@ fn denials(entries: Vec<(&str, DenialRow)>) -> Option<HashMap<String, DenialRow>
     )
 }
 
+/// The projection state production ships in: `kueue.armed=false`, no Workload
+/// ever observed. Every lease-focused test below runs against it so the Kueue
+/// block never silently changes what they assert.
+fn inert_kueue() -> KueueGateOutcome {
+    crate::repositories::task::board_health_kueue_admission::kueue_gate(
+        &crate::repositories::task::board_health_kueue_admission::KueueProjection::Inert,
+        "task-1",
+    )
+}
+
 fn gate(ledger: &LeaseLedger, task_id: &str) -> serde_json::Value {
     dispatch_gate_json(
         "worker",
@@ -77,8 +87,68 @@ fn gate(ledger: &LeaseLedger, task_id: &str) -> serde_json::Value {
         None,
         None,
         lease_gate(ledger, task_id),
+        inert_kueue(),
         Vec::new(),
     )
+}
+
+/// While the projection is empty the Kueue gate must be declared UNevaluated
+/// and must contribute no reason: an unarmed cluster is not a stalled one.
+#[test]
+fn an_empty_kueue_projection_leaves_the_gate_unevaluated() {
+    let ledger = observed(Vec::new(), capacity(0, 3, true));
+    let gate = gate(&ledger, "task-1");
+    assert_eq!(gate["gate_verdict"], VERDICT_UNEXPLAINED);
+    assert_eq!(
+        gate["kueue_admission"]["projection_state"],
+        "no_workloads_observed"
+    );
+    assert!(gate["kueue_workload"].is_null());
+    let unevaluated = gate["coverage"]["unevaluated_gates"].as_array().unwrap();
+    assert!(unevaluated.contains(&serde_json::json!("kueue_clusterqueue_admission")));
+    let evaluated = gate["coverage"]["evaluated_gates"].as_array().unwrap();
+    assert!(!evaluated.contains(&serde_json::json!("kueue_clusterqueue_admission")));
+}
+
+/// **The gate this reader was written to promote.** With rows in the
+/// projection, `kueue_clusterqueue_admission` moves from `unevaluated_gates` to
+/// `evaluated_gates` — it is no longer a permanent blind spot.
+#[test]
+fn an_observing_projection_promotes_the_kueue_gate_to_evaluated() {
+    let ledger = observed(Vec::new(), capacity(0, 3, true));
+    let kueue = KueueGateOutcome {
+        kueue_admission: serde_json::json!({ "projection_state": "observing" }),
+        kueue_workload: serde_json::json!({ "admission": "pending" }),
+        reasons: vec!["kueue_workload_pending"],
+        evaluated: true,
+        unevaluated_detail: None,
+    };
+    let gate = dispatch_gate_json(
+        "worker",
+        &["task_edit"],
+        None,
+        true,
+        false,
+        false,
+        false,
+        true,
+        None,
+        None,
+        lease_gate(&ledger, "task-1"),
+        kueue,
+        Vec::new(),
+    );
+    assert_eq!(gate["gate_verdict"], VERDICT_BLOCKED);
+    assert!(
+        gate["reasons"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("kueue_workload_pending"))
+    );
+    let evaluated = gate["coverage"]["evaluated_gates"].as_array().unwrap();
+    assert!(evaluated.contains(&serde_json::json!("kueue_clusterqueue_admission")));
+    let unevaluated = gate["coverage"]["unevaluated_gates"].as_array().unwrap();
+    assert!(!unevaluated.contains(&serde_json::json!("kueue_clusterqueue_admission")));
 }
 
 /// The regression this module exists for: a task denied for a capacity /
@@ -192,6 +262,7 @@ fn model_reasons_and_lease_reasons_compose() {
         None,
         None,
         lease_gate(&ledger, "task-1"),
+        inert_kueue(),
         vec!["no_eligible_model"],
     );
     let reasons = gate["reasons"].as_array().unwrap();
