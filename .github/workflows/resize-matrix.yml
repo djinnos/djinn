@@ -148,6 +148,17 @@ jobs:
       - name: Build the three image classes and load them onto the node
         run: tests/fixtures/resize-matrix/build.sh djinn-resize-omp4
 
+      # PREBUILT DELIBERATELY, and this step must stay ahead of the test step.
+      # The two flip proofs gate themselves on `deploy/preflight/cutover-preflight.sh`,
+      # which builds this binary itself when CUTOVER_PREFLIGHT_BIN is unset — and
+      # a `cargo build` launched from inside a running `cargo test` blocks
+      # forever on the build-directory lock the outer cargo still holds. The
+      # test asserts the binary exists rather than building it, so a missing
+      # prebuild fails loudly instead of hanging the lane.
+      - name: Prebuild the cutover preflight gate binary
+        working-directory: server
+        run: cargo build -p djinn-k8s --bin cutover-preflight
+
       - name: The live matrix
         working-directory: server
         env:

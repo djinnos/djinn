@@ -85,11 +85,18 @@
 //! ```text
 //! scripts/kind/setup-resize-matrix-cluster.sh up
 //! tests/fixtures/resize-matrix/build.sh djinn-resize-omp4
+//! # BEFORE cargo test, never from inside it: the gate script builds this
+//! # binary itself when CUTOVER_PREFLIGHT_BIN is unset, and a `cargo build`
+//! # launched from a running `cargo test` blocks on the build-directory lock.
+//! (cd server && cargo build -p djinn-k8s --bin cutover-preflight)
 //! DJINN_TEST_RESIZE_MATRIX=1 cargo test -p djinn-server \
 //!     --test task_run_resize_mixed_version -- --ignored --test-threads=1
 //! scripts/kind/setup-resize-matrix-cluster.sh down       # ALWAYS, pass or fail
 //! scripts/kind/setup-resize-matrix-cluster.sh selfcheck
 //! ```
+//!
+//! The preflight-gated proof additionally needs `helm` and `python3`; it needs
+//! no cluster, so it can be run on its own.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
