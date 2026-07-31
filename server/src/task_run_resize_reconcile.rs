@@ -85,7 +85,7 @@ use std::time::Duration;
 use djinn_coordinator::build_lease::BuildLeaseService;
 use djinn_db::{
     BuildLeaseConsumerKind, BuildLeaseKey, BuildLeaseRepository, BuildPodPermitRepository,
-    BuildPodPermitRow, BuildPodPermitState, Database, TaskRunRepository,
+    BuildPodPermitRow, BuildPodPermitState, Database, ReleaseBuildPodPermitResult, TaskRunRepository,
     TransitionBuildPodResizeLifecycleResult,
 };
 use djinn_supervisor::services::{
@@ -224,6 +224,32 @@ pub enum SkipReason {
     Unreadable,
 }
 
+/// Why a row is — or is not — the reconciler's responsibility.
+///
+/// A bool would have been enough to decide whether to act. It is not enough to
+/// decide what to do AFTERWARDS: a permit whose task run has ended is dead
+/// weight that nothing else will ever retire, while one whose run is still live
+/// belongs to the dispatch path. Collapsing the two into "stranded" is how a
+/// reconciler ends up either leaking permit rows forever or retiring one out
+/// from under a live build.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Strandedness {
+    /// A live driver owns this row.
+    Live,
+    /// The task run reached a terminal status, or its row is gone.
+    OwnerGone,
+    /// The exact Pod UID is confirmed absent.
+    PodGone,
+    /// The row is parked in a state no live driver rests in.
+    DropOwed,
+}
+
+impl Strandedness {
+    const fn acts(self) -> bool {
+        !matches!(self, Self::Live)
+    }
+}
+
 /// The observable result of one sweep.
 ///
 /// Every field is a count of something that was *done*, never of something that
@@ -244,6 +270,9 @@ pub struct ResizeReconcilePass {
     /// Rows whose drop settled on a fact that permits releasing the durable
     /// `build_leases` row, and for which that release was issued.
     pub leases_released: usize,
+    /// Rows whose `build_pod_permits` permit this pass retired, because nothing
+    /// else ever will.
+    pub permits_retired: usize,
     /// Rows whose resumption did not settle inside [`DEFAULT_ROW_BUDGET`].
     pub unsettled: usize,
     /// `true` when the durable scan itself failed.
@@ -347,8 +376,9 @@ impl TaskRunResizeReconciler {
                     .push((task_run_id, SkipReason::NotResizeGoverned));
                 continue;
             }
-            match self.is_stranded(&row).await {
-                Ok(false) => {
+            let strandedness = match self.strandedness(&row).await {
+                Ok(strandedness) if strandedness.acts() => strandedness,
+                Ok(_) => {
                     pass.skipped.push((task_run_id, SkipReason::OwnerLive));
                     continue;
                 }
@@ -356,8 +386,7 @@ impl TaskRunResizeReconciler {
                     pass.skipped.push((task_run_id, SkipReason::Unreadable));
                     continue;
                 }
-                Ok(true) => {}
-            }
+            };
             if !mode.acts() {
                 pass.would_resume += 1;
                 info!(
@@ -383,36 +412,118 @@ impl TaskRunResizeReconciler {
                 continue;
             }
             pass.resumed += 1;
-            match self.resume(&row).await {
-                Some(outcome) if outcome.releases_lease() => {
-                    if self.release_durable_lease(&row).await {
-                        pass.leases_released += 1;
-                    }
-                }
-                Some(_) => {}
-                None => pass.unsettled += 1,
+            let Some(outcome) = self.resume(&row).await else {
+                pass.unsettled += 1;
+                continue;
+            };
+            // THE PERMIT LEDGER MOVES FIRST. `build_pod_permits` is retired
+            // before `build_leases` is released, which is the same ordering the
+            // `release_lease` handler imposes: capacity may never be handed back
+            // ahead of the lifecycle that proves the CPU came with it.
+            if self.retire_permit(&row, &outcome, strandedness).await {
+                pass.permits_retired += 1;
+            }
+            if outcome.releases_lease() && self.release_durable_lease(&row).await {
+                pass.leases_released += 1;
             }
         }
         pass
+    }
+
+    /// Retire the `build_pod_permits` row when nothing else ever will.
+    ///
+    /// `acquire_build_pod_permit` in the dispatch seam records that "the resize
+    /// lifecycle that reclaims a permit (lift, drop, quarantine, release)
+    /// belongs to `0ppk-3`'s reconciler", and
+    /// [`ResizeDropOutcome::PodUidAbsent`] says in as many words that it leaves
+    /// the row nonterminal for this module. This is that.
+    ///
+    /// Retiring is also what makes the sweep TERMINATE. A row left at
+    /// `birth_confirmed` with a dead owner is stranded again by the next tick's
+    /// own predicate, so a reconciler that only ever dropped would re-drop the
+    /// same dead task run every 30 seconds forever.
+    async fn retire_permit(
+        &self,
+        row: &BuildPodPermitRow,
+        outcome: &ResizeDropOutcome,
+        strandedness: Strandedness,
+    ) -> bool {
+        let reason = match outcome {
+            // The Pod is gone. `capture_resize_identity` is write-once and
+            // `acquire` refuses to resurrect a released row, so this task run
+            // can never capture a replacement — recovery is a NEW task run.
+            ResizeDropOutcome::PodUidAbsent { .. } => "resize_pod_uid_absent",
+            // The launcher is back at 250m, and the run that borrowed the CPU
+            // has ended. Nothing will come back for this permit.
+            ResizeDropOutcome::Confirmed { .. } | ResizeDropOutcome::NotResizeGoverned
+                if strandedness != Strandedness::Live =>
+            {
+                if !matches!(strandedness, Strandedness::OwnerGone)
+                    && !self.owner_is_gone(&row.task_run_id).await.unwrap_or(false)
+                {
+                    return false;
+                }
+                "resize_owner_gone"
+            }
+            // `QuarantinedPodDeleted` already released the permit inside the
+            // drop; every other outcome is unsettled and must keep its row.
+            _ => return false,
+        };
+        match self
+            .permits
+            .release(
+                &row.task_run_id,
+                &row.permit_id,
+                row.fencing_token,
+                reason,
+            )
+            .await
+        {
+            Ok(ReleaseBuildPodPermitResult::Released(_)) => {
+                info!(
+                    task_run_id = %row.task_run_id,
+                    reason,
+                    "task_run_resize_reconcile: permit retired; this task run can never \
+                     capture a replacement Pod — recovery is a NEW task run"
+                );
+                true
+            }
+            Ok(ReleaseBuildPodPermitResult::AlreadyReleased(_)) => false,
+            Ok(ReleaseBuildPodPermitResult::Rejected) => {
+                warn!(
+                    task_run_id = %row.task_run_id,
+                    "task_run_resize_reconcile: the permit refused retirement"
+                );
+                false
+            }
+            Err(error) => {
+                warn!(
+                    task_run_id = %row.task_run_id,
+                    %error,
+                    "task_run_resize_reconcile: the permit could not be retired"
+                );
+                false
+            }
+        }
     }
 
     /// Whether this row is the reconciler's responsibility.
     ///
     /// `Err(())` means the evidence could not be read at all, which is never
     /// grounds to act: an unanswered database is not proof that a worker died.
-    async fn is_stranded(&self, row: &BuildPodPermitRow) -> Result<bool, ()> {
+    async fn strandedness(&self, row: &BuildPodPermitRow) -> Result<Strandedness, ()> {
         match row.state {
             // A drop is already owed. No live driver rests in these states —
             // something moved the row here and then stopped, which is exactly
             // the shape a dead worker or a restarted server leaves behind.
             BuildPodPermitState::DropRequired
             | BuildPodPermitState::DropApplying
-            | BuildPodPermitState::Quarantined => Ok(true),
+            | BuildPodPermitState::Quarantined => Ok(Strandedness::DropOwed),
             BuildPodPermitState::BirthConfirmed
             | BuildPodPermitState::LiftApplying
             | BuildPodPermitState::Lifted => {
                 if self.owner_is_gone(&row.task_run_id).await? {
-                    return Ok(true);
+                    return Ok(Strandedness::OwnerGone);
                 }
                 // A row that is HOLDING lifted CPU earns one fresh apiserver
                 // read even while its task run still reads live: a Pod whose
@@ -422,15 +533,16 @@ impl TaskRunResizeReconciler {
                 if matches!(
                     row.state,
                     BuildPodPermitState::LiftApplying | BuildPodPermitState::Lifted
-                ) {
-                    return Ok(self.pod_uid_absent(row).await);
+                ) && self.pod_uid_absent(row).await
+                {
+                    return Ok(Strandedness::PodGone);
                 }
-                Ok(false)
+                Ok(Strandedness::Live)
             }
             // Not in the nonterminal resize set at all; nothing to resume.
             BuildPodPermitState::Acquired
             | BuildPodPermitState::JobCreated
-            | BuildPodPermitState::Released => Ok(false),
+            | BuildPodPermitState::Released => Ok(Strandedness::Live),
         }
     }
 

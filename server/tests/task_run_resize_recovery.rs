@@ -657,13 +657,11 @@ async fn every_nonterminal_state_resumes_after_the_process_that_lifted_it_is_gon
              state; pass was {pass:?}"
         );
         let settled = permit_state(&db, &task_run_id).await;
-        assert!(
-            matches!(
-                settled,
-                BuildPodPermitState::BirthConfirmed | BuildPodPermitState::Released
-            ),
-            "{state:?}: resumption must settle at the birth limit or destroy the \
-             Pod, got {settled:?}"
+        assert_eq!(
+            settled,
+            BuildPodPermitState::Released,
+            "{state:?}: a permit whose task run has ended must be RETIRED, or the \
+             next sweep re-drops the same dead run every tick forever"
         );
         // THE POD IS NEVER RETURNED TO SERVICE: whatever happened, no launcher
         // is left holding a lifted ceiling.
@@ -860,10 +858,15 @@ async fn a_lifted_row_whose_pod_vanished_is_stranded_even_while_the_run_reads_li
         "an absent Pod UID strands the row on its own; pass was {pass:?}"
     );
     assert_eq!(
+        pass.permits_retired, 1,
+        "`PodUidAbsent` leaves the row nonterminal inside the drop and hands it \
+         to THIS module to retire; pass was {pass:?}"
+    );
+    assert_eq!(
         permit_state(&db, &task_run_id).await,
-        BuildPodPermitState::DropRequired,
-        "the row is claimed and settles as `PodUidAbsent`, which is nonterminal \
-         and stays visible to the next sweep"
+        BuildPodPermitState::Released,
+        "the write-once identity means this task run can never capture a \
+         replacement Pod, so the permit is dead weight nothing else will retire"
     );
 }
 
@@ -955,7 +958,7 @@ async fn the_gate_is_evaluated_every_tick_and_arming_needs_no_restart() {
 
     assert_eq!(
         permit_state(&db, &task_run_id).await,
-        BuildPodPermitState::BirthConfirmed,
+        BuildPodPermitState::Released,
         "arming is a configuration change, not a restart: the SAME loop must \
          pick the stranded row up on a later tick"
     );
@@ -1068,7 +1071,7 @@ async fn a_row_stranded_while_the_loop_runs_is_picked_up_on_a_later_tick() {
     wait_until(|| {
         let db = db.clone();
         let task_run_id = task_run_id.clone();
-        async move { permit_state(&db, &task_run_id).await == BuildPodPermitState::BirthConfirmed }
+        async move { permit_state(&db, &task_run_id).await == BuildPodPermitState::Released }
     })
     .await;
 
@@ -1142,8 +1145,12 @@ async fn the_build_lease_is_released_only_after_the_cluster_confirms_the_drop() 
          init-container status, in millicores"
     );
     assert_eq!(
+        pass.permits_retired, 1,
+        "the permit ledger moves FIRST; pass was {pass:?}"
+    );
+    assert_eq!(
         permit_state(&db, &task_run_id).await,
-        BuildPodPermitState::BirthConfirmed
+        BuildPodPermitState::Released
     );
     assert_eq!(
         build_lease_state(&db, invocation_id).await,
@@ -1297,6 +1304,10 @@ async fn two_concurrent_drivers_issue_exactly_one_patch() {
         "exactly one pods/resize PATCH per drop, across both drivers"
     );
     assert_eq!(status_millicores(&cluster), Some(BIRTH_MILLICORES));
+    assert_eq!(
+        permit_state(&db, &task_run_id).await,
+        BuildPodPermitState::Released
+    );
 }
 
 /// A leadership handover mid-drop: the new leader resumes and the OLD leader's
@@ -1329,12 +1340,13 @@ async fn a_leadership_handover_mid_drop_lets_only_the_new_leader_commit() {
     hold_build_lease(&leases, &task_id, &task_run_id, invocation_id).await;
     kill_the_worker(&db, &task_run_id).await;
 
-    // THE OLD LEADER. Its Pod refuses to actuate, so it parks in the retry loop
-    // holding a resumption it believes it owns.
-    let stalled_cluster = cluster.clone();
-    stalled_cluster.stop_actuating();
+    // THE OLD LEADER, mid-drop and stuck. Its view of the cluster never
+    // actuates — which is exactly WHY it is still in flight — so it is given its
+    // own stored Pod carrying the same UID. The DURABLE row is shared, and the
+    // durable row is the thing under test.
+    let stalled_view = StoredTaskRunPod::resize_v2(pod_uid, CEILING).never_actuating();
     let old_clock = Arc::new(RecordingClock::stalling_after(2));
-    let old = restart.restart(stalled_cluster, Arc::clone(&old_clock));
+    let old = restart.restart(stalled_view, Arc::clone(&old_clock));
     let old_reconciler = old.reconciler(Some(Arc::clone(&leases)), Arc::new(ArmedGate));
     let old_leader = tokio::spawn(async move { old_reconciler.run_pass().await });
     wait_until(|| {
@@ -1345,10 +1357,10 @@ async fn a_leadership_handover_mid_drop_lets_only_the_new_leader_commit() {
     assert_eq!(
         permit_state(&db, &task_run_id).await,
         BuildPodPermitState::DropApplying,
-        "precondition: the old leader is mid-drop"
+        "precondition: the old leader is mid-drop and has committed nothing"
     );
 
-    // THE NEW LEADER, on a Pod that answers. Same durable row.
+    // THE NEW LEADER, on a cluster that answers. Same durable row.
     cluster.reset_patch_counter();
     let new = restart.restart(cluster.clone(), Arc::new(RecordingClock::new()));
     let new_pass = new
@@ -1360,15 +1372,42 @@ async fn a_leadership_handover_mid_drop_lets_only_the_new_leader_commit() {
     assert_eq!(new_pass.leases_released, 1, "pass was {new_pass:?}");
     assert_eq!(
         permit_state(&db, &task_run_id).await,
-        BuildPodPermitState::BirthConfirmed
+        BuildPodPermitState::Released
     );
     assert_eq!(
         build_lease_state(&db, invocation_id).await,
         Some(BuildLeaseState::Terminal)
     );
 
-    // The old leader is still parked. Nothing it does from here may commit.
-    assert!(!old_leader.is_finished());
+    // The old leader is still parked, holding the exact fences it entered with.
+    assert!(
+        !old_leader.is_finished(),
+        "precondition: the old leader really is still in flight"
+    );
+
+    // ITS IN-FLIGHT COMMIT CANNOT LAND. This is the write the stalled driver
+    // would issue the moment its Pod finally reported 250m: the settle out of
+    // `drop_applying`, fenced on the same permit, token, Pod UID and invocation.
+    let rejected = permits
+        .transition_resize_lifecycle(
+            &task_run_id,
+            &row.permit_id,
+            row.fencing_token,
+            pod_uid,
+            Some(invocation_id),
+            BuildPodPermitState::DropApplying,
+            BuildPodPermitState::BirthConfirmed,
+        )
+        .await
+        .expect("the compare-and-swap must answer");
+    assert_eq!(
+        rejected,
+        TransitionBuildPodResizeLifecycleResult::Rejected,
+        "the old leader's in-flight attempt must be REJECTED by the durable \
+         compare-and-swap; without the fence it would commit a second settlement \
+         on top of the new leader's and release the lease twice"
+    );
+
     old_leader.abort();
 }
 
