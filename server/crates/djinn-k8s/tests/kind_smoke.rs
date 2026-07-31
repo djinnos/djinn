@@ -19,6 +19,23 @@
 //! DJINN_TEST_KIND=1 cargo test -p djinn-k8s --test kind_smoke -- --ignored
 //! ```
 //!
+//! TWO THINGS THIS FILE HAS TO DO BEFORE IT MAY BUILD A `kube::Client`
+//!
+//! 1. Install a process-level rustls `CryptoProvider`. Until this was added
+//!    (task `d2ae`) both tests below panicked *before their first API call*
+//!    with "Could not automatically determine the process-level CryptoProvider
+//!    from Rustls crate features" — a `#[ignore]`d, `DJINN_TEST_KIND`-gated
+//!    file that no CI lane runs, so nothing ever noticed. See
+//!    [`support::install_crypto_provider`] for the mechanism and for why the
+//!    server binary is unaffected.
+//! 2. Refuse any API server that is not on loopback. These tests CREATE Jobs
+//!    and Secrets. `kube::Client::try_default()` resolves whatever context
+//!    happens to be current, and every context in a Djinn developer's
+//!    kubeconfig is EKS — so an unguarded `try_default()` plus a stray
+//!    `DJINN_TEST_KIND=1` writes into a managed cluster. kind always serves on
+//!    loopback; no managed control plane does. Same discipline as
+//!    `tests/kueue_cluster_harness.rs` and `tests/kueue_disruption/mod.rs`.
+//!
 //! The tests do NOT attempt to run a full task-run end-to-end — a real task
 //! lifecycle needs the djinn-server TCP listener + mirror volume + GitHub App
 //! token, all out of scope until PR 4 pt2. Here we assert:
@@ -45,6 +62,8 @@ use djinn_runtime::{ResolvedCredentials, SessionRuntime, SupervisorFlow, TaskRun
 use k8s_openapi::api::batch::v1::Job;
 use k8s_openapi::api::core::v1::Secret;
 use kube::api::{Api, DeleteParams};
+
+mod support;
 
 /// Namespace the smoke tests write into. Assumed to exist — `make kind-up` in
 /// Phase 2 PR 4 creates it; otherwise we `kubectl create ns` it below.
@@ -102,6 +121,45 @@ fn kind_test_enabled() -> bool {
     true
 }
 
+/// Build the `kube::Client` these tests talk to.
+///
+/// Two things happen here that `kube::Client::try_default()` does not do.
+///
+/// First, [`support::install_crypto_provider`] runs — without it the very next
+/// line panics on "Could not automatically determine the process-level
+/// CryptoProvider from Rustls crate features", before any request is sent. It
+/// is safe to call once per test: the install itself happens exactly once per
+/// process and is loud if it ever loses a race.
+///
+/// Second, the resolved API-server URL is checked. These tests create real
+/// Jobs and Secrets, and a Djinn developer's kubeconfig contains nothing but
+/// EKS contexts, so "whatever context is current" is not an acceptable target.
+/// kind serves on loopback and no managed control plane does, which makes the
+/// host a sufficient guard. `DJINN_TEST_KIND_CONTEXT` selects a specific
+/// kubeconfig context; without it the current context is used, and still has
+/// to clear the loopback check.
+async fn kind_client() -> kube::Client {
+    support::install_crypto_provider();
+
+    let options = kube::config::KubeConfigOptions {
+        context: env::var("DJINN_TEST_KIND_CONTEXT").ok(),
+        ..Default::default()
+    };
+    let config = kube::Config::from_kubeconfig(&options)
+        .await
+        .expect("kind_smoke: resolve a kubeconfig for the kind cluster");
+
+    let host = config.cluster_url.host().unwrap_or_default().to_owned();
+    assert!(
+        matches!(host.as_str(), "127.0.0.1" | "localhost" | "::1" | "[::1]"),
+        "kind_smoke: refusing to run against non-loopback API server {host:?} — these tests \
+         CREATE Jobs and Secrets, and every context in a Djinn kubeconfig is EKS. Point \
+         KUBECONFIG (or DJINN_TEST_KIND_CONTEXT) at a local kind cluster.",
+    );
+
+    kube::Client::try_from(config).expect("kind_smoke: build a kube client for the kind cluster")
+}
+
 /// Build a `KubernetesConfig` scoped to the kind test namespace.
 ///
 /// `server_addr` is never actually dialed during these tests — the worker Pod
@@ -150,9 +208,7 @@ async fn kind_smoke_prepare_then_cancel() {
         return;
     }
 
-    let client = kube::Client::try_default()
-        .await
-        .expect("kind_smoke: kube::Client::try_default");
+    let client = kind_client().await;
 
     let config = test_config();
     let registry = std::sync::Arc::new(djinn_supervisor::ConnectionRegistry::new());
@@ -232,9 +288,7 @@ async fn kind_smoke_runtime_lifecycle() {
         return;
     }
 
-    let client = kube::Client::try_default()
-        .await
-        .expect("kind_smoke: kube::Client::try_default");
+    let client = kind_client().await;
 
     let config = test_config();
     let registry = std::sync::Arc::new(djinn_supervisor::ConnectionRegistry::new());

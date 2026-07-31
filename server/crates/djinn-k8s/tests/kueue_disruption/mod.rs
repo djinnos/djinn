@@ -27,6 +27,14 @@ use djinn_k8s::launcher::CgroupLauncherMode;
 use k8s_openapi::api::batch::v1::Job;
 use serde_json::Value;
 
+// `tests/support/` is shared by every test binary in this crate, but a binary
+// may only include it once — a second copy would mean a second `Once` and
+// exactly the half-initialised state the helper exists to prevent. The
+// `kueue_disruption_*` binaries reach it through this module, so they do NOT
+// declare `mod support;` themselves.
+#[path = "../support/mod.rs"]
+mod support;
+
 // ---------------------------------------------------------------------------
 // The one cluster this file may ever touch.
 // ---------------------------------------------------------------------------
@@ -131,12 +139,16 @@ pub fn which(bin: &str) -> bool {
 /// rustls 0.23 refuses to pick a provider when `workspace-hack` has unified both
 /// `ring` and `aws-lc-rs` into the build, and `kube::Client::try_from` panics on
 /// construction — for an `http://` URL as readily as an `https://` one, so there
-/// is no TLS-free route around it. Installing `ring` here is process-global,
-/// idempotent (the `Err` arm means somebody already installed one), and scoped
-/// to this test binary.
-pub fn install_crypto_provider() {
-    let _ = rustls::crypto::ring::default_provider().install_default();
-}
+/// is no TLS-free route around it.
+///
+/// Re-exported from `tests/support/mod.rs` rather than reimplemented, so that
+/// every live-cluster test binary in this crate shares ONE installer. The
+/// previous body here was `let _ = …install_default();`, which discarded the
+/// `Err` arm — and that arm does not mean "already fine", it means some *other*
+/// provider won the install and this process is half-initialised. The shared
+/// helper installs exactly once under a `Once` and panics rather than hiding
+/// that. See task `d2ae`.
+pub use support::install_crypto_provider;
 
 /// The context every live call is pinned to, after TWO independent refusals of
 /// anything else — the same discipline `tests/kueue_cluster_harness.rs` uses.
