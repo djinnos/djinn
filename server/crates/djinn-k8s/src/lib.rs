@@ -22,6 +22,7 @@ mod launcher_cpu;
 pub mod pod_resize;
 pub mod private_dep_config;
 pub mod runtime;
+mod runtime_eviction;
 pub mod scip_job;
 pub mod scip_schedule;
 pub mod secret;
