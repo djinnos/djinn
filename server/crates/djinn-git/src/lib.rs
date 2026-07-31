@@ -497,6 +497,12 @@ pub use actor::{GitActorHandle, get_or_spawn};
 
 pub mod exported_config;
 
+pub mod index_mode;
+pub use index_mode::{
+    IndexModes, MODE_EXECUTABLE, MODE_REGULAR, executable_modes_to_restore, parse_index_modes,
+    parse_tree_modes,
+};
+
 pub mod submission_diff;
 pub use submission_diff::{
     DEFAULT_SUBMISSION_BASE_REF, SubmissionDiffDigest, SubmissionDiffFingerprint,

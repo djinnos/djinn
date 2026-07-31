@@ -48,6 +48,7 @@ djinn-git = { path = "crates/djinn-git" }
 djinn-graph = { path = "crates/djinn-graph" }
 djinn-image-controller = { path = "crates/djinn-image-controller" }
 djinn-k8s = { path = "crates/djinn-k8s" }
+djinn-launcher-protocol = { path = "crates/djinn-launcher-protocol" }
 djinn-control-plane = { path = "crates/djinn-control-plane" }
 djinn-provider = { path = "crates/djinn-provider" }
 djinn-runtime = { path = "crates/djinn-runtime" }
@@ -77,7 +78,7 @@ ring = "0.17"
 base64 = "0.22"
 sha2 = "0.10"
 serde_urlencoded = "0.7"
-sqlx = { version = "0.8", features = ["mysql", "postgres", "runtime-tokio-rustls", "macros"] }
+sqlx = { version = "0.8", features = ["postgres", "runtime-tokio-rustls", "macros"] }
 schemars = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -114,7 +115,17 @@ tikv-jemalloc-ctl = { version = "0.6", features = ["stats"] }
 
 [dev-dependencies]
 djinn-control-plane = { path = "crates/djinn-control-plane", features = ["test-support"] }
+# The dispatch-seam reachability test drives a real stored `Pod` so the birth
+# downsize runs through the real `PodResizeClient` and the real
+# `confirm_launcher_cpu`, not through a stand-in that always agrees. The fixture
+# lives in djinn-k8s because `deny.toml` bans a direct `k8s-openapi` dependency
+# outside the Kubernetes capability owner — and that ban is right.
+djinn-k8s = { path = "crates/djinn-k8s", features = ["test-support"] }
 djinn-db = { path = "crates/djinn-db", features = ["test-support"] }
+# `task_run_resize_faults` builds a real `DirectServices` over a real
+# `BuildLeaseService` so the two-ledger ordering is asserted at the COMPOSITION
+# site — `release_lease` — rather than against the drop mechanism alone.
+djinn-agent = { path = "crates/djinn-agent", features = ["test-support"] }
 djinn-server = { path = ".", features = ["test-support"] }
 insta = { version = "1", features = ["json", "redactions"] }
 proptest = "1"

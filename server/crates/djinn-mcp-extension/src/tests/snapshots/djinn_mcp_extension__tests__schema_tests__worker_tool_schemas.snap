@@ -656,6 +656,32 @@ expression: tool_schemas_worker()
     "concurrent_safe": false
   },
   {
+    "name": "set_file_mode",
+    "description": "Set or clear the executable bit on a file in the task worktree. Use this instead of `chmod` in the shell: shell commands run as a different uid than the process that wrote the file, so `chmod` there fails with \"Operation not permitted\". Applies to regular files only. Refuses files carrying setuid/setgid/sticky bits. After committing, verify with `git ls-tree HEAD -- <path>` (expect 100755 or 100644) — not `git ls-files -s`, which shows the index and can report a mode that the commit path has not recorded.",
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "path",
+        "executable"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "Absolute or worktree-relative file path"
+        },
+        "executable": {
+          "type": "boolean",
+          "description": "true to make the file executable (git 100755), false to clear the executable bit (git 100644)"
+        }
+      }
+    },
+    "readOnly": false,
+    "destructive": false,
+    "idempotent": true,
+    "openWorld": false,
+    "concurrent_safe": false
+  },
+  {
     "name": "memory_build_context",
     "description": "Build a curated memory context pack for a task or query by combining note retrieval and ranking. Relevant proposals are surfaced alongside notes so a planner/worker sees the motivating proposal.",
     "inputSchema": {

@@ -18,12 +18,16 @@ pub(crate) use tokio::sync::broadcast;
 mod board_health;
 #[path = "task_tests/board_health_dispatch_gate.rs"]
 mod board_health_dispatch_gate;
+#[path = "task_tests/board_health_kueue_admission.rs"]
+mod board_health_kueue_admission;
 #[path = "task_tests/closed_task_sync.rs"]
 mod closed_task_sync;
 #[path = "task_tests/existing.rs"]
 mod existing;
 #[path = "task_tests/filter_matrices.rs"]
 mod filter_matrices;
+#[path = "task_tests/generation.rs"]
+mod generation;
 #[path = "task_tests/state_machine.rs"]
 mod state_machine;
 #[path = "task_tests/sync_terminal_state.rs"]

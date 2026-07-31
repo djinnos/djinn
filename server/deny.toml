@@ -31,8 +31,12 @@ ignore = [
     "RUSTSEC-2024-0436",
     # rustls-pemfile is unmaintained (transitive via hyper-rustls etc.)
     "RUSTSEC-2025-0134",
-    # Marvin Attack: timing sidechannel in RSA (transitive via ring/rustls)
-    "RUSTSEC-2023-0071",
+    # RUSTSEC-2023-0071 (Marvin Attack: timing sidechannel in the `rsa` crate)
+    # was removed here. `rsa` has no fixed release; it entered the graph only
+    # through sqlx's `mysql` driver feature (MySQL `caching_sha2_password`
+    # auth), which this workspace never used. Dropping that feature dropped
+    # `rsa` entirely — verified with `cargo tree`. Re-add only if a crate that
+    # genuinely needs RSA comes back.
     # Rand unsound with custom logger (transitive via many crates)
     "RUSTSEC-2026-0097",
     # ring: name constraints for URI names incorrectly accepted
@@ -123,18 +127,24 @@ wildcards = "allow"
 
 deny = [
 	# sqlx: only database-owner crates may declare it directly. The live
-	# workspace currently has djinn-server, djinn-agent, djinn-control-plane,
-	# djinn-core, djinn-db, djinn-memory, and djinn-provider as direct
-	# dependents; workspace-hack is included for hakari unification.
+	# workspace has djinn-server, djinn-control-plane, djinn-core, djinn-db,
+	# and djinn-memory as direct dependents.
+	#
+	# djinn-provider (#2847) and djinn-agent dropped their sqlx declarations
+	# outright — neither crate referenced a single sqlx item; both only ever
+	# resolved because workspace-hack unified the feature graph.
+	#
+	# workspace-hack is intentionally NOT listed: since the `mysql` feature was
+	# dropped, hakari no longer emits a direct `sqlx` dependency for it, only
+	# `sqlx-core`/`sqlx-postgres` (helper crates, not banned — see above). Per
+	# the convention documented above, workspace-hack is listed only when hakari
+	# actually generates the direct dependency.
 	{ crate = "sqlx", wrappers = [
 		"djinn-server",
-		"djinn-agent",
 		"djinn-control-plane",
 		"djinn-core",
 		"djinn-db",
 		"djinn-memory",
-		"djinn-provider",
-		"workspace-hack",
 	] },
 
 	# git2: NOT ratcheted via cargo-deny.

@@ -7,6 +7,7 @@
 
 pub mod build_resources;
 pub mod config;
+pub mod cutover_preflight;
 pub mod env_config;
 pub mod graph_warmer;
 pub mod graph_warmer_candidates;
@@ -14,12 +15,22 @@ pub mod graph_warmer_identity;
 pub mod infra_death_log_tail;
 pub mod invocation_journal;
 pub mod job;
+pub mod kueue_preflight;
 pub mod label_value;
 pub mod launcher;
 pub mod launcher_child_fs;
 mod launcher_cpu;
+pub mod pod_resize;
+/// Cluster-free `Pod` fixtures for the resize stack.
+///
+/// Gated so production binaries never link it, and `pub` under `test-support`
+/// so `djinn-server`'s dispatch-seam tests can drive a stored Pod without a
+/// direct `k8s-openapi` dependency — which `deny.toml` bans outside this crate.
+#[cfg(any(test, feature = "test-support"))]
+pub mod pod_resize_fixture;
 pub mod private_dep_config;
 pub mod runtime;
+mod runtime_eviction;
 pub mod scip_job;
 pub mod scip_schedule;
 pub mod secret;
@@ -44,6 +55,7 @@ pub use graph_warmer::{
     NoopJobWatcher, NoopWarmJobLister, WarmAdmission, WarmAdmissionError, WarmAdmissionPermit,
     WarmAdmissionRequest, WarmAdmissionTransition, WarmCompletionSink, WarmJobDispatcher,
     WarmJobLister, WarmJobManifest, WarmJobWatcher, WarmTerminalOutcome,
+    api_error_is_already_exists,
 };
 pub use graph_warmer_candidates::{
     CleanupObservation, GateObservation, KubeWarmCandidateClient, WarmAnnotationValidation,
@@ -52,6 +64,12 @@ pub use graph_warmer_candidates::{
     WarmInventoryObservation, WarmObjectLifecycle,
 };
 pub use graph_warmer_identity::{LeasedWarmJobIdentity, deterministic_warm_job_name, warm_work_id};
+pub use kueue_preflight::{
+    KueuePreflightOutcome, LABEL_KUEUE_MANAGED, NamespaceKueueStatus,
+    classify_labels as classify_kueue_namespace_labels, decide as decide_kueue_preflight,
+    disarm_kueue_globally, kueue_armed_from_env, kueue_disarmed_by_preflight,
+    observe_namespace as observe_kueue_namespace, run as run_kueue_preflight,
+};
 pub use runtime::{KubernetesRuntime, taskrun_job_name};
 pub use scip_job::{
     ANNOTATION_SCIP_REVISION, COMPONENT_SCIP_INDEX, LABEL_CAPACITY_RESERVED, LABEL_SCIP_INDEX,
@@ -63,7 +81,7 @@ pub use scip_schedule::{
     ScipJobObservation, decide as decide_scip_index, observe_from_jobs,
 };
 pub use token_review::TokenReviewer;
-pub use warm_job::{build_leased_warm_job, build_warm_job};
+pub use warm_job::{build_leased_warm_job, build_warm_job, warm_job_name};
 pub use workload_inventory::{
     KubeWorkloadInventory, LABEL_ADMISSION_DOMAIN, LABEL_ADMISSION_GENERATION,
     LABEL_ADMISSION_WORK_ID, ObjectPresence, UidGetResult, WorkloadInventory, WorkloadObjectKind,

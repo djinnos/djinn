@@ -895,3 +895,181 @@ async fn read_budget_truncated_records_truncated_coverage() {
         );
     }
 }
+
+// ─── ReadCoverage vs. the downstream tool-result clamp ────────────────────
+//
+// `output_stash::render_tool_result` clamps any result over
+// `MAX_TOOL_RESULT_CHARS` *after* `call_read` has recorded coverage. A file
+// well under both the 2000-line cap and the 8 MiB byte budget can still blow
+// that clamp, and because the numbered listing is a single enormous JSON
+// string, `smart_truncate`'s line-aware head/tail split keeps the envelope
+// keys and discards the entire listing. The tests below pin that the recorded
+// coverage describes what the model actually receives.
+
+/// Build a file of `n` lines of realistic source-code width.
+fn seed_wide_file(path: &std::path::Path, n: usize) -> String {
+    let mut contents = String::new();
+    for i in 1..=n {
+        contents.push_str(&format!(
+            "    let some_reasonable_line_of_rust_code_{i} = compute(value_{i});\n"
+        ));
+    }
+    std::fs::write(path, &contents).expect("seed file");
+    contents
+}
+
+/// A whole-file read whose result would be clamped downstream must NOT be
+/// recorded as `ReadCoverage::Full`, and must advertise `has_more`.
+///
+/// Non-vacuity: on the pre-fix code this file is under 2000 lines and under
+/// 8 MiB, so `has_more` was `false` and coverage was recorded `Full` — both
+/// assertions below failed.
+#[tokio::test]
+async fn read_clamped_by_tool_result_budget_is_not_recorded_as_full() {
+    use crate::file_time::ReadCoverage;
+
+    let worktree = crate::test_helpers::test_tempdir("djinn-ext-cov-clamp-");
+    let file = worktree.path().join("wide.rs");
+    // 900 lines x ~70 chars ~= 64k chars of numbered listing: comfortably over
+    // the 30k clamp, comfortably under the 2000-line cap and the 8 MiB budget.
+    seed_wide_file(&file, 900);
+
+    let state =
+        crate::test_helpers::agent_context_from_db(create_test_db(), CancellationToken::new());
+
+    let args = Some(
+        serde_json::json!({ "file_path": "wide.rs", "offset": 0, "limit": 2000 })
+            .as_object()
+            .expect("obj")
+            .clone(),
+    );
+    let result = call_read(&state, &args, worktree.path())
+        .await
+        .expect("read should succeed");
+
+    assert_eq!(
+        result.get("has_more").and_then(|v| v.as_bool()),
+        Some(true),
+        "a read cut short by the tool-result budget must advertise has_more=true"
+    );
+
+    let worktree_key = worktree.path().display().to_string();
+    let rec = state
+        .file_time
+        .latest_record(&worktree_key, &file)
+        .await
+        .expect("read record should exist");
+    assert!(
+        !rec.is_full(),
+        "a read the tool-result clamp would gut must not record Full coverage, got {:?}",
+        rec.coverage
+    );
+    assert!(
+        matches!(rec.coverage, ReadCoverage::Range { .. }),
+        "expected Range coverage, got {:?}",
+        rec.coverage
+    );
+}
+
+/// The listing a clamped read returns must actually survive
+/// `render_tool_result` — i.e. the model receives the lines the handler
+/// recorded coverage for.
+///
+/// Non-vacuity: on the pre-fix code `render_tool_result` reduced this result
+/// to a ~216-character stub containing the JSON envelope keys and zero file
+/// lines, so `surviving_lines` below was 0.
+#[tokio::test]
+async fn read_result_survives_the_tool_result_clamp() {
+    let worktree = crate::test_helpers::test_tempdir("djinn-ext-cov-survive-");
+    let file = worktree.path().join("wide.rs");
+    seed_wide_file(&file, 900);
+
+    let state =
+        crate::test_helpers::agent_context_from_db(create_test_db(), CancellationToken::new());
+
+    let args = Some(
+        serde_json::json!({ "file_path": "wide.rs", "offset": 0, "limit": 2000 })
+            .as_object()
+            .expect("obj")
+            .clone(),
+    );
+    let result = call_read(&state, &args, worktree.path())
+        .await
+        .expect("read should succeed");
+
+    let stash = std::sync::Mutex::new(crate::output_stash::OutputStash::new());
+    let rendered = crate::output_stash::render_tool_result(&stash, "call-1", "read", &result);
+
+    let surviving = rendered
+        .matches("let some_reasonable_line_of_rust_code_")
+        .count();
+    assert!(
+        surviving > 100,
+        "the rendered read result must still carry the file listing; only {surviving} \
+         lines survived render_tool_result ({} chars rendered)",
+        rendered.len()
+    );
+    assert!(
+        rendered.contains("let some_reasonable_line_of_rust_code_1 "),
+        "the first line of the window must reach the model"
+    );
+
+    // And the coverage record must not claim more than that.
+    let worktree_key = worktree.path().display().to_string();
+    let rec = state
+        .file_time
+        .latest_record(&worktree_key, &file)
+        .await
+        .expect("read record should exist");
+    assert!(!rec.is_full(), "clamped read must not record Full coverage");
+}
+
+/// Guard the legitimate `Full` case: a file whose listing fits inside the
+/// tool-result clamp must still record `Full`, or every edit in the system
+/// starts demanding a re-read.
+#[tokio::test]
+async fn read_within_tool_result_budget_still_records_full() {
+    let worktree = crate::test_helpers::test_tempdir("djinn-ext-cov-full-fits-");
+    let file = worktree.path().join("modest.rs");
+    // ~300 lines x ~70 chars ~= 21k chars: under the 30k clamp.
+    seed_wide_file(&file, 300);
+
+    let state =
+        crate::test_helpers::agent_context_from_db(create_test_db(), CancellationToken::new());
+
+    let args = Some(
+        serde_json::json!({ "file_path": "modest.rs", "offset": 0, "limit": 2000 })
+            .as_object()
+            .expect("obj")
+            .clone(),
+    );
+    let result = call_read(&state, &args, worktree.path())
+        .await
+        .expect("read should succeed");
+
+    assert_eq!(
+        result.get("has_more").and_then(|v| v.as_bool()),
+        Some(false),
+        "a read that fits the budget must not advertise has_more"
+    );
+
+    // It must genuinely pass through render_tool_result untouched.
+    let stash = std::sync::Mutex::new(crate::output_stash::OutputStash::new());
+    let rendered = crate::output_stash::render_tool_result(&stash, "call-1", "read", &result);
+    assert!(
+        !rendered.contains("djinn-output-stash"),
+        "an under-budget read must not be stashed/clamped at all"
+    );
+
+    let worktree_key = worktree.path().display().to_string();
+    let rec = state
+        .file_time
+        .latest_record(&worktree_key, &file)
+        .await
+        .expect("read record should exist");
+    assert!(
+        rec.is_full(),
+        "an under-budget whole-file read must still record Full, got {:?}",
+        rec.coverage
+    );
+}

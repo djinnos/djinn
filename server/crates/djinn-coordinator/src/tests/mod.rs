@@ -243,7 +243,7 @@ async fn make_epic(
     // real Postgres schema, whose image identity fields are length-bound.
     let image_tag = test_image_tag(&image_id);
     image_repo
-        .mark_ready(&image_id, &image_tag, Some("sha256:testhash"))
+        .mark_ready(&image_id, &image_tag, Some("sha256:testhash"), None)
         .await
         .unwrap();
     image_repo
@@ -435,7 +435,6 @@ fn coordinator_actor_for_tests(
                 )
             }),
         ),
-        build_admission: None,
         catalog: CatalogService::new(),
         health: HealthTracker::new(),
         role_registry: Arc::new(RoleRegistry::new()),
@@ -499,6 +498,7 @@ fn coordinator_actor_for_tests(
         active_refinements: HashMap::new(),
         refinement_sessions: HashMap::new(),
         stranded_ready_source: None,
+        doctor_registry: crate::actor::new_doctor_registry_handle(),
         closed_parent_open_children_source: None,
         dispatched: 0,
         recovered: 0,

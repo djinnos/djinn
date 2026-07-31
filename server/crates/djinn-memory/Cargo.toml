@@ -16,7 +16,11 @@ djinn-core = { path = "../djinn-core" }
 schemars = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sqlx = { version = "0.8", features = ["mysql", "runtime-tokio-rustls", "macros"], optional = true }
+# No driver feature on purpose: this crate's only sqlx use is
+# `#[derive(sqlx::FromRow)]` (from `macros`), which expands to a `Row`-generic
+# impl. The Postgres driver arrives through `djinn-core/sqlx`, which is what
+# the `sqlx` feature below enables. Do not add "postgres" here.
+sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "macros"], optional = true }
 time = { version = "0.3", features = ["formatting", "parsing"] }
 workspace-hack.workspace = true
 

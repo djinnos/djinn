@@ -2876,12 +2876,12 @@ async fn run_task_run(args: WorkerDefaultArgs) -> Result<()> {
     //
     // This is deliberately the FIRST thing after the RPC handshake, ahead of the
     // launcher handshake below, because the broker-backed shell authority the
-    // launcher path composes needs it: the durable `admission_handoff` epoch that
+    // launcher path composes needs it: the durable invocation-lease authority that
     // governs build-lease escalation lives in this database, and the launcher's
     // per-invocation lift decision is read from it. `bootstrap_warm_database`
     // resolves `DJINN_DATABASE_URL` and hard-errors when it is absent, so this
     // handle is never the project's `DATABASE_URL` catalog-service sidecar (which
-    // has no `admission_handoff` table). It is reused by the pre-task activity
+    // has no such row). It is reused by the pre-task activity
     // sink and by `WorkerSupervisorServices` (via `AgentContext`) below — one
     // connection, one database, for every in-pod platform read and write.
     let in_pod_db = bootstrap_warm_database()
@@ -3687,6 +3687,8 @@ fn build_worker_agent_context(
         graph_warmer: None,
         repo_graph_ops: None,
         runtime_ops: None,
+        resize_admission: None,
+        resize_drop: None,
         // In-Pod view of the shared cache PVC. The Job pod mounts it at
         // `/cache`, NOT at the server pod's `$DJINN_HOME/cache`, and Job specs
         // never set `DJINN_HOME` — so `djinn_core::paths::cargo_target_runs_root()`

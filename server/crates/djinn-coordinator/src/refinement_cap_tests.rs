@@ -10,8 +10,8 @@ use crate::types::{
 use djinn_core::events::{DjinnEventEnvelope, EventBus};
 use djinn_core::models::{Model, Pricing, Provider};
 use djinn_db::{
-    AdmissionDomain, AdmissionJournalRepository, ProposalCreateInput, ProposalRepository,
-    SessionRepository, TaskRepository, UserRepository, UserSettingsRepository,
+    ProposalCreateInput, ProposalRepository, SessionRepository, TaskRepository, UserRepository,
+    UserSettingsRepository,
 };
 use djinn_provider::catalog::CatalogService;
 use djinn_provider::catalog::health::HealthTracker;
@@ -125,7 +125,6 @@ pub(crate) fn build_refinement_actor(
         boot_at: ::time::OffsetDateTime::now_utc(),
         events_tx: events_tx.clone(),
         pool,
-        build_admission: None,
         catalog,
         health: HealthTracker::default(),
         role_registry: Arc::new(RoleRegistry::new()),
@@ -191,6 +190,7 @@ pub(crate) fn build_refinement_actor(
         active_refinements: HashMap::new(),
         refinement_sessions: HashMap::new(),
         stranded_ready_source: None,
+        doctor_registry: crate::actor::new_doctor_registry_handle(),
         closed_parent_open_children_source: None,
         dispatched: 0,
         recovered: 0,
@@ -220,15 +220,15 @@ pub(crate) fn spawn_test_pool(
     )
 }
 
-/// Create a controlled refinement pool whose runner snapshots the durable
-/// admission row before performing any lifecycle side effect.
+/// Create a controlled refinement pool whose runner reports the task it was
+/// handed and then parks until released, so the caller can observe the
+/// in-flight refinement session while the slot is still occupied.
 #[allow(clippy::type_complexity)]
-fn spawn_admission_observing_pool(
+fn spawn_blocking_refinement_pool(
     db: &djinn_db::Database,
-    journal: Arc<AdmissionJournalRepository>,
 ) -> (
     djinn_slot::SlotPoolHandle,
-    tokio::sync::mpsc::UnboundedReceiver<(String, Vec<djinn_db::AdmissionJournalRow>, i64)>,
+    tokio::sync::mpsc::UnboundedReceiver<String>,
     Arc<Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
 ) {
     let cancel = CancellationToken::new();
@@ -251,27 +251,17 @@ fn spawn_admission_observing_pool(
         },
         Arc::new(move |slot_id, model_id, event_tx, app_state, cancel| {
             let observed_tx = observed_tx.clone();
-            let journal = journal.clone();
             let release = release_for_factory.clone();
             let runner: djinn_slot::TestLifecycleRunner =
                 Arc::new(move |task_id, _, _, _, kill, _, _| {
                     let observed_tx = observed_tx.clone();
-                    let journal = journal.clone();
                     let release = release.clone();
                     Box::pin(async move {
-                        let history = journal
-                            .list_history(AdmissionDomain::TaskObservation, &task_id)
-                            .await
-                            .expect("snapshot refinement admission at create time");
-                        let occupancy = journal
-                            .count_task_or_warm_occupancy()
-                            .await
-                            .expect("snapshot refinement occupancy at create time");
                         let (release_tx, release_rx) = tokio::sync::oneshot::channel();
                         *release.lock().expect("refinement release mutex") = Some(release_tx);
                         observed_tx
-                            .send((task_id, history, occupancy))
-                            .expect("report refinement create-time snapshot");
+                            .send(task_id)
+                            .expect("report the dispatched refinement task");
                         tokio::select! {
                             _ = release_rx => {}
                             _ = kill.cancelled() => {}
@@ -380,15 +370,6 @@ async fn at_cap_refinement_defers_and_repeated_ticks_are_noops() {
     set_user_cap(&db, &fixture.user_id, TEST_MODEL, 1).await;
 
     let mut actor = build_refinement_actor(&db, &events_tx, pool.clone());
-    let journal = Arc::new(AdmissionJournalRepository::new(db.clone()));
-    actor.build_admission = Some(Arc::new(
-        crate::build_admission::BuildAdmissionController::new(
-            journal.clone(),
-            crate::build_admission::BuildAdmissionMode::Enforce,
-            2,
-            "refinement-route-test",
-        ),
-    ));
     seed_refinement_state(
         &mut actor,
         &fixture.proposal_id,
@@ -462,14 +443,6 @@ async fn at_cap_refinement_defers_and_repeated_ticks_are_noops() {
         refinement_tasks.is_empty(),
         "no refinement tasks should have been created during at-cap deferrals"
     );
-    assert_eq!(
-        journal
-            .count_task_or_warm_occupancy()
-            .await
-            .expect("count admission occupancy"),
-        0,
-        "cap denial must not create an admission journal row",
-    );
 
     // Clean up: release the blocking session.
     SessionRepository::new(db.clone(), EventBus::noop())
@@ -496,9 +469,7 @@ async fn capacity_free_retry_dispatches_exactly_one_refinement() {
     let db = crate::test_helpers::create_test_db();
     let fixture = seed_refinement_fixture(&db).await;
     let (events_tx, _events_rx) = tokio::sync::broadcast::channel::<DjinnEventEnvelope>(256);
-    let journal = Arc::new(AdmissionJournalRepository::new(db.clone()));
-    let (pool, mut create_observed_rx, release) =
-        spawn_admission_observing_pool(&db, journal.clone());
+    let (pool, mut create_observed_rx, release) = spawn_blocking_refinement_pool(&db);
 
     // Seed one running session + cap = 1 so the first tick defers.
     let blocking_task_id = seed_task(&db, &fixture.project_id, &fixture.user_id, "blocking").await;
@@ -507,14 +478,6 @@ async fn capacity_free_retry_dispatches_exactly_one_refinement() {
     set_user_cap(&db, &fixture.user_id, TEST_MODEL, 1).await;
 
     let mut actor = build_refinement_actor(&db, &events_tx, pool.clone());
-    actor.build_admission = Some(Arc::new(
-        crate::build_admission::BuildAdmissionController::new(
-            journal.clone(),
-            crate::build_admission::BuildAdmissionMode::Enforce,
-            2,
-            "refinement-route-test",
-        ),
-    ));
     seed_refinement_state(
         &mut actor,
         &fixture.proposal_id,
@@ -542,28 +505,11 @@ async fn capacity_free_retry_dispatches_exactly_one_refinement() {
     // Tick 2: should now dispatch exactly one refinement task.
     actor.drive_active_refinements().await;
 
-    let (created_task_id, create_time_history, create_time_occupancy) = create_observed_rx
+    let created_task_id = create_observed_rx
         .recv()
         .await
         .expect("controlled refinement create callback must execute");
-    // Task `h1yv`: the tribunal roles (advocate/adversary/judge) are
-    // `djinn_runtime::RoleResourceClass::Light` — unlikely enough to run the
-    // project's compile/test toolchain that pre-charging them a slot is the
-    // wrong trade — so build admission grants a zero-slot permit and writes NO
-    // journal row. A tribunal round that does compile is governed by the
-    // measured invocation lease, not here. This assertion previously
-    // demanded one durable generation; the invariant that survives is that a
-    // tribunal round reserves nothing and occupies nothing. The user-model cap
-    // exercised by this test (AC#3) is a separate, still-enforced gate.
-    assert!(
-        create_time_history.is_empty(),
-        "a light tribunal task-run must reserve no admission generation, got {create_time_history:?}"
-    );
     assert!(!created_task_id.is_empty(), "a refinement task was created");
-    assert_eq!(
-        create_time_occupancy, 0,
-        "a light tribunal task-run occupies no build capacity at create time"
-    );
 
     assert!(
         actor.refinement_sessions.contains_key(&fixture.proposal_id),
@@ -595,23 +541,9 @@ async fn capacity_free_retry_dispatches_exactly_one_refinement() {
         "exactly one refinement task should exist"
     );
 
-    // The durable journal stays empty: a light tribunal round never reserves,
-    // so there is nothing to make CreateStarted and nothing to release.
-    let journal_rows = journal
-        .list_history(AdmissionDomain::TaskObservation, &refinement_tasks[0].id)
-        .await
-        .expect("read refinement admission history");
-    assert!(
-        journal_rows.is_empty(),
-        "a light refinement route writes no admission generation, got {journal_rows:?}"
-    );
     assert_eq!(
-        journal
-            .count_task_or_warm_occupancy()
-            .await
-            .expect("count admission occupancy"),
-        0,
-        "a light refinement round consumes no build slot",
+        refinement_tasks[0].id, created_task_id,
+        "the created refinement task is the one the slot runner was handed"
     );
 
     // The state machine should have recorded one spawn.

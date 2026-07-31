@@ -12,31 +12,22 @@ use tokio_util::sync::CancellationToken;
 
 use crate::db::runtime::{DatabaseRuntimeHealth, DatabaseRuntimeManager};
 use crate::events::DjinnEventEnvelope;
-use djinn_agent::actors::coordinator::build_admission_handoff::{
-    EmergencyAuthorityDecision, HandoffWarningReason, InvocationAuthorityObservation,
-    evaluate_handoff,
-};
-use djinn_agent::actors::coordinator::{
-    BuildAdmissionController, BuildAdmissionMode, CoordinatorHandle,
-};
+use djinn_agent::actors::coordinator::CoordinatorHandle;
 use djinn_agent::actors::slot::{SlotPoolConfig, SlotPoolHandle};
 use djinn_agent::file_time::FileTime;
 use djinn_agent::lsp::LspManager;
 use djinn_agent::roles::RoleRegistry;
 use djinn_agent::runtime_bridge::{K8sTokenReviewValidator, RuntimeKind, runtime_kind};
-use djinn_coordinator::build_admission_inventory::ReconcileScope;
 use djinn_coordinator::build_lease::BuildLeaseService;
 use djinn_coordinator::build_lease_reclaim::BuildLeaseReclaimer;
-use djinn_coordinator::build_slot_authority::BuildLeaseDispatchAuthority;
 use djinn_coordinator::graph_warm_lease::BuildLeaseGraphWarmAdapter;
 use djinn_coordinator::run_dir_observe::{RunDirObserveSeams, arm_disk_observation};
 use djinn_core::clock::{Clock, SystemClock as SystemClockTrait};
 use djinn_core::models::KnowledgeInjectionConfig;
 use djinn_db::{
-    AdmissionHandoffAuthority, AdmissionHandoffRepository, BuildPodPermitRepository, Database,
-    NoopNoteVectorStore, NoteVectorStore, ProjectRepository, QdrantCodeChunkConfig,
-    QdrantCodeChunkVectorStore, QdrantConfig, QdrantNoteVectorStore, ReadyQuery,
-    SettingsRepository, TaskRepository,
+    Database, InvocationLeaseAuthorityRepository, NoopNoteVectorStore, NoteVectorStore,
+    ProjectRepository, QdrantCodeChunkConfig, QdrantCodeChunkVectorStore, QdrantConfig,
+    QdrantNoteVectorStore, SettingsRepository,
 };
 use djinn_git::{GitActorHandle, GitError};
 use djinn_image_controller::{
@@ -51,15 +42,10 @@ use djinn_provider::github_app::AppConfig as GitHubAppConfig;
 use djinn_provider::github_app::CredentialSourceState;
 use djinn_provider::repos::CredentialRepository;
 use djinn_runtime::GraphWarmerService;
-use djinn_supervisor::services::{InvocationLiftDecision, evaluate_invocation_lift};
 use djinn_supervisor::{AllowAllValidator, ConnectionRegistry, ServeHandle, serve_on_tcp};
 use djinn_workspace::{MirrorManager, WorkspaceStore, mirrors_root, workspaces_root};
 
-#[cfg(test)]
-mod admission_epoch_arming_tests;
 mod canonical_graph_refresh_planner;
-#[cfg(test)]
-mod handoff_warning_observation_tests;
 mod provider_catalog_refresh;
 mod settings;
 
@@ -71,153 +57,24 @@ const EVENT_CHANNEL_CAPACITY: usize = 1024;
 const SETTINGS_RAW_KEY: &str = "settings.raw";
 const MODEL_HEALTH_STATE_KEY: &str = "model_health.state";
 
-const BUILD_ADMISSION_MODE_ENV: &str = "DJINN_BUILD_ADMISSION_MODE";
-const MAX_BUILD_TASKRUNS_ENV: &str = "DJINN_MAX_BUILD_TASKRUNS";
-const MAX_BUILD_PODS_ENV: &str = "DJINN_MAX_BUILD_PODS";
-const HANDOFF_WARNING_INTERVAL: Duration = Duration::from_secs(5 * 60);
+/// How often every pod re-reads the durable invocation-lease authority to adopt
+/// an operator cap change without a restart.
+const BUILD_EPOCH_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum HandoffWarningLogEvent {
-    Warning(HandoffWarningReason),
-    Recovery(HandoffWarningReason),
-}
-
-#[derive(Default)]
-struct HandoffWarningLogState {
-    active: Option<HandoffWarningReason>,
-    last_logged: Option<Instant>,
-}
-
-impl HandoffWarningLogState {
-    /// Record the startup observation before the persistent loop takes ownership
-    /// of this state.
-    fn observe_startup(
-        &mut self,
-        now: Instant,
-        warning: Option<HandoffWarningReason>,
-    ) -> Option<HandoffWarningLogEvent> {
-        self.observe(now, warning)
-    }
-
-    /// Record a periodic observation using the transition state established at
-    /// startup. Keeping this distinct from `observe_startup` makes the
-    /// lifecycle handoff explicit and prevents recovery state from being lost.
-    fn observe_persistent(
-        &mut self,
-        now: Instant,
-        warning: Option<HandoffWarningReason>,
-    ) -> Option<HandoffWarningLogEvent> {
-        self.observe(now, warning)
-    }
-
-    fn observe(
-        &mut self,
-        now: Instant,
-        warning: Option<HandoffWarningReason>,
-    ) -> Option<HandoffWarningLogEvent> {
-        match (self.active, warning) {
-            (Some(previous), None) => {
-                self.active = None;
-                self.last_logged = None;
-                Some(HandoffWarningLogEvent::Recovery(previous))
-            }
-            (_, Some(current)) if self.active != Some(current) => {
-                self.active = Some(current);
-                self.last_logged = Some(now);
-                Some(HandoffWarningLogEvent::Warning(current))
-            }
-            (Some(current), Some(_))
-                if self
-                    .last_logged
-                    .is_none_or(|last| now.duration_since(last) >= HANDOFF_WARNING_INTERVAL) =>
-            {
-                self.last_logged = Some(now);
-                Some(HandoffWarningLogEvent::Warning(current))
-            }
-            _ => None,
-        }
-    }
-}
-
-/// Immutable build-admission startup policy. It is parsed before composition,
-/// so an environment change only takes effect after a process restart.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct BuildAdmissionConfig {
-    mode: BuildAdmissionMode,
-    cap: i64,
-    pod_limit: Option<i64>,
-}
-
-impl BuildAdmissionConfig {
-    const DEFAULT_CAP: i64 = 3;
-    const MAX_CAP: i64 = 64;
-
-    fn from_env() -> Result<Self, String> {
-        Self::parse(
-            std::env::var(BUILD_ADMISSION_MODE_ENV).ok().as_deref(),
-            std::env::var(MAX_BUILD_TASKRUNS_ENV).ok().as_deref(),
-            std::env::var(MAX_BUILD_PODS_ENV).ok().as_deref(),
-        )
-    }
-
-    fn parse(
-        mode: Option<&str>,
-        cap: Option<&str>,
-        pod_limit: Option<&str>,
-    ) -> Result<Self, String> {
-        let explicit_mode = match mode {
-            None => None,
-            Some("off") => Some(BuildAdmissionMode::Off),
-            Some("observe") => Some(BuildAdmissionMode::Observe),
-            Some("enforce") => Some(BuildAdmissionMode::Enforce),
-            Some("") => return Err(format!("{BUILD_ADMISSION_MODE_ENV} must not be empty")),
-            Some(value) => {
-                return Err(format!(
-                    "{BUILD_ADMISSION_MODE_ENV} must be exactly off, observe, or enforce (got {value:?})"
-                ));
-            }
-        };
-        let parsed_cap = match cap {
-            None => None,
-            Some("") => return Err(format!("{MAX_BUILD_TASKRUNS_ENV} must not be empty")),
-            Some(value) => Some(value.parse::<i64>().map_err(|_| {
-                format!(
-                    "{MAX_BUILD_TASKRUNS_ENV} must be an integer from 1 through 64 (got {value:?})"
-                )
-            })?),
-        };
-        if parsed_cap == Some(0) {
-            return match explicit_mode {
-                Some(BuildAdmissionMode::Observe | BuildAdmissionMode::Enforce) => Err(format!(
-                    "{MAX_BUILD_TASKRUNS_ENV}=0 conflicts with explicit {BUILD_ADMISSION_MODE_ENV}"
-                )),
-                _ => Ok(Self {
-                    mode: BuildAdmissionMode::Off,
-                    cap: 0,
-                    pod_limit: parse_pod_limit(pod_limit),
-                }),
-            };
-        }
-        let cap = parsed_cap.unwrap_or(Self::DEFAULT_CAP);
-        if !(1..=Self::MAX_CAP).contains(&cap) {
-            return Err(format!(
-                "{MAX_BUILD_TASKRUNS_ENV} must be an integer from 1 through 64 (got {cap})"
-            ));
-        }
-        Ok(Self {
-            mode: explicit_mode.unwrap_or(BuildAdmissionMode::Observe),
-            cap,
-            pod_limit: parse_pod_limit(pod_limit),
-        })
-    }
-}
-
-/// Parse the independent optional pod permit cap; invalid values remain unavailable.
-fn parse_pod_limit(value: Option<&str>) -> Option<i64> {
-    value
-        .and_then(|value| value.parse::<i64>().ok())
-        .filter(|limit| (1..=BuildAdmissionConfig::MAX_CAP).contains(limit))
-}
+/// Pre-recovery fallback for the build-slot FIFO's reference cap.
+///
+/// It is only a fallback. `BuildLeaseService::with_invocation_lease_authority`
+/// reads the durable authority's cap on recovery and an armed cap always wins,
+/// which is what makes `djinn-server epoch set-cap` a live control. This number
+/// is what the process uses in the window before that read completes, and on a
+/// deployment that has never seeded the authority.
+///
+/// It used to come from `DJINN_MAX_BUILD_TASKRUNS` via `BuildAdmissionConfig`.
+/// That variable configured the DELETED pre-create reservation authority, is no
+/// longer rendered by the chart, and is gone; the value it defaulted to is
+/// preserved here verbatim so a deployment's effective cap does not move as a
+/// side effect of the cutover.
+const DEFAULT_BUILD_SLOT_CAP: i64 = 3;
 
 /// Production [`WarmCompletionSink`]: converge the server's in-memory
 /// canonical-graph slot after an *out-of-pod* warm Job succeeds.
@@ -278,22 +135,6 @@ impl StartupReconnectabilityMeasurement {
     /// without re-deriving it separately from the count emitted in tracing.
     pub(crate) fn reconnectable_task_run_ids(&self) -> &HashSet<String> {
         &self.reconnectable_task_run_ids
-    }
-}
-
-/// The single rule deciding whether a build-admission reconciliation pass may
-/// write the durable admission journal.
-///
-/// A free function so the rule itself is testable without an `AppState`: the
-/// hazard being fenced off is a standby writing the shared ledger, and "the
-/// standby case maps to Observe" is the assertion that matters. See
-/// [`AppState::initialize_build_admission_inventory`] for why the decision
-/// cannot live at the call sites.
-fn reconcile_scope_for(topology_confirmed: bool) -> ReconcileScope {
-    if topology_confirmed {
-        ReconcileScope::Mutate
-    } else {
-        ReconcileScope::Observe
     }
 }
 
@@ -409,8 +250,8 @@ struct Inner {
     pub provider_catalog_refresh_interval: std::time::Duration,
     /// Ensures repeated startup hooks cannot create concurrent refresh loops.
     pub provider_catalog_refresh_started: AtomicBool,
-    /// Ensures startup creates at most one persistent handoff-warning loop.
-    pub handoff_warning_loop_started: AtomicBool,
+    /// Ensures startup creates at most one persistent authority-refresh loop.
+    pub build_epoch_loop_started: AtomicBool,
     /// Whether THIS process won the coordinator advisory lock and confirmed the
     /// single-active build-admission topology.
     ///
@@ -418,9 +259,9 @@ struct Inner {
     /// startup gate (see `require_enforcement`), and the topology gate may only
     /// be re-asserted by a process that actually holds the lock. A standby never
     /// sets this, so it can never re-open its own topology gate.
-    pub build_admission_topology_confirmed: AtomicBool,
     /// Independently parsed pod-permit cap; never derived from build task runs.
-    pub build_pod_limit: Option<i64>,
+    /// Carries HOW it resolved, not just the value, so an unarmed dimension can
+    /// be reported instead of silently denying every admission.
     /// Per-model circuit-breaker health tracker.
     pub health_tracker: HealthTracker,
     /// Immutable retrieval-health config parsed once at startup.
@@ -547,9 +388,26 @@ struct Inner {
     /// per-call.
     pub graph_warmer: tokio::sync::RwLock<Option<Arc<dyn GraphWarmerService>>>,
     /// The admission controller for this server process when admission is enabled.
-    pub build_admission: Option<Arc<BuildAdmissionController>>,
     /// Durable v1 authority injected into the production graph warmer.
     pub build_lease: Arc<BuildLeaseService>,
+    /// Proposal `3i92`'s post-admission resize stack: the durable
+    /// `build_pod_permits` relation, the limits-only `pods/resize` client and
+    /// the birth dispatch gate, composed once for the whole process.
+    ///
+    /// Threaded into every [`AppState::agent_context`], which is where the slot
+    /// pool's dispatch seam reads it. **This is the composition site.** Before
+    /// it existed the entire resize stack was merged, tested and structurally
+    /// unreachable — `scripts/check-resize-reachability.sh` exists to keep it
+    /// that way only over this maintainer's dead build.
+    pub resize_admission: Arc<crate::task_run_resize_bootstrap::TaskRunResizeAdmissionBridge>,
+    /// Proposal `3i92`'s fail-safe drop, composed once for the whole process.
+    ///
+    /// The other half of `resize_admission`: that one raises a launcher's
+    /// ceiling for one invocation, this one is the seam every terminal path
+    /// converges on to give the CPU back. Threaded into every
+    /// [`AppState::agent_context`], which is where `DirectServices`'
+    /// `release_lease` handler reads it. **This is the composition site.**
+    pub resize_drop: Arc<crate::task_run_resize_drop::TaskRunResizeDropBridge>,
 }
 
 /// Result of a boot token exchange attempt.
@@ -574,11 +432,6 @@ impl AppState {
             djinn_core::doctor::RetrievalHealthConfig::default(),
             Arc::new(djinn_telemetry::memory_retrieval::MemoryRetrievalMetrics::new()),
             KnowledgeInjectionConfig::default(),
-            BuildAdmissionConfig {
-                mode: BuildAdmissionMode::Observe,
-                cap: BuildAdmissionConfig::DEFAULT_CAP,
-                pod_limit: None,
-            },
         )
     }
 
@@ -590,7 +443,6 @@ impl AppState {
         retrieval_metrics: Arc<djinn_telemetry::memory_retrieval::MemoryRetrievalMetrics>,
         knowledge_injection_config: KnowledgeInjectionConfig,
     ) -> Result<Self, String> {
-        let admission_config = BuildAdmissionConfig::from_env()?;
         Ok(Self::new_inner(
             db,
             db_runtime,
@@ -598,7 +450,6 @@ impl AppState {
             retrieval_config,
             retrieval_metrics,
             knowledge_injection_config,
-            admission_config,
         ))
     }
 
@@ -609,28 +460,13 @@ impl AppState {
         retrieval_config: djinn_core::doctor::RetrievalHealthConfig,
         retrieval_metrics: Arc<djinn_telemetry::memory_retrieval::MemoryRetrievalMetrics>,
         knowledge_injection_config: KnowledgeInjectionConfig,
-        admission_config: BuildAdmissionConfig,
     ) -> Self {
         let (events, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
         let mirror = Arc::new(MirrorManager::new(mirrors_root()));
         let workspace_store = Arc::new(WorkspaceStore::new(workspaces_root(), Arc::clone(&mirror)));
-        // Each server process allocates a unique epoch so recovery can
-        // distinguish rows created by a predecessor from rows created here.
-        // The hostname is retained as a human-readable prefix; the UUIDv7
-        // suffix guarantees uniqueness across restarts and replicas.
-        let server_epoch = format!(
-            "{}:{}",
-            std::env::var("HOSTNAME").unwrap_or_else(|_| "coordinator".to_owned()),
-            djinn_agent::actors::coordinator::allocate_server_epoch()
-        );
-        let build_admission_journal =
-            Arc::new(djinn_db::AdmissionJournalRepository::new(db.clone()));
         // The ONE build-slot capacity authority. Every population that can
-        // occupy a build slot -- graph warming, layer-1 task dispatch, and the
-        // layer-2 invocation escalation -- draws from this single FIFO under
-        // this single cap. Before this, task dispatch was capped separately by
-        // the v0 admission journal against the same configured number, so the
-        // two authorities together admitted twice the operator's intent.
+        // occupy a build slot — graph warming and the invocation escalation —
+        // draws from this single FIFO under this single cap.
         //
         // Weights are derived from the SAME rendered manifests the cluster
         // sees, so the capacity a workload is charged and the CPU it is given
@@ -642,46 +478,75 @@ impl AppState {
                 warm_millicores: djinn_k8s::launcher::warm_job_millicores(&k8s),
             }
         };
+        // Proposal `3i92`'s lift, armed (0ppk-1c). **This is the composition
+        // site**, and it is the entire difference between a resize stack that
+        // exists and one that fires: `BuildLeaseService` holds the authority as
+        // an `Option`, and for the whole of `0ppk-1a` that `Option` was `None`
+        // at every composition — merged, green, and structurally unable to move
+        // a Pod.
+        //
+        // Arming had to wait for `0ppk-1b` (#2860), which made
+        // `BuildPodPermitRepository` a production writer. Before those rows
+        // existed this would have answered `DegradedUnleased { PermitAbsent }`
+        // for every production invocation, which is why 1a shipped it unarmed
+        // and said so in its module header.
+        //
+        // The applier is `ResizeLift`, whose apiserver surface resolves lazily
+        // on first lift — a server with no kubeconfig still boots, and every
+        // lift it then attempts degrades to `ResizeSurfaceUnavailable` rather
+        // than reporting a grant.
+        //
+        // Inert on the current fleet: `images.launcher_authority_protocol` is
+        // NULL fleet-wide, so every dispatch resolves `leaf-v1`, no `resize-v2`
+        // ceiling is rendered, no resize identity is captured, and the clamp
+        // refuses `leaf-v1` outright. This becomes live the first time an image
+        // row carries `resize-v2`.
+        let permits = Arc::new(djinn_db::BuildPodPermitRepository::new(db.clone()));
+        let resize_authority = Arc::new(
+            djinn_coordinator::resize_authorization::ResizeAuthority::new(
+                Arc::new(djinn_db::BuildLeaseRepository::new(db.clone())),
+                Arc::clone(&permits),
+                Arc::new(
+                    djinn_supervisor::services::DurableInvocationLiftAuthority::new(
+                        db.clone(),
+                        "server AppState",
+                    ),
+                ),
+                // No CPU quantity is passed from here on purpose. `0ppk-1a`
+                // handed this process's rendered `launcher_leased_millicores`
+                // in and the clamp `min`'d the per-Pod ceiling against it,
+                // which held every per-project-`cpu_limit`-override Pod below
+                // its own rendered lease (`gvix`). The lift target is now the
+                // write-once permit row's `admitted_cpu_millicores` alone —
+                // see `resize_authorization`'s header.
+                Arc::new(djinn_coordinator::resize_lift::ResizeLift::from_env(
+                    Arc::clone(&permits),
+                )),
+            ),
+        );
         let build_lease = Arc::new(
             BuildLeaseService::new(
                 Arc::new(djinn_db::BuildLeaseRepository::new(db.clone())),
-                admission_config.cap,
+                DEFAULT_BUILD_SLOT_CAP,
             )
             .with_slot_weights(warm_weights)
-            // The v1 lease service reads the durable admission epoch (and its
-            // reference cap) on recovery, so a restart observes the current
-            // epoch before admitting or spawning. An armed epoch cap still
-            // wins over the configured value above.
-            .with_handoff_epoch(Arc::new(AdmissionHandoffRepository::new(db.clone()))),
+            // The lease service reads the durable invocation-lease authority
+            // (and its reference cap) on recovery, so a restart observes the
+            // armed cap before admitting or spawning. An armed cap still wins
+            // over the configured value above.
+            .with_invocation_lease_authority(Arc::new(InvocationLeaseAuthorityRepository::new(
+                db.clone(),
+            )))
+            .with_resize_authority(resize_authority),
         );
-        // Retain an Off controller until the durable handoff row has been read.
-        // A row requiring v0 promotes it before recovery; a missing row keeps
-        // the configured standalone mode.
-        //
-        // The controller is handed the lease as its capacity authority. It has
-        // no cap of its own any more: the journal it owns is the lifecycle and
-        // fencing ledger, and it asks the authority above for capacity. That is
-        // the whole of the single-authority cut-over.
-        let slot_authority: Arc<dyn djinn_coordinator::build_admission::BuildSlotAuthority> =
-            Arc::new(BuildLeaseDispatchAuthority::new(build_lease.clone()));
-        let build_admission = Some(Arc::new(
-            match admission_config.mode {
-                BuildAdmissionMode::Off | BuildAdmissionMode::Observe => {
-                    BuildAdmissionController::new(
-                        build_admission_journal,
-                        admission_config.mode,
-                        admission_config.cap,
-                        server_epoch,
-                    )
-                }
-                BuildAdmissionMode::Enforce => BuildAdmissionController::new_closed(
-                    build_admission_journal,
-                    admission_config.cap,
-                    server_epoch,
-                ),
-            }
-            .with_slot_authority(slot_authority),
-        ));
+        // The one place proposal `3i92`'s resize stack becomes reachable. The
+        // apiserver surface underneath resolves lazily on first dispatch, so a
+        // server with no cluster configuration still boots.
+        let resize_admission = Arc::new(
+            crate::task_run_resize_bootstrap::TaskRunResizeAdmissionBridge::from_env(db.clone()),
+        );
+        let resize_drop =
+            Arc::new(crate::task_run_resize_drop::TaskRunResizeDropBridge::from_env(db.clone()));
         Self {
             inner: Arc::new(Inner {
                 db,
@@ -693,9 +558,7 @@ impl AppState {
                 provider_catalog_refresh_interval:
                     provider_catalog_refresh::refresh_interval_from_env(),
                 provider_catalog_refresh_started: AtomicBool::new(false),
-                handoff_warning_loop_started: AtomicBool::new(false),
-                build_admission_topology_confirmed: AtomicBool::new(false),
-                build_pod_limit: admission_config.pod_limit,
+                build_epoch_loop_started: AtomicBool::new(false),
                 health_tracker: HealthTracker::new(),
                 retrieval_config,
                 retrieval_metrics,
@@ -726,8 +589,9 @@ impl AppState {
                 image_controller: tokio::sync::RwLock::new(None),
                 image_build_watcher: tokio::sync::Mutex::new(None),
                 graph_warmer: tokio::sync::RwLock::new(None),
-                build_admission,
                 build_lease,
+                resize_admission,
+                resize_drop,
             }),
         }
     }
@@ -921,242 +785,6 @@ impl AppState {
         Arc::new(build_in_process_graph_warmer(self.clone())) as Arc<dyn GraphWarmerService>
     }
 
-    /// Read the durable handoff row once and project the invocation (v1)
-    /// authority from that exact same read.
-    ///
-    /// Every production `evaluate_handoff` call site used to pass
-    /// `InvocationAuthorityObservation::default()`, i.e. `enforcing: false`
-    /// hard-coded, so the server always believed v1 was not enforcing. The
-    /// consequence was a permanent, unclearable `stale_epoch` warning for every
-    /// phase of the forward cutover — byte-identical to a genuine incomplete
-    /// epoch, which made the runbook's stale-epoch detector unreadable.
-    ///
-    /// The observation is the launcher's own projection,
-    /// [`evaluate_invocation_lift`], applied to the row: v1 is enforcing exactly
-    /// when it lifts the cgroup quota. `Shadow` observes without enforcing and
-    /// `Unleased` is no authority at all, so neither counts.
-    ///
-    /// Reading once and handing the *same* row to both halves also closes a
-    /// torn-read window in which the projection and the warning would disagree
-    /// about which epoch they described.
-    async fn read_handoff_with_invocation_observation(
-        &self,
-    ) -> (
-        Result<Option<djinn_db::AdmissionHandoffRow>, ()>,
-        InvocationAuthorityObservation,
-    ) {
-        let row = AdmissionHandoffRepository::new(self.db().clone())
-            .read()
-            .await
-            .map_err(|_| ());
-        let invocation = InvocationAuthorityObservation {
-            enforcing: evaluate_invocation_lift(row.clone()) == InvocationLiftDecision::Lift,
-        };
-        (row, invocation)
-    }
-
-    /// Read the durable handoff row before journal recovery can weaken any emergency gate.
-    /// A storage failure remains fail-closed through the existing readiness gates.
-    async fn initialize_build_admission_handoff(&self) {
-        let Some(admission) = self.inner.build_admission.clone() else {
-            return;
-        };
-        let (row, invocation) = self.read_handoff_with_invocation_observation().await;
-        let snapshot = evaluate_handoff(
-            row,
-            admission.mode(),
-            admission.mode() == BuildAdmissionMode::Enforce,
-            admission.readiness(),
-            invocation,
-        );
-        match snapshot.emergency {
-            EmergencyAuthorityDecision::RequiredFailClosed => admission.require_enforcement(),
-            EmergencyAuthorityDecision::MayDisable => admission.disable(),
-            EmergencyAuthorityDecision::ConfiguredStandalone => {}
-        }
-        tracing::info!(state = ?snapshot.state, emergency = ?snapshot.emergency, mode = ?admission.mode(),
-            "build admission handoff applied before emergency recovery");
-        // The startup observation is part of the same transition stream as the
-        // periodic observations. Move its state into the loop so a warning that
-        // clears before the first tick still emits its one recovery transition.
-        let mut handoff_warning_log_state = HandoffWarningLogState::default();
-        if let Some(event) = handoff_warning_log_state.observe_startup(
-            SystemClockTrait::new().now_instant(),
-            self.publish_handoff_warning().await,
-        ) {
-            Self::log_handoff_warning(event);
-        }
-        self.start_handoff_warning_loop(handoff_warning_log_state);
-    }
-
-    async fn publish_handoff_warning(&self) -> Option<HandoffWarningReason> {
-        let admission = self.inner.build_admission.clone()?;
-        let emergency_enforcing = admission.mode() == BuildAdmissionMode::Enforce;
-        let (row, invocation) = self.read_handoff_with_invocation_observation().await;
-        let snapshot = evaluate_handoff(
-            row,
-            admission.mode(),
-            emergency_enforcing,
-            admission.readiness(),
-            invocation,
-        );
-        let warning = snapshot.warning_reason(emergency_enforcing, invocation);
-        djinn_telemetry::build_admission::set_handoff_warning(
-            warning.map(HandoffWarningReason::as_str),
-        );
-        warning
-    }
-
-    fn log_handoff_warning(event: HandoffWarningLogEvent) {
-        match event {
-            HandoffWarningLogEvent::Warning(reason) => tracing::warn!(
-                reason = reason.as_str(),
-                "build admission handoff warning active"
-            ),
-            HandoffWarningLogEvent::Recovery(reason) => tracing::info!(
-                reason = reason.as_str(),
-                "build admission handoff warning recovered"
-            ),
-        }
-    }
-
-    fn start_handoff_warning_loop(&self, mut log_state: HandoffWarningLogState) {
-        if self
-            .inner
-            .handoff_warning_loop_started
-            .swap(true, Ordering::AcqRel)
-        {
-            return;
-        }
-        let state = self.clone();
-        let cancel = self.cancel().clone();
-        tokio::spawn(async move {
-            let mut ticker = tokio::time::interval(HANDOFF_WARNING_INTERVAL);
-            ticker.tick().await;
-            loop {
-                tokio::select! {
-                    _ = ticker.tick() => {
-                        // Drive the controller from the durable epoch on each
-                        // tick so a mid-run epoch advance is authoritative
-                        // without a restart: RequiredFailClosed re-closes a
-                        // controller that is no longer Enforce, and MayDisable
-                        // releases emergency once invocation-primary is
-                        // committed. This is what re-acknowledges the emergency
-                        // authority after an operator `epoch advance` bumps the
-                        // epoch and clears both acks, so the rollout progresses
-                        // without a restart.
-                        //
-                        // This loop is started from
-                        // `initialize_build_admission_handoff`, i.e. on EVERY
-                        // pod, not only the leader. That is safe because
-                        // acknowledgement is gated on
-                        // `emergency_acknowledgement_allowed`, which requires
-                        // `readiness().is_healthy()`, and `topology_ready` is set
-                        // only by `confirm_build_admission_topology` inside
-                        // `become_leader`. A standby therefore ticks, observes,
-                        // and publishes telemetry but can never write an
-                        // acknowledgement: the readiness gate — not the spawn
-                        // site — is what keeps a single active admission writer.
-                        if let Some(admission) = state.inner.build_admission.clone() {
-                            state.finalize_build_admission_handoff(&admission).await;
-                        }
-                        // The epoch's REFERENCE CAP is part of the same durable
-                        // row this tick already re-reads for v0/v1 modes, and
-                        // it must be adopted on the same schedule. Without
-                        // this, `djinn-server epoch set-cap` wrote a value the
-                        // running process never read: production 2026-07-25
-                        // reported `set-cap --cap 12` applied, `epoch show`
-                        // confirmed `cap 12`, and every denial that followed
-                        // still said `cap=3` until the pods were restarted.
-                        // This loop runs on every pod including standbys,
-                        // which is safe: adopting a cap is a read of the
-                        // durable row, never a write to it.
-                        state.inner.build_lease.refresh_epoch_cap().await;
-                        if let Some(event) = log_state.observe_persistent(
-                            SystemClockTrait::new().now_instant(),
-                            state.publish_handoff_warning().await,
-                        ) {
-                            Self::log_handoff_warning(event);
-                        }
-                    }
-                    _ = cancel.cancelled() => break,
-                }
-            }
-        });
-    }
-
-    /// Verify the independent pod-permit prerequisites without changing the disarmed task-dispatch lease path.
-    async fn initialize_build_pod_permit_prerequisites(&self) {
-        let Some(admission) = self.inner.build_admission.clone() else {
-            return;
-        };
-        let ready = self.inner.build_pod_limit.is_some()
-            && BuildPodPermitRepository::new(self.db().clone())
-                .global_pool_is_readable()
-                .await
-                .unwrap_or(false);
-        if ready {
-            admission.mark_pod_permit_prerequisites_ready();
-        } else {
-            admission.mark_pod_permit_prerequisites_missing();
-        }
-    }
-
-    /// Recover the durable build-admission journal and seed the controller
-    /// before any Kubernetes inventory or task/warm create can run.
-    ///
-    /// Enforce admission remains fail-closed until recovery completes. Observe
-    /// runs lifecycle/telemetry but never denies; Off has no admission coupling.
-    /// This is idempotent: a second call re-seeds from the journal without harm.
-    async fn initialize_build_admission_recovery(&self) {
-        let Some(admission) = self.inner.build_admission.clone() else {
-            // Off: no journal, no controller, no readiness coupling.
-            return;
-        };
-        // Recover the ONE capacity authority before the controller that asks it
-        // for capacity.
-        //
-        // The lease service used to be recovered only inside
-        // `initialize_graph_warmer`, which runs after this and only on the
-        // Kubernetes path. An unrecovered service reports occupancy as unknown
-        // and answers every acquisition `Unavailable`, which Enforce turns into
-        // a denial -- so admission denied everything in the window before the
-        // warmer was wired, and denied everything FOREVER on any deployment
-        // that never reaches the Kubernetes branch. Capacity readiness is not
-        // the graph warmer's to own as a side effect: it is admission's own
-        // precondition, so it is established here.
-        //
-        // Idempotent. `initialize_graph_warmer` still recovers before handing
-        // the adapter a lease, which keeps that path's guarantee local to it.
-        let _ = self.inner.build_lease.recover().await;
-        match admission.recover_all_predecessors_and_seed().await {
-            Ok(report) => {
-                tracing::info!(
-                    mode = ?admission.mode(),
-                    retired_reserved = report.retired_reserved,
-                    marked_create_unknown = report.marked_create_unknown,
-                    seeded_rows = report.seeded_rows,
-                    readiness = ?report.readiness,
-                    "build_admission: recovered durable journal and seeded controller"
-                );
-            }
-            Err(error) => {
-                // Enforce fails closed: the journal gate records the unhealthy
-                // journal and every later gate stays pending, so admission
-                // keeps denying. Observe continues without denial (it never
-                // gated on readiness). A durable journal outage during
-                // recovery is a fail-closed condition for Enforce.
-                admission.mark_journal_unhealthy();
-                tracing::error!(
-                    %error,
-                    mode = ?admission.mode(),
-                    "build_admission: journal recovery failed; Enforce remains fail-closed"
-                );
-                admission.publish_metrics().await;
-            }
-        }
-    }
-
     /// Arm the observe-only disk dimension of build admission (proposal nquz,
     /// phase 1).
     ///
@@ -1175,6 +803,78 @@ impl AppState {
             .await;
     }
 
+    /// Run one durable invocation-lease authority pass, then start the loop that
+    /// repeats it.
+    ///
+    /// Runs on EVERY pod, leader or standby, and carries the one runtime thing
+    /// the retained per-invocation cgroup CPU lease depends on: the
+    /// operator-settable reference cap.
+    ///
+    /// The first pass is AWAITED here rather than left to the loop's first
+    /// tick. `tokio::time::interval` fires immediately and the loop consumes
+    /// that tick to establish its cadence, so a loop-only pass would leave a
+    /// restarted pod up to [`BUILD_EPOCH_INTERVAL`] behind — enforcing a cap an
+    /// operator has already changed, for five minutes, on a pod that just came
+    /// up during an incident.
+    ///
+    /// # What this pass no longer has to do
+    ///
+    /// S3a added an emergency-acknowledgement bridge here, because the retired
+    /// v0↔v1 handoff refused to arm the lease unless the deleted v0 authority's
+    /// acknowledgement was at the current epoch — so an `epoch advance` would
+    /// have silently dropped every invocation to `Unleased`. That bridge is gone
+    /// with the acknowledgement it wrote: the arming decision now reads the
+    /// authority's mode alone, so no periodic writer is required to keep the
+    /// lease armed and no missed tick can disarm it. The pass is now purely the
+    /// cap adoption it always also was.
+    async fn initialize_build_epoch_bridge(&self) {
+        self.run_build_epoch_pass().await;
+        self.start_build_epoch_loop();
+    }
+
+    /// The durable invocation-lease authority maintenance loop.
+    ///
+    /// One load-bearing half: `refresh_epoch_cap()`, which adopts an operator
+    /// `epoch set-cap` without a restart. On 2026-07-25 production reported
+    /// `set-cap --cap 12` applied and `epoch show` confirmed `cap 12`, while
+    /// every denial that followed still said `cap=3` until the pods were
+    /// restarted. A stored cap that is never adopted is not a control.
+    ///
+    /// It is a read-then-idempotent-write of a durable row, so running on every
+    /// pod including standbys is safe.
+    fn start_build_epoch_loop(&self) {
+        if self
+            .inner
+            .build_epoch_loop_started
+            .swap(true, Ordering::AcqRel)
+        {
+            return;
+        }
+        let state = self.clone();
+        let cancel = self.cancel().clone();
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(BUILD_EPOCH_INTERVAL);
+            ticker.tick().await;
+            loop {
+                tokio::select! {
+                    _ = ticker.tick() => state.run_build_epoch_pass().await,
+                    _ = cancel.cancelled() => break,
+                }
+            }
+        });
+    }
+
+    /// One tick of [`Self::start_build_epoch_loop`].
+    ///
+    /// Extracted so the pass is drivable by a test without waiting out a
+    /// five-minute `tokio::time::interval`. The loop above must contain nothing
+    /// but a call to this — `the_build_epoch_loop_runs_the_whole_pass` fails if
+    /// work is ever added directly to the loop body, where no test could reach
+    /// it.
+    pub(crate) async fn run_build_epoch_pass(&self) {
+        self.inner.build_lease.refresh_epoch_cap().await;
+    }
+
     /// Seam-bearing implementation of [`Self::initialize_run_dir_disk_observation`].
     ///
     /// Startup regressions drive a deterministic volume, capacity probe, and
@@ -1183,385 +883,54 @@ impl AppState {
     async fn initialize_run_dir_disk_observation_with(
         &self,
         seams: RunDirObserveSeams,
-    ) -> Option<djinn_coordinator::run_dir_observe::RunDirObserveReport> {
-        let admission = self.inner.build_admission.clone()?;
-        Some(arm_disk_observation(self.db(), &admission, seams).await)
+    ) -> djinn_coordinator::run_dir_observe::RunDirObserveReport {
+        arm_disk_observation(self.db(), seams).await
     }
 
-    /// Restore task identities that were durably ready when the previous
-    /// coordinator was replaced. The admission controller owns the lifecycle
-    /// bookkeeping and filters journal-active identities, while this production
-    /// startup seam supplies the canonical ready-query snapshot used by normal
-    /// coordinator dispatch.
-    async fn initialize_build_admission_deferred_recovery(&self) {
-        let Some(admission) = self.inner.build_admission.clone() else {
+    /// Verify, against the live cluster, that this pod's namespace is actually
+    /// Kueue-managed before any renderer is allowed to arm.
+    ///
+    /// `kueue.armed` in the chart drives both the `djinn.io/kueue-managed`
+    /// Namespace label and `DJINN_KUEUE_ARMED` here, so the two normally cannot
+    /// diverge. They can in exactly one configuration: `namespace.create=false`
+    /// renders no Namespace object, so the chart cannot apply the label, and the
+    /// operator asserts it exists via `kueue.namespaceLabelledExternally`. That
+    /// assertion is unverifiable at render time — this is where it is checked.
+    /// An armed Job in an unlabelled namespace is never captured, never
+    /// unsuspended, and hangs forever.
+    ///
+    /// Refusal disarms (via [`djinn_k8s::disarm_kueue_globally`]) rather than
+    /// aborting the boot: unsuspended Jobs with no Kueue quota is the
+    /// pre-cutover status quo, whereas a crash-looping server is a total outage.
+    async fn run_kueue_arming_preflight(&self) {
+        let config = KubernetesConfig::from_env();
+        if !config.kueue_armed {
             return;
-        };
-        let ready = match TaskRepository::new(self.db().clone(), self.event_bus())
-            .list_ready(ReadyQuery {
-                limit: i64::MAX,
-                ..Default::default()
-            })
-            .await
-        {
-            Ok(tasks) => tasks,
-            Err(error) => {
-                tracing::error!(%error, "build_admission: durable ready queue recovery failed");
-                admission.publish_metrics().await;
-                return;
-            }
-        };
-        let recovered = ready.len();
-        admission
-            .reconcile_deferred_tasks(ready.into_iter().map(|task| (task.id, 0)))
-            .await;
-        tracing::info!(
-            mode = ?admission.mode(),
-            durable_ready_tasks = recovered,
-            "build_admission: reconstructed deferred task identities from durable ready queue"
-        );
-    }
-
-    /// Re-run the Kubernetes inventory reconciliation pass on an already-booted
-    /// leader.
-    ///
-    /// This is [`Self::initialize_build_admission_inventory`] under a name that
-    /// says what it does outside startup. It exists because reclamation of an
-    /// occupying row whose object is gone is gated on that row having settled
-    /// past the reclaim settle window: a row created moments before a rolling
-    /// deploy is skipped by the successor's startup pass, and with no later
-    /// pass it holds shared capacity — or, for a `CreateUnknown` row, fails
-    /// every admission closed — until the next restart.
-    ///
-    /// Leader-only by construction: the caller is spawned from
-    /// [`Self::become_leader`], preserving the single-active-writer invariant
-    /// the topology gate enforces.
-    pub(crate) async fn reconcile_build_admission_inventory(&self) {
-        self.initialize_build_admission_inventory().await;
-    }
-
-    /// Publish the build-admission gauges, including the reconciliation-age
-    /// signal, without running a reconciliation pass.
-    ///
-    /// The reconciliation loop calls this after every tick so the age gauge
-    /// keeps being written even when the pass itself fails: a gauge that stops
-    /// being written is indistinguishable from a process that never started,
-    /// and that ambiguity is exactly what hid the dead reconciler.
-    pub(crate) async fn publish_build_admission_metrics(&self) {
-        if let Some(admission) = self.inner.build_admission.clone() {
-            admission.publish_metrics().await;
         }
-    }
-
-    /// Run the broad Kubernetes build-capable inventory and advance the
-    /// Enforce readiness gate.
-    ///
-    /// This MUST run after [`Self::initialize_build_admission_recovery`] (the
-    /// durable journal loads before any Kubernetes inventory) and after
-    /// [`Self::initialize_graph_warmer`] (the inventory rides the same client
-    /// selection). The gate fails closed: any inventory LIST error leaves
-    /// `InventoryPending` set so Enforce admission keeps denying until a real
-    /// inventory succeeds. The in-process runtime has no Kubernetes objects
-    /// to inventory, so its (empty) listing trivially completes the gate.
-    /// Observe records the same degradation but never denies.
-    ///
-    /// When the runtime owns a live Kubernetes client this runs the full
-    /// [`BuildAdmissionReconciler`] rather than a bare listing: recovery alone
-    /// retires Reserved rows and converts CreateInFlight into occupying
-    /// CreateUnknown, so without a reconciliation pass every occupying row
-    /// whose object died with its creator holds shared capacity permanently.
-    ///
-    /// Startup is not the only caller: [`crate::build_admission_reconcile`]
-    /// re-runs this on a leader-only timer via
-    /// [`Self::reconcile_build_admission_inventory`], because a row that had
-    /// not settled during the startup pass is otherwise never looked at again.
-    ///
-    /// ## Only the leader may run the MUTATING pass
-    ///
-    /// The scope comes from [`Self::build_admission_reconcile_scope`] rather
-    /// than from the call site, because the call sites are not all leader-only
-    /// and were never audited as if they were:
-    ///
-    /// * [`Self::initialize`] runs on **every** pod, standbys included, before
-    ///   leadership is contested;
-    /// * `reestablish_build_admission_gates` is reached from
-    ///   `finalize_build_admission_handoff`, which the handoff warning loop
-    ///   ticks on **every** pod (that loop's own comment argues it is safe
-    ///   because the emergency *acknowledgement* is readiness-gated — true, and
-    ///   it says nothing about the full reconciliation the branch above it
-    ///   performs).
-    ///
-    /// A mutating pass from a standby is not benign. `is_reclaimable`'s LIST
-    /// and GET clauses are structurally vacuous for `task_observation` rows, so
-    /// the creator-epoch fence is the only thing protecting a settled row — and
-    /// a standby clears that fence trivially, because the leader's epoch is not
-    /// its own. A standby could therefore retire the admission row of a
-    /// task-run still running on the leader, under-counting durable occupancy:
-    /// fail-open, silently, with no operator-visible signal.
-    ///
-    /// Deriving the scope from the topology flag rather than the call site also
-    /// means a future caller cannot reintroduce the hazard by forgetting.
-    async fn initialize_build_admission_inventory(&self) {
-        let Some(admission) = self.inner.build_admission.clone() else {
-            // Off: no controller, no readiness coupling.
-            return;
-        };
-        let scope = self.build_admission_reconcile_scope();
-        let warmer = self.inner.graph_warmer.read().await.clone();
-        let Some(warmer) = warmer else {
-            admission.mark_inventory_pending();
-            admission.publish_metrics().await;
-            tracing::error!(
-                mode = ?admission.mode(),
-                "build_admission: no graph warmer available for inventory; Enforce remains fail-closed"
+        if !matches!(runtime_kind(), RuntimeKind::Kubernetes) {
+            tracing::warn!(
+                "kueue preflight: DJINN_KUEUE_ARMED is set but the runtime is not Kubernetes; \
+                 disarming"
             );
-            return;
-        };
-        if let Some(inventory) = warmer
-            .as_any()
-            .downcast_ref::<djinn_k8s::K8sGraphWarmer>()
-            .and_then(djinn_k8s::K8sGraphWarmer::workload_inventory)
-        {
-            let report =
-                djinn_coordinator::build_admission_inventory::BuildAdmissionReconciler::new(
-                    admission.clone(),
-                    inventory,
-                )
-                .reconcile_with(scope)
-                .await;
-            if report.blockers.is_empty() {
-                // A pass that RAN and a pass that SUCCEEDED are different facts,
-                // and only the second one means occupancy is being reclaimed.
-                // This is the single point that knows the difference, so it is
-                // the one that stamps the "last successful reconcile" signal the
-                // `build_admission_health` doctor check reads. Nothing anywhere
-                // asserted this before, which is why a dead reconciler was
-                // indistinguishable from a working one for five hours.
-                admission.note_reconcile_success();
-                tracing::info!(
-                    mode = ?admission.mode(),
-                    ?scope,
-                    adopted = report.adopted,
-                    released = report.released,
-                    reclaimed = report.reclaimed,
-                    stale = report.stale,
-                    fenced = report.fenced,
-                    // A per-row reclaim failure leaves that row occupying,
-                    // which only ever over-counts capacity, so it does not
-                    // fail the pass. It still has to be visible: this is the
-                    // count of rows the next pass will have to try again.
-                    reclaim_failures = report.reclaim_failure_count,
-                    named_reclaim_failures = ?report.reclaim_failures,
-                    readiness = ?admission.readiness(),
-                    "build_admission: Kubernetes inventory reconciliation complete"
-                );
-            } else {
-                tracing::error!(
-                    mode = ?admission.mode(),
-                    ?scope,
-                    reclaim_failures = report.reclaim_failure_count,
-                    named_reclaim_failures = ?report.reclaim_failures,
-                    blockers = ?report.blockers,
-                    "build_admission: Kubernetes inventory reconciliation blocked; Enforce remains fail-closed"
-                );
-            }
+            djinn_k8s::disarm_kueue_globally();
             return;
         }
-        match warmer.list_taskrun_jobs().await {
-            Ok(jobs) => {
-                admission.mark_inventory_ready();
-                // The non-reconciler path (in-process runtime, or a warmer with
-                // no workload inventory) still proves the inventory, so it is
-                // still a completed pass by the only definition this signal has.
-                admission.note_reconcile_success();
-                admission.publish_metrics().await;
-                tracing::info!(
-                    mode = ?admission.mode(),
-                    task_run_jobs = jobs.len(),
-                    readiness = ?admission.readiness(),
-                    "build_admission: Kubernetes inventory complete"
-                );
-            }
+        let client = match djinn_k8s::try_default_client().await {
+            Ok(client) => client,
             Err(error) => {
-                admission.mark_inventory_pending();
-                admission.publish_metrics().await;
                 tracing::error!(
                     %error,
-                    mode = ?admission.mode(),
-                    "build_admission: Kubernetes inventory failed; Enforce remains fail-closed"
+                    "kueue preflight: no Kubernetes client, cannot confirm the namespace is \
+                     Kueue-managed; disarming"
                 );
-            }
-        }
-    }
-
-    /// Which reconciliation scope this process is entitled to right now.
-    ///
-    /// `build_admission_topology_confirmed` is set by exactly one writer,
-    /// [`Self::confirm_build_admission_topology`], which runs only from
-    /// [`Self::become_leader`] — i.e. only after this process won the
-    /// coordinator advisory lock. That flag IS the single-active-writer fact,
-    /// and it is the same one the topology readiness gate is re-asserted from,
-    /// so the journal writer and the admission gate can never disagree about
-    /// who the active process is.
-    fn build_admission_reconcile_scope(&self) -> ReconcileScope {
-        reconcile_scope_for(
-            self.inner
-                .build_admission_topology_confirmed
-                .load(Ordering::Acquire),
-        )
-    }
-
-    /// Re-walk the build-admission startup gates after a live promotion reset
-    /// them.
-    ///
-    /// [`BuildAdmissionController::require_enforcement`] clears the pod-permit,
-    /// journal, inventory, and topology gates so a configured Off/Observe process cannot
-    /// weaken a durable emergency epoch on the strength of checks it never ran.
-    /// That is right at startup, where the gates are walked immediately
-    /// afterwards — but the same promotion also happens on the periodic handoff
-    /// tick of an already-running process, and there nothing else reopens them.
-    ///
-    /// The journal and Kubernetes gates are genuinely re-run here, never
-    /// asserted. The topology gate is different: it cannot be re-derived from a
-    /// check, only from the fact that this process holds the coordinator advisory
-    /// lock, so it is re-asserted only when this process already confirmed it. A
-    /// standby leaves `build_admission_topology_confirmed` false and therefore
-    /// stays fail-closed at `TopologyPending`, preserving the single-active
-    /// writer invariant.
-    async fn reestablish_build_admission_gates(&self, admission: &BuildAdmissionController) {
-        self.initialize_build_pod_permit_prerequisites().await;
-        self.initialize_build_admission_recovery().await;
-        self.initialize_build_admission_inventory().await;
-        if self
-            .inner
-            .build_admission_topology_confirmed
-            .load(Ordering::Acquire)
-        {
-            admission.mark_topology_ready();
-        }
-        admission.publish_metrics().await;
-        tracing::info!(
-            mode = ?admission.mode(),
-            readiness = ?admission.readiness(),
-            topology_confirmed = self
-                .inner
-                .build_admission_topology_confirmed
-                .load(Ordering::Acquire),
-            "build_admission: startup gates re-established after a live promotion"
-        );
-    }
-
-    /// Re-read the durable row after topology has made the emergency controller
-    /// healthy Enforce, then acknowledge its exact emergency epoch.
-    async fn finalize_build_admission_handoff(&self, admission: &BuildAdmissionController) {
-        let (row, invocation) = self.read_handoff_with_invocation_observation().await;
-        let mut snapshot = evaluate_handoff(
-            row,
-            admission.mode(),
-            admission.mode() == BuildAdmissionMode::Enforce,
-            admission.readiness(),
-            invocation,
-        );
-        match snapshot.emergency {
-            EmergencyAuthorityDecision::MayDisable => {
-                admission.disable();
-                tracing::info!(state = ?snapshot.state, "build admission handoff committed; emergency disabled");
+                djinn_k8s::disarm_kueue_globally();
                 return;
             }
-            EmergencyAuthorityDecision::RequiredFailClosed
-                if admission.mode() != BuildAdmissionMode::Enforce =>
-            {
-                // The durable row requires v0 but this controller is not yet
-                // enforcing. Promote it — which resets every startup gate — and
-                // then re-establish those gates, because this may be a LIVE
-                // process rather than one still walking startup.
-                //
-                // Re-establishing is not optional. `initialize()` and
-                // `become_leader()` are the only other places the gates are
-                // walked, and neither runs again in a live process. On
-                // 2026-07-19 an operator restored the durable row against a
-                // running `mode: observe` deployment; this promotion reset the
-                // gates, nothing reopened them, and the controller denied every
-                // admission with a self-contradictory `occupancy 0 reached cap 3`
-                // until the pods were restarted. Nineteen tasks stalled.
-                admission.require_enforcement();
-                self.reestablish_build_admission_gates(admission).await;
-                // The gates moved, so the earlier projection is stale: re-read so
-                // a now-healthy controller can acknowledge in this same pass
-                // instead of waiting for the next tick.
-                let (row, invocation) = self.read_handoff_with_invocation_observation().await;
-                snapshot = evaluate_handoff(
-                    row,
-                    admission.mode(),
-                    admission.mode() == BuildAdmissionMode::Enforce,
-                    admission.readiness(),
-                    invocation,
-                );
-                if snapshot.emergency != EmergencyAuthorityDecision::RequiredFailClosed {
-                    return;
-                }
-            }
-            EmergencyAuthorityDecision::RequiredFailClosed
-            | EmergencyAuthorityDecision::ConfiguredStandalone => {}
-        }
-        if snapshot.emergency_acknowledgement_allowed
-            && let Some(row) = snapshot
-                .row
-                .filter(|row| row.emergency_ack_epoch != Some(row.epoch))
-        {
-            match AdmissionHandoffRepository::new(self.db().clone())
-                .acknowledge(AdmissionHandoffAuthority::Emergency, row.epoch)
-                .await
-            {
-                Ok(_) => tracing::info!(
-                    epoch = row.epoch,
-                    "build admission emergency handoff acknowledged"
-                ),
-                Err(error) => {
-                    tracing::error!(%error, epoch = row.epoch, "build admission handoff acknowledgement failed; emergency remains enforced")
-                }
-            }
-        }
-    }
-
-    ///
-    /// Called from [`Self::become_leader`], which runs only after this process
-    /// wins the coordinator advisory lock — the lock IS the single-active
-    /// topology gate for build admission. A standby pod never runs this, so
-    /// its Enforce admission stays fail-closed with `TopologyPending`.
-    async fn confirm_build_admission_topology(&self) {
-        if let Some(admission) = self.inner.build_admission.clone() {
-            // Record leadership BEFORE marking the gate, so a later live
-            // promotion (which resets the gate) can legitimately re-assert it.
-            self.inner
-                .build_admission_topology_confirmed
-                .store(true, Ordering::Release);
-            admission.mark_topology_ready();
-            self.finalize_build_admission_handoff(&admission).await;
-            admission.publish_metrics().await;
-            tracing::info!(
-                mode = ?admission.mode(),
-                readiness = ?admission.readiness(),
-                "build_admission: single-active topology confirmed by coordinator leadership"
-            );
-        }
-    }
-
-    /// Begin graceful build-admission draining.
-    ///
-    /// New Enforce reservations are blocked while draining; in-flight permits
-    /// may still transition to terminal. Observe and Off are unaffected because
-    /// they never gated admission on readiness. Safety under forced process
-    /// loss does not depend on this cooperative shutdown: the durable journal
-    /// records pre-POST state, so a replacement recovers the same occupancy.
-    pub async fn begin_build_admission_draining(&self) {
-        if let Some(admission) = self.inner.build_admission.clone() {
-            admission.begin_draining();
-            admission.publish_metrics().await;
-            tracing::info!(
-                mode = ?admission.mode(),
-                "build_admission: draining begun; new Enforce reservations blocked"
-            );
+        };
+        let outcome =
+            djinn_k8s::run_kueue_preflight(&client, &config.namespace, config.kueue_armed).await;
+        if !outcome.armed() {
+            djinn_k8s::disarm_kueue_globally();
         }
     }
 
@@ -1615,10 +984,6 @@ impl AppState {
                         );
                         warmer
                     };
-                    let warmer = match self.inner.build_admission.clone() {
-                        Some(admission) => warmer.with_warm_admission(admission),
-                        None => warmer,
-                    };
                     let warmer = Arc::new(warmer);
                     // Startup recovery inventories retained identities only; it
                     // cannot manufacture a fresh Kubernetes create request.
@@ -1637,14 +1002,6 @@ impl AppState {
                     let lease_reclaimer = warmer.workload_inventory().map(|inventory| {
                         Arc::new(BuildLeaseReclaimer::new(
                             Arc::new(djinn_db::BuildLeaseRepository::new(self.db().clone())),
-                            // The v0 lifecycle ledger. It is the only thing
-                            // that can prove a `task_dispatch` lease has no
-                            // owner: that population commits to no Kubernetes
-                            // object name, so before it was wired here every
-                            // leaked dispatch slot was permanently
-                            // unreclaimable and a leak was a total dispatch
-                            // outage.
-                            Arc::new(djinn_db::AdmissionJournalRepository::new(self.db().clone())),
                             inventory,
                         ))
                     });
@@ -1656,7 +1013,7 @@ impl AppState {
                             tick.tick().await;
                             // Adopt an operator `epoch set-cap` on the build
                             // lease's own maintenance cadence rather than
-                            // waiting out the five-minute handoff tick: a cap
+                            // waiting out the five-minute authority tick: a cap
                             // change is an incident control, and the whole
                             // point of it is that the board unwedges now.
                             cap_refresh_lease.refresh_epoch_cap().await;
@@ -2225,6 +1582,26 @@ impl AppState {
         &self.inner.cancel
     }
 
+    /// The process-wide durable CPU lease authority (`build_leases`).
+    ///
+    /// Handed out rather than reconstructed because the cap, the arming latch
+    /// and the recovery snapshot live on THIS instance: a second
+    /// `BuildLeaseService` over the same pool would be unarmed and would refuse
+    /// every operation.
+    pub fn build_lease(&self) -> Arc<djinn_coordinator::build_lease::BuildLeaseService> {
+        Arc::clone(&self.inner.build_lease)
+    }
+
+    /// Proposal `3i92`'s fail-safe drop, as composed for this process.
+    ///
+    /// The `release_lease` handler reaches it through the agent context; the
+    /// `0ppk-3` reconciler reaches it here, so a worker's terminal path and the
+    /// reconciler that speaks for a dead worker share one apiserver surface and
+    /// one retry schedule.
+    pub fn resize_drop(&self) -> Arc<crate::task_run_resize_drop::TaskRunResizeDropBridge> {
+        Arc::clone(&self.inner.resize_drop)
+    }
+
     pub fn events(&self) -> &broadcast::Sender<DjinnEventEnvelope> {
         &self.inner.events
     }
@@ -2255,17 +1632,6 @@ impl AppState {
 
     pub fn health_tracker(&self) -> &HealthTracker {
         &self.inner.health_tracker
-    }
-
-    /// The build-admission controller, when admission is not `Off`.
-    ///
-    /// Exposed so operator surfaces can report the controller's readiness. Its
-    /// state lives in process-local atomics on the leader, so no durable query
-    /// can reach it: on 2026-07-29 that made a five-hour, board-wide dispatch
-    /// outage diagnosable only by grepping container logs on the node.
-    #[must_use]
-    pub fn build_admission(&self) -> Option<Arc<BuildAdmissionController>> {
-        self.inner.build_admission.clone()
     }
 
     /// Immutable retrieval-health config parsed once at startup.
@@ -2383,6 +1749,8 @@ impl AppState {
                 self.clone(),
             ))),
             runtime_ops: Some(Arc::new(self.clone())),
+            resize_admission: Some(self.inner.resize_admission.clone()),
+            resize_drop: Some(self.inner.resize_drop.clone()),
             // Host-side runs root for the coordinator sweep + teardown backstop.
             // Resolves to `$DJINN_HOME/cache/cargo-target-runs` (the server pod's
             // mount of the shared cache PVC), not the Job-pod `/cache` path.
@@ -2511,10 +1879,6 @@ impl AppState {
         .with_mirror(self.inner.mirror.clone())
         .with_runtime_ops(Arc::new(self.clone()))
         .with_rpc_registry(self.inner.rpc_registry.clone());
-        let deps = match self.inner.build_admission.clone() {
-            Some(admission) => deps.with_build_admission(admission),
-            None => deps,
-        };
         let coordinator = djinn_agent::actors::coordinator::spawn_coordinator(deps);
 
         *self.inner.pool.lock().await = Some(pool.clone());
@@ -2652,30 +2016,22 @@ impl AppState {
         // image controller) now start in `become_leader()` so only the
         // single lock-holding pod runs them. See `crate::leadership`.
 
-        // Build-admission journal recovery. The durable journal is loaded and
-        // recovered BEFORE any Kubernetes inventory or task/warm create can run.
-        // Enforce admission remains fail-closed until recovery seeds the
-        // controller from all active recovered rows and confirms occupancy is
-        // within the cap. Observe records degradation but never denies; Off has
-        // no admission coupling. This must precede `initialize_graph_warmer`
-        // because the warmer can create warm jobs under the shared cap.
-        self.initialize_build_admission_handoff().await;
-        self.initialize_build_pod_permit_prerequisites().await;
-        self.initialize_build_admission_recovery().await;
-        self.initialize_build_admission_deferred_recovery().await;
+        // Durable invocation-lease authority maintenance. Runs on EVERY pod
+        // (leader and standby) because it is a read-then-idempotent-write: the
+        // reference-cap refresh that makes `epoch set-cap` a live control rather
+        // than a restart-gated value.
+        self.initialize_build_epoch_bridge().await;
+
+        // Kueue arming preflight. MUST precede `initialize_graph_warmer`: that
+        // is the first `KubernetesConfig::from_env()` whose result is retained,
+        // and a refusal only reaches a config built AFTER the latch is set.
+        self.run_kueue_arming_preflight().await;
 
         // Phase 3 PR 8: pick the canonical-graph warmer impl (K8s or
         // in-process) and cache it. This is just a cached handle (the actual
         // warm is single-flight-gated elsewhere), so it is safe on every pod
         // and the serving/chat path needs it regardless of leadership.
         self.initialize_graph_warmer().await;
-
-        // Build-admission Kubernetes inventory. This must follow BOTH the
-        // journal recovery above (the durable journal loads before any
-        // Kubernetes inventory) and the graph-warmer selection (the inventory
-        // rides the same client). Enforce stays fail-closed with
-        // `InventoryPending` until this LIST succeeds.
-        self.initialize_build_admission_inventory().await;
     }
 
     /// Start the subsystems that must run on **exactly one** pod: the
@@ -2692,49 +2048,9 @@ impl AppState {
     pub async fn become_leader(&self) {
         tracing::info!("become_leader: starting active coordinator subsystems");
 
-        // Build-admission single-active topology gate. Winning the coordinator
-        // advisory lock is the topology check: only this lock-holding pod may
-        // open Enforce admission, so standby pods stay fail-closed with
-        // `TopologyPending` (and their dispatch subsystems never start).
-        self.confirm_build_admission_topology().await;
-
-        // Periodic build-admission reconciliation. THE ORDER OF THESE TWO
-        // STATEMENTS IS LOAD-BEARING and this loop is deliberately the very
-        // first thing started after the gate above.
-        //
-        // The line above opens the topology gate, which is the last gate
-        // standing between this process and admitting work for the whole
-        // board. This spawn used to sit ~90 lines lower, behind roughly a dozen
-        // AWAITED initializers (a Zot preflight that can `exit(1)`, a stale
-        // session sweep, a pricing backfill, the coordinator itself). A hang or
-        // panic in ANY of them produced a fully-admitting leader with no
-        // reconciler — silently, forever — and because
-        // `leadership::run_with_leadership` awaits `on_acquire()` inline, the
-        // advisory-lock liveness ping stopped too. Admission open and
-        // reclamation absent is precisely the combination that halts the board.
-        //
-        // The loop's first tick fires IMMEDIATELY, and this spawn site is why
-        // that is now correct rather than merely wasteful. `initialize()` runs
-        // on every pod including standbys, so its reconciliation pass is
-        // observe-only and retires nothing (see
-        // `initialize_build_admission_inventory`). This spawn — the first
-        // statement after the topology gate opens — is therefore the first
-        // point at which THIS process is entitled to write the shared journal,
-        // and its immediate first pass is the one that retires the
-        // predecessor's orphans. Suppressing it would cost a full cadence at
-        // exactly the moment the stale population is largest.
-        //
-        // The startup pass alone cannot reclaim an occupying row that has not
-        // yet settled past the reclaim settle window, and a rolling deploy is
-        // precisely what creates such a row seconds before the successor's only
-        // pass runs. Writes the durable journal, so leader-only for the same
-        // reason as the loops below.
-        crate::build_admission_reconcile::spawn(self.clone());
-
-        // Observe-only disk dimension (proposal nquz). Runs after the topology
-        // gate because it writes the shared run-dir ledger and inventories the
-        // shared cache PVC — leader-only work. It never mutates the volume and
-        // never changes a grant.
+        // Observe-only disk dimension (proposal nquz). Leader-only because it
+        // writes the shared run-dir ledger and inventories the shared cache
+        // PVC. It never mutates the volume and never changes a grant.
         self.initialize_run_dir_disk_observation().await;
 
         let retention_config = ImageControllerConfig::from_env();
@@ -2809,10 +2125,11 @@ impl AppState {
         );
         crate::mirror_fetcher::spawn(self.clone());
 
-        // NOTE: `build_admission_reconcile::spawn` deliberately no longer lives
-        // here. It is now the first statement after the topology gate opens, so
-        // no awaited initializer between the two can leave a fully-admitting
-        // leader with no reconciler. See the comment at that call site.
+        // Kueue Workload reconciliation (slice S5), at the seam vacated by the
+        // deleted `build_admission_reconcile::spawn`. Leader-only: it writes the
+        // durable admission projection and terminalises evicted task-runs.
+        // Inert until `kueue.armed` — see the module docs.
+        crate::kueue_workload_reconcile::spawn(self.clone());
 
         // Standalone SCIP-index driver (leader-only, same reasoning as
         // mirror_fetcher: it creates cluster objects). The real scheduler is
@@ -2821,6 +2138,20 @@ impl AppState {
         // ordering is deliberate -- gating the WIRING instead of the ACTION is
         // how a feature ends up shipped and permanently unreachable.
         crate::scip_index_watcher::spawn(self.clone());
+
+        // Proposal 3i92 / epic 0ppk: the externally owned resize reconciler.
+        // Leader-only because it PATCHes and DELETEs Pods, moves
+        // `build_pod_permits` lifecycle rows and releases `build_leases` rows —
+        // a standby doing that concurrently would give one stranded Pod two
+        // drivers.
+        //
+        // `release_lease` is only ever sent by a worker that survived, so a Pod
+        // that dies mid-invocation strands its own drop inside itself. This is
+        // the only thing that can ever finish it. Wired UNCONDITIONALLY for the
+        // same reason as `scip_index_watcher` directly above: whether a tick
+        // acts is decided per tick by `DJINN_RESIZE_RECONCILE`, and gating the
+        // WIRING instead would ship a reconciler that can never run.
+        crate::task_run_resize_reconcile::spawn(self.clone());
 
         // Periodic `git gc` over every project's mirror + working clone. Both
         // fetch with `--prune` but never reclaim the objects behind deleted
@@ -4309,34 +3640,290 @@ mod retention_preflight_tests {
 }
 
 #[cfg(test)]
-mod build_admission_config_tests {
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod build_epoch_bridge_tests {
     use super::*;
-    use djinn_db::{
-        AdmissionDomain, AdmissionHandoffPhase, AdmissionJournalKey, AdmissionJournalRepository,
-        AdmissionWorkloadKind, AdoptLiveAdmissionInput,
-    };
+    use djinn_db::{InvocationLeaseAuthorityRepository, InvocationLeaseMode};
+    use djinn_supervisor::services::{InvocationLiftDecision, evaluate_invocation_lift};
 
-    static BUILD_ADMISSION_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    pub(super) static BUILD_ADMISSION_TELEMETRY_LOCK: std::sync::Mutex<()> =
-        std::sync::Mutex::new(());
-
-    fn state_for_admission_config(config: BuildAdmissionConfig) -> AppState {
-        let db = Database::open_in_memory().expect("test database");
-        state_for_admission_config_with_db(db, config)
+    pub(super) fn state_with_db(db: Database) -> AppState {
+        let runtime = DatabaseRuntimeManager::new(
+            crate::db::runtime::DatabaseRuntimeConfig::postgres(db.bootstrap_info().target.clone()),
+        );
+        AppState::new_inner(
+            db,
+            runtime,
+            CancellationToken::new(),
+            djinn_core::doctor::RetrievalHealthConfig::default(),
+            Arc::new(djinn_telemetry::memory_retrieval::MemoryRetrievalMetrics::new()),
+            KnowledgeInjectionConfig::default(),
+        )
     }
 
+    fn state() -> AppState {
+        state_with_db(Database::open_in_memory().expect("test database"))
+    }
+
+    fn authority(state: &AppState) -> InvocationLeaseAuthorityRepository {
+        InvocationLeaseAuthorityRepository::new(state.db().clone())
+    }
+
+    /// Project the durable row through the launcher-side authority.
+    ///
+    /// A read failure is a panic rather than an `Err(())` on purpose: this
+    /// helper exists to distinguish `Lift` from `Unleased`, and
+    /// `evaluate_invocation_lift` fails closed to `Unleased` on an unreadable
+    /// row — so a broken test database would look exactly like the disarm these
+    /// tests are written to catch.
+    async fn lift_decision(state: &AppState) -> InvocationLiftDecision {
+        let row = authority(state)
+            .read()
+            .await
+            .unwrap_or_else(|error| panic!("read the durable row: {error}"));
+        evaluate_invocation_lift(Ok(row))
+    }
+
+    // ── AC2: the invocation lease is never silently disarmed ────────────────
+
+    /// **THE INVOCATION LEASE STILL LIFTS ACROSS AN EPOCH BUMP.**
+    ///
+    /// This is the criterion the whole S3a/S3b split exists to protect.
+    ///
+    /// The durable authority is NOT a build-capacity relation. It is the arming
+    /// authority for the per-invocation cgroup CPU lease, which the Kueue cutover
+    /// explicitly retains. Under the retired v0↔v1 handoff, an epoch bump cleared
+    /// the per-authority acknowledgements and the lease went `Unleased` — no
+    /// quota of its own, no containment — until some writer re-acknowledged. S3a
+    /// deleted the only writer the emergency acknowledgement ever had, and had to
+    /// bridge it. S3b removes the acknowledgement instead, so there is nothing
+    /// left to go stale.
+    ///
+    /// The fixture is the VERBATIM live production row, retired handoff columns
+    /// and all, so this also proves the deployed binary still arms against the
+    /// row that is durably in production today.
+    ///
+    /// Non-vacuity: the last step disarms through the operator control and
+    /// asserts `Unleased`. A hard-coded `Lift` — which would remove the operator
+    /// kill switch — fails there, and mutating the arming read to its default
+    /// (`InvocationLiftDecision::Unleased`) fails everywhere above it.
+    #[tokio::test]
+    async fn the_invocation_lease_still_lifts_across_an_epoch_bump() {
+        let state = state();
+        let authority = authority(&state);
+
+        // 1. Production's actual durable row.
+        let row = authority
+            .seed_live_production_row_for_test()
+            .await
+            .expect("write the live production row");
+        assert_eq!(row.epoch, 14);
+        assert_eq!(row.cap, Some(3));
+
+        // 2. It lifts. This is the behaviour that must be preserved exactly.
+        assert_eq!(
+            lift_decision(&state).await,
+            InvocationLiftDecision::Lift,
+            "precondition: production's row lifts the per-invocation cpu quota"
+        );
+
+        // 3. An operator changes the cap, which bumps the epoch. This is the
+        //    exact mutation that used to clear both acknowledgements and disarm
+        //    the lease with no compile error and no failing test.
+        let bumped = authority
+            .set_mode_and_cap(row.epoch, InvocationLeaseMode::Enforce, Some(4))
+            .await
+            .expect("operator raises the cap");
+        assert_eq!(bumped.epoch, row.epoch + 1, "the epoch really did move");
+
+        // 4. The lease is STILL armed, with no bridge, no periodic writer, and
+        //    no acknowledgement to keep current.
+        assert_eq!(
+            lift_decision(&state).await,
+            InvocationLiftDecision::Lift,
+            "an epoch bump must not disarm the per-invocation cgroup CPU lease"
+        );
+
+        // 5. And the kill switch still works, so step 4 is not a constant.
+        djinn_coordinator::invocation_lease_control::InvocationLeaseControl::new(Arc::new(
+            InvocationLeaseAuthorityRepository::new(state.db().clone()),
+        ))
+        .kill_switch(bumped.epoch)
+        .await
+        .expect("operator kill switch");
+        assert_eq!(
+            lift_decision(&state).await,
+            InvocationLiftDecision::Unleased,
+            "the operator kill switch must still disarm the lease"
+        );
+    }
+
+    /// A deployment that has never seeded the authority is disarmed, and the
+    /// periodic pass never fabricates one for it.
+    #[tokio::test]
+    async fn the_pass_never_seeds_an_authority_for_an_unarmed_deployment() {
+        let state = state();
+        let authority = authority(&state);
+        authority
+            .delete_for_test()
+            .await
+            .expect("delete the singleton");
+
+        state.run_build_epoch_pass().await;
+
+        assert!(
+            authority.read().await.expect("read").is_none(),
+            "an unarmed deployment stays unarmed; the pass never seeds an authority"
+        );
+        assert_eq!(
+            lift_decision(&state).await,
+            InvocationLiftDecision::Unleased,
+            "no row is the documented, correct Unleased state"
+        );
+    }
+
+    // ── AC3: the reference cap stays a LIVE operator control ────────────────
+
+    /// The 2026-07-25 incident, as a test: `epoch set-cap --cap 12` was applied,
+    /// `epoch show` confirmed `cap 12`, and every denial that followed still
+    /// said `cap=3` until the pods were restarted. A stored cap that is never
+    /// adopted is not a control.
+    ///
+    /// So this asserts the value the lease ACTUALLY enforces — `build_lease.cap()`
+    /// — changes without a restart, driven through the same operator control the
+    /// `djinn-server epoch set-cap` CLI drives, against the live production row.
+    #[tokio::test]
+    async fn the_reference_cap_remains_operator_settable_without_a_restart() {
+        let state = state();
+        let repository = Arc::new(InvocationLeaseAuthorityRepository::new(state.db().clone()));
+        let row = repository
+            .seed_live_production_row_for_test()
+            .await
+            .expect("write the live production row");
+
+        let _ = state.inner.build_lease.recover().await;
+        assert_eq!(
+            state.inner.build_lease.cap(),
+            3,
+            "precondition: the live lease enforces production's cap of 3"
+        );
+
+        // The operator control, through the same path `epoch set-cap` drives.
+        djinn_coordinator::invocation_lease_control::InvocationLeaseControl::new(Arc::clone(
+            &repository,
+        ))
+        .set_cap(row.epoch, 12)
+        .await
+        .expect("epoch set-cap --cap 12");
+        assert_eq!(
+            state.inner.build_lease.cap(),
+            3,
+            "the durable write alone changes nothing in this process — that is \
+             exactly what the incident was"
+        );
+
+        // One tick of the production loop's pass. No restart.
+        state.run_build_epoch_pass().await;
+
+        assert_eq!(
+            state.inner.build_lease.cap(),
+            12,
+            "REMOVING refresh_epoch_cap() from the pass MUST make this fail: the \
+             cap the lease enforces has to move without a process restart"
+        );
+        // And the cap change did not disarm the lease on its way through.
+        assert_eq!(
+            lift_decision(&state).await,
+            InvocationLiftDecision::Lift,
+            "a cap change must never disarm the per-invocation cpu lease"
+        );
+    }
+
+    /// The pass is reachable from a test, and the loop body contains nothing
+    /// else.
+    ///
+    /// Work added directly to the `tokio::select!` arm would run in production
+    /// and be untestable — which is how an inert half survives review. The pass
+    /// is the only place work may live.
+    #[test]
+    fn the_build_epoch_loop_runs_the_whole_pass() {
+        let source = include_str!("mod.rs");
+        // Assembled at runtime so these assertions do not match their own
+        // literals inside the file they read.
+        let pass = format!("run_build_epoch_{}", "pass");
+        let cap = format!("refresh_epoch_{}", "cap");
+
+        let body_start = source
+            .find(&format!("fn start_build_epoch_{}(&self)", "loop"))
+            .expect("the loop exists");
+        let body_end = source
+            .find(&format!("pub(crate) async fn {pass}(&self)"))
+            .expect("the pass exists");
+        let loop_body = &source[body_start..body_end];
+        assert!(
+            loop_body.contains(&pass),
+            "the loop must drive the extracted pass"
+        );
+        assert!(
+            !loop_body.contains(&cap),
+            "no work may live directly in the loop body: work added there cannot \
+             be reached by any test"
+        );
+
+        let pass_body = &source[body_end..];
+        let pass_end = body_end
+            + pass_body
+                .find("\n    }\n")
+                .expect("the pass has a closing brace");
+        let pass_body = &source[body_end..pass_end];
+        assert!(
+            pass_body.contains(&cap),
+            "the pass must refresh the reference cap, or `epoch set-cap` stops \
+             being a live control"
+        );
+    }
+
+    /// The pass runs on EVERY pod, from `initialize()`, not only on the leader.
+    ///
+    /// It is a read-then-idempotent-write of one durable row, and a standby that
+    /// never adopted an operator cap change would enforce a stale ceiling for the
+    /// whole window between a leader dying and a successor winning the lock.
+    #[test]
+    fn the_build_epoch_bridge_is_started_on_every_pod() {
+        let source = include_str!("mod.rs");
+        let call = format!("self.initialize_build_epoch_{}().await;", "bridge");
+        assert_eq!(
+            source.matches(call.as_str()).count(),
+            1,
+            "exactly one production call site"
+        );
+        let initialize = source
+            .find("pub async fn initialize(&self)")
+            .expect("initialize exists");
+        let leader = source
+            .find("pub async fn become_leader")
+            .expect("become_leader exists");
+        let site = source.find(call.as_str()).expect("call site exists");
+        assert!(
+            site > initialize && site < leader,
+            "the pass must start in the every-pod initialize path, not in \
+             become_leader"
+        );
+    }
+
+    // ── Retained composition regressions ────────────────────────────────────
+
     /// The v1 lease is the ONLY authority that governs whether a graph-warm Job
-    /// may be created: `initialize_graph_warmer` wires it unconditionally and
-    /// `WarmDispatch` gives it precedence over the v0 journal controller. So the
-    /// cap this composition hands it decides whether warming can run at all.
+    /// may be created, so the cap this composition hands it decides whether
+    /// warming can run at all.
     ///
     /// Against a fresh database this reproduces production exactly — migration
-    /// 139 seeds `build_lease_caps.cap = 0` and `admission_handoff` is empty —
+    /// 139 seeds `build_lease_caps.cap = 0` and the invocation-lease authority is
+    /// unarmed —
     /// and drives the real adapter over the real repository. Composing with a
     /// zero cap left `grant_next` short-circuiting on `occupied >= cap` before
     /// it read the queue, denying every warm Job while occupancy read 0.
     #[tokio::test]
-    async fn composition_arms_the_v1_lease_from_the_configured_build_slot_cap() {
+    async fn composition_arms_the_v1_lease_from_the_default_build_slot_cap() {
         use djinn_k8s::GraphWarmLease;
         use djinn_supervisor::services::{GraphWarmLeaseIdentity, LeaseDeadlines};
 
@@ -4352,22 +3939,15 @@ mod build_admission_config_tests {
             "precondition: the durable lease cap starts unarmed, as in production"
         );
 
-        let state = state_for_admission_config_with_db(
-            db,
-            BuildAdmissionConfig {
-                mode: BuildAdmissionMode::Observe,
-                cap: 3,
-                pod_limit: None,
-            },
-        );
+        let state = state_with_db(db);
         assert!(matches!(
             state.inner.build_lease.recover().await,
             djinn_supervisor::services::LeaseResult::Status(_)
         ));
         assert_eq!(
             state.inner.build_lease.cap(),
-            3,
-            "the composed lease must adopt the configured build-slot cap"
+            DEFAULT_BUILD_SLOT_CAP,
+            "the composed lease must adopt the default build-slot cap"
         );
 
         let adapter = BuildLeaseGraphWarmAdapter::new(state.inner.build_lease.clone());
@@ -4384,25 +3964,7 @@ mod build_admission_config_tests {
                 },
             )
             .await
-            .expect("the composed lease must authorize a graph-warm Job POST");
-    }
-
-    pub(super) fn state_for_admission_config_with_db(
-        db: Database,
-        config: BuildAdmissionConfig,
-    ) -> AppState {
-        let runtime = DatabaseRuntimeManager::new(
-            crate::db::runtime::DatabaseRuntimeConfig::postgres(db.bootstrap_info().target.clone()),
-        );
-        AppState::new_inner(
-            db,
-            runtime,
-            CancellationToken::new(),
-            djinn_core::doctor::RetrievalHealthConfig::default(),
-            Arc::new(djinn_telemetry::memory_retrieval::MemoryRetrievalMetrics::new()),
-            KnowledgeInjectionConfig::default(),
-            config,
-        )
+            .expect("a warm lease must be grantable under a non-zero cap");
     }
 
     #[tokio::test]
@@ -4426,731 +3988,72 @@ mod build_admission_config_tests {
             djinn_core::doctor::RetrievalHealthConfig::default(),
             Arc::new(djinn_telemetry::memory_retrieval::MemoryRetrievalMetrics::new()),
             resolved,
-            BuildAdmissionConfig {
-                mode: BuildAdmissionMode::Observe,
-                cap: BuildAdmissionConfig::DEFAULT_CAP,
-                pod_limit: None,
-            },
         );
 
         assert_eq!(state.agent_context().knowledge_injection, resolved);
     }
 
-    pub(super) fn admission(state: &AppState) -> &Arc<BuildAdmissionController> {
-        state
-            .inner
-            .build_admission
-            .as_ref()
-            .expect("handoff controller")
-    }
-
-    pub(super) fn handoff_repository(state: &AppState) -> AdmissionHandoffRepository {
-        AdmissionHandoffRepository::new(state.db().clone())
-    }
-
-    fn gauge_value(rendered: &str, metric: &str) -> f64 {
-        rendered
-            .lines()
-            .find(|line| line.starts_with(metric) && !line.contains('{'))
-            .unwrap_or_else(|| panic!("missing unlabelled sample {metric} in:\n{rendered}"))
-            .rsplit_once(' ')
-            .and_then(|(_, value)| value.parse::<f64>().ok())
-            .unwrap_or_else(|| panic!("sample should end with a number for {metric}"))
-    }
-
-    async fn advance_handoff(
-        repository: &AdmissionHandoffRepository,
-        target: AdmissionHandoffPhase,
-    ) {
-        loop {
-            let row = repository
-                .read()
-                .await
-                .expect("read handoff")
-                .expect("seeded row");
-            if row.phase == target {
-                return;
-            }
-            match row.phase {
-                AdmissionHandoffPhase::EmergencyPrimary => {
-                    repository
-                        .acknowledge(AdmissionHandoffAuthority::Emergency, row.epoch)
-                        .await
-                        .expect("emergency ack");
-                    repository
-                        .advance(row.epoch, AdmissionHandoffPhase::ForwardOverlap, &[])
-                        .await
-                        .expect("forward advance");
-                }
-                AdmissionHandoffPhase::ForwardOverlap => {
-                    repository
-                        .acknowledge(AdmissionHandoffAuthority::Emergency, row.epoch)
-                        .await
-                        .expect("emergency ack");
-                    repository
-                        .acknowledge(AdmissionHandoffAuthority::Invocation, row.epoch)
-                        .await
-                        .expect("invocation ack");
-                    repository
-                        .advance(row.epoch, AdmissionHandoffPhase::InvocationPrimary, &[])
-                        .await
-                        .expect("invocation advance");
-                }
-                AdmissionHandoffPhase::InvocationPrimary => {
-                    repository
-                        .acknowledge(AdmissionHandoffAuthority::Invocation, row.epoch)
-                        .await
-                        .expect("invocation ack");
-                    repository
-                        .advance(row.epoch, AdmissionHandoffPhase::RollbackOverlap, &[])
-                        .await
-                        .expect("rollback advance");
-                }
-                AdmissionHandoffPhase::RollbackOverlap => {
-                    repository
-                        .acknowledge(AdmissionHandoffAuthority::Emergency, row.epoch)
-                        .await
-                        .expect("emergency ack");
-                    repository
-                        .acknowledge(AdmissionHandoffAuthority::Invocation, row.epoch)
-                        .await
-                        .expect("invocation ack");
-                    repository
-                        .advance(row.epoch, AdmissionHandoffPhase::EmergencyPrimary, &[])
-                        .await
-                        .expect("emergency advance");
-                }
-            }
-        }
-    }
-
-    async fn complete_handoff_phase(repository: &AdmissionHandoffRepository) {
-        let row = repository
-            .read()
-            .await
-            .expect("read handoff")
-            .expect("seeded row");
-        match row.phase {
-            AdmissionHandoffPhase::EmergencyPrimary => {
-                repository
-                    .acknowledge(AdmissionHandoffAuthority::Emergency, row.epoch)
-                    .await
-                    .expect("emergency ack");
-            }
-            AdmissionHandoffPhase::ForwardOverlap | AdmissionHandoffPhase::RollbackOverlap => {
-                repository
-                    .acknowledge(AdmissionHandoffAuthority::Emergency, row.epoch)
-                    .await
-                    .expect("emergency ack");
-                repository
-                    .acknowledge(AdmissionHandoffAuthority::Invocation, row.epoch)
-                    .await
-                    .expect("invocation ack");
-            }
-            AdmissionHandoffPhase::InvocationPrimary => {
-                repository
-                    .acknowledge(AdmissionHandoffAuthority::Invocation, row.epoch)
-                    .await
-                    .expect("invocation ack");
-            }
-        }
-    }
-
-    #[test]
-    fn handoff_warning_logging_carries_startup_state_into_the_persistent_loop() {
-        let start = SystemClockTrait::new().now_instant();
-        let mut startup_state = HandoffWarningLogState::default();
-        assert_eq!(
-            startup_state.observe_startup(start, Some(HandoffWarningReason::UnexpectedOverlap)),
-            Some(HandoffWarningLogEvent::Warning(
-                HandoffWarningReason::UnexpectedOverlap
-            ))
-        );
-        // `start_handoff_warning_loop` receives this exact state, so its first
-        // periodic observation retains the startup warning and emits recovery.
-        let mut loop_state = startup_state;
-        assert_eq!(
-            loop_state.observe_persistent(start + Duration::from_secs(1), None),
-            Some(HandoffWarningLogEvent::Recovery(
-                HandoffWarningReason::UnexpectedOverlap
-            ))
-        );
-        assert_eq!(
-            loop_state.observe_persistent(start + Duration::from_secs(2), None),
-            None
-        );
-
-        let mut state = HandoffWarningLogState::default();
-        assert_eq!(
-            state.observe_startup(start, Some(HandoffWarningReason::UnexpectedOverlap)),
-            Some(HandoffWarningLogEvent::Warning(
-                HandoffWarningReason::UnexpectedOverlap
-            ))
-        );
-        assert_eq!(
-            state.observe_persistent(
-                start + Duration::from_secs(299),
-                Some(HandoffWarningReason::UnexpectedOverlap)
-            ),
-            None
-        );
-        assert_eq!(
-            state.observe_persistent(
-                start + HANDOFF_WARNING_INTERVAL,
-                Some(HandoffWarningReason::UnexpectedOverlap)
-            ),
-            Some(HandoffWarningLogEvent::Warning(
-                HandoffWarningReason::UnexpectedOverlap
-            ))
-        );
-        assert_eq!(
-            state.observe_persistent(
-                start + HANDOFF_WARNING_INTERVAL + Duration::from_secs(1),
-                Some(HandoffWarningReason::StaleEpoch)
-            ),
-            Some(HandoffWarningLogEvent::Warning(
-                HandoffWarningReason::StaleEpoch
-            ))
-        );
-        assert_eq!(
-            state.observe_persistent(
-                start + HANDOFF_WARNING_INTERVAL + Duration::from_secs(2),
-                None
-            ),
-            Some(HandoffWarningLogEvent::Recovery(
-                HandoffWarningReason::StaleEpoch
-            ))
-        );
-        assert_eq!(
-            state.observe_persistent(
-                start + HANDOFF_WARNING_INTERVAL + Duration::from_secs(3),
-                None
-            ),
-            None
-        );
-    }
-
-    #[test]
-    fn build_admission_defaults_and_legacy_zero_are_deterministic() {
-        assert_eq!(
-            BuildAdmissionConfig::parse(None, None, None).unwrap(),
-            BuildAdmissionConfig {
-                mode: BuildAdmissionMode::Observe,
-                cap: 3,
-                pod_limit: None
-            }
-        );
-        assert_eq!(
-            BuildAdmissionConfig::parse(None, Some("0"), None).unwrap(),
-            BuildAdmissionConfig {
-                mode: BuildAdmissionMode::Off,
-                cap: 0,
-                pod_limit: None
-            }
-        );
-        assert!(BuildAdmissionConfig::parse(Some("observe"), Some("0"), None).is_err());
-        assert!(BuildAdmissionConfig::parse(Some("enforce"), Some("0"), None).is_err());
-    }
-
-    #[test]
-    fn build_admission_rejects_invalid_startup_values() {
-        for cap in ["", "-1", "not-a-number", "65"] {
-            assert!(
-                BuildAdmissionConfig::parse(None, Some(cap), None).is_err(),
-                "{cap}"
-            );
-        }
-        for mode in ["", "Observe", "unknown"] {
-            assert!(
-                BuildAdmissionConfig::parse(Some(mode), None, None).is_err(),
-                "{mode:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn build_pod_limit_is_independent_of_build_taskruns() {
-        for taskruns in [None, Some("1"), Some("64")] {
-            assert_eq!(
-                BuildAdmissionConfig::parse(None, taskruns, Some("7"))
-                    .expect("task-run input is not a pod fallback")
-                    .pod_limit,
-                Some(7),
-            );
-        }
-        for pods in [
-            None,
-            Some(""),
-            Some("0"),
-            Some("-1"),
-            Some("65"),
-            Some("invalid"),
-        ] {
-            assert_eq!(
-                BuildAdmissionConfig::parse(None, Some("4"), pods)
-                    .expect("valid task-run cap")
-                    .pod_limit,
-                None,
-                "{pods:?}",
-            );
-        }
-    }
-
+    /// The composition site for proposal `3i92`'s resize stack (0ppk-1b).
+    ///
+    /// `AppState::agent_context()` is what the slot pool dispatches through, so
+    /// a bridge this state builds but never threads into an `AgentContext` is a
+    /// bridge nothing can call. That distinction is not academic in this
+    /// neighbourhood: an override that nothing composed, and a projection with
+    /// no reader, both shipped green and inert here within the same week.
+    ///
+    /// What stays green if `new_inner` stops constructing the bridge, or if
+    /// `agent_context` stops threading it? Not this: `resize_admission` goes
+    /// back to `None` and a `resize-v2` dispatch would silently fall through to
+    /// an ungoverned launcher.
     #[tokio::test]
-    async fn absent_or_invalid_pod_limit_keeps_compile_readiness_closed() {
-        use djinn_agent::actors::coordinator::BuildAdmissionReadiness;
-
-        for pod_limit in [None, Some("invalid")] {
-            let config = BuildAdmissionConfig::parse(None, Some("4"), pod_limit)
-                .expect("the task-run cap remains independently valid");
-            assert_eq!(config.pod_limit, None, "{pod_limit:?}");
-            let state = state_for_admission_config(config);
-            state.initialize_build_pod_permit_prerequisites().await;
-            let admission = admission(&state);
-            assert_eq!(
-                admission.readiness(),
-                BuildAdmissionReadiness::PodPermitPrerequisitesMissing,
-                "{pod_limit:?} must not report healthy compile prerequisites"
-            );
-            assert!(!admission.is_ready());
-        }
-    }
-
-    #[tokio::test]
-    async fn missing_pool_row_or_repository_error_keeps_compile_readiness_closed() {
-        use djinn_agent::actors::coordinator::BuildAdmissionReadiness;
-
-        let missing_row_db = Database::open_in_memory().expect("test database");
-        BuildPodPermitRepository::new(missing_row_db.clone())
-            .delete_global_pool_for_test()
-            .await
-            .expect("delete canonical pool through repository test seam");
-        let missing_row = state_for_admission_config_with_db(
-            missing_row_db,
-            BuildAdmissionConfig {
-                mode: BuildAdmissionMode::Observe,
-                cap: 3,
-                pod_limit: Some(1),
-            },
-        );
-        missing_row
-            .initialize_build_pod_permit_prerequisites()
-            .await;
-        assert_eq!(
-            admission(&missing_row).readiness(),
-            BuildAdmissionReadiness::PodPermitPrerequisitesMissing,
-            "a missing canonical pool row must not report healthy prerequisites"
-        );
-
-        let unavailable_db = Database::open_in_memory().expect("test database");
-        BuildPodPermitRepository::new(unavailable_db.clone())
-            .drop_pool_relation_for_test()
-            .await
-            .expect("drop pool relation through repository test seam");
-        let unavailable = state_for_admission_config_with_db(
-            unavailable_db,
-            BuildAdmissionConfig {
-                mode: BuildAdmissionMode::Observe,
-                cap: 3,
-                pod_limit: Some(1),
-            },
-        );
-        unavailable
-            .initialize_build_pod_permit_prerequisites()
-            .await;
-        assert_eq!(
-            admission(&unavailable).readiness(),
-            BuildAdmissionReadiness::PodPermitPrerequisitesMissing,
-            "a repository error must be collapsed to closed prerequisites"
-        );
-    }
-
-    #[tokio::test]
-    async fn off_state_composition_retains_a_standby_handoff_controller() {
-        let state = state_for_admission_config(BuildAdmissionConfig {
-            mode: BuildAdmissionMode::Off,
-            cap: 3,
-            pod_limit: None,
-        });
-
-        // Startup must read a durable handoff row even when standalone v0 is
-        // configured Off, so composition retains an Off controller that can be
-        // promoted before recovery.
-        assert_eq!(
-            state
-                .inner
-                .build_admission
-                .as_ref()
-                .expect("handoff controller")
-                .mode(),
-            BuildAdmissionMode::Off
-        );
-
-        // The in-memory fixture has no handoff table, so its read is
-        // deliberately unreadable. Startup must promote the configured-Off
-        // controller before recovery rather than silently remain disabled.
-        state.initialize_build_admission_handoff().await;
-        let admission = state
-            .inner
-            .build_admission
-            .as_ref()
-            .expect("handoff controller");
-        assert_eq!(admission.mode(), BuildAdmissionMode::Enforce);
-        assert!(!admission.is_ready());
-
-        assert!(
-            state
-                .inner
-                .coordinator
-                .try_lock()
-                .expect("unstarted")
-                .is_none()
-        );
-        assert!(
-            state
-                .inner
-                .graph_warmer
-                .try_read()
-                .expect("unstarted")
-                .is_none()
-        );
-    }
-
-    #[tokio::test]
-    async fn handoff_composition_applies_every_complete_persisted_phase() {
-        let cases = [
-            (
-                AdmissionHandoffPhase::EmergencyPrimary,
-                BuildAdmissionMode::Enforce,
-            ),
-            (
-                AdmissionHandoffPhase::ForwardOverlap,
-                BuildAdmissionMode::Enforce,
-            ),
-            (
-                AdmissionHandoffPhase::InvocationPrimary,
-                BuildAdmissionMode::Off,
-            ),
-            (
-                AdmissionHandoffPhase::RollbackOverlap,
-                BuildAdmissionMode::Enforce,
-            ),
-        ];
-        for (phase, expected_mode) in cases {
-            let state = state_for_admission_config(BuildAdmissionConfig {
-                mode: BuildAdmissionMode::Observe,
-                cap: 3,
-                pod_limit: None,
-            });
-            let repository = handoff_repository(&state);
-            // A real cutover arms the invocation authority to enforce while the
-            // row is still emergency-primary, so the invocation-primary case is
-            // the committed cutover rather than a row where v1 never actually
-            // took over — the emergency controller is released only when some
-            // other authority is genuinely enforcing.
-            let seeded = repository
-                .read()
-                .await
-                .expect("read handoff")
-                .expect("seeded row");
-            repository
-                .set_modes_and_cap(
-                    seeded.epoch,
-                    djinn_db::V0Mode::Enforce,
-                    djinn_db::V1Mode::Enforce,
-                    None,
-                )
-                .await
-                .expect("arm v1 enforce");
-            advance_handoff(&repository, phase).await;
-            complete_handoff_phase(&repository).await;
-            state.initialize_build_admission_handoff().await;
-            assert_eq!(admission(&state).mode(), expected_mode, "{phase:?}");
-        }
-    }
-
-    #[tokio::test]
-    async fn healthy_finalization_persists_and_unhealthy_finalization_withholds_ack() {
-        let healthy = state_for_admission_config(BuildAdmissionConfig {
-            mode: BuildAdmissionMode::Observe,
-            cap: 3,
-            pod_limit: None,
-        });
-        let healthy_repository = handoff_repository(&healthy);
-        let epoch = healthy_repository
-            .read()
-            .await
-            .expect("read")
-            .expect("row")
-            .epoch;
-        healthy.initialize_build_admission_handoff().await;
-        admission(&healthy).mark_ready();
-        healthy
-            .finalize_build_admission_handoff(admission(&healthy))
-            .await;
-        assert_eq!(
-            healthy_repository
-                .read()
-                .await
-                .expect("read")
-                .expect("row")
-                .emergency_ack_epoch,
-            Some(epoch)
-        );
-
-        let unhealthy = state_for_admission_config(BuildAdmissionConfig {
-            mode: BuildAdmissionMode::Observe,
-            cap: 3,
-            pod_limit: None,
-        });
-        let unhealthy_repository = handoff_repository(&unhealthy);
-        unhealthy.initialize_build_admission_handoff().await;
-        assert!(!admission(&unhealthy).is_ready());
-        unhealthy
-            .finalize_build_admission_handoff(admission(&unhealthy))
-            .await;
-        assert_eq!(
-            unhealthy_repository
-                .read()
-                .await
-                .expect("read")
-                .expect("row")
-                .emergency_ack_epoch,
-            None
-        );
-    }
-
-    #[tokio::test]
-    async fn missing_and_incomplete_rows_are_safe_across_restart() {
+    async fn every_agent_context_carries_the_resize_admission_bridge() {
         let db = Database::open_in_memory().expect("test database");
-        let missing = state_for_admission_config_with_db(
-            db.clone(),
-            BuildAdmissionConfig {
-                mode: BuildAdmissionMode::Observe,
-                cap: 3,
-                pod_limit: None,
-            },
-        );
-        // Initialize the repository-backed fixture before removing its
-        // singleton to exercise the meaningful missing-row state.
-        handoff_repository(&missing)
-            .read()
-            .await
-            .expect("initialize handoff fixture");
-        handoff_repository(&missing)
-            .delete_for_test()
-            .await
-            .expect("remove row");
-        missing.initialize_build_admission_handoff().await;
-        assert_eq!(admission(&missing).mode(), BuildAdmissionMode::Observe);
-
-        let restart_db = Database::open_in_memory().expect("test database");
-        let first = state_for_admission_config_with_db(
-            restart_db.clone(),
-            BuildAdmissionConfig {
-                mode: BuildAdmissionMode::Observe,
-                cap: 3,
-                pod_limit: None,
-            },
-        );
-        first.initialize_build_admission_handoff().await;
-        assert_eq!(admission(&first).mode(), BuildAdmissionMode::Enforce);
-        let restarted = state_for_admission_config_with_db(
-            restart_db,
-            BuildAdmissionConfig {
-                mode: BuildAdmissionMode::Observe,
-                cap: 3,
-                pod_limit: None,
-            },
-        );
-        restarted.initialize_build_admission_handoff().await;
-        assert_eq!(admission(&restarted).mode(), BuildAdmissionMode::Enforce);
-    }
-
-    #[tokio::test]
-    async fn environment_rollback_requires_a_new_app_state() {
-        let _guard = BUILD_ADMISSION_ENV_LOCK.lock().expect("environment lock");
-        let old_mode = std::env::var_os(BUILD_ADMISSION_MODE_ENV);
-        let old_cap = std::env::var_os(MAX_BUILD_TASKRUNS_ENV);
-
-        // SAFETY: this test serializes its admission-environment mutations and
-        // restores both variables before returning.
-        unsafe {
-            std::env::set_var(BUILD_ADMISSION_MODE_ENV, "enforce");
-            std::env::set_var(MAX_BUILD_TASKRUNS_ENV, "4");
-        }
-        let running = state_for_admission_config(BuildAdmissionConfig::from_env().unwrap());
-        let running_admission = running
-            .inner
-            .build_admission
-            .as_ref()
-            .expect("enforce composes a controller");
-        assert!(!running_admission.is_ready(), "enforce begins closed");
-
-        // A rollback changes the process environment but cannot replace the
-        // controller retained by the already constructed process state.
-        unsafe {
-            std::env::set_var(BUILD_ADMISSION_MODE_ENV, "off");
-            std::env::set_var(MAX_BUILD_TASKRUNS_ENV, "3");
-        }
-        assert!(running.inner.build_admission.is_some());
-        let restarted = state_for_admission_config(BuildAdmissionConfig::from_env().unwrap());
-        assert_eq!(
-            restarted
-                .inner
-                .build_admission
-                .as_ref()
-                .expect("Off retains handoff reader")
-                .mode(),
-            BuildAdmissionMode::Off
-        );
-
-        // SAFETY: restore the inherited process environment before releasing
-        // the serialization lock.
-        unsafe {
-            match old_mode {
-                Some(value) => std::env::set_var(BUILD_ADMISSION_MODE_ENV, value),
-                None => std::env::remove_var(BUILD_ADMISSION_MODE_ENV),
-            }
-            match old_cap {
-                Some(value) => std::env::set_var(MAX_BUILD_TASKRUNS_ENV, value),
-                None => std::env::remove_var(MAX_BUILD_TASKRUNS_ENV),
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn enforce_state_allocates_fresh_epoch_and_starts_journal_recovery_incomplete() {
-        let first = state_for_admission_config(BuildAdmissionConfig {
-            mode: BuildAdmissionMode::Enforce,
-            cap: 3,
-            pod_limit: None,
-        });
-        let first_admission = first
-            .inner
-            .build_admission
-            .as_ref()
-            .expect("enforce composes a controller");
+        let state = AppState::new(db, CancellationToken::new());
         assert!(
-            !first_admission.is_ready(),
-            "Enforce starts fail-closed before recovery"
-        );
-        assert_eq!(
-            first_admission.readiness(),
-            djinn_agent::actors::coordinator::BuildAdmissionReadiness::JournalRecoveryIncomplete,
-        );
-
-        // A second AppState allocation produces a distinct, unique epoch.
-        let second = state_for_admission_config(BuildAdmissionConfig {
-            mode: BuildAdmissionMode::Enforce,
-            cap: 3,
-            pod_limit: None,
-        });
-        let second_admission = second
-            .inner
-            .build_admission
-            .as_ref()
-            .expect("enforce composes a controller");
-        assert_ne!(
-            first_admission.server_epoch(),
-            second_admission.server_epoch(),
-            "each Enforce startup allocates a fresh, unique server epoch"
+            state.agent_context().resize_admission.is_some(),
+            "AppState must thread the resize admission bridge into every \
+             AgentContext; without it the dispatch seam acquires no build-pod \
+             permit and no resize-v2 launcher is ever downsized to its birth limit"
         );
     }
 
+    /// **0ppk-1c ACCEPTANCE CRITERION 1: armed at the production composition
+    /// site.**
+    ///
+    /// `BuildLeaseService` holds its resize authorization as
+    /// `Option<Arc<ResizeAuthority>>`, defaulted to `None`. For the whole of
+    /// `0ppk-1a` that `Option` was `None` at every composition and
+    /// `with_resize_authority` had zero production call sites — the entire
+    /// authorization and clamp layer was merged, green, and structurally unable
+    /// to move a Pod. That is not a hypothetical failure mode in this
+    /// neighbourhood; it is what happened, and the sibling failure (a trait
+    /// default silently winning over an unreachable override) happened because
+    /// nothing ever checked the COMPOSITION site.
+    ///
+    /// So this test reads the service that `AppState::new` actually built. A
+    /// test that called `BuildLeaseService::new(..).with_resize_authority(..)`
+    /// itself would prove only that the setter works — which was never in doubt.
+    ///
+    /// NAMED FAILING MUTATION: delete the `.with_resize_authority(...)` call
+    /// from `new_inner` and this fails.
     #[tokio::test]
-    async fn begin_draining_blocks_enforce_admission_via_app_state() {
-        let state = state_for_admission_config(BuildAdmissionConfig {
-            mode: BuildAdmissionMode::Enforce,
-            cap: 1,
-            pod_limit: None,
-        });
-        let admission = state
-            .inner
-            .build_admission
-            .as_ref()
-            .expect("enforce composes a controller");
-        assert!(!admission.is_draining());
-        state.begin_build_admission_draining().await;
+    async fn the_production_build_lease_service_arms_the_resize_authority() {
+        let db = Database::open_in_memory().expect("test database");
+        let state = AppState::new(db, CancellationToken::new());
         assert!(
-            admission.is_draining(),
-            "graceful shutdown begins draining before permit release"
-        );
-        assert_eq!(
-            admission.readiness(),
-            djinn_agent::actors::coordinator::BuildAdmissionReadiness::ShutdownDraining,
+            state.inner.build_lease.resize_authority_armed(),
+            "AppState::new_inner must arm the Pod-resize authorization on the \
+             build-lease grant path. With it unarmed, `fold_into_grant` returns \
+             every grant untouched and no invocation escalation ever moves a \
+             launcher's cpu limit — which is exactly the state 0ppk-1a shipped in"
         );
     }
 
-    #[tokio::test]
-    async fn enforce_startup_walks_journal_inventory_topology_gates_in_order() {
-        use djinn_agent::actors::coordinator::BuildAdmissionReadiness;
-
-        let state = state_for_admission_config(BuildAdmissionConfig {
-            mode: BuildAdmissionMode::Enforce,
-            cap: 3,
-            pod_limit: Some(1),
-        });
-        let admission = state
-            .inner
-            .build_admission
-            .as_ref()
-            .expect("enforce composes a controller")
-            .clone();
-        assert_eq!(
-            admission.readiness(),
-            BuildAdmissionReadiness::JournalRecoveryIncomplete,
-            "Enforce starts fail-closed before journal recovery"
-        );
-
-        // Pod-permit prerequisites run before journal recovery in production.
-        // They are healthy in this fixture, but the higher-priority journal gate
-        // remains the visible readiness reason until recovery completes.
-        state.initialize_build_pod_permit_prerequisites().await;
-
-        // Journal recovery runs next and, on an empty journal, must NOT mark
-        // the controller healthy: the inventory gate keeps admission closed.
-        state.initialize_build_admission_recovery().await;
-        assert_eq!(
-            admission.readiness(),
-            BuildAdmissionReadiness::InventoryPending,
-            "journal recovery alone advances only to inventory-pending"
-        );
-        assert!(!admission.is_ready());
-
-        // Without a graph warmer there is no inventory to trust, so the gate
-        // stays pending (fail-closed) rather than opening optimistically.
-        state.initialize_build_admission_inventory().await;
-        assert_eq!(
-            admission.readiness(),
-            BuildAdmissionReadiness::InventoryPending,
-            "a missing inventory keeps Enforce fail-closed"
-        );
-
-        // The in-process runtime's warmer returns an empty Kubernetes
-        // inventory successfully, completing the inventory gate.
-        let warmer = build_in_process_graph_warmer(state.clone());
-        *state.inner.graph_warmer.write().await = Some(Arc::new(warmer));
-        state.initialize_build_admission_inventory().await;
-        assert_eq!(
-            admission.readiness(),
-            BuildAdmissionReadiness::TopologyPending,
-            "a successful inventory LIST advances the gate to topology-pending"
-        );
-        assert!(!admission.is_ready());
-
-        // Winning the coordinator advisory lock (single-active topology) is
-        // the final gate; only then does Enforce admission open.
-        state.confirm_build_admission_topology().await;
-        assert_eq!(admission.readiness(), BuildAdmissionReadiness::Healthy);
-        assert!(admission.is_ready());
-    }
-
-    // ── Observe-only disk dimension (proposal nquz) ────────────────────
+    // ── Observe-only disk dimension (proposal nquz) ─────────────────────────
 
     /// A capacity probe the test controls. Only the `statvfs` syscall and the
-    /// monotonic clock are substituted; the volume, the ledger, the controller,
-    /// and the startup seam itself are all the production ones.
+    /// monotonic clock are substituted; the volume, the ledger and the startup
+    /// seam itself are all the production ones.
     struct FixedCapacity(djinn_coordinator::cargo_warm_base_gc::CapacitySnapshot);
 
     impl djinn_coordinator::cargo_warm_base_gc::FilesystemCapacity for FixedCapacity {
@@ -5190,45 +4093,15 @@ mod build_admission_config_tests {
         }
     }
 
-    fn task_run_admission_request(
-        work_id: &str,
-    ) -> djinn_coordinator::build_admission::BuildAdmissionRequest {
-        djinn_coordinator::build_admission::BuildAdmissionRequest {
-            domain: AdmissionDomain::TaskObservation,
-            work_id: work_id.to_owned(),
-            generation: 0,
-            object_name: format!("djinn-taskrun-{work_id}"),
-            kind: djinn_coordinator::build_admission::BuildWorkloadKind::TaskRun {
-                role: djinn_coordinator::build_admission::TaskRunRole::Worker,
-            },
-            capacity: djinn_coordinator::build_admission::CapacitySource::AcquireDispatchSlot,
-        }
-    }
-
-    /// The whole point of the observe phase: the coordinator's real startup
-    /// seam inventories the volume, writes ledger rows, and installs the
-    /// capacity source — and NOTHING about dispatch changes.
+    /// The coordinator's real startup seam inventories the volume and writes
+    /// ledger rows, and NOTHING on the volume changes.
     ///
-    /// The volume is deliberately at critical pressure, which is the strongest
-    /// signal enforce would ever act on. The grant must be byte-identical to the
-    /// pre-arming grant, no directory may be created or removed, and no run-dir
-    /// row may carry a reservation, quota, or temp path.
+    /// The volume is deliberately at critical pressure, the strongest signal
+    /// enforce would ever act on. No directory may be created or removed, and no
+    /// run-dir row may carry a reservation, quota, or temp path.
     #[tokio::test]
-    async fn run_dir_disk_observation_startup_never_changes_a_grant_or_the_volume() {
-        use djinn_coordinator::build_admission::BuildAdmissionDecision;
-
-        let state = state_for_admission_config(BuildAdmissionConfig {
-            mode: BuildAdmissionMode::Observe,
-            cap: 4,
-            pod_limit: None,
-        });
-        let admission = state
-            .inner
-            .build_admission
-            .as_ref()
-            .expect("Observe composes a controller")
-            .clone();
-
+    async fn run_dir_disk_observation_startup_never_changes_the_volume() {
+        let state = state();
         let volume = tempfile::tempdir().expect("temp volume");
         let run_dir = "11111111-1111-1111-1111-111111111111";
         std::fs::create_dir(volume.path().join(run_dir)).expect("run dir");
@@ -5239,22 +4112,12 @@ mod build_admission_config_tests {
         .expect("payload");
         std::fs::create_dir(volume.path().join("operator-scratch")).expect("malformed dir");
 
-        // Baseline grant with the disk dimension still dark.
-        let before = admission
-            .admit(task_run_admission_request("before"))
-            .await
-            .expect("observe admits");
-        assert!(matches!(before, BuildAdmissionDecision::Permitted { .. }));
-        assert_eq!(admission.disk_would_defer_observation_count().await, 0);
-
-        // The production startup seam, driven with a critical volume.
         let report = state
             .initialize_run_dir_disk_observation_with(run_dir_seams(
                 volume.path().to_path_buf(),
                 NQUZ_GIB,
             ))
-            .await
-            .expect("a composed controller arms observation");
+            .await;
 
         assert!(!report.reconcile.inventory_failed);
         assert_eq!(report.reconcile.scanned, 2);
@@ -5268,22 +4131,6 @@ mod build_admission_config_tests {
             "quarantined bytes still count against the volume"
         );
 
-        // The grant after arming is identical; only the observe counter moved.
-        let after = admission
-            .admit(task_run_admission_request("after"))
-            .await
-            .expect("observe admits");
-        assert!(
-            matches!(after, BuildAdmissionDecision::Permitted { .. }),
-            "installing a disk capacity source must never turn a permit into a denial"
-        );
-        assert_eq!(
-            admission.disk_would_defer_observation_count().await,
-            1,
-            "critical pressure is recorded once, as telemetry only"
-        );
-
-        // No reservation, quota, or temp/final materialization anywhere.
         let rows = djinn_db::RunDirRepository::new(state.db().clone())
             .list_by_volume("startup-volume")
             .await
@@ -5296,7 +4143,6 @@ mod build_admission_config_tests {
             assert!(row.temp_path.is_none(), "observe creates no temp directory");
         }
 
-        // The volume is untouched: nothing deleted, nothing added.
         let mut names: Vec<String> = std::fs::read_dir(volume.path())
             .expect("volume readable")
             .filter_map(|entry| Some(entry.ok()?.file_name().to_string_lossy().into_owned()))
@@ -5312,11 +4158,7 @@ mod build_admission_config_tests {
     /// and still no deletion.
     #[tokio::test]
     async fn run_dir_disk_observation_startup_is_idempotent() {
-        let state = state_for_admission_config(BuildAdmissionConfig {
-            mode: BuildAdmissionMode::Observe,
-            cap: 4,
-            pod_limit: None,
-        });
+        let state = state();
         let volume = tempfile::tempdir().expect("temp volume");
         std::fs::create_dir(volume.path().join("22222222-2222-2222-2222-222222222222"))
             .expect("run dir");
@@ -5326,15 +4168,13 @@ mod build_admission_config_tests {
                 volume.path().to_path_buf(),
                 400 * NQUZ_GIB,
             ))
-            .await
-            .expect("armed");
+            .await;
         let second = state
             .initialize_run_dir_disk_observation_with(run_dir_seams(
                 volume.path().to_path_buf(),
                 400 * NQUZ_GIB,
             ))
-            .await
-            .expect("armed");
+            .await;
         assert_eq!(first.reconcile.quarantined, second.reconcile.quarantined);
 
         let rows = djinn_db::RunDirRepository::new(state.db().clone())
@@ -5355,39 +4195,18 @@ mod build_admission_config_tests {
     /// volume with no `prjquota` mount option today.
     #[tokio::test]
     async fn unavailable_quota_and_missing_volume_do_not_fail_observe_startup() {
-        let state = state_for_admission_config(BuildAdmissionConfig {
-            mode: BuildAdmissionMode::Observe,
-            cap: 4,
-            pod_limit: None,
-        });
-        let admission = state
-            .inner
-            .build_admission
-            .as_ref()
-            .expect("Observe composes a controller")
-            .clone();
-
+        let state = state();
         let report = state
             .initialize_run_dir_disk_observation_with(run_dir_seams(
                 std::path::PathBuf::from("/nonexistent/djinn/cargo-target-runs"),
                 400 * NQUZ_GIB,
             ))
-            .await
-            .expect("armed even with no volume");
+            .await;
         assert!(report.reconcile.inventory_failed);
         assert!(
             report.quota.enforce_prohibited,
             "a volume with no project quota may never be armed for enforce"
         );
-
-        // Startup completed and admission still works.
-        assert!(matches!(
-            admission
-                .admit(task_run_admission_request("after-missing-volume"))
-                .await
-                .expect("observe admits"),
-            djinn_coordinator::build_admission::BuildAdmissionDecision::Permitted { .. }
-        ));
     }
 
     /// The production composition must inventory the path the server pod
@@ -5400,188 +4219,6 @@ mod build_admission_config_tests {
         assert_eq!(
             seams.volume_id,
             djinn_coordinator::run_dir_observe::volume_id_from_env()
-        );
-    }
-
-    /// L5. A leader must never be able to reach a fully-admitting state with no
-    /// reconciler.
-    ///
-    /// `confirm_build_admission_topology` opens the LAST gate standing between
-    /// this process and admitting work for the whole board. The reconciler
-    /// spawn used to sit ~90 lines further down, behind roughly a dozen awaited
-    /// initializers — one of which can `std::process::exit(1)` and any of which
-    /// can hang or panic. This pins the ordering at the composition site, which
-    /// is the only place the property is expressible: the two statements are
-    /// both fire-and-forget from the type system's point of view.
-    #[test]
-    fn the_reconciler_is_spawned_immediately_after_the_topology_gate_opens() {
-        let source = include_str!("mod.rs");
-        // Assembled at runtime so these assertions do not match their own
-        // literals inside the file they read.
-        let topology = format!("self.confirm_build_admission_{}().await", "topology");
-        let spawn = format!(
-            "crate::build_admission_reconcile::{}(self.clone())",
-            "spawn"
-        );
-        assert_eq!(
-            source.matches(spawn.as_str()).count(),
-            1,
-            "exactly one production spawn site"
-        );
-
-        let leader = source
-            .find("pub async fn become_leader")
-            .expect("become_leader exists");
-        let gate = source[leader..]
-            .find(topology.as_str())
-            .expect("become_leader opens the topology gate");
-        let spawned = source[leader..]
-            .find(spawn.as_str())
-            .expect("become_leader spawns the reconciler");
-        assert!(
-            spawned > gate,
-            "the reconciler must be spawned AFTER leadership is confirmed"
-        );
-
-        // Nothing may be awaited between the two. An `.await` there is exactly
-        // the hazard: it can hang or panic, and the leader is already admitting.
-        let between = &source[leader + gate + topology.len()..leader + spawned];
-        assert!(
-            !between.contains(".await"),
-            "no awaited initializer may sit between the topology gate opening and \
-             the reconciler spawn; found: {between}"
-        );
-
-        // And it must precede the heavyweight leader initializers it used to
-        // sit behind — including the one that can terminate the process.
-        for later in [
-            "run_zot_retention_preflight",
-            "interrupt_stale_sessions_on_startup",
-            "self.initialize_agents().await",
-        ] {
-            let position = source[leader..]
-                .find(later)
-                .unwrap_or_else(|| panic!("{later} is part of become_leader"));
-            assert!(
-                spawned < position,
-                "the reconciler must be spawned before {later}"
-            );
-        }
-    }
-
-    /// The rule itself: a process that has not confirmed the single-active
-    /// topology gate gets an observe-only pass, and only a confirmed leader may
-    /// write the shared admission journal.
-    #[test]
-    fn only_a_confirmed_leader_reconciles_with_the_mutating_scope() {
-        assert_eq!(reconcile_scope_for(true), ReconcileScope::Mutate);
-        assert_eq!(
-            reconcile_scope_for(false),
-            ReconcileScope::Observe,
-            "a standby — every pod before leadership is won, and every pod that \
-             never wins it — must not write the durable admission journal"
-        );
-    }
-
-    /// Composition: the scope is derived from the topology flag, never chosen
-    /// at a call site.
-    ///
-    /// `initialize_build_admission_inventory` is reachable from
-    /// `initialize()` (every pod, before leadership is contested) and from
-    /// `reestablish_build_admission_gates` (reached from the handoff warning
-    /// tick, which also runs on every pod). Auditing those call sites is what
-    /// failed; deriving the scope from the one fact that identifies the active
-    /// writer is what cannot.
-    #[test]
-    fn the_reconcile_scope_is_derived_from_topology_confirmation_not_the_call_site() {
-        let source = include_str!("mod.rs");
-        // Assembled at runtime so these assertions do not match their own
-        // literals inside the file they read.
-        let mutate = format!("ReconcileScope::{}", "Mutate");
-        let flag = format!("build_admission_topology_{}", "confirmed");
-        let decision = format!("fn reconcile_scope_{}(", "for");
-
-        let decision_at = source.find(decision.as_str()).expect("the rule exists");
-        let body_end = source[decision_at..]
-            .find("\n}\n")
-            .expect("the rule has a body");
-        let body = &source[decision_at..decision_at + body_end];
-        assert!(
-            body.contains(mutate.as_str()),
-            "the rule is the only place that may hand out the mutating scope"
-        );
-
-        // Nowhere else in the production half of this file may construct it.
-        let production = &source[..decision_at + body_end];
-        assert_eq!(
-            production.matches(mutate.as_str()).count(),
-            1,
-            "the mutating scope must be constructed only by the rule"
-        );
-
-        // And the seam that runs the pass must ask the rule rather than decide.
-        let seam = source
-            .find("async fn initialize_build_admission_inventory")
-            .expect("the seam exists");
-        let seam_body = &source[seam..];
-        let asked = seam_body
-            .find("let scope = self.build_admission_reconcile_scope()")
-            .expect("the inventory seam derives its scope from the rule");
-        let used = seam_body
-            .find(".reconcile_with(scope)")
-            .expect("the inventory seam passes that scope to the reconciler");
-        assert!(
-            asked < used,
-            "the scope must be derived before the pass runs"
-        );
-
-        // The rule reads the topology flag, and that flag has exactly one
-        // writer — `confirm_build_admission_topology`, which only
-        // `become_leader` calls.
-        let store = format!(".store(true, Ordering::{})", "Release");
-        let confirm = source
-            .find("async fn confirm_build_admission_topology")
-            .expect("the topology seam exists");
-        let confirm_end = confirm
-            + source[confirm..]
-                .find("\n    }\n")
-                .expect("the topology seam has a body");
-        assert!(
-            source[confirm..confirm_end].contains(store.as_str()),
-            "leadership confirmation is what sets the flag"
-        );
-        let accessor = source
-            .find("fn build_admission_reconcile_scope")
-            .expect("the accessor exists");
-        let accessor_end = accessor
-            + source[accessor..]
-                .find("\n    }\n")
-                .expect("the accessor has a body");
-        assert!(
-            source[accessor..accessor_end].contains(flag.as_str()),
-            "the scope must be read from the topology-confirmation flag and nothing else"
-        );
-    }
-
-    /// L6. `begin_draining` has no clearing path on the production shutdown
-    /// path by design, so its single caller must genuinely be shutdown. Pins the
-    /// convention that used to be the only thing making the latch safe.
-    #[test]
-    fn draining_is_begun_only_after_the_http_server_has_stopped() {
-        let main_source = include_str!("../../main.rs");
-        let call = format!("begin_build_admission_{}().await", "draining");
-        assert_eq!(
-            main_source.matches(call.as_str()).count(),
-            1,
-            "exactly one production drain caller"
-        );
-        let serve = main_source
-            .find("server::run(router")
-            .expect("main serves HTTP");
-        let drain = main_source.find(call.as_str()).expect("main drains");
-        assert!(
-            drain > serve,
-            "draining may only begin after the HTTP server future has resolved"
         );
     }
 
@@ -5617,243 +4254,19 @@ mod build_admission_config_tests {
         );
     }
 
-    /// Regression for the 2026-07-19 admission-handoff seed wedge.
-    ///
-    /// Migration 129 seeds `('build', 'emergency_primary', 0)` with no
-    /// acknowledgement, which `evaluate_handoff` classifies as `IncompleteEpoch`
-    /// → `RequiredFailClosed`: startup promotes even a configured-Observe
-    /// controller to a fail-closed Enforce. The wedge was that nothing in
-    /// production could then complete that epoch — `mark_topology_ready` had no
-    /// production call site, so readiness parked at `TopologyPending` forever,
-    /// the seeded epoch was never acknowledged, and every dispatch was denied
-    /// until an operator deleted the row by hand.
-    ///
-    /// A freshly seeded row must now self-open with no manual intervention: the
-    /// ordered startup gates run, coordinator leadership confirms the
-    /// single-active topology, and that same seam writes the first emergency
-    /// acknowledgement, leaving a healthy enforcing v0 baseline that admits work
-    /// and survives a restart.
-    #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
-    async fn freshly_seeded_handoff_epoch_self_opens_without_operator_intervention() {
-        use djinn_agent::actors::coordinator::BuildAdmissionReadiness;
-        use djinn_coordinator::build_admission::BuildAdmissionDecision;
-
-        // This walks the real startup seams, which publish the process-global
-        // admission gauges; serialize against the other tests that read them.
-        let _telemetry_guard = BUILD_ADMISSION_TELEMETRY_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let db = Database::open_in_memory().expect("test database");
-        let state = state_for_admission_config_with_db(
-            db.clone(),
-            BuildAdmissionConfig {
-                mode: BuildAdmissionMode::Observe,
-                cap: 3,
-                pod_limit: Some(1),
-            },
-        );
-        let repository = handoff_repository(&state);
-        let seeded = repository.read().await.expect("read").expect("seeded row");
-        assert_eq!(seeded.phase, AdmissionHandoffPhase::EmergencyPrimary);
-        assert_eq!(
-            seeded.emergency_ack_epoch, None,
-            "the migration seeds an unacknowledged epoch"
-        );
-
-        // The durable row is read before recovery. An incomplete epoch is
-        // fail-closed, so the configured-Observe controller is promoted to
-        // Enforce with every startup gate reset.
-        state.initialize_build_admission_handoff().await;
-        state.initialize_build_pod_permit_prerequisites().await;
-        let controller = admission(&state).clone();
-        assert_eq!(
-            controller.mode(),
-            BuildAdmissionMode::Enforce,
-            "an incomplete durable epoch promotes the configured standalone mode"
-        );
-        assert_eq!(
-            controller.readiness(),
-            BuildAdmissionReadiness::JournalRecoveryIncomplete
-        );
-
-        // Journal recovery and the Kubernetes inventory advance their own gates
-        // and must not acknowledge anything: only a fully healthy controller may.
-        state.initialize_build_admission_recovery().await;
-        assert_eq!(
-            controller.readiness(),
-            BuildAdmissionReadiness::InventoryPending
-        );
-        *state.inner.graph_warmer.write().await =
-            Some(Arc::new(build_in_process_graph_warmer(state.clone())));
-        state.initialize_build_admission_inventory().await;
-        assert_eq!(
-            controller.readiness(),
-            BuildAdmissionReadiness::TopologyPending
-        );
-        assert_eq!(
-            repository
-                .read()
-                .await
-                .expect("read")
-                .expect("row")
-                .emergency_ack_epoch,
-            None,
-            "no gate short of topology may acknowledge the seeded epoch"
-        );
-
-        // Winning the coordinator advisory lock is the single-active topology
-        // gate AND the production writer of the first acknowledgement.
-        state.confirm_build_admission_topology().await;
-        assert_eq!(controller.readiness(), BuildAdmissionReadiness::Healthy);
-        assert_eq!(controller.mode(), BuildAdmissionMode::Enforce);
-        assert_eq!(
-            repository
-                .read()
-                .await
-                .expect("read")
-                .expect("row")
-                .emergency_ack_epoch,
-            Some(seeded.epoch),
-            "coordinator leadership acknowledges the seeded epoch without an operator"
-        );
-
-        // The completed epoch is the enforcing v0 baseline: it admits real work
-        // rather than denying it at the fail-closed readiness gate.
-        let decision = controller
-            .admit_task_run(
-                Some("worker"),
-                AdmissionDomain::TaskObservation,
-                "seeded-epoch-task".to_owned(),
-                0,
-                "seeded-epoch-job".to_owned(),
-            )
-            .await
-            .expect("admission decision");
+    /// Draining the HTTP server before tearing the RPC listener down.
+    #[test]
+    fn rpc_teardown_happens_after_the_http_server_has_stopped() {
+        let main_source = include_str!("../../main.rs");
+        let serve = main_source
+            .find("server::run(router, cli.port, cancel).await;")
+            .expect("main serves");
+        let teardown = main_source
+            .find("shutdown_rpc_listener()")
+            .expect("main tears the listener down");
         assert!(
-            matches!(decision, BuildAdmissionDecision::Permitted { .. }),
-            "a self-opened epoch admits work: {decision:?}"
+            teardown > serve,
+            "RPC teardown may only begin after the HTTP server future has resolved"
         );
-
-        // A restart re-reads the now-acknowledged row and stays the enforcing
-        // baseline instead of falling back into the incomplete-epoch state.
-        let restarted = state_for_admission_config_with_db(
-            db,
-            BuildAdmissionConfig {
-                mode: BuildAdmissionMode::Observe,
-                cap: 3,
-                pod_limit: None,
-            },
-        );
-        restarted.initialize_build_admission_handoff().await;
-        assert_eq!(admission(&restarted).mode(), BuildAdmissionMode::Enforce);
-        assert_eq!(
-            repository
-                .read()
-                .await
-                .expect("read")
-                .expect("row")
-                .emergency_ack_epoch,
-            Some(seeded.epoch),
-            "the acknowledged epoch survives a restart untouched"
-        );
-    }
-
-    #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
-    async fn replacement_recovery_restores_distinct_active_and_durable_ready_identities() {
-        let _telemetry_guard = BUILD_ADMISSION_TELEMETRY_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        djinn_telemetry::init().expect("telemetry initializes");
-
-        // Build the durable predecessor state first: one task is already live
-        // in the admission journal while a distinct task remains dispatchable
-        // in the exact ready-query source production recovery reads.
-        let db = Database::open_in_memory().expect("test database");
-        let state = state_for_admission_config_with_db(
-            db.clone(),
-            BuildAdmissionConfig {
-                mode: BuildAdmissionMode::Enforce,
-                cap: 3,
-                pod_limit: None,
-            },
-        );
-        let project = ProjectRepository::new(db.clone(), state.event_bus())
-            .create("admission-restart", "test", "admission-restart")
-            .await
-            .expect("create durable project");
-        let deferred_task = TaskRepository::new(db.clone(), state.event_bus())
-            .create_fixture_in_project(
-                &project.id,
-                None,
-                "durably denied ready task",
-                "",
-                "",
-                "task",
-                1,
-                "test",
-                Some("open"),
-                None,
-            )
-            .await
-            .expect("create durable ready task");
-        let active_key = AdmissionJournalKey {
-            domain: AdmissionDomain::TaskObservation,
-            work_id: "active-predecessor-task".into(),
-            generation: 0,
-        };
-        AdmissionJournalRepository::new(db.clone())
-            .adopt_live(&AdoptLiveAdmissionInput {
-                key: active_key.clone(),
-                workload_kind: AdmissionWorkloadKind::Task,
-                creator_server_epoch: "predecessor".into(),
-                object_name: "active-predecessor-job".into(),
-                object_uid: "active-predecessor-uid".into(),
-            })
-            .await
-            .expect("seed predecessor active journal identity");
-
-        // These are the two durable sources used by a replacement: the
-        // journal's active snapshot and TaskRepository::list_ready. Their
-        // identities must be distinct before the production seams reconcile
-        // them into controller occupancy and deferred lifecycle membership.
-        let ready = TaskRepository::new(db.clone(), state.event_bus())
-            .list_ready(ReadyQuery {
-                limit: i64::MAX,
-                ..Default::default()
-            })
-            .await
-            .expect("list durable ready tasks");
-        let ready_ids: HashSet<_> = ready.into_iter().map(|task| task.id).collect();
-        let active_ids: HashSet<_> = AdmissionJournalRepository::new(db.clone())
-            .list_active_rows()
-            .await
-            .expect("list active journal rows")
-            .into_iter()
-            .filter(|row| row.key.domain == AdmissionDomain::TaskObservation)
-            .map(|row| row.key.work_id)
-            .collect();
-        assert_eq!(ready_ids, HashSet::from([deferred_task.id.clone()]));
-        assert_eq!(active_ids, HashSet::from([active_key.work_id.clone()]));
-        assert!(ready_ids.is_disjoint(&active_ids));
-
-        // Invoke the same ordered recovery seams AppState::initialize uses on
-        // coordinator startup/replacement, rather than the controller helper
-        // directly. The ready task was previously denied/deferred; it must be
-        // restored alongside, but never overlap, the active journal identity.
-        state.initialize_build_admission_recovery().await;
-        state.initialize_build_admission_deferred_recovery().await;
-        let rendered = djinn_telemetry::render().expect("render recovery gauges");
-        assert_eq!(gauge_value(&rendered, "djinn_build_slots_in_use"), 1.0);
-        assert_eq!(gauge_value(&rendered, "djinn_build_slots_queued"), 1.0);
-
-        // Repeating the actual production deferred-recovery seam is
-        // idempotent: it must retain exactly the same unique, disjoint source
-        // cardinalities and never increment either gauge.
-        state.initialize_build_admission_deferred_recovery().await;
-        let rendered = djinn_telemetry::render().expect("render repeated recovery gauges");
-        assert_eq!(gauge_value(&rendered, "djinn_build_slots_in_use"), 1.0);
-        assert_eq!(gauge_value(&rendered, "djinn_build_slots_queued"), 1.0);
     }
 }

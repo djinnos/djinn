@@ -34,7 +34,7 @@ use djinn_stack::environment::EnvironmentConfig;
 use djinn_supervisor::services::wire::{PlannerAttemptResult, PlannerOutcome};
 use djinn_supervisor::services::{
     CostBasisHint, LeaseAbandonRequest, LeaseBindRequest, LeaseCancelRequest, LeaseGrantRequest,
-    LeaseQueueRequest, LeaseReleaseRequest, LeaseResult, LeaseStatusRequest,
+    LeaseIdentity, LeaseQueueRequest, LeaseReleaseRequest, LeaseResult, LeaseStatusRequest,
     SerializableCreateSessionParams, SerializableCreateTaskRunParams, SerializableDjinnEvent,
     WatchdogTerminationRequest,
 };
@@ -48,6 +48,7 @@ use tokio_util::sync::CancellationToken;
 use crate::actors::slot::lifecycle::memory_intent_planner::parse_planned_queries;
 use crate::context::AgentContext;
 use crate::supervisor_impl::{SupervisorCallbackContext, execute_stage, supervisor_pr_open};
+use crate::task_run_resize_drop_gate::{ResizeDropGateRequest, ResizeDropVerdict};
 use djinn_provider::catalog::builtin::classify_provider;
 use djinn_provider::message::{ContentBlock, Conversation};
 use djinn_provider::provider::{LlmProvider, LlmResponse, StreamEvent, TokenUsage, ToolChoice};
@@ -300,11 +301,11 @@ impl DirectServices {
                 Arc::new(BuildLeaseRepository::new(agent_context.db.clone())),
                 0,
             )
-            // Recovery reads the durable admission epoch (and its reference cap)
-            // before the lease service opens.
-            .with_handoff_epoch(Arc::new(djinn_db::AdmissionHandoffRepository::new(
-                agent_context.db.clone(),
-            ))),
+            // Recovery reads the durable invocation-lease authority (and its
+            // reference cap) before the lease service opens.
+            .with_invocation_lease_authority(Arc::new(
+                djinn_db::InvocationLeaseAuthorityRepository::new(agent_context.db.clone()),
+            )),
         );
         Self::with_provider_override_and_build_lease(
             agent_context,
@@ -1045,6 +1046,33 @@ impl SupervisorServices for DirectServices {
         if !self.recover_build_lease().await {
             return LeaseResult::LeaseUnavailable;
         }
+        // THE TWO-LEDGER GATE. `BuildLeaseService::release` writes
+        // `build_leases`; the launcher's lifted ceiling lives in
+        // `build_pod_permits`. Releasing capacity before the launcher is
+        // confirmed back at 250m sells the same CPU twice, so the permit
+        // lifecycle moves FIRST and this handler is where the ordering is
+        // imposed. Making this call unconditional again — as it was before
+        // `0ppk-2` — is acceptance criterion 6's named mutation.
+        if let Some(gate) = self.callbacks.agent_context.resize_drop.as_ref()
+            && let LeaseIdentity::TaskInvocation(claim) = &request.identity
+        {
+            let verdict = gate
+                .confirm_drop(&ResizeDropGateRequest {
+                    task_run_id: claim.task_run_id.clone(),
+                    invocation_id: claim.invocation_id.clone(),
+                })
+                .await;
+            if let ResizeDropVerdict::Held { detail } = verdict {
+                tracing::warn!(
+                    task_run_id = %claim.task_run_id,
+                    invocation_id = %claim.invocation_id,
+                    %detail,
+                    "release_lease: the launcher is not back at its birth limit; \
+                     holding the durable CPU lease"
+                );
+                return LeaseResult::LeaseUnavailable;
+            }
+        }
         self.build_lease.release(request).await
     }
 
@@ -1094,22 +1122,12 @@ impl SupervisorServices for DirectServices {
     // injected where the runner is built, so an unimplemented authority is a
     // compile error rather than a silent `Unleased`.
 
-    /// Record this live generation's acknowledgement of the current admission
-    /// epoch (host in-process path). Idempotent + stale-fenced in the database.
-    /// A missing epoch row or a read/write failure is non-fatal: the durable
-    /// invocation-primary edge stays blocked (fail closed) until the ack lands.
-    async fn record_generation_ack(&self, generation_key: String) -> Result<(), String> {
-        let repo =
-            djinn_db::AdmissionHandoffRepository::new(self.callbacks.agent_context.db.clone());
-        let epoch = match repo.read().await {
-            Ok(Some(row)) => row.epoch,
-            Ok(None) => return Ok(()),
-            Err(error) => return Err(error.to_string()),
-        };
-        repo.record_generation_ack(epoch, &generation_key)
-            .await
-            .map_err(|error| error.to_string())
-    }
+    // `record_generation_ack` is deliberately gone from this impl too. It wrote
+    // `admission_handoff_generation_ack` rows for the v0→v1 invocation-primary
+    // handoff edge, which the Kueue cutover deleted along with the v0 authority.
+    // The trait method was REMOVED rather than stubbed: its old default was
+    // `Ok(())`, so a stub here would have compiled, written nothing, and left
+    // the two real writers looking healthy.
 
     async fn load_task(&self, task_id: String) -> Result<Task, String> {
         crate::actors::slot::helpers::load_task(&task_id, &self.callbacks.agent_context)
@@ -2822,6 +2840,55 @@ mod tests {
     use djinn_provider::provider::{LlmProvider, StreamEvent, TokenUsage, ToolChoice};
     use futures::StreamExt;
     use std::pin::Pin;
+
+    /// **0ppk-1c ACCEPTANCE CRITERION 1, the second composition site.**
+    ///
+    /// `DirectServices::with_provider_override` builds a SECOND
+    /// `BuildLeaseService` as an agent-side fallback. The task requires an
+    /// explicit, asserted decision about it, because an unarmed second
+    /// composition is exactly how a lift silently does not happen for some
+    /// callers.
+    ///
+    /// THE DECISION: it **fails closed — deliberately unarmed**, and it must
+    /// stay that way. Three reasons, in order of force:
+    ///
+    /// 1. `djinn-agent` cannot depend on `djinn-server`. That is not a
+    ///    preference; it is why `0ppk-1b` had to introduce the
+    ///    `TaskRunResizeAdmission` trait at all. The lift's apiserver surface
+    ///    (`TaskRunPodResizeSurface`) and the permit-creating dispatch seam both
+    ///    live on the far side of that boundary.
+    /// 2. This fallback is not on the path that CREATES permits. Arming it would
+    ///    make it answer `DegradedUnleased { PermitAbsent }` for every
+    ///    invocation it served — strictly worse than the passthrough.
+    /// 3. Unarmed means "no lift": the launcher keeps the birth quota it was
+    ///    already given. That is the pre-`3i92` behaviour and it is safe. The
+    ///    dangerous direction is the other one — REPORTING a grant for CPU no Pod
+    ///    ever received — and that is precisely what an armed-but-surfaceless
+    ///    composition would do.
+    ///
+    /// NAMED FAILING MUTATION: add `.with_resize_authority(..)` to
+    /// `with_provider_override`'s `BuildLeaseService` chain and this fails.
+    #[tokio::test]
+    async fn the_agent_side_fallback_build_lease_fails_closed_unarmed() {
+        let db = crate::test_helpers::create_test_db();
+        let context = crate::test_helpers::agent_context_from_db(
+            db,
+            tokio_util::sync::CancellationToken::new(),
+        );
+        let services = DirectServices::with_provider_override(
+            context,
+            tokio_util::sync::CancellationToken::new(),
+            None,
+        );
+        assert!(
+            !services.build_lease.resize_authority_armed(),
+            "the agent-side fallback BuildLeaseService must stay UNARMED. \
+             `djinn-agent` cannot reach the server's apiserver surface or the \
+             dispatch seam that creates permits, so arming it would degrade \
+             every invocation it served to PermitAbsent while claiming to have \
+             lifted something"
+        );
+    }
 
     /// Helper: a non-zero pricing snapshot (used to represent a priced model).
     fn priced() -> Pricing {

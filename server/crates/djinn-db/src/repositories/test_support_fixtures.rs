@@ -465,7 +465,7 @@ pub async fn ensure_doctor_findings_schema(db: &Database) {
 /// or truncated ciphertext) without going through the encrypt/decrypt round-trip.
 ///
 /// This is a **test-only** escape hatch — all production writes MUST go through
-/// the `CredentialRepository` boundary in `djinn-provider`.
+/// the `CredentialRepository` boundary in `crate::repositories::credential`.
 pub async fn corrupt_credential_encrypted_value(db: &Database, key_name: &str, raw_bytes: Vec<u8>) {
     sqlx::query("UPDATE credentials SET encrypted_value = $1 WHERE key_name = $2")
         .bind(raw_bytes)

@@ -242,7 +242,7 @@ pub fn build_task_run_job(
         "required cgroup launcher requires runtimeClassName: djinn-cgroup-writable"
     );
     let task_run_id_str = task_run_id.to_string();
-    let labels = job_labels(&task_run_id_str);
+    let labels = job_labels(config, &task_run_id_str);
     let job_name = format!("djinn-taskrun-{task_run_id}");
     let role_class = RoleResourceClass::for_role(role);
 
@@ -623,6 +623,10 @@ pub fn build_task_run_job(
         spec: Some(JobSpec {
             template,
             backoff_limit: Some(0),
+            // Kueue create-then-admit: armed Jobs are created suspended and
+            // unsuspended by Kueue once the ClusterQueue admits their Workload.
+            // `None` when disarmed — see `KubernetesConfig::kueue_job_suspend`.
+            suspend: config.kueue_job_suspend(),
             // Static failed-job safety net. The coordinator may delete known
             // successes earlier, but this must never become a configurable
             // short retention policy for unknown or failed outcomes.
@@ -701,13 +705,17 @@ pub fn build_task_run_job_with_read_sources(
     job
 }
 
-fn job_labels(task_run_id: &str) -> BTreeMap<String, String> {
+fn job_labels(config: &KubernetesConfig, task_run_id: &str) -> BTreeMap<String, String> {
     let mut labels = BTreeMap::new();
     labels.insert(LABEL_TASK_RUN_ID.to_string(), task_run_id.to_string());
     labels.insert(
         LABEL_COMPONENT.to_string(),
         COMPONENT_TASK_RUN_WORKER.to_string(),
     );
+    // Stamped HERE, in the one map the caller clones into both the Job metadata
+    // and the Pod template, so Kueue's Job webhook and Pod webhook both see it.
+    // No-op unless `config.kueue_armed`.
+    config.apply_kueue_build_object_labels(crate::config::KueueQueueKind::TaskRun, &mut labels);
     labels
 }
 

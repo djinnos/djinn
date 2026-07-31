@@ -29,12 +29,38 @@
 use std::collections::BTreeSet;
 use std::fmt::Write;
 
+use djinn_launcher_protocol::LauncherAuthorityProtocol;
 use djinn_stack::environment::{
     EnvironmentConfig, HookCommand, Languages, NodeLanguage, RustLanguage,
 };
 use thiserror::Error;
 
 use crate::scripts::SCRIPTS;
+
+/// The launcher authority protocol every image this generator produces
+/// declares.
+///
+/// This is a property of the **artifact**, not of its name: the
+/// `djinn-cgroup-launcher` binary [`emit_agent_worker`] copies in writes its
+/// own invocation-leaf `cpu.max`, and that is exactly what
+/// [`LauncherAuthorityProtocol::LeafV1`] means.
+///
+/// Flipping this constant changes what the shipped binary does, so it must be
+/// accompanied by a [`crate::compute_environment_hash`] salt bump — the hash
+/// does not cover the Dockerfile text, and a cached image would otherwise keep
+/// its old launcher while the catalog claimed the new protocol.
+pub const DECLARED_LAUNCHER_PROTOCOL: LauncherAuthorityProtocol = LauncherAuthorityProtocol::LeafV1;
+
+/// OCI label key carrying the declaration into the built artifact's metadata.
+///
+/// This — not the image tag — is where the protocol is declared. A tag is
+/// mutable naming that can be made to say anything; build metadata is written
+/// once, at artifact creation, by the thing that actually assembled the image.
+pub const LAUNCHER_PROTOCOL_LABEL: &str = "djinn.app/launcher-authority-protocol";
+
+/// Environment variable the launcher sidecar reads out of the same image at
+/// runtime. Carries the identical wire string as [`LAUNCHER_PROTOCOL_LABEL`].
+pub const LAUNCHER_PROTOCOL_ENV: &str = "DJINN_LAUNCHER_AUTHORITY_PROTOCOL";
 
 /// The agent-worker helper-image ref baked into the `COPY --from=...`
 /// line. The tag is the sha of the worker binary used at build time.
@@ -74,6 +100,10 @@ pub struct BuildContext {
     /// the alternative (per-config filtering) would leak into the hash
     /// as the config evolves.
     pub scripts: Vec<(String, String)>,
+    /// The launcher authority protocol the emitted Dockerfile declares, so the
+    /// build Job can echo the *same* value into its build metadata without
+    /// re-deriving it from anything (least of all the image tag).
+    pub launcher_protocol: LauncherAuthorityProtocol,
 }
 
 #[derive(Debug, Error)]
@@ -116,6 +146,7 @@ pub fn generate_dockerfile(
     emit_path(&mut df);
     emit_system_packages(&mut df, config);
     emit_agent_worker(&mut df, agent_worker);
+    emit_launcher_protocol(&mut df, DECLARED_LAUNCHER_PROTOCOL);
     emit_language_blocks(&mut df, config)?;
     emit_env(&mut df, config);
     emit_post_build_hooks(&mut df, config);
@@ -127,6 +158,7 @@ pub fn generate_dockerfile(
             .iter()
             .map(|s| (format!("scripts/{}", s.name), s.body.to_string()))
             .collect(),
+        launcher_protocol: DECLARED_LAUNCHER_PROTOCOL,
     })
 }
 
@@ -295,6 +327,24 @@ fn emit_agent_worker(df: &mut String, agent_worker: &AgentWorkerImage) {
     )
     .unwrap();
     writeln!(df, "RUN /tmp/djinn-scripts/install-agent-worker.sh").unwrap();
+}
+
+/// Declare, in the artifact's own build metadata, which component owns the CPU
+/// quota of the invocation leaves the launcher copied in above will create.
+///
+/// Emitted immediately after that `COPY`, because it describes exactly that
+/// binary. Both lines carry [`LauncherAuthorityProtocol::as_wire`] verbatim —
+/// the same string migration 164 CHECKs and `djinn-db` persists — so the
+/// declaration cannot drift from the vocabulary the rest of the plane agrees
+/// on.
+fn emit_launcher_protocol(df: &mut String, protocol: LauncherAuthorityProtocol) {
+    writeln!(
+        df,
+        "LABEL {LAUNCHER_PROTOCOL_LABEL}=\"{}\"",
+        protocol.as_wire()
+    )
+    .unwrap();
+    writeln!(df, "ENV {LAUNCHER_PROTOCOL_ENV}={}", protocol.as_wire()).unwrap();
 }
 
 fn emit_language_blocks(
@@ -698,6 +748,53 @@ mod tests {
         );
         assert!(df.dockerfile.contains("install-agent-worker.sh"));
         assert!(!df.dockerfile.contains("install-rust.sh"));
+    }
+
+    /// The artifact declares its launcher authority protocol in its own build
+    /// metadata, using the canonical wire form, and reports the same value on
+    /// the [`BuildContext`] so the build Job never has to guess.
+    #[test]
+    fn the_artifact_declares_its_launcher_protocol_in_build_metadata() {
+        let df = generate_dockerfile(&minimal_valid_config(), &agent_worker()).unwrap();
+
+        assert_eq!(df.launcher_protocol, DECLARED_LAUNCHER_PROTOCOL);
+        assert!(
+            df.dockerfile.contains(&format!(
+                "LABEL {LAUNCHER_PROTOCOL_LABEL}=\"{}\"",
+                DECLARED_LAUNCHER_PROTOCOL.as_wire()
+            )),
+            "the OCI label is the declaration; without it the artifact says nothing:\n{}",
+            df.dockerfile
+        );
+        assert!(df.dockerfile.contains(&format!(
+            "ENV {LAUNCHER_PROTOCOL_ENV}={}",
+            DECLARED_LAUNCHER_PROTOCOL.as_wire()
+        )));
+
+        // The declaration describes the launcher binary, so it must land after
+        // the COPY that puts it there.
+        let copy = df
+            .dockerfile
+            .find("/opt/djinn/bin/djinn-cgroup-launcher")
+            .expect("launcher COPY");
+        let label = df.dockerfile.find(LAUNCHER_PROTOCOL_LABEL).expect("label");
+        assert!(copy < label);
+    }
+
+    /// The declaration is not derived from — and cannot be confused with — the
+    /// image's name. `generate_dockerfile` is never given a tag, and the wire
+    /// string comes from the canonical type rather than a local literal.
+    #[test]
+    fn the_declaration_is_build_metadata_not_a_name() {
+        let df = generate_dockerfile(&minimal_valid_config(), &agent_worker()).unwrap();
+        assert_eq!(DECLARED_LAUNCHER_PROTOCOL.as_wire(), "leaf-v1");
+        assert_eq!(
+            df.dockerfile
+                .matches(DECLARED_LAUNCHER_PROTOCOL.as_wire())
+                .count(),
+            2,
+            "the protocol appears exactly twice — the LABEL and the ENV — and nowhere else"
+        );
     }
 
     #[test]

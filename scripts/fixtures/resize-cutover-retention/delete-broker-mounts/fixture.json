@@ -1,0 +1,8 @@
+{
+  "asset": "broker-mounts",
+  "expect": "reject",
+  "why": "The launcher child mount set deleted. A brokered command executes in the LAUNCHER container's mount namespace, so without these mounts every child's chdir into the workspace is ENOENT — the failure this module exists to have already fixed.",
+  "operations": [
+    { "op": "delete", "path": "server/crates/djinn-k8s/src/launcher_child_fs.rs" }
+  ]
+}

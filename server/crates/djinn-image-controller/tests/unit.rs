@@ -95,37 +95,92 @@ fn build_job_labels_and_envs_match_plan() {
     );
 }
 
+/// An image build is an UPSTREAM DEPENDENCY of a task-run, so it must stay out
+/// of the shared ClusterQueue: a task-run holding a slot while the image build
+/// it is waiting on is queued behind it is a priority-inversion deadlock the
+/// current ledger cannot produce. Kueue cutover S1 therefore arms task-run, warm
+/// and SCIP only.
+///
+/// Parameterized over every combination of the two chart flags (`kueue.enabled`
+/// / `kueue.armed`, reaching this process only as `DJINN_KUEUE_*` env vars,
+/// since `ImageControllerConfig` deliberately has no Kueue field). Asserting the
+/// one default combination would pass even if `build_job.rs` started calling the
+/// shared `djinn_k8s` label helper.
 #[test]
 fn image_build_job_does_not_opt_into_kueue_build_object_admission() {
     const KUEUE_BUILD_OBJECT_LABEL: &str = "djinn.io/kueue-build-object";
+    const KUEUE_QUEUE_NAME_LABEL: &str = "kueue.x-k8s.io/queue-name";
+    const ARMED: &str = "DJINN_KUEUE_ARMED";
+    const ENABLED: &str = "DJINN_KUEUE_ENABLED";
 
-    let config = ImageControllerConfig::for_testing();
+    let restore_armed = std::env::var(ARMED).ok();
+    let restore_enabled = std::env::var(ENABLED).ok();
+
     let context = test_build_context();
-    let job = build_image_build_job(
-        &config,
-        &BuildSubject::project("proj-kueue-contract"),
-        "1a2b3c4d5e6f",
-        "registry.example/djinn-project-proj-kueue-contract:1a2b3c4d5e6f",
-        &context,
-    );
+    for enabled in ["false", "true"] {
+        for armed in ["false", "true"] {
+            // SAFETY: single-threaded within this test; no other test in this
+            // binary reads DJINN_KUEUE_*, and the pre-existing values are
+            // restored below.
+            unsafe {
+                std::env::set_var(ENABLED, enabled);
+                std::env::set_var(ARMED, armed);
+            }
 
-    assert!(
-        !job.metadata
-            .labels
-            .as_ref()
-            .and_then(|labels| labels.get(KUEUE_BUILD_OBJECT_LABEL))
-            .is_some_and(|value| value == "true"),
-        "image-build Job metadata must remain outside Kueue build-object admission",
-    );
-    assert!(
-        !job.spec
-            .as_ref()
-            .and_then(|spec| spec.template.metadata.as_ref())
-            .and_then(|metadata| metadata.labels.as_ref())
-            .and_then(|labels| labels.get(KUEUE_BUILD_OBJECT_LABEL))
-            .is_some_and(|value| value == "true"),
-        "image-build Pod-template metadata must remain outside Kueue build-object admission",
-    );
+            // `from_env`, not `for_testing`: a config constructor that ignored
+            // the environment would make the parameterization vacuous.
+            let config = ImageControllerConfig::from_env();
+            let job = build_image_build_job(
+                &config,
+                &BuildSubject::project("proj-kueue-contract"),
+                "1a2b3c4d5e6f",
+                "registry.example/djinn-project-proj-kueue-contract:1a2b3c4d5e6f",
+                &context,
+            );
+            let flags = format!("kueue.enabled={enabled} kueue.armed={armed}");
+
+            for (location, labels) in [
+                ("Job metadata", job.metadata.labels.as_ref()),
+                (
+                    "Pod-template metadata",
+                    job.spec
+                        .as_ref()
+                        .and_then(|spec| spec.template.metadata.as_ref())
+                        .and_then(|metadata| metadata.labels.as_ref()),
+                ),
+            ] {
+                let labels: &BTreeMap<String, String> =
+                    labels.expect("image-build Job renders labels at both locations");
+                assert!(
+                    !labels.contains_key(KUEUE_BUILD_OBJECT_LABEL),
+                    "image-build {location} must remain outside Kueue build-object admission at {flags}",
+                );
+                assert!(
+                    !labels.contains_key(KUEUE_QUEUE_NAME_LABEL),
+                    "image-build {location} must name no LocalQueue at {flags}",
+                );
+            }
+
+            // A suspended Job that no ClusterQueue will ever admit hangs forever.
+            assert_eq!(
+                job.spec.as_ref().and_then(|spec| spec.suspend),
+                None,
+                "image-build Job must never be created suspended at {flags}",
+            );
+        }
+    }
+
+    // SAFETY: see above; restores the ambient environment for the rest of the run.
+    unsafe {
+        match restore_armed {
+            Some(value) => std::env::set_var(ARMED, value),
+            None => std::env::remove_var(ARMED),
+        }
+        match restore_enabled {
+            Some(value) => std::env::set_var(ENABLED, value),
+            None => std::env::remove_var(ENABLED),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

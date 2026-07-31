@@ -52,6 +52,12 @@ env:
   # what a healthy hosted runner has free after the reclaim set below, so a
   # healthy runner never trips it — a preflight that false-fails is worse than
   # no preflight.
+  # Number of rows in `server-test`'s static matrix. Asserted against the plan
+  # inside every shard, so a plan wider than the matrix fails loudly instead of
+  # silently dropping the tail shards' tests. Must equal the row count of that
+  # matrix AND be >= the planner's widest shard count; `ci-nextest-plan.test.mjs`
+  # enforces both.
+  CI_SERVER_TEST_MATRIX_WIDTH: "8"
   CI_RUNNER_DISK_MIN_GB: "14"
   # Warn band. Free space between MIN and WARN still completes the build but is
   # already abnormal for a hosted runner, so annotate it: the run summary is
@@ -199,6 +205,12 @@ jobs:
         run: node --test scripts/ci-mold-trixie-apt-smoke.test.mjs
       - name: Verify routed-scope contract
         run: node --test scripts/ci-changed-scope.test.mjs
+      # scripts/lib/source-text.mjs is the shared comment stripper behind the
+      # workflow-text guards below. A regression in it is silent — a guard
+      # whose stripper returned "" would assert nothing and still exit 0 — so
+      # it is proven before its consumers run.
+      - name: Verify source-text stripper contract
+        run: node --test scripts/ci-source-text.test.mjs
       - name: Verify cache ownership policy
         run: node --test scripts/ci-cache-policy.test.mjs
       - name: Verify qa-smoke workflow contract
@@ -584,38 +596,180 @@ jobs:
           done
           echo "::error::cargo-deny check failed after 3 attempts"
           exit 1
-      - name: Check changed Rust file sizes
+      # REPORT, NOT A GATE. This step is structurally incapable of failing the
+      # run: every command is `|| true`-guarded and the block ends `exit 0`.
+      #
+      # It gated changed files from 2026-06-11 to 2026-07-30. Over those seven
+      # weeks it produced 108 `djinn:allow-oversize` markers and zero splits,
+      # while the oversized-file count went 22 -> 79 — every file that ever
+      # tripped it was marked, none was restructured. It also blocked two
+      # correctness fixes (#2815, #2839) on ~200 bytes of headroom each. See
+      # the rationale block at the top of scripts/check-file-size.sh.
+      #
+      # Retiring the veto deliberately leaves the measurement in place: the
+      # ranked report goes to the step summary and to `::notice` annotations,
+      # and the authorship-time nudge in djinn-agent carries the pressure that
+      # a merge-time gate could not.
+      #
+      # Note there is no `continue-on-error:` here. That would surface the step
+      # as a failure GitHub then ignores, which reads as "the size gate is
+      # broken" to every human scanning the run. A report that succeeds is not
+      # the same artifact as a failure that is tolerated.
+      - name: Self-test Rust file-size report
+        if: needs.preflight.outputs.size == 'true'
+        run: ./scripts/test-check-file-size.sh
+      - name: Report changed Rust file sizes
         if: needs.preflight.outputs.size == 'true'
         env:
           EVENT_NAME: ${{ github.event_name }}
         run: |
-          set -eu
+          # GitHub's default step shell is `bash -eo pipefail`. Both are turned
+          # off here on purpose: a report must not inherit gating semantics from
+          # its shell. `-u` is kept — an unset variable here is a bug in this
+          # block, not a finding about the tree.
+          set +e +o pipefail
+          set -u
 
           if [ -z "$BASE_SHA" ]; then
             # workflow_dispatch has no PR/merge context; fall back to origin/main
-            # so the guard still runs against changes since the main branch.
+            # so the report still covers changes since the main branch.
             git fetch --no-tags --depth=1 origin main >/dev/null 2>&1 || true
             BASE_SHA="$(git rev-parse --verify origin/main 2>/dev/null || true)"
           fi
 
           if [ -z "$BASE_SHA" ]; then
-            echo "::error::Could not determine a base SHA for changed-file detection (event=$EVENT_NAME)."
-            exit 1
+            echo "::warning::Could not determine a base SHA for changed-file detection (event=$EVENT_NAME); skipping the file-size report."
+            exit 0
           fi
 
           echo "Computing changed-file diff against base $BASE_SHA (event=$EVENT_NAME)..."
           # --diff-filter=AMR = Added, Modified, Renamed. D (Deleted) is
-          # intentionally excluded so deleted files are not re-checked.
+          # intentionally excluded so deleted files are not re-reported.
           # The three-dot form uses the merge base of $BASE_SHA and HEAD,
           # which tolerates a slightly stale PR base SHA after main advances.
           git diff --name-only --diff-filter=AMR "$BASE_SHA...HEAD" \
-            | ./scripts/check-file-size.sh --files-from-stdin
+            | ./scripts/check-file-size.sh --files-from-stdin \
+            || echo "::warning::The file-size report did not run to completion. It is report-only, so this does not block."
+          exit 0
       - name: Check applied migrations are immutable
         if: needs.preflight.outputs.migrations == 'true'
         run: ./scripts/check-migrations-immutable.sh
+      # Routed by the same output as the file-size report: both concern the
+      # shape of Rust source, and `size` is set for any server change. This
+      # one is still a GATE, deliberately — unlike a size limit it has no
+      # one-line escape, and the `_partN` fragmentation it forbids is exactly
+      # what the size gate's per-file line limit used to reward. It also scans
+      # the whole tree rather than the diff: a grep over tracked *.rs with no
+      # build, and a whole-tree scan cannot be dodged by a base-SHA trick.
+      # scripts/lib/rust-source-scan.awk is the single comment-stripping and
+      # `#[cfg(test)]`-tracking implementation behind five guards below
+      # (include!, global metrics, raw SQL, capability boundaries, resize
+      # authorization). A regression in it takes all five down at once and does
+      # so SILENTLY — a guard whose scanner matches nothing still exits 0. This
+      # runs before any of them so the shared piece is proven first.
+      - name: Self-test shared Rust source scanner
+        if: needs.preflight.outputs.size == 'true'
+        run: ./scripts/test-rust-source-scan.sh
+      - name: Self-test include! guard
+        if: needs.preflight.outputs.size == 'true'
+        run: ./scripts/test-check-include-macro.sh
+      - name: Check no include! of hand-written source
+        if: needs.preflight.outputs.size == 'true'
+        run: ./scripts/check-include-macro.sh
+      # Also a GATE, and for the same reason: complying costs the same keystrokes
+      # as violating (`render_isolated` instead of `render`), so there is nothing
+      # to escape to and no marker is offered.
+      #
+      # It scans the DIFF rather than the whole tree, which the include! guard
+      # above deliberately does not — the difference is that ~150 pre-existing
+      # reads exist and many sit in tests that hand work to `tokio::spawn`,
+      # where the conversion is a judgement call rather than a mechanical edit.
+      # Gating the whole tree would be a migration order. Note also that this
+      # workspace's nextest lane CANNOT observe the bug being prevented: nextest
+      # gives each test its own process, so the collision only ever appears
+      # under `cargo test` in the developer loop (measured: 21/40 runs failing
+      # under `cargo test`, 0/15 under `cargo nextest run`, same commit). That
+      # is precisely why a source-level gate is the only thing that can catch
+      # it at merge time.
+      - name: Self-test global-metrics-in-tests guard
+        if: needs.preflight.outputs.size == 'true'
+        run: ./scripts/test-check-test-global-metrics.sh
+      - name: Check tests do not read the process-global metrics registry
+        if: needs.preflight.outputs.size == 'true'
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -eu
+          if [ -z "$BASE_SHA" ]; then
+            git fetch --no-tags --depth=1 origin main >/dev/null 2>&1 || true
+            BASE_SHA="$(git rev-parse --verify origin/main 2>/dev/null || true)"
+          fi
+          if [ -z "$BASE_SHA" ]; then
+            echo "::warning::Could not determine a base SHA (event=$EVENT_NAME); falling back to a whole-tree report."
+            ./scripts/check-test-global-metrics.sh --all || true
+            exit 0
+          fi
+          ./scripts/check-test-global-metrics.sh "$BASE_SHA"
+      # rustfmt is NOT in server/rust-toolchain.toml's `components`, and that
+      # file's own comment records why that matters: rustup syncs to exactly
+      # what is listed. So `rustup toolchain install` above does not guarantee
+      # rustfmt on this runner, and relying on the hosted image's default
+      # profile would be an assumption. Add it explicitly — it is a component
+      # download, a few seconds, and it makes the next step's tool a fact
+      # rather than an inherited default.
+      - name: Install rustfmt
+        if: needs.preflight.outputs.size == 'true'
+        working-directory: server
+        run: |
+          rustup toolchain install
+          rustup component add rustfmt
+      # Formatting is already enforced inside agent pods by the task-run gate
+      # (which is why `rustfmt` is baked into the image — see RUST_COMPONENTS
+      # in djinn-image-builder/src/dockerfile.rs). This is the PR/merge-time
+      # backstop for everything that bypasses that gate: human commits, and
+      # historically anything hidden from rustfmt's module walk. It does not
+      # replace the task-run gate.
+      #
+      # Routed by `size` for the same reason as the include! guard above: both
+      # police the shape of Rust source, and `size` is set for any server
+      # change. Whole-tree rather than diff-scoped — `cargo fmt` parses but
+      # never compiles, so the whole workspace costs seconds, a whole-tree
+      # check cannot be dodged by a base-SHA trick, and rustfmt resolves
+      # edition and config per crate, which a per-file invocation would lose.
+      - name: Check Rust formatting
+        if: needs.preflight.outputs.size == 'true'
+        working-directory: server
+        run: cargo fmt --all --check
+      # The raw-SQL guard decides which matches are real code and which are
+      # string-literal data. That classification is only as good as its
+      # fixtures, and the fixtures are only worth anything if they run — this
+      # self-test shipped in #2814 and was never wired up, so nothing enforced
+      # that a guard edit still caught a violation. Mirrors the include! guard
+      # two steps above.
+      - name: Self-test raw-SQL boundary guard
+        if: needs.preflight.outputs.rawSql == 'true'
+        run: ./scripts/test-check-raw-sql-boundary.sh
       - name: Check raw-SQL boundary
         if: needs.preflight.outputs.rawSql == 'true'
         run: ./scripts/check-raw-sql-boundary.sh
+      # 0ppk-1a acceptance criterion 3. Routed by `size` like the include! and
+      # rustfmt guards above: `size` is set for any server change, and this is a
+      # whole-tree grep with no build, so a base-SHA trick cannot dodge it.
+      - name: Self-test resize-authorization boundary guard
+        if: needs.preflight.outputs.size == 'true'
+        run: ./scripts/test-check-resize-authorization-boundary.sh
+      - name: Check resize-authorization boundary
+        if: needs.preflight.outputs.size == 'true'
+        run: ./scripts/check-resize-authorization-boundary.sh
+      # 0ppk-1b acceptance criterion 2. Same `size` routing and the same
+      # reasoning: a whole-tree grep with no build, and the failure it catches
+      # (a merged, green, unreachable stack) is invisible to every other gate.
+      - name: Self-test resize reachability guard
+        if: needs.preflight.outputs.size == 'true'
+        run: ./scripts/test-check-resize-reachability.sh
+      - name: Check resize reachability
+        if: needs.preflight.outputs.size == 'true'
+        run: ./scripts/check-resize-reachability.sh
       - name: Self-test capability boundary detectors
         if: needs.preflight.outputs.capability == 'true'
         run: ./scripts/test-capability-boundaries.sh
@@ -627,7 +781,13 @@ jobs:
           ./scripts/check-k8s-boundary.sh
       - name: Check architectural boundaries
         if: needs.preflight.outputs.boundaries == 'true'
-        run: python3 scripts/check_boundaries.py
+        run: |
+          # The self-test exists and was never wired up, so nothing enforced
+          # that a checker edit still caught a violation. Its file-rule cases
+          # are paired in both directions — a scan that matched nothing would
+          # report "no boundary violations" forever.
+          python3 scripts/check_boundaries.py --self-test
+          python3 scripts/check_boundaries.py
   server-clippy:
     name: Server Clippy
     needs: preflight
@@ -857,6 +1017,149 @@ jobs:
         run: bash -c "$CI_RUNNER_DISK_PREFLIGHT"
       - name: Test deploy render-gate contract
         run: bash scripts/test-deploy-contracts.sh deploy/preflight/tests
+  cutover-preflight:
+    name: Cutover Preflight
+    needs: preflight
+    # Same routing as `deploy-render-gate`: this contract's inputs are the chart
+    # and the djinn-k8s crate, and every path that can change either lands in
+    # the router's `rustCore` lane or fails closed into `unknown`.
+    if: needs.preflight.outputs.clippy == 'true' && github.event_name != 'push'
+    runs-on: ubuntu-latest
+    # The deploy contract builds one binary and shells out to helm; the Rust
+    # proofs need a migrated Postgres template. 30 leaves margin for a cold
+    # djinn-k8s chain without hiding a hang.
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: server
+    env:
+      SQLX_OFFLINE: "true"
+      # Number of `#[ignore]`d proofs `tests/cutover_preflight.rs` declares.
+      #
+      # Those proofs are ignored because they need `helm` (for the live chart
+      # render every fixture is derived from) and a real Postgres (for the drain
+      # fence) — neither of which the ordinary sharded lane has. An `#[ignore]`
+      # nobody runs is precisely the "merged, green, unreachable" defect this
+      # task exists to remove, so the run below fails if fewer than this many
+      # actually execute, and the suite's always-on
+      # `the_cutover_preflight_lane_is_wired_and_cannot_silently_skip` reads
+      # this file back and fails if this declaration, the job, or the
+      # `--run-ignored all` invocation disappears.
+      DJINN_CUTOVER_EXPECTED_PROOFS: "18"
+      # The drain-fence proofs open template-cloned per-test databases here.
+      DJINN_TEST_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5433/postgres
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: djinn
+        ports:
+          - 5433:5432
+        options: --health-cmd="pg_isready -U postgres" --health-interval=5s --health-timeout=3s --health-retries=20
+    steps:
+      - uses: actions/checkout@v4
+      # Pinned to the same v3.12.3 deploy-render-gate installs — two lanes
+      # rendering the same chart on different helm majors is a contract that
+      # means nothing.
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.12.3
+      - run: rustup toolchain install
+        working-directory: server
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: server
+          shared-key: server-test
+          cache-on-failure: true
+          cache-all-crates: true
+          save-if: false
+        id: rust-cache
+      - name: Log cache family and restore status
+        run: |-
+          echo "cache-family=server-test"
+          echo "shared-key=server-test"
+          echo "runner-os=${{ runner.os }}"
+          echo "rustc=$(rustc --version || echo 'unknown')"
+          echo "cache-hit=${{ steps.rust-cache.outputs.cache-hit }}"
+          echo "::notice::cache-family=server-test shared-key=server-test cache-hit=${{ steps.rust-cache.outputs.cache-hit }}"
+      - name: Runner disk headroom preflight
+        # Body/thresholds: CI_RUNNER_DISK_PREFLIGHT at the top of this file.
+        run: bash -c "$CI_RUNNER_DISK_PREFLIGHT"
+      - name: Apply migrations
+        env:
+          DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5433/djinn
+        run: |
+          until pg_isready -h 127.0.0.1 -p 5433 -U postgres >/dev/null 2>&1; do sleep 1; done
+          SQLX_OFFLINE=true \
+            DJINN_MIGRATE_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5433/djinn \
+            DJINN_MIGRATE_OPERATOR_USER_ID=00000000-0000-7000-8000-000000000002 \
+            DJINN_MIGRATE_OPERATOR_GITHUB_ID=9000000002 \
+            DJINN_MIGRATE_OPERATOR_LOGIN=djinn-ci-migration-operator \
+            cargo test -p djinn-db --test apply_migrations -- --ignored --nocapture
+      - name: Build Postgres test template
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h 127.0.0.1 -p 5433 -U postgres -d postgres -v ON_ERROR_STOP=1 -c "DROP DATABASE IF EXISTS djinn_test_template"
+          psql -h 127.0.0.1 -p 5433 -U postgres -d postgres -v ON_ERROR_STOP=1 -c "CREATE DATABASE djinn_test_template"
+          SQLX_OFFLINE=true DJINN_TEST_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5433/postgres cargo test -p djinn-db --test setup_test_template -- --ignored
+          psql -h 127.0.0.1 -p 5433 -U postgres -d postgres -v ON_ERROR_STOP=1 -c "UPDATE pg_database SET datistemplate = TRUE WHERE datname = 'djinn_test_template'"
+      - uses: taiki-e/install-action@nextest
+      - name: Prove the cutover preflight against a live render and real Postgres
+        run: |
+          set -euo pipefail
+          # `--run-ignored all` runs the ignored proofs ALONGSIDE the always-on
+          # guards, so the wiring guard and the source gates are covered by the
+          # same invocation. The PASS count is then compared against the
+          # declaration above: a lane that quietly runs zero proofs must fail
+          # rather than look green.
+          #
+          # Counted from nextest's own `PASS` lines rather than
+          # `--message-format libtest-json`, which is gated behind an
+          # experimental flag and whose shape is explicitly unstable.
+          #
+          # ANSI is stripped first. This workflow sets `CARGO_TERM_COLOR: always`
+          # (env, line ~25), so nextest colorizes even into a pipe and every
+          # PASS line is `ESC[32;1m        PASS ESC[0m ...`. Matching the raw
+          # text counted 0 while all 25 proofs had just passed — caught here
+          # only because the guard fails CLOSED on a count it cannot read.
+          cargo nextest run -p djinn-k8s --test cutover_preflight \
+            --run-ignored all --no-fail-fast 2>&1 | tee "$RUNNER_TEMP/cutover.log"
+          plain="$RUNNER_TEMP/cutover-plain.log"
+          sed -E 's/\x1b\[[0-9;]*[A-Za-z]//g' "$RUNNER_TEMP/cutover.log" > "$plain"
+          executed=$(grep -cE '^ +PASS \[' "$plain" || true)
+          echo "::notice::cutover-preflight proofs executed=$executed expected>=$DJINN_CUTOVER_EXPECTED_PROOFS"
+          if [ "$executed" -lt "$DJINN_CUTOVER_EXPECTED_PROOFS" ]; then
+            echo "::error title=Cutover preflight proofs did not run::executed $executed, expected at least $DJINN_CUTOVER_EXPECTED_PROOFS. An ignored proof nobody runs is the exact defect this lane exists to prevent."
+            exit 1
+          fi
+          # A skipped proof is an unrun proof wearing a different hat.
+          if ! grep -qE '0 skipped' "$plain"; then
+            echo "::error title=Cutover preflight proofs were skipped::nextest reported skipped tests; --run-ignored all must execute every proof in this binary."
+            exit 1
+          fi
+      - name: Build the deploy-time cutover preflight driver
+        # Built HERE, from `server/`, and handed to the contract suite by path.
+        #
+        # This workflow sets `CARGO_BUILD_BUILD_DIR: target` (env, line ~26) and
+        # cargo resolves a RELATIVE build-dir against the process CWD. The
+        # contract suite runs from the repository root, so letting it build the
+        # binary itself would send every intermediate to `<repo>/target` and
+        # rebuild the whole djinn-k8s chain from proc-macro2 off a warm cache —
+        # the same trap `server-sqlx-freshness` documents at line ~1671.
+        run: cargo build -p djinn-k8s --bin cutover-preflight
+      - name: Test the deploy-time cutover preflight driver
+        # The exit code of deploy/preflight/cutover-preflight.sh is the whole
+        # contract, and this suite is what asserts it. DJINN_DATABASE_URL is
+        # supplied so the drain fence is READ rather than reported unobservable,
+        # which is the only configuration in which a clean verdict is a genuine
+        # exit 0.
+        working-directory: ${{ github.workspace }}
+        env:
+          DJINN_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5433/djinn
+          CUTOVER_PREFLIGHT_BIN: ${{ github.workspace }}/server/target/debug/cutover-preflight
+        run: bash deploy/preflight/tests/cutover-preflight.sh
   launcher-kernel-boundary:
     name: Launcher Kernel Boundary
     needs: preflight
@@ -1190,14 +1493,51 @@ jobs:
               rm -f "$page_response" "$page_candidates"
               break
             fi
-            jq -r '.artifacts[] | select(.workflow_run.conclusion == "success") | .id' "$page_response" > "$page_candidates"
+            # Emit `<artifact-id> <run-id>` pairs. The producing run's
+            # conclusion is resolved per candidate below and NOT filtered here:
+            # the artifacts endpoint's `workflow_run` object carries only
+            # {id, repository_id, head_repository_id, head_branch, head_sha} —
+            # there is no `conclusion` field on it. Selecting candidates by that
+            # missing field — which this loop did until 2026-07-30 — therefore
+            # matched NOTHING on every run: the candidate list came out empty,
+            # the bounded search ran to exhaustion, and the planner cold-started
+            # every single time. (ci-nextest-plan.test.mjs now fails if the
+            # filter comes back; that is why the expression is described here
+            # rather than quoted.) Verified 2026-07-30 on
+            # runs 30493437428, 30497097480, 30498632438 and 30499367637 — all
+            # four logged "No compatible prior timing artifact found".
+            #
+            # That silently made COLD_START_SHARDS the only shard count the PR
+            # lane ever used, so PR_DEFAULT_SHARDS, PR_MAX_SHARDS and both
+            # PR_WIDEN_* thresholds were dead code, and shard balancing was
+            # always equal-test-count rather than equal-duration.
+            #
+            # `expired` artifacts are dropped here because their download
+            # returns 410 and would burn a candidate slot.
+            jq -r '.artifacts[] | select(.expired != true) | "\(.id) \(.workflow_run.id)"' "$page_response" > "$page_candidates"
             artifact_count="$(jq '.artifacts | length' "$page_response")"
             rm -f "$page_response"
             if [ "$artifact_count" -eq 0 ]; then
               rm -f "$page_candidates"
               break
             fi
-            while IFS= read -r artifact_id && [ -n "$artifact_id" ]; do
+            while IFS=' ' read -r artifact_id run_id && [ -n "$artifact_id" ]; do
+              # Resolve the producing run's conclusion on the runs endpoint,
+              # which does expose it. Bounded: the loop breaks on the first
+              # compatible artifact, so this is normally one extra call. A
+              # non-success run's timings would still be SAFE to use (the
+              # planner's contract lets timing influence balancing only, never
+              # selection) but they are skewed — tests after an early failure
+              # never ran — so prefer a successful run and fall through to an
+              # older one.
+              set +e
+              run_conclusion="$(gh api "repos/${{ github.repository }}/actions/runs/$run_id" \
+                --jq '.conclusion' 2>> nextest-timing/restore.log)"
+              set -e
+              if [ "$run_conclusion" != success ]; then
+                echo "::notice::Timing artifact $artifact_id came from run $run_id (conclusion=${run_conclusion:-unknown}); trying next older candidate."
+                continue
+              fi
               rm -f nextest-timing/timing.zip nextest-timing/timing.json
               set +e
               gh api "repos/${{ github.repository }}/actions/artifacts/$artifact_id/zip" > nextest-timing/timing.zip 2>> nextest-timing/restore.log
@@ -1216,11 +1556,30 @@ jobs:
                 continue
               fi
               # Apply the planner's seven-day freshness policy before acceptance.
+              #
+              # The fractional-second strip is load-bearing, not defensive.
+              # `fromdateiso8601` is strptime("%Y-%m-%dT%H:%M:%SZ") and does NOT
+              # accept a fractional part, but this artifact's `generated_at` is
+              # written by `new Date().toISOString()` (see the timing publish
+              # step below), which always emits milliseconds:
+              #
+              #   date "2026-07-30T11:45:20.077Z" does not match format ...
+              #
+              # jq then EXITS NON-ZERO, `2>&1` swallowed the message, and the
+              # candidate was rejected as "malformed or incompatible" — so this
+              # gate rejected 100% of artifacts, including ones it had just
+              # confirmed were the right version and shape. Stacked with the
+              # artifacts-endpoint filter bug above, the restore had two
+              # independent reasons never to succeed.
+              #
+              # Fixed at the READER on purpose. Emitting second precision from
+              # the writer instead would leave every artifact already inside the
+              # seven-day window unreadable, i.e. a week with no balancing.
               if ! jq -e '
                 .version == "ci-nextest-timing/v1" and
                 (.tests | type) == "object" and
                 (.generated_at | type) == "string" and
-                ((.generated_at | fromdateiso8601) as $generated |
+                ((.generated_at | sub("\\.[0-9]+(?=Z$)"; "") | fromdateiso8601) as $generated |
                   $generated <= now and (now - $generated) <= (7 * 24 * 60 * 60))
               ' nextest-timing/timing.json > /dev/null 2>&1; then
                 echo "::notice::Timing artifact $artifact_id is malformed or incompatible; trying next older candidate."
@@ -1306,6 +1665,25 @@ jobs:
     timeout-minutes: 40
     strategy:
       fail-fast: false
+      # WIDTH INVARIANT: this list must have at least as many rows as the
+      # WIDEST plan the planner can emit, i.e. max(PR_MAX_SHARDS,
+      # WIDE_DEFAULT_SHARDS, COLD_START_SHARDS) in scripts/ci-nextest-plan.mjs.
+      # `CI_SERVER_TEST_MATRIX_WIDTH` at the top of this file must equal this
+      # row count, and `ci-nextest-plan.test.mjs` fails if either side drifts.
+      #
+      # Why it is load-bearing: because the surplus direction is SAFE and the
+      # deficit direction is SILENT. A plan narrower than the matrix no-ops its
+      # extra indices. A plan WIDER than the matrix has no job for the tail
+      # indices, so those tests simply never run — and nothing notices. The
+      # exact-once proof is a property of the PLAN's partition, not of what
+      # executed, so it still passes; the surviving shards all succeed; and the
+      # gate goes green.
+      #
+      # This happened. #2799 raised PR_MAX_SHARDS 4 -> 8 against this list
+      # while it still had four rows, and once #2803 made the planner reach
+      # PR_MAX_SHARDS at all, run 30544309199 planned eight shards of ~1458
+      # tests and ran four of them: 5834 of 11666 tests (50%) were assigned to
+      # shardIndex 4-7, which had no jobs. The run was green.
       matrix:
         include:
           - shard: shard-1
@@ -1316,6 +1694,14 @@ jobs:
             shardIndex: 2
           - shard: shard-4
             shardIndex: 3
+          - shard: shard-5
+            shardIndex: 4
+          - shard: shard-6
+            shardIndex: 5
+          - shard: shard-7
+            shardIndex: 6
+          - shard: shard-8
+            shardIndex: 7
     defaults:
       run:
         working-directory: server
@@ -1542,6 +1928,16 @@ jobs:
           set -euo pipefail
           matched=$(jq -r --argjson idx "$SHARD_INDEX" '[.shards[] | select(.shardIndex == $idx)] | length' nextest-plan/matrix.json)
           shard_count=$(jq -r '.shardCount' nextest-plan/matrix.json)
+          # WIDTH GUARD — fail closed when the plan is WIDER than the static
+          # matrix. Every running shard trips this, because no job can detect
+          # its own absence: the shards that would cover indices >= the matrix
+          # width are precisely the ones that were never created. Without this,
+          # a plan of 8 against a matrix of 4 runs half the suite and reports
+          # success (run 30544309199: 5834 of 11666 tests never executed).
+          if [ "$shard_count" -gt "$CI_SERVER_TEST_MATRIX_WIDTH" ]; then
+            echo "::error title=Shard matrix too narrow::Plan selected $shard_count shard(s) but server-test's static matrix provisions only $CI_SERVER_TEST_MATRIX_WIDTH. Tests on shardIndex $CI_SERVER_TEST_MATRIX_WIDTH..$((shard_count - 1)) would NEVER RUN and the gate would still pass. Add matrix rows (and raise CI_SERVER_TEST_MATRIX_WIDTH) or lower the planner's shard count."
+            exit 1
+          fi
           if [ "$matched" -eq 0 ]; then
             if [ "$SHARD_INDEX" -ge "$shard_count" ]; then
               # The matrix provisions the planner's maximum width; this plan
@@ -1596,7 +1992,19 @@ jobs:
         if: steps.shard.outputs.active == 'true'
         env:
           NEXTEST_PROFILE: ${{ github.event_name == 'pull_request' && 'pull-request' || github.event_name == 'merge_group' && 'merge-group' || 'full-validation' }}
-          RUST_MIN_STACK: "8388608"
+          # NOTE: there is deliberately NO `RUST_MIN_STACK` here. One used to be
+          # (`8388608`, added in 1b4641fc0 "eliminate coordinator shard
+          # stack-overflow failures"), and it masked a real defect for eleven
+          # days: `CoordinatorActor::run`'s nested `async fn` chain consumed
+          # 2,210,352 bytes — 105% of tokio's 2 MiB worker stack — in a debug
+          # build, and the worst-case path through the actor reached 3.6 MiB.
+          # Production has no equivalent override (`server/src/main.rs` builds
+          # `new_multi_thread()` with the default 2 MiB stacks), so the override
+          # bought CI a green tick on a configuration production never ran.
+          # The chain is now structurally bounded — see
+          # `djinn-coordinator/src/poll_stack.rs` — so CI and local runs see the
+          # same 2 MiB budget. Do not re-add it: raising the stack here hides
+          # exactly the regression this gate exists to catch.
         run: |
           set -uo pipefail
           started_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -2152,6 +2560,7 @@ jobs:
       - server-guards
       - server-clippy
       - deploy-render-gate
+      - cutover-preflight
       - server-aarch64-check
       - nextest-plan
       - server-test
@@ -2176,6 +2585,10 @@ jobs:
           CLIPPY: ${{ needs.preflight.outputs.clippy }}:${{ needs.server-clippy.result }}
           # Routed by the same output as clippy — see the job's own comment.
           RENDER_GATE: ${{ needs.preflight.outputs.clippy }}:${{ needs.deploy-render-gate.result }}
+          # Routed by the same output as clippy — see the job's own comment.
+          # Present here so `deploy/preflight/cutover-preflight.sh`'s exit code
+          # is a merge-blocking contract rather than a lane nobody reads.
+          CUTOVER_PREFLIGHT: ${{ needs.preflight.outputs.clippy }}:${{ needs.cutover-preflight.result }}
           AARCH64: ${{ needs.preflight.outputs.aarch64 }}:${{ needs.server-aarch64-check.result }}
           SERVER_TEST_PLAN: ${{ needs.preflight.outputs.serverTest }}:${{ needs.nextest-plan.result }}
           SERVER_TEST_SHARDS: ${{ needs.preflight.outputs.serverTest }}:${{ needs.server-test.result }}
@@ -2196,7 +2609,8 @@ jobs:
             echo "lane $lane selected=$selected result=$result"; return 1
           }
           check server-guards "$GUARDS"; check clippy "$CLIPPY"
-          check deploy-render-gate "$RENDER_GATE"; check aarch64 "$AARCH64"
+          check deploy-render-gate "$RENDER_GATE"; check cutover-preflight "$CUTOVER_PREFLIGHT"
+          check aarch64 "$AARCH64"
           check server-test-plan "$SERVER_TEST_PLAN"; check server-test-shards "$SERVER_TEST_SHARDS"; check server-test-timing "$SERVER_TEST_TIMING"
           check sqlx-freshness "$SQLX"; check memory-eval "$MEMORY"
           check local-dev-contracts "$TILT_CONTRACTS"; check qa-smoke "$QA_SMOKE"; check ui "$UI"

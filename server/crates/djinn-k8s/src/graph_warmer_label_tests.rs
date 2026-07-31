@@ -226,7 +226,13 @@ fn assert_job_identifiers_are_kubernetes_legal(job: &Job) {
 fn dispatched_warm_job_identifiers_are_kubernetes_legal() {
     let mut cfg = KubernetesConfig::for_testing();
     cfg.database_url = Some("postgres://djinn@djinn-postgres:5432/djinn".into());
-    let mut job = build_warm_job(&cfg, PROJECT_ID, "reg.example:5000/p:abc123", None);
+    let mut job = build_warm_job(
+        &cfg,
+        PROJECT_ID,
+        REVISION,
+        "reg.example:5000/p:abc123",
+        None,
+    );
     stamp_admission_identity(&mut job, &warm_request(PROJECT_ID, REVISION));
 
     assert_job_identifiers_are_kubernetes_legal(&job);
@@ -236,7 +242,13 @@ fn dispatched_warm_job_identifiers_are_kubernetes_legal() {
 fn admission_labels_carry_the_identity_reconciliation_reads_back() {
     let mut cfg = KubernetesConfig::for_testing();
     cfg.database_url = Some("postgres://djinn@djinn-postgres:5432/djinn".into());
-    let mut job = build_warm_job(&cfg, PROJECT_ID, "reg.example:5000/p:abc123", None);
+    let mut job = build_warm_job(
+        &cfg,
+        PROJECT_ID,
+        REVISION,
+        "reg.example:5000/p:abc123",
+        None,
+    );
     let request = warm_request(PROJECT_ID, REVISION);
     stamp_admission_identity(&mut job, &request);
 

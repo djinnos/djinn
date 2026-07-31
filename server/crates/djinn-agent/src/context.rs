@@ -1,3 +1,7 @@
+// djinn:allow-oversize — this file sat 44 bytes under the size guard before
+// 0ppk-1b added one server-injected bridge field to `AgentContext`, so any
+// field added here at all trips it. Split the context struct's supporting types
+// out when this file is next touched substantively.
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -86,17 +90,16 @@ impl ShellLaunchContext {
     /// # `admission_db` is the PLATFORM database, and it is not optional
     ///
     /// The build-lease escalation this context arms is governed by the durable
-    /// `admission_handoff` epoch, which lives in the platform database. This
+    /// invocation-lease authority, which lives in the platform database. This
     /// constructor therefore takes the handle and builds the authority itself,
     /// rather than accepting a pre-made authority or reading an environment
     /// variable: goxi launcher blocker 13 was a composition defect, where the
     /// runner was handed a `SupervisorServices` (`RpcServices`) whose defaulted
     /// `invocation_lift_decision` returned `Unleased` for every invocation while
-    /// the epoch was fully armed. Nothing here can now opt out of the read, and
+    /// the authority was armed. Nothing here can now opt out of the read, and
     /// the only `Database` a task-run Pod has is the one
     /// `bootstrap_warm_database()` opens from `DJINN_DATABASE_URL` — never the
-    /// project's `DATABASE_URL` catalog-service sidecar, which has no
-    /// `admission_handoff` table at all.
+    /// project's `DATABASE_URL` catalog sidecar, which has no authority row.
     pub async fn broker_backed(
         task_id: String,
         task_run_id: String,
@@ -456,6 +459,14 @@ pub struct AgentContext {
     /// control-plane seam without depending on Kubernetes directly. `None` in
     /// off-server/test contexts falls back to the agent-internal no-op runtime.
     pub runtime_ops: Option<Arc<dyn bridge::RuntimeOps>>,
+    /// Proposal `3i92`'s post-admission resize stack, injected at the server
+    /// boundary by `AppState::agent_context()`. `None` marks an off-server
+    /// context, never a disable switch — see
+    /// [`crate::task_run_resize_admission`] for what that distinction costs.
+    pub resize_admission: Option<crate::task_run_resize_admission::ResizeAdmissionBridge>,
+    /// Proposal `3i92`'s fail-safe drop, injected at the same boundary. `None`
+    /// marks an off-server context; see [`crate::task_run_resize_drop_gate`].
+    pub resize_drop: Option<crate::task_run_resize_drop_gate::ResizeDropBridge>,
     /// **This process's own view** of the per-task-run Cargo target root.
     ///
     /// Required, deliberately: the shared cache PVC is mounted at *different*

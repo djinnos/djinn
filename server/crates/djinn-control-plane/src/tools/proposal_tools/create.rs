@@ -1,3 +1,15 @@
+// djinn:allow-oversize
+//
+// Production module. It sat 141 bytes under the byte threshold on `main`; the
+// three `mod` declarations and their comment at the foot of this file pushed it
+// 200 bytes over. Marked rather than shaved: trimming a comment to buy back a
+// few dozen bytes would be evading the guard rather than answering it, and
+// would leave the next person to touch this file tripping the same wire.
+//
+// Not split either — carving up the create/import/export/show/list/update/
+// block-patch/delete tool surface is a behaviour-bearing change, and this PR is
+// a test-layout refactor. That split, if wanted, belongs in its own change.
+//
 // Create/read/import/export/list/update/block-patch/delete CRUD tools for the
 // global Proposals layer.
 //
@@ -5,7 +17,7 @@
 // delete mutation surface plus target add/remove and the cohesive list/show/
 // target response shaping used by those tools.
 //
-// CRUD tests live in `create_tests.rs`; cross-slice gate/readiness and response
+// CRUD tests live in `create/`; cross-slice gate/readiness and response
 // helpers remain shared in `mod.rs`.
 //
 // Debate-trail and refinement-status data fetches in `proposal_show`:
@@ -1212,7 +1224,15 @@ impl DjinnMcpServer {
     }
 }
 
+// Tests for this concern live in `create/`. They are real modules, not
+// textually included fragments: rust-analyzer emits no SCIP document for an
+// included file, so anything defined inside one is unfindable by every agent
+// and by the `*.rs`-filtered CI guards. See scripts/check-include-macro.sh.
 #[cfg(test)]
-mod create_tests {
-    include!("create_tests.rs");
-}
+mod create_tests;
+
+#[cfg(test)]
+mod create_mdx_tests;
+
+#[cfg(test)]
+mod create_lint_tests;

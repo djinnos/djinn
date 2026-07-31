@@ -1,9 +1,15 @@
 # Djinn Helm charts
 
-Phase 2 installs Djinn on top of Kubernetes via two charts:
+Phase 2 installs Djinn on top of Kubernetes via three charts:
 
-- `djinn-crds/` — reserved for future CustomResourceDefinitions. Install
-  first, upgrade independently. Empty in the current release.
+- `djinn-prereqs/` — cluster-scoped **third-party** prerequisites, pinned to
+  upstream releases. Today: Kueue `0.19.0`. Optional; install as its own
+  release before `djinn`, exactly like cert-manager. See its
+  [README](djinn-prereqs/README.md) and
+  [deploy/kueue/README.md](../kueue/README.md).
+- `djinn-crds/` — reserved for **Djinn's own** future CustomResourceDefinitions.
+  Install first, upgrade independently. Empty in the current release. Not a
+  home for third-party operators.
 - `djinn/` — the workload: djinn-server controller Deployment, bundled
   Postgres 16 + Qdrant StatefulSets, per-task-run RBAC, PVCs, and secrets.
 
@@ -11,6 +17,14 @@ Phase 2 installs Djinn on top of Kubernetes via two charts:
 
 - `kubectl` >= 1.29
 - `helm` >= 3.14
+- Only if you set `kueue.enabled: true` on the `djinn` chart: the
+  `djinn-prereqs` release, and a cluster at **Kubernetes >= 1.30** (a Kueue 0.19
+  requirement that the upstream chart does not declare, so Helm will not check
+  it; 1.29 rejects its CRDs, and the floor is 1.30 rather than 1.34 only
+  because Djinn's values disable the DRA feature gates — see
+  [deploy/kueue/README.md](../kueue/README.md#minimum-kubernetes-is-130-and-only-because-dra-is-disabled)).
+  Without it the `djinn` chart still installs — the queue topology is off
+  by default.
 - A Kubernetes cluster. For production deploys, ensure a StorageClass that
   satisfies `ReadWriteMany` is available (the `mirrors` and `cache` PVCs
   default to RWX so the mirror cache can be shared across task-run Pods on
@@ -21,9 +35,14 @@ Phase 2 installs Djinn on top of Kubernetes via two charts:
 ## Install order (production / manual)
 
 ```bash
+# Optional, and only if you want the Kueue queue topology:
+helm install djinn-prereqs deploy/helm/djinn-prereqs \
+  --namespace kueue-system --create-namespace --wait
+
 helm install djinn-crds deploy/helm/djinn-crds
 helm install djinn       deploy/helm/djinn \
   --namespace djinn --create-namespace
+# ... add --set kueue.enabled=true if you installed djinn-prereqs.
 ```
 
 ## Local kind workflow

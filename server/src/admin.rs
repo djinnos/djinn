@@ -6,266 +6,179 @@
 //! is returned to `main`, which prints it — this module performs no I/O to
 //! stdout/stderr itself so the coordinator lint budget stays clean.
 //!
-//! The `epoch` subtree drives the Build Leases v1 admission-epoch rollout through
-//! [`AdmissionTransitionExecutor`], the safe-ordering executor. Each `advance` /
-//! `rollback` / `kill-switch` invocation performs exactly one epoch-fenced step
-//! from the current durable state and reports what it did or what it is waiting
-//! on, so an operator (or the runbook) re-runs the command as controller and
-//! generation acknowledgements land.
+//! The `epoch` subtree is the operator surface for the **invocation-lease
+//! authority**: the durable arming switch and reference cap for the
+//! per-invocation cgroup CPU lease. It drives
+//! [`InvocationLeaseControl`], which composes the durable primitives; nothing
+//! here re-implements fencing.
 //!
-//! `seed` is the one step that creates the durable row rather than transitioning
-//! it. Startup deliberately never re-creates an absent row — mapping absence to
-//! the configured standalone v0 mode is the documented remediation for a wedged
-//! handoff — so restoring the rollout after that remediation is an explicit
-//! operator action rather than an implicit deploy-time side effect.
+//! `seed` is the one step that creates the durable row rather than mutating it.
+//! Startup deliberately never re-creates an absent row — an absent authority is
+//! a disarmed one, and removing the row is the documented remediation for a
+//! wedged authority — so restoring it is an explicit operator action rather than
+//! an implicit deploy-time side effect.
+//!
+//! # What the Kueue cutover removed here (S3b)
+//!
+//! `epoch advance` and `epoch rollback` are gone. They drove a four-phase ring
+//! (`emergency_primary → forward_overlap → invocation_primary →
+//! rollback_overlap`) whose only job was to hand admission authority between a v0
+//! "emergency" ledger and the v1 invocation authority without ever leaving zero
+//! enforcing authorities. The Kueue cutover deleted v0, so there is no handover
+//! to sequence and no phase to be in. `arm` and `kill-switch` express everything
+//! that is left, in one epoch-fenced write each. See
+//! `docs/BUILD_ADMISSION_EPOCH_RUNBOOK.md`.
 
 use std::fmt::Write as _;
 use std::sync::Arc;
 
-use djinn_coordinator::build_admission_transition::{AdmissionTransitionExecutor, TransitionError};
-#[cfg(test)]
-use djinn_db::AdmissionHandoffAuthority;
+use djinn_coordinator::invocation_lease_control::{ControlError, InvocationLeaseControl};
 use djinn_db::{
-    AdmissionHandoffPhase, AdmissionHandoffRepository, AdmissionHandoffRow, Database, V0Mode,
-    V1Mode,
+    Database, InvocationLeaseAuthorityRepository, InvocationLeaseAuthorityRow, InvocationLeaseMode,
 };
 
 /// Top-level operator admin commands.
 #[derive(clap::Subcommand, Debug)]
 pub enum AdminCommand {
-    /// Admission-epoch operator commands (Build Leases v1 rollout).
+    /// Invocation-lease authority operator commands.
     Epoch {
         #[command(subcommand)]
         action: EpochAction,
     },
 }
 
-/// Admission-epoch operator actions.
+/// The arming mode, as an operator spells it on the command line.
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ModeArg {
+    /// Disarmed: no invocation is leased.
+    Off,
+    /// Bind and measure, but never lift the reserved quota. NOTE this CLAMPS
+    /// every leased build to the unleased quota for its whole life — it is an
+    /// observation mode, not a faster one.
+    Shadow,
+    /// Armed: a bound invocation may lift `cpu.max`.
+    Enforce,
+}
+
+impl From<ModeArg> for InvocationLeaseMode {
+    fn from(value: ModeArg) -> Self {
+        match value {
+            ModeArg::Off => Self::Off,
+            ModeArg::Shadow => Self::Shadow,
+            ModeArg::Enforce => Self::Enforce,
+        }
+    }
+}
+
+/// Invocation-lease authority operator actions.
 #[derive(clap::Subcommand, Debug)]
 pub enum EpochAction {
-    /// Print the durable epoch row and its derived handoff state.
+    /// Print the durable authority row.
     Show,
-    /// Create the durable epoch row at its v0-enforcing baseline when it is
-    /// absent. Idempotent: an existing row is reported and left untouched.
+    /// Create the durable authority row, DISARMED, when it is absent.
+    /// Idempotent: an existing row is reported and left untouched.
     Seed,
-    /// Perform the next safe FORWARD step: arm shadow → arm overlap → enter
-    /// overlap → commit invocation-primary → observe v0.
-    Advance {
-        /// Reference cap for an arming step; defaults to the current cap.
+    /// Set the arming mode. `--cap` is required the first time the authority is
+    /// armed and preserved otherwise.
+    Arm {
+        #[arg(long, value_enum)]
+        mode: ModeArg,
+        /// Reference cap; defaults to the current cap.
         #[arg(long)]
         cap: Option<i64>,
-        /// Live generation keys that must acknowledge before invocation-primary.
-        #[arg(long = "generation")]
-        generations: Vec<String>,
     },
-    /// Change the reference cap (epoch-fenced; serializes with the handoff edge).
+    /// Change the reference cap, preserving the arming mode. Adopted by running
+    /// processes without a restart.
     SetCap {
         #[arg(long)]
         cap: i64,
     },
-    /// Perform the next safe ROLLBACK step. Defined from EVERY phase: from
-    /// invocation-primary/rollback-overlap it drives the three-step reverse
-    /// ordering that re-confirms v0 before releasing it; from an armed
-    /// emergency-primary or a forward-overlap — where v0 never stopped
-    /// enforcing — it aborts the cutover by setting v1 off in place.
-    Rollback {
-        /// Same-or-lower cap for the rollback arm; defaults to the current cap.
-        #[arg(long)]
-        cap: Option<i64>,
-    },
-    /// Urgent rollback — the same safe ordering as `rollback`, initiated while
-    /// v0 is still enforcing from the overlap.
-    KillSwitch {
-        /// Same-or-lower cap for the rollback arm; defaults to the current cap.
-        #[arg(long)]
-        cap: Option<i64>,
-    },
+    /// Urgent disarm: set the mode to `off` in one epoch-fenced write, keeping
+    /// the cap so re-arming needs no new number.
+    KillSwitch,
 }
 
 /// Run an admin command against `db`, returning a rendered result to print.
 ///
-/// A returned `Err` is a genuine failure (invalid transition, invalid config,
-/// storage error) that should exit non-zero. Expected "waiting" and "halted"
-/// outcomes are folded into the `Ok` rendering so an operator polling the command
-/// sees them without a non-zero exit.
+/// A returned `Err` is a genuine failure (stale epoch, invalid configuration,
+/// storage error) that should exit non-zero.
 pub async fn run_admin_command(db: &Database, command: AdminCommand) -> Result<String, String> {
-    let repo = Arc::new(AdmissionHandoffRepository::new(db.clone()));
-    let exec = AdmissionTransitionExecutor::new(repo);
+    let repo = Arc::new(InvocationLeaseAuthorityRepository::new(db.clone()));
+    let control = InvocationLeaseControl::new(repo);
     match command {
-        AdminCommand::Epoch { action } => run_epoch_action(&exec, action).await,
+        AdminCommand::Epoch { action } => run_epoch_action(&control, action).await,
     }
 }
 
 async fn run_epoch_action(
-    exec: &AdmissionTransitionExecutor,
+    control: &InvocationLeaseControl,
     action: EpochAction,
 ) -> Result<String, String> {
     match action {
         EpochAction::Show => {
-            let row = exec.show().await.map_err(|e| e.to_string())?;
+            let row = control.show().await.map_err(|e| e.to_string())?;
             Ok(render_show(row.as_ref()))
         }
         EpochAction::Seed => {
-            if let Some(row) = exec.show().await.map_err(|e| e.to_string())? {
+            if let Some(row) = control.show().await.map_err(|e| e.to_string())? {
                 return Ok(format!(
                     "seed: already present, left untouched\n{}",
                     render_show(Some(&row))
                 ));
             }
-            let row = exec.seed().await.map_err(|e| e.to_string())?;
+            let row = control.seed().await.map_err(|e| e.to_string())?;
             Ok(format!("seed: applied\n{}", render_show(Some(&row))))
         }
-        EpochAction::SetCap { cap } => {
-            let row = require_row(exec).await?;
-            fold(exec.set_cap(row.epoch, cap).await, "set-cap")
+        EpochAction::Arm { mode, cap } => {
+            let row = require_row(control).await?;
+            fold(control.arm(row.epoch, mode.into(), cap).await, "arm")
         }
-        EpochAction::Advance { cap, generations } => advance_forward(exec, cap, &generations).await,
-        EpochAction::Rollback { cap } | EpochAction::KillSwitch { cap } => {
-            advance_rollback(exec, cap).await
+        EpochAction::SetCap { cap } => {
+            let row = require_row(control).await?;
+            fold(control.set_cap(row.epoch, cap).await, "set-cap")
+        }
+        EpochAction::KillSwitch => {
+            let row = require_row(control).await?;
+            fold(control.kill_switch(row.epoch).await, "kill-switch")
         }
     }
 }
 
-async fn require_row(exec: &AdmissionTransitionExecutor) -> Result<AdmissionHandoffRow, String> {
-    exec.show()
+async fn require_row(
+    control: &InvocationLeaseControl,
+) -> Result<InvocationLeaseAuthorityRow, String> {
+    control
+        .show()
         .await
         .map_err(|e| e.to_string())?
-        .ok_or_else(|| "admission handoff row is absent".to_string())
+        .ok_or_else(|| ControlError::AuthorityAbsent.to_string())
 }
 
-/// Drive the next forward step from the current durable state.
-async fn advance_forward(
-    exec: &AdmissionTransitionExecutor,
-    cap: Option<i64>,
-    generations: &[String],
-) -> Result<String, String> {
-    let row = require_row(exec).await?;
-    let epoch = row.epoch;
-    match (row.phase, row.v0_mode, row.v1_mode) {
-        (AdmissionHandoffPhase::EmergencyPrimary, _, V1Mode::Off) => {
-            let cap = resolve_cap(cap, row.cap)?;
-            fold(exec.arm_shadow(epoch, cap).await, "arm-shadow")
-        }
-        (AdmissionHandoffPhase::EmergencyPrimary, _, V1Mode::Shadow) => {
-            let cap = resolve_cap(cap, row.cap)?;
-            fold(exec.arm_overlap(epoch, cap).await, "arm-overlap")
-        }
-        (AdmissionHandoffPhase::EmergencyPrimary, _, V1Mode::Enforce) => fold(
-            exec.enter_forward_overlap(epoch).await,
-            "enter-forward-overlap",
-        ),
-        (AdmissionHandoffPhase::ForwardOverlap, _, _) => fold(
-            exec.commit_invocation_primary(epoch, generations).await,
-            "commit-invocation-primary",
-        ),
-        (AdmissionHandoffPhase::InvocationPrimary, V0Mode::Enforce, _) => {
-            fold(exec.observe_v0(epoch).await, "observe-v0")
-        }
-        (AdmissionHandoffPhase::InvocationPrimary, _, _) => {
-            Ok("forward cutover complete: invocation-primary with v0 observing".to_string())
-        }
-        (phase, _, _) => Err(format!("no forward step is defined from phase {phase:?}")),
-    }
-}
-
-/// Drive the next rollback step from the current durable state.
-async fn advance_rollback(
-    exec: &AdmissionTransitionExecutor,
-    cap: Option<i64>,
-) -> Result<String, String> {
-    let row = require_row(exec).await?;
-    let epoch = row.epoch;
-    match row.phase {
-        AdmissionHandoffPhase::InvocationPrimary => {
-            let both_enforce = row.v0_mode == V0Mode::Enforce && row.v1_mode == V1Mode::Enforce;
-            if both_enforce {
-                fold(
-                    exec.enter_rollback_overlap(epoch).await,
-                    "enter-rollback-overlap",
-                )
-            } else {
-                let cap = resolve_cap(cap, row.cap)?;
-                fold(exec.arm_rollback(epoch, cap).await, "arm-rollback")
-            }
-        }
-        AdmissionHandoffPhase::RollbackOverlap => {
-            fold(exec.complete_rollback(epoch).await, "complete-rollback")
-        }
-        AdmissionHandoffPhase::EmergencyPrimary if row.v1_mode == V1Mode::Off => {
-            Ok("rollback complete: emergency-primary baseline (v0 enforce, v1 off)".to_string())
-        }
-        // A cutover that has NOT yet released v0 is aborted by disabling v1 in
-        // place, not by a phase move — the phase machine is a strict forward
-        // ring with no backward edge. This covers `forward_overlap` (where the
-        // only committed delta is "v1 lifts quota") and an `emergency_primary`
-        // row still carrying an armed shadow/overlap v1.
-        //
-        // Before this arm existed both fell through to
-        // `no rollback step is defined from phase ForwardOverlap`, so an
-        // operator who had advanced into the overlap had no epoch-level reverse
-        // gear at all: the documented workaround ("set v1 = off") named a
-        // command that did not exist, `set-cap` deliberately preserves modes,
-        // and the only remaining mitigation was disabling the launcher in Helm
-        // and redeploying while the durable row stayed armed. See
-        // `AdmissionTransitionExecutor::abort_v1_arming` for why this is safe.
-        AdmissionHandoffPhase::EmergencyPrimary | AdmissionHandoffPhase::ForwardOverlap => {
-            fold(exec.abort_v1_arming(epoch).await, "abort-v1-arming")
-        }
-    }
-}
-
-/// Use the requested cap, or fall back to the current durable cap; error when
-/// neither is available (an arming step must have a concrete cap).
-fn resolve_cap(requested: Option<i64>, current: Option<i64>) -> Result<i64, String> {
-    requested
-        .or(current)
-        .ok_or_else(|| "this step needs a cap; pass --cap N".to_string())
-}
-
-/// Fold a step result: success and the expected waiting/halted outcomes render
-/// to `Ok`; genuine failures render to `Err`.
 fn fold(
-    result: Result<AdmissionHandoffRow, TransitionError>,
+    result: Result<InvocationLeaseAuthorityRow, ControlError>,
     step: &str,
 ) -> Result<String, String> {
     match result {
         Ok(row) => Ok(format!("{step}: applied\n{}", render_show(Some(&row)))),
-        Err(err @ TransitionError::AwaitingEmergencyAck { .. })
-        | Err(err @ TransitionError::AwaitingGenerationAcks { .. })
-        | Err(err @ TransitionError::HaltedV0Unconfirmed { .. }) => {
-            Ok(format!("{step}: waiting — {err}"))
-        }
         Err(err) => Err(format!("{step}: {err}")),
     }
 }
 
-fn render_show(row: Option<&AdmissionHandoffRow>) -> String {
+fn render_show(row: Option<&InvocationLeaseAuthorityRow>) -> String {
     let Some(row) = row else {
-        return "admission handoff row: <absent>".to_string();
+        return "invocation lease authority: <absent> (disarmed; run `seed` to create it)"
+            .to_string();
     };
     let mut out = String::new();
-    let _ = writeln!(out, "phase                 {:?}", row.phase);
-    let _ = writeln!(out, "epoch                 {}", row.epoch);
-    let _ = writeln!(out, "v0_mode               {:?}", row.v0_mode);
-    let _ = writeln!(out, "v1_mode               {:?}", row.v1_mode);
+    let _ = writeln!(out, "mode                  {:?}", row.mode);
     let _ = writeln!(
         out,
         "cap                   {}",
         row.cap
             .map_or_else(|| "<unset>".to_string(), |c| c.to_string())
     );
-    let _ = writeln!(
-        out,
-        "emergency_ack_epoch   {}",
-        row.emergency_ack_epoch
-            .map_or_else(|| "<none>".to_string(), |e| e.to_string())
-    );
-    let _ = write!(
-        out,
-        "invocation_ack_epoch  {}",
-        row.invocation_ack_epoch
-            .map_or_else(|| "<none>".to_string(), |e| e.to_string())
-    );
+    let _ = writeln!(out, "epoch                 {}", row.epoch);
+    let _ = write!(out, "updated_at            {}", row.updated_at);
     out
 }
 
@@ -273,135 +186,127 @@ fn render_show(row: Option<&AdmissionHandoffRow>) -> String {
 mod tests {
     use super::*;
 
-    /// `epoch seed` is the operator surface that restores a deployment whose row
-    /// was deleted, and it must land on a complete (already acknowledged) v0
-    /// baseline so the next `advance` is not blocked waiting for an ack that
-    /// only a healthy coordinator leader can write.
+    /// **AC4: every surviving subcommand executes against a real database.**
+    ///
+    /// Not "the enum still has five variants" — each one is dispatched through
+    /// `run_epoch_action`, the exact path `main` takes, and its effect on the
+    /// durable row is asserted. A subcommand that still resolved to a deleted
+    /// relation would fail here rather than at 3am.
     #[tokio::test]
-    async fn seed_creates_an_acknowledged_baseline_and_is_idempotent() {
+    async fn every_surviving_subcommand_runs_against_a_real_database() {
         let db = Database::open_in_memory().expect("test database");
-        let repo = Arc::new(AdmissionHandoffRepository::new(db));
+        let repo = Arc::new(InvocationLeaseAuthorityRepository::new(db));
         repo.read().await.expect("initialize fixture");
         repo.delete_for_test().await.expect("remove row");
+        let control = InvocationLeaseControl::new(Arc::clone(&repo));
 
-        let rendered = run_admin_command_with(&repo, EpochAction::Seed)
+        // `show` against an absent authority names the state and the remedy.
+        let rendered = run_epoch_action(&control, EpochAction::Show)
+            .await
+            .expect("show never fails on an absent row");
+        assert!(rendered.contains("<absent>"), "{rendered}");
+        assert!(rendered.contains("seed"), "{rendered}");
+
+        // `seed` creates it, DISARMED.
+        let rendered = run_epoch_action(&control, EpochAction::Seed)
             .await
             .expect("seed applies");
         assert!(rendered.starts_with("seed: applied"), "{rendered}");
         let seeded = repo.read().await.expect("read").expect("seeded row");
-        assert_eq!(seeded.phase, AdmissionHandoffPhase::EmergencyPrimary);
-        assert_eq!(seeded.v0_mode, V0Mode::Enforce);
-        assert_eq!(seeded.v1_mode, V1Mode::Off);
-        assert_eq!(seeded.emergency_ack_epoch, Some(seeded.epoch));
+        assert_eq!(seeded.mode, InvocationLeaseMode::Off);
 
-        let rendered = run_admin_command_with(&repo, EpochAction::Seed)
+        // `seed` again is idempotent and never destructive.
+        let rendered = run_epoch_action(&control, EpochAction::Seed)
             .await
             .expect("repeat seed reports the existing row");
         assert!(rendered.starts_with("seed: already present"), "{rendered}");
         assert_eq!(repo.read().await.expect("read").expect("row"), seeded);
 
-        // The acknowledged baseline is immediately armable: the shadow step no
-        // longer has to wait for a coordinator tick to complete the epoch.
-        let rendered = run_admin_command_with(
-            &repo,
-            EpochAction::Advance {
+        // `arm --mode shadow --cap 3`.
+        let rendered = run_epoch_action(
+            &control,
+            EpochAction::Arm {
+                mode: ModeArg::Shadow,
                 cap: Some(3),
-                generations: Vec::new(),
             },
         )
         .await
         .expect("arm shadow");
-        assert!(rendered.starts_with("arm-shadow: applied"), "{rendered}");
-    }
-
-    /// goxi launcher blocker 14, second defect: `epoch rollback` must have a
-    /// step from **every** phase.
-    ///
-    /// It used to answer `no rollback step is defined from phase ForwardOverlap`,
-    /// so an operator who had advanced into the overlap had no epoch-level
-    /// reverse gear and had to disable the launcher in Helm and redeploy while
-    /// the durable row stayed armed. This drives the whole thing through the
-    /// **CLI dispatch** — `advance_rollback`'s phase table — which had no test at
-    /// all.
-    #[tokio::test]
-    async fn rollback_has_a_step_from_every_phase_including_the_forward_overlap() {
-        let db = Database::open_in_memory().expect("test database");
-        let repo = Arc::new(AdmissionHandoffRepository::new(db));
-        repo.read().await.expect("initialize fixture");
-
-        let advance = || EpochAction::Advance {
-            cap: Some(3),
-            generations: Vec::new(),
-        };
-        let rollback = || EpochAction::Rollback { cap: Some(3) };
-
-        // A rollback from an armed shadow (still emergency_primary) disables v1
-        // rather than erroring.
-        run_admin_command_with(&repo, advance())
-            .await
-            .expect("arm shadow");
-        let rendered = run_admin_command_with(&repo, rollback())
-            .await
-            .expect("an armed shadow must be abortable");
-        assert!(
-            rendered.starts_with("abort-v1-arming: applied"),
-            "{rendered}"
-        );
+        assert!(rendered.starts_with("arm: applied"), "{rendered}");
         assert_eq!(
-            repo.read().await.expect("read").expect("row").v1_mode,
-            V1Mode::Off
+            repo.read().await.expect("read").expect("row").mode,
+            InvocationLeaseMode::Shadow
         );
 
-        // Drive forward into the overlap: shadow -> overlap modes -> the phase
-        // advance (which needs the leader's v0 ack).
-        for _ in 0..2 {
-            run_admin_command_with(&repo, advance())
-                .await
-                .expect("arm forward");
+        // `arm --mode enforce` inherits the stored cap.
+        run_epoch_action(
+            &control,
+            EpochAction::Arm {
+                mode: ModeArg::Enforce,
+                cap: None,
+            },
+        )
+        .await
+        .expect("arm enforce");
+        let armed = repo.read().await.expect("read").expect("row");
+        assert_eq!(armed.mode, InvocationLeaseMode::Enforce);
+        assert_eq!(armed.cap, Some(3));
+
+        // `set-cap` preserves the mode.
+        let rendered = run_epoch_action(&control, EpochAction::SetCap { cap: 12 })
+            .await
+            .expect("set-cap");
+        assert!(rendered.starts_with("set-cap: applied"), "{rendered}");
+        let recapped = repo.read().await.expect("read").expect("row");
+        assert_eq!(recapped.cap, Some(12));
+        assert_eq!(
+            recapped.mode,
+            InvocationLeaseMode::Enforce,
+            "a cap change must never disarm the authority"
+        );
+
+        // `kill-switch` disarms and keeps the cap.
+        let rendered = run_epoch_action(&control, EpochAction::KillSwitch)
+            .await
+            .expect("kill-switch");
+        assert!(rendered.starts_with("kill-switch: applied"), "{rendered}");
+        let killed = repo.read().await.expect("read").expect("row");
+        assert_eq!(killed.mode, InvocationLeaseMode::Off);
+        assert_eq!(killed.cap, Some(12));
+
+        // And `show` renders the surviving fields, none of them retired.
+        let rendered = run_epoch_action(&control, EpochAction::Show)
+            .await
+            .expect("show");
+        for field in ["mode", "cap", "epoch", "updated_at"] {
+            assert!(rendered.contains(field), "{field} missing from {rendered}");
         }
-        let epoch = repo.read().await.expect("read").expect("row").epoch;
-        repo.acknowledge(AdmissionHandoffAuthority::Emergency, epoch)
-            .await
-            .expect("leader acks v0");
-        let rendered = run_admin_command_with(&repo, advance())
-            .await
-            .expect("enter the forward overlap");
-        assert!(
-            rendered.starts_with("enter-forward-overlap: applied"),
-            "{rendered}"
-        );
-        let overlap = repo.read().await.expect("read").expect("row");
-        assert_eq!(overlap.phase, AdmissionHandoffPhase::ForwardOverlap);
-        assert_eq!(overlap.v1_mode, V1Mode::Enforce);
-
-        // THE regression: this returned
-        // `no rollback step is defined from phase ForwardOverlap`.
-        let rendered = run_admin_command_with(&repo, rollback())
-            .await
-            .expect("a forward overlap must be abortable; an armed rollout needs a reverse gear");
-        assert!(
-            rendered.starts_with("abort-v1-arming: applied"),
-            "{rendered}"
-        );
-        let aborted = repo.read().await.expect("read").expect("row");
-        assert_eq!(aborted.v1_mode, V1Mode::Off, "v1 must stop lifting");
-        assert_eq!(
-            aborted.v0_mode,
-            V0Mode::Enforce,
-            "v0 must still be enforcing, so an authority survives the abort"
-        );
-
-        // And the terminal answer is still reported rather than looping.
-        let rendered = run_admin_command_with(&repo, rollback())
-            .await
-            .expect("the baseline reports completion");
-        assert!(rendered.starts_with("abort-v1-arming"), "{rendered}");
+        for retired in ["phase", "v0_mode", "v1_mode", "ack"] {
+            assert!(
+                !rendered.contains(retired),
+                "`{retired}` belongs to the retired v0↔v1 handoff and must not be \
+                 rendered: {rendered}"
+            );
+        }
     }
 
-    async fn run_admin_command_with(
-        repo: &Arc<AdmissionHandoffRepository>,
-        action: EpochAction,
-    ) -> Result<String, String> {
-        run_epoch_action(&AdmissionTransitionExecutor::new(repo.clone()), action).await
+    /// An operator error is a non-zero exit with an actionable message, not a
+    /// silently-applied write.
+    #[tokio::test]
+    async fn an_invalid_cap_is_refused_and_leaves_the_row_untouched() {
+        let db = Database::open_in_memory().expect("test database");
+        let repo = Arc::new(InvocationLeaseAuthorityRepository::new(db));
+        let before = repo.read().await.expect("read").expect("seeded row");
+        let control = InvocationLeaseControl::new(Arc::clone(&repo));
+
+        let error = run_epoch_action(&control, EpochAction::SetCap { cap: 0 })
+            .await
+            .expect_err("a zero cap must be refused");
+        assert!(error.contains("out of range"), "{error}");
+        assert_eq!(
+            repo.read().await.expect("read").expect("row"),
+            before,
+            "a refused command must not mutate the durable row"
+        );
     }
 }

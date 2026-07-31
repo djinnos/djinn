@@ -11,11 +11,10 @@ use std::sync::{
 
 use async_trait::async_trait;
 use djinn_db::{
-    AdmissionHandoffRepository, BuildLeaseConsumerKind, BuildLeaseKey, BuildLeaseRepository,
-    BuildLeaseRow, BuildLeaseState, BuildLeaseTerminalReason, GrantNextBuildLeaseResult,
+    BuildLeaseConsumerKind, BuildLeaseKey, BuildLeaseRepository, BuildLeaseRow, BuildLeaseState,
+    BuildLeaseTerminalReason, GrantNextBuildLeaseResult, InvocationLeaseAuthorityRepository,
     QueueBuildLeaseInput, QueueBuildLeaseResult,
 };
-use djinn_runtime::BuildSlotWeight;
 use djinn_supervisor::services::{
     LeaseAbandonRequest, LeaseBindRequest, LeaseCancelRequest, LeaseDeadlines, LeaseFencingToken,
     LeaseGrant, LeaseGrantRequest, LeaseIdentity, LeaseQueueRequest, LeaseReleaseRequest,
@@ -23,6 +22,8 @@ use djinn_supervisor::services::{
 };
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use tokio::sync::Mutex;
+
+use crate::resize_authorization::ResizeAuthority;
 
 /// Deterministic deadline clock seam, expressed in contract milliseconds.
 pub trait LeaseClock: Send + Sync {
@@ -184,65 +185,7 @@ impl LeaseTelemetry for MetricsLeaseTelemetry {
     }
 }
 
-/// Rendered CPU facts the weight policy is derived from, in millicores.
-///
-/// Supplied by composition from the SAME `KubernetesConfig` that renders the
-/// manifests, so the weight a workload is charged and the CPU it is actually
-/// given can never drift. Deliberately not read from the environment here: the
-/// grant path must have no opinion about where capacity facts come from, which
-/// is what lets a node-derived cap replace the configured one later without
-/// touching this module.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct BuildSlotWeights {
-    /// One build slot, in millicores: the quota a granted lease actually runs
-    /// under (`launcher_leased_millicores`, the task-run pod's `cpu_limit`).
-    pub slot_millicores: u32,
-    /// The graph-warm Job's rendered CPU request.
-    pub warm_millicores: u32,
-}
-
-impl Default for BuildSlotWeights {
-    /// The default render: a warm Job and a leased task invocation both request
-    /// 4000m, so both weigh exactly one slot. See [`BuildSlotWeight`] for why
-    /// equal weight is the measured answer rather than an approximation.
-    fn default() -> Self {
-        Self {
-            slot_millicores: 4_000,
-            warm_millicores: 4_000,
-        }
-    }
-}
-
-impl BuildSlotWeights {
-    /// Weight of a graph-warm Job.
-    #[must_use]
-    pub fn warm(&self) -> BuildSlotWeight {
-        BuildSlotWeight::for_millicores(self.warm_millicores, self.slot_millicores)
-    }
-
-    /// Weight of a layer-1 dispatch reservation for a build-capable task-run.
-    /// Light task-runs never reach here: dispatch does not acquire for them.
-    #[must_use]
-    pub fn dispatch(&self) -> BuildSlotWeight {
-        BuildSlotWeight::for_millicores(self.slot_millicores, self.slot_millicores)
-    }
-
-    /// Weight of a layer-2 invocation escalation.
-    ///
-    /// `holds_dispatch_slot` is the durable answer from
-    /// [`djinn_db::BuildLeaseRepository::has_occupying_dispatch`], never
-    /// anything the invocation itself asserted. That matters: weight is the
-    /// difference between occupying capacity and not, so a value the sandboxed
-    /// pod could supply would be a way to escape the cap.
-    #[must_use]
-    pub fn invocation(&self, holds_dispatch_slot: bool) -> BuildSlotWeight {
-        if holds_dispatch_slot {
-            BuildSlotWeight::REENTRANT
-        } else {
-            BuildSlotWeight::for_millicores(self.slot_millicores, self.slot_millicores)
-        }
-    }
-}
+pub use crate::build_slot_weights::BuildSlotWeights;
 
 /// Coordinator policy owner over the one repository-global FIFO.
 pub struct BuildLeaseService {
@@ -264,29 +207,34 @@ pub struct BuildLeaseService {
     /// `0` is read as "never armed" and resolves to this configured value.
     /// Draining is expressed by `is_ready()`, not by a zero cap, and the only
     /// production writer of a durable cap (`admin epoch set-cap`) is guarded by
-    /// `admission_handoff_cap_positive_check` and cannot store `0`.
+    /// the authority row's positive-cap CHECK constraint and cannot store `0`.
     configured_cap: i64,
     /// Rendered CPU facts the per-row weight is derived from. See
     /// [`BuildSlotWeights`]; the default matches the default manifest render.
     weights: BuildSlotWeights,
     recovered: AtomicBool,
-    /// Durable admission-handoff epoch reader. When present, [`Self::recover`]
-    /// and [`Self::recovery_snapshot`] read the epoch (and its reference cap)
+    /// Durable invocation-lease authority reader. When present, [`Self::recover`]
+    /// and [`Self::recovery_snapshot`] read the authority (and its reference cap)
     /// before the service opens, so a restart never admits or spawns without
-    /// having observed the current epoch. `None` in the many tests that exercise
+    /// having observed the armed cap. `None` in the many tests that exercise
     /// the lease state machine in isolation (behaviour then unchanged).
-    handoff: Option<Arc<AdmissionHandoffRepository>>,
-    /// The admission epoch observed by the most recent successful recovery, or
+    authority: Option<Arc<InvocationLeaseAuthorityRepository>>,
+    /// The authority epoch observed by the most recent successful read, or
     /// `-1` when none has been observed (unknown/unreadable ⇒ fail closed).
     observed_epoch: AtomicI64,
-    /// Whether the durable epoch puts the v1 authority in `Enforce`.
+    /// Whether the durable authority is armed to `Enforce`.
     ///
     /// This is the arming switch for layer-1 dispatch admission. Until the
-    /// operator flips the epoch to invocation-primary, dispatch runs in shadow:
-    /// it probes occupancy and records what enforcement WOULD have done, but
-    /// acquires nothing and denies nothing. Defaults to `false` so a process
-    /// that has not read the epoch cannot start enforcing a cap nobody armed.
+    /// operator arms the authority, dispatch runs in shadow: it probes occupancy
+    /// and records what enforcement WOULD have done, but acquires nothing and
+    /// denies nothing. Defaults to `false` so a process that has not read the
+    /// authority cannot start enforcing a cap nobody armed.
     dispatch_enforcing: AtomicBool,
+    /// Server-derived Pod-resize authorization for the grant path. `None` in
+    /// every composition on `main` — see [`crate::resize_authorization`] for why
+    /// arming it before `0ppk-1b` creates the permits would degrade every
+    /// production invocation to unleased.
+    resize_authority: Option<Arc<ResizeAuthority>>,
     /// Keeps queue+local-drain atomic in this process. Database advisory locks
     /// serialize the same decisions across replacement coordinators.
     operation: Mutex<()>,
@@ -321,11 +269,30 @@ impl BuildLeaseService {
             configured_cap: cap.max(0),
             weights: BuildSlotWeights::default(),
             recovered: AtomicBool::new(false),
-            handoff: None,
+            authority: None,
             observed_epoch: AtomicI64::new(-1),
             dispatch_enforcing: AtomicBool::new(false),
+            resize_authority: None,
             operation: Mutex::new(()),
         }
+    }
+
+    /// Install the server-derived Pod-resize authorization on the grant path.
+    #[must_use]
+    pub fn with_resize_authority(mut self, authority: Arc<ResizeAuthority>) -> Self {
+        self.resize_authority = Some(authority);
+        self
+    }
+
+    /// Whether a Pod-resize authorization is armed on this service's grant path.
+    ///
+    /// Exposed so **reachability** can be asserted at a composition site rather
+    /// than inferred from a unit test that installed the authority itself. The
+    /// difference is the whole point: `Option<Arc<ResizeAuthority>> = None` is
+    /// how this stack spent `0ppk-1a` merged, green and unable to fire.
+    #[must_use]
+    pub const fn resize_authority_armed(&self) -> bool {
+        self.resize_authority.is_some()
     }
 
     /// Install the rendered CPU facts that per-row weight is derived from.
@@ -367,11 +334,14 @@ impl BuildLeaseService {
         Ok(weight.slots())
     }
 
-    /// Install the durable admission-handoff epoch reader so recovery reads the
-    /// epoch (and its reference cap) before opening.
+    /// Install the durable invocation-lease authority reader so recovery adopts
+    /// its reference cap before opening.
     #[must_use]
-    pub fn with_handoff_epoch(mut self, handoff: Arc<AdmissionHandoffRepository>) -> Self {
-        self.handoff = Some(handoff);
+    pub fn with_invocation_lease_authority(
+        mut self,
+        authority: Arc<InvocationLeaseAuthorityRepository>,
+    ) -> Self {
+        self.authority = Some(authority);
         self
     }
 
@@ -380,7 +350,7 @@ impl BuildLeaseService {
         self.recovered.load(Ordering::Acquire)
     }
 
-    /// The admission epoch observed by the most recent successful recovery, or
+    /// The authority epoch observed by the most recent successful read, or
     /// `None` when none has been observed (unknown/unreadable ⇒ fail closed).
     #[must_use]
     pub fn observed_epoch(&self) -> Option<i64> {
@@ -388,7 +358,7 @@ impl BuildLeaseService {
         (epoch >= 0).then_some(epoch)
     }
 
-    /// Whether the durable epoch arms layer-1 dispatch admission for
+    /// Whether the durable authority arms layer-1 dispatch admission for
     /// enforcement. False means shadow: observe and report, never deny.
     #[must_use]
     pub fn dispatch_enforcing(&self) -> bool {
@@ -396,7 +366,7 @@ impl BuildLeaseService {
     }
 
     /// Force the dispatch-enforcement arming state. Tests only: production
-    /// arms exclusively through the durable admission epoch.
+    /// arms exclusively through the durable invocation-lease authority.
     #[doc(hidden)]
     pub fn set_dispatch_enforcing_for_test(&self, enforcing: bool) {
         self.dispatch_enforcing.store(enforcing, Ordering::Release);
@@ -410,11 +380,11 @@ impl BuildLeaseService {
         self.pause.before_transaction(LeaseOperation::Recover).await;
         match self.repository.snapshot().await {
             Ok(snapshot) => {
-                // Read the durable admission epoch (and its reference cap)
-                // BEFORE the service opens, so a restart never admits or spawns
-                // without having observed the current epoch. The handoff
+                // Read the durable invocation-lease authority (and its reference
+                // cap) BEFORE the service opens, so a restart never admits or
+                // spawns without having observed the armed cap. The authority's
                 // reference cap is authoritative when set.
-                let cap = self.read_handoff_epoch(snapshot.cap).await;
+                let cap = self.adopt_authority_cap(snapshot.cap).await;
                 if cap == 0 {
                     // Not a warning about capacity pressure: with a cap of zero
                     // `grant_next` short-circuits on `occupied >= cap` before it
@@ -439,15 +409,15 @@ impl BuildLeaseService {
 
     /// Return the durable non-terminal recovery view without mutating it.
     ///
-    /// The admission epoch (and its reference cap) is read alongside the lease
-    /// snapshot so the recovery view reflects the epoch's authoritative cap
+    /// The invocation-lease authority (and its reference cap) is read alongside
+    /// the lease snapshot so the recovery view reflects the authority's cap
     /// before any spawn decision is made.
     pub async fn recovery_snapshot(&self) -> Result<djinn_db::BuildLeaseSnapshot, ()> {
         if !self.is_ready() {
             return Err(());
         }
         let mut snapshot = self.repository.snapshot().await.map_err(|_| ())?;
-        snapshot.cap = self.read_handoff_epoch(snapshot.cap).await;
+        snapshot.cap = self.adopt_authority_cap(snapshot.cap).await;
         Ok(snapshot)
     }
 
@@ -555,13 +525,31 @@ impl BuildLeaseService {
         }
     }
 
-    /// A fenced grant acknowledgement moves the durable row to launching.
+    /// A fenced grant acknowledgement moves the durable row to launching, and is
+    /// the ONE place a Pod resize is authorized.
+    ///
+    /// The destructuring is load-bearing: it is exhaustive, so a coordinate
+    /// field added to [`LeaseGrantRequest`] — a namespace, a Pod name, a
+    /// container index, a CPU target — stops compiling here rather than silently
+    /// becoming something the grant path could honour.
     pub async fn grant(&self, request: LeaseGrantRequest) -> LeaseResult {
-        self.transition(
-            request.identity,
-            request.fencing_token,
-            BuildLeaseState::Launching,
-            LeaseOperation::Grant,
+        let LeaseGrantRequest {
+            identity,
+            fencing_token,
+        } = request;
+        let granted = self
+            .transition(
+                identity.clone(),
+                fencing_token.clone(),
+                BuildLeaseState::Launching,
+                LeaseOperation::Grant,
+            )
+            .await;
+        ResizeAuthority::fold_into_grant(
+            self.resize_authority.as_deref(),
+            &identity,
+            &fencing_token,
+            granted,
         )
         .await
     }

@@ -73,6 +73,7 @@ mod phase_1_surface_guard_tests;
 mod planner_routing_tests;
 mod proposal_dispatch_tests;
 mod schema_snapshot_tests;
+mod set_file_mode_tests;
 mod shell_dispatch_tests;
 mod skill_read_tests;
 mod task_kill_session_tests;

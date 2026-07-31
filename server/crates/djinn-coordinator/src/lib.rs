@@ -48,16 +48,12 @@ use types::*;
 
 pub mod audit_sampler;
 pub mod build_admission;
-pub mod build_admission_handoff;
-pub mod build_admission_inventory;
-/// Operator safe-ordering executor composing the durable epoch primitives into
-/// forward-cutover, kill-switch, and rollback workflows.
-pub mod build_admission_transition;
-/// Durable v1 lease service; v0 admission remains rollout authority.
+/// Durable build-slot lease service.
 pub mod build_lease;
 /// Retirement of occupying build leases whose Kubernetes object is provably gone.
 pub mod build_lease_reclaim;
-pub mod build_slot_authority;
+/// Rendered CPU facts the build-slot weight policy is derived from.
+pub mod build_slot_weights;
 pub mod cargo_warm_base_gc;
 pub(crate) mod ci_preflight_gate;
 pub mod ci_reproduction;
@@ -69,8 +65,12 @@ pub mod environment;
 pub mod events;
 pub mod file_time;
 pub mod github_error_render;
-/// Adapter that gives graph warming the same v1 FIFO service as task consumers.
+/// Adapter that gives graph warming the same FIFO service as task consumers.
 pub mod graph_warm_lease;
+/// Operator control surface for the durable invocation-lease authority — the
+/// arming switch and reference cap for the per-invocation cgroup CPU lease, and
+/// the engine behind the `djinn-server epoch` CLI.
+pub mod invocation_lease_control;
 pub mod output_stash;
 
 /// Terminalize the worker's in-flight attempt (and record a durable `reopened`
@@ -123,6 +123,8 @@ pub async fn record_supervisor_rework_reopen(
     .await;
 }
 
+pub mod resize_authorization;
+pub mod resize_lift;
 pub mod resource_monitor;
 pub mod roles;
 /// Production wiring that arms the observe-only disk dimension at coordinator
@@ -145,6 +147,7 @@ mod evidence_lifecycle_state;
 pub mod handle;
 mod health;
 pub mod messages;
+pub(crate) mod poll_stack;
 pub mod pr_poller;
 mod recover_terminal_linked_spike_evidence;
 mod reentrance;
@@ -169,9 +172,9 @@ mod worker_lifecycle;
 pub use handle::CoordinatorHandle;
 pub use types::{
     AutoMergeTracker, BackgroundWorkTracker, BreakerDebugEntry, CoordinatorDebugSnapshot,
-    CoordinatorDeps, CoordinatorError, CoordinatorStatus, DebugBuildAdmission, DebugCooldown,
-    DebugDispatchState, DebugFailureStreak, DebugInflightEntry, DebugSlot, DebugTotals,
-    DispatchPauseView, PrCleanupConfig,
+    CoordinatorDeps, CoordinatorError, CoordinatorStatus, DebugCooldown, DebugDispatchState,
+    DebugFailureStreak, DebugInflightEntry, DebugSlot, DebugTotals, DispatchPauseView,
+    PrCleanupConfig,
 };
 pub use worker_lifecycle::{
     CheckpointLifecycleConfig, CheckpointLifecycleMetadata, CheckpointRequestReason,
@@ -191,35 +194,19 @@ pub use djinn_orchestration_types::coordinator::PR_REVIEW_FEEDBACK_EVENT;
 // ─── Test modules ────────────────────────────────────────────────────────
 
 #[cfg(test)]
-pub(crate) mod build_admission_capacity_support;
-#[cfg(test)]
-mod build_admission_epoch_disruption_tests;
-#[cfg(test)]
-mod build_admission_epoch_matrix_tests;
-#[cfg(test)]
-mod build_admission_epoch_support;
-#[cfg(test)]
-mod build_admission_handoff_matrix_tests;
-#[cfg(test)]
-mod build_admission_integration_tests;
-#[cfg(test)]
-mod build_admission_inventory_tests;
-#[cfg(test)]
-mod build_admission_light_role_tests;
-#[cfg(test)]
-mod build_admission_stale_reclaim_tests;
-#[cfg(test)]
 mod build_lease_cap_arming_tests;
 #[cfg(test)]
 mod build_lease_cap_refresh_tests;
 #[cfg(test)]
 mod build_lease_deadline_echo_tests;
 #[cfg(test)]
-mod build_lease_dispatch_reclaim_tests;
-#[cfg(test)]
-mod build_lease_dispatch_tombstone_tests;
-#[cfg(test)]
 mod build_lease_integration_tests;
+#[cfg(test)]
+mod invocation_cpu_boundary_tests;
+#[cfg(test)]
+mod resize_authorization_tests;
+#[cfg(test)]
+mod resize_lift_tests;
 #[cfg(test)]
 pub(crate) mod test_helpers;
 #[cfg(test)]

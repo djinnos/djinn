@@ -193,6 +193,7 @@ async fn run_case(
     conversation.push(Message::user("éééé"));
     let output = run_reply_loop(
         ReplyLoopContext {
+            session_budget: None,
             provider: &provider,
             tools: &[],
             task_id: &task.id,
@@ -311,6 +312,7 @@ async fn oversized_transport_compaction_persists_boundary_occupancy() {
     conversation.push(Message::user("éééé"));
     let result = run_reply_loop(
         ReplyLoopContext {
+            session_budget: None,
             provider: &provider,
             tools: &[],
             task_id: &task.id,

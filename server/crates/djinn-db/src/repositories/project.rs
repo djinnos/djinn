@@ -1,10 +1,15 @@
 // djinn:allow-oversize — legacy module over size-guard threshold; split when touched substantively.
 use djinn_core::events::{DjinnEventEnvelope, EventBus};
 use djinn_core::models::Project;
+use djinn_launcher_protocol::LauncherAuthorityProtocol;
 use sqlx::Row;
 
 use crate::Result;
 use crate::database::Database;
+use crate::launcher_compatibility::{
+    AdmissionDecision, LegacyDigestInventory, admit_with_legacy_inventory,
+};
+use crate::repositories::launcher_authority_mode::LauncherAuthorityModeRepository;
 
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct ProjectConfig {
@@ -60,11 +65,34 @@ fn normalize_json_string_list(raw: &str) -> core::result::Result<String, String>
 pub struct ProjectRepository {
     db: Database,
     events: EventBus,
+    /// The deployment's signed inventory of pre-protocol digests. Held here
+    /// because [`ProjectRepository::resolve_dispatch_image`] is the seam every
+    /// dispatch passes through, and the decision must be made before a Job is
+    /// rendered rather than after a shell is running under a guessed authority.
+    ///
+    /// The *authority mode* is deliberately not held: it is z3gi's durable
+    /// `launcher_authority_mode` singleton, read per resolution so a flip takes
+    /// effect on the next dispatch rather than on the next process restart.
+    legacy_digest_inventory: LegacyDigestInventory,
 }
 
 impl ProjectRepository {
     pub fn new(db: Database, events: EventBus) -> Self {
-        Self { db, events }
+        Self {
+            db,
+            events,
+            legacy_digest_inventory: LegacyDigestInventory::process().clone(),
+        }
+    }
+
+    /// Override the pre-protocol digest inventory for this repository.
+    ///
+    /// The process-wide inventory is read from the environment once, which is
+    /// the right shape for a deployment-scoped document and the wrong shape for
+    /// a test.
+    pub fn with_legacy_digest_inventory(mut self, inventory: LegacyDigestInventory) -> Self {
+        self.legacy_digest_inventory = inventory;
+        self
     }
 
     pub async fn list(&self) -> Result<Vec<Project>> {
@@ -849,10 +877,15 @@ impl ProjectRepository {
         // builds (keyed by project_id); a project that selects a shared
         // catalog image stays `image_status = 'none'` forever even after the
         // catalog image is built, which would defer its dispatch indefinitely.
-        // `resolve_dispatch_image` returns `Ok(None)` only for an unknown
+        // `resolve_dispatch_image_row` returns `Ok(None)` only for an unknown
         // project (already handled above), so a `None` here is treated as the
         // not-dispatchable `none` status.
-        let image_status = match self.resolve_dispatch_image(project_id).await? {
+        //
+        // The *unfenced* row on purpose. Readiness reports what the catalog
+        // holds; it is not a dispatch, so a launcher-authority rejection must
+        // not turn a status query into an error. The fence lives on
+        // `resolve_dispatch_image`, which is what dispatch calls.
+        let image_status = match self.resolve_dispatch_image_row(project_id).await? {
             Some(img) => img.status,
             None => ProjectImageStatus::NONE.to_string(),
         };
@@ -883,9 +916,83 @@ impl ProjectRepository {
     /// image that isn't `ready` comes back with `tag = None` so the caller
     /// hard-fails (task dispatch) or skips (warm) — never a silent downgrade.
     ///
+    /// ## Launcher-authority admission
+    ///
+    /// A resolution that is actually dispatchable (`ready` + a tag) also runs
+    /// the centralized compatibility decision
+    /// ([`crate::launcher_compatibility::decide_admission`]) and **fails the
+    /// resolve** when the artifact may not run under this server's quota
+    /// authority — an explicit protocol mismatch, a missing declaration under
+    /// `resize-v2`, a non-canonical digest, a digest the signed inventory does
+    /// not list, or an inventory that cannot be trusted. This is the last seam
+    /// before `djinn_k8s::runtime::prepare` builds a Job, so the refusal lands
+    /// before any Kubernetes object exists and long before a shell runs.
+    ///
+    /// A `ready` row with **no digest and no declaration** is *not* an error
+    /// here: migration 166 deliberately keeps that row legal so an upgrade
+    /// cannot strand a live catalog, and `render_authority_protocol` (#2836)
+    /// already refuses to render a Job for it. It resolves with
+    /// `authority_protocol: None`.
+    ///
     /// Non-macro `sqlx::query` form (like [`ImageRepository`]) so the
     /// migration-46 columns don't require regenerating the offline cache.
     pub async fn resolve_dispatch_image(&self, project_id: &str) -> Result<Option<DispatchImage>> {
+        let Some(image) = self.resolve_dispatch_image_row(project_id).await? else {
+            return Ok(None);
+        };
+        Ok(Some(self.admit_dispatch_image(project_id, image).await?))
+    }
+
+    /// Apply the launcher-authority admission decision to a resolved row.
+    async fn admit_dispatch_image(
+        &self,
+        project_id: &str,
+        mut image: DispatchImage,
+    ) -> Result<DispatchImage> {
+        // Nothing that cannot be pulled can dispatch, so nothing about its
+        // quota authority is decidable — or needs to be. Keeping the decision
+        // behind `pull_ref` is what lets the readiness/warm/indexer callers
+        // resolve a `building` or unassigned image without tripping a fence
+        // that only governs dispatch, and it means an unassigned project costs
+        // no authority read.
+        if image.pull_ref().is_none() {
+            image.authority_protocol = None;
+            return Ok(image);
+        }
+        // z3gi's verdict first: the persisted authority singleton against the
+        // artifact's own declaration. An unreadable singleton is a refusal
+        // inside `admit_declared_protocol`, never a default.
+        let verdict = LauncherAuthorityModeRepository::new(self.db.clone())
+            .admit_declared_protocol(
+                image
+                    .declared_authority_protocol
+                    .map(LauncherAuthorityProtocol::as_wire),
+            )
+            .await;
+        match admit_with_legacy_inventory(
+            verdict,
+            image.digest.as_deref(),
+            &self.legacy_digest_inventory,
+        ) {
+            Ok(AdmissionDecision::Admitted(protocol)) => {
+                image.authority_protocol = Some(protocol);
+                Ok(image)
+            }
+            Ok(AdmissionDecision::Undeclarable) => {
+                image.authority_protocol = None;
+                Ok(image)
+            }
+            Err(rejection) => Err(crate::Error::InvalidData(format!(
+                "project {project_id} resolves to catalog image {} which may not dispatch: \
+                 {rejection}",
+                image.from_catalog.as_deref().unwrap_or("<none>")
+            ))),
+        }
+    }
+
+    /// The unfenced resolution: exactly the catalog-precedence read, with
+    /// `authority_protocol` still holding the raw declaration.
+    async fn resolve_dispatch_image_row(&self, project_id: &str) -> Result<Option<DispatchImage>> {
         self.db.ensure_initialized().await?;
         let row = sqlx::query("SELECT selected_image_id FROM projects WHERE id = $1")
             .bind(project_id)
@@ -905,11 +1012,14 @@ impl ProjectRepository {
                 digest: None,
                 from_catalog: None,
                 last_error: None,
+                declared_authority_protocol: None,
+                authority_protocol: None,
             }));
         };
 
         let img = sqlx::query(
-            "SELECT tag, registry_digest, status, last_error FROM images WHERE id = $1",
+            "SELECT tag, registry_digest, status, last_error, launcher_authority_protocol \
+             FROM images WHERE id = $1",
         )
         .bind(&image_id)
         .fetch_optional(self.db.pool())
@@ -921,6 +1031,15 @@ impl ProjectRepository {
                 digest: i.get("registry_digest"),
                 from_catalog: Some(image_id),
                 last_error: i.get("last_error"),
+                // Parsed, never passed through as a string: migration 166's
+                // CHECK and this parse are the same closed set, so a row that
+                // somehow holds an unknown value fails the RESOLVE rather than
+                // reaching the render as an unrecognised protocol.
+                declared_authority_protocol: parse_declared_protocol(
+                    i.get::<Option<String>, _>("launcher_authority_protocol"),
+                )?,
+                // Overwritten by `admit_dispatch_image`.
+                authority_protocol: None,
             },
             // FK RESTRICT makes a dangling selection impossible in practice;
             // treat it as "not ready" rather than panicking.
@@ -930,6 +1049,8 @@ impl ProjectRepository {
                 digest: None,
                 from_catalog: Some(image_id),
                 last_error: None,
+                declared_authority_protocol: None,
+                authority_protocol: None,
             },
         }))
     }
@@ -1006,6 +1127,23 @@ pub struct ProjectImage {
 /// precedence is applied — see [`ProjectRepository::resolve_dispatch_image`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DispatchImage {
+    /// The launcher quota-authority protocol this image DECLARED at build time
+    /// (`images.launcher_authority_protocol`, migration 166), or `None` for an
+    /// image that declared nothing.
+    ///
+    /// `None` is not "leaf-v1": it is "this artifact never said". This field is
+    /// the artifact's own claim, never a decision — it is the *input* to
+    /// [`crate::launcher_compatibility::decide_admission`].
+    pub declared_authority_protocol: Option<LauncherAuthorityProtocol>,
+    /// The **single effective quota authority** admission granted this
+    /// dispatch, or `None` when the artifact identifies neither itself nor its
+    /// authority and `djinn_k8s::launcher::render_authority_protocol` must
+    /// refuse the Job.
+    ///
+    /// A resolution that produced this field at all has already passed the
+    /// compatibility fence: every rejected combination fails
+    /// [`ProjectRepository::resolve_dispatch_image`] outright.
+    pub authority_protocol: Option<LauncherAuthorityProtocol>,
     /// The `ready` tag to pull, or `None` when the resolved image isn't
     /// built yet (caller hard-fails task dispatch / skips warming).
     pub tag: Option<String>,
@@ -1035,6 +1173,27 @@ impl DispatchImage {
             Some(digest) => Some(format!("{}@{}", strip_tag_suffix(tag), digest)),
             None => Some(tag.to_string()),
         }
+    }
+}
+
+/// Parse `images.launcher_authority_protocol` for a dispatch resolution.
+///
+/// `NULL` and the empty string are "declared nothing" — the shape every image
+/// built before migration 166 holds. Anything else must be one of the two wire
+/// forms: the column is already constrained by migration 166's `CHECK`, so a
+/// value that fails here means the constraint was bypassed, and resolving it to
+/// a default is precisely how a `resize-v2` image would end up dispatched as
+/// `leaf-v1` (or the reverse) with nothing reporting it.
+fn parse_declared_protocol(raw: Option<String>) -> Result<Option<LauncherAuthorityProtocol>> {
+    match raw.as_deref() {
+        None | Some("") => Ok(None),
+        Some(value) => value.parse().map(Some).map_err(|_| {
+            crate::Error::InvalidData(format!(
+                "images.launcher_authority_protocol = {value:?} is not a launcher authority \
+                 protocol; refusing to resolve a dispatch image whose quota authority cannot \
+                 be named"
+            ))
+        }),
     }
 }
 
@@ -1124,6 +1283,10 @@ mod tests {
     use crate::repositories::repo_graph_cache::{RepoGraphCacheInsert, RepoGraphCacheRepository};
 
     use super::*;
+
+    /// A canonical immutable manifest digest: `sha256:` + 64 lowercase hex.
+    const CANONICAL_DIGEST: &str =
+        "sha256:7822b7de0000000000000000000000000000000000000000000000000000cafe";
 
     #[test]
     fn dispatch_readiness_gates_on_image_only_not_graph_warm() {
@@ -1625,6 +1788,134 @@ mod tests {
             updated.graph_orphan_ignore,
             vec!["crates/test-support/src/db.rs".to_string()]
         );
+    }
+
+    /// AC3. The declared protocol survives the round trip to a **freshly
+    /// constructed** repository — the resolution reads the column, it does not
+    /// echo a value the same process just wrote.
+    ///
+    /// Every read below goes through a `ProjectRepository::new(...)` created
+    /// after the write, over a `Database` handle that is itself re-derived, so
+    /// nothing in-process can be serving the answer from memory. Making
+    /// `resolve_dispatch_image` return `authority_protocol: None`
+    /// unconditionally fails the first assertion.
+    ///
+    /// Each read runs with the persisted `launcher_authority_mode` singleton
+    /// (migration 167) flipped to the protocol under test, because a
+    /// declaration that disagrees with the authority is refused rather than
+    /// resolved — that disagreement has its own test.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn declared_authority_protocol_survives_readback_through_a_fresh_repository() {
+        use crate::repositories::image::ImageRepository;
+        use crate::repositories::launcher_authority_mode::SetLauncherAuthorityModeResult;
+
+        let db = test_db();
+        db.ensure_initialized().await.unwrap();
+        ProjectRepository::new(db.clone(), EventBus::noop())
+            .create_with_id("proto-p1", "proto", "test", "proto-p1")
+            .await
+            .unwrap();
+
+        for protocol in LauncherAuthorityProtocol::ALL {
+            let image_id = format!("img-{}", protocol.as_wire());
+            let images = ImageRepository::new(db.clone());
+            images
+                .create(&image_id, &format!("Rust {protocol}"), None, "{}")
+                .await
+                .unwrap();
+            // Migration 166 requires a digest alongside a declaration.
+            images
+                .mark_ready(
+                    &image_id,
+                    &format!("reg/djinn-image-{}:hash", protocol.as_wire()),
+                    Some(CANONICAL_DIGEST),
+                    Some(protocol),
+                )
+                .await
+                .unwrap();
+            images
+                .set_project_image("proto-p1", Some(&image_id))
+                .await
+                .unwrap();
+
+            // Flip the durable authority through z3gi's own fence, so the
+            // resolution reads a mode that really is stored.
+            let modes = LauncherAuthorityModeRepository::new(db.clone());
+            let epoch = modes.read().await.unwrap().expect("seeded").epoch;
+            assert!(
+                matches!(
+                    modes.set_mode(epoch, protocol).await,
+                    SetLauncherAuthorityModeResult::Flipped { .. }
+                        | SetLauncherAuthorityModeResult::Unchanged { .. }
+                ),
+                "the authority singleton must be settable to {protocol}"
+            );
+
+            let resolved = ProjectRepository::new(db.clone(), EventBus::noop())
+                .resolve_dispatch_image("proto-p1")
+                .await
+                .unwrap()
+                .expect("project resolves");
+            assert_eq!(
+                resolved.declared_authority_protocol,
+                Some(protocol),
+                "a {protocol} image must resolve as {protocol}, not as a default"
+            );
+            assert_eq!(
+                resolved.authority_protocol,
+                Some(protocol),
+                "the admitted authority is the artifact's own declaration"
+            );
+            assert_eq!(resolved.digest.as_deref(), Some(CANONICAL_DIGEST));
+        }
+
+        // An image that declared nothing resolves to `None` — "never said",
+        // which the render treats differently from either protocol.
+        let images = ImageRepository::new(db.clone());
+        images
+            .create("img-legacy", "Rust legacy", None, "{}")
+            .await
+            .unwrap();
+        images
+            .mark_ready("img-legacy", "reg/djinn-image-legacy:hash", None, None)
+            .await
+            .unwrap();
+        images
+            .set_project_image("proto-p1", Some("img-legacy"))
+            .await
+            .unwrap();
+        let resolved = ProjectRepository::new(db.clone(), EventBus::noop())
+            .resolve_dispatch_image("proto-p1")
+            .await
+            .unwrap()
+            .expect("project resolves");
+        assert_eq!(resolved.declared_authority_protocol, None);
+        assert_eq!(resolved.authority_protocol, None);
+        assert_eq!(resolved.digest, None);
+    }
+
+    /// A column value outside the closed set fails the resolution instead of
+    /// silently becoming `leaf-v1`. Migration 166's CHECK is the first door;
+    /// this is the second, and it is the one that would catch a constraint
+    /// dropped in a future migration.
+    #[test]
+    fn an_unparseable_declared_protocol_refuses_to_resolve() {
+        assert_eq!(parse_declared_protocol(None).unwrap(), None);
+        assert_eq!(parse_declared_protocol(Some(String::new())).unwrap(), None);
+        for protocol in LauncherAuthorityProtocol::ALL {
+            assert_eq!(
+                parse_declared_protocol(Some(protocol.as_wire().to_owned())).unwrap(),
+                Some(protocol)
+            );
+        }
+        for rejected in ["leaf-v2", "LEAF-V1", "resize-v2 ", "unknown"] {
+            let err = parse_declared_protocol(Some(rejected.to_owned()))
+                .expect_err("{rejected} must not resolve");
+            assert!(
+                err.to_string().contains(rejected),
+                "the refusal must name the offending value, got: {err}"
+            );
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

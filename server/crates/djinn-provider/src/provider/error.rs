@@ -71,6 +71,23 @@ impl ProviderError {
         }
     }
 
+    /// Whether this failure is a **throttle** — the provider shedding load
+    /// (rate limit / quota / overload) rather than malfunctioning.
+    ///
+    /// Every throttle signal is folded into [`ProviderError::RateLimit`] at
+    /// classification time ([`from_status`](Self::from_status) maps
+    /// 408/425/429/529 there; [`from_stream_error`](Self::from_stream_error)
+    /// maps `rate_limit`/`quota`/`overload` codes there), so the variant is the
+    /// single throttle marker. Callers use this to pick retry *patience*
+    /// separately from retry *eligibility* ([`retryable`](Self::retryable)):
+    /// a throttle episode routinely lasts minutes and clears on its own, so it
+    /// is worth waiting out with a deep schedule, while a genuine provider
+    /// fault that persists across a few quick retries usually will not clear
+    /// just by asking again.
+    pub fn is_throttle(&self) -> bool {
+        matches!(self, ProviderError::RateLimit { .. })
+    }
+
     /// Server-supplied Retry-After in milliseconds, if this is a RateLimit
     /// that carried one.
     pub fn retry_after_ms(&self) -> Option<u64> {
@@ -583,6 +600,39 @@ mod tests {
         assert!(!ProviderError::InvalidRequest.retryable());
         assert!(!ProviderError::ContextOverflow.retryable());
         assert!(!ProviderError::InvalidOutput.retryable());
+    }
+
+    #[test]
+    fn throttle_classification_tracks_the_rate_limit_variant() {
+        // `is_throttle` picks the retry PATIENCE (deep wait-it-out schedule vs
+        // shallow), so it must agree exactly with where the classifiers put
+        // capacity shedding: the RateLimit variant, and nothing else.
+        assert!(
+            ProviderError::from_stream_error(Some("server_is_overloaded"), "overloaded")
+                .is_throttle(),
+            "an overload stream code is capacity shedding and must get throttle patience"
+        );
+        assert!(ProviderError::from_status(429, "").is_throttle());
+        assert!(ProviderError::from_status(529, "overloaded").is_throttle());
+        assert!(
+            ProviderError::RateLimit {
+                retry_after_ms: Some(1000)
+            }
+            .is_throttle()
+        );
+
+        // Retryable-but-not-throttle classes keep the shallow budget: a fault
+        // is not a queue you can wait out.
+        for err in [
+            ProviderError::from_stream_error(Some("server_error"), "An error occurred"),
+            ProviderError::Transport,
+            ProviderError::EmptyCompletion,
+            ProviderError::ProviderInternal { status: 503 },
+        ] {
+            assert!(err.retryable(), "{err:?} must stay retryable");
+            assert!(!err.is_throttle(), "{err:?} is a fault, not a throttle");
+        }
+        assert!(!ProviderError::Authentication.is_throttle());
     }
 
     #[test]

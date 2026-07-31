@@ -948,15 +948,20 @@ mod tests {
         );
     }
 
-    /// Run the committed fixtures through the pipeline and write the baseline
-    /// with signal_comparisons. This test overwrites `baselines/phase1.json`
-    /// so reviewers can see graph/entity and task-affinity proof cases.
-    #[allow(clippy::print_stderr)]
+    /// Verification (NOT a refresh): the committed fixtures must still drive
+    /// both required signal-proof families through the real pipeline.
+    ///
+    /// This test used to *write* `baselines/phase1.json` from inside the test
+    /// harness, which made `cargo test` mutate a tracked file. See
+    /// [`crate::fixtures::reject_tracked_golden_write`] for why that was
+    /// removed and PR #2805 for what it cost. The committed baseline is
+    /// regenerated only by `run` + `refresh-baseline`; this test just proves
+    /// the fixtures still produce the coverage that baseline claims.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn refresh_baseline_with_committed_fixtures() {
-        let crate_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    async fn committed_fixtures_produce_both_signal_proof_families() {
+        let crate_root = crate::fixtures::tracked_crate_root();
         let fixtures =
-            crate::loader::load_fixtures_from_disk(&crate_root).expect("load committed fixtures");
+            crate::loader::load_fixtures_from_disk(crate_root).expect("load committed fixtures");
 
         let output = execute_run_with_fixtures(&fixtures)
             .await
@@ -967,117 +972,77 @@ mod tests {
             "committed fixtures must produce signal comparisons"
         );
 
-        let graph_count = output
+        // Same predicate the `validate-fixtures` gate applies to the committed
+        // baseline: at least one graph/entity and one task-affinity comparison
+        // that actually changed rank.
+        let graph_changed = output
             .signal_comparisons
             .iter()
-            .filter(|c| c.signal == "graph")
+            .filter(|c| c.signal == "graph" && c.rank_changed)
             .count();
-        let ta_count = output
+        let ta_changed = output
             .signal_comparisons
             .iter()
-            .filter(|c| c.signal == "task_affinity")
+            .filter(|c| c.signal == "task_affinity" && c.rank_changed)
             .count();
         assert!(
-            graph_count > 0,
-            "must have graph signal comparisons from committed fixtures"
+            graph_changed > 0,
+            "committed fixtures must yield a graph/entity rank-change proof case: {:?}",
+            output.signal_comparisons
         );
         assert!(
-            ta_count > 0,
-            "must have task-affinity signal comparisons from committed fixtures"
+            ta_changed > 0,
+            "committed fixtures must yield a task-affinity rank-change proof case: {:?}",
+            output.signal_comparisons
         );
 
-        // Build query result records
-        let all_records: Vec<&QueryRankRecord> = output
-            .query_records
-            .iter()
-            .chain(output.bad_case_records.iter())
-            .collect();
+        // The run path enforces the same invariant; keep them in lockstep.
+        assert_signal_effects(&output)
+            .expect("committed fixtures must satisfy assert_signal_effects");
+    }
 
-        let query_result_records: Vec<crate::metrics::QueryResultRecord> = all_records
-            .iter()
-            .map(|r| crate::metrics::QueryResultRecord {
-                query_id: r.query_id.clone(),
-                query_text: r.query_text.clone(),
-                expected_permalinks: r.expected_permalinks.clone(),
-                result_permalinks: r.result_permalinks.clone(),
-                best_rank: r.relevant_ranks.iter().filter_map(|rank| *rank).min(),
-                relevant_ranks: r.relevant_ranks.clone(),
-                is_bad_case: r.is_bad_case,
-                bad_case_type: r.bad_case_type.clone(),
-                note_ages_days: vec![],
-            })
-            .collect();
+    /// Regression guard for the #2805 vector, asserting the SIDE EFFECT.
+    ///
+    /// Performs the exact operation the deleted `refresh_baseline_with_
+    /// committed_fixtures` test performed — `write_baseline` against the
+    /// crate's own root — and asserts the tracked file's bytes are unchanged
+    /// afterwards. Delete the guard in `reject_tracked_golden_write` and this
+    /// test fails on the byte comparison, not on the error message.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_test_cannot_write_the_tracked_baseline() {
+        let crate_root = crate::fixtures::tracked_crate_root();
+        let baseline_path = crate_root.join(crate::fixtures::FixturePaths::PHASE1_BASELINE);
 
-        // Compute metrics
-        let all_query_metrics = crate::metrics::compute_suite_metrics(&output.query_records);
-        let bad_case_metrics = crate::metrics::compute_suite_metrics(&output.bad_case_records);
+        let before = std::fs::read(&baseline_path).expect("read committed baseline");
+        let committed = crate::report::load_baseline(crate_root).expect("load committed baseline");
 
-        let mut suite_metrics = std::collections::HashMap::new();
-        suite_metrics.insert("all_queries".to_string(), all_query_metrics.clone());
-        if !output.bad_case_records.is_empty() {
-            suite_metrics.insert("bad_cases".to_string(), bad_case_metrics.clone());
-        }
+        // A baseline that is *valid* but not what is committed: if the write
+        // went through, the bytes below would differ and the assert would fire.
+        let mut mutated = committed.clone();
+        mutated.age_bucket_recall.clear();
+        mutated.metadata.refresh_commit = "aabbccdd00112233445566778899aabbccddeeff".to_string();
 
-        let agg_suites: Vec<(&str, &crate::metrics::SuiteMetrics)> =
-            suite_metrics.iter().map(|(k, v)| (k.as_str(), v)).collect();
-        let aggregate_metrics = crate::metrics::compute_aggregate_metrics(&agg_suites);
+        let result = crate::report::write_baseline(crate_root, &mutated);
 
-        let age_bucket_recall = crate::metrics::compute_age_bucket_recall(
-            &output.query_records,
-            &std::collections::HashMap::new(),
-        );
-        let directional = crate::metrics::directional_metrics(&output.query_records);
-
-        // Build report
-        let fixture_hashes = fixtures.manifest.as_ref().map(|m| m.file_hashes.clone());
-        let report = crate::report::Phase1Report {
-            suite_metrics,
-            aggregate_metrics,
-            age_bucket_recall,
-            directional,
-            query_records: query_result_records,
-            signal_comparisons: output.signal_comparisons.clone(),
-            compare_result: None,
-            threshold_policy_version: crate::metrics::THRESHOLD_POLICY_VERSION.to_string(),
-            fixture_hashes,
-        };
-
-        // Build and write baseline
-        let refresh_commit = "aabbccdd00112233445566778899aabbccddeeff".to_string();
-        let baseline = crate::report::build_baseline(
-            &report,
-            report.fixture_hashes.clone(),
-            refresh_commit,
-            1752115200,
-        );
-
+        let after = std::fs::read(&baseline_path).expect("re-read committed baseline");
+        // Deliberately `assert!` on the comparison rather than `assert_eq!` on
+        // the buffers: this file is ~90 KB and a failing `assert_eq!` dumps
+        // both copies as byte arrays into the CI log.
         assert!(
-            !baseline.signal_comparisons.is_empty(),
-            "baseline must contain signal_comparisons"
+            before == after,
+            "a test mutated the tracked baseline at {} ({} bytes -> {} bytes); \
+             `cargo test` must never dirty the working tree (see PR #2805)",
+            baseline_path.display(),
+            before.len(),
+            after.len(),
         );
 
-        crate::report::write_baseline(&crate_root, &baseline).expect("write baseline");
-
-        let reloaded = crate::report::load_baseline(&crate_root).expect("reload baseline");
+        let err = result.expect_err("write_baseline must refuse the tracked crate root");
+        let err = format!("{err:#}");
         assert!(
-            !reloaded.signal_comparisons.is_empty(),
-            "reloaded baseline must contain signal_comparisons"
+            err.contains("refresh-baseline"),
+            "the refusal must point at the sanctioned writer: {err}"
         );
-
-        eprintln!(
-            "=== Baseline refreshed with {} signal comparisons ===",
-            reloaded.signal_comparisons.len()
-        );
-        for sc in &reloaded.signal_comparisons {
-            eprintln!(
-                "  query={}, signal={}, with={:?}, without={:?}, changed={}",
-                sc.query_id,
-                sc.signal,
-                sc.rank_with_signal,
-                sc.rank_without_signal,
-                sc.rank_changed
-            );
-        }
     }
 
     // ── assert_signal_effects focused tests ──────────────────────────────

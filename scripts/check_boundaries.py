@@ -27,7 +27,9 @@ Exit codes:
 from __future__ import annotations
 
 import argparse
+import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -209,20 +211,64 @@ def check_crate_rule(rule: dict, edges: list[tuple[str, str, str]]) -> list[dict
     return out
 
 
+SCAN_AWK = REPO_ROOT / "scripts" / "lib" / "rust-source-scan.awk"
+
+
+def scan_production_code(paths: list[Path], pattern: str) -> dict[str, list[str]]:
+    """Lines of ``paths`` that match ``pattern`` in PRODUCTION code.
+
+    Delegates to ``scripts/lib/rust-source-scan.awk`` — the same scanner the
+    shell guards in this directory use — rather than adding a fourth private
+    copy of "strip comments and track ``#[cfg(test)]``".
+
+    A file-level rule used to grep raw text, which is a ban with no comment
+    handling: a line like ``// this no longer reaches into djinn_k8s`` in one
+    of the four guarded slot-pool files failed the build. That is the pcod
+    defect (#2871), prose tripping a ban.
+
+    Test code is excluded for the same reason the reachability guards exclude
+    it: a ``#[cfg(test)]`` block that constructs a k8s type for a fixture is
+    not a production layering violation. The exclusion is STRUCTURAL, never
+    "truncate at the first marker" — that heuristic is what made
+    ``check-resize-reachability.sh`` read the first 8% of a 4147-line file.
+
+    Returns ``{relative_path: [raw lines]}``. Raises on any environment
+    failure: a scanner that cannot run must not read as "no violations".
+    """
+    if not paths:
+        return {}
+    if not SCAN_AWK.is_file():
+        _die(f"shared source scanner is missing: {SCAN_AWK}")
+    env = dict(os.environ, RS_PATTERN=pattern)
+    proc = subprocess.run(
+        ["awk", "-f", str(SCAN_AWK), "-v", "strings=blank", "-v", "scope=prod",
+         *(str(p) for p in paths)],
+        capture_output=True, text=True, env=env, check=False,
+    )
+    if proc.returncode != 0:
+        _die(f"source scanner failed (exit {proc.returncode}): {proc.stderr.strip()}")
+    hits: dict[str, list[str]] = {}
+    for line in proc.stdout.splitlines():
+        path, _, rest = line.partition(":")
+        _, _, text = rest.partition(":")
+        rel = Path(path).resolve().relative_to(REPO_ROOT).as_posix()
+        hits.setdefault(rel, []).append(text)
+    return hits
+
+
 def check_file_rule(rule: dict, files: list[Path]) -> list[dict]:
     target_crate = normalise_crate_glob(rule["to_glob"])
-    import_token = re.compile(r"\b" + re.escape(target_crate.replace("-", "_")) + r"\b")
+    token = target_crate.replace("-", "_")
     matchers = [glob_to_regex(g) for g in _expand_braces(rule["from_glob"])]
-    out = []
-    for path in files:
-        rel = path.relative_to(REPO_ROOT).as_posix()
-        if not any(m.match(rel) for m in matchers):
-            continue
-        text = path.read_text(encoding="utf-8", errors="replace")
-        if import_token.search(text):
-            out.append({"rule": rule, "from_key": rel, "to_key": target_crate,
-                        "witness": f"{rel} references `{target_crate.replace('-', '_')}`"})
-    return out
+    scoped = [p for p in files
+              if any(m.match(p.relative_to(REPO_ROOT).as_posix()) for m in matchers)]
+    # POSIX ERE has no `\b`, and `\<`/`\>` are a GNU extension the CI runner's
+    # awk may not have. Spell the word boundary out.
+    boundary = "[^A-Za-z0-9_]"
+    hits = scan_production_code(scoped, f"(^|{boundary}){re.escape(token)}({boundary}|$)")
+    return [{"rule": rule, "from_key": rel, "to_key": target_crate,
+             "witness": f"{rel} references `{token}`"}
+            for rel in sorted(hits)]
 
 
 def render_report(violations: list[dict]) -> str:
@@ -290,8 +336,74 @@ def _self_test() -> int:
     rule = {"name": "x", "from_glob": "**/djinn-a/**", "to_glob": "**/djinn-b/**", "description": "d"}
     assert check_crate_rule(rule, [("djinn-a", "djinn-b", "w")])
     assert not check_crate_rule(rule, [("djinn-a", "djinn-c", "w")])
+    _self_test_file_rule()
     print("self-test: OK")
     return 0
+
+
+def _self_test_file_rule() -> None:
+    """File-level rules: prove the scan fails in BOTH directions.
+
+    A ban that ignores comments and a ban that ignores everything look
+    identical from a green run, so each case below is paired with its
+    opposite. The two traps this is written against:
+
+    * A presence assertion and a ban assertion need DIFFERENT mutations.
+      Here the invariant is a BAN, so the mutation that must be caught is
+      ADDING the forbidden token as real code while leaving the rest alone --
+      not removing something.
+    * A trailing comment must not launder the code in front of it.
+    """
+    import tempfile
+
+    rule = {"name": "x", "description": "d",
+            "from_glob": "**/pool/{actor,handle}.rs", "to_glob": "**/djinn-k8s/**"}
+
+    cases = [
+        # (label, body, expect_violation)
+        ("a comment naming the crate is prose",
+         "// This module no longer reaches into djinn_k8s.\n"
+         "/// See [`djinn_k8s::Pod`] for what we deliberately do not use.\n"
+         "pub fn spawn() {}\n", False),
+        ("a real reference is a violation",
+         "// This module no longer reaches into djinn_k8s.\n"
+         "pub fn spawn(p: djinn_k8s::Pod) {}\n", True),
+        ("a trailing comment does not launder the code in front of it",
+         "pub fn spawn(p: djinn_k8s::Pod) {} // TODO: move behind a port\n", True),
+        ("a reference confined to a #[cfg(test)] block is not production",
+         "pub fn spawn() {}\n\n"
+         "#[cfg(test)]\nmod tests {\n"
+         "    fn fixture() -> djinn_k8s::Pod { todo!() }\n"
+         "}\n", False),
+        # The load-bearing pair for the case above: production code AFTER a
+        # #[cfg(test)] block is still production code. Truncating at the first
+        # marker is what made check-resize-reachability.sh read 8% of a file.
+        ("production code AFTER a #[cfg(test)] block is still scanned",
+         "#[cfg(test)]\nmod tests {\n    fn fixture() {}\n}\n\n"
+         "pub fn spawn(p: djinn_k8s::Pod) {}\n", True),
+        # #[cfg(test)] on a FIELD opens no block and must not swallow the
+        # production function that follows it.
+         ("a #[cfg(test)] field does not hide the next fn",
+         "pub struct S {\n    #[cfg(test)]\n    shim: bool,\n    real: u32,\n}\n\n"
+         "pub fn spawn(p: djinn_k8s::Pod) {}\n", True),
+        ("a substring of a longer crate name is not a reference",
+         "pub fn spawn(p: djinn_k8s_helpers::Pod) {}\n", False),
+    ]
+
+    with tempfile.TemporaryDirectory(dir=REPO_ROOT) as tmp:
+        root = Path(tmp) / "pool"
+        root.mkdir()
+        target = root / "actor.rs"
+        for label, body, expect_violation in cases:
+            target.write_text(body, encoding="utf-8")
+            # glob_to_regex matches repo-relative paths, so build the rule's
+            # matcher against this fixture's real relative path.
+            rel = target.relative_to(REPO_ROOT).as_posix()
+            scoped_rule = dict(rule, from_glob="**/pool/{actor,handle}.rs")
+            found = bool(check_file_rule(scoped_rule, [target]))
+            assert found == expect_violation, (
+                f"file-rule self-test failed: {label} (path {rel}, "
+                f"expected violation={expect_violation}, got {found})")
 
 
 def main() -> int:

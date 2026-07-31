@@ -124,13 +124,13 @@ async fn armed_epoch_is_born_clamped_and_then_lifted_through_the_in_pod_composit
 }
 
 /// Fail-closed, unchanged: the same composition over a database whose
-/// `admission_handoff` row is ABSENT must not lift, and must not clamp either
+/// invocation-lease authority row is ABSENT must not lift, and must not clamp either
 /// (nothing could ever raise that leaf — blocker 11).
 #[tokio::test]
 async fn absent_row_still_fails_closed_through_the_in_pod_composition() {
     let db = crate::test_helpers::create_test_db();
     super::lease_degrade_tests::arm_invocation_lift(&db).await;
-    djinn_db::AdmissionHandoffRepository::new(db.clone())
+    djinn_db::InvocationLeaseAuthorityRepository::new(db.clone())
         .delete_for_test()
         .await
         .unwrap();
@@ -160,7 +160,7 @@ async fn absent_row_still_fails_closed_through_the_in_pod_composition() {
 /// The wrong-database hazard, end to end.
 ///
 /// A task-run Pod's worker container carries TWO Postgres DSNs:
-/// `DJINN_DATABASE_URL` (the platform database, where `admission_handoff` lives)
+/// `DJINN_DATABASE_URL` (the platform database, where the invocation-lease authority lives)
 /// and `DATABASE_URL` (the project's `svc-postgres` catalog-service sidecar,
 /// which has no such table). If the lift decision is ever composed from the
 /// wrong one, the read fails — and with the old `.map_err(|_| ())` that was
@@ -278,7 +278,7 @@ async fn shadow_epoch_binds_but_never_lifts() {
 /// passed, because a no-op lift is exactly what the code did. What it could not
 /// see is that the leaf had *already* been born at 250m, so "never lifts" meant
 /// "clamped at 250m forever". Production ran with the durable
-/// `admission_handoff` row absent — `Unleased` for every invocation — and a
+/// authority row absent — `Unleased` for every invocation — and a
 /// measured leaf reached 21.1 CPU-seconds, 84x the 0.25 CPU-s escalation
 /// threshold, with `cpu.max` still reading `25000 100000`. Builds ran ~16x
 /// slower armed than disabled.

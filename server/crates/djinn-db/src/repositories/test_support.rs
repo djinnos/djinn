@@ -187,6 +187,153 @@ pub async fn refinement_run_audit_for_test(
     }
 }
 
+/// Count every row in `tasks`, across all projects and statuses.
+///
+/// No repository read is equivalent: every `TaskRepository` list is scoped to a
+/// project, an epic, or a status set, so a task row created and then stranded
+/// outside the fixture's project would not appear in any of them. The tests that
+/// use this assert that a *rejected* tool call left the whole table unchanged,
+/// which is precisely a claim about rows no scoped read can see.
+///
+/// **Not for production use.** Panics on SQL errors.
+pub async fn task_row_count_for_test(db: &Database) -> i64 {
+    db.ensure_initialized().await.unwrap();
+    sqlx::query_scalar("SELECT COUNT(*) FROM tasks")
+        .fetch_one(db.pool())
+        .await
+        .expect("failed to count task rows")
+}
+
+/// Correlate a task to a refinement run by run id ALONE, leaving
+/// `refinement_intent_id`, `refinement_generation`, `refinement_round`,
+/// `refinement_phase`, and `refinement_role` null.
+///
+/// [`crate::repositories::task::TaskRepository::set_refinement_correlation`]
+/// only writes a complete [`djinn_core::models::TaskRefinementCorrelation`], and
+/// [`ProposalRepository::acknowledge_refinement_task_materialization`] refuses a
+/// task that is not fully correlated. Neither can express the partially
+/// correlated row this fixture needs: the liveness snapshot selects task
+/// evidence on `refinement_run_id` alone, so a run-correlated task with no
+/// intent identity is exactly the durable shape that distinguishes task
+/// evidence from intent evidence.
+///
+/// **Not for production use.** Panics on SQL errors.
+pub async fn correlate_task_to_refinement_run_for_test(db: &Database, task_id: &str, run_id: &str) {
+    db.ensure_initialized().await.unwrap();
+    sqlx::query("UPDATE tasks SET refinement_run_id = $1 WHERE id = $2")
+        .bind(run_id)
+        .bind(task_id)
+        .execute(db.pool())
+        .await
+        .expect("failed to correlate task to refinement run");
+}
+
+/// Replace the `park_kind` of a run that is ALREADY parked.
+///
+/// [`ProposalRepository::park_refinement_run`] carries `AND state = 'running'`
+/// and [`ProposalRepository::park_refinement_run_from_intent`] consumes a live
+/// source intent, so neither can re-park a run that is already parked, and
+/// there is no un-park transition. Status tests that must observe both park
+/// kinds project from the same exact run have no repository path to the second
+/// one.
+///
+/// `parked_at` is left untouched so the run keeps the timestamp its original
+/// park wrote.
+///
+/// **Not for production use.** Panics on SQL errors.
+pub async fn force_refinement_run_park_kind_for_test(
+    db: &Database,
+    run_id: &str,
+    kind: djinn_core::refinement_liveness::RefinementParkKind,
+) {
+    db.ensure_initialized().await.unwrap();
+    let kind = match kind {
+        djinn_core::refinement_liveness::RefinementParkKind::AwaitingReview => "awaiting_review",
+        djinn_core::refinement_liveness::RefinementParkKind::AwaitingEvidence => {
+            "awaiting_evidence"
+        }
+    };
+    sqlx::query("UPDATE refinement_runs SET park_kind = $2 WHERE id = $1 AND state = 'parked'")
+        .bind(run_id)
+        .bind(kind)
+        .execute(db.pool())
+        .await
+        .expect("failed to force refinement run park kind");
+}
+
+/// Terminalize a run row out of band: no `proposal_revisions` audit append, no
+/// heartbeat refresh, and no generation fence.
+///
+/// [`ProposalRepository::terminal_refinement_run`] additionally appends a
+/// `refinement_stop` revision in the same transaction and stamps
+/// `heartbeat_at`. Both are observable, and the tests that use this helper
+/// observe them:
+///
+/// * one counts `refinement_stop` revisions to prove a tool handler emitted no
+///   spurious stop — a fixture-written audit row would be indistinguishable
+///   from the defect;
+/// * one asserts that a *prior* terminal run's stop reason does not leak into
+///   the current run's status, and `build_refinement_status` falls back to the
+///   latest `refinement_stop` revision when the exact run has no terminal
+///   reason — so a fixture-written audit row would make the regression
+///   undetectable.
+///
+/// `terminal_at` is caller-supplied because these fixtures model historic rows.
+///
+/// **Not for production use.** Panics on SQL errors.
+pub async fn force_refinement_run_terminal_for_test(
+    db: &Database,
+    run_id: &str,
+    reason: &djinn_core::refinement_liveness::RefinementStopReason,
+    terminal_at: &str,
+) {
+    db.ensure_initialized().await.unwrap();
+    let context = serde_json::to_value(reason)
+        .expect("failed to serialize refinement stop reason")
+        .get("context")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    sqlx::query(
+        "UPDATE refinement_runs \
+         SET state = 'terminal', parked_at = NULL, park_kind = NULL, \
+             terminal_at = $2, stop_tag = $3, stop_context = $4 \
+         WHERE id = $1",
+    )
+    .bind(run_id)
+    .bind(terminal_at)
+    .bind(reason.tag())
+    .bind(&context)
+    .execute(db.pool())
+    .await
+    .expect("failed to force refinement run terminal");
+}
+
+/// Complete a dispatch intent WITHOUT persisting its successor.
+///
+/// [`ProposalRepository::complete_refinement_intent`] always inserts exactly one
+/// next-phase intent in the same transaction — that atomicity is the point of
+/// the production method. A fixture that needs the completed intent to be the
+/// run's last intent (so that some other durable row is the sole remaining
+/// liveness evidence) cannot use it: the successor lands `pending`, and a
+/// pending intent outranks every task, session, and heartbeat fallback in the
+/// shared evaluator.
+///
+/// **Not for production use.** Panics on SQL errors.
+pub async fn complete_refinement_intent_without_successor_for_test(db: &Database, intent_id: &str) {
+    db.ensure_initialized().await.unwrap();
+    sqlx::query(
+        "UPDATE refinement_dispatch_intents \
+         SET state = 'completed', claimed_by = NULL, claimed_at = NULL, claim_expires_at = NULL, \
+             terminal_at = to_char(transaction_timestamp() AT TIME ZONE 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'), \
+             updated_at = to_char(transaction_timestamp() AT TIME ZONE 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') \
+         WHERE id = $1",
+    )
+    .bind(intent_id)
+    .execute(db.pool())
+    .await
+    .expect("failed to complete refinement intent without successor");
+}
+
 /// Corrupt a task role to model malformed legacy correlation evidence.
 pub async fn corrupt_refinement_task_role_for_test(db: &Database, task_id: &str, role: &str) {
     db.ensure_initialized().await.unwrap();
@@ -581,6 +728,23 @@ pub async fn override_debate_trail_body_metadata(
         .expect("failed to override debate trail body_metadata");
 }
 
+/// Count the rows in `table_name`. Test-fixture helper for tests that must
+/// prove a code path wrote NOTHING to a specific relation.
+///
+/// Deliberately per-relation rather than a summed total: a ledger with several
+/// relations lets a write to one hide behind an absent write to another, so the
+/// census that proves "zero writes" has to be taken relation by relation.
+///
+/// **Not for production use.**  Panics on SQL errors.
+pub async fn count_rows_for_test(db: &Database, table_name: &str) -> i64 {
+    db.ensure_initialized().await.unwrap();
+    let (count,): (i64,) = sqlx::query_as(&format!("SELECT count(*) FROM {table_name}"))
+        .fetch_one(db.pool())
+        .await
+        .unwrap_or_else(|error| panic!("count rows in {table_name}: {error}"));
+    count
+}
+
 /// Drop a database table if it exists.  Test-fixture helper for
 /// failure-injection tests that need to simulate a missing-table error
 /// (e.g. the coordinator reentrance `blocker_lookup_error` test).
@@ -658,47 +822,6 @@ pub async fn reject_new_task_arbitrations_for_test(db: &Database) {
     .execute(db.pool())
     .await
     .expect("failed to add task_arbitrations reject-insert constraint");
-}
-
-/// Toggle a test-only trigger that rejects admission-journal transitions to
-/// `create_in_flight`. This lets composition tests exercise an unavailable
-/// durable CreateStarted transition through the database-owner boundary.
-///
-/// **Not for production use.** Panics on SQL errors.
-pub async fn reject_admission_create_started_for_test(db: &Database, reject: bool) {
-    db.ensure_initialized().await.unwrap();
-    if reject {
-        sqlx::query(
-            "CREATE FUNCTION reject_admission_create_started_for_test() RETURNS trigger AS $$ \
-             BEGIN \
-               IF NEW.state = 'create_in_flight' THEN \
-                 RAISE EXCEPTION 'journal temporarily unavailable'; \
-               END IF; \
-               RETURN NEW; \
-             END; \
-             $$ LANGUAGE plpgsql",
-        )
-        .execute(db.pool())
-        .await
-        .expect("failed to create admission CreateStarted rejection function");
-        sqlx::query(
-            "CREATE TRIGGER reject_admission_create_started_for_test \
-             BEFORE UPDATE ON admission_journal \
-             FOR EACH ROW EXECUTE FUNCTION reject_admission_create_started_for_test()",
-        )
-        .execute(db.pool())
-        .await
-        .expect("failed to create admission CreateStarted rejection trigger");
-    } else {
-        sqlx::query("DROP TRIGGER reject_admission_create_started_for_test ON admission_journal")
-            .execute(db.pool())
-            .await
-            .expect("failed to drop admission CreateStarted rejection trigger");
-        sqlx::query("DROP FUNCTION reject_admission_create_started_for_test()")
-            .execute(db.pool())
-            .await
-            .expect("failed to drop admission CreateStarted rejection function");
-    }
 }
 
 /// Install a test-only trigger that rejects creation of a successor refinement

@@ -109,15 +109,21 @@ pub trait SupervisorServices: Send + Sync + 'static {
     // [`InvocationLiftAuthority`] — injected at the composition root. Do not
     // re-add it here.
 
-    /// Record this live generation's acknowledgement of the current admission
-    /// epoch, once the task-run is healthy under the new mode. `generation_key`
-    /// MUST be built through the canonical admission generation-key helper so it
-    /// byte-matches the invocation-primary edge's required-generation set. The
-    /// underlying write is idempotent and stale-fenced in the database; the
-    /// default is a no-op for impls without coordination-state access.
-    async fn record_generation_ack(&self, _generation_key: String) -> Result<(), String> {
-        Ok(())
-    }
+    // There is deliberately no `record_generation_ack` here either.
+    //
+    // It wrote `admission_handoff_generation_ack` rows, which existed for
+    // exactly one purpose: to hold the v0→v1 invocation-primary handoff edge
+    // closed until every live task-run generation had confirmed the new
+    // authority. The Kueue cutover deleted the v0 authority, and with it the
+    // edge, the phase ring, and the required-generation set those rows were
+    // matched against. Nothing reads them.
+    //
+    // It was REMOVED rather than stubbed. This trait's `Ok(())` default is what
+    // the method already looked like for impls without coordination-state
+    // access, so a stub would compile everywhere, drop every acknowledgement,
+    // and leave two real implementations writing rows nobody reads — the exact
+    // inert-mechanism shape the cutover exists to eliminate. Deleting it makes
+    // any surviving caller a compile error.
 
     /// Load the [`Task`] row backing this task-run.  Called once, before the
     /// first stage executes.

@@ -1,0 +1,93 @@
+# Djinn chart values for a DISPOSABLE single-node zero-capture gate cluster.
+#
+#   deploy/kueue/zero-capture-gate.sh \
+#     --context <disposable-target-context> \
+#     --designated-operator-secret <caller-owned-secret> \
+#     --values deploy/kueue/tests/fixtures/single-node-values.yaml \
+#     --set-string image.server=ghcr.io/djinnos/djinn-server:<release-under-test> \
+#     --set-string image.runtime=ghcr.io/djinnos/djinn-agent-runtime:<release-under-test>
+#
+# This file deliberately does NOT pin an image tag. The gate is
+# release-before-cutover evidence for a SPECIFIC release, so the tag under test
+# is the caller's to name on the command line and to record in the release
+# record. The committed chart default (`djinn-server:latest`, unqualified) is a
+# demo placeholder that resolves to docker.io/library/djinn-server:latest and
+# is not pullable anywhere.
+#
+# Everything below exists because the chart's committed defaults describe a
+# multi-node production cluster. Production does not run them either — see
+# docs/deploy/vps.md, which overrides the same three access modes.
+
+# The three shared volumes default to ReadWriteMany. No single-node default
+# StorageClass provisions RWX: kind's rancher.io/local-path and k3s's
+# local-path both leave the PVCs Pending forever, and the install then fails
+# with "PVC is not Bound. phase: Pending" followed by "context deadline
+# exceeded". RWO is correct on one node because RWO is enforced per-node, not
+# per-pod, so the server Pod and any Job can share the claim.
+storage:
+  mirrors:
+    accessMode: ReadWriteOnce
+    size: 2Gi
+  cache:
+    accessMode: ReadWriteOnce
+    size: 2Gi
+  projects:
+    accessMode: ReadWriteOnce
+    size: 2Gi
+
+postgres:
+  storage:
+    accessMode: ReadWriteOnce
+    size: 2Gi
+  config:
+    sharedBuffers: 512MB
+    maxConnections: 100
+  resources:
+    requests:
+      cpu: "250m"
+      memory: "512Mi"
+    limits:
+      cpu: "2"
+      memory: "2Gi"
+
+qdrant:
+  storage:
+    accessMode: ReadWriteOnce
+    size: 2Gi
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "256Mi"
+    limits:
+      cpu: "1"
+      memory: "1Gi"
+
+# A disposable cluster has no DNS name and no certificate issuer.
+ingress:
+  enabled: false
+
+# The gate only needs the chart's Kueue topology and its Namespace to render,
+# and the server Deployment to go Available. Keep requests small enough that a
+# single-node control plane can still schedule the fixture Pod afterwards.
+resources:
+  server:
+    requests:
+      cpu: "100m"
+      memory: "512Mi"
+    limits:
+      cpu: "2"
+      memory: "4Gi"
+  taskrun:
+    requests:
+      cpu: "100m"
+      memory: "256Mi"
+    limits:
+      cpu: "1"
+      memory: "2Gi"
+  warm:
+    requests:
+      cpu: "250m"
+      memory: "512Mi"
+    limits:
+      cpu: "2"
+      memory: "4Gi"

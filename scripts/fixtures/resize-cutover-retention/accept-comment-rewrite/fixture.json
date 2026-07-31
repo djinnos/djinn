@@ -1,0 +1,13 @@
+{
+  "asset": null,
+  "expect": "accept",
+  "why": "A second required-passing case: the doc comment above `kill` rewritten. Comments are the one thing the gate deliberately does not read, so rewriting one must not move the exit code. Paired with disable-cgroup-kill-commented-out this pins the gate's actual rule: comments never SATISFY a check and never BREAK one.",
+  "operations": [
+    {
+      "op": "replace",
+      "path": "server/crates/djinn-cgroup-launcher/src/lib.rs",
+      "find": "    /// Mark terminal intent before cgroup-wide kill so a concurrent/replayed\n    /// grant can never lift it afterwards.\n",
+      "with": "    /// Terminal intent is marked first: a lift that arrives (or is replayed)\n    /// after this point must be refused rather than raise a dying leaf's quota.\n"
+    }
+  ]
+}

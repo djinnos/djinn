@@ -36,6 +36,11 @@ run_linked_worktree_diff_guard() {
     LINKED_WORKTREE="$LOG_DIR/linked-worktree"
     git -C "$REPO_ROOT" worktree add --detach "$LINKED_WORKTREE" HEAD > "$LOG_DIR/t14_worktree_setup.log" 2>&1
     cp "$GUARD" "$LINKED_WORKTREE/scripts/check-raw-sql-boundary.sh"
+    # The worktree is checked out at HEAD, so it carries the COMMITTED guard and
+    # its committed dependencies. Copy the working-tree scanner alongside the
+    # working-tree guard: otherwise this case silently tests the old pair.
+    mkdir -p "$LINKED_WORKTREE/scripts/lib"
+    cp "$SCRIPT_DIR/lib/rust-source-scan.awk" "$LINKED_WORKTREE/scripts/lib/rust-source-scan.awk"
 
     ORIGIN_MAIN_BEFORE=$(git -C "$REPO_ROOT" rev-parse --verify origin/main^{commit})
     SHALLOW_BEFORE=$(git -C "$REPO_ROOT" rev-parse --is-shallow-repository)
@@ -310,6 +315,300 @@ assert_exit "T9 sqlx::query! macro violation exits non-zero" 1 "$t9_actual" "$LO
 assert_output_contains "T9 reports query! macro violation" \
     "::error::Raw sqlx query usage detected outside djinn-db: $QUERY_MACRO_PATH" \
     "$LOG_DIR/t9_query_macro.log.out"
+
+# ── T20: .inc files are compiled source and MUST be inspected ─────────
+#
+# Regression test for the hole this suite did not have: `.inc` files are
+# include!()d into a .rs module and compiled verbatim, but the guard's
+# candidate filter only accepted `*.rs`, so a real violation in
+# graph_tools/tests_coverage.inc sat in the tree with a green gate.
+FIXTURE_INC="$REPO_ROOT/$FIXTURE_BASE/src/tests_seed.inc"
+cat > "$FIXTURE_INC" <<'FIXTURE'
+    async fn seed(db: &Database) {
+        sqlx::query("INSERT INTO projects (id, name) VALUES ($1,$2)")
+            .bind("p1")
+            .bind("p1")
+            .execute(db.pool())
+            .await
+            .expect("seed project");
+    }
+FIXTURE
+
+INC_PATH="$FIXTURE_BASE/src/tests_seed.inc"
+set +e
+run_guard t20_inc_violation "$INC_PATH"
+t20_actual=$?
+set -e
+assert_exit "T20 sqlx::query in a .inc file exits non-zero" 1 "$t20_actual" "$LOG_DIR/t20_inc_violation.log.out"
+assert_output_contains "T20 reports the violating .inc file" \
+    "::error::Raw sqlx query usage detected outside djinn-db: $INC_PATH" \
+    "$LOG_DIR/t20_inc_violation.log.out"
+assert_output_lacks "T20 does not warn about .inc as unrecognised" \
+    "unrecognised extension" "$LOG_DIR/t20_inc_violation.log.out"
+
+# ── T21: a clean .inc file passes and is counted as checked ───────────
+FIXTURE_INC_CLEAN="$REPO_ROOT/$FIXTURE_BASE/src/tests_clean.inc"
+cat > "$FIXTURE_INC_CLEAN" <<'FIXTURE'
+    async fn seed(db: &Database) {
+        ProjectRepository::new(db.clone(), EventBus::noop())
+            .create_with_id("p1", "p1", "test", "p1")
+            .await
+            .expect("seed project");
+    }
+FIXTURE
+
+INC_CLEAN_PATH="$FIXTURE_BASE/src/tests_clean.inc"
+set +e
+run_guard t21_inc_clean "$INC_CLEAN_PATH"
+t21_actual=$?
+set -e
+assert_exit "T21 clean .inc file exits 0" 0 "$t21_actual" "$LOG_DIR/t21_inc_clean.log.out"
+assert_output_contains "T21 counts the .inc file as checked" \
+    "checked 1 Rust source file(s)" "$LOG_DIR/t21_inc_clean.log.out"
+
+# ── T22: an unrecognised extension is LOUD, not silently skipped ──────
+#
+# The defect was never `.inc` specifically — it was that a file the guard
+# declines to classify vanishes without a trace. An unknown extension under
+# the server source tree must be announced AND inspected, so a novel
+# compiled extension can never pass quietly.
+FIXTURE_UNKNOWN="$REPO_ROOT/$FIXTURE_BASE/src/generated_queries.rs2"
+cat > "$FIXTURE_UNKNOWN" <<'FIXTURE'
+pub async fn fetch(pool: &sqlx::PgPool) {
+    sqlx::query("SELECT 1").execute(pool).await.unwrap();
+}
+FIXTURE
+
+UNKNOWN_PATH="$FIXTURE_BASE/src/generated_queries.rs2"
+set +e
+run_guard t22_unknown_ext "$UNKNOWN_PATH"
+t22_actual=$?
+set -e
+assert_exit "T22 unrecognised extension with a violation exits non-zero" 1 "$t22_actual" "$LOG_DIR/t22_unknown_ext.log.out"
+assert_output_contains "T22 warns about the unrecognised extension" \
+    "::warning::check-raw-sql-boundary: unrecognised extension under the server source tree; inspecting it as if it were compiled Rust: $UNKNOWN_PATH" \
+    "$LOG_DIR/t22_unknown_ext.log.out"
+assert_output_contains "T22 still reports the violation" \
+    "::error::Raw sqlx query usage detected outside djinn-db: $UNKNOWN_PATH" \
+    "$LOG_DIR/t22_unknown_ext.log.out"
+
+# ── T23: a clean unrecognised extension warns but does not fail ───────
+FIXTURE_UNKNOWN_CLEAN="$REPO_ROOT/$FIXTURE_BASE/src/notes.rs2"
+cat > "$FIXTURE_UNKNOWN_CLEAN" <<'FIXTURE'
+pub const GREETING: &str = "hello";
+FIXTURE
+
+UNKNOWN_CLEAN_PATH="$FIXTURE_BASE/src/notes.rs2"
+set +e
+run_guard t23_unknown_clean "$UNKNOWN_CLEAN_PATH"
+t23_actual=$?
+set -e
+assert_exit "T23 clean unrecognised extension exits 0" 0 "$t23_actual" "$LOG_DIR/t23_unknown_clean.log.out"
+assert_output_contains "T23 still warns about the unrecognised extension" \
+    "unrecognised extension" "$LOG_DIR/t23_unknown_clean.log.out"
+assert_output_contains "T23 summary names the unclassified count" \
+    "1 with an unrecognised extension, inspected anyway" \
+    "$LOG_DIR/t23_unknown_clean.log.out"
+
+# ── T24: inert data files under server/ are skipped silently ──────────
+#
+# The loud-unclassified rule must not turn every fixture into noise. A .sql
+# fixture living under server/crates is data, not compiled source.
+FIXTURE_SQL="$REPO_ROOT/$FIXTURE_BASE/fixtures/seed.sql"
+mkdir -p -- "$(dirname -- "$FIXTURE_SQL")"
+cat > "$FIXTURE_SQL" <<'FIXTURE'
+INSERT INTO projects (id, name) VALUES ('p1', 'p1');
+FIXTURE
+
+SQL_FIXTURE_PATH="$FIXTURE_BASE/fixtures/seed.sql"
+set +e
+run_guard t24_inert "$SQL_FIXTURE_PATH"
+t24_actual=$?
+set -e
+assert_exit "T24 inert .sql fixture exits 0" 0 "$t24_actual" "$LOG_DIR/t24_inert.log.out"
+assert_output_lacks "T24 does not warn about inert data files" \
+    "unrecognised extension" "$LOG_DIR/t24_inert.log.out"
+
+# ── T25: sqlx syntax inside a string literal is DATA, not a call ──────
+#
+# djinn-graph/src/db_access.rs is a scanner that detects SQL in source text,
+# and its unit tests feed it Rust source as a string. The guard was matching
+# its own test fixtures. Rust never compiles the contents of a string
+# literal, so a literal cannot contain a call.
+#
+# The fixture below reproduces both real shapes from that file AND, on the
+# lines immediately adjacent, a genuine violation — because the rule that
+# fixes the false positive must not be able to swallow the real thing.
+FIXTURE_SCANNER="$REPO_ROOT/$FIXTURE_BASE/src/scanner_selftest.rs"
+cat > "$FIXTURE_SCANNER" <<'FIXTURE'
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn detects_insert_into() {
+        let hits = scan_sql("sqlx::query!(\"INSERT INTO orders (sku) VALUES (?)\", sku);");
+        assert_eq!(hits.len(), 1);
+    }
+
+    #[test]
+    fn ignores_select_without_from() {
+        let hits = scan_sql("let v = sqlx::query_scalar!(\"SELECT 1\");");
+        assert!(hits.is_empty());
+    }
+}
+FIXTURE
+
+SCANNER_PATH="$FIXTURE_BASE/src/scanner_selftest.rs"
+set +e
+run_guard t25_scanner_literals "$SCANNER_PATH"
+t25_actual=$?
+set -e
+assert_exit "T25 sqlx syntax inside a string literal exits 0" 0 "$t25_actual" "$LOG_DIR/t25_scanner_literals.log.out"
+assert_output_lacks "T25 does not flag the scanner self-test fixtures" \
+    "::error::Raw sqlx query usage detected outside djinn-db: $SCANNER_PATH" \
+    "$LOG_DIR/t25_scanner_literals.log.out"
+
+# ── T26: a real violation ADJACENT to such a literal is still caught ───
+#
+# This is the load-bearing test for T25. If the string-literal rule were
+# implemented as "skip lines that contain quotes" or "skip this file", the
+# real call two lines down would vanish with the fixtures.
+FIXTURE_ADJACENT="$REPO_ROOT/$FIXTURE_BASE/src/scanner_adjacent.rs"
+cat > "$FIXTURE_ADJACENT" <<'FIXTURE'
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn detects_insert_into() {
+        let hits = scan_sql("sqlx::query!(\"INSERT INTO orders (sku) VALUES (?)\", sku);");
+        sqlx::query("DELETE FROM orders").execute(pool).await.unwrap();
+        let more = scan_sql("let v = sqlx::query_scalar!(\"SELECT 1\");");
+        assert_eq!(hits.len(), more.len());
+    }
+}
+FIXTURE
+
+ADJACENT_PATH="$FIXTURE_BASE/src/scanner_adjacent.rs"
+set +e
+run_guard t26_adjacent_violation "$ADJACENT_PATH"
+t26_actual=$?
+set -e
+assert_exit "T26 real violation adjacent to string literals exits non-zero" 1 "$t26_actual" "$LOG_DIR/t26_adjacent_violation.log.out"
+assert_output_contains "T26 reports the adjacent violation" \
+    "::error::Raw sqlx query usage detected outside djinn-db: $ADJACENT_PATH" \
+    "$LOG_DIR/t26_adjacent_violation.log.out"
+assert_output_contains "T26 names the real call's line, not the fixtures'" \
+    "6:        sqlx::query(\"DELETE FROM orders\")" \
+    "$LOG_DIR/t26_adjacent_violation.log.out"
+assert_output_lacks "T26 does not report the line 5 fixture" \
+    "5:        let hits = scan_sql" "$LOG_DIR/t26_adjacent_violation.log.out"
+assert_output_lacks "T26 does not report the line 7 fixture" \
+    "7:        let more = scan_sql" "$LOG_DIR/t26_adjacent_violation.log.out"
+
+# ── T27: SQL built by concatenation is still a violation ───────────────
+#
+# The narrowness requirement: only the matched TOKENS being literal data is
+# excused, never the contents of a literal. `credential.rs` builds SQL with
+# format! on the same line as the call — a "quotes on this line" rule would
+# have blinded the guard to exactly that shape.
+FIXTURE_CONCAT="$REPO_ROOT/$FIXTURE_BASE/src/concat_sql.rs"
+cat > "$FIXTURE_CONCAT" <<'FIXTURE'
+const SET: &str = "UPDATE credentials SET value = $1 WHERE ";
+
+pub async fn upsert(pool: &sqlx::PgPool, id: &str) {
+    sqlx::query(&format!("{SET}owner_user_id = $3"))
+        .bind(id)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+FIXTURE
+
+CONCAT_PATH="$FIXTURE_BASE/src/concat_sql.rs"
+set +e
+run_guard t27_concat "$CONCAT_PATH"
+t27_actual=$?
+set -e
+assert_exit "T27 format!-built SQL still exits non-zero" 1 "$t27_actual" "$LOG_DIR/t27_concat.log.out"
+assert_output_contains "T27 reports the concatenation violation" \
+    "::error::Raw sqlx query usage detected outside djinn-db: $CONCAT_PATH" \
+    "$LOG_DIR/t27_concat.log.out"
+
+# ── T28: a call AFTER a closed literal on the same line still fails ────
+#
+# Escape handling matters: `"a\"b"` is ONE literal. Naive quote counting
+# would close it at the escaped quote, treat the rest of the line as string
+# body, and silently swallow the call that follows.
+FIXTURE_AFTER="$REPO_ROOT/$FIXTURE_BASE/src/after_literal.rs"
+cat > "$FIXTURE_AFTER" <<'FIXTURE'
+pub async fn go(pool: &sqlx::PgPool) {
+    let label = "a\"b"; sqlx::query("SELECT 1").execute(pool).await.unwrap();
+    let ch = '"'; sqlx::query_scalar("SELECT 2").fetch_one(pool).await.unwrap();
+    let _ = (label, ch);
+}
+FIXTURE
+
+AFTER_PATH="$FIXTURE_BASE/src/after_literal.rs"
+set +e
+run_guard t28_after_literal "$AFTER_PATH"
+t28_actual=$?
+set -e
+assert_exit "T28 call after a closed literal exits non-zero" 1 "$t28_actual" "$LOG_DIR/t28_after_literal.log.out"
+assert_output_contains "T28 catches the call after an escaped-quote literal" \
+    "2:    let label = " "$LOG_DIR/t28_after_literal.log.out"
+assert_output_contains "T28 catches the call after a double-quote char literal" \
+    "3:    let ch = " "$LOG_DIR/t28_after_literal.log.out"
+
+# ── T29: prose naming the banned call is not a call ───────────────────
+#
+# The pcod defect (#2871): a comment written to explain WHY a token is wrong
+# fired the ban that forbids it. A rule outside djinn-db is exactly the kind
+# of thing a doc comment says out loud, so this shape is common, not exotic.
+FIXTURE_PROSE="$REPO_ROOT/$FIXTURE_BASE/src/prose_only.rs"
+cat > "$FIXTURE_PROSE" <<'FIXTURE'
+//! Repository access notes.
+//!
+//! Raw `sqlx::query!` and `sqlx::query_as!` belong in djinn-db, never here.
+
+/// Do not reach for sqlx::query_scalar!( in this module; call the repository.
+/*
+ * A block comment mentioning sqlx::query( is prose too.
+ */
+pub async fn count(repo: &Repo) -> u64 {
+    repo.count().await
+}
+FIXTURE
+
+PROSE_PATH="$FIXTURE_BASE/src/prose_only.rs"
+set +e
+run_guard t29_prose "$PROSE_PATH"
+t29_actual=$?
+set -e
+assert_exit "T29 comments naming sqlx calls exit 0" 0 "$t29_actual" "$LOG_DIR/t29_prose.log.out"
+assert_output_lacks "T29 does not flag the prose file" \
+    "$PROSE_PATH" "$LOG_DIR/t29_prose.log.out"
+
+# ── T30: a trailing comment does not launder the code in front of it ───
+#
+# The load-bearing counterpart to T29. If comment stripping were implemented
+# as "drop any line containing //", every violation could be hidden by typing
+# a comment after it. `foo(); // note` is still a call to foo().
+FIXTURE_TRAILING="$REPO_ROOT/$FIXTURE_BASE/src/trailing_comment.rs"
+cat > "$FIXTURE_TRAILING" <<'FIXTURE'
+pub async fn touch(pool: &PgPool) {
+    // sqlx::query("SELECT 1") — this line is prose and must not be reported.
+    sqlx::query("DELETE FROM orders").execute(pool).await.unwrap(); // TODO: move to djinn-db
+}
+FIXTURE
+
+TRAILING_PATH="$FIXTURE_BASE/src/trailing_comment.rs"
+set +e
+run_guard t30_trailing "$TRAILING_PATH"
+t30_actual=$?
+set -e
+assert_exit "T30 code before a trailing comment still exits non-zero" 1 "$t30_actual" "$LOG_DIR/t30_trailing.log.out"
+assert_output_contains "T30 reports the real call on line 3" \
+    "3:    sqlx::query(\"DELETE FROM orders\")" "$LOG_DIR/t30_trailing.log.out"
+assert_output_lacks "T30 does not report the comment on line 2" \
+    "2:    // sqlx::query" "$LOG_DIR/t30_trailing.log.out"
 
 # ── T10: mixed files — violation + clean + djinn-db ───────────────────
 set +e

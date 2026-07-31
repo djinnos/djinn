@@ -56,6 +56,12 @@ pub enum ControlRejection {
     Nonce,
     /// The connection has not presented a valid worker readiness assertion.
     Worker,
+    /// The worker's READY named a different quota-authority protocol than the
+    /// launcher is running. Distinct from [`Self::Worker`] on purpose: the
+    /// assertion was well-formed and the peer is the authenticated worker —
+    /// what failed is the agreement, which points the operator at the image /
+    /// catalog declaration rather than at the worker's dumpability.
+    Protocol,
     /// Peer credentials or the worker-private pod credential did not match.
     Credential,
     /// The command request is malformed, over-budget, or outside the allow-list.
@@ -90,6 +96,7 @@ impl ControlRejection {
             E::InvalidInvocationBinding => Self::Binding,
             E::InvalidNonce => Self::Nonce,
             E::InvalidWorker => Self::Worker,
+            E::ProtocolMismatch { .. } => Self::Protocol,
             E::UnauthenticatedPeer | E::InvalidCredential => Self::Credential,
             E::InvalidCommand => Self::Command,
             E::InvalidControl | E::StillPopulated | E::UnsafeLeafName => Self::State,
@@ -112,6 +119,7 @@ impl ControlRejection {
             Self::State => 10,
             Self::Kernel => 11,
             Self::Malformed => 12,
+            Self::Protocol => 13,
             Self::Unspecified => 0,
         }
     }
@@ -133,6 +141,7 @@ impl ControlRejection {
             10 => Self::State,
             11 => Self::Kernel,
             12 => Self::Malformed,
+            13 => Self::Protocol,
             _ => Self::Unspecified,
         }
     }
@@ -154,6 +163,11 @@ impl ControlRejection {
             Self::Binding => "the control is not bound to the active launcher invocation",
             Self::Nonce => "the control nonce was stale, forged, or replayed",
             Self::Worker => "the connection has not presented a valid worker readiness assertion",
+            Self::Protocol => {
+                "the worker and the launcher disagree about which component owns invocation CPU \
+                 quota; the image's declared launcher authority protocol and the rendered \
+                 DJINN_LAUNCHER_AUTHORITY_PROTOCOL must name the same one"
+            }
             Self::Credential => "peer or worker-private credential authentication failed",
             Self::Command => {
                 "the command request is malformed, over-budget, or outside the broker allow-list"
@@ -194,6 +208,7 @@ mod tests {
             ControlRejection::State,
             ControlRejection::Kernel,
             ControlRejection::Malformed,
+            ControlRejection::Protocol,
             ControlRejection::Unspecified,
         ] {
             assert_eq!(ControlRejection::from_code(category.code()), category);

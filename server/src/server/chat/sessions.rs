@@ -287,18 +287,10 @@ async fn list_chat_session_messages(
         })?;
 
     let msg_repo = SessionMessageRepository::new(state.db().clone(), state.event_bus());
-    // content_json is JSONB so cast to text for the String slot (downstream
-    // from_str parses it). `"content_json!"` forces the macro to type the
-    // nullable cast result as a non-null String.
-    let rows = sqlx::query!(
-        r#"SELECT id, role, content_json::text AS "content_json!", token_count, created_at
-         FROM session_messages WHERE session_id = $1 ORDER BY created_at ASC, id ASC"#,
-        session.id,
-    )
-    .fetch_all(state.db().pool())
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let _ = msg_repo; // silence unused-var when only used for naming
+    let rows = msg_repo
+        .list_for_session(&session.id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     let mut messages: Vec<ChatMessageDTO> = Vec::with_capacity(rows.len());
     // Tool-use ids (in block order) of the most recently pushed assistant

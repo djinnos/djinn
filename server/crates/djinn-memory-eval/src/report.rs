@@ -292,7 +292,16 @@ pub fn load_baseline(crate_root: &Path) -> Result<Phase1Baseline> {
 }
 
 /// Write a Phase 1 baseline to disk.
+///
+/// Refuses to write this crate's own tracked `baselines/phase1.json` when
+/// running under the test harness — see
+/// [`crate::fixtures::reject_tracked_golden_write`]. The sanctioned writer is
+/// `cmd_refresh_baseline`, reached from the shipped binary.
 pub fn write_baseline(crate_root: &Path, baseline: &Phase1Baseline) -> Result<()> {
+    crate::fixtures::reject_tracked_golden_write(
+        crate_root,
+        crate::fixtures::FixturePaths::PHASE1_BASELINE,
+    )?;
     let dir = crate_root.join("baselines");
     std::fs::create_dir_all(&dir)
         .with_context(|| format!("creating baselines dir {}", dir.display()))?;
