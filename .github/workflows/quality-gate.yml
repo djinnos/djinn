@@ -630,6 +630,36 @@ jobs:
       - name: Check no include! of hand-written source
         if: needs.preflight.outputs.size == 'true'
         run: ./scripts/check-include-macro.sh
+      # rustfmt is NOT in server/rust-toolchain.toml's `components`, and that
+      # file's own comment records why that matters: rustup syncs to exactly
+      # what is listed. So `rustup toolchain install` above does not guarantee
+      # rustfmt on this runner, and relying on the hosted image's default
+      # profile would be an assumption. Add it explicitly — it is a component
+      # download, a few seconds, and it makes the next step's tool a fact
+      # rather than an inherited default.
+      - name: Install rustfmt
+        if: needs.preflight.outputs.size == 'true'
+        working-directory: server
+        run: |
+          rustup toolchain install
+          rustup component add rustfmt
+      # Formatting is already enforced inside agent pods by the task-run gate
+      # (which is why `rustfmt` is baked into the image — see RUST_COMPONENTS
+      # in djinn-image-builder/src/dockerfile.rs). This is the PR/merge-time
+      # backstop for everything that bypasses that gate: human commits, and
+      # historically anything hidden from rustfmt's module walk. It does not
+      # replace the task-run gate.
+      #
+      # Routed by `size` for the same reason as the include! guard above: both
+      # police the shape of Rust source, and `size` is set for any server
+      # change. Whole-tree rather than diff-scoped — `cargo fmt` parses but
+      # never compiles, so the whole workspace costs seconds, a whole-tree
+      # check cannot be dodged by a base-SHA trick, and rustfmt resolves
+      # edition and config per crate, which a per-file invocation would lose.
+      - name: Check Rust formatting
+        if: needs.preflight.outputs.size == 'true'
+        working-directory: server
+        run: cargo fmt --all --check
       - name: Check raw-SQL boundary
         if: needs.preflight.outputs.rawSql == 'true'
         run: ./scripts/check-raw-sql-boundary.sh
