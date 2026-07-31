@@ -871,24 +871,58 @@ impl TaskRunResizeDropBridge {
                 .cloned(),
         }
     }
+
+    /// The same apiserver surface the drop itself patches through.
+    ///
+    /// Exposed for `0ppk-3`'s reconciler, whose strand predicate has to ask
+    /// "is the exact Pod UID still there?" before it decides a live build's
+    /// launcher is the reconciler's responsibility. Handing out the composed
+    /// surface rather than letting the caller build its own is what keeps the
+    /// reconciler's read and the drop's PATCH pointed at the same cluster —
+    /// and, in a fixture, at the same stored Pod.
+    ///
+    /// # Errors
+    ///
+    /// The rendered failure from resolving an ambient `kube::Client`.
+    pub async fn resize_pod_surface(&self) -> Result<Arc<dyn TaskRunPodSurface>, String> {
+        self.surface().await
+    }
+
+    /// Build the fail-safe drop this bridge composes.
+    ///
+    /// **The one constructor.** `0ppk-3`'s reconciler resumes stranded rows
+    /// through this, so the backoff schedule, the 30-second confirmation
+    /// budget, the fresh-GET fences and the UID-fenced deletion exist exactly
+    /// once. A reconciler that built its own `TaskRunResizeDrop` from its own
+    /// constants would be a second copy of the retry schedule and a second
+    /// thing to drift.
+    ///
+    /// # Errors
+    ///
+    /// The rendered failure from resolving an ambient `kube::Client`.
+    pub async fn resize_drop_mechanism(&self) -> Result<TaskRunResizeDrop, String> {
+        Ok(TaskRunResizeDrop::with_clock(
+            Arc::new(BuildPodPermitRepository::new(self.db.clone())),
+            self.surface().await?,
+            Arc::clone(&self.clock),
+        ))
+    }
 }
 
 #[async_trait]
 impl TaskRunResizeDropGate for TaskRunResizeDropBridge {
     async fn confirm_drop(&self, request: &ResizeDropGateRequest) -> ResizeDropVerdict {
-        let surface = match self.surface().await {
-            Ok(surface) => surface,
+        // The SAME constructor `0ppk-3`'s reconciler uses. One schedule, one
+        // budget, one set of fences, reached from both the living worker's
+        // terminal path and the reconciler that speaks for a dead one.
+        let mechanism = match self.resize_drop_mechanism().await {
+            Ok(mechanism) => mechanism,
             Err(error) => {
                 return ResizeDropVerdict::Held {
                     detail: format!("no apiserver surface for the resize drop: {error}"),
                 };
             }
         };
-        let mechanism = TaskRunResizeDrop::with_clock(
-            Arc::new(BuildPodPermitRepository::new(self.db.clone())),
-            surface,
-            Arc::clone(&self.clock),
-        );
         let drop_request = ResizeDropRequest {
             task_run_id: request.task_run_id.clone(),
             invocation_id: Some(request.invocation_id.clone()),

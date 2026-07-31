@@ -256,6 +256,24 @@ impl Database {
         &self.pool
     }
 
+    /// The DSN of this handle's isolated per-test database, when it has one.
+    ///
+    /// `None` for a production handle: there is nothing here a test could not
+    /// already read from its own configuration, and the point is to make a
+    /// *restart* expressible. A test that wants to prove durability across a
+    /// lost process has to drop every in-memory object it built and rebuild
+    /// from nothing but a connection string; without this it can only re-invoke
+    /// a function on a live object, which proves the opposite.
+    ///
+    /// The returned DSN addresses the same template-cloned database, so the
+    /// original handle must stay alive for the reopened one to have a database
+    /// to connect to — dropping the last handle DROPs it.
+    pub fn test_dsn(&self) -> Option<String> {
+        self.test_branch
+            .as_ref()
+            .map(|branch| format!("{}/{}", branch.server_prefix, branch.test_db))
+    }
+
     /// Acquire a permit from the background full-text search semaphore.
     ///
     /// Latency-insensitive background fan-out (post-session extraction novelty
