@@ -74,10 +74,7 @@ fn an_empty_projection_is_inert_and_never_pending() {
 /// An unreadable relation must not be laundered into "no rows".
 #[test]
 fn an_unreadable_projection_is_not_an_empty_one() {
-    let outcome = kueue_gate(
-        &KueueProjection::Unobservable { detail: "boom" },
-        "task-1",
-    );
+    let outcome = kueue_gate(&KueueProjection::Unobservable { detail: "boom" }, "task-1");
     assert!(outcome.kueue_admission.is_null());
     assert!(!outcome.evaluated);
     assert_eq!(outcome.unevaluated_detail, Some("boom"));
@@ -86,7 +83,10 @@ fn an_unreadable_projection_is_not_an_empty_one() {
 /// A pending Workload for THIS task is a blocking reason.
 #[test]
 fn a_pending_workload_for_this_task_blocks() {
-    let outcome = kueue_gate(&observing(vec![row("run-1", "pending", Some("task-1"))]), "task-1");
+    let outcome = kueue_gate(
+        &observing(vec![row("run-1", "pending", Some("task-1"))]),
+        "task-1",
+    );
     assert!(outcome.evaluated);
     assert_eq!(outcome.reasons, vec!["kueue_workload_pending"]);
     assert_eq!(outcome.kueue_workload["admission"], "pending");

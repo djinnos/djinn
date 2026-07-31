@@ -99,7 +99,10 @@ fn an_empty_kueue_projection_leaves_the_gate_unevaluated() {
     let ledger = observed(Vec::new(), capacity(0, 3, true));
     let gate = gate(&ledger, "task-1");
     assert_eq!(gate["gate_verdict"], VERDICT_UNEXPLAINED);
-    assert_eq!(gate["kueue_admission"]["projection_state"], "no_workloads_observed");
+    assert_eq!(
+        gate["kueue_admission"]["projection_state"],
+        "no_workloads_observed"
+    );
     assert!(gate["kueue_workload"].is_null());
     let unevaluated = gate["coverage"]["unevaluated_gates"].as_array().unwrap();
     assert!(unevaluated.contains(&serde_json::json!("kueue_clusterqueue_admission")));
