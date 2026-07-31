@@ -672,6 +672,15 @@ jobs:
       - name: Check raw-SQL boundary
         if: needs.preflight.outputs.rawSql == 'true'
         run: ./scripts/check-raw-sql-boundary.sh
+      # 0ppk-1a acceptance criterion 3. Routed by `size` like the include! and
+      # rustfmt guards above: `size` is set for any server change, and this is a
+      # whole-tree grep with no build, so a base-SHA trick cannot dodge it.
+      - name: Self-test resize-authorization boundary guard
+        if: needs.preflight.outputs.size == 'true'
+        run: ./scripts/test-check-resize-authorization-boundary.sh
+      - name: Check resize-authorization boundary
+        if: needs.preflight.outputs.size == 'true'
+        run: ./scripts/check-resize-authorization-boundary.sh
       - name: Self-test capability boundary detectors
         if: needs.preflight.outputs.capability == 'true'
         run: ./scripts/test-capability-boundaries.sh

@@ -52,6 +52,8 @@ pub mod build_admission;
 pub mod build_lease;
 /// Retirement of occupying build leases whose Kubernetes object is provably gone.
 pub mod build_lease_reclaim;
+/// Rendered CPU facts the build-slot weight policy is derived from.
+pub mod build_slot_weights;
 pub mod cargo_warm_base_gc;
 pub(crate) mod ci_preflight_gate;
 pub mod ci_reproduction;
@@ -121,6 +123,7 @@ pub async fn record_supervisor_rework_reopen(
     .await;
 }
 
+pub mod resize_authorization;
 pub mod resource_monitor;
 pub mod roles;
 /// Production wiring that arms the observe-only disk dimension at coordinator
@@ -198,6 +201,8 @@ mod build_lease_deadline_echo_tests;
 mod build_lease_integration_tests;
 #[cfg(test)]
 mod invocation_cpu_boundary_tests;
+#[cfg(test)]
+mod resize_authorization_tests;
 #[cfg(test)]
 pub(crate) mod test_helpers;
 #[cfg(test)]
