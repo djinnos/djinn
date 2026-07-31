@@ -24,7 +24,7 @@ use djinn_control_plane::test_support::{McpTestHarness, RecordingExtensionDiagno
 use djinn_core::auth_context::SESSION_USER_ID;
 use djinn_core::doctor::{
     DoctorCheck, DoctorCheckCadence, DoctorError, DoctorResult, Finding, FindingSeverity,
-    ResolverSnapshot, registry,
+    ResolverSnapshot,
 };
 use djinn_core::extension_diagnostics::{
     ExtensionLoadDiagnosticV1, ExtensionLoadPhase, ExtensionLoadRemedyCode, ExtensionLoadSeverity,
@@ -39,9 +39,9 @@ use serde_json::json;
 // Sample fixable check for integration tests
 // ---------------------------------------------------------------------------
 
-/// Unique name for the test check registered in the global registry.
-/// Using a module-unique name avoids interference with other tests that
-/// might touch the global registry.
+/// Unique name for the test check registered in the harness registry.
+/// Using a module-unique name keeps it clear which check a `doctor_run`
+/// subset is selecting.
 const TEST_CHECK_NAME: &str = "test.doctor_integration_40jq";
 
 /// A sample check that demonstrates the shared-resolver invariant.
@@ -173,13 +173,18 @@ impl DoctorCheck for IntegrationFixableCheck {
 // Test helpers
 // ---------------------------------------------------------------------------
 
-/// Register the integration test check in the GLOBAL registry (the one
-/// `doctor_run` / `doctor_fix` consult via `registry()`).
+/// Register the integration test check in `harness`'s own registry — the one
+/// its `doctor_run` / `doctor_fix` consult.
+///
+/// It must NOT go into `djinn_core::doctor::registry()`: that singleton is
+/// process-wide and keyed by check name, so every test in this binary would
+/// register `TEST_CHECK_NAME` over the previous one and then assert on spy
+/// handles belonging to whichever test registered last.
 ///
 /// Returns spy handles so tests can assert on `fix_called` / `run_call_count`.
-fn register_test_check() -> (Arc<AtomicBool>, Arc<AtomicU32>) {
+fn register_test_check(harness: &McpTestHarness) -> (Arc<AtomicBool>, Arc<AtomicU32>) {
     let (check, fix_called, run_count) = IntegrationFixableCheck::new();
-    registry().register(Arc::new(check));
+    harness.doctor_registry().register(Arc::new(check));
     (fix_called, run_count)
 }
 
@@ -258,7 +263,7 @@ async fn create_admin_user(db: &djinn_db::Database) -> String {
 #[tokio::test]
 async fn doctor_run_rejects_non_admin_caller() {
     let harness = doctor_test_harness().await;
-    register_test_check();
+    register_test_check(&harness);
 
     let user_id = create_non_admin_user(harness.db()).await;
 
@@ -285,7 +290,7 @@ async fn doctor_run_rejects_non_admin_caller() {
 #[tokio::test]
 async fn doctor_fix_rejects_non_admin_caller() {
     let harness = doctor_test_harness().await;
-    register_test_check();
+    register_test_check(&harness);
 
     let user_id = create_non_admin_user(harness.db()).await;
 
@@ -320,7 +325,7 @@ async fn doctor_run_allows_trusted_no_user_background_path() {
     // When there is no SESSION_USER_ID scope (unauthenticated/background),
     // require_admin returns Ok(()). This is the trusted no-user path.
     let harness = doctor_test_harness().await;
-    let (fix_called, _) = register_test_check();
+    let (fix_called, _) = register_test_check(&harness);
 
     // No SESSION_USER_ID scope — simulates background/no-user context.
     let response = harness
@@ -338,7 +343,7 @@ async fn doctor_run_allows_trusted_no_user_background_path() {
 #[tokio::test]
 async fn doctor_run_allows_admin_caller() {
     let harness = doctor_test_harness().await;
-    register_test_check();
+    register_test_check(&harness);
 
     let admin_id = create_admin_user(harness.db()).await;
 
@@ -361,7 +366,7 @@ async fn doctor_run_allows_admin_caller() {
 #[tokio::test]
 async fn doctor_run_persists_findings_and_does_not_invoke_fix() {
     let harness = doctor_test_harness().await;
-    let (fix_called, _) = register_test_check();
+    let (fix_called, _) = register_test_check(&harness);
 
     // Run the check through the MCP tool.
     let response = harness
@@ -445,7 +450,7 @@ async fn doctor_run_persists_findings_and_does_not_invoke_fix() {
 #[tokio::test]
 async fn doctor_fix_invokes_fix_for_correct_finding() {
     let harness = doctor_test_harness().await;
-    let (fix_called, _) = register_test_check();
+    let (fix_called, _) = register_test_check(&harness);
 
     // Step 1: run to persist a finding.
     let run_response = harness
@@ -492,7 +497,7 @@ async fn doctor_fix_invokes_fix_for_correct_finding() {
 #[tokio::test]
 async fn doctor_fix_rejects_mismatched_check_name() {
     let harness = doctor_test_harness().await;
-    let (_, _) = register_test_check();
+    let (_, _) = register_test_check(&harness);
 
     // Run to persist a finding owned by TEST_CHECK_NAME.
     let run_response = harness
@@ -538,7 +543,7 @@ async fn doctor_fix_rejects_mismatched_check_name() {
 #[tokio::test]
 async fn doctor_fix_rejects_nonexistent_finding_id() {
     let harness = doctor_test_harness().await;
-    register_test_check();
+    register_test_check(&harness);
 
     let fix_response = harness
         .call_tool(
@@ -562,7 +567,7 @@ async fn doctor_fix_rejects_nonexistent_finding_id() {
 #[tokio::test]
 async fn doctor_fix_rejects_unknown_check_name() {
     let harness = doctor_test_harness().await;
-    register_test_check();
+    register_test_check(&harness);
 
     let fix_response = harness
         .call_tool(
@@ -604,7 +609,7 @@ async fn doctor_fix_rejects_unknown_check_name() {
 #[tokio::test]
 async fn fix_uses_resolver_snapshot_from_persisted_finding() {
     let harness = doctor_test_harness().await;
-    let (_, _) = register_test_check();
+    let (_, _) = register_test_check(&harness);
 
     // Run to persist a finding with the resolver snapshot.
     let run_response = harness
@@ -676,7 +681,7 @@ async fn fix_uses_resolver_snapshot_from_persisted_finding() {
 #[tokio::test]
 async fn doctor_run_without_check_names_runs_all_registered() {
     let harness = doctor_test_harness().await;
-    let (_, run_count) = register_test_check();
+    let (_, run_count) = register_test_check(&harness);
 
     let response = harness
         .call_tool("doctor_run", json!({}))
@@ -756,9 +761,10 @@ async fn doctor_run_persists_jk7v_aligned_classifier_evidence() {
 
     let harness = doctor_test_harness().await;
 
-    // Register our liveness-evidence-aware check in the global registry.
-    // We use a fresh AtomicBool to track whether it was found.
-    registry().register(Arc::new(LivenessEvidenceCheck));
+    // Register our liveness-evidence-aware check in this harness's registry.
+    harness
+        .doctor_registry()
+        .register(Arc::new(LivenessEvidenceCheck));
 
     // Run through the MCP tool.
     let response = harness

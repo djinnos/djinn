@@ -34,6 +34,56 @@ bits. Nothing in the chart is AWS-specific.
   schedule `buildkitd` (see [the hub](README.md#node-prerequisites)); on
   managed node images, set them via node group launch-template user data or a
   privileged DaemonSet.
+- **Optional: Kueue**, if you want the Djinn queue topology
+  (`kueue.enabled: true`). Kubernetes **>= 1.30** required. See
+  [the prerequisite release](#cluster-prerequisite-releases) below.
+
+### Cluster prerequisite releases
+
+Cluster-scoped third-party operators are installed as their own Helm releases,
+before `djinn`, and Djinn does not own their lifecycle. cert-manager is the
+familiar one:
+
+```bash
+helm repo add jetstack https://charts.jetstack.io
+helm upgrade --install cert-manager jetstack/cert-manager \
+  --namespace cert-manager --create-namespace --set crds.enabled=true
+```
+
+Kueue follows the same pattern, from a chart in this repository that pins the
+upstream OCI chart and applies Djinn's scoping as values:
+
+```bash
+helm upgrade --install djinn-prereqs deploy/helm/djinn-prereqs \
+  --namespace kueue-system --create-namespace --wait
+```
+
+That pins Kueue `0.19.0` (`oci://registry.k8s.io/kueue/charts/kueue`) and
+requires **Kubernetes >= 1.30** — verified by installing on 1.30.13 and 1.31.0,
+and by 1.29.14 rejecting the CRDs. The upstream `Chart.yaml` declares no
+`kubeVersion`, so Helm will not enforce it — check `kubectl version` first.
+
+The floor is 1.30 only because Djinn's values disable Kueue's DRA feature
+gates. Kueue 0.19 ships `KueueDRAIntegration` on, which needs
+`resource.k8s.io/v1` (GA in Kubernetes 1.34) and CrashLoopBackOffs below it.
+See [deploy/kueue/README.md](../../deploy/kueue/README.md#minimum-kubernetes-is-130-and-only-because-dra-is-disabled).
+
+The release is **inert**: Djinn's values set a *positive*
+`managedJobsNamespaceSelector` matching only namespaces labelled
+`djinn.io/kueue-managed=true`, and nothing labels one. No Workload is ever
+created. Read [deploy/kueue/README.md](../../deploy/kueue/README.md) — in
+particular the residual-risk section — before applying that label anywhere.
+
+Skip this if you don't want the queue topology: the `djinn` chart defaults to
+`kueue.enabled: false` and installs fine on a cluster with no Kueue CRDs. Set
+`kueue.enabled: true` **only** after installing `djinn-prereqs`; the topology is
+`kueue.x-k8s.io/v1beta1`, so without it the install fails with `no matches for
+kind "ResourceFlavor"`. `ClusterQueue` and `LocalQueue` also carry a conversion
+webhook, so the Kueue controller must be **Ready**, not merely installed — hence
+the `--wait` above.
+
+For GitOps, `djinn-prereqs` is a separate Application/HelmRelease with a sync
+wave ahead of `djinn` — again, exactly like cert-manager.
 
 ### 1. IAM for the image pipeline (IRSA)
 

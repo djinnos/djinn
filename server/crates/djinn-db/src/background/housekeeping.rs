@@ -381,10 +381,27 @@ fn parse_housekeeping_interval(raw: Option<&str>) -> Duration {
 /// This mirrors the existing housekeeping env-override pattern: resolve the
 /// operator-facing configuration at the tick boundary, then pass the concrete
 /// value into the repository sweep.
+///
+/// The environment read lives here and *only* here; every decision the parser
+/// makes is in [`resolve_archive_window_days`], which takes the raw value as a
+/// parameter. Tests exercise the parameterised form, so none of them has to
+/// mutate the process-global environment that every other test in this binary
+/// shares.
 fn parse_archive_window_days(caller_default: u32) -> u32 {
-    std::env::var(ARCHIVE_WINDOW_ENV)
-        .ok()
-        .and_then(|value| value.parse::<u32>().ok())
+    resolve_archive_window_days(
+        std::env::var(ARCHIVE_WINDOW_ENV).ok().as_deref(),
+        caller_default,
+    )
+}
+
+/// Pure resolution rule behind [`parse_archive_window_days`].
+///
+/// `raw` is the operator-supplied override exactly as the environment carried
+/// it (`None` when unset). A positive parse wins; anything else falls back to
+/// `caller_default`, and a zero `caller_default` means "use the module
+/// default".
+fn resolve_archive_window_days(raw: Option<&str>, caller_default: u32) -> u32 {
+    raw.and_then(|value| value.parse::<u32>().ok())
         .filter(|value| *value > 0)
         .or_else(|| (caller_default > 0).then_some(caller_default))
         .unwrap_or(DEFAULT_ARCHIVE_WINDOW_DAYS)
@@ -642,43 +659,67 @@ mod tests {
         assert_eq!(report.total_superseded_source_notes, 77);
     }
 
+    // These four exercise `resolve_archive_window_days`, the parameterised
+    // form, rather than `parse_archive_window_days`, which reads the ambient
+    // environment. The env var is process-global and `cargo test` runs every
+    // test in this binary as a thread of one process, so a `set_var` here is
+    // visible to every concurrently-running sibling — and every sibling's
+    // `remove_var` is visible here. Passing the raw value as an argument
+    // removes the shared cell entirely instead of trying to sequence access
+    // to it.
     #[test]
     fn parse_archive_window_days_uses_caller_default_when_env_unset() {
-        // SAFETY: single-threaded test; no other thread reads this env var
-        // here, and we restore the previous state at the end.
-        unsafe { std::env::remove_var(ARCHIVE_WINDOW_ENV) };
-        assert_eq!(parse_archive_window_days(60), 60);
+        assert_eq!(resolve_archive_window_days(None, 60), 60);
     }
 
     #[test]
     fn parse_archive_window_days_falls_back_to_60_when_caller_passes_zero() {
-        // SAFETY: single-threaded test; no other thread reads this env var
-        // here, and we restore the previous state at the end.
-        unsafe { std::env::remove_var(ARCHIVE_WINDOW_ENV) };
         // A zero caller default is treated as "use the module default", which
         // is 60 days. This mirrors the decay-window parser's contract.
-        assert_eq!(parse_archive_window_days(0), 60);
+        assert_eq!(resolve_archive_window_days(None, 0), 60);
     }
 
     #[test]
     fn parse_archive_window_days_honors_positive_env_override() {
-        // SAFETY: single-threaded test; no other thread reads this env var
-        // here, and we restore the previous state at the end.
-        unsafe { std::env::set_var(ARCHIVE_WINDOW_ENV, "90") };
         // Env wins over caller-provided value.
-        assert_eq!(parse_archive_window_days(60), 90);
-        unsafe { std::env::remove_var(ARCHIVE_WINDOW_ENV) };
+        assert_eq!(resolve_archive_window_days(Some("90"), 60), 90);
     }
 
     #[test]
     fn parse_archive_window_days_ignores_zero_and_invalid_env_values() {
-        // SAFETY: single-threaded test; no other thread reads this env var
-        // here, and we restore the previous state at the end.
-        unsafe { std::env::set_var(ARCHIVE_WINDOW_ENV, "0") };
-        assert_eq!(parse_archive_window_days(60), 60);
-        unsafe { std::env::set_var(ARCHIVE_WINDOW_ENV, "garbage") };
-        assert_eq!(parse_archive_window_days(60), 60);
-        unsafe { std::env::remove_var(ARCHIVE_WINDOW_ENV) };
+        assert_eq!(resolve_archive_window_days(Some("0"), 60), 60);
+        assert_eq!(resolve_archive_window_days(Some("garbage"), 60), 60);
+    }
+
+    /// The parameterised seam is only worth anything if production still reads
+    /// the operator's env var. A behavioural test of that read would have to
+    /// `set_var`, which is exactly what we removed, so assert the wiring
+    /// textually instead — no process-global is touched and nothing races.
+    ///
+    /// Deleting the `std::env::var` line makes this fail; so does bypassing
+    /// `resolve_archive_window_days` and re-inlining the parse rule where no
+    /// test can see it.
+    #[test]
+    fn parse_archive_window_days_still_reads_the_env_var() {
+        let source = include_str!("housekeeping.rs");
+        let after_signature = source
+            .split_once("fn parse_archive_window_days(")
+            .expect("parse_archive_window_days is defined in this file")
+            .1;
+        let body = &after_signature[..after_signature
+            .find("\n}\n")
+            .expect("parse_archive_window_days body terminates")];
+
+        assert!(
+            body.contains("std::env::var(ARCHIVE_WINDOW_ENV)"),
+            "parse_archive_window_days must keep reading {ARCHIVE_WINDOW_ENV}; \
+             without it the operator override silently stops working:\n{body}"
+        );
+        assert!(
+            body.contains("resolve_archive_window_days("),
+            "parse_archive_window_days must delegate to the resolver the unit \
+             tests above exercise, or those tests stop covering production:\n{body}"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -880,9 +921,10 @@ mod tests {
             .await
             .unwrap();
 
-        // SAFETY: single-threaded test; clear any leftover override and
-        // restore at the end.
-        unsafe { std::env::remove_var(ARCHIVE_WINDOW_ENV) };
+        // No env-var housekeeping here on purpose: nothing in this binary sets
+        // DJINN_LIFECYCLE_ARCHIVE_WINDOW_DAYS any more, so there is no leftover
+        // override to clear — and a `remove_var` would itself be a write to the
+        // process-global environment that every sibling test shares.
 
         let report = run_project_housekeeping(&db, &event_bus, &project)
             .await
@@ -979,8 +1021,9 @@ mod tests {
             .await
             .unwrap();
 
-        // SAFETY: single-threaded test; clear any leftover override.
-        unsafe { std::env::remove_var(ARCHIVE_WINDOW_ENV) };
+        // No env-var housekeeping here on purpose — see the sibling archive
+        // test: nothing sets the override any more, so clearing it would only
+        // add a write to a process-global every other test can observe.
 
         let report = run_tick(&db, &event_bus).await.unwrap();
 

@@ -32,17 +32,12 @@ pub mod turn;
 mod turn;
 mod turn_budget;
 
+pub use budget::SessionBudgetPolicy;
 pub use compaction_guard::CompactionCriticalSection;
 pub use phase::{SessionPhase, SessionPhaseRole, SessionPhaseTracker};
 pub use turn::{ReplyLoopContext, run_reply_loop};
 
-// Soft-budget tests hold `SESSION_BUDGET_ENV_LOCK` across `.await` on
-// purpose: the lock serializes env-var mutation (set/remove) for the
-// duration of each async test so concurrent tests cannot race the shared
-// process env. Mirrors the `AUTO_CODE_CONTEXT_ENV_LOCK` pattern in
-// `helpers/tests.rs`.
 #[cfg(test)]
-#[allow(clippy::await_holding_lock)]
 mod tests;
 
 /// Bounded, error-class-aware retry of transient MID-STREAM provider errors

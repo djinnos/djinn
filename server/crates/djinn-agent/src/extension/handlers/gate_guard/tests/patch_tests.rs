@@ -846,3 +846,201 @@ async fn gateguard_snapshot_proves_no_edit_forced_from_deficient_reads() {
     );
     assert_eq!(snap.edit_forced.len(), 1, "exactly one path in edit_forced");
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// apply_patch gates on the span it rewrites, not the whole file
+//
+// `call_apply_patch` used to declare `0..usize::MAX` for Update ops, which
+// only `ReadCoverage::Full` can satisfy. No read of a file past the 2000-line
+// cap — or past the tool-result budget — can produce `Full`, so patching such
+// a file was unsatisfiable: the gate demanded a whole-file read while
+// `patch.rs` told the worker not to re-read the whole file. Confirmed live:
+// 18 `FORCE-UNCOVERED-READ` denials with byte range [0, 18446744073709551615)
+// across 8 of 10 sampled worker sessions, apply_patch failing 35/50 calls, and
+// 12 `python3`/`cat` heredoc source rewrites routed through `shell` to escape.
+// ═══════════════════════════════════════════════════════════════════════
+
+/// Build a file large enough that no single read can record `Full` coverage.
+async fn seed_large_file(path: &std::path::Path, n: usize) {
+    let mut contents = String::new();
+    for i in 1..=n {
+        contents.push_str(&format!(
+            "    let value_{i} = compute_something(input_{i});\n"
+        ));
+    }
+    tokio::fs::write(path, &contents).await.expect("seed");
+}
+
+/// A windowed read that covers the patched region must let the patch through
+/// (reaching the ordinary first-edit investigation FORCE), not deny it as
+/// uncovered.
+///
+/// Non-vacuity: with the old `0..usize::MAX` span this returns
+/// FORCE-UNCOVERED-READ, because a windowed read can never be `Full`.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn apply_patch_accepts_a_read_window_covering_the_patched_span() {
+    let _jit_env = crate::test_helpers::jit_env_read_guard();
+    let (worktree, state) = setup_worktree("gg-patch-span-ok-");
+    let file = worktree.path().join("big.rs");
+    seed_large_file(&file, 900).await;
+
+    // Read the first window of the file — this is what a worker gets from a
+    // whole-file read of a file this size.
+    let read_args = Some(
+        serde_json::json!({ "file_path": "big.rs", "offset": 0, "limit": 100 })
+            .as_object()
+            .unwrap()
+            .clone(),
+    );
+    call_read(&state, &read_args, worktree.path())
+        .await
+        .expect("windowed read");
+
+    let session_id = worktree.path().display().to_string();
+    let rec = state
+        .file_time
+        .latest_record(&session_id, &file)
+        .await
+        .expect("record");
+    assert!(
+        !rec.is_full(),
+        "a 900-line file must not record Full coverage; the test would be vacuous otherwise"
+    );
+
+    // Patch line 10 — inside the window that was read.
+    let patch = "*** Begin Patch\n\
+                 *** Update File: big.rs\n\
+                 @@     let value_10 = compute_something(input_10);\n\
+                 -    let value_10 = compute_something(input_10);\n\
+                 +    let value_10 = compute_something_else(input_10);\n\
+                 *** End Patch\n";
+    let patch_args = Some(
+        serde_json::json!({ "patch": patch })
+            .as_object()
+            .unwrap()
+            .clone(),
+    );
+    let err = call_apply_patch(
+        &state,
+        &patch_args,
+        worktree.path(),
+        None,
+        Some("task-1"),
+        Some("worker"),
+    )
+    .await
+    .expect_err("first covered edit still hits the investigation FORCE");
+
+    assert!(
+        !err.contains("FORCE-UNCOVERED-READ"),
+        "a read window covering the patched span must not be denied as uncovered: {err}"
+    );
+    assert!(
+        err.contains("GateGuard"),
+        "expected the ordinary first-edit investigation prompt, got: {err}"
+    );
+}
+
+/// The gate still bites: a patch aimed outside the read window is denied.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn apply_patch_still_denies_a_span_outside_the_read_window() {
+    let _jit_env = crate::test_helpers::jit_env_read_guard();
+    let (worktree, state) = setup_worktree("gg-patch-span-deny-");
+    let file = worktree.path().join("big.rs");
+    seed_large_file(&file, 900).await;
+
+    // Read only the first 50 lines.
+    let read_args = Some(
+        serde_json::json!({ "file_path": "big.rs", "offset": 0, "limit": 50 })
+            .as_object()
+            .unwrap()
+            .clone(),
+    );
+    call_read(&state, &read_args, worktree.path())
+        .await
+        .expect("windowed read");
+
+    // Patch line 800 — far outside the window.
+    let patch = "*** Begin Patch\n\
+                 *** Update File: big.rs\n\
+                 @@     let value_800 = compute_something(input_800);\n\
+                 -    let value_800 = compute_something(input_800);\n\
+                 +    let value_800 = compute_something_else(input_800);\n\
+                 *** End Patch\n";
+    let patch_args = Some(
+        serde_json::json!({ "patch": patch })
+            .as_object()
+            .unwrap()
+            .clone(),
+    );
+    let err = call_apply_patch(
+        &state,
+        &patch_args,
+        worktree.path(),
+        None,
+        Some("task-1"),
+        Some("worker"),
+    )
+    .await
+    .expect_err("patch outside the read window must be denied");
+
+    assert!(
+        err.contains("FORCE-UNCOVERED-READ"),
+        "expected FORCE-UNCOVERED-READ for an unread region, got: {err}"
+    );
+
+    let contents = tokio::fs::read_to_string(&file).await.unwrap();
+    assert!(
+        contents.contains("let value_800 = compute_something(input_800);"),
+        "file must be unchanged"
+    );
+}
+
+/// A `Delete` still requires whole-file coverage — deleting destroys every
+/// byte, so the conservative span is the honest one.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn apply_patch_delete_still_requires_full_coverage() {
+    let _jit_env = crate::test_helpers::jit_env_read_guard();
+    let (worktree, state) = setup_worktree("gg-patch-del-");
+    let file = worktree.path().join("big.rs");
+    seed_large_file(&file, 900).await;
+
+    let read_args = Some(
+        serde_json::json!({ "file_path": "big.rs", "offset": 0, "limit": 100 })
+            .as_object()
+            .unwrap()
+            .clone(),
+    );
+    call_read(&state, &read_args, worktree.path())
+        .await
+        .expect("windowed read");
+
+    let patch = "*** Begin Patch\n\
+                 *** Delete File: big.rs\n\
+                 *** End Patch\n";
+    let patch_args = Some(
+        serde_json::json!({ "patch": patch })
+            .as_object()
+            .unwrap()
+            .clone(),
+    );
+    let err = call_apply_patch(
+        &state,
+        &patch_args,
+        worktree.path(),
+        None,
+        Some("task-1"),
+        Some("worker"),
+    )
+    .await
+    .expect_err("delete on a partially-read file must be denied");
+
+    assert!(
+        err.contains("FORCE-UNCOVERED-READ"),
+        "delete must still demand whole-file coverage, got: {err}"
+    );
+    assert!(file.exists(), "file must not be deleted");
+}

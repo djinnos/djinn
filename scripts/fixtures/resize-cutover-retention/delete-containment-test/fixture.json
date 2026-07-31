@@ -1,0 +1,8 @@
+{
+  "asset": "launcher-containment-tests",
+  "expect": "reject",
+  "why": "The launcher crate's own containment proof deleted. Retiring the test that proves containment is retiring containment on a delay.",
+  "operations": [
+    { "op": "delete", "path": "server/crates/djinn-cgroup-launcher/tests/containment_and_escalation.rs" }
+  ]
+}

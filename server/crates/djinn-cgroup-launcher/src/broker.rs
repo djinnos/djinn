@@ -188,12 +188,37 @@ impl<F: CgroupFs, S: SpawnIntoCgroup, N: NonceSource> Broker<F, S, N> {
     }
 
     /// Accept readiness only on a connection whose peer PID/UID and
-    /// worker-private credential have already been authenticated.
+    /// worker-private credential have already been authenticated, AND whose
+    /// asserted quota-authority protocol is the one this launcher runs.
+    ///
+    /// The protocol check happens here — before [`Self::begin_invocation`] can
+    /// bind anything and long before [`Self::create`] can clone a child —
+    /// because the disagreement it catches is about who writes the leaf's
+    /// `cpu.max`. A build that starts under a disagreement is not "slightly
+    /// wrong": either the launcher writes a quota Pod resize also owns, or
+    /// nobody writes one at all and the leaf inherits an unbounded ceiling.
+    ///
+    /// The mismatched connection is **dropped**, not merely left un-ready, so a
+    /// worker that ignores the refusal and sends `BEGIN` anyway is answered
+    /// `UnauthenticatedPeer` rather than finding a connection it can retry
+    /// readiness on. `transport` additionally closes the socket (see
+    /// `UnixBrokerServer::serve_connection`).
     pub fn accept_worker_readiness(
         &mut self,
         connection: ConnectionId,
-        _assertion: WorkerReadinessAssertion,
+        assertion: WorkerReadinessAssertion,
     ) -> Result<(), Error> {
+        // Look the connection up first: an unauthenticated caller learns
+        // nothing about the launcher's protocol.
+        if !self.connections.contains_key(&connection) {
+            return Err(Error::UnauthenticatedPeer);
+        }
+        let launcher = self.launcher.authority_protocol();
+        let worker = assertion.protocol();
+        if worker != launcher {
+            self.connections.remove(&connection);
+            return Err(Error::ProtocolMismatch { launcher, worker });
+        }
         self.connections
             .get_mut(&connection)
             .ok_or(Error::UnauthenticatedPeer)?
@@ -532,10 +557,15 @@ mod tests {
         }
     }
     fn broker() -> Broker<Fs, Clone, Nonces> {
+        broker_running(crate::LauncherAuthorityProtocol::LeafV1)
+    }
+    fn broker_running(protocol: crate::LauncherAuthorityProtocol) -> Broker<Fs, Clone, Nonces> {
         let launcher = Launcher::new(
             Fs::ready(),
             Clone,
-            crate::LauncherConfig::new(None, None, 0).unwrap(),
+            crate::LauncherConfig::new(None, None, 0)
+                .unwrap()
+                .with_authority_protocol(protocol),
         )
         .unwrap();
         Broker::new(
@@ -555,7 +585,10 @@ mod tests {
         }
     }
     fn readiness() -> WorkerReadinessAssertion {
-        prepare_worker_readiness(&mut ReadyDumpability).unwrap()
+        readiness_asserting(crate::LauncherAuthorityProtocol::LeafV1)
+    }
+    fn readiness_asserting(protocol: crate::LauncherAuthorityProtocol) -> WorkerReadinessAssertion {
+        prepare_worker_readiness(&mut ReadyDumpability, protocol).unwrap()
     }
     fn command() -> CommandSpec {
         CommandSpec {
@@ -667,6 +700,155 @@ mod tests {
         ));
         // A rejected fence leaves the authenticated nonce usable for a retry.
         assert!(broker.lift(connection, "one", nonce, 9).is_ok());
+    }
+
+    /// AC2. A READY that names a different quota-authority protocol is refused,
+    /// and the refusal happens before ANY invocation can be bound or any child
+    /// created — the two follow-up controls below are the ones that would
+    /// otherwise start real work under a disagreement.
+    ///
+    /// The mutation this is written against is the state of `broker.rs:195`
+    /// before this change: `_assertion: WorkerReadinessAssertion`, the payload
+    /// discarded. Restore that discard (or compare the protocol to itself) and
+    /// the first assertion below fails, because the mismatched READY is
+    /// accepted and `begin_invocation`/`create` then succeed.
+    #[test]
+    fn a_disagreeing_readiness_is_refused_before_any_begin_or_create() {
+        // The launcher runs resize-v2; the worker asserts leaf-v1.
+        let mut broker = broker_running(crate::LauncherAuthorityProtocol::ResizeV2);
+        let peer = FakePeer(UnixPeer {
+            pid: 42,
+            uid: 1000,
+            gid: 1000,
+        });
+        let connection = broker.authenticate(&peer, b"private").unwrap();
+
+        let refusal = broker
+            .accept_worker_readiness(
+                connection,
+                readiness_asserting(crate::LauncherAuthorityProtocol::LeafV1),
+            )
+            .expect_err(
+                "a worker asserting leaf-v1 to a resize-v2 launcher must be refused; accepting it \
+                 lets a build run with nobody writing the leaf quota",
+            );
+        assert!(
+            matches!(
+                refusal,
+                Error::ProtocolMismatch {
+                    launcher: crate::LauncherAuthorityProtocol::ResizeV2,
+                    worker: crate::LauncherAuthorityProtocol::LeafV1,
+                }
+            ),
+            "the refusal must name both sides, got {refusal:?}"
+        );
+        // The refusal names both protocols in its rendered form too: this is
+        // what reaches the pod's logs.
+        let rendered = refusal.to_string();
+        assert!(
+            rendered.contains("resize-v2") && rendered.contains("leaf-v1"),
+            "the refusal must name both protocols, got: {rendered}"
+        );
+
+        // Nothing may proceed on that connection.
+        assert!(
+            matches!(
+                broker.begin_invocation(
+                    connection,
+                    Invocation {
+                        id: "one".into(),
+                        fence: 9,
+                    },
+                ),
+                Err(Error::UnauthenticatedPeer)
+            ),
+            "the mismatched connection must be dropped, not merely left un-ready"
+        );
+        assert!(
+            matches!(
+                broker.create(
+                    connection,
+                    "one",
+                    ControlNonce([0; 32]),
+                    "leaf",
+                    LeaseAuthority::Armed,
+                    &command(),
+                ),
+                Err(Error::UnauthenticatedPeer)
+            ),
+            "no leaf may be created on a connection whose readiness was refused"
+        );
+
+        // And the agreeing case still works, so the check is a comparison and
+        // not a blanket refusal.
+        let mut agreeing = broker_running(crate::LauncherAuthorityProtocol::ResizeV2);
+        let connection = agreeing.authenticate(&peer, b"private").unwrap();
+        agreeing
+            .accept_worker_readiness(
+                connection,
+                readiness_asserting(crate::LauncherAuthorityProtocol::ResizeV2),
+            )
+            .expect("matching protocols must be accepted");
+        assert!(
+            agreeing
+                .begin_invocation(
+                    connection,
+                    Invocation {
+                        id: "one".into(),
+                        fence: 9,
+                    },
+                )
+                .is_ok()
+        );
+    }
+
+    /// The proof bytes are still checked, and the protocol byte is not allowed
+    /// to be inferred: a legacy 16-byte payload (no protocol at all) is refused
+    /// rather than read as `leaf-v1`.
+    #[test]
+    fn a_protocol_less_or_zeroed_readiness_payload_does_not_decode() {
+        let valid = readiness_asserting(crate::LauncherAuthorityProtocol::ResizeV2).wire_bytes();
+        assert_eq!(valid.len(), 17, "16 proof bytes plus one protocol byte");
+        assert_eq!(
+            valid[16],
+            crate::LauncherAuthorityProtocol::ResizeV2.frame_byte()
+        );
+
+        // The pre-#2823 wire form: proof only.
+        assert!(matches!(
+            WorkerReadinessAssertion::from_wire(&valid[..16]),
+            Err(Error::InvalidWorker)
+        ));
+        // An unassigned protocol byte, including the zero a truncated or
+        // memset frame would carry.
+        for byte in [0_u8, 3, 255] {
+            let mut bytes = valid;
+            bytes[16] = byte;
+            assert!(
+                matches!(
+                    WorkerReadinessAssertion::from_wire(&bytes),
+                    Err(Error::InvalidWorker)
+                ),
+                "protocol byte {byte} must not decode"
+            );
+        }
+        // An all-zero proof stays refused with a valid protocol byte.
+        let mut zeroed = [0_u8; 17];
+        zeroed[16] = crate::LauncherAuthorityProtocol::LeafV1.frame_byte();
+        assert!(matches!(
+            WorkerReadinessAssertion::from_wire(&zeroed),
+            Err(Error::InvalidWorker)
+        ));
+        // Round-trip: every protocol survives the wire.
+        for protocol in crate::LauncherAuthorityProtocol::ALL {
+            let bytes = readiness_asserting(protocol).wire_bytes();
+            assert_eq!(
+                WorkerReadinessAssertion::from_wire(&bytes)
+                    .expect("valid frame")
+                    .protocol(),
+                protocol
+            );
+        }
     }
 
     #[test]

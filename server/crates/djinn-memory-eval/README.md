@@ -264,6 +264,62 @@ cargo run -p djinn-memory-eval -- refresh-baseline
 cargo test -p djinn-memory-eval
 ```
 
+## `refresh-baseline` is the only writer of `baselines/phase1.json`
+
+**Running the test suite must never modify a tracked file.** After
+`cargo test -p djinn-memory-eval` (or `cargo test --workspace`),
+`git status --porcelain server/crates/djinn-memory-eval/` must be empty.
+
+The committed goldens — `baselines/phase1.json` and `fixtures/*.jsonl` —
+have exactly two sanctioned writers, both invoked deliberately by a human:
+
+```bash
+# the baseline
+cargo run -p djinn-memory-eval -- run              # writes target/memory-eval/ only
+cargo run -p djinn-memory-eval -- compare          # review the delta first
+cargo run -p djinn-memory-eval -- refresh-baseline # writes baselines/phase1.json
+
+# the fixtures
+python3 scripts/generate_fixtures.py               # then re-run the two commands above
+```
+
+This is enforced, not merely documented: `report::write_baseline` and the
+`test_helpers` fixture writers call
+[`fixtures::reject_tracked_golden_write`](src/fixtures.rs), which hard-fails
+when the target directory is this crate's own source tree **and** `cfg!(test)`
+is set. The crate is a single `[[bin]]` target, so that condition is true
+exactly under the test harness and false in the shipped binary —
+`refresh-baseline` is unaffected. Tests that need to exercise these writers
+must point them at a `tempfile::tempdir()`.
+
+**Why the guard exists.** A test called `refresh_baseline_with_committed_
+fixtures` used to regenerate the baseline in-place so reviewers "could see"
+the signal-comparison proof cases. It re-implemented `cmd_run`'s report
+assembly and got it wrong in two ways: it passed an empty note-age map and
+omitted bad-case records from the age-bucket computation (collapsing
+`age_bucket_recall` to `["under7d"]`), and it stamped a fabricated
+`metadata.refresh_commit`. Because `cargo test` wrote the file in the working
+tree, a later `git add -A` committed the degraded baseline — that is exactly
+what shipped on PR #2805 (`af35429`) and was caught only by the separate
+`Memory Eval Phase 1` lane. A stripped baseline fails nothing locally: the
+ranking-regression suite still passes while measuring less.
+
+Two tests replace it, both asserting side effects rather than labels:
+
+- `run::tests::a_test_cannot_write_the_tracked_baseline` performs the exact
+  offending call and asserts the file's **bytes are unchanged** afterwards.
+- `commands::tests::committed_baseline_and_fixtures_pass_the_shipped_gate`
+  runs `validate-fixtures` against the committed artifacts under
+  `cargo test`, so a stripped baseline fails in the unit-test lane instead of
+  only in the separate CI job.
+
+The second is a *coverage* check, not a byte-for-byte golden, and
+deliberately so: `cmd_run` derives age buckets from `SystemClock::now()`, so
+the bucket set drifts as fixtures age on the calendar. A strict-equality
+golden would rot on a date boundary. The invariant `validate-fixtures`
+depends on is time-safe — notes only get older, so `over_decay_threshold`
+only ever grows.
+
 ## Implementation roadmap
 
 | module                       | task  | status         |

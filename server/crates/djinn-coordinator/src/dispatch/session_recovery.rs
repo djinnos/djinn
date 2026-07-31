@@ -483,27 +483,31 @@ impl CoordinatorActor {
                     },
                     reason
                 );
-                self.route_loop_guard_planner_intervention(
-                    task_id,
-                    "coordinator",
-                    &intervention_reason,
-                )
+                poll_stack::boxed(|| {
+                    self.route_loop_guard_planner_intervention(
+                        task_id,
+                        "coordinator",
+                        &intervention_reason,
+                    )
+                })
                 .await;
 
                 // Terminalize the matching attempt as a loop-guard trip: a
                 // token/turn ceiling kill is a runaway guard, routed through the
                 // loop-guard planner intervention rather than a stall/timeout.
-                self.terminalize_recovery_attempt(
-                    task_id,
-                    &session.agent_type,
-                    TaskAttemptOutcome::LoopGuardTripped,
-                    "session_recovery_ceiling",
-                    Some(&session.id),
-                    session.task_run_id.as_deref(),
-                    Some("dead"),
-                    Some("ceiling_kill"),
-                    Some(&reason),
-                )
+                poll_stack::boxed(|| {
+                    self.terminalize_recovery_attempt(
+                        task_id,
+                        &session.agent_type,
+                        TaskAttemptOutcome::LoopGuardTripped,
+                        "session_recovery_ceiling",
+                        Some(&session.id),
+                        session.task_run_id.as_deref(),
+                        Some("dead"),
+                        Some("ceiling_kill"),
+                        Some(&reason),
+                    )
+                })
                 .await;
 
                 tracing::warn!(
@@ -634,17 +638,19 @@ impl CoordinatorActor {
                     // Terminalize the matching attempt as a timeout: a
                     // no-progress controlled exit reclaims a session that stopped
                     // making durable progress (a stall variant).
-                    self.terminalize_recovery_attempt(
-                        task_id,
-                        &session.agent_type,
-                        TaskAttemptOutcome::TimedOut,
-                        "session_recovery_no_progress",
-                        Some(&session.id),
-                        session.task_run_id.as_deref(),
-                        Some("dead"),
-                        Some("no_progress"),
-                        None,
-                    )
+                    poll_stack::boxed(|| {
+                        self.terminalize_recovery_attempt(
+                            task_id,
+                            &session.agent_type,
+                            TaskAttemptOutcome::TimedOut,
+                            "session_recovery_no_progress",
+                            Some(&session.id),
+                            session.task_run_id.as_deref(),
+                            Some("dead"),
+                            Some("no_progress"),
+                            None,
+                        )
+                    })
                     .await;
 
                     tracing::warn!(
@@ -715,7 +721,7 @@ impl CoordinatorActor {
             // Classification runs unconditionally so the result is available
             // for dead_reclaimed / kill_noop evidence persistence after the
             // kill, regardless of whether slow-extension is enabled.
-            let classification = self.classify_task_liveness(task_id).await;
+            let classification = poll_stack::boxed(|| self.classify_task_liveness(task_id)).await;
             let slow_ext = &self.worker_lifecycle_config.slow_extension;
             if slow_ext.enabled
                 && let Some(ref result) = classification
@@ -1045,17 +1051,19 @@ impl CoordinatorActor {
                 djinn_telemetry::reasoning_kill::OUTCOME_KILLED,
             );
 
-            self.terminalize_recovery_attempt(
-                task_id,
-                &session.agent_type,
-                TaskAttemptOutcome::TimedOut,
-                "session_recovery_stall",
-                Some(&session.id),
-                session.task_run_id.as_deref(),
-                stall_verdict,
-                Some(stall_failure_class),
-                Some(reason),
-            )
+            poll_stack::boxed(|| {
+                self.terminalize_recovery_attempt(
+                    task_id,
+                    &session.agent_type,
+                    TaskAttemptOutcome::TimedOut,
+                    "session_recovery_stall",
+                    Some(&session.id),
+                    session.task_run_id.as_deref(),
+                    stall_verdict,
+                    Some(stall_failure_class),
+                    Some(reason),
+                )
+            })
             .await;
 
             // ── Zero-output wall-clock observation ────────────────────
@@ -1140,11 +1148,13 @@ impl CoordinatorActor {
                 // Clear the streak so a post-intervention run starts fresh (and a
                 // re-armed intervention is not double-counted).
                 self.stall_cancel_streak.remove(task_id);
-                self.route_loop_guard_planner_intervention(
-                    task_id,
-                    "coordinator",
-                    &intervention_reason,
-                )
+                poll_stack::boxed(|| {
+                    self.route_loop_guard_planner_intervention(
+                        task_id,
+                        "coordinator",
+                        &intervention_reason,
+                    )
+                })
                 .await;
             }
         }
@@ -1297,7 +1307,7 @@ impl CoordinatorActor {
             // `Verdict::Live` for terminal tasks (the verdict is moot;
             // only the outcome matters). Without this ordering the `Live`
             // arm fires and the KillNoop handling is unreachable.
-            let classification = self.classify_task_liveness(task_id).await;
+            let classification = poll_stack::boxed(|| self.classify_task_liveness(task_id)).await;
             if let Some(ref result) = classification {
                 // Terminal task race: task is already terminal.
                 // classify_task_liveness already persisted the KillNoop
@@ -1345,11 +1355,13 @@ impl CoordinatorActor {
                         );
                     }
                     // Teardown any leaked K8s Job for this task-run.
-                    self.teardown_zombie_taskrun_job(
-                        task_id,
-                        &session.id,
-                        session.task_run_id.as_deref(),
-                    )
+                    poll_stack::boxed(|| {
+                        self.teardown_zombie_taskrun_job(
+                            task_id,
+                            &session.id,
+                            session.task_run_id.as_deref(),
+                        )
+                    })
                     .await;
                     self.stall_killed.remove(&session.id);
                     continue;
@@ -1489,8 +1501,14 @@ impl CoordinatorActor {
 
             // Forcibly reclaim the (likely leaked) slot so the reopened task is
             // not rejected with `SessionAlreadyActive` on redispatch.
-            self.teardown_zombie_taskrun_job(task_id, &session.id, session.task_run_id.as_deref())
-                .await;
+            poll_stack::boxed(|| {
+                self.teardown_zombie_taskrun_job(
+                    task_id,
+                    &session.id,
+                    session.task_run_id.as_deref(),
+                )
+            })
+            .await;
             let evict_task_id = task_id.to_owned();
             let evict_session_id = session.id.clone();
             let evict_span = tracing::info_span!(
@@ -1568,17 +1586,19 @@ impl CoordinatorActor {
                 .as_ref()
                 .map(|c| c.verdict.as_str())
                 .unwrap_or("dead");
-            self.terminalize_recovery_attempt(
-                task_id,
-                &session.agent_type,
-                zombie_outcome,
-                "session_recovery_zombie_reap",
-                Some(&session.id),
-                session.task_run_id.as_deref(),
-                Some(zombie_verdict),
-                Some(zombie_failure_class),
-                None,
-            )
+            poll_stack::boxed(|| {
+                self.terminalize_recovery_attempt(
+                    task_id,
+                    &session.agent_type,
+                    zombie_outcome,
+                    "session_recovery_zombie_reap",
+                    Some(&session.id),
+                    session.task_run_id.as_deref(),
+                    Some(zombie_verdict),
+                    Some(zombie_failure_class),
+                    None,
+                )
+            })
             .await;
 
             djinn_telemetry::zombie::increment_reap(djinn_telemetry::zombie::KIND_STALL);
@@ -1840,7 +1860,8 @@ impl CoordinatorActor {
                     // (verified by has_session and background-work checks
                     // above), so the classifier will normally return Dead.
                     // If the task is already terminal, record KillNoop.
-                    let classification = self.classify_task_liveness(&task.id).await;
+                    let classification =
+                        poll_stack::boxed(|| self.classify_task_liveness(&task.id)).await;
                     if let Some(ref result) = classification {
                         if result.outcome == Some(LivenessOutcome::KillNoop) {
                             let liveness_repo = LivenessRepository::new(self.db.clone());
@@ -1897,17 +1918,19 @@ impl CoordinatorActor {
                                 .as_ref()
                                 .map(|c| c.verdict.as_str())
                                 .unwrap_or("dead");
-                            self.terminalize_recovery_attempt(
-                                &task.id,
-                                &running_session.agent_type,
-                                TaskAttemptOutcome::Crashed,
-                                "session_recovery_stale_ready_state",
-                                Some(&running_session.id),
-                                running_session.task_run_id.as_deref(),
-                                Some(orphan_verdict),
-                                Some("stale_ready_state_orphan"),
-                                None,
-                            )
+                            poll_stack::boxed(|| {
+                                self.terminalize_recovery_attempt(
+                                    &task.id,
+                                    &running_session.agent_type,
+                                    TaskAttemptOutcome::Crashed,
+                                    "session_recovery_stale_ready_state",
+                                    Some(&running_session.id),
+                                    running_session.task_run_id.as_deref(),
+                                    Some(orphan_verdict),
+                                    Some("stale_ready_state_orphan"),
+                                    None,
+                                )
+                            })
                             .await;
                             affected += 1;
                         }
@@ -1961,7 +1984,8 @@ impl CoordinatorActor {
                 // and no background work. Consult the classifier to confirm
                 // this is a dead-orphan reclaim, and to detect concurrent
                 // terminal transitions.
-                let classification = self.classify_task_liveness(&task.id).await;
+                let classification =
+                    poll_stack::boxed(|| self.classify_task_liveness(&task.id)).await;
                 if let Some(ref result) = classification {
                     if result.outcome == Some(LivenessOutcome::KillNoop) {
                         let liveness_repo = LivenessRepository::new(self.db.clone());
@@ -2200,7 +2224,7 @@ impl CoordinatorActor {
                     "",
                     djinn_telemetry::preservation::TRIGGER_TERMINAL_FAIL,
                 );
-                self.log_preservation_result(&result).await;
+                poll_stack::boxed(|| self.log_preservation_result(&result)).await;
                 djinn_telemetry::preservation::increment_attempt(
                     djinn_telemetry::preservation::OUTCOME_RUNTIME_UNAVAILABLE,
                     djinn_telemetry::preservation::TRIGGER_TERMINAL_FAIL,
@@ -2233,7 +2257,7 @@ impl CoordinatorActor {
                 );
             }
         }
-        self.cleanup_pr_and_branch_on_close(&latest, CloseKind::NonMerge)
+        poll_stack::boxed(|| self.cleanup_pr_and_branch_on_close(&latest, CloseKind::NonMerge))
             .await;
         true
     }
@@ -2270,7 +2294,7 @@ impl CoordinatorActor {
         // coordinator) — record an explicit "runtime unavailable" result.
         if self.runtime_ops.is_none() {
             let result = PreservationGateResult::runtime_unavailable(task_id, session_id, trigger);
-            self.log_preservation_result(&result).await;
+            poll_stack::boxed(|| self.log_preservation_result(&result)).await;
             djinn_telemetry::preservation::increment_attempt(
                 djinn_telemetry::preservation::OUTCOME_RUNTIME_UNAVAILABLE,
                 trigger,
@@ -2282,7 +2306,7 @@ impl CoordinatorActor {
         let Some(run_id) = task_run_id else {
             let result =
                 PreservationGateResult::unavailable_worker(task_id, session_id, None, trigger);
-            self.log_preservation_result(&result).await;
+            poll_stack::boxed(|| self.log_preservation_result(&result)).await;
             djinn_telemetry::preservation::increment_attempt(
                 djinn_telemetry::preservation::OUTCOME_UNAVAILABLE_WORKER,
                 trigger,
@@ -2296,7 +2320,7 @@ impl CoordinatorActor {
         } else {
             // No connection registry — treat as runtime unavailable.
             let result = PreservationGateResult::runtime_unavailable(task_id, session_id, trigger);
-            self.log_preservation_result(&result).await;
+            poll_stack::boxed(|| self.log_preservation_result(&result)).await;
             djinn_telemetry::preservation::increment_attempt(
                 djinn_telemetry::preservation::OUTCOME_RUNTIME_UNAVAILABLE,
                 trigger,
@@ -2311,7 +2335,7 @@ impl CoordinatorActor {
                 Some(run_id),
                 trigger,
             );
-            self.log_preservation_result(&result).await;
+            poll_stack::boxed(|| self.log_preservation_result(&result)).await;
             djinn_telemetry::preservation::increment_attempt(
                 djinn_telemetry::preservation::OUTCOME_UNAVAILABLE_WORKER,
                 trigger,
@@ -2346,7 +2370,7 @@ impl CoordinatorActor {
             None, // commit_sha — filled by worker RPC when wired
             None, // ref_name — filled by worker RPC when wired
         );
-        self.log_preservation_result(&result).await;
+        poll_stack::boxed(|| self.log_preservation_result(&result)).await;
         djinn_telemetry::preservation::increment_attempt(
             djinn_telemetry::preservation::OUTCOME_SUCCEEDED,
             trigger,
@@ -2788,17 +2812,19 @@ impl CoordinatorActor {
                         "session exited failed while task nonterminal",
                     )
                 };
-            self.terminalize_recovery_attempt(
-                task_id,
-                role,
-                attempt_outcome,
-                "session_exit_liveness",
-                Some(session_id),
-                task_run_id,
-                Some(result.verdict.as_str()),
-                Some(failure_class),
-                Some(summary),
-            )
+            poll_stack::boxed(|| {
+                self.terminalize_recovery_attempt(
+                    task_id,
+                    role,
+                    attempt_outcome,
+                    "session_exit_liveness",
+                    Some(session_id),
+                    task_run_id,
+                    Some(result.verdict.as_str()),
+                    Some(failure_class),
+                    Some(summary),
+                )
+            })
             .await;
         }
 

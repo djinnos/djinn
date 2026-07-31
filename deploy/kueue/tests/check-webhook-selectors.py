@@ -1,240 +1,324 @@
 #!/usr/bin/env python3
-"""Check positive Kueue selectors on every Job/Pod CREATE admission rule.
+"""Check Djinn's Kueue admission scoping on a RENDERED djinn-prereqs manifest.
 
-The checker intentionally parses the relevant Kubernetes YAML documents into
-nested Python mappings/lists. It does not depend on the source ordering of a
-webhook's selectors and rules, so an upstream addition cannot escape merely by
-moving fields around.
+This checker takes the output of ``helm template`` over
+``deploy/helm/djinn-prereqs`` — i.e. what a cluster actually receives. It used
+to take ``deploy/kueue/vendor/kueue-v0.10.0.yaml``, a byte-vendored fork that
+no longer exists. Pointing it at a static file that is not the deployment
+artifact is the exact defect this rewrite removes: such a test stays green
+while validating something the cluster never sees.
+
+WHAT IS CHECKED
+---------------
+1. **Nothing selects Djinn's namespace.** With ``--namespace-labels`` the
+   checker evaluates each relevant webhook's ``namespaceSelector`` as
+   Kubernetes would, against the label set the ``djinn`` chart actually renders
+   onto its Namespace, and fails if any of them matches. This is the assertion
+   that bounds the availability blast radius, and it is checked directly rather
+   than through a proxy.
+
+   Stock upstream ships ``matchExpressions: kubernetes.io/metadata.name NotIn
+   [kube-system, kueue-system]``, which DOES select ``djinn``. Combined with
+   ``failurePolicy: Fail`` that makes an unavailable Kueue controller block Pod
+   and Job creation in the Djinn namespace — a total-outage vector on a
+   single-node cluster.
+
+2. **Positive fence.** Every admission webhook whose rules cover CREATE on a
+   *core Kubernetes* type Djinn creates or could create (``pods``, ``jobs``,
+   ``deployments``, ``statefulsets``) must carry exactly
+
+       namespaceSelector:
+         matchLabels:
+           djinn.io/kueue-managed: "true"
+
+   A namespace must be explicitly labelled before Kueue can select anything in
+   it. No asset in this repository applies that label.
+
+3. **Disabled frameworks.** The ``pods``/``deployments``/``statefulsets``
+   webhooks must have ``failurePolicy: Ignore``.
+
+   Note carefully, because it is counter-intuitive: removing ``pod`` from
+   ``integrations.frameworks`` does **not** unregister ``mpod``/``vpod``. The
+   upstream chart renders those webhooks UNCONDITIONALLY and uses the framework
+   list only to switch ``failurePolicy`` between ``Fail`` and ``Ignore``
+   (``templates/webhook/manifests.yaml``: ``{{- if has "pod" ... }}
+   failurePolicy: Fail {{- else }} failurePolicy: Ignore {{- end }}``). There is
+   no values hook that removes them. ``Ignore`` is therefore both the
+   render-visible proof that Djinn disabled the framework AND the actual
+   availability guarantee: an unreachable Kueue webhook is skipped rather than
+   fatal. If someone puts ``pod`` back, this assertion fires.
+
+   ``jobs`` is deliberately excluded from the ``Ignore`` requirement: batch/job
+   is the framework Djinn will use at cutover, so ``mjob``/``vjob`` are
+   legitimately ``Fail``. Assertion 1 is what keeps that safe.
+
+WHAT IS NO LONGER CHECKED, AND WHY — READ THIS BEFORE TRUSTING THE PASS
+----------------------------------------------------------------------
+The retired fork also required a SECOND, per-object fence on those webhooks:
+
+    objectSelector:
+      matchLabels:
+        djinn.io/kueue-build-object: "true"
+
+**The upstream chart has no objectSelector hook of any kind.** There is no
+value, at any version, that injects one. The only ways to keep that assertion
+would be to re-fork the upstream manifest or to post-process the rendered
+output — both of which recreate precisely the maintenance problem that pinning
+an upstream chart exists to remove. So the assertion is REMOVED, not weakened
+and not silently reinterpreted.
+
+The resulting scope reduction, which is an input to cutover epic 4c9q:
+
+  * ``mpod``/``vpod``, ``mdeployment``/``vdeployment`` and
+    ``mstatefulset``/``vstatefulset`` still register on core CREATE, but with
+    ``failurePolicy: Ignore``, so a Kueue outage cannot block those creations.
+  * ``mjob``/``vjob`` keep upstream's ``failurePolicy: Fail`` and are now
+    fenced by NAMESPACE ONLY. In a namespace labelled
+    ``djinn.io/kueue-managed=true``, *every* batch/v1 Job CREATE is routed
+    through Kueue's webhook and a Kueue outage blocks all of them. Under the
+    fork, the per-object label bounded that to marked build objects.
+  * Today the blast radius is zero because no namespace carries the label —
+    asserted directly by check 1 above, not assumed.
+  * 4c9q must decide the label's placement with that in mind: a dedicated
+    build-Job namespace keeps the fenced set narrow; labelling ``djinn``
+    itself would put every Job in the control-plane namespace behind a
+    ``Fail``-policy webhook.
+
+Usage:
+  check-webhook-selectors.py <rendered-manifest.yaml>
+      [--namespace-labels '{"k":"v",...}'] [--namespace-name djinn]
 """
 
 from __future__ import annotations
 
 import argparse
-import ast
 import json
-import re
 import sys
 from pathlib import Path
 from typing import Any
 
+try:
+    import yaml
+except ImportError:  # pragma: no cover - environment defect, not a code path
+    print(
+        "FAIL: PyYAML is required. This checker parses real `helm template` "
+        "output, which a bespoke parser cannot be trusted to read.",
+        file=sys.stderr,
+    )
+    raise SystemExit(2)
+
 WEBHOOK_KINDS = {"MutatingWebhookConfiguration", "ValidatingWebhookConfiguration"}
 NAMESPACE_LABEL = "djinn.io/kueue-managed"
-OBJECT_LABEL = "djinn.io/kueue-build-object"
+
+# Core Kubernetes types, keyed by the API group that owns them. A webhook is
+# "relevant" when it can intercept CREATE on one of these. CRD-backed types
+# (ray.io, kubeflow.org, jobset, ...) are out of scope: Djinn creates none of
+# them, and their webhooks cannot fire on a cluster without those CRDs.
+CORE_TARGETS = {
+    "": {"pods"},
+    "batch": {"jobs"},
+    "apps": {"deployments", "statefulsets"},
+}
+
+# Resources whose webhook must prove the framework is disabled. `jobs` is
+# deliberately absent: batch/job IS the framework Djinn will use at cutover,
+# so its webhook is legitimately armed (failurePolicy: Fail).
+MUST_BE_IGNORED = {"pods", "deployments", "statefulsets"}
+
+EXPECTED_SELECTOR = {"matchLabels": {NAMESPACE_LABEL: "true"}}
 
 
-class YamlError(ValueError):
-    pass
+def selector_matches(selector: Any, labels: dict[str, str]) -> bool:
+    """Evaluate a Kubernetes LabelSelector the way the API server does.
 
-
-def scalar(value: str) -> Any:
-    """Decode the scalar forms used by Kubernetes installation manifests."""
-    value = value.strip()
-    if value in {"", "null", "Null", "NULL", "~"}:
-        return None
-    if value in {"true", "True", "TRUE"}:
+    An empty or absent selector matches EVERYTHING — that is the case this
+    exists to catch, so it must not be special-cased into a pass.
+    """
+    if selector is None or selector == {}:
         return True
-    if value in {"false", "False", "FALSE"}:
-        return False
-    if value in {"{}", "[]"}:
-        return {} if value == "{}" else []
-    if value.startswith('"') and value.endswith('"'):
-        return json.loads(value)
-    if value.startswith("'") and value.endswith("'"):
-        return ast.literal_eval(value)
-    return value
+    if not isinstance(selector, dict):
+        # Unparseable: treat as matching. A checker that shrugs at a shape it
+        # does not understand is how a fence silently disappears.
+        return True
+    for key, value in (selector.get("matchLabels") or {}).items():
+        if labels.get(key) != value:
+            return False
+    for expression in selector.get("matchExpressions") or []:
+        key = expression.get("key")
+        operator = expression.get("operator")
+        values = expression.get("values") or []
+        present = key in labels
+        if operator == "In":
+            if not present or labels[key] not in values:
+                return False
+        elif operator == "NotIn":
+            if present and labels[key] in values:
+                return False
+        elif operator == "Exists":
+            if not present:
+                return False
+        elif operator == "DoesNotExist":
+            if present:
+                return False
+        else:
+            raise ValueError(f"unsupported matchExpressions operator: {operator!r}")
+    return True
 
 
-def tokens(document: str) -> list[tuple[int, str]]:
-    """Tokenize indentation while excluding comments and block-scalar bodies."""
-    result: list[tuple[int, str]] = []
-    block_indent: int | None = None
-    for line_no, raw in enumerate(document.splitlines(), 1):
-        if not raw.strip() or raw.lstrip().startswith("#"):
+def load(path: Path) -> list[dict[str, Any]]:
+    with path.open(encoding="utf-8") as handle:
+        return [doc for doc in yaml.safe_load_all(handle) if isinstance(doc, dict)]
+
+
+def targeted_resources(webhook: dict[str, Any]) -> set[str]:
+    """Bare core resource names this webhook can intercept on CREATE."""
+    hits: set[str] = set()
+    rules = webhook.get("rules")
+    if not isinstance(rules, list):
+        return hits
+    for rule in rules:
+        if not isinstance(rule, dict):
             continue
-        indent = len(raw) - len(raw.lstrip(" "))
-        if "\t" in raw[:indent]:
-            raise YamlError(f"line {line_no}: tabs are not supported")
-        if block_indent is not None:
-            if indent > block_indent:
-                continue
-            block_indent = None
-        content = raw[indent:]
-        if re.search(r":\s*[>|][+-]?\s*(?:#.*)?$", content):
-            block_indent = indent
-        result.append((indent, content))
-    return result
-
-
-def split_key_value(content: str) -> tuple[str, str | None]:
-    if ":" not in content:
-        raise YamlError(f"expected mapping entry, got {content!r}")
-    key, value = content.split(":", 1)
-    if not key:
-        raise YamlError(f"empty mapping key in {content!r}")
-    return key, value.strip() or None
-
-
-def parse_document(document: str) -> Any:
-    stream = tokens(document)
-
-    def parse_node(index: int, indent: int) -> tuple[Any, int]:
-        if index >= len(stream) or stream[index][0] < indent:
-            return None, index
-        if stream[index][0] != indent:
-            raise YamlError(f"unexpected indentation {stream[index][0]}, expected {indent}")
-        if stream[index][1].startswith("- ") or stream[index][1] == "-":
-            return parse_list(index, indent)
-        return parse_map(index, indent)
-
-    def parse_map(index: int, indent: int, initial: tuple[str, str | None] | None = None) -> tuple[dict[str, Any], int]:
-        output: dict[str, Any] = {}
-        if initial is not None:
-            key, value = initial
-            if value is None:
-                # A list item's first mapping key is written on the same line
-                # as the dash (for example, ``- operations:``). Its nested
-                # sequence begins at this map's indentation, while ordinary
-                # nested mapping values begin deeper.
-                if index < len(stream) and (
-                    stream[index][0] > indent
-                    or (stream[index][0] == indent and stream[index][1].startswith("-"))
-                ):
-                    output[key], index = parse_node(index, stream[index][0])
-                else:
-                    output[key] = None
-            else:
-                output[key] = scalar(value)
-        while index < len(stream) and stream[index][0] == indent and not stream[index][1].startswith("- "):
-            key, value = split_key_value(stream[index][1])
-            index += 1
-            if value is None:
-                # Kubernetes commonly places a sequence at the same
-                # indentation as its mapping key (``webhooks:\n- name:``).
-                if index < len(stream) and (
-                    stream[index][0] > indent
-                    or (stream[index][0] == indent and stream[index][1].startswith("-"))
-                ):
-                    output[key], index = parse_node(index, stream[index][0])
-                else:
-                    output[key] = None
-            else:
-                output[key] = scalar(value)
-        return output, index
-
-    def parse_list(index: int, indent: int) -> tuple[list[Any], int]:
-        output: list[Any] = []
-        while index < len(stream) and stream[index][0] == indent and (stream[index][1].startswith("- ") or stream[index][1] == "-"):
-            rest = stream[index][1][1:].strip()
-            index += 1
-            if not rest:
-                if index < len(stream) and stream[index][0] > indent:
-                    value, index = parse_node(index, stream[index][0])
-                else:
-                    value = None
-            elif ":" in rest:
-                key, inline_value = split_key_value(rest)
-                child_indent = stream[index][0] if index < len(stream) and stream[index][0] > indent else indent + 2
-                value, index = parse_map(index, child_indent, (key, inline_value))
-            else:
-                value = scalar(rest)
-            output.append(value)
-        return output, index
-
-    if not stream:
-        return None
-    value, index = parse_node(0, stream[0][0])
-    if index != len(stream):
-        raise YamlError("unparsed YAML content remains")
-    return value
-
-
-def documents(path: Path) -> list[dict[str, Any]]:
-    # Kubernetes multi-document separators occur on their own unindented line.
-    result: list[dict[str, Any]] = []
-    for document in re.split(r"^---\s*(?:#.*)?$", path.read_text(encoding="utf-8"), flags=re.MULTILINE):
-        if not re.search(r"^kind:\s*(?:Mutating|Validating)WebhookConfiguration\s*$", document, flags=re.MULTILINE):
+        operations = rule.get("operations") or []
+        if not any(operation in {"CREATE", "*"} for operation in operations):
             continue
-        parsed = parse_document(document)
-        if not isinstance(parsed, dict):
-            raise YamlError("webhook configuration is not a mapping")
-        result.append(parsed)
-    return result
+        groups = rule.get("apiGroups") or []
+        resources = rule.get("resources") or []
+        for group in groups:
+            for owner, owned in CORE_TARGETS.items():
+                if group not in {owner, "*"}:
+                    continue
+                for resource in resources:
+                    if not isinstance(resource, str):
+                        continue
+                    # Strip any subresource: `pods/binding` still reaches pods.
+                    bare = resource.split("/", 1)[0]
+                    if bare == "*":
+                        hits |= owned
+                    elif bare in owned:
+                        hits.add(bare)
+    return hits
 
 
-def covers_job_or_pod_create(rule: Any) -> bool:
-    if not isinstance(rule, dict):
-        return False
-    operations = rule.get("operations", [])
-    resources = rule.get("resources", [])
-    if not isinstance(operations, list) or not isinstance(resources, list):
-        return False
-    creates = any(operation in {"CREATE", "*"} for operation in operations)
-    targets = any(
-        isinstance(resource, str)
-        and (resource == "*" or resource in {"jobs", "pods"} or resource.startswith("jobs/") or resource.startswith("pods/"))
-        for resource in resources
-    )
-    return creates and targets
-
-
-def required_label(webhook: dict[str, Any], selector_name: str, label: str) -> bool:
-    selector = webhook.get(selector_name)
-    return (
-        isinstance(selector, dict)
-        and isinstance(selector.get("matchLabels"), dict)
-        and selector["matchLabels"].get(label) == "true"
-    )
-
-
-def check(path: Path) -> list[str]:
+def check(
+    path: Path,
+    namespace_name: str | None = None,
+    namespace_labels: dict[str, str] | None = None,
+) -> tuple[list[str], int]:
     failures: list[str] = []
     relevant = 0
-    configurations = documents(path)
+    documents = load(path)
+    configurations = [doc for doc in documents if doc.get("kind") in WEBHOOK_KINDS]
     if not configurations:
-        return [f"{path}: no admission webhook configurations found"]
+        return ([f"{path}: no admission webhook configurations found"], 0)
+
     for configuration in configurations:
         kind = configuration.get("kind")
-        if kind not in WEBHOOK_KINDS:
-            continue
-        metadata_value = configuration.get("metadata")
-        metadata: dict[str, Any] = metadata_value if isinstance(metadata_value, dict) else {}
-        config_name = metadata.get("name", "<unnamed>")
-        webhooks = configuration.get("webhooks", [])
+        metadata = configuration.get("metadata")
+        config_name = (metadata or {}).get("name", "<unnamed>")
+        webhooks = configuration.get("webhooks")
         if not isinstance(webhooks, list):
             failures.append(f"{kind}/{config_name}: webhooks is not a list")
             continue
         for webhook in webhooks:
             if not isinstance(webhook, dict):
                 continue
-            rules = webhook.get("rules", [])
-            if not isinstance(rules, list) or not any(covers_job_or_pod_create(rule) for rule in rules):
+            hits = targeted_resources(webhook)
+            if not hits:
                 continue
             relevant += 1
             name = webhook.get("name", "<unnamed>")
             prefix = f"{kind}/{config_name} webhook {name}"
-            if not required_label(webhook, "namespaceSelector", NAMESPACE_LABEL):
-                failures.append(f"{prefix}: namespaceSelector.matchLabels[{NAMESPACE_LABEL!r}] must be 'true'")
-            if not required_label(webhook, "objectSelector", OBJECT_LABEL):
-                failures.append(f"{prefix}: objectSelector.matchLabels[{OBJECT_LABEL!r}] must be 'true'")
+
+            selector = webhook.get("namespaceSelector")
+
+            # THE availability assertion: does this webhook actually select the
+            # namespace Djinn runs in, as the API server would evaluate it?
+            if namespace_labels is not None and selector_matches(selector, namespace_labels):
+                failures.append(
+                    f"{prefix}: namespaceSelector SELECTS namespace "
+                    f"{namespace_name!r} (labels {namespace_labels!r}) for CREATE "
+                    f"on {sorted(hits)}. With failurePolicy "
+                    f"{webhook.get('failurePolicy')!r} an unavailable Kueue "
+                    f"controller would block those creations. selector={selector!r}"
+                )
+
+            if selector != EXPECTED_SELECTOR:
+                failures.append(
+                    f"{prefix}: namespaceSelector must be exactly "
+                    f"{EXPECTED_SELECTOR!r} so a namespace is opted IN by label; "
+                    f"got {selector!r}"
+                )
+
+            gated = hits & MUST_BE_IGNORED
+            if gated:
+                policy = webhook.get("failurePolicy")
+                if policy != "Ignore":
+                    failures.append(
+                        f"{prefix}: failurePolicy must be 'Ignore' for "
+                        f"{sorted(gated)} (upstream sets 'Fail' only when the "
+                        f"framework is enabled, so {policy!r} means "
+                        f"integrations.frameworks re-enabled it)"
+                    )
+
     if relevant == 0:
-        failures.append(f"{path}: no Job/Pod CREATE webhook rules found")
-    return failures
+        failures.append(
+            f"{path}: no core Pod/Job/Deployment/StatefulSet CREATE webhook "
+            "rules found — the checker asserted nothing"
+        )
+    return failures, relevant
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("manifest", type=Path)
+    parser = argparse.ArgumentParser(description="Kueue admission scoping check")
+    parser.add_argument("manifest", type=Path, help="rendered djinn-prereqs manifest")
+    parser.add_argument(
+        "--namespace-labels",
+        help=(
+            "JSON object of the labels the djinn chart renders onto its "
+            "Namespace. When given, every relevant webhook's namespaceSelector "
+            "is evaluated against it and must NOT match."
+        ),
+    )
+    parser.add_argument("--namespace-name", default="djinn")
     args = parser.parse_args()
+
+    labels: dict[str, str] | None = None
+    if args.namespace_labels is not None:
+        labels = json.loads(args.namespace_labels)
+        if not isinstance(labels, dict):
+            print("FAIL: --namespace-labels must be a JSON object", file=sys.stderr)
+            return 2
+
     try:
-        failures = check(args.manifest)
-    except (OSError, ValueError, json.JSONDecodeError, SyntaxError) as error:
+        failures, relevant = check(args.manifest, args.namespace_name, labels)
+    except (OSError, ValueError, yaml.YAMLError) as error:
         print(f"FAIL: cannot parse {args.manifest}: {error}", file=sys.stderr)
         return 2
     if failures:
         for failure in failures:
             print(f"FAIL: {failure}", file=sys.stderr)
         return 1
-    print(f"PASS: {args.manifest}: all Job/Pod CREATE webhooks have both positive selectors")
+    print(
+        f"PASS: {args.manifest}: {relevant} core CREATE webhooks carry the "
+        f"positive {NAMESPACE_LABEL} namespace fence"
+    )
+    if labels is not None:
+        print(
+            f"PASS: none of those {relevant} webhooks selects namespace "
+            f"{args.namespace_name!r} with its real rendered labels {labels}"
+        )
+    else:
+        print(
+            "NOTE: --namespace-labels was not supplied, so no webhook was "
+            "evaluated against a real namespace."
+        )
+    print(
+        "NOTE: objectSelector is NOT checked and NOT present. The upstream "
+        "chart exposes no hook for it; the retired fork's second per-object "
+        "fence is gone. Job CREATE in a labelled namespace is namespace-fenced "
+        "only. See this file's docstring and deploy/kueue/README.md (4c9q)."
+    )
     return 0
 
 

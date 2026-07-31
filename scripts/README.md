@@ -96,19 +96,37 @@ Minimal local check:
 ./scripts/jit-pitfall-readout-bundle.sh --self-test
 ```
 
-## Rust size guard
+## Rust size report
 
-Lightweight guard for Rust source files under `server/crates/**` and `server/src/**`. A file fails when it exceeds either size threshold.
+Measures Rust source files under `server/crates/**` and `server/src/**` and ranks the largest worst-first. **It does not fail.** The only non-zero exit is a usage error.
 
-### CI gate
+### Why it is not a gate
 
-`.github/workflows/quality-gate.yml` runs the "Check changed Rust file sizes" step of the `server-guards` job for PR and merge-queue server changes. The step computes added, modified, and renamed files with `git diff --name-only --diff-filter=AMR` and pipes that list to changed-file mode:
+It was one, from 2026-06-11 to 2026-07-30. The outcome over those seven weeks:
+
+| | at landing | 2026-07-30 |
+| --- | --: | --: |
+| files carrying `// djinn:allow-oversize` | 0 | 108 |
+| oversized files (by line count) | 22 | 79 |
+| files split in response | — | 0 |
+
+101 of the 108 marker-carrying files were genuinely oversized and **no** oversized file lacked a marker. Every file that ever tripped the gate got a marker; none got restructured.
+
+That is an incentive gap, not a discipline problem: complying means restructuring a module, evading means adding one comment line. At roughly 100x cost asymmetry, evasion always wins. A per-file *line* limit is also satisfiable by cutting a file at any point, and the `_partN` fragments that produced hid 20.7k lines from rust-analyzer, rustfmt and three CI guards.
+
+On 2026-07-30 the gate blocked two correctness fixes on `MAX_BYTES`: PR #2815 (141 bytes of headroom, tipped over by its own explanatory comment) and PR #2839 (267 bytes, tipped over by the coverage fix itself). Both were resolved by adding a marker.
+
+Pressure toward workable file sizes now lives at authorship time instead, in `djinn-agent`'s `edit`/`write`/`apply_patch` tool results — the moment where there is nothing to satisfy and therefore nothing to game.
+
+### CI
+
+`.github/workflows/quality-gate.yml` runs the "Report changed Rust file sizes" step of the `server-guards` job for PR and merge-queue server changes. The step computes added, modified, and renamed files with `git diff --name-only --diff-filter=AMR` and pipes that list to changed-file mode:
 
 ```sh
 ./scripts/check-file-size.sh --files-from-stdin
 ```
 
-CI is a regression guard for new or edited Rust files; it does not full-tree scan every legacy file on each PR.
+The step is structurally incapable of failing the run. The ranked table lands in the job step summary and the worst offenders become `::notice` annotations (capped at 10, which is all GitHub renders per step). CI covers new or edited Rust files; it does not full-tree scan every legacy file on each PR.
 
 ### Run locally
 
@@ -124,19 +142,21 @@ Full-tree audit mode:
 ./scripts/check-file-size.sh --all
 ```
 
-A full-tree audit may still report legacy oversized files until future split work lands.
-
 ### Thresholds
 
-Defaults are `MAX_LINES=1500` and `MAX_BYTES=51200`; exceeding either limit fails the guard. Override either value with environment variables:
+Defaults are `MAX_LINES=1500` and `MAX_BYTES=51200`. These now decide only what appears in the report, not what is permitted. Override either value with environment variables:
 
 ```sh
 MAX_LINES=1200 MAX_BYTES=45000 ./scripts/check-file-size.sh --all
 ```
 
-### Escape hatch
+Rows are ranked by **bytes** descending, because bytes is the binding constraint on whether a reader can load a file at all — an agent's `read` returns at most 2000 lines and at most `output_stash::MAX_TOOL_RESULT_CHARS` (30 000) characters. Line count is shown alongside as the more legible number.
 
-Add `// djinn:allow-oversize` anywhere in a file to allow an intentional exception. Use this only when a Rust source file genuinely needs to exceed the guideline and should not block CI.
+### The marker
+
+`// djinn:allow-oversize` anywhere in a file no longer grants anything, because nothing is denied. It is still parsed: it is the author's on-the-record statement that the file's size is deliberate, and it splits the ranking into `acknowledged` and `unacknowledged` rows — the one axis on which the report is actionable.
+
+The 108 existing markers are deliberately left in place. Removing them would be 108 files of churn for zero behavioural change; if that cleanup is ever wanted it is its own piece of work.
 
 ### Skipped paths
 

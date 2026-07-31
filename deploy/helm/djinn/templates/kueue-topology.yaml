@@ -1,4 +1,38 @@
+{{- /*
+Kueue queue topology (ResourceFlavor + ClusterQueue + two LocalQueues).
+
+These are `kueue.x-k8s.io/v1beta1` objects, so the API server rejects them
+outright on a cluster where Kueue is not installed. Until this guard existed
+the templates rendered UNCONDITIONALLY, which made the whole `djinn` chart
+un-installable on any cluster lacking Kueue CRDs — observed on the production
+VPS.
+
+The guard is an explicit VALUE, deliberately not `.Capabilities.APIVersions`.
+Capability probing returns nothing under `helm template`, which is exactly what
+Tilt uses to render this chart, so a capability guard would silently omit the
+topology in local dev and silently include it in a live install — two different
+manifests from one chart, with no error either way.
+
+An explicit value fails loudly instead. Set `kueue.enabled: true` only after
+installing the prerequisite (`deploy/helm/djinn-prereqs`, see
+deploy/kueue/README.md). If you set it true without that, `helm install` stops
+with a plain "no matches for kind ResourceFlavor" from the API server — a
+diagnosable error, not a chart that quietly ships less than you asked for.
+
+This topology is INERT until `kueue.armed` is ALSO true. `kueue.enabled` renders
+the queues; `kueue.armed` labels the Namespace and stamps `suspend` +
+`kueue.x-k8s.io/queue-name` onto build Jobs. Keeping them separate is what makes
+"Kueue installed, topology rendered, nothing captured" representable — the exact
+state `deploy/kueue/zero-capture-gate.sh` verifies. `armed` implies `enabled`;
+`deployment-server.yaml` fails the render on the other combination.
+*/ -}}
+{{- if .Values.kueue.enabled -}}
 {{- $kueue := .Values.kueue -}}
+{{- if not (kindIs "float64" $kueue.buildPods) -}}
+{{- if not (kindIs "int64" $kueue.buildPods) -}}
+{{- fail "kueue.enabled is true but kueue.buildPods is not a number. It is the pods nominalQuota for the ClusterQueue; set a positive integer, or set kueue.enabled=false if the Kueue prerequisite (deploy/helm/djinn-prereqs) is not installed." -}}
+{{- end -}}
+{{- end -}}
 {{- $clusterQueueName := printf "%s-kueue" (include "djinn.fullname" .) | trunc 63 | trimSuffix "-" -}}
 apiVersion: kueue.x-k8s.io/v1beta1
 kind: ResourceFlavor
@@ -15,14 +49,84 @@ metadata:
   labels:
     {{- include "djinn.labels" . | nindent 4 }}
 spec:
-  queueingStrategy: StrictFIFO
+  # WHO MAY SUBMIT — and the reason this line is not optional.
+  #
+  # MEASURED on a live armed kind cluster (fbiy-B1, 2026-07-30): with this field
+  # ABSENT, every Workload this topology captured sat Pending forever with
+  #
+  #     QuotaReserved=False  reason=Pending
+  #     "workload namespace doesn't match ClusterQueue selector"
+  #
+  # and NOTHING was ever admitted. `kueue.armed` renders build Jobs with
+  # `suspend: true` and hands admission to Kueue; a ClusterQueue that admits
+  # nothing therefore never undoes that suspend, so an armed install captures
+  # every task-run/warm/SCIP Job and runs none of them. Patching `{}` onto the
+  # live ClusterQueue admitted 2 of 3 queued Jobs within seconds — same cluster,
+  # same Jobs, one field.
+  #
+  # The trap is in the CRD's own doc string: "Defaults to null which is a
+  # nothing selector (no namespaces eligible). If set to an empty selector `{}`,
+  # then all namespaces are eligible." An omitted selector is not "unrestricted";
+  # it is "nobody", and it fails silently.
+  #
+  # `{}` rather than a label selector on purpose. The admission fence already
+  # exists and it is not this field: Kueue only creates a Workload in a namespace
+  # carrying `djinn.io/kueue-managed` (the prerequisite's
+  # managedJobsNamespaceSelector), a Workload only reaches THIS ClusterQueue
+  # through a LocalQueue, and all three LocalQueues are rendered into the djinn
+  # namespace alone. A third, independently-settable copy of that same fence is
+  # exactly what wedged admission here without a single error anywhere.
+  namespaceSelector: {}
+  # BestEffortFIFO, not StrictFIFO. Three kinds (task-run, warm, SCIP) share a
+  # queue whose default nominal quota is 3 pods, and a warm Pod is long-lived
+  # (measured 5442s end to end). Under StrictFIFO one head-of-line Workload that
+  # cannot fit blocks every smaller Workload behind it; BestEffortFIFO lets the
+  # rest through. Fairness across kinds is not a goal here — throughput is.
+  queueingStrategy: BestEffortFIFO
+  # WHAT IS BOUNDED, AND WHY THREE RESOURCES ARE COVERED TO BOUND ONE.
+  #
+  # `pods` is the ONLY intended bound: N concurrent build Pods, whatever they
+  # ask for. `cpu` and `memory` appear here for a mechanical reason and are
+  # deliberately set to quotas no real cluster can reach.
+  #
+  # MEASURED on a live armed kind cluster (fbiy-B1, 2026-07-30) with only
+  # `pods` covered, a Job straight out of `build_task_run_job` was NEVER
+  # admitted:
+  #
+  #     QuotaReserved=False reason=Pending
+  #     "couldn't assign flavors to pod set main: resource cpu unavailable in
+  #      ClusterQueue"
+  #
+  # Kueue computes a Workload's request across EVERY resource its PodSet asks
+  # for and refuses to assign a flavor when any of them is outside the
+  # ClusterQueue's resourceGroups. Every task-run, warm and SCIP Pod requests
+  # cpu and memory (`KubernetesConfig::cpu_request` / `memory_request` and the
+  # per-kind equivalents), so a `pods`-only ClusterQueue admits nothing at all —
+  # it captures every build Job, suspends it, and never unsuspends one. Adding
+  # the two covered resources admitted the same Job within seconds on the same
+  # cluster.
+  #
+  # This is why a synthetic Job with no `resources:` block appeared to work
+  # while every real one did not, and why nothing but a live controller could
+  # have told the two apart.
+  #
+  # The quotas below are the "covered but unbounded" idiom: 10k cores and 100Ti
+  # are ~1000x any cluster Djinn will run on, so neither can ever be the binding
+  # constraint and `pods` stays the sole admission bound. They are NOT a
+  # capacity statement and must not be tuned as one — if a real CPU bound is
+  # ever wanted, that is a design change with its own task, not an edit to these
+  # numbers.
   resourceGroups:
-    - coveredResources: ["pods"]
+    - coveredResources: ["pods", "cpu", "memory"]
       flavors:
         - name: {{ printf "%s-kueue" (include "djinn.fullname" .) | trunc 63 | trimSuffix "-" }}
           resources:
             - name: pods
               nominalQuota: {{ $kueue.buildPods }}
+            - name: cpu
+              nominalQuota: 10k
+            - name: memory
+              nominalQuota: 100Ti
 ---
 apiVersion: kueue.x-k8s.io/v1beta1
 kind: LocalQueue
@@ -43,3 +147,24 @@ metadata:
     {{- include "djinn.labels" . | nindent 4 }}
 spec:
   clusterQueue: {{ $clusterQueueName }}
+---
+{{- /*
+SCIP joins Kueue. rust-analyzer indexing is genuinely CPU-heavy — the measured
+SCIP phase of a production warm was 3644s — so leaving it outside the quota
+would make the ClusterQueue under-count the very load it exists to bound.
+
+Image build deliberately gets NO LocalQueue. It is an upstream dependency of a
+task-run, so sharing this ClusterQueue admits a priority-inversion deadlock: a
+task-run holds a slot waiting on its project image while that image build is
+queued behind it. Adding a `-build` queue here re-introduces that.
+*/ -}}
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: LocalQueue
+metadata:
+  name: {{ include "djinn.fullname" . }}-scip
+  namespace: {{ include "djinn.namespace" . }}
+  labels:
+    {{- include "djinn.labels" . | nindent 4 }}
+spec:
+  clusterQueue: {{ $clusterQueueName }}
+{{- end }}

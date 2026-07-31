@@ -238,10 +238,22 @@ fn insert_cache(key: (String, String), text: String) {
     }
 }
 
+/// Drop every cached header belonging to `project_id`, leaving the rest of the
+/// map untouched.
+///
+/// The cache is a process-global `OnceLock<RwLock<HashMap>>` and cargo runs the
+/// whole test binary in one process, so a test starting from a clean slate has
+/// to reach into state its siblings are concurrently using. Keying the map by
+/// `(project_id, head)` already isolates the tests from one another — every test
+/// builds under its own project id — so the reset must be scoped the same way.
+/// A whole-map `clear()` throws that isolation away: a sibling calling it
+/// between another test's [`insert_cache`] and the [`lookup_cache`] that is
+/// supposed to hit evicts the entry under the running test, which then observes
+/// a freshly rendered header instead of the cached one.
 #[cfg(test)]
-pub(in crate::server::chat) fn clear_cache_for_tests() {
+pub(in crate::server::chat) fn clear_cache_for_tests(project_id: &str) {
     if let Ok(mut guard) = header_cache().write() {
-        guard.clear();
+        guard.retain(|(cached_project, _), _| cached_project != project_id);
     }
 }
 
@@ -713,7 +725,7 @@ mod tests {
 
     #[tokio::test]
     async fn full_header_includes_status_hotspots_and_tree() {
-        clear_cache_for_tests();
+        clear_cache_for_tests("p1-uniq-full");
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(tmp.path().join("src/api")).unwrap();
         std::fs::create_dir_all(tmp.path().join("src/models")).unwrap();
@@ -756,7 +768,7 @@ mod tests {
 
     #[tokio::test]
     async fn header_renders_with_only_status_when_others_fail() {
-        clear_cache_for_tests();
+        clear_cache_for_tests("p1-uniq-only-status");
         let tmp = tempfile::tempdir().unwrap();
         // No subdirs → folder tree is None.
 
@@ -776,7 +788,7 @@ mod tests {
 
     #[tokio::test]
     async fn cold_graph_with_tree_still_emits_header() {
-        clear_cache_for_tests();
+        clear_cache_for_tests("p1-uniq-cold");
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(tmp.path().join("src")).unwrap();
 
@@ -802,7 +814,7 @@ mod tests {
 
     #[tokio::test]
     async fn returns_none_when_everything_fails() {
-        clear_cache_for_tests();
+        clear_cache_for_tests("p1-uniq-none");
         let tmp = tempfile::tempdir().unwrap();
         // Empty dir → folder_tree is None too.
 
@@ -818,7 +830,7 @@ mod tests {
 
     #[tokio::test]
     async fn cache_returns_same_header_within_ttl() {
-        clear_cache_for_tests();
+        clear_cache_for_tests("p1-uniq-cache");
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(tmp.path().join("src")).unwrap();
 
@@ -887,7 +899,7 @@ mod tests {
 
     #[tokio::test]
     async fn built_header_is_wrapped_in_system_reminder() {
-        clear_cache_for_tests();
+        clear_cache_for_tests("p1-uniq-wrapped");
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(tmp.path().join("src")).unwrap();
 

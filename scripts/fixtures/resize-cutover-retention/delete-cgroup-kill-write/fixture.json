@@ -1,0 +1,13 @@
+{
+  "asset": "cgroup-kill",
+  "expect": "reject",
+  "why": "The cgroup-wide kill removed outright. `kill` still exists, still marks terminal intent, and still returns Ok — it just no longer reaches anything. This is the shape a 'simplification' takes when someone decides pod resize made containment somebody else's problem.",
+  "operations": [
+    {
+      "op": "replace",
+      "path": "server/crates/djinn-cgroup-launcher/src/lib.rs",
+      "find": "        self.fs.write_leaf(leaf.fd, \"cgroup.kill\", \"1\")\n",
+      "with": "        Ok(())\n"
+    }
+  ]
+}

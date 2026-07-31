@@ -1,8 +1,7 @@
 //! `epoch set-cap` against a RUNNING process.
 //!
 //! Production, 2026-07-25, mid-incident: `djinn-server epoch set-cap --cap 12`
-//! reported `set-cap: applied`, `djinn-server epoch show` read back
-//! `phase ForwardOverlap · epoch 4 · v0_mode Enforce · v1_mode Enforce · cap 12`,
+//! reported `set-cap: applied`, `djinn-server epoch show` read back `cap 12`,
 //! and the very next denial still said `occupancy=3 cap=3`. The durable write
 //! landed; the live `grant_next` read a cached atomic that only `recover()`
 //! ever wrote, so the operator's one cap knob was inert until a restart.
@@ -15,22 +14,22 @@
 use std::sync::Arc;
 
 use djinn_db::{
-    AdmissionHandoffRepository, BuildLeaseKey, BuildLeaseRepository, BuildLeaseState, Database,
-    V0Mode, V1Mode,
+    BuildLeaseKey, BuildLeaseRepository, BuildLeaseState, Database,
+    InvocationLeaseAuthorityRepository, InvocationLeaseMode,
 };
 use djinn_supervisor::services::{
     GraphWarmLeaseIdentity, LeaseDeadlines, LeaseIdentity, LeaseQueueRequest, LeaseResult,
 };
 
-use crate::build_admission_transition::AdmissionTransitionExecutor;
 use crate::build_lease::BuildLeaseService;
+use crate::invocation_lease_control::InvocationLeaseControl;
 
 const PROJECT: &str = "019ea3bd-a305-73e3-806c-4edcc96ebfe2";
 
 struct Fixture {
     service: Arc<BuildLeaseService>,
     leases: Arc<BuildLeaseRepository>,
-    operator: AdmissionTransitionExecutor,
+    operator: InvocationLeaseControl,
     epoch: i64,
 }
 
@@ -83,9 +82,9 @@ impl Fixture {
 async fn running_process(epoch_cap: i64) -> Fixture {
     let db = Database::open_in_memory().unwrap();
     db.ensure_initialized().await.unwrap();
-    let handoff = Arc::new(AdmissionHandoffRepository::new(db.clone()));
-    let row = handoff
-        .set_modes_and_cap(0, V0Mode::Enforce, V1Mode::Enforce, Some(epoch_cap))
+    let authority = Arc::new(InvocationLeaseAuthorityRepository::new(db.clone()));
+    let row = authority
+        .set_mode_and_cap(0, InvocationLeaseMode::Enforce, Some(epoch_cap))
         .await
         .expect("arm the epoch");
     let leases = Arc::new(BuildLeaseRepository::new(db.clone()));
@@ -93,7 +92,8 @@ async fn running_process(epoch_cap: i64) -> Fixture {
         // The configured `DJINN_MAX_BUILD_TASKRUNS` fallback is deliberately
         // different from the epoch cap, so any assertion below that passes by
         // reading the environment instead of the epoch is visible.
-        BuildLeaseService::new(Arc::clone(&leases), 9).with_handoff_epoch(Arc::clone(&handoff)),
+        BuildLeaseService::new(Arc::clone(&leases), 9)
+            .with_invocation_lease_authority(Arc::clone(&authority)),
     );
     assert!(matches!(service.recover().await, LeaseResult::Status(_)));
     assert_eq!(
@@ -104,7 +104,7 @@ async fn running_process(epoch_cap: i64) -> Fixture {
     Fixture {
         service,
         leases,
-        operator: AdmissionTransitionExecutor::new(handoff),
+        operator: InvocationLeaseControl::new(authority),
         epoch: row.epoch,
     }
 }
@@ -189,13 +189,13 @@ async fn lowering_the_cap_stops_granting_without_revoking_occupied_slots() {
 async fn a_refresh_before_recovery_never_moves_the_enforced_cap() {
     let db = Database::open_in_memory().unwrap();
     db.ensure_initialized().await.unwrap();
-    let handoff = Arc::new(AdmissionHandoffRepository::new(db.clone()));
-    handoff
-        .set_modes_and_cap(0, V0Mode::Enforce, V1Mode::Enforce, Some(7))
+    let authority = Arc::new(InvocationLeaseAuthorityRepository::new(db.clone()));
+    authority
+        .set_mode_and_cap(0, InvocationLeaseMode::Enforce, Some(7))
         .await
         .expect("arm the epoch");
     let service = BuildLeaseService::new(Arc::new(BuildLeaseRepository::new(db.clone())), 3)
-        .with_handoff_epoch(handoff);
+        .with_invocation_lease_authority(authority);
 
     assert_eq!(service.refresh_epoch_cap().await, None);
     assert_eq!(

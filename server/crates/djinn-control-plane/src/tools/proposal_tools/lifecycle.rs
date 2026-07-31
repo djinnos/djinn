@@ -713,11 +713,15 @@ fn proposal_disposition_summary(plan: &DispositionPlan) -> ProposalDispositionSu
 
 // ── Tests ───────────────────────────────────────────────────────────────────
 
+// Tests for this concern live in `lifecycle/`. They are real modules, not
+// textually included fragments: rust-analyzer emits no SCIP document for an
+// included file, so anything defined inside one is unfindable by every agent
+// and by the `*.rs`-filtered CI guards. See scripts/check-include-macro.sh.
 #[cfg(test)]
-include!("lifecycle_stop_build_tests.rs");
+mod stop_build_tests;
 
-// Graduation readiness tests — extracted to `graduation_readiness_tests.rs`
-// to meet the 1500-line file-size guard. These tests cover `proposal_graduate`
-// and its readiness guardrails, so they are paired with the lifecycle concern.
+// Graduation readiness tests — split out to meet the 1500-line file-size
+// guard. These tests cover `proposal_graduate` and its readiness guardrails,
+// so they are paired with the lifecycle concern.
 #[cfg(test)]
-include!("graduation_readiness_tests.rs");
+mod graduation_readiness_tests;

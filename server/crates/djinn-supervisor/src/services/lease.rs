@@ -117,25 +117,28 @@ pub struct LeaseDeadlines {
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LeaseFencingToken(pub u64);
-/// Whether the current durable admission epoch authorizes the launcher to lift
-/// the reserved cpu.max quota for a bound v1 (invocation) lease.
+/// Whether the durable invocation-lease authority authorizes the launcher to
+/// lift the reserved cpu.max quota for a bound invocation lease.
 ///
-/// This is the agent/launcher-side projection of the admission handoff epoch.
-/// It is deliberately small and fail-closed: only a committed overlap or
-/// invocation-primary epoch with v1 enforcing yields [`Self::Lift`]. A shadow
-/// epoch is observed but never lifts; every other epoch (baseline, missing,
-/// unreadable, stale, or the illegal both-non-enforcing combo) keeps the quota
-/// unleased.
+/// This is the agent/launcher-side projection of that authority. It is
+/// deliberately small and fail-closed: only an armed (`enforce`) authority
+/// yields [`Self::Lift`]. A shadowing authority is observed but never lifts;
+/// every other state — disarmed, missing, unreadable — keeps the quota unleased.
+///
+/// The variants are a stable contract: `djinn-cgroup-launcher` maps them onto
+/// `LeaseAuthority` at leaf creation, and proposal `3i92`'s tasks depend on
+/// these two types rather than on the durable row. Their meanings are unchanged
+/// by the Kueue cutover — only the inputs that produce them shrank.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum InvocationLiftDecision {
-    /// The epoch is a committed overlap or invocation-primary phase with v1
-    /// enforcing: a matching durable fencing token may lift cpu.max.
+    /// The authority is armed to enforce: a matching durable fencing token may
+    /// lift cpu.max.
     Lift,
-    /// v1 is shadowing: the invocation authority observes what it would do but
-    /// never lifts. The launcher stays throttled under v0.
+    /// The authority is shadowing: it observes what it would do but never lifts,
+    /// leaving the leaf pinned at the broker's unleased quota.
     Shadow,
-    /// Baseline / missing / unreadable / stale / contradictory epoch: keep the
-    /// launcher quota unleased. This is the fail-closed default.
+    /// Disarmed / missing / unreadable authority: keep the launcher quota
+    /// unleased. This is the fail-closed default.
     #[default]
     Unleased,
 }
@@ -214,6 +217,110 @@ pub struct LeaseGrant {
     pub fencing_token: LeaseFencingToken,
     pub deadlines: LeaseDeadlines,
 }
+/// Why a lease that is otherwise live may not have its Pod resized, and must
+/// therefore run at the unleased quota.
+///
+/// Every variant is a **settled** answer. None of them is transient, and none of
+/// them becomes true by waiting: the correct response to all of them is to keep
+/// running unleased. They are separated only so the log line and the metric can
+/// tell an authorization DENIAL (`NotTheInvocationOwner`, `FencingTokenMismatch`
+/// — a caller reaching for something that is not its own) apart from an
+/// UNCERTAINTY (everything else — the server could not prove the resize is
+/// allowed), because the first is an attack signal and the second is an
+/// operational one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DegradedUnleasedReason {
+    /// The task run presenting this grant is not the task run the durable lease
+    /// row records as the invocation's owner. An authorization DENIAL.
+    NotTheInvocationOwner,
+    /// The presented fencing token is not the one the durable row was minted
+    /// with. An authorization DENIAL.
+    FencingTokenMismatch,
+    /// No durable build-pod permit is active for the owning task run, so there
+    /// is no server-side relation to derive Pod coordinates from.
+    PermitAbsent,
+    /// The permit exists but carries no write-once Pod resize identity yet.
+    ResizeIdentityUnknown,
+    /// The Pod's effective launcher protocol cannot express a Pod resize.
+    ProtocolNotResizable,
+    /// The stored admitted ceiling is not a usable CPU quantity.
+    CeilingUnusable,
+    /// The durable state needed to decide could not be read at all. A DEFECT —
+    /// reported as a settled degrade because an unreadable authority is not
+    /// permission, and a retry cannot turn it into one.
+    AuthorizationUnreadable,
+
+    // ── Apply-time outcomes (0ppk-1c) ──────────────────────────────────────
+    //
+    // Everything above is decided from durable rows alone. Everything below is
+    // decided by what the apiserver and the kubelet actually did, and every one
+    // of them is a reason a lift was ATTEMPTED and did not take. They are a
+    // CLOSED set on `DegradedUnleased` on purpose: the worker's only correct
+    // handling for all of them is to proceed unleased, and expressing any of
+    // them as an `Err` would put them back on the retry path this variant
+    // exists to keep them off.
+    //
+    // Each one leaves the durable permit in `drop_required`, so the drop
+    // reconciler (0ppk-3) owns returning the Pod to its birth limit. A lift
+    // that could not be confirmed must never leave the row claiming `lifted`.
+    /// The permit's resize lifecycle is not in a state a lift may start from.
+    /// Neither `birth_confirmed` (fresh) nor `lifted` (idempotent re-confirm).
+    PermitNotLiftable,
+    /// The `birth_confirmed → lift_applying` (or the terminal) compare-and-swap
+    /// was refused, or durable storage could not answer it. The lift is not
+    /// attempted, or its outcome could not be recorded — either way nothing may
+    /// claim the Pod was lifted.
+    LiftLifecycleUnwritable,
+    /// No apiserver surface could be resolved, or the call failed with
+    /// something that is not a settled apiserver verdict (transport error,
+    /// timeout, 5xx). Still a settled degrade: see this enum's header.
+    ResizeSurfaceUnavailable,
+    /// The apiserver answered `403 Forbidden`. The controller's `pods/resize`
+    /// RBAC rule is missing or narrower than this namespace.
+    ResizeForbidden,
+    /// The apiserver answered `422 Unprocessable Entity` — the resize request
+    /// itself was rejected (for example, a limit the Pod's QoS class forbids).
+    ResizeRejected,
+    /// No Pod carries this task run's label any more, or the stored Pod is not
+    /// complete enough to fence a resize against.
+    LiftPodAbsent,
+    /// The launcher is not uniquely nameable in `spec.initContainers` or in
+    /// `status.initContainerStatuses`. Zero and two are the same failure.
+    LiftIdentityAmbiguous,
+    /// The live Pod's `metadata.uid` is not the permit's write-once `pod_uid`.
+    /// A Pod deleted and recreated under the same NAME is a different object,
+    /// and `PodResizeClient::resize_launcher_cpu` — which takes only a name —
+    /// would happily patch it. **No PATCH is issued when this is raised.**
+    ResizeIdentityChanged,
+    /// The launcher's live `containerID` is not the one the permit captured:
+    /// the sidecar restarted, so the cgroup the lift was reasoned about is
+    /// gone. **No PATCH is issued when this is raised.**
+    LauncherRestarted,
+    /// The launcher's live `DJINN_LAUNCHER_AUTHORITY_PROTOCOL` is not the
+    /// permit's `effective_launcher_protocol`. Exactly one authority governs an
+    /// admitted Pod. **No PATCH is issued when this is raised.**
+    LauncherProtocolChanged,
+    /// A `PodResizePending` condition is present: the kubelet has accepted the
+    /// request and has not actuated it, so no limit we can read is
+    /// authoritative.
+    LiftResizePending,
+    /// `status.initContainerStatuses[cgroup-launcher].resources.limits.cpu` is
+    /// absent. An absent value is never a match.
+    LiftStatusAbsent,
+    /// That status reports a CPU limit that is not the clamped target, or one
+    /// that will not parse. The PATCH may well have been accepted; acceptance
+    /// is not actuation.
+    LiftStatusStale,
+    /// The confirmation budget was spent waiting and the init-container status
+    /// never agreed.
+    ///
+    /// Distinct from [`Self::LiftStatusStale`] by whether waiting was
+    /// permitted: a lift configured with no confirmation budget reports the
+    /// specific thing its one observation saw, while a lift that slept its
+    /// whole budget reports that it spent it. Both degrade; they are separated
+    /// so an operator can tell "the kubelet never moved" from "we never waited".
+    LiftDeadlineExceeded,
+}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LeaseResult {
     Queued(LeaseStatus),
@@ -234,6 +341,26 @@ pub enum LeaseResult {
     },
     LeaseWaitTimeout {
         timeout_credit: Option<TimeoutCredit>,
+    },
+    /// The lease itself is live, but the server would not authorize a resize
+    /// for it: this invocation MUST run at the unleased quota.
+    ///
+    /// # Why this is a result and not an `Err`
+    ///
+    /// `LeaseUnavailable` and a transport `Err` both mean *ask again* — the
+    /// invocation runner treats them as retryable and keeps polling. Every
+    /// input to a resize authorization is durable and settled: who owns the
+    /// invocation, which Pod the permit was captured against, what ceiling was
+    /// admitted. None of those change because a caller retried, so surfacing an
+    /// uncertainty as an error would spend the queue deadline re-asking a
+    /// question whose answer is fixed, while the child runs clamped the whole
+    /// time. That is the shape of the 30s-invocation-deadline degrade this lease
+    /// path has already paid for once.
+    ///
+    /// So the answer is stated once, positively, with the reason attached, and
+    /// the caller's only correct handling is to proceed unleased.
+    DegradedUnleased {
+        reason: DegradedUnleasedReason,
     },
     LeaseUnavailable,
 }

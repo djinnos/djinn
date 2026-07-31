@@ -1,0 +1,13 @@
+{
+  "asset": "wait-empty",
+  "expect": "reject",
+  "why": "AC9, mutation one. `wait_empty` replaced with an immediate `Ok(())`. The symbol is still there, the call sites still compile, every existence check still passes — and the leaf is never observed to drain. A gate that only checks the file still exists stays green under this.",
+  "operations": [
+    {
+      "op": "replace",
+      "path": "server/crates/djinn-cgroup-launcher/src/lib.rs",
+      "find": "        let events = self.fs.read_leaf(leaf.fd, \"cgroup.events\")?;\n        if populated_zero(&events)? {\n            Ok(())\n        } else {\n            Err(Error::StillPopulated)\n        }\n",
+      "with": "        Ok(())\n"
+    }
+  ]
+}

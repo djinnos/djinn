@@ -107,7 +107,7 @@ fn render_into_job(
             false,
             None,
         ),
-        Kind::Warm => djinn_k8s::build_warm_job(config, "proj", "img:tag", None),
+        Kind::Warm => djinn_k8s::build_warm_job(config, "proj", "deadbeef", "img:tag", None),
     };
     apply_resolved_resources(&mut job, rr);
     job.spec

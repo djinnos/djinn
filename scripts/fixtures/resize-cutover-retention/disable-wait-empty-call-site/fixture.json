@@ -1,0 +1,13 @@
+{
+  "asset": "wait-empty",
+  "expect": "reject",
+  "why": "Retirement by unreachability. `wait_empty` survives untouched in the launcher, the broker, the transport and the handle trait — and the one production caller that turns the asynchronous `cgroup.kill` into an OBSERVED drain is gone. Presence checks all pass. This is the failure mode the resize reachability guard was written for, applied to containment.",
+  "operations": [
+    {
+      "op": "replace",
+      "path": "server/crates/djinn-agent/src/process.rs",
+      "find": "        child.wait_empty().map_err(LeaseInvocationError::Launcher)?;\n",
+      "with": ""
+    }
+  ]
+}

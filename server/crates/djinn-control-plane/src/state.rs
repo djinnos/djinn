@@ -1,6 +1,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use djinn_core::doctor::DoctorRegistry;
 use djinn_core::doctor::checks::retrieval::RetrievalHealthConfig;
 use djinn_core::events::EventBus;
 use djinn_core::models::DjinnSettings;
@@ -47,6 +48,19 @@ pub struct McpState {
     /// This remains absent in off-server contexts; the explicitly selected
     /// doctor probe then reports that it has not been configured.
     extension_diagnostics_probe: Option<Arc<dyn ExtensionDiagnosticsProbeOps>>,
+    /// Doctor check registry the `doctor_run` / `doctor_fix` tools resolve
+    /// checks from. `None` means "use the process-wide singleton", which is
+    /// what the server binary wants: the coordinator registers every
+    /// production check into `djinn_core::doctor::registry()` at startup and
+    /// the MCP surface must see exactly those.
+    ///
+    /// It is injectable because the singleton is keyed by check *name*, and
+    /// `register` replaces by name. Two `McpState`s alive in one process that
+    /// both register a check under the same name — the situation every
+    /// concurrently-running integration test in one test binary is in — would
+    /// otherwise clobber each other, and whichever registered last would serve
+    /// every caller, including the ones bound to a different database.
+    doctor_registry: Option<Arc<DoctorRegistry>>,
 }
 
 impl McpState {
@@ -123,6 +137,7 @@ impl McpState {
             repo_graph,
             enrichment_ops,
             extension_diagnostics_probe: None,
+            doctor_registry: None,
         }
     }
 
@@ -135,6 +150,37 @@ impl McpState {
     ) -> Self {
         self.extension_diagnostics_probe = Some(ops);
         self
+    }
+
+    /// Bind this state to a caller-owned doctor check registry instead of the
+    /// process-wide singleton. Production composition never calls this — the
+    /// server wants the singleton the coordinator populates. Test harnesses
+    /// call it so that each harness registers into, and resolves from, a
+    /// registry private to itself.
+    pub fn with_doctor_registry(mut self, registry: Arc<DoctorRegistry>) -> Self {
+        self.doctor_registry = Some(registry);
+        self
+    }
+
+    /// The doctor check registry `doctor_run` / `doctor_fix` must consult.
+    ///
+    /// Falls back to the process-wide singleton, which is the production
+    /// wiring: `djinn-coordinator` registers every real check into
+    /// [`djinn_core::doctor::registry()`] during startup.
+    pub fn doctor_registry(&self) -> &DoctorRegistry {
+        match &self.doctor_registry {
+            Some(registry) => registry,
+            None => djinn_core::doctor::registry(),
+        }
+    }
+
+    /// The injected registry, or `None` when this state falls back to the
+    /// process-wide singleton. Test harnesses use it to carry an already-bound
+    /// registry across a state rebuild instead of silently minting a second
+    /// one, which would leave the rebuilt server resolving checks the test had
+    /// registered into the original.
+    pub fn doctor_registry_override(&self) -> Option<Arc<DoctorRegistry>> {
+        self.doctor_registry.clone()
     }
 
     pub fn db(&self) -> &Database {

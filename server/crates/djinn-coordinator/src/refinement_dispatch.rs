@@ -33,6 +33,7 @@ use super::actor::CoordinatorActor;
 use super::refinement_inflight::DurableInflightRegistration;
 use super::refinement_outcome::RefinementOutcomeApplication;
 use super::types::{InflightDispatch, REFINEMENT_INTENT_CLAIM_LEASE_MILLIS};
+use crate::poll_stack;
 use djinn_core::clock::{Clock, SystemClock};
 use djinn_core::models::TaskRefinementCorrelation;
 use djinn_core::refinement_liveness::RefinementRole;
@@ -168,7 +169,7 @@ impl CoordinatorActor {
         if run_ids.is_empty() {
             // The durable ledger remains dispatch authority when no disposable
             // projection survived to this tick.
-            self.drive_durable_refinement_intents().await;
+            poll_stack::boxed(|| self.drive_durable_refinement_intents()).await;
             return;
         }
 
@@ -208,15 +209,14 @@ impl CoordinatorActor {
         };
 
         for run_id in run_ids {
-            self.drive_one_refinement(&run_id, running_tasks.as_ref())
-                .await;
+            poll_stack::boxed(|| self.drive_one_refinement(&run_id, running_tasks.as_ref())).await;
         }
 
         // The durable intent ledger is the dispatch authority. Run it after
         // monitoring the projections that existed at tick entry: a successful
         // enqueue must leave its newly-created outcome projection intact until
         // the next tick can observe its real session/outcome evidence.
-        self.drive_durable_refinement_intents().await;
+        poll_stack::boxed(|| self.drive_durable_refinement_intents()).await;
 
         // Clean up completed refinements.
         self.active_refinements
@@ -277,18 +277,22 @@ impl CoordinatorActor {
                             // before this coordinator rebuilt its disposable
                             // projection. Recover that outcome without sending a
                             // closed role task through the pool again.
-                            let role_ran = self.refinement_session_has_started(&task.id).await;
+                            let role_ran =
+                                poll_stack::boxed(|| self.refinement_session_has_started(&task.id))
+                                    .await;
                             if role_ran {
-                                self.register_durable_refinement_inflight(
-                                    DurableInflightRegistration {
-                                        run_id: &run.run_id,
-                                        generation: run.generation,
-                                        proposal: &proposal,
-                                        phase: intent.phase,
-                                        round: intent.round,
-                                        task_id: &task.id,
-                                    },
-                                )
+                                poll_stack::boxed(|| {
+                                    self.register_durable_refinement_inflight(
+                                        DurableInflightRegistration {
+                                            run_id: &run.run_id,
+                                            generation: run.generation,
+                                            proposal: &proposal,
+                                            phase: intent.phase,
+                                            round: intent.round,
+                                            task_id: &task.id,
+                                        },
+                                    )
+                                })
                                 .await;
                                 continue;
                             }
@@ -332,22 +336,26 @@ impl CoordinatorActor {
                             else {
                                 continue;
                             };
-                            let project_path =
-                                self.resolve_refinement_project_path(&run.proposal_id).await;
+                            let project_path = poll_stack::boxed(|| {
+                                self.resolve_refinement_project_path(&run.proposal_id)
+                            })
+                            .await;
                             match self.pool.dispatch(&task.id, &project_path, &model_id).await {
                                 Ok(()) => {
                                     // Do not manufacture the outcome projection
                                     // until this retry enqueue has succeeded.
-                                    self.register_durable_refinement_inflight(
-                                        DurableInflightRegistration {
-                                            run_id: &run.run_id,
-                                            generation: run.generation,
-                                            proposal: &proposal,
-                                            phase: intent.phase,
-                                            round: intent.round,
-                                            task_id: &task.id,
-                                        },
-                                    )
+                                    poll_stack::boxed(|| {
+                                        self.register_durable_refinement_inflight(
+                                            DurableInflightRegistration {
+                                                run_id: &run.run_id,
+                                                generation: run.generation,
+                                                proposal: &proposal,
+                                                phase: intent.phase,
+                                                round: intent.round,
+                                                task_id: &task.id,
+                                            },
+                                        )
+                                    })
                                     .await;
                                     if let Some(session) =
                                         self.refinement_sessions.get_mut(&run.run_id)
@@ -543,18 +551,22 @@ impl CoordinatorActor {
                 {
                     continue;
                 }
-                let project_path = self.resolve_refinement_project_path(&run.proposal_id).await;
+                let project_path =
+                    poll_stack::boxed(|| self.resolve_refinement_project_path(&run.proposal_id))
+                        .await;
                 match self.pool.dispatch(&task_id, &project_path, &model_id).await {
                     Ok(()) => {
                         // Register only after the pool accepted this exact task.
                         // This is the run-keyed bridge to outcome completion.
-                        self.register_durable_refinement_inflight(DurableInflightRegistration {
-                            run_id: &lease.run_id,
-                            generation: lease.generation,
-                            proposal: &proposal,
-                            phase: lease.phase,
-                            round: lease.round,
-                            task_id: &task_id,
+                        poll_stack::boxed(|| {
+                            self.register_durable_refinement_inflight(DurableInflightRegistration {
+                                run_id: &lease.run_id,
+                                generation: lease.generation,
+                                proposal: &proposal,
+                                phase: lease.phase,
+                                round: lease.round,
+                                task_id: &task_id,
+                            })
                         })
                         .await;
                         if let Some(session) = self.refinement_sessions.get_mut(&lease.run_id)
@@ -596,7 +608,9 @@ impl CoordinatorActor {
         &self,
         proposal_id: &str,
     ) -> Option<DurableDispatchBlock> {
-        let Some(proposal) = self.load_proposal_for_lifecycle(proposal_id).await else {
+        let Some(proposal) =
+            poll_stack::boxed(|| self.load_proposal_for_lifecycle(proposal_id)).await
+        else {
             tracing::warn!(
                 proposal_id = %proposal_id,
                 "Durable refinement dispatch skipped: could not load proposal for evidence \
@@ -604,7 +618,7 @@ impl CoordinatorActor {
             );
             return Some(DurableDispatchBlock::ProposalUnreadable);
         };
-        match self.derive_proposal_evidence_lifecycle(&proposal).await {
+        match poll_stack::boxed(|| self.derive_proposal_evidence_lifecycle(&proposal)).await {
             EvidenceLifecycleState::PausedOrFrozen => {
                 tracing::info!(
                     proposal_id = %proposal_id,
@@ -663,7 +677,8 @@ impl CoordinatorActor {
         }
 
         let phase = refinement_phase_for_intent(phase);
-        let diverse_refinement = self.read_diverse_refinement_setting(proposal_id).await;
+        let diverse_refinement =
+            poll_stack::boxed(|| self.read_diverse_refinement_setting(proposal_id)).await;
         let (agent_type, model_id) = self
             .resolve_refinement_dispatch_params(phase, diverse_refinement, Some(owner.as_str()))
             .await?;
@@ -681,9 +696,11 @@ impl CoordinatorActor {
         let lane_cap = settings
             .and_then(|settings| settings.lane_max_sessions)
             .map(|limits| limits.for_role(&agent_type));
-        self.check_user_model_admission(&owner, &model_id, model_cap, &agent_type, lane_cap)
-            .await
-            .then_some((agent_type, model_id))
+        poll_stack::boxed(|| {
+            self.check_user_model_admission(&owner, &model_id, model_cap, &agent_type, lane_cap)
+        })
+        .await
+        .then_some((agent_type, model_id))
     }
 
     /// Drive a single refinement loop. `running_tasks` is the pool's running
@@ -741,7 +758,11 @@ impl CoordinatorActor {
                 let session_started_at = match session.session_started_at {
                     Some(started) => Some(started),
                     None => {
-                        if self.refinement_session_has_started(&session.task_id).await {
+                        if poll_stack::boxed(|| {
+                            self.refinement_session_has_started(&session.task_id)
+                        })
+                        .await
+                        {
                             let observed = SystemClock::new().now_instant();
                             if let Some(s) = self.refinement_sessions.get_mut(run_id) {
                                 s.session_started_at = Some(observed);
@@ -764,19 +785,23 @@ impl CoordinatorActor {
                                 phase = ?session.phase,
                                 "Refinement session timed out (execution budget from session start)"
                             );
-                            self.close_refinement_task(
-                                &session.task_id,
-                                "refinement session timed out",
-                            )
+                            poll_stack::boxed(|| {
+                                self.close_refinement_task(
+                                    &session.task_id,
+                                    "refinement session timed out",
+                                )
+                            })
                             .await;
-                            self.terminate_refinement(
-                                run_id,
-                                StopReason::AgentFailure {
-                                    role: role_for_phase(session.phase),
-                                    error_code: "agent_failure".into(),
-                                    message: "session timeout".into(),
-                                },
-                            )
+                            poll_stack::boxed(|| {
+                                self.terminate_refinement(
+                                    run_id,
+                                    StopReason::AgentFailure {
+                                        role: role_for_phase(session.phase),
+                                        error_code: "agent_failure".into(),
+                                        message: "session timeout".into(),
+                                    },
+                                )
+                            })
                             .await;
                         }
                     }
@@ -801,13 +826,13 @@ impl CoordinatorActor {
                                 "role session failed to start {REFINEMENT_DISPATCH_RETRY_CAP} times \
                                  (task-run pod stuck Pending in scheduler queue)"
                             );
-                            self.retry_or_terminate_unstarted_refinement(
+                            poll_stack::boxed(|| self.retry_or_terminate_unstarted_refinement(
                                 run_id,
                                 &session,
                                 "refinement role session never started (task-run pod stuck Pending)",
                                 over_cap_error,
                                 true,
-                            )
+                            ))
                             .await;
                         }
                     }
@@ -824,7 +849,8 @@ impl CoordinatorActor {
             // Treating (b) as a completed-but-"dry" round silently burns rounds
             // on a dispatch outage and can hollow-converge the tribunal. Tell
             // them apart by whether any session row exists for the task.
-            let session_ran = self.refinement_session_has_started(&session.task_id).await;
+            let session_ran =
+                poll_stack::boxed(|| self.refinement_session_has_started(&session.task_id)).await;
 
             if !session_ran {
                 // Dispatch/setup failure: the role never executed. Re-dispatch
@@ -836,13 +862,15 @@ impl CoordinatorActor {
                     "role session failed to start {REFINEMENT_DISPATCH_RETRY_CAP} times \
                      (runtime/devcontainer setup failure)"
                 );
-                self.retry_or_terminate_unstarted_refinement(
-                    run_id,
-                    &session,
-                    "refinement role session never started (dispatch/setup failure)",
-                    over_cap_error,
-                    false,
-                )
+                poll_stack::boxed(|| {
+                    self.retry_or_terminate_unstarted_refinement(
+                        run_id,
+                        &session,
+                        "refinement role session never started (dispatch/setup failure)",
+                        over_cap_error,
+                        false,
+                    )
+                })
                 .await;
                 return;
             }
@@ -869,13 +897,15 @@ impl CoordinatorActor {
                      {REFINEMENT_DISPATCH_RETRY_CAP} times (upstream 5xx / overload / \
                      mid-flight stream death)"
                 );
-                self.retry_or_terminate_unstarted_refinement(
+                poll_stack::boxed(|| {
+                    self.retry_or_terminate_unstarted_refinement(
                     run_id,
                     &session,
                     "refinement role session died on a transient provider fault (parked for retry)",
                     over_cap_error,
                     false,
                 )
+                })
                 .await;
                 return;
             }
@@ -883,14 +913,16 @@ impl CoordinatorActor {
             // Session actually ran — clear the dispatch-failure counter and
             // process the outcome, then close the task so finished phase/round
             // tasks don't linger `open` on the board.
-            if self.process_refinement_outcome(run_id, &session).await
+            if poll_stack::boxed(|| self.process_refinement_outcome(run_id, &session)).await
                 == RefinementOutcomeApplication::Committed
             {
                 if let Some(state) = self.active_refinements.get_mut(run_id) {
                     state.dispatch_failures = 0;
                 }
-                self.close_refinement_task(&session.task_id, "refinement phase complete")
-                    .await;
+                poll_stack::boxed(|| {
+                    self.close_refinement_task(&session.task_id, "refinement phase complete")
+                })
+                .await;
                 self.refinement_sessions.remove(run_id);
             }
             return;
@@ -904,7 +936,7 @@ impl CoordinatorActor {
         }
 
         // Legacy non-durable compatibility path only.
-        self.dispatch_next_refinement_phase(run_id).await;
+        poll_stack::boxed(|| self.dispatch_next_refinement_phase(run_id)).await;
     }
 
     /// Whether an agent session row exists yet for a dispatched refinement
@@ -1015,9 +1047,9 @@ impl CoordinatorActor {
                             "Failed to tear down terminal Pending refinement task-run"
                         );
                     }
-                    self.clear_inflight_dispatch(&session.task_id).await;
+                    poll_stack::boxed(|| self.clear_inflight_dispatch(&session.task_id)).await;
                 }
-                self.close_refinement_task(&session.task_id, close_reason)
+                poll_stack::boxed(|| self.close_refinement_task(&session.task_id, close_reason))
                     .await;
             }
             return;
@@ -1036,10 +1068,9 @@ impl CoordinatorActor {
                     "Failed to tear down Pending refinement task-run; proceeding with retry"
                 );
             }
-            self.clear_inflight_dispatch(&session.task_id).await;
+            poll_stack::boxed(|| self.clear_inflight_dispatch(&session.task_id)).await;
         }
-        self.close_refinement_task(&session.task_id, close_reason)
-            .await;
+        poll_stack::boxed(|| self.close_refinement_task(&session.task_id, close_reason)).await;
         self.refinement_sessions.remove(run_id);
         tracing::warn!(
             run_id = %run_id,
@@ -1073,7 +1104,7 @@ impl CoordinatorActor {
         run_id: &str,
         phase: RefinementPhase,
     ) -> RefinementRoleContext {
-        let readiness = self.evaluate_proposal_readiness(proposal_id).await;
+        let readiness = poll_stack::boxed(|| self.evaluate_proposal_readiness(proposal_id)).await;
         let mut readiness_context = readiness
             .as_ref()
             .map(CoordinatorActor::format_readiness_context)
@@ -1166,7 +1197,7 @@ impl CoordinatorActor {
         }
 
         // Administrative dispatch-pause gate.
-        if self.refinement_dispatch_paused(&proposal_id).await {
+        if poll_stack::boxed(|| self.refinement_dispatch_paused(&proposal_id)).await {
             tracing::info!(
                 proposal_id = %proposal_id,
                 phase = ?phase,
@@ -1188,9 +1219,11 @@ impl CoordinatorActor {
         // The in-memory `AwaitingEvidence` and admin-dispause checks above
         // serve as fast-path early returns that avoid DB reads when the
         // in-memory state is already parked.
-        let lifecycle_proposal = self.load_proposal_for_lifecycle(&proposal_id).await;
+        let lifecycle_proposal =
+            poll_stack::boxed(|| self.load_proposal_for_lifecycle(&proposal_id)).await;
         if let Some(ref proposal) = lifecycle_proposal {
-            let lifecycle_state = self.derive_proposal_evidence_lifecycle(proposal).await;
+            let lifecycle_state =
+                poll_stack::boxed(|| self.derive_proposal_evidence_lifecycle(proposal)).await;
             match lifecycle_state {
                 EvidenceLifecycleState::Active | EvidenceLifecycleState::EvidenceReady => {
                     // Proceed to dispatch — either normal refinement or
@@ -1261,15 +1294,18 @@ impl CoordinatorActor {
                  (no explicit attributed_user_id and no proposal author). \
                  Refusing to dispatch without a real user identity."
             );
-            self.terminate_refinement(
-                run_id,
-                StopReason::AgentFailure {
-                    role: role_for_phase(phase),
-                    error_code: "agent_failure".into(),
-                    message: "attribution unresolvable: no user identity for refinement dispatch"
-                        .into(),
-                },
-            )
+            poll_stack::boxed(|| {
+                self.terminate_refinement(
+                    run_id,
+                    StopReason::AgentFailure {
+                        role: role_for_phase(phase),
+                        error_code: "agent_failure".into(),
+                        message:
+                            "attribution unresolvable: no user identity for refinement dispatch"
+                                .into(),
+                    },
+                )
+            })
             .await;
             return;
         };
@@ -1282,14 +1318,16 @@ impl CoordinatorActor {
                 explicit = ?state.attributed_user_id,
                 "Refinement dispatch: attributed user is empty — failing closed"
             );
-            self.terminate_refinement(
-                run_id,
-                StopReason::AgentFailure {
-                    role: role_for_phase(phase),
-                    error_code: "agent_failure".into(),
-                    message: "attributed user is empty".into(),
-                },
-            )
+            poll_stack::boxed(|| {
+                self.terminate_refinement(
+                    run_id,
+                    StopReason::AgentFailure {
+                        role: role_for_phase(phase),
+                        error_code: "agent_failure".into(),
+                        message: "attributed user is empty".into(),
+                    },
+                )
+            })
             .await;
             return;
         }
@@ -1307,14 +1345,16 @@ impl CoordinatorActor {
                     user_id = %user_id,
                     "Refinement dispatch: attributed user does not resolve to a row — failing closed"
                 );
-                self.terminate_refinement(
-                    run_id,
-                    StopReason::AgentFailure {
-                        role: role_for_phase(phase),
-                        error_code: "agent_failure".into(),
-                        message: format!("attributed user {user_id} not found in users table"),
-                    },
-                )
+                poll_stack::boxed(|| {
+                    self.terminate_refinement(
+                        run_id,
+                        StopReason::AgentFailure {
+                            role: role_for_phase(phase),
+                            error_code: "agent_failure".into(),
+                            message: format!("attributed user {user_id} not found in users table"),
+                        },
+                    )
+                })
                 .await;
                 return;
             }
@@ -1331,9 +1371,10 @@ impl CoordinatorActor {
         }
 
         // Read diverse_refinement setting at the round boundary.
-        let diverse_refinement = self.read_diverse_refinement_setting(&proposal_id).await;
+        let diverse_refinement =
+            poll_stack::boxed(|| self.read_diverse_refinement_setting(&proposal_id)).await;
 
-        let readiness = self.evaluate_proposal_readiness(&proposal_id).await;
+        let readiness = poll_stack::boxed(|| self.evaluate_proposal_readiness(&proposal_id)).await;
 
         if let Some(ref readiness) = readiness
             && !readiness.ready
@@ -1356,14 +1397,16 @@ impl CoordinatorActor {
                 user_id = %user_id,
                 "Refinement dispatch FAIL-CLOSED: durable owner has no eligible credential-backed model; no task or spawn will be created"
             );
-            self.terminate_refinement(
-                run_id,
-                StopReason::AgentFailure {
-                    role: role_for_phase(phase),
-                    error_code: "agent_failure".into(),
-                    message: "no eligible credential-backed model for refinement owner".into(),
-                },
-            )
+            poll_stack::boxed(|| {
+                self.terminate_refinement(
+                    run_id,
+                    StopReason::AgentFailure {
+                        role: role_for_phase(phase),
+                        error_code: "agent_failure".into(),
+                        message: "no eligible credential-backed model for refinement owner".into(),
+                    },
+                )
+            })
             .await;
             return;
         };
@@ -1490,32 +1533,16 @@ impl CoordinatorActor {
         // existing reconciliation (pool liveness check) and session-start
         // cleanup can clear it, and so subsequent candidates for the same
         // (user, model) see the reservation under the durable key.
-        self.rekey_provisional_to_inflight(
-            &provisional_key,
-            &task_id,
-            user_id,
-            &model_id,
-            &agent_type,
-        )
-        .await;
-
-        // The task identity is now fixed; journal CreateStarted before the pool side effect.
-        // A cap denial is neutral: leave this open refinement task queued.
-        let build_admission = match self
-            .begin_task_run_build_admission(
-                &agent_type,
+        poll_stack::boxed(|| {
+            self.rekey_provisional_to_inflight(
+                &provisional_key,
                 &task_id,
-                i64::from(round),
-                format!("task-run-{}-{}", task_id, round),
+                user_id,
+                &model_id,
+                &agent_type,
             )
-            .await
-        {
-            Ok(permit) => permit,
-            Err(()) => {
-                self.clear_inflight_dispatch(&task_id).await;
-                return;
-            }
-        };
+        })
+        .await;
 
         // ── Step 4: Consume spawn budget ────────────────────────────────────
         //
@@ -1530,22 +1557,22 @@ impl CoordinatorActor {
                     ?reason,
                     "Refinement spawn cap reached"
                 );
-                // No pool side effect will occur after this deterministic denial.
-                self.finish_task_run_build_admission(build_admission, false)
-                    .await;
-                self.clear_inflight_dispatch(&task_id).await;
-                self.close_refinement_task(
-                    &task_id,
-                    "refinement spawn cap reached — task will not be dispatched",
-                )
+                poll_stack::boxed(|| self.clear_inflight_dispatch(&task_id)).await;
+                poll_stack::boxed(|| {
+                    self.close_refinement_task(
+                        &task_id,
+                        "refinement spawn cap reached — task will not be dispatched",
+                    )
+                })
                 .await;
-                self.persist_refinement_stop(&proposal_id, &reason).await;
+                poll_stack::boxed(|| self.persist_refinement_stop(&proposal_id, &reason)).await;
                 self.refinement_sessions.remove(run_id);
                 return;
             }
         }
 
-        let project_path = self.resolve_refinement_project_path(&proposal_id).await;
+        let project_path =
+            poll_stack::boxed(|| self.resolve_refinement_project_path(&proposal_id)).await;
 
         // ── Step 5: Dispatch through the slot pool (last side effect) ───────
         //
@@ -1554,8 +1581,6 @@ impl CoordinatorActor {
         // are retryable and must not be classified as agent outcomes.
         match self.pool.dispatch(&task_id, &project_path, &model_id).await {
             Ok(()) => {
-                self.finish_task_run_build_admission(build_admission, true)
-                    .await;
                 tracing::info!(
                     proposal_id = %proposal_id,
                     task_id = %task_id,
@@ -1578,11 +1603,11 @@ impl CoordinatorActor {
                 );
             }
             Err(e) => {
-                self.finish_task_run_build_admission(build_admission, false)
-                    .await;
-                self.clear_inflight_dispatch(&task_id).await;
-                self.close_refinement_task(&task_id, "refinement dispatch failed (pool error)")
-                    .await;
+                poll_stack::boxed(|| self.clear_inflight_dispatch(&task_id)).await;
+                poll_stack::boxed(|| {
+                    self.close_refinement_task(&task_id, "refinement dispatch failed (pool error)")
+                })
+                .await;
                 tracing::warn!(
                     proposal_id = %proposal_id,
                     task_id = %task_id,
@@ -1628,7 +1653,8 @@ impl CoordinatorActor {
                     state.resume_after_evidence_received();
                 }
 
-                let lifecycle_state = self.derive_proposal_evidence_lifecycle(&proposal).await;
+                let lifecycle_state =
+                    poll_stack::boxed(|| self.derive_proposal_evidence_lifecycle(&proposal)).await;
                 if matches!(lifecycle_state, EvidenceLifecycleState::PausedOrFrozen) {
                     tracing::info!(
                         proposal_id = %proposal_id,
@@ -1639,7 +1665,7 @@ impl CoordinatorActor {
                     return;
                 }
 
-                self.dispatch_next_refinement_phase(&run_id).await;
+                poll_stack::boxed(|| self.dispatch_next_refinement_phase(&run_id)).await;
             }
             Err(e) => {
                 tracing::warn!(

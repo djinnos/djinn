@@ -256,6 +256,56 @@ impl Database {
         &self.pool
     }
 
+    /// The DSN of this handle's isolated per-test database, when it has one.
+    ///
+    /// `None` for a production handle: there is nothing here a test could not
+    /// already read from its own configuration, and the point is to make a
+    /// *restart* expressible. A test that wants to prove durability across a
+    /// lost process has to drop every in-memory object it built and rebuild
+    /// from nothing but a connection string; without this it can only re-invoke
+    /// a function on a live object, which proves the opposite.
+    ///
+    /// The returned DSN addresses the same template-cloned database, so the
+    /// original handle must stay alive for the reopened one to have a database
+    /// to connect to — dropping the last handle DROPs it. Pair it with
+    /// [`Self::reopen_test`].
+    pub fn test_dsn(&self) -> Option<String> {
+        self.test_branch
+            .as_ref()
+            .map(|branch| format!("{}/{}", branch.server_prefix, branch.test_db))
+    }
+
+    /// Reopen a [`Self::test_dsn`] behind a brand-new connection pool.
+    ///
+    /// This is what a test uses to express a **restart**: every in-memory object
+    /// built on the old handle is dropped, and the new one is constructed from
+    /// nothing but a connection string.
+    ///
+    /// Two things distinguish it from [`Self::open_with_config`], and both
+    /// matter:
+    ///
+    /// * The pool is the same **4** connections [`Self::open_in_memory`] uses,
+    ///   not the production default of 32. A suite that reopens two or three
+    ///   handles per test and runs a dozen tests in parallel exhausts the test
+    ///   server's connection limit at 32 apiece, and the symptom is not a clean
+    ///   error — it is an unrelated test somewhere else timing out while it
+    ///   waits for a connection it will never get.
+    /// * It carries **no** `TestDbInit`, so dropping it does not DROP the
+    ///   database out from under the handle that owns the clone.
+    ///
+    /// # Errors
+    ///
+    /// The rendered connection failure.
+    pub fn reopen_test(dsn: &str) -> DbResult<Self> {
+        Self::open_postgres_inner(
+            &PostgresDatabaseConfig {
+                url: dsn.to_owned(),
+            },
+            4,
+            None,
+        )
+    }
+
     /// Acquire a permit from the background full-text search semaphore.
     ///
     /// Latency-insensitive background fan-out (post-session extraction novelty

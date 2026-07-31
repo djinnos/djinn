@@ -1031,6 +1031,13 @@ pub struct BoardHealthStrandedThreshold {
 /// record of a layer-1 build-admission attempt. Absent when the task has no
 /// lease row, or when the ledger could not be read (see
 /// `BoardHealthDispatchGateCoverage::unevaluated_gates`).
+///
+/// **Legacy population since the Kueue cutover.** The pre-create dispatch
+/// reservation was stood down and nothing acquires a `task_dispatch` lease any
+/// more, so this block is present only for rows that predate the cutover. Pool
+/// occupancy is unaffected — `BoardHealthBuildCapacity` sums every consumer
+/// kind, and the per-invocation cgroup lease still writes `task_invocation`
+/// rows from inside the task-run Pod.
 #[derive(Serialize, Deserialize, schemars::JsonSchema, Default)]
 pub struct BoardHealthBuildLease {
     /// `{task_id}:{generation}` — the lease key the dispatcher asked for.
@@ -1055,6 +1062,13 @@ pub struct BoardHealthBuildLease {
 
 /// Pool-wide build capacity as the dispatcher's own authority reads it.
 /// Absent when the lease ledger could not be read.
+///
+/// The Kueue cutover deleted the pre-create admission ledger, so this is the
+/// only occupancy authority **in this payload**. It is NOT the only gate that
+/// can stop a build: Kueue's ClusterQueue now decides admission, and a Job it
+/// has not admitted stays suspended with nothing recorded in `build_leases`.
+/// `at_capacity: false` therefore still does not mean a dispatch can proceed —
+/// read `BoardHealthKueueAdmission` for what Kueue itself decided.
 #[derive(Serialize, Deserialize, schemars::JsonSchema, Default)]
 pub struct BoardHealthBuildCapacity {
     /// Always `build_leases`, so the payload names its own authority.
@@ -1065,56 +1079,23 @@ pub struct BoardHealthBuildCapacity {
     pub occupancy: i64,
     /// `build_lease_caps.cap`.
     pub cap: i64,
-    /// True only when `admission_handoff.v1_mode = 'enforce'`. While the v1
-    /// authority is off or shadowing it writes no dispatch rows and cannot be
-    /// denying anything, so a full pool is not attributed to it.
+    /// True only when the durable invocation-lease authority is armed to
+    /// `enforce`. While it is off, shadowing, or absent entirely, the lease
+    /// authority writes no dispatch rows and cannot be denying anything, so a
+    /// full pool is not attributed to it. An absent authority row reports a real
+    /// `false` here rather than making the whole capacity block unobservable.
     ///
     /// **Renamed from `enforcing`.** The bare name read as "build admission is
-    /// enforcing", which is a different authority entirely. On 2026-07-29 this
-    /// block reported `{occupancy: 1, cap: 3, enforcing: true, at_capacity:
-    /// false}` for five hours while the build-admission controller denied every
-    /// single dispatch before capacity was measured. See `build_admission`.
+    /// enforcing", which used to be a different authority entirely. On
+    /// 2026-07-29 this block reported `{occupancy: 1, cap: 3, enforcing: true,
+    /// at_capacity: false}` for five hours while the since-deleted
+    /// build-admission controller denied every single dispatch before capacity
+    /// was measured. The name is kept scoped to the lease FIFO so it can never
+    /// be misread that way again.
     pub lease_authority_enforcing: bool,
-    /// `occupancy >= cap` with a positive cap. Reached only AFTER the
-    /// build-admission controller's readiness gate passes, so `false` here is
-    /// not evidence that a dispatch can proceed.
+    /// `occupancy >= cap` with a positive cap.
     pub at_capacity: bool,
     /// Human-readable restatement of the authority boundary.
-    #[serde(default)]
-    pub note: String,
-}
-
-/// The build-admission JOURNAL authority — the **other** gate, and the one
-/// that wedged the board for five hours on 2026-07-29.
-///
-/// Not the same thing as [`BoardHealthBuildCapacity`]. That one is the lease
-/// FIFO and is the only authority that ever measures occupancy. This one is
-/// `admission_journal`, owned by the `BuildAdmissionController`, and it fails
-/// **closed on a readiness gate before occupancy is measured at all** — so
-/// `build_capacity` can report a completely healthy pool while every single
-/// dispatch is being denied with `cause: "controller_not_admitting"`.
-#[derive(Serialize, Deserialize, schemars::JsonSchema, Default)]
-pub struct BoardHealthBuildAdmission {
-    /// Always `admission_journal`, so the payload names its own authority.
-    #[serde(default)]
-    pub authority: String,
-    /// Rows currently in `create_unknown`, healthy in-flight creates included.
-    pub create_unknown_active: i64,
-    /// Of those, the ones untouched for longer than `settle_window_seconds`.
-    /// This is the population that cannot be explained as a normal
-    /// POST→session window, and the one that arms `CreateUnknownHealth`.
-    pub create_unknown_settled: i64,
-    /// The reclaim settle window in seconds (mirrors
-    /// `DEFAULT_RECLAIM_SETTLE_WINDOW`).
-    pub settle_window_seconds: i64,
-    /// Distinct `creator_server_epoch` values across the active population.
-    /// More than one means at least one row is definitely a predecessor's,
-    /// which is the population that actually arms the gate since #2746.
-    pub distinct_creator_epochs: i64,
-    /// `updated_at` of the oldest active `create_unknown` row.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub oldest_create_unknown_at: Option<String>,
-    /// Human-readable restatement of what these counts do and do not prove.
     #[serde(default)]
     pub note: String,
 }
@@ -1129,6 +1110,12 @@ pub struct BoardHealthBuildAdmission {
 /// a `tracing::info!` line — and thrown away. On 2026-07-29 the dispatcher knew
 /// on every tick, for five hours, precisely why it was refusing every task, and
 /// `board_health` reported `unexplained` the whole time.
+///
+/// **No writer remains.** The Kueue cutover deleted the process that recorded
+/// these rows, so an absent block is now the steady state and says nothing
+/// about whether Kueue admitted the Job. Legacy rows are still surfaced, and a
+/// new writer must not be added — a denial recorded against a deleted authority
+/// would be the replayed tombstone of #2661 in a new table.
 #[derive(Serialize, Deserialize, schemars::JsonSchema, Default)]
 pub struct BoardHealthBuildAdmissionDenial {
     /// `at_capacity`, `controller_not_admitting` or `authority_unavailable`.
@@ -1169,6 +1156,99 @@ pub struct BoardHealthBuildAdmissionDenial {
     pub note: String,
 }
 
+/// One row of the Kueue admission projection (migration 165) — Kueue's own
+/// decision about one build Workload, as the leader's Workload reflector
+/// observed it.
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Default)]
+pub struct BoardHealthKueueWorkload {
+    /// The `task_runs.id` the Workload accounts for.
+    pub task_run_id: String,
+    /// `pending`, `admitted` or `finished`. Reversible between the first two:
+    /// Kueue preempts admitted Workloads for quota and re-admits them later.
+    pub admission: String,
+    /// Kueue's own word for the state (`Preempted`, `ClusterQueueStopped`,
+    /// `Deactivated`, ...). `null` is honest — Kueue offered no reason — never
+    /// a stand-in for one that was lost.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// The Workload object name, for `kubectl -n djinn describe workload <name>`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workload_name: Option<String>,
+    /// Observed state CHANGES, not observations — a watch resync does not move
+    /// this. A high count on a `pending` row is quota thrash.
+    pub transitions: i64,
+    /// The owning task, when a `task_runs` row exists to tie it to one.
+    ///
+    /// `null` is the NORMAL state of a genuinely-pending Workload: under
+    /// create-then-admit the `task_runs` row is written by the in-pod
+    /// supervisor, which cannot run until Kueue admits the Job. An entry is
+    /// never attributed to a guessed task.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_short_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_seen_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_at: Option<String>,
+    /// Seconds since the Workload was first observed at all.
+    pub first_seen_age_seconds: i64,
+    /// Seconds since the last observation. Small while the reflector is alive.
+    pub observed_age_seconds: i64,
+}
+
+/// What Kueue decided, read from the `kueue_workload_admission` projection.
+///
+/// This is a **different authority** from `BoardHealthBuildCapacity`. Since the
+/// Kueue cutover the ClusterQueue decides build capacity, and a Job it has not
+/// admitted sits suspended with no `build_leases` row at all — so a healthy
+/// `build_capacity` used to be the last word available while the board was
+/// wedged behind a quota nothing recorded. Migration 165 records it; this block
+/// is where it surfaces.
+///
+/// **`projection_state` is the field to read first.** `no_workloads_observed`
+/// means the relation is EMPTY, which is what `kueue.armed=false` — the shipped
+/// default — looks like. It is explicitly not a stalled queue: nothing is
+/// pending. It is equally not proof that Kueue admitted anything, because a
+/// reflector that never started looks identical, which is why
+/// `kueue_clusterqueue_admission` stays in
+/// `BoardHealthDispatchGateCoverage::unevaluated_gates` in that state and moves
+/// to `evaluated_gates` only under `observing`.
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Default)]
+pub struct BoardHealthKueueAdmission {
+    /// Always `kueue_workload_admission`, so the payload names its authority.
+    #[serde(default)]
+    pub authority: String,
+    /// `no_workloads_observed` (relation empty) or `observing` (has rows).
+    pub projection_state: String,
+    pub total: i64,
+    /// Build Workloads Kueue has NOT admitted: Jobs suspended behind
+    /// ClusterQueue quota.
+    pub pending: i64,
+    pub admitted: i64,
+    pub finished: i64,
+    /// Rows with no `task_runs` row. Normal rather than alarming — see
+    /// `BoardHealthKueueWorkload::task_id`.
+    pub without_task_run: i64,
+    /// Age of the stalest observation in the relation. A watch resync refreshes
+    /// every row it replays, so a large value means nobody is watching Kueue,
+    /// not that Kueue is idle. `null` when the relation is empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stalest_observation_age_seconds: Option<i64>,
+    /// How long the longest-waiting pending Workload has been known about.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oldest_pending_first_seen_age_seconds: Option<i64>,
+    /// Cap on `pending_task_runs`; the counts above it are exact regardless.
+    #[serde(default)]
+    pub pending_entry_limit: i64,
+    /// The head of the pending queue, oldest-known first.
+    #[serde(default)]
+    pub pending_task_runs: Vec<BoardHealthKueueWorkload>,
+    /// Human-readable restatement of the authority boundary.
+    #[serde(default)]
+    pub note: String,
+}
+
 /// What the dispatch-gate verdict actually covers.
 ///
 /// This block exists because an empty `reasons` used to be indistinguishable
@@ -1185,6 +1265,13 @@ pub struct BoardHealthDispatchGateCoverage {
     /// Gates the dispatcher applies that this section did not consult. Every
     /// entry is a way a task can be left queued while `gate_verdict` is
     /// `unexplained`.
+    ///
+    /// `kueue_clusterqueue_admission` moves between this list and
+    /// `evaluated_gates` per call. It is here whenever
+    /// `BoardHealthKueueAdmission::projection_state` is not `observing` — an
+    /// empty projection is what both an unarmed cluster and a stopped reflector
+    /// look like from Postgres — and moves to `evaluated_gates` once the
+    /// projection has rows.
     #[serde(default)]
     pub unevaluated_gates: Vec<String>,
     /// Human-readable restatement of the bound, carried in the payload so an
@@ -1225,22 +1312,27 @@ pub struct BoardHealthDispatchGate {
     /// The task's own `task_dispatch` build-lease row, when it has one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub build_lease: Option<BoardHealthBuildLease>,
-    /// Pool-wide build capacity, when the lease ledger was readable.
-    ///
-    /// **Read this together with `build_admission`.** They are different
-    /// authorities; a healthy `build_capacity` is not evidence that a dispatch
-    /// is possible.
+    /// Pool-wide build capacity, when the lease ledger was readable. This is
+    /// the only occupancy authority; pair it with `build_admission_denial`,
+    /// which is what the dispatcher actually recorded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub build_capacity: Option<BoardHealthBuildCapacity>,
-    /// The build-admission journal authority, when `admission_journal` was
-    /// readable. This is the gate that denies before capacity is measured.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub build_admission: Option<BoardHealthBuildAdmission>,
     /// The dispatcher's own recorded `DenialCause` for this task, when it has
     /// one. Absent means the most recent decision was not a denial: the
     /// permitted path deletes the row.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub build_admission_denial: Option<BoardHealthBuildAdmissionDenial>,
+    /// What Kueue decided, pool-wide. Absent only when the projection could not
+    /// be read — an EMPTY projection is still reported, as
+    /// `projection_state: "no_workloads_observed"`, because "nothing is queued"
+    /// and "nobody looked" are different answers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kueue_admission: Option<BoardHealthKueueAdmission>,
+    /// This task's own Kueue Workload, when the projection has a row that ties
+    /// to a live `task_runs` row for it. A row that cannot be tied to one is
+    /// never attributed here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kueue_workload: Option<BoardHealthKueueWorkload>,
     /// Final gate verdict — `blocked` when an evaluated gate fired,
     /// `unexplained` when none did.
     ///
@@ -1255,7 +1347,7 @@ pub struct BoardHealthDispatchGate {
     /// Machine-readable gate reasons (`no_eligible_model`,
     /// `image_not_ready`, `build_lease_queued`, `build_lease_terminal`,
     /// `build_lease_occupied_without_session`, `build_pool_at_capacity`,
-    /// `admission_create_unknown_pending`).
+    /// `kueue_workload_pending`, `kueue_workload_admitted_without_session`).
     /// Always present in the serialized output (may be an empty array) so
     /// clients can rely on the key existing. Read it together with
     /// `coverage`: empty means "no EVALUATED gate fired".

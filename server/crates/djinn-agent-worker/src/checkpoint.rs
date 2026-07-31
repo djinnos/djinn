@@ -474,6 +474,18 @@ pub async fn preserve_checkpoint(
     result.parent_sha = git_rev_parse(worktree, "HEAD").await.ok();
 
     // ── 4. Reset index and stage safe files (targeted, not add -A) ──────
+    // Capture staged executable-mode intent BEFORE the reset. A mode lives only
+    // in the index entry, so the reset below drops it and the targeted `add`
+    // re-reads it from disk — silently reverting a `100755` an agent staged with
+    // `git update-index --chmod=+x` back to `100644`. That fallback is the only
+    // one an agent has when the worktree rejects `chmod` (inode-metadata ops are
+    // owner-only, and `write`/`edit` files are owned by the worker at uid 1000
+    // while the shell runs at 1001). See `djinn_git::index_mode`.
+    let modes_before = git_cmd(worktree, &["ls-files", "-s"])
+        .await
+        .map(|output| djinn_git::parse_index_modes(&output))
+        .unwrap_or_default();
+
     // Reset the index first to avoid stale staging state from prior operations.
     if let Err(e) = git_cmd(worktree, &["reset", "--mixed", "--quiet", "HEAD", "--"]).await {
         warn!(
@@ -496,6 +508,8 @@ pub async fn preserve_checkpoint(
             );
         }
     }
+
+    restore_dropped_executable_modes(worktree, &modes_before, task_run_id, branch).await;
 
     // Check if anything is actually staged.
     let staged_names = git_cmd(worktree, &["diff", "--cached", "--name-only"])
@@ -897,6 +911,80 @@ async fn git_cmd_with_env(
     Ok(out.stdout)
 }
 
+/// Re-mark any path whose staged executable bit the restage dropped.
+///
+/// `modes_before` is [`djinn_git::parse_index_modes`] output captured before the
+/// `reset` + targeted `add`. Only the losing direction is restored: a bit the
+/// restage *found on disk* is the truth to keep (see
+/// [`djinn_git::executable_modes_to_restore`]).
+///
+/// Best-effort by design. A checkpoint exists to preserve work under a
+/// deadline; failing one because a mode could not be re-marked would trade real
+/// content for a permission bit. Every failure is logged with the path so a
+/// reverted mode is diagnosable from the checkpoint's own log line rather than
+/// from a reviewer's `ls-tree` three cycles later.
+async fn restore_dropped_executable_modes(
+    worktree: &Path,
+    modes_before: &djinn_git::IndexModes,
+    task_run_id: &str,
+    branch: &str,
+) {
+    if modes_before.is_empty() {
+        return;
+    }
+
+    let modes_after = match git_cmd(worktree, &["ls-files", "-s"]).await {
+        Ok(output) => djinn_git::parse_index_modes(&output),
+        Err(e) => {
+            warn!(
+                task_run_id,
+                branch,
+                error = %e,
+                "checkpoint preservation: could not re-read index modes; \
+                 staged executable bits may revert"
+            );
+            return;
+        }
+    };
+
+    // HEAD's modes separate staged intent from a deliberate `chmod -x`. An empty
+    // map (unborn HEAD, or a failed read) means "nothing inherited", which is the
+    // conservative direction here: it can only ever restore MORE, and on an
+    // unborn HEAD every staged mode genuinely is new intent.
+    let head_modes = git_cmd(worktree, &["ls-tree", "-r", "HEAD"])
+        .await
+        .map(|output| djinn_git::parse_tree_modes(&output))
+        .unwrap_or_default();
+
+    let to_restore =
+        djinn_git::executable_modes_to_restore(modes_before, &modes_after, &head_modes);
+    if to_restore.is_empty() {
+        return;
+    }
+
+    for path in &to_restore {
+        // `--chmod=+x` sets the index entry's mode without touching disk, which
+        // is the whole point: the mount may forbid `chmod` outright.
+        if let Err(e) = git_cmd(worktree, &["update-index", "--chmod=+x", path]).await {
+            warn!(
+                task_run_id,
+                branch,
+                path,
+                error = %e,
+                "checkpoint preservation: failed to restore staged executable mode"
+            );
+        }
+    }
+
+    info!(
+        task_run_id,
+        branch,
+        restored_count = to_restore.len(),
+        restored_paths = ?to_restore,
+        "checkpoint preservation: restored staged executable modes dropped by restage"
+    );
+}
+
 /// Resolve a ref to a SHA via `git rev-parse`.
 async fn git_rev_parse(worktree: &Path, rev: &str) -> Result<String, String> {
     let output = git_cmd(worktree, &["rev-parse", rev]).await?;
@@ -1189,6 +1277,143 @@ mod tests {
         assert!(!result.commit_attempted);
         assert_eq!(result.push_attempts, 0);
         assert!(!result.had_changes);
+    }
+
+    // ── Index-only executable-mode preservation (tv9g) ─────────────────────
+
+    /// The git mode recorded for `path` in `rev`'s tree.
+    ///
+    /// Deliberately `ls-tree`, never `ls-files -s`: the index is exactly what
+    /// reads green on a mode the commit is about to discard. tv9g's worker
+    /// verified the index, reported success, and was correctly rejected four
+    /// times — a test asserting the index would have agreed with the worker.
+    async fn tree_mode(worktree: &std::path::Path, rev: &str, path: &str) -> String {
+        let out = git_cmd(worktree, &["ls-tree", rev, "--", path])
+            .await
+            .expect("ls-tree");
+        out.split_whitespace()
+            .next()
+            .unwrap_or_default()
+            .to_string()
+    }
+
+    /// The tv9g regression, at the checkpoint path.
+    ///
+    /// Step 4 does `git reset --mixed HEAD --` then a targeted `git add` per
+    /// safety-approved file. The reset drops the index entry's mode and the add
+    /// re-reads it from disk, so before the fix an agent's
+    /// `git update-index --chmod=+x` — its only option on a mount that rejects
+    /// `chmod` — silently reverted to 100644 in the checkpoint commit.
+    #[tokio::test]
+    async fn checkpoint_preserves_an_index_only_executable_bit() {
+        let (_origin, clone) = setup_test_repos().await;
+        let cp = clone.path();
+
+        std::fs::write(cp.join("gate.sh"), "#!/usr/bin/env bash\necho hi\n").unwrap();
+        // Index-only executable intent: `--chmod=+x` never touches disk, which
+        // is what makes it the available fallback on a hostile mount.
+        git_cmd(cp, &["add", "gate.sh"]).await.expect("add");
+        git_cmd(cp, &["update-index", "--chmod=+x", "gate.sh"])
+            .await
+            .expect("update-index");
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let disk = std::fs::metadata(cp.join("gate.sh"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o111;
+            assert_eq!(
+                disk, 0,
+                "precondition: disk must not be executable, or this proves nothing"
+            );
+        }
+
+        let meta = test_metadata("task/test-branch", CheckpointReason::Signal);
+        let result = preserve_checkpoint(cp, &meta, None).await;
+        assert!(
+            result.commit_succeeded,
+            "checkpoint must commit: {result:?}"
+        );
+
+        assert_eq!(
+            tree_mode(cp, "HEAD", "gate.sh").await,
+            "100755",
+            "the checkpoint commit must carry the executable bit the agent staged"
+        );
+    }
+
+    /// The inverse hazard: a deliberate `chmod -x` on a file HEAD already tracks
+    /// as executable must survive. HEAD's mode is what separates inherited from
+    /// staged intent; without that check the restore becomes a one-way ratchet.
+    #[tokio::test]
+    async fn checkpoint_honours_a_deliberate_chmod_minus_x_on_a_tracked_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_origin, clone) = setup_test_repos().await;
+        let cp = clone.path();
+
+        // Land it executable first so HEAD tracks 100755.
+        std::fs::write(cp.join("tool.sh"), "#!/bin/sh\necho v1\n").unwrap();
+        std::fs::set_permissions(cp.join("tool.sh"), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+        let meta = test_metadata("task/test-branch", CheckpointReason::Signal);
+        assert!(preserve_checkpoint(cp, &meta, None).await.commit_succeeded);
+        assert_eq!(
+            tree_mode(cp, "HEAD", "tool.sh").await,
+            "100755",
+            "precondition"
+        );
+
+        // Now remove the bit on purpose.
+        std::fs::set_permissions(cp.join("tool.sh"), std::fs::Permissions::from_mode(0o644))
+            .unwrap();
+
+        let result = preserve_checkpoint(cp, &meta, None).await;
+        assert!(result.commit_succeeded, "mode-only change must commit");
+        assert_eq!(
+            tree_mode(cp, "HEAD", "tool.sh").await,
+            "100644",
+            "an intentional chmod -x must survive the restage"
+        );
+    }
+
+    /// Neutralization guard: the restore must be conditional, never a blanket
+    /// `+x`. If this reports 100755 the test above passes for the wrong reason.
+    #[tokio::test]
+    async fn checkpoint_leaves_a_plain_file_non_executable() {
+        let (_origin, clone) = setup_test_repos().await;
+        let cp = clone.path();
+
+        std::fs::write(cp.join("plain.txt"), "hello\n").unwrap();
+
+        let meta = test_metadata("task/test-branch", CheckpointReason::Signal);
+        let result = preserve_checkpoint(cp, &meta, None).await;
+        assert!(result.commit_succeeded);
+
+        assert_eq!(
+            tree_mode(cp, "HEAD", "plain.txt").await,
+            "100644",
+            "a file nobody marked executable must stay 100644"
+        );
+    }
+
+    /// One-directional: a bit found on DISK is the truth to keep. A symmetric
+    /// restore would clear this and make an honest `chmod +x` uncommittable.
+    #[tokio::test]
+    async fn checkpoint_keeps_an_executable_bit_set_on_disk() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_origin, clone) = setup_test_repos().await;
+        let cp = clone.path();
+
+        std::fs::write(cp.join("ondisk.sh"), "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(cp.join("ondisk.sh"), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+
+        let meta = test_metadata("task/test-branch", CheckpointReason::Signal);
+        let result = preserve_checkpoint(cp, &meta, None).await;
+        assert!(result.commit_succeeded);
+
+        assert_eq!(tree_mode(cp, "HEAD", "ondisk.sh").await, "100755");
     }
 
     #[tokio::test]

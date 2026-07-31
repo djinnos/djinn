@@ -2,26 +2,22 @@
 //!
 //! These drive the SAME functions the coordinator's startup path composes
 //! ([`arm_disk_observation`] and [`reconcile_run_dirs_at_startup`]) against a
-//! real temporary volume, a real ephemeral Postgres, and a real
-//! [`BuildAdmissionController`]. Only the capacity probe and the clock are
-//! substituted, because a test cannot make a real filesystem report critical
-//! pressure or age a monotonic instant.
+//! real temporary volume and a real ephemeral Postgres. Only the capacity probe
+//! and the clock are substituted, because a test cannot make a real filesystem
+//! report critical pressure or age a monotonic instant.
 
 use std::collections::HashMap;
 use std::os::unix::fs::symlink;
 use std::sync::Arc;
 
 use djinn_db::{
-    AdmissionJournalRepository, BuildLeaseConsumerKind, BuildLeaseKey, BuildLeaseRepository,
-    BuildLeaseState, Database, GrantNextBuildLeaseResult, QueueBuildLeaseInput,
-    QueueBuildLeaseResult, RunDirRepository, RunDirState,
+    BuildLeaseConsumerKind, BuildLeaseKey, BuildLeaseRepository, BuildLeaseState, Database,
+    GrantNextBuildLeaseResult, QueueBuildLeaseInput, QueueBuildLeaseResult, RunDirRepository,
+    RunDirState,
 };
 
 use super::*;
-use crate::build_admission::{
-    BuildAdmissionController, BuildAdmissionDecision, BuildAdmissionMode, BuildAdmissionRequest,
-    BuildWorkloadKind, CapacitySource, LIGHT_ROLE_AUDIT_REASON, TaskRunRole,
-};
+use crate::build_admission::{BuildWorkloadKind, LIGHT_ROLE_AUDIT_REASON, TaskRunRole};
 
 const GIB: u64 = 1024 * 1024 * 1024;
 const VOLUME: &str = "test-volume";
@@ -76,28 +72,6 @@ fn fixture_volume() -> tempfile::TempDir {
     symlink(root.join(LIVE_RUN), root.join("dangling-link")).unwrap();
     std::fs::write(root.join("debris.log"), vec![1_u8; 2048]).unwrap();
     dir
-}
-
-fn controller(db: &Database) -> BuildAdmissionController {
-    BuildAdmissionController::new(
-        Arc::new(AdmissionJournalRepository::new(db.clone())),
-        BuildAdmissionMode::Observe,
-        4,
-        "epoch",
-    )
-}
-
-fn worker_request(id: &str) -> BuildAdmissionRequest {
-    BuildAdmissionRequest {
-        domain: djinn_db::AdmissionDomain::TaskObservation,
-        work_id: id.to_owned(),
-        generation: 0,
-        object_name: format!("job-{id}"),
-        kind: BuildWorkloadKind::TaskRun {
-            role: TaskRunRole::Worker,
-        },
-        capacity: CapacitySource::AcquireDispatchSlot,
-    }
 }
 
 /// Drive a task-invocation lease all the way to pod-bound through the real
@@ -415,7 +389,9 @@ async fn a_failed_probe_with_no_history_is_unknown_and_would_defer() {
     assert_eq!(sample.state, DiskCapacityState::Unknown);
 
     let observation = source
-        .observe(&worker_request("unknown-sample"))
+        .observe(BuildWorkloadKind::TaskRun {
+            role: TaskRunRole::Worker,
+        })
         .await
         .expect("a build workload always yields an observation");
     assert_eq!(
@@ -488,7 +464,9 @@ async fn a_stale_fallback_sample_ages_past_the_freshness_bound() {
     // A stale sample that would reserve new bytes is a typed unknown-capacity
     // defer, not an optimistic grant.
     let observation = source
-        .observe(&worker_request("stale-sample"))
+        .observe(BuildWorkloadKind::TaskRun {
+            role: TaskRunRole::Worker,
+        })
         .await
         .unwrap();
     assert_eq!(
@@ -501,7 +479,12 @@ async fn a_stale_fallback_sample_ages_past_the_freshness_bound() {
 async fn critical_pressure_would_defer_with_the_disk_pressure_reason() {
     let db = Database::open_in_memory().unwrap();
     let source = source_with(&db, Ok(snapshot(5 * GIB)), Duration::ZERO);
-    let observation = source.observe(&worker_request("critical")).await.unwrap();
+    let observation = source
+        .observe(BuildWorkloadKind::TaskRun {
+            role: TaskRunRole::Worker,
+        })
+        .await
+        .unwrap();
     assert_eq!(
         observation.would_defer,
         Some(crate::disk_admission::DiskQueueReason::DiskPressure)
@@ -513,7 +496,12 @@ async fn critical_pressure_would_defer_with_the_disk_pressure_reason() {
 async fn a_healthy_sample_within_budget_would_not_defer() {
     let db = Database::open_in_memory().unwrap();
     let source = source_with(&db, Ok(snapshot(400 * GIB)), Duration::ZERO);
-    let observation = source.observe(&worker_request("healthy")).await.unwrap();
+    let observation = source
+        .observe(BuildWorkloadKind::TaskRun {
+            role: TaskRunRole::Worker,
+        })
+        .await
+        .unwrap();
     assert_eq!(observation.would_defer, None);
 }
 
@@ -530,18 +518,22 @@ async fn light_and_non_build_workloads_never_consult_disk() {
         TaskRunRole::Judge,
     ] {
         assert!(is_light_role(role), "{role:?} must classify as light");
-        let mut request = worker_request("light");
-        request.kind = BuildWorkloadKind::TaskRun { role };
         assert!(
-            source.observe(&request).await.is_none(),
+            source
+                .observe(BuildWorkloadKind::TaskRun { role })
+                .await
+                .is_none(),
             "{role:?} must never consult disk admission"
         );
     }
-    let mut non_build = worker_request("non-build");
-    non_build.kind = BuildWorkloadKind::NonBuild {
-        audit_reason: LIGHT_ROLE_AUDIT_REASON,
-    };
-    assert!(source.observe(&non_build).await.is_none());
+    assert!(
+        source
+            .observe(BuildWorkloadKind::NonBuild {
+                audit_reason: LIGHT_ROLE_AUDIT_REASON,
+            })
+            .await
+            .is_none()
+    );
 }
 
 // ── Quota probe ─────────────────────────────────────────────────────────────
@@ -606,39 +598,19 @@ fn seams_for(
 }
 
 #[tokio::test]
-async fn arming_observation_records_pressure_without_changing_any_grant() {
+async fn arming_observation_mutates_nothing_on_the_volume() {
     let db = Database::open_in_memory().unwrap();
     let volume = fixture_volume();
     bind_lease(&db, LIVE_RUN, "pod-live-uid").await;
-    let controller = controller(&db);
 
-    // Baseline: the same request is permitted with the disk dimension dark.
-    let before = controller.admit(worker_request("grant-a")).await.unwrap();
-    assert!(matches!(before, BuildAdmissionDecision::Permitted { .. }));
-    assert_eq!(controller.disk_would_defer_observation_count().await, 0);
-
-    let report =
-        arm_disk_observation(&db, &controller, seams_for(&volume, Ok(snapshot(GIB)))).await;
+    let report = arm_disk_observation(&db, seams_for(&volume, Ok(snapshot(GIB)))).await;
     assert_eq!(report.reconcile.resolved, 1);
     assert!(
         report.projected_seed_bytes > 0,
         "history feeds the projection"
     );
 
-    // Armed, under critical pressure: the grant is IDENTICAL and only the
-    // observe counter advances.
-    let after = controller.admit(worker_request("grant-b")).await.unwrap();
-    assert!(
-        matches!(after, BuildAdmissionDecision::Permitted { .. }),
-        "disk observation must never change a grant outcome"
-    );
-    assert_eq!(
-        controller.disk_would_defer_observation_count().await,
-        1,
-        "critical pressure is recorded as a would-defer"
-    );
-
-    // And no reservation, quota, temp dir, or deletion resulted.
+    // No reservation, quota, temp dir, or deletion resulted.
     for row in RunDirRepository::new(db.clone())
         .list_by_volume(VOLUME)
         .await
@@ -653,38 +625,39 @@ async fn arming_observation_records_pressure_without_changing_any_grant() {
     assert!(volume.path().join(MALFORMED_DIR).exists());
 }
 
+/// Critical pressure is still OBSERVABLE after the Kueue cutover (o53p) removed
+/// the pre-create controller this used to be installed on.
+///
+/// The disk seam that survives is [`CoordinatorDiskCapacitySource::observe`],
+/// and this asserts it reports a would-defer under the same conditions the old
+/// controller-coupled test drove. Proposal nquz owns giving that observation a
+/// decision to feed; until then this is what proves the measurement still works.
 #[tokio::test]
-async fn observation_remains_non_denying_under_the_reference_cap() {
+async fn critical_pressure_is_still_observable_without_a_controller() {
     let db = Database::open_in_memory().unwrap();
     let volume = fixture_volume();
-    let controller = BuildAdmissionController::new(
-        Arc::new(AdmissionJournalRepository::new(db.clone())),
-        BuildAdmissionMode::Observe,
-        1,
-        "epoch",
+    bind_lease(&db, LIVE_RUN, "pod-live-uid").await;
+    let report = arm_disk_observation(&db, seams_for(&volume, Ok(snapshot(GIB)))).await;
+
+    let source = CoordinatorDiskCapacitySource::new(
+        VOLUME.to_owned(),
+        volume.path().to_path_buf(),
+        config(),
+        Arc::new(FixedCapacity(Ok(snapshot(GIB)))),
+        Arc::new(RunDirRepository::new(db.clone())),
+        Arc::new(SystemObserveClock),
+        report.projected_seed_bytes,
     );
-
-    arm_disk_observation(&db, &controller, seams_for(&volume, Ok(snapshot(GIB)))).await;
-
-    // Pressure is observed only after the ordinary reference cap has admitted
-    // the first build. The disk signal records a would-defer, but does not
-    // alter that grant or reserve run-dir resources.
-    let first = controller.admit(worker_request("cap-first")).await.unwrap();
-    assert!(matches!(first, BuildAdmissionDecision::Permitted { .. }));
-    assert_eq!(controller.disk_would_defer_observation_count().await, 1);
-
-    // Observe mode intentionally keeps dispatch non-denying even when the
-    // reference cap is one. The second admitted build receives another
-    // would-defer observation rather than a policy-changing denial.
-    let second = controller
-        .admit(worker_request("cap-second"))
+    let observation = source
+        .observe(BuildWorkloadKind::TaskRun {
+            role: TaskRunRole::Worker,
+        })
         .await
-        .unwrap();
-    assert!(matches!(second, BuildAdmissionDecision::Permitted { .. }));
+        .expect("a build-capable task-run consults disk");
     assert_eq!(
-        controller.disk_would_defer_observation_count().await,
-        2,
-        "every permitted build is observed without changing dispatch policy"
+        observation.would_defer,
+        Some(crate::disk_admission::DiskQueueReason::DiskPressure),
+        "critical pressure is recorded as a would-defer"
     );
 }
 
@@ -692,22 +665,32 @@ async fn observation_remains_non_denying_under_the_reference_cap() {
 async fn arming_observation_on_a_healthy_volume_records_nothing() {
     let db = Database::open_in_memory().unwrap();
     let volume = fixture_volume();
-    let controller = controller(&db);
-    arm_disk_observation(
-        &db,
-        &controller,
-        seams_for(&volume, Ok(snapshot(400 * GIB))),
-    )
-    .await;
-    let decision = controller.admit(worker_request("healthy")).await.unwrap();
-    assert!(matches!(decision, BuildAdmissionDecision::Permitted { .. }));
-    assert_eq!(controller.disk_would_defer_observation_count().await, 0);
+    let report = arm_disk_observation(&db, seams_for(&volume, Ok(snapshot(400 * GIB)))).await;
+
+    let source = CoordinatorDiskCapacitySource::new(
+        VOLUME.to_owned(),
+        volume.path().to_path_buf(),
+        config(),
+        Arc::new(FixedCapacity(Ok(snapshot(400 * GIB)))),
+        Arc::new(RunDirRepository::new(db.clone())),
+        Arc::new(SystemObserveClock),
+        report.projected_seed_bytes,
+    );
+    let observation = source
+        .observe(BuildWorkloadKind::TaskRun {
+            role: TaskRunRole::Worker,
+        })
+        .await
+        .expect("a build-capable task-run consults disk");
+    assert_eq!(
+        observation.would_defer, None,
+        "a healthy volume records no would-defer"
+    );
 }
 
 #[tokio::test]
 async fn arming_observation_survives_a_missing_volume() {
     let db = Database::open_in_memory().unwrap();
-    let controller = controller(&db);
     let seams = RunDirObserveSeams {
         root: std::path::PathBuf::from("/nonexistent/djinn/run-dirs"),
         volume_id: VOLUME.to_owned(),
@@ -716,11 +699,10 @@ async fn arming_observation_survives_a_missing_volume() {
         capacity: Arc::new(FixedCapacity(Err("no such volume".into()))),
         clock: Arc::new(SystemObserveClock),
     };
-    let report = arm_disk_observation(&db, &controller, seams).await;
+    // Observe-mode startup is not a boot hazard: it reports the failure and
+    // returns rather than panicking or aborting the boot.
+    let report = arm_disk_observation(&db, seams).await;
     assert!(report.reconcile.inventory_failed);
-    // Observe-mode startup is not a boot hazard: admission still works.
-    let decision = controller.admit(worker_request("missing")).await.unwrap();
-    assert!(matches!(decision, BuildAdmissionDecision::Permitted { .. }));
 }
 
 // ── Bounded telemetry ───────────────────────────────────────────────────────

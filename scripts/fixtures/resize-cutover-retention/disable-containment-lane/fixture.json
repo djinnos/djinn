@@ -1,0 +1,13 @@
+{
+  "asset": "launcher-containment-tests",
+  "expect": "reject",
+  "why": "AC9's last clause. The containment proofs are retained on disk and no CI lane runs them any more. A retained test nothing invokes is a retired test, and this is the cheapest possible way to retire one: delete a line from a workflow.",
+  "operations": [
+    {
+      "op": "replace",
+      "path": ".github/workflows/quality-gate.yml",
+      "find": "            --test brokered_lease_lift_boundary \\\n",
+      "with": ""
+    }
+  ]
+}

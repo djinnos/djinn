@@ -550,3 +550,407 @@ fn a_resolved_cpu_limit_override_retunes_the_lease() {
     retune_launcher_lease(&mut pod, "not-a-quantity");
     assert_eq!(leased(&pod), "6500");
 }
+
+// ---------------------------------------------------------------------------
+// Task 4wx3: the resize-v2-only launcher CPU ceiling.
+//
+// The 7deu measurement (see the note in `launcher.rs` where `LAUNCHER_CPU_LIMIT`
+// used to be) is the whole reason these tests assert an ABSENCE on the leaf-v1
+// arm. A container CPU limit on the launcher is an ancestor clamp over every
+// invocation leaf; under leaf-v1 the launcher writes those leaves' `cpu.max`, so
+// the clamp silently caps every build. Under resize-v2 the launcher writes no
+// leaf quota at all, so the container limit is the only ceiling there is.
+// ---------------------------------------------------------------------------
+
+/// Build the real task-run Job, so these assertions run against the manifest
+/// dispatch actually submits rather than a hand-assembled `Container`.
+fn rendered_task_run_job(config: &KubernetesConfig) -> k8s_openapi::api::batch::v1::Job {
+    crate::job::build_task_run_job(
+        config,
+        &Uuid::nil(),
+        "project-1",
+        "djinn-task-run-secret",
+        "registry.example/proj:tag",
+        &[],
+        None,
+        false,
+        None,
+    )
+}
+
+fn launcher_of(job: &k8s_openapi::api::batch::v1::Job) -> &Container {
+    job.spec
+        .as_ref()
+        .and_then(|spec| spec.template.spec.as_ref())
+        .and_then(|pod| pod.init_containers.as_ref())
+        .and_then(|containers| {
+            containers
+                .iter()
+                .find(|container| container.name == LAUNCHER_CONTAINER_NAME)
+        })
+        .expect("the armed render carries the launcher sidecar")
+}
+
+fn quantities(
+    map: Option<&BTreeMap<String, k8s_openapi::apimachinery::pkg::api::resource::Quantity>>,
+) -> BTreeMap<String, String> {
+    map.map(|map| {
+        map.iter()
+            .map(|(key, value)| (key.clone(), value.0.clone()))
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
+fn launcher_limits(job: &k8s_openapi::api::batch::v1::Job) -> BTreeMap<String, String> {
+    quantities(
+        launcher_of(job)
+            .resources
+            .as_ref()
+            .and_then(|resources| resources.limits.as_ref()),
+    )
+}
+
+fn launcher_requests(job: &k8s_openapi::api::batch::v1::Job) -> BTreeMap<String, String> {
+    quantities(
+        launcher_of(job)
+            .resources
+            .as_ref()
+            .and_then(|resources| resources.requests.as_ref()),
+    )
+}
+
+/// Read one env value off a container, or `None`.
+fn env_value(container: &Container, name: &str) -> Option<String> {
+    container
+        .env
+        .iter()
+        .flatten()
+        .find(|entry| entry.name == name)
+        .and_then(|entry| entry.value.clone())
+}
+
+fn apply(
+    job: &mut k8s_openapi::api::batch::v1::Job,
+    protocol: LauncherAuthorityProtocol,
+) -> Result<(), RenderValidationError> {
+    apply_launcher_authority_protocol(job, CgroupLauncherMode::Required, protocol)
+}
+
+/// Overwrite (or remove) the rendered lease-ceiling env on the launcher sidecar,
+/// so the ceiling guards can be driven to states the two current writers of that
+/// variable cannot themselves produce.
+fn set_lease_env(job: &mut k8s_openapi::api::batch::v1::Job, value: Option<&str>) {
+    let pod = job
+        .spec
+        .as_mut()
+        .and_then(|spec| spec.template.spec.as_mut())
+        .expect("rendered pod spec");
+    for container in pod.init_containers.iter_mut().flatten() {
+        if container.name != LAUNCHER_CONTAINER_NAME {
+            continue;
+        }
+        let env = container.env.get_or_insert_with(Vec::new);
+        match value {
+            Some(value) => {
+                for entry in env.iter_mut() {
+                    if entry.name == LEASED_MILLICORES_ENV {
+                        entry.value = Some(value.to_string());
+                    }
+                }
+            }
+            None => env.retain(|entry| entry.name != LEASED_MILLICORES_ENV),
+        }
+    }
+}
+
+/// The millicore spelling of [`LAUNCHER_CPU_REQUEST`] used by the below-request
+/// guard is the same number as the string the manifest carries.
+#[test]
+fn the_launcher_cpu_request_constants_agree() {
+    assert_eq!(
+        LAUNCHER_CPU_REQUEST,
+        format!("{LAUNCHER_CPU_REQUEST_MILLICORES}m")
+    );
+}
+
+/// **AC1.** A leaf-v1 render has NO `cpu` key in the launcher sidecar's limits;
+/// a resize-v2 render has exactly the configured lease ceiling.
+///
+/// Non-vacuity, exactly as the AC words it: delete the
+/// `protocol.launcher_owns_leaf_quota()` early return in
+/// `resolve_launcher_cpu_ceiling` — i.e. render the ceiling unconditionally —
+/// and the leaf-v1 assertion below fails. That mutation is the literal 7deu
+/// defect-1 regression: an ancestor clamp on every invocation leaf, measured at
+/// 0.25 of a core against a leaf set to 4.
+#[test]
+fn the_launcher_cpu_ceiling_is_rendered_only_under_resize_v2() {
+    let cfg = KubernetesConfig::for_testing();
+
+    let mut leaf_v1 = rendered_task_run_job(&cfg);
+    apply(&mut leaf_v1, LauncherAuthorityProtocol::LeafV1).expect("leaf-v1 renders");
+    let limits = launcher_limits(&leaf_v1);
+    assert!(
+        !limits.contains_key("cpu"),
+        "leaf-v1 must render no launcher CPU limit; a limit here clamps every \
+         invocation leaf the launcher lifts (7deu defect 1). Got: {limits:?}"
+    );
+
+    let mut resize_v2 = rendered_task_run_job(&cfg);
+    apply(&mut resize_v2, LauncherAuthorityProtocol::ResizeV2).expect("resize-v2 renders");
+    assert_eq!(
+        launcher_limits(&resize_v2).get("cpu").map(String::as_str),
+        Some(format!("{}m", launcher_leased_millicores(&cfg)).as_str()),
+    );
+    // Stated absolutely once as well, so a change to the default is visible.
+    assert_eq!(
+        launcher_limits(&resize_v2).get("cpu").map(String::as_str),
+        Some("4000m")
+    );
+}
+
+/// The ceiling is the lease the launcher will actually grant, including a
+/// per-project `build_resources.task.cpu_limit` override — which
+/// `apply_resolved_resources` applies BEFORE the protocol seam runs. Deriving
+/// the ceiling from the deployment default instead would clamp such a pod below
+/// its own lease: the 7deu ancestor clamp, re-entered through the override path.
+#[test]
+fn the_resize_v2_ceiling_tracks_a_per_project_cpu_limit_override() {
+    let cfg = KubernetesConfig::for_testing();
+    let mut job = rendered_task_run_job(&cfg);
+    let pod = job
+        .spec
+        .as_mut()
+        .and_then(|spec| spec.template.spec.as_mut())
+        .expect("rendered pod spec");
+    retune_launcher_lease(pod, "8");
+    apply(&mut job, LauncherAuthorityProtocol::ResizeV2).expect("resize-v2 renders");
+    assert_eq!(
+        launcher_limits(&job).get("cpu").map(String::as_str),
+        Some("8000m"),
+        "the container ceiling must equal the lease ceiling, not the deployment default"
+    );
+}
+
+/// Re-applying leaf-v1 over a resize-v2 render must leave no stale clamp: the
+/// rendered resource shape is a total statement of the protocol, not an
+/// additive one.
+#[test]
+fn re_rendering_leaf_v1_clears_a_resize_v2_ceiling() {
+    let cfg = KubernetesConfig::for_testing();
+    let mut job = rendered_task_run_job(&cfg);
+    apply(&mut job, LauncherAuthorityProtocol::ResizeV2).expect("resize-v2 renders");
+    assert!(launcher_limits(&job).contains_key("cpu"));
+    apply(&mut job, LauncherAuthorityProtocol::LeafV1).expect("leaf-v1 renders");
+    assert!(
+        !launcher_limits(&job).contains_key("cpu"),
+        "a leaf-v1 re-render must not inherit the resize-v2 clamp"
+    );
+}
+
+/// **AC2.** The sidecar's requests are byte-identical across both renders — and
+/// to the untouched builder output — and the memory limit is unchanged.
+///
+/// Non-vacuity: change either request value in one arm (or have
+/// `apply_launcher_cpu_ceiling` write into `requests` rather than `limits`) and
+/// the byte-equality below fails.
+#[test]
+fn the_launcher_requests_and_memory_limit_are_identical_across_protocols() {
+    let cfg = KubernetesConfig::for_testing();
+    let baseline_requests = launcher_requests(&rendered_task_run_job(&cfg));
+    assert_eq!(
+        baseline_requests,
+        BTreeMap::from([
+            ("cpu".to_string(), LAUNCHER_CPU_REQUEST.to_string()),
+            ("memory".to_string(), LAUNCHER_MEMORY_REQUEST.to_string()),
+        ]),
+        "the request is the broker's steady footprint; it is not the build's"
+    );
+
+    for protocol in LauncherAuthorityProtocol::ALL {
+        let mut job = rendered_task_run_job(&cfg);
+        apply(&mut job, protocol).expect("both protocols render");
+        assert_eq!(
+            launcher_requests(&job),
+            baseline_requests,
+            "{protocol} must not disturb the launcher's requests"
+        );
+        assert_eq!(
+            launcher_limits(&job).get("memory").map(String::as_str),
+            Some(cfg.memory_limit.as_str()),
+            "{protocol} must not disturb the launcher's memory limit — every \
+             brokered command's memory peak lands in this container's cgroup"
+        );
+    }
+}
+
+/// **AC3.** A resize-v2 ceiling below the sidecar's own CPU request is a render
+/// error, not a Pod the apiserver rejects at admission.
+///
+/// Non-vacuity: delete the `ceiling < LAUNCHER_CPU_REQUEST_MILLICORES` arm in
+/// `resolve_launcher_cpu_ceiling` and this renders `limits.cpu: 10m` against
+/// `requests.cpu: 50m` — a structurally invalid Pod — instead of failing.
+#[test]
+fn a_resize_v2_ceiling_below_the_launcher_cpu_request_is_refused() {
+    let cfg = KubernetesConfig::for_testing();
+    let mut job = rendered_task_run_job(&cfg);
+    set_lease_env(&mut job, Some("10"));
+    let error = apply(&mut job, LauncherAuthorityProtocol::ResizeV2)
+        .expect_err("a 10m ceiling under a 50m request must not render");
+    assert!(
+        matches!(
+            error,
+            RenderValidationError::LauncherCpuCeilingBelowRequest { ceiling: 10, .. }
+        ),
+        "unexpected error: {error:?}"
+    );
+    // A refusal leaves the Job as it found it rather than half-applied.
+    assert!(!launcher_limits(&job).contains_key("cpu"));
+    assert_eq!(
+        env_value(launcher_of(&job), AUTHORITY_PROTOCOL_ENV),
+        None,
+        "a refused render must not have already written the protocol"
+    );
+    // leaf-v1 is unaffected: its launcher container carries no ceiling at all,
+    // so there is nothing that could sit below the request.
+    let mut leaf_v1 = rendered_task_run_job(&cfg);
+    set_lease_env(&mut leaf_v1, Some("10"));
+    apply(&mut leaf_v1, LauncherAuthorityProtocol::LeafV1)
+        .expect("leaf-v1 has no ceiling to check");
+}
+
+/// **AC3, the config-level door.** The same 10m stated as the pod CPU limit
+/// never reaches a render at all: `validate_enforcement_render` refuses it
+/// before the Job is built, because 10m maps onto no usable lease quota.
+#[test]
+fn a_ten_millicore_pod_cpu_limit_never_arms() {
+    let mut cfg = KubernetesConfig::for_testing();
+    cfg.cpu_limit = "10m".to_string();
+    let error = validate_enforcement_render(&cfg)
+        .expect_err("10m must not arm enforcement under either protocol");
+    assert!(
+        matches!(error, RenderValidationError::UnsupportedLeaseQuota { .. }),
+        "unexpected error: {error:?}"
+    );
+}
+
+/// A resize-v2 render whose ceiling cannot be resolved at all is refused rather
+/// than rendered without one. Under resize-v2 the launcher never writes leaf
+/// `cpu.max`, so "no container limit" does not mean "the leaf bounds it" — it
+/// means the build is bounded only by the node.
+#[test]
+fn an_unresolvable_resize_v2_ceiling_is_refused() {
+    let cfg = KubernetesConfig::for_testing();
+    for lease in [None, Some(""), Some("   "), Some("4000m"), Some("0")] {
+        let mut job = rendered_task_run_job(&cfg);
+        set_lease_env(&mut job, lease);
+        let error = apply(&mut job, LauncherAuthorityProtocol::ResizeV2)
+            .expect_err("an unresolvable lease ceiling must not render");
+        assert!(
+            matches!(
+                error,
+                RenderValidationError::UnresolvableLauncherCpuCeiling { .. }
+            ),
+            "lease {lease:?}: unexpected error {error:?}"
+        );
+        assert!(!launcher_limits(&job).contains_key("cpu"));
+    }
+}
+
+/// **AC4.** No non-launcher container's resources change under either protocol.
+///
+/// Asserted structurally over the WHOLE rendered manifest: every container in
+/// `initContainers` and `containers` is discovered from the serialized Job and
+/// its `resources` compared, so a resource change on the worker — or on a
+/// backing-service sidecar, or on a container that does not exist yet — is
+/// caught without this test naming it. The container SET is compared too, so
+/// dropping a container is not silently "nothing's resources changed".
+#[test]
+fn no_non_launcher_container_resources_change_under_either_protocol() {
+    let cfg = KubernetesConfig::for_testing();
+
+    fn container_resources(
+        job: &k8s_openapi::api::batch::v1::Job,
+    ) -> BTreeMap<String, serde_json::Value> {
+        let document = serde_json::to_value(job).expect("the Job serializes");
+        let pod = &document["spec"]["template"]["spec"];
+        ["initContainers", "containers"]
+            .into_iter()
+            .flat_map(|field| {
+                pod[field]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(move |container| {
+                        (
+                            format!(
+                                "{field}/{}",
+                                container["name"].as_str().unwrap_or("<unnamed>")
+                            ),
+                            container
+                                .get("resources")
+                                .cloned()
+                                .unwrap_or(serde_json::Value::Null),
+                        )
+                    })
+            })
+            .collect()
+    }
+
+    let launcher_key = format!("initContainers/{LAUNCHER_CONTAINER_NAME}");
+    let baseline = container_resources(&rendered_task_run_job(&cfg));
+    assert!(
+        baseline.contains_key(&launcher_key) && baseline.len() > 1,
+        "the manifest must carry the launcher AND something else, or this test \
+         proves nothing: {baseline:?}"
+    );
+
+    for protocol in LauncherAuthorityProtocol::ALL {
+        let mut job = rendered_task_run_job(&cfg);
+        apply(&mut job, protocol).expect("both protocols render");
+        let after = container_resources(&job);
+        assert_eq!(
+            baseline.keys().collect::<Vec<_>>(),
+            after.keys().collect::<Vec<_>>(),
+            "{protocol} changed the rendered container set"
+        );
+        for (key, before) in &baseline {
+            if key == &launcher_key {
+                continue;
+            }
+            assert_eq!(
+                Some(before),
+                after.get(key),
+                "{protocol} changed the resources of container {key}"
+            );
+        }
+    }
+}
+
+/// A `disabled` render carries no sidecar to hold a ceiling, and asking for one
+/// is a no-op rather than an error — the same shape the protocol env has.
+#[test]
+fn a_disabled_render_gets_no_launcher_ceiling() {
+    let mut cfg = KubernetesConfig::for_testing();
+    cfg.cgroup_launcher_mode = CgroupLauncherMode::Disabled;
+    let mut job = rendered_task_run_job(&cfg);
+    apply_launcher_authority_protocol(
+        &mut job,
+        CgroupLauncherMode::Disabled,
+        LauncherAuthorityProtocol::ResizeV2,
+    )
+    .expect("disabled is a no-op");
+    let pod = job
+        .spec
+        .as_ref()
+        .and_then(|spec| spec.template.spec.as_ref())
+        .expect("rendered pod spec");
+    assert!(
+        !pod.init_containers
+            .iter()
+            .flatten()
+            .any(|container| container.name == LAUNCHER_CONTAINER_NAME),
+        "a disabled render carries no launcher sidecar at all"
+    );
+}

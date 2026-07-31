@@ -175,12 +175,15 @@ const BUILD_SLOT_QUEUE_WAIT_BUCKETS: [f64; 15] = [
 ];
 const BUILD_SLOTS_IN_USE: &str = "djinn_build_slots_in_use";
 const BUILD_SLOTS_QUEUED: &str = "djinn_build_slots_queued";
-const BUILD_ADMISSION_WOULD_DEFER_TOTAL: &str = "djinn_build_admission_would_defer_total";
-const BUILD_ADMISSION_UNKNOWN_CLASSIFICATION_TOTAL: &str =
-    "djinn_build_admission_unknown_classification_total";
-const BUILD_ADMISSION_INVENTORY_DEGRADED: &str = "djinn_build_admission_inventory_degraded";
-const BUILD_ADMISSION_JOURNAL_DEGRADED: &str = "djinn_build_admission_journal_degraded";
-const BUILD_ADMISSION_CREATE_UNKNOWN_HEALTH: &str = "djinn_build_admission_create_unknown_health";
+// The pre-create admission ledger (`BuildAdmissionController` and its
+// reconciler) was deleted by the Kueue cutover, and with it every gauge that
+// only that controller wrote: inventory / journal / create-unknown health,
+// occupancy-over-cap, stale rows, seconds-since-reconcile, the handoff warning
+// family, the would-defer and unknown-classification counters, and the durable
+// transition-outcome family. A described metric with no writer renders as a
+// permanently-absent series, which reads as "healthy" — so they are gone rather
+// than left declared. What remains below is the per-invocation cgroup CPU lease,
+// which djinn-agent still writes from inside the task-run Pod.
 const BUILD_ADMISSION_SHADOW_INVOCATION_TOTAL: &str =
     "djinn_build_admission_shadow_invocation_total";
 const BUILD_ADMISSION_LIFT_REJECTED_TOTAL: &str = "djinn_build_admission_lift_rejected_total";
@@ -197,24 +200,6 @@ const BUILD_ADMISSION_DEGRADE_REASONS: [&str; 6] = [
     "lease_unavailable",
     "unclassified",
 ];
-const BUILD_ADMISSION_TRANSITION_TOTAL: &str = "djinn_build_admission_transition_total";
-// One closed enumeration for every durable journal write attempt: the two
-// lifecycle outcomes plus the two startup-reconciliation outcomes. Extending
-// this family rather than adding a parallel metric keeps a single query able to
-// answer "is the journal accepting writes, and is anything reclaiming stale
-// occupancy" for a whole fleet.
-const BUILD_ADMISSION_TRANSITION_OUTCOMES: [&str; 4] =
-    ["accepted", "rejected", "reclaimed", "reclaim_fenced"];
-const BUILD_ADMISSION_OCCUPANCY_OVER_CAP: &str = "djinn_build_admission_occupancy_over_cap";
-const BUILD_ADMISSION_STALE_ROWS: &str = "djinn_build_admission_stale_rows";
-/// Seconds since the last blocker-free build-admission reconciliation pass.
-/// `-1` means no pass has ever completed in this process — a louder condition
-/// than a large age, not a quieter one.
-const BUILD_ADMISSION_SECONDS_SINCE_RECONCILE: &str =
-    "djinn_build_admission_seconds_since_reconcile";
-const BUILD_ADMISSION_HANDOFF_WARNING: &str = "djinn_build_admission_handoff_warning";
-const BUILD_ADMISSION_HANDOFF_WARNING_REASONS: [&str; 3] =
-    ["unexpected_overlap", "stale_epoch", "epoch_unreadable"];
 const AGENT_SESSION_PHASE_SECONDS_TOTAL: &str = "djinn_agent_session_phase_seconds_total";
 
 // ─── Run-dir disk-admission telemetry (proposal nquz, phase 1) ─────────────
@@ -1250,6 +1235,56 @@ pub fn render_isolated<T>(f: impl FnOnce() -> T) -> (T, String) {
     )
 }
 
+/// Test support: the `async` counterpart of [`render_isolated`].
+///
+/// [`render_isolated`] takes a closure, which an `async` test body cannot be
+/// wrapped in. This type splits the same mechanism in two: construct it, hold
+/// the guard returned by [`Self::scope`] for the region to capture, and read
+/// [`Self::render`] for a registry containing *only* what was emitted while
+/// the guard was held. Absolute assertions become exact, so a test needs
+/// neither a before/after delta (which a concurrent writer can still land
+/// inside) nor a mutex serializing it against its siblings.
+///
+/// Same soundness rule as [`render_isolated`], and it is the reason the guard
+/// is separate from the recorder: the scope is thread-local. A
+/// `#[tokio::test]` body — including a `multi_thread` one — is polled by
+/// `Runtime::block_on` on the thread that created the guard, so the body's own
+/// straight-line code is captured across `.await` points. Work the body hands
+/// to `tokio::spawn` or `spawn_blocking` runs elsewhere and records to the
+/// process-global recorder instead, where this type will not see it. That
+/// failure mode is loud rather than silent: the expected series is simply
+/// absent from [`Self::render`].
+pub struct IsolatedRecorder {
+    recorder: metrics_exporter_prometheus::PrometheusRecorder,
+}
+
+impl IsolatedRecorder {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            recorder: PrometheusBuilder::new().build_recorder(),
+        }
+    }
+
+    /// Route this thread's `metrics` emissions here until the guard drops.
+    #[must_use]
+    pub fn scope(&self) -> metrics::LocalRecorderGuard<'_> {
+        metrics::set_default_local_recorder(&self.recorder)
+    }
+
+    /// Render everything recorded through this recorder so far.
+    #[must_use]
+    pub fn render(&self) -> String {
+        prioritize_dispatch_attempts(self.recorder.handle().render())
+    }
+}
+
+impl Default for IsolatedRecorder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 fn prioritize_dispatch_attempts(rendered: String) -> String {
     const DISPATCH_HELP: &str = "# HELP djinn_dispatch_attempts_total";
     if rendered.starts_with(DISPATCH_HELP) {
@@ -1924,14 +1959,6 @@ fn register_metrics() {
     );
     metrics::gauge!(BUILD_SLOTS_QUEUED).set(0.0);
     metrics::describe_counter!(
-        BUILD_ADMISSION_WOULD_DEFER_TOTAL,
-        "Observe-mode admissions that would have been deferred at the effective cap."
-    );
-    metrics::describe_counter!(
-        BUILD_ADMISSION_UNKNOWN_CLASSIFICATION_TOTAL,
-        "Build-admission requests with an unknown workload classification."
-    );
-    metrics::describe_counter!(
         BUILD_ADMISSION_SHADOW_INVOCATION_TOTAL,
         "Shadow-mode v1 invocation decisions the launcher observed but did not act on."
     );
@@ -1950,43 +1977,6 @@ fn register_metrics() {
          to the 250m unleased quota because their queue position expired — the \
          one-way degrade is silent in every other signal."
     );
-    metrics::describe_counter!(
-        BUILD_ADMISSION_TRANSITION_TOTAL,
-        "Durable admission-journal lifecycle transitions by outcome. A rejected \
-         share near one means the journal is refusing every observation and \
-         cannot be trusted as a grant authority."
-    );
-    for metric in [
-        BUILD_ADMISSION_INVENTORY_DEGRADED,
-        BUILD_ADMISSION_JOURNAL_DEGRADED,
-        BUILD_ADMISSION_CREATE_UNKNOWN_HEALTH,
-        BUILD_ADMISSION_OCCUPANCY_OVER_CAP,
-    ] {
-        metrics::describe_gauge!(
-            metric,
-            "Bounded build-admission health signal; one means degraded."
-        );
-    }
-    metrics::describe_gauge!(
-        BUILD_ADMISSION_STALE_ROWS,
-        "Occupying admission-journal rows whose Kubernetes object was proven \
-         absent by the last reconciliation pass. A population above the cap is \
-         the shape that wedges every admission once the cap is armed."
-    );
-    metrics::describe_gauge!(
-        BUILD_ADMISSION_SECONDS_SINCE_RECONCILE,
-        "Seconds since the last blocker-free build-admission reconciliation pass; \
-         -1 means no pass has ever completed in this process. A value that keeps \
-         climbing past the configured cadence means the reconciliation loop is \
-         dead or hung, and occupying admission rows are no longer being reclaimed."
-    );
-    metrics::describe_gauge!(
-        BUILD_ADMISSION_HANDOFF_WARNING,
-        "Current bounded emergency-to-invocation admission handoff warning; one means active."
-    );
-    for reason in BUILD_ADMISSION_HANDOFF_WARNING_REASONS {
-        metrics::gauge!(BUILD_ADMISSION_HANDOFF_WARNING, "reason" => reason).set(0.0);
-    }
     metrics::describe_counter!(
         AGENT_SESSION_PHASE_SECONDS_TOTAL,
         "Cumulative seconds spent in agent session phases, partitioned by bounded phase and role labels."
@@ -3207,100 +3197,15 @@ pub mod build_slot_occupancy {
 /// High-cardinality dimensions (`task_id`, `session_id`, `project_id`,
 /// `user_id`, `work_id`) belong in structured tracing fields emitted at the
 /// phase transition site, not in Prometheus labels.
-/// Build-admission metrics whose labels are restricted to effective mode/cap.
-/// Work IDs, UIDs, epochs, and diagnostics must remain in tracing only.
+/// Per-invocation build-admission (cgroup CPU lease) metrics. Every label is a
+/// closed enumeration; work IDs, UIDs, epochs, and diagnostics must remain in
+/// tracing only.
+///
+/// The pre-create admission ledger that this module also used to serve — the
+/// readiness health gauges, the reconciliation age and stale-row gauges, the
+/// handoff-warning family, and the durable transition-outcome counters — was
+/// deleted with `BuildAdmissionController`. Nothing here reports on it any more.
 pub mod build_admission {
-    /// Set exactly one handoff warning and explicitly clear every stale reason
-    /// series. `None` clears the entire bounded family.
-    pub fn set_handoff_warning(active: Option<&'static str>) {
-        for reason in super::BUILD_ADMISSION_HANDOFF_WARNING_REASONS {
-            metrics::gauge!(super::BUILD_ADMISSION_HANDOFF_WARNING, "reason" => reason)
-                .set(f64::from(Some(reason) == active));
-        }
-    }
-
-    /// One durable-write outcome for the closed `outcome` enumeration.
-    pub const OUTCOME_ACCEPTED: &str = "accepted";
-    pub const OUTCOME_REJECTED: &str = "rejected";
-    /// A stale occupying row was terminalized against Kubernetes absence proof.
-    pub const OUTCOME_RECLAIMED: &str = "reclaimed";
-    /// A reclamation was refused because the row no longer matched its proof.
-    pub const OUTCOME_RECLAIM_FENCED: &str = "reclaim_fenced";
-
-    /// Set readiness-derived health gauges. `true` means degraded.
-    pub fn set_health(
-        effective_mode: &'static str,
-        effective_cap: i64,
-        inventory_degraded: bool,
-        journal_degraded: bool,
-        create_unknown: bool,
-        occupancy_over_cap: bool,
-    ) {
-        let cap = effective_cap.to_string();
-        metrics::gauge!(super::BUILD_ADMISSION_INVENTORY_DEGRADED, "effective_mode" => effective_mode, "effective_cap" => cap.clone()).set(f64::from(inventory_degraded));
-        metrics::gauge!(super::BUILD_ADMISSION_JOURNAL_DEGRADED, "effective_mode" => effective_mode, "effective_cap" => cap.clone()).set(f64::from(journal_degraded));
-        metrics::gauge!(super::BUILD_ADMISSION_CREATE_UNKNOWN_HEALTH, "effective_mode" => effective_mode, "effective_cap" => cap.clone()).set(f64::from(create_unknown));
-        metrics::gauge!(super::BUILD_ADMISSION_OCCUPANCY_OVER_CAP, "effective_mode" => effective_mode, "effective_cap" => cap).set(f64::from(occupancy_over_cap));
-    }
-
-    /// Set how long ago the last blocker-free reconciliation pass completed.
-    ///
-    /// `None` (no pass has ever completed in this process) is exported as `-1`
-    /// rather than omitted: a missing series is indistinguishable from a
-    /// process that never started, which is the exact ambiguity that made the
-    /// dead-reconciler failure mode invisible.
-    pub fn set_seconds_since_reconcile(effective_mode: &'static str, seconds: Option<i64>) {
-        metrics::gauge!(super::BUILD_ADMISSION_SECONDS_SINCE_RECONCILE, "effective_mode" => effective_mode)
-            .set(seconds.unwrap_or(-1) as f64);
-    }
-
-    /// Set the absolute count of occupying rows whose object was proven absent
-    /// by the last reconciliation pass.
-    pub fn set_stale_rows(effective_mode: &'static str, effective_cap: i64, stale_rows: u64) {
-        metrics::gauge!(super::BUILD_ADMISSION_STALE_ROWS, "effective_mode" => effective_mode, "effective_cap" => effective_cap.to_string()).set(stale_rows as f64);
-    }
-    /// Record one bounded Observe-mode would-defer event.
-    pub fn increment_would_defer(effective_mode: &'static str, effective_cap: i64) {
-        metrics::counter!(super::BUILD_ADMISSION_WOULD_DEFER_TOTAL, "effective_mode" => effective_mode, "effective_cap" => effective_cap.to_string()).increment(1);
-    }
-    /// Record the outcome of one durable admission-journal lifecycle transition.
-    ///
-    /// `outcome` is a two-valued closed enumeration (`accepted` / `rejected`),
-    /// so a fleet running Observe can be checked for a 100% rejection rate —
-    /// the shape that makes the journal unsafe to arm as a grant authority —
-    /// without reading a single log line.
-    pub fn record_transition(effective_mode: &'static str, effective_cap: i64, accepted: bool) {
-        let outcome = if accepted {
-            OUTCOME_ACCEPTED
-        } else {
-            OUTCOME_REJECTED
-        };
-        record_transition_outcome(effective_mode, effective_cap, outcome);
-    }
-
-    /// Record one durable admission-journal write attempt under the closed
-    /// `outcome` enumeration. `outcome` MUST be one of the `OUTCOME_*`
-    /// constants; reconciliation reports `reclaimed` / `reclaim_fenced` through
-    /// the same family the lifecycle reports `accepted` / `rejected` through.
-    pub fn record_transition_outcome(
-        effective_mode: &'static str,
-        effective_cap: i64,
-        outcome: &'static str,
-    ) {
-        let cap = effective_cap.to_string();
-        // Every series exists as soon as any is written, so a process that has
-        // reclaimed nothing is distinguishable from one that never reported.
-        for candidate in super::BUILD_ADMISSION_TRANSITION_OUTCOMES {
-            metrics::counter!(super::BUILD_ADMISSION_TRANSITION_TOTAL, "effective_mode" => effective_mode, "effective_cap" => cap.clone(), "outcome" => candidate)
-                .increment(u64::from(candidate == outcome));
-        }
-    }
-
-    /// Record one bounded unknown-classification event.
-    pub fn increment_unknown_classification(effective_mode: &'static str, effective_cap: i64) {
-        metrics::counter!(super::BUILD_ADMISSION_UNKNOWN_CLASSIFICATION_TOTAL, "effective_mode" => effective_mode, "effective_cap" => effective_cap.to_string()).increment(1);
-    }
-
     /// Record one bounded shadow-mode v1 invocation decision.
     ///
     /// Emitted per user spawn while the epoch has v1 shadowing: the invocation
@@ -6089,32 +5994,6 @@ mod tests {
     }
 
     #[test]
-    fn handoff_warning_gauge_has_exact_bounded_values_and_resets_stale_series() {
-        let _guard = test_guard();
-        init().unwrap();
-        for active in [
-            Some("unexpected_overlap"),
-            Some("stale_epoch"),
-            Some("epoch_unreadable"),
-            None,
-        ] {
-            // Each update must make all three bounded series exact.
-            build_admission::set_handoff_warning(active);
-            let rendered = render().unwrap();
-            for reason in BUILD_ADMISSION_HANDOFF_WARNING_REASONS {
-                assert_eq!(
-                    labeled_sample_value(
-                        &rendered,
-                        BUILD_ADMISSION_HANDOFF_WARNING,
-                        &[("reason", reason)]
-                    ),
-                    f64::from(Some(reason) == active),
-                    "reason={reason} active={active:?}"
-                );
-            }
-        }
-    }
-    #[test]
     fn agent_session_phase_counter_covers_all_combinations() {
         let _guard = test_guard();
         init().unwrap();
@@ -6522,3 +6401,7 @@ mod galaxy_artifact_route_tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "kueue_retired_relation_tests.rs"]
+mod kueue_retired_relation_tests;

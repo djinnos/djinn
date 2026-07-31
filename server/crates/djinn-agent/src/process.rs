@@ -21,10 +21,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use djinn_core::clock::{Clock, SystemClock};
 use djinn_supervisor::services::{
-    InvocationLiftAuthority, InvocationLiftDecision, LeaseAbandonRequest, LeaseBindRequest,
-    LeaseDeadlines, LeaseFencingToken, LeaseGrantRequest, LeaseIdentity, LeaseQueueRequest,
-    LeaseReleaseRequest, LeaseResult, LeaseState, LeaseStatus, LeaseStatusRequest,
-    SupervisorServices, TaskInvocationLeaseIdentity, WatchdogTerminationRequest,
+    DegradedUnleasedReason, InvocationLiftAuthority, InvocationLiftDecision, LeaseAbandonRequest,
+    LeaseBindRequest, LeaseDeadlines, LeaseFencingToken, LeaseGrantRequest, LeaseIdentity,
+    LeaseQueueRequest, LeaseReleaseRequest, LeaseResult, LeaseState, LeaseStatus,
+    LeaseStatusRequest, SupervisorServices, TaskInvocationLeaseIdentity,
+    WatchdogTerminationRequest,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -619,7 +620,7 @@ impl LeaseInvocationRunner {
         // leaf is born at. `Unleased` was then implemented as `{}` — and because
         // the leaf had already been pinned to the 250m unleased quota, that
         // "no-op" clamped every command for its whole life. Production ran with
-        // the `admission_handoff` row ABSENT, so `Unleased` was the decision for
+        // the invocation-lease authority row ABSENT, so `Unleased` was the decision for
         // EVERY invocation: a measured leaf reached 21.1 CPU-seconds (84x the
         // 0.25 CPU-s escalation threshold) while `cpu.max` never left
         // `25000 100000`. Reading it here, and deriving the birth authority from
@@ -1447,6 +1448,41 @@ fn degrade_reason(result: &LeaseResult) -> &'static str {
         }) => "released",
         LeaseResult::Abandoned { .. } => "abandoned",
         LeaseResult::LeaseUnavailable => "lease_unavailable",
+        // The lease is live; the server refused to authorize a Pod resize for
+        // it. Bounded because `DegradedUnleasedReason` is a closed enum, and
+        // carried through as a label because "which uncertainty" is the whole
+        // operational value of the degrade — a run of `NotTheInvocationOwner`
+        // is an attack signal, a run of `PermitAbsent` is a wiring bug.
+        LeaseResult::DegradedUnleased { reason } => match reason {
+            DegradedUnleasedReason::NotTheInvocationOwner => "not_the_invocation_owner",
+            DegradedUnleasedReason::FencingTokenMismatch => "fencing_token_mismatch",
+            DegradedUnleasedReason::PermitAbsent => "permit_absent",
+            DegradedUnleasedReason::ResizeIdentityUnknown => "resize_identity_unknown",
+            DegradedUnleasedReason::ProtocolNotResizable => "protocol_not_resizable",
+            DegradedUnleasedReason::CeilingUnusable => "ceiling_unusable",
+            DegradedUnleasedReason::AuthorizationUnreadable => "authorization_unreadable",
+            // Apply-time outcomes (0ppk-1c). Each is its own label because each
+            // names a different operator action: `resize_forbidden` is a missing
+            // RBAC rule, `launcher_restarted` is a Pod-level event, and
+            // `lift_status_stale` is a node that accepted a resize and never
+            // actuated it. Folding them together would reproduce exactly the
+            // "3 enum variants carried 4 meanings" failure this label exists to
+            // avoid.
+            DegradedUnleasedReason::PermitNotLiftable => "permit_not_liftable",
+            DegradedUnleasedReason::LiftLifecycleUnwritable => "lift_lifecycle_unwritable",
+            DegradedUnleasedReason::ResizeSurfaceUnavailable => "resize_surface_unavailable",
+            DegradedUnleasedReason::ResizeForbidden => "resize_forbidden",
+            DegradedUnleasedReason::ResizeRejected => "resize_rejected",
+            DegradedUnleasedReason::LiftPodAbsent => "lift_pod_absent",
+            DegradedUnleasedReason::LiftIdentityAmbiguous => "lift_identity_ambiguous",
+            DegradedUnleasedReason::ResizeIdentityChanged => "resize_identity_changed",
+            DegradedUnleasedReason::LauncherRestarted => "launcher_restarted",
+            DegradedUnleasedReason::LauncherProtocolChanged => "launcher_protocol_changed",
+            DegradedUnleasedReason::LiftResizePending => "lift_resize_pending",
+            DegradedUnleasedReason::LiftStatusAbsent => "lift_status_absent",
+            DegradedUnleasedReason::LiftStatusStale => "lift_status_stale",
+            DegradedUnleasedReason::LiftDeadlineExceeded => "lift_deadline_exceeded",
+        },
         _ => "unclassified",
     }
 }
@@ -1492,6 +1528,22 @@ fn lease_failure_classify(
             state: LeaseState::Cancelled | LeaseState::Released,
             ..
         }) => *unleased = true,
+        // A refused resize authorization is a SETTLED answer, and this arm is
+        // what makes that true at the only place it is consumed.
+        //
+        // Without it the result falls to `_ => {}`: nothing latches, `fence`
+        // stays `None`, and the next poll reads the still-live lease as
+        // `Status(Launching)` — which re-enters the grant arm above and asks
+        // the same question again, for as long as the child runs. Every input
+        // to the answer is durable (who owns the invocation, which Pod the
+        // permit was captured against, what ceiling was admitted), so the spin
+        // could only ever re-collect the same refusal.
+        //
+        // Latching `unleased` is exactly the documented handling on
+        // [`LeaseResult::DegradedUnleased`]: proceed unleased. It sets no
+        // `output`, so the command is slowed and never failed, and the durable
+        // lease is still reconciled to terminal after the loop.
+        LeaseResult::DegradedUnleased { .. } => *unleased = true,
         _ => {}
     }
 }

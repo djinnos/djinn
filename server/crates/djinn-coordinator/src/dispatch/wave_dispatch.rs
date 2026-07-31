@@ -129,8 +129,10 @@ impl CoordinatorActor {
                     .await
                 {
                     Ok(_) => {
-                        self.cleanup_pr_and_branch_on_close(&task, CloseKind::NonMerge)
-                            .await;
+                        poll_stack::boxed(|| {
+                            self.cleanup_pr_and_branch_on_close(&task, CloseKind::NonMerge)
+                        })
+                        .await;
                     }
                     Err(e) => {
                         tracing::warn!(
@@ -216,11 +218,13 @@ impl CoordinatorActor {
             // source of merge-queue rejections. Best-effort: a conflict or any
             // git failure logs and proceeds; `supervisor_pr_open` (and the
             // downstream pr_poller conflict/merge-queue handling) run unchanged.
-            self.proactively_rebase_approved_branch(
-                &task.project_id,
-                &spec.task_branch,
-                &spec.base_branch,
-            )
+            poll_stack::boxed(|| {
+                self.proactively_rebase_approved_branch(
+                    &task.project_id,
+                    &spec.task_branch,
+                    &spec.base_branch,
+                )
+            })
             .await;
 
             let callbacks = crate::supervisor_impl::SupervisorCallbackContext {
@@ -247,13 +251,15 @@ impl CoordinatorActor {
                     // worker attempt as `adopted_pr`. A fresh open leaves the
                     // attempt live — it continues through PR review. Best-effort.
                     if pr_url_existed_before {
-                        self.terminalize_wave_dispatch_attempt(
-                            &task,
-                            WaveDispatchAttemptOutcome::AdoptedPr {
-                                pr_url: &url,
-                                head_sha: &sha,
-                            },
-                        )
+                        poll_stack::boxed(|| {
+                            self.terminalize_wave_dispatch_attempt(
+                                &task,
+                                WaveDispatchAttemptOutcome::AdoptedPr {
+                                    pr_url: &url,
+                                    head_sha: &sha,
+                                },
+                            )
+                        })
                         .await;
                     }
                 }
@@ -272,13 +278,15 @@ impl CoordinatorActor {
                     // stops here — the task is closed without a PR. Terminalize
                     // as `handoff` (another process — the close itself — takes
                     // over). Best-effort.
-                    self.terminalize_wave_dispatch_attempt(
-                        &task,
-                        WaveDispatchAttemptOutcome::Handoff {
-                            reason: &reason,
-                            replacement: "task_closed_no_commits",
-                        },
-                    )
+                    poll_stack::boxed(|| {
+                        self.terminalize_wave_dispatch_attempt(
+                            &task,
+                            WaveDispatchAttemptOutcome::Handoff {
+                                reason: &reason,
+                                replacement: "task_closed_no_commits",
+                            },
+                        )
+                    })
                     .await;
                 }
                 djinn_runtime::TaskRunOutcome::Failed { stage, reason, .. } => {
@@ -348,11 +356,13 @@ impl CoordinatorActor {
                             error = %reason,
                             "CoordinatorActor: PR push rejected (oversized blob in history) — escalating to Planner to rewrite history"
                         );
-                        self.dispatch_planner_escalation(
-                            &task.id,
-                            &escalation_reason,
-                            &task.project_id,
-                        )
+                        poll_stack::boxed(|| {
+                            self.dispatch_planner_escalation(
+                                &task.id,
+                                &escalation_reason,
+                                &task.project_id,
+                            )
+                        })
                         .await;
                         if let Err(e) = repo
                             .transition(
@@ -379,13 +389,15 @@ impl CoordinatorActor {
                         // push was rejected by GitHub for a non-transient reason
                         // (oversized blob in branch history). Terminalize the
                         // current worker attempt as `force_closed`. Best-effort.
-                        self.terminalize_wave_dispatch_attempt(
-                            &task,
-                            WaveDispatchAttemptOutcome::ForceClosed {
-                                reason: &reason,
-                                close_reason: "oversized_blob_in_branch_history",
-                            },
-                        )
+                        poll_stack::boxed(|| {
+                            self.terminalize_wave_dispatch_attempt(
+                                &task,
+                                WaveDispatchAttemptOutcome::ForceClosed {
+                                    reason: &reason,
+                                    close_reason: "oversized_blob_in_branch_history",
+                                },
+                            )
+                        })
                         .await;
                     } else if branch_missing && task.pr_url.is_none() {
                         tracing::warn!(
@@ -421,10 +433,12 @@ impl CoordinatorActor {
                         // this reopen — honoring #1719's invariant that every
                         // rework reopen leaves a `reopened` latest attempt.
                         // Best-effort.
-                        self.terminalize_wave_dispatch_attempt(
-                            &task,
-                            WaveDispatchAttemptOutcome::Reopened { reason: &reason },
-                        )
+                        poll_stack::boxed(|| {
+                            self.terminalize_wave_dispatch_attempt(
+                                &task,
+                                WaveDispatchAttemptOutcome::Reopened { reason: &reason },
+                            )
+                        })
                         .await;
                     } else if task.pr_url.is_some() {
                         tracing::info!(
@@ -462,13 +476,15 @@ impl CoordinatorActor {
                     // the current worker attempt and re-routed the task to
                     // another process (remediation or a fresh worker round).
                     // Terminalize as `handoff`. Best-effort.
-                    self.terminalize_wave_dispatch_attempt(
-                        &task,
-                        WaveDispatchAttemptOutcome::Handoff {
-                            reason: &reason,
-                            replacement: "pre_pr_gate_rerouted",
-                        },
-                    )
+                    poll_stack::boxed(|| {
+                        self.terminalize_wave_dispatch_attempt(
+                            &task,
+                            WaveDispatchAttemptOutcome::Handoff {
+                                reason: &reason,
+                                replacement: "pre_pr_gate_rerouted",
+                            },
+                        )
+                    })
                     .await;
                 }
                 other => {

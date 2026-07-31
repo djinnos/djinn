@@ -50,6 +50,7 @@ use std::time::Duration;
 
 use djinn_core::events::{DjinnEventEnvelope, EventBus};
 use djinn_db::{Database, ImageRepository, ProjectImage, ProjectImageStatus, ProjectRepository};
+use djinn_launcher_protocol::{LauncherAuthorityProtocol, ParseLauncherAuthorityProtocolError};
 use djinn_runtime::GraphWarmerService;
 use futures::StreamExt;
 use k8s_openapi::api::batch::v1::Job;
@@ -86,6 +87,15 @@ const FAILURE_LOG_CHAR_LIMIT: usize = 2000;
 /// devcontainer-cli / buildkit failures surface the root cause in the
 /// last screen or two of output — well within 80 lines.
 const FAILURE_LOG_TAIL_LINES: i64 = 80;
+
+/// Sentinel prefix the build script emits for the pushed manifest digest.
+const DIGEST_SENTINEL: &str = "DJINN_IMAGE_DIGEST=";
+
+/// Sentinel prefix the build script emits for the launcher authority protocol
+/// the artifact declares. The value is echoed from the `BuildContext` that
+/// rendered the Dockerfile, which bakes the identical string into the image's
+/// `djinn.app/launcher-authority-protocol` LABEL.
+const PROTOCOL_SENTINEL: &str = "DJINN_LAUNCHER_PROTOCOL=";
 
 /// Background task that watches image-build Jobs to completion.
 ///
@@ -392,15 +402,57 @@ async fn handle_image_event(
     match outcome {
         JobOutcome::Succeeded => {
             let image_tag = format_catalog_image_tag(&config.registry_host, image_id, &hash_prefix);
-            // The pushed manifest digest is emitted on a sentinel log line by
-            // the build script; capture it for digest-pinned dispatch. Tag is
-            // already content-addressed, so a missing digest is non-fatal.
-            let digest = match client {
-                Some(c) => fetch_image_digest(c, &config.namespace, &job_name).await,
-                None => None,
+            // The build script emits its metadata — the pushed manifest digest
+            // and the launcher authority protocol the artifact declares — on
+            // deterministic sentinel log lines.
+            let metadata = match client {
+                Some(c) => fetch_build_metadata(c, &config.namespace, &job_name).await,
+                None => BuildMetadata::default(),
             };
+
+            let (digest, protocol) = match classify_ready(image_id, &job_name, &metadata) {
+                ReadyOutcome::Ready { digest, protocol } => (digest, protocol),
+                // The build produced an artifact that cannot dispatch. Record
+                // why and leave the row out of `ready` — a `ready` row that no
+                // Pod can bootstrap is the wedge this whole path exists to
+                // avoid, and it surfaces nowhere until dispatch stops.
+                ReadyOutcome::Refuse(last_error) => {
+                    if let Err(e) = image_repo.mark_failed(image_id, &last_error).await {
+                        warn!(
+                            image_id,
+                            hash = %hash_prefix,
+                            job = %job_name,
+                            error = %e,
+                            "image_build_watcher: images.mark_failed failed"
+                        );
+                        return;
+                    }
+                    warn!(
+                        image_id,
+                        hash = %hash_prefix,
+                        job = %job_name,
+                        reason = %last_error,
+                        "image_build_watcher: catalog image build succeeded but its artifact cannot \
+                         dispatch — refused ready, flipped images.status to failed"
+                    );
+                    event_bus.send(image_catalog_event(
+                        "build_failed",
+                        image_id,
+                        None,
+                        Some(&hash_prefix),
+                        Some(&last_error),
+                        &job_name,
+                    ));
+                    if seen.len() >= DEDUPE_CAP {
+                        seen.clear();
+                    }
+                    seen.insert(dedupe_key);
+                    return;
+                }
+            };
+
             if let Err(e) = image_repo
-                .mark_ready(image_id, &image_tag, digest.as_deref())
+                .mark_ready(image_id, &image_tag, digest.as_deref(), protocol)
                 .await
             {
                 warn!(
@@ -418,6 +470,7 @@ async fn handle_image_event(
                 job = %job_name,
                 image_tag = %image_tag,
                 digest = ?digest,
+                launcher_protocol = ?protocol.map(LauncherAuthorityProtocol::as_wire),
                 "image_build_watcher: catalog image build succeeded — flipped images.status to ready"
             );
             event_bus.send(image_catalog_event(
@@ -508,20 +561,61 @@ async fn handle_image_event(
     seen.insert(dedupe_key);
 }
 
-/// Parse the build Pod's logs for the `DJINN_IMAGE_DIGEST=sha256:...`
-/// sentinel the build script emits via `--metadata-file`. Returns `None`
-/// when logs are unavailable or no digest was captured — dispatch falls
-/// back to the immutable content-addressed tag.
-async fn fetch_image_digest(
+/// What a finished build Job reported about the artifact it produced.
+///
+/// Both fields are captured from the build Pod's own log sentinels, never
+/// inferred from the image tag or the Job name.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct BuildMetadata {
+    /// The pushed manifest digest (`sha256:…`), or `None` when the build
+    /// emitted no usable `DJINN_IMAGE_DIGEST=` sentinel.
+    pub(crate) digest: Option<String>,
+    /// The raw, unparsed launcher-authority-protocol declaration. `None` means
+    /// the build declared nothing at all — a builder that predates the
+    /// declaration — which is a legacy artifact, not an unknown protocol.
+    pub(crate) declared_protocol: Option<String>,
+}
+
+impl BuildMetadata {
+    /// The parsed declaration.
+    ///
+    /// `Ok(None)` is "declared nothing". An unrecognised string is an error,
+    /// never a fallback: the protocol decides whether the launcher or Pod
+    /// resize owns CPU quota, and guessing is a production outage in one
+    /// direction and a 16x slowdown in the other.
+    pub(crate) fn protocol(
+        &self,
+    ) -> Result<Option<LauncherAuthorityProtocol>, ParseLauncherAuthorityProtocolError> {
+        match self.declared_protocol.as_deref() {
+            None => Ok(None),
+            Some(wire) => wire.parse().map(Some),
+        }
+    }
+}
+
+/// Read a finished build Job's metadata out of its Pod logs.
+///
+/// Returns an empty [`BuildMetadata`] when logs are unavailable (Pod GC'd,
+/// never started, …) — indistinguishable from a build that reported nothing,
+/// which is exactly how it should be treated.
+pub(crate) async fn fetch_build_metadata(
     client: &kube::Client,
     namespace: &str,
     job_name: &str,
-) -> Option<String> {
-    let logs = fetch_job_pod_logs(client, namespace, job_name)
-        .await
-        .ok()
-        .flatten()?;
-    parse_digest_sentinel(&logs)
+) -> BuildMetadata {
+    match fetch_job_pod_logs(client, namespace, job_name).await {
+        Ok(Some(logs)) => parse_build_metadata(&logs),
+        _ => BuildMetadata::default(),
+    }
+}
+
+/// Pure sentinel extraction, split out so the decision it feeds is testable
+/// without a cluster.
+fn parse_build_metadata(logs: &str) -> BuildMetadata {
+    BuildMetadata {
+        digest: parse_digest_sentinel(logs),
+        declared_protocol: parse_protocol_sentinel(logs),
+    }
 }
 
 /// Extract the `sha256:...` digest from a `DJINN_IMAGE_DIGEST=` sentinel
@@ -529,10 +623,88 @@ async fn fetch_image_digest(
 fn parse_digest_sentinel(logs: &str) -> Option<String> {
     logs.lines()
         .rev()
-        .find_map(|line| line.trim().strip_prefix("DJINN_IMAGE_DIGEST="))
+        .find_map(|line| line.trim().strip_prefix(DIGEST_SENTINEL))
         .map(str::trim)
         .filter(|d| d.starts_with("sha256:") && d.len() > "sha256:".len())
         .map(String::from)
+}
+
+/// Extract the raw declaration from a `DJINN_LAUNCHER_PROTOCOL=` sentinel line.
+///
+/// An empty value is "declared nothing" — that is what an older build script
+/// with the variable unset prints. Anything non-empty is passed through
+/// unparsed so [`BuildMetadata::protocol`] can refuse it by name.
+fn parse_protocol_sentinel(logs: &str) -> Option<String> {
+    logs.lines()
+        .rev()
+        .find_map(|line| line.trim().strip_prefix(PROTOCOL_SENTINEL))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(String::from)
+}
+
+/// What the succeeded-build reconcile should do with the `images` row.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ReadyOutcome {
+    /// Flip to `ready`, persisting the digest and the declaration.
+    Ready {
+        digest: Option<String>,
+        protocol: Option<LauncherAuthorityProtocol>,
+    },
+    /// Refuse. The artifact cannot dispatch; the row must stay out of `ready`
+    /// and carry this diagnostic as its `last_error`.
+    Refuse(String),
+}
+
+/// Decide whether a succeeded build may be marked `ready`.
+///
+/// **Why a missing digest is fatal for a protocol-declaring image.** Migration
+/// 164's `build_pod_permits_resize_identity_check` requires `image_digest IS
+/// NOT NULL` whenever resize identity is present. An image that declares a
+/// launcher authority protocol but has no immutable digest therefore yields a
+/// build Pod that can never capture that identity — bootstrap fails closed and
+/// every task run on that image stops dispatching, with nothing surfacing the
+/// gap until it does. Refusing here converts a silent dispatch wedge into a
+/// visible failed build.
+///
+/// **Why it is not fatal for everything.** An image that declares nothing is a
+/// legacy artifact, which is the shape of every image already built on a live
+/// deployment. Those keep going `ready` on their content-addressed tag under
+/// `leaf-v1`, exactly as they do today. Making the check unconditional would
+/// brick all of them on the next deploy.
+///
+/// Nothing here reads the image tag: the declaration comes from build metadata
+/// or it does not exist.
+pub(crate) fn classify_ready(
+    image_id: &str,
+    job_name: &str,
+    metadata: &BuildMetadata,
+) -> ReadyOutcome {
+    let protocol = match metadata.protocol() {
+        Ok(protocol) => protocol,
+        Err(e) => {
+            return ReadyOutcome::Refuse(format!(
+                "catalog image build Job {job_name} declared a launcher authority protocol \
+                 image {image_id} cannot run under: {e}. Refusing to mark it ready rather than \
+                 guessing which component owns its CPU quota."
+            ));
+        }
+    };
+
+    match (protocol, metadata.digest.as_deref()) {
+        (Some(protocol), None) => ReadyOutcome::Refuse(format!(
+            "catalog image build Job {job_name} succeeded but emitted no \
+             `{DIGEST_SENTINEL}sha256:…` sentinel. Image {image_id} declares launcher authority \
+             protocol `{}`, and migration 164 requires a non-null image digest for a build Pod to \
+             capture resize identity — a digestless protocol-declaring image would leave every \
+             task run on it unable to dispatch. Refusing to mark it ready; re-run the build.",
+            protocol.as_wire()
+        )),
+        (protocol, _) => ReadyOutcome::Ready {
+            digest: metadata.digest.clone(),
+            protocol,
+        },
+    }
 }
 
 async fn apply_success(
@@ -954,47 +1126,8 @@ mod tests {
         // Non-sha256 value rejected.
         assert_eq!(parse_digest_sentinel("DJINN_IMAGE_DIGEST=garbage\n"), None);
     }
-
-    #[test]
-    fn image_catalog_event_ready_shape() {
-        let ev = image_catalog_event(
-            "ready",
-            "img-1",
-            Some("reg/djinn-image-img-1:abc123"),
-            Some("abc123"),
-            None,
-            "djinn-build-img-img-1-abc123",
-        );
-        assert_eq!(ev.entity_type, "image");
-        assert_eq!(ev.action, "ready");
-        assert_eq!(ev.id.as_deref(), Some("img-1"));
-        assert_eq!(
-            ev.payload.get("image_tag").and_then(|v| v.as_str()),
-            Some("reg/djinn-image-img-1:abc123")
-        );
-    }
-
-    #[test]
-    fn image_status_event_build_failed_carries_last_error() {
-        let envelope = image_status_event(
-            "build_failed",
-            "proj-xyz",
-            None,
-            Some("deadbeef"),
-            Some(
-                "build Job djinn-build-proj-xyz-deadbeef failed; see kubectl logs job/djinn-build-proj-xyz-deadbeef",
-            ),
-            None,
-            "djinn-build-proj-xyz-deadbeef",
-        );
-        assert_eq!(envelope.action, "build_failed");
-        assert!(
-            envelope
-                .payload
-                .get("last_error")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .contains("kubectl logs")
-        );
-    }
 }
+
+#[cfg(test)]
+#[path = "watcher_protocol_tests.rs"]
+mod protocol_tests;
