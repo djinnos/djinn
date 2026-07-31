@@ -2813,6 +2813,55 @@ mod tests {
     use futures::StreamExt;
     use std::pin::Pin;
 
+    /// **0ppk-1c ACCEPTANCE CRITERION 1, the second composition site.**
+    ///
+    /// `DirectServices::with_provider_override` builds a SECOND
+    /// `BuildLeaseService` as an agent-side fallback. The task requires an
+    /// explicit, asserted decision about it, because an unarmed second
+    /// composition is exactly how a lift silently does not happen for some
+    /// callers.
+    ///
+    /// THE DECISION: it **fails closed — deliberately unarmed**, and it must
+    /// stay that way. Three reasons, in order of force:
+    ///
+    /// 1. `djinn-agent` cannot depend on `djinn-server`. That is not a
+    ///    preference; it is why `0ppk-1b` had to introduce the
+    ///    `TaskRunResizeAdmission` trait at all. The lift's apiserver surface
+    ///    (`TaskRunPodResizeSurface`) and the permit-creating dispatch seam both
+    ///    live on the far side of that boundary.
+    /// 2. This fallback is not on the path that CREATES permits. Arming it would
+    ///    make it answer `DegradedUnleased { PermitAbsent }` for every
+    ///    invocation it served — strictly worse than the passthrough.
+    /// 3. Unarmed means "no lift": the launcher keeps the birth quota it was
+    ///    already given. That is the pre-`3i92` behaviour and it is safe. The
+    ///    dangerous direction is the other one — REPORTING a grant for CPU no Pod
+    ///    ever received — and that is precisely what an armed-but-surfaceless
+    ///    composition would do.
+    ///
+    /// NAMED FAILING MUTATION: add `.with_resize_authority(..)` to
+    /// `with_provider_override`'s `BuildLeaseService` chain and this fails.
+    #[tokio::test]
+    async fn the_agent_side_fallback_build_lease_fails_closed_unarmed() {
+        let db = crate::test_helpers::create_test_db();
+        let context = crate::test_helpers::agent_context_from_db(
+            db,
+            tokio_util::sync::CancellationToken::new(),
+        );
+        let services = DirectServices::with_provider_override(
+            context,
+            tokio_util::sync::CancellationToken::new(),
+            None,
+        );
+        assert!(
+            !services.build_lease.resize_authority_armed(),
+            "the agent-side fallback BuildLeaseService must stay UNARMED. \
+             `djinn-agent` cannot reach the server's apiserver surface or the \
+             dispatch seam that creates permits, so arming it would degrade \
+             every invocation it served to PermitAbsent while claiming to have \
+             lifted something"
+        );
+    }
+
     /// Helper: a non-zero pricing snapshot (used to represent a priced model).
     fn priced() -> Pricing {
         Pricing {

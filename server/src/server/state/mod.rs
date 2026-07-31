@@ -470,6 +470,52 @@ impl AppState {
                 warm_millicores: djinn_k8s::launcher::warm_job_millicores(&k8s),
             }
         };
+        // Proposal `3i92`'s lift, armed (0ppk-1c). **This is the composition
+        // site**, and it is the entire difference between a resize stack that
+        // exists and one that fires: `BuildLeaseService` holds the authority as
+        // an `Option`, and for the whole of `0ppk-1a` that `Option` was `None`
+        // at every composition — merged, green, and structurally unable to move
+        // a Pod.
+        //
+        // Arming had to wait for `0ppk-1b` (#2860), which made
+        // `BuildPodPermitRepository` a production writer. Before those rows
+        // existed this would have answered `DegradedUnleased { PermitAbsent }`
+        // for every production invocation, which is why 1a shipped it unarmed
+        // and said so in its module header.
+        //
+        // The applier is `ResizeLift`, whose apiserver surface resolves lazily
+        // on first lift — a server with no kubeconfig still boots, and every
+        // lift it then attempts degrades to `ResizeSurfaceUnavailable` rather
+        // than reporting a grant.
+        //
+        // Inert on the current fleet: `images.launcher_authority_protocol` is
+        // NULL fleet-wide, so every dispatch resolves `leaf-v1`, no `resize-v2`
+        // ceiling is rendered, no resize identity is captured, and the clamp
+        // refuses `leaf-v1` outright. This becomes live the first time an image
+        // row carries `resize-v2`.
+        let permits = Arc::new(djinn_db::BuildPodPermitRepository::new(db.clone()));
+        let resize_authority = Arc::new(
+            djinn_coordinator::resize_authorization::ResizeAuthority::new(
+                Arc::new(djinn_db::BuildLeaseRepository::new(db.clone())),
+                Arc::clone(&permits),
+                Arc::new(
+                    djinn_supervisor::services::DurableInvocationLiftAuthority::new(
+                        db.clone(),
+                        "server AppState",
+                    ),
+                ),
+                // The process's own rendered lease, from the SAME `KubernetesConfig`
+                // the manifests are rendered from. The per-Pod ceiling it is clamped
+                // against comes from the write-once permit row, never from here —
+                // see `resize_authorization::clamp`.
+                i64::from(djinn_k8s::launcher::launcher_leased_millicores(
+                    &djinn_k8s::KubernetesConfig::from_env(),
+                )),
+                Arc::new(djinn_coordinator::resize_lift::ResizeLift::from_env(
+                    Arc::clone(&permits),
+                )),
+            ),
+        );
         let build_lease = Arc::new(
             BuildLeaseService::new(
                 Arc::new(djinn_db::BuildLeaseRepository::new(db.clone())),
@@ -480,9 +526,10 @@ impl AppState {
             // (and its reference cap) on recovery, so a restart observes the
             // armed cap before admitting or spawning. An armed cap still wins
             // over the configured value above.
-            .with_invocation_lease_authority(Arc::new(
-                InvocationLeaseAuthorityRepository::new(db.clone()),
-            )),
+            .with_invocation_lease_authority(Arc::new(InvocationLeaseAuthorityRepository::new(
+                db.clone(),
+            )))
+            .with_resize_authority(resize_authority),
         );
         // The one place proposal `3i92`'s resize stack becomes reachable. The
         // apiserver surface underneath resolves lazily on first dispatch, so a
@@ -3921,6 +3968,38 @@ mod build_epoch_bridge_tests {
             "AppState must thread the resize admission bridge into every \
              AgentContext; without it the dispatch seam acquires no build-pod \
              permit and no resize-v2 launcher is ever downsized to its birth limit"
+        );
+    }
+
+    /// **0ppk-1c ACCEPTANCE CRITERION 1: armed at the production composition
+    /// site.**
+    ///
+    /// `BuildLeaseService` holds its resize authorization as
+    /// `Option<Arc<ResizeAuthority>>`, defaulted to `None`. For the whole of
+    /// `0ppk-1a` that `Option` was `None` at every composition and
+    /// `with_resize_authority` had zero production call sites — the entire
+    /// authorization and clamp layer was merged, green, and structurally unable
+    /// to move a Pod. That is not a hypothetical failure mode in this
+    /// neighbourhood; it is what happened, and the sibling failure (a trait
+    /// default silently winning over an unreachable override) happened because
+    /// nothing ever checked the COMPOSITION site.
+    ///
+    /// So this test reads the service that `AppState::new` actually built. A
+    /// test that called `BuildLeaseService::new(..).with_resize_authority(..)`
+    /// itself would prove only that the setter works — which was never in doubt.
+    ///
+    /// NAMED FAILING MUTATION: delete the `.with_resize_authority(...)` call
+    /// from `new_inner` and this fails.
+    #[tokio::test]
+    async fn the_production_build_lease_service_arms_the_resize_authority() {
+        let db = Database::open_in_memory().expect("test database");
+        let state = AppState::new(db, CancellationToken::new());
+        assert!(
+            state.inner.build_lease.resize_authority_armed(),
+            "AppState::new_inner must arm the Pod-resize authorization on the \
+             build-lease grant path. With it unarmed, `fold_into_grant` returns \
+             every grant untouched and no invocation escalation ever moves a \
+             launcher's cpu limit — which is exactly the state 0ppk-1a shipped in"
         );
     }
 

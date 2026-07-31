@@ -124,6 +124,7 @@ pub async fn record_supervisor_rework_reopen(
 }
 
 pub mod resize_authorization;
+pub mod resize_lift;
 pub mod resource_monitor;
 pub mod roles;
 /// Production wiring that arms the observe-only disk dimension at coordinator
@@ -203,6 +204,8 @@ mod build_lease_integration_tests;
 mod invocation_cpu_boundary_tests;
 #[cfg(test)]
 mod resize_authorization_tests;
+#[cfg(test)]
+mod resize_lift_tests;
 #[cfg(test)]
 pub(crate) mod test_helpers;
 #[cfg(test)]
