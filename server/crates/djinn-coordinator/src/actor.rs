@@ -79,7 +79,21 @@ where
 /// Giving each actor its own registry in tests makes a check's database the
 /// database of the actor that runs it, which is what the production invariant
 /// already says.
+/// Registering into the global as well under `cfg(test)` is not redundant. It
+/// is what keeps every *other* consequence of this change at zero: a
+/// registration owns an `Arc` of its source, which owns a `Database`, and
+/// `register` replacing by name is what drops the previous actor's sources —
+/// which is what runs `TestDbInit::drop`, i.e. `DROP DATABASE`, on the *next*
+/// actor's construction thread. Take that away and the test databases either
+/// accumulate until Postgres runs out of shared memory (a leaked registry) or
+/// get dropped from a task being torn down inside `Runtime::drop`, where
+/// `TestDbInit`'s blocking `std::thread::spawn(..).join()` wedged the suite
+/// past the 900 s cap. Both were observed. Keeping the global registration
+/// keeps object lifetimes byte-identical to before; only the *read* moves.
+#[cfg(not(test))]
 pub(super) type DoctorRegistryHandle = &'static djinn_core::doctor::DoctorRegistry;
+#[cfg(test)]
+pub(super) type DoctorRegistryHandle = Arc<djinn_core::doctor::DoctorRegistry>;
 
 /// Build the registry a freshly-constructed actor resolves its checks from.
 #[cfg(not(test))]
@@ -87,22 +101,9 @@ pub(super) fn new_doctor_registry_handle() -> DoctorRegistryHandle {
     djinn_core::doctor::registry()
 }
 
-/// A fresh per-actor registry, leaked so it is `&'static` like the production
-/// singleton.
-///
-/// The leak is deliberate and it is what the singleton already did: a check
-/// registered into the global registry holds an `Arc` of its source, which
-/// holds a `Database`, and nothing ever unregisters — so every test database
-/// in the binary was already kept alive for the whole process. An owned
-/// `Arc<DoctorRegistry>` would instead have dropped with its actor, and that
-/// changed something unrelated to check isolation: `TestDbInit::drop` issues
-/// `DROP DATABASE` from a `std::thread::spawn(..).join()`, and running that
-/// from a task being dropped during `Runtime::drop` wedged the suite (one
-/// observed run sat on a single wave test past the 900 s cap). Matching the
-/// production lifetime keeps this change to the one thing it is about.
 #[cfg(test)]
 pub(super) fn new_doctor_registry_handle() -> DoctorRegistryHandle {
-    Box::leak(Box::new(djinn_core::doctor::DoctorRegistry::new()))
+    Arc::new(djinn_core::doctor::DoctorRegistry::new())
 }
 
 /// Coordinator actor state.
@@ -620,57 +621,65 @@ impl CoordinatorActor {
                 events_tx.clone(),
             ),
         );
-        crate::doctor::register_doctor_checks(
-            &doctor_registry,
-            Arc::new(crate::doctor::live_mover::NoOpLiveMoverSource),
-            Arc::clone(&stranded_ready_source) as Arc<dyn crate::doctor::StrandedReadySource>,
-        );
         let retrieval_health_source =
             Arc::new(crate::doctor::retrieval_health::RetrievalHealthSource::new(
                 db.clone(),
                 djinn_core::models::KnowledgeInjectionConfig::default(),
             ));
-        crate::doctor::register_retrieval_health_checks(
-            &doctor_registry,
-            Arc::clone(&retrieval_health_source),
-        );
         let closed_parent_open_children_source = Arc::new(
             crate::doctor::TaskRepositoryClosedParentOpenChildrenSource::new(
                 db.clone(),
                 events_tx.clone(),
             ),
         );
-        crate::doctor::register_closed_parent_open_children_check_with_repair(
-            &doctor_registry,
-            Arc::clone(&closed_parent_open_children_source)
-                as Arc<dyn crate::doctor::ClosedParentOpenChildrenSource>,
-            Arc::clone(&closed_parent_open_children_source)
-                as Arc<dyn crate::doctor::ClosedParentOpenChildrenRepairSource>,
-        );
-        // Read-only cache-root manifest detector. On-demand cadence: it stats
-        // the cache PVC and walks candidates, which is too expensive for the
-        // cheap periodic subset. It has no fix path.
-        crate::doctor::register_stale_cache_roots_check(
-            &doctor_registry,
-            Arc::new(crate::doctor::ProjectRepositoryStaleCacheRootsSource::new(
-                db.clone(),
-            )),
-        );
-        crate::doctor::register_refinement_phantom_active_check(
-            &doctor_registry,
-            Arc::new(
-                crate::doctor::ProposalRepositoryRefinementPhantomActiveSource::new(
+        let register_checks_into = |registry: &djinn_core::doctor::DoctorRegistry| {
+            crate::doctor::register_doctor_checks(
+                registry,
+                Arc::new(crate::doctor::live_mover::NoOpLiveMoverSource),
+                Arc::clone(&stranded_ready_source) as Arc<dyn crate::doctor::StrandedReadySource>,
+            );
+            crate::doctor::register_retrieval_health_checks(
+                registry,
+                Arc::clone(&retrieval_health_source),
+            );
+            crate::doctor::register_closed_parent_open_children_check_with_repair(
+                registry,
+                Arc::clone(&closed_parent_open_children_source)
+                    as Arc<dyn crate::doctor::ClosedParentOpenChildrenSource>,
+                Arc::clone(&closed_parent_open_children_source)
+                    as Arc<dyn crate::doctor::ClosedParentOpenChildrenRepairSource>,
+            );
+            // Read-only cache-root manifest detector. On-demand cadence: it
+            // stats the cache PVC and walks candidates, which is too expensive
+            // for the cheap periodic subset. It has no fix path.
+            crate::doctor::register_stale_cache_roots_check(
+                registry,
+                Arc::new(crate::doctor::ProjectRepositoryStaleCacheRootsSource::new(
                     db.clone(),
-                    events_tx.clone(),
+                )),
+            );
+            crate::doctor::register_refinement_phantom_active_check(
+                registry,
+                Arc::new(
+                    crate::doctor::ProposalRepositoryRefinementPhantomActiveSource::new(
+                        db.clone(),
+                        events_tx.clone(),
+                    ),
                 ),
-            ),
-        );
-        crate::doctor::register_stalled_epic_check(
-            &doctor_registry,
-            Arc::new(crate::doctor::TaskRepositoryStalledEpicSource::new(
-                db.clone(),
-            )),
-        );
+            );
+            crate::doctor::register_stalled_epic_check(
+                registry,
+                Arc::new(crate::doctor::TaskRepositoryStalledEpicSource::new(
+                    db.clone(),
+                )),
+            );
+        };
+        register_checks_into(&doctor_registry);
+        // Under `cfg(test)` the line above filled a registry private to this
+        // actor, so the global still needs its (unread) registration to keep
+        // source lifetimes exactly as they were — see [`DoctorRegistryHandle`].
+        #[cfg(test)]
+        register_checks_into(djinn_core::doctor::registry());
         Self {
             receiver,
             events,
