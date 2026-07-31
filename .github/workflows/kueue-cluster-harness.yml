@@ -88,6 +88,17 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: server
+          # save-if MUST stay false. rust-cache SAVES by default, and every
+          # cache family in this repository has exactly one writer, declared in
+          # quality-gate.yml (`scripts/ci-cache-policy.test.mjs`). Without this
+          # line an opt-in lane quietly becomes a second writer to a family it
+          # does not own.
+          save-if: false
+          # server-test (codegen), not server-quality (clippy/rmeta only): this
+          # job builds and RUNS the djinn-k8s test binary.
+          shared-key: server-test
+          cache-on-failure: true
+          cache-all-crates: true
 
       # The hermetic half needs no cluster. Running it first means a broken
       # production-safety guard fails in seconds instead of after a cluster

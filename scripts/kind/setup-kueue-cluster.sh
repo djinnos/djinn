@@ -126,8 +126,13 @@ EXIT_VERSION_FLOOR=7
 
 MIN_K8S_MINOR=30
 
+# The header comment above IS the help text. Printing it rather than
+# maintaining a second copy is why the range stops at the last commented line
+# (`#   1   anything else ...`), which `awk` finds instead of a line number that
+# would silently drift on the next edit.
 usage() {
-    sed -n '2,95p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
+    awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' \
+        "${BASH_SOURCE[0]}" >&2
 }
 
 fail() {
