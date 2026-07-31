@@ -24,6 +24,8 @@
 //! a different thing entirely and the dispatch seam refuses it — see
 //! `execute_runtime_report_phase`.
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use djinn_launcher_protocol::LauncherAuthorityProtocol;
 
@@ -75,6 +77,9 @@ pub struct ResizeAdmissionRefused {
     /// happened to it.
     pub pod_deleted: bool,
 }
+
+/// The server-side resize stack, as [`crate::context::AgentContext`] holds it.
+pub type ResizeAdmissionBridge = Arc<dyn TaskRunResizeAdmission>;
 
 /// The server-side resize stack, as the dispatch seam consumes it.
 #[async_trait]

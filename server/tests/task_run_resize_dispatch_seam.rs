@@ -255,7 +255,9 @@ impl TaskRunPodSurface for FakeCluster {
                 "uid precondition failed: stored `{stored}`, fenced `{pod_uid}`"
             ));
         }
-        state.deletes.push((task_run_id.to_owned(), pod_uid.to_owned()));
+        state
+            .deletes
+            .push((task_run_id.to_owned(), pod_uid.to_owned()));
         state.pod = None;
         Ok(())
     }
@@ -648,7 +650,9 @@ async fn the_birth_limit_is_read_back_from_the_launcher_init_container_status() 
     // The ceiling is real and is not the birth limit, so "already there" cannot
     // be mistaken for "was downsized".
     assert_eq!(
-        CpuLimit::parse(RENDERED_CEILING).expect("ceiling parses").millis(),
+        CpuLimit::parse(RENDERED_CEILING)
+            .expect("ceiling parses")
+            .millis(),
         4000
     );
 
@@ -854,7 +858,11 @@ async fn a_leaf_v1_dispatch_issues_no_resize_and_captures_no_identity() {
     let pod = build_pod(
         "pod-uid-ac7",
         json!([launcher]),
-        json!([init_status("cgroup-launcher", None, Some("containerd://launcher"))]),
+        json!([init_status(
+            "cgroup-launcher",
+            None,
+            Some("containerd://launcher")
+        )]),
         json!([]),
     );
     let cluster = FakeCluster::new(pod, Actuation::Actuates);
@@ -872,8 +880,16 @@ async fn a_leaf_v1_dispatch_issues_no_resize_and_captures_no_identity() {
         0,
         "leaf-v1 must never touch pods/resize"
     );
-    assert_eq!(cluster.deletes(), Vec::new(), "leaf-v1 Pods are not deleted");
-    assert_eq!(runtime.attaches(), 1, "leaf-v1 dispatches exactly as before");
+    assert_eq!(
+        cluster.deletes(),
+        Vec::new(),
+        "leaf-v1 Pods are not deleted"
+    );
+    assert_eq!(
+        runtime.attaches(),
+        1,
+        "leaf-v1 dispatches exactly as before"
+    );
     let row = BuildPodPermitRepository::new(db.clone())
         .active(&seeded.spec.task_run_id)
         .await
@@ -892,11 +908,13 @@ async fn a_leaf_v1_dispatch_issues_no_resize_and_captures_no_identity() {
 /// rather than in the bridge's private guts.
 #[test]
 fn the_bootstrap_type_is_the_one_the_bridge_composes() {
-    fn _accepts(_: fn(
-        BuildPodPermitRepository,
-        Arc<dyn TaskRunPodSurface>,
-        Arc<djinn_server::task_run_resize_bootstrap::DispatchGate>,
-    ) -> TaskRunResizeBootstrap) {
+    fn _accepts(
+        _: fn(
+            BuildPodPermitRepository,
+            Arc<dyn TaskRunPodSurface>,
+            Arc<djinn_server::task_run_resize_bootstrap::DispatchGate>,
+        ) -> TaskRunResizeBootstrap,
+    ) {
     }
     _accepts(TaskRunResizeBootstrap::new);
 }

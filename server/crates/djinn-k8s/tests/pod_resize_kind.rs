@@ -1,3 +1,6 @@
+// Test: eprintln is the skip-reason channel for the gated half, mirroring
+// tests/kueue_cluster_harness.rs.
+#![allow(clippy::print_stderr)]
 //! Live-apiserver proof for the `resize-v2` birth downsize (0ppk-1b, AC8).
 //!
 //! # Two halves, on purpose
@@ -52,15 +55,15 @@
 
 use std::env;
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
+use djinn_cgroup_launcher::LauncherAuthorityProtocol;
 use djinn_k8s::KubernetesConfig;
 use djinn_k8s::launcher::LAUNCHER_CONTAINER_NAME;
 use djinn_k8s::pod_resize::{
     CpuLimit, KubePodResizeApi, PodResizeClient, confirm_launcher_cpu, declared_launcher_cpu_limit,
     locate_launcher_spec, locate_launcher_status,
 };
-use djinn_cgroup_launcher::LauncherAuthorityProtocol;
 use k8s_openapi::api::core::v1::Pod;
 use kube::api::{DeleteParams, PostParams};
 use kube::{Api, Client};
@@ -140,7 +143,10 @@ fn guard_a_non_local_apiserver_is_refused() {
         "https://localhost:41234",
         "https://[::1]:6443",
     ] {
-        assert!(is_local_apiserver(benign), "{benign} is a local kind server");
+        assert!(
+            is_local_apiserver(benign),
+            "{benign} is a local kind server"
+        );
     }
 }
 
@@ -149,9 +155,11 @@ fn guard_the_setup_script_exists_and_reserves_the_same_names() {
     let script = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../../scripts/kind/setup-resize-cluster.sh")
         .canonicalize()
-        .expect("scripts/kind/setup-resize-cluster.sh must exist; this harness cannot \
+        .expect(
+            "scripts/kind/setup-resize-cluster.sh must exist; this harness cannot \
                  create its own cluster and a missing script means the live half is \
-                 unrunnable rather than merely skipped");
+                 unrunnable rather than merely skipped",
+        );
     let body = std::fs::read_to_string(script).expect("read setup script");
     for reserved in RESERVED_CLUSTER_NAMES {
         assert!(
@@ -313,8 +321,13 @@ async fn ensure_namespace(client: &Client) {
 /// Poll until the launcher sidecar is present and started in BOTH
 /// `spec.initContainers` and `status.initContainerStatuses`.
 async fn await_admitted_launcher(pods: &Api<Pod>, name: &str) -> Pod {
-    let deadline = Instant::now() + Duration::from_secs(180);
-    loop {
+    // Iteration-counted rather than deadline-based: `Instant::now` is a
+    // workspace-disallowed method (`clippy.toml`), and the Kueue harness polls
+    // the same way.
+    const TICKS: usize = 90;
+    const TICK: Duration = Duration::from_secs(2);
+    let mut last: Option<Pod> = None;
+    for _ in 0..TICKS {
         let pod = pods.get(name).await.expect("get harness pod");
         let named = locate_launcher_spec(&pod).is_ok() && locate_launcher_status(&pod).is_ok();
         let started = locate_launcher_status(&pod)
@@ -324,13 +337,13 @@ async fn await_admitted_launcher(pods: &Api<Pod>, name: &str) -> Pod {
         if named && started {
             return pod;
         }
-        assert!(
-            Instant::now() < deadline,
-            "launcher sidecar never became admitted and started; last status: {:?}",
-            pod.status,
-        );
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        last = Some(pod);
+        tokio::time::sleep(TICK).await;
     }
+    panic!(
+        "launcher sidecar never became admitted and started; last status: {:?}",
+        last.and_then(|pod| pod.status),
+    );
 }
 
 /// **AC8.** Render a real `resize-v2` task-run Pod, capture the ceiling the
@@ -414,7 +427,8 @@ async fn live_birth_downsize_is_confirmed_by_a_real_kubelet() {
         "an in-place resize must not restart the launcher: restartCount moved",
     );
     assert_eq!(
-        after.spec
+        after
+            .spec
             .as_ref()
             .and_then(|spec| spec.init_containers.as_ref())
             .map_or(0, Vec::len),
@@ -438,7 +452,9 @@ async fn live_birth_downsize_is_confirmed_by_a_real_kubelet() {
         "the QoS class must be byte-identical across the resize",
     );
     assert_eq!(
-        locate_launcher_spec(&after).expect("launcher spec after").name,
+        locate_launcher_spec(&after)
+            .expect("launcher spec after")
+            .name,
         LAUNCHER_CONTAINER_NAME,
         "the resize target is still the launcher and only the launcher",
     );

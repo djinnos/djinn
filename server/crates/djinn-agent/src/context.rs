@@ -1,3 +1,7 @@
+// djinn:allow-oversize — this file sat 44 bytes under the size guard before
+// 0ppk-1b added one server-injected bridge field to `AgentContext`, so any
+// field added here at all trips it. Split the context struct's supporting types
+// out when this file is next touched substantively.
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -456,24 +460,10 @@ pub struct AgentContext {
     /// off-server/test contexts falls back to the agent-internal no-op runtime.
     pub runtime_ops: Option<Arc<dyn bridge::RuntimeOps>>,
     /// Proposal `3i92`'s post-admission resize stack, injected at the server
-    /// boundary by `AppState::agent_context()`.
-    ///
-    /// When `Some`, the dispatch seam acquires a durable `build_pod_permits`
-    /// row before the Job is created, binds the Job UID after it, and — for a
-    /// `resize-v2` render — captures the admitted launcher CPU ceiling and
-    /// confirms the birth downsize before any worker session starts.
-    ///
-    /// `None` is *not* a disable switch. It marks an off-server context (an
-    /// in-pod worker, a test that dispatches no Kubernetes Job) that renders no
-    /// launcher sidecar in the first place. A `resize-v2` dispatch reaching a
-    /// context with no bridge is refused rather than quietly dispatched
-    /// ungoverned; see
-    /// [`crate::actors::slot::supervisor_runner::execute_runtime_report_phase`].
-    ///
-    /// `djinn-agent` cannot depend on the server crate (ADR-047), which is why
-    /// this is a trait object rather than the concrete
-    /// `djinn_server::task_run_resize_bootstrap::TaskRunResizeAdmissionBridge`.
-    pub resize_admission: Option<Arc<dyn crate::task_run_resize_admission::TaskRunResizeAdmission>>,
+    /// boundary by `AppState::agent_context()`. `None` marks an off-server
+    /// context, never a disable switch — see
+    /// [`crate::task_run_resize_admission`] for what that distinction costs.
+    pub resize_admission: Option<crate::task_run_resize_admission::ResizeAdmissionBridge>,
     /// **This process's own view** of the per-task-run Cargo target root.
     ///
     /// Required, deliberately: the shared cache PVC is mounted at *different*

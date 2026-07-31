@@ -3900,6 +3900,30 @@ mod build_epoch_bridge_tests {
         assert_eq!(state.agent_context().knowledge_injection, resolved);
     }
 
+    /// The composition site for proposal `3i92`'s resize stack (0ppk-1b).
+    ///
+    /// `AppState::agent_context()` is what the slot pool dispatches through, so
+    /// a bridge this state builds but never threads into an `AgentContext` is a
+    /// bridge nothing can call. That distinction is not academic in this
+    /// neighbourhood: an override that nothing composed, and a projection with
+    /// no reader, both shipped green and inert here within the same week.
+    ///
+    /// What stays green if `new_inner` stops constructing the bridge, or if
+    /// `agent_context` stops threading it? Not this: `resize_admission` goes
+    /// back to `None` and a `resize-v2` dispatch would silently fall through to
+    /// an ungoverned launcher.
+    #[tokio::test]
+    async fn every_agent_context_carries_the_resize_admission_bridge() {
+        let db = Database::open_in_memory().expect("test database");
+        let state = AppState::new(db, CancellationToken::new());
+        assert!(
+            state.agent_context().resize_admission.is_some(),
+            "AppState must thread the resize admission bridge into every \
+             AgentContext; without it the dispatch seam acquires no build-pod \
+             permit and no resize-v2 launcher is ever downsized to its birth limit"
+        );
+    }
+
     // ── Observe-only disk dimension (proposal nquz) ─────────────────────────
 
     /// A capacity probe the test controls. Only the `statvfs` syscall and the

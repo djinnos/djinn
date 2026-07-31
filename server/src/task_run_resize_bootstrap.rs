@@ -1031,10 +1031,13 @@ impl TaskRunResizeAdmission for TaskRunResizeAdmissionBridge {
         &self,
         request: &ResizeAdmissionRequest,
     ) -> Result<ResizeAdmissionOutcome, ResizeAdmissionRefused> {
-        let surface = self.surface().await.map_err(|error| ResizeAdmissionRefused {
-            reason: format!("no apiserver surface for the resize bootstrap: {error}"),
-            pod_deleted: false,
-        })?;
+        let surface = self
+            .surface()
+            .await
+            .map_err(|error| ResizeAdmissionRefused {
+                reason: format!("no apiserver surface for the resize bootstrap: {error}"),
+                pod_deleted: false,
+            })?;
         let permit = PermitBinding {
             task_run_id: request.task_run_id.clone(),
             permit_id: request.permit_id.clone(),
@@ -1051,7 +1054,10 @@ impl TaskRunResizeAdmission for TaskRunResizeAdmissionBridge {
         // refusal below always names the condition that was still unmet.
         let stalled: String;
         loop {
-            match bootstrap.bootstrap(&permit, request.effective_protocol).await {
+            match bootstrap
+                .bootstrap(&permit, request.effective_protocol)
+                .await
+            {
                 BootstrapOutcome::BirthConfirmed {
                     pod_uid,
                     admitted_cpu_millicores,
@@ -1060,24 +1066,24 @@ impl TaskRunResizeAdmission for TaskRunResizeAdmissionBridge {
                     // the in-process confirmed result of this very bootstrap, so
                     // a `birth_confirmed` row left behind by a previous process
                     // cannot admit anything on its own.
-                    self.gate
-                        .admit(&permit.task_run_id)
-                        .map_err(|error| ResizeAdmissionRefused {
+                    self.gate.admit(&permit.task_run_id).map_err(|error| {
+                        ResizeAdmissionRefused {
                             reason: error.to_string(),
                             pod_deleted: false,
-                        })?;
+                        }
+                    })?;
                     return Ok(ResizeAdmissionOutcome::BirthConfirmed {
                         pod_uid,
                         admitted_cpu_millicores,
                     });
                 }
                 BootstrapOutcome::LeafAuthority => {
-                    self.gate
-                        .admit(&permit.task_run_id)
-                        .map_err(|error| ResizeAdmissionRefused {
+                    self.gate.admit(&permit.task_run_id).map_err(|error| {
+                        ResizeAdmissionRefused {
                             reason: error.to_string(),
                             pod_deleted: false,
-                        })?;
+                        }
+                    })?;
                     return Ok(ResizeAdmissionOutcome::LeafAuthority);
                 }
                 BootstrapOutcome::NotReady(reason) => {

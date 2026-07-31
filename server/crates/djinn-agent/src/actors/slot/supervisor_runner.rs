@@ -976,9 +976,7 @@ async fn acquire_build_pod_permit(
     app_state: &AgentContext,
     spec: &TaskRunSpec,
 ) -> Option<AcquiredBuildPodPermit> {
-    if app_state.resize_admission.is_none() {
-        return None;
-    }
+    app_state.resize_admission.as_ref()?;
     let permits = djinn_db::BuildPodPermitRepository::new(app_state.db.clone());
     match permits
         .acquire(&spec.task_run_id, build_pod_permit_limit())
