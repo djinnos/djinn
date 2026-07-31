@@ -120,10 +120,13 @@ KEEP_ON_FAILURE=false
 CGROUP_WRITABLE=false
 ACTION=""
 
-# The node-level half of the writable-cgroup contract. Both names are the ones
-# `deploy/helm/djinn/templates/runtimeclass-cgroup-writable.yaml` resolves
-# against, so they are read from the same place the chart states them rather
-# than restated here as free-standing strings.
+# The node-level half of the writable-cgroup contract: the `handler:` and the
+# `scheduling.nodeSelector` key of
+# `deploy/helm/djinn/templates/runtimeclass-cgroup-writable.yaml`. Both are
+# literals here because a shell script cannot read a helm template, so the
+# handler is ASSERTED equal to `containerd-config-version.sh`'s own
+# `DJINN_CONTAINERD_HANDLER` below — a rename on either side is then a hard
+# failure rather than two spellings that never meet.
 CGROUP_WRITABLE_HANDLER="runc-cgroupwritable"
 CGROUP_WRITABLE_NODE_LABEL="djinn.io/cgroup-writable"
 CONTAINERD_LIVE_CONFIG="/etc/containerd/config.toml"
@@ -527,7 +530,7 @@ EOF
     esac
     case "$runtimes" in
         *cgroup_writable*|*CgroupWritable*|*cgroupWritable*) ;;
-        *) fail 1 "containerd on node $node loaded ${CGROUP_WRITABLE_HANDLER} but reports no cgroup_writable property; this containerd is too old to give a container a writable cgroup and the launcher would fail readiness instead" ;;
+        *) fail 1 "containerd on node $node loaded ${CGROUP_WRITABLE_HANDLER} but reports no cgroup_writable property; this containerd is too old to give a container a writable cgroup, so the RuntimeClass would resolve, the Pod would be admitted, and the launcher would fail readiness on a read-only /sys/fs/cgroup. Use a newer node image (--k8s-version 1.35.0 ships containerd 2.2.0, measured 2026-07-31)" ;;
     esac
     info "node $node: containerd reports the ${CGROUP_WRITABLE_HANDLER} handler with a cgroup_writable property"
 }
