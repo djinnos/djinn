@@ -45,26 +45,42 @@
 # in `server/crates/djinn-k8s/Cargo.toml`, which is the same floor from the
 # client side.
 #
-# WHAT IT DOES NOT DO — the fbiy-C1 hook
-# --------------------------------------
-# It patches containerd for REGISTRIES ONLY, exactly like
-# `scripts/kind/setup-kind.sh:59-106`. It installs NO `runc-cgroupwritable`
-# runtime handler and applies NO `djinn.io/cgroup-writable=true` node label,
-# both of which `deploy/helm/djinn/templates/runtimeclass-cgroup-writable.yaml`
-# needs. That is deliberate and it is load-bearing twice over:
+# THE WRITABLE-CGROUP NODE — `--cgroup-writable`, OFF BY DEFAULT (fbiy-C1)
+# ------------------------------------------------------------------------
+# Without the flag this script patches containerd for REGISTRIES ONLY, exactly
+# like `scripts/kind/setup-kind.sh:59-106`: no `runc-cgroupwritable` runtime
+# handler and no `djinn.io/cgroup-writable=true` node label, both of which
+# `deploy/helm/djinn/templates/runtimeclass-cgroup-writable.yaml` needs. That
+# default is load-bearing — `fbiy-B0`/`B1`/`B2` clusters must stay byte
+# identical to what they were measured against — so the C1 node work is opt-in
+# rather than unconditional.
 #
-#   * `deploy/kueue/preflight.sh --mode cutover` must exit 10 ("RuntimeClass
-#     djinn-cgroup-writable is absent") against this cluster. Installing the
-#     RuntimeClass here would silently retire that assertion.
-#   * fbiy-C1 owns proving the governor end to end and will need a real
-#     writable-cgroup node. See `configure_node_containerd` below: the C1
-#     extension goes inside that loop, plus a node label after cluster create.
-#     Nothing else in this script has to move.
+# `--cgroup-writable` adds exactly two node-level facts, and NOTHING chart-level:
+#
+#   * a `runc-cgroupwritable` containerd runtime handler on every node, written
+#     into the schema the node's LIVE `/etc/containerd/config.toml` declares
+#     (resolved with `deploy/node/k3s/containerd-config-version.sh`, the same
+#     detector the managed-k3s conformance uses — never from a version string);
+#   * the `djinn.io/cgroup-writable=true` node label the RuntimeClass's
+#     `scheduling.nodeSelector` requires.
+#
+# It still installs NO RuntimeClass. That object comes from the chart, gated by
+# `cgroupWritable.runtimeClass.enabled`, so `deploy/kueue/preflight.sh --mode
+# cutover` continues to exit 10 ("RuntimeClass djinn-cgroup-writable is absent")
+# against a `--values` file that leaves the gate off — which is 6knv's AC4, and
+# is unaffected by this flag. A caller that wants the class passes a values file
+# that enables it (see `deploy/helm/djinn/tests/fixtures/kueue-governor-values.yaml`);
+# a caller that enables the class WITHOUT this flag gets Pods that never
+# schedule, which is why the flag verifies the handler is live rather than
+# assuming the append worked.
 #
 # USAGE
 #   scripts/kind/setup-kueue-cluster.sh up      # create + install + arm
 #   scripts/kind/setup-kueue-cluster.sh down    # delete cluster AND registry
 #   scripts/kind/setup-kueue-cluster.sh check   # run the guards only, touch nothing
+#
+#   --cgroup-writable   install the runc-cgroupwritable containerd handler and
+#                       label the nodes (fbiy-C1); off by default
 #
 # `up` deletes the cluster and the registry on FAILURE (that is AC3 of 6knv);
 # on success it leaves them running for the Rust harness and the caller is
@@ -101,7 +117,17 @@ INSTALL_TIMEOUT_SECONDS="${DJINN_KUEUE_HARNESS_INSTALL_TIMEOUT_SECONDS:-600}"
 VALUES_FILE="${DJINN_KUEUE_HARNESS_VALUES:-$REPO_ROOT/deploy/helm/djinn/tests/fixtures/kueue-cluster-values.yaml}"
 REQUESTED_CONTEXT=""
 KEEP_ON_FAILURE=false
+CGROUP_WRITABLE=false
 ACTION=""
+
+# The node-level half of the writable-cgroup contract. Both names are the ones
+# `deploy/helm/djinn/templates/runtimeclass-cgroup-writable.yaml` resolves
+# against, so they are read from the same place the chart states them rather
+# than restated here as free-standing strings.
+CGROUP_WRITABLE_HANDLER="runc-cgroupwritable"
+CGROUP_WRITABLE_NODE_LABEL="djinn.io/cgroup-writable"
+CONTAINERD_LIVE_CONFIG="/etc/containerd/config.toml"
+CONTAINERD_VERSION_LIB="$REPO_ROOT/deploy/node/k3s/containerd-config-version.sh"
 
 PREREQS_CHART="$REPO_ROOT/deploy/helm/djinn-prereqs"
 PREREQS_RELEASE="djinn-prereqs"
@@ -191,6 +217,10 @@ while [ "$#" -gt 0 ]; do
             KEEP_ON_FAILURE=true
             shift
             ;;
+        --cgroup-writable)
+            CGROUP_WRITABLE=true
+            shift
+            ;;
         --help|-h)
             usage
             exit 0
@@ -250,8 +280,8 @@ KUBECTL=("$KUBECTL_BIN" --context "$CONTEXT")
 HELM=("$HELM_BIN" --kube-context "$CONTEXT")
 
 if [ "$ACTION" = check ]; then
-    printf 'PASS: guards accept cluster=%s context=%s registry=%s:%s k8s=%s\n' \
-        "$CLUSTER_NAME" "$CONTEXT" "$REG_NAME" "$REG_PORT" "$KIND_IMAGE_VERSION"
+    printf 'PASS: guards accept cluster=%s context=%s registry=%s:%s k8s=%s cgroup-writable=%s\n' \
+        "$CLUSTER_NAME" "$CONTEXT" "$REG_NAME" "$REG_PORT" "$KIND_IMAGE_VERSION" "$CGROUP_WRITABLE"
     exit 0
 fi
 
@@ -379,25 +409,39 @@ SERVER_MINOR=$("${KUBECTL[@]}" version -o json | sed -n 's/.*"minor": *"\([0-9]*
     "the live API server reports 1.${SERVER_MINOR}, below the 1.${MIN_K8S_MINOR} floor Kueue 0.19.0 requires"
 info "live API server is Kubernetes 1.${SERVER_MINOR} (floor 1.${MIN_K8S_MINOR})"
 
-# 3. containerd registry wiring, per node.
+# 3. containerd wiring, per node: registry mirrors always, and — only under
+#    `--cgroup-writable` — the `runc-cgroupwritable` runtime handler the
+#    RuntimeClass names (fbiy-C1).
 #
-# ============================ fbiy-C1 EXTENSION HOOK =========================
-# C1 (prove the governor end to end) needs a node that can actually run the
-# writable-cgroup RuntimeClass. Everything it must add is local to this
-# function plus one node label:
+# WHY THE SCHEMA IS MEASURED AND NOT ASSUMED
+# ------------------------------------------
+# A kind node's containerd BINARY version and its CRI CONFIGURATION schema are
+# different facts, and on this image they disagree: `kindest/node:v1.35.0` ships
+# containerd 2.2.0 — which reads schema v3 — under a `/etc/containerd/config.toml`
+# whose first non-comment line is literally `version = 2`. The production VPS
+# runs the v3 schema (`deploy/node/k3s/containerd/config-v3.toml.tmpl`, pinned at
+# containerd 2.2.3-k3s1), so a handler block copied from the repo's production
+# asset would land in a plugin namespace this node's config does not use and
+# would be silently ignored: the RuntimeClass would resolve, the Pod would be
+# admitted, and the sandbox would come up under plain `runc` with a READ-ONLY
+# /sys/fs/cgroup. The launcher would then fail readiness for a reason that looks
+# nothing like "the handler was written into the wrong table".
 #
-#   * write a `runc-cgroupwritable` runtime handler into the node's
-#     /etc/containerd/config.toml (plugins."io.containerd.grpc.v1.cri".containerd
-#     .runtimes.runc-cgroupwritable) and restart containerd on the node;
-#   * `kubectl label node <node> djinn.io/cgroup-writable=true`;
-#   * flip cgroupWritable.runtimeClass.enabled / cgroupWritable.taskRuns.enabled
-#     and cgroupLauncher.mode in a C1-owned values file.
+# So the table header is resolved from the LIVE file by
+# `deploy/node/k3s/containerd-config-version.sh` — the same detector the managed
+# k3s conformance uses, sourced rather than reimplemented — and the result is
+# verified against `crictl info` after the restart. `cgroup_writable` is what
+# makes the container's own cgroup writable; `SystemdCgroup` mirrors the node's
+# base `runc` handler, because a handler on the other driver places its
+# containers under a cgroup parent the kubelet does not manage.
 #
-# It must NOT do that here. `deploy/kueue/preflight.sh --mode cutover` exiting
-# 10 against this cluster is 6knv's AC4, and exit 10 means "RuntimeClass
-# djinn-cgroup-writable is absent". Installing the class in B0 would delete
-# that assertion without deleting a single line of the test that makes it.
-# =============================================================================
+# This still installs NO RuntimeClass — that object is the chart's, gated by
+# `cgroupWritable.runtimeClass.enabled` — so `deploy/kueue/preflight.sh --mode
+# cutover` still exits 10 against a values file that leaves the gate off, which
+# is 6knv's AC4.
+# shellcheck source=../../deploy/node/k3s/containerd-config-version.sh
+. "$CONTAINERD_VERSION_LIB"
+
 configure_node_containerd() {
     local registry_dir="/etc/containerd/certs.d/localhost:${REG_PORT}"
     local in_cluster_dir="/etc/containerd/certs.d/${REG_NAME}:5000"
@@ -412,10 +456,97 @@ EOF
 [host."http://${REG_NAME}:5000"]
   capabilities = ["pull", "resolve"]
 EOF
+        [ "$CGROUP_WRITABLE" = true ] || continue
+        install_cgroup_writable_handler "$node"
     done
 }
-info 'wiring containerd registry mirrors (registries only — see the fbiy-C1 hook)'
+
+# Append the handler to ONE node's live containerd configuration, restart
+# containerd, and prove the handler is actually loaded.
+install_cgroup_writable_handler() {
+    local node=$1 live version table quote namespace
+    live=$(mktemp)
+    # A `docker exec cat` rather than a bind mount: the file lives inside the
+    # node container and the detector reads a path.
+    "$DOCKER" exec "$node" cat "$CONTAINERD_LIVE_CONFIG" >"$live" 2>/dev/null \
+        || fail 1 "node $node has no readable $CONTAINERD_LIVE_CONFIG; nothing to extend"
+    version=$(djinn_containerd_detect_version "$live") \
+        || fail 1 "could not resolve the containerd config schema of node $node"
+    namespace=$(djinn_containerd_namespace_for_version "$version")
+    # `DJINN_CONTAINERD_HANDLER` is the library's own handler name and already
+    # defaults to the one the chart names; asserted rather than re-set, so a
+    # rename on either side is a hard failure instead of two spellings.
+    [ "$DJINN_CONTAINERD_HANDLER" = "$CGROUP_WRITABLE_HANDLER" ] || fail 1 \
+        "handler name drift: $CONTAINERD_VERSION_LIB says '$DJINN_CONTAINERD_HANDLER', this script and the chart say '$CGROUP_WRITABLE_HANDLER'"
+    table=$(djinn_containerd_runtime_table_for_version "$version")
+    rm -f "$live"
+    case "$version" in
+        2) quote='"' ;;
+        3) quote="'" ;;
+    esac
+    info "node $node runs containerd CRI config schema v${version} (namespace ${namespace}); appending handler ${CGROUP_WRITABLE_HANDLER}"
+
+    # Idempotent: a second `up` against the same node must not double-declare
+    # the table, which containerd rejects outright.
+    if "$DOCKER" exec "$node" grep -qF "$table" "$CONTAINERD_LIVE_CONFIG"; then
+        info "node $node already declares ${table}"
+    else
+        "$DOCKER" exec -i "$node" tee -a "$CONTAINERD_LIVE_CONFIG" >/dev/null <<EOF
+
+# Added by scripts/kind/setup-kueue-cluster.sh --cgroup-writable (fbiy-C1).
+# Mirrors the managed-k3s templates in deploy/node/k3s/containerd/, rendered in
+# the schema this node's live configuration declares.
+${table}
+  runtime_type = "io.containerd.runc.v2"
+  cgroup_writable = true
+[plugins.${quote}${namespace}${quote}.containerd.runtimes.${CGROUP_WRITABLE_HANDLER}.options]
+  SystemdCgroup = true
+EOF
+    fi
+
+    "$DOCKER" exec "$node" systemctl restart containerd \
+        || fail 1 "containerd did not restart on node $node after the handler was appended"
+
+    # Prove it, do not assume it. `crictl info` reports the runtime table
+    # containerd actually PARSED; a handler in the wrong namespace, or a config
+    # containerd refused, is absent here while the file on disk still shows it.
+    local attempt=0 runtimes=""
+    while [ "$attempt" -lt 60 ]; do
+        runtimes=$("$DOCKER" exec "$node" crictl info 2>/dev/null) || runtimes=""
+        case "$runtimes" in
+            *"$CGROUP_WRITABLE_HANDLER"*) break ;;
+        esac
+        attempt=$((attempt + 1))
+        sleep 1
+    done
+    case "$runtimes" in
+        *"$CGROUP_WRITABLE_HANDLER"*) ;;
+        *) fail 1 "containerd on node $node never reported the ${CGROUP_WRITABLE_HANDLER} handler after restart; the table was written into ${namespace} for schema v${version}" ;;
+    esac
+    case "$runtimes" in
+        *cgroup_writable*|*CgroupWritable*|*cgroupWritable*) ;;
+        *) fail 1 "containerd on node $node loaded ${CGROUP_WRITABLE_HANDLER} but reports no cgroup_writable property; this containerd is too old to give a container a writable cgroup and the launcher would fail readiness instead" ;;
+    esac
+    info "node $node: containerd reports the ${CGROUP_WRITABLE_HANDLER} handler with a cgroup_writable property"
+}
+
+info 'wiring containerd registry mirrors'
 configure_node_containerd
+
+if [ "$CGROUP_WRITABLE" = true ]; then
+    # The label half of the contract. `RuntimeClass/djinn-cgroup-writable`
+    # carries `scheduling.nodeSelector: djinn.io/cgroup-writable: "true"`, which
+    # the RuntimeClass admission controller merges into every Pod naming the
+    # class — so without this an armed task-run Pod is permanently Pending with
+    # no event that mentions cgroups at all.
+    for node in $("$KIND" get nodes --name "$CLUSTER_NAME"); do
+        info "labelling node ${node} ${CGROUP_WRITABLE_NODE_LABEL}=true"
+        "${KUBECTL[@]}" label node "$node" "${CGROUP_WRITABLE_NODE_LABEL}=true" --overwrite
+    done
+    # The API server and the kubelet both went through a containerd restart;
+    # wait for the node to be Ready again before helm starts creating objects.
+    "${KUBECTL[@]}" wait --for=condition=Ready node --all --timeout=180s
+fi
 
 if [ "$("$DOCKER" inspect -f '{{json .NetworkSettings.Networks.kind}}' "$REG_NAME" 2>/dev/null)" = 'null' ]; then
     "$DOCKER" network connect kind "$REG_NAME"

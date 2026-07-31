@@ -1,0 +1,103 @@
+# Djinn chart values for the DISPOSABLE armed-Kueue **and armed-launcher**
+# cluster (fbiy-C1).
+#
+# Consumed by `scripts/kind/setup-kueue-cluster.sh --cgroup-writable` and
+# asserted against by
+# `server/crates/djinn-k8s/tests/kueue_governor_conformance.rs`.
+#
+# HOW THIS DIFFERS FROM `kueue-cluster-values.yaml`, AND WHY IT IS A SECOND FILE
+# -----------------------------------------------------------------------------
+# The B0 fixture's whole point is that the RuntimeClass is ABSENT: the live
+# assertion `deploy/kueue/preflight.sh --mode cutover` must exit 10 against it,
+# and `tests/kueue_cluster_harness.rs` states in prose that flipping those three
+# values would retire that assertion without deleting the test. So C1 does not
+# flip them there. It flips them here, in a file no other harness installs, on a
+# cluster no other harness creates.
+#
+# THIS FILE ARMS BOTH KUEUE AND THE CGROUP LAUNCHER. It is safe only because the
+# only cluster it is ever applied to is one `setup-kueue-cluster.sh` created
+# seconds earlier and deletes on the way out. Arming the production VPS is a
+# gated operator act behind `deploy/kueue/preflight.sh --mode cutover` and
+# `deploy/runbooks/cgroup-launcher-rearm.md`; it is not this.
+
+namespace:
+  create: true
+  name: djinn
+
+# -----------------------------------------------------------------------------
+# The armed queue topology
+# -----------------------------------------------------------------------------
+kueue:
+  enabled: true
+  armed: true
+  # M. Read back off the live ClusterQueue by the test — never compared against
+  # this literal — and deliberately NOT the chart default of 3, for the same
+  # reason the B0 fixture is not: a number equal to the default would pass
+  # against an install that never read this file.
+  #
+  # Three is the smallest M that admits a cap K strictly between "authorizes
+  # nothing" (K = 0) and "bounds nothing" (K >= M). At K = 2 the live cluster
+  # holds two lifted invocations and one refused one simultaneously, which is
+  # the population AC3 measures.
+  buildPods: 3
+  namespaceLabelledExternally: false
+
+# -----------------------------------------------------------------------------
+# The arming triple — verbatim from values.yaml:200-201
+# -----------------------------------------------------------------------------
+# All three must move together. `deployment-server.yaml` `fail`s the render when
+# `kueue.armed` is set with `cgroupLauncher.mode: required` and
+# `cgroupWritable.taskRuns.enabled: false`, and `build_task_run_job` asserts the
+# same pairing at render time. The node prerequisite (the
+# `runc-cgroupwritable` containerd handler plus the `djinn.io/cgroup-writable`
+# label) is installed by `setup-kueue-cluster.sh --cgroup-writable`; without it
+# every task-run Pod here is permanently Pending.
+cgroupLauncher:
+  mode: required
+cgroupWritable:
+  runtimeClass:
+    enabled: true
+  taskRuns:
+    enabled: true
+
+# -----------------------------------------------------------------------------
+# Everything below only exists to make the install land on one throwaway node
+# -----------------------------------------------------------------------------
+postgres:
+  enabled: false
+qdrant:
+  enabled: false
+imagePipeline:
+  enabled: false
+ingress:
+  enabled: false
+monitoring:
+  enabled: false
+logCollector:
+  enabled: false
+
+database:
+  externalUrl: "postgres://harness:harness@127.0.0.1:5432/djinn-kueue-governor?sslmode=disable"
+
+migration:
+  designatedOperatorSecret: djinn-kueue-governor-operator
+
+storage:
+  mirrors:
+    accessMode: ReadWriteOnce
+    size: 1Gi
+  cache:
+    accessMode: ReadWriteOnce
+    size: 1Gi
+  projects:
+    accessMode: ReadWriteOnce
+    size: 1Gi
+
+resources:
+  server:
+    requests:
+      cpu: "50m"
+      memory: "128Mi"
+    limits:
+      cpu: "1"
+      memory: "1Gi"
