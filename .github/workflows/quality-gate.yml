@@ -660,6 +660,15 @@ jobs:
         if: needs.preflight.outputs.size == 'true'
         working-directory: server
         run: cargo fmt --all --check
+      # The raw-SQL guard decides which matches are real code and which are
+      # string-literal data. That classification is only as good as its
+      # fixtures, and the fixtures are only worth anything if they run — this
+      # self-test shipped in #2814 and was never wired up, so nothing enforced
+      # that a guard edit still caught a violation. Mirrors the include! guard
+      # two steps above.
+      - name: Self-test raw-SQL boundary guard
+        if: needs.preflight.outputs.rawSql == 'true'
+        run: ./scripts/test-check-raw-sql-boundary.sh
       - name: Check raw-SQL boundary
         if: needs.preflight.outputs.rawSql == 'true'
         run: ./scripts/check-raw-sql-boundary.sh
