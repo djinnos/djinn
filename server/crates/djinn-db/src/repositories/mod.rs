@@ -21,6 +21,7 @@ pub mod image;
 pub mod init;
 pub mod invocation_lease_authority;
 pub mod kueue_workload_admission;
+pub mod launcher_authority_mode;
 pub mod legacy_settings_import;
 pub mod liveness;
 pub mod llm_call_attempt;

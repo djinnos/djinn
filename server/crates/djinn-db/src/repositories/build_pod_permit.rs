@@ -80,6 +80,38 @@ impl BuildPodPermitState {
     }
 }
 
+/// The nonterminal resize/lease lifecycle states introduced by migration 164.
+///
+/// This is the single Rust-side definition of that set. It is deliberately a
+/// `const` rather than six string literals repeated at each use site: the
+/// authority-mode drain fence
+/// ([`crate::repositories::launcher_authority_mode`]) partitions the active
+/// permits on exactly this set, and a seventh resize state added to
+/// [`BuildPodPermitState`] but forgotten in one hand-written `IN (...)` list
+/// would be a Pod that is live, owed a drop, and invisible to the fence that
+/// exists to refuse a flip while it is.
+pub(crate) const NONTERMINAL_RESIZE_STATES: [BuildPodPermitState; 6] = [
+    BuildPodPermitState::BirthConfirmed,
+    BuildPodPermitState::LiftApplying,
+    BuildPodPermitState::Lifted,
+    BuildPodPermitState::DropRequired,
+    BuildPodPermitState::DropApplying,
+    BuildPodPermitState::Quarantined,
+];
+
+/// Render states as a SQL literal list body, e.g. `'lifted', 'quarantined'`.
+///
+/// The spellings come from [`BuildPodPermitState::as_str`], which migration
+/// 164's `build_pod_permits_state_check` already constrains, so a list built
+/// this way cannot drift from the durable vocabulary.
+pub(crate) fn sql_state_list(states: &[BuildPodPermitState]) -> String {
+    states
+        .iter()
+        .map(|state| format!("'{}'", state.as_str()))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// Write-once native-sidecar resize identity for one Pod UID.
 ///
 /// The whole struct is all-or-nothing in the database
@@ -480,10 +512,10 @@ impl BuildPodPermitRepository {
     /// 164.
     pub async fn list_nonterminal_resize(&self) -> DbResult<Vec<BuildPodPermitRow>> {
         self.db.ensure_initialized().await?;
+        let nonterminal = sql_state_list(&NONTERMINAL_RESIZE_STATES);
         sqlx::query_as::<_, DbRow>(&format!(
             "SELECT {ROW_COLUMNS} FROM build_pod_permits \
-             WHERE state IN ('birth_confirmed', 'lift_applying', 'lifted', \
-                             'drop_required', 'drop_applying', 'quarantined') \
+             WHERE state IN ({nonterminal}) \
              ORDER BY acquired_at, task_run_id"
         ))
         .fetch_all(self.db.pool())
