@@ -136,6 +136,11 @@ pub use repositories::{
     kueue_workload_admission::{
         AdmissionApplied, KueueWorkloadAdmissionRecord, KueueWorkloadAdmissionRepository,
     },
+    launcher_authority_mode::{
+        LauncherAuthorityDrainCensus, LauncherAuthorityModeRepository, LauncherAuthorityModeRow,
+        LauncherProtocolAdmission, SetLauncherAuthorityModeResult,
+        decide_launcher_protocol_admission,
+    },
     legacy_settings_import::{
         LegacySettingsImport, LegacySettingsImportError, LegacySettingsImportResult,
     },
