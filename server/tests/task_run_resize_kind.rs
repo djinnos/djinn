@@ -173,6 +173,60 @@ fn read_repo_file(relative: &str) -> String {
         .unwrap_or_else(|error| panic!("read {relative}: {error}"))
 }
 
+/// `text` with whole-line comments removed.
+///
+/// Every text guard in this file matches against SOURCE, and a comment is not
+/// source: it cannot call a function, set a variable, or arm a workflow step. So
+/// a comment must neither satisfy a positive assertion nor trip a negative one,
+/// and both directions have now bitten this campaign:
+///
+/// * **False negative.** `1j64`'s teardown-trap guard matched the prose in a
+///   header and stayed green when the real `trap` line was deleted. `0vku`'s CI
+///   guard passed on a commented-out arming call. The guard immediately below
+///   already carries the scar tissue from the first of those.
+/// * **False positive.** On 2026-07-31 the `Patch::Apply` ban fired on a comment
+///   in `pod_resize.rs` explaining that `PatchParams::force` is rejected
+///   client-side on any non-apply body — a comment recording a real production
+///   defect. A guard that punishes the comment naming the wrong variant is a
+///   guard that argues against being told why the code is the way it is.
+///
+/// Only WHOLE-line comments are dropped, deliberately: a trailing comment must
+/// not be able to hide the code in front of it. Block comments are not handled
+/// because none of the guarded files use them; a `/* … */` naming a banned token
+/// would still be a false positive, and the fix then is to delete the block
+/// comment, not to widen this.
+fn code_lines(text: &str, comment_prefix: &str) -> String {
+    text.lines()
+        .filter(|line| !line.trim_start().starts_with(comment_prefix))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// [`code_lines`] for Rust. Covers `//`, `///` and `//!`.
+fn rust_code(source: &str) -> String {
+    code_lines(source, "//")
+}
+
+/// [`code_lines`] for shell and YAML, which share the `#` comment marker.
+fn script_code(text: &str) -> String {
+    code_lines(text, "#")
+}
+
+/// The `Patch` variants that must never reach the wire for this subresource.
+const BANNED_PATCH_VARIANTS: [&str; 3] = ["Patch::Merge", "Patch::Json", "Patch::Apply"];
+
+/// The banned `Patch` variant `source` actually CONSTRUCTS, if any.
+///
+/// Split out from its guard so the guard's own logic is testable against
+/// synthetic input — otherwise "ignore comments" and "ignore everything" are
+/// indistinguishable from a green run.
+fn banned_patch_variant_in(source: &str) -> Option<&'static str> {
+    let code = rust_code(source);
+    BANNED_PATCH_VARIANTS
+        .into_iter()
+        .find(|wrong| code.contains(wrong))
+}
+
 fn run_script(args: &[&str]) -> Output {
     Command::new("bash")
         .arg(repo_root().join(SETUP_SCRIPT))
@@ -297,7 +351,7 @@ fn guard_both_kubernetes_floors_are_enforced() {
         );
     }
 
-    let script = read_repo_file(SETUP_SCRIPT);
+    let script = script_code(&read_repo_file(SETUP_SCRIPT));
     assert!(
         script.contains("MIN_K8S_MINOR=30") && script.contains("RESIZE_MIN_K8S_MINOR=33"),
         "the two floors must be named constants, not inline literals"
@@ -343,14 +397,20 @@ fn guard_the_teardown_trap_precedes_everything_it_must_clean_up() {
         trap < registry && trap < cluster,
         "the EXIT trap is installed on line {trap}, after the registry ({registry}) or the cluster ({cluster}); everything the harness creates must be created UNDER the trap"
     );
+    // `script` above stays RAW because the ordering assertion needs real line
+    // numbers. These two are presence checks, so they read code only — a comment
+    // saying "the failure path calls teardown" must not be able to satisfy them.
+    // That is `1j64`'s defect verbatim, and this guard already carries the scar
+    // from it on the `trap` line above.
+    let code = script_code(&script);
     assert!(
-        script.contains("teardown || true"),
+        code.contains("teardown || true"),
         "the failure path must call teardown"
     );
     // The live lane runs `selftest`, which injects a real failure and proves
     // the registry container is gone. This is its hermetic half.
     assert!(
-        script.contains("DJINN_RESIZE_HARNESS_FAIL_AFTER=registry"),
+        code.contains("DJINN_RESIZE_HARNESS_FAIL_AFTER=registry"),
         "the selftest's injection point is gone; the trap would then be untested"
     );
 }
@@ -360,7 +420,7 @@ fn guard_the_teardown_trap_precedes_everything_it_must_clean_up() {
 /// resolved from the live node rather than assumed.
 #[test]
 fn guard_the_harness_installs_cgroup_delegation_rather_than_disabling_it() {
-    let script = read_repo_file(SETUP_SCRIPT);
+    let script = script_code(&read_repo_file(SETUP_SCRIPT));
     // The sibling harness makes the writable-cgroup node opt-in behind a
     // `--cgroup-writable)` case arm and a `CGROUP_WRITABLE` toggle. Neither may
     // exist here: a run without the node would not fail, it would pass a weaker
@@ -451,6 +511,10 @@ fn guard_the_source_admits_no_forbidden_shortcut() {
     );
     // Assembled from halves for the same reason the status token above is: a
     // gate that spelled its own forbidden strings would always find them.
+    //
+    // Code only, and hoisted out of the loop: the module docs must stay free to
+    // name a burner while explaining why it is forbidden.
+    let suite_code = rust_code(source);
     for (head, tail) in [
         ("while :", "; do"),
         ("dd if=", "/dev/zero"),
@@ -460,7 +524,7 @@ fn guard_the_source_admits_no_forbidden_shortcut() {
     ] {
         let burner = format!("{head}{tail}");
         assert!(
-            !source.contains(burner.as_str()),
+            !suite_code.contains(burner.as_str()),
             "the suite contains the synthetic burner `{burner}`; the measured workload is the probe's brokered `sha256sum` and nothing else"
         );
     }
@@ -487,18 +551,27 @@ fn guard_the_source_admits_no_forbidden_shortcut() {
 #[test]
 fn guard_the_production_resize_patch_is_strategic_and_minimal() {
     let source = read_repo_file(POD_RESIZE_SOURCE);
+    let code = rust_code(&source);
     assert!(
-        source.contains("Patch::Strategic"),
+        code.contains("Patch::Strategic"),
         "{POD_RESIZE_SOURCE} no longer uses a strategic merge patch; the initContainers array carries `patchMergeKey: name`, so a JSON-merge body REPLACES the whole array and destroys every other init container"
     );
-    for wrong in ["Patch::Merge", "Patch::Json", "Patch::Apply"] {
-        assert!(
-            !source.contains(wrong),
-            "{POD_RESIZE_SOURCE} uses {wrong}; only Patch::Strategic survives the initContainers merge key"
-        );
-    }
+    assert_eq!(
+        banned_patch_variant_in(&source),
+        None,
+        "{POD_RESIZE_SOURCE} constructs a banned Patch variant; only Patch::Strategic survives the initContainers merge key"
+    );
+    // `PatchParams::force()` is an SSA-only knob: `kube` rejects it client-side
+    // on any non-`Patch::Apply` body, before a byte leaves the process and with
+    // no HTTP status to notice. That is how every resize this client could ever
+    // issue failed silently until 2026-07-31, so it is guarded here beside the
+    // variant it is invalid with.
     assert!(
-        source.contains("patch_subresource(RESIZE_SUBRESOURCE"),
+        !code.contains(".force()"),
+        "{POD_RESIZE_SOURCE} calls PatchParams::force(); `force` is a server-side-apply conflict override and kube REFUSES it client-side alongside a strategic patch with `PatchParams::force only works with Patch::Apply`. The refusal has no HTTP status and never reaches an apiserver audit log"
+    );
+    assert!(
+        code.contains("patch_subresource(RESIZE_SUBRESOURCE"),
         "the PATCH must go to the pods/resize subresource, not to the Pod itself"
     );
     assert_eq!(RESIZE_SUBRESOURCE, "resize");
@@ -646,6 +719,10 @@ fn the_misleading_container_status_is_not_confirmation() {
 #[test]
 fn guard_the_live_lane_is_wired() {
     let workflow = read_repo_file(WORKFLOW);
+    // Code only, both directions: a YAML comment naming the lane must not
+    // satisfy the presence checks, and one mentioning `continue-on-error` must
+    // not trip the ban.
+    let workflow_code = script_code(&workflow);
     for required in [
         SETUP_SCRIPT,
         "task_run_resize_kind",
@@ -655,12 +732,12 @@ fn guard_the_live_lane_is_wired() {
         "down",
     ] {
         assert!(
-            workflow.contains(required),
+            workflow_code.contains(required),
             "{WORKFLOW} no longer references {required}"
         );
     }
     assert!(
-        !workflow.contains("continue-on-error"),
+        !workflow_code.contains("continue-on-error"),
         "a live proof that cannot fail the lane is not a proof"
     );
     // The same non-vacuity device `brokered_lease_lift_boundary.rs` uses: the
@@ -670,7 +747,7 @@ fn guard_the_live_lane_is_wired() {
         .matches("\n#[ignore")
         .count();
     assert!(
-        workflow.contains(&format!("RESIZE_KIND_EXPECTED_PROOFS: \"{expected}\"")),
+        workflow_code.contains(&format!("RESIZE_KIND_EXPECTED_PROOFS: \"{expected}\"")),
         "{WORKFLOW} declares a different live-proof count than the {expected} this file carries"
     );
 }
@@ -1904,4 +1981,80 @@ fn measure_effective_cpu(pod: &str, invocation: &str) -> Effective {
         wall_millis,
         effective_millicores: usage_usec.saturating_mul(1_000) / (wall_millis.max(1) * 1_000),
     }
+}
+
+/// **The comment-stripping guards are accurate, not merely quiet.**
+///
+/// "Ignore comments" and "ignore everything" are indistinguishable from a green
+/// run, so the predicate the source guards share is exercised here against
+/// synthetic input where the right answer is known. Without this, the
+/// 2026-07-31 fix for the `Patch::Apply` false positive would have been a
+/// licence to make every text guard in this file vacuous.
+#[test]
+fn guard_the_source_guards_read_code_and_not_comments() {
+    // The false positive this was written for: a comment naming a banned
+    // variant is not a call site.
+    assert_eq!(
+        banned_patch_variant_in(
+            "// kube rejects force on any non-apply body\nlet p = Patch::Strategic(&body);"
+        ),
+        None,
+        "a comment naming a banned variant must not fail the guard",
+    );
+    // The property that must survive that fix: real code still fails it.
+    assert_eq!(
+        banned_patch_variant_in("let p = Patch::Merge(&body);"),
+        Some("Patch::Merge"),
+        "a REAL Patch::Merge must still be caught; if this ever returns None the \
+         comment fix turned the guard into a no-op",
+    );
+    assert_eq!(
+        banned_patch_variant_in("    let p = Patch::Json(&body);"),
+        Some("Patch::Json"),
+        "indentation is not a comment",
+    );
+    assert_eq!(
+        banned_patch_variant_in("let p = Patch::Apply(&body);"),
+        Some("Patch::Apply"),
+    );
+    // A TRAILING comment must not hide the code in front of it — the stripping
+    // is whole-line only, and this is the case that proves the difference.
+    assert_eq!(
+        banned_patch_variant_in("let p = Patch::Merge(&body); // sorry"),
+        Some("Patch::Merge"),
+        "a trailing comment must not launder the code before it",
+    );
+    // Doc comments are comments.
+    assert_eq!(
+        banned_patch_variant_in("/// See the merge variant for why this is wrong.\nlet p = ();"),
+        None,
+    );
+
+    // The shell/YAML half, in both directions.
+    assert!(
+        !script_code("# MIN_K8S_MINOR=29 was the floor before #2818").contains("MIN_K8S_MINOR=29"),
+        "a shell comment must not trip a negative script guard",
+    );
+    assert!(
+        script_code("MIN_K8S_MINOR=29").contains("MIN_K8S_MINOR=29"),
+        "a real assignment must still be caught",
+    );
+    assert!(
+        !script_code("  # continue-on-error: true").contains("continue-on-error"),
+        "a YAML comment must not trip the continue-on-error ban",
+    );
+    assert!(
+        script_code("  continue-on-error: true").contains("continue-on-error"),
+        "a real YAML key must still be caught",
+    );
+    assert!(
+        !script_code("# the failure path calls teardown || true").contains("teardown || true"),
+        "prose describing the teardown call must not SATISFY the presence check; \
+         that is 1j64's defect, where a guard matched a header comment and stayed \
+         green after the real trap line was deleted",
+    );
+    assert!(
+        script_code("    teardown || true").contains("teardown || true"),
+        "the real call must still satisfy it",
+    );
 }

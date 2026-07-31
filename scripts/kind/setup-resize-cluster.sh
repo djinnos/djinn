@@ -280,20 +280,47 @@ if ! "$DOCKER" inspect "$REG_NAME" >/dev/null 2>&1; then
         --name "$REG_NAME" registry:2 >/dev/null
 fi
 
+# Guard 5b: state the feature gate only where stating it is legal.
+#
+# `InPlacePodVerticalScaling` is beta-on-by-default at 1.33 and GA from 1.34
+# (measured 2026-07-31: a 1.35.0 kubelet logs "Setting GA feature gate
+# InPlacePodVerticalScaling=true. It will be removed in a future release").
+# Naming a GA gate is tolerated with a deprecation warning until it is removed,
+# and naming a REMOVED gate is a hard kubelet start failure — so an
+# unconditional `featureGates:` block silently pins this harness to a closing
+# window of node images. Below the GA minor the explicit statement still earns
+# its place: it is the only thing standing between a node image whose beta
+# default flipped and a run that reports "not confirmed" for a reason that has
+# nothing to do with the code under test.
+GA_K8S_MINOR=34
+FEATURE_GATES_BLOCK=""
+if [ "$K8S_MINOR" -lt "$GA_K8S_MINOR" ]; then
+    FEATURE_GATES_BLOCK=$'featureGates:\n  InPlacePodVerticalScaling: true'
+    info "k8s 1.${K8S_MINOR}: stating InPlacePodVerticalScaling=true explicitly (beta)"
+else
+    info "k8s 1.${K8S_MINOR}: InPlacePodVerticalScaling is GA; naming it would only earn a removal warning"
+fi
+
 info "creating kind cluster ${CLUSTER_NAME} (k8s ${KIND_IMAGE_VERSION})"
 "$KIND" create cluster --name "$CLUSTER_NAME" --image "kindest/node:v${KIND_IMAGE_VERSION}" \
     --config /dev/stdin <<EOF
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
-# Stated explicitly rather than relying on the 1.33 default. A node image whose
-# default flipped would otherwise leave the subresource present and the resize
-# unactuated, which is indistinguishable from the defect under test.
-featureGates:
-  InPlacePodVerticalScaling: true
+${FEATURE_GATES_BLOCK}
+# The registry is wired through containerd's per-host \`certs.d\` directory, NOT
+# through a \`registry.mirrors\` table. kind's node image already sets
+# \`config_path\`, and containerd v2 refuses to load its CRI image plugin at all
+# when both are present: "\`mirrors\` cannot be set when \`config_path\` is
+# provided". That refusal is total and silent from the outside — the CRI service
+# never registers, the kubelet dies on "unknown service runtime.v1.RuntimeService",
+# and \`kind create\` fails four minutes later at "waiting for a healthy kubelet"
+# with nothing in its output naming containerd. Restating \`config_path\` here is
+# what \`scripts/kind/setup-kueue-cluster.sh\` does and is the only shape that
+# works on a containerd v2 node.
 containerdConfigPatches:
   - |-
-    [plugins."io.containerd.grpc.v1.cri".registry.mirrors."localhost:${REG_PORT}"]
-      endpoint = ["http://${REG_NAME}:5000"]
+    [plugins."io.containerd.grpc.v1.cri".registry]
+      config_path = "/etc/containerd/certs.d"
 nodes:
   - role: control-plane
 EOF
@@ -303,13 +330,39 @@ if [ "$("$DOCKER" inspect -f '{{json .NetworkSettings.Networks.kind}}' "$REG_NAM
     "$DOCKER" network connect kind "$REG_NAME" >/dev/null
 fi
 
+# Both spellings, because a manifest may name the registry either from the host
+# (`localhost:$REG_PORT`) or from inside the cluster (`$REG_NAME:5000`).
+info "pointing the node's certs.d at the registry"
+REGISTRY_HOST_DIR="/etc/containerd/certs.d/localhost:${REG_PORT}"
+REGISTRY_INTERNAL_DIR="/etc/containerd/certs.d/${REG_NAME}:5000"
+for node in $("$KIND" get nodes --name "$CLUSTER_NAME"); do
+    "$DOCKER" exec "$node" mkdir -p "$REGISTRY_HOST_DIR" "$REGISTRY_INTERNAL_DIR"
+    "$DOCKER" exec -i "$node" cp /dev/stdin "$REGISTRY_HOST_DIR/hosts.toml" <<EOF
+[host."http://${REG_NAME}:5000"]
+  capabilities = ["pull", "resolve"]
+EOF
+    "$DOCKER" exec -i "$node" cp /dev/stdin "$REGISTRY_INTERNAL_DIR/hosts.toml" <<EOF
+[host."http://${REG_NAME}:5000"]
+  capabilities = ["pull", "resolve"]
+EOF
+done
+
 info "waiting for the node to become Ready"
 "${KUBECTL[@]}" wait --for=condition=Ready node --all \
     --timeout="${READY_TIMEOUT_SECONDS}s" >/dev/null
 
 # Guard 6: re-check the floor against the LIVE API server, not the requested
 # image tag. A tag can lie; the server cannot.
-LIVE_MINOR=$("${KUBECTL[@]}" version -o json | awk -F'"' '/"minor"/ { gsub(/[^0-9]/, "", $4); print $4; exit }')
+#
+# Read through `get --raw /version`, which returns the SERVER's version object and
+# nothing else. `kubectl version -o json` emits `clientVersion` FIRST and
+# `serverVersion` second, so the obvious `awk '/"minor"/ { ...; exit }'` over it
+# reads the local kubectl's minor and calls it the cluster's. That is not a
+# cosmetic slip: it is a floor guard measuring the wrong ledger, and it would
+# have waved through a 1.20 API server on any developer machine with a current
+# kubectl — exactly the "the tag can lie" case this guard exists for. Observed
+# live: a 1.33.1 cluster reported as "k8s: 1.36".
+LIVE_MINOR=$("${KUBECTL[@]}" get --raw /version | awk -F'"' '/"minor"/ { gsub(/[^0-9]/, "", $4); print $4; exit }')
 [ -n "$LIVE_MINOR" ] || fail 1 "could not read the live API server minor version"
 [ "$LIVE_MINOR" -ge "$MIN_K8S_MINOR" ] || fail "$EXIT_VERSION_FLOOR" \
     "the created cluster reports Kubernetes 1.${LIVE_MINOR}, below the 1.${MIN_K8S_MINOR} in-place-resize floor"

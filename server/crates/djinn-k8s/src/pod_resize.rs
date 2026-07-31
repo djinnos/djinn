@@ -504,7 +504,26 @@ impl PodResizeApi for KubePodResizeApi {
         // Strategic, not Merge: `initContainers` has `patchMergeKey: name`, so
         // a strategic patch merges into the named entry. A Merge patch would
         // replace the entire array and drop every other init container.
-        let params = PatchParams::apply(&self.field_manager).force();
+        //
+        // `field_manager` only — NOT `PatchParams::apply(..).force()`.
+        // `apply()` is the server-side-apply constructor and `force` is an SSA
+        // conflict override; `kube` validates the pair CLIENT-SIDE and rejects
+        // any non-`Patch::Apply` body carrying `force` with
+        //
+        //     Failed to build request: failed to validate request:
+        //     PatchParams::force only works with Patch::Apply
+        //
+        // That refusal happens before a byte leaves the process, so it has no
+        // HTTP status and never appears in an apiserver audit log. Every resize
+        // this client could ever issue failed there — measured 2026-07-31
+        // against a real 1.33.1 kubelet. It survived review because
+        // `KubePodResizeApi` is the one part of this module no hermetic test
+        // constructs: every other test drives `PodResizeApi` through a fixture,
+        // so the transport had no coverage at all.
+        let params = PatchParams {
+            field_manager: Some(self.field_manager.clone()),
+            ..PatchParams::default()
+        };
         self.pods
             .patch_subresource(RESIZE_SUBRESOURCE, name, &params, &Patch::Strategic(body))
             .await
