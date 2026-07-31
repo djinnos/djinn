@@ -1,3 +1,10 @@
+// djinn:allow-oversize — task pcod's design names `server/tests/task_run_resize_kind.rs`
+// as the single exclusive path for this proof, so the live helpers cannot move
+// into a `tests/<name>/mod.rs` sibling without leaving that set. The hermetic
+// guards and the live proofs also share the render-derived CPU arithmetic
+// (`rendered_cpu_facts`), which is the one thing that must not have two copies:
+// a second copy is how a hardcoded absolute pod-slice value gets back in.
+//
 // `kubectl`, `docker` and the setup script all report through stderr, and the
 // skip lines below are the only channel a `--ignored` run has for saying why it
 // did nothing. The workspace denies `print_stderr` for library and server code.
