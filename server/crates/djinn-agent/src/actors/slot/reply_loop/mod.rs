@@ -434,6 +434,7 @@ pub(crate) async fn run_reply_loop(
     let (result, output, tokens_in, tokens_out, cache_read, cache_write) =
         djinn_slot::reply_loop::run_reply_loop(
             djinn_slot::reply_loop::ReplyLoopContext {
+                session_budget: None,
                 provider,
                 tools,
                 task_id,

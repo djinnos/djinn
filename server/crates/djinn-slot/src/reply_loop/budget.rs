@@ -108,7 +108,7 @@ impl UsageAccountingForTest {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct SessionBudgetPolicy {
+pub struct SessionBudgetPolicy {
     fallback_context_window_tokens: u32,
     soft_threshold_ratio: f64,
     hard_threshold_ratio: f64,
@@ -169,21 +169,12 @@ impl SessionBudgetPolicy {
     pub(crate) fn from_env() -> Result<Self, SessionBudgetConfigError> {
         Self::from_env_iter(env::vars())
     }
-    #[cfg(test)]
-    fn from_env_iter<I, K, V>(vars: I) -> Result<Self, SessionBudgetConfigError>
-    where
-        I: IntoIterator<Item = (K, V)>,
-        K: Into<String>,
-        V: Into<String>,
-    {
-        let env: HashMap<String, String> = vars
-            .into_iter()
-            .map(|(key, value)| (key.into(), value.into()))
-            .collect();
-        Self::from_env_map(&env)
-    }
-    #[cfg(not(test))]
-    fn from_env_iter<I, K, V>(vars: I) -> Result<Self, SessionBudgetConfigError>
+    /// Build a policy from an explicit set of `DJINN_SESSION_BUDGET_*` pairs
+    /// instead of the process environment. Tests inject the result through
+    /// [`crate::reply_loop::ReplyLoopContext::session_budget`] so a budget
+    /// override is scoped to the one reply loop under test rather than to
+    /// every test sharing the process env.
+    pub(crate) fn from_env_iter<I, K, V>(vars: I) -> Result<Self, SessionBudgetConfigError>
     where
         I: IntoIterator<Item = (K, V)>,
         K: Into<String>,
