@@ -1,0 +1,317 @@
+{
+  "run": {
+    "id": "run-terminal",
+    "project_id": "project-readiness",
+    "status": "completed_with_errors",
+    "repository_snapshot": "d34db33fd34db33fd34db33fd34db33fd34db33f",
+    "skill_name": "agent-readiness-guardrails",
+    "skill_version": "1.0.0",
+    "expected_area_count": 2,
+    "created_at": "2026-07-30T12:00:00Z",
+    "completed_at": "2026-07-30T12:01:00Z"
+  },
+  "areas": [
+    {
+      "id": "area-backend",
+      "area_key": "backend",
+      "composition": {
+        "roles": [
+          "backend"
+        ],
+        "evidence": [
+          "server/Cargo.toml"
+        ],
+        "languages": [
+          "Rust"
+        ],
+        "confidence": 0.97,
+        "frameworks": [
+          "Axum"
+        ],
+        "key_libraries": [
+          "sqlx"
+        ]
+      },
+      "path_scopes": [
+        "server/"
+      ],
+      "frozen_at": "2026-07-30T12:00:01Z",
+      "status": "succeeded",
+      "attempts": [
+        {
+          "id": "attempt-backend",
+          "attempt_number": 1,
+          "status": "succeeded",
+          "payload_digest": "backend-digest",
+          "created_at": "2026-07-30T12:00:02Z",
+          "terminal_at": "2026-07-30T12:00:03Z",
+          "is_current": true
+        }
+      ],
+      "accepted_findings": [
+        {
+          "id": "finding-backend-auth",
+          "attempt_id": "attempt-backend",
+          "guardrail_key": "backend-auth",
+          "status": "covered",
+          "severity": "high",
+          "confidence": 0.9,
+          "evidence": [
+            {
+              "line": 48,
+              "path": "server/src/auth.rs"
+            }
+          ],
+          "created_at": "2026-07-30T12:00:03Z"
+        },
+        {
+          "id": "finding-backend-secrets",
+          "attempt_id": "attempt-backend",
+          "guardrail_key": "backend-secrets",
+          "status": "analysis_error",
+          "severity": "low",
+          "confidence": 0.85,
+          "evidence": [
+            {
+              "line": 9,
+              "path": "server/src/config.rs"
+            }
+          ],
+          "created_at": "2026-07-30T12:00:03Z"
+        }
+      ],
+      "accepted_outputs": [
+        {
+          "attempt_id": "attempt-backend",
+          "result": {
+            "findings": [
+              {
+                "status": "covered",
+                "evidence": [
+                  {
+                    "line": 48,
+                    "path": "server/src/auth.rs"
+                  }
+                ],
+                "severity": "high",
+                "confidence": 0.9,
+                "guardrail_key": "backend-auth"
+              },
+              {
+                "status": "analysis_error",
+                "evidence": [
+                  {
+                    "line": 9,
+                    "path": "server/src/config.rs"
+                  }
+                ],
+                "severity": "low",
+                "confidence": 0.85,
+                "guardrail_key": "backend-secrets"
+              }
+            ],
+            "warnings": [
+              {
+                "reason": "secret rotation is not configured"
+              }
+            ],
+            "unsupported": [],
+            "remediation_suggestions": [
+              {
+                "action": "Apply shared authentication remediation",
+                "area_ids": [
+                  "area-backend"
+                ],
+                "dedupe_key": "shared-auth-remediation",
+                "guardrail_ids": [
+                  "backend-auth"
+                ]
+              }
+            ]
+          },
+          "created_at": "2026-07-30T12:00:03Z"
+        }
+      ]
+    },
+    {
+      "id": "area-frontend",
+      "area_key": "frontend",
+      "composition": {
+        "roles": [
+          "frontend"
+        ],
+        "evidence": [
+          "web/package.json"
+        ],
+        "languages": [
+          "TypeScript"
+        ],
+        "confidence": 0.95,
+        "frameworks": [
+          "React"
+        ],
+        "key_libraries": [
+          "zod"
+        ]
+      },
+      "path_scopes": [
+        "web/"
+      ],
+      "frozen_at": "2026-07-30T12:00:01Z",
+      "status": "succeeded",
+      "attempts": [
+        {
+          "id": "attempt-frontend",
+          "attempt_number": 1,
+          "status": "succeeded",
+          "payload_digest": "frontend-digest",
+          "created_at": "2026-07-30T12:00:02Z",
+          "terminal_at": "2026-07-30T12:00:03Z",
+          "is_current": true
+        }
+      ],
+      "accepted_findings": [
+        {
+          "id": "finding-frontend-auth",
+          "attempt_id": "attempt-frontend",
+          "guardrail_key": "frontend-auth",
+          "status": "covered",
+          "severity": "high",
+          "confidence": 0.95,
+          "evidence": [
+            {
+              "line": 12,
+              "path": "web/auth.ts"
+            }
+          ],
+          "created_at": "2026-07-30T12:00:03Z"
+        },
+        {
+          "id": "finding-frontend-inputs",
+          "attempt_id": "attempt-frontend",
+          "guardrail_key": "frontend-inputs",
+          "status": "partial",
+          "severity": "medium",
+          "confidence": 0.8,
+          "evidence": [
+            {
+              "line": 31,
+              "path": "web/forms.ts"
+            }
+          ],
+          "created_at": "2026-07-30T12:00:03Z"
+        }
+      ],
+      "accepted_outputs": [
+        {
+          "attempt_id": "attempt-frontend",
+          "result": {
+            "findings": [
+              {
+                "status": "covered",
+                "evidence": [
+                  {
+                    "line": 12,
+                    "path": "web/auth.ts"
+                  }
+                ],
+                "severity": "high",
+                "confidence": 0.95,
+                "guardrail_key": "frontend-auth"
+              },
+              {
+                "status": "partial",
+                "evidence": [
+                  {
+                    "line": 31,
+                    "path": "web/forms.ts"
+                  }
+                ],
+                "severity": "medium",
+                "confidence": 0.8,
+                "guardrail_key": "frontend-inputs"
+              }
+            ],
+            "warnings": [
+              {
+                "reason": "legacy form remains outside migration scope"
+              }
+            ],
+            "unsupported": [
+              {
+                "reason": "not applicable to this frontend",
+                "guardrail_key": "browser-session"
+              }
+            ],
+            "remediation_suggestions": [
+              {
+                "action": "Apply shared authentication remediation",
+                "area_id": "area-frontend",
+                "dedupe_key": "shared-auth-remediation",
+                "guardrail_id": "frontend-auth",
+                "validation_guidance": "Verify web/auth.ts and server/src/auth.rs after the change."
+              }
+            ]
+          },
+          "created_at": "2026-07-30T12:00:03Z"
+        }
+      ]
+    }
+  ],
+  "area_scores": [
+    {
+      "area_id": "area-frontend",
+      "score": 0.8,
+      "applicable_weight": 5,
+      "covered_weight": 4.0,
+      "status": "supported",
+      "created_at": "2026-07-30T12:01:00Z"
+    },
+    {
+      "area_id": "area-backend",
+      "score": 0.75,
+      "applicable_weight": 4,
+      "covered_weight": 3.0,
+      "status": "supported",
+      "created_at": "2026-07-30T12:01:00Z"
+    }
+  ],
+  "project_score": {
+    "score": 0.7777777777777778,
+    "band": "ready",
+    "created_at": "2026-07-30T12:01:00Z"
+  },
+  "suggestions": [
+    {
+      "id": "suggestion-1",
+      "dedupe_key": "shared-auth-remediation",
+      "suggestion": {
+        "action": "Apply shared authentication remediation",
+        "area_ids": [
+          "area-frontend",
+          "area-backend"
+        ],
+        "dedupe_key": "shared-auth-remediation",
+        "guardrail_ids": [
+          "backend-auth",
+          "frontend-auth"
+        ],
+        "validation_guidance": "Verify web/auth.ts and server/src/auth.rs after the change."
+      },
+      "created_at": "2026-07-30T12:01:00Z"
+    }
+  ],
+  "events": [
+    {
+      "id": "event-1",
+      "event_kind": "readiness_aggregated",
+      "payload": {
+        "band": "ready",
+        "owner": "authenticated-http-fixture",
+        "score": 0.7777777777777778,
+        "status": "completed_with_errors"
+      },
+      "created_at": "2026-07-30T12:01:00Z"
+    }
+  ]
+}
