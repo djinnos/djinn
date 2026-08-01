@@ -114,6 +114,7 @@ function EventDiagnostics({ detail }: { detail: ReadinessRunDetail }) {
   const diagnostics = detail.events.filter((event) =>
     event.event_kind.includes("error") ||
     event.event_kind.includes("failed") ||
+    field(event.payload, ["status"]) === "completed_with_errors" ||
     objectEntries(event.payload, "warnings").length > 0 ||
     objectEntries(event.payload, "errors").length > 0,
   );

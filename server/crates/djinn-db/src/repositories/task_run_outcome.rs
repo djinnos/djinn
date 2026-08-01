@@ -119,25 +119,36 @@ impl TaskRunOutcomeRepository {
         }
         let mut tx = self.db.pool().begin().await?;
         // Catalog authorization is bound at dispatch, never re-selected from a
-        // mutable project at read time. This per-attempt insert must therefore
-        // bind `catalog_image_id` with exactly the same semantics as
-        // [`crate::repositories::task_run::TaskRunRepository::create`]: the
-        // project's currently selected image, snapshotted inside this
-        // transaction so a rolled-back run leaves no partial binding. Omitting
-        // it left every real dispatch with a NULL binding, which fails the
-        // final-verification completion boundary closed.
+        // mutable project at read time. This per-attempt insert therefore binds
+        // `catalog_image_id` through the shared
+        // [`crate::repositories::task_run::INSERT_TASK_RUN_SQL`]: the project's
+        // currently selected image, snapshotted inside this transaction so a
+        // rolled-back run leaves no partial binding. Omitting it left every real
+        // dispatch with a NULL binding, which fails the final-verification
+        // completion boundary closed.
         //
-        // Runtime query (not the macro): `catalog_image_id` evolves with the
-        // task-run schema and must not require regenerating sqlx offline
-        // metadata.
-        sqlx::query(
-            "INSERT INTO task_runs
-                (id, project_id, task_id, trigger_type, status, workspace_path, mirror_ref, dispatch_group_id, catalog_image_id)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8,
-                (SELECT selected_image_id FROM projects WHERE id = $2))",
-        )
-            .bind(params.id).bind(params.project_id).bind(params.task_id).bind(params.trigger_type)
-            .bind(status).bind(params.workspace_path).bind(params.mirror_ref).bind(params.dispatch_group_id).execute(&mut *tx).await?;
+        // The insert ADOPTS an existing row. By the time the in-pod supervisor
+        // sends this RPC the host has already created the `task_runs` row at
+        // dispatch, because the run's build-pod permit has a foreign key onto
+        // it and had to be acquired before the Job POST. A plain insert here
+        // would now be a duplicate-key failure on every dispatch. The
+        // `catalog_image_id` binding is unchanged by that: the host's insert
+        // used this same statement, so the column is bound either way.
+        sqlx::query(&format!(
+            "{}{}",
+            crate::repositories::task_run::INSERT_TASK_RUN_SQL,
+            crate::repositories::task_run::ADOPT_EXISTING_TASK_RUN
+        ))
+        .bind(params.id)
+        .bind(params.project_id)
+        .bind(params.task_id)
+        .bind(params.trigger_type)
+        .bind(status)
+        .bind(params.workspace_path)
+        .bind(params.mirror_ref)
+        .bind(params.dispatch_group_id)
+        .execute(&mut *tx)
+        .await?;
         let attempt: Option<(String, Option<String>, i32)> = sqlx::query_as(
             "SELECT task_id, task_run_id, attempt_seq FROM task_attempts WHERE id = $1 FOR UPDATE",
         )
@@ -162,8 +173,18 @@ impl TaskRunOutcomeRepository {
             .await?;
         sqlx::query("INSERT INTO task_run_outcome_facts (task_run_id, attempt_seq, outcome) VALUES ($1, $2, 'observed')")
             .bind(params.id).bind(attempt_seq).execute(&mut *tx).await?;
-        let run = sqlx::query_as("SELECT id, project_id, task_id, trigger_type, status, started_at, ended_at, workspace_path, mirror_ref, dispatch_group_id FROM task_runs WHERE id = $1")
+        let run: djinn_core::models::TaskRunRecord = sqlx::query_as("SELECT id, project_id, task_id, trigger_type, status, started_at, ended_at, workspace_path, mirror_ref, dispatch_group_id FROM task_runs WHERE id = $1")
             .bind(params.id).fetch_one(&mut *tx).await?;
+        // The insert above adopts an existing row instead of colliding with it,
+        // so re-read what it adopted. A run id already bound to a different task
+        // or project must still fail, and inside this transaction the failure
+        // rolls the attempt association back with it. This is the integrity the
+        // duplicate-key error used to provide for free.
+        if run.task_id != params.task_id || run.project_id != params.project_id {
+            return Err(DbError::InvalidData(
+                "task run id is already bound to a different task".into(),
+            ));
+        }
         tx.commit().await?;
         Ok(run)
     }
@@ -841,6 +862,173 @@ mod tests {
                 .is_none(),
             "the rejected transaction must leave no task-run row, bound or otherwise"
         );
+    }
+
+    /// Dispatch creates the `task_runs` row on the host so the run's build-pod
+    /// permit has a foreign-key parent. The in-pod supervisor's
+    /// `create_task_run` RPC then arrives for the same id and must ADOPT that
+    /// row.
+    ///
+    /// This is the other half of the ordering fix, and it is the half that
+    /// breaks loudly: without the adoption clause this call is a duplicate-key
+    /// violation on the primary key, and every dispatch fails at the worker's
+    /// first RPC instead of at the permit.
+    ///
+    /// Mutation: delete `ADOPT_EXISTING_TASK_RUN` from the insert in
+    /// `create_run_for_attempt` and this test fails on the `expect` below with a
+    /// unique-violation.
+    #[tokio::test]
+    async fn the_in_pod_rpc_adopts_the_task_runs_row_dispatch_already_created() {
+        let db = Database::open_in_memory().unwrap();
+        let (project_id, task_id) = create_task(&db).await;
+        let runs = crate::repositories::task_run::TaskRunRepository::new(db.clone());
+
+        // A selected catalog image, so the binding the shared insert snapshots
+        // can be observed rather than assumed.
+        let images = crate::repositories::image::ImageRepository::new(db.clone());
+        let image_id = format!(
+            "catalog-{}",
+            &uuid::Uuid::now_v7().simple().to_string()[..16]
+        );
+        images.create(&image_id, "adopt", None, "{}").await.unwrap();
+        images
+            .set_project_image(&project_id, Some(&image_id))
+            .await
+            .unwrap();
+
+        let attempt = TaskAttemptRepository::new(db.clone())
+            .create_or_get_pending(CreateTaskAttemptParams {
+                id: &uuid::Uuid::now_v7().to_string(),
+                task_id: &task_id,
+                role: "worker",
+                dispatch_key: "adopt-host-created-row",
+                session_id: None,
+                attempt_seq: None,
+                dispatch_owner_incarnation_id: None,
+                dispatch_group_id: None,
+            })
+            .await
+            .unwrap();
+
+        let run_id = uuid::Uuid::now_v7().to_string();
+        let params = || CreateTaskRunParams {
+            id: &run_id,
+            project_id: &project_id,
+            task_id: &task_id,
+            trigger_type: TaskRunTrigger::NewTask.as_str(),
+            status: Some("starting"),
+            workspace_path: None,
+            mirror_ref: None,
+            dispatch_group_id: None,
+        };
+
+        // ── the host, at dispatch ──
+        assert!(
+            runs.create_for_dispatch(params()).await.unwrap(),
+            "the first dispatch-time call creates the row"
+        );
+        assert!(
+            !runs.create_for_dispatch(params()).await.unwrap(),
+            "a redispatch of the same run id adopts rather than duplicating"
+        );
+
+        // ── the in-pod supervisor, one Pod boot later ──
+        TaskRunOutcomeRepository::new(db.clone())
+            .create_run_for_attempt(params(), &attempt.id)
+            .await
+            .expect("the in-pod RPC must adopt the row dispatch created, not collide with it");
+
+        let rows: i64 = sqlx::query_scalar("SELECT count(*)::bigint FROM task_runs WHERE id = $1")
+            .bind(&run_id)
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(rows, 1, "exactly one durable run row, created once");
+
+        // The catalog binding is what a naive `ON CONFLICT DO NOTHING` on a
+        // creator that omitted the column would silently leave NULL, which fails
+        // the final-verification completion boundary closed.
+        assert_eq!(
+            runs.catalog_image_id(&run_id).await.unwrap().as_deref(),
+            Some(image_id.as_str()),
+            "the adopted row still carries the catalog image bound at dispatch"
+        );
+
+        // Adoption must not skip the association work the RPC is actually for.
+        let bound: Option<String> =
+            sqlx::query_scalar("SELECT task_run_id FROM task_attempts WHERE id = $1")
+                .bind(&attempt.id)
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+        assert_eq!(bound.as_deref(), Some(run_id.as_str()));
+        assert!(
+            TaskRunOutcomeRepository::new(db.clone())
+                .get_for_attempt(&attempt.id)
+                .await
+                .unwrap()
+                .is_some(),
+            "the outcome fact is still recorded for an adopted run"
+        );
+    }
+
+    /// A run id already bound to a different task must still be refused. The
+    /// adoption clause removed the duplicate-key error that used to provide
+    /// this, so the repository re-reads the row it adopted.
+    ///
+    /// Mutation: delete the `run.task_id != params.task_id` guard from
+    /// `create_run_for_attempt` and this test's `expect_err` fails.
+    #[tokio::test]
+    async fn adoption_refuses_a_run_id_that_belongs_to_a_different_task() {
+        let db = Database::open_in_memory().unwrap();
+        let (project_id, task_id) = create_task(&db).await;
+        let (_other_project_id, other_task_id) = create_task(&db).await;
+        let runs = crate::repositories::task_run::TaskRunRepository::new(db.clone());
+
+        let run_id = uuid::Uuid::now_v7().to_string();
+        runs.create_for_dispatch(CreateTaskRunParams {
+            id: &run_id,
+            project_id: &project_id,
+            task_id: &task_id,
+            trigger_type: TaskRunTrigger::NewTask.as_str(),
+            status: Some("starting"),
+            workspace_path: None,
+            mirror_ref: None,
+            dispatch_group_id: None,
+        })
+        .await
+        .unwrap();
+
+        let attempt = TaskAttemptRepository::new(db.clone())
+            .create_or_get_pending(CreateTaskAttemptParams {
+                id: &uuid::Uuid::now_v7().to_string(),
+                task_id: &other_task_id,
+                role: "worker",
+                dispatch_key: "adopt-wrong-task",
+                session_id: None,
+                attempt_seq: None,
+                dispatch_owner_incarnation_id: None,
+                dispatch_group_id: None,
+            })
+            .await
+            .unwrap();
+
+        TaskRunOutcomeRepository::new(db.clone())
+            .create_run_for_attempt(
+                CreateTaskRunParams {
+                    id: &run_id,
+                    project_id: &project_id,
+                    task_id: &other_task_id,
+                    trigger_type: TaskRunTrigger::NewTask.as_str(),
+                    status: Some("starting"),
+                    workspace_path: None,
+                    mirror_ref: None,
+                    dispatch_group_id: None,
+                },
+                &attempt.id,
+            )
+            .await
+            .expect_err("a run id bound to another task must not be adopted");
     }
 }
 

@@ -305,7 +305,17 @@ impl BuildPodPermitRepository {
         match self.acquire_inner(task_run_id, limit).await {
             Ok(result) => result,
             Err(error) => {
-                tracing::warn!(error = %error, "build pod permit acquisition unavailable");
+                // `Unavailable` is deliberately undifferentiated so this API
+                // fails closed, which means this log line is the *only* place
+                // the actual cause is ever named. It carries `task_run_id`
+                // because without it a foreign-key violation here is
+                // indistinguishable from a pool outage at the other end of the
+                // dispatch log.
+                tracing::warn!(
+                    task_run_id,
+                    error = %error,
+                    "build pod permit acquisition unavailable"
+                );
                 AcquireBuildPodPermitResult::Unavailable
             }
         }
