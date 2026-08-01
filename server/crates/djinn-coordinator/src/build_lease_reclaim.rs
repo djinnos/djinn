@@ -11,8 +11,9 @@
 //!   `Launching`/`Bound`/`Active`/`Suspect` and returns `None` for everything
 //!   else, so a `granted` row is invisible to `reconcile_durable_warm_leases`;
 //! * `BuildLeaseService::expire_deadlines` — the one thing that would move
-//!   `granted` to the recoverable `suspect` — has no production caller at all,
-//!   and even when called it only exchanges one occupying state for another.
+//!   `granted` to the recoverable `suspect` — had no production caller at all
+//!   until 2026-07-30 (see "The `queued` row nothing could see" below), and
+//!   even now it only exchanges one occupying state for another.
 //!
 //! Neither gap is a deadline problem, which is why this module reads no
 //! deadline. (#2605 fixed a real defect one layer over: the shared column list
@@ -90,14 +91,68 @@
 //! Retiring the legacy rows is the point. Leaving them would strand the
 //! cutover's own leftovers against a production reference cap of 3, which is
 //! the outage shape this module was written to end.
+//!
+//! # Presence is not liveness (2026-07-30, v0.7.31)
+//!
+//! Everything above proves a lease ownerless by showing its object is GONE.
+//! That is a strictly weaker proof than it reads as, and the gap is an hour
+//! wide.
+//!
+//! Production, single-node k3s, dispatch paused, every task-run Job at
+//! `Complete` (`succeeded=1`, conditions `Suspended → SuccessCriteriaMet →
+//! Complete`, zero Pods): three `task_invocation` rows sat in `launching`, plus
+//! one in `queued`. They survived ~7 minutes of polling, a full `djinn-server`
+//! rollout restart, and every owning Job reaching a terminal condition. Both
+//! incidents that day were ended by a hand-written SQL `UPDATE`.
+//!
+//! The mechanism is that a finished Job does not disappear. Task-run Jobs carry
+//! `ttlSecondsAfterFinished: 3600`, so for a full hour after the work ends the
+//! object is still listed — and this sweep collapsed the authoritative LIST to
+//! a set of NAMES (`records.into_iter().map(|record| record.name)`), discarding
+//! the `terminal` flag `job_record` had already computed for every one of them.
+//! A listed name short-circuited to "still live". Meanwhile no other path can
+//! retire the row either: `release`/`cancel` need the dead worker's fencing
+//! token, and `abandon_queued` refuses anything past `queued`.
+//!
+//! That also explains the one row that DID clear earlier the same day, which is
+//! the most informative fact in the report: its Job's TTL had already fired, so
+//! the object was genuinely absent and the old proof applied. The difference
+//! between the row that healed and the four that did not was never the lease —
+//! it was whether Kubernetes had gotten around to deleting the Job.
+//!
+//! So the LIST now keeps the terminal flag, and a listed-but-terminal object is
+//! [`OwnerlessProof::ObjectFinished`]. This is still observable state, never
+//! elapsed time: a Job with no terminal condition is live work at any age, and
+//! a degraded API server still yields no proof at all.
+//!
+//! # The `queued` row nothing could see
+//!
+//! The fourth stranded row was `queued`, and it was unreachable by every reaper
+//! in the process for a different reason: `queued` holds no capacity, so it is
+//! not in `OCCUPYING`, so the sweep's own listing filtered it out. The only
+//! thing that retires a queued row is `expire_queued_tx`, which runs INSIDE
+//! `grant_next` — i.e. only when some other lease is being drained. With
+//! dispatch paused, nothing calls `grant_next`, and the row is immortal.
+//! `BuildLeaseRepository::expire_deadlines`, the one method that sweeps queue
+//! deadlines on their own, had no production caller anywhere in the workspace.
+//!
+//! `deploy/kueue/preflight.sh` fences the authority cutover on `state <>
+//! 'terminal'`, which counts `queued`, so that row blocked the cutover
+//! indefinitely while every occupancy-shaped reconciler reported clean.
+//!
+//! The sweep is therefore over NONTERMINAL rows, and the periodic loop that
+//! drives it now also calls `expire_deadlines`. Widening the sweep to `queued`
+//! makes the absence proof vacuous for one population — a `graph_warm` lease
+//! POSTs its Job only AFTER it is granted, so a queued warm lease has no object
+//! and never did — which [`object_predates_lease`] excludes explicitly.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use djinn_db::{
-    BuildLeaseConsumerKind, BuildLeaseRepository, BuildLeaseRow, ReclaimAbsentBuildLeaseInput,
-    ReclaimAbsentBuildLeaseOutcome,
+    BuildLeaseConsumerKind, BuildLeaseRepository, BuildLeaseRow, BuildLeaseState,
+    BuildLeaseTerminalReason, ReclaimAbsentBuildLeaseInput, ReclaimAbsentBuildLeaseOutcome,
 };
 use djinn_k8s::{
     ObjectPresence, WorkloadInventory, WorkloadObjectKind, deterministic_warm_job_name,
@@ -118,8 +173,10 @@ const MAX_NAMED_FAILURES: usize = 5;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct BuildLeaseReclaimReport {
-    /// Occupying leases the pass examined.
-    pub occupying: usize,
+    /// Nonterminal leases the pass examined. Named for what it counts: the
+    /// sweep covers `queued` as well as the five occupying states, because
+    /// `queued` was the one population no reaper could see.
+    pub examined: usize,
     /// Leases whose object was proven absent, plus the `task_dispatch` leases
     /// whose owning admission generation is proven terminal. Both are the
     /// "this lease has no owner" population; see `ownerless_dispatch` for the
@@ -130,6 +187,11 @@ pub struct BuildLeaseReclaimReport {
     /// population that produced a total dispatch outage while every
     /// Kubernetes-shaped reconciler reported success.
     pub ownerless_dispatch: usize,
+    /// Leases retired because their Kubernetes object still EXISTS but has
+    /// reached a terminal condition. Reported separately because this is the
+    /// population no absence proof could ever see, and the one that stranded
+    /// three `launching` rows behind three `Complete` Jobs in production.
+    pub finished_object: usize,
     /// Leases retired by this pass.
     pub reclaimed: usize,
     /// Leases that changed after their absence proof and were left alone.
@@ -184,12 +246,17 @@ pub fn lease_object_name(row: &BuildLeaseRow) -> Option<String> {
     }
 }
 
-/// Why one settled occupying lease may be retired.
+/// Why one settled nonterminal lease may be retired.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum OwnerlessProof {
     /// The authoritative LIST and an independent GET both say the object this
     /// lease committed to does not exist.
     ObjectAbsent,
+    /// The object EXISTS and has reached a terminal condition (`Complete` or
+    /// `Failed`). Nothing will run under it again, so the holder that would
+    /// have released this lease is gone — and the object's continued existence
+    /// for its `ttlSecondsAfterFinished` is not evidence to the contrary.
+    ObjectFinished,
     /// The lease is a `task_dispatch` row, and the pre-create dispatch
     /// reservation that was its only possible acquirer no longer exists (Kueue
     /// cutover, o53p). No owner can exist, so this is legacy capacity to
@@ -203,6 +270,41 @@ impl OwnerlessProof {
     /// cut-over was given a sweep of its own.
     fn is_dispatch(self) -> bool {
         matches!(self, Self::DispatchAuthorityDeleted)
+    }
+
+    /// The reason stamped on the retired row, so the ledger records WHICH proof
+    /// ended the lease rather than flattening every reclamation into one word.
+    fn terminal_reason(self) -> BuildLeaseTerminalReason {
+        match self {
+            Self::ObjectAbsent | Self::DispatchAuthorityDeleted => {
+                BuildLeaseTerminalReason::ReclaimedAbsent
+            }
+            Self::ObjectFinished => BuildLeaseTerminalReason::ReclaimedFinished,
+        }
+    }
+}
+
+/// Whether this lease's Kubernetes object is guaranteed to ALREADY EXIST, so
+/// that "no such object" is evidence of a dead owner rather than of an object
+/// that was never going to exist yet.
+///
+/// This is the guard that keeps the absence proof from becoming vacuous now
+/// that the sweep also sees `queued` rows:
+///
+/// * a `task_invocation` lease is asked for from INSIDE a running task-run pod,
+///   so its Job predates the lease in every nonterminal state — absence is real
+///   evidence even while the lease is still queued;
+/// * a `graph_warm` lease is what AUTHORIZES the warm Job POST, so a `queued`
+///   warm lease has no object yet and never did. Probing for it would find
+///   nothing and retire a legitimately queued warm request — one that may sit
+///   untouched behind a full cap for hours, so no settle window saves it.
+///   Only its queue deadline may retire it.
+fn object_predates_lease(row: &BuildLeaseRow) -> bool {
+    match row.key.consumer_kind {
+        BuildLeaseConsumerKind::TaskInvocation => true,
+        BuildLeaseConsumerKind::GraphWarm | BuildLeaseConsumerKind::TaskDispatch => {
+            row.state != BuildLeaseState::Queued
+        }
     }
 }
 
@@ -249,7 +351,7 @@ impl BuildLeaseReclaimer {
     async fn ownerless_proof(
         &self,
         row: &BuildLeaseRow,
-        listed_names: &HashSet<String>,
+        listed: &HashMap<String, bool>,
     ) -> Option<OwnerlessProof> {
         if row.key.consumer_kind == BuildLeaseConsumerKind::TaskDispatch {
             // See the module docs. Nothing constructs `LeaseIdentity::TaskDispatch`
@@ -259,9 +361,18 @@ impl BuildLeaseReclaimer {
             // being true.
             return Some(OwnerlessProof::DispatchAuthorityDeleted);
         }
-        let object_name = lease_object_name(row)?;
-        if listed_names.contains(&object_name) {
+        if !object_predates_lease(row) {
             return None;
+        }
+        let object_name = lease_object_name(row)?;
+        if let Some(&terminal) = listed.get(&object_name) {
+            // The object is here. Whether that means its owner is ALIVE is the
+            // entire question, and for an hour after a task-run Job completes
+            // the answer is no: the Job lingers for its `ttlSecondsAfterFinished`
+            // while the worker that would have sent `release_lease` is gone.
+            // Reading presence as liveness is what stranded three `launching`
+            // rows behind three `Complete` Jobs in production.
+            return terminal.then_some(OwnerlessProof::ObjectFinished);
         }
         (self
             .inventory
@@ -283,8 +394,17 @@ impl BuildLeaseReclaimer {
 
         // An unusable listing is a pass-level blocker: without an authoritative
         // namespace view nothing below is evidence of anything.
-        let listed_names: HashSet<String> = match self.inventory.list().await {
-            Ok(records) => records.into_iter().map(|record| record.name).collect(),
+        //
+        // Each listed object is kept WITH its terminal flag. Collapsing this to
+        // a set of names — which is what it used to be — throws away the only
+        // evidence that separates "this Job is running" from "this Job finished
+        // and is waiting out its TTL", and the second is exactly when a lease
+        // needs retiring.
+        let listed: HashMap<String, bool> = match self.inventory.list().await {
+            Ok(records) => records
+                .into_iter()
+                .map(|record| (record.name, record.terminal))
+                .collect(),
             Err(error) => {
                 report.blockers.push(error);
                 return report;
@@ -293,7 +413,7 @@ impl BuildLeaseReclaimer {
 
         let rows = match self
             .repository
-            .list_occupying_with_settlement(self.settle_window.as_secs() as i64)
+            .list_nonterminal_with_settlement(self.settle_window.as_secs() as i64)
             .await
         {
             Ok(rows) => rows,
@@ -302,19 +422,22 @@ impl BuildLeaseReclaimer {
                 return report;
             }
         };
-        report.occupying = rows.len();
+        report.examined = rows.len();
 
         for (row, settled) in rows {
             let lease = format!("{:?}/{}", row.key.consumer_kind, row.key.consumer_id);
             if !settled {
                 continue;
             }
-            let Some(proof) = self.ownerless_proof(&row, &listed_names).await else {
+            let Some(proof) = self.ownerless_proof(&row, &listed).await else {
                 continue;
             };
             report.absent += 1;
             if proof.is_dispatch() {
                 report.ownerless_dispatch += 1;
+            }
+            if proof == OwnerlessProof::ObjectFinished {
+                report.finished_object += 1;
             }
             let input = ReclaimAbsentBuildLeaseInput {
                 key: row.key.clone(),
@@ -323,6 +446,7 @@ impl BuildLeaseReclaimer {
                 observed_fencing_token: row.fencing_token,
                 observed_bound_pod_uid: row.bound_pod_uid.clone(),
                 observed_updated_at: row.updated_at.clone(),
+                terminal_reason: proof.terminal_reason(),
             };
             match self.repository.reclaim_absent_object(&input).await {
                 Ok(ReclaimAbsentBuildLeaseOutcome::Reclaimed(_)) => {

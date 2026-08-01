@@ -307,7 +307,11 @@ if [ -n "$lease_rows" ]; then
         printf 'DIAGNOSTICS: OCCUPYING rows (they hold capacity, and a revert that resumes over them double-books it):\n%s\n' "$occupying" >&2
     fi
     fail "$EXIT_NONTERMINAL_LEASES" \
-        "$(refusal): the drain fence does not hold — build_leases carries nonterminal rows. Every row must reach state 'terminal' first; on a revert, stale occupying rows must be explicitly cleared before dispatch resumes, or the restored ledger admits against capacity it believes is already taken."
+        "$(refusal): the drain fence does not hold — build_leases carries nonterminal rows. Every row must reach state 'terminal' first; on a revert, stale occupying rows must be explicitly cleared before dispatch resumes, or the restored ledger admits against capacity it believes is already taken.
+REMEDY: a lease whose owning Job has reached a terminal condition, or whose Job is gone, is retired automatically by the server's reclamation sweep within one settle window (default 300s) — wait before intervening. If a row survives that, clear it explicitly:
+  djinn-server build-lease list
+  djinn-server build-lease clear --lease <consumer_kind>:<consumer_id>
+Do NOT hand-write an UPDATE against build_leases: 'clear' takes the ledger's advisory lock and records terminal_reason='operator_cleared', so the intervention is auditable and cannot race a live grant."
 fi
 printf 'PASS: zero nonterminal build_leases rows\n'
 

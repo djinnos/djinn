@@ -997,6 +997,17 @@ fn terminal_result(row: &BuildLeaseRow) -> LeaseResult {
         // retires the spent row on the next `queue`); warm and invocation
         // owners re-enter under a fresh identity.
         BuildLeaseTerminalReason::ReclaimedAbsent => LeaseResult::LeaseUnavailable,
+        // Same conclusion, different evidence: the object still EXISTS but has
+        // reached a terminal condition, so nothing will run under it again and
+        // its holder is equally gone. A finished Job lingers for its whole
+        // `ttlSecondsAfterFinished`, which is why this needed a proof of its
+        // own rather than waiting for the absence one to become true.
+        BuildLeaseTerminalReason::ReclaimedFinished => LeaseResult::LeaseUnavailable,
+        // An operator retired this row by hand. The lease is over by decree
+        // rather than by proof, and the owner -- if one somehow still exists --
+        // must mint a fresh attempt exactly as it would after a reclamation
+        // rather than adopt a lease a human has declared dead.
+        BuildLeaseTerminalReason::OperatorCleared => LeaseResult::LeaseUnavailable,
     }
 }
 fn status(row: &BuildLeaseRow) -> LeaseStatus {
