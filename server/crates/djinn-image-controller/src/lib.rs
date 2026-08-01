@@ -26,7 +26,9 @@
 //!           ├─ render_build_context(controller config, cfg)
 //!           │    └─ generate_dockerfile(cfg, agent_worker, declared protocol)
 //!           ├─ BuildContext::environment_hash(...)   ← hashes what was rendered
-//!           ├─ compare to projects.image_hash
+//!           ├─ catalog_reconcile_decision(row, hash, rendered protocol)
+//!           │    ← compares the ARTIFACT the row points at (its ready tag +
+//!           │      its declaration), never images.config_hash
 //!           ├─ if changed: take in-flight guard + check the cluster-wide
 //!           │    concurrency cap (count live build Jobs; defer if at cap)
 //!           │    ├─ upsert per-build ConfigMap (Dockerfile + scripts)

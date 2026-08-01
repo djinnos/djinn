@@ -11,12 +11,16 @@
 //!    the migration-10 default (`'{}'`) or has `schema_version = 0`,
 //!    skip — the boot reseed hook will seed it on the next server
 //!    boot; until then there's nothing to build.
-//! 2. Compute `djinn_image_builder::compute_environment_hash(&cfg,
-//!    &agent_worker_ref)`. This covers config edits, installer-script
-//!    edits, and worker-binary rebuilds — every input that could
-//!    change the resulting image invalidates the hash.
-//! 3. Compare against `projects.image_hash`. Skip if unchanged and the
-//!    previous build reached `ready`.
+//! 2. Render the Dockerfile, then take the hash from what was rendered
+//!    (`BuildContext::environment_hash`). This covers config edits,
+//!    installer-script edits, worker-binary rebuilds, and the declared
+//!    launcher authority protocol — every input that could change the
+//!    resulting image invalidates the hash.
+//! 3. Ask [`catalog_reconcile_decision`] whether the artifact the row
+//!    already points at IS that build: the hash prefix of the tag it
+//!    went ready at, and the protocol it declares. Deliberately not
+//!    `images.config_hash` — see [`CatalogDecision`] for the production
+//!    wedge that reading an intent instead of a fact produced.
 //! 4. Take the per-project in-flight guard, then check the cluster-wide
 //!    concurrency cap: count the live (pending + running) build Jobs the
 //!    controller owns and defer this project to a later reconcile tick if
@@ -37,6 +41,7 @@ use djinn_db::{
     Database, Image, ImageRepository, ImageStatus, ProjectRepository, ServicePresetRepository,
 };
 use djinn_image_builder::{AgentWorkerImage, BuildContext, generate_dockerfile};
+use djinn_launcher_protocol::LauncherAuthorityProtocol;
 use djinn_stack::environment::EnvironmentConfig;
 use k8s_openapi::api::batch::v1::Job;
 use k8s_openapi::api::core::v1::ConfigMap;
@@ -443,15 +448,22 @@ impl ImageController {
             &self.config.build_version,
         );
 
-        if image.config_hash.as_deref() == Some(new_hash.as_str())
-            && image.status == ImageStatus::READY
-        {
-            debug!(
+        match catalog_reconcile_decision(&image, &new_hash, build_context.launcher_protocol) {
+            CatalogDecision::UpToDate => {
+                debug!(
+                    image_id = %image_id,
+                    hash = %short_hash(&new_hash),
+                    protocol = %build_context.launcher_protocol,
+                    "image_controller: the ready artifact was built from these inputs — skipping"
+                );
+                return Ok(());
+            }
+            CatalogDecision::Build(reason) => info!(
                 image_id = %image_id,
                 hash = %short_hash(&new_hash),
-                "image_controller: catalog image hash unchanged and ready — skipping"
-            );
-            return Ok(());
+                %reason,
+                "image_controller: catalog image must be rebuilt"
+            ),
         }
 
         let subject = BuildSubject::image(&image_id);
@@ -649,6 +661,161 @@ enum BuildDispatch {
     FailedCleared,
 }
 
+/// What a reconcile should do with a catalog row.
+///
+/// # Why this is decided from the artifact and not from `config_hash`
+///
+/// `images.config_hash` is an **intent**: `mark_building` writes it at dispatch,
+/// before any artifact exists, and no completion path ever revisits it —
+/// `mark_ready` writes `tag`, `registry_digest` and
+/// `launcher_authority_protocol`, `mark_failed` writes only the error. So the
+/// cache key and the artifact the row points at are written by different
+/// operations at different times, and any build that is dispatched but whose
+/// result lands differently leaves them describing different builds.
+///
+/// That is not hypothetical. On the VPS, flipping
+/// `DJINN_IMAGE_LAUNCHER_AUTHORITY_PROTOCOL` to `resize-v2` dispatched a build
+/// (so `config_hash` became the `resize-v2` hash), and the row's ready-facts
+/// were subsequently rewritten with the older `leaf-v1` artifact — the watcher
+/// replays every still-present Job as `Event::InitApply` after a restart with an
+/// empty dedupe set, and `mark_ready` is unconditional. The row settled at
+/// `status = ready`, `config_hash = <resize-v2 hash>`,
+/// `launcher_authority_protocol = leaf-v1`. A skip keyed on `config_hash` then
+/// matches on **every** tick, forever: the deployment is configured for
+/// `resize-v2`, serves a `leaf-v1` artifact, and never builds again. Nulling
+/// the hash does not help either, because a retrigger is just another reconcile
+/// through the same predicate.
+///
+/// Deciding from what `mark_ready` wrote — the tag the artifact went ready at,
+/// which carries the hash prefix of the build that produced it, and the
+/// declaration that artifact actually made — cannot get into that state: both
+/// are facts about one artifact, written in one statement. A row whose artifact
+/// declares `leaf-v1` can never satisfy a `resize-v2` deployment no matter what
+/// intent was recorded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CatalogDecision {
+    /// The ready artifact was built from these inputs and declares what this
+    /// deployment declares.
+    UpToDate,
+    /// Build. Carries the input that moved so the log names it.
+    Build(BuildReason),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum BuildReason {
+    /// No artifact has gone ready yet (or the last build failed).
+    NotReady { status: String },
+    /// Ready, but with no content-addressed tag to compare — nothing records
+    /// which build the artifact came from.
+    NoContentAddressedTag { tag: Option<String> },
+    /// A build input other than the protocol changed.
+    HashMoved {
+        artifact: String,
+        configured: String,
+    },
+    /// The artifact declares a different launcher authority protocol than this
+    /// deployment builds. **This is the cutover arm.**
+    ProtocolMoved {
+        artifact: String,
+        configured: String,
+    },
+    /// The stored declaration is not a protocol this plane knows. Rebuild
+    /// rather than guess which component owns the artifact's CPU quota.
+    UndecodableProtocol { stored: String },
+}
+
+impl std::fmt::Display for BuildReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotReady { status } => write!(f, "no ready artifact (status={status})"),
+            Self::NoContentAddressedTag { tag } => {
+                write!(f, "ready artifact has no content-addressed tag ({tag:?})")
+            }
+            Self::HashMoved {
+                artifact,
+                configured,
+            } => write!(
+                f,
+                "build inputs changed: the ready artifact was built at {artifact}, this \
+                 deployment builds {configured}"
+            ),
+            Self::ProtocolMoved {
+                artifact,
+                configured,
+            } => write!(
+                f,
+                "launcher authority protocol changed: the ready artifact declares {artifact}, \
+                 this deployment declares {configured}"
+            ),
+            Self::UndecodableProtocol { stored } => write!(
+                f,
+                "the ready artifact's stored declaration {stored:?} is not a known launcher \
+                 authority protocol"
+            ),
+        }
+    }
+}
+
+/// Decide whether the catalog row already holds the artifact this deployment
+/// would build. See [`CatalogDecision`] for why `config_hash` is not consulted.
+///
+/// `declared` is taken from the [`BuildContext`] that was just rendered — the
+/// same value that would be baked into the artifact and hashed into its tag —
+/// so nothing here restates the deployment's configuration.
+pub(crate) fn catalog_reconcile_decision(
+    image: &Image,
+    new_hash: &str,
+    declared: LauncherAuthorityProtocol,
+) -> CatalogDecision {
+    if image.status != ImageStatus::READY {
+        return CatalogDecision::Build(BuildReason::NotReady {
+            status: image.status.clone(),
+        });
+    }
+
+    let configured = new_hash[..HASH_TAG_PREFIX_LEN.min(new_hash.len())].to_string();
+    let Some(artifact) = image.tag.as_deref().and_then(content_addressed_tag_hash) else {
+        return CatalogDecision::Build(BuildReason::NoContentAddressedTag {
+            tag: image.tag.clone(),
+        });
+    };
+    if artifact != configured {
+        return CatalogDecision::Build(BuildReason::HashMoved {
+            artifact: artifact.to_string(),
+            configured,
+        });
+    }
+
+    // `effective_*`, not `declared_*`: an artifact built before the declaration
+    // existed runs as `leaf-v1`, so an unconfigured deployment must NOT rebuild
+    // the whole catalog on upgrade — and a `resize-v2` deployment must.
+    match image.effective_launcher_protocol() {
+        Ok(artifact_protocol) if artifact_protocol == declared => CatalogDecision::UpToDate,
+        Ok(artifact_protocol) => CatalogDecision::Build(BuildReason::ProtocolMoved {
+            artifact: artifact_protocol.as_wire().to_string(),
+            configured: declared.as_wire().to_string(),
+        }),
+        Err(e) => CatalogDecision::Build(BuildReason::UndecodableProtocol {
+            stored: e.to_string(),
+        }),
+    }
+}
+
+/// The hash-prefix segment of a content-addressed catalog tag
+/// (`<registry>/djinn-image-<id>:<hash-prefix>`).
+///
+/// `None` for anything that is not one — a digest-pinned reference, or a tag
+/// whose segment is not a hash prefix — so an unrecognisable tag is treated as
+/// "cannot tell which build this came from" and rebuilt, never as a match.
+fn content_addressed_tag_hash(tag: &str) -> Option<&str> {
+    if tag.contains('@') {
+        return None;
+    }
+    let (_, segment) = tag.rsplit_once(':')?;
+    (segment.len() == HASH_TAG_PREFIX_LEN && segment.chars().all(|c| c.is_ascii_hexdigit()))
+        .then_some(segment)
+}
+
 /// Render the build context for `cfg` under this deployment's configuration.
 ///
 /// The one place the deployment's
@@ -811,6 +978,212 @@ fn build_slots_available(cap: usize, in_flight: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A catalog row. `config_hash` is separate from the ready-facts on
+    /// purpose — the whole defect is that they can describe different builds.
+    fn image_row(
+        status: &str,
+        config_hash: Option<&str>,
+        tag: Option<&str>,
+        protocol: Option<&str>,
+    ) -> Image {
+        Image {
+            id: "019ea3c1-4938-7bd0-a595-bb34a115b967".into(),
+            name: "Rust + Node".into(),
+            description: None,
+            config: "{}".into(),
+            config_hash: config_hash.map(str::to_string),
+            tag: tag.map(str::to_string),
+            registry_digest: Some(format!("sha256:{}", "c5".repeat(32))),
+            status: status.into(),
+            last_error: None,
+            launcher_authority_protocol: protocol.map(str::to_string),
+        }
+    }
+
+    const RESIZE_HASH: &str = "f4339cd712ef00000000000000000000000000000000000000000000000000ab";
+    const LEAF_TAG: &str =
+        "djinn-zot.djinn.svc.cluster.local:5000/djinn-image-019ea3c1:f9f4f5eb6cf2";
+
+    /// **The production wedge, reproduced.**
+    ///
+    /// The VPS row on 2026-07-31: `status = ready`, `config_hash` equal to the
+    /// hash the `resize-v2` deployment computes (written by `mark_building`
+    /// when the flip DID dispatch a build), and ready-facts still describing
+    /// the older `leaf-v1` artifact (rewritten afterwards by a replayed
+    /// `Event::InitApply` for the older Job). The old predicate —
+    /// `config_hash == computed && status == ready` — takes the skip arm on
+    /// every tick, so the deployment serves `leaf-v1` forever and never builds.
+    ///
+    /// MUTATION: decide from `config_hash` again (`image.config_hash.as_deref()
+    /// == Some(new_hash) && status == READY ⇒ UpToDate`). This test fails: the
+    /// row skips and the cutover is unreachable, which is exactly what shipped.
+    #[test]
+    fn a_row_whose_artifact_declares_the_other_protocol_is_rebuilt_not_skipped() {
+        let wedged = image_row(
+            ImageStatus::READY,
+            // The intent recorded by the build that WAS dispatched…
+            Some(RESIZE_HASH),
+            // …and the artifact the row actually points at, which is not it.
+            Some(LEAF_TAG),
+            Some("leaf-v1"),
+        );
+
+        let decision =
+            catalog_reconcile_decision(&wedged, RESIZE_HASH, LauncherAuthorityProtocol::ResizeV2);
+
+        assert_eq!(
+            decision,
+            CatalogDecision::Build(BuildReason::HashMoved {
+                artifact: "f9f4f5eb6cf2".into(),
+                configured: "f4339cd712ef".into(),
+            }),
+            "a deployment configured for resize-v2 must rebuild a row still pointing at the \
+             leaf-v1 artifact, whatever config_hash claims"
+        );
+        assert_ne!(
+            decision,
+            CatalogDecision::UpToDate,
+            "the skip arm must not be reachable while the catalog serves the other protocol"
+        );
+    }
+
+    /// The same wedge with the tag ALSO matching — the state reached when the
+    /// artifact at the configured hash was rebuilt but its row was overwritten
+    /// with an older artifact's declaration. Only the protocol can catch this,
+    /// so this is the case that fails if the protocol comparison is dropped.
+    ///
+    /// MUTATION: delete the `effective_launcher_protocol` arm and return
+    /// `UpToDate` once the tag matches. This test fails.
+    #[test]
+    fn a_matching_tag_does_not_excuse_a_disagreeing_declaration() {
+        let row = image_row(
+            ImageStatus::READY,
+            Some(RESIZE_HASH),
+            Some("reg:5000/djinn-image-x:f4339cd712ef"),
+            Some("leaf-v1"),
+        );
+
+        assert_eq!(
+            catalog_reconcile_decision(&row, RESIZE_HASH, LauncherAuthorityProtocol::ResizeV2),
+            CatalogDecision::Build(BuildReason::ProtocolMoved {
+                artifact: "leaf-v1".into(),
+                configured: "resize-v2".into(),
+            })
+        );
+    }
+
+    /// The default deployment is still a no-op: a consistent row is skipped,
+    /// and a legacy artifact that declared nothing (every image built before
+    /// migration 166) runs as `leaf-v1` and must NOT trigger a fleet-wide
+    /// rebuild on upgrade.
+    ///
+    /// MUTATION: compare `declared_launcher_protocol()` instead of
+    /// `effective_launcher_protocol()`. The legacy case rebuilds, which is a
+    /// full catalog rebuild for every deployment that upgrades.
+    #[test]
+    fn a_consistent_row_is_still_skipped_and_legacy_rows_do_not_rebuild() {
+        let tag = "reg:5000/djinn-image-x:f4339cd712ef";
+        for declaration in [Some("leaf-v1"), None] {
+            let row = image_row(
+                ImageStatus::READY,
+                Some(RESIZE_HASH),
+                Some(tag),
+                declaration,
+            );
+            assert_eq!(
+                catalog_reconcile_decision(&row, RESIZE_HASH, LauncherAuthorityProtocol::LeafV1),
+                CatalogDecision::UpToDate,
+                "declaration {declaration:?} must not rebuild an unconfigured deployment"
+            );
+        }
+
+        // …and the same legacy row DOES rebuild once the deployment declares
+        // resize-v2 — the artifact runs as leaf-v1 and cannot be relabelled.
+        let legacy = image_row(ImageStatus::READY, Some(RESIZE_HASH), Some(tag), None);
+        assert!(matches!(
+            catalog_reconcile_decision(&legacy, RESIZE_HASH, LauncherAuthorityProtocol::ResizeV2),
+            CatalogDecision::Build(BuildReason::ProtocolMoved { .. })
+        ));
+    }
+
+    /// Everything that is not a ready, content-addressed, decodable artifact
+    /// builds. A row we cannot read is never a row we skip.
+    #[test]
+    fn unreadable_or_unfinished_rows_always_build() {
+        let cases: [(Image, &str); 5] = [
+            (
+                image_row(
+                    "building",
+                    Some(RESIZE_HASH),
+                    Some(LEAF_TAG),
+                    Some("leaf-v1"),
+                ),
+                "building",
+            ),
+            (
+                image_row("failed", Some(RESIZE_HASH), Some(LEAF_TAG), Some("leaf-v1")),
+                "failed",
+            ),
+            (
+                image_row(ImageStatus::READY, Some(RESIZE_HASH), None, Some("leaf-v1")),
+                "no tag",
+            ),
+            (
+                // Digest-pinned reference: carries no build identity.
+                image_row(
+                    ImageStatus::READY,
+                    Some(RESIZE_HASH),
+                    Some("reg:5000/djinn-image-x@sha256:abc"),
+                    Some("leaf-v1"),
+                ),
+                "digest-pinned",
+            ),
+            (
+                image_row(
+                    ImageStatus::READY,
+                    Some(RESIZE_HASH),
+                    Some("reg:5000/djinn-image-x:f4339cd712ef"),
+                    Some("resize-v3"),
+                ),
+                "undecodable declaration",
+            ),
+        ];
+
+        for (row, what) in cases {
+            assert!(
+                matches!(
+                    catalog_reconcile_decision(
+                        &row,
+                        RESIZE_HASH,
+                        LauncherAuthorityProtocol::LeafV1
+                    ),
+                    CatalogDecision::Build(_)
+                ),
+                "{what}: must build"
+            );
+        }
+    }
+
+    /// A build input other than the protocol moving still rebuilds, exactly as
+    /// the `config_hash` predicate did.
+    #[test]
+    fn a_changed_build_input_still_rebuilds() {
+        let row = image_row(
+            ImageStatus::READY,
+            Some(RESIZE_HASH),
+            Some("reg:5000/djinn-image-x:f4339cd712ef"),
+            Some("leaf-v1"),
+        );
+        let moved = "aaaaaaaaaaaa00000000000000000000000000000000000000000000000000ab";
+        assert_eq!(
+            catalog_reconcile_decision(&row, moved, LauncherAuthorityProtocol::LeafV1),
+            CatalogDecision::Build(BuildReason::HashMoved {
+                artifact: "f4339cd712ef".into(),
+                configured: "aaaaaaaaaaaa".into(),
+            })
+        );
+    }
 
     #[test]
     fn format_image_tag_matches_registry_and_project() {
