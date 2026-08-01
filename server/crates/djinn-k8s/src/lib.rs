@@ -95,7 +95,7 @@ pub use workload_inventory::{
     JOB_CONDITION_COMPLETE, JOB_CONDITION_FAILED, KubeWorkloadInventory, LABEL_ADMISSION_DOMAIN,
     LABEL_ADMISSION_GENERATION, LABEL_ADMISSION_WORK_ID, ObjectPresence, UidGetResult,
     WorkloadInventory, WorkloadObjectKind, WorkloadRecord, has_canonical_warm_signature,
-    job_reached_terminal_condition,
+    job_reached_terminal_condition, terminal_job_condition,
 };
 
 /// Re-exported `kube::Client` type so non-owner callers can name the

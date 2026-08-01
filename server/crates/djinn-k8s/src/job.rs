@@ -34,6 +34,7 @@ use crate::launcher::{
 use crate::sidecar::{
     BackingServiceSpec, sidecar_conn_env, sidecar_container, sidecar_dshm_volume,
 };
+use crate::workload_inventory::terminal_job_condition;
 
 /// Label key for the task-run id (Djinn's primary correlator).
 pub const LABEL_TASK_RUN_ID: &str = "djinn.app/task-run-id";
@@ -128,22 +129,7 @@ pub fn taskrun_job_ref_from_job(job: &Job) -> Option<djinn_runtime::TaskrunJobRe
         .as_ref()
         .and_then(|status| status.completion_time.as_ref())
         .map(|time| std::time::SystemTime::from(time.0));
-    let terminal_condition = job.status.as_ref().and_then(|status| {
-        let conditions = status.conditions.as_ref()?;
-        if conditions
-            .iter()
-            .any(|condition| condition.type_ == "Failed")
-        {
-            Some("Failed".to_string())
-        } else if conditions
-            .iter()
-            .any(|condition| condition.type_ == "Complete")
-        {
-            Some("Complete".to_string())
-        } else {
-            None
-        }
-    });
+    let terminal_condition = terminal_job_condition(job.status.as_ref()).map(str::to_owned);
 
     Some(djinn_runtime::TaskrunJobRef {
         job_name,
@@ -1263,6 +1249,86 @@ mod tests {
         assert!(taskrun_job_ref_from_job(&inventory_job(Some("other-job"), None)).is_none());
         assert!(taskrun_job_ref_from_job(&inventory_job(None, Some("not-a-uuid"))).is_none());
         assert!(task_run_id_from_job_name("not-djinn-taskrun-id").is_none());
+    }
+
+    #[test]
+    fn taskrun_job_ref_uses_the_shared_true_terminal_condition_predicate() {
+        use k8s_openapi::api::batch::v1::{JobCondition, JobStatus};
+
+        let cases = [
+            (vec![], None),
+            (vec![("Complete", "False")], None),
+            (vec![("Failed", "FALSE")], None),
+            (vec![("Complete", "tRuE")], Some("Complete")),
+            (vec![("Failed", "True")], Some("Failed")),
+            (
+                vec![("Complete", "True"), ("Failed", "True")],
+                Some("Failed"),
+            ),
+        ];
+
+        for (conditions, expected) in cases {
+            let task_run_id = Uuid::now_v7();
+            let job_name = format!("{TASKRUN_JOB_NAME_PREFIX}{task_run_id}");
+            let mut job = inventory_job(Some(&job_name), None);
+            job.status = Some(JobStatus {
+                conditions: Some(
+                    conditions
+                        .iter()
+                        .map(|(type_, status)| JobCondition {
+                            type_: (*type_).to_owned(),
+                            status: (*status).to_owned(),
+                            ..Default::default()
+                        })
+                        .collect(),
+                ),
+                ..Default::default()
+            });
+            let reference = taskrun_job_ref_from_job(&job).expect("task-run job reference");
+            assert_eq!(reference.terminal_condition.as_deref(), expected);
+            assert_eq!(
+                reference.terminal_condition.is_some(),
+                crate::workload_inventory::job_reached_terminal_condition(job.status.as_ref()),
+                "inventory and retention readers must agree for {conditions:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn complete_false_flows_to_the_acting_retention_consumer_as_live() {
+        use djinn_core::job_retention::{
+            JobRetentionEvidence, RetentionOutcome, SessionEvidence, classify_taskrun_job,
+        };
+        use k8s_openapi::api::batch::v1::{JobCondition, JobStatus};
+
+        let task_run_id = Uuid::now_v7();
+        let job_name = format!("{TASKRUN_JOB_NAME_PREFIX}{task_run_id}");
+        let mut job = inventory_job(Some(&job_name), None);
+        job.status = Some(JobStatus {
+            conditions: Some(vec![JobCondition {
+                type_: "Complete".to_owned(),
+                status: "False".to_owned(),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        });
+        let reference = taskrun_job_ref_from_job(&job).expect("task-run reference");
+        let sessions = [SessionEvidence {
+            status: "running",
+            ended_at: None,
+        }];
+        let decision = classify_taskrun_job(
+            std::time::SystemTime::UNIX_EPOCH,
+            JobRetentionEvidence {
+                created_at: reference.created_at,
+                completed_at: reference.completed_at,
+                terminal_condition: reference.terminal_condition.as_deref(),
+                task_run_status: Some("running"),
+                task_run_ended_at: None,
+                sessions: &sessions,
+            },
+        );
+        assert_eq!(decision.outcome, RetentionOutcome::Live);
     }
 
     #[test]

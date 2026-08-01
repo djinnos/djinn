@@ -101,6 +101,7 @@ async fn resolve(
 ) -> djinn_db::Result<Option<djinn_db::DispatchImage>> {
     let db = Database::open_in_memory().unwrap();
     db.ensure_initialized().await.unwrap();
+    djinn_db::test_support::seed_legacy_launcher_authority_for_test(&db).await;
     ProjectRepository::new(db.clone(), djinn_core::events::EventBus::noop())
         .create_with_id("p1", "p-1", "test", "p1")
         .await
@@ -558,6 +559,7 @@ fn the_rejection_reasons_are_distinct_and_none_is_a_catch_all() {
 async fn an_unreadable_authority_singleton_refuses_every_dispatch() {
     let db = Database::open_in_memory().unwrap();
     db.ensure_initialized().await.unwrap();
+    djinn_db::test_support::seed_legacy_launcher_authority_for_test(&db).await;
     ProjectRepository::new(db.clone(), djinn_core::events::EventBus::noop())
         .create_with_id("p1", "p-1", "test", "p1")
         .await

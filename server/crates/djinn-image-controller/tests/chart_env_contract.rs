@@ -89,16 +89,10 @@ fn every_image_controller_env_var_is_rendered_by_the_server_deployment() {
     }
 }
 
-/// The knob is reachable from `values.yaml` too, and ships unset so an upgrade
-/// changes no artifact and rebuilds no image.
-///
-/// MUTATION: default `launcherAuthorityProtocol` to `resize-v2` in
-/// `values.yaml`. The emptiness assertion fails — which is the point: that
-/// default would silently re-tag and rebuild every catalog image on upgrade,
-/// and hand quota ownership to Kubernetes on clusters whose launcher still
-/// writes leaf `cpu.max`.
+/// The knob is reachable from `values.yaml` too, and HMI6 ships the completed
+/// cutover explicitly rather than relying on a binary fallback.
 #[test]
-fn the_chart_exposes_the_protocol_and_defaults_it_to_unset() {
+fn the_chart_exposes_the_protocol_and_defaults_it_to_resize_v2() {
     let values = read("deploy/helm/djinn/values.yaml");
     let deployment = read("deploy/helm/djinn/templates/deployment-server.yaml");
 
@@ -107,10 +101,9 @@ fn the_chart_exposes_the_protocol_and_defaults_it_to_unset() {
         .find(|line| line.trim_start().starts_with("launcherAuthorityProtocol:"))
         .expect("values.yaml must expose imagePipeline.controller.launcherAuthorityProtocol");
     let value = line.split_once(':').unwrap().1.trim().trim_matches('"');
-    assert!(
-        value.is_empty(),
-        "the chart must ship no protocol selection, got {value:?} — the built-in default is \
-         what every existing deployment already builds"
+    assert_eq!(
+        value, "resize-v2",
+        "the shipped chart must select resize-v2"
     );
 
     assert!(
