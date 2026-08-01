@@ -470,6 +470,7 @@ fn coordinator_actor_for_tests(
         last_auto_dispatch_sweep: StdInstant::now(),
         last_proposal_review_sweep: StdInstant::now(),
         last_graph_refresh: StdInstant::now(),
+        workload_inventory: None,
         graph_warmer: None,
         mirror: None,
         runtime_ops: None,
@@ -1413,6 +1414,9 @@ mod intervention;
 mod pause_is_not_fault;
 mod proposal_spec_integrity_rollout_contract;
 mod provider_fault_attribution;
+/// The stuck-task reaper's observed-cluster witness: a restart-emptied slot
+/// pool must not authorize releasing a live session.
+mod reaper_cluster_witness;
 mod session_reaping;
 mod status_and_stuck;
 mod terminal_gate_latest_row;
