@@ -33,7 +33,10 @@ state `deploy/kueue/zero-capture-gate.sh` verifies. `armed` implies `enabled`;
 {{- fail "kueue.enabled is true but kueue.buildPods is not a number. It is the pods nominalQuota for the ClusterQueue; set a positive integer, or set kueue.enabled=false if the Kueue prerequisite (deploy/helm/djinn-prereqs) is not installed." -}}
 {{- end -}}
 {{- end -}}
-{{- $clusterQueueName := printf "%s-kueue" (include "djinn.fullname" .) | trunc 63 | trimSuffix "-" -}}
+{{- $cohortName := printf "%s-build" (include "djinn.fullname" .) | trunc 63 | trimSuffix "-" -}}
+{{- $taskQueueName := printf "%s-kueue" (include "djinn.fullname" .) | trunc 63 | trimSuffix "-" -}}
+{{- $warmQueueName := printf "%s-warm" (include "djinn.fullname" .) | trunc 63 | trimSuffix "-" -}}
+{{- $scipQueueName := printf "%s-scip" (include "djinn.fullname" .) | trunc 63 | trimSuffix "-" -}}
 apiVersion: kueue.x-k8s.io/v1beta1
 kind: ResourceFlavor
 metadata:
@@ -45,10 +48,13 @@ spec: {}
 apiVersion: kueue.x-k8s.io/v1beta1
 kind: ClusterQueue
 metadata:
-  name: {{ $clusterQueueName }}
+  name: {{ $taskQueueName }}
   labels:
     {{- include "djinn.labels" . | nindent 4 }}
 spec:
+  cohort: {{ $cohortName }}
+  preemption:
+    reclaimWithinCohort: Any
   # WHO MAY SUBMIT — and the reason this line is not optional.
   #
   # MEASURED on a live armed kind cluster (fbiy-B1, 2026-07-30): with this field
@@ -136,7 +142,30 @@ metadata:
   labels:
     {{- include "djinn.labels" . | nindent 4 }}
 spec:
-  clusterQueue: {{ $clusterQueueName }}
+  clusterQueue: {{ $taskQueueName }}
+---
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: ClusterQueue
+metadata:
+  name: {{ $warmQueueName }}
+  labels:
+    {{- include "djinn.labels" . | nindent 4 }}
+spec:
+  cohort: {{ $cohortName }}
+  namespaceSelector: {}
+  queueingStrategy: BestEffortFIFO
+  resourceGroups:
+    - coveredResources: ["pods", "cpu", "memory"]
+      flavors:
+        - name: {{ printf "%s-kueue" (include "djinn.fullname" .) | trunc 63 | trimSuffix "-" }}
+          resources:
+            - name: pods
+              nominalQuota: 0
+              borrowingLimit: 1
+            - name: cpu
+              nominalQuota: 10k
+            - name: memory
+              nominalQuota: 100Ti
 ---
 apiVersion: kueue.x-k8s.io/v1beta1
 kind: LocalQueue
@@ -146,7 +175,7 @@ metadata:
   labels:
     {{- include "djinn.labels" . | nindent 4 }}
 spec:
-  clusterQueue: {{ $clusterQueueName }}
+  clusterQueue: {{ $warmQueueName }}
 ---
 {{- /*
 SCIP joins Kueue. rust-analyzer indexing is genuinely CPU-heavy — the measured
@@ -159,6 +188,29 @@ task-run holds a slot waiting on its project image while that image build is
 queued behind it. Adding a `-build` queue here re-introduces that.
 */ -}}
 apiVersion: kueue.x-k8s.io/v1beta1
+kind: ClusterQueue
+metadata:
+  name: {{ $scipQueueName }}
+  labels:
+    {{- include "djinn.labels" . | nindent 4 }}
+spec:
+  cohort: {{ $cohortName }}
+  namespaceSelector: {}
+  queueingStrategy: BestEffortFIFO
+  resourceGroups:
+    - coveredResources: ["pods", "cpu", "memory"]
+      flavors:
+        - name: {{ printf "%s-kueue" (include "djinn.fullname" .) | trunc 63 | trimSuffix "-" }}
+          resources:
+            - name: pods
+              nominalQuota: 0
+              borrowingLimit: 1
+            - name: cpu
+              nominalQuota: 10k
+            - name: memory
+              nominalQuota: 100Ti
+---
+apiVersion: kueue.x-k8s.io/v1beta1
 kind: LocalQueue
 metadata:
   name: {{ include "djinn.fullname" . }}-scip
@@ -166,5 +218,5 @@ metadata:
   labels:
     {{- include "djinn.labels" . | nindent 4 }}
 spec:
-  clusterQueue: {{ $clusterQueueName }}
+  clusterQueue: {{ $scipQueueName }}
 {{- end }}

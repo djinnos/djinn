@@ -592,9 +592,20 @@ flavor = flavors[0]
 assert flavor.get("spec") == {}, "ResourceFlavor must be empty"
 
 queues = named("ClusterQueue")
-assert len(queues) == 1, f"expected one ClusterQueue, got {len(queues)}"
-queue = queues[0]
+assert len(queues) == 3, f"expected task-run, warm and scip ClusterQueues, got {len(queues)}"
+queue_by_name = {queue["metadata"]["name"]: queue for queue in queues}
+assert set(queue_by_name) == {
+    "kueue-topology-test-djinn-kueue",
+    "kueue-topology-test-djinn-warm",
+    "kueue-topology-test-djinn-scip",
+}, f"unexpected ClusterQueue set: {sorted(queue_by_name)}"
+queue = queue_by_name["kueue-topology-test-djinn-kueue"]
 spec = queue["spec"]
+cohort = spec.get("cohort")
+assert cohort and all(q["spec"].get("cohort") == cohort for q in queues), "all queues must share one cohort"
+assert spec.get("preemption") == {"reclaimWithinCohort": "Any"}, (
+    f"task-run must reclaim its nominal capacity with Any, got {spec.get('preemption')}"
+)
 # BestEffortFIFO, not StrictFIFO: three kinds share a 3-slot queue, so one
 # head-of-line Workload that cannot fit would block everything behind it.
 assert spec.get("queueingStrategy") == "BestEffortFIFO", (
@@ -655,6 +666,28 @@ assert resources["pods"] == int(expected_pods), "pods quota must render buildPod
 assert resources["cpu"] == "10k", f"cpu quota must stay non-binding, got {resources['cpu']}"
 assert resources["memory"] == "100Ti", f"memory quota must stay non-binding, got {resources['memory']}"
 
+for background_name in ["kueue-topology-test-djinn-warm", "kueue-topology-test-djinn-scip"]:
+    background = queue_by_name[background_name]
+    background_spec = background["spec"]
+    assert "preemption" not in background_spec, f"{background_name} must not preempt"
+    assert "stopPolicy" not in background_spec, f"{background_name} must not set stopPolicy"
+    assert background_spec.get("namespaceSelector") == {}, f"{background_name} selector drifted"
+    assert background_spec.get("queueingStrategy") == "BestEffortFIFO"
+    bg_groups = background_spec.get("resourceGroups")
+    assert isinstance(bg_groups, list) and len(bg_groups) == 1
+    assert bg_groups[0].get("coveredResources") == covered
+    bg_entries = bg_groups[0]["flavors"][0]["resources"]
+    bg_resources = {entry["name"]: entry for entry in bg_entries}
+    assert set(bg_resources) == set(covered)
+    assert bg_resources["pods"].get("nominalQuota") == 0
+    assert bg_resources["pods"].get("borrowingLimit") == 1
+    assert bg_resources["cpu"].get("nominalQuota") == "10k"
+    assert bg_resources["memory"].get("nominalQuota") == "100Ti"
+    assert all("borrowingLimit" not in bg_resources[name] for name in ["cpu", "memory"])
+
+assert "withinClusterQueue" not in spec.get("preemption", {})
+assert "stopPolicy" not in spec
+
 # Exactly three LocalQueues. SCIP joins Kueue because rust-analyzer indexing is
 # CPU-heavy and excluding it under-counts the load the quota exists to bound.
 # Image build stays out on purpose: it is an UPSTREAM DEPENDENCY of a task-run,
@@ -668,7 +701,15 @@ assert local_names == {
     "kueue-topology-test-djinn-warm",
     "kueue-topology-test-djinn-scip",
 }, f"unexpected LocalQueue set: {sorted(local_names)}"
-assert all(local.get("spec", {}).get("clusterQueue") == queue["metadata"]["name"] for local in local_queues)
+local_targets = {
+    local["metadata"]["name"]: local.get("spec", {}).get("clusterQueue")
+    for local in local_queues
+}
+assert local_targets == {
+    "kueue-topology-test-djinn-task-run": "kueue-topology-test-djinn-kueue",
+    "kueue-topology-test-djinn-warm": "kueue-topology-test-djinn-warm",
+    "kueue-topology-test-djinn-scip": "kueue-topology-test-djinn-scip",
+}, f"LocalQueue targets drifted: {local_targets}"
 
 namespaces = named("Namespace")
 assert len(namespaces) == 1, f"expected one Namespace, got {len(namespaces)}"

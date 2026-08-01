@@ -473,6 +473,8 @@ spec:
               value: {{ .Values.resources.warm.limits.memory | quote }}
             - name: DJINN_K8S_WARM_JOB_TIMEOUT_SECONDS
               value: {{ .Values.resources.warm.jobTimeoutSeconds | quote }}
+            - name: DJINN_K8S_WARM_JOB_TERMINATION_GRACE_PERIOD_SECONDS
+              value: {{ .Values.resources.warm.terminationGracePeriodSeconds | quote }}
             # SCIP indexer cache retention. Tuning only — djinn-graph carries
             # the same defaults, so a deployment that omits these still gets a
             # bounded cache. The server forwards both onto every warm and
