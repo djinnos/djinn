@@ -742,6 +742,7 @@ mod tests {
         let (event_tx, mut event_rx) = mpsc::channel(4);
         let runner: LifecycleRunner = Arc::new(
             |_task_id,
+             _execution_generation,
              _project_path,
              _model_id,
              _app_state,
@@ -762,7 +763,7 @@ mod tests {
             cancel,
             runner,
         );
-        slot.run_task("task-123".to_string(), "/tmp/project".to_string())
+        slot.run_task("task-123".to_string(), 101, "/tmp/project".to_string())
             .await
             .expect("dispatch should be accepted");
         let evt = tokio::time::timeout(Duration::from_secs(1), event_rx.recv())
@@ -817,6 +818,7 @@ mod tests {
         let (event_tx, mut event_rx) = mpsc::channel(4);
         let runner: LifecycleRunner = Arc::new(
             |_task_id,
+             _execution_generation,
              _project_path,
              _model_id,
              _app_state,
@@ -837,7 +839,7 @@ mod tests {
             cancel,
             runner,
         );
-        slot.run_task("task-kill".to_string(), "/tmp/project".to_string())
+        slot.run_task("task-kill".to_string(), 102, "/tmp/project".to_string())
             .await
             .expect("dispatch should be accepted");
         slot.kill().await.expect("kill should be accepted");
@@ -874,23 +876,21 @@ mod tests {
             Some("test/kill-model")
         );
     }
-    /// Additive re-dispatch path: the slot actor must hand the optional
-    /// resume-via-git lifecycle metadata blob to the lifecycle runner so it
-    /// lands on `TaskRunSpec::resume_lifecycle_metadata`. The runner records
-    /// the metadata it received; the assertion catches the "selector was
-    /// invoked and then dropped" failure mode (the bug the prior review
-    /// flagged in the dispatch path).
+    /// A resume command must carry its admitted generation and metadata all
+    /// the way to the lifecycle runner, which constructs the TaskRunSpec.
     #[tokio::test(flavor = "current_thread")]
-    async fn run_task_with_resume_forwards_metadata_to_runner() {
+    async fn run_task_with_resume_forwards_generation_and_metadata_to_runner() {
         let _tracing_guard = tracing_lock().await;
         let (app_state, cancel, _temp) = test_app_state();
         let (event_tx, mut event_rx) = mpsc::channel(4);
         // Shared slot to capture what the runner received.
-        let observed: std::sync::Arc<std::sync::Mutex<Option<serde_json::Value>>> =
-            std::sync::Arc::new(std::sync::Mutex::new(None));
+        let observed: std::sync::Arc<
+            std::sync::Mutex<Option<(String, i64, Option<serde_json::Value>)>>,
+        > = std::sync::Arc::new(std::sync::Mutex::new(None));
         let observed_clone = observed.clone();
         let runner: LifecycleRunner = Arc::new(
-            move |_task_id,
+            move |task_id,
+                  execution_generation,
                   _project_path,
                   _model_id,
                   _app_state,
@@ -899,7 +899,8 @@ mod tests {
                   resume_lifecycle_metadata| {
                 let observed = observed_clone.clone();
                 Box::pin(async move {
-                    *observed.lock().expect("observed mutex") = resume_lifecycle_metadata;
+                    *observed.lock().expect("observed mutex") =
+                        Some((task_id, execution_generation, resume_lifecycle_metadata));
                     Ok(())
                 })
             },
@@ -929,6 +930,7 @@ mod tests {
         });
         slot.run_task_with_resume(
             "task-resume".to_string(),
+            4242,
             "/tmp/project".to_string(),
             Some(metadata.clone()),
         )
@@ -940,25 +942,25 @@ mod tests {
         let recorded = observed.lock().expect("observed mutex").clone();
         assert_eq!(
             recorded,
-            Some(metadata),
-            "slot pipeline must hand the resume metadata blob to the lifecycle runner \
-             so downstream `TaskRunSpec::resume_lifecycle_metadata` carries the full selection"
+            Some(("task-resume".to_string(), 4242, Some(metadata))),
+            "resume command must preserve its admitted generation and metadata through \
+             the lifecycle runner for the downstream TaskRunSpec"
         );
     }
-    /// Default/off path: the legacy `run_task` entry point must thread
-    /// `None` for the resume metadata, preserving the byte-for-byte
-    /// existing dispatch contract. A bug here would silently resume tasks
-    /// that the coordinator did not select for resume.
+    /// A plain command must preserve its admitted generation and thread no
+    /// resume metadata to the lifecycle runner.
     #[tokio::test(flavor = "current_thread")]
-    async fn run_task_default_off_threads_no_resume_metadata() {
+    async fn run_task_forwards_admitted_generation_without_resume_metadata() {
         let _tracing_guard = tracing_lock().await;
         let (app_state, cancel, _temp) = test_app_state();
         let (event_tx, mut event_rx) = mpsc::channel(4);
-        let observed: std::sync::Arc<std::sync::Mutex<Option<serde_json::Value>>> =
-            std::sync::Arc::new(std::sync::Mutex::new(None));
+        let observed: std::sync::Arc<
+            std::sync::Mutex<Option<(String, i64, Option<serde_json::Value>)>>,
+        > = std::sync::Arc::new(std::sync::Mutex::new(None));
         let observed_clone = observed.clone();
         let runner: LifecycleRunner = Arc::new(
-            move |_task_id,
+            move |task_id,
+                  execution_generation,
                   _project_path,
                   _model_id,
                   _app_state,
@@ -967,7 +969,8 @@ mod tests {
                   resume_lifecycle_metadata| {
                 let observed = observed_clone.clone();
                 Box::pin(async move {
-                    *observed.lock().expect("observed mutex") = resume_lifecycle_metadata;
+                    *observed.lock().expect("observed mutex") =
+                        Some((task_id, execution_generation, resume_lifecycle_metadata));
                     Ok(())
                 })
             },
@@ -980,15 +983,19 @@ mod tests {
             cancel,
             runner,
         );
-        slot.run_task("task-default".to_string(), "/tmp/project".to_string())
-            .await
-            .expect("legacy dispatch should be accepted");
+        slot.run_task(
+            "task-default".to_string(),
+            31337,
+            "/tmp/project".to_string(),
+        )
+        .await
+        .expect("legacy dispatch should be accepted");
         let _ = tokio::time::timeout(Duration::from_secs(1), event_rx.recv()).await;
         let recorded = observed.lock().expect("observed mutex").clone();
         assert_eq!(
-            recorded, None,
-            "legacy run_task must thread `None` for resume metadata; \
-             the disabled/default-off path must not silently inject selections"
+            recorded,
+            Some(("task-default".to_string(), 31337, None)),
+            "plain command must preserve the admitted generation and no resume metadata"
         );
     }
     // ── Compaction-aware deferral tests ────────────────────────────────
@@ -1014,6 +1021,7 @@ mod tests {
         let compacted2 = compacted.clone();
         let runner: LifecycleRunner = Arc::new(
             move |_task_id,
+                  _execution_generation,
                   _project_path,
                   _model_id,
                   app_state: SlotContext,
@@ -1039,7 +1047,7 @@ mod tests {
             cancel,
             runner,
         );
-        slot.run_task("task-ck".to_string(), "/tmp/project".to_string())
+        slot.run_task("task-ck".to_string(), 103, "/tmp/project".to_string())
             .await
             .expect("dispatch accepted");
         // Wait until the runner has entered the compaction guard.
@@ -1080,6 +1088,7 @@ mod tests {
         let compacted2 = compacted.clone();
         let runner: LifecycleRunner = Arc::new(
             move |_task_id,
+                  _execution_generation,
                   _project_path,
                   _model_id,
                   app_state: SlotContext,
@@ -1103,7 +1112,7 @@ mod tests {
             cancel,
             runner,
         );
-        slot.run_task("task-cd".to_string(), "/tmp/project".to_string())
+        slot.run_task("task-cd".to_string(), 104, "/tmp/project".to_string())
             .await
             .expect("dispatch accepted");
         tokio::time::timeout(Duration::from_secs(1), compacted.notified())
@@ -1146,6 +1155,7 @@ mod tests {
         let observed = pause_token_observed.clone();
         let runner: LifecycleRunner = Arc::new(
             move |_task_id,
+                  _execution_generation,
                   _project_path,
                   _model_id,
                   app_state: SlotContext,
@@ -1173,7 +1183,7 @@ mod tests {
             cancel,
             runner,
         );
-        slot.run_task("task-cp".to_string(), "/tmp/project".to_string())
+        slot.run_task("task-cp".to_string(), 105, "/tmp/project".to_string())
             .await
             .expect("dispatch accepted");
         tokio::time::timeout(Duration::from_secs(1), compacted.notified())
@@ -1203,6 +1213,7 @@ mod tests {
         // Runner waits for the kill token without entering compaction.
         let runner: LifecycleRunner = Arc::new(
             |_task_id,
+             _execution_generation,
              _project_path,
              _model_id,
              _app_state,
@@ -1223,7 +1234,7 @@ mod tests {
             cancel,
             runner,
         );
-        slot.run_task("task-nck".to_string(), "/tmp/project".to_string())
+        slot.run_task("task-nck".to_string(), 106, "/tmp/project".to_string())
             .await
             .expect("dispatch accepted");
         // No compaction active — kill must be applied immediately.

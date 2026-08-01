@@ -1682,7 +1682,6 @@ impl From<TaskRunSpecInputs> for TaskRunSpec {
             task_run_id: inputs.task_run_id,
             task_attempt_id: inputs.task_attempt_id,
             task_id: inputs.task_id,
-            execution_generation: 0,
             execution_generation: inputs.execution_generation,
             project_id: inputs.project_id,
             trigger: inputs.trigger,
