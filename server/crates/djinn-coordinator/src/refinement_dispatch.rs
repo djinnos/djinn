@@ -913,9 +913,9 @@ impl CoordinatorActor {
             // Session actually ran — clear the dispatch-failure counter and
             // process the outcome, then close the task so finished phase/round
             // tasks don't linger `open` on the board.
-            if poll_stack::boxed(|| self.process_refinement_outcome(run_id, &session)).await
-                == RefinementOutcomeApplication::Committed
-            {
+            let application =
+                poll_stack::boxed(|| self.process_refinement_outcome(run_id, &session)).await;
+            if application == RefinementOutcomeApplication::Committed {
                 if let Some(state) = self.active_refinements.get_mut(run_id) {
                     state.dispatch_failures = 0;
                 }
@@ -924,6 +924,41 @@ impl CoordinatorActor {
                 })
                 .await;
                 self.refinement_sessions.remove(run_id);
+            } else {
+                // The task is already terminal, so this is a stalled durable
+                // handoff rather than a running-agent retry. Persist the budget
+                // on the intent; an actor rebuild cannot reset it.
+                let repo = djinn_db::ProposalRepository::new(
+                    self.db.clone(),
+                    crate::events::event_bus_for(&self.events_tx),
+                );
+                match repo
+                    .increment_refinement_outcome_attempt(
+                        run_id,
+                        session.generation,
+                        &session.task_id,
+                    )
+                    .await
+                {
+                    Ok(attempts) if attempts >= REFINEMENT_DISPATCH_RETRY_CAP => {
+                        tracing::warn!(run_id, task_id = %session.task_id, attempts,
+                            "refinement outcome retry cap reached; terminalizing stalled handoff");
+                        let _ = self.terminate_refinement(
+                            run_id,
+                            StopReason::AgentFailure {
+                                role: role_for_phase(session.phase),
+                                error_code: "outcome_application_failed".into(),
+                                message: format!(
+                                    "refinement outcome could not be applied after {attempts} durable attempts"
+                                ),
+                            },
+                        ).await;
+                    }
+                    Ok(attempts) => tracing::warn!(run_id, task_id = %session.task_id, attempts,
+                        application = ?application, "stalled refinement handoff will be retried"),
+                    Err(error) => tracing::warn!(run_id, task_id = %session.task_id, %error,
+                        "could not persist refinement outcome attempt"),
+                }
             }
             return;
         }

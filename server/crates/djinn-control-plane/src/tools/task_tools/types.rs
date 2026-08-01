@@ -1470,6 +1470,10 @@ pub struct BoardHealthResponse {
     /// Current evaluator-classified phantom refinement runs across the board.
     #[serde(default)]
     pub refinement_phantom_active_count: i64,
+    /// Materialized intents whose correlated role task is terminal and which
+    /// have no durable successor.
+    #[serde(default)]
+    pub refinement_stalled_handoff_count: i64,
     /// Durable phantom-reap events committed within the database-time 24-hour window.
     #[serde(default)]
     pub refinement_phantom_reaps_24h: i64,

@@ -276,6 +276,17 @@ impl RefinementLoopState {
         self
     }
 
+    /// Rebuild an in-flight projection from the run's captured revision. The
+    /// live proposal head can already contain the Advocate's output and cannot
+    /// be used as the progress baseline.
+    pub fn with_recovered_snapshot_seq(mut self, snapshot_revision_seq: Option<i32>) -> Self {
+        if let Some(seq) = snapshot_revision_seq.filter(|seq| *seq > 0) {
+            self.snapshot_revision_seq = seq;
+            self.current_revision_seq = seq;
+        }
+        self
+    }
+
     /// Attribute this refinement run to a specific user (owner of the spawned
     /// refinement tasks + scope for per-user model resolution). Builder-style so
     /// the existing `new`/`with_config` constructors stay source-compatible.
@@ -1151,6 +1162,13 @@ mod tests {
             let state = RefinementLoopState::new("p1", 7).with_captured_snapshot_seq(absent);
             assert_eq!(state.snapshot_revision_seq, 7);
         }
+    }
+
+    #[test]
+    fn recovered_snapshot_seeds_progress_baseline_from_captured_revision() {
+        let state = RefinementLoopState::new("p1", 9).with_recovered_snapshot_seq(Some(2));
+        assert_eq!(state.snapshot_revision_seq, 2);
+        assert_eq!(state.current_revision_seq, 2);
     }
 
     #[test]

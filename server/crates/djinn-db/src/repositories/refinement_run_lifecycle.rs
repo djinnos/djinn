@@ -14,6 +14,122 @@ use crate::repositories::proposal::ProposalRepository;
 use super::refinement_run::*;
 
 impl ProposalRepository {
+    /// Read-only enumeration keyed only on durable task terminal state and the
+    /// absence of a successor. No age or heartbeat participates.
+    pub async fn load_refinement_stalled_handoffs(
+        &self,
+    ) -> IntentMutationResult<Vec<RefinementStalledHandoff>> {
+        self.db().ensure_initialized().await?;
+        let rows = sqlx::query(
+            "SELECT r.proposal_id, r.id AS run_id, r.generation, i.id AS intent_id, \
+                    t.id AS task_id, t.status AS task_status, t.updated_at AS task_terminal_at, \
+                    i.outcome_attempts, GREATEST(0, EXTRACT(EPOCH FROM \
+                    (transaction_timestamp() - t.updated_at::timestamptz))::BIGINT) AS terminal_elapsed_seconds \
+             FROM refinement_dispatch_intents i \
+             JOIN refinement_runs r ON r.id = i.run_id \
+             JOIN tasks t ON t.id = i.task_id \
+             WHERE r.state = 'running' AND i.state = 'materialized' \
+               AND t.status = 'closed' AND i.next_intent_id IS NULL \
+             ORDER BY t.updated_at, i.id",
+        )
+        .fetch_all(self.db().pool())
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| RefinementStalledHandoff {
+                proposal_id: row.get("proposal_id"),
+                run_id: row.get("run_id"),
+                generation: row.get("generation"),
+                intent_id: row.get("intent_id"),
+                task_id: row.get("task_id"),
+                task_status: row.get("task_status"),
+                task_terminal_at: row.get("task_terminal_at"),
+                terminal_elapsed_seconds: row.get("terminal_elapsed_seconds"),
+                outcome_attempts: row.get("outcome_attempts"),
+            })
+            .collect())
+    }
+
+    /// Atomically consume one durable retry from the exact stalled handoff.
+    pub async fn increment_refinement_outcome_attempt(
+        &self,
+        run_id: &str,
+        generation: i32,
+        task_id: &str,
+    ) -> IntentMutationResult<i32> {
+        self.db().ensure_initialized().await?;
+        let attempts = sqlx::query_scalar::<_, i32>(
+            "UPDATE refinement_dispatch_intents i SET outcome_attempts = outcome_attempts + 1, \
+                    updated_at = to_char(transaction_timestamp() AT TIME ZONE 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') \
+             FROM refinement_runs r, tasks t \
+             WHERE i.task_id = $1 AND i.run_id = $2 AND r.id = i.run_id AND r.generation = $3 \
+               AND r.state = 'running' AND i.state = 'materialized' AND t.id = i.task_id \
+               AND t.status = 'closed' AND i.next_intent_id IS NULL \
+             RETURNING i.outcome_attempts",
+        )
+        .bind(task_id).bind(run_id).bind(generation)
+        .fetch_optional(self.db().pool()).await?;
+        attempts.ok_or_else(|| RefinementIntentMutationError::NotStalledHandoff {
+            run_id: run_id.to_owned(),
+        })
+    }
+
+    /// Guarded operator escape hatch. It uses the same generation fence as all
+    /// other terminal transitions and refuses live/open role work.
+    pub async fn operator_stop_stalled_refinement(
+        &self,
+        run_id: &str,
+        generation: i32,
+        actor: &str,
+        reason: Option<String>,
+    ) -> IntentMutationResult<bool> {
+        if run_id.trim().is_empty() || generation <= 0 || actor.trim().is_empty() {
+            return Err(RefinementIntentMutationError::InvalidRequest(
+                "exact run, positive generation, and actor are required".into(),
+            ));
+        }
+        self.db().ensure_initialized().await?;
+        let stop = djinn_core::refinement_liveness::RefinementStopReason::OperatorStop {
+            actor: actor.to_owned(),
+            reason,
+        };
+        let context = serde_json::to_value(&stop)
+            .map_err(|e| RefinementIntentMutationError::InvalidRequest(e.to_string()))?
+            .get("context")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        let mut tx = self.db().pool().begin().await?;
+        let proposal_id = sqlx::query_scalar::<_, String>(
+            "UPDATE refinement_runs r SET state = 'terminal', terminal_at = \
+                    to_char(transaction_timestamp() AT TIME ZONE 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'), \
+                    stop_tag = 'operator_stop', stop_context = $3, updated_at = \
+                    to_char(transaction_timestamp() AT TIME ZONE 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') \
+             WHERE r.id = $1 AND r.generation = $2 AND r.state = 'running' AND EXISTS ( \
+               SELECT 1 FROM refinement_dispatch_intents i JOIN tasks t ON t.id = i.task_id \
+               WHERE i.run_id = r.id AND i.state = 'materialized' AND i.next_intent_id IS NULL \
+                 AND t.status = 'closed') RETURNING r.proposal_id",
+        )
+        .bind(run_id).bind(generation).bind(&context)
+        .fetch_optional(&mut *tx).await?;
+        let Some(proposal_id) = proposal_id else {
+            return Err(RefinementIntentMutationError::NotStalledHandoff {
+                run_id: run_id.to_owned(),
+            });
+        };
+        let seq = sqlx::query_scalar::<_, i32>(
+            "SELECT latest_revision_seq FROM proposals WHERE id = $1 FOR UPDATE",
+        )
+        .bind(&proposal_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        sqlx::query("INSERT INTO proposal_revisions (id, proposal_id, seq, title, body, body_format, acceptance_criteria, edited_by_user_id, event_kind, event_metadata, refinement_run_id, refinement_stop_tag, refinement_stop_context) VALUES ($1, $2, $3, '', '', 'markdown', '[]', NULL, 'refinement_stop', $4, $5, 'operator_stop', $6)")
+            .bind(uuid::Uuid::now_v7().to_string()).bind(&proposal_id).bind(seq)
+            .bind(serde_json::json!({"reason_tag":"operator_stop","stop_context":context}))
+            .bind(run_id).bind(&context).execute(&mut *tx).await?;
+        tx.commit().await?;
+        Ok(true)
+    }
+
     /// Discover all nonterminal exact runs for restart recovery. Unlike the
     /// dispatcher list this includes parks, which are live but not dispatchable.
     pub async fn load_recoverable_refinement_runs(

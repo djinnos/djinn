@@ -248,9 +248,10 @@ pub use repositories::{
         RefinementAdmissionSource, RefinementDurableProgress, RefinementIntentLease,
         RefinementIntentMutationError, RefinementLifecycleAggregate, RefinementNextIntent,
         RefinementPendingIntent, RefinementRunAggregate, RefinementRunSnapshotError,
-        RefinementRunSnapshotResult, ReleaseRefinementIntentClaimRequest,
+        RefinementRunSnapshotResult, RefinementStalledHandoff, ReleaseRefinementIntentClaimRequest,
         ResolveRefinementHumanReviewRequest, SourceIntentTransitionRequest,
         TerminalRefinementRunFromIntentRequest, TerminalRefinementRunRequest,
+        is_refinement_stalled_handoff,
     },
     repo_graph_cache::{CachedRepoGraph, RepoGraphCacheInsert, RepoGraphCacheRepository},
     repo_graph_generation::{

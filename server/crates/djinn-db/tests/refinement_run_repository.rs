@@ -42,6 +42,79 @@ async fn fixture() -> (Database, ProposalRepository, String) {
 }
 
 #[tokio::test]
+async fn operator_stop_requires_terminal_stalled_handoff_and_records_audit() {
+    let (db, repo, proposal_id) = fixture().await;
+    let admitted = repo
+        .admit_refinement_run(demand(proposal_id.clone(), "operator-stop"))
+        .await
+        .unwrap();
+    let (run_id, intent_id, generation) = match admitted {
+        RefinementAdmissionOutcome::Admitted {
+            run_id,
+            intent_id,
+            generation,
+        } => (run_id, intent_id, generation),
+        _ => unreachable!(),
+    };
+    let project_id = uuid::Uuid::now_v7().to_string();
+    seed_project(&db, &project_id, "operator-stop-project").await;
+    let task_id = seed_task_row(
+        &db,
+        UsageTestTaskSeed {
+            project_id: &project_id,
+            status: "open",
+            close_reason: None,
+            total_reopen_count: 0,
+        },
+    )
+    .await;
+    sqlx::query(
+        "UPDATE refinement_dispatch_intents SET state='materialized', task_id=$2 WHERE id=$1",
+    )
+    .bind(&intent_id)
+    .bind(&task_id)
+    .execute(db.pool())
+    .await
+    .unwrap();
+
+    assert!(matches!(
+        repo.operator_stop_stalled_refinement(&run_id, generation, "test-operator", None)
+            .await,
+        Err(RefinementIntentMutationError::NotStalledHandoff { .. })
+    ));
+    assert_eq!(sqlx::query_scalar::<_, i64>("SELECT count(*) FROM proposal_revisions WHERE refinement_run_id=$1 AND refinement_stop_tag='operator_stop'")
+        .bind(&run_id).fetch_one(db.pool()).await.unwrap(), 0);
+
+    sqlx::query("UPDATE tasks SET status='closed', close_reason='completed' WHERE id=$1")
+        .bind(&task_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+    assert!(
+        repo.operator_stop_stalled_refinement(
+            &run_id,
+            generation,
+            "test-operator",
+            Some("manual recovery".into())
+        )
+        .await
+        .unwrap()
+    );
+    let (state, tag, context) = sqlx::query_as::<_, (String, Option<String>, Option<Value>)>(
+        "SELECT state, stop_tag, stop_context FROM refinement_runs WHERE id=$1",
+    )
+    .bind(&run_id)
+    .fetch_one(db.pool())
+    .await
+    .unwrap();
+    assert_eq!(state, "terminal");
+    assert_eq!(tag.as_deref(), Some("operator_stop"));
+    assert!(context.is_some());
+    assert_eq!(sqlx::query_scalar::<_, i64>("SELECT count(*) FROM proposal_revisions WHERE refinement_run_id=$1 AND refinement_stop_tag='operator_stop'")
+        .bind(&run_id).fetch_one(db.pool()).await.unwrap(), 1);
+}
+
+#[tokio::test]
 async fn human_review_acceptance_and_rejection_failures_are_atomic_and_retryable() {
     let (db, repo, proposal_id) = fixture().await;
     sqlx::query("INSERT INTO proposal_revisions (id, proposal_id, seq, title, body, body_format, acceptance_criteria, event_kind) VALUES ($1, $2, 1, 'captured', 'captured body', 'markdown', '[]', 'spec_revision')").bind(uuid::Uuid::now_v7().to_string()).bind(&proposal_id).execute(db.pool()).await.unwrap();

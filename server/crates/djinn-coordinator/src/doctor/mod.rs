@@ -20,6 +20,7 @@ pub mod leader_tick;
 pub mod live_mover;
 pub mod mismatch_scan;
 pub mod refinement_phantom_active;
+pub mod refinement_stalled_handoff;
 pub mod retrieval_health;
 pub mod stale_cache_roots;
 pub mod stalled_epic;
@@ -39,6 +40,10 @@ pub use refinement_phantom_active::{
     MemoryRefinementPhantomActiveSource, ProposalRepositoryRefinementPhantomActiveSource,
     REFINEMENT_PHANTOM_ACTIVE_CHECK_NAME, RefinementPhantomActiveCheck,
     RefinementPhantomActiveSource,
+};
+pub use refinement_stalled_handoff::{
+    ProposalRepositoryRefinementStalledHandoffSource, REFINEMENT_STALLED_HANDOFF_CHECK_NAME,
+    RefinementStalledHandoffCheck, RefinementStalledHandoffSource,
 };
 pub use stale_cache_roots::{
     CacheObservation, CacheObservationClass, CacheScanConfig, CacheScanReport, LiveProjectSet,
@@ -145,6 +150,13 @@ pub fn register_refinement_phantom_active_check(
     source: Arc<dyn RefinementPhantomActiveSource>,
 ) -> Option<String> {
     registry.register(Arc::new(RefinementPhantomActiveCheck::new(source)))
+}
+
+pub fn register_refinement_stalled_handoff_check(
+    registry: &DoctorRegistry,
+    source: Arc<dyn RefinementStalledHandoffSource>,
+) -> Option<String> {
+    registry.register(Arc::new(RefinementStalledHandoffCheck::new(source)))
 }
 
 /// Register the read-only stalled-epic detector.
