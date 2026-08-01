@@ -116,6 +116,28 @@ pub(super) fn registry_of(handle: &DoctorRegistryHandle) -> &djinn_core::doctor:
     handle
 }
 
+/// Extract the broad Kubernetes workload inventory from the production graph
+/// warmer.
+///
+/// The stuck-task reaper needs an observed-cluster witness it can hold against
+/// the amnesiac in-memory slot pool, and the composition root must not build a
+/// second `kube::Client`. Deriving it here rather than adding another
+/// `CoordinatorDeps` field means the reaper's witness is wired by construction:
+/// any deployment whose warmer owns a live client gets it, and no call site can
+/// forget to pass it.
+///
+/// `None` for any other warmer implementation — an in-process/dev runtime has
+/// no task-run Jobs to observe at all, so there is nothing for the reaper to
+/// corroborate against and it keeps its pre-existing behaviour.
+fn workload_inventory_from_warmer(
+    warmer: Option<&Arc<dyn djinn_runtime::GraphWarmerService>>,
+) -> Option<Arc<dyn djinn_k8s::WorkloadInventory>> {
+    warmer?
+        .as_any()
+        .downcast_ref::<djinn_k8s::graph_warmer::K8sGraphWarmer>()?
+        .workload_inventory()
+}
+
 /// Coordinator actor state.
 ///
 /// Durability boundary: `last_dispatched`, `inflight_dispatches`,
@@ -269,6 +291,21 @@ pub(super) struct CoordinatorActor {
     /// project on a 10-minute cadence.  Tests leave this `None`, which makes
     /// the proactive refresh tick branch a no-op.
     pub(super) graph_warmer: Option<Arc<dyn djinn_runtime::GraphWarmerService>>,
+    /// Independent, observed-cluster witness the stuck-task reaper consults
+    /// before any destructive release/interrupt.
+    ///
+    /// The reaper's other witness — [`Self::pool`] — is an IN-MEMORY map that a
+    /// coordinator restart wipes, so after a rolling deploy every live session
+    /// reads as absent. This is the corroborating source that makes an absence
+    /// mean something; see
+    /// [`crate::dispatch::session_recovery`]'s cluster-witness section.
+    ///
+    /// Derived from the production `K8sGraphWarmer` rather than plumbed
+    /// separately, so it is exactly the `WorkloadInventory` the build-lease
+    /// reclaimer already probes with and cannot be forgotten at a call site.
+    /// `None` off-server (no kube client, hence no task-run Jobs to observe)
+    /// and in tests unless a fake is injected.
+    pub(super) workload_inventory: Option<Arc<dyn djinn_k8s::WorkloadInventory>>,
     /// Shared bare-mirror manager used by `process_approved_tasks` to build
     /// an `AgentContext` whose direct-push fallback can clone ephemeral
     /// workspaces. `None` in tests.
@@ -736,6 +773,7 @@ impl CoordinatorActor {
             last_auto_dispatch_sweep: SystemClock::new().now_instant(),
             last_proposal_review_sweep: SystemClock::new().now_instant(),
             last_graph_refresh: SystemClock::new().now_instant(),
+            workload_inventory: workload_inventory_from_warmer(graph_warmer.as_ref()),
             graph_warmer,
             mirror,
             runtime_ops,
