@@ -67,6 +67,46 @@ scipCache:
   maxIdleHours: 168
 
 # -----------------------------------------------------------------------------
+# Standalone SCIP-index Job
+# -----------------------------------------------------------------------------
+# PR #2697 split the semantic (SCIP) index out of the graph-warm Job into its
+# own Job so a warm would find the index already computed and only warm the
+# cargo/build cache. `enabled` below is the ONLY thing that decides whether that
+# Job is ever created (`djinn_k8s::scip_schedule::ScipIndexScheduler::enabled`,
+# read per tick from `DJINN_K8S_SCIP_INDEX_ENABLED`, default false).
+#
+# Until this block existed the chart rendered NO env var for it, so the switch
+# had no operator surface at all: the split shipped, stayed green, and never
+# ran once in production. Every warm therefore paid the full inline index —
+# measured 2026-07-27 at 3644s of a 5442s warm, i.e. 67% of the warm's wall
+# clock was the phase the split exists to remove. The chart even renders a
+# `<fullname>-scip` LocalQueue (templates/kueue-topology.yaml) to admit Jobs
+# that nothing could create.
+#
+# Arming this creates an additional Pod sized by `resources.scip` — a 16Gi
+# memory limit against a measured ~10 GB peak. Read the cadence gates in
+# `djinn_k8s::scip_schedule::decide` before arming: the Job is additionally
+# skipped while a warm Job is in flight and while the head has not stood still
+# for `quiescenceSeconds`, so on a repository that merges more often than it
+# indexes, arming it costs a Pod and returns little.
+scipIndex:
+  # Master arming switch. False renders the switch explicitly OFF — which is
+  # the point: an env var rendered as "false" is a lever an operator can find
+  # and flip; an absent one is a feature nobody can reach.
+  enabled: false
+  # Cadence floor between dispatches, in seconds. Default 3h.
+  intervalSeconds: 10800
+  # How long the repository head must have stood still before an index is worth
+  # producing, in seconds. Default 3523 — the measured SCIP phase cost. The
+  # cache key folds in source hashes, so an index produced at a head that then
+  # moves serves nobody. 0 disables the gate.
+  quiescenceSeconds: 3523
+  # How long a warm Pod waits for another Pod's in-flight index of the same
+  # tree before indexing inline itself, in seconds. Projected onto every warm
+  # Pod as DJINN_SCIP_CLAIM_WAIT_SECONDS. 0 disables waiting.
+  claimWaitSeconds: 900
+
+# -----------------------------------------------------------------------------
 # Kueue prerequisite topology
 # -----------------------------------------------------------------------------
 # The exact pods quota for Kueue's inert prerequisite queues; task-run and warm

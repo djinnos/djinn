@@ -292,6 +292,8 @@ async fn a_spent_task_dispatch_attempt_is_retired_rather_than_replayed_forever()
     for (task_id, reason) in [
         ("expired-task", BuildLeaseTerminalReason::DeadlineExpired),
         ("reclaimed-task", BuildLeaseTerminalReason::ReclaimedAbsent),
+        ("finished-task", BuildLeaseTerminalReason::ReclaimedFinished),
+        ("operator-task", BuildLeaseTerminalReason::OperatorCleared),
         ("abandoned-task", BuildLeaseTerminalReason::Abandoned),
         ("released-task", BuildLeaseTerminalReason::Released),
         ("cancelled-task", BuildLeaseTerminalReason::Cancelled),
@@ -327,11 +329,44 @@ async fn a_spent_task_dispatch_attempt_is_retired_rather_than_replayed_forever()
                         observed_fencing_token: granted.fencing_token,
                         observed_bound_pod_uid: granted.bound_pod_uid.clone(),
                         observed_updated_at: granted.updated_at.clone(),
+                        terminal_reason: BuildLeaseTerminalReason::ReclaimedAbsent,
                     })
                     .await
                     .unwrap(),
                     ReclaimAbsentBuildLeaseOutcome::Reclaimed(_)
                 ));
+            }
+            // The object still EXISTS but reached a terminal condition — the
+            // proof that ends a lease whose Job is Complete but still inside
+            // its `ttlSecondsAfterFinished` window.
+            BuildLeaseTerminalReason::ReclaimedFinished => {
+                repo.queue(&request).await.unwrap();
+                let granted = grant(&repo, 1).await;
+                assert!(matches!(
+                    repo.reclaim_absent_object(&ReclaimAbsentBuildLeaseInput {
+                        key: request.key.clone(),
+                        observed_state: granted.state,
+                        observed_immutable_identity: granted.immutable_identity.clone(),
+                        observed_fencing_token: granted.fencing_token,
+                        observed_bound_pod_uid: granted.bound_pod_uid.clone(),
+                        observed_updated_at: granted.updated_at.clone(),
+                        terminal_reason: BuildLeaseTerminalReason::ReclaimedFinished,
+                    })
+                    .await
+                    .unwrap(),
+                    ReclaimAbsentBuildLeaseOutcome::Reclaimed(_)
+                ));
+            }
+            // The operator escape hatch `preflight.sh` promises.
+            BuildLeaseTerminalReason::OperatorCleared => {
+                repo.queue(&request).await.unwrap();
+                assert_eq!(
+                    repo.clear_for_operator(std::slice::from_ref(&request.key))
+                        .await
+                        .unwrap()
+                        .len(),
+                    1
+                );
             }
             BuildLeaseTerminalReason::Abandoned => {
                 repo.queue(&request).await.unwrap();

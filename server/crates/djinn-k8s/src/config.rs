@@ -19,6 +19,53 @@ use crate::launcher::CgroupLauncherMode;
 /// followed by the whole warm.
 pub const MEASURED_FULL_WARM_SECONDS: i64 = 5_442;
 
+/// One operator lever whose default is OFF, so an unset environment variable
+/// leaves the feature permanently inert.
+///
+/// The `armed` probe is what makes membership checkable rather than declared:
+/// [`fail_closed_arming_switches_are_all_off_by_default`] reads it against
+/// [`KubernetesConfig::for_testing`], so a switch listed here that is actually
+/// on by default fails the build instead of quietly overstating the contract.
+#[derive(Clone, Copy, Debug)]
+pub struct ArmingSwitch {
+    /// Environment variable the server reads to arm the feature.
+    pub env: &'static str,
+    /// Reads the armed state this switch controls out of a config.
+    pub armed: fn(&KubernetesConfig) -> bool,
+}
+
+/// Every environment variable whose ABSENCE silently disables a whole feature.
+///
+/// # Why this list exists as data
+///
+/// A fail-closed switch that no chart renders is not a disabled feature, it is
+/// an unreachable one — there is no supported way to turn it on, and the
+/// deployment looks healthy while the code path never executes. That is exactly
+/// what happened to the standalone SCIP-index Job: PR #2697 split the semantic
+/// index out of the graph-warm Job specifically so a warm would stop paying for
+/// it, `DJINN_K8S_SCIP_INDEX_ENABLED` was made the per-tick arming switch so
+/// that "arming is a config flip, not a redeploy" — and then no chart, no values
+/// file and no deploy script ever set it. The split shipped, stayed green, and
+/// never created a single Job in production, while `kueue-topology.yaml` went on
+/// rendering a `-scip` LocalQueue to admit Jobs nothing could create. Every warm
+/// kept paying the full inline index: 3644s of a measured 5442s warm.
+///
+/// `deploy/helm/djinn/tests/scip-index-arming-render.sh` derives its required
+/// env set from THIS list and fails when the server Deployment does not render
+/// a member. Adding a switch here without a chart surface fails that test;
+/// deleting the chart surface of an existing one fails it too. The list is the
+/// contract, the chart is the obligation.
+pub const FAIL_CLOSED_ARMING_SWITCHES: &[ArmingSwitch] = &[
+    ArmingSwitch {
+        env: "DJINN_K8S_SCIP_INDEX_ENABLED",
+        armed: |cfg: &KubernetesConfig| cfg.scip_index_enabled,
+    },
+    ArmingSwitch {
+        env: "DJINN_KUEUE_ARMED",
+        armed: |cfg: &KubernetesConfig| cfg.kueue_armed,
+    },
+];
+
 /// Configuration for `KubernetesRuntime`.
 ///
 /// Loaded once at djinn-server boot and cloned into the runtime. Fields
@@ -945,5 +992,54 @@ pub(crate) mod tests {
             cfg.warm_job_timeout_seconds,
             MEASURED_FULL_WARM_SECONDS,
         );
+    }
+
+    /// Membership in [`FAIL_CLOSED_ARMING_SWITCHES`] has to be *true*, not
+    /// merely asserted: the chart-render obligation the list creates is only
+    /// justified for a switch that is genuinely off until something sets it.
+    ///
+    /// A switch that is on by default needs no chart surface to be reachable,
+    /// so listing it here would inflate the contract with an entry whose
+    /// absence from the chart costs nothing — and the next reader would trust
+    /// the list less. Probing the config is what keeps the list honest.
+    #[test]
+    fn fail_closed_arming_switches_are_all_off_by_default() {
+        let cfg = KubernetesConfig::for_testing();
+        assert!(
+            !FAIL_CLOSED_ARMING_SWITCHES.is_empty(),
+            "the fail-closed arming-switch list is empty; the chart-render \
+             contract in deploy/helm/djinn/tests/scip-index-arming-render.sh \
+             would then assert nothing at all"
+        );
+        for switch in FAIL_CLOSED_ARMING_SWITCHES {
+            assert!(
+                !(switch.armed)(&cfg),
+                "{} is listed as a FAIL-CLOSED arming switch but the shipped \
+                 default already has its feature armed. Either the default \
+                 changed (and the switch no longer needs a chart surface to be \
+                 reachable), or the probe reads the wrong field.",
+                switch.env,
+            );
+        }
+    }
+
+    /// Duplicate entries would let one charted switch satisfy the render
+    /// contract twice while a second, genuinely unrendered switch hid behind
+    /// the same name.
+    #[test]
+    fn fail_closed_arming_switches_are_uniquely_named() {
+        let mut seen = std::collections::BTreeSet::new();
+        for switch in FAIL_CLOSED_ARMING_SWITCHES {
+            assert!(
+                switch.env.starts_with("DJINN_"),
+                "{} does not look like a djinn env var",
+                switch.env
+            );
+            assert!(
+                seen.insert(switch.env),
+                "{} is listed twice in FAIL_CLOSED_ARMING_SWITCHES",
+                switch.env
+            );
+        }
     }
 }

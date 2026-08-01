@@ -82,6 +82,21 @@ fn agent_context() {
 pub async fn become_leader(&self) {
     crate::task_run_resize_reconcile::spawn(self.clone());
 }
+// The build-lease maintenance tick. The reclaimer must be CONSTRUCTED and
+// DRIVEN, and the deadline sweep must actually run: a reaper that is built and
+// never ticked is the exact shape this guard exists to catch.
+fn initialize_graph_warmer(&self) {
+    let lease_reclaimer = warmer.workload_inventory().map(|inventory| {
+        Arc::new(BuildLeaseReclaimer::new(repo, inventory))
+    });
+    let cap_refresh_lease = self.inner.build_lease.clone();
+    tokio::spawn(async move {
+        loop {
+            cap_refresh_lease.expire_deadlines().await;
+            let report = reclaimer.reclaim().await;
+        }
+    });
+}
 EOF
 }
 
@@ -115,6 +130,21 @@ fn agent_context() {
 }
 pub async fn become_leader(&self) {
     crate::task_run_resize_reconcile::spawn(self.clone());
+}
+// The build-lease maintenance tick. The reclaimer must be CONSTRUCTED and
+// DRIVEN, and the deadline sweep must actually run: a reaper that is built and
+// never ticked is the exact shape this guard exists to catch.
+fn initialize_graph_warmer(&self) {
+    let lease_reclaimer = warmer.workload_inventory().map(|inventory| {
+        Arc::new(BuildLeaseReclaimer::new(repo, inventory))
+    });
+    let cap_refresh_lease = self.inner.build_lease.clone();
+    tokio::spawn(async move {
+        loop {
+            cap_refresh_lease.expire_deadlines().await;
+            let report = reclaimer.reclaim().await;
+        }
+    });
 }
 EOF
 }
@@ -232,6 +262,46 @@ path = "src/bin/authority_cutover.rs"
 EOF
 }
 
+# The build-lease reclamation sweep and its operator surface.
+#
+# Both were merged in a state this guard is FOR: the reclaimer could not see the
+# populations it existed to retire, and the operator remedy `preflight.sh`
+# promises ("stale rows must be explicitly cleared") existed in no CLI at all,
+# so production was unwedged twice on 2026-07-30 by a hand-written SQL UPDATE.
+write_build_lease() {
+    mkdir -p -- "$SCRATCH/server/crates/djinn-coordinator/src"
+    cat >"$SCRATCH/server/crates/djinn-coordinator/src/build_lease_reclaim.rs" <<'EOF'
+// Reclaimer fixture: the sweep must read the NONTERMINAL population, so a
+// `queued` row -- the one state with no other reaper -- is reachable at all.
+use djinn_db::BuildLeaseRepository;
+
+impl BuildLeaseReclaimer {
+    pub async fn reclaim(&self) -> BuildLeaseReclaimReport {
+        let rows = self.repository.list_nonterminal_with_settlement(secs).await;
+    }
+}
+EOF
+    mkdir -p -- "$SCRATCH/server/src"
+    cat >"$SCRATCH/server/src/admin.rs" <<'EOF'
+// Operator surface fixture.
+use djinn_db::BuildLeaseRepository;
+
+pub async fn run_admin_command(db: &Database, command: AdminCommand) {
+    match command {
+        AdminCommand::BuildLease { action } => {
+            run_build_lease_action(&BuildLeaseRepository::new(db.clone()), action).await
+        }
+    }
+}
+async fn run_build_lease_action(repository: &BuildLeaseRepository, action: BuildLeaseAction) {
+    match action {
+        BuildLeaseAction::List => repository.list_nonterminal().await,
+        BuildLeaseAction::Clear { leases } => repository.clear_for_operator(&keys).await,
+    }
+}
+EOF
+}
+
 fixture() {
     rm -rf -- "$SCRATCH"
     write_state
@@ -239,6 +309,7 @@ fixture() {
     write_seam
     write_reconcile
     write_cutover
+    write_build_lease
 }
 
 run_guard() {
@@ -501,6 +572,56 @@ mv "$SCRATCH/.tmp" "$SCRATCH/$ROLLOUT"
 expect_fail_naming \
     "dropping the reverse preflight call fails the anchor" \
     "clear_preflight"
+
+# 22. The build-lease reclaimer is CONSTRUCTED but never driven. This is the
+#     shape the campaign keeps finding: a reaper wired and never spawned, or
+#     spawned and never ticked. It looks identical to a working one until a
+#     stranded lease holds the cap for an hour.
+fixture
+grep -v 'reclaimer.reclaim().await' "$SCRATCH/$STATE" >"$SCRATCH/.tmp"
+mv "$SCRATCH/.tmp" "$SCRATCH/$STATE"
+expect_fail_naming \
+    "a reclaimer that is built but never driven fails the anchor" \
+    "reclaimer"
+
+# 23. The periodic deadline sweep is dropped. `expire_deadlines` had ZERO
+#     production callers until 2026-07-30, which is why a `queued` build lease
+#     was immortal whenever no other lease happened to be draining.
+fixture
+grep -v 'cap_refresh_lease.expire_deadlines().await' "$SCRATCH/$STATE" >"$SCRATCH/.tmp"
+mv "$SCRATCH/.tmp" "$SCRATCH/$STATE"
+expect_fail_naming \
+    "dropping the periodic deadline sweep fails, naming the symbol" \
+    "BuildLeaseService::expire_deadlines has ZERO production callers"
+
+# 24. The sweep narrows back to the occupying population, so a `queued` row is
+#     invisible again and no reaper anywhere can retire it.
+fixture
+grep -v 'list_nonterminal_with_settlement' \
+    "$SCRATCH/server/crates/djinn-coordinator/src/build_lease_reclaim.rs" >"$SCRATCH/.tmp"
+mv "$SCRATCH/.tmp" "$SCRATCH/server/crates/djinn-coordinator/src/build_lease_reclaim.rs"
+expect_fail_naming \
+    "a sweep that stops reading the nonterminal population fails, naming the symbol" \
+    "BuildLeaseRepository::list_nonterminal_with_settlement has ZERO production callers"
+
+# 25. The operator escape hatch is defined but no longer dispatched from
+#     `run_admin_command`, so `preflight.sh` again names a remedy that does not
+#     exist and SQL is the only way out.
+fixture
+grep -v 'AdminCommand::BuildLease' "$SCRATCH/server/src/admin.rs" >"$SCRATCH/.tmp"
+mv "$SCRATCH/.tmp" "$SCRATCH/server/src/admin.rs"
+expect_fail_naming \
+    "an operator subcommand nothing dispatches fails the anchor" \
+    "AdminCommand::BuildLease"
+
+# 26. …and the clear itself, which is the only thing that retires a row a proof
+#     cannot reach.
+fixture
+grep -v 'clear_for_operator' "$SCRATCH/server/src/admin.rs" >"$SCRATCH/.tmp"
+mv "$SCRATCH/.tmp" "$SCRATCH/server/src/admin.rs"
+expect_fail_naming \
+    "an operator clear with no production caller fails, naming the symbol" \
+    "BuildLeaseRepository::clear_for_operator has ZERO production callers"
 
 printf '\n%s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] || exit 1

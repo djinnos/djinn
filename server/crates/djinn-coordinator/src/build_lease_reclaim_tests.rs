@@ -282,7 +282,11 @@ async fn abandoned_grant_wedges_the_cap_until_its_absent_object_is_proven() {
         "failures: {:?}",
         report.failures
     );
-    assert_eq!(report.occupying, 1);
+    // Two nonterminal rows: the phantom `granted` occupant and the `live` warm
+    // still queued behind it. The sweep examines both and retires only the one
+    // it has a proof about — a queued warm has no object to prove anything
+    // with.
+    assert_eq!(report.examined, 2);
     assert_eq!(report.absent, 1);
     assert_eq!(report.reclaimed, 1);
     assert_eq!(report.fenced, 0);
@@ -351,7 +355,7 @@ async fn reclamation_reads_no_deadline_and_retires_bounded_and_unbounded_leases_
         "blockers: {:?}",
         report.blockers
     );
-    assert_eq!(report.occupying, 2);
+    assert_eq!(report.examined, 2);
     assert_eq!(
         report.reclaimed, 2,
         "an unexpired deadline is not a reason to keep a phantom lease, and an \
@@ -379,7 +383,7 @@ async fn a_lease_whose_object_still_exists_is_never_retired() {
     )
     .reclaim()
     .await;
-    assert_eq!(report.occupying, 1);
+    assert_eq!(report.examined, 1);
     assert_eq!(report.absent, 0, "the object was listed; nothing is absent");
     assert_eq!(report.reclaimed, 0);
     assert_eq!(
@@ -403,7 +407,7 @@ async fn an_uncertain_probe_is_never_proof_of_absence() {
     let report = reclaimer(&repository, NamespaceInventory::uncertain())
         .reclaim()
         .await;
-    assert_eq!(report.occupying, 1);
+    assert_eq!(report.examined, 1);
     assert_eq!(report.absent, 0, "`Uncertain` is never proof");
     assert_eq!(report.reclaimed, 0);
     assert_eq!(
@@ -471,7 +475,7 @@ async fn an_unsettled_lease_is_not_judged_by_a_listing_it_could_predate() {
     )
     .reclaim()
     .await;
-    assert_eq!(report.occupying, 1);
+    assert_eq!(report.examined, 1);
     assert_eq!(report.absent, 0);
     assert_eq!(report.reclaimed, 0);
 }
@@ -503,6 +507,7 @@ async fn evidence_that_predates_a_holder_acknowledgement_is_fenced() {
             observed_fencing_token: observed.fencing_token,
             observed_bound_pod_uid: observed.bound_pod_uid.clone(),
             observed_updated_at: observed.updated_at.clone(),
+            terminal_reason: djinn_db::BuildLeaseTerminalReason::ReclaimedAbsent,
         })
         .await
         .unwrap();
@@ -679,5 +684,335 @@ fn no_dispatch_lease_can_ever_be_acquired_again() {
          grounds that no acquirer exists. Replace `DispatchAuthorityDeleted` \
          with a real ownership proof BEFORE landing this:\n{}",
         offenders.join("\n")
+    );
+}
+
+// =============================================================================
+// Presence is not liveness (2026-07-30, v0.7.31)
+// =============================================================================
+//
+// Production, dispatch paused, every task-run Job at `Complete` with zero Pods:
+// three `task_invocation` rows stuck in `launching` and one in `queued`. They
+// outlived ~7 minutes of polling, a full `djinn-server` rollout restart, and
+// every owning Job reaching a terminal condition, and were ended by a
+// hand-written SQL `UPDATE` against production. Twice that day.
+//
+// Nothing below writes a lease row by hand. Every stranded row is produced by
+// `BuildLeaseService` against a real `BuildLeaseRepository`, exactly as a worker
+// that dies mid-invocation leaves one.
+
+use djinn_supervisor::services::TaskInvocationLeaseIdentity;
+
+const TASK: &str = "019fba8a-a25e-77c3-a38f-b74943e79893";
+const RUN: &str = "019fba9a-5992-7083-9beb-641f878200e1";
+
+fn invocation(invocation_id: &str) -> LeaseIdentity {
+    LeaseIdentity::TaskInvocation(TaskInvocationLeaseIdentity {
+        task_id: TASK.into(),
+        task_run_id: RUN.into(),
+        invocation_id: invocation_id.into(),
+    })
+}
+
+fn invocation_request(invocation_id: &str) -> LeaseQueueRequest {
+    LeaseQueueRequest {
+        identity: invocation(invocation_id),
+        // Deliberately far in the future on BOTH edges. Every assertion below
+        // must hold for a lease that is nowhere near any deadline, because the
+        // fix must be an observable-state proof and not a timeout in disguise.
+        deadlines: LeaseDeadlines {
+            queue_deadline_ms: 100 + 7_200_000,
+            launch_deadline_ms: 100 + 7_200_000,
+        },
+    }
+}
+
+/// The durable key `BuildLeaseService` composes for an invocation identity: the
+/// invocation id alone is the consumer id, while the task and run live in the
+/// immutable identity that `lease_object_name` reads.
+fn invocation_key(invocation_id: &str) -> BuildLeaseKey {
+    BuildLeaseKey {
+        consumer_kind: BuildLeaseConsumerKind::TaskInvocation,
+        consumer_id: invocation_id.to_owned(),
+    }
+}
+
+/// The name of the task-run Job that owns every invocation lease here.
+fn owning_job_name() -> String {
+    djinn_k8s::taskrun_job_name(RUN)
+}
+
+impl NamespaceInventory {
+    /// A namespace holding Jobs that have reached a terminal condition — the
+    /// shape a completed task-run leaves behind for its whole
+    /// `ttlSecondsAfterFinished`, which is 3600s.
+    fn holding_finished(names: &[&str]) -> Self {
+        let mut inventory = Self::holding(names);
+        for record in inventory.records.get_mut() {
+            record.terminal = true;
+        }
+        inventory
+    }
+}
+
+/// Drive a `task_invocation` lease to `launching` — granted, acknowledged, and
+/// then abandoned because the worker holding it died.
+async fn launching_invocation(service: &Arc<BuildLeaseService>, invocation_id: &str) {
+    let queued = service.queue(invocation_request(invocation_id)).await;
+    let LeaseResult::Granted(grant) = queued else {
+        panic!("a queue against a free cap must grant: {queued:?}");
+    };
+    // `grant` is the worker acknowledging the slot: `granted` → `launching`.
+    // This is the last thing the dead worker ever did.
+    assert!(matches!(
+        service
+            .grant(LeaseGrantRequest {
+                identity: invocation(invocation_id),
+                fencing_token: grant.fencing_token,
+            })
+            .await,
+        LeaseResult::Status(_)
+    ));
+}
+
+/// **The production incident, verbatim.**
+///
+/// A `task_invocation` lease sits in `launching`. Its owning task-run Job is
+/// still LISTED — it completed, and Kubernetes keeps a finished Job for its
+/// `ttlSecondsAfterFinished` — but it has reached a terminal condition and has
+/// no Pods. The worker that would have sent `release_lease` is gone.
+///
+/// The mutation this fails on: collapse the LIST back to a set of names
+/// (`records.into_iter().map(|record| record.name)`) and the terminal flag is
+/// gone, the object reads as live, and the lease is never retired. That one
+/// `.map` is the whole defect.
+#[tokio::test]
+async fn a_lease_whose_job_completed_is_retired_even_though_the_job_still_exists() {
+    let (service, repository) = service(1).await;
+    launching_invocation(&service, "inv-1").await;
+    assert_eq!(
+        repository
+            .get(&invocation_key("inv-1"))
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        BuildLeaseState::Launching,
+        "the lease must be stranded in `launching`, the production state"
+    );
+
+    // The namespace still holds the Job. It is Complete.
+    let job = owning_job_name();
+    let report = reclaimer(&repository, NamespaceInventory::holding_finished(&[&job]))
+        .reclaim()
+        .await;
+
+    assert!(
+        report.blockers.is_empty(),
+        "blockers: {:?}",
+        report.blockers
+    );
+    assert!(
+        report.failures.is_empty(),
+        "failures: {:?}",
+        report.failures
+    );
+    assert_eq!(
+        report.finished_object, 1,
+        "the proof must be `the object finished`, not `the object is absent` — \
+         the Job is right there in the listing"
+    );
+    assert_eq!(report.reclaimed, 1);
+
+    let row = repository
+        .get(&invocation_key("inv-1"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.state, BuildLeaseState::Terminal);
+    assert_eq!(
+        row.terminal_reason.as_deref(),
+        Some("reclaimed_finished"),
+        "an operator triaging the ledger must be able to tell `its Job was \
+         collected` from `its Job finished and nobody released`"
+    );
+
+    // And the capacity is genuinely back: a fresh invocation is granted.
+    assert!(
+        matches!(
+            service.queue(invocation_request("inv-2")).await,
+            LeaseResult::Granted(_)
+        ),
+        "retiring the stranded lease must actually free the slot it held"
+    );
+}
+
+/// The other direction, and the one that matters more: a Job that is listed and
+/// has NOT reached a terminal condition is live work, and no proof retires it.
+///
+/// Releasing capacity out from under a running compile is strictly worse than
+/// leaking it. The mutation this fails on: treat every listed object as
+/// finished, or derive `terminal` from the `succeeded`/`failed` Pod counters.
+#[tokio::test]
+async fn a_lease_whose_job_is_still_running_is_never_retired() {
+    let (service, repository) = service(1).await;
+    launching_invocation(&service, "inv-1").await;
+
+    let job = owning_job_name();
+    // `holding` builds records with `terminal: false` — a live Job.
+    let report = reclaimer(&repository, NamespaceInventory::holding(&[&job]))
+        .reclaim()
+        .await;
+
+    assert_eq!(report.examined, 1, "the sweep must have seen the lease");
+    assert_eq!(report.absent, 0);
+    assert_eq!(report.finished_object, 0);
+    assert_eq!(report.reclaimed, 0);
+    assert_eq!(
+        repository
+            .get(&invocation_key("inv-1"))
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        BuildLeaseState::Launching,
+        "a live holder must keep its lease"
+    );
+}
+
+/// A degraded API server proves nothing, and that must stay true on the new
+/// path too: an `Uncertain` probe against a Job that is not in the listing
+/// leaves the lease exactly where it is.
+#[tokio::test]
+async fn an_unanswerable_probe_never_retires_an_invocation_lease() {
+    let (service, repository) = service(1).await;
+    launching_invocation(&service, "inv-1").await;
+
+    let report = reclaimer(&repository, NamespaceInventory::uncertain())
+        .reclaim()
+        .await;
+
+    assert_eq!(report.reclaimed, 0);
+    assert_eq!(
+        repository
+            .get(&invocation_key("inv-1"))
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        BuildLeaseState::Launching
+    );
+}
+
+/// **The fourth stranded row.**
+///
+/// A `queued` lease holds no capacity, so it is not in `OCCUPYING`, so the
+/// sweep's own listing used to filter it out — and the only other thing that
+/// retires a queued row is `expire_queued_tx` inside `grant_next`, which never
+/// runs while dispatch is paused. `preflight.sh` fences the cutover on
+/// `state <> 'terminal'`, so this row blocked the cutover with no code path
+/// anywhere able to clear it.
+///
+/// The mutation this fails on: narrow the sweep back to occupying states only.
+#[tokio::test]
+async fn a_queued_invocation_lease_whose_task_run_finished_is_retired() {
+    let (service, repository) = service(1).await;
+    // Fill the cap so the second invocation is QUEUED rather than granted.
+    launching_invocation(&service, "inv-holder").await;
+    assert!(
+        matches!(
+            service.queue(invocation_request("inv-queued")).await,
+            LeaseResult::Queued(_)
+        ),
+        "the second invocation must queue behind the full cap"
+    );
+    assert_eq!(
+        repository
+            .get(&invocation_key("inv-queued"))
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        BuildLeaseState::Queued
+    );
+
+    // Both leases belong to the same task-run, whose Job has completed.
+    let job = owning_job_name();
+    let report = reclaimer(&repository, NamespaceInventory::holding_finished(&[&job]))
+        .reclaim()
+        .await;
+
+    assert_eq!(
+        report.examined, 2,
+        "the sweep must examine the `queued` row, not just the occupying one"
+    );
+    assert_eq!(report.reclaimed, 2);
+    assert_eq!(
+        repository
+            .get(&invocation_key("inv-queued"))
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        BuildLeaseState::Terminal,
+        "a queued row whose task-run provably finished must reach terminal \
+         without a human writing SQL"
+    );
+}
+
+/// The guard that keeps widening the sweep to `queued` from making the absence
+/// proof vacuous.
+///
+/// A `graph_warm` lease is what AUTHORIZES the warm Job POST, so a queued warm
+/// lease has no Kubernetes object and never did. Probing for it finds nothing —
+/// and a warm request can legitimately sit untouched behind a full cap for
+/// hours, so no settle window rescues it either. Retiring it would silently
+/// cancel a queued warm.
+///
+/// The mutation this fails on: delete `object_predates_lease`, or make it
+/// return `true` unconditionally.
+#[tokio::test]
+async fn a_queued_warm_lease_is_never_retired_on_an_object_proof() {
+    let (service, repository) = service(1).await;
+    // `holder` occupies the cap; `waiting` queues behind it and stays queued.
+    let granted = service.queue(queue_request("holder")).await;
+    let LeaseResult::Granted(grant) = granted else {
+        panic!("the first queue against a free cap must grant: {granted:?}");
+    };
+    assert!(matches!(
+        service
+            .grant(LeaseGrantRequest {
+                identity: warm("holder"),
+                fencing_token: grant.fencing_token,
+            })
+            .await,
+        LeaseResult::Status(_)
+    ));
+    assert!(matches!(
+        service.queue(queue_request("waiting")).await,
+        LeaseResult::Queued(_)
+    ));
+
+    // An EMPTY namespace: the strongest possible absence evidence. The queued
+    // warm still must not be touched, because its object was never going to
+    // exist yet.
+    let report = reclaimer(&repository, NamespaceInventory::empty())
+        .reclaim()
+        .await;
+
+    assert_eq!(
+        repository
+            .get(&key("waiting"))
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        BuildLeaseState::Queued,
+        "a queued warm lease has no object yet; absence is not evidence about it"
+    );
+    assert!(
+        report.examined >= 2,
+        "the queued warm must still be EXAMINED — it is skipped by proof, not by \
+         being invisible: {report:?}"
     );
 }
