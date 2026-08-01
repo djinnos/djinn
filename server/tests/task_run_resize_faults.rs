@@ -35,6 +35,10 @@ use djinn_k8s::pod_resize_fixture::{ApiFault, StoredTaskRunPod};
 use djinn_k8s::runtime::{LauncherObservationError, ObservedLauncherSidecar};
 use djinn_server::task_run_resize_bootstrap::TaskRunPodSurface;
 use djinn_server::task_run_resize_drop::{ResizeDropClock, TaskRunResizeDropBridge};
+use djinn_server::task_run_resize_reconcile::{
+    ResizeReconcileGate, ResizeReconcileMode, ResizeReconcilePass, SkipReason,
+    TaskRunResizeReconciler,
+};
 use djinn_supervisor::services::{
     LeaseFencingToken, LeaseGrantRequest, LeaseIdentity, LeaseQueueRequest, LeaseReleaseRequest,
     LeaseResult, SupervisorServices, TaskInvocationLeaseIdentity,
@@ -541,6 +545,191 @@ async fn a_confirmed_drop_releases_the_build_lease() {
         status_millicores(&ledgers.cluster),
         Some(250),
         "the lease is only returned because the launcher actually came back down"
+    );
+}
+
+// ── The reconciler must not race the worker it speaks for ──────────────────
+
+/// A gate fixed at [`ResizeReconcileMode::Enforce`].
+struct ArmedGate;
+
+impl ResizeReconcileGate for ArmedGate {
+    fn mode(&self) -> ResizeReconcileMode {
+        ResizeReconcileMode::Enforce
+    }
+}
+
+/// A surface that fires one full reconciler sweep from INSIDE the worker's own
+/// drop, at the instant the durable row is at `drop_applying`.
+///
+/// This is the 2026-08-01 production interleaving, made deterministic. The
+/// reconciler is a 30-second timer in production, so the race is decided by
+/// where the tick lands; here it lands exactly where it landed in the incident —
+/// after `apply_drop` wrote `drop_applying` and before the confirming read that
+/// precedes `settle_confirmed`.
+///
+/// The reconciler drives the SAME stored Pod through its own bridge, so a
+/// resumption really does PATCH and really does settle the ledger, exactly as
+/// the second `task_run_resize_drop: returning the launcher to its birth limit`
+/// line in the incident log did.
+struct ReconcilerRacingSurface {
+    cluster: StoredTaskRunPod,
+    reconciler: Arc<TaskRunResizeReconciler>,
+    observations: std::sync::atomic::AtomicU64,
+    passes: std::sync::Mutex<Vec<ResizeReconcilePass>>,
+}
+
+#[async_trait]
+impl TaskRunPodSurface for ReconcilerRacingSurface {
+    async fn observe_launcher(
+        &self,
+        _task_run_id: &str,
+    ) -> Result<Option<ObservedLauncherSidecar>, LauncherObservationError> {
+        if self
+            .observations
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            == 0
+        {
+            let pass = self.reconciler.run_pass().await;
+            self.passes.lock().expect("passes").push(pass);
+        }
+        self.cluster.observe_launcher()
+    }
+
+    async fn resize_launcher_cpu(
+        &self,
+        pod_name: &str,
+        target_millicores: u64,
+    ) -> Result<(), PodResizeError> {
+        self.cluster
+            .resize_launcher_cpu(pod_name, target_millicores)
+            .await
+    }
+
+    async fn uid_fenced_delete(&self, task_run_id: &str, pod_uid: &str) -> Result<(), String> {
+        self.cluster.uid_fenced_delete(task_run_id, pod_uid)
+    }
+}
+
+/// A reconciler tick landing inside the worker's own drop must not turn a drop
+/// that SUCCEEDED into `LeaseUnavailable`.
+///
+/// The production failure, in one sentence: the reconciler resumed a
+/// `drop_applying` row a live worker was already driving, won the
+/// `drop_applying -> birth_confirmed` compare-and-swap, and the worker's own
+/// settle was then rejected — so `release_lease` reported
+/// `Unavailable("permit ... refused the DropApplying -> BirthConfirmed
+/// transition")` and returned `LeaseUnavailable` for a launcher that was
+/// demonstrably back at 250m. Three consecutive `LeaseUnavailable` responses
+/// force `ResizeDropCause::LeaseUnavailableForcedCancel`, so a healthy task run
+/// could be cancelled because the reconciler raced its own worker.
+///
+/// This is asserted at the COMPOSITION — `DirectServices::release_lease` — and
+/// not against `strandedness`, because the harm is the RPC's answer. A test of
+/// the classifier alone cannot see a lease that was refused.
+///
+/// NAMED FAILING MUTATION: restore
+/// `DropRequired | DropApplying | Quarantined => Ok(Strandedness::DropOwed)` in
+/// `task_run_resize_reconcile::strandedness`. The recorded pass then reports
+/// `resumed = 1`, the permit ends at `birth_confirmed` before the worker's
+/// settle runs, and `release_lease` answers `LeaseUnavailable` — this test's
+/// first assertion — while `build_leases` stays occupying.
+#[tokio::test]
+async fn a_reconciler_tick_inside_the_workers_own_drop_does_not_refuse_the_lease() {
+    let ledgers = Ledgers::lifted("racing-reconciler").await;
+    // A LONG-RUNNING task run: the permit row is two hours old before the
+    // worker's drop even begins. The grace must key on when the LIFECYCLE last
+    // moved, not on when the permit was acquired — otherwise every real build's
+    // row is permanently past any grace and this fix ships inert.
+    ledgers
+        .permits
+        .backdate_state_change_for_test(&ledgers.task_run_id, Duration::from_secs(7200))
+        .await
+        .expect("age the permit row");
+
+    // The reconciler's own view of the cluster: the same stored Pod, its own
+    // bridge, exactly as the leader's sweep has in production.
+    let reconciler = Arc::new(TaskRunResizeReconciler::new(
+        ledgers.db.clone(),
+        Arc::new(TaskRunResizeDropBridge::with_surface(
+            ledgers.db.clone(),
+            Arc::new(FixtureSurface(ledgers.cluster.clone())) as Arc<dyn TaskRunPodSurface>,
+            Arc::new(StallingClock::new(64)) as Arc<dyn ResizeDropClock>,
+        )),
+        None,
+        Arc::new(ArmedGate),
+    ));
+    let racing = Arc::new(ReconcilerRacingSurface {
+        cluster: ledgers.cluster.clone(),
+        reconciler: Arc::clone(&reconciler),
+        observations: std::sync::atomic::AtomicU64::new(0),
+        passes: std::sync::Mutex::new(Vec::new()),
+    });
+    let services = direct_services(
+        &ledgers,
+        Arc::clone(&racing) as Arc<dyn TaskRunPodSurface>,
+        Arc::new(StallingClock::new(64)),
+        Duration::from_secs(10),
+    );
+
+    let identity = ledgers.lease_identity();
+    let fence = occupying_lease(&services, &identity).await;
+
+    let released = services
+        .release_lease(LeaseReleaseRequest {
+            identity,
+            fencing_token: fence,
+            candidate_cleanup: false,
+        })
+        .await;
+
+    // THE ASSERTION THE INCIDENT IS ABOUT.
+    assert!(
+        matches!(released, LeaseResult::Released { .. }),
+        "a drop the worker completed must release, even though a reconciler \
+         swept the row mid-drop: {released:?}"
+    );
+
+    // NON-VACUITY: the sweep really did run, really did see this row, and
+    // really did decline it. Without this, a reconciler that was never invoked
+    // would pass the assertion above for the wrong reason.
+    let passes = racing.passes.lock().expect("passes").clone();
+    assert_eq!(
+        passes.len(),
+        1,
+        "exactly one sweep must have raced the drop"
+    );
+    let pass = &passes[0];
+    assert_eq!(
+        pass.scanned, 1,
+        "the sweep must have SEEN the in-flight row; pass was {pass:?}"
+    );
+    assert_eq!(
+        pass.resumed, 0,
+        "the sweep must not resume a drop its own worker is performing; pass \
+         was {pass:?}"
+    );
+    assert_eq!(
+        pass.skipped,
+        vec![(ledgers.task_run_id.clone(), SkipReason::OwnerLive)],
+        "pass was {pass:?}"
+    );
+
+    // Both ledgers, and the enforced fact.
+    assert_eq!(
+        ledgers.permit_state().await,
+        BuildPodPermitState::BirthConfirmed
+    );
+    assert_eq!(
+        ledgers.build_lease_state().await,
+        Some(BuildLeaseState::Terminal),
+        "capacity must be returned for a drop that succeeded"
+    );
+    assert_eq!(
+        status_millicores(&ledgers.cluster),
+        Some(250),
+        "the launcher really did come back down, which is why refusing the \
+         lease was always wrong"
     );
 }
 

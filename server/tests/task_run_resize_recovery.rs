@@ -97,7 +97,8 @@ use djinn_k8s::runtime::{LauncherObservationError, ObservedLauncherSidecar};
 use djinn_server::task_run_resize_bootstrap::TaskRunPodSurface;
 use djinn_server::task_run_resize_drop::{ResizeDropClock, TaskRunResizeDropBridge};
 use djinn_server::task_run_resize_reconcile::{
-    ResizeReconcileGate, ResizeReconcileMode, SkipReason, TaskRunResizeReconciler, run_loop,
+    DROP_TRANSIT_GRACE, ResizeReconcileGate, ResizeReconcileMode, SkipReason,
+    TaskRunResizeReconciler, run_loop,
 };
 use djinn_supervisor::services::{
     LeaseDeadlines, LeaseFencingToken, LeaseGrantRequest, LeaseIdentity, LeaseQueueRequest,
@@ -967,6 +968,224 @@ async fn a_lifted_row_whose_pod_vanished_is_stranded_even_while_the_run_reads_li
         BuildPodPermitState::Released,
         "the write-once identity means this task run can never capture a \
          replacement Pod, so the permit is dead weight nothing else will retire"
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// The drop states a LIVE worker transits
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// A drop a living worker is in the middle of performing is NOT the
+/// reconciler's.
+///
+/// This is the 2026-08-01 production defect. `require_drop` writes
+/// `lifted -> drop_required` and `apply_drop` writes
+/// `drop_required -> drop_applying`, both from inside a `release_lease` that is
+/// still running; the row then sits at `drop_applying` for about a second while
+/// the kubelet actuates. A 30-second sweep landing in that window used to
+/// classify the row `DropOwed` unconditionally and start a second drop against
+/// the same Pod. Both drivers then raced `drop_applying -> birth_confirmed`,
+/// the loser settled `Unavailable`, and `release_lease` answered
+/// `LeaseUnavailable` for a drop that had succeeded — three of which force a
+/// cancel. It happened in 6 of 12 resumptions in one session.
+///
+/// The task run is `running` and the exact Pod is present, which is everything
+/// the previous predicate had to work with. What separates this row from a
+/// genuinely abandoned one is only its AGE, and the sibling test below is the
+/// half that proves the age is a window rather than a blanket refusal.
+///
+/// NAMED FAILING MUTATION: restore
+/// `DropRequired | DropApplying | Quarantined => Ok(Strandedness::DropOwed)` in
+/// `strandedness`. Both rows are then resumed, `resumed` reads 1, a PATCH is
+/// issued against a Pod whose own worker is mid-drop, and this test fails.
+///
+/// NAMED FAILING MUTATION 2: compare the age against `Duration::ZERO` instead
+/// of `self.drop_transit_grace`. Every row is then instantly stale and this
+/// test fails identically, which is what keeps the grace from being tuned to
+/// nothing while the arm that reads it stays in place.
+///
+/// NAMED FAILING MUTATION 3: delete
+/// `IF NEW.state IS DISTINCT FROM OLD.state THEN NEW.state_changed_at := now();`
+/// from migration 170's trigger. The permit row below is deliberately aged two
+/// hours BEFORE the lift, so without the stamp the age never returns to zero
+/// and the precondition assertion fails. That is the shape in which this fix
+/// would otherwise ship inert: every real build's permit row is far older than
+/// any grace, so a column that is only ever set at INSERT grants no grace at
+/// all.
+#[tokio::test]
+async fn a_drop_a_live_worker_is_still_performing_is_not_stolen() {
+    for (index, state) in [
+        BuildPodPermitState::DropRequired,
+        BuildPodPermitState::DropApplying,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let restart = Restart::new().await;
+        let db = restart.db().clone();
+        let suffix = format!("mid-drop-{index}");
+        let (_task_id, task_run_id) = seed_task_run(&db, &suffix).await;
+        let pod_uid = format!("pod-uid-{suffix}");
+        let invocation_id = format!("invocation-{suffix}");
+        let cluster = StoredTaskRunPod::resize_v2(&pod_uid, CEILING);
+        let permits = BuildPodPermitRepository::new(db.clone());
+        let row = captured_permit(&permits, &task_run_id, &pod_uid).await;
+        // A LONG-RUNNING task run: the permit row itself is two hours old.
+        // Backdating BEFORE the lift is what makes this test a statement about
+        // the STATE CHANGE rather than about row age — a grace keyed to when
+        // the permit was acquired would be permanently expired for every real
+        // build, which is the fix quietly doing nothing.
+        permits
+            .backdate_state_change_for_test(&task_run_id, Duration::from_secs(7200))
+            .await
+            .expect("age the permit row");
+        lift_then_park(&permits, &cluster, &row, &pod_uid, &invocation_id, state).await;
+
+        // The worker is ALIVE and its drop is IN FLIGHT: the task run is still
+        // `running`, the exact Pod is still present, and the row reached this
+        // state moments ago.
+        assert!(
+            permits
+                .active(&task_run_id)
+                .await
+                .expect("read permit")
+                .expect("permit exists")
+                .state_age()
+                < Duration::from_secs(5),
+            "{state:?}: precondition — the row must be freshly moved, as a live \
+             worker's own drop leaves it"
+        );
+        cluster.reset_patch_counter();
+
+        let rebuilt = restart.restart(cluster.clone(), Arc::new(RecordingClock::new()));
+        let pass = rebuilt
+            .reconciler(None, Arc::new(ArmedGate))
+            .run_pass()
+            .await;
+
+        assert_eq!(
+            pass.scanned, 1,
+            "{state:?}: the row IS in the scan; pass was {pass:?}"
+        );
+        assert_eq!(
+            pass.resumed, 0,
+            "{state:?}: a drop a live worker is performing must not be resumed; \
+             pass was {pass:?}"
+        );
+        assert_eq!(
+            pass.skipped,
+            vec![(task_run_id.clone(), SkipReason::OwnerLive)],
+            "{state:?}: the row belongs to a live driver"
+        );
+        assert_eq!(
+            cluster.resize_patches(),
+            0,
+            "{state:?}: not one PATCH may be issued against a Pod whose own \
+             worker is mid-drop"
+        );
+        // THE DURABLE ROW, not a log line: the lifecycle is exactly where the
+        // worker left it, so the worker's own `drop_applying -> birth_confirmed`
+        // compare-and-swap will still succeed and its `release_lease` will not
+        // answer `LeaseUnavailable`.
+        assert_eq!(
+            permit_state(&db, &task_run_id).await,
+            state,
+            "{state:?}: the reconciler must leave the row for its owner"
+        );
+        assert_eq!(
+            status_millicores(&cluster),
+            Some(LIFTED_MILLICORES),
+            "{state:?}: the reconciler must not have actuated a downsize the \
+             worker is already actuating"
+        );
+        drop(rebuilt);
+    }
+}
+
+/// NON-VACUITY for the test above: the grace is a WINDOW, and a drop nobody is
+/// performing any more is still resumed.
+///
+/// This is the case neither `owner_is_gone` nor `pod_uid_absent` can see: the
+/// server restarted mid-drop while the task run kept running and its Pod stayed
+/// up. Nothing will ever emit a terminal signal for the row, so without the age
+/// it would hold its lifted ceiling and its `build_leases` row for the rest of
+/// the run. The reconciler must still be the thing that ends that.
+///
+/// NAMED FAILING MUTATION: delete the
+/// `if row.state_age() >= self.drop_transit_grace` arm from `strandedness`, so
+/// the drop states are graced whenever their owner reads live. `resumed` reads
+/// 0, the row stays at `drop_applying` and the launcher stays at 4000m — the
+/// reconciler would have been disabled for exactly the rows it exists for.
+#[tokio::test]
+async fn a_drop_abandoned_past_the_grace_is_resumed_even_while_the_run_reads_live() {
+    let restart = Restart::new().await;
+    let db = restart.db().clone();
+    let (_task_id, task_run_id) = seed_task_run(&db, "abandoned-drop").await;
+    let pod_uid = "pod-uid-abandoned-drop";
+    let invocation_id = "invocation-abandoned-drop";
+    let cluster = StoredTaskRunPod::resize_v2(pod_uid, CEILING);
+    let permits = BuildPodPermitRepository::new(db.clone());
+    let row = captured_permit(&permits, &task_run_id, pod_uid).await;
+    lift_then_park(
+        &permits,
+        &cluster,
+        &row,
+        pod_uid,
+        invocation_id,
+        BuildPodPermitState::DropApplying,
+    )
+    .await;
+
+    // Age the row past the production grace. Everything else is identical to
+    // the test above: the run reads `running`, the Pod is present.
+    permits
+        .backdate_state_change_for_test(&task_run_id, DROP_TRANSIT_GRACE + Duration::from_secs(30))
+        .await
+        .expect("age the row");
+    assert_eq!(
+        TaskRunRepository::new(db.clone())
+            .get(&task_run_id)
+            .await
+            .expect("read run")
+            .expect("run exists")
+            .status,
+        "running",
+        "precondition: nothing has terminalised the task run"
+    );
+    assert!(
+        cluster.observe_launcher().expect("observe").is_some(),
+        "precondition: the Pod is still present, so `pod_uid_absent` cannot be \
+         what strands this row"
+    );
+    cluster.reset_patch_counter();
+
+    let rebuilt = restart.restart(cluster.clone(), Arc::new(RecordingClock::new()));
+    let pass = rebuilt
+        .reconciler(None, Arc::new(ArmedGate))
+        .run_pass()
+        .await;
+
+    assert_eq!(
+        pass.resumed, 1,
+        "a drop older than any live driver could hold it must be resumed; pass \
+         was {pass:?}"
+    );
+    assert_eq!(
+        permit_state(&db, &task_run_id).await,
+        BuildPodPermitState::BirthConfirmed,
+        "the resumed drop must settle the row back at its birth state"
+    );
+    assert_eq!(
+        status_millicores(&cluster),
+        Some(BIRTH_MILLICORES),
+        "the CPU must actually come back, confirmed through \
+         status.initContainerStatuses in MILLICORES"
+    );
+    // The run is still LIVE, so its permit is not dead weight and must survive.
+    // Retiring it here would mean the task run could never lift again.
+    assert_eq!(
+        pass.permits_retired, 0,
+        "a live task run's permit must not be retired; pass was {pass:?}"
     );
 }
 

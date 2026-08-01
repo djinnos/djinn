@@ -32,20 +32,54 @@
 //! the resting state of every captured permit between invocations. A reconciler
 //! that dropped every nonterminal row it found would take the CPU away from
 //! every running build in the cluster on its first tick. So a row is the
-//! reconciler's responsibility only when one of two **worker-independent**
+//! reconciler's responsibility only when one of three **worker-independent**
 //! facts is true:
 //!
-//! 1. **A drop is already owed.** `drop_required`, `drop_applying` and
-//!    `quarantined` are states no live driver rests in — something moved the row
-//!    there and then stopped. Resume unconditionally.
-//! 2. **The owner is gone.** The task run reached a terminal status (or its row
-//!    is gone entirely), or — for a row that is actually holding lifted CPU —
-//!    the exact Pod UID is confirmed absent from a fresh apiserver read.
+//! 1. **The owner is gone.** The task run reached a terminal status, or its row
+//!    is gone entirely.
+//! 2. **The Pod is gone.** The exact Pod UID is confirmed absent from a fresh
+//!    apiserver read.
+//! 3. **Nobody has touched the row for longer than any live driver could hold
+//!    it.** See [`DROP_TRANSIT_GRACE`].
 //!
-//! Both facts are established without asking the worker anything. The task-run
-//! status is written by the coordinator's own Job/session reconciliation, and
-//! Pod absence is read from the apiserver. Neither can be withheld by a process
-//! that has already died.
+//! All three are established without asking the worker anything. The task-run
+//! status is written by the coordinator's own Job/session reconciliation, Pod
+//! absence is read from the apiserver, and `build_pod_permits.state_changed_at`
+//! is stamped by a database trigger on every state change (migration 170).
+//! None of them can be withheld by a process that has already died.
+//!
+//! # The premise that was false: a live worker TRANSITS the drop states
+//!
+//! This module used to classify `drop_required` and `drop_applying` as states
+//! "no live driver rests in" and resume them unconditionally. That is wrong,
+//! and production on 2026-08-01 charged for it. A living worker's own terminal
+//! path writes `lifted -> drop_required` in `require_drop`, then
+//! `drop_required -> drop_applying` in `apply_drop`, and then sits at
+//! `drop_applying` while the kubelet actuates the downsize — about one second.
+//! A 30-second sweep landing in that window found a row it believed nobody
+//! owned:
+//!
+//! ```text
+//! 19:29:36.934  task_run_resize_drop: returning the launcher to its birth limit
+//! 19:29:37.983  task_run_resize_reconcile: resuming a stranded resize row
+//! 19:29:37.985  task_run_resize_drop: returning the launcher to its birth limit
+//! ```
+//!
+//! Both drivers then race `drop_applying -> birth_confirmed`; the loser's
+//! compare-and-swap is rejected, its drop settles [`ResizeDropOutcome`]
+//! `::Unavailable`, and `release_lease` answers `LeaseUnavailable` for a drop
+//! that had in fact succeeded. Three of those force a cancel, so the reconciler
+//! could kill a healthy task run by racing its own worker. It happened in 6 of
+//! 12 resumptions in one session.
+//!
+//! `quarantined` keeps the unconditional treatment, and that asymmetry is
+//! deliberate rather than an oversight: a live driver DOES rest there (the
+//! absence loop is unbounded on purpose), but two drivers converging on
+//! quarantine both issue the same UID-fenced DELETE and both end at
+//! `settle_quarantine`, whose release is idempotent —
+//! `AlreadyReleased` settles as `QuarantinedPodDeleted` exactly as `Released`
+//! does. There is no losing compare-and-swap for a second driver to trip over,
+//! so no `LeaseUnavailable` is manufactured.
 //!
 //! # Two ledgers
 //!
@@ -97,7 +131,8 @@ use tracing::{info, warn};
 
 use crate::server::AppState;
 use crate::task_run_resize_drop::{
-    ResizeDropCause, ResizeDropOutcome, ResizeDropRequest, TaskRunResizeDropBridge,
+    DROP_GATE_BUDGET, ResizeDropCause, ResizeDropOutcome, ResizeDropRequest,
+    TaskRunResizeDropBridge,
 };
 
 /// How often the sweep runs when no override is configured.
@@ -119,6 +154,25 @@ pub const DEFAULT_SWEEP_INTERVAL: Duration = Duration::from_secs(30);
 /// why the reconciler must impose a bound out here instead — otherwise one
 /// unreachable Pod would starve every other stranded row in the sweep.
 pub const DEFAULT_ROW_BUDGET: Duration = Duration::from_secs(45);
+
+/// How long a row may rest in `drop_required` or `drop_applying` before this
+/// module is allowed to conclude that whoever put it there has stopped.
+///
+/// Derived from [`DROP_GATE_BUDGET`] rather than written as a number, because
+/// the quantity being bounded is *how long a live worker can legitimately be
+/// mid-drop*, and that is precisely what the gate budget bounds:
+/// `DirectServices::release_lease` waits at most `DROP_GATE_BUDGET` for
+/// `TaskRunResizeDropBridge::confirm_drop`, which internally waits at most
+/// `DROP_CONFIRMATION_BUDGET` (30s) for the kubelet before quarantining. A
+/// worker that has not settled by then has already been told `Held` and is no
+/// longer in the window this grace protects.
+///
+/// The factor of two is the margin for the second `release_lease` attempt a
+/// worker makes after a `Held` verdict. Widening it trades a longer stranded
+/// lease for a smaller race; narrowing it below `DROP_GATE_BUDGET` re-opens the
+/// defect, because the reconciler would then be able to reach a row while the
+/// handler that owns it is still inside its own wait.
+pub const DROP_TRANSIT_GRACE: Duration = Duration::from_secs(DROP_GATE_BUDGET.as_secs() * 2);
 
 /// Environment variable naming the reconciler's per-tick mode.
 pub const MODE_ENV: &str = "DJINN_RESIZE_RECONCILE";
@@ -290,6 +344,7 @@ pub struct TaskRunResizeReconciler {
     drop_bridge: Arc<TaskRunResizeDropBridge>,
     gate: Arc<dyn ResizeReconcileGate>,
     row_budget: Duration,
+    drop_transit_grace: Duration,
     /// Task runs a pass in this process is currently driving.
     ///
     /// Two invocations of one task run can be concurrent — the runner is
@@ -318,6 +373,7 @@ impl TaskRunResizeReconciler {
             drop_bridge,
             gate,
             row_budget: DEFAULT_ROW_BUDGET,
+            drop_transit_grace: DROP_TRANSIT_GRACE,
             in_flight: Mutex::new(HashSet::new()),
             passes: AtomicU64::new(0),
         }
@@ -327,6 +383,19 @@ impl TaskRunResizeReconciler {
     #[must_use]
     pub const fn with_row_budget(mut self, budget: Duration) -> Self {
         self.row_budget = budget;
+        self
+    }
+
+    /// Override [`DROP_TRANSIT_GRACE`].
+    ///
+    /// Exists so a test can prove that the grace is a WINDOW and not a blanket
+    /// refusal to touch the drop states: with the grace collapsed, a row that
+    /// is otherwise identical to the graced one is picked up. Production never
+    /// calls this — [`spawn`] builds the reconciler through [`Self::new`], so
+    /// the constant is the only value the server ever runs with.
+    #[must_use]
+    pub const fn with_drop_transit_grace(mut self, grace: Duration) -> Self {
+        self.drop_transit_grace = grace;
         self
     }
 
@@ -508,12 +577,33 @@ impl TaskRunResizeReconciler {
     /// grounds to act: an unanswered database is not proof that a worker died.
     async fn strandedness(&self, row: &BuildPodPermitRow) -> Result<Strandedness, ()> {
         match row.state {
-            // A drop is already owed. No live driver rests in these states —
-            // something moved the row here and then stopped, which is exactly
-            // the shape a dead worker or a restarted server leaves behind.
-            BuildPodPermitState::DropRequired
-            | BuildPodPermitState::DropApplying
-            | BuildPodPermitState::Quarantined => Ok(Strandedness::DropOwed),
+            // A live driver rests here for as long as the apiserver takes to
+            // stop answering, and a second driver cannot hurt it: see the
+            // module header on why quarantine is the one state where a
+            // duplicate resumption manufactures no `LeaseUnavailable`.
+            BuildPodPermitState::Quarantined => Ok(Strandedness::DropOwed),
+            // THE STATES A LIVE WORKER TRANSITS. `require_drop` writes
+            // `drop_required` and `apply_drop` writes `drop_applying`, both
+            // from inside a `release_lease` that is still running, so being
+            // parked here is NOT on its own evidence that anybody stopped.
+            // Something worker-independent has to say so.
+            BuildPodPermitState::DropRequired | BuildPodPermitState::DropApplying => {
+                if self.owner_is_gone(&row.task_run_id).await? {
+                    return Ok(Strandedness::OwnerGone);
+                }
+                if self.pod_uid_absent(row).await {
+                    return Ok(Strandedness::PodGone);
+                }
+                // The last resort, and the only one that covers the case the
+                // other two cannot see: this process restarted mid-drop while
+                // the task run kept running and its Pod stayed up. Nothing will
+                // ever emit a terminal signal for that row, so without an age
+                // it would hold its `build_leases` row for the rest of the run.
+                if row.state_age() >= self.drop_transit_grace {
+                    return Ok(Strandedness::DropOwed);
+                }
+                Ok(Strandedness::Live)
+            }
             BuildPodPermitState::BirthConfirmed
             | BuildPodPermitState::LiftApplying
             | BuildPodPermitState::Lifted => {
