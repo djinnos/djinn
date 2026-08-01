@@ -325,8 +325,11 @@ fn frontend_result(area_id: &str) -> Value {
     serde_json::json!({"findings":[{"guardrail_key":"frontend-auth","status":"covered","severity":"high","confidence":0.95,"evidence":[{"path":"web/auth.ts","line":12}]},{"guardrail_key":"frontend-inputs","status":"partial","severity":"medium","confidence":0.80,"evidence":[{"path":"web/forms.ts","line":31}]}],"unsupported":[{"guardrail_key":"browser-session","reason":"not applicable to this frontend"}],"warnings":[{"reason":"legacy form remains outside migration scope"}],"remediation_suggestions":[{"dedupe_key":"shared-auth-remediation","action":"Apply shared authentication remediation","area_id":area_id,"guardrail_id":"frontend-auth","validation_guidance":"Verify web/auth.ts and server/src/auth.rs after the change."}]})
 }
 
+/// Mirror the validator-accepted backend payload from the control-plane flow
+/// regression: every contract array is present and the remediation suggestion
+/// arrives in the canonical plural `area_ids`/`guardrail_ids` shape.
 fn backend_result(area_id: &str) -> Value {
-    serde_json::json!({"findings":[{"guardrail_key":"backend-auth","status":"covered","severity":"high","confidence":0.90,"evidence":[{"path":"server/src/auth.rs","line":48}]},{"guardrail_key":"backend-secrets","status":"analysis_error","severity":"low","confidence":0.85,"evidence":[{"path":"server/src/config.rs","line":9}]}],"errors":[{"reason":"secret rotation is not configured"}],"warnings":[{"reason":"secret rotation is not configured"}],"remediation_suggestions":[{"dedupe_key":"shared-auth-remediation","action":"Apply shared authentication remediation","area_id":area_id,"guardrail_id":"backend-auth","validation_guidance":"Verify web/auth.ts and server/src/auth.rs after the change."}]})
+    serde_json::json!({"findings":[{"guardrail_key":"backend-auth","status":"covered","severity":"high","confidence":0.90,"evidence":[{"path":"server/src/auth.rs","line":48}]},{"guardrail_key":"backend-secrets","status":"analysis_error","severity":"low","confidence":0.85,"evidence":[{"path":"server/src/config.rs","line":9}]}],"unsupported":[],"warnings":[{"reason":"secret rotation is not configured"}],"remediation_suggestions":[{"dedupe_key":"shared-auth-remediation","action":"Apply shared authentication remediation","area_ids":[area_id],"guardrail_ids":["backend-auth"]}]})
 }
 
 async fn get(

@@ -42,26 +42,30 @@ describe("ProjectReadinessPage terminal HTTP detail", () => {
     expect(screen.getByText("agent-readiness-guardrails v1.0.0")).toBeInTheDocument();
     expect(screen.getByText("Score: 0.7777777777777778 — Band: ready")).toBeInTheDocument();
     expect(screen.getAllByRole("article", { name: /Readiness area/ })).toHaveLength(2);
-    expect(screen.getByRole("article", { name: "Readiness area frontend" })).toHaveTextContent('"languages":["TypeScript"],"roles":["frontend"]');
+    // The frozen composition is rendered whole, exactly as the route serializes it.
+    expect(screen.getByRole("article", { name: "Readiness area frontend" })).toHaveTextContent('{"roles":["frontend"],"evidence":["web/package.json"],"languages":["TypeScript"],"confidence":0.95,"frameworks":["React"],"key_libraries":["zod"]}');
     expect(screen.getByRole("article", { name: "Readiness area frontend" })).toHaveTextContent("Persisted area score: 0.8");
-    expect(screen.getByRole("article", { name: "Readiness area backend" })).toHaveTextContent('"languages":["Rust"],"roles":["backend"]');
+    expect(screen.getByRole("article", { name: "Readiness area backend" })).toHaveTextContent('{"roles":["backend"],"evidence":["server/Cargo.toml"],"languages":["Rust"],"confidence":0.97,"frameworks":["Axum"],"key_libraries":["sqlx"]}');
     expect(screen.getByRole("article", { name: "Readiness area backend" })).toHaveTextContent("Persisted area score: 0.75");
     expect(screen.getByTestId("current-attempt-area-frontend")).toHaveTextContent("#1 — succeeded");
     expect(screen.getByTestId("current-attempt-area-backend")).toHaveTextContent("#1 — succeeded");
     expect(screen.getByText("frontend-auth")).toBeInTheDocument();
     expect(screen.getByText("Confidence: 0.95")).toBeInTheDocument();
-    expect(screen.getByText('Evidence: [{"path":"web/auth.ts","line":12}]')).toBeInTheDocument();
+    expect(screen.getByText('Evidence: [{"line":12,"path":"web/auth.ts"}]')).toBeInTheDocument();
     expect(screen.getByText("backend-auth")).toBeInTheDocument();
     expect(screen.getByText("Confidence: 0.9")).toBeInTheDocument();
-    expect(screen.getByText('Evidence: [{"path":"server/src/auth.rs","line":48}]')).toBeInTheDocument();
+    expect(screen.getByText('Evidence: [{"line":48,"path":"server/src/auth.rs"}]')).toBeInTheDocument();
     expect(screen.getByText("backend-secrets")).toBeInTheDocument();
     expect(screen.getByText("Confidence: 0.85")).toBeInTheDocument();
-    expect(screen.getByText('Evidence: [{"path":"server/src/config.rs","line":9}]')).toBeInTheDocument();
+    expect(screen.getByText('Evidence: [{"line":9,"path":"server/src/config.rs"}]')).toBeInTheDocument();
     expect(screen.getByLabelText("frontend Unsupported entries")).toHaveTextContent("browser-session");
     expect(screen.getByLabelText("frontend Warnings")).toHaveTextContent("legacy form remains outside migration scope");
     expect(screen.getByLabelText("backend Warnings")).toHaveTextContent("secret rotation is not configured");
-    expect(screen.getByLabelText("backend Errors")).toHaveTextContent("secret rotation is not configured");
-    expect(screen.getByLabelText("Run diagnostics")).toHaveTextContent("readiness_aggregated");
+    // The validator-accepted backend result carries no out-of-contract `errors`
+    // array; its degraded guardrail surfaces as the analysis_error finding and
+    // as the run-level `completed_with_errors` aggregate below.
+    expect(screen.queryByLabelText("backend Errors")).toBeNull();
+    expect(screen.getByLabelText("Run diagnostics")).toHaveTextContent('readiness_aggregated: {"band":"ready","owner":"authenticated-http-fixture","score":0.7777777777777778,"status":"completed_with_errors"}');
     expect(screen.getByLabelText("Suggested next actions")).toHaveTextContent("Verify web/auth.ts and server/src/auth.rs after the change.");
     expect(screen.getAllByText("shared-auth-remediation")).toHaveLength(1);
 
