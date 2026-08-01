@@ -9,6 +9,8 @@
 //! nonterminal resize lifecycle. Capacity accounting is unchanged: every
 //! resize state is simply another `state <> 'released'` shape.
 
+use std::time::Duration;
+
 use serde::{Deserialize, Serialize};
 use sqlx::{Postgres, Transaction};
 
@@ -16,10 +18,18 @@ use crate::database::Database;
 use crate::error::{DbError, DbResult};
 
 const POOL_KEY: &str = "global";
+// `state_age_seconds` is computed by the DATABASE, from the same `now()` the
+// migration-170 trigger stamps `state_changed_at` with. Rendering the timestamp
+// and subtracting it in Rust would compare two clocks — a server whose clock
+// runs behind Postgres would read every row as young and grace a genuinely
+// stranded drop forever, which is the failure this column was added to end.
+// `GREATEST` clamps the one case a single clock can still produce: a row
+// stamped by a transaction that committed after this SELECT's snapshot.
 const ROW_COLUMNS: &str = "task_run_id, permit_id::text AS permit_id, fencing_token, state, job_uid, \
     to_char(acquired_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS acquired_at, \
     to_char(released_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS released_at, \
-    released_fencing_token, release_reason, pod_namespace, pod_name, pod_uid, launcher_container_name, launcher_container_id, image_digest, observed_launcher_protocol, effective_launcher_protocol, admitted_cpu_millicores, resize_invocation_id";
+    released_fencing_token, release_reason, pod_namespace, pod_name, pod_uid, launcher_container_name, launcher_container_id, image_digest, observed_launcher_protocol, effective_launcher_protocol, admitted_cpu_millicores, resize_invocation_id, \
+    GREATEST(0, EXTRACT(EPOCH FROM (now() - state_changed_at)))::bigint AS state_age_seconds";
 
 /// Durable lifecycle states. `acquired`/`job_created`/`released` come from
 /// migration 162; the six nonterminal resize states come from migration 164.
@@ -175,6 +185,29 @@ pub struct BuildPodPermitRow {
     /// `drop_required`/`quarantined` by an infrastructure observer that has no
     /// invocation to name. See migration 168.
     pub resize_invocation_id: Option<String>,
+    /// How long this row has rested in [`Self::state`], in whole seconds, as
+    /// measured by the database at the instant of the read.
+    ///
+    /// It is an AGE and not a timestamp on purpose. The consumer —
+    /// `task_run_resize_reconcile`'s strand predicate — asks exactly one
+    /// question of it ("has this row been here longer than any live driver could
+    /// hold it?"), and answering that from a rendered timestamp would mean
+    /// subtracting the reader's wall clock from the writer's. See
+    /// [`Self::state_age`] and migration 170.
+    pub state_age_seconds: i64,
+}
+
+impl BuildPodPermitRow {
+    /// [`Self::state_age_seconds`] as a [`Duration`].
+    ///
+    /// A negative age is impossible by construction (the SELECT clamps it) and
+    /// is folded to zero here anyway, because the safe reading of "I cannot tell
+    /// how old this is" is "it is brand new" — that grants a live driver the
+    /// benefit of the doubt instead of taking a drop away from it.
+    #[must_use]
+    pub fn state_age(&self) -> Duration {
+        Duration::from_secs(u64::try_from(self.state_age_seconds).unwrap_or(0))
+    }
 }
 
 /// The admission result deliberately has no successful fallback for unavailable
@@ -290,6 +323,38 @@ impl BuildPodPermitRepository {
         sqlx::query("DROP TABLE build_pod_permit_pools")
             .execute(self.db.pool())
             .await?;
+        Ok(())
+    }
+
+    /// Age a row's `state_changed_at` backwards so a test can reach the far
+    /// side of a grace window without spending it in wall clock.
+    ///
+    /// Test-support-only, and deliberately so: the migration-170 trigger stamps
+    /// `state_changed_at` on every state change and no production write path
+    /// names the column at all, which is what makes the age unforgeable by a
+    /// caller. This seam does not weaken that — it changes no state, so the
+    /// stamp it moves is one the trigger will overwrite the moment the row's
+    /// lifecycle advances again.
+    ///
+    /// # Errors
+    ///
+    /// Propagates any durable failure.
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn backdate_state_change_for_test(
+        &self,
+        task_run_id: &str,
+        age: Duration,
+    ) -> DbResult<()> {
+        self.db.ensure_initialized().await?;
+        sqlx::query(
+            "UPDATE build_pod_permits \
+             SET state_changed_at = now() - make_interval(secs => $1) \
+             WHERE task_run_id = $2",
+        )
+        .bind(age.as_secs_f64())
+        .bind(task_run_id)
+        .execute(self.db.pool())
+        .await?;
         Ok(())
     }
 
@@ -740,6 +805,7 @@ struct DbRow {
     effective_launcher_protocol: Option<String>,
     admitted_cpu_millicores: Option<i64>,
     resize_invocation_id: Option<String>,
+    state_age_seconds: i64,
 }
 
 impl TryFrom<DbRow> for BuildPodPermitRow {
@@ -749,6 +815,7 @@ impl TryFrom<DbRow> for BuildPodPermitRow {
         let resize_invocation_id = row.resize_invocation_id.clone();
         Ok(Self {
             resize_invocation_id,
+            state_age_seconds: row.state_age_seconds,
             task_run_id: row.task_run_id,
             permit_id: row.permit_id,
             fencing_token: row.fencing_token,

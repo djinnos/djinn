@@ -13,6 +13,47 @@
 use super::*;
 use std::sync::atomic::AtomicUsize;
 
+/// The drop-transit grace must stay ANCHORED to the handler budget it is
+/// protecting, not to a number somebody typed once.
+///
+/// `DROP_TRANSIT_GRACE` exists to cover the whole window in which a LIVE
+/// `release_lease` can still be mid-drop. That window is bounded by
+/// `DROP_GATE_BUDGET`, which in turn contains `DROP_CONFIRMATION_BUDGET`. A
+/// grace shorter than the gate budget lets the reconciler reach a row while the
+/// handler that owns it is still inside its own wait — the defect, restored.
+///
+/// NAMED FAILING MUTATION: write `DROP_TRANSIT_GRACE` as a literal
+/// `Duration::from_secs(90)`. The first assertion still passes, and then
+/// changing `DROP_GATE_BUDGET` (which is what a future tuning pass would do)
+/// silently breaks the relationship — which is what the second and third
+/// assertions catch, because they are stated as inequalities against the
+/// constants rather than against 90.
+#[test]
+fn the_drop_transit_grace_is_derived_from_the_budget_it_protects() {
+    assert_eq!(
+        DROP_TRANSIT_GRACE,
+        DROP_GATE_BUDGET * 2,
+        "the grace must be twice the handler's own wait budget, so a worker \
+         that retries once after a `Held` verdict is still inside it"
+    );
+    assert!(
+        DROP_TRANSIT_GRACE > DROP_GATE_BUDGET,
+        "a grace no longer than the handler's wait budget lets the reconciler \
+         resume a drop the handler is still performing"
+    );
+    assert!(
+        DROP_TRANSIT_GRACE > crate::task_run_resize_drop::DROP_CONFIRMATION_BUDGET,
+        "a grace shorter than the confirmation budget would strand a row while \
+         the kubelet is still legitimately being waited on"
+    );
+    assert!(
+        DROP_TRANSIT_GRACE < Duration::from_secs(600),
+        "the grace is also an upper bound on how long a genuinely abandoned \
+         drop keeps its build_leases row; it must stay small enough that \
+         reconciliation is still the point of this module"
+    );
+}
+
 /// An unrecognised configuration value must ARM the reconciler, not disarm it.
 ///
 /// A typo in a deployment value deciding that stranded Pods keep their CPU is

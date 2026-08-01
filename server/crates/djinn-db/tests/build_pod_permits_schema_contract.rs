@@ -108,6 +108,11 @@ const REQUIRED_COLUMNS: &[(&str, &str)] = &[
     ("observed_launcher_protocol", "character varying"),
     ("effective_launcher_protocol", "character varying"),
     ("admitted_cpu_millicores", "bigint"),
+    // Migration 170 — how long the row has rested in `state`. The reconciler's
+    // strand predicate reads it to tell a drop a live worker is performing from
+    // one a dead worker abandoned; without it that distinction is inexpressible
+    // and the reconciler steals in-flight drops.
+    ("state_changed_at", "timestamp with time zone"),
 ];
 
 #[tokio::test]
