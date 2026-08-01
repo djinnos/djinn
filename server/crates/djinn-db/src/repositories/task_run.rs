@@ -34,6 +34,34 @@ pub enum TerminalStatusAcceptance {
     Rejected,
 }
 
+/// The one dispatch-time `task_runs` insert, shared by every creator.
+///
+/// It is a constant rather than a third copy because of what the copies get
+/// wrong: `catalog_image_id` has to be snapshotted from the project inside the
+/// same statement. Omitting that binding in one creator already left every real
+/// dispatch with a NULL catalog image and failed the final-verification
+/// completion boundary closed.
+///
+/// Runtime query (not the macro): `catalog_image_id` evolves with the task-run
+/// schema and must not require regenerating sqlx offline metadata.
+pub(crate) const INSERT_TASK_RUN_SQL: &str = "INSERT INTO task_runs
+                (id, project_id, task_id, trigger_type, status, workspace_path, mirror_ref, dispatch_group_id, catalog_image_id)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8,
+                (SELECT selected_image_id FROM projects WHERE id = $2))";
+
+/// The clause that turns [`INSERT_TASK_RUN_SQL`] into an adoption of a row that
+/// is already there.
+///
+/// Dispatch creates the `task_runs` row on the host, before the build-pod
+/// permit whose foreign key points at it. The in-pod supervisor's
+/// `create_task_run` RPC then arrives for the same id a Pod boot later and must
+/// adopt that row rather than collide with it.
+///
+/// This is not a licence to create one run twice: run ids are uuid-v7, minted
+/// once per dispatch, and every adopting creator re-reads the row it found and
+/// refuses one that belongs to a different task.
+pub(crate) const ADOPT_EXISTING_TASK_RUN: &str = " ON CONFLICT (id) DO NOTHING";
+
 impl TaskRunRepository {
     pub fn new(db: Database) -> Self {
         Self { db }
@@ -47,24 +75,17 @@ impl TaskRunRepository {
             Uuid::parse_str(group_id)
                 .map_err(|_| DbError::InvalidData("dispatch_group_id must be a UUID".to_owned()))?;
         }
-        // Runtime query: `catalog_image_id` evolves with the task-run schema
-        // and must not require regenerating sqlx offline metadata.
-        sqlx::query(
-            "INSERT INTO task_runs
-                (id, project_id, task_id, trigger_type, status, workspace_path, mirror_ref, dispatch_group_id, catalog_image_id)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8,
-                (SELECT selected_image_id FROM projects WHERE id = $2))",
-        )
-        .bind(params.id)
-        .bind(params.project_id)
-        .bind(params.task_id)
-        .bind(params.trigger_type)
-        .bind(status)
-        .bind(params.workspace_path)
-        .bind(params.mirror_ref)
-        .bind(params.dispatch_group_id)
-        .execute(self.db.pool())
-        .await?;
+        sqlx::query(INSERT_TASK_RUN_SQL)
+            .bind(params.id)
+            .bind(params.project_id)
+            .bind(params.task_id)
+            .bind(params.trigger_type)
+            .bind(status)
+            .bind(params.workspace_path)
+            .bind(params.mirror_ref)
+            .bind(params.dispatch_group_id)
+            .execute(self.db.pool())
+            .await?;
 
         let run = sqlx::query_as!(
             TaskRunRecord,
@@ -78,6 +99,47 @@ impl TaskRunRepository {
         .await?;
 
         Ok(run)
+    }
+
+    /// Create the dispatch-time `task_runs` row if it is not already there.
+    /// Returns `true` when this call inserted it.
+    ///
+    /// # Why the host calls this before it acquires a build-pod permit
+    ///
+    /// `build_pod_permits.task_run_id` is `REFERENCES task_runs(id)` (migration
+    /// 162). The permit must be acquired before the Job POST — its fencing
+    /// token is what every later resize write is checked against, so a permit
+    /// minted after the Pod could not fence the window it owns. The in-pod
+    /// supervisor's `create_task_run` RPC cannot satisfy that foreign key at
+    /// that point: it travels over a stdio channel that does not exist until a
+    /// Pod schedule, image pull and handshake later.
+    ///
+    /// So the parent row is created here, on the host, at dispatch. The row is
+    /// the same one the worker would have created — same id, same `starting`
+    /// status, same `catalog_image_id` binding — only earlier, which is where
+    /// the ordering was wrong.
+    pub async fn create_for_dispatch(&self, params: CreateTaskRunParams<'_>) -> Result<bool> {
+        self.db.ensure_initialized().await?;
+
+        let status = params.status.unwrap_or("running");
+        if let Some(group_id) = params.dispatch_group_id {
+            Uuid::parse_str(group_id)
+                .map_err(|_| DbError::InvalidData("dispatch_group_id must be a UUID".to_owned()))?;
+        }
+        let inserted = sqlx::query(&format!("{INSERT_TASK_RUN_SQL}{ADOPT_EXISTING_TASK_RUN}"))
+            .bind(params.id)
+            .bind(params.project_id)
+            .bind(params.task_id)
+            .bind(params.trigger_type)
+            .bind(status)
+            .bind(params.workspace_path)
+            .bind(params.mirror_ref)
+            .bind(params.dispatch_group_id)
+            .execute(self.db.pool())
+            .await?
+            .rows_affected();
+
+        Ok(inserted == 1)
     }
 
     /// Immutable catalog image selected at dispatch. NULL is a legacy or

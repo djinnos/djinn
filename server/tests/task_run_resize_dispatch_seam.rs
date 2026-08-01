@@ -43,9 +43,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 use djinn_core::clock::{Clock, SystemClock};
 use djinn_db::{
-    BuildPodPermitRepository, BuildPodPermitState, CreateTaskRunParams, Database,
-    EffectiveCreatorProvenance, ProjectRepository, TaskRepository, TaskRunRepository,
-    UserRepository,
+    BuildPodPermitRepository, BuildPodPermitState, CreateTaskAttemptParams, CreateTaskRunParams,
+    Database, EffectiveCreatorProvenance, ProjectRepository, TaskAttemptRepository, TaskRepository,
+    TaskRunRepository, UserRepository,
 };
 use djinn_k8s::pod_resize::{CpuLimit, PodResizeError};
 use djinn_k8s::pod_resize_fixture::StoredTaskRunPod;
@@ -121,6 +121,21 @@ struct RecordingRuntime {
     protocol: Option<LauncherAuthorityProtocol>,
     attaches: Arc<AtomicUsize>,
     teardowns: Arc<AtomicUsize>,
+    /// When set, `prepare` reads the durable state of this dispatch **at the
+    /// instant of the Job POST** and parks it in `at_job_post`.
+    probe: Option<Database>,
+    at_job_post: Arc<std::sync::Mutex<Option<DurableStateAtJobPost>>>,
+}
+
+/// What the database held for one dispatch at the moment its Job was POSTed.
+///
+/// Both counts are ordering facts, not liveness facts: the Job POST is the
+/// point after which a Pod can exist, so anything that has to fence that Pod
+/// must already be durable here.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DurableStateAtJobPost {
+    task_run_status: Option<String>,
+    build_pod_permits: i64,
 }
 
 impl RecordingRuntime {
@@ -130,6 +145,26 @@ impl RecordingRuntime {
             protocol,
             attaches: Arc::new(AtomicUsize::new(0)),
             teardowns: Arc::new(AtomicUsize::new(0)),
+            probe: None,
+            at_job_post: Arc::new(std::sync::Mutex::new(None)),
+        })
+    }
+
+    /// Same runtime, but it reads the durable ordering out of `db` inside
+    /// `prepare`. Asserting after the seam returns cannot distinguish "created
+    /// before the Job" from "created after it"; this can.
+    fn observing(
+        db: &Database,
+        job_uid: Option<&str>,
+        protocol: Option<LauncherAuthorityProtocol>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            job_uid: job_uid.map(ToOwned::to_owned),
+            protocol,
+            attaches: Arc::new(AtomicUsize::new(0)),
+            teardowns: Arc::new(AtomicUsize::new(0)),
+            probe: Some(db.clone()),
+            at_job_post: Arc::new(std::sync::Mutex::new(None)),
         })
     }
 
@@ -140,6 +175,14 @@ impl RecordingRuntime {
     fn teardowns(&self) -> usize {
         self.teardowns.load(Ordering::SeqCst)
     }
+
+    fn durable_state_at_job_post(&self) -> DurableStateAtJobPost {
+        self.at_job_post
+            .lock()
+            .expect("job-post observation mutex")
+            .clone()
+            .expect("prepare must have run and recorded the durable state")
+    }
 }
 
 #[async_trait]
@@ -149,6 +192,27 @@ impl SessionRuntime for RecordingRuntime {
         spec: &TaskRunSpec,
         _credentials: &ResolvedCredentials,
     ) -> Result<RunHandle, RuntimeError> {
+        if let Some(db) = self.probe.as_ref() {
+            db.ensure_initialized().await.expect("probe db");
+            let task_run_status: Option<String> =
+                sqlx::query_scalar("SELECT status FROM task_runs WHERE id = $1")
+                    .bind(&spec.task_run_id)
+                    .fetch_optional(db.pool())
+                    .await
+                    .expect("read task_runs at job post");
+            let build_pod_permits: i64 = sqlx::query_scalar(
+                "SELECT count(*)::bigint FROM build_pod_permits WHERE task_run_id = $1",
+            )
+            .bind(&spec.task_run_id)
+            .fetch_one(db.pool())
+            .await
+            .expect("count build_pod_permits at job post");
+            *self.at_job_post.lock().expect("job-post observation mutex") =
+                Some(DurableStateAtJobPost {
+                    task_run_status,
+                    build_pod_permits,
+                });
+        }
         Ok(RunHandle {
             task_run_id: spec.task_run_id.clone(),
             container_id: None,
@@ -192,7 +256,9 @@ struct Seeded {
     spec: TaskRunSpec,
 }
 
-async fn seed(db: &Database, suffix: &str) -> Seeded {
+/// Seed only the rows that exist before dispatch begins: a user, a project and
+/// a task.
+async fn seed_task(db: &Database, suffix: &str) -> djinn_core::models::Task {
     let user = UserRepository::new(db.clone())
         .upsert_from_github(
             i64::try_from(uuid::Uuid::now_v7().as_u128() % 8_000_000_000_000_000_000)
@@ -211,7 +277,7 @@ async fn seed(db: &Database, suffix: &str) -> Seeded {
         )
         .await
         .expect("seed project");
-    let task = TaskRepository::new(db.clone(), djinn_core::events::EventBus::noop())
+    TaskRepository::new(db.clone(), djinn_core::events::EventBus::noop())
         .create_in_project_with_provenance(
             &project.id,
             None,
@@ -226,12 +292,21 @@ async fn seed(db: &Database, suffix: &str) -> Seeded {
             None,
         )
         .await
-        .expect("seed task");
+        .expect("seed task")
+}
+
+/// A run that already has its durable `task_runs` row when the seam is entered.
+///
+/// This is **not** the shape production dispatch presents — see
+/// [`seed_as_dispatch_does`] — but it is the right fixture for every assertion
+/// about what the resize stack does once a permit can be acquired at all.
+async fn seed(db: &Database, suffix: &str) -> Seeded {
+    let task = seed_task(db, suffix).await;
     let task_run_id = uuid::Uuid::now_v7().to_string();
     TaskRunRepository::new(db.clone())
         .create(CreateTaskRunParams {
             id: &task_run_id,
-            project_id: &project.id,
+            project_id: &task.project_id,
             task_id: &task.id,
             trigger_type: "manual",
             status: Some("running"),
@@ -241,11 +316,57 @@ async fn seed(db: &Database, suffix: &str) -> Seeded {
         })
         .await
         .expect("seed task run");
-    let spec = TaskRunSpec {
+    Seeded {
+        spec: spec_for(&task, task_run_id, None),
+        task,
+    }
+}
+
+/// The shape production dispatch actually presents to the seam.
+///
+/// `dispatch_task_runtime` mints a fresh uuid-v7 `task_run_id`, allocates the
+/// `task_attempts` row for it, and enters `execute_runtime_report_phase`. It
+/// does **not** create the `task_runs` row: until this fix, nothing on the host
+/// did, and the only production creator was the in-pod supervisor's
+/// `create_task_run` RPC — which cannot land until a Pod boot later.
+///
+/// Every other fixture in this file pre-seeds that row, which is precisely why
+/// the whole file stayed green while every `resize-v2` dispatch in production
+/// failed closed on a foreign-key violation it could not report.
+async fn seed_as_dispatch_does(db: &Database, suffix: &str) -> Seeded {
+    let task = seed_task(db, suffix).await;
+    let task_run_id = uuid::Uuid::now_v7().to_string();
+    let attempt_id = uuid::Uuid::now_v7().to_string();
+    let dispatch_key = format!("task-run:{task_run_id}");
+    let attempt = TaskAttemptRepository::new(db.clone())
+        .create_or_get_pending(CreateTaskAttemptParams {
+            id: &attempt_id,
+            task_id: &task.id,
+            role: "worker",
+            dispatch_key: &dispatch_key,
+            session_id: None,
+            attempt_seq: None,
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
+        })
+        .await
+        .expect("seed the exact attempt dispatch allocates");
+    Seeded {
+        spec: spec_for(&task, task_run_id, Some(attempt.id)),
+        task,
+    }
+}
+
+fn spec_for(
+    task: &djinn_core::models::Task,
+    task_run_id: String,
+    task_attempt_id: Option<String>,
+) -> TaskRunSpec {
+    TaskRunSpec {
         task_run_id,
-        task_attempt_id: None,
+        task_attempt_id,
         task_id: task.id.clone(),
-        project_id: project.id.clone(),
+        project_id: task.project_id.clone(),
         trigger: djinn_core::models::TaskRunTrigger::NewTask,
         base_branch: "main".to_owned(),
         task_branch: "djinn/resize-seam".to_owned(),
@@ -259,8 +380,7 @@ async fn seed(db: &Database, suffix: &str) -> Seeded {
         commit_author_email: None,
         resume_lifecycle_metadata: None,
         is_evidence_spike: false,
-    };
-    Seeded { task, spec }
+    }
 }
 
 /// The production `AgentContext` — built by `AppState::agent_context()`, the
@@ -614,6 +734,194 @@ async fn a_leaf_v1_dispatch_issues_no_resize_and_captures_no_identity() {
     );
     assert_eq!(row.state, BuildPodPermitState::JobCreated);
     assert_eq!(bridge.gate().dispatches_before_birth_confirmation(), 0);
+}
+
+// ── The dispatch-time ordering of `task_runs` and `build_pod_permits` ──────
+
+/// **The regression.** A dispatch entering the seam the way production enters
+/// it — fresh uuid-v7 run id, `task_attempts` row allocated, **no `task_runs`
+/// row yet** — must still end up with a durable permit row.
+///
+/// `build_pod_permits.task_run_id` is `REFERENCES task_runs(id)`. Before this
+/// fix nothing on the host created that parent, so `acquire` violated the
+/// foreign key, `BuildPodPermitRepository::acquire` collapsed the violation into
+/// `Unavailable` to fail closed, and `admit_task_run_dispatch` refused every
+/// `resize-v2` render with "holds no durable build-pod permit". Production had
+/// zero rows in `build_pod_permits`.
+///
+/// What stays green if the body does nothing? Nothing. This asserts the ROW, in
+/// the real table, behind the real foreign key. Delete the
+/// `ensure_durable_task_run_row` call from `execute_runtime_report_phase` and
+/// the permit lookup below returns `None` — there is no row at all, exactly as
+/// in production.
+#[tokio::test]
+async fn the_seam_acquires_a_permit_for_a_dispatch_that_has_no_task_runs_row_yet() {
+    const POD_UID: &str = "pod-uid-fk";
+    const JOB_UID: &str = "job-uid-fk";
+
+    let db = Database::ephemeral().await.expect("ephemeral db");
+    let seeded = seed_as_dispatch_does(&db, "fk").await;
+
+    // The premise of the whole test: production's parent row is genuinely absent
+    // when the seam is entered. If a future refactor makes some earlier step
+    // create it, this assertion fails rather than letting the test go vacuous.
+    let before: i64 = sqlx::query_scalar("SELECT count(*)::bigint FROM task_runs WHERE id = $1")
+        .bind(&seeded.spec.task_run_id)
+        .fetch_one(db.pool())
+        .await
+        .expect("count task_runs before dispatch");
+    assert_eq!(
+        before, 0,
+        "production enters this seam with no task_runs row; a fixture that pre-seeds one \
+         is measuring itself"
+    );
+
+    let cluster = StoredTaskRunPod::resize_v2(POD_UID, RENDERED_CEILING);
+    let bridge = bridge_for(&db, &cluster, CONFIRMING_BUDGET);
+    let context = context_with(&db, &bridge);
+    let runtime = RecordingRuntime::new(Some(JOB_UID), Some(LauncherAuthorityProtocol::ResizeV2));
+
+    drive_seam(runtime.clone(), &seeded, &context)
+        .await
+        .expect("a resize-v2 dispatch with no pre-existing task_runs row is admitted");
+
+    let row = BuildPodPermitRepository::new(db.clone())
+        .active(&seeded.spec.task_run_id)
+        .await
+        .expect("read permit")
+        .expect(
+            "the seam must have acquired a permit; a None here is the production failure — \
+             the foreign key onto task_runs had no parent to point at",
+        );
+    assert_eq!(row.state, BuildPodPermitState::BirthConfirmed);
+    assert_eq!(row.job_uid.as_deref(), Some(JOB_UID));
+    assert_eq!(runtime.attaches(), 1, "the worker session started");
+
+    // The parent the foreign key points at is the run's own row, not some other
+    // dispatch's, and the host terminalizes the row it created rather than
+    // leaving it live for the stale sweep.
+    let (task_id, status): (String, String) =
+        sqlx::query_as("SELECT task_id, status FROM task_runs WHERE id = $1")
+            .bind(&seeded.spec.task_run_id)
+            .fetch_one(db.pool())
+            .await
+            .expect("the durable task_runs row exists after dispatch");
+    assert_eq!(task_id, seeded.task.id);
+    assert!(
+        matches!(status.as_str(), "completed" | "failed" | "interrupted"),
+        "the host reaps the run row it created; found {status}"
+    );
+}
+
+/// **The ordering.** Both durable rows must exist at the instant the Job is
+/// POSTed, because the Job POST is the point after which a Pod can exist.
+///
+/// Asserting after the seam returns proves only that the rows were written at
+/// some point. This reads them from inside `SessionRuntime::prepare`, which is
+/// the Job POST itself, so it can tell "before" from "after".
+///
+/// Two named mutations make it red, and they are the two orderings that matter:
+///
+/// * move `ensure_durable_task_run_row` to after `runtime.prepare` — the
+///   `task_runs` count at the Job POST is 0, and the permit is gone with it;
+/// * move `acquire_build_pod_permit` to after `runtime.prepare` — the permit
+///   count at the Job POST is 0, which is the fencing violation the permit's
+///   own doc comment forbids.
+#[tokio::test]
+async fn both_durable_rows_exist_before_the_job_that_they_fence_is_posted() {
+    let db = Database::ephemeral().await.expect("ephemeral db");
+    let seeded = seed_as_dispatch_does(&db, "order").await;
+    let cluster = StoredTaskRunPod::resize_v2("pod-uid-order", RENDERED_CEILING);
+    let bridge = bridge_for(&db, &cluster, CONFIRMING_BUDGET);
+    let context = context_with(&db, &bridge);
+    let runtime = RecordingRuntime::observing(
+        &db,
+        Some("job-uid-order"),
+        Some(LauncherAuthorityProtocol::ResizeV2),
+    );
+
+    drive_seam(runtime.clone(), &seeded, &context)
+        .await
+        .expect("a healthy resize-v2 dispatch is admitted");
+
+    assert_eq!(
+        runtime.durable_state_at_job_post(),
+        DurableStateAtJobPost {
+            // `starting`, not merely present: the host creates the row in the
+            // same pre-session state the in-pod supervisor would have.
+            task_run_status: Some("starting".to_owned()),
+            build_pod_permits: 1,
+        },
+        "the task_runs row and the permit that references it must both be durable \
+         before the Job POST, not after it"
+    );
+}
+
+/// **The guard is not weakened.** With the ordering fixed, a `resize-v2` render
+/// that genuinely cannot obtain a permit must still refuse to start a worker
+/// session.
+///
+/// Two components writing one leaf's `cpu.max`, or none, is the exact hazard
+/// `3i92` exists to prevent, so "no permit" must stay fatal for `resize-v2`. The
+/// permit is made genuinely unobtainable by removing the global pool row that
+/// `acquire` locks first — a real repository failure, not a stubbed result.
+///
+/// Change `admit_task_run_dispatch`'s `permit.is_none()` arm to return `Ok(())`
+/// unconditionally instead of bailing for non-leaf, and `attaches()` below goes
+/// to 1.
+#[tokio::test]
+async fn a_resize_v2_render_still_refuses_when_no_permit_can_be_obtained() {
+    let db = Database::ephemeral().await.expect("ephemeral db");
+    let seeded = seed_as_dispatch_does(&db, "nopermit").await;
+    BuildPodPermitRepository::new(db.clone())
+        .delete_global_pool_for_test()
+        .await
+        .expect("remove the pool row acquire locks first");
+
+    let cluster = StoredTaskRunPod::resize_v2("pod-uid-nopermit", RENDERED_CEILING);
+    let bridge = bridge_for(&db, &cluster, CONFIRMING_BUDGET);
+    let context = context_with(&db, &bridge);
+    let runtime = RecordingRuntime::new(
+        Some("job-uid-nopermit"),
+        Some(LauncherAuthorityProtocol::ResizeV2),
+    );
+
+    let error = drive_seam(runtime.clone(), &seeded, &context)
+        .await
+        .expect_err("a resize-v2 render with no permit must not dispatch");
+    let rendered = format!("{error:#}");
+    assert!(
+        rendered.contains("holds no durable build-pod permit"),
+        "the refusal must name the missing permit, not some downstream symptom: {rendered}"
+    );
+
+    assert_eq!(
+        runtime.attaches(),
+        0,
+        "no worker session may start with no resize identity: {rendered}"
+    );
+    assert_eq!(runtime.teardowns(), 1, "the refused run is torn down");
+    assert_eq!(cluster.resize_patches(), 0, "nothing was resized");
+    assert!(
+        BuildPodPermitRepository::new(db.clone())
+            .active(&seeded.spec.task_run_id)
+            .await
+            .expect("read permit")
+            .is_none(),
+        "no permit was acquired, so the refusal is the real one and not a stubbed result"
+    );
+
+    // The run row the host created is terminalized rather than stranded
+    // `starting` — before dispatch created it, this path had nothing to reap.
+    let status: String = sqlx::query_scalar("SELECT status FROM task_runs WHERE id = $1")
+        .bind(&seeded.spec.task_run_id)
+        .fetch_one(db.pool())
+        .await
+        .expect("the durable task_runs row exists");
+    assert_eq!(
+        status, "failed",
+        "a refused dispatch must not leave its run row live forever"
+    );
 }
 
 /// The bootstrap type is still constructible and still composes — a compile-time
