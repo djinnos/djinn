@@ -600,6 +600,58 @@ impl SessionRepository {
         .await?)
     }
 
+    /// List every non-terminal session for one canonical task in the stable
+    /// reconciliation order. Unlike [`Self::active_for_task`], this is not a
+    /// latest-row helper: duplicate running rows are valid and are all
+    /// returned. Paused rows are also included because they remain resumable.
+    pub async fn list_non_terminal_for_task(&self, task_id: &str) -> Result<Vec<SessionRecord>> {
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_as::<_, SessionRecord>(
+            r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
+                status, tokens_in, tokens_out,
+                cache_read_tokens, cache_write_tokens, task_run_id, title,
+                parked_reason,
+                cost_usd, input_price_per_million_snapshot,
+                output_price_per_million_snapshot,
+                cache_read_price_per_million_snapshot,
+                cache_write_price_per_million_snapshot,
+                cost_basis,
+                billing_source
+             FROM sessions
+             WHERE task_id = $1 AND status IN ('running', 'paused')
+             ORDER BY started_at ASC, id ASC"#,
+        )
+        .bind(task_id)
+        .fetch_all(self.db.pool())
+        .await?)
+    }
+
+    /// Terminalize one named non-terminal session for task reconciliation.
+    ///
+    /// The session id is the sole target and the status guard makes repeated
+    /// or raced settlement an observable no-op rather than touching a sibling
+    /// or newer session for the same task.
+    pub async fn settle_non_terminal_by_id(&self, session_id: &str) -> Result<bool> {
+        self.db.ensure_initialized().await?;
+        let result = sqlx::query(
+            r#"UPDATE sessions
+               SET status = 'interrupted',
+                   ended_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+               WHERE id = $1 AND status IN ('running', 'paused')"#,
+        )
+        .bind(session_id)
+        .execute(self.db.pool())
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    /// Re-read the complete residual non-terminal set after reconciliation
+    /// actions. This explicit final-read contract intentionally retains the
+    /// complete, deterministic semantics of [`Self::list_non_terminal_for_task`].
+    pub async fn reread_non_terminal_for_task(&self, task_id: &str) -> Result<Vec<SessionRecord>> {
+        self.list_non_terminal_for_task(task_id).await
+    }
+
     /// List all sessions linked to a task-run row. Used by runtime-resource
     /// reconciliation: the task-run id is the label carried by K8s Jobs, while
     /// session liveness is persisted here.
