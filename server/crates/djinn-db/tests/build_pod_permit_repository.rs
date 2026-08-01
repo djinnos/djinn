@@ -809,7 +809,7 @@ async fn the_invocation_id_may_only_change_on_entry_to_lift_applying() {
 ///
 /// NAMED FAILING MUTATION: delete
 /// `IF NEW.state IS DISTINCT FROM OLD.state THEN NEW.state_changed_at := now();`
-/// from migration 170's trigger body. The row stays 600 seconds old across a
+/// from migration 171's trigger body. The row stays 600 seconds old across a
 /// real transition and the third assertion block fails.
 ///
 /// NAMED FAILING MUTATION 2: stamp unconditionally (drop the `IS DISTINCT FROM`

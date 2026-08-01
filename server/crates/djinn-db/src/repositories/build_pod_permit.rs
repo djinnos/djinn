@@ -193,7 +193,7 @@ pub struct BuildPodPermitRow {
     /// question of it ("has this row been here longer than any live driver could
     /// hold it?"), and answering that from a rendered timestamp would mean
     /// subtracting the reader's wall clock from the writer's. See
-    /// [`Self::state_age`] and migration 170.
+    /// [`Self::state_age`] and migration 171.
     pub state_age_seconds: i64,
 }
 
