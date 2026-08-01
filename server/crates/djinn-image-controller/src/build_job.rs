@@ -30,6 +30,9 @@ pub const LABEL_PROJECT_ID: &str = "djinn.app/project-id";
 /// decide whether to reconcile the `projects` row or the `images` row.
 pub const LABEL_IMAGE_ID: &str = "djinn.app/image-id";
 pub const LABEL_IMAGE_HASH: &str = "djinn.app/image-hash";
+/// Full, collision-free build intent. Labels retain the short hash because of
+/// Kubernetes' 63-character label-value limit; terminal CAS uses this annotation.
+pub const ANNOTATION_IMAGE_CONFIG_HASH: &str = "djinn.app/image-config-hash";
 
 /// Value written to [`LABEL_COMPONENT`] on build resources.
 pub const COMPONENT_IMAGE_BUILD: &str = "image-build";

@@ -199,12 +199,19 @@ impl ImageController {
         // its Dockerfile does not carry — the Job env becomes the catalog row
         // and the Dockerfile becomes the artifact's label, so building one that
         // disagrees would hand the same Pod's CPU quota to two owners.
-        let job =
+        let mut job =
             build_image_build_job(&self.config, subject, hash_prefix, image_tag, build_context)
                 .map_err(|source| ImageControllerError::LauncherDeclaration {
                     project_id: subject_id.clone(),
                     source,
                 })?;
+        job.metadata
+            .annotations
+            .get_or_insert_with(std::collections::BTreeMap::new)
+            .insert(
+                crate::build_job::ANNOTATION_IMAGE_CONFIG_HASH.to_owned(),
+                new_hash.to_owned(),
+            );
         let jobs: Api<Job> = Api::namespaced(self.client.clone(), &self.config.namespace);
         let job_name =
             job.metadata.name.clone().unwrap_or_else(|| {
@@ -531,8 +538,14 @@ impl ImageController {
                 .await;
                 match crate::watcher::classify_ready(&image_id, &job_name, &metadata) {
                     crate::watcher::ReadyOutcome::Ready { digest, protocol } => {
-                        image_repo
-                            .mark_ready(&image_id, &image_tag, digest.as_deref(), protocol)
+                        let _ = image_repo
+                            .mark_ready_if_current_build(
+                                &image_id,
+                                &new_hash,
+                                &image_tag,
+                                digest.as_deref(),
+                                protocol,
+                            )
                             .await?;
                     }
                     crate::watcher::ReadyOutcome::Refuse(last_error) => {
@@ -543,7 +556,9 @@ impl ImageController {
                             "image_controller: finished catalog build cannot dispatch — \
                              refused ready, marking failed"
                         );
-                        image_repo.mark_failed(&image_id, &last_error).await?;
+                        let _ = image_repo
+                            .mark_failed_if_current_build(&image_id, &new_hash, &last_error)
+                            .await?;
                     }
                 }
             }

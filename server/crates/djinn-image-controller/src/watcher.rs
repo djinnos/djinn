@@ -49,7 +49,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use djinn_core::events::{DjinnEventEnvelope, EventBus};
-use djinn_db::{Database, ImageRepository, ProjectImage, ProjectImageStatus, ProjectRepository};
+use djinn_db::{
+    CurrentBuildTransition, Database, ImageRepository, ProjectImage, ProjectImageStatus,
+    ProjectRepository,
+};
 use djinn_launcher_protocol::{LauncherAuthorityProtocol, ParseLauncherAuthorityProtocolError};
 use djinn_runtime::GraphWarmerService;
 use futures::StreamExt;
@@ -61,7 +64,9 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
-use crate::build_job::{LABEL_BUILD, LABEL_IMAGE_HASH, LABEL_IMAGE_ID, LABEL_PROJECT_ID};
+use crate::build_job::{
+    ANNOTATION_IMAGE_CONFIG_HASH, LABEL_BUILD, LABEL_IMAGE_HASH, LABEL_IMAGE_ID, LABEL_PROJECT_ID,
+};
 use crate::config::ImageControllerConfig;
 use crate::controller::{format_catalog_image_tag, format_image_tag};
 
@@ -382,6 +387,20 @@ async fn handle_image_event(
         );
         return;
     };
+    let Some(expected_hash) = job
+        .metadata
+        .annotations
+        .as_ref()
+        .and_then(|annotations| annotations.get(ANNOTATION_IMAGE_CONFIG_HASH))
+        .cloned()
+    else {
+        // A short label cannot prove exact identity. Inferring the suffix from
+        // the current row would let an older Job sharing the prefix impersonate
+        // the current build, so pre-annotation terminal Jobs fail closed.
+        debug!(image_id, hash = %hash_prefix,
+            "image_build_watcher: terminal Job has no full build identity annotation; ignoring");
+        return;
+    };
     let job_name = job
         .metadata
         .name
@@ -421,15 +440,21 @@ async fn handle_image_event(
                 // Pod can bootstrap is the wedge this whole path exists to
                 // avoid, and it surfaces nowhere until dispatch stops.
                 ReadyOutcome::Refuse(last_error) => {
-                    if let Err(e) = image_repo.mark_failed(image_id, &last_error).await {
-                        warn!(
-                            image_id,
-                            hash = %hash_prefix,
-                            job = %job_name,
-                            error = %e,
-                            "image_build_watcher: images.mark_failed failed"
-                        );
-                        return;
+                    let transition = image_repo
+                        .mark_failed_if_current_build(image_id, &expected_hash, &last_error)
+                        .await;
+                    match transition {
+                        Ok(CurrentBuildTransition::Applied) => {}
+                        Ok(CurrentBuildTransition::Stale) => {
+                            log_stale_catalog_job(image_repo, image_id, &hash_prefix, &job_name)
+                                .await;
+                            return;
+                        }
+                        Err(e) => {
+                            warn!(image_id, hash = %hash_prefix, job = %job_name, error = %e,
+                                "image_build_watcher: images.mark_failed failed");
+                            return;
+                        }
                     }
                     warn!(
                         image_id,
@@ -455,18 +480,26 @@ async fn handle_image_event(
                 }
             };
 
-            if let Err(e) = image_repo
-                .mark_ready(image_id, &image_tag, digest.as_deref(), protocol)
-                .await
-            {
-                warn!(
+            let transition = image_repo
+                .mark_ready_if_current_build(
                     image_id,
-                    hash = %hash_prefix,
-                    job = %job_name,
-                    error = %e,
-                    "image_build_watcher: images.mark_ready failed"
-                );
-                return;
+                    &expected_hash,
+                    &image_tag,
+                    digest.as_deref(),
+                    protocol,
+                )
+                .await;
+            match transition {
+                Ok(CurrentBuildTransition::Applied) => {}
+                Ok(CurrentBuildTransition::Stale) => {
+                    log_stale_catalog_job(image_repo, image_id, &hash_prefix, &job_name).await;
+                    return;
+                }
+                Err(e) => {
+                    warn!(image_id, hash = %hash_prefix, job = %job_name, error = %e,
+                        "image_build_watcher: conditional ready transition failed");
+                    return;
+                }
             }
             info!(
                 image_id,
@@ -532,15 +565,20 @@ async fn handle_image_event(
                 },
                 None => format!("{header}; see kubectl logs job/{job_name}"),
             };
-            if let Err(e) = image_repo.mark_failed(image_id, &last_error).await {
-                warn!(
-                    image_id,
-                    hash = %hash_prefix,
-                    job = %job_name,
-                    error = %e,
-                    "image_build_watcher: images.mark_failed failed"
-                );
-                return;
+            let transition = image_repo
+                .mark_failed_if_current_build(image_id, &expected_hash, &last_error)
+                .await;
+            match transition {
+                Ok(CurrentBuildTransition::Applied) => {}
+                Ok(CurrentBuildTransition::Stale) => {
+                    log_stale_catalog_job(image_repo, image_id, &hash_prefix, &job_name).await;
+                    return;
+                }
+                Err(e) => {
+                    warn!(image_id, hash = %hash_prefix, job = %job_name, error = %e,
+                        "image_build_watcher: images.mark_failed failed");
+                    return;
+                }
             }
             warn!(
                 image_id,
@@ -563,6 +601,23 @@ async fn handle_image_event(
         seen.clear();
     }
     seen.insert(dedupe_key);
+}
+
+async fn log_stale_catalog_job(
+    image_repo: &ImageRepository,
+    image_id: &str,
+    job_hash: &str,
+    job_name: &str,
+) {
+    let current = image_repo.get(image_id).await.ok().flatten();
+    debug!(
+        image_id,
+        job = job_name,
+        job_hash,
+        current_hash = ?current.as_ref().and_then(|image| image.config_hash.as_deref()),
+        current_status = ?current.as_ref().map(|image| image.status.as_str()),
+        "image_build_watcher: stale terminal Job ignored"
+    );
 }
 
 /// What a finished build Job reported about the artifact it produced.

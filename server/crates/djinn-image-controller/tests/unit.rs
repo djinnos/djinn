@@ -200,13 +200,18 @@ mod watcher_transitions {
     use std::sync::{Arc, Mutex};
 
     use djinn_core::events::{DjinnEventEnvelope, EventBus};
-    use djinn_db::{Database, ProjectImage, ProjectImageStatus, ProjectRepository};
+    use djinn_db::{
+        Database, ImageRepository, ProjectImage, ProjectImageStatus, ProjectRepository,
+    };
     use k8s_openapi::api::batch::v1::{Job, JobStatus};
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
     use kube::runtime::watcher;
 
     use djinn_image_controller::ImageControllerConfig;
-    use djinn_image_controller::build_job::{LABEL_BUILD, LABEL_IMAGE_HASH, LABEL_PROJECT_ID};
+    use djinn_image_controller::build_job::{
+        ANNOTATION_IMAGE_CONFIG_HASH, LABEL_BUILD, LABEL_IMAGE_HASH, LABEL_IMAGE_ID,
+        LABEL_PROJECT_ID,
+    };
 
     use super::__test_handle_event;
 
@@ -234,6 +239,36 @@ mod watcher_transitions {
             metadata: ObjectMeta {
                 name: Some(name.into()),
                 labels: Some(labels),
+                ..ObjectMeta::default()
+            },
+            status: Some(JobStatus {
+                succeeded,
+                failed,
+                ..JobStatus::default()
+            }),
+            ..Job::default()
+        }
+    }
+
+    fn fake_catalog_job(
+        image_id: &str,
+        full_hash: &str,
+        succeeded: Option<i32>,
+        failed: Option<i32>,
+    ) -> Job {
+        let prefix = &full_hash[..12.min(full_hash.len())];
+        let mut labels = BTreeMap::new();
+        labels.insert(LABEL_BUILD.into(), "true".into());
+        labels.insert(LABEL_IMAGE_ID.into(), image_id.into());
+        labels.insert(LABEL_IMAGE_HASH.into(), prefix.into());
+        let mut annotations = BTreeMap::new();
+        annotations.insert(ANNOTATION_IMAGE_CONFIG_HASH.into(), full_hash.into());
+        Job {
+            metadata: ObjectMeta {
+                name: Some(format!("djinn-build-image-{image_id}-{prefix}")),
+                uid: Some(format!("uid-{full_hash}")),
+                labels: Some(labels),
+                annotations: Some(annotations),
                 ..ObjectMeta::default()
             },
             status: Some(JobStatus {
@@ -384,5 +419,136 @@ mod watcher_transitions {
                 .unwrap_or_default(),
             err
         );
+    }
+
+    #[tokio::test]
+    async fn catalog_restart_replay_ignores_stale_success_and_failure_without_events() {
+        let cfg = ImageControllerConfig::for_testing();
+        let db = Database::open_in_memory().unwrap();
+        let images = ImageRepository::new(db.clone());
+        images
+            .create("catalog", "Catalog", None, "{}")
+            .await
+            .unwrap();
+        images
+            .mark_building("catalog", "newnewnewnew-full")
+            .await
+            .unwrap();
+        images
+            .mark_ready_if_current_build(
+                "catalog",
+                "newnewnewnew-full",
+                "registry/catalog:new",
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        let before = images.get("catalog").await.unwrap().unwrap();
+        let (bus, captured) = capturing_bus();
+
+        for job in [
+            fake_catalog_job("catalog", "oldoldoldold-full", Some(1), None),
+            fake_catalog_job("catalog", "oldoldoldold-full", None, Some(1)),
+        ] {
+            let mut fresh_seen = HashSet::new();
+            __test_handle_event(
+                &cfg,
+                &db,
+                &bus,
+                &mut fresh_seen,
+                watcher::Event::InitApply(job),
+            )
+            .await;
+        }
+        let after = images.get("catalog").await.unwrap().unwrap();
+        assert_eq!(after.status, before.status);
+        assert_eq!(after.tag, before.tag);
+        assert_eq!(after.registry_digest, before.registry_digest);
+        assert_eq!(
+            after.launcher_authority_protocol,
+            before.launcher_authority_protocol
+        );
+        assert!(
+            captured.lock().unwrap().is_empty(),
+            "stale replays emitted an event"
+        );
+    }
+
+    #[tokio::test]
+    async fn annotationless_same_prefix_terminal_jobs_cannot_impersonate_current_build() {
+        let cfg = ImageControllerConfig::for_testing();
+        let db = Database::open_in_memory().unwrap();
+        let images = ImageRepository::new(db.clone());
+        images
+            .create("collision", "Collision", None, "{}")
+            .await
+            .unwrap();
+        let current_hash = "sameprefix12-current-b";
+        images
+            .mark_building("collision", current_hash)
+            .await
+            .unwrap();
+        let before = images.get("collision").await.unwrap().unwrap();
+        let (bus, captured) = capturing_bus();
+
+        for (succeeded, failed) in [(Some(1), None), (None, Some(1))] {
+            let mut old = fake_catalog_job("collision", "sameprefix12-older-a", succeeded, failed);
+            old.metadata.annotations = None;
+            let mut fresh_seen = HashSet::new();
+            __test_handle_event(
+                &cfg,
+                &db,
+                &bus,
+                &mut fresh_seen,
+                watcher::Event::InitApply(old),
+            )
+            .await;
+        }
+        let after = images.get("collision").await.unwrap().unwrap();
+        assert_eq!(after.status, before.status);
+        assert_eq!(after.config_hash, before.config_hash);
+        assert!(captured.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn current_catalog_terminal_jobs_apply_and_emit_exactly_one_matching_event() {
+        for (succeeded, failed, expected_status, expected_action) in [
+            (Some(1), None, "ready", "ready"),
+            (None, Some(1), "failed", "build_failed"),
+        ] {
+            let cfg = ImageControllerConfig::for_testing();
+            let db = Database::open_in_memory().unwrap();
+            let images = ImageRepository::new(db.clone());
+            images
+                .create("current", "Current", None, "{}")
+                .await
+                .unwrap();
+            let full_hash = if succeeded.is_some() {
+                "successhash1-full"
+            } else {
+                "failurehash1-full"
+            };
+            images.mark_building("current", full_hash).await.unwrap();
+            let (bus, captured) = capturing_bus();
+            let mut seen = HashSet::new();
+            __test_handle_event(
+                &cfg,
+                &db,
+                &bus,
+                &mut seen,
+                watcher::Event::InitApply(fake_catalog_job(
+                    "current", full_hash, succeeded, failed,
+                )),
+            )
+            .await;
+            assert_eq!(
+                images.get("current").await.unwrap().unwrap().status,
+                expected_status
+            );
+            let events = captured.lock().unwrap();
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0].action, expected_action);
+        }
     }
 }

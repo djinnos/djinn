@@ -65,3 +65,16 @@ fn postgres_migration_150_is_immutable() {
         "c341372f7b745f384175ef412d1d40a7c809b8194930cf16533eb638d49f3dc1"
     );
 }
+
+#[test]
+fn postgres_migration_167_is_immutable() {
+    let bytes =
+        fs::read(migrations_dir("migrations_postgres").join("167_launcher_authority_mode.sql"))
+            .expect("migration 167 readable");
+    let digest = Sha256::digest(bytes);
+
+    assert_eq!(
+        format!("{digest:x}"),
+        "137a03e948625947052b6aeed64dea53efa6a99184c30fd832815619e26edae7"
+    );
+}
