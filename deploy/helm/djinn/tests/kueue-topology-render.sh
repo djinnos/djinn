@@ -949,6 +949,7 @@ grep -q 'cgroupLauncher.mode=required requires cgroupWritable.taskRuns.enabled=t
 render "$WORK/disarmed-runtimeclass.yaml" \
     --set kueue.enabled=true \
     --set-string cgroupLauncher.mode=disabled \
+    --set-string imagePipeline.controller.launcherAuthorityProtocol=leaf-v1 \
     --set cgroupWritable.taskRuns.enabled=false \
     --set kueue.armed=false
 assert_topology "$WORK/disarmed-runtimeclass.yaml" 3 no

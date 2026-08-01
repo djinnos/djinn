@@ -1084,8 +1084,10 @@ imagePipeline:
     # resize-v2. Expect a full rebuild of the catalog after changing it, and
     # sequence it against the cluster-wide launcher_authority_mode row: images
     # declaring a protocol the mode does not admit are refused at dispatch.
-    # Leave empty to keep the built-in default (leaf-v1) and rebuild nothing.
-    launcherAuthorityProtocol: ""
+    # Fresh installs declare Kubernetes resize authority. This is coherent with
+    # the armed cgroup-launcher defaults above; explicit rollback remains
+    # available through the durable launcher-authority admin command.
+    launcherAuthorityProtocol: "resize-v2"
     resources:
       requests:
         cpu: "100m"

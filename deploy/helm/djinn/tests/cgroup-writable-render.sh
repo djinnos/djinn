@@ -34,7 +34,8 @@ trap 'rm -rf "$WORK"' EXIT
 helm template cgroup-writable-default "$CHART_DIR" --is-upgrade >"$WORK/default.yaml"
 helm template cgroup-writable-preparation "$CHART_DIR" --is-upgrade \
   --set cgroupWritable.runtimeClass.enabled=true,cgroupWritable.taskRuns.enabled=false \
-  --set cgroupLauncher.mode=disabled >"$WORK/preparation.yaml"
+  --set cgroupLauncher.mode=disabled \
+  --set imagePipeline.controller.launcherAuthorityProtocol=leaf-v1 >"$WORK/preparation.yaml"
 helm template cgroup-writable-activation "$CHART_DIR" --is-upgrade \
   --set cgroupWritable.runtimeClass.enabled=true,cgroupWritable.taskRuns.enabled=true >"$WORK/activation.yaml"
 # The fully armed production pairing: an armed launcher together with the
@@ -104,6 +105,8 @@ base, preparation, activation, armed = (
 )
 fixtures = Path(sys.argv[5])
 assert len(runtime_classes(base)) == 2, 'armed defaults must render both RuntimeClasses'
+assert '''- name: DJINN_IMAGE_LAUNCHER_AUTHORITY_PROTOCOL
+              value: "resize-v2"''' in base, 'shipped chart must arm resize-v2 authority explicitly'
 runtime_class_named(base, TASK_RUN_CLASS)
 runtime_class_named(base, PROBE_CLASS)
 
