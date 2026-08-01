@@ -71,6 +71,23 @@ async fn two_area_service_flow_persists_worked_terminal_readiness_detail() {
         .expect("Rust backend fanout");
     assert_eq!(frontend.attempt.attempt_number, 1);
     assert_eq!(backend.attempt.attempt_number, 1);
+    // Fan-out is the production hand-off to Architect work. The persisted
+    // marker, rather than task text or role, is the S0 eligibility contract
+    // that delivers this exact pin to the native-skill resolver.
+    for area_work in [frontend, backend] {
+        assert_eq!(
+            area_work.task.execution_context,
+            Some(
+                djinn_core::models::TaskExecutionContext::readiness_guardrail_analysis(
+                    READINESS_SKILL_NAME,
+                    READINESS_SKILL_VERSION,
+                )
+                .expect("the kickoff pin is a valid execution context"),
+            ),
+            "frozen {} area work must carry the exact pinned readiness marker",
+            area_work.area.area_key,
+        );
+    }
 
     assert_eq!(
         repository

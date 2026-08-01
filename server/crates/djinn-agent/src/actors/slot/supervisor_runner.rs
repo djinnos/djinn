@@ -961,12 +961,81 @@ struct AcquiredBuildPodPermit {
     fencing_token: i64,
 }
 
+/// Create the durable `task_runs` row this dispatch will be recorded against,
+/// **before** the build-pod permit whose foreign key points at it.
+///
+/// # The ordering this exists to fix
+///
+/// `build_pod_permits.task_run_id` is `REFERENCES task_runs(id)` (migration
+/// 162), and [`acquire_build_pod_permit`] must run before the Job POST. Until
+/// this function existed, nothing on the host created the parent row: the only
+/// production creator was the in-pod supervisor's `create_task_run` RPC, which
+/// travels over a stdio channel [`attach_and_await_terminal_report`] has not
+/// opened yet — a Pod schedule, image pull and handshake later.
+///
+/// So every permit insert on a fresh dispatch referenced a parent that did not
+/// exist. This was never a race. It was strictly sequential and strictly
+/// backwards, and it failed on *every* dispatch, not some of them.
+///
+/// `BuildPodPermitRepository::acquire` collapses all errors into `Unavailable`
+/// to fail closed, so the foreign-key violation surfaced as "no permit" rather
+/// than as anything nameable. Under `leaf-v1` that was invisible —
+/// [`admit_task_run_dispatch`]'s `permit.is_none()` arm returns `Ok(())` for
+/// leaf. Under `resize-v2` the same arm refuses the dispatch, which is why the
+/// launcher-authority cutover looked like it broke dispatch when all it did was
+/// stop masking this.
+///
+/// The row created here is the one the worker would have created anyway: same
+/// host-minted id, same `starting` status, same `catalog_image_id` binding. The
+/// worker's RPC now adopts it.
+async fn ensure_durable_task_run_row(
+    app_state: &AgentContext,
+    spec: &TaskRunSpec,
+) -> anyhow::Result<()> {
+    let created = TaskRunRepository::new(app_state.db.clone())
+        .create_for_dispatch(djinn_db::CreateTaskRunParams {
+            id: &spec.task_run_id,
+            project_id: &spec.project_id,
+            task_id: &spec.task_id,
+            trigger_type: spec.trigger.as_str(),
+            // Byte-identical to what the in-pod supervisor sends: the run is
+            // visible to the UI and to the host-side pre-session liveness
+            // deadline from dispatch, and flips to `running` when the first
+            // reply-loop session is created.
+            status: Some(TaskRunStatus::Starting.as_str()),
+            workspace_path: None,
+            mirror_ref: None,
+            dispatch_group_id: spec
+                .resume_lifecycle_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.dispatch_group_id.as_deref()),
+        })
+        .await
+        .map_err(|error| {
+            anyhow::anyhow!(
+                "supervisor dispatch: could not create the durable task_runs row for task-run \
+                 {}: {error}; refusing to dispatch a run that has no durable identity to \
+                 fence, record a terminal status against, or reap",
+                spec.task_run_id
+            )
+        })?;
+    tracing::debug!(
+        task_run_id = %spec.task_run_id,
+        created,
+        "supervisor dispatch: durable task_runs row ready before permit acquisition"
+    );
+    Ok(())
+}
+
 /// Acquire the durable `build_pod_permits` row for this dispatch, **before**
 /// the Job that it fences exists.
 ///
-/// Ordering is load-bearing: the permit's `fencing_token` is what every later
-/// durable write is checked against, so a row created after the Job could not
-/// fence the window in which the Job already has a Pod.
+/// Ordering is load-bearing in both directions. The permit's `fencing_token` is
+/// what every later durable write is checked against, so a row created after the
+/// Job could not fence the window in which the Job already has a Pod — and the
+/// permit's own `task_run_id` is a foreign key, so [`ensure_durable_task_run_row`]
+/// has to have run before this. Calling this first is what made every
+/// `resize-v2` dispatch fail closed.
 ///
 /// Returns `None` when this context composes no resize stack at all (an in-pod
 /// worker, a test that dispatches no Job) or when the pool could not answer.
@@ -979,10 +1048,16 @@ struct AcquiredBuildPodPermit {
 /// resize lifecycle that reclaims a permit (lift, drop, quarantine, release)
 /// belongs to `0ppk-3`'s reconciler. Until that lands, rows accumulate in
 /// `job_created` / `birth_confirmed`, which is why
-/// [`BUILD_POD_PERMIT_LIMIT_DEFAULT`] is sized not to bind and why a `PoolFull`
-/// result is a warning rather than a refusal for `leaf-v1` — the arm every Pod
-/// on the current fleet takes. A ceiling that both accumulates and fails closed
-/// is how `DJINN_MAX_BUILD_PODS` wedged the whole cluster.
+/// [`BUILD_POD_PERMIT_LIMIT_DEFAULT`] is sized not to bind. A ceiling that both
+/// accumulates and fails closed is how `DJINN_MAX_BUILD_PODS` wedged the whole
+/// cluster.
+///
+/// A `PoolFull` result is still only a warning *here*; whether it refuses is
+/// [`admit_task_run_dispatch`]'s call, and it refuses for `resize-v2`. The
+/// version of this note that said "a warning rather than a refusal for
+/// `leaf-v1` — the arm every Pod on the current fleet takes" was true when it
+/// was written and stopped being true at the `resize-v2` cutover. Do not read
+/// the fleet's current protocol out of a comment.
 async fn acquire_build_pod_permit(
     app_state: &AgentContext,
     spec: &TaskRunSpec,
@@ -1169,14 +1244,27 @@ pub async fn execute_runtime_report_phase(
     app_state: &AgentContext,
     kill: &CancellationToken,
 ) -> anyhow::Result<RuntimeExecutionOutcome> {
+    // The durable `task_runs` row is created BEFORE the permit, because the
+    // permit's `task_run_id` is a foreign key onto it and the in-pod supervisor
+    // cannot create it until a Pod boot later. See
+    // `ensure_durable_task_run_row`.
+    ensure_durable_task_run_row(app_state, spec).await?;
     // The durable permit is acquired BEFORE the Job exists: its fencing token is
     // what every later resize write is checked against, and a row minted after
     // the Pod could not fence the window it is supposed to own.
     let permit = acquire_build_pod_permit(app_state, spec).await;
-    let handle = runtime
-        .prepare(spec, credentials)
-        .await
-        .map_err(|e| anyhow::anyhow!("runtime.prepare failed: {e}"))?;
+    let handle = match runtime.prepare(spec, credentials).await {
+        Ok(handle) => handle,
+        Err(error) => {
+            // The `task_runs` row above outlives a failed Job POST. Before that
+            // row was created on this side of the boot there was nothing here to
+            // terminalize, and leaving it `starting` would strand it until the
+            // coordinator's stale sweep.
+            reap_orphan_task_run(app_state, &spec.task_run_id, TaskRunStatus::Failed).await;
+            teardown_cargo_target_run_dir(app_state, &spec.task_run_id).await;
+            return Err(anyhow::anyhow!("runtime.prepare failed: {error}"));
+        }
+    };
     // The JOB uid the create above confirmed. Not a Pod UID — `prepare` never
     // waits for a Pod and never sees one.
     let job_uid_bound = match permit.as_ref() {
