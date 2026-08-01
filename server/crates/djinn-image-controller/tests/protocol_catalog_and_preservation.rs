@@ -118,6 +118,7 @@ async fn a_newly_cataloged_artifact_declares_a_protocol_and_pins_a_digest() {
         .await
         .unwrap();
     let images = ImageRepository::new(db.clone());
+    let artifact_protocol = LauncherAuthorityProtocol::ResizeV2;
     images
         .create("new", "Newly built", None, "{}")
         .await
@@ -129,7 +130,7 @@ async fn a_newly_cataloged_artifact_declares_a_protocol_and_pins_a_digest() {
             "new",
             "reg/djinn-image-new:contenthash",
             Some(&digest),
-            Some(DEFAULT_LAUNCHER_PROTOCOL),
+            Some(artifact_protocol),
         )
         .await
         .unwrap();
@@ -138,14 +139,14 @@ async fn a_newly_cataloged_artifact_declares_a_protocol_and_pins_a_digest() {
     let row = images.get("new").await.unwrap().expect("row");
     assert_eq!(
         row.declared_launcher_protocol().unwrap(),
-        Some(DEFAULT_LAUNCHER_PROTOCOL)
+        Some(artifact_protocol)
     );
     assert_eq!(row.registry_digest.as_deref(), Some(digest.as_str()));
 
     // The inventory is EMPTY and the artifact still dispatches: a declaring
     // image is admitted on its own declaration, never on an allowlist entry.
-    // (Migration 167 seeds the authority singleton at `leaf-v1`, which is what
-    // `DEFAULT_LAUNCHER_PROTOCOL` is, so no flip is needed here.)
+    // A fresh database has completed the resize-v2 cutover, so the newly built
+    // artifact declares resize-v2 and dispatches without an inventory entry.
     let resolved = ProjectRepository::new(db.clone(), djinn_core::events::EventBus::noop())
         .with_legacy_digest_inventory(launcher_compatibility::LegacyDigestInventory::verified(
             "ops",
@@ -156,7 +157,7 @@ async fn a_newly_cataloged_artifact_declares_a_protocol_and_pins_a_digest() {
         .await
         .unwrap()
         .expect("project resolves");
-    assert_eq!(resolved.authority_protocol, Some(DEFAULT_LAUNCHER_PROTOCOL));
+    assert_eq!(resolved.authority_protocol, Some(artifact_protocol));
 
     // And a declaring artifact can never be written without a digest, so a new
     // build cannot fall into the legacy population by accident.
@@ -166,7 +167,7 @@ async fn a_newly_cataloged_artifact_declares_a_protocol_and_pins_a_digest() {
             "bad",
             "reg/djinn-image-bad:contenthash",
             None,
-            Some(DEFAULT_LAUNCHER_PROTOCOL),
+            Some(artifact_protocol),
         )
         .await
         .expect_err("a declaring build with no digest must be refused");
