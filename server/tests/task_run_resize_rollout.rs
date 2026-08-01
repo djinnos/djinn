@@ -319,9 +319,8 @@ impl TaskRunPodPlane for RecordingPodPlane {
 /// A preflight whose verdict is chosen by the test, recording every call.
 ///
 /// The REAL preflight — `djinn_k8s::cutover_preflight::run` over a live
-/// `helm template` render — is driven end to end through
-/// `ResizeRollout::production` in `tests/authority_cutover.rs`. What this
-/// fixture is for is the *ordering* property: that a blocked preflight leaves
+/// `helm template` render — is exercised by the retained djinn-k8s preflight
+/// suite. What this fixture proves is the *ordering* property: a blocked preflight leaves
 /// the mode untouched and that the flip is unreachable without it. Both of
 /// those are properties of the journal, not of any rule inside the preflight.
 struct RecordingPreflight {
@@ -1273,10 +1272,8 @@ async fn the_flip_cannot_precede_the_drain_and_the_resume_cannot_precede_the_fli
 /// refusal leaves the durable mode and the epoch exactly where they were, and
 /// leaves admission paused, because `resume_admission` requires a journaled
 /// flip and the flip requires a journaled preflight. The half this cannot prove
-/// — that the preflight production composes is the real one — is proven in
-/// `tests/authority_cutover.rs`, which drives
-/// `djinn_k8s::cutover_preflight::run` over a live render through
-/// `ResizeRollout::production`.
+/// — that the deploy preflight composes the real validator — is proven by the
+/// retained `djinn-k8s/tests/cutover_preflight.rs` suite.
 #[tokio::test]
 async fn a_blocked_preflight_leaves_the_mode_and_the_epoch_where_they_were() {
     let db = legacy_leaf_database().await;
