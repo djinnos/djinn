@@ -63,6 +63,117 @@ pub(crate) const ZOMBIE_HARD_CAP_SECS: u64 = 10 * 60;
 /// bounds how many extensions are actually granted.
 pub(crate) const HARD_RUNTIME_CAP_SECS: u64 = 3 * 60 * 60;
 
+// ─── Cluster witness for the stuck-task reaper ──────────────────────────────
+//
+// # An amnesiac in-memory source may never authorize a destructive transition.
+//
+// The stuck-task reaper releases a task out of an execution state, and
+// finalizes its `running` session rows, on the strength of one question:
+// `SlotPoolHandle::has_session`. That is an IN-MEMORY map owned by this
+// process. A coordinator restart wipes it, so on the first scan after a rolling
+// deploy EVERY live session reads as absent and every task holding one is
+// reaped out from under a worker that is still running.
+//
+// Production, 2026-08-01, v0.7.31 rollout: three workers went
+// `in_progress → open` at 00:09:34 and two reviewers went
+// `in_task_review → needs_task_review` at 00:10:33, all with live pods. Task
+// `zd7p`'s reviewer submitted an `approved` verdict 31 seconds AFTER its
+// demotion — the verdict row persisted, the state transition was dropped on the
+// floor because the task was no longer in the status the transition expected,
+// and the task was re-reviewed from scratch ~12h later at ~570k tokens.
+//
+// A liveness classifier was already consulted below the gate, with a comment
+// claiming it would "confirm this is a dead-orphan reclaim". It could not.
+// [`build_liveness_evidence`] is not `async` and derives `pod_phase` from
+// `pool_info: Option<&RunningTaskInfo>` — the SAME in-memory map `has_session`
+// just read. On any path that reaches the reaper that argument is always
+// `None`, forcing `PodPhase::Absent` + `ActivitySignal::Idle`, which
+// [`super::liveness::classify`] can only resolve to `Dead` (or `KillNoop` for
+// an already-terminal task). `Verdict::Alive` is structurally unreachable
+// there, so gating on it would have been a no-op that shipped green.
+//
+// What follows is a witness of the EXTERNAL world, taken from the same
+// [`djinn_k8s::WorkloadInventory`] the build-lease reclaimer probes with, and
+// it follows that module's discipline exactly:
+//
+//   * the object name is deterministic ([`taskrun_job_name`]), derived from the
+//     durable `task_runs` row rather than from any process-local state;
+//   * an authoritative LIST that just succeeded is the primary evidence, and it
+//     keeps each object's terminal flag — presence is not liveness, since a
+//     finished task-run Job lingers for its whole `ttlSecondsAfterFinished`;
+//   * a direct GET, taken independently of that LIST, is what turns "not in the
+//     listing" into "absent";
+//   * `Uncertain` is NEVER proof. A degraded API server, a client-side timeout,
+//     or an unreadable ledger leaves every task exactly where it is.
+//
+// The fail-safe direction is not symmetric and the asymmetry is the point: a
+// task left sitting in an execution state is recovered by the very next scan
+// thirty seconds later, while a reaped live session destroys hours of work
+// irrecoverably.
+//
+// The in-memory pool remains as a fast-path HINT — a `true` still
+// short-circuits and skips the Kubernetes round-trip, because a pool that
+// remembers a session is positive evidence of one. Only its `false` needs
+// corroborating, because only its `false` is what amnesia produces.
+
+/// What observed cluster state says about the task-run a candidate reap would
+/// destroy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ClusterWitness {
+    /// A task-run Job for this task exists and has NOT reached a terminal
+    /// condition: work is live behind it. Never reap.
+    Live,
+    /// Every task-run this task could still own is provably finished or gone —
+    /// the authoritative LIST and an independent GET agree. Reaping is safe.
+    Gone,
+    /// The cluster could not be asked, or its answer was ambiguous. Never proof
+    /// of anything, so the caller must leave the task alone.
+    Unknown,
+    /// There is nothing to ask about: this deployment observes no task-run Jobs
+    /// at all (no kube client), or this task has no live `task_runs` row that
+    /// could own one. The witness does not apply and the caller keeps its
+    /// pre-existing behaviour.
+    NotApplicable,
+}
+
+impl ClusterWitness {
+    /// Whether observed cluster state permits a destructive transition.
+    ///
+    /// `Unknown` sits with `Live` deliberately: an unanswered probe is not a
+    /// weaker "yes", it is not an answer, and the whole reason this witness
+    /// exists is that acting on a non-answer is what reaped five live tasks.
+    pub(crate) fn permits_reap(self) -> bool {
+        match self {
+            Self::Gone | Self::NotApplicable => true,
+            Self::Live | Self::Unknown => false,
+        }
+    }
+
+    /// Short, stable label for structured logs.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Live => "live",
+            Self::Gone => "gone",
+            Self::Unknown => "unknown",
+            Self::NotApplicable => "not_applicable",
+        }
+    }
+}
+
+/// One scan pass's authoritative view of the Kubernetes objects in the
+/// namespace, taken once and reused for every candidate in that pass.
+pub(crate) enum ClusterJobListing {
+    /// Object name → whether it has reached a terminal condition. Built from a
+    /// LIST that succeeded, so an object missing from it is a candidate for the
+    /// independent absence GET.
+    Listed(std::collections::HashMap<String, bool>),
+    /// The LIST failed or timed out. Nothing in this pass may be reaped on an
+    /// absence proof.
+    Unavailable,
+    /// No inventory is wired: this deployment runs no task-run Jobs.
+    NotConfigured,
+}
+
 impl CoordinatorActor {
     pub(crate) async fn teardown_zombie_taskrun_job(
         &self,
@@ -1755,6 +1866,147 @@ impl CoordinatorActor {
         }
     }
 
+    /// Take this pass's authoritative listing of Kubernetes objects.
+    ///
+    /// Called at most once per scan pass, and only once some task has actually
+    /// reached the reap gate, so a quiet board costs no API call at all.
+    ///
+    /// A failed listing is [`ClusterJobListing::Unavailable`], never an empty
+    /// map: collapsing "the API server did not answer" into "there are no
+    /// objects" is precisely how a k8s outage would read as proof that every
+    /// live session is gone.
+    pub(crate) async fn cluster_job_listing(&self) -> ClusterJobListing {
+        let Some(inventory) = self.workload_inventory.as_ref() else {
+            return ClusterJobListing::NotConfigured;
+        };
+        match inventory.list().await {
+            Ok(records) => ClusterJobListing::Listed(
+                records
+                    .into_iter()
+                    .map(|record| (record.name, record.terminal))
+                    .collect(),
+            ),
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "CoordinatorActor: Kubernetes workload listing failed during stuck-task \
+                     scan; no task will be reaped on an absence proof this pass"
+                );
+                ClusterJobListing::Unavailable
+            }
+        }
+    }
+
+    /// Corroborate the in-memory slot pool against observed cluster state for
+    /// one task.
+    ///
+    /// See the cluster-witness section at the top of this module: an amnesiac
+    /// in-memory source may never authorize a destructive transition, so this
+    /// is the independent witness a `has_session == false` must clear before
+    /// anything is released or interrupted.
+    pub(crate) async fn cluster_witness_for_task(
+        &self,
+        task_id: &str,
+        listing: &ClusterJobListing,
+    ) -> ClusterWitness {
+        // The durable `task_runs` ledger, not the slot pool and not the session
+        // rows, is what names the objects this task could still own. It is also
+        // what covers the 20-60s window between the Job being created and the
+        // in-pod worker inserting its `sessions` row: during that window there
+        // is a live pod and no session to point at it.
+        let runs = match djinn_db::TaskRunRepository::new(self.db.clone())
+            .list_for_task(task_id)
+            .await
+        {
+            Ok(runs) => runs,
+            Err(e) => {
+                tracing::warn!(
+                    task_id = %task_id,
+                    error = %e,
+                    "CoordinatorActor: failed to read task_runs for the reaper's cluster \
+                     witness; treating liveness as unknown and leaving the task alone"
+                );
+                return ClusterWitness::Unknown;
+            }
+        };
+        // Kept unless PROVABLY terminal, rather than kept only when provably
+        // live. The two are the same for every value the enum defines, and they
+        // differ exactly on a status string this build does not recognise —
+        // where "not provably finished" is the fail-safe reading. Such a run
+        // still resolves through the cluster probe below; it is not assumed
+        // alive, only not assumed dead.
+        let live_run_ids: Vec<String> = runs
+            .into_iter()
+            .filter(|run| {
+                !run.status
+                    .parse::<djinn_core::models::TaskRunStatus>()
+                    .is_ok_and(|status| status.is_terminal())
+            })
+            .map(|run| run.id)
+            .collect();
+        if live_run_ids.is_empty() {
+            // Nothing this task owns could be running in a pod. That is a real
+            // answer, not an unanswered question: a task with no live run is
+            // exactly the stranded shape this reaper exists to recover.
+            return ClusterWitness::NotApplicable;
+        }
+
+        let listed = match listing {
+            ClusterJobListing::NotConfigured => return ClusterWitness::NotApplicable,
+            ClusterJobListing::Unavailable => return ClusterWitness::Unknown,
+            ClusterJobListing::Listed(listed) => listed,
+        };
+
+        let mut witness = ClusterWitness::Gone;
+        for run_id in live_run_ids {
+            match self.witness_for_task_run(&run_id, listed).await {
+                // One live Job is enough; nothing weaker can override it.
+                ClusterWitness::Live => return ClusterWitness::Live,
+                ClusterWitness::Unknown => witness = ClusterWitness::Unknown,
+                ClusterWitness::Gone | ClusterWitness::NotApplicable => {}
+            }
+        }
+        witness
+    }
+
+    /// The witness for ONE task-run id, from the deterministic name its Job
+    /// commits to.
+    async fn witness_for_task_run(
+        &self,
+        task_run_id: &str,
+        listed: &std::collections::HashMap<String, bool>,
+    ) -> ClusterWitness {
+        let job_name = djinn_k8s::taskrun_job_name(task_run_id);
+        if let Some(&terminal) = listed.get(&job_name) {
+            // The object is here. Whether its owner is ALIVE is the entire
+            // question: a task-run Job carries `ttlSecondsAfterFinished: 3600`,
+            // so for a full hour after the work ends the Job is still listed
+            // while the worker behind it is gone. Reading presence as liveness
+            // would block recovery for an hour; reading it as absence would
+            // reap live work. The terminal condition is what separates them.
+            return if terminal {
+                ClusterWitness::Gone
+            } else {
+                ClusterWitness::Live
+            };
+        }
+
+        // Not in the listing. That is not yet proof — take an INDEPENDENT GET
+        // against the same deterministic name before believing it.
+        let Some(inventory) = self.workload_inventory.as_ref() else {
+            return ClusterWitness::Unknown;
+        };
+        match inventory
+            .presence(djinn_k8s::WorkloadObjectKind::Job, &job_name)
+            .await
+        {
+            djinn_k8s::ObjectPresence::Absent => ClusterWitness::Gone,
+            djinn_k8s::ObjectPresence::Present { .. } => ClusterWitness::Live,
+            // A transport or permission failure. Proof of nothing.
+            djinn_k8s::ObjectPresence::Uncertain => ClusterWitness::Unknown,
+        }
+    }
+
     /// On each tick: find tasks in active execution states with no active session
     /// and release them back to a dispatch-ready state (AGENT-08).
     ///
@@ -1771,6 +2023,11 @@ impl CoordinatorActor {
             self.db.clone(),
             crate::events::event_bus_for(&self.events_tx),
         );
+
+        // One authoritative Kubernetes listing for the whole pass, taken lazily
+        // the first time some task actually reaches a reap gate. A quiet board
+        // makes no API call at all; a busy one makes exactly one.
+        let mut cluster_listing: Option<ClusterJobListing> = None;
 
         for status in [
             "in_progress",
@@ -1854,12 +2111,44 @@ impl CoordinatorActor {
                         continue;
                     }
 
+                    // ── Cluster witness gate (ready-state orphan) ─────────────
+                    // `has_session` above is an IN-MEMORY read, and a
+                    // coordinator restart wipes it. Corroborate its `false`
+                    // against observed cluster state before finalizing anything:
+                    // an amnesiac in-memory source may never authorize a
+                    // destructive transition. See the module's cluster-witness
+                    // section.
+                    let listing = match cluster_listing {
+                        Some(ref listing) => listing,
+                        None => cluster_listing
+                            .insert(poll_stack::boxed(|| self.cluster_job_listing()).await),
+                    };
+                    let witness =
+                        poll_stack::boxed(|| self.cluster_witness_for_task(&task.id, listing))
+                            .await;
+                    if !witness.permits_reap() {
+                        tracing::info!(
+                            task_id = %task.short_id,
+                            status = %task.status,
+                            session_id = %running_session.id,
+                            witness = witness.as_str(),
+                            "CoordinatorActor: ready-state orphan candidate has live or \
+                             unverifiable cluster state; leaving its session alone"
+                        );
+                        continue;
+                    }
+
                     // ── Liveness classifier gate for stale ready-state orphan ──
                     // Consult the classifier before finalizing the running
                     // session. A stale ready-state orphan has no live pod
                     // (verified by has_session and background-work checks
                     // above), so the classifier will normally return Dead.
                     // If the task is already terminal, record KillNoop.
+                    //
+                    // NOTE: this classifier cannot substitute for the witness
+                    // above. `build_liveness_evidence` reads the same in-memory
+                    // pool `has_session` just read, so on this path it always
+                    // sees `PodPhase::Absent` and can only answer `Dead`.
                     let classification =
                         poll_stack::boxed(|| self.classify_task_liveness(&task.id)).await;
                     if let Some(ref result) = classification {
@@ -1979,11 +2268,43 @@ impl CoordinatorActor {
                     continue;
                 }
 
+                // ── Cluster witness gate (execution-state orphan) ────────────
+                // This is the gate the 2026-08-01 v0.7.31 rollout crossed with
+                // nothing behind it: three workers and two reviewers with live
+                // pods were released here because the restart had emptied the
+                // in-memory pool `has_session` reads. An amnesiac in-memory
+                // source may never authorize a destructive transition, so its
+                // `false` is corroborated against observed cluster state before
+                // the task is moved anywhere. See the module's cluster-witness
+                // section.
+                let listing = match cluster_listing {
+                    Some(ref listing) => listing,
+                    None => cluster_listing
+                        .insert(poll_stack::boxed(|| self.cluster_job_listing()).await),
+                };
+                let witness =
+                    poll_stack::boxed(|| self.cluster_witness_for_task(&task.id, listing)).await;
+                if !witness.permits_reap() {
+                    tracing::info!(
+                        task_id = %task.short_id,
+                        status = %task.status,
+                        witness = witness.as_str(),
+                        "CoordinatorActor: stuck-task candidate has live or unverifiable \
+                         cluster state; leaving it in its execution state"
+                    );
+                    continue;
+                }
+
                 // ── Liveness classifier gate for execution-state orphan ──
                 // The task is in an execution state but has no slot session
                 // and no background work. Consult the classifier to confirm
                 // this is a dead-orphan reclaim, and to detect concurrent
                 // terminal transitions.
+                //
+                // NOTE: this classifier cannot substitute for the witness
+                // above. `build_liveness_evidence` reads the same in-memory
+                // pool `has_session` just read, so on this path it always sees
+                // `PodPhase::Absent` and can only answer `Dead`.
                 let classification =
                     poll_stack::boxed(|| self.classify_task_liveness(&task.id)).await;
                 if let Some(ref result) = classification {
