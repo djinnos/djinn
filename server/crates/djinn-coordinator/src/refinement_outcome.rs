@@ -148,6 +148,18 @@ fn every_ignored_outcome_fence_has_a_unique_structured_reason() {
         .collect::<std::collections::HashSet<_>>();
     assert_eq!(reasons.len(), 7);
     assert!(reasons.iter().all(|reason| !reason.trim().is_empty()));
+    // Couple the catalog to all seven production return sites. This makes a
+    // missing reason, duplicated reason index, or reintroduced bare return a
+    // regression rather than merely proving that an unused array is unique.
+    let source = include_str!("refinement_outcome.rs");
+    for index in 0..OUTCOME_IGNORED_REASONS.len() {
+        let production_return = format!("OutcomeFence::Ignored(OUTCOME_IGNORED_REASONS[{index}])");
+        assert_eq!(
+            source.matches(&production_return).count(),
+            1,
+            "ignored fence branch {index} must emit its one distinct structured reason"
+        );
+    }
 }
 #[cfg(test)]
 use super::refinement_lint_evidence::{
