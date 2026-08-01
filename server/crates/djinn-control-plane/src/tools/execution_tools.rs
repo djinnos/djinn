@@ -89,9 +89,8 @@ impl DjinnMcpServer {
             .is_some_and(|t| t.status == "closed" || t.status == "force_closed");
 
         if task_is_terminal {
-            // Task is already terminal — no live work to free. Record kill_noop evidence.
-            // We need a valid session_id for the FK constraint. Try active first,
-            // then fall back to any session for the task (including terminal ones).
+            // Task is already terminal — no live work to free. Record task-scoped
+            // kill_noop evidence, retaining scalar ownership only when available.
             let active_session = session_repo
                 .active_for_task(&p.task_id)
                 .await
@@ -107,22 +106,20 @@ impl DjinnMcpServer {
                     .and_then(|sessions| sessions.into_iter().next())
             };
             let evidence_session = active_session.as_ref().or(any_session.as_ref());
-            if let Some(session) = evidence_session {
-                let snapshot = LivenessEvidenceSnapshot {
-                    session_id: session.id.clone(),
-                    task_id: Some(p.task_id.clone()),
-                    task_run_id: session.task_run_id.clone(),
-                    verdict: "live".to_owned(), // verdict is moot for terminal tasks
-                    outcome_kind: Some("kill_noop".to_owned()),
-                    outcome_reason: None,
-                    evidence: serde_json::json!({
-                        "reason": "task_already_terminal",
-                        "task_status": task.as_ref().map(|t| t.status.as_str()).unwrap_or("unknown"),
-                        "kill_source": "execution_kill_task",
-                    }),
-                };
-                let _ = liveness_repo.persist_evidence(&snapshot).await;
-            }
+            let snapshot = LivenessEvidenceSnapshot {
+                session_id: evidence_session.map(|session| session.id.clone()),
+                task_id: Some(p.task_id.clone()),
+                task_run_id: evidence_session.and_then(|session| session.task_run_id.clone()),
+                verdict: "live".to_owned(), // verdict is moot for terminal tasks
+                outcome_kind: Some("kill_noop".to_owned()),
+                outcome_reason: None,
+                evidence: serde_json::json!({
+                    "reason": "task_already_terminal",
+                    "task_status": task.as_ref().map(|t| t.status.as_str()).unwrap_or("unknown"),
+                    "kill_source": "execution_kill_task",
+                }),
+            };
+            let _ = liveness_repo.persist_evidence(&snapshot).await;
             return Json(ExecutionKillTaskResponse {
                 ok: false,
                 task_id: Some(p.task_id),
@@ -141,28 +138,26 @@ impl DjinnMcpServer {
             .flatten();
         let has_pool_session = pool.has_session(&p.task_id).await.unwrap_or(true);
         if active_session.is_none() && !has_pool_session {
-            // No live work to free — try to find any session for the task
-            // to satisfy the liveness_evidence FK constraint on session_id.
+            // No live work to free. This is task-scoped evidence unless a
+            // single historical session is available as its scalar owner.
             let any_session = session_repo
                 .list_for_task(&p.task_id)
                 .await
                 .ok()
                 .and_then(|sessions| sessions.into_iter().next());
-            if let Some(session) = any_session.as_ref() {
-                let snapshot = LivenessEvidenceSnapshot {
-                    session_id: session.id.clone(),
-                    task_id: Some(p.task_id.clone()),
-                    task_run_id: session.task_run_id.clone(),
-                    verdict: "live".to_owned(),
-                    outcome_kind: Some("kill_noop".to_owned()),
-                    outcome_reason: None,
-                    evidence: serde_json::json!({
-                        "reason": "no_active_session",
-                        "kill_source": "execution_kill_task",
-                    }),
-                };
-                let _ = liveness_repo.persist_evidence(&snapshot).await;
-            }
+            let snapshot = LivenessEvidenceSnapshot {
+                session_id: any_session.as_ref().map(|session| session.id.clone()),
+                task_id: Some(p.task_id.clone()),
+                task_run_id: any_session.and_then(|session| session.task_run_id),
+                verdict: "live".to_owned(),
+                outcome_kind: Some("kill_noop".to_owned()),
+                outcome_reason: None,
+                evidence: serde_json::json!({
+                    "reason": "no_active_session",
+                    "kill_source": "execution_kill_task",
+                }),
+            };
+            let _ = liveness_repo.persist_evidence(&snapshot).await;
             return Json(ExecutionKillTaskResponse {
                 ok: false,
                 task_id: Some(p.task_id),
@@ -184,10 +179,7 @@ impl DjinnMcpServer {
                 // Record dead_reclaimed evidence with the session/task_run that
                 // was reclaimed.
                 let snapshot = LivenessEvidenceSnapshot {
-                    session_id: active_session
-                        .as_ref()
-                        .map(|s| s.id.clone())
-                        .unwrap_or_default(),
+                    session_id: active_session.as_ref().map(|s| s.id.clone()),
                     task_id: Some(p.task_id.clone()),
                     task_run_id: active_session.as_ref().and_then(|s| s.task_run_id.clone()),
                     verdict: "dead".to_owned(),

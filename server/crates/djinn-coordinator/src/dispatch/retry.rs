@@ -573,11 +573,13 @@ impl CoordinatorActor {
     /// the Planner for the same decompose / rescope / close decision instead.
     ///
     /// The premise is that the RUNS CONCLUDE and the task still does not move.
-    /// A session cancelled by infrastructure never concluded, says nothing about
-    /// the task's scope, and must not reach here — see
-    /// [`PriorSessionDisposition`]. The reason emitted below therefore names the
-    /// terminal `task_attempts` outcomes actually observed instead of asserting
-    /// completion the coordinator never checked (task 7mq0, 2026-07-28).
+    /// A session cancelled by infrastructure — or, after the 2026-08-01
+    /// launcher-protocol outage, one that `spawn_failed` before any session
+    /// existed — never concluded, says nothing about the task's scope, and must
+    /// not reach here; see [`PriorSessionDisposition`]. The reason emitted below
+    /// therefore names the terminal `task_attempts` outcomes actually observed
+    /// instead of asserting completion the coordinator never checked (task 7mq0,
+    /// 2026-07-28).
     ///
     /// Shares all of trigger A's machinery — second-strike terminal park,
     /// reopen-count-keyed idempotency marker (stable across a review-cycle
@@ -603,10 +605,13 @@ impl CoordinatorActor {
                 .to_owned()
         } else {
             format!(
-                "Observed session outcomes for `{role}`, newest first: {}. Sessions cancelled or \
-                 reclaimed by infrastructure (`cancelled` / `timed_out` / `interrupted`) do NOT \
-                 advance this streak, so every run counted above reached its own terminal \
-                 decision and the task still landed right back where it was.",
+                "Observed session outcomes for `{role}`, newest first: {}. This escalation arms \
+                 only when the MOST RECENT run reached its own terminal decision: a session \
+                 cancelled, reclaimed, or never created by infrastructure (`cancelled` / \
+                 `timed_out` / `interrupted` / `spawn_failed`) can never arm it, so the newest \
+                 outcome above is a decision the run itself made and the task still landed right \
+                 back where it was. Any infrastructure outcome listed after it is shown for \
+                 context only and is not evidence about this task.",
                 observed.join(", ")
             )
         };
