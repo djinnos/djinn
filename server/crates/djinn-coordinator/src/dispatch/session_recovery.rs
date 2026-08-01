@@ -517,7 +517,7 @@ impl CoordinatorActor {
                 {
                     let liveness_repo = LivenessRepository::new(self.db.clone());
                     let snapshot = LivenessEvidenceSnapshot {
-                        session_id: session.id.clone(),
+                        session_id: Some(session.id.clone()),
                         task_id: Some(task_id.to_owned()),
                         task_run_id: session.task_run_id.clone(),
                         verdict: "dead".to_owned(),
@@ -724,7 +724,7 @@ impl CoordinatorActor {
                     {
                         let liveness_repo = LivenessRepository::new(self.db.clone());
                         let snapshot = LivenessEvidenceSnapshot {
-                            session_id: session.id.clone(),
+                            session_id: Some(session.id.clone()),
                             task_id: Some(task_id.to_owned()),
                             task_run_id: session.task_run_id.clone(),
                             verdict: "dead".to_owned(),
@@ -861,7 +861,7 @@ impl CoordinatorActor {
                             // Persist slow_extended evidence.
                             let liveness_repo = LivenessRepository::new(self.db.clone());
                             let evidence_snapshot = LivenessEvidenceSnapshot {
-                                session_id: session.id.clone(),
+                                session_id: Some(session.id.clone()),
                                 task_id: Some(task_id.to_owned()),
                                 task_run_id: session.task_run_id.clone(),
                                 verdict: Verdict::Slow.as_str().to_owned(),
@@ -1016,7 +1016,7 @@ impl CoordinatorActor {
                         )
                     };
                 let snapshot = LivenessEvidenceSnapshot {
-                    session_id: session.id.clone(),
+                    session_id: Some(session.id.clone()),
                     task_id: Some(task_id.to_owned()),
                     task_run_id: session.task_run_id.clone(),
                     verdict: verdict_str,
@@ -1440,7 +1440,7 @@ impl CoordinatorActor {
                     // here, or the DB write was silently swallowed).
                     let liveness_repo = LivenessRepository::new(self.db.clone());
                     let snapshot = LivenessEvidenceSnapshot {
-                        session_id: session.id.clone(),
+                        session_id: Some(session.id.clone()),
                         task_id: Some(task_id.to_owned()),
                         task_run_id: session.task_run_id.clone(),
                         verdict: result.verdict.as_str().to_owned(),
@@ -1503,7 +1503,7 @@ impl CoordinatorActor {
                     }),
                 };
                 let snapshot = LivenessEvidenceSnapshot {
-                    session_id: session.id.clone(),
+                    session_id: Some(session.id.clone()),
                     task_id: Some(task_id.to_owned()),
                     task_run_id: session.task_run_id.clone(),
                     verdict: Verdict::Dead.as_str().to_owned(),
@@ -1733,7 +1733,7 @@ impl CoordinatorActor {
                         {
                             let liveness_repo = LivenessRepository::new(self.db.clone());
                             let snapshot = LivenessEvidenceSnapshot {
-                                session_id: session.id.clone(),
+                                session_id: Some(session.id.clone()),
                                 task_id: Some(task_id.to_owned()),
                                 task_run_id: session.task_run_id.clone(),
                                 verdict: Verdict::Dead.as_str().to_owned(),
@@ -2155,7 +2155,7 @@ impl CoordinatorActor {
                         if result.outcome == Some(LivenessOutcome::KillNoop) {
                             let liveness_repo = LivenessRepository::new(self.db.clone());
                             let snapshot = LivenessEvidenceSnapshot {
-                                session_id: running_session.id.clone(),
+                                session_id: Some(running_session.id.clone()),
                                 task_id: Some(task.id.clone()),
                                 task_run_id: running_session.task_run_id.clone(),
                                 verdict: result.verdict.as_str().to_owned(),
@@ -2176,7 +2176,7 @@ impl CoordinatorActor {
                         if result.verdict == Verdict::Dead {
                             let liveness_repo = LivenessRepository::new(self.db.clone());
                             let snapshot = LivenessEvidenceSnapshot {
-                                session_id: running_session.id.clone(),
+                                session_id: Some(running_session.id.clone()),
                                 task_id: Some(task.id.clone()),
                                 task_run_id: running_session.task_run_id.clone(),
                                 verdict: Verdict::Dead.as_str().to_owned(),
@@ -2311,7 +2311,7 @@ impl CoordinatorActor {
                     if result.outcome == Some(LivenessOutcome::KillNoop) {
                         let liveness_repo = LivenessRepository::new(self.db.clone());
                         let snapshot = LivenessEvidenceSnapshot {
-                            session_id: String::new(),
+                            session_id: None,
                             task_id: Some(task.id.clone()),
                             task_run_id: None,
                             verdict: result.verdict.as_str().to_owned(),
@@ -2329,7 +2329,7 @@ impl CoordinatorActor {
                     if result.verdict == Verdict::Dead {
                         let liveness_repo = LivenessRepository::new(self.db.clone());
                         let snapshot = LivenessEvidenceSnapshot {
-                            session_id: String::new(),
+                            session_id: None,
                             task_id: Some(task.id.clone()),
                             task_run_id: None,
                             verdict: Verdict::Dead.as_str().to_owned(),
@@ -2851,7 +2851,7 @@ impl CoordinatorActor {
         // idempotent outcomes (the verdict is KillNoop, not a mutation).
         if let Some(ref session_id) = db_state.active_session_id {
             let snapshot = LivenessEvidenceSnapshot {
-                session_id: session_id.clone(),
+                session_id: Some(session_id.clone()),
                 task_id: Some(task_id.to_owned()),
                 task_run_id: db_state.latest_task_run_id.clone(),
                 verdict: result.verdict.as_str().to_owned(),
@@ -3015,7 +3015,7 @@ impl CoordinatorActor {
 
         // ── 4. Persist evidence ────────────────────────────────────────
         let snapshot = LivenessEvidenceSnapshot {
-            session_id: session_id.to_owned(),
+            session_id: Some(session_id.to_owned()),
             task_id: Some(task_id.to_owned()),
             task_run_id: task_run_id.map(str::to_owned),
             verdict: result.verdict.as_str().to_owned(),
@@ -3756,7 +3756,7 @@ mod liveness_foundation_tests {
         let result = super::super::liveness::classify(&evidence);
 
         let snapshot = LivenessEvidenceSnapshot {
-            session_id: "sess-1".to_owned(),
+            session_id: Some("sess-1".to_owned()),
             task_id: Some("task-1".to_owned()),
             task_run_id: Some("run-1".to_owned()),
             verdict: result.verdict.as_str().to_owned(),
@@ -3769,7 +3769,7 @@ mod liveness_foundation_tests {
         let back: LivenessEvidenceSnapshot = serde_json::from_str(&json).unwrap();
         assert_eq!(back.verdict, "live");
         assert_eq!(back.outcome_kind, None);
-        assert_eq!(back.session_id, "sess-1");
+        assert_eq!(back.session_id.as_deref(), Some("sess-1"));
         assert!(back.evidence.is_object());
     }
 
@@ -3784,7 +3784,7 @@ mod liveness_foundation_tests {
         let result = super::super::liveness::classify(&evidence);
 
         let snapshot = LivenessEvidenceSnapshot {
-            session_id: "sess-1".to_owned(),
+            session_id: Some("sess-1".to_owned()),
             task_id: Some("task-1".to_owned()),
             task_run_id: Some("run-1".to_owned()),
             verdict: result.verdict.as_str().to_owned(),
@@ -4030,7 +4030,7 @@ mod liveness_foundation_tests {
 
         // Build the snapshot as the kill path would.
         let snapshot = LivenessEvidenceSnapshot {
-            session_id: db.active_session_id.clone().unwrap_or_default(),
+            session_id: Some(db.active_session_id.clone().unwrap_or_default()),
             task_id: Some("task-1".to_owned()),
             task_run_id: db.latest_task_run_id.clone(),
             verdict: result.verdict.as_str().to_owned(),
@@ -4073,7 +4073,7 @@ mod liveness_foundation_tests {
 
         // Build snapshot as the stall kill path would.
         let snapshot = LivenessEvidenceSnapshot {
-            session_id: db.active_session_id.clone().unwrap_or_default(),
+            session_id: Some(db.active_session_id.clone().unwrap_or_default()),
             task_id: Some("task-1".to_owned()),
             task_run_id: db.latest_task_run_id.clone(),
             verdict: result.verdict.as_str().to_owned(),

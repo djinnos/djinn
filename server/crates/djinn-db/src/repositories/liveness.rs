@@ -24,8 +24,10 @@ use crate::error::DbResult;
 /// columns.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LivenessEvidenceSnapshot {
-    /// The session that was classified.
-    pub session_id: String,
+    /// The session that was classified, when one scalar session owns this
+    /// snapshot. Task-wide reconciliation deliberately leaves this unset and
+    /// records all executions in [`Self::evidence`].
+    pub session_id: Option<String>,
     /// The task context, if known.
     pub task_id: Option<String>,
     /// The task_run context, if known.
@@ -142,15 +144,16 @@ impl LivenessRepository {
 
     /// Persist a classifier evidence/outcome snapshot.
     ///
-    /// Inserts one row into the `liveness_evidence` append-only table and
-    /// updates the denormalized liveness columns on the `sessions` row. If a
-    /// `task_run_id` is present, the `task_runs` row is updated too.
+    /// Inserts one row into the `liveness_evidence` append-only table and, when
+    /// supplied, updates the denormalized liveness columns on its scalar
+    /// `sessions` and `task_runs` owners. The whole operation is atomic.
     ///
     /// Returns the id of the newly-inserted `liveness_evidence` row.
     pub async fn persist_evidence(&self, snapshot: &LivenessEvidenceSnapshot) -> DbResult<String> {
         self.db.ensure_initialized().await?;
 
         let evidence_id = uuid::Uuid::now_v7().to_string();
+        let mut tx = self.db.pool().begin().await?;
 
         // 1. Insert into the append-only liveness_evidence table.
         sqlx::query(
@@ -167,25 +170,27 @@ impl LivenessRepository {
         .bind(&snapshot.outcome_kind)
         .bind(&snapshot.outcome_reason)
         .bind(&snapshot.evidence)
-        .execute(self.db.pool())
+        .execute(&mut *tx)
         .await?;
 
-        // 2. Update denormalized columns on the sessions row.
-        sqlx::query(
-            "UPDATE sessions
-             SET liveness_verdict = $1,
-                 liveness_outcome_kind = $2,
-                 liveness_outcome_reason = $3,
-                 liveness_evidence = $4
-             WHERE id = $5",
-        )
-        .bind(&snapshot.verdict)
-        .bind(&snapshot.outcome_kind)
-        .bind(&snapshot.outcome_reason)
-        .bind(&snapshot.evidence)
-        .bind(&snapshot.session_id)
-        .execute(self.db.pool())
-        .await?;
+        // 2. Update denormalized columns only for an unambiguous session.
+        if let Some(session_id) = &snapshot.session_id {
+            sqlx::query(
+                "UPDATE sessions
+                 SET liveness_verdict = $1,
+                     liveness_outcome_kind = $2,
+                     liveness_outcome_reason = $3,
+                     liveness_evidence = $4
+                 WHERE id = $5",
+            )
+            .bind(&snapshot.verdict)
+            .bind(&snapshot.outcome_kind)
+            .bind(&snapshot.outcome_reason)
+            .bind(&snapshot.evidence)
+            .bind(session_id)
+            .execute(&mut *tx)
+            .await?;
+        }
 
         // 3. Update denormalized columns on the task_runs row (if known).
         if let Some(ref run_id) = snapshot.task_run_id {
@@ -200,10 +205,11 @@ impl LivenessRepository {
             .bind(&snapshot.outcome_reason)
             .bind(&snapshot.evidence)
             .bind(run_id)
-            .execute(self.db.pool())
+            .execute(&mut *tx)
             .await?;
         }
 
+        tx.commit().await?;
         Ok(evidence_id)
     }
 

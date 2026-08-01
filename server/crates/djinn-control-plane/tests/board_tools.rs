@@ -139,7 +139,7 @@ async fn board_health_liveness_outcomes_match_seeded_evidence() {
     let liveness_repo = LivenessRepository::new(harness.db().clone());
     let evidence_id = liveness_repo
         .persist_evidence(&LivenessEvidenceSnapshot {
-            session_id: session.id.clone(),
+            session_id: Some(session.id.clone()),
             task_id: Some(task.id.clone()),
             task_run_id: None,
             verdict: "dead".to_owned(),
@@ -212,7 +212,7 @@ async fn board_health_liveness_outcomes_match_seeded_evidence() {
     // the protocol_violations section with matching fields.
     let _evidence_id_2 = liveness_repo
         .persist_evidence(&LivenessEvidenceSnapshot {
-            session_id: session.id.clone(),
+            session_id: Some(session.id.clone()),
             task_id: Some(task.id.clone()),
             task_run_id: None,
             verdict: "protocol_violation".to_owned(),
@@ -287,7 +287,7 @@ async fn board_health_mcp_legacy_and_additive_fields_coexist() {
     let liveness_repo = LivenessRepository::new(harness.db().clone());
     let _evidence_id = liveness_repo
         .persist_evidence(&LivenessEvidenceSnapshot {
-            session_id: session.id.clone(),
+            session_id: Some(session.id.clone()),
             task_id: Some(task.id.clone()),
             task_run_id: None,
             verdict: "dead".to_owned(),
@@ -304,7 +304,7 @@ async fn board_health_mcp_legacy_and_additive_fields_coexist() {
     // ── Seed protocol-violation evidence ───────────────────────────────
     let _pv_evidence_id = liveness_repo
         .persist_evidence(&LivenessEvidenceSnapshot {
-            session_id: session.id.clone(),
+            session_id: Some(session.id.clone()),
             task_id: Some(task.id.clone()),
             task_run_id: None,
             verdict: "protocol_violation".to_owned(),
