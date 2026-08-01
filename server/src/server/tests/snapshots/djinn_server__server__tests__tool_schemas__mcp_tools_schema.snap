@@ -19930,6 +19930,71 @@ expression: signatures
     }
   },
   {
+    "name": "proposal_refinement_stop",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "proposal_id": {
+          "description": "Proposal UUID or short_id.",
+          "type": "string"
+        },
+        "reason": {
+          "default": null,
+          "description": "Auditable operator explanation.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "proposal_id"
+      ],
+      "type": "object"
+    },
+    "output_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "code": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "proposal_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "stop_tag": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "stopped": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "stopped"
+      ],
+      "type": "object"
+    }
+  },
+  {
     "name": "proposal_remove_target",
     "read_only": false,
     "destructive": true,
