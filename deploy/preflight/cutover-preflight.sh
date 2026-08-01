@@ -221,18 +221,11 @@ done <"$WORK/env.nul"
 
 # `env -i` is the point: the verdict must depend on the RENDER, never on the
 # DJINN_K8S_* variables exported in the operator's shell. The names below are
-# forwarded explicitly because they describe the CUTOVER, not the render — which
-# mode we are flipping to, where the durable fence lives, and where the
-# cluster/registry observations are.
-#
-# The DIRECTION/PLAN/PAUSED_BY trio is read only by `authority-cutover`, which
-# deploy/cutover/authority-cutover.sh runs THROUGH this script by pointing
-# CUTOVER_PREFLIGHT_BIN at it. Doing the cutover that way is deliberate: the flip
-# and the deploy gate then judge the same render under the same extracted
-# environment, which is the only way the preflight verdict is about the flip.
+# forwarded explicitly because they describe the validation target, not the
+# render — which authority mode is being checked, where the durable fence lives,
+# and where the cluster/registry observations are.
 forward=()
 for name in DJINN_CUTOVER_AUTHORITY_MODE DJINN_CUTOVER_OBSERVATIONS DJINN_DATABASE_URL \
-  DJINN_CUTOVER_DIRECTION DJINN_CUTOVER_PLAN DJINN_CUTOVER_PAUSED_BY \
   DJINN_LEGACY_LAUNCHER_DIGEST_INVENTORY DJINN_LEGACY_LAUNCHER_DIGEST_INVENTORY_PUBLIC_KEY \
   DJINN_LEGACY_LAUNCHER_DIGEST_INVENTORY_SIGNATURE; do
   if [ -n "${!name:-}" ]; then

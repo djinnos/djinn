@@ -2,7 +2,6 @@
 
 pub mod admin;
 pub mod allocator;
-pub mod authority_cutover;
 pub mod codex_keepalive;
 pub mod db;
 pub mod error;
@@ -22,7 +21,6 @@ pub mod sse;
 pub mod task_run_resize_bootstrap;
 pub mod task_run_resize_drop;
 pub mod task_run_resize_reconcile;
-pub mod task_run_resize_rollout;
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_helpers;

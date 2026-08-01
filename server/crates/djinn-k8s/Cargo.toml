@@ -9,10 +9,9 @@ doctest = false
 
 [features]
 default = []
-# Exposes cluster-free `Pod` fixtures (`pod_resize_fixture`) and the recording
-# in-process apiserver (`runtime_fixture`) to downstream test targets. Kept
-# behind a feature so production binaries never link them.
-test-support = ["dep:tower", "dep:http", "dep:http-body-util"]
+# Exposes cluster-free `Pod` fixtures (`pod_resize_fixture`) to downstream test
+# targets. Kept behind a feature so production binaries never link them.
+test-support = []
 
 [dependencies]
 djinn-cgroup-launcher = { path = "../djinn-cgroup-launcher" }
@@ -42,13 +41,6 @@ time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
 tokio = { version = "1", features = ["rt", "sync", "macros", "time", "net", "io-util", "process"] }
 tracing = "0.1"
 uuid = { version = "1", features = ["v7"] }
-# `runtime_fixture` only. Optional regular dependencies rather than dev-only
-# ones, because a dev-dependency is absent when this crate is compiled as a
-# dependency of `djinn-server`'s test binary with `test-support` enabled — the
-# same reason `server/Cargo.toml` carries `tower` as an optional dependency.
-tower = { version = "0.5", features = ["util"], optional = true }
-http = { version = "1", optional = true }
-http-body-util = { version = "0.1", optional = true }
 workspace-hack.workspace = true
 
 [dev-dependencies]
