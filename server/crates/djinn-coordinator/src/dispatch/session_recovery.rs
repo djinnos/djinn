@@ -3769,7 +3769,7 @@ mod liveness_foundation_tests {
         let back: LivenessEvidenceSnapshot = serde_json::from_str(&json).unwrap();
         assert_eq!(back.verdict, "live");
         assert_eq!(back.outcome_kind, None);
-        assert_eq!(back.session_id, "sess-1");
+        assert_eq!(back.session_id.as_deref(), Some("sess-1"));
         assert!(back.evidence.is_object());
     }
 
