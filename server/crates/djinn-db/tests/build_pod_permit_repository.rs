@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use djinn_db::{
     AcquireBuildPodPermitResult, BindBuildPodPermitResult, BuildPodPermitRepository,
@@ -794,4 +795,93 @@ async fn the_invocation_id_may_only_change_on_entry_to_lift_applying() {
         panic!("the next invocation must be able to claim, got {second:?}");
     };
     assert_eq!(row.resize_invocation_id.as_deref(), Some("invocation-b"));
+}
+
+/// Migration 170: every state change restamps `state_changed_at`, and nothing
+/// else does.
+///
+/// This is the fact `task_run_resize_reconcile`'s strand predicate rests on.
+/// Without it the reconciler cannot tell a row a live worker moved one second
+/// ago from a row a dead worker abandoned an hour ago, and production on
+/// 2026-08-01 showed what it does when it guesses: it resumes a drop that is
+/// already under way, and the real driver's `release_lease` then answers
+/// `LeaseUnavailable` for a drop that had succeeded.
+///
+/// NAMED FAILING MUTATION: delete
+/// `IF NEW.state IS DISTINCT FROM OLD.state THEN NEW.state_changed_at := now();`
+/// from migration 170's trigger body. The row stays 600 seconds old across a
+/// real transition and the third assertion block fails.
+///
+/// NAMED FAILING MUTATION 2: stamp unconditionally (drop the `IS DISTINCT FROM`
+/// guard) and the SECOND block fails: a write that changes no state would reset
+/// the age, which is how a driver stuck re-attempting one drop would renew its
+/// own grace forever and never be reconciled at all.
+///
+/// Against REAL Postgres, deliberately: the stamp is a trigger behaviour, and a
+/// fake repository would assert this test's opinion of it.
+#[tokio::test]
+async fn a_state_change_restamps_the_row_age_and_nothing_else_does() {
+    let db = Database::ephemeral().await.unwrap();
+    seed_runs(&db, &["age-run"]).await;
+    let repo = BuildPodPermitRepository::new(db.clone());
+    let (permit_id, fence) = birth_confirmed(&db, "age-run", "pod-age").await;
+
+    let fresh = repo.active("age-run").await.unwrap().unwrap();
+    assert!(
+        fresh.state_age() < Duration::from_secs(5),
+        "a row that just reached birth_confirmed must read as young, got {:?}",
+        fresh.state_age()
+    );
+
+    // A write that changes no state. The age must survive it.
+    repo.backdate_state_change_for_test("age-run", Duration::from_secs(600))
+        .await
+        .unwrap();
+    let aged = repo.active("age-run").await.unwrap().unwrap();
+    assert!(
+        aged.state_age() >= Duration::from_secs(595),
+        "a non-state write must not restamp the age, got {:?}",
+        aged.state_age()
+    );
+    assert_eq!(
+        aged.state, fresh.state,
+        "precondition: the backdate changed no state"
+    );
+
+    // THE STAMP. A real lifecycle edge, through the production repository.
+    assert!(matches!(
+        repo.begin_resize_invocation("age-run", &permit_id, fence, "pod-age", "invocation-age")
+            .await
+            .unwrap(),
+        TransitionBuildPodResizeLifecycleResult::Transitioned(_)
+    ));
+    let restamped = repo.active("age-run").await.unwrap().unwrap();
+    assert_eq!(restamped.state, BuildPodPermitState::LiftApplying);
+    assert!(
+        restamped.state_age() < Duration::from_secs(5),
+        "a state change must restamp the age; the row still reads {:?} old, so \
+         the reconciler would treat a drop a live worker just started as \
+         abandoned",
+        restamped.state_age()
+    );
+
+    // And a caller cannot forge a young row into an old one across a state
+    // change: the trigger overwrites whatever the statement supplied. Without
+    // this the stamp would be advisory, and any future write path could hand
+    // the reconciler a row that lies about its age.
+    sqlx::query(
+        "UPDATE build_pod_permits \
+         SET state = 'lifted', state_changed_at = now() - interval '3 hours' \
+         WHERE task_run_id = 'age-run'",
+    )
+    .execute(db.pool())
+    .await
+    .unwrap();
+    let forged = repo.active("age-run").await.unwrap().unwrap();
+    assert_eq!(forged.state, BuildPodPermitState::Lifted);
+    assert!(
+        forged.state_age() < Duration::from_secs(5),
+        "the trigger, not the caller, owns the stamp on a state change; got {:?}",
+        forged.state_age()
+    );
 }
