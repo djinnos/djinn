@@ -486,6 +486,14 @@ impl Deployment {
         LazyLock::force(&ENVIRONMENT);
         let db = Database::ephemeral().await.unwrap();
         assert_real_postgres(&db).await;
+        // Activation scenarios model a deployment that has not crossed the
+        // authority boundary yet. Fresh databases are post-cutover now, so
+        // seed the legacy authority explicitly for those fixtures. Rollback
+        // scenarios (which select a leaf-v1 artifact) intentionally retain the
+        // fresh resize-v2 authority.
+        if declared == LauncherAuthorityProtocol::ResizeV2 {
+            djinn_db::test_support::seed_legacy_launcher_authority_for_test(&db).await;
+        }
         seed_project_and_run(&db, task_run_id).await;
         let registry = LocalRegistry::start().await;
         let current_digest = registry.push(
@@ -922,6 +930,9 @@ async fn a_missing_artifact_blocks_the_rollback_leaving_admission_paused_and_no_
 /// Move a drained deployment to `resize-v2` so a rollback has somewhere to come
 /// back from. Setup only — the property under test is what the DRIVER does next.
 async fn arm_at_resize_v2(db: &Database) {
+    // Preserve the historical transition and epoch that a rollback follows;
+    // fresh databases already start at resize-v2 after the cutover migration.
+    djinn_db::test_support::seed_legacy_launcher_authority_for_test(db).await;
     let result = LauncherAuthorityModeRepository::new(db.clone())
         .set_mode(0, RESIZE)
         .await;
