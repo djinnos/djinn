@@ -466,6 +466,43 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn launcher_authority_cli_refuses_a_nonempty_drain() {
+        use djinn_db::{AcquireBuildPodPermitResult, BuildPodPermitRepository};
+
+        let db = Database::open_in_memory().expect("test database");
+        db.ensure_initialized().await.unwrap();
+        let pool = db.pool();
+        sqlx::query("INSERT INTO users (id, github_id, github_login) VALUES ('00000000-0000-7000-8000-0000000005a0', 9000000500, 'admin-authority-test')")
+            .execute(pool).await.unwrap();
+        sqlx::query("INSERT INTO projects (id, name, github_owner, github_repo) VALUES ('admin-authority-project', 'admin-authority-project', 'djinnos', 'admin-authority')")
+            .execute(pool).await.unwrap();
+        sqlx::query("INSERT INTO tasks (id, project_id, short_id, title, description, design, labels, acceptance_criteria, memory_refs, created_by_user_id) VALUES ('admin-authority-task', 'admin-authority-project', 'aa01', 'title', 'description', 'design', '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, '00000000-0000-7000-8000-0000000005a0')")
+            .execute(pool).await.unwrap();
+        sqlx::query("INSERT INTO task_runs (id, project_id, task_id, trigger_type, status) VALUES ('admin-authority-run', 'admin-authority-project', 'admin-authority-task', 'manual', 'running')")
+            .execute(pool).await.unwrap();
+        assert!(matches!(
+            BuildPodPermitRepository::new(db.clone())
+                .acquire("admin-authority-run", 8)
+                .await,
+            AcquireBuildPodPermitResult::Acquired { .. }
+        ));
+
+        let repository = LauncherAuthorityModeRepository::new(db);
+        let row = repository.read().await.unwrap().unwrap();
+        let error = run_launcher_authority_action(
+            &repository,
+            LauncherAuthorityAction::Set {
+                mode: LauncherAuthorityModeArg::ResizeV2,
+                expected_epoch: row.epoch,
+            },
+        )
+        .await
+        .expect_err("live permit must refuse the operator flip");
+        assert!(error.contains("drain refused"), "{error}");
+        assert_eq!(repository.read().await.unwrap().unwrap(), row);
+    }
+
     /// **AC4: every surviving subcommand executes against a real database.**
     ///
     /// Not "the enum still has five variants" — each one is dispatched through

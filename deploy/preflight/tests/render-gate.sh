@@ -305,7 +305,7 @@ PY
 HELM="$(stub_helm "$WORK/breadth-base.yaml" breadth-base)" \
   expect_gate 'same name in different containers remains valid' pass 'DISPATCHABLE' "$CHART_DIR"
 
-python3 - "$WORK/breadth-base.yaml" "$WORK/dup-pod.yaml" "$WORK/dup-init.yaml" "$WORK/dup-cron.yaml" <<'PY'
+python3 - "$WORK/breadth-base.yaml" "$WORK/dup-pod.yaml" "$WORK/dup-init.yaml" "$WORK/dup-cron.yaml" "$WORK/dup-controller.yaml" <<'PY'
 import sys
 from pathlib import Path
 
@@ -314,6 +314,8 @@ mutations = [
     ('SHARED_OK, value: a}', 'SHARED_OK, value: a}, {name: SHARED_OK, value: b}'),
     ('INIT_OK, value: a}', 'INIT_OK, value: a}, {name: INIT_OK, value: b}'),
     ('CRON_OK, value: a}', 'CRON_OK, value: a}, {name: CRON_OK, value: b}'),
+    ('CROSS_CONTAINER, value: a}',
+     'CROSS_CONTAINER, value: a}, {name: CROSS_CONTAINER, value: duplicate}'),
 ]
 for destination, (before, after) in zip(sys.argv[2:], mutations):
     assert base.count(before) == 1
@@ -329,6 +331,9 @@ HELM="$(stub_helm "$WORK/dup-init.yaml" dup-init)" \
 HELM="$(stub_helm "$WORK/dup-cron.yaml" dup-cron)" \
   expect_gate 'CronJob nested Pod-template duplicates are rejected' \
   fail 'CronJob/scheduled containers/cron-worker: CRON_OK' "$CHART_DIR"
+HELM="$(stub_helm "$WORK/dup-controller.yaml" dup-controller)" \
+  expect_gate 'controller Pod-template duplicates are rejected' \
+  fail 'DaemonSet/agents containers/agent: CROSS_CONTAINER' "$CHART_DIR"
 
 # ---------------------------------------------------------------------------
 if [ "$failures" -ne 0 ]; then

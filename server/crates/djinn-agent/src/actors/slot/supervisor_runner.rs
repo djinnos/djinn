@@ -1179,6 +1179,14 @@ async fn admit_task_run_dispatch(
     };
     let leaf = effective_protocol.launcher_owns_leaf_quota();
 
+    validate_resize_birth_gate_inputs(
+        effective_protocol,
+        app_state.resize_admission.is_some(),
+        permit_attempt,
+        job_uid_bound,
+        &spec.task_run_id,
+    )?;
+
     let Some(admission) = app_state.resize_admission.as_ref() else {
         if leaf {
             return Ok(());
@@ -1249,6 +1257,43 @@ async fn admit_task_run_dispatch(
             refusal.pod_deleted,
             refusal.reason
         )),
+    }
+}
+
+fn validate_resize_birth_gate_inputs(
+    protocol: djinn_launcher_protocol::LauncherAuthorityProtocol,
+    has_resize_bridge: bool,
+    permit_attempt: &BuildPodPermitAttempt,
+    job_uid_bound: bool,
+    task_run_id: &str,
+) -> anyhow::Result<()> {
+    if protocol.launcher_owns_leaf_quota() {
+        return Ok(());
+    }
+    if !has_resize_bridge {
+        anyhow::bail!(
+            "supervisor dispatch: task-run {task_run_id} rendered `{}` but this context composes \
+             no resize admission bridge",
+            protocol.as_wire()
+        );
+    }
+    match permit_attempt {
+        BuildPodPermitAttempt::Failed(cause) => anyhow::bail!(
+            "supervisor dispatch: task-run {task_run_id} rendered `{}` but build-pod permit \
+             acquisition failed ({cause})",
+            protocol.as_wire()
+        ),
+        BuildPodPermitAttempt::NotComposed => anyhow::bail!(
+            "supervisor dispatch: task-run {task_run_id} rendered `{}` but no build-pod permit \
+             was requested",
+            protocol.as_wire()
+        ),
+        BuildPodPermitAttempt::Acquired(_) if !job_uid_bound => anyhow::bail!(
+            "supervisor dispatch: task-run {task_run_id} rendered `{}` but its build-pod permit \
+             carries no bound Job UID",
+            protocol.as_wire()
+        ),
+        BuildPodPermitAttempt::Acquired(_) => Ok(()),
     }
 }
 
@@ -2299,6 +2344,42 @@ mod tests {
     use tracing_subscriber::layer::Context;
     use tracing_subscriber::prelude::*;
     use tracing_subscriber::{Layer, registry::LookupSpan};
+
+    #[test]
+    fn resize_birth_gate_refuses_every_missing_input_while_leaf_v1_continues() {
+        use djinn_launcher_protocol::LauncherAuthorityProtocol::{LeafV1, ResizeV2};
+
+        let acquired = BuildPodPermitAttempt::Acquired(AcquiredBuildPodPermit {
+            task_run_id: "run".into(),
+            permit_id: "permit".into(),
+            fencing_token: 1,
+        });
+        let cases = [
+            (false, &acquired, true, "no resize admission bridge"),
+            (
+                true,
+                &BuildPodPermitAttempt::NotComposed,
+                false,
+                "no build-pod permit was requested",
+            ),
+            (
+                true,
+                &BuildPodPermitAttempt::Failed("PoolFull { active_count: 8, limit: 8 }".into()),
+                false,
+                "PoolFull",
+            ),
+            (true, &acquired, false, "no bound Job UID"),
+        ];
+        for (bridge, attempt, bound, expected) in cases {
+            let error = validate_resize_birth_gate_inputs(ResizeV2, bridge, attempt, bound, "run")
+                .expect_err("resize-v2 must fail closed");
+            assert!(error.to_string().contains(expected), "{error:#}");
+            validate_resize_birth_gate_inputs(LeafV1, bridge, attempt, bound, "run")
+                .expect("leaf-v1 preserves warning-and-continue compatibility");
+        }
+        validate_resize_birth_gate_inputs(ResizeV2, true, &acquired, true, "run")
+            .expect("complete resize-v2 inputs pass the preflight");
+    }
     #[derive(Clone, Debug, Default)]
     struct RecordedSpan {
         name: String,

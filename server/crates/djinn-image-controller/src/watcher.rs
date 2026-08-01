@@ -64,7 +64,9 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
-use crate::build_job::{LABEL_BUILD, LABEL_IMAGE_HASH, LABEL_IMAGE_ID, LABEL_PROJECT_ID};
+use crate::build_job::{
+    ANNOTATION_IMAGE_CONFIG_HASH, LABEL_BUILD, LABEL_IMAGE_HASH, LABEL_IMAGE_ID, LABEL_PROJECT_ID,
+};
 use crate::config::ImageControllerConfig;
 use crate::controller::{format_catalog_image_tag, format_image_tag};
 
@@ -385,6 +387,33 @@ async fn handle_image_event(
         );
         return;
     };
+    let expected_hash = if let Some(hash) = job
+        .metadata
+        .annotations
+        .as_ref()
+        .and_then(|annotations| annotations.get(ANNOTATION_IMAGE_CONFIG_HASH))
+    {
+        hash.clone()
+    } else {
+        // Compatibility for Jobs created immediately before the annotation
+        // shipped. The subsequent SQL CAS still matches the full hash exactly;
+        // this read is never the authority decision.
+        match image_repo.get(image_id).await {
+            Ok(Some(image))
+                if image
+                    .config_hash
+                    .as_deref()
+                    .is_some_and(|hash| hash.starts_with(&hash_prefix)) =>
+            {
+                image.config_hash.expect("guarded Some")
+            }
+            _ => {
+                debug!(image_id, hash = %hash_prefix,
+                    "image_build_watcher: terminal Job has no full current build identity; ignoring");
+                return;
+            }
+        }
+    };
     let job_name = job
         .metadata
         .name
@@ -425,7 +454,7 @@ async fn handle_image_event(
                 // avoid, and it surfaces nowhere until dispatch stops.
                 ReadyOutcome::Refuse(last_error) => {
                     let transition = image_repo
-                        .mark_failed_if_current_build(image_id, &hash_prefix, &last_error)
+                        .mark_failed_if_current_build(image_id, &expected_hash, &last_error)
                         .await;
                     match transition {
                         Ok(CurrentBuildTransition::Applied) => {}
@@ -467,7 +496,7 @@ async fn handle_image_event(
             let transition = image_repo
                 .mark_ready_if_current_build(
                     image_id,
-                    &hash_prefix,
+                    &expected_hash,
                     &image_tag,
                     digest.as_deref(),
                     protocol,
@@ -550,7 +579,7 @@ async fn handle_image_event(
                 None => format!("{header}; see kubectl logs job/{job_name}"),
             };
             let transition = image_repo
-                .mark_failed_if_current_build(image_id, &hash_prefix, &last_error)
+                .mark_failed_if_current_build(image_id, &expected_hash, &last_error)
                 .await;
             match transition {
                 Ok(CurrentBuildTransition::Applied) => {}

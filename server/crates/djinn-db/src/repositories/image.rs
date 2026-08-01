@@ -357,7 +357,7 @@ impl ImageRepository {
                       launcher_authority_protocol = $5, last_error = NULL,
                       updated_at = to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
                WHERE id = $1 AND status = 'building'
-                 AND left(config_hash, length($2)) = $2"#,
+                 AND config_hash = $2"#,
         )
         .bind(id)
         .bind(expected_hash)
@@ -425,7 +425,7 @@ impl ImageRepository {
         self.db.ensure_initialized().await?;
         let result = sqlx::query(
             "UPDATE images SET status = 'failed', last_error = $3 WHERE id = $1 \
-             AND status = 'building' AND left(config_hash, length($2)) = $2",
+             AND status = 'building' AND config_hash = $2",
         )
         .bind(id)
         .bind(expected_hash)
@@ -1336,9 +1336,15 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            repo.mark_ready_if_current_build("cas", "aaaaaaaaaaaa", "registry/new:b", None, None)
-                .await
-                .unwrap(),
+            repo.mark_ready_if_current_build(
+                "cas",
+                "aaaaaaaaaaaa-full",
+                "registry/new:b",
+                None,
+                None,
+            )
+            .await
+            .unwrap(),
             CurrentBuildTransition::Applied
         );
         let ready_b = repo.get("cas").await.unwrap().unwrap();
@@ -1365,7 +1371,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            repo.mark_failed_if_current_build("cas", "bbbbbbbbbbbb", "current failure")
+            repo.mark_failed_if_current_build("cas", "bbbbbbbbbbbb-full", "current failure")
                 .await
                 .unwrap(),
             CurrentBuildTransition::Applied

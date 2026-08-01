@@ -1295,6 +1295,43 @@ mod tests {
     }
 
     #[test]
+    fn complete_false_flows_to_the_acting_retention_consumer_as_live() {
+        use djinn_core::job_retention::{
+            JobRetentionEvidence, RetentionOutcome, SessionEvidence, classify_taskrun_job,
+        };
+        use k8s_openapi::api::batch::v1::{JobCondition, JobStatus};
+
+        let task_run_id = Uuid::now_v7();
+        let job_name = format!("{TASKRUN_JOB_NAME_PREFIX}{task_run_id}");
+        let mut job = inventory_job(Some(&job_name), None);
+        job.status = Some(JobStatus {
+            conditions: Some(vec![JobCondition {
+                type_: "Complete".to_owned(),
+                status: "False".to_owned(),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        });
+        let reference = taskrun_job_ref_from_job(&job).expect("task-run reference");
+        let sessions = [SessionEvidence {
+            status: "running",
+            ended_at: None,
+        }];
+        let decision = classify_taskrun_job(
+            std::time::SystemTime::UNIX_EPOCH,
+            JobRetentionEvidence {
+                created_at: reference.created_at,
+                completed_at: reference.completed_at,
+                terminal_condition: reference.terminal_condition.as_deref(),
+                task_run_status: Some("running"),
+                task_run_ended_at: None,
+                sessions: &sessions,
+            },
+        );
+        assert_eq!(decision.outcome, RetentionOutcome::Live);
+    }
+
+    #[test]
     fn builds_task_run_job_manifest() {
         let cfg = KubernetesConfig::for_testing();
         let task_run_id = Uuid::now_v7();
