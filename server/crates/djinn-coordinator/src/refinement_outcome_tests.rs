@@ -1,6 +1,83 @@
 // djinn:allow-oversize — repository-backed outcome and coordinator-fault invariants share exact-run fixtures.
 use super::*;
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn recovered_advocate_projection_scores_revisions_after_snapshot_as_advanced() {
+    let mut f = durable_outcome_fixture().await;
+    let repo = ProposalRepository::new(f.db.clone(), djinn_core::events::EventBus::noop());
+    let captured = repo
+        .refinement_run_captured_snapshot_seq(&f.run_id)
+        .await
+        .unwrap();
+    let original = repo.get(&f.fixture.proposal_id).await.unwrap().unwrap();
+    repo.update(
+        &f.fixture.proposal_id,
+        djinn_db::repositories::proposal::ProposalUpdateInput {
+            title: &original.title,
+            body: "advocate advanced body",
+            acceptance_criteria: "[]",
+            status: &original.status,
+            superseded_by: None,
+            body_format: Some(&original.body_format),
+            event_metadata: None,
+        },
+    )
+    .await
+    .unwrap();
+    let mut rebuilt = RefinementLoopState::new(&f.fixture.proposal_id, 2)
+        .with_run_identity(f.run_id.clone(), f.generation)
+        .with_recovered_snapshot_seq(captured);
+    rebuilt.phase = RefinementPhase::AdvocateRevision;
+    rebuilt.current_round = 1;
+    let candidate = f
+        .actor
+        .process_advocate_outcome(&f.run_id, &f.fixture.proposal_id, &f.task_id, &rebuilt)
+        .await
+        .expect("productive Advocate result is applicable");
+    assert_eq!(candidate.current_revision_seq, 2);
+    assert_eq!(candidate.phase, RefinementPhase::JudgeAdjudication);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn durable_outcome_attempt_cap_survives_projection_rebuild() {
+    let mut f = durable_outcome_fixture().await;
+    djinn_db::test_support::close_task_at(&f.db, &f.task_id, "2026-08-01T00:00:01.000Z").await;
+    let repo = ProposalRepository::new(f.db.clone(), djinn_core::events::EventBus::noop());
+    assert_eq!(
+        repo.increment_refinement_outcome_attempt(&f.run_id, f.generation, &f.task_id)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        repo.increment_refinement_outcome_attempt(&f.run_id, f.generation, &f.task_id)
+            .await
+            .unwrap(),
+        2
+    );
+    f.actor.active_refinements.clear();
+    f.actor.refinement_sessions.clear();
+    f.actor.recover_interrupted_refinements().await;
+    assert!(f.actor.active_refinements.contains_key(&f.run_id));
+    f.actor
+        .handle_stalled_outcome_application(
+            &f.run_id,
+            &f.session,
+            RefinementOutcomeApplication::Retryable,
+        )
+        .await;
+    let exact = repo
+        .load_refinement_run_snapshot(LoadRefinementRunSnapshotRequest {
+            run_id: f.run_id.clone(),
+            heartbeat_grace_millis: 60_000,
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(exact.snapshot.run.state, RefinementRunState::Terminal);
+    assert!(exact.snapshot.run.terminal_reason.is_some());
+}
+
 // ---- is_already_closed_refinement_close_error ----
 
 #[test]

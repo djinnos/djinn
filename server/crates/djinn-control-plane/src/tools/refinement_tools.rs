@@ -17,7 +17,7 @@ use crate::server::DjinnMcpServer;
 use crate::tools::proposal_ops::{
     DemandRoundResponse, NeedsEvidenceDemandResponse, NeedsEvidenceDemandResult,
     ProposalRefinementStartResponse, ProposalRefinementStatusModel,
-    ProposalRefinementStatusResponse, VerdictOverrideResponse,
+    ProposalRefinementStatusResponse, ProposalRefinementStopResponse, VerdictOverrideResponse,
 };
 use crate::tools::refinement_helpers::validate_demand_evidence;
 pub use crate::tools::refinement_helpers::{
@@ -211,6 +211,15 @@ pub struct ProposalRefinementStatusParams {
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
+pub struct ProposalRefinementStopParams {
+    /// Proposal UUID or short_id.
+    pub proposal_id: String,
+    /// Auditable operator explanation.
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
 pub struct ProposalRefinementDemandRoundParams {
     /// Proposal UUID or short_id.
     pub proposal_id: String,
@@ -287,7 +296,6 @@ impl DjinnMcpServer {
                 p.proposal_id
             )));
         };
-
         // Only allow refinement for proposals in draft or in_review.
         if !matches!(proposal.status.as_str(), "draft" | "in_review") {
             return Json(err_refinement_start(format!(
@@ -630,6 +638,69 @@ impl DjinnMcpServer {
             resolved: true,
             error: None,
         })
+    }
+
+    #[tool(
+        description = "Stop a stalled proposal refinement handoff. Issues the canonical operator_stop tag under the exact run generation fence. Refuses healthy runs whose correlated role task is not terminal."
+    )]
+    pub async fn proposal_refinement_stop(
+        &self,
+        Parameters(p): Parameters<ProposalRefinementStopParams>,
+    ) -> Json<ProposalRefinementStopResponse> {
+        let repo = ProposalRepository::new(self.state.db().clone(), self.state.event_bus());
+        let Some(proposal) = repo.resolve(&p.proposal_id).await.ok().flatten() else {
+            return Json(ProposalRefinementStopResponse {
+                proposal_id: None,
+                stopped: false,
+                stop_tag: None,
+                code: Some("proposal_not_found".into()),
+                error: Some(format!("proposal not found: {}", p.proposal_id)),
+            });
+        };
+        if let Err(error) = self
+            .gate_proposal_edit(proposal.author_user_id.as_deref())
+            .await
+        {
+            return Json(ProposalRefinementStopResponse {
+                proposal_id: Some(proposal.id),
+                stopped: false,
+                stop_tag: None,
+                code: Some("forbidden".into()),
+                error: Some(error),
+            });
+        }
+        let exact = match repo
+            .load_current_refinement_run_snapshot(&proposal.id, 60_000)
+            .await
+        {
+            Ok(Some(exact)) => exact,
+            Ok(None) => {
+                return Json(ProposalRefinementStopResponse {
+                    proposal_id: Some(proposal.id),
+                    stopped: false,
+                    stop_tag: None,
+                    code: Some("no_refinement_run".into()),
+                    error: Some("proposal has no refinement run".into()),
+                });
+            }
+            Err(error) => {
+                return Json(ProposalRefinementStopResponse {
+                    proposal_id: Some(proposal.id),
+                    stopped: false,
+                    stop_tag: None,
+                    code: Some("persistence".into()),
+                    error: Some(error.to_string()),
+                });
+            }
+        };
+        let actor =
+            djinn_core::auth_context::current_user_id().unwrap_or_else(|| "operator".into());
+        match repo.operator_stop_stalled_refinement(&exact.snapshot.run.run_id, exact.generation, &actor, p.reason).await {
+            Ok(true) => Json(ProposalRefinementStopResponse { proposal_id: Some(proposal.id), stopped: true, stop_tag: Some("operator_stop".into()), code: None, error: None }),
+            Ok(false) => Json(ProposalRefinementStopResponse { proposal_id: Some(proposal.id), stopped: false, stop_tag: None, code: Some("already_stopped".into()), error: Some("refinement was already stopped".into()) }),
+            Err(djinn_db::RefinementIntentMutationError::NotStalledHandoff { .. }) => Json(ProposalRefinementStopResponse { proposal_id: Some(proposal.id), stopped: false, stop_tag: None, code: Some("not_stalled_handoff".into()), error: Some("refinement role task is not terminal or its handoff already has a successor".into()) }),
+            Err(error) => Json(ProposalRefinementStopResponse { proposal_id: Some(proposal.id), stopped: false, stop_tag: None, code: Some("persistence".into()), error: Some(error.to_string()) }),
+        }
     }
 
     /// Override a latest `needs-work` verdict with auditable sign-off/approval

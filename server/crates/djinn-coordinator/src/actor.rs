@@ -714,6 +714,15 @@ impl CoordinatorActor {
                     ),
                 ),
             );
+            crate::doctor::register_refinement_stalled_handoff_check(
+                registry,
+                Arc::new(
+                    crate::doctor::ProposalRepositoryRefinementStalledHandoffSource::new(
+                        db.clone(),
+                        events_tx.clone(),
+                    ),
+                ),
+            );
             crate::doctor::register_stalled_epic_check(
                 registry,
                 Arc::new(crate::doctor::TaskRepositoryStalledEpicSource::new(
@@ -1760,7 +1769,7 @@ impl CoordinatorActor {
         let mut state =
             super::refinement::RefinementLoopState::new(&exact.proposal_id, revision_seq)
                 .with_run_identity(exact.snapshot.run.run_id.clone(), exact.generation)
-                .with_captured_snapshot_seq(captured_snapshot_seq);
+                .with_recovered_snapshot_seq(captured_snapshot_seq);
         if let Some(park) = &exact.snapshot.park {
             state.phase = match park.kind {
                 RefinementParkKind::AwaitingReview => {

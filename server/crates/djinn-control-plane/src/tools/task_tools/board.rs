@@ -36,6 +36,14 @@ pub(super) async fn board_health_impl(
                         return Json(ErrorOr::Error(ErrorResponse::new(error.to_string())));
                     }
                 }
+                match refinement_repo.load_refinement_stalled_handoffs().await {
+                    Ok(findings) => {
+                        parsed.refinement_stalled_handoff_count = findings.len() as i64;
+                    }
+                    Err(error) => {
+                        return Json(ErrorOr::Error(ErrorResponse::new(error.to_string())));
+                    }
+                }
 
                 // Surface aggregate coordinator metrics (throughput + PR errors).
                 if let Some(coordinator) = server.state.coordinator().await

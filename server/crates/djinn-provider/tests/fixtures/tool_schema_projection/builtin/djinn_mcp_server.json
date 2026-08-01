@@ -20057,6 +20057,72 @@
     "concurrent_safe": false
   },
   {
+    "name": "proposal_refinement_stop",
+    "description": "Stop a stalled proposal refinement handoff. Issues the canonical operator_stop tag under the exact run generation fence. Refuses healthy runs whose correlated role task is not terminal.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "required": [
+        "proposal_id"
+      ],
+      "type": "object",
+      "properties": {
+        "proposal_id": {
+          "description": "Proposal UUID or short_id.",
+          "type": "string"
+        },
+        "reason": {
+          "description": "Auditable operator explanation.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      }
+    },
+    "outputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "required": [
+        "stopped"
+      ],
+      "type": "object",
+      "properties": {
+        "proposal_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "stopped": {
+          "type": "boolean"
+        },
+        "stop_tag": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "code": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "readOnly": false,
+    "destructive": true,
+    "idempotent": false,
+    "openWorld": false,
+    "concurrent_safe": false
+  },
+  {
     "name": "proposal_remove_target",
     "description": "Remove a target project from a proposal. `project` is a UUID or owner/repo slug. No-op if it wasn't a target. Returns the proposal's updated target list.",
     "inputSchema": {

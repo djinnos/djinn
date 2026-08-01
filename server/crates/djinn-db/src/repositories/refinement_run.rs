@@ -60,6 +60,48 @@ pub struct ActiveRefinementRun {
     pub generation: i32,
 }
 
+/// A materialized role handoff whose task is terminal but whose intent has not
+/// been consumed. This is deliberately orthogonal to liveness: materialized
+/// intents remain valid `Live` evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RefinementStalledHandoff {
+    pub proposal_id: String,
+    pub run_id: String,
+    pub generation: i32,
+    pub intent_id: String,
+    pub task_id: String,
+    pub task_status: String,
+    pub task_terminal_at: String,
+    pub terminal_elapsed_seconds: i64,
+    pub outcome_attempts: i32,
+}
+
+pub fn is_refinement_stalled_handoff(
+    intent_materialized: bool,
+    task_terminal: bool,
+    successor_present: bool,
+) -> bool {
+    intent_materialized && task_terminal && !successor_present
+}
+
+#[cfg(test)]
+mod stalled_handoff_predicate_tests {
+    use super::is_refinement_stalled_handoff;
+
+    #[test]
+    fn terminal_materialized_task_without_successor_is_the_only_stalled_population() {
+        let old_heartbeat_is_irrelevant = true;
+        assert!(is_refinement_stalled_handoff(true, true, false));
+        assert!(old_heartbeat_is_irrelevant);
+        assert!(
+            !is_refinement_stalled_handoff(true, false, false),
+            "an old heartbeat cannot make an open task stalled"
+        );
+        assert!(!is_refinement_stalled_handoff(true, true, true));
+        assert!(!is_refinement_stalled_handoff(false, true, false));
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClaimRefinementIntentRequest {
     pub run_id: String,
@@ -175,6 +217,8 @@ pub enum RefinementIntentMutationError {
     TaskCorrelationMismatch { task_id: String },
     #[error("source intent {intent_id} does not match the current role outcome")]
     SourceIntentMismatch { intent_id: String },
+    #[error("run {run_id} is not a stalled refinement handoff")]
+    NotStalledHandoff { run_id: String },
 }
 impl From<sqlx::Error> for RefinementIntentMutationError {
     fn from(error: sqlx::Error) -> Self {

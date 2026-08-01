@@ -825,6 +825,19 @@ pub struct ProposalRefinementStartResponse {
     pub error: Option<String>,
 }
 
+#[derive(Serialize, Deserialize, Clone, schemars::JsonSchema)]
+pub struct ProposalRefinementStopResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proposal_id: Option<String>,
+    pub stopped: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stop_tag: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 /// Response for `proposal_refinement_status`.
 #[derive(Serialize, Deserialize, Clone, schemars::JsonSchema)]
 pub struct ProposalRefinementStatusResponse {
