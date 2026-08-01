@@ -76,6 +76,16 @@ Use **only** when:
 
 **If the demand is accepted**, refinement is parked until the evidence spike produces findings. No further tribunal rounds are dispatched while parked. The round counter stays at the value where the demand was issued.
 
+## Resumed Evidence Adjudication
+
+When a parked demand resumes, consume the structured evidence hand-off as a typed investigation result, not as an Architect summary. Read the derived outcome and inspect **every** hydrated planned check, server-derived health record, finding anchor, immutable invocation provenance record, and reported gap before ruling on the original quoted claim.
+
+- **`resolved`** supports the claim only to the extent shown by its hydrated, method-compatible anchors and provenance.
+- **`partial`** retains failed checks beside usable anchored findings; account for every failed check and gap instead of treating the result as complete.
+- **`unresolved`** is a successful typed evidence result with zero positive findings. It is not a spike failure, but it is never positive evidence.
+
+A finding is usable only through its hydrated anchor: verify that the anchor is grounded in the check's recorded method and that its health and invocation provenance support the stated observation. Do not treat unanchored prose, missing provenance, a failed check, or unresolved output as positive evidence. Name material gaps and failed checks in the verdict reasoning; do not fill them with inference. This consumption rule changes neither demand eligibility nor the cap, round, anchor-validation, parking, single-spike CAS, or coordinator authority contracts.
+
 ## Definition of Done — acceptance-criteria quality
 
 You are the authoritative judge of AC quality — a keyword heuristic cannot tell

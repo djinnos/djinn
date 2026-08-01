@@ -39,15 +39,15 @@ pub(crate) const STREAK_INTERVENTION_THRESHOLD: u32 = 4;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PriorSessionDisposition {
     /// The run reached its own terminal decision — it submitted, completed,
-    /// was reopened by a reviewer, crashed, or failed to spawn. Trigger B's
-    /// premise ("each run finishes and the task lands right back where it
-    /// was") holds for this reappearance.
+    /// was reopened by a reviewer, or crashed mid-run. Trigger B's premise
+    /// ("each run finishes and the task lands right back where it was") holds
+    /// for this reappearance.
     Concluded,
-    /// The session was cancelled or reclaimed by the platform before the run
-    /// could conclude (attempt outcome `cancelled` / `timed_out` /
-    /// `interrupted` — see
-    /// [`TaskAttemptOutcome::is_cancelled_or_reclaimed`](djinn_core::models::task_attempt::TaskAttemptOutcome::is_cancelled_or_reclaimed)).
-    CancelledOrReclaimed,
+    /// The session was cancelled, reclaimed, or never created at all, so the
+    /// run never reached its own terminal decision (attempt outcome
+    /// `cancelled` / `timed_out` / `interrupted` / `spawn_failed` — see
+    /// [`TaskAttemptOutcome::never_concluded`](djinn_core::models::task_attempt::TaskAttemptOutcome::never_concluded)).
+    NeverConcluded,
 }
 
 impl PriorSessionDisposition {
@@ -56,7 +56,7 @@ impl PriorSessionDisposition {
     /// never silently disarm trigger B for a genuine review-cycle livelock.
     pub(crate) fn from_attempt_outcome(outcome: &str) -> Self {
         match outcome.parse::<djinn_core::models::task_attempt::TaskAttemptOutcome>() {
-            Ok(parsed) if parsed.is_cancelled_or_reclaimed() => Self::CancelledOrReclaimed,
+            Ok(parsed) if parsed.never_concluded() => Self::NeverConcluded,
             _ => Self::Concluded,
         }
     }
@@ -72,15 +72,22 @@ impl PriorSessionDisposition {
 ///   problems, already bounded by the breaker/failover and the cooldown
 ///   ladder, not task-shape problems a Planner can fix. Trigger D
 ///   (`maybe_escalate_provider_failure_streak`) owns that class.
-/// - `prior_session` excludes reappearances whose prior session was CANCELLED
-///   or reclaimed before the run could conclude. Trigger B asserts, in its own
-///   user-facing reason, that "each run finishes and the task lands right back
-///   where it was" — an infrastructure cancellation makes that false, and it is
-///   no evidence whatsoever that the task's scope or acceptance criteria are
-///   wrong. Task 7mq0 (2026-07-28) rode four consecutive `session cancelled` +
-///   coordinator-recovery cycles into this gate; the Planner it summoned had no
-///   lever but reshaping the work, so an infra timeout permanently narrowed a
-///   healthy task. Coordinator stall kills keep their own truthful escalation
+/// - `prior_session` excludes reappearances whose prior session was CANCELLED,
+///   reclaimed, or never created before the run could conclude. Trigger B
+///   asserts, in its own user-facing reason, that "each run finishes and the
+///   task lands right back where it was" — an infrastructure cancellation makes
+///   that false, and it is no evidence whatsoever that the task's scope or
+///   acceptance criteria are wrong. Task 7mq0 (2026-07-28) rode four
+///   consecutive `session cancelled` + coordinator-recovery cycles into this
+///   gate; the Planner it summoned had no lever but reshaping the work, so an
+///   infra timeout permanently narrowed a healthy task. On 2026-08-01 a
+///   launcher protocol mismatch (`resize-v2` catalog vs `leaf-v1` server) made
+///   `resolve_dispatch_image` refuse every dispatch at `runtime.prepare`, and
+///   four `spawn_failed` streaks minted four planner remediations for tasks
+///   that had never been given a turn — a `spawn_failed` session was never
+///   created at all, which is strictly LESS evidence of task-level
+///   non-convergence than an `interrupted` run that at least started.
+///   Coordinator stall kills keep their own truthful escalation
 ///   (`STALL_CANCEL_ESCALATION_THRESHOLD` in `session_recovery`).
 /// - worker/reviewer roles only: a planner-role task must never escalate to
 ///   another Planner (recursive intervention), and lead/architect loops have
@@ -90,6 +97,13 @@ impl PriorSessionDisposition {
 /// t9wi/32bk wedge) is untouched: those runs terminalize their attempts
 /// `completed` / `submitted` / `reopened`, which classify as
 /// [`PriorSessionDisposition::Concluded`].
+///
+/// MIXED STREAKS: `prior_session` describes the MOST RECENT same-role attempt
+/// only (`CoordinatorActor::latest_attempt_strike_decision` reads the newest
+/// non-guard row). A streak that mixes infra and concluded outcomes therefore
+/// arms iff its newest attempt concluded — unchanged from how the
+/// cancelled/timed_out/interrupted exclusion has always behaved, and the reason
+/// text emitted by `maybe_intervene_on_cycling_task` says exactly that.
 pub(crate) fn should_route_cycling_intervention(
     role: &str,
     next_streak: u32,
@@ -109,7 +123,7 @@ mod tests {
 
     #[test]
     fn trigger_b_gate_arms_on_clean_same_role_streak_only() {
-        use PriorSessionDisposition::{CancelledOrReclaimed, Concluded};
+        use PriorSessionDisposition::{Concluded, NeverConcluded};
 
         // The review-cycle livelock shape: reviewer-role reappearances with no
         // provider failure, streak at the threshold → arm the Planner route.
@@ -149,19 +163,20 @@ mod tests {
             Concluded
         ));
 
-        // A cancelled / infrastructure-reclaimed session never finished, so the
-        // reappearance says nothing about the task's shape either (task 7mq0).
+        // A cancelled / reclaimed / never-created session never finished, so the
+        // reappearance says nothing about the task's shape either (task 7mq0,
+        // and the 2026-08-01 `spawn_failed` remediation storm).
         assert!(!should_route_cycling_intervention(
             "worker",
             STREAK_INTERVENTION_THRESHOLD,
             false,
-            CancelledOrReclaimed
+            NeverConcluded
         ));
         assert!(!should_route_cycling_intervention(
             "worker",
             STREAK_INTERVENTION_THRESHOLD + 6,
             false,
-            CancelledOrReclaimed
+            NeverConcluded
         ));
 
         // Planner-role tasks must never recursively escalate to a Planner.
@@ -184,20 +199,21 @@ mod tests {
 
     /// The disposition is derived from the session's terminal `task_attempts`
     /// outcome — the only signal the gate is allowed to use. A run that reached
-    /// its own terminal decision (including a genuine crash or a spawn failure)
-    /// stays `Concluded`; only cancellation/reclamation disarms trigger B. An
-    /// unknown outcome string fails CLOSED so vocabulary drift cannot silently
-    /// disable the escalation.
+    /// its own terminal decision (including a genuine mid-run crash) stays
+    /// `Concluded`; cancellation, reclamation, and a session that was never
+    /// created (`spawn_failed`) disarm trigger B. An unknown outcome string
+    /// fails CLOSED so vocabulary drift cannot silently disable the escalation.
     #[test]
-    fn prior_session_disposition_only_excludes_cancelled_or_reclaimed_outcomes() {
+    fn prior_session_disposition_excludes_every_never_concluded_outcome() {
         for outcome in [
-            "cancelled",   // session cancellation token fired (task 7mq0)
-            "timed_out",   // coordinator stall kill reclaimed a live session
-            "interrupted", // deploy/rollout/reap environmental interruption
+            "cancelled",    // session cancellation token fired (task 7mq0)
+            "timed_out",    // coordinator stall kill reclaimed a live session
+            "interrupted",  // deploy/rollout/reap environmental interruption
+            "spawn_failed", // no session ever created (2026-08-01 protocol mismatch)
         ] {
             assert_eq!(
                 PriorSessionDisposition::from_attempt_outcome(outcome),
-                PriorSessionDisposition::CancelledOrReclaimed,
+                PriorSessionDisposition::NeverConcluded,
                 "`{outcome}` must not count as a concluded run"
             );
         }
@@ -209,7 +225,6 @@ mod tests {
             "force_closed",
             "loop_guard_tripped",
             "crashed",
-            "spawn_failed",
             "pending",
             "not_a_real_outcome",
         ] {

@@ -133,9 +133,9 @@ impl TaskAttemptOutcome {
         matches!(self, Self::Interrupted)
     }
 
-    /// True if this terminal outcome proves the session was CANCELLED or
-    /// reclaimed by the platform before the agent's run could conclude, rather
-    /// than the run reaching its own terminal decision.
+    /// True if this terminal outcome proves the agent's run never reached its
+    /// own terminal decision — the platform cancelled it, reclaimed it, or
+    /// never created the session at all.
     ///
     /// - `Cancelled` — the session's cancellation token fired (operator, host,
     ///   arbiter, or the session cap); the supervisor reports
@@ -143,21 +143,35 @@ impl TaskAttemptOutcome {
     ///   releases the task back to `open` / `needs_task_review`.
     /// - `TimedOut` — a coordinator stall kill reclaimed a live session.
     /// - `Interrupted` — an environmental deploy/rollout/reap interruption.
+    /// - `SpawnFailed` — the dispatch died at `runtime.prepare`: no session row,
+    ///   no pod, no turn. Strictly LESS evidence about the task than an
+    ///   `Interrupted` run, which at least started executing.
     ///
     /// This is deliberately NARROWER than [`is_infra`](Self::is_infra): a
-    /// `Crashed` or `SpawnFailed` attempt did reach its own terminal decision
-    /// (it is a genuine failure of the run) and is therefore excluded here.
+    /// `Crashed` attempt DID run and reach its own terminal decision (a genuine
+    /// failure of the run) and is therefore excluded here.
     ///
     /// Used by the coordinator's cycling gate (trigger B), whose whole premise
     /// is "each run FINISHES and the task lands right back where it was". A
-    /// cancelled session never finished, so it is no evidence at all about the
-    /// task's scope or acceptance criteria and must not arm a Planner
-    /// remediation (task 7mq0, 2026-07-28: four ~10-minute worker sessions in a
-    /// row ended `session cancelled` + coordinator recovery, trigger B fired on
-    /// the fourth, and the Planner — with no lever but reshaping the work —
-    /// force-closed a healthy task and replaced it with narrower ones).
-    pub fn is_cancelled_or_reclaimed(&self) -> bool {
-        matches!(self, Self::Cancelled | Self::TimedOut | Self::Interrupted)
+    /// session that never concluded is no evidence at all about the task's scope
+    /// or acceptance criteria and must not arm a Planner remediation:
+    ///
+    /// - task 7mq0 (2026-07-28): four ~10-minute worker sessions in a row ended
+    ///   `session cancelled` + coordinator recovery, trigger B fired on the
+    ///   fourth, and the Planner — with no lever but reshaping the work —
+    ///   force-closed a healthy task and replaced it with narrower ones.
+    /// - 2026-08-01: the catalog image declared launcher protocol `resize-v2`
+    ///   while the server still ran `leaf-v1`, so `resolve_dispatch_image`
+    ///   refused every dispatch at `runtime.prepare`. Four healthy tasks
+    ///   (`cfxt`, `skf0`, `zd7p`, `q8i4`) accumulated four `spawn_failed`
+    ///   attempts each and, inside two minutes, summoned four planner
+    ///   remediations (`sy3z`, `2so0`, `kol2`, `orh8`) for "cycling without
+    ///   converging" — without ever having been given a turn.
+    pub fn never_concluded(&self) -> bool {
+        matches!(
+            self,
+            Self::Cancelled | Self::TimedOut | Self::Interrupted | Self::SpawnFailed
+        )
     }
 
     /// Lifecycle rank used for forward-only ordering.
