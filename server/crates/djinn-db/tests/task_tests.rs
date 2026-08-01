@@ -32,6 +32,8 @@ mod generation;
 mod state_machine;
 #[path = "task_tests/sync_terminal_state.rs"]
 mod sync_terminal_state;
+#[path = "task_tests/task_execution_session_generation.rs"]
+mod task_execution_session_generation;
 
 // ── Local test helpers (pure djinn-db / djinn-core) ──────────────────────────
 
