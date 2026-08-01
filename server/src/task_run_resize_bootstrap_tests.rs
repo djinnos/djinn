@@ -90,6 +90,16 @@ impl TaskRunPodSurface for FakeSurface {
         }
     }
 
+    /// Every test in this file drives `TaskRunResizeBootstrap::bootstrap`
+    /// directly, one pass at a time. Nothing here consults the Job: the Kueue
+    /// clock lives in the bridge's wait loop, which these tests do not enter.
+    /// The seam tests in `tests/task_run_resize_dispatch_seam.rs` are where a
+    /// suspended Job is driven, and they drive it through a real `Job` object
+    /// rather than a constant.
+    async fn observe_job_admission(&self, _task_run_id: &str) -> JobAdmission {
+        JobAdmission::Admitted
+    }
+
     async fn uid_fenced_delete(&self, task_run_id: &str, pod_uid: &str) -> Result<(), String> {
         self.state
             .lock()
