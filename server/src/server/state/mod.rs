@@ -673,6 +673,12 @@ impl AppState {
             builder_image = %config.builder_image,
             agent_worker_image = %config.agent_worker_image,
             namespace = %config.namespace,
+            // The declaration every image this deployment builds will carry.
+            // Logged because an operator flipping the launcher-authority
+            // cutover otherwise has no way to confirm the binary saw the
+            // env var: an unhonoured flip and an honoured one that skips the
+            // rebuild look identical from outside the process.
+            declared_launcher_protocol = %config.declared_launcher_protocol,
             "image_controller: config loaded"
         );
         let controller = Arc::new(ImageController::new(
