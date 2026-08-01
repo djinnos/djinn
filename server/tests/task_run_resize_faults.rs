@@ -32,7 +32,7 @@ use djinn_db::{
 };
 use djinn_k8s::pod_resize::PodResizeError;
 use djinn_k8s::pod_resize_fixture::{ApiFault, StoredTaskRunPod};
-use djinn_k8s::runtime::{LauncherObservationError, ObservedLauncherSidecar};
+use djinn_k8s::runtime::{JobAdmission, LauncherObservationError, ObservedLauncherSidecar};
 use djinn_server::task_run_resize_bootstrap::TaskRunPodSurface;
 use djinn_server::task_run_resize_drop::{ResizeDropClock, TaskRunResizeDropBridge};
 use djinn_server::task_run_resize_reconcile::{
@@ -71,6 +71,10 @@ impl TaskRunPodSurface for FixtureSurface {
         self.0
             .resize_launcher_cpu(pod_name, target_millicores)
             .await
+    }
+
+    async fn observe_job_admission(&self, _task_run_id: &str) -> JobAdmission {
+        self.0.job_admission()
     }
 
     async fn uid_fenced_delete(&self, task_run_id: &str, pod_uid: &str) -> Result<(), String> {
@@ -604,6 +608,10 @@ impl TaskRunPodSurface for ReconcilerRacingSurface {
         self.cluster
             .resize_launcher_cpu(pod_name, target_millicores)
             .await
+    }
+
+    async fn observe_job_admission(&self, _task_run_id: &str) -> JobAdmission {
+        self.cluster.job_admission()
     }
 
     async fn uid_fenced_delete(&self, task_run_id: &str, pod_uid: &str) -> Result<(), String> {

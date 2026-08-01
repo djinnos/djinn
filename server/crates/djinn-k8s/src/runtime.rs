@@ -2297,7 +2297,30 @@ pub async fn get_taskrun_pod_fresh(
     }
 }
 
-/// The three apiserver operations the resize bootstrap performs, bound to one
+/// Whether a task run's Job has left the Kueue admission queue.
+///
+/// A Job Kueue is still holding carries `spec.suspend: true`, and the Job
+/// controller creates **no Pod** for a suspended Job. That is not a slow start:
+/// while this reads [`Self::Suspended`] there is no launcher in existence, so
+/// there is nothing to resize and nothing that could confirm a birth limit. Any
+/// budget that measures the launcher must therefore not run.
+///
+/// The three variants are deliberately not two. Only a *proven* suspension may
+/// defer a deadline; a Job that could not be read at all must keep the launcher
+/// clock running, or an apiserver outage would buy an unbounded wait.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum JobAdmission {
+    /// The Job exists and `spec.suspend` is `true` — queued, not started.
+    Suspended,
+    /// The Job exists and is not suspended. A Pod is expected to materialize;
+    /// one that does not is a real stall.
+    Admitted,
+    /// No Job carries this task run's label, or the read failed. Folded with
+    /// [`Self::Admitted`] by every caller, on purpose: see the type docs.
+    Unknown(String),
+}
+
+/// The four apiserver operations the resize bootstrap performs, bound to one
 /// namespace and one field manager.
 ///
 /// It exists so `djinn-server` can drive the bootstrap without depending on
@@ -2397,6 +2420,39 @@ impl TaskRunPodResizeSurface {
                 crate::pod_resize::CpuLimit::from_millis(target_millicores),
             )
             .await
+    }
+
+    /// Whether this task run's Job has been admitted out of the Kueue queue.
+    ///
+    /// Reads `spec.suspend` off the Job itself rather than the Kueue Workload:
+    /// `suspend` is the field the Job controller actually consults before it
+    /// creates a Pod, so it is the fact that decides whether a Pod can exist.
+    /// A Workload condition is Kueue's *intent*; this is the effect.
+    ///
+    /// Never returns an error. An unreadable Job is [`JobAdmission::Unknown`],
+    /// which every caller folds with [`JobAdmission::Admitted`] — the fail-safe
+    /// direction, because only a proven suspension may defer a deadline.
+    pub async fn observe_job_admission(&self, task_run_id: &str) -> JobAdmission {
+        let jobs: Api<Job> = Api::namespaced(self.client.clone(), &self.namespace);
+        let selector = format!("{}={task_run_id}", crate::job::LABEL_TASK_RUN_ID);
+        let listed = match jobs.list(&ListParams::default().labels(&selector)).await {
+            Ok(list) => list.items,
+            Err(error) => return JobAdmission::Unknown(format!("list task-run Jobs: {error}")),
+        };
+        match listed.as_slice() {
+            [] => JobAdmission::Unknown(format!("no Job carries the label `{selector}`")),
+            [job] => {
+                if job.spec.as_ref().and_then(|spec| spec.suspend) == Some(true) {
+                    JobAdmission::Suspended
+                } else {
+                    JobAdmission::Admitted
+                }
+            }
+            many => JobAdmission::Unknown(format!(
+                "task-run {task_run_id} resolves to {} Jobs; refusing to pick one",
+                many.len()
+            )),
+        }
     }
 
     /// UID-fenced destruction of exactly the observed Pod, plus its Job.
