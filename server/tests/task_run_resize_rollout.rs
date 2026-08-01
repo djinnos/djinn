@@ -56,6 +56,12 @@ const EEKY_TASK_ID: &str = "eeky-task";
 const LEAF: LauncherAuthorityProtocol = LauncherAuthorityProtocol::LeafV1;
 const RESIZE: LauncherAuthorityProtocol = LauncherAuthorityProtocol::ResizeV2;
 
+async fn legacy_leaf_database() -> Database {
+    let db = Database::ephemeral().await.unwrap();
+    djinn_db::test_support::seed_legacy_launcher_authority_for_test(&db).await;
+    db
+}
+
 // ═══ harness ════════════════════════════════════════════════════════════════
 
 /// Prove the "database" under these tests is really PostgreSQL.
@@ -517,7 +523,7 @@ fn probe_for(image: &Image) -> DispatchProbe {
 /// manifest turns it red while every catalog row stays exactly as it was.
 #[tokio::test]
 async fn retention_is_proven_by_a_registry_round_trip_not_by_a_stored_column() {
-    let db = Database::ephemeral().await.unwrap();
+    let db = legacy_leaf_database().await;
     assert_real_postgres(&db).await;
     let registry = LocalRegistry::start().await;
 
@@ -587,7 +593,7 @@ async fn retention_is_proven_by_a_registry_round_trip_not_by_a_stored_column() {
 /// under `leaf-v1` an allowlisted no-handshake digest maps to leaf authority.
 #[tokio::test]
 async fn catalog_metadata_is_validated_against_the_mode_and_not_only_the_declaration() {
-    let db = Database::ephemeral().await.unwrap();
+    let db = legacy_leaf_database().await;
     assert_real_postgres(&db).await;
     seed_project_and_run(&db, "019fb854-2222-7000-8000-000000000001").await;
     seed_image(&db, "legacy", Some(&digest('a')), None).await;
@@ -637,7 +643,7 @@ async fn catalog_metadata_is_validated_against_the_mode_and_not_only_the_declara
 /// `resize-v2`, and the reverse holds for `leaf-v1`.
 #[tokio::test]
 async fn a_declaration_is_admitted_only_by_the_mode_that_matches_it() {
-    let db = Database::ephemeral().await.unwrap();
+    let db = legacy_leaf_database().await;
     assert_real_postgres(&db).await;
     seed_project_and_run(&db, "019fb854-3333-7000-8000-000000000001").await;
     seed_image(&db, "modern", Some(&digest('c')), Some(RESIZE)).await;
@@ -691,7 +697,7 @@ async fn a_declaration_is_admitted_only_by_the_mode_that_matches_it() {
 /// inner one, and both are proven rather than assumed.
 #[tokio::test]
 async fn an_unknown_protocol_string_is_refused_and_is_also_unstorable() {
-    let db = Database::ephemeral().await.unwrap();
+    let db = legacy_leaf_database().await;
     assert_real_postgres(&db).await;
     seed_image(&db, "modern", Some(&digest('c')), Some(RESIZE)).await;
 
@@ -733,7 +739,7 @@ async fn an_unknown_protocol_string_is_refused_and_is_also_unstorable() {
 /// creation count not moving.
 #[tokio::test]
 async fn the_admission_pause_is_proven_by_a_refused_dispatch() {
-    let db = Database::ephemeral().await.unwrap();
+    let db = legacy_leaf_database().await;
     assert_real_postgres(&db).await;
     seed_project_and_run(&db, "019fb854-4444-7000-8000-000000000001").await;
     let image = seed_image(&db, "legacy", Some(&digest('a')), None).await;
@@ -795,7 +801,7 @@ async fn the_admission_pause_is_proven_by_a_refused_dispatch() {
 /// implementation. This one does not, which is the whole point.
 #[tokio::test]
 async fn a_pause_row_without_a_wired_refusal_blocks_the_cutover() {
-    let db = Database::ephemeral().await.unwrap();
+    let db = legacy_leaf_database().await;
     assert_real_postgres(&db).await;
     seed_project_and_run(&db, "019fb854-5555-7000-8000-000000000001").await;
     let image = seed_image(&db, "legacy", Some(&digest('a')), None).await;
@@ -876,7 +882,7 @@ async fn both_flips_are_gated_on_zero_live_pods_and_zero_nonterminal_rows() {
     for (label, target) in [("forward", RESIZE), ("rollback", LEAF)] {
         // ── one nonterminal resize row blocks this flip ──────────────────
         {
-            let db = Database::ephemeral().await.unwrap();
+            let db = legacy_leaf_database().await;
             assert_real_postgres(&db).await;
             let run = "019fb854-6666-7000-8000-000000000001";
             seed_project_and_run(&db, run).await;
@@ -925,7 +931,7 @@ async fn both_flips_are_gated_on_zero_live_pods_and_zero_nonterminal_rows() {
 
         // ── one live task-run Pod blocks this flip ───────────────────────
         {
-            let db = Database::ephemeral().await.unwrap();
+            let db = legacy_leaf_database().await;
             assert_real_postgres(&db).await;
             seed_project_and_run(&db, "019fb854-7777-7000-8000-000000000001").await;
             let image = seed_image(&db, "legacy", Some(&digest('a')), None).await;
@@ -966,7 +972,7 @@ async fn both_flips_are_gated_on_zero_live_pods_and_zero_nonterminal_rows() {
 /// stuck closed.
 #[tokio::test]
 async fn a_drained_snapshot_flips_forward_and_back() {
-    let db = Database::ephemeral().await.unwrap();
+    let db = legacy_leaf_database().await;
     assert_real_postgres(&db).await;
     seed_project_and_run(&db, "019fb854-8888-7000-8000-000000000001").await;
     let image = seed_image(&db, "legacy", Some(&digest('a')), None).await;
@@ -1008,7 +1014,7 @@ async fn rollback_is_blocked_and_leaves_admission_paused() {
     // admission through the production path, break exactly one thing, attempt
     // the rollback, then dispatch and require a refusal.
     for case in ["allowlist absent", "digest not pullable", "row repointed"] {
-        let db = Database::ephemeral().await.unwrap();
+        let db = legacy_leaf_database().await;
         assert_real_postgres(&db).await;
         seed_project_and_run(&db, "019fb854-9999-7000-8000-000000000001").await;
         let registry = LocalRegistry::start().await;
@@ -1134,7 +1140,7 @@ async fn rollback_is_blocked_and_leaves_admission_paused() {
 /// The full forward sequence, asserted as an observed step sequence.
 #[tokio::test]
 async fn the_forward_cutover_records_the_specced_step_sequence() {
-    let db = Database::ephemeral().await.unwrap();
+    let db = legacy_leaf_database().await;
     assert_real_postgres(&db).await;
     seed_project_and_run(&db, "019fb854-aaaa-7000-8000-000000000001").await;
     let registry = LocalRegistry::start().await;
@@ -1187,7 +1193,7 @@ async fn the_forward_cutover_records_the_specced_step_sequence() {
 /// The two reorderings the criterion names, each attempted for real.
 #[tokio::test]
 async fn the_flip_cannot_precede_the_drain_and_the_resume_cannot_precede_the_flip() {
-    let db = Database::ephemeral().await.unwrap();
+    let db = legacy_leaf_database().await;
     assert_real_postgres(&db).await;
     seed_project_and_run(&db, "019fb854-bbbb-7000-8000-000000000001").await;
     let image = seed_image(&db, "legacy", Some(&digest('a')), None).await;
@@ -1273,7 +1279,7 @@ async fn the_flip_cannot_precede_the_drain_and_the_resume_cannot_precede_the_fli
 /// `ResizeRollout::production`.
 #[tokio::test]
 async fn a_blocked_preflight_leaves_the_mode_and_the_epoch_where_they_were() {
-    let db = Database::ephemeral().await.unwrap();
+    let db = legacy_leaf_database().await;
     assert_real_postgres(&db).await;
     seed_project_and_run(&db, "019fb854-cccc-7000-8000-000000000001").await;
     let image = seed_image(&db, "legacy", Some(&digest('a')), None).await;
@@ -1373,7 +1379,7 @@ async fn a_blocked_preflight_leaves_the_mode_and_the_epoch_where_they_were() {
 /// A step cannot run twice, so a replayed cutover cannot launder a fence.
 #[tokio::test]
 async fn no_step_runs_twice() {
-    let db = Database::ephemeral().await.unwrap();
+    let db = legacy_leaf_database().await;
     assert_real_postgres(&db).await;
     let rollout = ResizeRollout::new(
         db.clone(),
@@ -1398,7 +1404,7 @@ async fn no_step_runs_twice() {
 /// and counted `pods/resize` PATCHes.
 #[tokio::test]
 async fn no_pod_ever_has_two_quota_authorities_or_none() {
-    let db = Database::ephemeral().await.unwrap();
+    let db = legacy_leaf_database().await;
     assert_real_postgres(&db).await;
     seed_project_and_run(&db, "019fb854-cccc-7000-8000-000000000001").await;
     let legacy = seed_image(&db, "legacy", Some(&digest('a')), None).await;

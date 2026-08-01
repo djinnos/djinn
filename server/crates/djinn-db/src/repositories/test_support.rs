@@ -708,6 +708,22 @@ pub async fn seed_project(db: &Database, project_id: &str, name: &str) {
     .expect("failed to seed project");
 }
 
+/// Restore the pre-cutover launcher-authority seed for rollout integration
+/// tests that deliberately exercise the leaf-v1 -> resize-v2 transition.
+/// Fresh-database tests must not call this helper: migration 170 owns their
+/// shipped resize-v2/epoch-zero assertion.
+pub async fn seed_legacy_launcher_authority_for_test(db: &Database) {
+    db.ensure_initialized().await.unwrap();
+    sqlx::query(
+        "UPDATE launcher_authority_mode \
+         SET mode = 'leaf-v1', epoch = 0, updated_at = now() \
+         WHERE mode_key = 'global'",
+    )
+    .execute(db.pool())
+    .await
+    .expect("seed pre-cutover launcher authority fixture");
+}
+
 /// Overwrite a debate-trail entry's `body_metadata`, bypassing the
 /// evidence-findings validation enforced by `add_debate_trail_entry`.
 /// Recovery tests use this to fabricate legacy/corrupt rows that can no
