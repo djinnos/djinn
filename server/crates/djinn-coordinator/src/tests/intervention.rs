@@ -1112,6 +1112,225 @@ async fn completed_same_role_redispatches_still_route_the_cycling_planner_interv
     );
 }
 
+/// Regression for the 2026-08-01 launcher-protocol outage. The catalog image
+/// declared `resize-v2` while the server still ran `leaf-v1`, so
+/// `resolve_dispatch_image` refused EVERY dispatch at `runtime.prepare`: no
+/// session row, no pod, no turn. Within two minutes four healthy tasks
+/// (`cfxt`, `skf0`, `zd7p`, `q8i4`) had each accumulated four `spawn_failed`
+/// attempts and trigger B minted four Planner remediations (`sy3z`, `2so0`,
+/// `kol2`, `orh8`) claiming they were "cycling without converging" — tasks that
+/// had never been given a turn.
+///
+/// A `spawn_failed` attempt is strictly LESS evidence of task-level
+/// non-convergence than the `interrupted` outcome trigger B already excludes:
+/// an interrupted session at least started running.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn spawn_failed_sessions_do_not_route_the_cycling_planner_intervention() {
+    let mut harness = InterventionChaosHarness::new(0).await;
+    let role = "worker";
+
+    assert_eq!(
+        STREAK_INTERVENTION_THRESHOLD, 4,
+        "the 2026-08-01 regression is pinned to the production threshold"
+    );
+
+    // Exactly the outage shape: four same-role redispatches, each explained by
+    // a dispatch that died before any session existed.
+    let (handled, task) = harness
+        .dispatch_same_role_reappearances_after_sessions(
+            role,
+            djinn_core::models::TaskAttemptOutcome::SpawnFailed,
+            STREAK_INTERVENTION_THRESHOLD,
+        )
+        .await;
+
+    assert!(
+        !handled,
+        "four spawn_failed dispatches must NOT route a Planner intervention — no \
+         session was ever created, so the streak is no evidence about the task's scope"
+    );
+    assert_eq!(
+        task.status, "open",
+        "the source task must stay dispatchable, not be handed to a Planner"
+    );
+    harness.assert_planner_marker_count(0).await;
+    // The load-bearing side effect: no remediation review task row exists.
+    harness.assert_open_planner_review_count(0).await;
+
+    // The 60s-and-up dispatch backoff is deliberately UNCHANGED: a genuinely
+    // unlaunchable task should still be throttled, it just must not manufacture
+    // Planner work.
+    harness
+        .assert_same_role_backoff_after_reappearance(STREAK_INTERVENTION_THRESHOLD)
+        .await;
+
+    // Well past the threshold the exclusion still holds — it is not a
+    // one-cycle grace period the next spawn failure walks straight through.
+    let (still_excluded, still_open) = harness
+        .dispatch_same_role_reappearances_after_sessions(
+            role,
+            djinn_core::models::TaskAttemptOutcome::SpawnFailed,
+            3,
+        )
+        .await;
+    assert!(
+        !still_excluded,
+        "the spawn-failure exclusion must not decay as the streak grows"
+    );
+    assert_eq!(still_open.status, "open");
+    harness.assert_planner_marker_count(0).await;
+    harness.assert_open_planner_review_count(0).await;
+}
+
+/// The other half of the spawn_failed contract: a streak of genuine reviewer
+/// rejections (`reopened` — the run concluded and a reviewer sent it back) MUST
+/// still mint the remediation. Proves the fix narrows the gate rather than
+/// disabling trigger B.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rejected_same_role_redispatches_still_route_the_cycling_planner_intervention() {
+    let mut harness = InterventionChaosHarness::new(0).await;
+    let role = "worker";
+
+    let (below_handled, below) = harness
+        .dispatch_same_role_reappearances_after_sessions(
+            role,
+            djinn_core::models::TaskAttemptOutcome::Reopened,
+            STREAK_INTERVENTION_THRESHOLD - 1,
+        )
+        .await;
+    assert!(!below_handled, "below threshold only seeds backoff");
+    assert_eq!(below.status, "open");
+    harness.assert_open_planner_review_count(0).await;
+
+    let (handled, routed) = harness
+        .dispatch_same_role_reappearances_after_sessions(
+            role,
+            djinn_core::models::TaskAttemptOutcome::Reopened,
+            1,
+        )
+        .await;
+    assert!(
+        handled,
+        "four rejected same-role redispatches must still route the Planner \
+         intervention — excluding spawn_failed must not disable the escalation"
+    );
+    assert_eq!(routed.status, "open", "the source task stays open");
+    harness.assert_planner_marker_count(1).await;
+    harness.assert_open_planner_review_count(1).await;
+
+    let description = harness
+        .open_planner_intervention_reviews()
+        .await
+        .first()
+        .map(|review| review.description.clone())
+        .expect("trigger B must create a Planner remediation review task");
+    assert!(
+        description.contains(
+            "Observed session outcomes for `worker`, newest first: \
+             reopened, reopened, reopened, reopened"
+        ),
+        "the reason must report the session outcomes it counted, got: {description}"
+    );
+    // The narration must not lie in the other direction either: now that
+    // `spawn_failed` cannot arm this escalation, the enumerated exclusion set
+    // has to name it.
+    assert!(
+        description.contains("`cancelled` / `timed_out` / `interrupted` / `spawn_failed`"),
+        "the reason must enumerate spawn_failed among the outcomes that cannot arm \
+         this escalation, got: {description}"
+    );
+}
+
+/// A streak that MIXES infra and concluded outcomes.
+///
+/// Rule (unchanged by this fix, and identical to how the
+/// cancelled/timed_out/interrupted exclusion has always behaved): the gate
+/// reads the MOST RECENT same-role attempt only, so a mixed streak arms iff its
+/// newest attempt concluded on its own. Both directions are pinned here.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mixed_streak_arms_only_when_the_newest_attempt_concluded() {
+    let role = "worker";
+
+    // Direction 1 — newest attempt is a real rejection: 2 spawn_failed then 2
+    // reopened. The task DID get its turn most recently and still did not move,
+    // so the escalation is legitimate and must fire.
+    let mut newest_concluded = InterventionChaosHarness::new(0).await;
+    newest_concluded
+        .dispatch_same_role_reappearances_after_sessions(
+            role,
+            djinn_core::models::TaskAttemptOutcome::SpawnFailed,
+            2,
+        )
+        .await;
+    // `task_attempts.created_at` is millisecond-resolution and the read orders
+    // by it descending; separate the phases so "newest" is unambiguous.
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    let (handled, task) = newest_concluded
+        .dispatch_same_role_reappearances_after_sessions(
+            role,
+            djinn_core::models::TaskAttemptOutcome::Reopened,
+            2,
+        )
+        .await;
+    assert!(
+        handled,
+        "a mixed streak whose newest attempt concluded must still route the \
+         Planner intervention"
+    );
+    assert_eq!(task.status, "open");
+    newest_concluded.assert_open_planner_review_count(1).await;
+    let description = newest_concluded
+        .open_planner_intervention_reviews()
+        .await
+        .first()
+        .map(|review| review.description.clone())
+        .expect("trigger B must create a Planner remediation review task");
+    assert!(
+        description.contains(
+            "Observed session outcomes for `worker`, newest first: \
+             reopened, reopened, spawn_failed, spawn_failed"
+        ),
+        "the reason must show the mixed evidence verbatim, got: {description}"
+    );
+    assert!(
+        description.contains("arms only when the MOST RECENT run reached its own terminal"),
+        "the reason must state the newest-attempt rule it actually applied, got: {description}"
+    );
+
+    // Direction 2 — same mix, opposite order: 2 reopened then 2 spawn_failed.
+    // The most recent dispatch never produced a session, so the reappearance is
+    // not evidence about the task and must not mint a remediation.
+    let mut newest_spawn_failed = InterventionChaosHarness::new(0).await;
+    newest_spawn_failed
+        .dispatch_same_role_reappearances_after_sessions(
+            role,
+            djinn_core::models::TaskAttemptOutcome::Reopened,
+            2,
+        )
+        .await;
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    let (mixed_handled, mixed_task) = newest_spawn_failed
+        .dispatch_same_role_reappearances_after_sessions(
+            role,
+            djinn_core::models::TaskAttemptOutcome::SpawnFailed,
+            2,
+        )
+        .await;
+    assert!(
+        !mixed_handled,
+        "a mixed streak whose newest attempt never produced a session must NOT \
+         route a Planner intervention"
+    );
+    assert_eq!(mixed_task.status, "open");
+    newest_spawn_failed.assert_planner_marker_count(0).await;
+    newest_spawn_failed
+        .assert_open_planner_review_count(0)
+        .await;
+    newest_spawn_failed
+        .assert_same_role_backoff_after_reappearance(STREAK_INTERVENTION_THRESHOLD)
+        .await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn below_threshold_does_not_intervene() {
     let db = test_helpers::create_test_db();
