@@ -132,16 +132,16 @@ async fn flip_forward_then_roll_back_from_a_drained_snapshot() {
     let db = Database::ephemeral().await.unwrap();
     let modes = LauncherAuthorityModeRepository::new(db.clone());
 
-    // Migration 167 seeds the pre-existing behavior, never the new one.
+    // Migration 171 cuts a fresh deployment over to resize-v2 at epoch zero.
     let (mode, epoch) = current(&modes).await;
     assert_eq!(
-        mode, LEAF,
-        "a fresh deployment must keep launcher authority"
+        mode, RESIZE,
+        "a fresh deployment must use resize-v2 launcher authority"
     );
     assert_eq!(epoch, 0);
 
-    // leaf-v1 -> resize-v2 (activation).
-    let flipped = modes.set_mode(epoch, RESIZE).await;
+    // resize-v2 -> leaf-v1 (rollback).
+    let flipped = modes.set_mode(epoch, LEAF).await;
     let SetLauncherAuthorityModeResult::Flipped {
         row,
         previous,
@@ -150,31 +150,65 @@ async fn flip_forward_then_roll_back_from_a_drained_snapshot() {
     else {
         panic!("expected a flip from a drained snapshot, got {flipped:?}");
     };
-    assert_eq!(previous, LEAF);
-    assert_eq!(row.mode, RESIZE);
+    assert_eq!(previous, RESIZE);
+    assert_eq!(row.mode, LEAF);
     assert_eq!(row.epoch, 1);
     assert_eq!(drain, LauncherAuthorityDrainCensus::default());
     assert!(drain.is_drained() && drain.total() == 0);
-    assert_eq!(current(&modes).await, (RESIZE, 1));
+    assert_eq!(current(&modes).await, (LEAF, 1));
 
-    // resize-v2 -> leaf-v1 (rollback), from the epoch the flip left behind.
-    let rolled_back = modes.set_mode(1, LEAF).await;
+    // leaf-v1 -> resize-v2 (forward), from the epoch the flip left behind.
+    let rolled_back = modes.set_mode(1, RESIZE).await;
     let SetLauncherAuthorityModeResult::Flipped { row, previous, .. } = rolled_back else {
         panic!("expected a rollback, got {rolled_back:?}");
     };
-    assert_eq!(previous, RESIZE);
-    assert_eq!(row.mode, LEAF);
+    assert_eq!(previous, LEAF);
+    assert_eq!(row.mode, RESIZE);
     assert_eq!(row.epoch, 2);
-    assert_eq!(current(&modes).await, (LEAF, 2));
+    assert_eq!(current(&modes).await, (RESIZE, 2));
 
     // The fence is a fence in both directions: replaying the activation at the
     // now-stale epoch is refused and changes nothing.
-    let stale = modes.set_mode(1, RESIZE).await;
+    let stale = modes.set_mode(1, LEAF).await;
     let SetLauncherAuthorityModeResult::EpochConflict { row } = stale else {
         panic!("expected a stale-epoch refusal, got {stale:?}");
     };
     assert_eq!(row.epoch, 2);
-    assert_eq!(current(&modes).await, (LEAF, 2));
+    assert_eq!(current(&modes).await, (RESIZE, 2));
+}
+
+/// Reapplying the cutover SQL to an operator-managed row models an upgrade
+/// whose migration history has not yet recorded 170. Only the untouched
+/// migration-167 seed (epoch zero) may be advanced automatically.
+#[tokio::test]
+async fn migration_171_preserves_an_operator_managed_leaf_epoch() {
+    let db = Database::ephemeral().await.unwrap();
+    let modes = LauncherAuthorityModeRepository::new(db.clone());
+
+    assert!(matches!(
+        modes.set_mode(0, LEAF).await,
+        SetLauncherAuthorityModeResult::Flipped { .. }
+    ));
+    assert!(matches!(
+        modes.set_mode(1, RESIZE).await,
+        SetLauncherAuthorityModeResult::Flipped { .. }
+    ));
+    assert!(matches!(
+        modes.set_mode(2, LEAF).await,
+        SetLauncherAuthorityModeResult::Flipped { .. }
+    ));
+    assert_eq!(current(&modes).await, (LEAF, 3));
+
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("migrations_postgres/171_launcher_authority_resize_v2_default.sql");
+    let sql = std::fs::read_to_string(path).expect("migration 171 must be readable");
+    sqlx::raw_sql(&sql).execute(db.pool()).await.unwrap();
+
+    assert_eq!(
+        current(&modes).await,
+        (LEAF, 3),
+        "the default cutover must not overwrite an operator-managed epoch"
+    );
 }
 
 /// A same-mode replay is idempotent — but only after passing the identical
@@ -192,14 +226,14 @@ async fn same_mode_replay_is_idempotent_but_never_skips_the_fence() {
     let permits = BuildPodPermitRepository::new(db.clone());
 
     // Drained: the replay is a no-op that neither writes nor bumps the epoch.
-    let replay = modes.set_mode(0, LEAF).await;
+    let replay = modes.set_mode(0, RESIZE).await;
     let SetLauncherAuthorityModeResult::Unchanged { row, drain } = replay else {
         panic!("expected an idempotent replay, got {replay:?}");
     };
-    assert_eq!(row.mode, LEAF);
+    assert_eq!(row.mode, RESIZE);
     assert_eq!(row.epoch, 0, "an idempotent replay must not move the fence");
     assert!(drain.is_drained());
-    assert_eq!(current(&modes).await, (LEAF, 0));
+    assert_eq!(current(&modes).await, (RESIZE, 0));
 
     // Occupied: the SAME no-op request is now refused with the same verdict a
     // real flip would get.
@@ -207,13 +241,13 @@ async fn same_mode_replay_is_idempotent_but_never_skips_the_fence() {
         permits.acquire("replay-occupant", 8).await,
         AcquireBuildPodPermitResult::Acquired { .. }
     ));
-    let blocked = modes.set_mode(0, LEAF).await;
+    let blocked = modes.set_mode(0, RESIZE).await;
     let SetLauncherAuthorityModeResult::DrainNotEmpty { row, drain } = blocked else {
         panic!("a replay must not bypass the drain fence, got {blocked:?}");
     };
-    assert_eq!(row.mode, LEAF);
+    assert_eq!(row.mode, RESIZE);
     assert_eq!(drain.pending_pod_permits, 1);
-    assert_eq!(current(&modes).await, (LEAF, 0));
+    assert_eq!(current(&modes).await, (RESIZE, 0));
 }
 
 /// Drain dimension one — a live task-run Pod holding a permit with no resize
@@ -262,7 +296,7 @@ async fn a_pending_pod_permit_alone_refuses_the_flip() {
         "dimension one must be nonzero with dimension two independently at zero"
     );
 
-    let refused = modes.set_mode(0, RESIZE).await;
+    let refused = modes.set_mode(0, LEAF).await;
     let SetLauncherAuthorityModeResult::DrainNotEmpty { drain, .. } = refused else {
         panic!("expected the flip to be refused, got {refused:?}");
     };
@@ -270,7 +304,7 @@ async fn a_pending_pod_permit_alone_refuses_the_flip() {
     assert_eq!(drain.nonterminal_resize_leases, 0);
     assert_eq!(
         current(&modes).await,
-        (LEAF, 0),
+        (RESIZE, 0),
         "a refused flip must not change the mode or the fence"
     );
 }
@@ -302,13 +336,13 @@ async fn a_nonterminal_resize_lease_alone_refuses_the_flip() {
     );
     assert!(!census.is_drained());
 
-    let refused = modes.set_mode(0, RESIZE).await;
+    let refused = modes.set_mode(0, LEAF).await;
     let SetLauncherAuthorityModeResult::DrainNotEmpty { drain, .. } = refused else {
         panic!("expected the flip to be refused, got {refused:?}");
     };
     assert_eq!(drain.pending_pod_permits, 0);
     assert_eq!(drain.nonterminal_resize_leases, 1);
-    assert_eq!(current(&modes).await, (LEAF, 0));
+    assert_eq!(current(&modes).await, (RESIZE, 0));
 
     // Draining that dimension — an explicit fenced release — reopens the flip.
     let row = permits.active("resize-occupant").await.unwrap().unwrap();
@@ -323,7 +357,7 @@ async fn a_nonterminal_resize_lease_alone_refuses_the_flip() {
         .unwrap();
     assert!(modes.drain_census().await.unwrap().is_drained());
     assert!(matches!(
-        modes.set_mode(0, RESIZE).await,
+        modes.set_mode(0, LEAF).await,
         SetLauncherAuthorityModeResult::Flipped { .. }
     ));
 }
@@ -365,7 +399,7 @@ async fn a_concurrent_admission_cannot_be_raced_by_a_zero_count() {
 
     let mut flip = tokio::spawn({
         let modes = Arc::clone(&modes);
-        async move { modes.set_mode(0, RESIZE).await }
+        async move { modes.set_mode(0, LEAF).await }
     });
 
     // The flip must be BLOCKED, not merely late. An unfenced read would have
@@ -391,7 +425,7 @@ async fn a_concurrent_admission_cannot_be_raced_by_a_zero_count() {
     assert_eq!(drain.pending_pod_permits, 1);
     assert_eq!(
         current(&modes).await,
-        (LEAF, 0),
+        (RESIZE, 0),
         "no mode change may survive a raced admission"
     );
 }
@@ -431,10 +465,10 @@ async fn an_unreadable_permit_relation_is_unavailable_and_never_drained() {
         "an unreadable census must not resolve to zero"
     );
     assert_eq!(
-        modes.set_mode(0, RESIZE).await,
+        modes.set_mode(0, LEAF).await,
         SetLauncherAuthorityModeResult::Unavailable
     );
-    assert_eq!(current(&modes).await, (LEAF, 0));
+    assert_eq!(current(&modes).await, (RESIZE, 0));
 
     // The pool relation is the fence itself; losing it is equally unavailable.
     let db = Database::ephemeral().await.unwrap();
@@ -444,10 +478,10 @@ async fn an_unreadable_permit_relation_is_unavailable_and_never_drained() {
         .await
         .unwrap();
     assert_eq!(
-        modes.set_mode(0, RESIZE).await,
+        modes.set_mode(0, LEAF).await,
         SetLauncherAuthorityModeResult::Unavailable
     );
-    assert_eq!(current(&modes).await, (LEAF, 0));
+    assert_eq!(current(&modes).await, (RESIZE, 0));
 
     // A present relation with no singleton row is also unfenced, not empty.
     let db = Database::ephemeral().await.unwrap();
@@ -457,10 +491,10 @@ async fn an_unreadable_permit_relation_is_unavailable_and_never_drained() {
         .await
         .unwrap();
     assert_eq!(
-        modes.set_mode(0, RESIZE).await,
+        modes.set_mode(0, LEAF).await,
         SetLauncherAuthorityModeResult::Unavailable
     );
-    assert_eq!(current(&modes).await, (LEAF, 0));
+    assert_eq!(current(&modes).await, (RESIZE, 0));
 }
 
 /// An absent authority row is not a default mode.
@@ -510,24 +544,7 @@ async fn admission_admits_exactly_the_configured_authority() {
     let db = Database::ephemeral().await.unwrap();
     let modes = LauncherAuthorityModeRepository::new(db.clone());
 
-    // Under leaf authority.
-    assert_eq!(
-        modes.admit_declared_protocol(Some("leaf-v1")).await,
-        LauncherProtocolAdmission::Admitted { mode: LEAF }
-    );
-    assert_eq!(
-        modes.admit_declared_protocol(Some("resize-v2")).await,
-        LauncherProtocolAdmission::ProtocolMismatch {
-            mode: LEAF,
-            declared: RESIZE,
-        }
-    );
-
-    // Under resize authority, after a real fenced flip.
-    assert!(matches!(
-        modes.set_mode(0, RESIZE).await,
-        SetLauncherAuthorityModeResult::Flipped { .. }
-    ));
+    // Under the shipped resize authority.
     assert_eq!(
         modes.admit_declared_protocol(Some("resize-v2")).await,
         LauncherProtocolAdmission::Admitted { mode: RESIZE }
@@ -537,6 +554,23 @@ async fn admission_admits_exactly_the_configured_authority() {
         LauncherProtocolAdmission::ProtocolMismatch {
             mode: RESIZE,
             declared: LEAF,
+        }
+    );
+
+    // Under rollback leaf authority, after a real fenced flip.
+    assert!(matches!(
+        modes.set_mode(0, LEAF).await,
+        SetLauncherAuthorityModeResult::Flipped { .. }
+    ));
+    assert_eq!(
+        modes.admit_declared_protocol(Some("leaf-v1")).await,
+        LauncherProtocolAdmission::Admitted { mode: LEAF }
+    );
+    assert_eq!(
+        modes.admit_declared_protocol(Some("resize-v2")).await,
+        LauncherProtocolAdmission::ProtocolMismatch {
+            mode: LEAF,
+            declared: RESIZE,
         }
     );
 

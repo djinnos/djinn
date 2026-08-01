@@ -130,27 +130,47 @@ with_baseline() {
 }
 
 # ---------------------------------------------------------------------------
-# 1. The stock chart, and an armed chart, under the mode each actually runs.
+# 1. The stock chart, and the explicit rollback profile, under their modes.
 # ---------------------------------------------------------------------------
-# The chart ships `cgroupLauncher.mode: disabled`, which is the leaf-v1 status
-# quo: no sidecar, no broker, nothing to bound.
-expect_classes 'stock chart defaults are a clean leaf-v1 deployment' \
+# HMI6 ships the coherent resize-v2 profile: required launcher, writable
+# RuntimeClass assignment, and an explicit resize-v2 protocol declaration.
+DJINN_CUTOVER_AUTHORITY_MODE=resize-v2 \
+  expect_classes 'stock chart defaults are a clean resize-v2 deployment' \
   "$BASELINE_STATUS" "$(with_baseline '')" "$CHART_DIR"
 
 ARMED_ARGS=(--set cgroupLauncher.mode=required --set cgroupWritable.taskRuns.enabled=true
   --set cgroupWritable.runtimeClass.enabled=true)
+ROLLBACK_ARGS=(--set cgroupLauncher.mode=disabled --set cgroupWritable.taskRuns.enabled=false
+  --set cgroupWritable.runtimeClass.enabled=false
+  --set imagePipeline.controller.launcherAuthorityProtocol=leaf-v1)
 
-expect_classes 'an armed chart is a clean leaf-v1 deployment' \
-  "$BASELINE_STATUS" "$(with_baseline '')" "$CHART_DIR" "${ARMED_ARGS[@]}"
+expect_classes 'the explicit rollback profile is a clean leaf-v1 deployment' \
+  "$BASELINE_STATUS" "$(with_baseline '')" "$CHART_DIR" "${ROLLBACK_ARGS[@]}"
 
 DJINN_CUTOVER_AUTHORITY_MODE=resize-v2 \
   expect_classes 'an armed chart is ready for the resize-v2 cutover' \
   "$BASELINE_STATUS" "$(with_baseline '')" "$CHART_DIR" "${ARMED_ARGS[@]}"
 
-# The defect an operator would actually hit first: flipping the authority mode
-# while the launcher is still disabled. There is no sidecar for pod resize to
-# move, so every brokered build would be bounded only by the node.
+# The chart itself rejects resize-v2 plus a disabled launcher, so exercise the
+# preflight independently with a one-line mutation of the live stock render.
+# This proves the deploy-time gate still catches drift that bypasses Helm.
+helm template djinn-cutover-preflight "$CHART_DIR" --is-upgrade >"$WORK/stock.yaml"
+python3 - "$WORK/stock.yaml" "$WORK/launcher-disabled.yaml" <<'PY'
+import sys
+from pathlib import Path
+
+source, destination = map(Path, sys.argv[1:3])
+lines = source.read_text(encoding='utf-8').splitlines(keepends=True)
+anchors = [i for i, line in enumerate(lines) if line.strip() == '- name: DJINN_K8S_CGROUP_LAUNCHER_MODE']
+assert len(anchors) == 1, f'expected one launcher-mode env, found {len(anchors)}'
+index = anchors[0] + 1
+assert lines[index].strip() == 'value: "required"', lines[index]
+indent = lines[index][:len(lines[index]) - len(lines[index].lstrip())]
+lines[index] = f'{indent}value: "disabled"\n'
+destination.write_text(''.join(lines), encoding='utf-8')
+PY
 DJINN_CUTOVER_AUTHORITY_MODE=resize-v2 \
+  CUTOVER_PREFLIGHT_RENDER="$WORK/launcher-disabled.yaml" \
   expect_classes 'resize-v2 with the launcher disabled is refused' \
   1 "$(with_baseline 'launcher-cpu-ceiling')" "$CHART_DIR"
 

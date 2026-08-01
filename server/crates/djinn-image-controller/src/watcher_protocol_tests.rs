@@ -197,7 +197,7 @@ async fn a_declaring_build_with_a_digest_goes_ready_and_dispatches_pinned() {
 
     let metadata = parse_build_metadata(&build_logs(
         Some("sha256:abc123"),
-        Some(LauncherAuthorityProtocol::LeafV1.as_wire()),
+        Some(LauncherAuthorityProtocol::ResizeV2.as_wire()),
     ));
     let ReadyOutcome::Ready { digest, protocol } = classify_ready("i1", "job", &metadata) else {
         panic!("a declaring build with a digest must be marked ready");

@@ -97,7 +97,7 @@ expect_gate() {
 # 1. The launcher pairing, through the real chart.
 # ---------------------------------------------------------------------------
 expect_gate 'armed launcher without the task-run RuntimeClass is refused' \
-  fail 'MissingDelegatedRuntimeClass' \
+  fail 'cgroupLauncher.mode=required requires cgroupWritable.taskRuns.enabled=true' \
   "$CHART_DIR" --set cgroupLauncher.mode=required --set cgroupWritable.taskRuns.enabled=false
 
 expect_gate 'armed launcher with the task-run RuntimeClass dispatches' \
@@ -107,15 +107,15 @@ expect_gate 'armed launcher with the task-run RuntimeClass dispatches' \
 
 expect_gate 'disarmed launcher dispatches without the RuntimeClass' \
   pass 'DISPATCHABLE' \
-  "$CHART_DIR" --set cgroupLauncher.mode=disabled --set cgroupWritable.taskRuns.enabled=false
+  "$CHART_DIR" --set cgroupLauncher.mode=disabled --set cgroupWritable.taskRuns.enabled=false \
+  --set imagePipeline.controller.launcherAuthorityProtocol=leaf-v1
 
 # The regression that took production down: a stock `helm install` of the chart
 # has to be able to dispatch, with no operator overrides at all.
 expect_gate 'stock chart defaults dispatch' pass 'DISPATCHABLE' "$CHART_DIR"
 
 # ---------------------------------------------------------------------------
-# 2. A chart whose values.yaml restores the fatal default must be rejected by
-#    BOTH the gate and the hermetic chart contract.
+# 2. The explicit local/development profile may disable the complete stack.
 # ---------------------------------------------------------------------------
 ARMED_CHART="$WORK/chart-armed-default"
 cp -R "$CHART_DIR" "$ARMED_CHART"
@@ -131,37 +131,24 @@ for index, line in enumerate(lines):
         for offset in range(index + 1, len(lines)):
             stripped = lines[offset].strip()
             if stripped.startswith('mode:'):
-                assert stripped == 'mode: disabled', f'unexpected default launcher mode: {stripped}'
-                lines[offset] = lines[offset].replace('mode: disabled', 'mode: required')
+                assert stripped == 'mode: required', f'unexpected default launcher mode: {stripped}'
+                lines[offset] = lines[offset].replace('mode: required', 'mode: disabled')
                 patched += 1
                 break
         break
-assert patched == 1, 'cgroupLauncher.mode was not found in values.yaml'
+for index, line in enumerate(lines):
+    if line.strip() == 'launcherAuthorityProtocol: "resize-v2"':
+        lines[index] = line.replace('"resize-v2"', '"leaf-v1"')
+        patched += 1
+        break
+assert patched == 2, 'coherent launcher mode/protocol defaults were not found in values.yaml'
 path.write_text(''.join(lines), encoding='utf-8')
 PY
 
-expect_gate 'values.yaml restoring cgroupLauncher.mode=required is refused' \
-  fail 'MissingDelegatedRuntimeClass' "$ARMED_CHART"
+expect_gate 'values.yaml explicitly disabling the launcher remains renderable' \
+  pass 'DISPATCHABLE' "$ARMED_CHART"
 
-case_index=$((case_index + 1))
-set +e
-contract_out=$(DJINN_CHART_DIR="$ARMED_CHART" bash "$CHART_CONTRACT" 2>&1)
-contract_status=$?
-set -e
-if [ "$contract_status" -eq 0 ]; then
-  printf 'FAIL [chart contract rejects the restored fatal default]: expected non-zero, got 0\n%s\n' \
-    "$contract_out" >&2
-  failures=$((failures + 1))
-elif ! printf '%s' "$contract_out" | grep -qF 'undispatchable render'; then
-  printf 'FAIL [chart contract rejects the restored fatal default]: rejected for the wrong reason\n%s\n' \
-    "$contract_out" >&2
-  failures=$((failures + 1))
-else
-  printf 'ok [chart contract rejects the restored fatal default]\n'
-fi
-
-# The same contract must still pass against the unmodified chart, or the check
-# above proves only that something, somewhere, is broken.
+# The chart contract must pass against the unmodified armed defaults.
 case_index=$((case_index + 1))
 if DJINN_CHART_DIR="$CHART_DIR" bash "$CHART_CONTRACT" >"$WORK/contract-clean.log" 2>&1; then
   printf 'ok [chart contract passes against the shipped chart]\n'
@@ -248,24 +235,111 @@ HELM="$(stub_helm "$WORK/bad.yaml" bad)" \
   --set cgroupWritable.taskRuns.enabled=true --set cgroupWritable.runtimeClass.enabled=true
 
 # ---------------------------------------------------------------------------
-# 4. Env extraction: duplicates resolve the way the kubelet resolves them, and
-#    a name the render never sets is an error rather than a code default.
+# 4. Explicit env arrays are strategic-merge keys. Duplicate names must be
+#    rejected before extraction; a missing required name remains an error.
 # ---------------------------------------------------------------------------
 mutate "$WORK/good.yaml" "$WORK/dup-last-false.yaml" duplicate "$ACTIVATION_ENV" false
 mutate "$WORK/bad.yaml" "$WORK/dup-last-true.yaml" duplicate "$ACTIVATION_ENV" true
 mutate "$WORK/good.yaml" "$WORK/no-mode.yaml" delete DJINN_K8S_CGROUP_LAUNCHER_MODE
 
 HELM="$(stub_helm "$WORK/dup-last-false.yaml" duplast-false)" \
-  expect_gate 'a duplicated env name resolves to the LAST entry (true then false)' \
-  fail 'MissingDelegatedRuntimeClass' "$CHART_DIR"
+  expect_gate 'the real djinn-server collision is rejected before deploy' \
+  fail 'Deployment/render-gate-fixture-djinn-server containers/djinn-server' "$CHART_DIR"
 
 HELM="$(stub_helm "$WORK/dup-last-true.yaml" duplast-true)" \
-  expect_gate 'a duplicated env name resolves to the LAST entry (false then true)' \
-  pass 'DISPATCHABLE' "$CHART_DIR"
+  expect_gate 'duplicate diagnostics name every repeated variable' \
+  fail "$ACTIVATION_ENV" "$CHART_DIR"
 
 HELM="$(stub_helm "$WORK/no-mode.yaml" no-mode)" \
   expect_gate 'a render that omits the launcher mode is an error, not a default' \
   fail 'does not set DJINN_K8S_CGROUP_LAUNCHER_MODE' "$CHART_DIR"
+
+python3 - "$WORK/good.yaml" "$WORK/breadth-base.yaml" <<'PY'
+import sys
+from pathlib import Path
+
+source, destination = map(Path, sys.argv[1:3])
+extra = '''
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: direct-pod}
+spec:
+  containers:
+    - name: worker
+      image: example.invalid/test
+      env: [{name: SHARED_OK, value: a}]
+  initContainers:
+    - name: setup
+      image: example.invalid/test
+      env: [{name: INIT_OK, value: a}]
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata: {name: scheduled}
+spec:
+  schedule: '* * * * *'
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: cron-worker
+              image: example.invalid/test
+              env: [{name: CRON_OK, value: a}]
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata: {name: agents}
+spec:
+  selector: {matchLabels: {app: agent}}
+  template:
+    metadata: {labels: {app: agent}}
+    spec:
+      containers:
+        - name: agent
+          image: example.invalid/test
+          env: [{name: CROSS_CONTAINER, value: a}]
+        - name: helper
+          image: example.invalid/test
+          env: [{name: CROSS_CONTAINER, value: b}]
+'''
+destination.write_text(source.read_text(encoding='utf-8') + extra, encoding='utf-8')
+PY
+
+HELM="$(stub_helm "$WORK/breadth-base.yaml" breadth-base)" \
+  expect_gate 'same name in different containers remains valid' pass 'DISPATCHABLE' "$CHART_DIR"
+
+python3 - "$WORK/breadth-base.yaml" "$WORK/dup-pod.yaml" "$WORK/dup-init.yaml" "$WORK/dup-cron.yaml" "$WORK/dup-controller.yaml" <<'PY'
+import sys
+from pathlib import Path
+
+base = Path(sys.argv[1]).read_text(encoding='utf-8')
+mutations = [
+    ('SHARED_OK, value: a}', 'SHARED_OK, value: a}, {name: SHARED_OK, value: b}'),
+    ('INIT_OK, value: a}', 'INIT_OK, value: a}, {name: INIT_OK, value: b}'),
+    ('CRON_OK, value: a}', 'CRON_OK, value: a}, {name: CRON_OK, value: b}'),
+    ('CROSS_CONTAINER, value: a}',
+     'CROSS_CONTAINER, value: a}, {name: CROSS_CONTAINER, value: duplicate}'),
+]
+for destination, (before, after) in zip(sys.argv[2:], mutations):
+    assert base.count(before) == 1
+    Path(destination).write_text(base.replace(before, after), encoding='utf-8')
+PY
+
+HELM="$(stub_helm "$WORK/dup-pod.yaml" dup-pod)" \
+  expect_gate 'direct Pod regular-container duplicates are rejected' \
+  fail 'Pod/direct-pod containers/worker: SHARED_OK' "$CHART_DIR"
+HELM="$(stub_helm "$WORK/dup-init.yaml" dup-init)" \
+  expect_gate 'direct Pod init-container duplicates are rejected' \
+  fail 'Pod/direct-pod initContainers/setup: INIT_OK' "$CHART_DIR"
+HELM="$(stub_helm "$WORK/dup-cron.yaml" dup-cron)" \
+  expect_gate 'CronJob nested Pod-template duplicates are rejected' \
+  fail 'CronJob/scheduled containers/cron-worker: CRON_OK' "$CHART_DIR"
+HELM="$(stub_helm "$WORK/dup-controller.yaml" dup-controller)" \
+  expect_gate 'controller Pod-template duplicates are rejected' \
+  fail 'DaemonSet/agents containers/agent: CROSS_CONTAINER' "$CHART_DIR"
 
 # ---------------------------------------------------------------------------
 if [ "$failures" -ne 0 ]; then

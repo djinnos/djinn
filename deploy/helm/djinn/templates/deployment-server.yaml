@@ -23,6 +23,15 @@ always renders, so both checks fire regardless of `--show-only`.
     {{- fail "kueue.armed=true with cgroupLauncher.mode=required requires cgroupWritable.taskRuns.enabled=true (required cgroup launcher requires runtimeClassName: djinn-cgroup-writable). The task-run renderer asserts this at djinn-k8s/src/job.rs:242 and panics the coordinator otherwise; arming Kueue on top of it wedges all dispatch. Enable cgroupWritable.taskRuns (and cgroupWritable.runtimeClass), or set cgroupLauncher.mode=disabled." -}}
   {{- end -}}
 {{- end -}}
+{{- if and (eq .Values.imagePipeline.controller.launcherAuthorityProtocol "resize-v2") (ne .Values.cgroupLauncher.mode "required") -}}
+  {{- fail (printf "launcherAuthorityProtocol=%s with cgroupLauncher.mode=%s renders no cgroup-launcher sidecar and therefore no quota mechanism; resize-v2 requires cgroupLauncher.mode=required" .Values.imagePipeline.controller.launcherAuthorityProtocol .Values.cgroupLauncher.mode) -}}
+{{- end -}}
+{{- if and (eq .Values.cgroupLauncher.mode "required") (not .Values.cgroupWritable.taskRuns.enabled) -}}
+  {{- fail "cgroupLauncher.mode=required requires cgroupWritable.taskRuns.enabled=true: the armed launcher needs the writable task-run RuntimeClass" -}}
+{{- end -}}
+{{- if and .Values.cgroupWritable.taskRuns.enabled (not .Values.cgroupWritable.runtimeClass.enabled) -}}
+  {{- fail "cgroupWritable.taskRuns.enabled=true requires cgroupWritable.runtimeClass.enabled=true" -}}
+{{- end -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:

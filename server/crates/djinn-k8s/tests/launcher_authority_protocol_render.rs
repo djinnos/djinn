@@ -232,7 +232,12 @@ async fn a_protocol_less_undigested_image_creates_zero_kubernetes_objects() {
     // The digest is canonical (`sha256:` + 64 lowercase hex): task vf7a's
     // admission compatibility fence compares digests exactly, so a placeholder
     // like `sha256:abc` is refused as a non-digest before the render is reached.
-    let (created, digest_pinned) = prepare_with_image(Some(CANONICAL_DIGEST), None).await;
+    let (created, digest_pinned) = prepare_with_image(
+        Some(CANONICAL_DIGEST),
+        None,
+        LauncherAuthorityProtocol::LeafV1,
+    )
+    .await;
     assert!(
         digest_pinned.is_ok(),
         "a digest-pinned image must still dispatch: {digest_pinned:?}"
@@ -242,7 +247,8 @@ async fn a_protocol_less_undigested_image_creates_zero_kubernetes_objects() {
         "the harness must be able to reach the Job POST, got {created:?}"
     );
 
-    let (created, refused) = prepare_with_image(None, None).await;
+    let (created, refused) =
+        prepare_with_image(None, None, LauncherAuthorityProtocol::LeafV1).await;
     // The count first: this is the claim. A render that falls through to a
     // default is caught HERE, naming the objects it created.
     assert!(
@@ -260,6 +266,7 @@ async fn a_protocol_less_undigested_image_creates_zero_kubernetes_objects() {
     let (created, declared) = prepare_with_image(
         Some(CANONICAL_DIGEST),
         Some(LauncherAuthorityProtocol::ResizeV2),
+        LauncherAuthorityProtocol::ResizeV2,
     )
     .await;
     assert!(
@@ -274,6 +281,7 @@ async fn a_protocol_less_undigested_image_creates_zero_kubernetes_objects() {
 async fn prepare_with_image(
     digest: Option<&str>,
     protocol: Option<LauncherAuthorityProtocol>,
+    authority: LauncherAuthorityProtocol,
 ) -> (Vec<String>, Result<(), String>) {
     use http::Response;
     use kube::client::Body;
@@ -320,6 +328,9 @@ async fn prepare_with_image(
 
     let db = Database::open_in_memory().expect("in-memory database");
     db.ensure_initialized().await.expect("migrations");
+    if authority == LauncherAuthorityProtocol::LeafV1 {
+        djinn_db::test_support::seed_legacy_launcher_authority_for_test(&db).await;
+    }
     // Bounded to `projects.id`'s varchar(36); the digest is only summarized.
     let project_id = format!(
         "proj-{}-{}",
