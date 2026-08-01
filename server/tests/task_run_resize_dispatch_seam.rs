@@ -891,7 +891,7 @@ async fn a_resize_v2_render_still_refuses_when_no_permit_can_be_obtained() {
         .expect_err("a resize-v2 render with no permit must not dispatch");
     let rendered = format!("{error:#}");
     assert!(
-        rendered.contains("holds no durable build-pod permit"),
+        rendered.contains("build-pod permit acquisition failed"),
         "the refusal must name the missing permit, not some downstream symptom: {rendered}"
     );
 
