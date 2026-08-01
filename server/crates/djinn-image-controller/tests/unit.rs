@@ -476,6 +476,42 @@ mod watcher_transitions {
     }
 
     #[tokio::test]
+    async fn annotationless_same_prefix_terminal_jobs_cannot_impersonate_current_build() {
+        let cfg = ImageControllerConfig::for_testing();
+        let db = Database::open_in_memory().unwrap();
+        let images = ImageRepository::new(db.clone());
+        images
+            .create("collision", "Collision", None, "{}")
+            .await
+            .unwrap();
+        let current_hash = "sameprefix12-current-b";
+        images
+            .mark_building("collision", current_hash)
+            .await
+            .unwrap();
+        let before = images.get("collision").await.unwrap().unwrap();
+        let (bus, captured) = capturing_bus();
+
+        for (succeeded, failed) in [(Some(1), None), (None, Some(1))] {
+            let mut old = fake_catalog_job("collision", "sameprefix12-older-a", succeeded, failed);
+            old.metadata.annotations = None;
+            let mut fresh_seen = HashSet::new();
+            __test_handle_event(
+                &cfg,
+                &db,
+                &bus,
+                &mut fresh_seen,
+                watcher::Event::InitApply(old),
+            )
+            .await;
+        }
+        let after = images.get("collision").await.unwrap().unwrap();
+        assert_eq!(after.status, before.status);
+        assert_eq!(after.config_hash, before.config_hash);
+        assert!(captured.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn current_catalog_terminal_jobs_apply_and_emit_exactly_one_matching_event() {
         for (succeeded, failed, expected_status, expected_action) in [
             (Some(1), None, "ready", "ready"),

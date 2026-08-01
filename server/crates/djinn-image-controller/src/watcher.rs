@@ -387,32 +387,19 @@ async fn handle_image_event(
         );
         return;
     };
-    let expected_hash = if let Some(hash) = job
+    let Some(expected_hash) = job
         .metadata
         .annotations
         .as_ref()
         .and_then(|annotations| annotations.get(ANNOTATION_IMAGE_CONFIG_HASH))
-    {
-        hash.clone()
-    } else {
-        // Compatibility for Jobs created immediately before the annotation
-        // shipped. The subsequent SQL CAS still matches the full hash exactly;
-        // this read is never the authority decision.
-        match image_repo.get(image_id).await {
-            Ok(Some(image))
-                if image
-                    .config_hash
-                    .as_deref()
-                    .is_some_and(|hash| hash.starts_with(&hash_prefix)) =>
-            {
-                image.config_hash.expect("guarded Some")
-            }
-            _ => {
-                debug!(image_id, hash = %hash_prefix,
-                    "image_build_watcher: terminal Job has no full current build identity; ignoring");
-                return;
-            }
-        }
+        .cloned()
+    else {
+        // A short label cannot prove exact identity. Inferring the suffix from
+        // the current row would let an older Job sharing the prefix impersonate
+        // the current build, so pre-annotation terminal Jobs fail closed.
+        debug!(image_id, hash = %hash_prefix,
+            "image_build_watcher: terminal Job has no full build identity annotation; ignoring");
+        return;
     };
     let job_name = job
         .metadata
