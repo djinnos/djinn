@@ -151,6 +151,12 @@ CONTAINERD_VERSION_LIB="$REPO_ROOT/deploy/node/k3s/containerd-config-version.sh"
 PREREQS_CHART="$REPO_ROOT/deploy/helm/djinn-prereqs"
 PREREQS_RELEASE="djinn-prereqs"
 PREREQS_NAMESPACE="kueue-system"
+# The throwaway object step 4a admits to prove the Kueue webhook is serving. Its
+# own name: it is created and deleted seconds apart, and must never be mistaken
+# for the chart's `djinn-kueue` ResourceFlavor.
+WEBHOOK_PROBE_FLAVOR="djinn-resize-harness-webhook-probe"
+WEBHOOK_PROBE_ATTEMPTS="${DJINN_RESIZE_HARNESS_WEBHOOK_ATTEMPTS:-90}"
+WEBHOOK_PROBE_INTERVAL_SECONDS=2
 CHART="$REPO_ROOT/deploy/helm/djinn"
 RELEASE="djinn"
 NAMESPACE="djinn"
@@ -651,7 +657,129 @@ info "installing pinned Kueue prerequisite ${PREREQS_RELEASE} (Kueue 0.19.0, DRA
     --namespace "$PREREQS_NAMESPACE" --create-namespace \
     --wait --timeout "${INSTALL_TIMEOUT_SECONDS}s"
 
-# 5. The djinn chart, ARMED.
+# 4a. `--wait` is necessary and NOT sufficient. It returns when the controller's
+# Pod reports Ready, and "Ready" is a strictly weaker fact than "the webhook is
+# serving": kueue answers its readiness probe on the health port before the
+# webhook server has bound :9443. Installing the djinn chart inside that window
+# fails on whichever webhook the API server reaches first — observed twice while
+# verifying this script, roughly one bring-up in two:
+#
+#   Error: failed to create resource: Internal error occurred: conversion webhook
+#   for kueue.x-k8s.io/v1beta1, Kind=ClusterQueue failed: Post
+#   "https://djinn-prereqs-kueue-webhook-service.kueue-system.svc:443/convert?
+#   timeout=30s": dial tcp 10.96.219.155:443: connect: connection refused
+#
+#   Error: ... failed calling webhook "mresourceflavor.kb.io" ... connection refused
+#
+# Both are the same fact and both land in the same place the namespace collision
+# did: the bring-up step, with zero test assertions executed. So this is a
+# MEASUREMENT rather than a sleep or a condition read off the Deployment. It
+# creates a throwaway `v1beta1` ResourceFlavor, which the API server can only
+# admit by calling BOTH the conversion webhook (v1beta1 is not the storage
+# version) and `mresourceflavor.kb.io`, on the same :9443 the chart's topology
+# needs. When that round trip succeeds, the webhook is serving.
+info 'waiting for the Kueue webhook to actually serve (Pod Ready is a weaker fact)'
+webhook_probe_apply() {
+    "${KUBECTL[@]}" apply -f - 2>&1 <<EOF
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: ResourceFlavor
+metadata:
+  name: ${WEBHOOK_PROBE_FLAVOR}
+EOF
+}
+webhook_serving=false
+webhook_last_output=""
+webhook_attempt=0
+while [ "$webhook_attempt" -lt "$WEBHOOK_PROBE_ATTEMPTS" ]; do
+    webhook_attempt=$((webhook_attempt + 1))
+    if webhook_last_output=$(webhook_probe_apply); then
+        webhook_serving=true
+        break
+    fi
+    sleep "$WEBHOOK_PROBE_INTERVAL_SECONDS"
+done
+"${KUBECTL[@]}" delete resourceflavor "$WEBHOOK_PROBE_FLAVOR" --ignore-not-found >/dev/null 2>&1 || true
+[ "$webhook_serving" = true ] || fail 1 \
+    "the Kueue webhook never served after ${webhook_attempt} attempts over $((WEBHOOK_PROBE_ATTEMPTS * WEBHOOK_PROBE_INTERVAL_SECONDS))s, so the djinn chart's queue topology cannot be applied. Last error:
+${webhook_last_output}"
+info "Kueue webhook is serving (admitted the probe ResourceFlavor on attempt ${webhook_attempt})"
+
+# 5. WHO OWNS THE `djinn` NAMESPACE.
+#
+# The chart does — and this block exists so that helm agrees with it. Read this
+# before touching either the `kubectl apply` or the helm flags below; the two are
+# one mechanism and changing either alone reintroduces a wedge that produces ZERO
+# test assertions.
+#
+# `$VALUES_FILE` sets `namespace.create: true` (the chart default), so
+# `deploy/helm/djinn/templates/namespace.yaml` renders a Namespace object as part
+# of the release, and it is that object that carries `djinn.io/kueue-managed`.
+# The label is not decoration: Kueue captures Jobs ONLY in a namespace carrying
+# it, and the chart refuses to arm without it. So the chart must stay the thing
+# that applies it.
+#
+# Helm 3 then boxes this in from both sides, and BOTH sides were observed:
+#
+#   * `--create-namespace` (what this script used to pass) makes helm create the
+#     namespace itself, out-of-band, with no release ownership metadata. The
+#     release's own rendered Namespace is then a second create of the same
+#     object:
+#
+#         Release "djinn" does not exist. Installing it now.
+#         Error: 1 error occurred:
+#           * namespaces "djinn" already exists
+#
+#     That is verbatim what killed the first-ever dispatch of
+#     `.github/workflows/resize-kind.yml` — both jobs, at this step, with zero
+#     test assertions executed. `--take-ownership` does NOT rescue it: it relaxes
+#     the ownership CHECK, not the create.
+#
+#   * Dropping the flag and letting the chart render the namespace unaided fails
+#     one step earlier, because helm stores the release record IN the release
+#     namespace and needs it to exist before any manifest is applied:
+#
+#         Error: create: failed to create: namespaces "djinn" not found
+#
+# The way through is helm's own documented resource-adoption contract: a
+# pre-existing object carrying the managed-by label and the two `meta.helm.sh`
+# annotations is ADOPTED into the release instead of being created. So this
+# script creates an EMPTY namespace shell stamped with exactly those three keys
+# and nothing else, and the chart's Namespace object — labels, `djinn.io/
+# kueue-managed` and all — lands on top of it as a release-owned update. Ownership
+# ends where it started: with the chart. Verified against helm 3.21.3 (what the
+# workflow's `get-helm-3` installs) and helm 4.2.1.
+#
+# Omit any of the three keys and helm 3 names the missing one:
+#
+#     Error: Unable to continue with install: Namespace "djinn" in namespace ""
+#     exists and cannot be imported into the current release: invalid ownership
+#     metadata; label validation error: missing key
+#     "app.kubernetes.io/managed-by": must be set to "Helm"; ...
+#
+# The prerequisite install above KEEPS `--create-namespace` for the mirror-image
+# reason: `djinn-prereqs` renders no Namespace object, so there helm is the only
+# candidate owner and `kueue-system` would otherwise never exist.
+#
+# The alternative — pre-creating the namespace with `--set namespace.create=false`
+# — is rejected on purpose. The chart `fail`s that render outright while armed,
+# and silencing THAT with `kueue.namespaceLabelledExternally=true` would arm this
+# cluster down a different branch than production, with `djinn.io/kueue-managed`
+# applied by this script instead of by the chart. The proof would stop exercising
+# the thing it exists to exercise.
+info "creating the ${NAMESPACE} namespace shell for helm to adopt into release ${RELEASE}"
+"${KUBECTL[@]}" apply -f - <<EOF
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ${NAMESPACE}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: ${RELEASE}
+    meta.helm.sh/release-namespace: ${NAMESPACE}
+EOF
+
+# 6. The djinn chart, ARMED.
 #
 # Deliberately NOT `--wait`. The harness proves a resize contract, not a running
 # Djinn: the server image tag in the values file resolves to nothing here and
@@ -659,11 +787,22 @@ info "installing pinned Kueue prerequisite ${PREREQS_RELEASE} (Kueue 0.19.0, DRA
 # time out on a state that is by design.
 info "installing djinn chart release ${RELEASE} (RuntimeClass + cgroup launcher armed)"
 "${HELM[@]}" upgrade --install "$RELEASE" "$CHART" \
-    --namespace "$NAMESPACE" --create-namespace \
+    --namespace "$NAMESPACE" \
     --values "$VALUES_FILE" \
     --set kueue.enabled=true --set kueue.armed=true
 
-# 6. Report what the API server actually holds. Printed, not asserted: the
+# The adoption actually happened. This is a BRING-UP precondition, not a
+# restatement of the resize contract: if the chart's Namespace object did not
+# land on the shell above, `djinn.io/kueue-managed` is absent, Kueue captures
+# nothing, every suspended Job hangs forever, and the Rust suite reports it as
+# "no Pod reached Running" — a scheduling story for a labelling fault. Fail here,
+# where the cause is still legible.
+kueue_managed=$("${KUBECTL[@]}" get namespace "$NAMESPACE" \
+    -o 'jsonpath={.metadata.labels.djinn\.io/kueue-managed}')
+[ "$kueue_managed" = true ] || fail 1 \
+    "namespace ${NAMESPACE} is not labelled djinn.io/kueue-managed=true after the armed install (read back: '${kueue_managed}'). The chart's Namespace object did not adopt the shell this script created, so nothing would ever unsuspend a captured Job."
+
+# 7. Report what the API server actually holds. Printed, not asserted: the
 # assertions live in server/tests/task_run_resize_kind.rs, and duplicating them
 # here in a weaker form would invite someone to trust the weaker copy.
 info 'cluster state:'
