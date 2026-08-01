@@ -47,6 +47,7 @@ pub(crate) mod ci;
 pub(crate) mod ci_artifact;
 mod code_intel;
 mod evidence_exec;
+mod evidence_plan;
 mod file_mode;
 pub(crate) mod gate_guard;
 mod jit_pitfalls;
@@ -229,6 +230,17 @@ pub(super) async fn dispatch_tool_call(
         "evidence_exec" => {
             let root = state.working_root_for(worktree_path);
             evidence_exec::call_evidence_exec(
+                state,
+                &call.arguments,
+                &root,
+                session_task_id,
+                cancel.authenticated_session_id.as_deref(),
+            )
+            .await
+        }
+        "evidence_plan" => {
+            let root = state.working_root_for(worktree_path);
+            evidence_plan::call_evidence_plan(
                 state,
                 &call.arguments,
                 &root,

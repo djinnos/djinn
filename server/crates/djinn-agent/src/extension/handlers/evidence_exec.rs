@@ -156,7 +156,7 @@ fn canonical_cwd(clone_root: &Path, requested: Option<&str>) -> Result<PathBuf, 
     Ok(canonical)
 }
 
-async fn evidence_identity(
+pub(super) async fn evidence_identity(
     task_id: &str,
     session_id: &str,
     clone_root: &Path,
