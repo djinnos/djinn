@@ -939,14 +939,18 @@ if render_capture "$WORK/armed-runtimeclass.out" "${RUNTIME_CLASS_VALUES[@]}" --
     echo "FAIL: arming Kueue over an unsatisfiable cgroup launcher rendered successfully" >&2
     exit 1
 fi
-grep -q 'required cgroup launcher requires runtimeClassName: djinn-cgroup-writable' "$WORK/armed-runtimeclass.out" || {
+grep -q 'cgroupLauncher.mode=required requires cgroupWritable.taskRuns.enabled=true' "$WORK/armed-runtimeclass.out" || {
     echo "FAIL: the RuntimeClass rejection did not mirror the job.rs:242 assertion:" >&2
     cat "$WORK/armed-runtimeclass.out" >&2
     exit 1
 }
-# Non-vacuity: the SAME values with armed=false must render, so the failure above
-# cannot be an unrelated chart error that would reject either way.
-render "$WORK/disarmed-runtimeclass.yaml" "${RUNTIME_CLASS_VALUES[@]}" --set kueue.armed=false
+# Non-vacuity: the coherent explicitly-disabled launcher profile still renders.
+# HMI6 makes required+no-RuntimeClass globally invalid, independent of Kueue.
+render "$WORK/disarmed-runtimeclass.yaml" \
+    --set kueue.enabled=true \
+    --set-string cgroupLauncher.mode=disabled \
+    --set cgroupWritable.taskRuns.enabled=false \
+    --set kueue.armed=false
 assert_topology "$WORK/disarmed-runtimeclass.yaml" 3 no
 
 # ---------------------------------------------------------------------------
