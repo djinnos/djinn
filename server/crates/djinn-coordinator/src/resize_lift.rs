@@ -59,6 +59,42 @@
 //! list, so this module cannot invent one. A lift that could not be confirmed
 //! must never leave a row claiming `lifted` — the drop reconciler (`0ppk-3`) is
 //! what returns the Pod to its birth limit, and it reads `drop_required`.
+//!
+//! # …and when even THAT write is refused, the lift is undone on the wire
+//!
+//! `→ drop_required` is itself a compare-and-swap, and it can lose. Measured in
+//! production on 2026-08-01, 2m42s after a lift failure at 19:18:13.470Z:
+//!
+//! ```text
+//! permit row : state=birth_confirmed  resize_invocation_id=019fbec3-2047-…  admitted=4000
+//! live Pod   : SPEC   init cgroup-launcher limits.cpu = "4"
+//!              STATUS init cgroup-launcher limits.cpu = "4"
+//! ```
+//!
+//! The 4000m PATCH had already landed AND been status-confirmed; the closing
+//! `lift_applying → lifted` CAS was refused because the in-process 30s drop
+//! reconciler had walked the same row `lift_applying → drop_required →
+//! drop_applying → birth_confirmed` underneath it; and the fallback
+//! `lift_applying → drop_required` was refused for the same reason and then
+//! **only logged**. The ledger said birth-clamped, the kubelet said 4 cores, and
+//! nothing reconciled it: `strandedness()` classifies `birth_confirmed` with a
+//! live owner as `Live` and deliberately will not touch it. Eleven lift failures
+//! in one session — roughly 26% of lifts — all of this shape.
+//!
+//! So a refused closing transition **actuates**. [`ResizeLift::require_drop`]
+//! re-reads the durable row, and when the ledger is not claiming a lift for this
+//! Pod it returns the launcher to [`BIRTH_CPU_MILLICORES`] with a real,
+//! status-confirmed PATCH. The invariant that restores is the one the log line
+//! `resize lift did not take; degrading unleased` has always implied and never
+//! enforced: **the launcher's actual limit may not exceed what the ledger says
+//! was admitted for it.**
+//!
+//! It has to be safe under the very race that produced the defect, because the
+//! competing actor is a reconciler ticking every 30 seconds against the same
+//! row. So the fallback re-reads before acting, refuses to touch a row another
+//! driver owns or one that durably records a lift, treats "already back at
+//! birth" as success with **zero** PATCHes, and fences the Pod UID on every
+//! observation.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -86,6 +122,18 @@ pub const LIFT_CONFIRMATION_BUDGET: Duration = Duration::from_secs(30);
 
 /// Interval between confirmation observations.
 pub const LIFT_CONFIRMATION_POLL_INTERVAL: Duration = Duration::from_millis(500);
+
+/// The CPU limit every `resize-v2` launcher sidecar is downsized to before its
+/// worker session may dispatch — and therefore the limit a lift that could not
+/// be recorded has to put back.
+///
+/// Restated from `djinn_server::task_run_resize_bootstrap::BIRTH_CPU_MILLICORES`
+/// rather than imported, because `djinn-server` depends on this crate and not
+/// the other way round. It is NOT a second source of truth: that module carries
+/// a `const _: () = assert!(…)` against this constant, so the two numbers
+/// drifting apart is a build failure rather than a Pod left holding CPU its
+/// ledger does not admit.
+pub const BIRTH_CPU_MILLICORES: u64 = 250;
 
 /// The two apiserver operations a lift performs.
 ///
@@ -155,6 +203,29 @@ enum SurfaceSource {
     Ambient(tokio::sync::OnceCell<Arc<dyn LauncherResizeSurface>>),
     /// Supplied by the caller. Fixtures use this.
     Fixed(Arc<dyn LauncherResizeSurface>),
+}
+
+/// What the durable permit row claims about a launcher's CPU limit, re-read at
+/// the moment a losing lift has to decide whether to undo itself.
+///
+/// The whole point of this type is that the answer is NOT "what state did this
+/// invocation leave the row in" — by the time it is consulted, the row has
+/// demonstrably moved under us.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LedgerClaim {
+    /// The row durably records a lift for this Pod. The launcher holding the
+    /// admitted ceiling is exactly what the ledger says, so nothing is owed.
+    Lifted,
+    /// Another invocation, or another Pod's permit, owns this lifecycle. It
+    /// settles its own row; a PATCH from here would clamp somebody else's lift.
+    OwnedByAnotherDriver,
+    /// The ledger claims the birth clamp. A launcher above it is a strand.
+    ///
+    /// `state` is the row's state as re-read, carried so a failed actuation can
+    /// still attempt the durable hand-off to the drop reconciler from the state
+    /// the row is *actually* in. `None` means no row was readable at all, and
+    /// therefore no hand-off is possible.
+    BirthClamped { state: Option<BuildPodPermitState> },
 }
 
 /// The status-confirmed, UID/restart/protocol-fenced lift.
@@ -296,24 +367,301 @@ impl ResizeLift {
         }
     }
 
-    /// Best-effort `→ drop_required`.
+    /// `→ drop_required`, and — when that write is refused — the PATCH that
+    /// makes the refusal true anyway.
     ///
-    /// The lift has already failed by the time this runs, so its own failure
-    /// cannot change the reason the caller sees — the Pod is left holding a
-    /// limit nobody granted a lease for either way, and a reconciler that finds
-    /// a stranded `lift_applying` row treats it the same as `drop_required`.
-    /// What must not happen is the failure being swallowed silently, so it is
-    /// logged at `error`.
-    async fn require_drop(&self, intent: &PodResizeIntent, from: BuildPodPermitState) {
-        if let Err(failure) = self
+    /// The lift has already failed by the time this runs, so nothing here can
+    /// change the reason the caller sees. What it *does* change is whether the
+    /// Pod agrees with the ledger.
+    ///
+    /// When the compare-and-swap lands, the row durably owes a drop and the
+    /// external drop reconciler owns it from there — `drop_required` is
+    /// classified `DropOwed`, which is a state it acts on unconditionally. That
+    /// path is unchanged.
+    ///
+    /// When the compare-and-swap is **refused**, this invocation has lost the
+    /// row to another actor and has no ledger edge left to write. Before this
+    /// slice that was the end of it: an `error!` line and a Pod still holding
+    /// the full lifted limit, with the row back at `birth_confirmed` where
+    /// `strandedness()` classifies a live owner as `Live` and skips it forever.
+    /// See this module's header for the production measurement. So the refusal
+    /// is now actuated instead of narrated.
+    ///
+    /// `surface` is `None` only on the one path that failed *because* no
+    /// apiserver surface could be resolved — there is nothing to PATCH through
+    /// and, having never reached the wire, nothing to undo.
+    async fn require_drop(
+        &self,
+        surface: Option<&Arc<dyn LauncherResizeSurface>>,
+        intent: &PodResizeIntent,
+        from: BuildPodPermitState,
+    ) {
+        let Err(failure) = self
             .transition(intent, from, BuildPodPermitState::DropRequired)
             .await
-        {
+        else {
+            return;
+        };
+        tracing::error!(
+            task_run_id = %intent.task_run_id,
+            permit_id = %intent.permit_id,
+            detail = %failure.detail,
+            "resize lift: could not mark the permit drop-required after a failed lift; \
+             returning the launcher to its birth limit directly"
+        );
+        let Some(surface) = surface else {
             tracing::error!(
                 task_run_id = %intent.task_run_id,
                 permit_id = %intent.permit_id,
-                detail = %failure.detail,
-                "resize lift: could not mark the permit drop-required after a failed lift"
+                "resize lift: no apiserver surface to return the launcher through; the \
+                 lift never reached the wire, so there is nothing to undo"
+            );
+            return;
+        };
+        self.return_to_birth_limit(surface, intent).await;
+    }
+
+    /// What the durable row currently claims about this Pod's launcher limit.
+    ///
+    /// Re-read, never inferred from the state this invocation last saw: by the
+    /// time this runs the row has demonstrably moved under us at least once.
+    async fn ledger_claim(&self, intent: &PodResizeIntent) -> LedgerClaim {
+        let row = match self.permits.active(&intent.task_run_id).await {
+            Ok(Some(row)) => row,
+            // No capacity-active permit at all. Nothing durable governs this
+            // Pod any more, so no row is claiming the ceiling and nothing will
+            // ever reconcile a limit left on it. The birth clamp is the honest
+            // reading — and the UID fence at the observation is what keeps that
+            // from becoming a PATCH addressed to somebody else's Pod.
+            Ok(None) => return LedgerClaim::BirthClamped { state: None },
+            Err(error) => {
+                tracing::warn!(
+                    task_run_id = %intent.task_run_id,
+                    %error,
+                    "resize lift: durable permit unreadable while undoing a lift; the lift \
+                     is unrecorded either way, so the launcher is returned to birth"
+                );
+                return LedgerClaim::BirthClamped { state: None };
+            }
+        };
+        // The row must still govern the object this intent was captured
+        // against. A permit whose identity names another Pod UID is not a
+        // ledger entry about our launcher at all.
+        if row.resize_identity.as_ref().map(|id| id.pod_uid.as_str())
+            != Some(intent.pod_uid.as_str())
+        {
+            return LedgerClaim::OwnedByAnotherDriver;
+        }
+        match row.state {
+            // The ledger records a lift. The Pod holding the ceiling is exactly
+            // what the row admits, so the invariant already holds and taking it
+            // away would strand whoever earned it.
+            BuildPodPermitState::Lifted => LedgerClaim::Lifted,
+            // Another invocation is mid-lift on this row. It owns the outcome,
+            // it will settle its own row, and a PATCH from here would clamp a
+            // lift that is still being driven.
+            BuildPodPermitState::LiftApplying
+                if row.resize_invocation_id.as_deref() != Some(intent.invocation_id.as_str()) =>
+            {
+                LedgerClaim::OwnedByAnotherDriver
+            }
+            state => LedgerClaim::BirthClamped { state: Some(state) },
+        }
+    }
+
+    /// Undo a lift the ledger refused to record: PATCH the launcher back to
+    /// [`BIRTH_CPU_MILLICORES`] and confirm it through the init-container
+    /// status.
+    ///
+    /// # Safe under the concurrent reconciler
+    ///
+    /// Three properties, each of which the tests name a mutation for:
+    ///
+    /// 1. **Re-read before acting.** [`Self::ledger_claim`] decides from the
+    ///    row as it is *now*, so a row another driver owns, or one that durably
+    ///    records a lift, is left alone.
+    /// 2. **Already-at-birth is success, not failure.** The first observation
+    ///    reads the launcher's persisted `limits.cpu`; if it is already at or
+    ///    below the birth clamp, somebody else got there first and this path
+    ///    returns having issued **zero** PATCHes.
+    /// 3. **The UID fence on every pass.** The observation is re-fenced before
+    ///    each attempt, so a Pod deleted and recreated under the same name is
+    ///    never the object that gets clamped.
+    ///
+    /// Deliberately NOT fenced on the launcher's `containerID` or its declared
+    /// protocol, unlike a lift. Both of those exist to stop a *grant* being
+    /// reasoned about a cgroup that is gone; a restarted launcher comes back
+    /// holding whatever `spec.initContainers[..].limits.cpu` the failed lift
+    /// left behind, so returning that spec to birth is still exactly right and
+    /// refusing to would leave the strand in place.
+    async fn return_to_birth_limit(
+        &self,
+        surface: &Arc<dyn LauncherResizeSurface>,
+        intent: &PodResizeIntent,
+    ) {
+        let state = match self.ledger_claim(intent).await {
+            LedgerClaim::Lifted => {
+                tracing::info!(
+                    task_run_id = %intent.task_run_id,
+                    pod_uid = %intent.pod_uid,
+                    "resize lift: the permit durably records a lift for this Pod; the \
+                     launcher's limit is admitted and is not returned"
+                );
+                return;
+            }
+            LedgerClaim::OwnedByAnotherDriver => {
+                tracing::info!(
+                    task_run_id = %intent.task_run_id,
+                    pod_uid = %intent.pod_uid,
+                    "resize lift: another driver owns this permit's resize lifecycle; not \
+                     patching"
+                );
+                return;
+            }
+            LedgerClaim::BirthClamped { state } => state,
+        };
+
+        let deadline = tokio::time::Instant::now() + self.budget;
+        let mut patched = false;
+        loop {
+            let observed = match surface.observe_launcher(&intent.task_run_id).await {
+                Ok(Some(observed)) => observed,
+                // No Pod carries the label. Nothing holds the lifted limit.
+                Ok(None) => {
+                    tracing::info!(
+                        task_run_id = %intent.task_run_id,
+                        pod_uid = %intent.pod_uid,
+                        "resize lift: no Pod carries the label; the lifted limit is moot"
+                    );
+                    return;
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        task_run_id = %intent.task_run_id,
+                        %error,
+                        "resize lift: apiserver did not answer while returning the \
+                         launcher to its birth limit"
+                    );
+                    if !self.wait_for_retry(deadline).await {
+                        return self
+                            .strand_alarm(intent, state, "the apiserver never answered")
+                            .await;
+                    }
+                    continue;
+                }
+            };
+            // THE UID FENCE. A Pod recreated under the same name belongs to
+            // whoever created it; our lift is not on it and must not be undone
+            // there.
+            if observed.pod_uid != intent.pod_uid {
+                tracing::info!(
+                    task_run_id = %intent.task_run_id,
+                    permit_pod_uid = %intent.pod_uid,
+                    live_pod_uid = %observed.pod_uid,
+                    "resize lift: the Pod was recreated under the same name; the lifted \
+                     limit went with the object that held it"
+                );
+                return;
+            }
+            // ALREADY BACK AT BIRTH. Somebody else — the drop reconciler, most
+            // likely the very actor that took this row away — got there first.
+            // That is success, and it must cost zero PATCHes: re-PATCHing a
+            // launcher that is already clamped is how an idempotent fallback
+            // turns into a second writer fighting the first.
+            if !patched
+                && observed
+                    .admitted_cpu_millicores
+                    .is_some_and(|millicores| millicores <= BIRTH_CPU_MILLICORES)
+            {
+                tracing::info!(
+                    task_run_id = %intent.task_run_id,
+                    pod_uid = %intent.pod_uid,
+                    "resize lift: the launcher is already at its birth limit; nothing to \
+                     return"
+                );
+                return;
+            }
+
+            patched = true;
+            match surface
+                .resize_launcher_cpu(&observed.pod_name, BIRTH_CPU_MILLICORES)
+                .await
+            {
+                // `resize_launcher_cpu` confirms through
+                // `status.initContainerStatuses`, so `Ok` is the kubelet's
+                // answer and not the apiserver's acknowledgement.
+                Ok(()) => {
+                    tracing::warn!(
+                        task_run_id = %intent.task_run_id,
+                        pod_uid = %intent.pod_uid,
+                        birth_millicores = BIRTH_CPU_MILLICORES,
+                        "resize lift: the ledger refused to record this lift, so the \
+                         launcher was returned to its birth limit"
+                    );
+                    return;
+                }
+                Err(error) => {
+                    if !is_retryable(&error) {
+                        return self.strand_alarm(intent, state, &error.to_string()).await;
+                    }
+                    if !self.wait_for_retry(deadline).await {
+                        return self.strand_alarm(intent, state, &error.to_string()).await;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Sleep one poll interval if the budget allows it. `false` means the
+    /// budget is gone and the caller must settle.
+    async fn wait_for_retry(&self, deadline: tokio::time::Instant) -> bool {
+        if tokio::time::Instant::now() + self.poll_interval >= deadline {
+            return false;
+        }
+        tokio::time::sleep(self.poll_interval).await;
+        true
+    }
+
+    /// The launcher could not be returned. Say so loudly, and — if the row is
+    /// still one this invocation can move — leave a `drop_required` behind so
+    /// the external reconciler has a state it will actually act on.
+    ///
+    /// `state` is the row's re-read state at the moment the fallback started,
+    /// and `None` means there was no readable row to move. This is best-effort
+    /// on top of best-effort: an unreachable apiserver is exactly the condition
+    /// under which the durable hand-off is the only remaining lever.
+    async fn strand_alarm(
+        &self,
+        intent: &PodResizeIntent,
+        state: Option<BuildPodPermitState>,
+        detail: &str,
+    ) {
+        tracing::error!(
+            task_run_id = %intent.task_run_id,
+            permit_id = %intent.permit_id,
+            pod_uid = %intent.pod_uid,
+            admitted_cpu_millicores = intent.admitted_cpu_millicores,
+            detail,
+            "resize lift: THE LAUNCHER IS STRANDED ABOVE ITS LEDGER — the lift could \
+             neither be recorded nor undone"
+        );
+        let Some(state) = state else { return };
+        if let Ok(TransitionBuildPodResizeLifecycleResult::Transitioned(_)) = self
+            .permits
+            .transition_resize_lifecycle(
+                &intent.task_run_id,
+                &intent.permit_id,
+                intent.fencing_token,
+                &intent.pod_uid,
+                Some(&intent.invocation_id),
+                state,
+                BuildPodPermitState::DropRequired,
+            )
+            .await
+        {
+            tracing::warn!(
+                task_run_id = %intent.task_run_id,
+                "resize lift: handed the stranded launcher to the drop reconciler"
             );
         }
     }
@@ -489,7 +837,7 @@ impl PodResizeApplier for ResizeLift {
         let surface = match self.surface().await {
             Ok(surface) => surface,
             Err(failure) => {
-                self.require_drop(intent, entered).await;
+                self.require_drop(None, intent, entered).await;
                 return Err(failure);
             }
         };
@@ -511,14 +859,14 @@ impl PodResizeApplier for ResizeLift {
                     // dropped back to the birth limit by the reconciler, and
                     // a lease granted against it would be a lease for CPU
                     // that is about to be taken away.
-                    self.require_drop(intent, BuildPodPermitState::LiftApplying)
+                    self.require_drop(Some(&surface), intent, BuildPodPermitState::LiftApplying)
                         .await;
                     return Err(failure);
                 }
                 Ok(())
             }
             Err(failure) => {
-                self.require_drop(intent, entered).await;
+                self.require_drop(Some(&surface), intent, entered).await;
                 Err(failure)
             }
         }

@@ -619,6 +619,47 @@ async fn evidence_spike_allows_submit_work_findings_handoff() {
     }
 }
 
+/// The advertised plan tool must reach its authenticated local handler rather
+/// than an unknown-tool fallback or a dynamic registry.
+#[tokio::test]
+async fn evidence_spike_routes_evidence_plan_only_with_authenticated_identity() {
+    let db = create_test_db();
+    let state = agent_context_from_db(db, CancellationToken::new());
+    let services = crate::test_helpers::test_services();
+    let tmp = crate::test_helpers::test_tempdir("djinn-ev-plan-auth-");
+    let schemas = evidence_spike_schemas();
+
+    let result = dispatch_tool_call(
+        &state,
+        &services,
+        &make_tool_call(
+            "evidence_plan",
+            Some(
+                serde_json::json!({"checks": [{
+                    "check_id": "source",
+                    "question": "what is wired?",
+                    "method": "code"
+                }]})
+                .as_object()
+                .expect("plan object")
+                .clone(),
+            ),
+        ),
+        tmp.path(),
+        Some(&schemas),
+        None,
+        None,
+        None,
+        &crate::extension::ToolCancellation::never(),
+    )
+    .await;
+
+    assert_eq!(
+        result.expect_err("anonymous evidence-plan capture must fail"),
+        "evidence_plan requires an authenticated task session"
+    );
+}
+
 // ── Dynamic MCP registry tools: must be rejected under evidence-spike ────
 
 #[tokio::test]
