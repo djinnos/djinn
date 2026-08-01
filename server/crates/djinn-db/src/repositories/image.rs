@@ -832,7 +832,8 @@ mod tests {
             "catalog image not ready ⇒ not dispatchable"
         );
 
-        // Mark the catalog image ready with a digest → digest-pinned pull ref.
+        // Mark the catalog image ready with a digest and the protocol a fresh
+        // deployment now requires → digest-pinned pull ref.
         // The digest is canonical (`sha256:` + 64 lowercase hex) because the
         // launcher-authority fence compares digests exactly; a placeholder like
         // `sha256:abc` names no artifact and is refused before dispatch.
@@ -841,7 +842,7 @@ mod tests {
                 "i1",
                 "reg/djinn-image-i1:hash",
                 Some(CANONICAL_DIGEST),
-                None,
+                Some(LauncherAuthorityProtocol::ResizeV2),
             )
             .await
             .unwrap();
