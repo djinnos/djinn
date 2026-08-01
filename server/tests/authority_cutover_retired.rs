@@ -54,6 +54,19 @@ fn retirement_keeps_its_evidence_and_permanent_safety_surfaces() {
         );
     }
 
+    let runbook = read("docs/deploy/launcher-authority-cutover.md");
+    for command in [
+        "djinn-server launcher-authority show",
+        "djinn-server launcher-authority set resize-v2 --expected-epoch",
+        "djinn-server launcher-authority set leaf-v1 --expected-epoch",
+    ] {
+        assert!(
+            runbook.contains(command),
+            "the durable authority runbook must document {command:?}"
+        );
+    }
+    assert!(!runbook.contains("djinn-server admin launcher-authority"));
+
     for relative in [
         "deploy/preflight/cutover-preflight.sh",
         "docs/deploy/launcher-authority-cutover.md",

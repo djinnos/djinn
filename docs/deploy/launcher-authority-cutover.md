@@ -1,7 +1,7 @@
 # Launcher authority administration
 
 The one-shot cutover orchestrator is retired. Launcher authority remains a
-durable, epoch-fenced database setting operated through `djinn-server admin`.
+durable, epoch-fenced database setting operated through `djinn-server`.
 The read-only deploy preflight remains mandatory and does not change authority.
 
 ## Read the current mode and epoch
@@ -10,7 +10,7 @@ Run against the production database from an approved operator environment:
 
 ```bash
 DJINN_DATABASE_URL=postgres://... \
-  djinn-server admin launcher-authority show
+  djinn-server launcher-authority show
 ```
 
 Retain the exact output with the change record. It has this form:
@@ -33,7 +33,7 @@ Use the epoch returned by `show`:
 
 ```bash
 DJINN_DATABASE_URL=postgres://... \
-  djinn-server admin launcher-authority set resize-v2 --expected-epoch 4
+  djinn-server launcher-authority set resize-v2 --expected-epoch 4
 ```
 
 For rollback, repeat the same drain and preflight procedure, then target
@@ -41,7 +41,7 @@ For rollback, repeat the same drain and preflight procedure, then target
 
 ```bash
 DJINN_DATABASE_URL=postgres://... \
-  djinn-server admin launcher-authority set leaf-v1 --expected-epoch 5
+  djinn-server launcher-authority set leaf-v1 --expected-epoch 5
 ```
 
 The command performs its own drain census and transactional fence. A non-empty
