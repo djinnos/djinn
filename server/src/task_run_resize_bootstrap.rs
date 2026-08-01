@@ -111,6 +111,14 @@ use tracing::{info, warn};
 /// ceiling; that lifecycle belongs to `0ppk`.
 pub const BIRTH_CPU_MILLICORES: u64 = 250;
 
+/// The coordinator's losing-lift fallback — `ResizeLift::return_to_birth_limit`,
+/// the path that undoes a lift the ledger refused to record — PATCHes the
+/// launcher back to this same number, and it cannot import the constant:
+/// `djinn-server` depends on `djinn-coordinator`, not the other way round. Tying
+/// the two together here makes a drift a **build failure** rather than a Pod left
+/// holding CPU its ledger does not admit.
+const _: () = assert!(BIRTH_CPU_MILLICORES == djinn_coordinator::resize_lift::BIRTH_CPU_MILLICORES);
+
 /// The Postgres SQLSTATE for a unique-violation. It is the *only* signal that
 /// distinguishes "another permit already owns this Pod UID" from "the database
 /// did not answer", and those two must not be conflated: the first is a

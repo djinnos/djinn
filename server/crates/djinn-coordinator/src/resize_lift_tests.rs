@@ -26,6 +26,7 @@
 //! everything.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -33,6 +34,7 @@ use djinn_db::{
     AcquireBuildPodPermitResult, BuildLeaseRepository, BuildPodPermitRepository,
     BuildPodPermitState, BuildPodResizeIdentity, CaptureBuildPodResizeIdentityResult, Database,
     InvocationLeaseAuthorityRepository, InvocationLeaseMode,
+    TransitionBuildPodResizeLifecycleResult,
 };
 use djinn_k8s::pod_resize::PodResizeError;
 use djinn_k8s::pod_resize_fixture::{ApiFault, StoredTaskRunPod};
@@ -148,6 +150,25 @@ impl Fixture {
     /// hand-written — so a fence comparison cannot pass because a test typed the
     /// same string twice.
     async fn armed(pod: StoredTaskRunPod, budget: Duration) -> Self {
+        Self::armed_with(pod, budget, |pod, _| Arc::new(FixtureSurface(pod.clone()))).await
+    }
+
+    /// The same composition, with the lift's apiserver surface built by the
+    /// caller from the fixture Pod **and the live permit repository**.
+    ///
+    /// That second argument is what lets a test inject the concurrent drop
+    /// reconciler: the race that produced this module's production strand is a
+    /// second actor writing the SAME durable row while the lift's PATCH is in
+    /// flight, and it cannot be modelled by a surface that only knows about
+    /// Kubernetes.
+    async fn armed_with(
+        pod: StoredTaskRunPod,
+        budget: Duration,
+        surface: impl FnOnce(
+            &StoredTaskRunPod,
+            &Arc<BuildPodPermitRepository>,
+        ) -> Arc<dyn LauncherResizeSurface>,
+    ) -> Self {
         let db = Database::open_in_memory().unwrap();
         db.ensure_initialized().await.unwrap();
         seed_task_run(&db, RUN).await;
@@ -170,11 +191,8 @@ impl Fixture {
             "resize-lift-tests",
         ));
         let applier = Arc::new(RecordingApplier {
-            inner: ResizeLift::with_surface(
-                Arc::clone(&permits),
-                Arc::new(FixtureSurface(pod.clone())),
-            )
-            .with_wait(budget, Duration::from_millis(1)),
+            inner: ResizeLift::with_surface(Arc::clone(&permits), surface(&pod, &permits))
+                .with_wait(budget, Duration::from_millis(1)),
             intents: std::sync::Mutex::new(Vec::new()),
         });
         let authority = Arc::new(ResizeAuthority::new(
@@ -1055,5 +1073,361 @@ async fn an_intent_above_its_own_ceiling_still_patches_at_the_ceiling() {
         fixture.pod.launcher_status_cpu().as_deref(),
         Some(format!("{ADMITTED_CEILING}m").as_str()),
         "and the launcher ends up holding the CEILING, not the forged 9999m"
+    );
+}
+
+// ── The refused CLOSING transition: a lift the ledger will not record must not
+//    stay physically in place ──────────────────────────────────────────────
+
+/// What the concurrent drop reconciler does to the row it steals, injected at
+/// the exact instant production put it: after the lift's PATCH has landed and
+/// been status-confirmed, before the closing `lift_applying -> lifted` CAS.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Steal {
+    /// The production shape, measured 2026-08-01. The reconciler walked the row
+    /// `lift_applying -> drop_required -> drop_applying -> birth_confirmed` and
+    /// the Pod was **never** returned: ledger says birth-clamped, kubelet says
+    /// the full ceiling, and `strandedness()` classifies `birth_confirmed` with
+    /// a live owner as `Live` so nothing ever comes back for it.
+    LedgerOnly,
+    /// The same walk, but the reconciler really did PATCH the launcher home
+    /// first. The losing lift must recognise that and do nothing.
+    LedgerAndPod,
+    /// Another actor recorded the very lift this invocation was about to
+    /// record. The ledger now admits the ceiling, so the launcher holding it is
+    /// correct and must not be clamped.
+    RecordLifted,
+}
+
+/// A surface that is the production one plus one concurrent durable writer.
+///
+/// It adds no Kubernetes rules of its own — every observation and every PATCH
+/// goes through [`StoredTaskRunPod`], i.e. the production
+/// `observe_launcher_sidecar` / `PodResizeClient` / `confirm_launcher_cpu`. The
+/// only thing it injects is the second writer on `build_pod_permits`, which is
+/// exactly what the real reconciler is.
+struct ReconcilerRacesTheLift {
+    pod: StoredTaskRunPod,
+    permits: Arc<BuildPodPermitRepository>,
+    steal: Steal,
+    fired: AtomicBool,
+    /// How many PATCH bodies had been sent when the steal completed, so a test
+    /// can count what the FALLBACK sent rather than what the whole lift sent.
+    patches_at_steal: AtomicUsize,
+}
+
+impl ReconcilerRacesTheLift {
+    fn new(pod: &StoredTaskRunPod, permits: &Arc<BuildPodPermitRepository>, steal: Steal) -> Self {
+        Self {
+            pod: pod.clone(),
+            permits: Arc::clone(permits),
+            steal,
+            fired: AtomicBool::new(false),
+            patches_at_steal: AtomicUsize::new(0),
+        }
+    }
+
+    /// The reconciler's own durable moves, made through the SAME repository
+    /// method the reconciler uses, so migration 164's legal-edge trigger has to
+    /// accept every one of them.
+    async fn steal_the_row(&self) {
+        let row = self
+            .permits
+            .active(RUN)
+            .await
+            .expect("the permit is readable")
+            .expect("the permit exists");
+        assert_eq!(
+            row.state,
+            BuildPodPermitState::LiftApplying,
+            "the steal has to land while the lift owns the row, or it is not the race"
+        );
+        let identity = row
+            .resize_identity
+            .clone()
+            .expect("a lifting row has a captured identity");
+        let walk: &[(BuildPodPermitState, BuildPodPermitState)] = match self.steal {
+            Steal::LedgerOnly | Steal::LedgerAndPod => &[
+                (
+                    BuildPodPermitState::LiftApplying,
+                    BuildPodPermitState::DropRequired,
+                ),
+                (
+                    BuildPodPermitState::DropRequired,
+                    BuildPodPermitState::DropApplying,
+                ),
+                (
+                    BuildPodPermitState::DropApplying,
+                    BuildPodPermitState::BirthConfirmed,
+                ),
+            ],
+            Steal::RecordLifted => &[(
+                BuildPodPermitState::LiftApplying,
+                BuildPodPermitState::Lifted,
+            )],
+        };
+        for (from, to) in walk {
+            if *to == BuildPodPermitState::BirthConfirmed && self.steal == Steal::LedgerAndPod {
+                // A real drop settles `drop_applying -> birth_confirmed` only
+                // after 250m is confirmed off the init-container status.
+                self.pod
+                    .resize_launcher_cpu(&identity.pod_name, BIRTH_MILLICORES)
+                    .await
+                    .expect("the reconciler's drop confirms on a healthy node");
+            }
+            let moved = self
+                .permits
+                .transition_resize_lifecycle(
+                    RUN,
+                    &row.permit_id,
+                    row.fencing_token,
+                    &identity.pod_uid,
+                    row.resize_invocation_id.as_deref(),
+                    *from,
+                    *to,
+                )
+                .await
+                .expect("the lifecycle is writable");
+            assert!(
+                matches!(
+                    moved,
+                    TransitionBuildPodResizeLifecycleResult::Transitioned(_)
+                ),
+                "the reconciler's {from:?} -> {to:?} move must land: {moved:?}"
+            );
+        }
+    }
+
+    /// Every PATCH body issued AFTER the row was stolen — i.e. the fallback's.
+    fn fallback_patches(&self) -> Vec<u64> {
+        let at_steal = self.patches_at_steal.load(Ordering::SeqCst);
+        let mut bodies = self.pod.patched_cpu_millicores();
+        bodies.split_off(at_steal)
+    }
+}
+
+#[async_trait]
+impl LauncherResizeSurface for ReconcilerRacesTheLift {
+    async fn observe_launcher(
+        &self,
+        _task_run_id: &str,
+    ) -> Result<Option<ObservedLauncherSidecar>, LauncherObservationError> {
+        self.pod.observe_launcher()
+    }
+
+    async fn resize_launcher_cpu(
+        &self,
+        pod_name: &str,
+        target_millicores: u64,
+    ) -> Result<(), PodResizeError> {
+        let result = self
+            .pod
+            .resize_launcher_cpu(pod_name, target_millicores)
+            .await;
+        if result.is_ok() && !self.fired.swap(true, Ordering::SeqCst) {
+            self.steal_the_row().await;
+            self.patches_at_steal
+                .store(self.pod.patched_cpu_millicores().len(), Ordering::SeqCst);
+        }
+        result
+    }
+}
+
+/// The racing surface, kept so a test can ask what the FALLBACK patched.
+type Racer = Arc<ReconcilerRacesTheLift>;
+
+/// Build the racing composition. Returns the fixture and the racer, because the
+/// fixture only keeps the surface as a `dyn` trait object.
+async fn racing_fixture(steal: Steal) -> (Fixture, Racer) {
+    let pod = healthy_pod();
+    let cell: Arc<std::sync::Mutex<Option<Racer>>> = Arc::new(std::sync::Mutex::new(None));
+    let captured = Arc::clone(&cell);
+    let fixture = Fixture::armed_with(pod, NO_WAIT, move |pod, permits| {
+        let racer = Arc::new(ReconcilerRacesTheLift::new(pod, permits, steal));
+        *captured.lock().expect("cell") = Some(Arc::clone(&racer));
+        racer as Arc<dyn LauncherResizeSurface>
+    })
+    .await;
+    let racer = cell.lock().expect("cell").clone().expect("surface built");
+    (fixture, racer)
+}
+
+/// **THE DEFECT.** A lift whose closing CAS is refused leaves the launcher at
+/// its BIRTH clamp, not at the lifted value.
+///
+/// Asserted on `status.initContainerStatuses` — the only field that can confirm
+/// a resize — and on the PATCH body the fallback actually put on the wire.
+/// Never on a log line: the shipped code already logged, and logging is
+/// precisely what left 4 unleased cores on eleven Pods in one session.
+///
+/// NAMED FAILING MUTATION: in `ResizeLift::require_drop`, delete the
+/// `self.return_to_birth_limit(surface, intent).await` call and keep the
+/// `error!` — i.e. restore the shipped behaviour. The launcher then reads
+/// `2500m` against a `birth_confirmed` row, which is the production
+/// ledger-vs-kubelet divergence reproduced exactly.
+#[tokio::test]
+async fn a_refused_closing_transition_returns_the_launcher_to_its_birth_limit() {
+    let (fixture, _racer) = racing_fixture(Steal::LedgerOnly).await;
+    assert_eq!(
+        fixture.pod.launcher_status_cpu().as_deref(),
+        Some(format!("{BIRTH_MILLICORES}m").as_str()),
+        "precondition: the launcher sits at its birth limit before the lift"
+    );
+
+    let result = fixture.lift().await;
+
+    assert_eq!(
+        result,
+        LeaseResult::DegradedUnleased {
+            reason: DegradedUnleasedReason::LiftLifecycleUnwritable
+        },
+        "an unrecordable lift still degrades unleased: {result:?}"
+    );
+    // The ledger is where the concurrent reconciler left it: birth-clamped.
+    assert_eq!(
+        fixture.permit_state().await,
+        BuildPodPermitState::BirthConfirmed,
+        "the row is the one `strandedness()` classifies `Live` and never revisits"
+    );
+    // THE INVARIANT. The Pod agrees with that row.
+    assert_eq!(
+        fixture.pod.launcher_status_cpu().as_deref(),
+        Some(format!("{BIRTH_MILLICORES}m").as_str()),
+        "the launcher must be back at its BIRTH clamp; anything else is the \
+         production strand — a ledger saying birth_confirmed over a kubelet \
+         holding the full ceiling"
+    );
+    let bodies = fixture.pod.patched_cpu_millicores();
+    assert_eq!(
+        bodies.last().copied(),
+        Some(BIRTH_MILLICORES),
+        "and it got there through a real PATCH, not a log line; bodies: {bodies:?}"
+    );
+    assert!(
+        bodies.contains(&ADMITTED_CEILING),
+        "non-vacuity: the lift really did raise the launcher first, so the \
+         fallback had something to undo; bodies: {bodies:?}"
+    );
+}
+
+/// **IDEMPOTENCY UNDER THE CONCURRENT RECONCILER.** If the actor that took the
+/// row also returned the launcher to its birth limit, the losing lift's
+/// fallback succeeds having issued **zero** further PATCHes.
+///
+/// "Someone else already returned it to birth" is success, not failure, and not
+/// a second writer fighting the first.
+///
+/// NAMED FAILING MUTATION: in `ResizeLift::return_to_birth_limit`, delete the
+/// `if !patched && observed.admitted_cpu_millicores.is_some_and(|m| m <=
+/// BIRTH_CPU_MILLICORES)` short-circuit. The fallback then re-PATCHes an
+/// already-clamped launcher and this test counts one fallback body instead of
+/// none.
+#[tokio::test]
+async fn a_launcher_another_actor_already_returned_is_not_patched_again() {
+    let (fixture, racer) = racing_fixture(Steal::LedgerAndPod).await;
+
+    let result = fixture.lift().await;
+
+    assert_eq!(
+        result,
+        LeaseResult::DegradedUnleased {
+            reason: DegradedUnleasedReason::LiftLifecycleUnwritable
+        },
+        "the losing lift still degrades unleased rather than erroring: {result:?}"
+    );
+    assert_eq!(
+        fixture.pod.launcher_status_cpu().as_deref(),
+        Some(format!("{BIRTH_MILLICORES}m").as_str()),
+        "the launcher is at its birth limit — put there by the OTHER actor"
+    );
+    assert_eq!(
+        racer.fallback_patches(),
+        Vec::<u64>::new(),
+        "and the fallback added nothing: a launcher already at birth needs no \
+         second writer"
+    );
+}
+
+/// **THE FALLBACK NEVER CLAMPS AN ADMITTED LIFT.** If the row durably records
+/// `lifted` for this Pod, the ledger admits the ceiling the launcher is holding
+/// — the invariant already holds, and taking the CPU away would strand whoever
+/// earned it.
+///
+/// NAMED FAILING MUTATION: in `ResizeLift::ledger_claim`, delete the
+/// `BuildPodPermitState::Lifted => LedgerClaim::Lifted` arm so `Lifted` falls
+/// through to `BirthClamped`. The fallback then PATCHes a launcher whose own
+/// ledger admits the ceiling, and the last two assertions below fail.
+#[tokio::test]
+async fn a_permit_that_durably_records_a_lift_is_never_clamped_by_the_fallback() {
+    let (fixture, racer) = racing_fixture(Steal::RecordLifted).await;
+
+    let result = fixture.lift().await;
+
+    assert_eq!(
+        result,
+        LeaseResult::DegradedUnleased {
+            reason: DegradedUnleasedReason::LiftLifecycleUnwritable
+        },
+        "this invocation still lost the CAS and must not report a grant: {result:?}"
+    );
+    assert_eq!(
+        fixture.permit_state().await,
+        BuildPodPermitState::Lifted,
+        "the ledger admits the ceiling"
+    );
+    assert_eq!(
+        fixture.pod.launcher_status_cpu().as_deref(),
+        Some(format!("{ADMITTED_CEILING}m").as_str()),
+        "so the launcher keeps it — the invariant is `limit <= admitted`, not \
+         `always drop`"
+    );
+    assert_eq!(
+        racer.fallback_patches(),
+        Vec::<u64>::new(),
+        "and the fallback issued no PATCH at all"
+    );
+}
+
+/// **THE HAPPY PATH IS UNTOUCHED.** A lift that confirms and records ends
+/// holding its ceiling, with no birth-limit body anywhere on the wire.
+///
+/// This is the regression guard for the fix itself: a fallback that also ran on
+/// success would silently undo every healthy lift in the fleet, and every
+/// existing assertion about `lifted` would still pass on the DURABLE row while
+/// the Pod sat back at 250m.
+///
+/// NAMED FAILING MUTATION: in `ResizeLift::apply`, move the
+/// `self.require_drop(Some(&surface), intent, BuildPodPermitState::LiftApplying)`
+/// call out of the `if let Err(failure) = …` guard so it runs on every
+/// confirmed lift. `require_drop`'s CAS is then refused (the row reads
+/// `lifted`), the fallback runs, and — pairing it with the `ledger_claim`
+/// mutation above — a `250m` body appears and the launcher's init status reads
+/// `250m`.
+#[tokio::test]
+async fn a_confirmed_lift_is_left_at_its_ceiling_with_no_drop_patch() {
+    let fixture = Fixture::armed(healthy_pod(), NO_WAIT).await;
+
+    let result = fixture.lift().await;
+
+    assert!(
+        matches!(result, LeaseResult::Status(_)),
+        "the happy path still grants: {result:?}"
+    );
+    assert_eq!(
+        fixture.permit_state().await,
+        BuildPodPermitState::Lifted,
+        "and still records `lifted`"
+    );
+    assert_eq!(
+        fixture.pod.launcher_status_cpu().as_deref(),
+        Some(format!("{ADMITTED_CEILING}m").as_str()),
+        "the launcher holds its ceiling"
+    );
+    let bodies = fixture.pod.patched_cpu_millicores();
+    assert_eq!(
+        bodies,
+        vec![ADMITTED_CEILING],
+        "exactly ONE body, at the ceiling: no fallback ran, so no birth-limit \
+         PATCH exists; bodies: {bodies:?}"
     );
 }
