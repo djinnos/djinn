@@ -49,7 +49,7 @@ use djinn_db::{
 };
 use djinn_k8s::pod_resize::{CpuLimit, PodResizeError};
 use djinn_k8s::pod_resize_fixture::StoredTaskRunPod;
-use djinn_k8s::runtime::{LauncherObservationError, ObservedLauncherSidecar};
+use djinn_k8s::runtime::{JobAdmission, LauncherObservationError, ObservedLauncherSidecar};
 use djinn_launcher_protocol::LauncherAuthorityProtocol;
 use djinn_runtime::{
     BiStream, ResolvedCredentials, RunHandle, RuntimeError, SessionRuntime, SupervisorFlow,
@@ -74,6 +74,22 @@ const CONFIRMING_BUDGET: Duration = Duration::from_secs(5);
 /// allowed by the env parser and would be a different code path anyway; one
 /// pass then a deadline is exactly the "never becomes admitted" shape.
 const GIVE_UP_BUDGET: Duration = Duration::from_millis(1);
+
+/// The bridge's poll interval in every test here. Named because the Kueue tests
+/// derive an elapsed-time lower bound from it.
+const POLL_INTERVAL: Duration = Duration::from_millis(5);
+
+/// The launcher's own budget in the Kueue tests. Short on purpose: the queue
+/// wait below outlives it several times over, which is the whole point.
+const BIRTH_BUDGET: Duration = Duration::from_millis(150);
+
+/// Long enough that no Kueue test can reach it by accident, so a refusal in one
+/// of them is always the *birth* clock and never this one.
+const PATIENT_QUEUE_BUDGET: Duration = Duration::from_secs(120);
+
+/// How many Job observations Kueue holds a Workload for in these tests.
+/// `60 * POLL_INTERVAL` = 300ms, twice [`BIRTH_BUDGET`].
+const QUEUED_OBSERVATIONS: u64 = 60;
 
 // ── The apiserver surface ─────────────────────────────────────────────────
 
@@ -104,8 +120,88 @@ impl TaskRunPodSurface for FixtureSurface {
             .await
     }
 
+    async fn observe_job_admission(&self, _task_run_id: &str) -> JobAdmission {
+        self.0.job_admission()
+    }
+
     async fn uid_fenced_delete(&self, task_run_id: &str, pod_uid: &str) -> Result<(), String> {
         self.0.uid_fenced_delete(task_run_id, pod_uid)
+    }
+}
+
+/// A cluster whose Job starts suspended in the Kueue admission queue.
+///
+/// It counts Job observations and models the admission edge on the Nth one, so
+/// "the gate waited out the queue" is a *call count* rather than a wall-clock
+/// guess. `admit_after` observations at the bridge's poll interval is also a
+/// lower bound on elapsed time, which is what makes the birth budget provably
+/// outlived.
+struct QueuedSurface {
+    cluster: StoredTaskRunPod,
+    admit_after: u64,
+    /// What the Job controller does when Kueue admits: create the Pod, or not.
+    creates_pod_on_admission: bool,
+    job_observations: Arc<AtomicUsize>,
+}
+
+impl QueuedSurface {
+    fn new(cluster: &StoredTaskRunPod, admit_after: u64, creates_pod_on_admission: bool) -> Self {
+        Self {
+            cluster: cluster.clone().suspended_in_kueue(),
+            admit_after,
+            creates_pod_on_admission,
+            job_observations: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    /// A cluster that is never suspended at all — the healthy fleet's shape.
+    fn never_queued(cluster: &StoredTaskRunPod) -> Self {
+        Self {
+            cluster: cluster.clone(),
+            admit_after: 0,
+            creates_pod_on_admission: true,
+            job_observations: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    fn job_observations(&self) -> usize {
+        self.job_observations.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl TaskRunPodSurface for QueuedSurface {
+    async fn observe_launcher(
+        &self,
+        _task_run_id: &str,
+    ) -> Result<Option<ObservedLauncherSidecar>, LauncherObservationError> {
+        self.cluster.observe_launcher()
+    }
+
+    async fn resize_launcher_cpu(
+        &self,
+        pod_name: &str,
+        target_millicores: u64,
+    ) -> Result<(), PodResizeError> {
+        self.cluster
+            .resize_launcher_cpu(pod_name, target_millicores)
+            .await
+    }
+
+    async fn observe_job_admission(&self, _task_run_id: &str) -> JobAdmission {
+        let seen = self.job_observations.fetch_add(1, Ordering::SeqCst) + 1;
+        if seen as u64 >= self.admit_after {
+            if self.creates_pod_on_admission {
+                self.cluster.kueue_admits();
+            } else {
+                self.cluster.kueue_admits_without_creating_the_pod();
+            }
+        }
+        self.cluster.job_admission()
+    }
+
+    async fn uid_fenced_delete(&self, task_run_id: &str, pod_uid: &str) -> Result<(), String> {
+        self.cluster.uid_fenced_delete(task_run_id, pod_uid)
     }
 }
 
@@ -412,6 +508,20 @@ fn bridge_for(
             Arc::new(FixtureSurface(cluster.clone())) as Arc<dyn TaskRunPodSurface>,
         )
         .with_wait(budget, Duration::from_millis(5)),
+    )
+}
+
+/// A bridge over a caller-supplied surface, with both wait clocks set.
+fn bridge_over(
+    db: &Database,
+    surface: Arc<dyn TaskRunPodSurface>,
+    birth_budget: Duration,
+    queue_budget: Duration,
+) -> Arc<TaskRunResizeAdmissionBridge> {
+    Arc::new(
+        TaskRunResizeAdmissionBridge::with_surface(db.clone(), surface)
+            .with_wait(birth_budget, POLL_INTERVAL)
+            .with_queue_wait(queue_budget),
     )
 }
 
@@ -922,6 +1032,312 @@ async fn a_resize_v2_render_still_refuses_when_no_permit_can_be_obtained() {
         status, "failed",
         "a refused dispatch must not leave its run row live forever"
     );
+}
+
+// ── Kueue queue time is not launcher latency ───────────────────────────────
+//
+// Production, 2026-08-01, server v0.7.35: 13 dispatches refused by this gate
+// with "launcher birth limit was not confirmed within 180s: no Pod exists for
+// this task run", while their Jobs sat `Suspended` for ~10 minutes against a
+// ClusterQueue holding admitted=3 pending=5 on a nominal quota of 3 Pods. A
+// suspended Job has no Pod, so the confirmation the gate waited for was not
+// late — it was impossible, and the 180s were spent entirely in the queue.
+
+/// **The defect.** A task run whose Job stays suspended past the birth budget is
+/// NOT refused. The gate keeps waiting, and when Kueue finally admits it the run
+/// dispatches normally with its launcher clamped.
+///
+/// The queue here outlives the birth budget by 2x, measured two independent
+/// ways: [`QUEUED_OBSERVATIONS`] polls of the Job, and the elapsed wall clock.
+///
+/// **Named mutation.** In `TaskRunResizeAdmissionBridge::admit_dispatch`, make
+/// queue time count: change the wait loop's
+/// `JobAdmission::Suspended => birth_deadline = None` arm to
+/// `JobAdmission::Suspended => { birth_deadline.get_or_insert(now + self.budget); }`.
+/// One clock, running while the Job is suspended — `main`'s behaviour and the
+/// production defect. This test then fails at `drive_seam`: the seam returns the
+/// refusal, `attaches()` is 0 and no identity is ever captured.
+#[tokio::test]
+async fn a_job_still_suspended_in_the_kueue_queue_is_waited_out_rather_than_refused() {
+    const POD_UID: &str = "pod-uid-kueue-wait";
+    const JOB_UID: &str = "job-uid-kueue-wait";
+
+    let db = Database::ephemeral().await.expect("ephemeral db");
+    let seeded = seed(&db, "kueuewait").await;
+    let cluster = StoredTaskRunPod::resize_v2(POD_UID, RENDERED_CEILING);
+    let surface = Arc::new(QueuedSurface::new(&cluster, QUEUED_OBSERVATIONS, true));
+    let bridge = bridge_over(
+        &db,
+        surface.clone() as Arc<dyn TaskRunPodSurface>,
+        BIRTH_BUDGET,
+        PATIENT_QUEUE_BUDGET,
+    );
+    let context = context_with(&db, &bridge);
+    let runtime = RecordingRuntime::new(Some(JOB_UID), Some(LauncherAuthorityProtocol::ResizeV2));
+
+    // The premise: while the Job is suspended the cluster serves no Pod at all.
+    assert_eq!(surface.cluster.job_admission(), JobAdmission::Suspended);
+    assert!(
+        surface
+            .cluster
+            .observe_launcher()
+            .expect("a suspended Job is not an observation error")
+            .is_none(),
+        "a suspended Job has no Pod; a fixture that serves one is not modelling the defect"
+    );
+
+    let started = SystemClock::new().now_instant();
+    drive_seam(runtime.clone(), &seeded, &context)
+        .await
+        .expect("a Job waiting on Kueue quota must not be refused as a stalled launcher");
+    let elapsed = started.elapsed();
+
+    // The wait genuinely spanned more queue time than the launcher's whole
+    // budget — twice over — so a budget that counted it would have expired.
+    assert!(
+        surface.job_observations() as u64 >= QUEUED_OBSERVATIONS,
+        "the gate must have polled the queued Job {QUEUED_OBSERVATIONS} times; saw {}",
+        surface.job_observations()
+    );
+    assert!(
+        elapsed > BIRTH_BUDGET * 2,
+        "the dispatch outlived twice the birth budget in the queue ({elapsed:?}) and was \
+         still admitted, which is only possible if queue time never ran the launcher clock"
+    );
+
+    // And the clamp is not weakened by any of it: the launcher is at 250m
+    // before the worker session starts.
+    assert_eq!(
+        CpuLimit::parse(
+            &cluster
+                .launcher_status_cpu()
+                .expect("the launcher reports a cpu limit")
+        )
+        .expect("the reported quantity parses")
+        .millis(),
+        BIRTH_MILLICORES,
+        "a run admitted after a queue wait is still clamped to the birth limit"
+    );
+    let row = BuildPodPermitRepository::new(db.clone())
+        .active(&seeded.spec.task_run_id)
+        .await
+        .expect("read permit")
+        .expect("the seam acquired a permit");
+    assert_eq!(row.state, BuildPodPermitState::BirthConfirmed);
+    assert_eq!(
+        row.resize_identity
+            .expect("a birth_confirmed row carries an identity")
+            .pod_uid,
+        POD_UID,
+        "the identity is fenced to the Pod Kueue eventually produced"
+    );
+    assert_eq!(runtime.attaches(), 1, "the worker session started");
+    assert_eq!(
+        cluster.deletes(),
+        Vec::new(),
+        "a queued Job's Pod is never destroyed for being queued"
+    );
+    assert_eq!(bridge.gate().dispatches_before_birth_confirmation(), 0);
+}
+
+/// **The failure mode survives.** Once the Pod exists, a launcher that never
+/// reaches its birth limit is still refused — inside the birth budget, and with
+/// the Pod destroyed.
+///
+/// This is the composed shape, not the pre-existing one: the Job is queued
+/// first, admitted, and only then does its launcher fail to actuate. So it
+/// proves the birth clock *arms* on Pod existence rather than never running.
+///
+/// **Named mutation.** Delete the birth-expiry arm from the wait loop — the
+/// `Some(deadline) if now >= deadline => { expiry = BudgetExpiry::Birth(..); break }`
+/// match arm — so an armed clock can no longer end the loop. The seam then waits
+/// out the 120s queue budget and this test fails on its 30s timeout.
+#[tokio::test]
+async fn a_launcher_that_never_confirms_after_admission_is_still_refused() {
+    const POD_UID: &str = "pod-uid-kueue-stall";
+
+    let db = Database::ephemeral().await.expect("ephemeral db");
+    let seeded = seed(&db, "kueuestall").await;
+    // Kueue admits it; the apiserver accepts the resize; the kubelet never
+    // actuates it. A launcher above its birth limit, forever.
+    let cluster = StoredTaskRunPod::resize_v2(POD_UID, RENDERED_CEILING).never_actuating();
+    let surface = Arc::new(QueuedSurface::new(&cluster, QUEUED_OBSERVATIONS, true));
+    let bridge = bridge_over(
+        &db,
+        surface.clone() as Arc<dyn TaskRunPodSurface>,
+        BIRTH_BUDGET,
+        PATIENT_QUEUE_BUDGET,
+    );
+    let context = context_with(&db, &bridge);
+    let runtime = RecordingRuntime::new(
+        Some("job-uid-kueue-stall"),
+        Some(LauncherAuthorityProtocol::ResizeV2),
+    );
+
+    let error = tokio::time::timeout(
+        Duration::from_secs(30),
+        drive_seam(runtime.clone(), &seeded, &context),
+    )
+    .await
+    .expect("the gate must remain bounded; an unbounded wait is a wedged slot, not a fix")
+    .expect_err("a launcher that never confirms must not dispatch");
+    let rendered = format!("{error:#}");
+
+    // The refusal is the LAUNCHER's, not the queue's: the run got past Kueue.
+    assert!(
+        rendered.contains("launcher birth limit was not confirmed"),
+        "the birth clock must be the one that expired: {rendered}"
+    );
+    assert!(
+        !rendered.contains("Kueue did not admit"),
+        "this run was admitted; refusing it as still-queued would name the wrong cause: \
+         {rendered}"
+    );
+    assert!(
+        surface.job_observations() as u64 >= QUEUED_OBSERVATIONS,
+        "the refusal must come after the queue wait, not during it"
+    );
+
+    assert_eq!(
+        runtime.attaches(),
+        0,
+        "no worker session may start behind an unconfirmed birth limit: {rendered}"
+    );
+    assert_eq!(runtime.teardowns(), 1, "the refused run is torn down");
+    assert!(
+        cluster.resize_patches() >= 1,
+        "the PATCH was issued and accepted; only confirmation failed"
+    );
+    assert_eq!(
+        cluster.deletes(),
+        vec![(seeded.spec.task_run_id.clone(), POD_UID.to_owned())],
+        "an ungovernable Pod is destroyed, fenced to its own uid"
+    );
+    assert_eq!(bridge.gate().dispatches_before_birth_confirmation(), 0);
+}
+
+/// **An admitted Job keeps the short leash.** Kueue unsuspends the Job and the
+/// Pod never appears. That is a stall, not a queue, and it must be refused on the
+/// birth budget rather than inherit the queue's generous one.
+///
+/// **Named mutation.** Fold `JobAdmission::Admitted` in with `Suspended` in the
+/// wait loop — `JobAdmission::Suspended | JobAdmission::Admitted => birth_deadline = None`
+/// — and this run waits out the whole 120s queue budget, blowing the 30s
+/// timeout; shorten the queue budget and the refusal names Kueue instead, which
+/// the assertions below reject.
+#[tokio::test]
+async fn an_admitted_job_whose_pod_never_appears_is_refused_on_the_birth_budget() {
+    let db = Database::ephemeral().await.expect("ephemeral db");
+    let seeded = seed(&db, "kueuepodless").await;
+    let cluster = StoredTaskRunPod::resize_v2("pod-uid-kueue-podless", RENDERED_CEILING);
+    // Admitted after the usual queue wait, but the Job controller creates
+    // nothing: `spec.suspend` is false and there is still no Pod.
+    let surface = Arc::new(QueuedSurface::new(&cluster, QUEUED_OBSERVATIONS, false));
+    let bridge = bridge_over(
+        &db,
+        surface.clone() as Arc<dyn TaskRunPodSurface>,
+        BIRTH_BUDGET,
+        PATIENT_QUEUE_BUDGET,
+    );
+    let context = context_with(&db, &bridge);
+    let runtime = RecordingRuntime::new(
+        Some("job-uid-kueue-podless"),
+        Some(LauncherAuthorityProtocol::ResizeV2),
+    );
+
+    let started = SystemClock::new().now_instant();
+    let error = tokio::time::timeout(
+        Duration::from_secs(30),
+        drive_seam(runtime.clone(), &seeded, &context),
+    )
+    .await
+    .expect("an admitted-but-Podless run must not wait out the queue budget")
+    .expect_err("a Pod that never appears must not dispatch");
+    let rendered = format!("{error:#}");
+    let elapsed = started.elapsed();
+
+    assert_eq!(
+        surface.cluster.job_admission(),
+        JobAdmission::Admitted,
+        "the premise: the Job left the queue"
+    );
+    assert!(
+        rendered.contains("launcher birth limit was not confirmed"),
+        "an admitted Job's missing Pod is a launcher stall: {rendered}"
+    );
+    assert!(
+        !rendered.contains("Kueue did not admit"),
+        "an unsuspended Job must not be refused as still-queued: {rendered}"
+    );
+    assert!(
+        elapsed < PATIENT_QUEUE_BUDGET / 2,
+        "the short leash is the point; this took {elapsed:?} of a {PATIENT_QUEUE_BUDGET:?} \
+         queue budget"
+    );
+    assert_eq!(runtime.attaches(), 0, "nothing dispatched: {rendered}");
+    assert_eq!(cluster.resize_patches(), 0, "there was nothing to resize");
+    assert_eq!(
+        cluster.deletes(),
+        Vec::new(),
+        "there is no Pod to fence a delete to, and guessing a uid destroys someone else's"
+    );
+}
+
+/// **The fast path is unchanged and pays nothing.** A dispatch whose Job was
+/// never suspended confirms on the first pass, and the Job is never read at all.
+///
+/// The zero is the assertion. The Kueue lookup lives strictly on the
+/// "no Pod, and no evidence one exists" branch, so a healthy dispatch adds no
+/// apiserver call — and a refactor that moves the lookup to the top of the wait
+/// loop, or arms the clock by asking the Job first, turns this red.
+#[tokio::test]
+async fn a_dispatch_that_was_never_queued_confirms_without_consulting_the_job() {
+    const POD_UID: &str = "pod-uid-fastpath";
+
+    let db = Database::ephemeral().await.expect("ephemeral db");
+    let seeded = seed(&db, "fastpath").await;
+    let cluster = StoredTaskRunPod::resize_v2(POD_UID, RENDERED_CEILING);
+    let surface = Arc::new(QueuedSurface::never_queued(&cluster));
+    let bridge = bridge_over(
+        &db,
+        surface.clone() as Arc<dyn TaskRunPodSurface>,
+        BIRTH_BUDGET,
+        PATIENT_QUEUE_BUDGET,
+    );
+    let context = context_with(&db, &bridge);
+    let runtime = RecordingRuntime::new(
+        Some("job-uid-fastpath"),
+        Some(LauncherAuthorityProtocol::ResizeV2),
+    );
+
+    drive_seam(runtime.clone(), &seeded, &context)
+        .await
+        .expect("a healthy resize-v2 dispatch is admitted");
+
+    assert_eq!(
+        surface.job_observations(),
+        0,
+        "a run whose Pod exists on the first pass must never consult its Job"
+    );
+    assert_eq!(runtime.attaches(), 1, "the worker session started");
+    assert_eq!(
+        CpuLimit::parse(
+            &cluster
+                .launcher_status_cpu()
+                .expect("the launcher reports a cpu limit")
+        )
+        .expect("the reported quantity parses")
+        .millis(),
+        BIRTH_MILLICORES,
+        "the clamp is unchanged on the fast path"
+    );
+    let row = BuildPodPermitRepository::new(db.clone())
+        .active(&seeded.spec.task_run_id)
+        .await
+        .expect("read permit")
+        .expect("the seam acquired a permit");
+    assert_eq!(row.state, BuildPodPermitState::BirthConfirmed);
+    assert_eq!(bridge.gate().dispatches_before_birth_confirmation(), 0);
 }
 
 /// The bootstrap type is still constructible and still composes — a compile-time

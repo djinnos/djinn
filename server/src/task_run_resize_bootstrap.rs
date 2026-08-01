@@ -28,6 +28,24 @@
 //! happens after admission is that a mutating webhook may have changed what was
 //! rendered.
 //!
+//! # A queued Job is not a stalled one
+//!
+//! Under `9oga` a task-run Job is created **suspended** and Kueue unsuspends it
+//! when quota is available. A suspended Job has no Pod: the Job controller
+//! creates none. So for as long as it sits in the queue there is no launcher, no
+//! ceiling to capture, and nothing that could confirm a birth limit.
+//!
+//! The wait budget in [`TaskRunResizeAdmissionBridge`] therefore does not start
+//! at dispatch. It starts when a Pod exists. Queue time runs against a separate
+//! [`QUEUE_ADMISSION_BUDGET_DEFAULT`], and the two clocks are separate objects
+//! rather than one clock with a subtraction so that no amount of queueing can
+//! consume the launcher's budget by arithmetic accident.
+//!
+//! This is the only thing about the ordering below that is negotiable. The clamp
+//! is not: the Pod is created with the launcher at its full admitted ceiling, and
+//! between Pod start and the confirmed downsize the launcher is ungoverned, so no
+//! worker session may dispatch until the clamp is confirmed.
+//!
 //! # `birth_confirmed` is a capture state, not a confirmation state
 //!
 //! Migration 164's `capture_resize_identity` sets `state = 'birth_confirmed'`
@@ -101,7 +119,7 @@ use djinn_db::{
 use djinn_k8s::launcher::LAUNCHER_CPU_REQUEST_MILLICORES;
 use djinn_k8s::pod_resize::PodResizeError;
 use djinn_k8s::runtime::{
-    LauncherObservationError, ObservedLauncherSidecar, TaskRunPodResizeSurface,
+    JobAdmission, LauncherObservationError, ObservedLauncherSidecar, TaskRunPodResizeSurface,
 };
 use djinn_launcher_protocol::LauncherAuthorityProtocol;
 use tracing::{info, warn};
@@ -128,12 +146,17 @@ const UNIQUE_VIOLATION: &str = "23505";
 
 // ── The apiserver seam ─────────────────────────────────────────────────────
 
-/// The three Kubernetes operations bootstrap performs.
+/// The four Kubernetes operations bootstrap performs.
 ///
 /// Behind a trait so the whole sequence is drivable from fixtures with no
 /// cluster, and so this crate needs no `kube` / `k8s-openapi` dependency of its
 /// own. The production implementation is
 /// [`djinn_k8s::runtime::TaskRunPodResizeSurface`].
+///
+/// [`Self::observe_job_admission`] deliberately has **no default body**. A
+/// default returning "admitted" would be the pre-`9oga` assumption written down
+/// as a trait default, and every fixture that forgot to override it would
+/// silently re-acquire the defect this method exists to fix.
 #[async_trait]
 pub trait TaskRunPodSurface: Send + Sync {
     /// Fresh GET of the single Pod labelled for this task run, flattened to the
@@ -161,6 +184,12 @@ pub trait TaskRunPodSurface: Send + Sync {
         target_millicores: u64,
     ) -> Result<(), PodResizeError>;
 
+    /// Whether this task run's Job has left the Kueue admission queue.
+    ///
+    /// Never fails: an unreadable Job is [`JobAdmission::Unknown`], which the
+    /// caller folds with [`JobAdmission::Admitted`].
+    async fn observe_job_admission(&self, task_run_id: &str) -> JobAdmission;
+
     /// UID-fenced destruction of exactly the observed Pod.
     ///
     /// # Errors
@@ -184,6 +213,10 @@ impl TaskRunPodSurface for TaskRunPodResizeSurface {
         target_millicores: u64,
     ) -> Result<(), PodResizeError> {
         Self::resize_launcher_cpu(self, pod_name, target_millicores).await
+    }
+
+    async fn observe_job_admission(&self, task_run_id: &str) -> JobAdmission {
+        Self::observe_job_admission(self, task_run_id).await
     }
 
     async fn uid_fenced_delete(&self, task_run_id: &str, pod_uid: &str) -> Result<(), String> {
@@ -238,6 +271,29 @@ pub enum NotReady {
     /// must not be destroyed because Postgres blinked.
     #[error("durable storage unavailable: {0}")]
     StorageUnavailable(String),
+}
+
+impl NotReady {
+    /// Whether reaching this outcome required a Pod object to exist.
+    ///
+    /// This is the predicate the birth budget is armed by, so it is a statement
+    /// about *evidence*, not about likelihood. Three variants are only
+    /// reachable from a stored Pod the bootstrap actually read:
+    /// [`Self::PodIncomplete`] and [`Self::LauncherNotStarted`] are produced by
+    /// flattening one, and [`Self::BirthUnconfirmed`] by resizing one.
+    ///
+    /// The rest are not. [`Self::PodAbsent`] says so outright;
+    /// [`Self::JobNotBound`] is decided before any observation; and the two
+    /// unavailability variants mean the observation did not happen at all. For
+    /// those the caller must ask the Job whether it is queued — an apiserver
+    /// that did not answer is *not* proof of a Kueue queue.
+    #[must_use]
+    pub const fn observed_a_pod(&self) -> bool {
+        matches!(
+            self,
+            Self::PodIncomplete(_) | Self::LauncherNotStarted { .. } | Self::BirthUnconfirmed(_)
+        )
+    }
 }
 
 /// Why bootstrap refused, permanently, for this Pod.
@@ -926,13 +982,40 @@ impl TaskRunResizeBootstrap {
 /// Environment override for the birth-confirmation wait budget, in seconds.
 pub const BIRTH_ADMISSION_BUDGET_ENV: &str = "DJINN_BIRTH_CONFIRMATION_BUDGET_SECS";
 
-/// How long one dispatch waits for its launcher sidecar to be admitted and its
-/// birth downsize confirmed.
+/// How long one dispatch waits, **once its Pod exists**, for the launcher
+/// sidecar to be admitted and its birth downsize confirmed.
 ///
 /// Deliberately shorter than the supervisor's 480s pre-session deadline: an
 /// unconfirmable Pod must surface as a dispatch failure that names *why*, not as
 /// a pre-session timeout that names nothing.
+///
+/// # This clock does not start at dispatch
+///
+/// It starts when there is a launcher to measure. Between `9oga` (Kueue
+/// create-then-admit) and this gate there is a window in which the Job carries
+/// `spec.suspend: true`, the Job controller has created no Pod, and no launcher
+/// exists — 2026-08-01 saw 13 dispatches refused inside that window, against a
+/// `ClusterQueue` holding `admitted=3 pending=5` with a nominal quota of 3 Pods.
+/// The refusals were literally accurate and entirely wrong: the confirmation
+/// they timed out waiting for was not late, it was impossible.
+///
+/// Queue time is bounded by [`QUEUE_ADMISSION_BUDGET_DEFAULT`] instead, which is
+/// a separate clock precisely so no amount of queueing can consume this one.
 pub const BIRTH_ADMISSION_BUDGET_DEFAULT: Duration = Duration::from_secs(180);
+
+/// Environment override for the Kueue queue-wait budget, in seconds.
+pub const QUEUE_ADMISSION_BUDGET_ENV: &str = "DJINN_KUEUE_QUEUE_WAIT_BUDGET_SECS";
+
+/// How long one dispatch waits for Kueue to admit its Job at all.
+///
+/// A queue is not a stall, so this is generous — an hour of quota contention is
+/// a capacity fact, not a broken Pod. It is nevertheless finite: a slot held for
+/// a Workload that will never be admitted is a wedge, and trading a false
+/// refusal for a hang is not an improvement.
+///
+/// It is measured from dispatch and is **never** re-armed, so it also bounds the
+/// pathological case where a Workload is repeatedly admitted and preempted.
+pub const QUEUE_ADMISSION_BUDGET_DEFAULT: Duration = Duration::from_secs(3600);
 
 /// Interval between bootstrap passes while the launcher is still starting.
 const BIRTH_ADMISSION_POLL_INTERVAL: Duration = Duration::from_millis(500);
@@ -959,6 +1042,7 @@ pub struct TaskRunResizeAdmissionBridge {
     gate: Arc<DispatchGate>,
     surface: SurfaceSource,
     budget: Duration,
+    queue_budget: Duration,
     poll_interval: Duration,
 }
 
@@ -972,6 +1056,7 @@ impl TaskRunResizeAdmissionBridge {
             gate: Arc::new(DispatchGate::new()),
             surface: SurfaceSource::Ambient(tokio::sync::OnceCell::new()),
             budget: budget_from_env(),
+            queue_budget: queue_budget_from_env(),
             poll_interval: BIRTH_ADMISSION_POLL_INTERVAL,
         }
     }
@@ -984,15 +1069,27 @@ impl TaskRunResizeAdmissionBridge {
             gate: Arc::new(DispatchGate::new()),
             surface: SurfaceSource::Fixed(surface),
             budget: budget_from_env(),
+            queue_budget: queue_budget_from_env(),
             poll_interval: BIRTH_ADMISSION_POLL_INTERVAL,
         }
     }
 
-    /// Override the wait budget and poll interval.
+    /// Override the birth-confirmation wait budget and poll interval.
+    ///
+    /// Leaves the queue budget alone: a caller that shortens the launcher clock
+    /// to prove a refusal must not shorten the Kueue clock by accident, or the
+    /// refusal it observes may be the wrong one.
     #[must_use]
     pub const fn with_wait(mut self, budget: Duration, poll_interval: Duration) -> Self {
         self.budget = budget;
         self.poll_interval = poll_interval;
+        self
+    }
+
+    /// Override the Kueue queue-wait budget.
+    #[must_use]
+    pub const fn with_queue_wait(mut self, queue_budget: Duration) -> Self {
+        self.queue_budget = queue_budget;
         self
     }
 
@@ -1026,6 +1123,24 @@ fn budget_from_env() -> Duration {
         .map_or(BIRTH_ADMISSION_BUDGET_DEFAULT, Duration::from_secs)
 }
 
+fn queue_budget_from_env() -> Duration {
+    std::env::var(QUEUE_ADMISSION_BUDGET_ENV)
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .filter(|secs| *secs > 0)
+        .map_or(QUEUE_ADMISSION_BUDGET_DEFAULT, Duration::from_secs)
+}
+
+/// Which of the bridge's two wait clocks ran out, carrying the condition that
+/// was still unmet when it did.
+enum BudgetExpiry {
+    /// A Pod existed and its launcher never reached the birth limit. The real
+    /// failure mode, and the one this gate exists for.
+    Birth(String),
+    /// Kueue never admitted the Job, so no Pod ever existed to govern.
+    Queue(String),
+}
+
 fn refused(reason: impl Into<String>, disposition: &PodDisposition) -> ResizeAdmissionRefused {
     ResizeAdmissionRefused {
         reason: reason.into(),
@@ -1057,10 +1172,23 @@ impl TaskRunResizeAdmission for TaskRunResizeAdmissionBridge {
             self.gate.clone(),
         );
 
-        let deadline = tokio::time::Instant::now() + self.budget;
+        // Two clocks, and at most one of them is running at any moment.
+        //
+        // `queue_deadline` bounds the whole wait from dispatch and is never
+        // re-armed, so nothing here can hang. `birth_deadline` is the launcher's
+        // own budget: unarmed until a Pod is known to exist, and *disarmed*
+        // again whenever the Job is observed back in the Kueue queue. That is
+        // what makes queue time structurally unable to consume it — not an
+        // estimate subtracted after the fact, but a clock that is not running.
+        let queue_deadline = tokio::time::Instant::now() + self.queue_budget;
+        let mut birth_deadline: Option<tokio::time::Instant> = None;
         // Assigned on exactly the path that breaks out of the loop, so the
-        // refusal below always names the condition that was still unmet.
-        let stalled: String;
+        // refusal below always names the clock that ran out and the condition
+        // that was still unmet.
+        let expiry: BudgetExpiry;
+        // One line per dispatch, not one per poll: an operator needs to know a
+        // run is queued rather than stalled, and needs it once.
+        let mut queue_wait_logged = false;
         loop {
             match bootstrap
                 .bootstrap(&permit, request.effective_protocol)
@@ -1095,9 +1223,56 @@ impl TaskRunResizeAdmission for TaskRunResizeAdmissionBridge {
                     return Ok(ResizeAdmissionOutcome::LeafAuthority);
                 }
                 BootstrapOutcome::NotReady(reason) => {
-                    if tokio::time::Instant::now() >= deadline {
-                        stalled = reason.to_string();
-                        break;
+                    let now = tokio::time::Instant::now();
+                    if reason.observed_a_pod() {
+                        // There is a launcher to measure, so the launcher's
+                        // clock runs. From here a birth limit that never
+                        // confirms is a genuine stall and is refused as one.
+                        birth_deadline.get_or_insert(now + self.budget);
+                    } else {
+                        match bootstrap
+                            .surface
+                            .observe_job_admission(&permit.task_run_id)
+                            .await
+                        {
+                            // Proven suspended: no Pod exists, none can, and
+                            // the launcher clock is unarmed rather than merely
+                            // paused. A Workload that is admitted, preempted
+                            // and re-queued therefore gets a full budget on
+                            // each admission — which is the only correct
+                            // reading, since its Pod is destroyed and rebuilt
+                            // each time.
+                            JobAdmission::Suspended => {
+                                if !queue_wait_logged {
+                                    queue_wait_logged = true;
+                                    info!(
+                                        task_run_id = %permit.task_run_id,
+                                        queue_budget_secs = self.queue_budget.as_secs(),
+                                        "task_run_resize_bootstrap: Job is suspended in the \
+                                         Kueue admission queue; the launcher birth budget is \
+                                         not running"
+                                    );
+                                }
+                                birth_deadline = None;
+                            }
+                            // An unreadable Job is NOT evidence of a queue. It
+                            // folds with `Admitted` so that an apiserver
+                            // outage cannot buy an unbounded wait.
+                            JobAdmission::Admitted | JobAdmission::Unknown(_) => {
+                                birth_deadline.get_or_insert(now + self.budget);
+                            }
+                        }
+                    }
+                    match birth_deadline {
+                        Some(deadline) if now >= deadline => {
+                            expiry = BudgetExpiry::Birth(reason.to_string());
+                            break;
+                        }
+                        None if now >= queue_deadline => {
+                            expiry = BudgetExpiry::Queue(reason.to_string());
+                            break;
+                        }
+                        _ => {}
                     }
                     tokio::time::sleep(self.poll_interval).await;
                 }
@@ -1110,10 +1285,17 @@ impl TaskRunResizeAdmission for TaskRunResizeAdmissionBridge {
             }
         }
 
-        let message = format!(
-            "launcher birth limit was not confirmed within {}s: {stalled}",
-            self.budget.as_secs()
-        );
+        let message = match &expiry {
+            BudgetExpiry::Birth(stalled) => format!(
+                "launcher birth limit was not confirmed within {}s of the Pod existing: {stalled}",
+                self.budget.as_secs()
+            ),
+            BudgetExpiry::Queue(stalled) => format!(
+                "Kueue did not admit this task-run Job within {}s; the Job is still suspended \
+                 in the admission queue, so no Pod and no launcher have ever existed: {stalled}",
+                self.queue_budget.as_secs()
+            ),
+        };
         let disposition = bootstrap.abandon(&permit, &message).await;
         Err(refused(message, &disposition))
     }
