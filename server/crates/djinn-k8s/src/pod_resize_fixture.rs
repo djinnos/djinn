@@ -33,7 +33,9 @@ use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use serde_json::{Value, json};
 
 use crate::pod_resize::{CpuLimit, PodResizeApi, PodResizeClient, PodResizeError};
-use crate::runtime::{LauncherObservationError, ObservedLauncherSidecar, observe_launcher_sidecar};
+use crate::runtime::{
+    JobAdmission, LauncherObservationError, ObservedLauncherSidecar, observe_launcher_sidecar,
+};
 
 /// Whether the fixture kubelet actuates an accepted resize into
 /// `status.initContainerStatuses`.
@@ -106,6 +108,17 @@ impl ApiFault {
 
 struct ClusterState {
     pod: Option<Pod>,
+    /// Whether the Job that would create [`Self::pod`] is still suspended in the
+    /// Kueue admission queue.
+    ///
+    /// This is not decoration next to `pod: None`. A suspended Job and a Job
+    /// whose Pod is merely slow both present as "no Pod" to an observer of Pods;
+    /// only this field tells them apart, and telling them apart is the entire
+    /// subject of the birth-gate budget.
+    job_suspended: bool,
+    /// The Pod the Job controller will create the moment Kueue admits it.
+    /// `None` once it has been handed over to [`Self::pod`].
+    pod_on_admission: Option<Pod>,
     actuation: Actuation,
     resize_patches: usize,
     deletes: Vec<(String, String)>,
@@ -131,6 +144,8 @@ impl StoredTaskRunPod {
         Self {
             state: Arc::new(Mutex::new(ClusterState {
                 pod: Some(pod),
+                job_suspended: false,
+                pod_on_admission: None,
                 actuation: Actuation::Actuates,
                 resize_patches: 0,
                 deletes: Vec::new(),
@@ -194,6 +209,55 @@ impl StoredTaskRunPod {
                 Some("containerd://launcher")
             )]),
         ))
+    }
+
+    /// Hold this Pod's Job in the Kueue admission queue.
+    ///
+    /// `spec.suspend: true`, so the Job controller has created nothing: the
+    /// cluster serves **no Pod** until [`Self::kueue_admits`] is called. This is
+    /// the production shape of `ClusterQueue djinn-kueue: admitted=3 pending=5`
+    /// — a Job that exists, is accounted for, and has no launcher to govern.
+    #[must_use]
+    pub fn suspended_in_kueue(self) -> Self {
+        let mut state = self.state.lock().expect("cluster");
+        state.job_suspended = true;
+        state.pod_on_admission = state.pod.take();
+        drop(state);
+        self
+    }
+
+    /// Kueue admits the Workload: `spec.suspend` flips to false and the Job
+    /// controller creates the Pod.
+    ///
+    /// A no-op for a fixture that was never suspended, so a test that calls it
+    /// on a healthy cluster still measures the healthy path.
+    pub fn kueue_admits(&self) {
+        let mut state = self.state.lock().expect("cluster");
+        state.job_suspended = false;
+        if let Some(pod) = state.pod_on_admission.take() {
+            state.pod = Some(pod);
+        }
+    }
+
+    /// Kueue admits the Workload but the Job controller creates no Pod.
+    ///
+    /// `spec.suspend` is false and there is still nothing to observe. The window
+    /// is real and normally milliseconds long; a run stuck in it is a genuine
+    /// stall, and it must keep the launcher's short leash rather than inherit
+    /// the queue's generous one.
+    pub fn kueue_admits_without_creating_the_pod(&self) {
+        self.state.lock().expect("cluster").job_suspended = false;
+    }
+
+    /// What an observer of the Job would read, exactly as
+    /// `TaskRunPodResizeSurface::observe_job_admission` reads it.
+    #[must_use]
+    pub fn job_admission(&self) -> JobAdmission {
+        if self.state.lock().expect("cluster").job_suspended {
+            JobAdmission::Suspended
+        } else {
+            JobAdmission::Admitted
+        }
     }
 
     /// Model a node that accepts the resize request and never actuates it.
