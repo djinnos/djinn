@@ -41,6 +41,7 @@ RECONCILE=server/src/task_run_resize_reconcile.rs
 CUTOVER=server/src/authority_cutover.rs
 CUTOVER_BIN=server/src/bin/authority_cutover.rs
 ROLLOUT=server/src/task_run_resize_rollout.rs
+IMAGE_RECONCILE=server/crates/djinn-image-controller/src/controller.rs
 MANIFEST=server/Cargo.toml
 
 cleanup() {
@@ -250,6 +251,20 @@ impl ResizeRollout {
         self.prove_drained().await?;
         self.clear_preflight(LauncherAuthorityProtocol::LeafV1).await?;
         self.flip_authority_mode(plan.expected_epoch, LauncherAuthorityProtocol::LeafV1).await
+    }
+}
+EOF
+
+    mkdir -p -- "$SCRATCH/$(dirname "$IMAGE_RECONCILE")"
+    cat >"$SCRATCH/$IMAGE_RECONCILE" <<'EOF'
+// Image-reconcile fixture: the skip decision reads the artifact the row points
+// at and the protocol just rendered, never images.config_hash.
+impl ImageController {
+    pub async fn enqueue_image(&self, image_id: String) -> Result<()> {
+        match catalog_reconcile_decision(&image, &new_hash, build_context.launcher_protocol) {
+            CatalogDecision::UpToDate => return Ok(()),
+            CatalogDecision::Build(reason) => info!(%reason, "must be rebuilt"),
+        }
     }
 }
 EOF
@@ -622,6 +637,39 @@ mv "$SCRATCH/.tmp" "$SCRATCH/server/src/admin.rs"
 expect_fail_naming \
     "an operator clear with no production caller fails, naming the symbol" \
     "BuildLeaseRepository::clear_for_operator has ZERO production callers"
+
+# 27. The image reconcile must decide from the artifact and the protocol it just
+#     rendered. Reverting it to the `images.config_hash` predicate is what
+#     wedged the VPS cutover on 2026-07-31: configured `resize-v2`, serving
+#     `leaf-v1`, taking the skip arm on every tick with no build Job ever
+#     created. The declaration reaching the artifact was proven; the controller
+#     deciding to build at all was not.
+fixture
+cat >"$SCRATCH/$IMAGE_RECONCILE" <<'EOF'
+impl ImageController {
+    pub async fn enqueue_image(&self, image_id: String) -> Result<()> {
+        if image.config_hash.as_deref() == Some(new_hash.as_str())
+            && image.status == ImageStatus::READY
+        {
+            return Ok(());
+        }
+    }
+}
+EOF
+expect_fail_naming \
+    "an image reconcile that skips on config_hash fails the anchor" \
+    "catalog_reconcile_decision"
+
+# 28. …and restating the configured protocol at the call site instead of using
+#     the one that was actually rendered fails too: a second restatement of the
+#     protocol is exactly the drift the rendered BuildContext exists to prevent.
+fixture
+sed 's/build_context\.launcher_protocol/self.config.declared_launcher_protocol/' \
+    "$SCRATCH/$IMAGE_RECONCILE" >"$SCRATCH/.tmp"
+mv "$SCRATCH/.tmp" "$SCRATCH/$IMAGE_RECONCILE"
+expect_fail_naming \
+    "restating the protocol at the reconcile call site fails the anchor" \
+    "catalog_reconcile_decision"
 
 printf '\n%s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] || exit 1
