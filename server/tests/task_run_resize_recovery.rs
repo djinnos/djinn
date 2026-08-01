@@ -1006,7 +1006,7 @@ async fn a_lifted_row_whose_pod_vanished_is_stranded_even_while_the_run_reads_li
 ///
 /// NAMED FAILING MUTATION 3: delete
 /// `IF NEW.state IS DISTINCT FROM OLD.state THEN NEW.state_changed_at := now();`
-/// from migration 171's trigger. The permit row below is deliberately aged two
+/// from migration 170's trigger. The permit row below is deliberately aged two
 /// hours BEFORE the lift, so without the stamp the age never returns to zero
 /// and the precondition assertion fails. That is the shape in which this fix
 /// would otherwise ship inert: every real build's permit row is far older than

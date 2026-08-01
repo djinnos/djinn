@@ -45,7 +45,7 @@
 //! All three are established without asking the worker anything. The task-run
 //! status is written by the coordinator's own Job/session reconciliation, Pod
 //! absence is read from the apiserver, and `build_pod_permits.state_changed_at`
-//! is stamped by a database trigger on every state change (migration 171).
+//! is stamped by a database trigger on every state change (migration 170).
 //! None of them can be withheld by a process that has already died.
 //!
 //! # The premise that was false: a live worker TRANSITS the drop states
