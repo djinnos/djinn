@@ -28,6 +28,8 @@ mod existing;
 mod filter_matrices;
 #[path = "task_tests/generation.rs"]
 mod generation;
+#[path = "task_tests/session_reconciliation.rs"]
+mod session_reconciliation;
 #[path = "task_tests/state_machine.rs"]
 mod state_machine;
 #[path = "task_tests/sync_terminal_state.rs"]
