@@ -85,7 +85,9 @@ fn expected_safety_tuple(name: &str) -> Option<(bool, bool, bool, bool)> {
         | "memory_recall_trace"
         | "memory_retrieval_outcomes_report"
         | "agent_metrics"
-        | "pr_review_context" => Some(read_only),
+        | "pr_review_context"
+        | "evidence_plan"
+        | "evidence_exec" => Some(read_only),
         "code_search" | "github_search" | "code_graph" => Some(open_world_read_only),
         "task_update"
         | "epic_update"

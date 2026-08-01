@@ -26,6 +26,44 @@ pub fn tool_memory_retrieval_outcomes_report() -> RmcpTool {
     )
 }
 
+/// Capture the one-shot investigation plan for an authenticated evidence spike.
+pub fn tool_evidence_plan() -> RmcpTool {
+    RmcpTool::new(
+        "evidence_plan".to_string(),
+        "Capture the one-shot evidence investigation plan for this authenticated spike session. Supply a nonempty set of uniquely identified checks using exactly one closed method: code, graph, or command. Task/session identity and provenance are server-derived and cannot be supplied by callers.".to_string(),
+        object!({
+            "type": "object", "additionalProperties": false, "required": ["checks"],
+            "properties": {"checks": {"type": "array", "minItems": 1, "items": {
+                "type": "object", "additionalProperties": false,
+                "required": ["check_id", "question", "method"],
+                "properties": {
+                    "check_id": {"type": "string", "minLength": 1, "description": "Nonempty unique check identifier within this plan."},
+                    "question": {"type": "string", "minLength": 1, "description": "Nonempty investigation question."},
+                    "method": {"type": "string", "enum": ["code", "graph", "command"], "description": "Closed investigation method."}
+                }
+            }}}
+        }),
+    )
+}
+
+/// Execute a frozen command-method check in the server read-only sandbox.
+pub fn tool_evidence_exec() -> RmcpTool {
+    RmcpTool::new(
+        "evidence_exec".to_string(),
+        "Run one frozen command-method evidence check in the server read-only sandbox. Provide a planned check ID and nonempty argv; cwd is an optional relative in-clone directory and timeout_ms is bounded to 1 through 30000. This is argv execution only: command strings, stdin, executable selection, identity, provenance, and sandbox-policy overrides are not accepted.".to_string(),
+        object!({
+            "type": "object", "additionalProperties": false,
+            "required": ["check_id", "argv"],
+            "properties": {
+                "check_id": {"type": "string", "minLength": 1, "description": "Nonempty ID of a frozen command-method evidence check."},
+                "argv": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}, "description": "Argument vector for the constrained read-only executor; no command-string shell is available."},
+                "cwd": {"type": "string", "minLength": 1, "description": "Optional relative directory inside the authenticated clone."},
+                "timeout_ms": {"type": "integer", "minimum": 1, "maximum": 30000, "description": "Optional bounded execution timeout in milliseconds (1-30000)."}
+            }
+        }),
+    )
+}
+
 /// Inspect persisted memory retrieval traces for the current project.
 ///
 /// The two request forms deliberately live in one tool: list calls stay small

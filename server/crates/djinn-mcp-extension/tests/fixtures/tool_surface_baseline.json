@@ -789,6 +789,102 @@
   },
   {
     "concurrent_safe": true,
+    "description": "Run one frozen command-method evidence check in the server read-only sandbox. Provide a planned check ID and nonempty argv; cwd is an optional relative in-clone directory and timeout_ms is bounded to 1 through 30000. This is argv execution only: command strings, stdin, executable selection, identity, provenance, and sandbox-policy overrides are not accepted.",
+    "destructive": false,
+    "idempotent": true,
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "argv": {
+          "description": "Argument vector for the constrained read-only executor; no command-string shell is available.",
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array"
+        },
+        "check_id": {
+          "description": "Nonempty ID of a frozen command-method evidence check.",
+          "minLength": 1,
+          "type": "string"
+        },
+        "cwd": {
+          "description": "Optional relative directory inside the authenticated clone.",
+          "minLength": 1,
+          "type": "string"
+        },
+        "timeout_ms": {
+          "description": "Optional bounded execution timeout in milliseconds (1-30000).",
+          "maximum": 30000,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "check_id",
+        "argv"
+      ],
+      "type": "object"
+    },
+    "name": "evidence_exec",
+    "openWorld": false,
+    "readOnly": true
+  },
+  {
+    "concurrent_safe": true,
+    "description": "Capture the one-shot evidence investigation plan for this authenticated spike session. Supply a nonempty set of uniquely identified checks using exactly one closed method: code, graph, or command. Task/session identity and provenance are server-derived and cannot be supplied by callers.",
+    "destructive": false,
+    "idempotent": true,
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "checks": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "check_id": {
+                "description": "Nonempty unique check identifier within this plan.",
+                "minLength": 1,
+                "type": "string"
+              },
+              "method": {
+                "description": "Closed investigation method.",
+                "enum": [
+                  "code",
+                  "graph",
+                  "command"
+                ],
+                "type": "string"
+              },
+              "question": {
+                "description": "Nonempty investigation question.",
+                "minLength": 1,
+                "type": "string"
+              }
+            },
+            "required": [
+              "check_id",
+              "question",
+              "method"
+            ],
+            "type": "object"
+          },
+          "minItems": 1,
+          "type": "array"
+        }
+      },
+      "required": [
+        "checks"
+      ],
+      "type": "object"
+    },
+    "name": "evidence_plan",
+    "openWorld": false,
+    "readOnly": true
+  },
+  {
+    "concurrent_safe": true,
     "description": "Return the committed proposal MDX block vocabulary as a lean list of (type, tag) pairs sourced from proposal_block_catalog.json.",
     "destructive": false,
     "idempotent": true,

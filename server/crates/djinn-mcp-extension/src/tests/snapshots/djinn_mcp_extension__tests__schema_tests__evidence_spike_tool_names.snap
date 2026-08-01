@@ -31,5 +31,7 @@ expression: names
   "memory_orphans",
   "proposal_show",
   "proposal_debate_list",
+  "evidence_plan",
+  "evidence_exec",
   "submit_work"
 ]

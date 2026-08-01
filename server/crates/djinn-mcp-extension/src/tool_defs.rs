@@ -959,8 +959,8 @@ pub fn tool_schemas_judge() -> Vec<serde_json::Value> {
     tool_values
 }
 
-/// Tool schemas for an evidence-spike session: read-only investigation tools
-/// plus the `submit_work` finalize path for evidence findings handoff.
+/// Tool schemas for an evidence-spike session: read-only investigation tools,
+/// constrained evidence plan/execution, and the `submit_work` finalizer.
 ///
 /// Evidence-spike tasks are created by the Judge demand-evidence tool
 /// (`proposal_refinement_demand_evidence` in epic `6tjy`) and carry the
@@ -1061,6 +1061,18 @@ pub fn tool_schemas_evidence_spike() -> Vec<serde_json::Value> {
     ));
     tool_values.push(serialize_tool(
         shared_schemas::tool_proposal_debate_list(),
+        read_only(),
+    ));
+
+    // ── Grounded evidence controls ──────────────────────────────────────
+    // Closed caller-owned schemas; authenticated identity/provenance and the
+    // frozen-plan/read-only-sandbox boundaries remain server-owned.
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_evidence_plan(),
+        read_only(),
+    ));
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_evidence_exec(),
         read_only(),
     ));
 
