@@ -178,8 +178,10 @@ impl SessionRepository {
             "INSERT INTO sessions
                 (id, project_id, task_id, model_id, agent_type, status,
                  created_by_user_id, task_run_id,
-                 input_price_per_million_snapshot, output_price_per_million_snapshot,
-                 cache_read_price_per_million_snapshot, cache_write_price_per_million_snapshot,
+                 input_price_per_million_snapshot,
+                 output_price_per_million_snapshot,
+                 cache_read_price_per_million_snapshot,
+                 cache_write_price_per_million_snapshot,
                  cost_basis)
              VALUES ($1, $2, $3, $4, $5, 'running', $6, $7, $8, $9, $10, $11, $12)",
             id,
@@ -198,17 +200,27 @@ impl SessionRepository {
         .execute(&mut *tx)
         .await?;
         if let Some(run_id) = params.session.task_run_id {
-            sqlx::query!("UPDATE task_runs SET status = 'running', ended_at = NULL WHERE id = $1 AND status = 'starting'", run_id)
-                .execute(&mut *tx).await?;
+            sqlx::query!(
+                "UPDATE task_runs SET status = 'running', ended_at = NULL
+                 WHERE id = $1 AND status = 'starting'",
+                run_id,
+            )
+            .execute(&mut *tx)
+            .await?;
         }
         let session = sqlx::query_as!(
             SessionRecord,
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
-            status AS "status!", tokens_in, tokens_out, cache_read_tokens, cache_write_tokens,
-            task_run_id, title, parked_reason AS "parked_reason?", cost_usd,
-            input_price_per_million_snapshot, output_price_per_million_snapshot,
-            cache_read_price_per_million_snapshot, cache_write_price_per_million_snapshot,
-            cost_basis, billing_source FROM sessions WHERE id = $1"#,
+                status AS "status!", tokens_in, tokens_out,
+                cache_read_tokens, cache_write_tokens, task_run_id, title,
+                parked_reason AS "parked_reason?",
+                cost_usd, input_price_per_million_snapshot,
+                output_price_per_million_snapshot,
+                cache_read_price_per_million_snapshot,
+                cache_write_price_per_million_snapshot,
+                cost_basis,
+                billing_source
+             FROM sessions WHERE id = $1"#,
             id
         )
         .fetch_one(&mut *tx)
