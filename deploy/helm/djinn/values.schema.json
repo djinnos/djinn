@@ -29,6 +29,22 @@
         "maxIdleHours": { "type": "integer", "minimum": 0 }
       }
     },
+    "scipIndex": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enabled",
+        "intervalSeconds",
+        "quiescenceSeconds",
+        "claimWaitSeconds"
+      ],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "intervalSeconds": { "type": "integer", "minimum": 1 },
+        "quiescenceSeconds": { "type": "integer", "minimum": 0 },
+        "claimWaitSeconds": { "type": "integer", "minimum": 0 }
+      }
+    },
     "kueue": {
       "type": "object",
       "additionalProperties": false,
