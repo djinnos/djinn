@@ -174,6 +174,8 @@ impl SessionRepository {
             });
         }
 
+        // Keep this SQL literal byte-identical to the unrestricted `create`
+        // query above so both paths share the committed SQLx offline metadata.
         sqlx::query!(
             "INSERT INTO sessions
                 (id, project_id, task_id, model_id, agent_type, status,
