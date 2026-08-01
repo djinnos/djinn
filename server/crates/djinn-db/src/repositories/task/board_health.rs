@@ -160,7 +160,7 @@ pub(super) async fn liveness_outcomes_section(pool: &sqlx::PgPool) -> serde_json
                 "outcome_reason": row.get::<Option<String>, _>("outcome_reason"),
                 "created_at":     row.get::<String, _>("created_at"),
                 "task_id":        row.get::<Option<String>, _>("task_id"),
-                "session_id":     row.get::<String, _>("session_id"),
+                "session_id":     row.get::<Option<String>, _>("session_id"),
             })
         })
         .collect();
@@ -202,7 +202,7 @@ pub(super) async fn protocol_violations_section(pool: &sqlx::PgPool) -> serde_js
                 "outcome_reason": row.get::<Option<String>, _>("outcome_reason"),
                 "created_at":     row.get::<String, _>("created_at"),
                 "task_id":        row.get::<Option<String>, _>("task_id"),
-                "session_id":     row.get::<String, _>("session_id"),
+                "session_id":     row.get::<Option<String>, _>("session_id"),
                 "task_short_id":  row.get::<Option<String>, _>("task_short_id"),
                 "task_title":     row.get::<Option<String>, _>("task_title"),
                 "task_status":    row.get::<Option<String>, _>("task_status"),
