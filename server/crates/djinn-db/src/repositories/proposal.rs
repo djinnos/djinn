@@ -362,6 +362,30 @@ pub struct EvidenceLifecycleMetadata {
     /// exact handoff row without repeating fuzzy lookup.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub findings_metadata_json: Option<String>,
+    /// Closed result from an authoritative V1 completion. Missing keeps rows
+    /// written before typed completions backward-readable.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub derived_outcome: Option<EvidenceDerivedOutcome>,
+}
+
+/// A typed terminal completion is successful evidence even when unresolved.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EvidenceDerivedOutcome {
+    Resolved,
+    Partial,
+    Unresolved,
+}
+
+impl EvidenceDerivedOutcome {
+    fn parse_stored(value: &str) -> Option<Self> {
+        match value {
+            "resolved" => Some(Self::Resolved),
+            "partial" => Some(Self::Partial),
+            "unresolved" => Some(Self::Unresolved),
+            _ => None,
+        }
+    }
 }
 
 impl EvidenceLifecycleMetadata {
@@ -383,6 +407,7 @@ impl EvidenceLifecycleMetadata {
             failure_reason: None,
             findings_debate_entry_id: None,
             findings_metadata_json: None,
+            derived_outcome: None,
         }
     }
 
@@ -402,6 +427,7 @@ impl EvidenceLifecycleMetadata {
             against_revision_seq,
             None,
             None,
+            None,
         )
     }
 
@@ -415,6 +441,7 @@ impl EvidenceLifecycleMetadata {
         against_revision_seq: i32,
         findings_debate_entry_id: Option<&str>,
         findings_metadata_json: Option<&str>,
+        derived_outcome: Option<EvidenceDerivedOutcome>,
     ) -> Self {
         Self {
             phase: "received".to_owned(),
@@ -426,6 +453,7 @@ impl EvidenceLifecycleMetadata {
             failure_reason: None,
             findings_debate_entry_id: findings_debate_entry_id.map(str::to_owned),
             findings_metadata_json: findings_metadata_json.map(str::to_owned),
+            derived_outcome,
         }
     }
 
@@ -448,6 +476,7 @@ impl EvidenceLifecycleMetadata {
             failure_reason: Some(failure_reason.to_owned()),
             findings_debate_entry_id: None,
             findings_metadata_json: None,
+            derived_outcome: None,
         }
     }
 
@@ -514,7 +543,9 @@ pub struct LinkedEvidenceSpikeRecoveryCandidate {
 pub enum TerminalLinkedEvidenceSpikeOutcome {
     /// The spike completed successfully and valid current findings were found;
     /// a `refinement_evidence_received` lifecycle event was written.
-    EvidenceReceived,
+    EvidenceReceived {
+        derived_outcome: Option<EvidenceDerivedOutcome>,
+    },
     /// The spike terminated unsuccessfully, or completed without valid current
     /// findings; a `refinement_evidence_failed` lifecycle event was written.
     EvidenceFailed { reason: String },
@@ -1851,6 +1882,7 @@ impl ProposalRepository {
             findings.against_revision_seq,
             Some(&findings.debate_entry_id),
             Some(&findings.findings_metadata_json),
+            None,
         );
         let value = meta.to_event_metadata();
         self.record_refinement_lifecycle(
@@ -2883,7 +2915,7 @@ impl ProposalRepository {
         } else {
             None
         };
-        let (event_kind, metadata, outcome) = if let Some((entry_id, findings_metadata)) = findings
+        let (event_kind, metadata, outcome) = if let Some((entry_id, findings_metadata, derived_outcome)) = findings
         {
             (
                 evidence_lifecycle_kind::EVIDENCE_RECEIVED,
@@ -2895,9 +2927,10 @@ impl ProposalRepository {
                     against_revision_seq,
                     Some(&entry_id),
                     Some(&findings_metadata),
+                    derived_outcome,
                 )
                 .to_event_metadata(),
-                TerminalLinkedEvidenceSpikeOutcome::EvidenceReceived,
+                TerminalLinkedEvidenceSpikeOutcome::EvidenceReceived { derived_outcome },
             )
         } else {
             let reason = if success {
@@ -2940,21 +2973,24 @@ impl ProposalRepository {
         spike_task_id: &str,
         round: i32,
         against_revision_seq: i32,
-    ) -> Result<Option<(String, String)>> {
+    ) -> Result<Option<(String, String, Option<EvidenceDerivedOutcome>)>> {
         let has_plan = sqlx::query_scalar::<_, bool>(
             "SELECT EXISTS(SELECT 1 FROM evidence_plans WHERE spike_task_id = $1)",
         )
         .bind(spike_task_id)
         .fetch_one(&mut **tx)
         .await?;
-        if has_plan {
-            let committed_v1 = sqlx::query_scalar::<_, bool>(
-                "SELECT EXISTS(SELECT 1 FROM evidence_plans p JOIN evidence_finalized_projections f ON f.plan_id = p.id WHERE p.spike_task_id = $1 AND f.version = 1 AND f.payload->>'schema_version' = '1' AND f.payload->>'plan_id' = p.id AND jsonb_typeof(f.payload->'checks') = 'array' AND jsonb_typeof(f.payload->'findings') = 'array' AND jsonb_typeof(f.payload->'gaps') = 'array')")
-                .bind(spike_task_id).fetch_one(&mut **tx).await?;
-            if !committed_v1 {
+        let derived_outcome = if has_plan {
+            let outcome = sqlx::query_scalar::<_, String>(
+                "SELECT f.payload->>'outcome' FROM evidence_plans p JOIN evidence_finalized_projections f ON f.plan_id = p.id WHERE p.spike_task_id = $1 AND f.version = 1 AND f.payload->>'schema_version' = '1' AND f.payload->>'plan_id' = p.id AND jsonb_typeof(f.payload->'checks') = 'array' AND jsonb_typeof(f.payload->'findings') = 'array' AND jsonb_typeof(f.payload->'gaps') = 'array' ORDER BY f.created_at DESC, f.id DESC LIMIT 1")
+                .bind(spike_task_id).fetch_optional(&mut **tx).await?;
+            let Some(outcome) = outcome.and_then(|value| EvidenceDerivedOutcome::parse_stored(&value)) else {
                 return Ok(None);
-            }
-        }
+            };
+            Some(outcome)
+        } else {
+            None
+        };
         let row = sqlx::query("SELECT id, body_metadata::text AS body_metadata FROM proposal_debate_trail WHERE proposal_id = $1 AND kind = 'evidence_findings' AND source_task_id = $2 AND round = $3 AND against_revision_seq = $4 ORDER BY created_at DESC, updated_at DESC, id DESC LIMIT 1")
             .bind(proposal_id).bind(spike_task_id).bind(round).bind(against_revision_seq).fetch_optional(&mut **tx).await?;
         let Some(row) = row else { return Ok(None) };
@@ -2968,7 +3004,7 @@ impl ProposalRepository {
         if !valid {
             return Ok(None);
         }
-        Ok(Some((row.try_get("id")?, metadata)))
+        Ok(Some((row.try_get("id")?, metadata, derived_outcome)))
     }
 
     /// Freeze or un-freeze a build. Frozen builds stay `building` but their
@@ -8045,7 +8081,9 @@ mod tests {
             .unwrap();
         assert_eq!(
             outcome,
-            TerminalLinkedEvidenceSpikeOutcome::EvidenceReceived
+            TerminalLinkedEvidenceSpikeOutcome::EvidenceReceived {
+                derived_outcome: None
+            }
         );
 
         let repeated = repo

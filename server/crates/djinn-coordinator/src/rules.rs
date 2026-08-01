@@ -237,10 +237,11 @@ impl CoordinatorActor {
             )
             .await
         {
-            Ok(TerminalLinkedEvidenceSpikeOutcome::EvidenceReceived) => {
+            Ok(TerminalLinkedEvidenceSpikeOutcome::EvidenceReceived { derived_outcome }) => {
                 tracing::info!(
                     proposal_id = %proposal.id,
                     spike_task_id = %task.id,
+                    derived_outcome = ?derived_outcome,
                     outcome = "EvidenceReceived",
                     "CoordinatorActor: recorded linked evidence spike receipt"
                 );
