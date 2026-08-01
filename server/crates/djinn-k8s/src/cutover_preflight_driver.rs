@@ -5,15 +5,12 @@
 //!
 //! [`crate::cutover_preflight::run`] judges an input it does not assemble. The
 //! assembly — a live `helm template` render, the Rust-rendered task-run Job, the
-//! signed inventory resolved from the deployment's environment, the durable
-//! drain fence read with the production query — used to live entirely inside
-//! `bin/cutover-preflight.rs`, which meant a *second* caller could only get a
-//! verdict by rebuilding it.
+//! signed inventory resolved from the deployment's environment, and the durable
+//! drain fence read with the production query — lives here so the permanent
+//! deploy gate has one testable assembly boundary.
 //!
-//! There is now a second caller: `djinn-server`'s authority-cutover driver runs
-//! this preflight and refuses to flip the authority mode when it blocks. A
-//! preflight the flip assembles differently from the one the deploy gate
-//! assembles is not the same preflight, so both go through [`RenderedCutoverPreflight`].
+//! The retired one-shot authority-cutover driver also consumed this boundary.
+//! The permanent deploy gate continues to use [`RenderedCutoverPreflight`].
 //!
 //! # What a caller must supply, and what it must not
 //!
