@@ -41,6 +41,7 @@ RECONCILE=server/src/task_run_resize_reconcile.rs
 CUTOVER=server/src/authority_cutover.rs
 CUTOVER_BIN=server/src/bin/authority_cutover.rs
 ROLLOUT=server/src/task_run_resize_rollout.rs
+IMAGE_RECONCILE=server/crates/djinn-image-controller/src/controller.rs
 MANIFEST=server/Cargo.toml
 
 cleanup() {
@@ -82,6 +83,21 @@ fn agent_context() {
 pub async fn become_leader(&self) {
     crate::task_run_resize_reconcile::spawn(self.clone());
 }
+// The build-lease maintenance tick. The reclaimer must be CONSTRUCTED and
+// DRIVEN, and the deadline sweep must actually run: a reaper that is built and
+// never ticked is the exact shape this guard exists to catch.
+fn initialize_graph_warmer(&self) {
+    let lease_reclaimer = warmer.workload_inventory().map(|inventory| {
+        Arc::new(BuildLeaseReclaimer::new(repo, inventory))
+    });
+    let cap_refresh_lease = self.inner.build_lease.clone();
+    tokio::spawn(async move {
+        loop {
+            cap_refresh_lease.expire_deadlines().await;
+            let report = reclaimer.reclaim().await;
+        }
+    });
+}
 EOF
 }
 
@@ -115,6 +131,21 @@ fn agent_context() {
 }
 pub async fn become_leader(&self) {
     crate::task_run_resize_reconcile::spawn(self.clone());
+}
+// The build-lease maintenance tick. The reclaimer must be CONSTRUCTED and
+// DRIVEN, and the deadline sweep must actually run: a reaper that is built and
+// never ticked is the exact shape this guard exists to catch.
+fn initialize_graph_warmer(&self) {
+    let lease_reclaimer = warmer.workload_inventory().map(|inventory| {
+        Arc::new(BuildLeaseReclaimer::new(repo, inventory))
+    });
+    let cap_refresh_lease = self.inner.build_lease.clone();
+    tokio::spawn(async move {
+        loop {
+            cap_refresh_lease.expire_deadlines().await;
+            let report = reclaimer.reclaim().await;
+        }
+    });
 }
 EOF
 }
@@ -224,11 +255,65 @@ impl ResizeRollout {
 }
 EOF
 
+    mkdir -p -- "$SCRATCH/$(dirname "$IMAGE_RECONCILE")"
+    cat >"$SCRATCH/$IMAGE_RECONCILE" <<'EOF'
+// Image-reconcile fixture: the skip decision reads the artifact the row points
+// at and the protocol just rendered, never images.config_hash.
+impl ImageController {
+    pub async fn enqueue_image(&self, image_id: String) -> Result<()> {
+        match catalog_reconcile_decision(&image, &new_hash, build_context.launcher_protocol) {
+            CatalogDecision::UpToDate => return Ok(()),
+            CatalogDecision::Build(reason) => info!(%reason, "must be rebuilt"),
+        }
+    }
+}
+EOF
+
     mkdir -p -- "$SCRATCH/$(dirname "$MANIFEST")"
     cat >"$SCRATCH/$MANIFEST" <<'EOF'
 [[bin]]
 name = "authority-cutover"
 path = "src/bin/authority_cutover.rs"
+EOF
+}
+
+# The build-lease reclamation sweep and its operator surface.
+#
+# Both were merged in a state this guard is FOR: the reclaimer could not see the
+# populations it existed to retire, and the operator remedy `preflight.sh`
+# promises ("stale rows must be explicitly cleared") existed in no CLI at all,
+# so production was unwedged twice on 2026-07-30 by a hand-written SQL UPDATE.
+write_build_lease() {
+    mkdir -p -- "$SCRATCH/server/crates/djinn-coordinator/src"
+    cat >"$SCRATCH/server/crates/djinn-coordinator/src/build_lease_reclaim.rs" <<'EOF'
+// Reclaimer fixture: the sweep must read the NONTERMINAL population, so a
+// `queued` row -- the one state with no other reaper -- is reachable at all.
+use djinn_db::BuildLeaseRepository;
+
+impl BuildLeaseReclaimer {
+    pub async fn reclaim(&self) -> BuildLeaseReclaimReport {
+        let rows = self.repository.list_nonterminal_with_settlement(secs).await;
+    }
+}
+EOF
+    mkdir -p -- "$SCRATCH/server/src"
+    cat >"$SCRATCH/server/src/admin.rs" <<'EOF'
+// Operator surface fixture.
+use djinn_db::BuildLeaseRepository;
+
+pub async fn run_admin_command(db: &Database, command: AdminCommand) {
+    match command {
+        AdminCommand::BuildLease { action } => {
+            run_build_lease_action(&BuildLeaseRepository::new(db.clone()), action).await
+        }
+    }
+}
+async fn run_build_lease_action(repository: &BuildLeaseRepository, action: BuildLeaseAction) {
+    match action {
+        BuildLeaseAction::List => repository.list_nonterminal().await,
+        BuildLeaseAction::Clear { leases } => repository.clear_for_operator(&keys).await,
+    }
+}
 EOF
 }
 
@@ -239,6 +324,7 @@ fixture() {
     write_seam
     write_reconcile
     write_cutover
+    write_build_lease
 }
 
 run_guard() {
@@ -501,6 +587,89 @@ mv "$SCRATCH/.tmp" "$SCRATCH/$ROLLOUT"
 expect_fail_naming \
     "dropping the reverse preflight call fails the anchor" \
     "clear_preflight"
+
+# 22. The build-lease reclaimer is CONSTRUCTED but never driven. This is the
+#     shape the campaign keeps finding: a reaper wired and never spawned, or
+#     spawned and never ticked. It looks identical to a working one until a
+#     stranded lease holds the cap for an hour.
+fixture
+grep -v 'reclaimer.reclaim().await' "$SCRATCH/$STATE" >"$SCRATCH/.tmp"
+mv "$SCRATCH/.tmp" "$SCRATCH/$STATE"
+expect_fail_naming \
+    "a reclaimer that is built but never driven fails the anchor" \
+    "reclaimer"
+
+# 23. The periodic deadline sweep is dropped. `expire_deadlines` had ZERO
+#     production callers until 2026-07-30, which is why a `queued` build lease
+#     was immortal whenever no other lease happened to be draining.
+fixture
+grep -v 'cap_refresh_lease.expire_deadlines().await' "$SCRATCH/$STATE" >"$SCRATCH/.tmp"
+mv "$SCRATCH/.tmp" "$SCRATCH/$STATE"
+expect_fail_naming \
+    "dropping the periodic deadline sweep fails, naming the symbol" \
+    "BuildLeaseService::expire_deadlines has ZERO production callers"
+
+# 24. The sweep narrows back to the occupying population, so a `queued` row is
+#     invisible again and no reaper anywhere can retire it.
+fixture
+grep -v 'list_nonterminal_with_settlement' \
+    "$SCRATCH/server/crates/djinn-coordinator/src/build_lease_reclaim.rs" >"$SCRATCH/.tmp"
+mv "$SCRATCH/.tmp" "$SCRATCH/server/crates/djinn-coordinator/src/build_lease_reclaim.rs"
+expect_fail_naming \
+    "a sweep that stops reading the nonterminal population fails, naming the symbol" \
+    "BuildLeaseRepository::list_nonterminal_with_settlement has ZERO production callers"
+
+# 25. The operator escape hatch is defined but no longer dispatched from
+#     `run_admin_command`, so `preflight.sh` again names a remedy that does not
+#     exist and SQL is the only way out.
+fixture
+grep -v 'AdminCommand::BuildLease' "$SCRATCH/server/src/admin.rs" >"$SCRATCH/.tmp"
+mv "$SCRATCH/.tmp" "$SCRATCH/server/src/admin.rs"
+expect_fail_naming \
+    "an operator subcommand nothing dispatches fails the anchor" \
+    "AdminCommand::BuildLease"
+
+# 26. …and the clear itself, which is the only thing that retires a row a proof
+#     cannot reach.
+fixture
+grep -v 'clear_for_operator' "$SCRATCH/server/src/admin.rs" >"$SCRATCH/.tmp"
+mv "$SCRATCH/.tmp" "$SCRATCH/server/src/admin.rs"
+expect_fail_naming \
+    "an operator clear with no production caller fails, naming the symbol" \
+    "BuildLeaseRepository::clear_for_operator has ZERO production callers"
+
+# 27. The image reconcile must decide from the artifact and the protocol it just
+#     rendered. Reverting it to the `images.config_hash` predicate is what
+#     wedged the VPS cutover on 2026-07-31: configured `resize-v2`, serving
+#     `leaf-v1`, taking the skip arm on every tick with no build Job ever
+#     created. The declaration reaching the artifact was proven; the controller
+#     deciding to build at all was not.
+fixture
+cat >"$SCRATCH/$IMAGE_RECONCILE" <<'EOF'
+impl ImageController {
+    pub async fn enqueue_image(&self, image_id: String) -> Result<()> {
+        if image.config_hash.as_deref() == Some(new_hash.as_str())
+            && image.status == ImageStatus::READY
+        {
+            return Ok(());
+        }
+    }
+}
+EOF
+expect_fail_naming \
+    "an image reconcile that skips on config_hash fails the anchor" \
+    "catalog_reconcile_decision"
+
+# 28. …and restating the configured protocol at the call site instead of using
+#     the one that was actually rendered fails too: a second restatement of the
+#     protocol is exactly the drift the rendered BuildContext exists to prevent.
+fixture
+sed 's/build_context\.launcher_protocol/self.config.declared_launcher_protocol/' \
+    "$SCRATCH/$IMAGE_RECONCILE" >"$SCRATCH/.tmp"
+mv "$SCRATCH/.tmp" "$SCRATCH/$IMAGE_RECONCILE"
+expect_fail_naming \
+    "restating the protocol at the reconcile call site fails the anchor" \
+    "catalog_reconcile_decision"
 
 printf '\n%s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] || exit 1

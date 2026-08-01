@@ -673,6 +673,12 @@ impl AppState {
             builder_image = %config.builder_image,
             agent_worker_image = %config.agent_worker_image,
             namespace = %config.namespace,
+            // The declaration every image this deployment builds will carry.
+            // Logged because an operator flipping the launcher-authority
+            // cutover otherwise has no way to confirm the binary saw the
+            // env var: an unhonoured flip and an honoured one that skips the
+            // rebuild look identical from outside the process.
+            declared_launcher_protocol = %config.declared_launcher_protocol,
             "image_controller: config loaded"
         );
         let controller = Arc::new(ImageController::new(
@@ -1017,6 +1023,17 @@ impl AppState {
                             // change is an incident control, and the whole
                             // point of it is that the board unwedges now.
                             cap_refresh_lease.refresh_epoch_cap().await;
+                            // Sweep queue and launch deadlines. Until 2026-07-30
+                            // this had NO production caller at all: the only
+                            // thing that expired a queued lease was
+                            // `expire_queued_tx` inside `grant_next`, so a
+                            // `queued` row survived indefinitely whenever no
+                            // OTHER lease was being drained — which is exactly
+                            // the state a paused board is in. It also moves a
+                            // `granted`/`launching` row past its launch deadline
+                            // to `suspect`, where the reclaimer's object proof
+                            // can reach it.
+                            cap_refresh_lease.expire_deadlines().await;
                             recovery_warmer.reconcile_durable_warm_leases().await;
                             let Some(reclaimer) = lease_reclaimer.as_ref() else {
                                 continue;
@@ -1028,15 +1045,16 @@ impl AppState {
                                 || !report.blockers.is_empty()
                             {
                                 tracing::warn!(
-                                    occupying = report.occupying,
+                                    examined = report.examined,
                                     absent = report.absent,
                                     ownerless_dispatch = report.ownerless_dispatch,
+                                    finished_object = report.finished_object,
                                     reclaimed = report.reclaimed,
                                     fenced = report.fenced,
                                     failures = report.failure_count,
                                     named_failures = ?report.failures,
                                     blockers = ?report.blockers,
-                                    "build_lease: reclamation pass over occupying leases"
+                                    "build_lease: reclamation pass over nonterminal leases"
                                 );
                             }
                         }

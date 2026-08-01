@@ -11,6 +11,23 @@ use crate::{Database, Error as DbError, Result as DbResult};
 
 const OCCUPYING: [&str; 5] = ["granted", "launching", "bound", "active", "suspect"];
 
+/// Every state that is not `terminal`.
+///
+/// Wider than [`OCCUPYING`] by exactly one state, `queued`, and the difference
+/// is load-bearing. A `queued` row holds no capacity, so nothing that reasons
+/// about occupancy has any cause to look at it — which is how a queued row
+/// became the one population with NO reaper at all. `deploy/kueue/preflight.sh`
+/// fences the authority cutover on `state <> 'terminal'`, so such a row blocks
+/// the cutover indefinitely while every occupancy-shaped sweep reports clean.
+const NONTERMINAL: [&str; 6] = [
+    "queued",
+    "granted",
+    "launching",
+    "bound",
+    "active",
+    "suspect",
+];
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BuildLeaseConsumerKind {
@@ -103,6 +120,16 @@ pub enum BuildLeaseTerminalReason {
     Released,
     DeadlineExpired,
     ReclaimedAbsent,
+    /// The reclaimer retired this lease because the Kubernetes object it
+    /// committed to still EXISTS but has reached a terminal condition
+    /// (`Complete`/`Failed`). Distinct from [`Self::ReclaimedAbsent`] so an
+    /// operator reading the ledger can tell "its Job was garbage-collected"
+    /// apart from "its Job finished and its holder never released".
+    ReclaimedFinished,
+    /// An operator retired this lease explicitly, via
+    /// `djinn-server build-lease clear`. Distinct from every automatic reason
+    /// so a human intervention is never mistaken for the reclaimer working.
+    OperatorCleared,
 }
 impl BuildLeaseTerminalReason {
     #[must_use]
@@ -113,6 +140,8 @@ impl BuildLeaseTerminalReason {
             Self::Released => "released",
             Self::DeadlineExpired => "deadline_expired",
             Self::ReclaimedAbsent => "reclaimed_absent",
+            Self::ReclaimedFinished => "reclaimed_finished",
+            Self::OperatorCleared => "operator_cleared",
         }
     }
     /// Parse a stored reason. `None` covers both a NULL column and a value
@@ -125,6 +154,8 @@ impl BuildLeaseTerminalReason {
             "released" => Some(Self::Released),
             "deadline_expired" => Some(Self::DeadlineExpired),
             "reclaimed_absent" => Some(Self::ReclaimedAbsent),
+            "reclaimed_finished" => Some(Self::ReclaimedFinished),
+            "operator_cleared" => Some(Self::OperatorCleared),
             _ => None,
         }
     }
@@ -226,6 +257,11 @@ pub struct ReclaimAbsentBuildLeaseInput {
     pub observed_fencing_token: Option<i64>,
     pub observed_bound_pod_uid: Option<String>,
     pub observed_updated_at: String,
+    /// Why this lease is being retired, recorded on the row. The caller owns
+    /// the proof, so the caller names it: an operator triaging a stale ledger
+    /// reads this column, and "the Job was collected" and "the Job finished
+    /// and nobody released" call for different follow-up.
+    pub terminal_reason: BuildLeaseTerminalReason,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -735,13 +771,18 @@ impl BuildLeaseRepository {
             .collect()
     }
 
-    /// Every currently occupying lease, each paired with whether it has been
+    /// Every currently nonterminal lease, each paired with whether it has been
     /// untouched for at least `settle_seconds`.
     ///
     /// Read-only and lock-free: reclamation gathers evidence from this listing
     /// and then fences its write on the row's `updated_at`, so a lease that
     /// moves between the listing and the write is rejected rather than raced.
-    pub async fn list_occupying_with_settlement(
+    ///
+    /// Scoped to [`NONTERMINAL`] rather than [`OCCUPYING`] on purpose: the
+    /// reclaimer is the ledger's only self-healing path, and the fence that
+    /// blocks the authority cutover counts every nonterminal row. A sweep that
+    /// could not even SEE a `queued` row could never retire one.
+    pub async fn list_nonterminal_with_settlement(
         &self,
         settle_seconds: i64,
     ) -> DbResult<Vec<(BuildLeaseRow, bool)>> {
@@ -755,7 +796,7 @@ impl BuildLeaseRepository {
             "SELECT {COLS}, (updated_at <= now() - make_interval(secs => $2)) AS settled \
              FROM build_leases WHERE state = ANY($1) ORDER BY enqueue_sequence"
         ))
-        .bind(OCCUPYING.as_slice())
+        .bind(NONTERMINAL.as_slice())
         .bind(settle_seconds as f64)
         .fetch_all(self.db.pool())
         .await?;
@@ -788,9 +829,14 @@ impl BuildLeaseRepository {
         &self,
         input: &ReclaimAbsentBuildLeaseInput,
     ) -> DbResult<ReclaimAbsentBuildLeaseOutcome> {
-        if !OCCUPYING.contains(&state_str(input.observed_state)) {
+        if !NONTERMINAL.contains(&state_str(input.observed_state)) {
             return Err(DbError::InvalidData(
-                "reclamation evidence must describe an occupying build lease state".into(),
+                "reclamation evidence must describe a nonterminal build lease state".into(),
+            ));
+        }
+        if input.terminal_reason == BuildLeaseTerminalReason::OperatorCleared {
+            return Err(DbError::InvalidData(
+                "operator_cleared is not a reclamation proof; use clear_for_operator".into(),
             ));
         }
         self.db.ensure_initialized().await?;
@@ -826,13 +872,70 @@ impl BuildLeaseRepository {
         ))
         .bind(input.key.consumer_kind.as_str())
         .bind(&input.key.consumer_id)
-        .bind(BuildLeaseTerminalReason::ReclaimedAbsent.as_str())
+        .bind(input.terminal_reason.as_str())
         .fetch_one(&mut *tx)
         .await?;
         tx.commit().await?;
         Ok(ReclaimAbsentBuildLeaseOutcome::Reclaimed(
             reclaimed.try_into()?,
         ))
+    }
+
+    /// Every nonterminal lease, oldest first. The operator read behind
+    /// `djinn-server build-lease list`.
+    pub async fn list_nonterminal(&self) -> DbResult<Vec<BuildLeaseRow>> {
+        self.db.ensure_initialized().await?;
+        sqlx::query_as::<_, DbRow>(&format!(
+            "SELECT {COLS} FROM build_leases WHERE state = ANY($1) ORDER BY enqueue_sequence"
+        ))
+        .bind(NONTERMINAL.as_slice())
+        .fetch_all(self.db.pool())
+        .await?
+        .into_iter()
+        .map(TryInto::try_into)
+        .collect()
+    }
+
+    /// Retire nonterminal leases on an operator's explicit instruction.
+    ///
+    /// This is the sanctioned answer to `preflight.sh`'s "stale occupying rows
+    /// must be explicitly cleared", which until now named a remedy that did not
+    /// exist in any CLI, MCP tool, or admin route — leaving a hand-written SQL
+    /// `UPDATE` against production as the only way out.
+    ///
+    /// Deliberately UNFENCED on Kubernetes evidence, and deliberately NOT
+    /// reachable from any automatic path: it takes the same advisory lock as
+    /// every other mutation, refuses rows that are already terminal, and stamps
+    /// [`BuildLeaseTerminalReason::OperatorCleared`] so the ledger records that
+    /// a human, not a proof, ended these leases. `keys` is explicit — there is
+    /// no "clear everything" spelling here, because the caller that wants one
+    /// can list first and pass what it read.
+    pub async fn clear_for_operator(&self, keys: &[BuildLeaseKey]) -> DbResult<Vec<BuildLeaseRow>> {
+        self.db.ensure_initialized().await?;
+        let mut tx = self.db.pool().begin().await?;
+        lock(&mut tx).await?;
+        let mut cleared = Vec::new();
+        for key in keys {
+            let Some(row) = fetch(&mut tx, key, true).await? else {
+                continue;
+            };
+            if row.state == BuildLeaseState::Terminal {
+                continue;
+            }
+            let updated = sqlx::query_as::<_, DbRow>(&format!(
+                "UPDATE build_leases SET state='terminal',terminal_reason=$3,\
+                 terminal_at=now(),updated_at=now() WHERE consumer_kind=$1 AND consumer_id=$2 \
+                 RETURNING {COLS}"
+            ))
+            .bind(key.consumer_kind.as_str())
+            .bind(&key.consumer_id)
+            .bind(BuildLeaseTerminalReason::OperatorCleared.as_str())
+            .fetch_one(&mut *tx)
+            .await?;
+            cleared.push(updated.try_into()?);
+        }
+        tx.commit().await?;
+        Ok(cleared)
     }
 
     async fn terminal(

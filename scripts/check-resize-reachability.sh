@@ -73,6 +73,10 @@ BuildPodPermitRepository::capture_resize_identity|\.capture_resize_identity\(|Bu
 BuildPodPermitRepository::list_nonterminal_resize|\.list_nonterminal_resize\(|BuildPodPermitRepository
 task_run_resize_reconcile::spawn|task_run_resize_reconcile::spawn\(|become_leader
 ResizeRollout::production|ResizeRollout::production\(|ResizeRollout
+BuildLeaseRepository::list_nonterminal_with_settlement|\.list_nonterminal_with_settlement\(|BuildLeaseRepository
+BuildLeaseRepository::list_nonterminal|\.list_nonterminal\(|BuildLeaseRepository
+BuildLeaseRepository::clear_for_operator|\.clear_for_operator\(|BuildLeaseRepository
+BuildLeaseService::expire_deadlines|\.expire_deadlines\(\)|build_lease
 "
 
 # file|extended-regex|why this anchor exists
@@ -90,6 +94,11 @@ server/src/authority_cutover.rs|rollout\.activate\(&plan\)|the driver must run t
 server/src/authority_cutover.rs|rollout\.rollback\(&plan\)|the driver must run the reverse sequence through ResizeRollout, not through set_mode
 server/src/task_run_resize_rollout.rs|self\.clear_preflight\(LauncherAuthorityProtocol::ResizeV2\)|the forward cutover must run the real preflight before the flip
 server/src/task_run_resize_rollout.rs|self\.clear_preflight\(LauncherAuthorityProtocol::LeafV1\)|the reverse cutover must run the real preflight before the flip
+server/src/server/state/mod.rs|BuildLeaseReclaimer::new\(|the build-lease reclaimer must be constructed at the composition root
+server/src/server/state/mod.rs|reclaimer\.reclaim\(\)\.await|the reclaimer must be DRIVEN on the periodic tick, not merely constructed; a startup-only reaper never sees a worker that dies at minute 40
+server/src/server/state/mod.rs|cap_refresh_lease\.expire_deadlines\(\)\.await|queue and launch deadlines must be swept periodically -- expire_deadlines had ZERO production callers, which is why a queued build lease was immortal whenever no other lease was being drained
+server/src/admin.rs|AdminCommand::BuildLease|the operator surface preflight.sh promises must be dispatched from run_admin_command, or its refusal message names a remedy that does not exist
+server/crates/djinn-image-controller/src/controller.rs|catalog_reconcile_decision\(&image, &new_hash, build_context\.launcher_protocol\)|the reconcile must decide from the artifact the row points at and the protocol just rendered; a skip keyed on images.config_hash wedged the VPS cutover on 2026-07-31 — configured resize-v2, serving leaf-v1, skipping every tick
 "
 
 status=0

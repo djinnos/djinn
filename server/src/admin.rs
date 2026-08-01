@@ -34,7 +34,8 @@ use std::sync::Arc;
 
 use djinn_coordinator::invocation_lease_control::{ControlError, InvocationLeaseControl};
 use djinn_db::{
-    Database, InvocationLeaseAuthorityRepository, InvocationLeaseAuthorityRow, InvocationLeaseMode,
+    BuildLeaseConsumerKind, BuildLeaseKey, BuildLeaseRepository, BuildLeaseRow, Database,
+    InvocationLeaseAuthorityRepository, InvocationLeaseAuthorityRow, InvocationLeaseMode,
 };
 
 /// Top-level operator admin commands.
@@ -44,6 +45,42 @@ pub enum AdminCommand {
     Epoch {
         #[command(subcommand)]
         action: EpochAction,
+    },
+    /// Build-lease ledger operator commands.
+    BuildLease {
+        #[command(subcommand)]
+        action: BuildLeaseAction,
+    },
+}
+
+/// Build-lease ledger operator actions.
+///
+/// `deploy/kueue/preflight.sh` refuses the authority cutover (exit 30) while
+/// any nonterminal `build_leases` row exists, and its refusal message says
+/// stale rows "must be explicitly cleared". Until this subtree existed nothing
+/// could clear them — no CLI, no MCP tool, no admin route — so the only way
+/// past that gate was a hand-written SQL `UPDATE` against production, which
+/// happened twice on 2026-07-30.
+///
+/// This is the last resort, not the first. The reclaimer retires an ownerless
+/// lease on its own within one settle window; `clear` exists for the case where
+/// an operator has looked and decided, and it stamps `operator_cleared` so the
+/// ledger never confuses a human decision with a proof.
+#[derive(clap::Subcommand, Debug)]
+pub enum BuildLeaseAction {
+    /// List every nonterminal row — exactly the population the cutover
+    /// preflight counts.
+    List,
+    /// Retire named nonterminal rows.
+    ///
+    /// Each `--lease` is `<consumer_kind>:<consumer_id>`. Naming them
+    /// individually is deliberate: an operator who wants everything runs
+    /// `list` first and passes what they read, so a clear is always against a
+    /// population they actually saw.
+    Clear {
+        /// Repeatable. `task_invocation:019fba8a-…`.
+        #[arg(long = "lease", required = true)]
+        leases: Vec<String>,
     },
 }
 
@@ -107,7 +144,97 @@ pub async fn run_admin_command(db: &Database, command: AdminCommand) -> Result<S
     let control = InvocationLeaseControl::new(repo);
     match command {
         AdminCommand::Epoch { action } => run_epoch_action(&control, action).await,
+        AdminCommand::BuildLease { action } => {
+            run_build_lease_action(&BuildLeaseRepository::new(db.clone()), action).await
+        }
     }
+}
+
+/// Parse `<consumer_kind>:<consumer_id>` into a ledger key.
+///
+/// The kind is validated against the closed enum rather than passed through, so
+/// a typo is refused before it can silently match nothing and be reported as a
+/// successful clear of zero rows.
+fn parse_lease_key(raw: &str) -> Result<BuildLeaseKey, String> {
+    let (kind, id) = raw
+        .split_once(':')
+        .ok_or_else(|| format!("`{raw}` is not `<consumer_kind>:<consumer_id>`"))?;
+    let consumer_kind = match kind {
+        "task_invocation" => BuildLeaseConsumerKind::TaskInvocation,
+        "graph_warm" => BuildLeaseConsumerKind::GraphWarm,
+        "task_dispatch" => BuildLeaseConsumerKind::TaskDispatch,
+        other => {
+            return Err(format!(
+                "unknown consumer kind `{other}`; expected one of \
+                 task_invocation, graph_warm, task_dispatch"
+            ));
+        }
+    };
+    if id.is_empty() {
+        return Err(format!("`{raw}` has an empty consumer id"));
+    }
+    Ok(BuildLeaseKey {
+        consumer_kind,
+        consumer_id: id.to_owned(),
+    })
+}
+
+async fn run_build_lease_action(
+    repository: &BuildLeaseRepository,
+    action: BuildLeaseAction,
+) -> Result<String, String> {
+    match action {
+        BuildLeaseAction::List => {
+            let rows = repository
+                .list_nonterminal()
+                .await
+                .map_err(|e| e.to_string())?;
+            Ok(render_leases("nonterminal build leases", &rows))
+        }
+        BuildLeaseAction::Clear { leases } => {
+            let keys = leases
+                .iter()
+                .map(|raw| parse_lease_key(raw))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| format!("clear: {e}"))?;
+            let cleared = repository
+                .clear_for_operator(&keys)
+                .await
+                .map_err(|e| format!("clear: {e}"))?;
+            // A row that was already terminal, or that does not exist, is
+            // skipped rather than failed — but it is NOT reported as cleared.
+            // An operator who asked for four and is told two must go look at
+            // the other two instead of believing the ledger is drained.
+            let mut out = format!(
+                "clear: {} of {} requested lease(s) retired\n",
+                cleared.len(),
+                keys.len()
+            );
+            out.push_str(&render_leases("retired", &cleared));
+            Ok(out)
+        }
+    }
+}
+
+fn render_leases(heading: &str, rows: &[BuildLeaseRow]) -> String {
+    if rows.is_empty() {
+        return format!("{heading}: <none>");
+    }
+    let mut out = format!("{heading}: {}\n", rows.len());
+    for row in rows {
+        let _ = writeln!(
+            out,
+            "{}:{}  state={:?} identity={} granted_at={} updated_at={}",
+            row.key.consumer_kind.as_str(),
+            row.key.consumer_id,
+            row.state,
+            row.immutable_identity,
+            row.granted_at.as_deref().unwrap_or("<never>"),
+            row.updated_at,
+        );
+    }
+    out.truncate(out.trim_end().len());
+    out
 }
 
 async fn run_epoch_action(
@@ -288,6 +415,118 @@ mod tests {
                  rendered: {rendered}"
             );
         }
+    }
+
+    /// **An operator can clear a stuck build lease without writing SQL.**
+    ///
+    /// `deploy/kueue/preflight.sh` refuses the authority cutover (exit 30) while
+    /// any nonterminal `build_leases` row exists, and its message says stale
+    /// rows "must be explicitly cleared" — a remedy that, until this subtree,
+    /// existed in no CLI, MCP tool, or admin route. Production was unwedged
+    /// twice on 2026-07-30 by a hand-written `UPDATE`.
+    ///
+    /// Driven through `run_build_lease_action`, the exact path `main` takes,
+    /// against a real Postgres ledger whose row is created by the production
+    /// repository. The mutation this fails on is the obvious one: a `clear`
+    /// whose body does nothing leaves the row nonterminal and the final `list`
+    /// non-empty.
+    #[tokio::test]
+    async fn an_operator_can_list_and_clear_a_stuck_build_lease() {
+        use djinn_db::{BuildLeaseState, QueueBuildLeaseInput, QueueBuildLeaseResult};
+
+        let db = Database::open_in_memory().expect("test database");
+        let repository = BuildLeaseRepository::new(db);
+        let key = BuildLeaseKey {
+            consumer_kind: BuildLeaseConsumerKind::TaskInvocation,
+            consumer_id: "019fba8a-a25e-77c3-a38f-b74943e79893".to_owned(),
+        };
+
+        // The row is minted by the production queue path, not hand-written.
+        let queued = repository
+            .queue(&QueueBuildLeaseInput {
+                key: key.clone(),
+                immutable_identity: "task:t:019fba9a-5992-7083-9beb-641f878200e1:inv".to_owned(),
+                queue_deadline: None,
+                launch_deadline: None,
+                weight: 1,
+            })
+            .await
+            .expect("queue a lease");
+        assert!(matches!(queued, QueueBuildLeaseResult::Queued { .. }));
+
+        // `list` shows it, and shows enough to act on.
+        let rendered = run_build_lease_action(&repository, BuildLeaseAction::List)
+            .await
+            .expect("list");
+        assert!(rendered.contains(&key.consumer_id), "{rendered}");
+        assert!(rendered.contains("task_invocation"), "{rendered}");
+
+        // A typo is refused rather than reported as a successful clear of zero.
+        let error = run_build_lease_action(
+            &repository,
+            BuildLeaseAction::Clear {
+                leases: vec!["task_invocatoin:whatever".to_owned()],
+            },
+        )
+        .await
+        .expect_err("an unknown consumer kind must be refused");
+        assert!(error.contains("unknown consumer kind"), "{error}");
+        assert_eq!(
+            repository
+                .get(&key)
+                .await
+                .expect("read")
+                .expect("row")
+                .state,
+            BuildLeaseState::Queued,
+            "a refused clear must not mutate the ledger"
+        );
+
+        // And the real thing.
+        let rendered = run_build_lease_action(
+            &repository,
+            BuildLeaseAction::Clear {
+                leases: vec![format!("task_invocation:{}", key.consumer_id)],
+            },
+        )
+        .await
+        .expect("clear");
+        assert!(rendered.contains("1 of 1"), "{rendered}");
+
+        let row = repository.get(&key).await.expect("read").expect("row");
+        assert_eq!(
+            row.state,
+            BuildLeaseState::Terminal,
+            "the operator command must actually retire the row — this is the \
+             whole point, and the SQL UPDATE it replaces"
+        );
+        assert_eq!(
+            row.terminal_reason.as_deref(),
+            Some("operator_cleared"),
+            "a human intervention must never be recorded as the reclaimer \
+             having proven something"
+        );
+
+        // The cutover fence now reads clean.
+        let rendered = run_build_lease_action(&repository, BuildLeaseAction::List)
+            .await
+            .expect("list");
+        assert!(
+            rendered.contains("<none>"),
+            "preflight.sh counts exactly this population: {rendered}"
+        );
+
+        // Clearing again is idempotent and reports honestly: nothing was
+        // retired, because there was nothing left to retire.
+        let rendered = run_build_lease_action(
+            &repository,
+            BuildLeaseAction::Clear {
+                leases: vec![format!("task_invocation:{}", key.consumer_id)],
+            },
+        )
+        .await
+        .expect("repeat clear");
+        assert!(rendered.contains("0 of 1"), "{rendered}");
     }
 
     /// An operator error is a non-zero exit with an actionable message, not a

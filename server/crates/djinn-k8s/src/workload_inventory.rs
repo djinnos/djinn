@@ -38,6 +38,14 @@ pub struct WorkloadRecord {
     pub name: String,
     pub uid: Option<String>,
     pub labels: BTreeMap<String, String>,
+    /// The object exists but has reached a terminal condition: nothing will run
+    /// under it again. See [`job_reached_terminal_condition`].
+    ///
+    /// This is the distinction between "the object is here" and "its holder is
+    /// alive", and conflating them is what stranded build leases in production:
+    /// a task-run Job stays listed for its whole `ttlSecondsAfterFinished`
+    /// (3600s) after it completes, so a reader that treats mere presence as
+    /// liveness sees a live owner for an hour after the owner died.
     pub terminal: bool,
     pub images: Vec<String>,
     pub commands: Vec<String>,
@@ -156,12 +164,52 @@ fn containers(spec: Option<&k8s_openapi::api::core::v1::PodSpec>) -> (Vec<String
     }
     (images, commands)
 }
+/// Condition Kubernetes sets, exactly once and permanently, on a Job whose
+/// completions have all succeeded.
+pub const JOB_CONDITION_COMPLETE: &str = "Complete";
+/// Condition Kubernetes sets, exactly once and permanently, on a Job that
+/// exhausted its backoff limit or active deadline.
+pub const JOB_CONDITION_FAILED: &str = "Failed";
+
+/// Whether a Job has reached a TERMINAL condition — nothing will run under it
+/// again, ever.
+///
+/// # Why the conditions and not the `succeeded`/`failed` counters
+///
+/// The counters are a per-Pod tally, and a tally is not a lifecycle. A nonzero
+/// `succeeded` on a Job with `completions: N` means one Pod finished while the
+/// rest are still running; a nonzero `failed` on a Job with a nonzero
+/// `backoffLimit` means a Pod died and a replacement is about to be created.
+/// Either read would call a Job terminal while its work is live — and the only
+/// consumer of this flag retires the build lease that work is holding, so a
+/// false positive releases capacity out from under a running compile.
+///
+/// The conditions carry no such ambiguity: the Job controller sets `Complete`
+/// or `Failed` only when it has stopped managing Pods for this Job.
+///
+/// `SuccessCriteriaMet` and `FailureTarget` are deliberately NOT terminal.
+/// They are the intermediate conditions the controller sets first, while it is
+/// still tearing down Pods; production's own trace for a finished task-run Job
+/// reads `Suspended → SuccessCriteriaMet → Complete`, so treating
+/// `SuccessCriteriaMet` as terminal would fire during teardown rather than
+/// after it.
+#[must_use]
+pub fn job_reached_terminal_condition(
+    status: Option<&k8s_openapi::api::batch::v1::JobStatus>,
+) -> bool {
+    status.is_some_and(|status| {
+        status.conditions.iter().flatten().any(|condition| {
+            matches!(
+                condition.type_.as_str(),
+                JOB_CONDITION_COMPLETE | JOB_CONDITION_FAILED
+            ) && condition.status.eq_ignore_ascii_case("True")
+        })
+    })
+}
+
 fn job_record(j: Job) -> Option<WorkloadRecord> {
     let (images, commands) = containers(j.spec.as_ref().and_then(|s| s.template.spec.as_ref()));
-    let terminal = j
-        .status
-        .as_ref()
-        .is_some_and(|s| s.succeeded.unwrap_or(0) > 0 || s.failed.unwrap_or(0) > 0);
+    let terminal = job_reached_terminal_condition(j.status.as_ref());
     Some(WorkloadRecord {
         kind: WorkloadObjectKind::Job,
         name: j.metadata.name?,
@@ -580,6 +628,149 @@ impl WorkloadWatch for KubeWorkloadWatch {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod job_terminal_condition_tests {
+    use super::*;
+    use k8s_openapi::api::batch::v1::{JobCondition, JobStatus};
+
+    fn condition(kind: &str, status: &str) -> JobCondition {
+        JobCondition {
+            type_: kind.to_owned(),
+            status: status.to_owned(),
+            ..Default::default()
+        }
+    }
+
+    fn status(conditions: Vec<JobCondition>) -> JobStatus {
+        JobStatus {
+            conditions: Some(conditions),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_job_with_no_status_is_not_terminal() {
+        assert!(!job_reached_terminal_condition(None));
+    }
+
+    #[test]
+    fn a_running_job_is_not_terminal() {
+        let running = JobStatus {
+            active: Some(1),
+            ..Default::default()
+        };
+        assert!(!job_reached_terminal_condition(Some(&running)));
+    }
+
+    #[test]
+    fn a_complete_job_is_terminal() {
+        assert!(job_reached_terminal_condition(Some(&status(vec![
+            condition("Complete", "True")
+        ]))));
+    }
+
+    #[test]
+    fn a_failed_job_is_terminal() {
+        assert!(job_reached_terminal_condition(Some(&status(vec![
+            condition("Failed", "True")
+        ]))));
+    }
+
+    /// A condition that is present but FALSE is not that condition. A reader
+    /// that checked only for the type would call every suspended Job complete.
+    #[test]
+    fn a_complete_condition_that_is_false_is_not_terminal() {
+        assert!(!job_reached_terminal_condition(Some(&status(vec![
+            condition("Complete", "False")
+        ]))));
+    }
+
+    /// The exact production trace: `Suspended → SuccessCriteriaMet → Complete`.
+    ///
+    /// `SuccessCriteriaMet` is the INTERMEDIATE condition the Job controller
+    /// sets while it is still tearing Pods down. Treating it as terminal would
+    /// retire the build lease of a Job whose Pod is still being killed, which
+    /// is releasing capacity out from under running work.
+    #[test]
+    fn success_criteria_met_alone_is_not_terminal() {
+        assert!(!job_reached_terminal_condition(Some(&status(vec![
+            condition("Suspended", "False"),
+            condition("SuccessCriteriaMet", "True"),
+        ]))));
+        assert!(
+            job_reached_terminal_condition(Some(&status(vec![
+                condition("Suspended", "False"),
+                condition("SuccessCriteriaMet", "True"),
+                condition("Complete", "True"),
+            ]))),
+            "the same Job one condition later IS terminal"
+        );
+    }
+
+    /// `FailureTarget` is `SuccessCriteriaMet`'s mirror on the failure path and
+    /// is equally intermediate.
+    #[test]
+    fn failure_target_alone_is_not_terminal() {
+        assert!(!job_reached_terminal_condition(Some(&status(vec![
+            condition("FailureTarget", "True")
+        ]))));
+    }
+
+    /// The mutation guard for the derivation itself.
+    ///
+    /// This is precisely the shape the previous counter-based reading got
+    /// wrong: a Job with `completions: 3` reports `succeeded: 1` while two Pods
+    /// are still running, and one with a nonzero `backoffLimit` reports
+    /// `failed: 1` while a replacement Pod is being created. Reverting
+    /// `job_reached_terminal_condition` to `succeeded > 0 || failed > 0` makes
+    /// both of these read as terminal and fails here.
+    #[test]
+    fn the_pod_counters_alone_never_make_a_job_terminal() {
+        let partial_success = JobStatus {
+            succeeded: Some(1),
+            active: Some(2),
+            ..Default::default()
+        };
+        assert!(
+            !job_reached_terminal_condition(Some(&partial_success)),
+            "one succeeded Pod out of several is not a finished Job"
+        );
+
+        let retrying = JobStatus {
+            failed: Some(1),
+            active: Some(1),
+            ..Default::default()
+        };
+        assert!(
+            !job_reached_terminal_condition(Some(&retrying)),
+            "a failed Pod inside the backoff limit is not a finished Job"
+        );
+    }
+
+    /// The whole point of the flag, stated as the production fact: a Job that
+    /// has completed is still LISTED for its `ttlSecondsAfterFinished`, and the
+    /// record must say so.
+    #[test]
+    fn a_completed_job_record_is_listed_and_flagged_terminal() {
+        let job = Job {
+            metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
+                name: Some("djinn-taskrun-abc".to_owned()),
+                uid: Some("uid-1".to_owned()),
+                ..Default::default()
+            },
+            spec: None,
+            status: Some(status(vec![condition("Complete", "True")])),
+        };
+        let record = job_record(job).expect("a named Job yields a record");
+        assert_eq!(record.name, "djinn-taskrun-abc");
+        assert!(
+            record.terminal,
+            "a Complete Job is still listed; the record is what carries the fact \
+             that its holder is gone"
+        );
     }
 }
 
