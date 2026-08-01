@@ -107,7 +107,8 @@ expect_gate 'armed launcher with the task-run RuntimeClass dispatches' \
 
 expect_gate 'disarmed launcher dispatches without the RuntimeClass' \
   pass 'DISPATCHABLE' \
-  "$CHART_DIR" --set cgroupLauncher.mode=disabled --set cgroupWritable.taskRuns.enabled=false
+  "$CHART_DIR" --set cgroupLauncher.mode=disabled --set cgroupWritable.taskRuns.enabled=false \
+  --set imagePipeline.controller.launcherAuthorityProtocol=leaf-v1
 
 # The regression that took production down: a stock `helm install` of the chart
 # has to be able to dispatch, with no operator overrides at all.
@@ -135,7 +136,12 @@ for index, line in enumerate(lines):
                 patched += 1
                 break
         break
-assert patched == 1, 'cgroupLauncher.mode was not found in values.yaml'
+for index, line in enumerate(lines):
+    if line.strip() == 'launcherAuthorityProtocol: "resize-v2"':
+        lines[index] = line.replace('"resize-v2"', '"leaf-v1"')
+        patched += 1
+        break
+assert patched == 2, 'coherent launcher mode/protocol defaults were not found in values.yaml'
 path.write_text(''.join(lines), encoding='utf-8')
 PY
 
