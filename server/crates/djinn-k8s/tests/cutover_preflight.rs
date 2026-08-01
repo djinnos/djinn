@@ -1521,13 +1521,15 @@ fn rust_code(source: &str) -> String {
         .join("\n")
 }
 
-/// **AC1.** `run` is the production entry point, and there is exactly one
-/// assembly that feeds the deploy binary.
+/// **AC1.** `run` is the production entry point, and there is exactly ONE
+/// assembly that feeds it.
 ///
 /// The assembly used to live inside `bin/cutover-preflight.rs`. It now lives in
-/// `cutover_preflight_driver` so the assembly is independently testable. The
-/// guard is in three parts: the module calls `run`, the binary reaches the
-/// module, and the binary holds no second copy.
+/// `cutover_preflight_driver`, because `djinn-server`'s authority-cutover driver
+/// runs this same preflight before it flips the authority mode, and a preflight
+/// the flip assembles differently from the one the deploy gate assembles is not
+/// the same preflight. So the guard is in three parts: the module calls `run`,
+/// the binary reaches the module, and neither holds a second copy.
 #[test]
 fn the_deploy_driver_calls_the_production_run() {
     let module = rust_code(

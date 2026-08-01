@@ -8,8 +8,9 @@
 //! # What it assembles
 //!
 //! The assembly itself lives in [`djinn_k8s::cutover_preflight_driver`], not in
-//! this file, so its assembly is independently testable and this deploy binary
-//! remains a thin caller. What that module gathers:
+//! this file, because `djinn-server`'s authority-cutover driver runs the same
+//! preflight before it flips the authority mode and must not assemble a
+//! *different* one. What that module gathers:
 //!
 //! * **The Helm surface** — the `pods/resize` Role rule, the task-run
 //!   ServiceAccount and every RoleBinding — comes from a LIVE `helm template`

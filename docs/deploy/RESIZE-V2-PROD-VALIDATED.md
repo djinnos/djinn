@@ -232,6 +232,8 @@ Deployment after the fixes:
 | Field | Value |
 | --- | --- |
 | Image | `ghcr.io/djinnos/djinn-server:0.7.35` |
+| Image digest | `sha256:df180f82a3822283918bd5f81657858180702e6abff8f619308ea05a80dc1c3c` |
+| Release commit | `ba69b19b8e5be32e98c49ff164f012e23e2ea445` |
 | Server pod | `djinn-server-57ddd4c479-kbb6r`, ready, 0 restarts |
 | Migration | `170 build pod permit state changed at` — applied, `success=t` |
 | Trigger | `build_pod_permits_immutable_trigger`, `tgenabled=O` |
@@ -297,6 +299,6 @@ the namespace owner collision. Its result does not override the direct
 production observations recorded above and is not a condition of this sign-off.
 
 **Operator decision (2026-08-01): approved for retirement.** The one-shot
-`authority-cutover` wrapper, binary, composition and rollout modules, runbook,
-and dedicated rollout tests may be removed. Permanent fail-closed validation, durable
+`authority-cutover` wrapper, binary, composition module, and its dedicated test
+may be removed. Permanent fail-closed validation, the durable admin runbook, durable
 launcher-authority administration, and resize-v2 runtime reconciliation remain.

@@ -51,6 +51,24 @@
 //! * Every CPU comparison goes through `pod_resize::CpuLimit`, i.e. parsed
 //!   millicores.
 //!
+//! # The two flip tests go through the production driver (task `li91`)
+//!
+//! `omp4` branched before `eeky` (#2858) and `zpen` (#2859) merged, so it
+//! composed the mode flip out of `LauncherAuthorityModeRepository::set_mode`
+//! and could not call the cutover preflight at all. That is not a cosmetic
+//! difference. `set_mode`'s own fence refuses a seeded nonterminal row anyway —
+//! with a BARE CENSUS — so a test that flips through `set_mode` passes whether
+//! or not `ResizeRollout`, the production rollout driver, is wired to anything.
+//! `ResizeRollout::prove_drained` refuses the same row NAMING it
+//! (`task_run_id`, `state`, `pod_uid`), so asserting on the named rows is what
+//! makes deleting the driver detectable.
+//!
+//! Both flips are therefore driven by [`ResizeRollout`], and both are GATED on
+//! `deploy/preflight/cutover-preflight.sh` — the deploy-time gate itself, run
+//! as a subprocess over a live `helm template` render, not a second copy of any
+//! of its six checks. `the_cutover_preflight_gates_the_flip_and_one_defect_class_refuses_it`
+//! mutates that render by exactly one line and requires the flip to be refused.
+//!
 //! # Confirmation site
 //!
 //! Confirmation for the native sidecar comes ONLY from
@@ -77,28 +95,41 @@
 //! scripts/kind/setup-resize-matrix-cluster.sh selfcheck
 //! ```
 //!
+//! The preflight-gated proof additionally needs `helm` and `python3`; it needs
+//! no cluster, so it can be run on its own.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use async_trait::async_trait;
 use djinn_db::launcher_compatibility::{
     AdmissionDecision, AdmissionRejection, InventoryFault, LegacyDigestInventory,
     PreProtocolDigest, admit_with_legacy_inventory,
 };
 use djinn_db::{
-    Database, LauncherAuthorityModeRepository, LauncherProtocolAdmission,
-    SetLauncherAuthorityModeResult,
+    AcquireBuildPodPermitResult, BuildPodPermitRepository, BuildPodPermitRow,
+    BuildPodResizeIdentity, CaptureBuildPodResizeIdentityResult, Database, Image, ImageRepository,
+    LauncherAuthorityModeRepository, LauncherProtocolAdmission, SetLauncherAuthorityModeResult,
 };
 use djinn_k8s::config::KubernetesConfig;
-use djinn_k8s::job::{LABEL_TASK_RUN_ID, build_task_run_job};
+use djinn_k8s::job::{
+    COMPONENT_TASK_RUN_WORKER, LABEL_COMPONENT, LABEL_TASK_RUN_ID, build_task_run_job,
+};
 use djinn_k8s::launcher::{
     CgroupLauncherMode, LAUNCHER_CONTAINER_NAME, apply_launcher_authority_protocol,
     render_authority_protocol,
 };
 use djinn_k8s::pod_resize::{CpuLimit, build_resize_patch};
 use djinn_launcher_protocol::{LEAF_V1_WIRE, LauncherAuthorityProtocol, RESIZE_V2_WIRE};
+use djinn_server::task_run_resize_rollout::{
+    CutoverPreflight, DispatchProbe, DurableAdmissionControl, LiveTaskRunPod,
+    PreflightVerdict as RolloutPreflightVerdict, RegistryProbe, ResizeRollout, RolloutBlocked,
+    RolloutStep, TaskRunPodPlane,
+};
 use serde_json::{Value, json};
 
 // ===========================================================================
@@ -443,6 +474,71 @@ async fn admit(
     let verdict: LauncherProtocolAdmission =
         modes.admit_declared_protocol(image.declared_wire()).await;
     admit_with_legacy_inventory(verdict, digest, inventory)
+}
+
+/// A real `task_runs` row, because `build_pod_permits.task_run_id` carries a
+/// foreign key to it.
+///
+/// Every repository here is the production one against real PostgreSQL: the
+/// permit row whose presence the drain fence counts is reachable only through
+/// the same chain dispatch walks, and a `Fake` would have let the fence pass
+/// with nothing behind it.
+async fn seed_task_run(db: &Database) -> String {
+    use djinn_db::{
+        CreateTaskRunParams, EffectiveCreatorProvenance, ProjectRepository, TaskRepository,
+        TaskRunRepository, UserRepository,
+    };
+
+    let unique = uuid::Uuid::now_v7();
+    let user = UserRepository::new(db.clone())
+        .upsert_from_github(
+            i64::try_from(unique.as_u128() % 8_000_000_000_000_000_000).expect("github id"),
+            &format!("resize-matrix-{unique}"),
+            None,
+            None,
+        )
+        .await
+        .expect("seed user");
+    let project = ProjectRepository::new(db.clone(), djinn_core::events::EventBus::noop())
+        .create(
+            &format!("resize-matrix-{unique}"),
+            "djinnos",
+            &format!("resize-matrix-{unique}"),
+        )
+        .await
+        .expect("seed project");
+    let task = TaskRepository::new(db.clone(), djinn_core::events::EventBus::noop())
+        .create_in_project_with_provenance(
+            &project.id,
+            None,
+            EffectiveCreatorProvenance::explicit_user_id(&user.id),
+            "resize matrix",
+            "description",
+            "design",
+            "task",
+            2,
+            "owner",
+            None,
+            None,
+        )
+        .await
+        .expect("seed task");
+
+    let task_run_id = uuid::Uuid::now_v7().to_string();
+    TaskRunRepository::new(db.clone())
+        .create(CreateTaskRunParams {
+            id: &task_run_id,
+            project_id: &project.id,
+            task_id: &task.id,
+            trigger_type: "manual",
+            status: Some("running"),
+            workspace_path: None,
+            mirror_ref: None,
+            dispatch_group_id: None,
+        })
+        .await
+        .expect("seed task run");
+    task_run_id
 }
 
 /// Put the server into `mode`, satisfying the drain fence.
@@ -2519,3 +2615,1203 @@ fn a_misleading_regular_container_status_is_not_confirmation() {
 }
 
 // ===========================================================================
+// AC9: the flips are driven by `ResizeRollout` and gated by the deploy-time
+// cutover preflight, against real PostgreSQL and real cluster state.
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// The driver's three injectable seams.
+// ---------------------------------------------------------------------------
+
+/// A Pod plane holding **no** live task-run Pods, and counting what the driver
+/// attempted against it.
+///
+/// This is not a fake repository and cannot become one: [`ResizeRollout::new`]
+/// builds `BuildPodPermitRepository`, `LauncherAuthorityModeRepository` and
+/// `ImageRepository` from the `Database` it is handed and exposes no seam
+/// through which a substitute could be passed. Every durable assertion below
+/// therefore runs against real PostgreSQL. What this stands in for is the ONE
+/// dimension PostgreSQL cannot answer — "is a Pod still alive" — in the half of
+/// the suite that has no API server. `ClusterPodPlane` answers it for real.
+///
+/// The counters exist so "the cutover created nothing" is an observed effect
+/// rather than an intention: `creations` moves the instant a Pod is created,
+/// whether or not anybody wrote an assertion about ordering.
+#[derive(Default)]
+struct DrainedPodPlane {
+    creations: AtomicU64,
+    resizes: AtomicU64,
+}
+
+impl DrainedPodPlane {
+    fn creations(&self) -> u64 {
+        self.creations.load(Ordering::SeqCst)
+    }
+
+    fn resizes(&self) -> u64 {
+        self.resizes.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl TaskRunPodPlane for DrainedPodPlane {
+    async fn create_task_run_pod(&self, _task_run_id: &str, _image_id: &str) -> Result<(), String> {
+        self.creations.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    async fn resize_launcher_cpu(
+        &self,
+        _task_run_id: &str,
+        _millicores: u64,
+    ) -> Result<(), String> {
+        self.resizes.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    async fn live_task_run_pods(&self) -> Result<Vec<LiveTaskRunPod>, String> {
+        Ok(Vec::new())
+    }
+}
+
+/// The LIVE task-run Pod census, read off the harness cluster.
+///
+/// # Why not `KubernetesTaskRunPodPlane`, the production implementation
+///
+/// Because building one requires a `KubernetesRuntime`, and every constructor
+/// for that resolves its client through `kube::Client::try_default()` — which
+/// reads the CURRENT kubeconfig context. Every context in a Djinn developer's
+/// kubeconfig is a live EKS cluster, and the whole safety property of this
+/// harness is that it never consults the current context: it passes
+/// `--context kind-djinn-resize-omp4` explicitly on every call and
+/// [`harness_context`] refuses that name unless it resolves to a loopback API
+/// server. Composing the production plane here would trade a real production
+/// hazard for a naming nicety.
+///
+/// What is preserved is that the census is a REAL apiserver read: the rows
+/// below are Pods the kubelet is running, with the `metadata.uid` the resize
+/// fence would be taken against, selected by the label the production renderer
+/// actually writes ([`LABEL_COMPONENT`] = [`COMPONENT_TASK_RUN_WORKER`], not
+/// `app.kubernetes.io/component=task-run`, which matches nothing).
+struct ClusterPodPlane;
+
+#[async_trait]
+impl TaskRunPodPlane for ClusterPodPlane {
+    /// Refuses, always — as [`djinn_server::task_run_resize_rollout::KubernetesTaskRunPodPlane`]
+    /// does. The cutover's only dispatch is the probe `pause_admission` issues
+    /// to disbelieve its own pause, and a probe that materialised a task-run Pod
+    /// on the cluster would be a worse bug than the one it checks for.
+    async fn create_task_run_pod(&self, task_run_id: &str, _image_id: &str) -> Result<(), String> {
+        Err(format!(
+            "the authority cutover never creates task-run Pods; refusing to materialise one for \
+             {task_run_id}"
+        ))
+    }
+
+    async fn resize_launcher_cpu(&self, task_run_id: &str, _millicores: u64) -> Result<(), String> {
+        Err(format!(
+            "the authority cutover never issues pods/resize; refusing one for {task_run_id}"
+        ))
+    }
+
+    async fn live_task_run_pods(&self) -> Result<Vec<LiveTaskRunPod>, String> {
+        Ok(live_task_run_pods_on_cluster())
+    }
+}
+
+/// Every task-run Pod the harness cluster still holds, from the apiserver.
+///
+/// A `Succeeded`/`Failed` Pod owes the cutover nothing — it has no running
+/// launcher and no leaf to write — so the census is the set that is genuinely
+/// still in flight. Feeding the SAME list to the driver and to the preflight's
+/// observation bundle is deliberate: the two cannot disagree about what is
+/// alive.
+fn live_task_run_pods_on_cluster() -> Vec<LiveTaskRunPod> {
+    kubectl_json(&[
+        "-n",
+        NAMESPACE,
+        "get",
+        "pods",
+        "-l",
+        &format!("{LABEL_COMPONENT}={COMPONENT_TASK_RUN_WORKER}"),
+    ])["items"]
+        .as_array()
+        .expect("a List has items")
+        .iter()
+        .filter(|item| {
+            !matches!(
+                item["status"]["phase"].as_str().unwrap_or_default(),
+                "Succeeded" | "Failed"
+            )
+        })
+        .map(|item| LiveTaskRunPod {
+            pod_name: item["metadata"]["name"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned(),
+            pod_uid: item["metadata"]["uid"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned(),
+            task_run_id: item["metadata"]["labels"][LABEL_TASK_RUN_ID]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned(),
+        })
+        .collect()
+}
+
+/// The registry seam, wired to refuse.
+///
+/// Every flip below calls `verify_retention(&[])` — retention over an EMPTY
+/// retained set. Retention is `eeky`'s property and is proven there against a
+/// real HTTP round trip whose response BODY is hashed; a probe that panics is
+/// what stops this file quietly acquiring a second, weaker copy of that proof.
+struct UnreachedRegistry;
+
+#[async_trait]
+impl RegistryProbe for UnreachedRegistry {
+    async fn fetch_manifest(&self, repository: &str, reference: &str) -> Result<Vec<u8>, String> {
+        panic!(
+            "the flip tests retain nothing, so the registry must never be reached; asked for \
+             {repository}@{reference}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Driving the production cutover.
+// ---------------------------------------------------------------------------
+
+/// A cutover driver bound to `db`, with the production admission control.
+///
+/// `DurableAdmissionControl` writes the real `dispatch_pauses` state and reads
+/// it back through `djinn_coordinator`'s OWN refusal predicate, so the pause the
+/// cutover believes in is the pause that refuses task dispatch.
+fn cutover_rollout(db: &Database, pods: Arc<dyn TaskRunPodPlane>) -> ResizeRollout {
+    ResizeRollout::new(
+        db.clone(),
+        signed_inventory(&[&stub_digest(ImageClass::LegacyNoHandshake)]),
+        Arc::new(DurableAdmissionControl::new(
+            db.clone(),
+            djinn_core::events::EventBus::noop(),
+            "li91-cutover",
+        )),
+        pods,
+        Arc::new(UnreachedRegistry),
+        // The gate this suite drives for real is the SHELL one —
+        // `deploy/preflight/cutover-preflight.sh`, run as a subprocess against a
+        // live helm render, whose verdict `gated_flip` refuses on. What the
+        // rollout's own seam adds here is the ORDERING: `PreflightCleared` is a
+        // prerequisite of `AuthorityModeFlipped`, so a flip that skipped
+        // `clear_preflight` is `StepOutOfOrder` rather than an ungated flip.
+        Arc::new(AlwaysClearPreflight),
+    )
+}
+
+/// A preflight seam that clears, so the journal ordering is exercised while the
+/// real verdict comes from the shell gate this suite runs as a subprocess.
+struct AlwaysClearPreflight;
+
+#[async_trait]
+impl CutoverPreflight for AlwaysClearPreflight {
+    async fn evaluate(
+        &self,
+        _mode: LauncherAuthorityProtocol,
+        _live_task_run_pods: &[String],
+    ) -> RolloutPreflightVerdict {
+        RolloutPreflightVerdict::Clear {
+            evaluated: DEPLOY_GATE_CLASSES
+                .iter()
+                .map(|c| (*c).to_string())
+                .collect(),
+        }
+    }
+}
+
+/// The six classes `djinn_k8s::cutover_preflight::run` evaluates.
+const DEPLOY_GATE_CLASSES: &[&str] = &[
+    "birth-confirmation",
+    "catalog-protocol",
+    "credential-boundary",
+    "drain-fence",
+    "launcher-cpu-ceiling",
+    "pods-resize-rbac",
+];
+
+/// A catalog row the probe dispatch can name, written by the production
+/// `ImageRepository`.
+async fn seed_catalog_image(db: &Database, class: ImageClass) -> Image {
+    let images = ImageRepository::new(db.clone());
+    // `images.id` is `varchar(36)`, so the class goes in the NAME. A derived id
+    // that overflowed would fail here rather than truncate, but there is no
+    // reason to make a fixture live on that edge.
+    let id = format!("img-{}", uuid::Uuid::now_v7().simple());
+    images
+        .create(
+            &id,
+            &format!("resize-matrix-{}", class.as_str()),
+            None,
+            "{}",
+        )
+        .await
+        .expect("seed a catalog image");
+    images
+        .mark_ready(
+            &id,
+            &format!("reg/resize-matrix-{}:{id}", class.as_str()),
+            Some(&stub_digest(class)),
+            class.declared(),
+        )
+        .await
+        .expect("mark the seeded image ready");
+    images
+        .get(&id)
+        .await
+        .expect("read it back")
+        .expect("it exists")
+}
+
+/// Walk the driver to the point where the drain proof is the next step, and
+/// prove it got there by reading the journal rather than by assuming it.
+///
+/// `pause_admission` does not trust the row it writes: it dispatches `probe`
+/// through the same `attempt_dispatch` a task run takes and requires
+/// `RefusedByAdmissionPause`. A pause row with no wired refusal blocks the
+/// cutover here rather than producing a paused one.
+async fn arm_at_the_flip(rollout: &ResizeRollout, probe: DispatchProbe) {
+    rollout
+        .verify_retention(&[])
+        .await
+        .expect("retention over an empty retained set is provable");
+    rollout
+        .pause_admission("li91 authority cutover", &probe)
+        .await
+        .expect("the production dispatch-pause predicate must refuse the probe");
+    assert_eq!(
+        rollout.journal(),
+        vec![RolloutStep::RetentionVerified, RolloutStep::AdmissionPaused],
+        "the driver must be armed at exactly the drain proof",
+    );
+}
+
+fn probe_for(image: &Image, task_run_id: &str) -> DispatchProbe {
+    DispatchProbe {
+        task_run_id: task_run_id.to_owned(),
+        image: image.clone(),
+    }
+}
+
+async fn current_mode(modes: &LauncherAuthorityModeRepository) -> LauncherAuthorityProtocol {
+    modes
+        .read()
+        .await
+        .expect("read the mode")
+        .expect("the singleton row")
+        .mode
+}
+
+async fn current_epoch(modes: &LauncherAuthorityModeRepository) -> i64 {
+    modes
+        .read()
+        .await
+        .expect("read the mode")
+        .expect("the singleton row")
+        .epoch
+}
+
+/// Acquire a permit and drive it into a NONTERMINAL RESIZE state, using only
+/// production repository calls.
+///
+/// `acquire` alone is not enough: `state = 'acquired'` is not one of migration
+/// 164's six nonterminal resize states, so
+/// `build_pod_permits_resize_nonterminal_idx` does not select it and the
+/// driver's row-naming refusal would never fire. `bind_or_refresh_job_uid` then
+/// `capture_resize_identity` reach `birth_confirmed`, which it does select — and
+/// which carries the `pod_uid` the refusal names.
+///
+/// Returns the row (so the caller can release it) and the captured Pod UID.
+async fn seed_nonterminal_resize_row(
+    permits: &BuildPodPermitRepository,
+    task_run_id: &str,
+) -> (BuildPodPermitRow, String) {
+    let row = match permits.acquire(task_run_id, 4).await {
+        AcquireBuildPodPermitResult::Acquired { row, .. } => row,
+        other => panic!("the fixture must be able to acquire a permit: {other:?}"),
+    };
+    permits
+        .bind_or_refresh_job_uid(
+            task_run_id,
+            &row.permit_id,
+            row.fencing_token,
+            &format!("job-uid-{task_run_id}"),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("binding a Job UID must succeed: {error}"));
+    let pod_uid = format!("uid-{task_run_id}");
+    let captured = permits
+        .capture_resize_identity(
+            task_run_id,
+            &row.permit_id,
+            row.fencing_token,
+            &BuildPodResizeIdentity {
+                pod_namespace: NAMESPACE.into(),
+                pod_name: format!("taskrun-{task_run_id}"),
+                pod_uid: pod_uid.clone(),
+                launcher_container_name: LAUNCHER_CONTAINER_NAME.into(),
+                launcher_container_id: "containerd://li91".into(),
+                image_digest: stub_digest(ImageClass::ResizeV2),
+                observed_launcher_protocol: RESIZE_V2_WIRE.into(),
+                effective_launcher_protocol: RESIZE_V2_WIRE.into(),
+                admitted_cpu_millicores: 4_000,
+            },
+        )
+        .await
+        .expect("capture the resize identity");
+    assert!(
+        matches!(captured, CaptureBuildPodResizeIdentityResult::Captured(_)),
+        "the fixture must actually capture: {captured:?}",
+    );
+    (row, pod_uid)
+}
+
+/// **AC9, durable half.** Both flips are driven by `ResizeRollout` and both are
+/// refused — NAMING the offending row — while a nonterminal resize row exists.
+///
+/// Real PostgreSQL, real repositories, no `Fake`. The row is created through
+/// `acquire` / `bind_or_refresh_job_uid` / `capture_resize_identity` — the
+/// production calls — so the row the fence reads is the row dispatch writes.
+///
+/// # The distinguisher this test exists for
+///
+/// `LauncherAuthorityModeRepository::set_mode` refuses this same seeded row on
+/// its own, with `DrainNotEmpty` and a bare per-dimension COUNT. A test that
+/// flipped through `set_mode` would therefore be green whether or not the
+/// production rollout driver existed. `ResizeRollout::prove_drained` refuses
+/// with `NonterminalResizeRows`, carrying `task_run_id`, `state` and `pod_uid`,
+/// and only `BuildPodPermitRepository::list_nonterminal_resize` can produce
+/// that. Asserting the named rows is what makes deleting the driver visible.
+#[tokio::test]
+async fn neither_flip_proceeds_with_a_live_permit_row() {
+    let db = Database::ephemeral().await.expect("a real test database");
+    let modes = LauncherAuthorityModeRepository::new(db.clone());
+    let permits = BuildPodPermitRepository::new(db.clone());
+
+    force_mode(&modes, LauncherAuthorityProtocol::LeafV1).await;
+    let drained = modes.drain_census().await.expect("read the drain census");
+    assert!(
+        drained.is_drained(),
+        "the fixture must start drained or the refusals below prove nothing: {drained:?}",
+    );
+    let probe_image = seed_catalog_image(&db, ImageClass::LeafV1).await;
+
+    for (label, target) in [
+        ("activation", LauncherAuthorityProtocol::ResizeV2),
+        ("rollback", LauncherAuthorityProtocol::LeafV1),
+    ] {
+        let before = current_mode(&modes).await;
+        assert_ne!(
+            before, target,
+            "{label}: a same-mode replay would move nothing and prove nothing",
+        );
+
+        let task_run_id = seed_task_run(&db).await;
+        let (row, pod_uid) = seed_nonterminal_resize_row(&permits, &task_run_id).await;
+
+        let census = modes.drain_census().await.expect("read the drain census");
+        assert!(
+            !census.is_drained(),
+            "{label}: one live permit must make the drain non-empty: {census:?}",
+        );
+        assert_eq!(
+            permits
+                .list_nonterminal_resize()
+                .await
+                .expect("read the nonterminal resize rows")
+                .len(),
+            1,
+            "{label}: the fixture must produce a row the nonterminal partial index actually \
+             selects, or the driver's refusal below is about nothing",
+        );
+
+        // A new driver per flip: every step may run exactly once, which is the
+        // point — a cutover is not idempotent by replay.
+        let pods = Arc::new(DrainedPodPlane::default());
+        let rollout = cutover_rollout(&db, Arc::clone(&pods) as Arc<dyn TaskRunPodPlane>);
+        arm_at_the_flip(&rollout, probe_for(&probe_image, &task_run_id)).await;
+
+        // ── the drain proof refuses, NAMING the row ─────────────────────
+        let blocked = rollout
+            .prove_drained()
+            .await
+            .expect_err("a nonterminal resize row must block the drain proof");
+        let RolloutBlocked::NonterminalResizeRows(rows) = &blocked else {
+            panic!(
+                "{label}: the driver must refuse naming the rows, got {blocked:?}. \
+                 `AuthorityDrainRefused` here would mean the flip was fenced by `set_mode`'s bare \
+                 census, which refuses this row whether or not `ResizeRollout` is wired to \
+                 anything — the exact vacuity this test exists to remove."
+            );
+        };
+        assert_eq!(rows.len(), 1, "{label}: one seeded row, one named row");
+        assert_eq!(
+            rows[0].task_run_id, task_run_id,
+            "{label}: the refusal must name the task run an operator has to go and find",
+        );
+        assert_eq!(
+            rows[0].state, "BirthConfirmed",
+            "{label}: the refusal must name the durable lifecycle state",
+        );
+        assert_eq!(
+            rows[0].pod_uid.as_deref(),
+            Some(pod_uid.as_str()),
+            "{label}: the refusal must name the Pod UID the resize fence is taken against",
+        );
+
+        // A step whose body failed must not be journalled: reserving on entry
+        // would let a refused proof satisfy the prerequisite of the flip.
+        assert!(
+            !rollout.journal().contains(&RolloutStep::DrainProven),
+            "{label}: a refused drain proof must not appear in the journal: {:?}",
+            rollout.journal(),
+        );
+        let epoch = current_epoch(&modes).await;
+        assert_eq!(
+            rollout.flip_authority_mode(epoch, target).await,
+            Err(RolloutBlocked::StepOutOfOrder {
+                step: RolloutStep::AuthorityModeFlipped,
+                missing: RolloutStep::DrainProven,
+            }),
+            "{label}: an unproven drain must not be flippable",
+        );
+        assert_eq!(
+            current_mode(&modes).await,
+            before,
+            "{label}: a refused flip must not have moved the mode anyway — an Err returned AFTER \
+             the write is exactly the shape this assertion exists to catch",
+        );
+
+        // ── drain, and the SAME driver flips ────────────────────────────
+        permits
+            .release(&task_run_id, &row.permit_id, row.fencing_token, "matrix")
+            .await
+            .expect("release the permit");
+        assert!(
+            permits
+                .list_nonterminal_resize()
+                .await
+                .expect("read the nonterminal resize rows")
+                .is_empty(),
+            "{label}: releasing the permit must clear the nonterminal row",
+        );
+
+        rollout
+            .prove_drained()
+            .await
+            .expect("a drained snapshot must prove");
+        rollout
+            .clear_preflight(target)
+            .await
+            .expect("the preflight gate must clear before the flip is reachable");
+        let flipped = rollout
+            .flip_authority_mode(epoch, target)
+            .await
+            .unwrap_or_else(|error| panic!("{label}: a proven drain must flip: {error:?}"));
+        rollout
+            .resume_admission()
+            .await
+            .expect("admission resumes after a confirmed flip");
+
+        assert_eq!(
+            rollout.journal(),
+            vec![
+                RolloutStep::RetentionVerified,
+                RolloutStep::AdmissionPaused,
+                RolloutStep::DrainProven,
+                RolloutStep::PreflightCleared,
+                RolloutStep::AuthorityModeFlipped,
+                RolloutStep::AdmissionResumed,
+            ],
+            "{label}: the observed step sequence is the ordering proof",
+        );
+        assert_eq!(
+            current_mode(&modes).await,
+            target,
+            "{label}: PostgreSQL must hold the new mode",
+        );
+        assert!(
+            flipped > epoch,
+            "{label}: the flip must advance the epoch, got {flipped} from {epoch}",
+        );
+        assert_eq!(
+            (
+                pods.creations(),
+                pods.resizes(),
+                rollout.dispatches_admitted_while_paused()
+            ),
+            (0, 0, 0),
+            "{label}: the cutover must create no Pod and issue no pods/resize PATCH",
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The deploy-time gate: `deploy/preflight/cutover-preflight.sh`.
+// ---------------------------------------------------------------------------
+
+/// The chart values that arm the launcher. Without them there is no sidecar for
+/// pod resize to move, and `resize-v2` is refused with `launcher-cpu-ceiling` —
+/// which is a correct verdict about a deployment that is not ready, and not the
+/// question these tests ask.
+const ARMED_CHART_VALUES: &[&str] = &[
+    "--set",
+    "cgroupLauncher.mode=required",
+    "--set",
+    "cgroupWritable.taskRuns.enabled=true",
+    "--set",
+    "cgroupWritable.runtimeClass.enabled=true",
+];
+
+/// One verdict from the deploy-time gate.
+#[derive(Debug)]
+struct PreflightVerdict {
+    /// 0 the cutover may proceed, 1 blocked, 2 unevaluable. A missing code
+    /// (killed by a signal) is neither and is kept distinct from both.
+    status: Option<i32>,
+    /// The defect classes it printed, as an exact set.
+    classes: BTreeSet<String>,
+    output: String,
+}
+
+impl PreflightVerdict {
+    /// Only exit 0 clears. `2` — unevaluable — is deliberately NOT a pass: a
+    /// gate that could not evaluate itself has said nothing about the cutover.
+    fn cleared(&self) -> bool {
+        self.status == Some(0)
+    }
+}
+
+/// The prebuilt gate binary.
+///
+/// Deliberately NOT built here. `deploy/preflight/cutover-preflight.sh` builds
+/// it itself when `CUTOVER_PREFLIGHT_BIN` is unset, and a `cargo build` launched
+/// from inside a running `cargo test` blocks forever on the build-directory lock
+/// the outer cargo still holds. The lane prebuilds it; a missing binary is a
+/// loud failure naming the command, never a skip.
+fn preflight_binary() -> PathBuf {
+    let path = std::env::var("CUTOVER_PREFLIGHT_BIN").map_or_else(
+        |_| {
+            std::env::var("CARGO_TARGET_DIR")
+                .map_or_else(|_| repo_root().join("server/target"), PathBuf::from)
+                .join("debug/cutover-preflight")
+        },
+        PathBuf::from,
+    );
+    assert!(
+        path.is_file(),
+        "the cutover preflight binary is missing at {}. Build it BEFORE running this suite — \
+         `cd server && cargo build -p djinn-k8s --bin cutover-preflight` — because the gate script \
+         would otherwise build it from inside this process and deadlock on cargo's build-directory \
+         lock. Override with CUTOVER_PREFLIGHT_BIN.",
+        path.display(),
+    );
+    path
+}
+
+/// The URL of the ephemeral test database, so the gate reads the SAME durable
+/// fence this test seeded.
+///
+/// Without `DJINN_DATABASE_URL` the gate reports the drain fence UNOBSERVABLE,
+/// which is a defect by design — so a test that forgot to pass it would be
+/// asserting a blocked verdict it did not cause.
+async fn ephemeral_database_url(db: &Database) -> String {
+    let name: String = sqlx::query_scalar("SELECT current_database()")
+        .fetch_one(db.pool())
+        .await
+        .expect("the ephemeral database answers");
+    let base = djinn_db::test_database_base_url();
+    let trimmed = base.trim_end_matches('/');
+    let (scheme, rest) = trimmed
+        .split_once("://")
+        .expect("the test database URL carries a scheme");
+    let authority = rest.split('/').next().unwrap_or(rest);
+    format!("{scheme}://{authority}/{name}")
+}
+
+/// Run `deploy/preflight/cutover-preflight.sh` — the deploy-time gate itself,
+/// as a subprocess.
+///
+/// This file contains no copy of any of its six checks. `render` optionally
+/// substitutes a mutated render through the same `CUTOVER_PREFLIGHT_RENDER`
+/// seam the gate's own contract suite uses.
+fn cutover_preflight(
+    mode: LauncherAuthorityProtocol,
+    database_url: &str,
+    observations: &Path,
+    render: Option<&Path>,
+) -> PreflightVerdict {
+    let mut command = Command::new("bash");
+    command
+        .arg(repo_root().join("deploy/preflight/cutover-preflight.sh"))
+        .arg(repo_root().join("deploy/helm/djinn"))
+        .args(ARMED_CHART_VALUES)
+        .current_dir(repo_root())
+        .env("CUTOVER_PREFLIGHT_BIN", preflight_binary())
+        .env("DJINN_CUTOVER_AUTHORITY_MODE", mode.as_wire())
+        .env("DJINN_DATABASE_URL", database_url)
+        .env("DJINN_CUTOVER_OBSERVATIONS", observations);
+    if let Some(render) = render {
+        command.env("CUTOVER_PREFLIGHT_RENDER", render);
+    }
+    let output = command
+        .output()
+        .expect("deploy/preflight/cutover-preflight.sh is runnable");
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let classes = text
+        .lines()
+        .filter_map(|line| line.strip_prefix("cutover-preflight: DEFECT "))
+        .filter_map(|rest| rest.split_whitespace().next())
+        .map(str::to_owned)
+        .collect();
+    assert_ne!(
+        output.status.code(),
+        Some(2),
+        "the gate could not evaluate itself, which is neither clear nor blocked:\n{text}",
+    );
+    PreflightVerdict {
+        status: output.status.code(),
+        classes,
+        output: text,
+    }
+}
+
+/// The cluster/registry facts a render cannot contain, written where the gate
+/// expects them.
+///
+/// Every field is read off the catalog ROW the production `ImageRepository`
+/// wrote — including the declaration, which comes from
+/// `images.launcher_authority_protocol` rather than from the test's idea of
+/// what the class declares. A bundle that restated the declaration would be
+/// asking the gate about an image that does not exist.
+fn write_observations(path: &Path, catalog: &[&Image], live_pods: &[String]) {
+    let images: Vec<Value> = catalog
+        .iter()
+        .map(|image| {
+            json!({
+                "pull_ref": image.tag.clone().unwrap_or_else(|| image.id.clone()),
+                "declared": image.launcher_authority_protocol.clone(),
+                "digest": image.registry_digest.clone(),
+            })
+        })
+        .collect();
+    std::fs::write(
+        path,
+        serde_json::to_vec(&json!({
+            "catalog": images,
+            "births": [],
+            "live_task_run_pods": live_pods,
+        }))
+        .expect("the observation bundle serializes"),
+    )
+    .unwrap_or_else(|error| panic!("write {}: {error}", path.display()));
+}
+
+/// A LIVE `helm template` of the shipped chart, armed the way the cutover needs.
+fn armed_render(destination: &Path) {
+    let output = Command::new("helm")
+        .args(["template", "djinn-cutover-preflight"])
+        .arg(repo_root().join("deploy/helm/djinn"))
+        .arg("--is-upgrade")
+        .args(ARMED_CHART_VALUES)
+        .current_dir(repo_root())
+        .output()
+        .expect(
+            "helm must be on PATH: the gate's whole claim is that it judges a LIVE render of the \
+             shipped chart, so a missing helm is a failure and never a skip",
+        );
+    assert!(
+        output.status.success(),
+        "helm template failed: {}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+    std::fs::write(destination, &output.stdout)
+        .unwrap_or_else(|error| panic!("write {}: {error}", destination.display()));
+}
+
+/// **The mutation AC2 names, embodied.** The armed render with the `pods/resize`
+/// grant's RESOURCE — and nothing else — changed to `pods`.
+///
+/// `pods` is not `pods/resize`, so the grant authorises nothing the lift needs
+/// and every resize PATCH would be a 403. Line-scoped rather than a YAML round
+/// trip on purpose: a re-serialised manifest differs from the real render in a
+/// hundred incidental ways, and the claim under test is that ONE line flips the
+/// verdict. Both invariants are asserted here so a refusal can never be
+/// attributed to fixture drift.
+fn render_with_a_broken_pods_resize_grant(source: &Path, destination: &Path) {
+    const ANCHOR: &str = r#"resources: ["pods/resize"]"#;
+    let text = std::fs::read_to_string(source)
+        .unwrap_or_else(|error| panic!("read {}: {error}", source.display()));
+    let anchors = text.lines().filter(|line| line.trim() == ANCHOR).count();
+    assert_eq!(
+        anchors, 1,
+        "the render must carry exactly one pods/resize rule for this mutation to be surgical",
+    );
+    let mutated: Vec<String> = text
+        .lines()
+        .map(|line| {
+            if line.trim() == ANCHOR {
+                line.replace(r#"["pods/resize"]"#, r#"["pods"]"#)
+            } else {
+                line.to_owned()
+            }
+        })
+        .collect();
+    let original: Vec<&str> = text.lines().collect();
+    assert_eq!(
+        original.len(),
+        mutated.len(),
+        "the mutation must not change the line count",
+    );
+    assert_eq!(
+        original
+            .iter()
+            .zip(&mutated)
+            .filter(|(before, after)| *before != &**after)
+            .count(),
+        1,
+        "the mutation must differ from the live render in exactly one line",
+    );
+    std::fs::write(destination, mutated.join("\n") + "\n")
+        .unwrap_or_else(|error| panic!("write {}: {error}", destination.display()));
+}
+
+/// A scratch directory, namespaced per process so concurrent harnesses cannot
+/// read each other's renders.
+fn scratch_dir() -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("djinn-li91-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir_all(&dir).expect("create the scratch directory");
+    dir
+}
+
+/// **AC9 + the cutover preflight.** The flip is gated on
+/// `deploy/preflight/cutover-preflight.sh`, and a render mutated in exactly one
+/// line refuses it.
+///
+/// Three cases, and the third is the one that makes the first two mean
+/// something:
+///
+/// 1. A clean gate over a live render of the shipped chart, a drained database
+///    and an empty Pod census CLEARS, and the driver flips.
+/// 2. The same arguments with the `pods/resize` grant's resource changed to
+///    `pods` are refused with exactly `pods-resize-rbac` — so the gate reads
+///    the RENDER and not its flags — and the flip never happens: no
+///    `AuthorityModeFlipped` in the journal, and PostgreSQL still holds the old
+///    mode.
+/// 3. A seeded nonterminal resize row makes the gate report `drain-fence` from
+///    the production `list_nonterminal_resize` query, and the driver refuses the
+///    same row by name. One fact, two independent readers.
+///
+/// Needs `helm`, `python3` and a prebuilt gate binary; it needs no cluster.
+/// `#[ignore]`d for the same reason the crate's own render-bearing proofs are:
+/// the ordinary sharded lane has PostgreSQL but not helm.
+#[test]
+#[ignore = "needs helm, python3 and a prebuilt cutover-preflight binary"]
+fn the_cutover_preflight_gates_the_flip_and_one_defect_class_refuses_it() {
+    if !live_tests_enabled() {
+        return;
+    }
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("a tokio runtime");
+    let db = runtime
+        .block_on(Database::ephemeral())
+        .expect("a real test database");
+    let modes = LauncherAuthorityModeRepository::new(db.clone());
+    let permits = BuildPodPermitRepository::new(db.clone());
+    runtime.block_on(force_mode(&modes, LauncherAuthorityProtocol::LeafV1));
+
+    let url = runtime.block_on(ephemeral_database_url(&db));
+    let resize_image = runtime.block_on(seed_catalog_image(&db, ImageClass::ResizeV2));
+    let leaf_image = runtime.block_on(seed_catalog_image(&db, ImageClass::LeafV1));
+    let scratch = scratch_dir();
+
+    // One bundle per direction. The catalog a cutover prepares is the catalog
+    // that may run AFTER it: a declared `resize-v2` row under a `leaf-v1` mode
+    // is a genuine `catalog-protocol` defect, and mixing the two would make the
+    // exact-class assertions below prove something else.
+    let for_resize = scratch.join("observations-resize-v2.json");
+    let for_leaf = scratch.join("observations-leaf-v1.json");
+    write_observations(&for_resize, &[&resize_image], &[]);
+    write_observations(&for_leaf, &[&leaf_image], &[]);
+
+    // ── 1. a clean gate opens, and the driver flips ─────────────────────
+    let clear = cutover_preflight(LauncherAuthorityProtocol::ResizeV2, &url, &for_resize, None);
+    assert!(
+        clear.cleared() && clear.classes.is_empty(),
+        "a live render of the armed chart over a drained database must CLEAR the cutover, got \
+         {clear:?}",
+    );
+
+    let pods = Arc::new(DrainedPodPlane::default());
+    let rollout = cutover_rollout(&db, Arc::clone(&pods) as Arc<dyn TaskRunPodPlane>);
+    let probe_run = runtime.block_on(seed_task_run(&db));
+    runtime.block_on(arm_at_the_flip(
+        &rollout,
+        probe_for(&resize_image, &probe_run),
+    ));
+    let epoch = runtime.block_on(current_epoch(&modes));
+    let flipped = runtime
+        .block_on(gated_flip(
+            &rollout,
+            &clear,
+            epoch,
+            LauncherAuthorityProtocol::ResizeV2,
+        ))
+        .expect("a cleared gate must let the driver flip");
+    assert!(
+        rollout
+            .journal()
+            .contains(&RolloutStep::AuthorityModeFlipped),
+        "the flip must be journalled: {:?}",
+        rollout.journal(),
+    );
+    assert_eq!(
+        runtime.block_on(current_mode(&modes)),
+        LauncherAuthorityProtocol::ResizeV2,
+    );
+
+    // ── 2. one mutated line refuses the flip ────────────────────────────
+    let live = scratch.join("live.yaml");
+    let broken = scratch.join("rbac-resource.yaml");
+    armed_render(&live);
+    render_with_a_broken_pods_resize_grant(&live, &broken);
+
+    let refused = cutover_preflight(
+        LauncherAuthorityProtocol::LeafV1,
+        &url,
+        &for_leaf,
+        Some(&broken),
+    );
+    assert_eq!(
+        refused.status,
+        Some(1),
+        "a broken pods/resize grant must BLOCK the cutover:\n{}",
+        refused.output,
+    );
+    assert_eq!(
+        refused.classes,
+        ["pods-resize-rbac".to_owned()].into_iter().collect(),
+        "exactly one class must fire, and it must be the one the mutation broke — the ARGUMENTS \
+         were the healthy ones that cleared above, so the verdict came from the render:\n{}",
+        refused.output,
+    );
+
+    let rollback_pods = Arc::new(DrainedPodPlane::default());
+    let rollback = cutover_rollout(&db, Arc::clone(&rollback_pods) as Arc<dyn TaskRunPodPlane>);
+    let rollback_run = runtime.block_on(seed_task_run(&db));
+    runtime.block_on(arm_at_the_flip(
+        &rollback,
+        probe_for(&leaf_image, &rollback_run),
+    ));
+    let blocked = runtime
+        .block_on(gated_flip(
+            &rollback,
+            &refused,
+            flipped,
+            LauncherAuthorityProtocol::LeafV1,
+        ))
+        .expect_err("a blocked gate must refuse the flip");
+    assert!(
+        blocked.contains("pods-resize-rbac"),
+        "the refusal must carry the gate's own class: {blocked}",
+    );
+    assert!(
+        !rollback
+            .journal()
+            .contains(&RolloutStep::AuthorityModeFlipped),
+        "a gate-refused cutover must never journal a flip: {:?}",
+        rollback.journal(),
+    );
+    assert_eq!(
+        runtime.block_on(current_mode(&modes)),
+        LauncherAuthorityProtocol::ResizeV2,
+        "a gate-refused cutover must leave PostgreSQL exactly where it was",
+    );
+
+    // ── 3. the drain fence, read twice from one fact ────────────────────
+    let task_run_id = runtime.block_on(seed_task_run(&db));
+    let (_row, pod_uid) = runtime.block_on(seed_nonterminal_resize_row(&permits, &task_run_id));
+
+    let fenced = cutover_preflight(LauncherAuthorityProtocol::LeafV1, &url, &for_leaf, None);
+    assert_eq!(
+        fenced.classes,
+        ["drain-fence".to_owned()].into_iter().collect(),
+        "the seeded row must reach the gate through the production \
+         list_nonterminal_resize query:\n{}",
+        fenced.output,
+    );
+
+    let fence_pods = Arc::new(DrainedPodPlane::default());
+    let fence_rollout = cutover_rollout(&db, Arc::clone(&fence_pods) as Arc<dyn TaskRunPodPlane>);
+    runtime.block_on(arm_at_the_flip(
+        &fence_rollout,
+        probe_for(&leaf_image, &task_run_id),
+    ));
+    let named = runtime
+        .block_on(fence_rollout.prove_drained())
+        .expect_err("the driver must refuse the same row");
+    let RolloutBlocked::NonterminalResizeRows(rows) = &named else {
+        panic!("the driver must name the rows the gate counted, got {named:?}");
+    };
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].task_run_id, task_run_id);
+    assert_eq!(rows[0].pod_uid.as_deref(), Some(pod_uid.as_str()));
+
+    assert_eq!(
+        (
+            pods.creations(),
+            rollback_pods.creations(),
+            fence_pods.creations()
+        ),
+        (0, 0, 0),
+        "no cutover in this test may materialise a Pod",
+    );
+    let _ = std::fs::remove_dir_all(&scratch);
+}
+
+/// **The gate itself.** The deploy-time preflight decides, and only then does
+/// the rollout driver touch the authority mode.
+///
+/// Written as one function used by every flip below so the ordering cannot be
+/// forgotten at a call site: a `PreflightVerdict` that did not clear returns
+/// before `prove_drained` is reached, so a blocked gate leaves the journal — and
+/// the durable mode — untouched.
+async fn gated_flip(
+    rollout: &ResizeRollout,
+    verdict: &PreflightVerdict,
+    expected_epoch: i64,
+    target: LauncherAuthorityProtocol,
+) -> Result<i64, String> {
+    if !verdict.cleared() {
+        return Err(format!(
+            "the cutover preflight refused: status={:?} classes={:?}",
+            verdict.status, verdict.classes,
+        ));
+    }
+    rollout
+        .prove_drained()
+        .await
+        .map_err(|blocked| format!("the drain proof refused: {blocked}"))?;
+    // The rollout's own preflight step, so the flip below is reachable at all:
+    // `AuthorityModeFlipped` lists `PreflightCleared` among its prerequisites.
+    rollout
+        .clear_preflight(target)
+        .await
+        .map_err(|blocked| format!("the rollout preflight gate refused: {blocked}"))?;
+    rollout
+        .flip_authority_mode(expected_epoch, target)
+        .await
+        .map_err(|blocked| format!("the flip refused: {blocked}"))
+}
+
+/// **AC9, cluster half.** A REAL task-run Pod on the cluster blocks the flip —
+/// both through the rollout driver's own Pod census and through the deploy-time
+/// preflight — and the flip proceeds once it is gone.
+///
+/// The live Pod is the dimension PostgreSQL cannot see. `set_mode`'s fence
+/// cannot answer it at all: a Pod that outlived its permit is invisible to every
+/// count it can take. `ResizeRollout::prove_drained` enumerates the apiserver
+/// first and refuses with `LiveTaskRunPods`, naming the Pod, its UID and its
+/// task run.
+#[test]
+#[ignore = "requires scripts/kind/setup-resize-matrix-cluster.sh up"]
+fn a_live_pod_on_the_cluster_blocks_the_flip() {
+    if !live_tests_enabled() {
+        return;
+    }
+    harness_context();
+    let images = BuiltImages::ensure();
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("a tokio runtime");
+    let db = runtime
+        .block_on(Database::ephemeral())
+        .expect("a real test database");
+    let modes = LauncherAuthorityModeRepository::new(db.clone());
+    let permits = BuildPodPermitRepository::new(db.clone());
+    runtime.block_on(force_mode(&modes, LauncherAuthorityProtocol::LeafV1));
+
+    let url = runtime.block_on(ephemeral_database_url(&db));
+    let leaf_image = runtime.block_on(seed_catalog_image(&db, ImageClass::LeafV1));
+    // The catalog a forward cutover prepares is the one that may run AFTER it,
+    // so the bundle handed to the gate carries the `resize-v2` row and not the
+    // `leaf-v1` row the blocking Pod is running.
+    let resize_image = runtime.block_on(seed_catalog_image(&db, ImageClass::ResizeV2));
+    let scratch = scratch_dir();
+    let observations = scratch.join("observations.json");
+
+    // A REAL Pod, under the mode we are about to try to leave.
+    let cell = Cell {
+        image: ImageClass::LeafV1,
+        mode: ServerMode::Preparation,
+        expected: expectation(ImageClass::LeafV1, ServerMode::Preparation),
+    };
+    let task_run_id = runtime.block_on(seed_task_run(&db));
+    let live = dispatch_as(&images, cell, task_run_id);
+
+    // The permit that the dispatch path would have taken for it. Acquired here
+    // because this harness drives the renderer directly rather than the whole
+    // dispatch actor; the ROW is the production one either way.
+    let row = match runtime.block_on(permits.acquire(&live.task_run_id, 4)) {
+        AcquireBuildPodPermitResult::Acquired { row, .. } => row,
+        other => panic!("acquire the live Pod's permit: {other:?}"),
+    };
+
+    // The Pod really is alive — otherwise every refusal below is about a stale
+    // row rather than about live cluster state.
+    let phase = pod_json(&live.pod)["status"]["phase"].clone();
+    assert_eq!(
+        phase, "Running",
+        "the blocking Pod must actually be running, got {phase:?}",
+    );
+
+    // ── the driver's own Pod census refuses, naming the Pod ─────────────
+    let rollout = cutover_rollout(&db, Arc::new(ClusterPodPlane));
+    runtime.block_on(arm_at_the_flip(
+        &rollout,
+        probe_for(&leaf_image, &live.task_run_id),
+    ));
+    let blocked = runtime
+        .block_on(rollout.prove_drained())
+        .expect_err("a live task-run Pod must block the drain proof");
+    let RolloutBlocked::LiveTaskRunPods(pods) = &blocked else {
+        panic!(
+            "the driver must refuse on the Pod census it took from the apiserver, got {blocked:?}. \
+             `set_mode`'s fence cannot see a Pod at all, so a refusal of any other shape here \
+             would be about a database row."
+        );
+    };
+    let named = pods
+        .iter()
+        .find(|pod| pod.pod_name == live.pod)
+        .unwrap_or_else(|| panic!("the census must name Pod {}: {pods:?}", live.pod));
+    assert_eq!(
+        named.pod_uid, live.pod_uid,
+        "the refusal must carry the immutable UID the resize fence is taken against",
+    );
+    assert_eq!(named.task_run_id, live.task_run_id);
+
+    // ── and so does the deploy-time gate, from the same census ──────────
+    let census: Vec<String> = live_task_run_pods_on_cluster()
+        .into_iter()
+        .map(|pod| pod.pod_name)
+        .collect();
+    assert!(
+        census.contains(&live.pod),
+        "the census fed to the gate must contain the live Pod: {census:?}",
+    );
+    write_observations(&observations, &[&resize_image], &census);
+    let refused = cutover_preflight(
+        LauncherAuthorityProtocol::ResizeV2,
+        &url,
+        &observations,
+        None,
+    );
+    assert_eq!(
+        refused.classes,
+        ["drain-fence".to_owned()].into_iter().collect(),
+        "a live task-run Pod must reach the deploy-time gate as the drain-fence defect, and as \
+         that defect ALONE — every other class is render-derived and the render did not \
+         change:\n{}",
+        refused.output,
+    );
+
+    let epoch = runtime.block_on(current_epoch(&modes));
+    assert!(
+        runtime
+            .block_on(gated_flip(
+                &rollout,
+                &refused,
+                epoch,
+                LauncherAuthorityProtocol::ResizeV2,
+            ))
+            .is_err(),
+        "neither the gate nor the driver may let this flip through",
+    );
+    assert!(
+        !rollout
+            .journal()
+            .contains(&RolloutStep::AuthorityModeFlipped),
+        "a blocked cutover must never journal a flip: {:?}",
+        rollout.journal(),
+    );
+    assert_eq!(
+        runtime.block_on(current_mode(&modes)),
+        LauncherAuthorityProtocol::LeafV1,
+        "a blocked cutover must leave PostgreSQL exactly where it was",
+    );
+
+    // ── the Pod goes, and the same driver flips ─────────────────────────
+    delete_cell(&live);
+    runtime
+        .block_on(permits.release(
+            &live.task_run_id,
+            &row.permit_id,
+            row.fencing_token,
+            "matrix",
+        ))
+        .expect("release the permit");
+    for _ in 0..AWAIT_TICKS {
+        if live_task_run_pods_on_cluster().is_empty() {
+            break;
+        }
+        std::thread::sleep(TICK);
+    }
+    assert!(
+        live_task_run_pods_on_cluster().is_empty(),
+        "the harness must reach an empty Pod census before the flip is expected to succeed",
+    );
+
+    write_observations(&observations, &[&resize_image], &[]);
+    let cleared = cutover_preflight(
+        LauncherAuthorityProtocol::ResizeV2,
+        &url,
+        &observations,
+        None,
+    );
+    assert!(
+        cleared.cleared(),
+        "with the Pod gone and the permit released the gate must clear:\n{}",
+        cleared.output,
+    );
+    runtime
+        .block_on(gated_flip(
+            &rollout,
+            &cleared,
+            epoch,
+            LauncherAuthorityProtocol::ResizeV2,
+        ))
+        .expect("with the cluster drained, the cutover must proceed");
+    assert_eq!(
+        rollout.journal(),
+        vec![
+            RolloutStep::RetentionVerified,
+            RolloutStep::AdmissionPaused,
+            RolloutStep::DrainProven,
+            RolloutStep::AuthorityModeFlipped,
+        ],
+        "the observed step sequence is the ordering proof",
+    );
+    assert_eq!(
+        runtime.block_on(current_mode(&modes)),
+        LauncherAuthorityProtocol::ResizeV2,
+    );
+    let _ = std::fs::remove_dir_all(&scratch);
+}

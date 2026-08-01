@@ -57,6 +57,14 @@ cd "$ROOT"
 # merged and unreachable — and `task_run_resize_reconcile::spawn` is the seam
 # that makes a dead worker's stranded Pod somebody's problem at all. Both are
 # exactly the shape this guard exists to catch.
+#
+# `ResizeRollout::production` is the last entry, and it was in the same state:
+# the staged activation this whole proposal is FOR, composed correctly, tested
+# thoroughly, and callable by nobody. Its only reference outside its own module
+# was a test asserting the constructor existed. The composition anchors below
+# pin the two halves that make it reachable — the driver that calls it and the
+# binary that calls the driver — because a production caller inside a function
+# no `main` reaches is still zero reachability.
 GUARDED_SYMBOLS="
 TaskRunResizeBootstrap::bootstrap|\.bootstrap\(|TaskRunResizeBootstrap
 DispatchGate::admit|\.admit\(|DispatchGate
@@ -64,6 +72,7 @@ BuildPodPermitRepository::acquire|\.acquire\(|BuildPodPermitRepository
 BuildPodPermitRepository::capture_resize_identity|\.capture_resize_identity\(|BuildPodPermitRepository
 BuildPodPermitRepository::list_nonterminal_resize|\.list_nonterminal_resize\(|BuildPodPermitRepository
 task_run_resize_reconcile::spawn|task_run_resize_reconcile::spawn\(|become_leader
+ResizeRollout::production|ResizeRollout::production\(|ResizeRollout
 BuildLeaseRepository::list_nonterminal_with_settlement|\.list_nonterminal_with_settlement\(|BuildLeaseRepository
 BuildLeaseRepository::list_nonterminal|\.list_nonterminal\(|BuildLeaseRepository
 BuildLeaseRepository::clear_for_operator|\.clear_for_operator\(|BuildLeaseRepository
@@ -79,6 +88,12 @@ server/crates/djinn-agent/src/actors/slot/supervisor_runner.rs|bind_build_pod_pe
 server/crates/djinn-agent/src/actors/slot/supervisor_runner.rs|admit_task_run_dispatch\(|the dispatch seam must gate stdio attach on the birth downsize
 server/crates/djinn-agent/src/actors/slot/supervisor_runner.rs|record_dispatch_started\(|the dispatch site must report itself so the gate's absence is observable
 server/src/server/state/mod.rs|task_run_resize_reconcile::spawn\(self\.clone\(\)\)|the resize reconciler must be armed from become_leader, or a worker death strands its Pod forever
+server/src/bin/authority_cutover.rs|let report = run\(|the operator binary must call the cutover driver, or ResizeRollout::production sits inside a function no main reaches
+server/Cargo.toml|^name = .authority-cutover.$|the operator entry point must be a declared binary target; a src/bin file cargo does not build is not an entry point
+server/src/authority_cutover.rs|rollout\.activate\(&plan\)|the driver must run the forward sequence through ResizeRollout, not through set_mode
+server/src/authority_cutover.rs|rollout\.rollback\(&plan\)|the driver must run the reverse sequence through ResizeRollout, not through set_mode
+server/src/task_run_resize_rollout.rs|self\.clear_preflight\(LauncherAuthorityProtocol::ResizeV2\)|the forward cutover must run the real preflight before the flip
+server/src/task_run_resize_rollout.rs|self\.clear_preflight\(LauncherAuthorityProtocol::LeafV1\)|the reverse cutover must run the real preflight before the flip
 server/src/server/state/mod.rs|BuildLeaseReclaimer::new\(|the build-lease reclaimer must be constructed at the composition root
 server/src/server/state/mod.rs|reclaimer\.reclaim\(\)\.await|the reclaimer must be DRIVEN on the periodic tick, not merely constructed; a startup-only reaper never sees a worker that dies at minute 40
 server/src/server/state/mod.rs|cap_refresh_lease\.expire_deadlines\(\)\.await|queue and launch deadlines must be swept periodically -- expire_deadlines had ZERO production callers, which is why a queued build lease was immortal whenever no other lease was being drained

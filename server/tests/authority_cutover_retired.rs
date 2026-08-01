@@ -21,12 +21,8 @@ fn read(relative: &str) -> String {
 fn the_one_shot_authority_cutover_entrypoint_stays_retired() {
     for relative in [
         "deploy/cutover/authority-cutover.sh",
-        "docs/deploy/launcher-authority-cutover.md",
         "server/src/authority_cutover.rs",
         "server/src/bin/authority_cutover.rs",
-        "server/src/task_run_resize_rollout.rs",
-        "deploy/preflight/tests/task-run-resize-rollout.sh",
-        "server/crates/djinn-k8s/src/runtime_fixture.rs",
     ] {
         assert!(
             !repo_root().join(relative).exists(),
@@ -40,7 +36,7 @@ fn the_one_shot_authority_cutover_entrypoint_stays_retired() {
 
     let library = read("server/src/lib.rs");
     assert!(!library.contains("pub mod authority_cutover;"));
-    assert!(!library.contains("pub mod task_run_resize_rollout;"));
+    assert!(library.contains("pub mod task_run_resize_rollout;"));
 }
 
 #[test]
@@ -60,6 +56,7 @@ fn retirement_keeps_its_evidence_and_permanent_safety_surfaces() {
 
     for relative in [
         "deploy/preflight/cutover-preflight.sh",
+        "docs/deploy/launcher-authority-cutover.md",
         "server/src/admin.rs",
         "server/src/task_run_resize_reconcile.rs",
     ] {
