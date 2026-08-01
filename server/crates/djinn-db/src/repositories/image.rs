@@ -29,6 +29,12 @@ impl ImageStatus {
     pub const FAILED: &'static str = "failed";
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CurrentBuildTransition {
+    Applied,
+    Stale,
+}
+
 /// A row of `images`. The JSON `config` field is returned as raw text; callers
 /// parse it against `djinn-stack`. The set of injected backing services lives in
 /// the `image_service_presets` junction (see [`ImageRepository::list_service_presets`]),
@@ -324,6 +330,49 @@ impl ImageRepository {
         Ok(())
     }
 
+    /// Atomically publish a terminal artifact only when the Job still names
+    /// the row's expected build intent. Kubernetes labels carry the canonical
+    /// hash prefix used by the build tag, hence the prefix comparison against
+    /// the persisted full config hash.
+    pub async fn mark_ready_if_current_build(
+        &self,
+        id: &str,
+        expected_hash: &str,
+        tag: &str,
+        registry_digest: Option<&str>,
+        launcher_protocol: Option<LauncherAuthorityProtocol>,
+    ) -> Result<CurrentBuildTransition> {
+        let digest = registry_digest.map(str::trim).filter(|d| !d.is_empty());
+        if let Some(protocol) = launcher_protocol
+            && digest.is_none()
+        {
+            return Err(crate::Error::InvalidData(format!(
+                "image {id} declares launcher authority protocol {} but captured no immutable registry digest",
+                protocol.as_wire()
+            )));
+        }
+        self.db.ensure_initialized().await?;
+        let result = sqlx::query(
+            r#"UPDATE images SET status = 'ready', tag = $3, registry_digest = $4,
+                      launcher_authority_protocol = $5, last_error = NULL,
+                      updated_at = to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+               WHERE id = $1 AND status = 'building'
+                 AND left(config_hash, length($2)) = $2"#,
+        )
+        .bind(id)
+        .bind(expected_hash)
+        .bind(tag)
+        .bind(digest)
+        .bind(launcher_protocol.map(LauncherAuthorityProtocol::as_wire))
+        .execute(self.db.pool())
+        .await?;
+        Ok(if result.rows_affected() == 1 {
+            CurrentBuildTransition::Applied
+        } else {
+            CurrentBuildTransition::Stale
+        })
+    }
+
     /// Enumerate the `ready`, digest-pinned images that declare no launcher
     /// authority protocol.
     ///
@@ -365,6 +414,29 @@ impl ImageRepository {
             .execute(self.db.pool())
             .await?;
         Ok(())
+    }
+
+    pub async fn mark_failed_if_current_build(
+        &self,
+        id: &str,
+        expected_hash: &str,
+        error: &str,
+    ) -> Result<CurrentBuildTransition> {
+        self.db.ensure_initialized().await?;
+        let result = sqlx::query(
+            "UPDATE images SET status = 'failed', last_error = $3 WHERE id = $1 \
+             AND status = 'building' AND left(config_hash, length($2)) = $2",
+        )
+        .bind(id)
+        .bind(expected_hash)
+        .bind(error)
+        .execute(self.db.pool())
+        .await?;
+        Ok(if result.rows_affected() == 1 {
+            CurrentBuildTransition::Applied
+        } else {
+            CurrentBuildTransition::Stale
+        })
     }
 
     // ── injected backing services (junction table, migration 66) ────────────
@@ -1251,6 +1323,56 @@ mod tests {
             .await
             .is_err(),
             "migration 166 must refuse a protocol-declaring row with no digest"
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_build_transitions_are_fenced_by_current_hash_and_building_state() {
+        let db = Database::open_in_memory().unwrap();
+        let repo = ImageRepository::new(db);
+        repo.create("cas", "CAS", None, "{}").await.unwrap();
+        repo.mark_building("cas", "aaaaaaaaaaaa-full")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            repo.mark_ready_if_current_build("cas", "aaaaaaaaaaaa", "registry/new:b", None, None)
+                .await
+                .unwrap(),
+            CurrentBuildTransition::Applied
+        );
+        let ready_b = repo.get("cas").await.unwrap().unwrap();
+        for stale in [
+            repo.mark_failed_if_current_build("cas", "oldoldoldold", "old failure")
+                .await
+                .unwrap(),
+            repo.mark_ready_if_current_build("cas", "oldoldoldold", "registry/old:a", None, None)
+                .await
+                .unwrap(),
+        ] {
+            assert_eq!(stale, CurrentBuildTransition::Stale);
+        }
+        let after = repo.get("cas").await.unwrap().unwrap();
+        assert_eq!(after.status, ready_b.status);
+        assert_eq!(after.tag, ready_b.tag);
+        assert_eq!(after.registry_digest, ready_b.registry_digest);
+        assert_eq!(
+            after.launcher_authority_protocol,
+            ready_b.launcher_authority_protocol
+        );
+
+        repo.mark_building("cas", "bbbbbbbbbbbb-full")
+            .await
+            .unwrap();
+        assert_eq!(
+            repo.mark_failed_if_current_build("cas", "bbbbbbbbbbbb", "current failure")
+                .await
+                .unwrap(),
+            CurrentBuildTransition::Applied
+        );
+        assert_eq!(
+            repo.get("cas").await.unwrap().unwrap().status,
+            ImageStatus::FAILED
         );
     }
 }

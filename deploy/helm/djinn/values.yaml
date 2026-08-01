@@ -251,10 +251,9 @@ kueue:
 # real render; run it against the values you are about to deploy before you
 # deploy them.
 cgroupLauncher:
-  # Production task-runs should use the brokered invocation-leaf path, but must
-  # opt in together with `cgroupWritable` above. The stock default is the
-  # prerequisite-free profile that any cluster can actually dispatch.
-  mode: disabled
+  # Armed by default: a production render must include the quota mechanism
+  # required by resize-v2 rather than silently dispatching ungoverned work.
+  mode: required
 
 # -----------------------------------------------------------------------------
 # Writable cgroup preparation rollout
@@ -264,10 +263,9 @@ cgroupLauncher:
 # corresponding conformance check and are labeled
 # `djinn.io/cgroup-writable=true`.
 #
-# Both switches are deliberately disabled by default. Enabling runtimeClass
-# only makes the class available; it neither changes launcher privileges nor
-# assigns it to task-run Pods. taskRuns may only be enabled together with
-# runtimeClass in the activation release.
+# The stock profile renders and assigns the writable RuntimeClass because the
+# armed launcher depends on it. Operators may explicitly disable the complete
+# stack for local/direct-worker profiles.
 #
 # `taskRuns.enabled` is also the other half of `cgroupLauncher.mode` above:
 # `required` + `taskRuns.enabled: false` is refused at dispatch
@@ -275,9 +273,9 @@ cgroupLauncher:
 # Jobs, which is the outage this default pairing caused on 2026-07-29.
 cgroupWritable:
   runtimeClass:
-    enabled: false
+    enabled: true
   taskRuns:
-    enabled: false
+    enabled: true
 
 # -----------------------------------------------------------------------------
 # Server deployment

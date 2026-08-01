@@ -49,7 +49,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use djinn_core::events::{DjinnEventEnvelope, EventBus};
-use djinn_db::{Database, ImageRepository, ProjectImage, ProjectImageStatus, ProjectRepository};
+use djinn_db::{
+    CurrentBuildTransition, Database, ImageRepository, ProjectImage, ProjectImageStatus,
+    ProjectRepository,
+};
 use djinn_launcher_protocol::{LauncherAuthorityProtocol, ParseLauncherAuthorityProtocolError};
 use djinn_runtime::GraphWarmerService;
 use futures::StreamExt;
@@ -421,15 +424,21 @@ async fn handle_image_event(
                 // Pod can bootstrap is the wedge this whole path exists to
                 // avoid, and it surfaces nowhere until dispatch stops.
                 ReadyOutcome::Refuse(last_error) => {
-                    if let Err(e) = image_repo.mark_failed(image_id, &last_error).await {
-                        warn!(
-                            image_id,
-                            hash = %hash_prefix,
-                            job = %job_name,
-                            error = %e,
-                            "image_build_watcher: images.mark_failed failed"
-                        );
-                        return;
+                    let transition = image_repo
+                        .mark_failed_if_current_build(image_id, &hash_prefix, &last_error)
+                        .await;
+                    match transition {
+                        Ok(CurrentBuildTransition::Applied) => {}
+                        Ok(CurrentBuildTransition::Stale) => {
+                            log_stale_catalog_job(image_repo, image_id, &hash_prefix, &job_name)
+                                .await;
+                            return;
+                        }
+                        Err(e) => {
+                            warn!(image_id, hash = %hash_prefix, job = %job_name, error = %e,
+                                "image_build_watcher: images.mark_failed failed");
+                            return;
+                        }
                     }
                     warn!(
                         image_id,
@@ -455,18 +464,26 @@ async fn handle_image_event(
                 }
             };
 
-            if let Err(e) = image_repo
-                .mark_ready(image_id, &image_tag, digest.as_deref(), protocol)
-                .await
-            {
-                warn!(
+            let transition = image_repo
+                .mark_ready_if_current_build(
                     image_id,
-                    hash = %hash_prefix,
-                    job = %job_name,
-                    error = %e,
-                    "image_build_watcher: images.mark_ready failed"
-                );
-                return;
+                    &hash_prefix,
+                    &image_tag,
+                    digest.as_deref(),
+                    protocol,
+                )
+                .await;
+            match transition {
+                Ok(CurrentBuildTransition::Applied) => {}
+                Ok(CurrentBuildTransition::Stale) => {
+                    log_stale_catalog_job(image_repo, image_id, &hash_prefix, &job_name).await;
+                    return;
+                }
+                Err(e) => {
+                    warn!(image_id, hash = %hash_prefix, job = %job_name, error = %e,
+                        "image_build_watcher: conditional ready transition failed");
+                    return;
+                }
             }
             info!(
                 image_id,
@@ -532,15 +549,20 @@ async fn handle_image_event(
                 },
                 None => format!("{header}; see kubectl logs job/{job_name}"),
             };
-            if let Err(e) = image_repo.mark_failed(image_id, &last_error).await {
-                warn!(
-                    image_id,
-                    hash = %hash_prefix,
-                    job = %job_name,
-                    error = %e,
-                    "image_build_watcher: images.mark_failed failed"
-                );
-                return;
+            let transition = image_repo
+                .mark_failed_if_current_build(image_id, &hash_prefix, &last_error)
+                .await;
+            match transition {
+                Ok(CurrentBuildTransition::Applied) => {}
+                Ok(CurrentBuildTransition::Stale) => {
+                    log_stale_catalog_job(image_repo, image_id, &hash_prefix, &job_name).await;
+                    return;
+                }
+                Err(e) => {
+                    warn!(image_id, hash = %hash_prefix, job = %job_name, error = %e,
+                        "image_build_watcher: images.mark_failed failed");
+                    return;
+                }
             }
             warn!(
                 image_id,
@@ -563,6 +585,23 @@ async fn handle_image_event(
         seen.clear();
     }
     seen.insert(dedupe_key);
+}
+
+async fn log_stale_catalog_job(
+    image_repo: &ImageRepository,
+    image_id: &str,
+    job_hash: &str,
+    job_name: &str,
+) {
+    let current = image_repo.get(image_id).await.ok().flatten();
+    debug!(
+        image_id,
+        job = job_name,
+        job_hash,
+        current_hash = ?current.as_ref().and_then(|image| image.config_hash.as_deref()),
+        current_status = ?current.as_ref().map(|image| image.status.as_str()),
+        "image_build_watcher: stale terminal Job ignored"
+    );
 }
 
 /// What a finished build Job reported about the artifact it produced.

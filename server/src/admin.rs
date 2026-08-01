@@ -36,7 +36,9 @@ use djinn_coordinator::invocation_lease_control::{ControlError, InvocationLeaseC
 use djinn_db::{
     BuildLeaseConsumerKind, BuildLeaseKey, BuildLeaseRepository, BuildLeaseRow, Database,
     InvocationLeaseAuthorityRepository, InvocationLeaseAuthorityRow, InvocationLeaseMode,
+    LauncherAuthorityModeRepository, SetLauncherAuthorityModeResult,
 };
+use djinn_launcher_protocol::LauncherAuthorityProtocol;
 
 /// Top-level operator admin commands.
 #[derive(clap::Subcommand, Debug)]
@@ -50,6 +52,39 @@ pub enum AdminCommand {
     BuildLease {
         #[command(subcommand)]
         action: BuildLeaseAction,
+    },
+    /// Durable launcher quota-authority controls.
+    LauncherAuthority {
+        #[command(subcommand)]
+        action: LauncherAuthorityAction,
+    },
+}
+
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LauncherAuthorityModeArg {
+    LeafV1,
+    ResizeV2,
+}
+
+impl From<LauncherAuthorityModeArg> for LauncherAuthorityProtocol {
+    fn from(value: LauncherAuthorityModeArg) -> Self {
+        match value {
+            LauncherAuthorityModeArg::LeafV1 => Self::LeafV1,
+            LauncherAuthorityModeArg::ResizeV2 => Self::ResizeV2,
+        }
+    }
+}
+
+#[derive(clap::Subcommand, Debug)]
+pub enum LauncherAuthorityAction {
+    /// Report the durable mode and CAS epoch.
+    Show,
+    /// Change authority only behind an empty drain and the expected epoch.
+    Set {
+        #[arg(value_enum)]
+        mode: LauncherAuthorityModeArg,
+        #[arg(long)]
+        expected_epoch: i64,
     },
 }
 
@@ -146,6 +181,61 @@ pub async fn run_admin_command(db: &Database, command: AdminCommand) -> Result<S
         AdminCommand::Epoch { action } => run_epoch_action(&control, action).await,
         AdminCommand::BuildLease { action } => {
             run_build_lease_action(&BuildLeaseRepository::new(db.clone()), action).await
+        }
+        AdminCommand::LauncherAuthority { action } => {
+            run_launcher_authority_action(&LauncherAuthorityModeRepository::new(db.clone()), action)
+                .await
+        }
+    }
+}
+
+async fn run_launcher_authority_action(
+    repository: &LauncherAuthorityModeRepository,
+    action: LauncherAuthorityAction,
+) -> Result<String, String> {
+    match action {
+        LauncherAuthorityAction::Show => repository
+            .read()
+            .await
+            .map_err(|error| error.to_string())?
+            .map(|row| format!("mode={}\nepoch={}", row.mode.as_wire(), row.epoch))
+            .ok_or_else(|| "launcher authority mode is uninitialized".to_owned()),
+        LauncherAuthorityAction::Set {
+            mode,
+            expected_epoch,
+        } => {
+            let observed = repository
+                .drain_census()
+                .await
+                .map_err(|error| format!("launcher authority drain census failed: {error}"))?;
+            if !observed.is_drained() {
+                return Err(format!("launcher authority drain refused: {observed:?}"));
+            }
+            match repository.set_mode(expected_epoch, mode.into()).await {
+                SetLauncherAuthorityModeResult::Flipped { row, .. } => Ok(format!(
+                    "launcher authority set: mode={} epoch={}",
+                    row.mode.as_wire(),
+                    row.epoch
+                )),
+                SetLauncherAuthorityModeResult::Unchanged { row, .. } => Err(format!(
+                    "launcher authority unchanged: mode={} epoch={}",
+                    row.mode.as_wire(),
+                    row.epoch
+                )),
+                SetLauncherAuthorityModeResult::DrainNotEmpty { drain, .. } => {
+                    Err(format!("launcher authority drain refused: {drain:?}"))
+                }
+                SetLauncherAuthorityModeResult::EpochConflict { row } => Err(format!(
+                    "launcher authority epoch conflict: expected {expected_epoch}, current {}",
+                    row.epoch
+                )),
+                SetLauncherAuthorityModeResult::Uninitialized => {
+                    Err("launcher authority mode is uninitialized".to_owned())
+                }
+                SetLauncherAuthorityModeResult::Unavailable => {
+                    Err("launcher authority mode is unavailable".to_owned())
+                }
+            }
         }
     }
 }
@@ -312,6 +402,69 @@ fn render_show(row: Option<&InvocationLeaseAuthorityRow>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn launcher_authority_cli_shows_and_flips_both_directions_with_epoch_fencing() {
+        let db = Database::open_in_memory().expect("test database");
+        let repository = LauncherAuthorityModeRepository::new(db);
+        let initial = repository.read().await.unwrap().expect("seeded authority");
+
+        let shown = run_launcher_authority_action(&repository, LauncherAuthorityAction::Show)
+            .await
+            .unwrap();
+        assert!(shown.contains(initial.mode.as_wire()), "{shown}");
+        assert!(
+            shown.contains(&format!("epoch={}", initial.epoch)),
+            "{shown}"
+        );
+
+        let other = match initial.mode {
+            LauncherAuthorityProtocol::LeafV1 => LauncherAuthorityModeArg::ResizeV2,
+            LauncherAuthorityProtocol::ResizeV2 => LauncherAuthorityModeArg::LeafV1,
+        };
+        run_launcher_authority_action(
+            &repository,
+            LauncherAuthorityAction::Set {
+                mode: other,
+                expected_epoch: initial.epoch,
+            },
+        )
+        .await
+        .expect("forward flip");
+        let forward = repository.read().await.unwrap().unwrap();
+        assert_eq!(forward.epoch, initial.epoch + 1);
+
+        let conflict = run_launcher_authority_action(
+            &repository,
+            LauncherAuthorityAction::Set {
+                mode: match initial.mode {
+                    LauncherAuthorityProtocol::LeafV1 => LauncherAuthorityModeArg::LeafV1,
+                    LauncherAuthorityProtocol::ResizeV2 => LauncherAuthorityModeArg::ResizeV2,
+                },
+                expected_epoch: initial.epoch,
+            },
+        )
+        .await
+        .expect_err("stale expected epoch");
+        assert!(conflict.contains("epoch conflict"), "{conflict}");
+
+        run_launcher_authority_action(
+            &repository,
+            LauncherAuthorityAction::Set {
+                mode: match initial.mode {
+                    LauncherAuthorityProtocol::LeafV1 => LauncherAuthorityModeArg::LeafV1,
+                    LauncherAuthorityProtocol::ResizeV2 => LauncherAuthorityModeArg::ResizeV2,
+                },
+                expected_epoch: forward.epoch,
+            },
+        )
+        .await
+        .expect("rollback flip");
+        assert_eq!(
+            repository.read().await.unwrap().unwrap().epoch,
+            initial.epoch + 2
+        );
+    }
 
     /// **AC4: every surviving subcommand executes against a real database.**
     ///

@@ -33,7 +33,8 @@ trap 'rm -rf "$WORK"' EXIT
 # task-run assignment.
 helm template cgroup-writable-default "$CHART_DIR" --is-upgrade >"$WORK/default.yaml"
 helm template cgroup-writable-preparation "$CHART_DIR" --is-upgrade \
-  --set cgroupWritable.runtimeClass.enabled=true >"$WORK/preparation.yaml"
+  --set cgroupWritable.runtimeClass.enabled=true,cgroupWritable.taskRuns.enabled=false \
+  --set cgroupLauncher.mode=disabled >"$WORK/preparation.yaml"
 helm template cgroup-writable-activation "$CHART_DIR" --is-upgrade \
   --set cgroupWritable.runtimeClass.enabled=true,cgroupWritable.taskRuns.enabled=true >"$WORK/activation.yaml"
 # The fully armed production pairing: an armed launcher together with the
@@ -102,10 +103,9 @@ base, preparation, activation, armed = (
     Path(path).read_text(encoding='utf-8') for path in sys.argv[1:5]
 )
 fixtures = Path(sys.argv[5])
-assert not runtime_classes(base), 'disabled defaults rendered a RuntimeClass'
-for absent in (TASK_RUN_CLASS, PROBE_CLASS):
-    assert absent not in base, f'disabled defaults rendered {absent}'
-assert 'runtimeClassName:' not in base, 'disabled defaults assigned RuntimeClass to a PodSpec'
+assert len(runtime_classes(base)) == 2, 'armed defaults must render both RuntimeClasses'
+runtime_class_named(base, TASK_RUN_CLASS)
+runtime_class_named(base, PROBE_CLASS)
 
 # Enabling the single gate must render BOTH classes: the constrained task-run
 # class and the unconstrained probe class. They exist for opposite reasons and
@@ -171,7 +171,7 @@ def server_activation(rendered):
     return server_env(rendered, 'DJINN_K8S_TASK_RUN_CGROUP_WRITABLE_ENABLED')
 
 
-assert server_activation(base) == 'false', 'disabled render armed task-run activation'
+assert server_activation(base) == 'true', 'armed defaults omitted task-run activation'
 assert server_activation(preparation) == 'false', 'preparation render armed task-run activation'
 assert server_activation(activation) == 'true', 'activation render omitted task-run activation'
 
@@ -209,20 +209,7 @@ for label, rendered in (
 ):
     assert_dispatchable(rendered, label)
 
-# Non-vacuity: flip ONLY the launcher mode in the default render and the same
-# check must reject it. Without this, a check that never fires reads identically
-# to one that passes.
-armed_default = base.replace(
-    'name: DJINN_K8S_CGROUP_LAUNCHER_MODE\n              value: "disabled"',
-    'name: DJINN_K8S_CGROUP_LAUNCHER_MODE\n              value: "required"',
-)
-assert armed_default != base, 'default render no longer states the launcher mode this check reads'
-try:
-    assert_dispatchable(armed_default, 'synthetic armed default')
-except AssertionError:
-    pass
-else:
-    raise AssertionError('undispatchable required/false pairing was accepted')
+assert server_env(base, 'DJINN_K8S_CGROUP_LAUNCHER_MODE') == 'required'
 
 
 def fail(message, contract):

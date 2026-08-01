@@ -120,11 +120,11 @@ trap 'rm -rf "$WORK"' EXIT
 "$HELM" template "$RELEASE_NAME" "$CHART_DIR" --is-upgrade "$@" >"$WORK/rendered.yaml" ||
   die "helm template failed for chart $CHART_DIR"
 
-# Reduce the render to the environment the kubelet would hand the djinn-server
-# container: `envFrom` ConfigMap keys first, then explicit `env` entries, with
-# later entries winning — the kubelet's own precedence, so a chart that emits a
-# name twice is judged the way the cluster would resolve it rather than the way
-# a reader might hope.
+# First reject duplicate names in every explicit Pod-container `env` array.
+# Kubernetes strategic-merge patches key this array by `name`; unlike kubelet
+# runtime precedence, an upgrade cannot order duplicate keys and rejects the
+# whole workload patch.  Only after preserving that signal do we reduce the
+# djinn-server environment for the dispatch validator.
 python3 - "$WORK/rendered.yaml" >"$WORK/env.nul" <<'PY'
 import sys
 from pathlib import Path
@@ -147,6 +147,35 @@ def fail(message):
 
 def warn(message):
     sys.stderr.write(f'render-gate: warning: {message}\n')
+
+
+def pod_specs(document):
+    kind = str(document.get('kind') or '<unknown>')
+    spec = document.get('spec') or {}
+    if kind == 'Pod':
+        return [spec]
+    if kind == 'CronJob':
+        pod_spec = (((spec.get('jobTemplate') or {}).get('spec') or {})
+                    .get('template') or {}).get('spec')
+        return [pod_spec] if isinstance(pod_spec, dict) else []
+    pod_spec = (spec.get('template') or {}).get('spec')
+    return [pod_spec] if isinstance(pod_spec, dict) else []
+
+
+for document in documents:
+    workload = f"{document.get('kind', '<unknown>')}/{(document.get('metadata') or {}).get('name', '<unnamed>')}"
+    for pod_spec in pod_specs(document):
+        for container_kind in ('containers', 'initContainers'):
+            for candidate in pod_spec.get(container_kind) or []:
+                counts = {}
+                for entry in candidate.get('env') or []:
+                    name = entry.get('name')
+                    if name:
+                        counts[name] = counts.get(name, 0) + 1
+                repeated = sorted(name for name, count in counts.items() if count > 1)
+                if repeated:
+                    fail(f"duplicate explicit env names in {workload} {container_kind}/"
+                         f"{candidate.get('name', '<unnamed>')}: {', '.join(repeated)}")
 
 
 config_maps = {

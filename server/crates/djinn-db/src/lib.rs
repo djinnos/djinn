@@ -136,7 +136,10 @@ pub use repositories::{
     },
     extension_load_diagnostic::{ExtensionLoadDiagnosticRepository, InsertExtensionLoadDiagnostic},
     git_settings::GitSettingsRepository,
-    image::{Image, ImageRepository, ImageStatus, PreProtocolImage, SelectedCatalogImage},
+    image::{
+        CurrentBuildTransition, Image, ImageRepository, ImageStatus, PreProtocolImage,
+        SelectedCatalogImage,
+    },
     invocation_lease_authority::{
         InvocationLeaseAuthorityRepository, InvocationLeaseAuthorityRow, InvocationLeaseMode,
     },

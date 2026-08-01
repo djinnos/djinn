@@ -171,6 +171,28 @@ pub const JOB_CONDITION_COMPLETE: &str = "Complete";
 /// exhausted its backoff limit or active deadline.
 pub const JOB_CONDITION_FAILED: &str = "Failed";
 
+/// Return the terminal Job condition whose status is affirmatively `True`.
+///
+/// Kubernetes may retain `Complete=False` / `Failed=False` conditions while a
+/// Job is still live.  Keeping the predicate here gives inventory and the
+/// task-run retention reader one lifecycle definition.
+pub fn terminal_job_condition(
+    status: Option<&k8s_openapi::api::batch::v1::JobStatus>,
+) -> Option<&'static str> {
+    let conditions = status?.conditions.as_ref()?;
+    if conditions.iter().any(|condition| {
+        condition.type_ == JOB_CONDITION_FAILED && condition.status.eq_ignore_ascii_case("True")
+    }) {
+        Some(JOB_CONDITION_FAILED)
+    } else if conditions.iter().any(|condition| {
+        condition.type_ == JOB_CONDITION_COMPLETE && condition.status.eq_ignore_ascii_case("True")
+    }) {
+        Some(JOB_CONDITION_COMPLETE)
+    } else {
+        None
+    }
+}
+
 /// Whether a Job has reached a TERMINAL condition — nothing will run under it
 /// again, ever.
 ///
@@ -197,14 +219,7 @@ pub const JOB_CONDITION_FAILED: &str = "Failed";
 pub fn job_reached_terminal_condition(
     status: Option<&k8s_openapi::api::batch::v1::JobStatus>,
 ) -> bool {
-    status.is_some_and(|status| {
-        status.conditions.iter().flatten().any(|condition| {
-            matches!(
-                condition.type_.as_str(),
-                JOB_CONDITION_COMPLETE | JOB_CONDITION_FAILED
-            ) && condition.status.eq_ignore_ascii_case("True")
-        })
-    })
+    terminal_job_condition(status).is_some()
 }
 
 fn job_record(j: Job) -> Option<WorkloadRecord> {
