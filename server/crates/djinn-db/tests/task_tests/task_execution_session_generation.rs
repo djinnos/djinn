@@ -65,16 +65,17 @@ fn guarded_params<'a>(
     }
 }
 
-/// Wait until `expected` repository operations are queued behind the transaction
-/// which holds the task row. This makes the lock acquisition order explicit,
-/// rather than relying on scheduler timing in the concurrent test below.
-async fn wait_for_blocked_operations(db: &Database, blocking_backend_pid: i32, expected: i64) {
+/// Wait until `expected` repository operations are queued for a lock in this
+/// test database. PostgreSQL may report the first waiter as the direct blocker
+/// of later waiters, so counting only operations directly blocked by the
+/// transaction holding the task row misses valid lock queues.
+async fn wait_for_blocked_operations(db: &Database, expected: i64) {
     for _ in 0..100 {
         let blocked: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM pg_stat_activity \
-             WHERE $1 = ANY(pg_blocking_pids(pid))",
+             WHERE datname = current_database() \
+               AND cardinality(pg_blocking_pids(pid)) > 0",
         )
-        .bind(blocking_backend_pid)
         .fetch_one(db.pool())
         .await
         .unwrap();
@@ -89,25 +90,21 @@ async fn wait_for_blocked_operations(db: &Database, blocking_backend_pid: i32, e
 async fn hold_task_row_lock<'a>(
     db: &'a Database,
     task_id: &str,
-) -> (sqlx::Transaction<'a, sqlx::Postgres>, i32) {
+) -> sqlx::Transaction<'a, sqlx::Postgres> {
     let mut tx = db.pool().begin().await.unwrap();
-    let backend_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(&mut *tx)
-        .await
-        .unwrap();
     sqlx::query("SELECT id FROM tasks WHERE id = $1 FOR UPDATE")
         .bind(task_id)
         .execute(&mut *tx)
         .await
         .unwrap();
-    (tx, backend_pid)
+    tx
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn guarded_create_lock_first_commits_before_later_fence() {
     let (db, tasks, sessions, task_id, project_id, task_run_id, generation) =
         guarded_fixture().await;
-    let (lock, lock_pid) = hold_task_row_lock(&db, &task_id).await;
+    let lock = hold_task_row_lock(&db, &task_id).await;
 
     let create_repo = sessions.clone();
     let create_task_id = task_id.clone();
@@ -123,7 +120,7 @@ async fn guarded_create_lock_first_commits_before_later_fence() {
             ))
             .await
     });
-    wait_for_blocked_operations(&db, lock_pid, 1).await;
+    wait_for_blocked_operations(&db, 1).await;
 
     let fence_repo = tasks.clone();
     let fence_task_id = task_id.clone();
@@ -132,7 +129,7 @@ async fn guarded_create_lock_first_commits_before_later_fence() {
             .fence_execution_generation_for_kill(&fence_task_id)
             .await
     });
-    wait_for_blocked_operations(&db, lock_pid, 2).await;
+    wait_for_blocked_operations(&db, 2).await;
     lock.commit().await.unwrap();
 
     let (created, fenced_generation) = tokio::join!(create, fence);
@@ -161,7 +158,7 @@ async fn guarded_create_lock_first_commits_before_later_fence() {
 async fn fence_lock_first_rejects_stale_guarded_create_without_side_effects() {
     let (db, tasks, sessions, task_id, project_id, task_run_id, generation) =
         guarded_fixture().await;
-    let (lock, lock_pid) = hold_task_row_lock(&db, &task_id).await;
+    let lock = hold_task_row_lock(&db, &task_id).await;
 
     let fence_repo = tasks.clone();
     let fence_task_id = task_id.clone();
@@ -170,7 +167,7 @@ async fn fence_lock_first_rejects_stale_guarded_create_without_side_effects() {
             .fence_execution_generation_for_kill(&fence_task_id)
             .await
     });
-    wait_for_blocked_operations(&db, lock_pid, 1).await;
+    wait_for_blocked_operations(&db, 1).await;
 
     let create_repo = sessions.clone();
     let create_task_id = task_id.clone();
@@ -186,7 +183,7 @@ async fn fence_lock_first_rejects_stale_guarded_create_without_side_effects() {
             ))
             .await
     });
-    wait_for_blocked_operations(&db, lock_pid, 2).await;
+    wait_for_blocked_operations(&db, 2).await;
     lock.commit().await.unwrap();
 
     let (fenced_generation, created) = tokio::join!(fence, create);
