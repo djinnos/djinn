@@ -1228,6 +1228,102 @@ expression: tool_schemas_evidence_spike()
     "concurrent_safe": true
   },
   {
+    "name": "evidence_plan",
+    "description": "Capture the one-shot evidence investigation plan for this authenticated spike session. Supply a nonempty set of uniquely identified checks using exactly one closed method: code, graph, or command. Task/session identity and provenance are server-derived and cannot be supplied by callers.",
+    "inputSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "checks"
+      ],
+      "properties": {
+        "checks": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "check_id",
+              "question",
+              "method"
+            ],
+            "properties": {
+              "check_id": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Nonempty unique check identifier within this plan."
+              },
+              "question": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Nonempty investigation question."
+              },
+              "method": {
+                "type": "string",
+                "enum": [
+                  "code",
+                  "graph",
+                  "command"
+                ],
+                "description": "Closed investigation method."
+              }
+            }
+          }
+        }
+      }
+    },
+    "readOnly": true,
+    "destructive": false,
+    "idempotent": true,
+    "openWorld": false,
+    "concurrent_safe": true
+  },
+  {
+    "name": "evidence_exec",
+    "description": "Run one frozen command-method evidence check in the server read-only sandbox. Provide a planned check ID and nonempty argv; cwd is an optional relative in-clone directory and timeout_ms is bounded to 1 through 30000. This is argv execution only: command strings, stdin, executable selection, identity, provenance, and sandbox-policy overrides are not accepted.",
+    "inputSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "check_id",
+        "argv"
+      ],
+      "properties": {
+        "check_id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Nonempty ID of a frozen command-method evidence check."
+        },
+        "argv": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "Argument vector for the constrained read-only executor; no command-string shell is available."
+        },
+        "cwd": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Optional relative directory inside the authenticated clone."
+        },
+        "timeout_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 30000,
+          "description": "Optional bounded execution timeout in milliseconds (1-30000)."
+        }
+      }
+    },
+    "readOnly": true,
+    "destructive": false,
+    "idempotent": true,
+    "openWorld": false,
+    "concurrent_safe": true
+  },
+  {
     "name": "submit_work",
     "description": "Signal that the worker has finished implementing the task. Provide a summary of changes made and list of files modified. Your session ends after this call.",
     "inputSchema": {

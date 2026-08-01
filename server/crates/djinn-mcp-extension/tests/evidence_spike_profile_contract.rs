@@ -39,7 +39,10 @@ fn evidence_spike_profile_contract() {
     let spike = tool_names(&tool_schemas_evidence_spike());
 
     assert_eq!(judge, fixture.judge, "Judge tool names changed");
-    assert_eq!(spike, fixture.evidence_spike, "evidence-spike tool names changed");
+    assert_eq!(
+        spike, fixture.evidence_spike,
+        "evidence-spike tool names changed"
+    );
 
     assert!(judge.contains("shell"), "Judge retains ordinary shell");
     assert!(
