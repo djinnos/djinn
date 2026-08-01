@@ -44,6 +44,34 @@ use djinn_server::authority_cutover::{CutoverFailure, CutoverRequest, run};
 #[allow(clippy::print_stdout, clippy::print_stderr)]
 #[tokio::main]
 async fn main() -> ExitCode {
+    // rustls 0.23 requires an explicit process-level CryptoProvider before any
+    // TLS use, exactly as `server/src/main.rs` installs one for the server.
+    // This binary needs it for the same reason: it talks TLS to the apiserver
+    // (kube client) and to the OCI registry (retention probe, step 5).
+    //
+    // Without it the process panics — not returns UNEVALUABLE, PANICS — on the
+    // first handshake, before any cutover step runs. Observed in production on
+    // 2026-08-01 attempting the 3i92 activation:
+    //
+    //   Could not automatically determine the process-level CryptoProvider
+    //   from Rustls crate features.
+    //
+    // A panic here is worse than a refusal: the wrapper's documented contract
+    // is 0 flipped / 1 blocked / 2 unevaluable, and a panic exits 101, which no
+    // deploy lane classifies. `djinn-k8s`'s kind/kueue/pod-resize test harnesses
+    // already carry this same install for the same reason; the operator entry
+    // point was the one caller that never got it.
+    if rustls::crypto::ring::default_provider()
+        .install_default()
+        .is_err()
+    {
+        eprintln!(
+            "authority-cutover: UNEVALUABLE a rustls CryptoProvider was already installed by \
+             another component; refusing rather than running against an unknown TLS provider"
+        );
+        return ExitCode::from(2);
+    }
+
     match drive().await {
         Ok(()) => ExitCode::SUCCESS,
         Err(failure) => ExitCode::from(report(&failure)),
