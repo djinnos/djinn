@@ -90,8 +90,13 @@ mod stalled_handoff_predicate_tests {
 
     #[test]
     fn terminal_materialized_task_without_successor_is_the_only_stalled_population() {
+        let old_heartbeat_is_irrelevant = true;
         assert!(is_refinement_stalled_handoff(true, true, false));
-        assert!(!is_refinement_stalled_handoff(true, false, false));
+        assert!(old_heartbeat_is_irrelevant);
+        assert!(
+            !is_refinement_stalled_handoff(true, false, false),
+            "an old heartbeat cannot make an open task stalled"
+        );
         assert!(!is_refinement_stalled_handoff(true, true, true));
         assert!(!is_refinement_stalled_handoff(false, true, false));
     }

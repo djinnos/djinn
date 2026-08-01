@@ -296,7 +296,6 @@ impl DjinnMcpServer {
                 p.proposal_id
             )));
         };
-
         // Only allow refinement for proposals in draft or in_review.
         if !matches!(proposal.status.as_str(), "draft" | "in_review") {
             return Json(err_refinement_start(format!(
@@ -658,6 +657,18 @@ impl DjinnMcpServer {
                 error: Some(format!("proposal not found: {}", p.proposal_id)),
             });
         };
+        if let Err(error) = self
+            .gate_proposal_edit(proposal.author_user_id.as_deref())
+            .await
+        {
+            return Json(ProposalRefinementStopResponse {
+                proposal_id: Some(proposal.id),
+                stopped: false,
+                stop_tag: None,
+                code: Some("forbidden".into()),
+                error: Some(error),
+            });
+        }
         let exact = match repo
             .load_current_refinement_run_snapshot(&proposal.id, 60_000)
             .await

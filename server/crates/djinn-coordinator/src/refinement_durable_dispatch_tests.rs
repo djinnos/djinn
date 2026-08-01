@@ -6,6 +6,7 @@ use djinn_core::{
         RefinementStopReason,
     },
 };
+use djinn_db::test_support::{UsageTestSessionSeed, seed_session_row};
 use djinn_db::{
     AdmitRefinementRunRequest, ClaimRefinementIntentRequest, LoadRefinementRunSnapshotRequest,
     ProposalRepository, RefinementAdmissionOutcome, RefinementAdmissionSource,
@@ -79,6 +80,67 @@ async fn wait_until_pool_releases(pool: &djinn_slot::SlotPoolHandle, task_id: &s
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     panic!("observing pool did not release {task_id}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn terminal_role_task_handoff_is_advanced_or_terminalized_by_driver() {
+    let db = crate::test_helpers::create_test_db();
+    let fixture = refinement_cap_tests::seed_refinement_fixture(&db).await;
+    let (events_tx, _events_rx) = tokio::sync::broadcast::channel::<DjinnEventEnvelope>(256);
+    let (pool, mut dispatched) = spawn_model_observing_pool(&db, refinement_cap_tests::TEST_MODEL);
+    let mut actor = refinement_cap_tests::build_refinement_actor(&db, &events_tx, pool.clone());
+    let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+    let (run_id, generation) = admit_run(&repo, &fixture.proposal_id, "terminal-handoff").await;
+    let source_intent_id = only_intent(&repo, &run_id, generation).await;
+    actor.recover_interrupted_refinements().await;
+    actor.drive_active_refinements().await;
+    let (task_id, _) = tokio::time::timeout(Duration::from_secs(1), dispatched.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    wait_until_pool_releases(&pool, &task_id).await;
+    seed_session_row(
+        &db,
+        UsageTestSessionSeed {
+            project_id: &fixture.project_id,
+            model_id: refinement_cap_tests::TEST_MODEL,
+            agent_type: "adversary",
+            started_at: "2026-08-01T00:00:00.000Z",
+            tokens_in: 0,
+            tokens_out: 0,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            cost_usd: None,
+            cost_basis: "unpriced",
+            task_id: Some(&task_id),
+        },
+    )
+    .await;
+    djinn_db::test_support::close_task_at(&db, &task_id, "2026-08-01T00:00:01.000Z").await;
+
+    for _ in 0..3 {
+        actor.drive_active_refinements().await;
+    }
+    let snapshot = repo
+        .load_refinement_run_snapshot(LoadRefinementRunSnapshotRequest {
+            run_id: run_id.clone(),
+            heartbeat_grace_millis: 60_000,
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    let successors = snapshot
+        .snapshot
+        .intents
+        .iter()
+        .filter(|intent| intent.run_id == run_id && intent.intent_id != source_intent_id)
+        .count();
+    assert!(
+        successors == 1
+            || (snapshot.snapshot.run.state == RefinementRunState::Terminal
+                && snapshot.snapshot.run.terminal_reason.is_some())
+    );
+    assert_eq!(snapshot.generation, generation);
 }
 
 pub(crate) async fn admit_run(

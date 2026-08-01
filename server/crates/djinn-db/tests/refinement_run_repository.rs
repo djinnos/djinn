@@ -77,6 +77,13 @@ async fn operator_stop_requires_terminal_stalled_handoff_and_records_audit() {
     .await
     .unwrap();
 
+    assert!(
+        repo.load_refinement_stalled_handoffs()
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
     assert!(matches!(
         repo.operator_stop_stalled_refinement(&run_id, generation, "test-operator", None)
             .await,
@@ -90,6 +97,34 @@ async fn operator_stop_requires_terminal_stalled_handoff_and_records_audit() {
         .execute(db.pool())
         .await
         .unwrap();
+    let before = durable_shape(&db, &proposal_id).await;
+    let first = repo.load_refinement_stalled_handoffs().await.unwrap();
+    let second = repo.load_refinement_stalled_handoffs().await.unwrap();
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0].task_id, task_id);
+    assert_eq!(second.len(), 1);
+    assert_eq!(durable_shape(&db, &proposal_id).await, before);
+    assert_eq!(
+        repo.increment_refinement_outcome_attempt(&run_id, generation, &task_id)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        repo.increment_refinement_outcome_attempt(&run_id, generation, &task_id)
+            .await
+            .unwrap(),
+        2
+    );
+    drop(repo);
+    let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+    assert_eq!(
+        repo.increment_refinement_outcome_attempt(&run_id, generation, &task_id)
+            .await
+            .unwrap(),
+        3,
+        "durable attempt budget survives repository/actor projection rebuilds"
+    );
     assert!(
         repo.operator_stop_stalled_refinement(
             &run_id,
@@ -110,6 +145,16 @@ async fn operator_stop_requires_terminal_stalled_handoff_and_records_audit() {
     assert_eq!(state, "terminal");
     assert_eq!(tag.as_deref(), Some("operator_stop"));
     assert!(context.is_some());
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT state FROM refinement_dispatch_intents WHERE id=$1"
+        )
+        .bind(&intent_id)
+        .fetch_one(db.pool())
+        .await
+        .unwrap(),
+        "cancelled"
+    );
     assert_eq!(sqlx::query_scalar::<_, i64>("SELECT count(*) FROM proposal_revisions WHERE refinement_run_id=$1 AND refinement_stop_tag='operator_stop'")
         .bind(&run_id).fetch_one(db.pool()).await.unwrap(), 1);
 }

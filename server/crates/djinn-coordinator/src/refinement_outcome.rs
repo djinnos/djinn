@@ -130,6 +130,25 @@ enum OutcomeFence {
     Retryable(&'static str),
     Eligible(SourceIntentTransitionRequest),
 }
+const OUTCOME_IGNORED_REASONS: [&str; 7] = [
+    "run_generation_or_phase_mismatch",
+    "task_correlation_absent",
+    "task_correlation_invalid",
+    "unexpected_session_phase",
+    "task_correlation_mismatch",
+    "run_snapshot_absent",
+    "durable_intent_ineligible",
+];
+
+#[cfg(test)]
+#[test]
+fn every_ignored_outcome_fence_has_a_unique_structured_reason() {
+    let reasons = OUTCOME_IGNORED_REASONS
+        .into_iter()
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(reasons.len(), 7);
+    assert!(reasons.iter().all(|reason| !reason.trim().is_empty()));
+}
 #[cfg(test)]
 use super::refinement_lint_evidence::{
     parse_spec_lint_rejection, parse_spec_lint_rejection_from_conversation,
@@ -284,7 +303,7 @@ impl CoordinatorActor {
             || state.generation != session.generation
             || state.phase != session.phase
         {
-            return OutcomeFence::Ignored("run_generation_or_phase_mismatch");
+            return OutcomeFence::Ignored(OUTCOME_IGNORED_REASONS[0]);
         }
         let event_bus = crate::events::event_bus_for(&self.events_tx);
         #[cfg(test)]
@@ -307,8 +326,8 @@ impl CoordinatorActor {
         };
         let correlation = match task.refinement_correlation() {
             Ok(Some(value)) => value,
-            Ok(None) => return OutcomeFence::Ignored("task_correlation_absent"),
-            Err(_) => return OutcomeFence::Ignored("task_correlation_invalid"),
+            Ok(None) => return OutcomeFence::Ignored(OUTCOME_IGNORED_REASONS[1]),
+            Err(_) => return OutcomeFence::Ignored(OUTCOME_IGNORED_REASONS[2]),
         };
         let (expected_phase, expected_role) = match session.phase {
             RefinementPhase::AdversaryAttack => (
@@ -323,7 +342,7 @@ impl CoordinatorActor {
                 djinn_core::refinement_liveness::RefinementPhase::JudgeAdjudication,
                 RefinementRole::Judge,
             ),
-            _ => return OutcomeFence::Ignored("unexpected_session_phase"),
+            _ => return OutcomeFence::Ignored(OUTCOME_IGNORED_REASONS[3]),
         };
         if correlation.run_id() != run_id
             || correlation.generation() != i64::from(state.generation)
@@ -331,7 +350,7 @@ impl CoordinatorActor {
             || correlation.phase() != expected_phase
             || correlation.role() != expected_role
         {
-            return OutcomeFence::Ignored("task_correlation_mismatch");
+            return OutcomeFence::Ignored(OUTCOME_IGNORED_REASONS[4]);
         }
         let snapshot = match ProposalRepository::new(self.db.clone(), event_bus)
             .load_refinement_run_snapshot(LoadRefinementRunSnapshotRequest {
@@ -341,7 +360,7 @@ impl CoordinatorActor {
             .await
         {
             Ok(Some(value)) => value,
-            Ok(None) => return OutcomeFence::Ignored("run_snapshot_absent"),
+            Ok(None) => return OutcomeFence::Ignored(OUTCOME_IGNORED_REASONS[5]),
             Err(error) => {
                 tracing::warn!(run_id, %error, "unable to fence refinement outcome snapshot; retrying");
                 return OutcomeFence::Retryable("run_snapshot_reload_failed");
@@ -361,7 +380,7 @@ impl CoordinatorActor {
                     )
             });
         if !eligible {
-            return OutcomeFence::Ignored("durable_intent_ineligible");
+            return OutcomeFence::Ignored(OUTCOME_IGNORED_REASONS[6]);
         }
         OutcomeFence::Eligible(SourceIntentTransitionRequest {
             run_id: run_id.to_owned(),

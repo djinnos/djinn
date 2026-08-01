@@ -22,30 +22,39 @@ impl ProposalRepository {
         self.db().ensure_initialized().await?;
         let rows = sqlx::query(
             "SELECT r.proposal_id, r.id AS run_id, r.generation, i.id AS intent_id, \
-                    t.id AS task_id, t.status AS task_status, t.updated_at AS task_terminal_at, \
-                    i.outcome_attempts, GREATEST(0, EXTRACT(EPOCH FROM \
-                    (transaction_timestamp() - t.updated_at::timestamptz))::BIGINT) AS terminal_elapsed_seconds \
+                    t.id AS task_id, t.status AS task_status, COALESCE(t.closed_at, t.updated_at) AS task_terminal_at, \
+                    i.outcome_attempts, (i.next_intent_id IS NOT NULL) AS successor_present, GREATEST(0, EXTRACT(EPOCH FROM \
+                    (transaction_timestamp() - COALESCE(t.closed_at, t.updated_at)::timestamptz))::BIGINT) AS terminal_elapsed_seconds \
              FROM refinement_dispatch_intents i \
              JOIN refinement_runs r ON r.id = i.run_id \
              JOIN tasks t ON t.id = i.task_id \
              WHERE r.state = 'running' AND i.state = 'materialized' \
-               AND t.status = 'closed' AND i.next_intent_id IS NULL \
              ORDER BY t.updated_at, i.id",
         )
         .fetch_all(self.db().pool())
         .await?;
         Ok(rows
             .into_iter()
-            .map(|row| RefinementStalledHandoff {
-                proposal_id: row.get("proposal_id"),
-                run_id: row.get("run_id"),
-                generation: row.get("generation"),
-                intent_id: row.get("intent_id"),
-                task_id: row.get("task_id"),
-                task_status: row.get("task_status"),
-                task_terminal_at: row.get("task_terminal_at"),
-                terminal_elapsed_seconds: row.get("terminal_elapsed_seconds"),
-                outcome_attempts: row.get("outcome_attempts"),
+            .filter_map(|row| {
+                let task_status: String = row.get("task_status");
+                if !is_refinement_stalled_handoff(
+                    true,
+                    task_status == "closed",
+                    row.get("successor_present"),
+                ) {
+                    return None;
+                }
+                Some(RefinementStalledHandoff {
+                    proposal_id: row.get("proposal_id"),
+                    run_id: row.get("run_id"),
+                    generation: row.get("generation"),
+                    intent_id: row.get("intent_id"),
+                    task_id: row.get("task_id"),
+                    task_status,
+                    task_terminal_at: row.get("task_terminal_at"),
+                    terminal_elapsed_seconds: row.get("terminal_elapsed_seconds"),
+                    outcome_attempts: row.get("outcome_attempts"),
+                })
             })
             .collect())
     }
@@ -116,6 +125,13 @@ impl ProposalRepository {
                 run_id: run_id.to_owned(),
             });
         };
+        sqlx::query(
+            "UPDATE refinement_dispatch_intents SET state='cancelled', terminal_at=\
+             to_char(transaction_timestamp() AT TIME ZONE 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'), \
+             updated_at=to_char(transaction_timestamp() AT TIME ZONE 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') \
+             WHERE run_id=$1 AND state='materialized' AND next_intent_id IS NULL AND task_id IN \
+             (SELECT id FROM tasks WHERE status='closed')",
+        ).bind(run_id).execute(&mut *tx).await?;
         let seq = sqlx::query_scalar::<_, i32>(
             "SELECT latest_revision_seq FROM proposals WHERE id = $1 FOR UPDATE",
         )
