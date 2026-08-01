@@ -478,6 +478,30 @@ spec:
               value: {{ .Values.scipCache.maxBytes | int64 | quote }}
             - name: DJINN_SCIP_CACHE_MAX_IDLE_HOURS
               value: {{ .Values.scipCache.maxIdleHours | quote }}
+            # Standalone SCIP-index Job. `DJINN_K8S_SCIP_INDEX_ENABLED` is the
+            # ONLY thing that decides whether that Job is ever created
+            # (`djinn_k8s::scip_schedule::ScipIndexScheduler::enabled`, read per
+            # tick), and it defaults to false in the binary. Rendering it
+            # explicitly — even as "false" — is what makes it an operator lever:
+            # before this block the chart set no value for it anywhere, so the
+            # Job split shipped green and never ran once, and every graph-warm
+            # paid the full inline SCIP index it exists to remove.
+            #
+            # Listed in `djinn_k8s::config::FAIL_CLOSED_ARMING_SWITCHES`, whose
+            # members this chart is required to render — see
+            # deploy/helm/djinn/tests/scip-index-arming-render.sh.
+            - name: DJINN_K8S_SCIP_INDEX_ENABLED
+              value: {{ .Values.scipIndex.enabled | quote }}
+            - name: DJINN_K8S_SCIP_INDEX_INTERVAL_SECONDS
+              value: {{ .Values.scipIndex.intervalSeconds | int64 | quote }}
+            - name: DJINN_K8S_SCIP_QUIESCENCE_SECONDS
+              value: {{ .Values.scipIndex.quiescenceSeconds | int64 | quote }}
+            # Read by the warm Pod, not by this one: the server projects it onto
+            # every warm Job it renders (`djinn_k8s::warm_job`), and
+            # `djinn_graph::semantic_index_claim` reads it there. A value the
+            # server never parses is a value no warm Pod can ever be given.
+            - name: DJINN_K8S_SCIP_CLAIM_WAIT_SECONDS
+              value: {{ .Values.scipIndex.claimWaitSeconds | int64 | quote }}
             # Per-invocation CPU lease. `required` renders the cgroup-launcher
             # sidecar onto every task-run Pod; `disabled` is an explicit local
             # development compatibility profile that renders no launcher surface.
