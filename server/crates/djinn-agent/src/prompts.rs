@@ -25,10 +25,19 @@ pub fn render_prompt_for_role(
     task: &djinn_core::models::Task,
     ctx: &TaskContext,
 ) -> String {
-    let tool_schemas_fn = djinn_roles::tool_schemas_fn_for(
-        crate::AgentType::parse(config.name).unwrap_or(crate::AgentType::Worker),
-    )
-    .unwrap_or(Vec::new);
+    // The evidence profile retains the Architect identity but has a distinct
+    // fail-closed schema surface. Use the same strict predicate as dispatch so
+    // the rendered instructions never advertise unavailable capabilities.
+    let tool_schemas_fn = if config.name == "architect"
+        && djinn_core::models::task::is_evidence_spike(&task.labels)
+    {
+        crate::extension::tool_schemas_evidence_spike
+    } else {
+        djinn_roles::tool_schemas_fn_for(
+            crate::AgentType::parse(config.name).unwrap_or(crate::AgentType::Worker),
+        )
+        .unwrap_or(Vec::new)
+    };
 
     djinn_roles::prompts::render_prompt_for_role(config, tool_schemas_fn, task, ctx)
 }

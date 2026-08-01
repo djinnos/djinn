@@ -32,6 +32,8 @@ pub const REVIEWER_TEMPLATE: &str = include_str!("task-reviewer.md");
 pub const LEAD_TEMPLATE: &str = include_str!("lead.md");
 pub const PLANNER_TEMPLATE: &str = include_str!("planner.md");
 pub const ARCHITECT_TEMPLATE: &str = include_str!("architect.md");
+/// Dedicated plan-first contract for the strict refinement-evidence profile.
+pub const EVIDENCE_SPIKE_TEMPLATE: &str = include_str!("evidence-spike.md");
 /// PR F4: cluster-doc synthesis template.
 pub const CLUSTER_DOC_TEMPLATE: &str = include_str!("cluster-doc.md");
 /// Proposal refinement tribunal roles (k9zw).
@@ -159,7 +161,16 @@ pub fn render_prompt_for_role(
     task: &Task,
     ctx: &TaskContext,
 ) -> String {
-    let (role_name, role_template) = (config.display_name, config.initial_message);
+    let role_name = config.display_name;
+    // The strict evidence profile replaces, rather than appends to, generic
+    // Architect consultant/finalization prose.
+    let role_template = if config.name == "architect"
+        && djinn_core::models::task::is_evidence_spike(&task.labels)
+    {
+        EVIDENCE_SPIKE_TEMPLATE
+    } else {
+        config.initial_message
+    };
 
     let ac = format_acceptance_criteria(&task.acceptance_criteria);
     let labels = format_labels(&task.labels);
