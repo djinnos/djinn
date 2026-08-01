@@ -132,7 +132,7 @@ async fn flip_forward_then_roll_back_from_a_drained_snapshot() {
     let db = Database::ephemeral().await.unwrap();
     let modes = LauncherAuthorityModeRepository::new(db.clone());
 
-    // Migration 170 cuts a fresh deployment over to resize-v2 at epoch zero.
+    // Migration 171 cuts a fresh deployment over to resize-v2 at epoch zero.
     let (mode, epoch) = current(&modes).await;
     assert_eq!(
         mode, RESIZE,
@@ -181,7 +181,7 @@ async fn flip_forward_then_roll_back_from_a_drained_snapshot() {
 /// whose migration history has not yet recorded 170. Only the untouched
 /// migration-167 seed (epoch zero) may be advanced automatically.
 #[tokio::test]
-async fn migration_170_preserves_an_operator_managed_leaf_epoch() {
+async fn migration_171_preserves_an_operator_managed_leaf_epoch() {
     let db = Database::ephemeral().await.unwrap();
     let modes = LauncherAuthorityModeRepository::new(db.clone());
 
@@ -200,8 +200,8 @@ async fn migration_170_preserves_an_operator_managed_leaf_epoch() {
     assert_eq!(current(&modes).await, (LEAF, 3));
 
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("migrations_postgres/170_launcher_authority_resize_v2_default.sql");
-    let sql = std::fs::read_to_string(path).expect("migration 170 must be readable");
+        .join("migrations_postgres/171_launcher_authority_resize_v2_default.sql");
+    let sql = std::fs::read_to_string(path).expect("migration 171 must be readable");
     sqlx::raw_sql(&sql).execute(db.pool()).await.unwrap();
 
     assert_eq!(
