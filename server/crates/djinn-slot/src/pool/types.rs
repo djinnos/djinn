@@ -49,6 +49,8 @@ pub enum PoolError {
     SlotNotFound { slot_id: usize },
     #[error("slot error: {0}")]
     Slot(#[from] super::super::SlotError),
+    #[error("failed to admit task {task_id} with an execution generation: {source}")]
+    ExecutionGenerationAllocation { task_id: String, source: String },
 }
 
 #[derive(Debug, Clone)]

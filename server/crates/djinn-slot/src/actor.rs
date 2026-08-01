@@ -20,6 +20,7 @@ type LifecycleFuture = Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + 
 type LifecycleRunner = Arc<
     dyn Fn(
             String,
+            i64,
             String,
             String,
             SlotContext,
@@ -191,9 +192,10 @@ impl SlotActor {
                     }
                     cmd = self.receiver.recv() => {
                         match cmd {
-                            Some(SlotCommand::RunTask { task_id, project_path, respond_to }) => {
+                            Some(SlotCommand::RunTask { task_id, execution_generation, project_path, respond_to }) => {
                                 let lifecycle = self.start_lifecycle(
                                     task_id,
+                                    execution_generation,
                                     project_path,
                                     None,
                                 );
@@ -202,12 +204,14 @@ impl SlotActor {
                             }
                             Some(SlotCommand::RunTaskWithResume {
                                 task_id,
+                                execution_generation,
                                 project_path,
                                 resume_lifecycle_metadata,
                                 respond_to,
                             }) => {
                                 let lifecycle = self.start_lifecycle(
                                     task_id,
+                                    execution_generation,
                                     project_path,
                                     resume_lifecycle_metadata,
                                 );
@@ -233,6 +237,7 @@ impl SlotActor {
     fn start_lifecycle(
         &self,
         task_id: String,
+        execution_generation: i64,
         project_path: String,
         resume_lifecycle_metadata: Option<serde_json::Value>,
     ) -> ActiveLifecycle {
@@ -247,6 +252,7 @@ impl SlotActor {
         );
         let run = (self.runner)(
             task_id.clone(),
+            execution_generation,
             project_path,
             self.model_id.clone(),
             self.app_state.clone(),
@@ -391,9 +397,17 @@ impl SlotHandle {
         // `lifecycle_tests.rs` which exercises it directly.  Task #8 will
         // delete the worktree/lifecycle code entirely after soak.
         let runner: LifecycleRunner = Arc::new(
-            |task_id, project_path, model_id, app_state, kill, pause, resume_lifecycle_metadata| {
+            |task_id,
+             execution_generation,
+             project_path,
+             model_id,
+             app_state,
+             kill,
+             pause,
+             resume_lifecycle_metadata| {
                 Box::pin(run_supervisor_dispatch(
                     task_id,
+                    execution_generation,
                     project_path,
                     model_id,
                     app_state,
@@ -469,8 +483,14 @@ impl SlotHandle {
         skip(self, project_path),
         fields(slot_id = self.id, model_id = %self.model_id, task_id = %task_id)
     )]
-    pub async fn run_task(&self, task_id: String, project_path: String) -> Result<(), SlotError> {
-        self.run_task_with_resume(task_id, project_path, None).await
+    pub async fn run_task(
+        &self,
+        task_id: String,
+        execution_generation: i64,
+        project_path: String,
+    ) -> Result<(), SlotError> {
+        self.run_task_with_resume(task_id, execution_generation, project_path, None)
+            .await
     }
     /// Additive re-dispatch path used by the coordinator's
     /// `DispatchWithResume` slot-pool message. The `resume_lifecycle_metadata`
@@ -492,6 +512,7 @@ impl SlotHandle {
     pub async fn run_task_with_resume(
         &self,
         task_id: String,
+        execution_generation: i64,
         project_path: String,
         resume_lifecycle_metadata: Option<serde_json::Value>,
     ) -> Result<(), SlotError> {
@@ -499,12 +520,14 @@ impl SlotHandle {
         let cmd = match resume_lifecycle_metadata {
             Some(metadata) => SlotCommand::RunTaskWithResume {
                 task_id,
+                execution_generation,
                 project_path,
                 resume_lifecycle_metadata: Some(metadata),
                 respond_to: tx,
             },
             None => SlotCommand::RunTask {
                 task_id,
+                execution_generation,
                 project_path,
                 respond_to: tx,
             },
@@ -588,7 +611,7 @@ mod tests {
         };
 
         let result = handle
-            .run_task_with_resume("task-1".to_string(), "/tmp/proj".to_string(), None)
+            .run_task_with_resume("task-1".to_string(), 1, "/tmp/proj".to_string(), None)
             .await;
 
         match result {

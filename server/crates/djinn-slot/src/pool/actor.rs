@@ -352,6 +352,16 @@ impl SlotPool {
                 task_id: task_id.to_string(),
             });
         }
+        // Allocation commits dispatch admission before a slot command ACK or
+        // pool mapping/activity mutation; downstream receives this exact value.
+        let execution_generation =
+            djinn_db::TaskRepository::new(self.ctx.db.clone(), self.ctx.event_bus.clone())
+                .allocate_execution_generation(task_id)
+                .await
+                .map_err(|error| PoolError::ExecutionGenerationAllocation {
+                    task_id: task_id.to_string(),
+                    source: error.to_string(),
+                })?;
         // Elastic: there is no fixed per-model ceiling. Admission is gated
         // per-user by the coordinator (each user's per-model cap); if that gate
         // let this dispatch through, place the task on a slot — reuse a free
@@ -391,6 +401,7 @@ impl SlotPool {
             match slot
                 .run_task_with_resume(
                     task_owned.clone(),
+                    execution_generation,
                     proj_owned.clone(),
                     resume_lifecycle_metadata.clone(),
                 )

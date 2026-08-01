@@ -21,6 +21,7 @@ use crate::host::SlotContext;
 /// disabled.
 pub async fn run_supervisor_dispatch(
     task_id: String,
+    execution_generation: i64,
     project_path: String,
     model_id: String,
     ctx: SlotContext,
@@ -31,6 +32,7 @@ pub async fn run_supervisor_dispatch(
     ctx.callbacks
         .run_task_dispatch(
             task_id,
+            execution_generation,
             project_path,
             model_id,
             ctx.clone(),

@@ -4318,6 +4318,7 @@ mod tests {
                 task_run_id: "worker-config-propagation".into(),
                 task_attempt_id: None,
                 task_id: "task".into(),
+                execution_generation: 0,
                 project_id: "immutable-owner".into(),
                 trigger: djinn_core::models::TaskRunTrigger::NewTask,
                 base_branch: "main".into(),

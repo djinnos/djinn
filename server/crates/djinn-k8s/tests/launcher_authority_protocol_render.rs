@@ -380,6 +380,7 @@ async fn prepare_with_image(
         task_run_id: uuid::Uuid::now_v7().to_string(),
         task_attempt_id: None,
         task_id: "task-protocol-render".into(),
+        execution_generation: 0,
         project_id: project_id.clone(),
         trigger: TaskRunTrigger::NewTask,
         base_branch: "main".into(),

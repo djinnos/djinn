@@ -3068,6 +3068,7 @@ mod tests {
         fn run_task_dispatch<'a>(
             &'a self,
             _task_id: String,
+            _execution_generation: i64,
             _project_path: String,
             _model_id: String,
             _ctx: SlotContext,

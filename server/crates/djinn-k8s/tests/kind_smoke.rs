@@ -276,6 +276,7 @@ fn sample_spec(task_id: &str) -> TaskRunSpec {
         task_run_id: uuid::Uuid::now_v7().to_string(),
         task_attempt_id: None,
         task_id: task_id.into(),
+        execution_generation: 0,
         project_id: format!("proj-{task_id}"),
         trigger: TaskRunTrigger::NewTask,
         base_branch: "main".into(),

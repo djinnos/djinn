@@ -265,6 +265,7 @@ mod tests {
             task_run_id: "019e6a03-8aef-7201-9c9d-d7ba17613a0b".to_string(),
             task_attempt_id: None,
             task_id: "task-abc".to_string(),
+            execution_generation: 0,
             project_id: "proj-xyz".to_string(),
             trigger: TaskRunTrigger::NewTask,
             base_branch: "main".to_string(),

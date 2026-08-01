@@ -185,6 +185,7 @@ impl CoordinatorActor {
                 task_run_id: uuid::Uuid::now_v7().to_string(),
                 task_attempt_id: None,
                 task_id: task.id.clone(),
+                execution_generation: 0,
                 project_id: task.project_id.clone(),
                 trigger: djinn_core::models::TaskRunTrigger::NewTask,
                 base_branch: {

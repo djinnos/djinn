@@ -119,6 +119,7 @@ impl djinn_slot::host::SlotHostCallbacks for AgentHostCallbacks {
     fn run_task_dispatch<'a>(
         &'a self,
         task_id: String,
+        execution_generation: i64,
         project_path: String,
         model_id: String,
         ctx: djinn_slot::host::SlotContext,
@@ -140,6 +141,7 @@ impl djinn_slot::host::SlotHostCallbacks for AgentHostCallbacks {
         Box::pin(async move {
             super::supervisor_runner::dispatch_task_runtime(
                 task_id,
+                execution_generation,
                 project_path,
                 model_id,
                 agent,

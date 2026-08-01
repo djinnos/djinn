@@ -643,6 +643,7 @@ impl LiveWorld {
             task_run_id: self.task_run_id.clone(),
             task_attempt_id: None,
             task_id: "fbiy-b2b-task".into(),
+            execution_generation: 0,
             project_id: PROJECT_ID.into(),
             trigger: TaskRunTrigger::NewTask,
             base_branch: "main".into(),
