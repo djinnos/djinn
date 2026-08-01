@@ -937,8 +937,13 @@ mod tests {
         .await
         .expect("dispatch with resume metadata should be accepted");
         // Wait for the lifecycle to complete (the runner returns Ok(()) on its
-        // own after recording the metadata).
-        let _ = tokio::time::timeout(Duration::from_secs(1), event_rx.recv()).await;
+        // own after recording the metadata). Do not merely discard the result:
+        // the assertion below must observe the runner after the resume command
+        // has traversed the actor mailbox.
+        tokio::time::timeout(Duration::from_secs(1), event_rx.recv())
+            .await
+            .expect("resume lifecycle completion event should arrive")
+            .expect("resume lifecycle event channel should stay open");
         let recorded = observed.lock().expect("observed mutex").clone();
         assert_eq!(
             recorded,
@@ -990,7 +995,12 @@ mod tests {
         )
         .await
         .expect("legacy dispatch should be accepted");
-        let _ = tokio::time::timeout(Duration::from_secs(1), event_rx.recv()).await;
+        // The completion event establishes that the plain RunTask command was
+        // consumed and its captured generation reached the lifecycle runner.
+        tokio::time::timeout(Duration::from_secs(1), event_rx.recv())
+            .await
+            .expect("plain lifecycle completion event should arrive")
+            .expect("plain lifecycle event channel should stay open");
         let recorded = observed.lock().expect("observed mutex").clone();
         assert_eq!(
             recorded,
