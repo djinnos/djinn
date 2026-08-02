@@ -41,7 +41,7 @@ env:
 jobs:
   memory-qa-phase2:
     name: Phase 2 Memory QA Judge
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     defaults:
       run:
@@ -55,19 +55,11 @@ jobs:
       # publish a credential-error artifact, never fall back anonymously.
       DJINN_MEMORY_QA_JUDGE_MODEL: ${{ github.event.inputs.judge_model || vars.DJINN_MEMORY_QA_JUDGE_MODEL || '' }}
       DJINN_MEMORY_QA_SKIP_JUDGE: ${{ github.event.inputs.qa_run_only == 'true' && '1' || '' }}
-    services:
-      postgres:
-        image: public.ecr.aws/docker/library/postgres:16
-        env:
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: djinn
-        ports:
-          - 5433:5432
-        options: >-
-          --health-cmd="pg_isready -U postgres"
-          --health-interval=5s --health-timeout=3s --health-retries=20
     steps:
       - uses: actions/checkout@v4
+      - name: Start PostgreSQL 16
+        working-directory: ${{ github.workspace }}
+        run: ./scripts/ci-start-postgres.sh
 
       - run: rustup toolchain install
         working-directory: server
