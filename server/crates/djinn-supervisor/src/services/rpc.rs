@@ -1956,6 +1956,7 @@ mod tests {
             match frame.payload {
                 FramePayload::Rpc(ServiceRpcRequest::CreateSession { params }) => {
                     assert_eq!(params.project_id, "p1");
+                    assert_eq!(params.execution_generation, Some(17));
                     let rec = djinn_core::models::SessionRecord {
                         id: "s1".into(),
                         project_id: Some(params.project_id.clone()),
@@ -1995,6 +1996,7 @@ mod tests {
         let params = SerializableCreateSessionParams {
             project_id: "p1".into(),
             task_id: Some("t1".into()),
+            execution_generation: Some(17),
             model: "anthropic/claude-opus-4-7".into(),
             agent_type: "planner".into(),
             metadata_json: None,

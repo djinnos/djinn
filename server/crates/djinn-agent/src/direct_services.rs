@@ -25,7 +25,7 @@ use djinn_db::repositories::llm_call_attempt::{
     CreateLlmCallAttemptParams, FinalizeLlmCallAttemptParams, LlmCallAttemptRepository,
     LlmCallOutcome,
 };
-use djinn_db::repositories::session::CreateSessionParams;
+use djinn_db::repositories::session::{CreateSessionParams, CreateTaskExecutionSessionParams};
 use djinn_db::repositories::task_run::{CreateTaskRunParams, TerminalStatusAcceptance};
 use djinn_db::repositories::task_run_outcome::TaskRunOutcomeRepository;
 use djinn_db::{BuildLeaseRepository, TaskRunRepository};
@@ -1269,19 +1269,31 @@ impl SupervisorServices for DirectServices {
             pricing.as_ref(),
             catalog_model.as_ref().map(|m| m.provider_id.as_str()),
         );
-        let created = repo
-            .create(CreateSessionParams {
-                project_id: params.project_id.as_str(),
-                task_id: params.task_id.as_deref(),
-                model: params.model.as_str(),
-                agent_type: params.agent_type.as_str(),
-                metadata_json: params.metadata_json.as_deref(),
-                task_run_id: params.task_run_id.as_deref(),
-                pricing: pricing.as_ref(),
-                cost_basis: Some(cost_basis),
-            })
-            .await
-            .map_err(|e| e.to_string())?;
+        let session = CreateSessionParams {
+            project_id: params.project_id.as_str(),
+            task_id: params.task_id.as_deref(),
+            model: params.model.as_str(),
+            agent_type: params.agent_type.as_str(),
+            metadata_json: params.metadata_json.as_deref(),
+            task_run_id: params.task_run_id.as_deref(),
+            pricing: pricing.as_ref(),
+            cost_basis: Some(cost_basis),
+        };
+        let created = match (params.task_id.as_deref(), params.execution_generation) {
+            (Some(task_id), Some(execution_generation)) => {
+                repo.create_task_execution_session(CreateTaskExecutionSessionParams {
+                    task_id,
+                    execution_generation,
+                    session,
+                })
+                .await
+            }
+            (_, None) => repo.create(session).await,
+            (None, Some(_)) => {
+                return Err("task-execution session requires canonical task_id".to_string());
+            }
+        }
+        .map_err(|e| e.to_string())?;
         // Persist the credential kind (`plan_oauth` / `api_key`) derived from the
         // resolved credential at model-resolution time, so plan-vs-API-key usage
         // is queryable after the fact. A dedicated post-insert write rather than
