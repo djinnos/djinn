@@ -116,19 +116,36 @@ pub async fn record_command_observation(
         djinn_telemetry::evidence_metrics::EvidenceStage::Invocation,
         djinn_telemetry::evidence_metrics::EvidenceOutcome::Attempted,
     );
-    let hydration = require_frozen_plan(repository, identity)
-        .await
-        .map_err(EvidenceCommandError::Plan)?;
+    let hydration = match require_frozen_plan(repository, identity).await {
+        Ok(hydration) => hydration,
+        Err(error) => {
+            djinn_telemetry::evidence_metrics::reject(
+                djinn_telemetry::evidence_metrics::EvidenceRejection::NoFrozenPlan,
+            );
+            return Err(EvidenceCommandError::Plan(error));
+        }
+    };
     let check_id = check_id.trim();
     let check = hydration
         .plan
         .checks
         .iter()
-        .find(|check| check.check_id == check_id)
-        .ok_or_else(|| EvidenceCommandError::UnknownCheck {
-            check_id: check_id.to_owned(),
-        })?;
+        .find(|check| check.check_id == check_id);
+    let check = match check {
+        Some(check) => check,
+        None => {
+            djinn_telemetry::evidence_metrics::reject(
+                djinn_telemetry::evidence_metrics::EvidenceRejection::UnknownCheck,
+            );
+            return Err(EvidenceCommandError::UnknownCheck {
+                check_id: check_id.to_owned(),
+            });
+        }
+    };
     if check.method != "command" {
+        djinn_telemetry::evidence_metrics::reject(
+            djinn_telemetry::evidence_metrics::EvidenceRejection::MethodMismatch,
+        );
         return Err(EvidenceCommandError::MethodMismatch {
             check_id: check_id.to_owned(),
             actual: check.method.clone(),

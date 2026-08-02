@@ -11,7 +11,7 @@ use super::*;
 use djinn_core::clock::{Clock, SystemClock};
 use djinn_core::models::IssueType;
 use djinn_core::models::task::{PRIORITY_CRITICAL, PROPOSAL_REVIEW_TITLE_PREFIX};
-use djinn_db::repositories::proposal::TerminalLinkedEvidenceSpikeOutcome;
+use djinn_db::repositories::proposal::{EvidenceDerivedOutcome, TerminalLinkedEvidenceSpikeOutcome};
 use djinn_db::{EffectiveCreatorProvenance, EpicRepository, ProposalRepository};
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -23,6 +23,17 @@ pub(super) const THROUGHPUT_WINDOW: Duration = Duration::from_secs(60 * 60);
 /// pass for an amended building proposal. The full marker is exactly
 /// `Reconcile proposal <short_id>: <title>` for reliable deduplication.
 pub(super) const PROPOSAL_RECONCILE_TITLE_PREFIX: &str = "Reconcile proposal";
+
+/// Emits only for the repository result that inserted a new durable receipt.
+pub(super) fn record_evidence_terminal_outcome(outcome: Option<EvidenceDerivedOutcome>) {
+    let outcome = match outcome {
+        Some(EvidenceDerivedOutcome::Resolved) => djinn_telemetry::evidence_metrics::EvidenceOutcome::Resolved,
+        Some(EvidenceDerivedOutcome::Partial) => djinn_telemetry::evidence_metrics::EvidenceOutcome::Partial,
+        Some(EvidenceDerivedOutcome::Unresolved) => djinn_telemetry::evidence_metrics::EvidenceOutcome::Unresolved,
+        None => return,
+    };
+    djinn_telemetry::evidence_metrics::terminal(outcome);
+}
 
 // ── Epic completion rules ─────────────────────────────────────────────────────
 
@@ -238,6 +249,7 @@ impl CoordinatorActor {
             .await
         {
             Ok(TerminalLinkedEvidenceSpikeOutcome::EvidenceReceived { derived_outcome }) => {
+                record_evidence_terminal_outcome(derived_outcome);
                 tracing::info!(
                     proposal_id = %proposal.id,
                     spike_task_id = %task.id,
