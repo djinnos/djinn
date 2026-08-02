@@ -1,28 +1,54 @@
 {
   "version": 1,
   "candidates": [
-    { "phase": "RETIRE_BASE", "paths": ["server/crates/djinn-cgroup-launcher/**", "server/crates/djinn-launcher-protocol/**", "server/crates/djinn-agent/src/process_broker.rs", "server/crates/djinn-agent-worker/src/launcher_handshake.rs"] },
-    { "phase": "RETIRE_BASE", "paths": ["server/crates/djinn-k8s/src/{job.rs,launcher_cpu.rs,runtime.rs,warm_job.rs,pod_resize.rs}", "server/crates/djinn-k8s/tests/{launcher_child_runtime_handoff.rs,kueue_governor_conformance.rs,kueue_admission_conformance.rs}"] },
-    { "phase": "RETIRE_BASE", "paths": ["server/crates/djinn-db/{migrations_postgres/{166_images_launcher_authority_protocol.sql,167_launcher_authority_mode.sql,171_launcher_authority_resize_v2_default.sql},src/{launcher_compatibility.rs,repositories/launcher_authority_mode.rs},tests/{launcher_admission_compatibility_matrix.rs,launcher_authority_mode_drain_fence.rs,launcher_protocol_database_agreement.rs}}", "server/crates/djinn-image-controller/{src/{build_job.rs,config.rs,controller.rs,declared_protocol_tests.rs,watcher.rs,watcher_protocol_tests.rs},tests/{chart_env_contract.rs,protocol_catalog_and_preservation.rs,unit.rs}}"] },
-    { "phase": "RETIRE_HEAD", "paths": ["server/crates/djinn-image-builder/**", "server/docker/djinn-agent-runtime.Dockerfile", "scripts/{tilt/build-binaries.sh,tilt/wrap-agent-runtime-image.sh,test-wrap-agent-runtime-image.sh}"] },
-    { "phase": "RETIRE_HEAD", "paths": ["deploy/helm/djinn/templates/runtimeclass-cgroup-writable.yaml", "deploy/helm/djinn/{values.yaml,values.schema.json}", "deploy/node/k3s/**", "deploy/kueue/{README.md,zero-capture-gate.sh,tests/**}"] },
-    { "phase": "RETIRE_HEAD", "paths": [".github/workflows/{quality-gate.yml,release.yml}", "server/Cargo.toml", "server/Cargo.lock"] }
+    {
+      "phase": "RETIRE_BASE",
+      "paths": [
+        "server/crates/djinn-cgroup-launcher/{Cargo.toml,examples/governor_probe.rs,src/{bootstrap.rs,broker.rs,child.rs,command_path.rs,control_rejection.rs,env.rs,git_trust.rs,lease_authority.rs,lib.rs,main.rs,native_fs.rs,spawn.rs,transport.rs},tests/{brokered_git_trust.rs,brokered_lease_lift_boundary.rs,containment_and_escalation.rs,delegated_cpu_lease_lifecycle.rs,kernel_boundary_under_rendered_context.rs,startup_readiness_contract.rs,fixtures/rendered-security-context.env,rendered_boundary/mod.rs}}",
+        "server/crates/djinn-launcher-protocol/{Cargo.toml,src/lib.rs}",
+        "server/crates/djinn-agent/{Cargo.toml,src/process_broker.rs}",
+        "server/crates/djinn-agent/src/process/tests/{process_lease_broker_lift_tests.rs,process_lease_degrade_tests.rs,process_lease_queue_deadline_tests.rs,process_lease_tests.rs}",
+        "server/crates/djinn-agent-worker/{Cargo.toml,src/{launcher_handshake.rs,main.rs}}"
+      ]
+    },
+    {
+      "phase": "RETIRE_BASE",
+      "paths": [
+        "server/crates/djinn-k8s/{Cargo.toml,src/{job.rs,launcher_cpu.rs,pod_resize.rs,runtime.rs,runtime_fixture.rs,runtime_kueue_create_tests.rs,runtime_pod_fence_tests.rs,warm_job.rs,warm_job_tests.rs,workload_inventory.rs},tests/{kueue_admission_conformance.rs,kueue_governor_conformance.rs,launcher_authority_protocol_render.rs,launcher_child_runtime_handoff.rs,pod_resize_kind.rs,pod_resize_serialization.rs,rendered_launcher_delegation.rs}}",
+        "server/crates/djinn-db/{migrations_postgres/{166_images_launcher_authority_protocol.sql,167_launcher_authority_mode.sql,171_launcher_authority_resize_v2_default.sql},src/{launcher_compatibility.rs,repositories/{build_pod_permit.rs,image.rs,launcher_authority_mode.rs,project.rs}},tests/{image_legacy_digest_allowlist.rs,launcher_admission_compatibility_matrix.rs,launcher_authority_mode_drain_fence.rs,launcher_protocol_database_agreement.rs}}",
+        "server/crates/djinn-coordinator/src/{build_lease_cap.rs,resize_authorization.rs,resize_authorization_tests.rs,resize_lift.rs}",
+        "server/crates/djinn-image-controller/{Cargo.toml,src/{build_job.rs,config.rs,controller.rs,declared_protocol_tests.rs,watcher.rs,watcher_protocol_tests.rs},tests/{chart_env_contract.rs,protocol_catalog_and_preservation.rs,unit.rs}}"
+      ]
+    },
+    {
+      "phase": "RETIRE_HEAD",
+      "paths": [
+        "server/crates/djinn-image-builder/{Cargo.toml,scripts/{base-alpine.sh,base-debian.sh,install-agent-worker.sh,install-clang.sh,install-dotnet.sh,install-go.sh,install-java.sh,install-node.sh,install-python.sh,install-ruby.sh,install-rust.sh,install-system.sh},src/{dockerfile.rs,hash.rs,lib.rs,scripts.rs},tests/{golden.rs,golden_fixtures/{polyglot_monorepo.Dockerfile,polyglot_monorepo.config.json,single_rust.Dockerfile,single_rust.config.json}}}",
+        "server/docker/djinn-agent-runtime.Dockerfile",
+        "scripts/{tilt/{build-binaries.sh,wrap-agent-runtime-image.sh},test-wrap-agent-runtime-image.sh}"
+      ]
+    },
+    {
+      "phase": "RETIRE_HEAD",
+      "paths": [
+        "deploy/helm/djinn/{values.yaml,values.local.yaml,values.schema.json,templates/{deployment-server.yaml,kueue-topology.yaml,namespace.yaml,prereq-guard.yaml,role-controller.yaml,runtimeclass-cgroup-writable.yaml},tests/{fixtures/{cgroup-writable/{activation-task-run.json,enabled-task-run-hostpath.json,probe-class-task-run.json},kueue-cluster-values.yaml,kueue-governor-values.yaml},capacity-controller-render.sh,kueue-build-object-labels.sh,kueue-topology-render.sh,light-cpu-request-schema.sh,prereq-guard-render.sh}}",
+        "deploy/helm/{README.md,djinn/{Chart.yaml,README.md}}",
+        "deploy/kueue/{README.md,zero-capture-gate.sh,tests/{fixtures/precutover-task-run.yaml,preflight.sh,webhook-selectors.sh,zero-capture-gate.sh}}",
+        "deploy/node/k3s/{containerd/{config-v3.toml.tmpl,config.toml.tmpl},djinn-cgroup-writable-conformance.sh,tests/conformance-version-lifecycle.sh}",
+        ".github/workflows/{quality-gate.yml,release.yml,resize-matrix.yml}",
+        "server/{Cargo.toml,Cargo.lock}"
+      ]
+    }
   ],
   "preserved": [
-    "scripts/check-resize-cutover-retention.sh",
-    "scripts/resize-cutover-retention-manifest.mjs",
-    "scripts/test-resize-cutover-retention.mjs",
-    "scripts/test-helm-chart-contracts.sh",
-    "scripts/test-deploy-contracts.sh",
+    "scripts/{check-resize-cutover-retention.sh,resize-cutover-retention-manifest.mjs,test-resize-cutover-retention.mjs}",
+    "scripts/{test-helm-chart-contracts.sh,test-deploy-contracts.sh}",
     "deploy/preflight/{render-gate.sh,cutover-preflight.sh}",
     "deploy/preflight/tests/{render-gate.sh,cutover-preflight.sh,task-run-resize-rollout.sh}",
-    "server/crates/djinn-k8s/src/bin/render-gate.rs",
-    "server/crates/djinn-k8s/src/cutover_preflight.rs",
+    "server/crates/djinn-k8s/src/{bin/render-gate.rs,cutover_preflight.rs,launcher.rs,launcher_child_fs.rs,launcher_tests.rs}",
     "deploy/kueue/preflight.sh",
-    "server/crates/djinn-k8s/src/{launcher.rs,launcher_child_fs.rs}",
     "deploy/helm/djinn/tests/{cgroup-writable-render.sh,volume-ownership-render.sh,pods-resize-rbac.sh}",
     "server/crates/djinn-agent/src/process.rs",
-    "server/crates/djinn-k8s/src/launcher_tests.rs",
     "scripts/fixtures/cgroup-retirement/{PREP_HEAD.json,schema.json,candidates/**,cases/**}",
     "scripts/fixtures/resize-cutover-retention/**"
   ],
