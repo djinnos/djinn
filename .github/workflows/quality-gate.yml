@@ -437,9 +437,11 @@ jobs:
       # server-sqlx-freshness.
       - name: Report warm footprint
         if: always()
+        working-directory: ${{ github.workspace }}
         run: |-
-          echo "::notice::warm-footprint target=$(du -sh target 2>/dev/null | cut -f1) free=$(df -h --output=avail . | tail -1 | tr -d ' ')"
+          echo "::notice::warm-footprint target=$(du -sh server/target 2>/dev/null | cut -f1) free=$(df -h --output=avail . | tail -1 | tr -d ' ')"
       - name: Log cache family and restore status
+        working-directory: ${{ github.workspace }}
         run: |-
           echo "cache-family=server-test"
           echo "shared-key=server-test"
@@ -933,9 +935,10 @@ jobs:
         run: cargo clippy --workspace --all-targets --features qdrant --keep-going -- -D warnings
       - name: Fingerprint census (after clippy)
         if: always()
+        working-directory: ${{ github.workspace }}
         run: |-
           before='${{ steps.fingerprints-restored.outputs.count }}'
-          after=$(ls target/debug/.fingerprint 2>/dev/null | wc -l)
+          after=$(ls server/target/debug/.fingerprint 2>/dev/null | wc -l)
           echo "::notice::clippy-fingerprints restored=${before:-0} after=${after} built=$((after - ${before:-0}))"
   # deploy/preflight/tests/ is a DEPLOY contract, not a Rust one, but it must
   # `cargo build -p djinn-k8s --bin render-gate` and shell out to `helm`, so it
@@ -1050,7 +1053,7 @@ jobs:
       DJINN_TEST_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5433/postgres
     services:
       postgres:
-        image: postgres:16
+        image: public.ecr.aws/docker/library/postgres:16
         env:
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: djinn
@@ -1707,7 +1710,7 @@ jobs:
         working-directory: server
     services:
       postgres:
-        image: postgres:16
+        image: public.ecr.aws/docker/library/postgres:16
         env:
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: djinn
@@ -2048,6 +2051,7 @@ jobs:
         # nextest log is simply absent there, and the annotation then reports
         # that observation — it does NOT name a layer it cannot see.
         if: failure()
+        working-directory: ${{ github.workspace }}
         run: |
           set -uo pipefail
           # The parsing lives in a checked-in script, NOT in an inline
@@ -2215,7 +2219,7 @@ jobs:
       DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5433/djinn
     services:
       postgres:
-        image: postgres:16
+        image: public.ecr.aws/docker/library/postgres:16
         env:
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: djinn
@@ -2309,7 +2313,7 @@ jobs:
       SQLX_OFFLINE: "true"
     services:
       postgres:
-        image: postgres:16
+        image: public.ecr.aws/docker/library/postgres:16
         env:
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: djinn
@@ -2425,8 +2429,9 @@ jobs:
           retention-days: 30
       - name: Write job summary
         if: always()
+        working-directory: ${{ github.workspace }}
         run: |
-          SUMMARY="target/memory-eval/phase1-summary.md"
+          SUMMARY="server/target/memory-eval/phase1-summary.md"
           if [[ -f "$SUMMARY" ]]; then
             cat "$SUMMARY" >> "$GITHUB_STEP_SUMMARY"
           fi
@@ -2446,7 +2451,7 @@ jobs:
       DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5433/djinn_test_template
     services:
       postgres:
-        image: postgres:16
+        image: public.ecr.aws/docker/library/postgres:16
         env:
           POSTGRES_PASSWORD: postgres
         ports:
