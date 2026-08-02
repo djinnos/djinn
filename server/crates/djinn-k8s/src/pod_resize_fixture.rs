@@ -195,6 +195,58 @@ impl StoredTaskRunPod {
         ))
     }
 
+    /// The production race of 2026-08-02: the Pod object exists and its spec
+    /// names the launcher, but the kubelet has not written
+    /// `status.initContainerStatuses` yet — the array is **empty**.
+    ///
+    /// This is not a broken Pod. It is a healthy Pod observed a second or two
+    /// early, and [`Self::kubelet_publishes_status`] turns it into the same
+    /// object [`Self::resize_v2`] serves. A gate that treats this shape as a
+    /// permanent verdict leaves the launcher at `ceiling` forever.
+    #[must_use]
+    pub fn resize_v2_status_not_populated(pod_uid: &str, ceiling: &str) -> Self {
+        Self::new(build_pod(
+            pod_uid,
+            json!([
+                init_container("preflight", None, None),
+                init_container("cgroup-launcher", Some(ceiling), Some("resize-v2")),
+            ]),
+            json!([]),
+        ))
+    }
+
+    /// The kubelet catches up and publishes the init-container statuses.
+    ///
+    /// After this the cluster serves exactly what [`Self::resize_v2`] serves, so
+    /// a test can assert that the *same* Pod becomes governable rather than
+    /// asserting against a differently-shaped fixture.
+    pub fn kubelet_publishes_status(&self, ceiling: &str) {
+        let mut state = self.state.lock().expect("cluster");
+        let statuses: Vec<k8s_openapi::api::core::v1::ContainerStatus> =
+            serde_json::from_value(json!([
+                init_status("preflight", None, Some("containerd://preflight")),
+                init_status(
+                    "cgroup-launcher",
+                    Some(ceiling),
+                    Some("containerd://launcher")
+                ),
+            ]))
+            .expect("init container statuses");
+        let ClusterState {
+            pod,
+            pod_on_admission,
+            ..
+        } = &mut *state;
+        for pod in [pod.as_mut(), pod_on_admission.as_mut()]
+            .into_iter()
+            .flatten()
+        {
+            pod.status
+                .get_or_insert_with(Default::default)
+                .init_container_statuses = Some(statuses.clone());
+        }
+    }
+
     /// A `leaf-v1` Pod. It carries **no** launcher CPU limit, because
     /// `resolve_launcher_cpu_ceiling` returns `Ok(None)` for `leaf-v1` — a limit
     /// there is an ancestor clamp over every invocation leaf.
