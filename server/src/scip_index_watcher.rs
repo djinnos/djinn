@@ -32,7 +32,9 @@ use std::time::Duration;
 use djinn_db::ProjectRepository;
 use djinn_k8s::scip_schedule::{
     GitMirrorHeadSource, MirrorHeadSource, ScipIndexDecision, ScipIndexScheduler,
+    reconcile_warm_attempts_for_heads,
 };
+use time::format_description::well_known::Rfc3339;
 use tokio::time::{Interval, MissedTickBehavior};
 
 use crate::server::AppState;
@@ -86,6 +88,35 @@ async fn resolve_scheduler(state: &AppState) -> Option<ScipIndexScheduler> {
 }
 
 async fn run_tick(state: &AppState, heads: &dyn MirrorHeadSource) -> anyhow::Result<()> {
+    let repo = ProjectRepository::new(state.db().clone(), state.event_bus());
+    // Durable lifecycle recovery is independent of the standalone SCIP switch
+    // and intentionally does not use Kubernetes Job retention as evidence.
+    let mut project_heads = Vec::new();
+    for project in repo.list().await? {
+        let project_id = project.id.as_str().to_string();
+        if let Some(head) = heads.head(&project_id).await {
+            project_heads.push((project_id, head));
+        }
+    }
+    let recovery_heads = project_heads
+        .iter()
+        .map(|(project_id, head)| (project_id.clone(), head.revision.clone()))
+        .collect::<Vec<_>>();
+    let now = time::OffsetDateTime::now_utc().format(&Rfc3339)?;
+    let timed_out = reconcile_warm_attempts_for_heads(
+        state.db().clone(),
+        &recovery_heads,
+        &now,
+        Duration::from_secs(DEFAULT_TICK_SECS),
+    )
+    .await?;
+    if !timed_out.is_empty() {
+        tracing::info!(
+            count = timed_out.len(),
+            "scip_index_watcher: timed out stale warm attempts"
+        );
+    }
+
     let Some(scheduler) = resolve_scheduler(state).await else {
         // Read the flag straight from the environment here: without a
         // scheduler there is no config to read it from, and staying silent
@@ -111,14 +142,13 @@ async fn run_tick(state: &AppState, heads: &dyn MirrorHeadSource) -> anyhow::Res
     if !scheduler.enabled() {
         tracing::debug!(
             "scip_index_watcher: disarmed (DJINN_K8S_SCIP_INDEX_ENABLED); \
-             evaluating nothing this tick"
+             standalone dispatch disabled; durable warm attempts reconciled"
         );
         return Ok(());
     }
 
-    let repo = ProjectRepository::new(state.db().clone(), state.event_bus());
-    for project in repo.list().await? {
-        let project_id = project.id.as_str();
+    for (project_id, head) in project_heads {
+        let project_id = project_id.as_str();
 
         // Same filter mirror_fetcher applies before triggering a warm: the
         // canonical graph is a CODE graph, so a docs-only repo indexes to zero
@@ -141,12 +171,11 @@ async fn run_tick(state: &AppState, heads: &dyn MirrorHeadSource) -> anyhow::Res
             continue;
         };
 
-        let head = heads.head(project_id).await;
         // `policy` is `None` deliberately: `warm_cache_env_vars` ignores the
         // cargo-cache policy (incremental-on is an invariant across all djinn
         // build pods), so passing it would imply an influence it does not have.
         let decision = scheduler
-            .tick_project(project_id, head.as_ref(), &image_tag, None)
+            .tick_project(project_id, Some(&head), &image_tag, None)
             .await;
         if let ScipIndexDecision::Dispatch { revision } = &decision {
             tracing::info!(

@@ -57,6 +57,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use djinn_db::{Database, WarmGraphAttemptRepository};
 use k8s_openapi::api::batch::v1::Job;
 use k8s_openapi::chrono::{DateTime, Utc};
 use kube::api::{Api, ListParams};
@@ -396,6 +397,35 @@ impl ScipIndexScheduler {
     }
 }
 
+/// Reconcile durable warm attempts on the scheduler's existing tick.
+///
+/// Retained Kubernetes Jobs are deliberately not an input. Exact-head graph
+/// publication and immutable attempt deadlines are durable evidence, so
+/// publication is reconciled before stale rows are reaped. The caller supplies
+/// `now` and the scheduler-tick `grace` so strict boundaries need no sleep.
+pub async fn reconcile_warm_attempts_for_heads(
+    db: Database,
+    heads: &[(String, String)],
+    now: &str,
+    grace: Duration,
+) -> anyhow::Result<Vec<String>> {
+    let attempts = WarmGraphAttemptRepository::new(db);
+    for (project_id, revision) in heads {
+        // A bad or cross-revision inventory is not completion evidence. Keep
+        // reconciling other heads instead of blocking stale recovery globally.
+        if let Err(error) = attempts.warm_outcome_for_head(project_id, revision).await {
+            warn!(
+                project_id,
+                revision,
+                %error,
+                "warm-attempt reconciliation: exact-head publication unavailable"
+            );
+        }
+    }
+    let grace = k8s_openapi::chrono::Duration::from_std(grace)?;
+    Ok(attempts.reconcile_stale_attempts(now, grace).await?)
+}
+
 /// Reads `refs/heads/main` and its commit age straight out of the project's
 /// bare mirror.
 ///
@@ -587,6 +617,9 @@ pub fn observe_from_jobs(jobs: &[Job], now: DateTime<Utc>) -> ScipJobObservation
 #[cfg(test)]
 mod tests {
     use super::*;
+    use djinn_db::{
+        Database, WarmGraphAttemptRepository, WarmGraphAttemptStatus, test_support::seed_project,
+    };
     use k8s_openapi::api::batch::v1::JobStatus;
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::{ObjectMeta, Time};
     use k8s_openapi::chrono::TimeDelta;
@@ -600,6 +633,105 @@ mod tests {
     /// not about it.
     const QUIET: Option<Duration> = Some(Duration::from_secs(9_999));
     const QUIESCENCE: Duration = Duration::from_secs(3_523);
+
+    /// There are deliberately no Kubernetes Job fixtures here. Job retention
+    /// is a hint only: normal terminal state survives its TTL and an absent Job
+    /// cannot make a durable running attempt time out before its grace window.
+    #[tokio::test]
+    async fn failed_warm_remains_recoverable_after_job_gc() {
+        let db = Database::open_in_memory().expect("test database");
+        seed_project(&db, "proj", "proj").await;
+        let attempts = WarmGraphAttemptRepository::new(db.clone());
+        let tick = Duration::from_secs(300);
+        // `start_attempt` records `started_at` with PostgreSQL's transaction
+        // clock, so use a deadline safely after that real clock. Derive all
+        // reconciliation instants from it to keep this boundary fixture
+        // deterministic without sleeping.
+        let deadline_at = Utc::now() + TimeDelta::days(1);
+        let deadline = deadline_at.to_rfc3339();
+        let running = attempts
+            .start_attempt("proj", HEAD, &deadline)
+            .await
+            .expect("persist running attempt");
+        let failed = attempts
+            .start_attempt("proj", OLD, &deadline)
+            .await
+            .expect("persist terminal attempt");
+        assert!(
+            attempts
+                .finish_attempt_if_running(
+                    &failed,
+                    WarmGraphAttemptStatus::Failed,
+                    Some("normal failure")
+                )
+                .await
+                .expect("finish failed attempt")
+        );
+
+        let heads = vec![("proj".to_string(), HEAD.to_string())];
+        let timeout_boundary = deadline_at + TimeDelta::seconds(tick.as_secs() as i64);
+        for now in [
+            timeout_boundary - TimeDelta::milliseconds(1),
+            timeout_boundary,
+        ] {
+            assert!(
+                reconcile_warm_attempts_for_heads(db.clone(), &heads, &now.to_rfc3339(), tick)
+                    .await
+                    .expect("reconcile absent Job")
+                    .is_empty()
+            );
+            assert_eq!(
+                attempts
+                    .get_attempt(&running)
+                    .await
+                    .expect("read running")
+                    .expect("row")
+                    .status,
+                WarmGraphAttemptStatus::Running,
+            );
+        }
+        assert_eq!(
+            reconcile_warm_attempts_for_heads(
+                db.clone(),
+                &heads,
+                &(timeout_boundary + TimeDelta::milliseconds(1)).to_rfc3339(),
+                tick,
+            )
+            .await
+            .expect("post-boundary reconcile"),
+            vec![running.clone()],
+        );
+        assert!(
+            reconcile_warm_attempts_for_heads(
+                db.clone(),
+                &heads,
+                &(timeout_boundary + TimeDelta::seconds(tick.as_secs() as i64)).to_rfc3339(),
+                tick,
+            )
+            .await
+            .expect("idempotent reconcile")
+            .is_empty()
+        );
+        assert_eq!(
+            attempts
+                .get_attempt(&running)
+                .await
+                .expect("read timeout")
+                .expect("row")
+                .status,
+            WarmGraphAttemptStatus::TimedOut,
+        );
+        assert_eq!(
+            attempts
+                .get_attempt(&failed)
+                .await
+                .expect("read failure")
+                .expect("row")
+                .status,
+            WarmGraphAttemptStatus::Failed,
+            "a normal terminal failure survives Job garbage collection",
+        );
+    }
 
     fn observed(
         in_flight: bool,
