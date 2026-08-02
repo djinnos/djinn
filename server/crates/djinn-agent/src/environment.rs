@@ -20,10 +20,72 @@
 //! [`djinn_stack::environment::EnvironmentConfig`]. We log a `warn` so
 //! misconfiguration is visible in the logs without blocking the task.
 
+use std::collections::BTreeMap;
+use std::io;
 use std::path::Path;
+use std::process::Command;
 
 use djinn_db::{Database, ProjectRepository};
 use djinn_stack::environment::EnvironmentConfig;
+
+/// The explicitly admitted environment for a child that is not launched by the
+/// cgroup launcher.
+///
+/// The launcher receives a complete `CommandSpec` environment and validates it
+/// before `execve`; a launcher-free child used to inherit the worker's entire
+/// environment instead. Keep the two paths under the same entry policy. In
+/// particular, `GIT_CONFIG_SYSTEM` is an entry-level decision: its value must
+/// be the launcher trust anchor, not merely a variable with a familiar name.
+///
+/// Explicit command values override inherited values, while `env_remove` wins
+/// over both. Entries outside the policy are omitted rather than passed to the
+/// child. The policy is deliberately delegated to the launcher crate so this
+/// path shares its `git_trust::is_anchor_value` check instead of growing a
+/// second, key-name-only trust predicate.
+pub(crate) fn admitted_child_environment(command: &Command) -> io::Result<Vec<(String, String)>> {
+    let mut environment: BTreeMap<String, String> = std::env::vars()
+        .filter(|(key, value)| djinn_cgroup_launcher::is_allowed_environment_entry(key, value))
+        .collect();
+
+    for (key, value) in command.get_envs() {
+        let key = key.to_str().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "environment key must be UTF-8")
+        })?;
+        match value {
+            // `Command::env_remove` is represented as a `None` value.
+            None => {
+                environment.remove(key);
+            }
+            Some(value) => {
+                let value = value.to_str().ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "environment value must be UTF-8",
+                    )
+                })?;
+                if djinn_cgroup_launcher::is_allowed_environment_entry(key, value) {
+                    environment.insert(key.to_owned(), value.to_owned());
+                } else {
+                    environment.remove(key);
+                }
+            }
+        }
+    }
+
+    Ok(environment.into_iter().collect())
+}
+
+/// Replace inherited state with only [`admitted_child_environment`] before a
+/// launcher-free child is spawned.
+///
+/// `Command::env_clear` is load-bearing: filtering only `get_envs()` would
+/// leave inherited variables such as loader injection and Git's indexed config
+/// protocol intact.
+pub(crate) fn clear_and_admit_child_environment(command: &mut Command) -> io::Result<()> {
+    let environment = admitted_child_environment(command)?;
+    command.env_clear().envs(environment);
+    Ok(())
+}
 
 /// Resolve a project id from a workspace path (exact or fuzzy prefix match).
 ///
