@@ -1,7 +1,7 @@
 {
   "version": 1,
   "candidates": [
-    { "phase": "RETIRE_BASE", "paths": ["server/crates/djinn-cgroup-launcher/**", "server/crates/djinn-launcher-protocol/**"] },
+    { "phase": "RETIRE_BASE", "paths": ["server/crates/djinn-cgroup-launcher/**", "server/crates/djinn-launcher-protocol/**", "server/crates/djinn-agent/src/process_broker.rs"] },
     { "phase": "RETIRE_BASE", "paths": ["server/crates/djinn-k8s/src/job.rs", "server/crates/djinn-k8s/tests/{launcher_child_runtime_handoff.rs,kueue_governor_conformance.rs}"] },
     { "phase": "RETIRE_HEAD", "paths": ["server/crates/djinn-image-builder/**", "server/docker/djinn-agent-runtime.Dockerfile", "server/crates/djinn-image-controller/tests/protocol_catalog_and_preservation.rs"] },
     { "phase": "RETIRE_HEAD", "paths": ["deploy/helm/djinn/templates/runtimeclass-cgroup-writable.yaml", "deploy/helm/djinn/{values.yaml,values.schema.json}", "deploy/node/k3s/**", "deploy/kueue/{README.md,zero-capture-gate.sh,tests/**}"] },
@@ -11,6 +11,7 @@
     "scripts/check-resize-cutover-retention.sh",
     "scripts/resize-cutover-retention-manifest.mjs",
     "scripts/test-resize-cutover-retention.mjs",
+    "scripts/test-helm-chart-contracts.sh",
     "scripts/test-deploy-contracts.sh",
     "deploy/preflight/{render-gate.sh,cutover-preflight.sh}",
     "deploy/preflight/tests/{render-gate.sh,cutover-preflight.sh,task-run-resize-rollout.sh}",
@@ -18,7 +19,14 @@
     "server/crates/djinn-k8s/src/cutover_preflight.rs",
     "deploy/kueue/preflight.sh",
     "server/crates/djinn-k8s/src/{launcher.rs,launcher_child_fs.rs}",
-    "deploy/helm/djinn/tests/{cgroup-writable-render.sh,volume-ownership-render.sh}",
-    "scripts/fixtures/{cgroup-retirement/**,resize-cutover-retention/**}"
+    "deploy/helm/djinn/tests/{cgroup-writable-render.sh,volume-ownership-render.sh,pods-resize-rbac.sh}",
+    "server/crates/djinn-agent/src/process.rs",
+    "server/crates/djinn-k8s/src/launcher_tests.rs",
+    "scripts/fixtures/cgroup-retirement/{PREP_HEAD.json,schema.json,candidates/**,cases/**}",
+    "scripts/fixtures/resize-cutover-retention/**"
+  ],
+  "guard_work": [
+    "scripts/{check-cgroup-retirement-gate.sh,cgroup-retirement-gate.mjs,cgroup-retirement-assets.json,test-cgroup-retirement-gate.sh}",
+    "scripts/fixtures/cgroup-retirement/gate/**"
   ]
 }
