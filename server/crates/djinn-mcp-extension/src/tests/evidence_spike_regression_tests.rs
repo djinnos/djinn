@@ -530,3 +530,37 @@ fn evidence_spike_profile_matches_demand_evidence_contract_requirements() {
         "demand-evidence contract evidence-spike profile must retain `submit_work` for findings handoff"
     );
 }
+
+/// A rollout rollback withholds only the newly advertised evidence controls.
+/// The baseline investigation/finalization profile is retained verbatim, so no
+/// storage migration or evidence cleanup can be coupled to this surface change.
+#[test]
+fn evidence_advertisement_rollback_removes_only_rollout_tools() {
+    let enabled = ev_schema_names(&tool_schemas_evidence_spike_with_evidence_advertisement(
+        true,
+    ));
+    let rolled_back = ev_schema_names(&tool_schemas_evidence_spike_with_evidence_advertisement(
+        false,
+    ));
+
+    assert!(enabled.contains("evidence_plan"));
+    assert!(enabled.contains("evidence_exec"));
+    assert!(!rolled_back.contains("evidence_plan"));
+    assert!(!rolled_back.contains("evidence_exec"));
+
+    let removed: BTreeSet<_> = enabled.difference(&rolled_back).cloned().collect();
+    assert_eq!(
+        removed,
+        BTreeSet::from(["evidence_exec".to_owned(), "evidence_plan".to_owned()]),
+        "rollback must be advertisement-only"
+    );
+    assert_eq!(
+        rolled_back,
+        BTreeSet::from_iter(
+            enabled
+                .into_iter()
+                .filter(|name| name != "evidence_plan" && name != "evidence_exec")
+        ),
+        "every pre-existing tool remains advertised during rollback"
+    );
+}

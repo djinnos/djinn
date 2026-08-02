@@ -1147,3 +1147,69 @@ async fn sibling_refinement_completions_after_awaiting_evidence_do_not_enqueue_e
     );
     assert!(actor.refinement_sessions.is_empty());
 }
+
+/// Startup recovery is the production historical-backfill seam. With no
+/// linked spike candidate it must return from its read-only candidate query,
+/// rather than manufacturing lifecycle evidence for an unrelated proposal.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn empty_historical_evidence_backfill_is_a_zero_write_noop() {
+    let db = crate::test_helpers::create_test_db();
+    let fixture = seed_refinement_fixture(&db).await;
+    let (events_tx, _events_rx) = tokio::sync::broadcast::channel::<DjinnEventEnvelope>(256);
+    let proposals = ProposalRepository::new(db.clone(), EventBus::noop());
+
+    assert!(
+        proposals
+            .list_linked_evidence_spike_recovery_candidates()
+            .await
+            .expect("query empty eligible population")
+            .is_empty(),
+        "fixture intentionally has no linked evidence spike eligible for backfill"
+    );
+
+    let before = (
+        djinn_db::test_support::count_rows_for_test(&db, "evidence_plans").await,
+        djinn_db::test_support::count_rows_for_test(&db, "evidence_command_invocations").await,
+        djinn_db::test_support::count_rows_for_test(&db, "evidence_finalized_projections").await,
+        djinn_db::test_support::count_rows_for_test(&db, "proposal_debate_trail").await,
+        djinn_db::test_support::count_rows_for_test(&db, "proposal_revisions").await,
+    );
+    let revisions_before = proposals
+        .revisions(&fixture.proposal_id)
+        .await
+        .expect("read lifecycle baseline");
+
+    let mut actor = build_refinement_actor(&db, &events_tx, spawn_test_pool(&db, 4));
+    actor.recover_terminal_linked_spike_evidence().await;
+
+    let after = (
+        djinn_db::test_support::count_rows_for_test(&db, "evidence_plans").await,
+        djinn_db::test_support::count_rows_for_test(&db, "evidence_command_invocations").await,
+        djinn_db::test_support::count_rows_for_test(&db, "evidence_finalized_projections").await,
+        djinn_db::test_support::count_rows_for_test(&db, "proposal_debate_trail").await,
+        djinn_db::test_support::count_rows_for_test(&db, "proposal_revisions").await,
+    );
+    assert_eq!(
+        after, before,
+        "empty historical backfill must perform zero writes"
+    );
+
+    let revisions_after = proposals
+        .revisions(&fixture.proposal_id)
+        .await
+        .expect("read lifecycle after empty backfill");
+    assert_eq!(
+        serde_json::to_value(revisions_after.clone()).expect("serialize lifecycle after backfill"),
+        serde_json::to_value(revisions_before).expect("serialize lifecycle baseline"),
+        "no lifecycle row may be fabricated"
+    );
+    assert!(
+        revisions_after.iter().all(|revision| {
+            !matches!(
+                revision.event_kind.as_str(),
+                "refinement_evidence_received" | "refinement_evidence_failed"
+            )
+        }),
+        "empty backfill emits neither receipt nor failure"
+    );
+}

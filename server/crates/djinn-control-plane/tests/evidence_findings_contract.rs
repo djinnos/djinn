@@ -520,3 +520,114 @@ async fn evidence_judge_projection_contract() {
         insta::assert_snapshot!(format!("evidence_judge_{snapshot_case}"), rendered);
     }
 }
+
+/// Profile rollback is deliberately a tool-surface operation. This persists the
+/// complete production evidence hand-off first, records its typed lifecycle
+/// receipt, then rehydrates every durable artifact without any migration or
+/// storage rewrite.
+#[tokio::test]
+async fn evidence_artifacts_remain_readable_after_advertisement_rollback() {
+    let case = cases()
+        .valid_cases
+        .into_iter()
+        .find(|case| case.name == "resolved")
+        .expect("resolved fixture exists");
+    let (h, projection, rendered_before) = submit_case(&case).await;
+    let evidence = EvidenceRepository::new(h.db.clone());
+
+    let persisted_before = evidence
+        .hydrate_by_identity(&h.task_id, &h.session_id)
+        .await
+        .expect("hydrate frozen artifacts")
+        .expect("frozen artifacts exist");
+    assert_eq!(persisted_before.plan.id, h.plan_id);
+    assert_eq!(persisted_before.plan.checks.len(), 3, "frozen plan checks");
+    assert_eq!(
+        persisted_before.invocations.len(),
+        1,
+        "immutable invocation"
+    );
+    assert_eq!(
+        persisted_before
+            .finalized_projection
+            .as_ref()
+            .expect("structured findings projection")
+            .payload,
+        projection
+    );
+    assert!(rendered_before.contains("finding code:"));
+    assert!(rendered_before.contains("finding graph:"));
+    assert!(rendered_before.contains("finding command:"));
+
+    // The same completed spike drives the production lifecycle receipt writer.
+    // No evidence row is rewritten while the receipt is persisted.
+    TaskRepository::new(h.db.clone(), h.ctx.event_bus.clone())
+        .set_status_with_reason(&h.task_id, "closed", Some("completed"))
+        .await
+        .expect("close completed evidence spike");
+    let proposals = ProposalRepository::new(h.db.clone(), h.ctx.event_bus.clone());
+    let outcome = proposals
+        .persist_terminal_linked_spike_evidence_lifecycle(
+            &h.proposal_id,
+            &h.task_id,
+            "closed",
+            Some("completed"),
+        )
+        .await
+        .expect("persist typed lifecycle receipt");
+    assert!(matches!(
+        outcome,
+        djinn_db::repositories::proposal::TerminalLinkedEvidenceSpikeOutcome::EvidenceReceived {
+            derived_outcome: Some(
+                djinn_db::repositories::proposal::EvidenceDerivedOutcome::Resolved
+            )
+        }
+    ));
+
+    // The profile rollback test disables only `evidence_plan`/`evidence_exec`
+    // advertisement. Rehydration must therefore observe byte-for-byte the same
+    // persisted artifacts after that configuration-only operation.
+    let persisted_after = evidence
+        .hydrate_by_identity(&h.task_id, &h.session_id)
+        .await
+        .expect("rehydrate after advertisement rollback")
+        .expect("frozen artifacts survive rollback");
+    assert_eq!(
+        serde_json::to_value(&persisted_after.plan).expect("serialize plan"),
+        serde_json::to_value(&persisted_before.plan).expect("serialize baseline plan")
+    );
+    assert_eq!(
+        serde_json::to_value(&persisted_after.invocations).expect("serialize invocations"),
+        serde_json::to_value(&persisted_before.invocations)
+            .expect("serialize baseline invocations")
+    );
+    assert_eq!(
+        persisted_after
+            .finalized_projection
+            .expect("finalized projection remains readable")
+            .payload,
+        projection
+    );
+    assert_eq!(
+        render_evidence_judge_projection(&projection).expect("rehydrate Judge projection"),
+        rendered_before
+    );
+
+    let receipt = proposals
+        .revisions(&h.proposal_id)
+        .await
+        .expect("read lifecycle receipt")
+        .into_iter()
+        .find(|revision| revision.event_kind == "refinement_evidence_received")
+        .expect("typed receipt exists");
+    let metadata =
+        djinn_db::repositories::proposal::EvidenceLifecycleMetadata::parse_event_metadata(
+            receipt.event_metadata.as_deref(),
+        )
+        .expect("parse typed receipt")
+        .expect("receipt metadata exists");
+    assert_eq!(
+        metadata.derived_outcome,
+        Some(djinn_db::repositories::proposal::EvidenceDerivedOutcome::Resolved)
+    );
+}
