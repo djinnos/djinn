@@ -46,7 +46,8 @@ pub mod test_support {
         replace_legacy_proposal_head_for_test, seed_board_health_mismatch_candidate,
         seed_chat_session_row, seed_legacy_launcher_authority_for_test, seed_project,
         seed_readiness_detail_projection_for_test, seed_session_row, seed_session_row_with_id,
-        seed_task_row, structured_evidence_handoff_counts_for_test, task_row_count_for_test,
+        seed_task_row, seed_workspace_coverage_for_test,
+        structured_evidence_handoff_counts_for_test, task_row_count_for_test,
     };
 }
 

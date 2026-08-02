@@ -269,6 +269,27 @@ impl WarmGraphAttemptRepository {
         }
     }
 
+    /// Read-only exact-revision publication classification for a caller that
+    /// owns a single projected attempt. In contrast to
+    /// [`Self::warm_outcome_for_head`], this does not terminalize every running
+    /// attempt for the revision.
+    pub async fn publication_status_for_revision(
+        &self,
+        project_id: &str,
+        revision: &str,
+    ) -> DbResult<Option<WarmGraphAttemptStatus>> {
+        Ok(self
+            .exact_revision_publication(project_id, revision)
+            .await?
+            .map(|complete| {
+                if complete {
+                    WarmGraphAttemptStatus::PublishedComplete
+                } else {
+                    WarmGraphAttemptStatus::PublishedPartial
+                }
+            }))
+    }
+
     /// Return `Some(complete)` only when the current generation is exactly the
     /// requested revision. Coverage is a replace-set, not lifecycle history;
     /// every row must agree with the current generation before it is used.
