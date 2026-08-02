@@ -462,6 +462,7 @@ fn spec_for(
         task_run_id,
         task_attempt_id,
         task_id: task.id.clone(),
+        execution_generation: 0,
         project_id: task.project_id.clone(),
         trigger: djinn_core::models::TaskRunTrigger::NewTask,
         base_branch: "main".to_owned(),
