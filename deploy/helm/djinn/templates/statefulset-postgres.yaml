@@ -16,6 +16,7 @@ spec:
     metadata:
       labels:
         {{- include "djinn.postgres.selectorLabels" . | nindent 8 }}
+        djinn.io/capacity-reserved: "true"
     spec:
       containers:
         - name: postgres

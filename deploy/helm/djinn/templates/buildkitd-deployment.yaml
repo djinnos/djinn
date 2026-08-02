@@ -29,6 +29,7 @@ spec:
       labels:
         {{- include "djinn.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: buildkitd
+        djinn.io/capacity-reserved: "true"
       annotations:
         # Protect in-flight builds from Karpenter consolidation eviction. This
         # is a single shared replicas:1 + Recreate daemon, so any eviction (the

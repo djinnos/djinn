@@ -29,8 +29,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use k8s_openapi::api::core::v1::{
-    Capabilities, Container, EmptyDirVolumeSource, EnvVar, PodSecurityContext,
-    ResourceRequirements, SeccompProfile, SecurityContext, Volume, VolumeMount,
+    Capabilities, Container, ContainerResizePolicy, EmptyDirVolumeSource, EnvVar,
+    PodSecurityContext, ResourceRequirements, SeccompProfile, SecurityContext, Volume, VolumeMount,
 };
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use serde::{Deserialize, Serialize};
@@ -424,6 +424,10 @@ pub fn launcher_sidecar_container(
         image_pull_policy: Some(config.image_pull_policy.clone()),
         // Native sidecar: init container that lives for the worker's lifetime.
         restart_policy: Some("Always".to_string()),
+        resize_policy: Some(vec![ContainerResizePolicy {
+            resource_name: "cpu".to_string(),
+            restart_policy: "NotRequired".to_string(),
+        }]),
         command: Some(vec![LAUNCHER_BIN.to_string()]),
         args: Some(vec!["serve".to_string()]),
         env: Some(vec![

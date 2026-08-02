@@ -234,6 +234,9 @@ def validate_release_contract(contract):
     server = contract['server']
     pod = contract['taskRunPod']['spec']
     sidecar = launcher(contract)
+    assert sidecar.get('resizePolicy') == [
+        {'resourceName': 'cpu', 'restartPolicy': 'NotRequired'}
+    ], f'{contract["release"]}: launcher must declare CPU resize without restart'
     enabled = server['environment']['DJINN_K8S_TASK_RUN_CGROUP_WRITABLE_ENABLED'] == 'true'
     generation = server['runtimeImageGeneration']
     security = sidecar['securityContext']

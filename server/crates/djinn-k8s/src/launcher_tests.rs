@@ -9,6 +9,20 @@
 
 use super::*;
 
+#[test]
+fn launcher_sidecar_declares_cpu_resize_without_restart() {
+    let launcher = launcher_sidecar_container(
+        &KubernetesConfig::for_testing(),
+        "registry.example/djinn:test",
+        false,
+        false,
+    );
+    let policies = launcher.resize_policy.expect("explicit resize policy");
+    assert_eq!(policies.len(), 1);
+    assert_eq!(policies[0].resource_name, "cpu");
+    assert_eq!(policies[0].restart_policy, "NotRequired");
+}
+
 use std::collections::BTreeMap;
 
 use djinn_cgroup_launcher::bootstrap::RETAINED_CAPABILITY_NAMES;
