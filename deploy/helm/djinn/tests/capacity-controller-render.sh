@@ -13,6 +13,40 @@ helm template capacity-test "$CHART_DIR" --is-upgrade \
   --set kueue.capacity.nodeSelector.value=worker-1 \
   --set imagePipeline.zot.enabled=true >"$WORK/render.yaml"
 
+# Do not advertise a Karpenter API version: dedicated rendering is selected by
+# values alone, never by CRD discovery.
+helm template capacity-nodepool "$CHART_DIR" --is-upgrade \
+  --set kueue.enabled=true \
+  --set kueue.capacity.enabled=true \
+  --set kueue.capacity.source=nodepool-limits \
+  --set kueue.capacity.nodePool.dedicated=true \
+  --set kueue.capacity.nodePool.name=task-pool \
+  --set-string kueue.capacity.staticFallback.cpu=12 \
+  --set-string kueue.capacity.staticFallback.memory=48Gi \
+  --set kueue.capacity.staticFallback.pods=3 >"$WORK/nodepool.yaml"
+
+helm template capacity-nodepool "$CHART_DIR" --is-upgrade \
+  --api-versions karpenter.sh/v1 \
+  --set kueue.enabled=true \
+  --set kueue.capacity.enabled=true \
+  --set kueue.capacity.source=nodepool-limits \
+  --set kueue.capacity.nodePool.dedicated=true \
+  --set kueue.capacity.nodePool.name=task-pool \
+  --set-string kueue.capacity.staticFallback.cpu=12 \
+  --set-string kueue.capacity.staticFallback.memory=48Gi \
+  --set kueue.capacity.staticFallback.pods=3 >"$WORK/nodepool-with-api.yaml"
+
+# `--api-versions` legitimately changes Helm's advertised capability list (the
+# prerequisite guard consumes that list for a separate install-time refusal).
+# Compare the capacity resources themselves: Karpenter discovery must not alter
+# the source-selected flavor, watcher RBAC, controller configuration, or task
+# scheduling identity.
+
+helm template capacity-static "$CHART_DIR" --is-upgrade \
+  --set kueue.enabled=true \
+  --set kueue.capacity.enabled=true \
+  --set kueue.capacity.source=static >"$WORK/static.yaml"
+
 python3 - "$WORK/render.yaml" <<'PY'
 import sys, yaml
 docs=[d for d in yaml.safe_load_all(open(sys.argv[1])) if d]
@@ -24,6 +58,7 @@ assert queue["metadata"]["labels"]["djinn.io/quota-owner"] == "derived-capacity"
 assert queue["metadata"]["annotations"]["djinn.io/binding-resource"] == "pods"
 assert "stopPolicy" not in queue["spec"]
 assert "withinClusterQueue" not in queue["spec"].get("preemption", {})
+assert by_kind["ResourceFlavor"][0]["spec"] == {}
 for background in by_kind["ClusterQueue"][1:]:
   assert background["metadata"]["labels"]["djinn.io/quota-owner"] == "warm-borrow"
 
@@ -51,7 +86,55 @@ rules={(tuple(x["apiGroups"]),tuple(x["resources"])):set(x["verbs"]) for x in ro
 assert rules[(('',),('nodes',))] == {'get','list','watch'}
 assert rules[(('',),('pods',))] == {'get','list','watch'}
 assert rules[(('kueue.x-k8s.io',),('clusterqueues',))] == {'get','list','watch','patch'}
+assert (('karpenter.sh',),('nodepools',)) not in rules
 assert all('*' not in groups+resources and '*' not in verbs for (groups,resources),verbs in rules.items())
+PY
+
+python3 - "$WORK/nodepool.yaml" "$WORK/nodepool-with-api.yaml" "$WORK/static.yaml" <<'PY'
+import json, sys, yaml
+
+def docs(path): return [d for d in yaml.safe_load_all(open(path)) if d]
+def one(items, kind, suffix=None):
+    matches = [d for d in items if d['kind'] == kind and (not suffix or d['metadata']['name'].endswith(suffix))]
+    assert len(matches) == 1, (kind, suffix, [d['metadata']['name'] for d in matches])
+    return matches[0]
+def env(deployment):
+    return {e['name']: e['value'] for e in deployment['spec']['template']['spec']['containers'][0]['env'] if 'value' in e}
+
+nodepool, nodepool_with_api, static = (docs(path) for path in sys.argv[1:])
+pool = 'task-pool'
+assert one(nodepool, 'ResourceFlavor')['spec'] == {'nodeLabels': {'karpenter.sh/nodepool': pool}}
+role = one(nodepool, 'ClusterRole', '-capacity')
+assert [r for r in role['rules'] if r['apiGroups'] == ['karpenter.sh']] == [
+    {'apiGroups': ['karpenter.sh'], 'resources': ['nodepools'], 'verbs': ['get', 'list', 'watch']}]
+settings = env(one(nodepool, 'Deployment', '-server'))
+assert settings['DJINN_CAPACITY_SOURCE'] == 'nodepool-limits'
+assert (settings['DJINN_CAPACITY_STATIC_CPU'], settings['DJINN_CAPACITY_STATIC_MEMORY'], settings['DJINN_CAPACITY_STATIC_PODS']) == ('12', '48Gi', '3')
+assert settings['DJINN_CAPACITY_NODEPOOL_NAME'] == pool
+assert settings['DJINN_CAPACITY_NODEPOOL_DEDICATED'] == 'true'
+assert json.loads(settings['DJINN_CAPACITY_FLAVOR_SELECTOR']) == {'karpenter.sh/nodepool': pool}
+assert json.loads(settings['DJINN_K8S_NODE_SELECTOR']) == {'karpenter.sh/nodepool': pool}
+assert {'key': 'djinn.io/task-pool', 'operator': 'Equal', 'value': pool, 'effect': 'NoSchedule'} in json.loads(settings['DJINN_K8S_TOLERATIONS'])
+
+# Supplying a Karpenter API version is not an activation signal. All
+# Karpenter-related resources and controller/task identity remain value-driven.
+api_role = one(nodepool_with_api, 'ClusterRole', '-capacity')
+api_settings = env(one(nodepool_with_api, 'Deployment', '-server'))
+assert one(nodepool_with_api, 'ResourceFlavor')['spec'] == one(nodepool, 'ResourceFlavor')['spec']
+assert [r for r in api_role['rules'] if r['apiGroups'] == ['karpenter.sh']] == [r for r in role['rules'] if r['apiGroups'] == ['karpenter.sh']]
+for name in ('DJINN_CAPACITY_SOURCE', 'DJINN_CAPACITY_NODEPOOL_NAME',
+             'DJINN_CAPACITY_NODEPOOL_DEDICATED', 'DJINN_CAPACITY_FLAVOR_SELECTOR',
+             'DJINN_K8S_NODE_SELECTOR', 'DJINN_K8S_TOLERATIONS'):
+    assert api_settings[name] == settings[name], name
+assert not any(d['kind'] == 'NodePool' for d in nodepool), 'the chart must not own a Karpenter NodePool'
+
+assert one(static, 'ResourceFlavor')['spec'] == {}
+static_role = one(static, 'ClusterRole', '-capacity')
+assert not any(r['apiGroups'] == ['karpenter.sh'] for r in static_role['rules'])
+static_env = env(one(static, 'Deployment', '-server'))
+assert static_env['DJINN_CAPACITY_SOURCE'] == 'static'
+assert not any(n.startswith('DJINN_CAPACITY_NODEPOOL') or n == 'DJINN_CAPACITY_FLAVOR_SELECTOR' for n in static_env)
+print('dedicated NodePool identity, isolation, and conditional watcher RBAC verified')
 PY
 
 # The launcher Job is produced by djinn-k8s rather than by Helm. Keep its
@@ -65,4 +148,30 @@ if helm template capacity-test "$CHART_DIR" --is-upgrade --set kueue.enabled=tru
 fi
 grep -q 'requires capacity.nodeSelector' "$WORK/rejected"
 
-echo "PASS: derived capacity Helm ownership, protected inputs, queue safety, selector, and RBAC"
+for invalid in 'kueue.capacity.nodePool.dedicated=false' 'kueue.capacity.nodePool.name='; do
+  if helm template capacity-nodepool-invalid "$CHART_DIR" --is-upgrade \
+    --set kueue.enabled=true \
+    --set kueue.capacity.source=nodepool-limits \
+    --set "$invalid" >"$WORK/nodepool-invalid" 2>&1; then
+    echo "FAIL: nodepool-limits rendered with $invalid" >&2; exit 1
+  fi
+done
+
+if helm template capacity-nodepool-mismatch "$CHART_DIR" --is-upgrade \
+  --set kueue.enabled=true \
+  --set kueue.capacity.source=nodepool-limits \
+  --set kueue.capacity.nodePool.dedicated=true \
+  --set kueue.capacity.nodePool.name=task-pool \
+  --set-string 'resources.taskrun.nodeSelector.karpenter\.sh/nodepool=other-pool' >"$WORK/nodepool-mismatch" 2>&1; then
+  echo "FAIL: nodepool-limits rendered with mismatched task nodepool identity" >&2; exit 1
+fi
+grep -q 'must match resources.taskrun.nodeSelector.karpenter.sh/nodepool' "$WORK/nodepool-mismatch"
+
+if grep -q '\.Capabilities\.APIVersions.*karpenter\|karpenter.*\.Capabilities\.APIVersions' \
+  "$CHART_DIR/templates/kueue-topology.yaml" \
+  "$CHART_DIR/templates/clusterrole-capacity.yaml" \
+  "$CHART_DIR/templates/deployment-server.yaml"; then
+  echo "FAIL: Karpenter CRD presence controls capacity source rendering" >&2; exit 1
+fi
+
+echo "PASS: derived capacity Helm ownership, protected inputs, queue safety, NodePool identity, selector, and conditional RBAC"
