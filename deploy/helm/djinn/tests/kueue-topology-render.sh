@@ -614,8 +614,9 @@ queue = queue_by_name["kueue-topology-test-djinn-kueue"]
 spec = queue["spec"]
 cohort = spec.get("cohort")
 assert cohort and all(q["spec"].get("cohort") == cohort for q in queues), "all queues must share one cohort"
-assert spec.get("preemption") == {"reclaimWithinCohort": "Any"}, (
-    f"task-run must reclaim its nominal capacity with Any, got {spec.get('preemption')}"
+assert spec.get("preemption") == {"reclaimWithinCohort": "Never"}, (
+    "kueue-topology-test-djinn-kueue must let admitted background work run to completion "
+    f"with reclaimWithinCohort Never, got {spec.get('preemption')}"
 )
 # BestEffortFIFO, not StrictFIFO: three kinds share a 3-slot queue, so one
 # head-of-line Workload that cannot fit would block everything behind it.

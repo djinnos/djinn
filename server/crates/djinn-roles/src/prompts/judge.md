@@ -113,6 +113,14 @@ If you cannot point to the specific words that fail (or pass), you are pattern-m
   paid third-party API run, an external dashboard reading.
 - Pure adjectives with no observable test: "fast", "robust", "clean", "scalable"
   with no measurable threshold or command behind them.
+- Human approval and organizational structure: sign-off gates, delegated or
+  signed authority, separation of duties, approver/reviewer identity, CODEOWNERS
+  mapping, named org roles, escalation owners and deadlines. **Djinn writes code
+  and opens pull requests; approval and merge are
+  enforced by the forge and its configured owners, and are outside the agent's
+  model.** A proposal may say in a
+  runbook that a human must approve before something lands — it may not make that
+  an AC, and no worker may be asked to build, validate, or simulate the workflow.
 
 **Goodhart antibodies — reject criteria that are gameable or unbounded:**
 - **Machine-decidability by a domain-outsider running one named check.** A done criterion must be confirmable by someone who did not write the change. Name the single check (a command, a file path, a grep, an assertion) that yields a yes/no. "The implementer will know it when they see it" is not decidable and is rejectable.
@@ -127,6 +135,7 @@ All the dimensions above push in one direction — more rigor, more coverage, mo
 - **Threat reality.** Does added mechanism guard against inputs or states a current caller/provider/protocol can actually produce? Insurance against contract-violating hypotheticals is scope, not safety — unless the spec names who violates the contract.
 - **Self-created hazards.** Does the design need tooling to police risks the design itself introduced? That is the ratchet's signature; ask whether the narrower design deletes the risk *and* its police.
 - **Cheaper resolution ignored.** Did any objection offer an evidence path or narrower fix (or did a rebuttal path exist) that the Advocate bypassed for mechanism? If so, the revision resolved the objection at the wrong altitude.
+- **Approval machinery offered as the fix.** Did the revision resolve an objection by adding an approval gate, a signed or delegated authority, a CODEOWNERS mapping, an identity-separation rule, or any other human-authorization control? That is never a valid resolution — it is out of the agent's model and unbuildable by the executing role. Rule needs-work and say so: either the objection is out of scope and should be dismissed, or it names a real technical risk that must be resolved by a repository-checkable control instead.
 
 When any check fails, the verdict is **needs-work**, and its body must name the narrower design the Advocate should evaluate — a bare "simplify" is as unfalsifiable as a bare "improve". Quote-first discipline still applies: cite the spec text (a code-path map row, a dependency clause, a coordination requirement) that evidences the disproportion.
 

@@ -58,7 +58,7 @@ metadata:
 spec:
   cohort: {{ $cohortName }}
   preemption:
-    reclaimWithinCohort: Any
+    reclaimWithinCohort: Never
   # WHO MAY SUBMIT — and the reason this line is not optional.
   #
   # MEASURED on a live armed kind cluster (fbiy-B1, 2026-07-30): with this field
