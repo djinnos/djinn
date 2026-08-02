@@ -237,8 +237,8 @@ async fn non_task_session_creation_remains_unrestricted() {
         .create(CreateSessionParams {
             project_id: &project_id,
             task_id: None,
-            model: "chat-model",
-            agent_type: "chat",
+            model: "extraction-model",
+            agent_type: "extraction",
             metadata_json: None,
             task_run_id: None,
             pricing: None,
