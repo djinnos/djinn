@@ -112,6 +112,10 @@ pub async fn record_command_observation(
     check_id: &str,
     observation: ServerCommandObservation,
 ) -> Result<EvidenceCommandInvocation, EvidenceCommandError> {
+    djinn_telemetry::evidence_metrics::record(
+        djinn_telemetry::evidence_metrics::EvidenceStage::Invocation,
+        djinn_telemetry::evidence_metrics::EvidenceOutcome::Attempted,
+    );
     let hydration = require_frozen_plan(repository, identity)
         .await
         .map_err(EvidenceCommandError::Plan)?;
@@ -130,7 +134,12 @@ pub async fn record_command_observation(
             actual: check.method.clone(),
         });
     }
-    repository
+    let timed_out = observation.timed_out;
+    let runner_failed = observation.runner_failure.is_some()
+        || observation.launch_state == "failed_to_launch"
+        || observation.process_state == "runner_failed";
+    let exit_code = observation.exit_code;
+    let result = repository
         .append_invocation(AppendEvidenceInvocation {
             id: uuid::Uuid::now_v7().to_string(),
             plan_id: hydration.plan.id,
@@ -159,7 +168,18 @@ pub async fn record_command_observation(
             stderr_truncated: observation.stderr_truncated,
         })
         .await
-        .map_err(|error| EvidenceCommandError::Persistence(error.to_string()))
+        .map_err(|error| EvidenceCommandError::Persistence(error.to_string()));
+    match &result {
+        Ok(_) => djinn_telemetry::evidence_metrics::invocation_result(
+            timed_out,
+            runner_failed,
+            exit_code,
+        ),
+        Err(_) => djinn_telemetry::evidence_metrics::reject(
+            djinn_telemetry::evidence_metrics::EvidenceRejection::Persistence,
+        ),
+    }
+    result
 }
 
 /// Hydrate every immutable event associated with this exact frozen identity.
