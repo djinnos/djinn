@@ -174,7 +174,7 @@ impl SlotPoolOps for SlotPoolBridge {
     async fn reconcile_terminate(
         &self,
         task_id: &str,
-    ) -> Result<djinn_slot::pool::ReconcileTerminateSnapshot, String> {
+    ) -> Result<ReconcileTerminateSnapshot, String> {
         let snapshot = self
             .0
             .reconcile_terminate(task_id)

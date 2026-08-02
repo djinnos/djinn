@@ -3,16 +3,50 @@ use std::collections::HashMap;
 use async_trait::async_trait;
 use serde::Serialize;
 
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ReconcileTerminateKind { GenuinelyAbsent, Terminated, DesyncReconciled, TeardownFailed, SettlementFailed, ReconciliationIncomplete }
+pub enum ReconcileTerminateKind {
+    GenuinelyAbsent,
+    Terminated,
+    DesyncReconciled,
+    TeardownFailed,
+    SettlementFailed,
+    ReconciliationIncomplete,
+}
 #[derive(Debug, Clone, Serialize)]
-pub struct ReconcileTerminateExecution { pub session_id: String, pub task_run_id: Option<String>, pub teardown_owner: bool, pub teardown_attempted: bool, pub teardown_error: Option<String>, pub settlement_attempted: bool, pub settlement_error: Option<String> }
+pub struct ReconcileTerminateExecution {
+    pub session_id: String,
+    pub task_run_id: Option<String>,
+    pub teardown_owner: bool,
+    pub teardown_attempted: bool,
+    pub teardown_error: Option<String>,
+    pub settlement_attempted: bool,
+    pub settlement_error: Option<String>,
+}
 #[derive(Debug, Clone, Serialize)]
-pub struct ReconcileTerminateObservations { pub initial_non_terminal_ids: Vec<String>, pub initial_mapping_slot_id: Option<usize>, pub initial_pending_teardown: bool, pub initial_compacting: bool, pub fenced_generation: Option<i64>, pub initial_capture_error: Option<String>, pub final_non_terminal_ids: Vec<String>, pub final_mapping_slot_id: Option<usize>, pub final_pending_teardown: bool, pub final_reread_error: Option<String>, pub pool_cleanup_error: Option<String>, pub completion_source: String, pub underlying_kind: Option<ReconcileTerminateKind> }
+pub struct ReconcileTerminateObservations {
+    pub initial_non_terminal_ids: Vec<String>,
+    pub initial_mapping_slot_id: Option<usize>,
+    pub initial_pending_teardown: bool,
+    pub initial_compacting: bool,
+    pub fenced_generation: Option<i64>,
+    pub initial_capture_error: Option<String>,
+    pub final_non_terminal_ids: Vec<String>,
+    pub final_mapping_slot_id: Option<usize>,
+    pub final_pending_teardown: bool,
+    pub final_reread_error: Option<String>,
+    pub pool_cleanup_error: Option<String>,
+    pub completion_source: String,
+    pub underlying_kind: Option<ReconcileTerminateKind>,
+}
 #[derive(Debug, Clone, Serialize)]
-pub struct ReconcileTerminateSnapshot { pub ok: bool, pub kind: ReconcileTerminateKind, pub task_id: String, pub executions: Vec<ReconcileTerminateExecution>, pub observations: ReconcileTerminateObservations }
+pub struct ReconcileTerminateSnapshot {
+    pub ok: bool,
+    pub kind: ReconcileTerminateKind,
+    pub task_id: String,
+    pub executions: Vec<ReconcileTerminateExecution>,
+    pub observations: ReconcileTerminateObservations,
+}
 
 #[derive(Debug, Clone)]
 pub struct ModelPoolStatus {
