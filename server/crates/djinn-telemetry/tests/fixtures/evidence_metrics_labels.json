@@ -1,0 +1,19 @@
+[
+  [["stage", "demand"], ["outcome", "accepted"]],
+  [["stage", "plan"], ["outcome", "captured"]],
+  [["stage", "invocation"], ["outcome", "attempted"]],
+  [["stage", "invocation"], ["outcome", "ok"]],
+  [["stage", "invocation"], ["outcome", "degraded"]],
+  [["stage", "invocation"], ["outcome", "timeout"]],
+  [["stage", "invocation"], ["outcome", "error"]],
+  [["stage", "terminal"], ["outcome", "resolved"]],
+  [["stage", "terminal"], ["outcome", "partial"]],
+  [["stage", "terminal"], ["outcome", "unresolved"]],
+  [["stage", "rejection"], ["reason", "validation"]],
+  [["stage", "rejection"], ["reason", "persistence"]],
+  [["stage", "rejection"], ["reason", "no_frozen_plan"]],
+  [["stage", "rejection"], ["reason", "already_finalized"]],
+  [["stage", "rejection"], ["reason", "unknown_check"]],
+  [["stage", "rejection"], ["reason", "method_mismatch"]],
+  [["stage", "rejection"], ["reason", "invalid_anchor"]]
+]

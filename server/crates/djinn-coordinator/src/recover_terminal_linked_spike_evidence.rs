@@ -1,4 +1,5 @@
 use super::actor::CoordinatorActor;
+use super::rules::record_evidence_terminal_outcome;
 use djinn_db::ProposalRepository;
 use djinn_db::repositories::proposal::{
     TerminalLinkedEvidenceSpikeOutcome, evidence_spike_task_is_terminal,
@@ -61,6 +62,7 @@ impl CoordinatorActor {
                 .await
             {
                 Ok(TerminalLinkedEvidenceSpikeOutcome::EvidenceReceived { derived_outcome }) => {
+                    record_evidence_terminal_outcome(derived_outcome);
                     tracing::info!(
                         proposal_id = %proposal_id,
                         spike_task_id = %spike_task_id,
