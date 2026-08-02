@@ -76,8 +76,6 @@ pub enum CapacityError {
     ZeroCost,
     #[error("capacity arithmetic overflowed")]
     Overflow,
-    #[error("derived Kubernetes CPU quantity is unrepresentable")]
-    UnrepresentableCpu,
 }
 
 /// Derive pod count (`M`), binding CPU (`M*I`), and compile slots (`K`).
@@ -111,9 +109,11 @@ pub fn derive(inputs: DerivationInputs, fail_safe: FailSafeCapacity) -> Capacity
     let Some(binding_cpu) = pods.checked_mul(inputs.idle_cost.get()) else {
         return conservative(CapacityError::Overflow);
     };
-    let Ok(binding_cpu) = CpuMillicores::new(binding_cpu) else {
-        return conservative(CapacityError::UnrepresentableCpu);
-    };
+    // `pods` and `idle_cost` are non-negative, so a successful checked
+    // multiplication is already inside CpuMillicores' complete i64 domain.
+    // Every value in that domain has an exact Kubernetes DecimalSI `m`
+    // representation; there is no additional fallible conversion here.
+    let binding_cpu = CpuMillicores(binding_cpu);
     CapacityOutcome::Derived(DerivedCapacity {
         pods,
         binding_cpu,
@@ -240,6 +240,10 @@ mod tests {
             CpuMillicores(750)
         );
         assert_eq!(CpuMillicores::new(-1), Err(CapacityError::NegativeCpu));
+        assert_eq!(
+            format!("{}m", CpuMillicores::new(i64::MAX).unwrap().get()),
+            "9223372036854775807m"
+        );
         assert_eq!(
             scheduler_effective_request(
                 [CpuMillicores(i64::MAX), CpuMillicores(1)],
