@@ -65,7 +65,12 @@ fn missing_role_fails_safe_to_build_capable() {
 
 #[test]
 fn worker_resources_role_classing() {
-    let cfg = KubernetesConfig::for_testing();
+    // `parse_cpu_millicores` deliberately accepts only the invocation-lease
+    // range (at least one core). Use distinct, valid config quantities here so
+    // this test exercises that shared parser while checking class selection.
+    let mut cfg = KubernetesConfig::for_testing();
+    cfg.light_cpu_request = "1".to_string();
+    cfg.cpu_request = "2".to_string();
     let light = worker_resources(&cfg, RoleResourceClass::Light);
     let build_capable = worker_resources(&cfg, RoleResourceClass::BuildCapable);
 
