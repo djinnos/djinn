@@ -116,22 +116,65 @@ fn derived_flavor_targets(
         }
         let last = weights.len().checked_sub(1)?;
         let mut remainder = total;
-        weights.into_iter().enumerate().map(|(index, weight)| {
-            let value = if index == last { remainder } else {
-                i64::try_from((i128::from(total) * i128::from(weight)) / i128::from(denominator)).ok()?
-            };
-            remainder = remainder.checked_sub(value)?;
-            Some(value)
-        }).collect()
+        weights
+            .into_iter()
+            .enumerate()
+            .map(|(index, weight)| {
+                let value = if index == last {
+                    remainder
+                } else {
+                    i64::try_from(
+                        (i128::from(total) * i128::from(weight)) / i128::from(denominator),
+                    )
+                    .ok()?
+                };
+                remainder = remainder.checked_sub(value)?;
+                Some(value)
+            })
+            .collect()
     };
-    let cpus = split(derived.cpu.get(), aggregate.cpu.get(), ownership.targets.iter().map(|t| t.vector.cpu.get()).collect())?;
-    let memories = split(derived.memory.get(), aggregate.memory.get(), ownership.targets.iter().map(|t| t.vector.memory.get()).collect())?;
-    let pods = split(derived.pods.get(), aggregate.pods.get(), ownership.targets.iter().map(|t| t.vector.pods.get()).collect())?;
-    ownership.targets.into_iter().zip(cpus.into_iter().zip(memories).zip(pods)).map(|(target, ((cpu, memory), pods))| {
-        Some(FlavorQuotaTarget { flavor_name: target.flavor_name, vector: ResourceVector {
-            cpu: CpuMillicores::new(cpu).ok()?, memory: MemoryBytes::new(memory).ok()?, pods: PodCount::new(pods).ok()?,
-        }})
-    }).collect()
+    let cpus = split(
+        derived.cpu.get(),
+        aggregate.cpu.get(),
+        ownership
+            .targets
+            .iter()
+            .map(|t| t.vector.cpu.get())
+            .collect(),
+    )?;
+    let memories = split(
+        derived.memory.get(),
+        aggregate.memory.get(),
+        ownership
+            .targets
+            .iter()
+            .map(|t| t.vector.memory.get())
+            .collect(),
+    )?;
+    let pods = split(
+        derived.pods.get(),
+        aggregate.pods.get(),
+        ownership
+            .targets
+            .iter()
+            .map(|t| t.vector.pods.get())
+            .collect(),
+    )?;
+    ownership
+        .targets
+        .into_iter()
+        .zip(cpus.into_iter().zip(memories).zip(pods))
+        .map(|(target, ((cpu, memory), pods))| {
+            Some(FlavorQuotaTarget {
+                flavor_name: target.flavor_name,
+                vector: ResourceVector {
+                    cpu: CpuMillicores::new(cpu).ok()?,
+                    memory: MemoryBytes::new(memory).ok()?,
+                    pods: PodCount::new(pods).ok()?,
+                },
+            })
+        })
+        .collect()
 }
 
 fn validate_owned_flavors(owned_flavors: &[OwnedFlavor]) -> Result<(), ConservativeReason> {
@@ -692,18 +735,19 @@ impl CapacityControllerConfig {
             Some("node-sum") => CapacitySource::NodeSum,
             _ => CapacitySource::Invalid,
         };
-        let (flavor_selector, flavor_selectors) = match std::env::var("DJINN_CAPACITY_FLAVOR_SELECTOR") {
-            Ok(value) => {
-                let value: Value = serde_json::from_str(&value).ok()?;
-                if value.as_object()?.values().all(Value::is_string) {
-                    (Some(serde_json::from_value(value).ok()?), BTreeMap::new())
-                } else {
-                    (None, serde_json::from_value(value).ok()?)
+        let (flavor_selector, flavor_selectors) =
+            match std::env::var("DJINN_CAPACITY_FLAVOR_SELECTOR") {
+                Ok(value) => {
+                    let value: Value = serde_json::from_str(&value).ok()?;
+                    if value.as_object()?.values().all(Value::is_string) {
+                        (Some(serde_json::from_value(value).ok()?), BTreeMap::new())
+                    } else {
+                        (None, serde_json::from_value(value).ok()?)
+                    }
                 }
-            }
-            Err(std::env::VarError::NotPresent) => (None, BTreeMap::new()),
-            Err(_) => return None,
-        };
+                Err(std::env::VarError::NotPresent) => (None, BTreeMap::new()),
+                Err(_) => return None,
+            };
         let build_job = controller_build_job();
         Some(Self {
             source,
@@ -852,7 +896,10 @@ pub async fn run_capacity_controller(
         // This branch is before all Node/Pod APIs.
         if config.source != CapacitySource::NodeSum {
             if config.source == CapacitySource::Invalid {
-                tracing::warn!(reason = "CapacitySourceInvalid", "capacity controller static fallback");
+                tracing::warn!(
+                    reason = "CapacitySourceInvalid",
+                    "capacity controller static fallback"
+                );
             }
             let _ = snapshots.send(CapacityVector {
                 binding: BindingQuota::Pods(config.fail_safe.pods),
@@ -899,7 +946,70 @@ pub async fn run_capacity_controller(
                     )
                 })
                 .collect();
-            let nodes = aggregate_eligible_nodes(&node_observations).ok()?;
+            let observation = queue.clone()?;
+            // Establish exclusive ownership before deriving either capacity or
+            // the node-name scope used for protected Pods. Unmatched Nodes are
+            // outside this controller's capacity domain.
+            let owned: Vec<_> =
+                observation
+                    .flavors
+                    .iter()
+                    .map(|flavor| OwnedFlavor {
+                        flavor_name: flavor.name.clone(),
+                        selector: config.flavor_selectors.get(&flavor.name).cloned().or_else(
+                            || {
+                                (observation.flavors.len() == 1).then(|| {
+                                    config.flavor_selector.clone().unwrap_or_else(|| {
+                                        BTreeMap::from([(
+                                            config.node_selector_key.clone(),
+                                            config.node_selector_value.clone(),
+                                        )])
+                                    })
+                                })
+                            },
+                        ),
+                        static_fallback: config.static_fallback,
+                    })
+                    .collect();
+            validate_owned_flavors(&owned).ok()?;
+            let mut assigned_names = BTreeSet::new();
+            let mut objects = Vec::new();
+            for node in node_observations.iter().filter(|node| {
+                node.selector_matches && node.ready && !node.unschedulable && !node.terminating
+            }) {
+                let matches = owned
+                    .iter()
+                    .filter(|flavor| {
+                        matches_flavor_selector(
+                            &node.labels,
+                            flavor.selector.as_ref().expect("ownership validated"),
+                        )
+                    })
+                    .count();
+                if matches == 0 {
+                    continue;
+                }
+                if matches > 1 {
+                    return None;
+                }
+                let vector = ResourceVector {
+                    cpu: node.allocatable_cpu?,
+                    memory: node.allocatable_memory?,
+                    pods: node.allocatable_pods?,
+                };
+                if node.name.is_empty() || !assigned_names.insert(node.name.clone()) {
+                    return None;
+                }
+                objects.push(CapacityObjectObservation {
+                    effective_labels: node.labels.clone(),
+                    vector,
+                });
+            }
+            let ownership = derive_flavor_ownership(&owned, &objects).ok()?;
+            if assigned_names.is_empty() {
+                return None;
+            }
+            let assigned_allocatable = ownership.assigned_aggregate;
             let protected = pods
                 .list(&ListParams::default().labels("djinn.io/capacity-reserved=true"))
                 .await
@@ -907,14 +1017,13 @@ pub async fn run_capacity_controller(
             if protected.items.len() < config.expected_protected_pods {
                 return None;
             }
-            let protected = protected_requests_on_nodes(&protected.items, &nodes.names).ok()?;
-            let observation = queue.clone()?;
+            let protected = protected_requests_on_nodes(&protected.items, &assigned_names).ok()?;
             let podset_cost =
                 podset_cost_from_pod_spec(rendered_pod_spec(&config.build_job)?).ok()?;
             let ResourceVectorOutcome::Derived(vector) =
                 derive_resource_vector(ResourceVectorDerivationInputs {
                     protected_population_complete: true,
-                    allocatable: ResourceVectorInput::complete(nodes.allocatable),
+                    allocatable: ResourceVectorInput::complete(assigned_allocatable),
                     protected: ResourceVectorInput::complete(protected),
                     headroom: ResourceVectorInput::complete(config.headroom),
                     podset_cost: ResourceVectorInput::complete(podset_cost),
@@ -923,7 +1032,7 @@ pub async fn run_capacity_controller(
                 return None;
             };
             let capacity = derive_capacity_from_rendered_build_job(
-                nodes.allocatable,
+                assigned_allocatable,
                 protected,
                 config.headroom,
                 rendered_pod_spec(&config.build_job)?,
@@ -938,39 +1047,6 @@ pub async fn run_capacity_controller(
                 memory: vector.raw.memory,
                 pods: vector.admitted_podsets,
             };
-            let owned: Vec<_> = observation
-                .flavors
-                .iter()
-                .map(|flavor| OwnedFlavor {
-                    flavor_name: flavor.name.clone(),
-                    selector: config.flavor_selectors.get(&flavor.name).cloned().or_else(|| {
-                        (observation.flavors.len() == 1).then(|| {
-                            config.flavor_selector.clone().unwrap_or_else(|| BTreeMap::from([(
-                                config.node_selector_key.clone(),
-                                config.node_selector_value.clone(),
-                            )]))
-                        })
-                    }),
-                    static_fallback: config.static_fallback,
-                })
-                .collect();
-            let objects: Vec<_> = node_observations
-                .iter()
-                .filter(|node| {
-                    node.selector_matches && node.ready && !node.unschedulable && !node.terminating
-                })
-                .map(|node| {
-                    Some(CapacityObjectObservation {
-                        effective_labels: node.labels.clone(),
-                        vector: ResourceVector {
-                            cpu: node.allocatable_cpu?,
-                            memory: node.allocatable_memory?,
-                            pods: node.allocatable_pods?,
-                        },
-                    })
-                })
-                .collect::<Option<Vec<_>>>()?;
-            let ownership = derive_flavor_ownership(&owned, &objects).ok()?;
             let targets = derived_flavor_targets(ownership, target_vector)?;
             Some((
                 observation,
@@ -984,7 +1060,10 @@ pub async fn run_capacity_controller(
         .await;
 
         let Some((queue, targets, snapshot)) = observed else {
-            tracing::warn!(reason = "NodeSumObservationFailed", "capacity controller static fallback");
+            tracing::warn!(
+                reason = "NodeSumObservationFailed",
+                "capacity controller static fallback"
+            );
             let _ = snapshots.send(CapacityVector {
                 binding: BindingQuota::Pods(config.fail_safe.pods),
                 compile_slots: config.fail_safe.compile_slots,
@@ -1752,15 +1831,43 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn capacity_source_selection() {
-        use crate::runtime_fixture::capacity_controller_cluster;
+        use crate::runtime_fixture::{
+            capacity_controller_cluster, capacity_controller_multi_flavor_cluster,
+        };
 
         for source in [CapacitySource::Static, CapacitySource::NodeSum] {
-            let (client, recorder) = capacity_controller_cluster("default", "pods");
+            let (client, recorder) = if source == CapacitySource::NodeSum {
+                capacity_controller_multi_flavor_cluster("default", "pods")
+            } else {
+                capacity_controller_cluster("default", "pods")
+            };
+            let flavor_selectors = if source == CapacitySource::NodeSum {
+                BTreeMap::from([
+                    (
+                        "a".into(),
+                        BTreeMap::from([("djinn.io/capacity-pool".into(), "a".into())]),
+                    ),
+                    (
+                        "b".into(),
+                        BTreeMap::from([("djinn.io/capacity-pool".into(), "b".into())]),
+                    ),
+                ])
+            } else {
+                BTreeMap::new()
+            };
             let config = CapacityControllerConfig {
                 source,
                 queue_name: "djinn-kueue".into(),
-                node_selector_key: "kubernetes.io/hostname".into(),
-                node_selector_value: "worker-1".into(),
+                node_selector_key: if source == CapacitySource::NodeSum {
+                    "djinn.io/eligible".into()
+                } else {
+                    "kubernetes.io/hostname".into()
+                },
+                node_selector_value: if source == CapacitySource::NodeSum {
+                    "true".into()
+                } else {
+                    "worker-1".into()
+                },
                 idle_cost: CpuMillicores::new(750).unwrap(),
                 compile_cost: CpuMillicores::new(2_800).unwrap(),
                 headroom: ResourceVector::ZERO,
@@ -1769,7 +1876,7 @@ mod tests {
                 expected_protected_pods: 5,
                 static_fallback: resources(9_000, 8_192, 9),
                 flavor_selector: None,
-                flavor_selectors: BTreeMap::new(),
+                flavor_selectors,
             };
             let (tx, _) = watch::channel(CapacityVector {
                 binding: BindingQuota::Pods(3),
@@ -1821,14 +1928,41 @@ mod tests {
                 assert_eq!(
                     paths,
                     vec![
-                        ("GET", "/apis/kueue.x-k8s.io/v1beta1/clusterqueues/djinn-kueue"),
+                        (
+                            "GET",
+                            "/apis/kueue.x-k8s.io/v1beta1/clusterqueues/djinn-kueue"
+                        ),
                         ("GET", "/api/v1/nodes"),
                         ("GET", "/api/v1/pods"),
-                        ("PATCH", "/apis/kueue.x-k8s.io/v1beta1/clusterqueues/djinn-kueue"),
+                        (
+                            "PATCH",
+                            "/apis/kueue.x-k8s.io/v1beta1/clusterqueues/djinn-kueue"
+                        ),
                     ],
                     "node-sum permits only queue identity, Nodes, protected Pods, and the fenced patch"
                 );
                 assert_eq!(recorder.mutations().len(), 1);
+                let patch: Value = serde_json::from_str(&recorder.mutations()[0].body).unwrap();
+                assert_eq!(
+                    patch,
+                    json!([
+                        {"op":"test","path":"/metadata/resourceVersion","value":"42"},
+                        {"op":"replace","path":"/spec/resourceGroups/0/flavors/0/resources/1/nominalQuota","value":"9480m"},
+                        {"op":"replace","path":"/spec/resourceGroups/0/flavors/0/resources/2/nominalQuota","value":"51536461824"},
+                        {"op":"replace","path":"/spec/resourceGroups/0/flavors/0/resources/0/nominalQuota","value":"9"},
+                        {"op":"replace","path":"/spec/resourceGroups/0/flavors/1/resources/1/nominalQuota","value":"6320m"},
+                        {"op":"replace","path":"/spec/resourceGroups/0/flavors/1/resources/2/nominalQuota","value":"34357641216"},
+                        {"op":"replace","path":"/spec/resourceGroups/0/flavors/1/resources/0/nominalQuota","value":"6"}
+                    ])
+                );
+                // 20 cores, 80 GiB and 180 Pods are exclusively assigned. The
+                // five assigned protected Pods, configured deductions, and
+                // rendered PodSet cost produce this conserved global target;
+                // the 100-core unmatched Node and its 90-core protected Pod do
+                // not enter either side of the derivation.
+                assert_eq!(9_480 + 6_320, 15_800);
+                assert_eq!(51_536_461_824_i64 + 34_357_641_216, 85_894_103_040);
+                assert_eq!(9 + 6, 15);
             }
         }
     }
