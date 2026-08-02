@@ -601,11 +601,11 @@ impl SlotPool {
             .and_then(|id| self.slots.get(id))
             .is_some_and(|slot| slot.is_compacting());
         let repo = SessionRepository::new(self.ctx.db.clone(), self.ctx.event_bus.clone());
-        let (captured, initial_capture_error) =
-            match repo.list_non_terminal_for_task(task_id).await {
-                Ok(rows) => (rows, None),
-                Err(error) => (Vec::new(), Some(error.to_string())),
-            };
+        let (captured, initial_capture_error) = match repo.list_non_terminal_for_task(task_id).await
+        {
+            Ok(rows) => (rows, None),
+            Err(error) => (Vec::new(), Some(error.to_string())),
+        };
         let initial_non_terminal_ids = captured.iter().map(|row| row.id.clone()).collect();
         let mut seen = HashSet::new();
         let mut executions: Vec<ReconcileTerminateExecution> = captured

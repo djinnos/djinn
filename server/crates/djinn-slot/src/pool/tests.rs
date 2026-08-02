@@ -2543,52 +2543,231 @@ async fn dispatch_generation_allocation_failure_leaves_resume_dispatch_unadmitte
     .await;
 }
 
-/// Reconciliation must use every captured row (rather than a task-wide latest
-/// row) and must deduplicate teardown ownership by task-run ID.
-#[tokio::test]
-async fn reconcile_terminate_unmapped_duplicate_rows_settles_exact_rows_and_deduplicates() {
+/// Exercise the immediate zero/one/duplicate × mapped/unmapped matrix. The
+/// pre-read uses `(started_at, id)` order, guarding mapping-first and latest-row
+/// implementations while making per-session action ordering observable.
+async fn assert_immediate_reconcile_matrix_case(
+    label: &str,
+    runs: &[&str],
+    mapped: bool,
+    expected_kind: ReconcileTerminateKind,
+) {
     let (mut app_state, cancel, _temp) = test_app_state();
     let runtime = RecordingRuntimeOps::new(false);
     app_state.runtime_ops = Some(Arc::new(runtime.clone()));
-    let task_id = seed_running_session_with_task_run(&app_state, "reconcile duplicate", "run-shared").await;
-    let task = djinn_db::TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone())
-        .get(&task_id).await.expect("task lookup").expect("seeded task");
-    let sessions = djinn_db::SessionRepository::new(app_state.db.clone(), app_state.event_bus.clone());
-    let second = sessions.create(djinn_db::CreateSessionParams {
-        project_id: &task.project_id, task_id: Some(&task_id), model: "model-a",
-        agent_type: "worker", metadata_json: None, task_run_id: Some("run-shared"),
-        pricing: None, cost_basis: None,
-    }).await.expect("second running session");
+    let task_id = if let Some((first, rest)) = runs.split_first() {
+        let task_id = seed_running_session_with_task_run(&app_state, label, first).await;
+        let task = djinn_db::TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone())
+            .get(&task_id)
+            .await
+            .expect("task lookup")
+            .expect("seeded task");
+        let sessions =
+            djinn_db::SessionRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+        let mut created_runs = HashSet::from([(*first).to_owned()]);
+        for run in rest {
+            if created_runs.insert((*run).to_owned()) {
+                djinn_db::TaskRunRepository::new(app_state.db.clone())
+                    .create(djinn_db::CreateTaskRunParams {
+                        id: run,
+                        project_id: &task.project_id,
+                        task_id: &task_id,
+                        trigger_type: "test",
+                        status: None,
+                        workspace_path: None,
+                        mirror_ref: None,
+                        dispatch_group_id: None,
+                    })
+                    .await
+                    .expect("extra task run");
+            }
+            sessions
+                .create(djinn_db::CreateSessionParams {
+                    project_id: &task.project_id,
+                    task_id: Some(&task_id),
+                    model: "model-a",
+                    agent_type: "worker",
+                    metadata_json: None,
+                    task_run_id: Some(run),
+                    pricing: None,
+                    cost_basis: None,
+                })
+                .await
+                .expect("extra running session");
+        }
+        task_id
+    } else {
+        create_dispatch_task_ids(&app_state, 1).await.remove(0)
+    };
+    let sessions =
+        djinn_db::SessionRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+    let captured = sessions
+        .list_non_terminal_for_task(&task_id)
+        .await
+        .expect("ordered capture");
+    let expected_session_ids: Vec<_> = captured.iter().map(|row| row.id.clone()).collect();
+    let mut expected_teardowns = Vec::new();
+    let mut seen_runs = HashSet::new();
+    for row in &captured {
+        if let Some(run) = row.task_run_id.as_deref()
+            && seen_runs.insert(run.to_owned())
+        {
+            expected_teardowns.push(run.to_owned());
+        }
+    }
     let (_tx, rx) = mpsc::channel(1);
-    let mut pool = SlotPool::new(rx, app_state.clone(), cancel, make_config(vec![model("model-a", 1, &["worker"])], &[("worker", vec!["model-a"])]));
+    let mut pool = SlotPool::new(
+        rx,
+        app_state.clone(),
+        cancel,
+        make_config(
+            vec![model("model-a", 1, &["worker"])],
+            &[("worker", vec!["model-a"])],
+        ),
+    );
+    if mapped {
+        pool.test_assign_busy(&task_id, 0);
+    }
     let snapshot = pool.test_reconcile_terminate(&task_id).await;
-    assert_eq!(snapshot.kind, ReconcileTerminateKind::DesyncReconciled);
-    assert!(snapshot.ok);
-    assert_eq!(snapshot.executions.len(), 2, "both durable rows must be captured");
-    assert_eq!(runtime.calls(), vec!["run-shared"], "shared run tears down once");
-    assert!(snapshot.executions.iter().all(|entry| entry.settlement_attempted));
+    assert_eq!(snapshot.kind, expected_kind, "{label}");
+    assert!(snapshot.ok, "{label}");
+    assert_eq!(
+        snapshot.observations.initial_non_terminal_ids, expected_session_ids,
+        "{label}: deterministic complete capture"
+    );
+    assert_eq!(
+        snapshot
+            .executions
+            .iter()
+            .map(|entry| entry.session_id.clone())
+            .collect::<Vec<_>>(),
+        expected_session_ids,
+        "{label}: actions follow ordered capture"
+    );
+    assert_eq!(
+        runtime.calls(),
+        expected_teardowns,
+        "{label}: distinct runs tear down once in capture order"
+    );
+    assert!(
+        snapshot
+            .executions
+            .iter()
+            .all(|entry| entry.settlement_attempted && entry.settlement_error.is_none())
+    );
+    assert!(snapshot.executions.iter().all(|entry| !entry.teardown_owner
+        || (entry.teardown_attempted && entry.teardown_error.is_none())));
+    assert_eq!(
+        snapshot.observations.initial_mapping_slot_id,
+        mapped.then_some(0)
+    );
+    assert!(
+        !snapshot.observations.initial_pending_teardown
+            && !snapshot.observations.initial_compacting
+    );
+    assert!(
+        snapshot.observations.fenced_generation.is_some()
+            && snapshot.observations.initial_capture_error.is_none()
+    );
     assert!(snapshot.observations.final_non_terminal_ids.is_empty());
-    assert!(sessions.reread_non_terminal_for_task(&task_id).await.expect("reread").is_empty());
-    assert!(second.id == snapshot.executions[0].session_id || second.id == snapshot.executions[1].session_id);
+    assert_eq!(snapshot.observations.final_mapping_slot_id, None);
+    assert!(
+        !snapshot.observations.final_pending_teardown
+            && snapshot.observations.final_reread_error.is_none()
+    );
+    assert_eq!(
+        snapshot.observations.completion_source,
+        if mapped { "immediate" } else { "none" }
+    );
+    assert!(
+        sessions
+            .reread_non_terminal_for_task(&task_id)
+            .await
+            .expect("final reread")
+            .is_empty()
+    );
+    for session_id in expected_session_ids {
+        let row = sessions
+            .get(&session_id)
+            .await
+            .expect("terminal lookup")
+            .expect("captured session persists");
+        assert_eq!(
+            row.status, "interrupted",
+            "{label}: exact session terminalized"
+        );
+        assert!(
+            row.ended_at.is_some(),
+            "{label}: exact session records ended_at"
+        );
+    }
+    if mapped {
+        assert!(
+            pool.test_free_slots("model-a").is_empty(),
+            "{label}: immediate cleanup must not return the draining slot"
+        );
+    }
 }
 
-/// A mapped immediate reconciliation must remove its mapping without returning
-/// the still-draining slot to capacity; the later slot event is the sole owner.
 #[tokio::test]
-async fn reconcile_terminate_mapped_zero_rows_keeps_slot_off_free_list() {
-    let (app_state, cancel, _temp) = test_app_state();
-    let task_ids = create_dispatch_task_ids(&app_state, 1).await;
-    let task_id = &task_ids[0];
-    let (_tx, rx) = mpsc::channel(1);
-    let mut pool = SlotPool::new(rx, app_state, cancel, make_config(vec![model("model-a", 1, &["worker"])], &[("worker", vec!["model-a"])]));
-    pool.test_assign_busy(task_id, 0);
-    let snapshot = pool.test_reconcile_terminate(task_id).await;
-    assert_eq!(snapshot.kind, ReconcileTerminateKind::Terminated);
-    assert!(snapshot.ok);
-    assert_eq!(snapshot.observations.completion_source, "immediate");
-    assert_eq!(snapshot.observations.initial_mapping_slot_id, Some(0));
-    assert_eq!(snapshot.observations.final_mapping_slot_id, None);
-    assert!(pool.test_free_slots("model-a").is_empty(), "immediate cleanup must not return a draining slot");
+async fn reconcile_terminate_unmapped_zero_rows_is_genuinely_absent() {
+    assert_immediate_reconcile_matrix_case(
+        "unmapped zero",
+        &[],
+        false,
+        ReconcileTerminateKind::GenuinelyAbsent,
+    )
+    .await;
+}
+#[tokio::test]
+async fn reconcile_terminate_mapped_zero_rows_is_desync_and_keeps_slot_off_free_list() {
+    assert_immediate_reconcile_matrix_case(
+        "mapped zero",
+        &[],
+        true,
+        ReconcileTerminateKind::DesyncReconciled,
+    )
+    .await;
+}
+#[tokio::test]
+async fn reconcile_terminate_unmapped_one_row_reconciles_desync() {
+    assert_immediate_reconcile_matrix_case(
+        "unmapped one",
+        &["run-unmapped-one"],
+        false,
+        ReconcileTerminateKind::DesyncReconciled,
+    )
+    .await;
+}
+#[tokio::test]
+async fn reconcile_terminate_mapped_one_row_terminates() {
+    assert_immediate_reconcile_matrix_case(
+        "mapped one",
+        &["run-mapped-one"],
+        true,
+        ReconcileTerminateKind::Terminated,
+    )
+    .await;
+}
+#[tokio::test]
+async fn reconcile_terminate_unmapped_duplicate_rows_deduplicate_shared_run() {
+    assert_immediate_reconcile_matrix_case(
+        "unmapped duplicate shared",
+        &["run-shared", "run-shared"],
+        false,
+        ReconcileTerminateKind::DesyncReconciled,
+    )
+    .await;
+}
+#[tokio::test]
+async fn reconcile_terminate_mapped_duplicate_rows_tear_down_distinct_runs() {
+    assert_immediate_reconcile_matrix_case(
+        "mapped duplicate distinct",
+        &["run-mapped-first", "run-mapped-second"],
+        true,
+        ReconcileTerminateKind::Terminated,
+    )
+    .await;
 }
 
 /// Missing runtime ownership is an explicit teardown failure, never a successful
@@ -2596,15 +2775,30 @@ async fn reconcile_terminate_mapped_zero_rows_keeps_slot_off_free_list() {
 #[tokio::test]
 async fn reconcile_terminate_without_runtime_fails_closed_after_settlement() {
     let (app_state, cancel, _temp) = test_app_state();
-    let task_id = seed_running_session_with_task_run(&app_state, "reconcile no runtime", "run-no-runtime").await;
+    let task_id =
+        seed_running_session_with_task_run(&app_state, "reconcile no runtime", "run-no-runtime")
+            .await;
     let (_tx, rx) = mpsc::channel(1);
-    let mut pool = SlotPool::new(rx, app_state.clone(), cancel, make_config(vec![model("model-a", 1, &["worker"])], &[("worker", vec!["model-a"])]));
+    let mut pool = SlotPool::new(
+        rx,
+        app_state.clone(),
+        cancel,
+        make_config(
+            vec![model("model-a", 1, &["worker"])],
+            &[("worker", vec!["model-a"])],
+        ),
+    );
     let snapshot = pool.test_reconcile_terminate(&task_id).await;
     assert_eq!(snapshot.kind, ReconcileTerminateKind::TeardownFailed);
     assert!(!snapshot.ok);
     assert!(!snapshot.executions[0].teardown_attempted);
     assert!(snapshot.executions[0].teardown_error.is_some());
     assert!(snapshot.executions[0].settlement_attempted);
-    assert!(djinn_db::SessionRepository::new(app_state.db.clone(), app_state.event_bus.clone())
-        .reread_non_terminal_for_task(&task_id).await.expect("reread").is_empty());
+    assert!(
+        djinn_db::SessionRepository::new(app_state.db.clone(), app_state.event_bus.clone())
+            .reread_non_terminal_for_task(&task_id)
+            .await
+            .expect("reread")
+            .is_empty()
+    );
 }
