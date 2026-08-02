@@ -76,6 +76,11 @@ pub const ENV_WARM_LEASE_CONSUMER_ID: &str = "DJINN_WARM_LEASE_CONSUMER_ID";
 /// carry the current token is rejected by the ledger, so a Pod outlived by a
 /// newer grant can never release the new holder's slot.
 pub const ENV_WARM_LEASE_FENCING_TOKEN: &str = "DJINN_WARM_LEASE_FENCING_TOKEN";
+/// Durable attempt identity read by `warm-graph` to finish exactly the row
+/// created by the producer before this Job was posted.
+pub const ENV_WARM_ATTEMPT_ID: &str = "DJINN_WARM_ATTEMPT_ID";
+/// Immutable RFC3339 deadline shared by the attempt ledger and warm worker.
+pub const ENV_WARM_ATTEMPT_DEADLINE_AT: &str = "DJINN_WARM_ATTEMPT_DEADLINE_AT";
 
 /// Mount path for the read-only mirror PVC (mirrors the task-run Job).
 pub const MIRROR_MOUNT_DIR: &str = "/mirror";
@@ -582,6 +587,21 @@ fn env_var(name: &str, value: &str) -> EnvVar {
         value: Some(value.to_string()),
         ..EnvVar::default()
     }
+}
+
+/// Stamp durable attempt data after either warm manifest variant has been
+/// constructed. This keeps public builders and deterministic Job identity
+/// unchanged while giving leased and unleased Pods the same worker contract.
+pub(crate) fn stamp_warm_attempt(job: &mut Job, attempt_id: &str, deadline_at: &str) {
+    let container = job
+        .spec
+        .as_mut()
+        .and_then(|spec| spec.template.spec.as_mut())
+        .and_then(|spec| spec.containers.first_mut())
+        .expect("warm Job builder always renders a warmer container");
+    let env = container.env.get_or_insert_with(Vec::new);
+    env.push(env_var(ENV_WARM_ATTEMPT_ID, attempt_id));
+    env.push(env_var(ENV_WARM_ATTEMPT_DEADLINE_AT, deadline_at));
 }
 
 /// Sanitise a project id to a DNS-label-safe form for Job names and label

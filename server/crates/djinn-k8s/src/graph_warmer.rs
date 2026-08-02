@@ -9,7 +9,10 @@ use std::time::{Duration, Instant};
 use djinn_core::clock::{Clock, SystemClock};
 
 use async_trait::async_trait;
-use djinn_db::{Database, ProjectRepository, RepoGraphCacheRepository};
+use djinn_db::{
+    Database, ProjectRepository, RepoGraphCacheRepository, WarmGraphAttemptRepository,
+    WarmGraphAttemptStatus,
+};
 use djinn_runtime::{GraphWarmerService, TaskrunJobRef, WarmerError};
 use djinn_supervisor::services::{
     GraphWarmLeaseIdentity, LeaseDeadlines, LeaseFencingToken, LeaseGrant, LeaseState,
@@ -23,7 +26,9 @@ use crate::config::KubernetesConfig;
 use crate::graph_warmer_identity::{
     LeasedWarmJobIdentity, deterministic_warm_job_name, stamp_admission_identity, warm_work_id,
 };
-use crate::warm_job::{LABEL_PROJECT_ID, LABEL_WARM, build_leased_warm_job, build_warm_job};
+use crate::warm_job::{
+    LABEL_PROJECT_ID, LABEL_WARM, build_leased_warm_job, build_warm_job, stamp_warm_attempt,
+};
 
 /// Warm Job manifest accepted by [`WarmJobDispatcher`].
 ///
@@ -941,6 +946,45 @@ impl WarmDispatch {
         // Every gate this cycle had to clear is behind us: capacity was granted,
         // so the refusal backoff for this project starts fresh.
         self.clear_admission_backoff(project_id).await;
+        // Start the durable row only after all gates authorize the POST. The
+        // revision is the single mirror-head read shared by the Job identity.
+        let deadline_at = time::OffsetDateTime::now_utc()
+            .checked_add(time::Duration::seconds(
+                self.config.warm_job_timeout_seconds,
+            ))
+            .and_then(|deadline| {
+                deadline
+                    // The repository reads this PostgreSQL timestamp back at
+                    // millisecond precision. Render that persisted precision
+                    // here as well, so the worker receives the exact immutable
+                    // deadline stored on its attempt rather than a differently
+                    // formatted equivalent instant.
+                    .format(&time::macros::format_description!(
+                        "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:3]Z"
+                    ))
+                    .ok()
+            });
+        let Some(deadline_at) = deadline_at else {
+            warn!(
+                project_id,
+                "K8sGraphWarmer: could not derive warm attempt deadline; skipping Job POST"
+            );
+            self.release_in_flight(project_id).await;
+            return;
+        };
+        let attempts = WarmGraphAttemptRepository::new(self.db.clone());
+        let attempt_id = match attempts
+            .start_attempt(project_id, &warm_generation, &deadline_at)
+            .await
+        {
+            Ok(attempt_id) => attempt_id,
+            Err(error) => {
+                warn!(project_id, error = %error, "K8sGraphWarmer: could not persist warm attempt; skipping Job POST");
+                self.release_in_flight(project_id).await;
+                return;
+            }
+        };
+        stamp_warm_attempt(&mut job, &attempt_id, &deadline_at);
         let job_name = match self.dispatcher.dispatch(&namespace, job).await {
             Ok(name) => name,
             Err(e) => {
@@ -949,6 +993,17 @@ impl WarmDispatch {
                     error = %e,
                     "K8sGraphWarmer: Job dispatch failed"
                 );
+                if dispatcher_error_is_definitive(&e)
+                    && let Err(error) = attempts
+                        .finish_attempt_if_running(
+                            &attempt_id,
+                            WarmGraphAttemptStatus::DispatchFailed,
+                            Some(&e),
+                        )
+                        .await
+                {
+                    warn!(project_id, error = %error, "K8sGraphWarmer: failed to terminalize definitive dispatch failure");
+                }
                 if let (Some(admission), Some(permit)) = (ledger_admission, permit.as_ref()) {
                     let transition = if dispatcher_error_is_definitive(&e) {
                         WarmAdmissionTransition::DefinitiveFailure {
@@ -1059,6 +1114,9 @@ impl WarmDispatch {
         let namespace_owned = namespace.clone();
         let job_name_owned = job_name.clone();
         let notify_owned = notify.clone();
+        let attempts = WarmGraphAttemptRepository::new(self.db.clone());
+        let attempt_id = attempt_id.clone();
+        let warm_generation = warm_generation.clone();
         tokio::spawn(async move {
             let outcome = watcher
                 .wait_terminal(&namespace_owned, &job_name_owned)
@@ -1084,6 +1142,26 @@ impl WarmDispatch {
                 && let Some(sink) = completion_sink.as_ref()
             {
                 sink.on_warm_succeeded(&project_id_owned).await;
+            }
+            let terminal = match outcome {
+                WarmTerminalOutcome::Failed => {
+                    attempts
+                        .finish_attempt_if_running(
+                            &attempt_id,
+                            WarmGraphAttemptStatus::Failed,
+                            Some("warm Job watcher observed terminal failure"),
+                        )
+                        .await
+                }
+                // Exact-revision reconciliation recovers publication which
+                // committed before the worker wrote its final lifecycle state.
+                WarmTerminalOutcome::Succeeded => attempts
+                    .warm_outcome_for_head(&project_id_owned, &warm_generation)
+                    .await
+                    .map(|_| false),
+            };
+            if let Err(error) = terminal {
+                warn!(project_id = %project_id_owned, error = %error, "K8sGraphWarmer: failed to reconcile durable warm attempt");
             }
             debug!(
                 project_id = %project_id_owned,
