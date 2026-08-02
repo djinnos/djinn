@@ -1,8 +1,10 @@
 //! CPU-only arithmetic for elastic build admission.
 //!
-//! This module deliberately knows nothing about Kubernetes clients or memory.
-//! It is the single normative implementation used by the controller and tests.
+//! This module deliberately knows nothing about Kubernetes clients. It owns the
+//! pure CPU/memory arithmetic and rendered-Pod request extraction used by tests
+//! and future admission callers.
 
+use k8s_openapi::api::core::v1::{Container, PodSpec};
 use thiserror::Error;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -88,6 +90,14 @@ pub enum CapacityError {
     MissingPods,
     #[error("capacity arithmetic underflowed")]
     Underflow,
+    #[error("container resource requests are missing CPU")]
+    MissingContainerCpuRequest,
+    #[error("container resource requests are missing memory")]
+    MissingContainerMemoryRequest,
+    #[error("container CPU request quantity is malformed")]
+    MalformedContainerCpuRequest,
+    #[error("container memory request quantity is malformed")]
+    MalformedContainerMemoryRequest,
 }
 
 /// Derive pod count (`M`), binding CPU (`M*I`), and compile slots (`K`).
@@ -342,6 +352,95 @@ pub fn scheduler_effective_request(
     })?;
     let init = init.into_iter().map(CpuMillicores::get).max().unwrap_or(0);
     CpuMillicores::new(regular.max(init))
+}
+
+/// Extract the scheduler-effective CPU and memory cost of one rendered PodSet.
+///
+/// Kubernetes schedules regular containers and native init-sidecars concurrently,
+/// while ordinary init containers run serially before that steady state. Each
+/// resource dimension is therefore the maximum of the regular-plus-sidecar sum
+/// and every ordinary init container request.
+pub fn podset_cost_from_pod_spec(pod: &PodSpec) -> Result<ResourceVector, CapacityError> {
+    let steady_state = pod
+        .containers
+        .iter()
+        .chain(
+            pod.init_containers
+                .iter()
+                .flatten()
+                .filter(|container| container.restart_policy.as_deref() == Some("Always")),
+        )
+        .try_fold(ResourceVector::ZERO, |sum, container| {
+            sum.checked_add(container_request_vector(container)?)
+        })?;
+
+    let effective = pod
+        .init_containers
+        .iter()
+        .flatten()
+        .filter(|container| container.restart_policy.as_deref() != Some("Always"))
+        .try_fold(steady_state, |effective, container| {
+            let init = container_request_vector(container)?;
+            Ok(ResourceVector {
+                cpu: CpuMillicores(effective.cpu.get().max(init.cpu.get())),
+                memory: MemoryBytes(effective.memory.get().max(init.memory.get())),
+                pods: PodCount(0),
+            })
+        })?;
+
+    Ok(ResourceVector {
+        pods: PodCount(1),
+        ..effective
+    })
+}
+
+fn container_request_vector(container: &Container) -> Result<ResourceVector, CapacityError> {
+    let requests = container
+        .resources
+        .as_ref()
+        .and_then(|resources| resources.requests.as_ref());
+    let cpu = requests
+        .and_then(|requests| requests.get("cpu"))
+        .ok_or(CapacityError::MissingContainerCpuRequest)?;
+    let memory = requests
+        .and_then(|requests| requests.get("memory"))
+        .ok_or(CapacityError::MissingContainerMemoryRequest)?;
+    Ok(ResourceVector {
+        cpu: parse_cpu_millicores(&cpu.0)?,
+        memory: parse_binary_memory_bytes(&memory.0)?,
+        pods: PodCount(0),
+    })
+}
+
+fn parse_cpu_millicores(quantity: &str) -> Result<CpuMillicores, CapacityError> {
+    let value = match quantity.strip_suffix('m') {
+        Some(millicores) => millicores
+            .parse::<i64>()
+            .map_err(|_| CapacityError::MalformedContainerCpuRequest)?,
+        None => quantity
+            .parse::<i64>()
+            .map_err(|_| CapacityError::MalformedContainerCpuRequest)?
+            .checked_mul(1_000)
+            .ok_or(CapacityError::Overflow)?,
+    };
+    CpuMillicores::new(value).map_err(|_| CapacityError::MalformedContainerCpuRequest)
+}
+
+fn parse_binary_memory_bytes(quantity: &str) -> Result<MemoryBytes, CapacityError> {
+    let parsed = [("Ki", 1_i64 << 10), ("Mi", 1_i64 << 20), ("Gi", 1_i64 << 30)]
+        .into_iter()
+        .find_map(|(suffix, multiplier)| quantity.strip_suffix(suffix).map(|value| (value, multiplier)));
+    let value = match parsed {
+        Some((number, multiplier)) => number
+            .parse::<i64>()
+            .map_err(|_| CapacityError::MalformedContainerMemoryRequest)?
+            .checked_mul(multiplier)
+            .ok_or(CapacityError::Overflow)?,
+        None => quantity
+            .parse::<i64>()
+            .map_err(|_| CapacityError::MalformedContainerMemoryRequest)?,
+    };
+    MemoryBytes::new(value).map_err(|_| CapacityError::MalformedContainerMemoryRequest)
 }
 
 #[cfg(test)]
