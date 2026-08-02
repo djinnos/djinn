@@ -15,6 +15,17 @@ expect_ok() {
     label=$1; shift
     if "$@" >/dev/null 2>&1; then pass "$label"; else fail "$label"; fi
 }
+retire_deletion_case() {
+    name=$1 path=$2 phase=$3 expect=$4
+    repo="$SCRATCH/delete-$name"; new_repo "$repo"
+    base=$(git -C "$repo" rev-parse HEAD)
+    git -C "$repo" rm -q "$path" && git -C "$repo" commit -qm "delete-$name"
+    if [ "$expect" = ok ]; then
+        expect_ok "RETIRE accepts correctly phased $name deletion" env CGROUP_RETIREMENT_GATE_ROOT="$repo" "$GATE" --retire "$phase" "$base" "$(git -C "$repo" rev-parse HEAD)"
+    else
+        expect_reject "RETIRE rejects $name deletion" env CGROUP_RETIREMENT_GATE_ROOT="$repo" "$GATE" --retire "$phase" "$base" "$(git -C "$repo" rev-parse HEAD)"
+    fi
+}
 expect_reject() {
     label=$1; shift
     set +e
@@ -202,8 +213,6 @@ protected_deletion_case() {
 retire_mutation_case() {
     name=$1 path=$2 phase=$3 expect=$4
     repo="$SCRATCH/retire-$name"; new_repo "$repo"
-    cp "$REPO_ROOT/scripts/cgroup-retirement-assets.json" "$repo/scripts/cgroup-retirement-assets.json"
-    git -C "$repo" add scripts/cgroup-retirement-assets.json && git -C "$repo" commit -qm inventory
     base=$(git -C "$repo" rev-parse HEAD)
     commit_file "$repo" "$path" "fixture mutation: $name"
     if [ "$expect" = ok ]; then
@@ -216,6 +225,9 @@ retire_mutation_case() {
 printf 'Testing cgroup-retirement PREP range and fail-closed action gates\n'
 retire_mutation_case production-broker server/crates/djinn-agent/src/process_broker.rs RETIRE_BASE ok
 retire_mutation_case wrong-phase-broker server/crates/djinn-agent/src/process_broker.rs RETIRE_HEAD reject
+retire_deletion_case production-broker server/crates/djinn-agent/src/process_broker.rs RETIRE_BASE ok
+retire_deletion_case wrong-phase-broker server/crates/djinn-agent/src/process_broker.rs RETIRE_HEAD reject
+retire_deletion_case preserved-launcher server/crates/djinn-k8s/src/launcher.rs RETIRE_BASE reject
 # These mutate real preserved surfaces, proving the preservation assertions are
 # not fixture-only stand-ins.
 retire_mutation_case render-gate deploy/preflight/render-gate.sh RETIRE_BASE reject
