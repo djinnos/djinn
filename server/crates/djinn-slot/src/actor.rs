@@ -884,6 +884,7 @@ mod tests {
         let (app_state, cancel, _temp) = test_app_state();
         let (event_tx, mut event_rx) = mpsc::channel(4);
         // Shared slot to capture what the runner received.
+        #[allow(clippy::type_complexity)]
         let observed: std::sync::Arc<
             std::sync::Mutex<Option<(String, i64, Option<serde_json::Value>)>>,
         > = std::sync::Arc::new(std::sync::Mutex::new(None));
@@ -959,6 +960,7 @@ mod tests {
         let _tracing_guard = tracing_lock().await;
         let (app_state, cancel, _temp) = test_app_state();
         let (event_tx, mut event_rx) = mpsc::channel(4);
+        #[allow(clippy::type_complexity)]
         let observed: std::sync::Arc<
             std::sync::Mutex<Option<(String, i64, Option<serde_json::Value>)>>,
         > = std::sync::Arc::new(std::sync::Mutex::new(None));

@@ -639,6 +639,7 @@ async fn route_loop_guard_planner_intervention_if_needed(
 ///
 /// `Ok(())` = terminal outcome (slot treats as `SlotEvent::Free`).
 /// `Err` = infra setup failure the runtime can't express via `TaskRunReport`.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn dispatch_task_runtime(
     task_id: String,
     execution_generation: i64,
