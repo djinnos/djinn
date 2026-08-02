@@ -740,6 +740,7 @@ mod tests {
             task_run_id: "run-t1".into(),
             task_attempt_id: None,
             task_id: "t1".into(),
+            execution_generation: 0,
             project_id: "p1".into(),
             trigger: TaskRunTrigger::NewTask,
             base_branch: "main".into(),

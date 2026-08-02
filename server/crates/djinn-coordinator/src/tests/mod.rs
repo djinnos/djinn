@@ -423,6 +423,7 @@ fn coordinator_actor_for_tests(
             Arc::new(|slot_id, model_id, event_tx, app_state, cancel| {
                 let runner: djinn_slot::TestLifecycleRunner = Arc::new(
                     |_task_id,
+                     _execution_generation,
                      _project_path,
                      _model_id,
                      _app_state,
@@ -934,6 +935,7 @@ async fn live_mover_evidence_collects_active_session() {
         Arc::new(|slot_id, model_id, event_tx, app_state, cancel| {
             let runner: djinn_slot::TestLifecycleRunner = Arc::new(
                 |_task_id,
+                 _execution_generation,
                  _project_path,
                  _model_id,
                  _app_state,

@@ -779,6 +779,7 @@ fn kueue_spec() -> TaskRunSpec {
         task_run_id: TASK_RUN_ID.into(),
         task_attempt_id: None,
         task_id: "task-kueue-cutover".into(),
+        execution_generation: 0,
         project_id: "owner-project-id".into(),
         trigger: TaskRunTrigger::NewTask,
         base_branch: "main".into(),

@@ -48,7 +48,7 @@ fn spawn_holding_pool(db: &djinn_db::Database) -> djinn_slot::SlotPoolHandle {
         },
         Arc::new(|slot_id, model_id, event_tx, app_state, cancel| {
             let runner: djinn_slot::TestLifecycleRunner =
-                Arc::new(move |_task_id, _, _, _, kill, _, _| {
+                Arc::new(move |_task_id, _, _, _, _, kill, _, _| {
                     Box::pin(async move {
                         kill.cancelled().await;
                         Ok(())

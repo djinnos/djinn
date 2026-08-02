@@ -124,6 +124,7 @@ pub trait SlotHostCallbacks: Send + Sync + 'static {
     fn run_task_dispatch<'a>(
         &'a self,
         task_id: String,
+        execution_generation: i64,
         project_path: String,
         model_id: String,
         ctx: SlotContext,

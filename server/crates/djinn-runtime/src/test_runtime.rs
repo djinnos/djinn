@@ -422,6 +422,7 @@ mod tests {
             task_run_id: format!("run-{task_id}"),
             task_attempt_id: None,
             task_id: task_id.into(),
+            execution_generation: 0,
             project_id: "p1".into(),
             trigger: TaskRunTrigger::NewTask,
             base_branch: "main".into(),

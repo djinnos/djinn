@@ -462,6 +462,8 @@ pub struct TaskRunSpec {
     #[serde(default)]
     pub task_attempt_id: Option<String>,
     pub task_id: String,
+    /// Durable generation committed by pool dispatch admission.
+    pub execution_generation: i64,
     pub project_id: String,
     pub trigger: TaskRunTrigger,
     /// Existing branch in the mirror to start from (e.g. `main`).
@@ -991,6 +993,7 @@ mod tests {
             task_run_id: "019e6a03-8aef-7201-9c9d-d7ba17613a0b".to_string(),
             task_attempt_id: None,
             task_id: "task-abc".to_string(),
+            execution_generation: 42,
             project_id: "proj-xyz".to_string(),
             trigger: TaskRunTrigger::NewTask,
             base_branch: "main".to_string(),
@@ -1019,6 +1022,7 @@ mod tests {
 
         assert_eq!(back.task_run_id, spec.task_run_id);
         assert_eq!(back.task_id, spec.task_id);
+        assert_eq!(back.execution_generation, spec.execution_generation);
         assert_eq!(back.project_id, spec.project_id);
         assert_eq!(back.trigger, spec.trigger);
         assert_eq!(back.base_branch, spec.base_branch);
@@ -1051,6 +1055,7 @@ mod tests {
             task_run_id: "019f1a03-8aef-7201-9c9d-d7ba17613a0b".to_string(),
             task_attempt_id: None,
             task_id: "task-resume".to_string(),
+            execution_generation: 0,
             project_id: "proj-xyz".to_string(),
             trigger: TaskRunTrigger::NewTask,
             base_branch: "main".to_string(),
@@ -1166,6 +1171,7 @@ mod tests {
             task_run_id: "run-default".to_string(),
             task_attempt_id: None,
             task_id: "task-default".to_string(),
+            execution_generation: 0,
             project_id: "proj-1".to_string(),
             trigger: TaskRunTrigger::NewTask,
             base_branch: "main".to_string(),
@@ -1197,6 +1203,7 @@ mod tests {
             task_run_id: "run-ev".to_string(),
             task_attempt_id: None,
             task_id: "task-ev".to_string(),
+            execution_generation: 0,
             project_id: "proj-1".to_string(),
             trigger: TaskRunTrigger::NewTask,
             base_branch: "main".to_string(),
@@ -1241,6 +1248,7 @@ mod tests {
             task_run_id: "run-evidence".to_string(),
             task_attempt_id: None,
             task_id: "task-evidence".to_string(),
+            execution_generation: 0,
             project_id: "proj-1".to_string(),
             trigger: TaskRunTrigger::NewTask,
             base_branch: "main".to_string(),

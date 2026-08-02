@@ -56,7 +56,7 @@ fn spawn_observing_pool(
         Arc::new(move |slot_id, model_id, event_tx, app_state, cancel| {
             let observed_tx = observed_tx.clone();
             let runner: djinn_slot::TestLifecycleRunner =
-                Arc::new(move |task_id, _, model_id, _, _, _, _| {
+                Arc::new(move |task_id, _, _, model_id, _, _, _, _| {
                     let observed_tx = observed_tx.clone();
                     Box::pin(async move {
                         observed_tx

@@ -639,8 +639,10 @@ async fn route_loop_guard_planner_intervention_if_needed(
 ///
 /// `Ok(())` = terminal outcome (slot treats as `SlotEvent::Free`).
 /// `Err` = infra setup failure the runtime can't express via `TaskRunReport`.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn dispatch_task_runtime(
     task_id: String,
+    execution_generation: i64,
     _project_path: String,
     model_id: String,
     app_state: AgentContext,
@@ -685,6 +687,7 @@ pub(super) async fn dispatch_task_runtime(
         &ctx,
         &app_state,
         &model_id,
+        execution_generation,
         resume_lifecycle_metadata,
     )
     .await?;
@@ -1620,6 +1623,7 @@ struct TaskRunSpecInputs {
     task_run_id: String,
     task_attempt_id: Option<String>,
     task_id: String,
+    execution_generation: i64,
     project_id: String,
     trigger: TaskRunTrigger,
     base_branch: String,
@@ -1644,6 +1648,7 @@ impl TaskRunSpecInputs {
         ctx: &DispatchContext<'_>,
         app_state: &AgentContext,
         model_id: &str,
+        execution_generation: i64,
         resume_lifecycle_metadata: Option<serde_json::Value>,
     ) -> anyhow::Result<Self> {
         let mut model_id_per_role: HashMap<RoleKind, String> = HashMap::new();
@@ -1725,6 +1730,7 @@ impl TaskRunSpecInputs {
             task_run_id,
             task_attempt_id: Some(task_attempt_id),
             task_id: task.id.clone(),
+            execution_generation,
             project_id: task.project_id.clone(),
             trigger: trigger_for_flow(flow, ctx.has_conflict),
             base_branch: ctx.base_branch.clone(),
@@ -1750,6 +1756,7 @@ impl From<TaskRunSpecInputs> for TaskRunSpec {
             task_run_id: inputs.task_run_id,
             task_attempt_id: inputs.task_attempt_id,
             task_id: inputs.task_id,
+            execution_generation: inputs.execution_generation,
             project_id: inputs.project_id,
             trigger: inputs.trigger,
             base_branch: inputs.base_branch,

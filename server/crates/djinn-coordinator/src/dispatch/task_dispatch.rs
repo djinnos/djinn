@@ -3646,6 +3646,7 @@ mod inflight_ledger_tests {
                     let releases = releases.clone();
                     let runner: djinn_slot::TestLifecycleRunner = std::sync::Arc::new(
                         move |task_id,
+                              _execution_generation,
                               _project_path,
                               _model_id,
                               _app_state,
@@ -5035,7 +5036,14 @@ mod failover_chain_tests {
             Arc::new(move |_slot_id, model_id, _event_tx, _app_state, kill| {
                 let releases_inner = releases_clone.clone();
                 let runner: djinn_slot::TestLifecycleRunner = Arc::new(
-                    move |task_id, _project_path, _model_id, _app_state, kill, _pause, _resume| {
+                    move |task_id,
+                          _execution_generation,
+                          _project_path,
+                          _model_id,
+                          _app_state,
+                          kill,
+                          _pause,
+                          _resume| {
                         let releases_inner = releases_inner.clone();
                         Box::pin(async move {
                             let (release_tx, release_rx) = tokio::sync::oneshot::channel();
@@ -5144,6 +5152,29 @@ mod failover_chain_tests {
         (actor, cancel, releases)
     }
 
+    /// Persist the identity used by a successful failover pool dispatch.
+    async fn persisted_dispatch_task(
+        db: &djinn_db::Database,
+        title: &str,
+    ) -> djinn_core::models::Task {
+        let project = crate::test_helpers::create_test_project(db).await;
+        djinn_db::TaskRepository::new(db.clone(), djinn_core::events::EventBus::noop())
+            .create_fixture_in_project(
+                &project.id,
+                None,
+                title,
+                "",
+                "",
+                "task",
+                0,
+                "worker",
+                Some("open"),
+                Some("[]"),
+            )
+            .await
+            .expect("create persisted failover dispatch task")
+    }
+
     /// AC1: Failover-chain traversal preserves candidate order.
     ///
     /// When the first candidate's breaker is open, dispatch should advance to the
@@ -5154,6 +5185,7 @@ mod failover_chain_tests {
         let _ = djinn_telemetry::init();
         let db = crate::test_helpers::create_test_db();
         let (events_tx, _) = tokio::sync::broadcast::channel(64);
+        let task = persisted_dispatch_task(&db, "failover task").await;
 
         // 3 models, each with 1 slot
         let (actor, cancel, _releases) = failover_actor(
@@ -5186,7 +5218,7 @@ mod failover_chain_tests {
                 ],
                 |pool, model_id| {
                     let pool = pool.clone();
-                    let tid = "failover-task".to_owned();
+                    let tid = task.id.clone();
                     let pp = "/tmp/proj".to_owned();
                     let mid = model_id.to_owned();
                     async move { pool.dispatch(&tid, &pp, &mid).await }
@@ -5204,18 +5236,14 @@ mod failover_chain_tests {
         let model_b_running = status
             .running_tasks
             .iter()
-            .filter(|t| t.model_id == "provider/model-b" && t.task_id == "failover-task")
+            .filter(|t| t.model_id == "provider/model-b" && t.task_id == task.id)
             .count();
         assert!(
             model_b_running > 0,
             "failover-task should be running on model-b"
         );
         assert!(
-            actor
-                .pool
-                .has_session("failover-task")
-                .await
-                .unwrap_or(false),
+            actor.pool.has_session(&task.id).await.unwrap_or(false),
             "failover-task should have an active session"
         );
 
@@ -5230,6 +5258,7 @@ mod failover_chain_tests {
         let _ = djinn_telemetry::init();
         let db = crate::test_helpers::create_test_db();
         let (events_tx, _) = tokio::sync::broadcast::channel(64);
+        let task = persisted_dispatch_task(&db, "breaker failover task").await;
 
         let (actor, cancel, _releases) = failover_actor(
             &db,
@@ -5261,7 +5290,7 @@ mod failover_chain_tests {
                 ],
                 |pool, model_id| {
                     let pool = pool.clone();
-                    let tid = "breaker-task".to_owned();
+                    let tid = task.id.clone();
                     let pp = "/tmp/proj".to_owned();
                     let mid = model_id.to_owned();
                     async move { pool.dispatch(&tid, &pp, &mid).await }
@@ -5330,6 +5359,7 @@ mod failover_chain_tests {
         let _ = djinn_telemetry::init();
         let db = crate::test_helpers::create_test_db();
         let (events_tx, _) = tokio::sync::broadcast::channel(64);
+        let task = persisted_dispatch_task(&db, "mixed failover task").await;
 
         let (actor, cancel, _releases) = failover_actor(
             &db,
@@ -5367,7 +5397,7 @@ mod failover_chain_tests {
                 ],
                 |pool, model_id| {
                     let pool = pool.clone();
-                    let tid = "mixed-task".to_owned();
+                    let tid = task.id.clone();
                     let pp = "/tmp/proj".to_owned();
                     let mid = model_id.to_owned();
                     async move { pool.dispatch(&tid, &pp, &mid).await }
@@ -5391,6 +5421,7 @@ mod failover_chain_tests {
         let _ = djinn_telemetry::init();
         let db = crate::test_helpers::create_test_db();
         let (events_tx, _) = tokio::sync::broadcast::channel(64);
+        let task = persisted_dispatch_task(&db, "ordered failover task").await;
 
         let (actor, cancel, _releases) = failover_actor(
             &db,
@@ -5422,7 +5453,7 @@ mod failover_chain_tests {
                 ],
                 |pool, model_id| {
                     let pool = pool.clone();
-                    let tid = "order-task".to_owned();
+                    let tid = task.id.clone();
                     let pp = "/tmp/proj".to_owned();
                     let mid = model_id.to_owned();
                     async move { pool.dispatch(&tid, &pp, &mid).await }
@@ -5471,6 +5502,7 @@ mod failover_chain_tests {
         let _ = djinn_telemetry::init();
         let db = crate::test_helpers::create_test_db();
         let (events_tx, _) = tokio::sync::broadcast::channel(64);
+        let task = persisted_dispatch_task(&db, "model tracking failover task").await;
 
         let (actor, cancel, _releases) = failover_actor(
             &db,
@@ -5505,7 +5537,7 @@ mod failover_chain_tests {
                 ],
                 |pool, model_id| {
                     let pool = pool.clone();
-                    let tid = "model-tracking-task".to_owned();
+                    let tid = task.id.clone();
                     let pp = "/tmp/proj".to_owned();
                     let mid = model_id.to_owned();
                     let tracker = attempted_models_clone.clone();
@@ -5559,6 +5591,7 @@ mod failover_chain_tests {
     async fn failover_chain_logging_captures_candidate_events() {
         let db = crate::test_helpers::create_test_db();
         let (events_tx, _) = tokio::sync::broadcast::channel(64);
+        let task = persisted_dispatch_task(&db, "logging event failover task").await;
 
         let (actor, cancel, _releases) = failover_actor(
             &db,
@@ -5588,7 +5621,7 @@ mod failover_chain_tests {
                 ],
                 |pool, model_id| {
                     let pool = pool.clone();
-                    let tid = "logging-event-task".to_owned();
+                    let tid = task.id.clone();
                     let pp = "/tmp/proj".to_owned();
                     let mid = model_id.to_owned();
                     async move { pool.dispatch(&tid, &pp, &mid).await }
@@ -5638,6 +5671,7 @@ mod failover_chain_tests {
         let _ = djinn_telemetry::init();
         let db = crate::test_helpers::create_test_db();
         let (events_tx, _) = tokio::sync::broadcast::channel(64);
+        let task = persisted_dispatch_task(&db, "restamp failover task").await;
 
         let (actor, cancel, _releases) = failover_actor(
             &db,
@@ -5664,7 +5698,7 @@ mod failover_chain_tests {
                 &["provider/model-a".to_owned(), "provider/model-b".to_owned()],
                 |pool, model_id| {
                     let pool = pool.clone();
-                    let tid = "restamp-task".to_owned();
+                    let tid = task.id.clone();
                     let pp = "/tmp/proj".to_owned();
                     let mid = model_id.to_owned();
                     let restamped = restamped_clone.clone();
@@ -5784,6 +5818,7 @@ mod failover_chain_tests {
     async fn failover_chain_restamp_and_logging_comprehensive() {
         let db = crate::test_helpers::create_test_db();
         let (events_tx, _) = tokio::sync::broadcast::channel(64);
+        let task = persisted_dispatch_task(&db, "restamp logging failover task").await;
 
         let (actor, cancel, _releases) = failover_actor(
             &db,
@@ -5810,7 +5845,7 @@ mod failover_chain_tests {
                 &["provider/model-a".to_owned(), "provider/model-b".to_owned()],
                 |pool, model_id| {
                     let pool = pool.clone();
-                    let tid = "restamp-log-task".to_owned();
+                    let tid = task.id.clone();
                     let pp = "/tmp/proj".to_owned();
                     let mid = model_id.to_owned();
                     let restamped = restamped_clone.clone();
@@ -5960,6 +5995,7 @@ mod failover_chain_tests {
     async fn failover_chain_first_candidate_failure_fallback_succeeds_no_terminal_effects() {
         let db = crate::test_helpers::create_test_db();
         let (events_tx, _) = tokio::sync::broadcast::channel(64);
+        let task = persisted_dispatch_task(&db, "fallback failover task").await;
 
         let (actor, cancel, _releases) = failover_actor(
             &db,
@@ -5980,7 +6016,7 @@ mod failover_chain_tests {
                 &["provider/model-a".to_owned(), "provider/model-b".to_owned()],
                 |pool, model_id| {
                     let pool = pool.clone();
-                    let tid = "fallback-task".to_owned();
+                    let tid = task.id.clone();
                     let pp = "/tmp/proj".to_owned();
                     let mid = model_id.to_owned();
                     let tracker = attempted_models_clone.clone();
@@ -6629,7 +6665,7 @@ mod failover_chain_tests {
                 &["provider/model-a".to_owned(), "provider/model-b".to_owned()],
                 |pool, model_id| {
                     let pool = pool.clone();
-                    let tid = "ac3-fallback-task".to_owned();
+                    let tid = task.id.clone();
                     let pp = "/tmp/proj".to_owned();
                     let mid = model_id.to_owned();
                     let tracker = attempted_models_clone.clone();
@@ -6898,7 +6934,7 @@ mod failover_chain_tests {
             &events_tx,
             // Single model per chain (model-a failing, plus a model-b fallback);
             // every exhaust chain in step 3 contains both candidates.
-            vec![("provider/model-a", 1), ("provider/model-b", 1)],
+            vec![("provider/model-a", 1), ("provider/model-b", 2)],
         );
 
         // Build a minimal Task for `apply_chain_exhaustion_side_effects` (only
@@ -6965,6 +7001,11 @@ mod failover_chain_tests {
             refinement_role: None,
         };
 
+        let dispatch_tasks = [
+            persisted_dispatch_task(&db, "breaker eligibility fallback one").await,
+            persisted_dispatch_task(&db, "breaker eligibility fallback two").await,
+        ];
+
         // ── Step 1: Two model-a failures, each rescued by model-b ─────────
         // After two of these chains, model-a's `consecutive_failures` will be
         // 2, but breaker-eligible failures are STILL zero — the two
@@ -6979,7 +7020,7 @@ mod failover_chain_tests {
                     &["provider/model-a".to_owned(), "provider/model-b".to_owned()],
                     |pool, model_id| {
                         let pool = pool.clone();
-                        let tid = format!("{}-{}", task.short_id, chain);
+                        let tid = dispatch_tasks[chain - 1].id.clone();
                         let pp = "/tmp/proj".to_owned();
                         let mid = model_id.to_owned();
                         async move {
@@ -7365,7 +7406,7 @@ mod failover_chain_tests {
                 &["provider/model-a".to_owned(), "provider/model-b".to_owned()],
                 |pool, model_id| {
                     let pool = pool.clone();
-                    let tid = "ac5-dirty-fallback-task".to_owned();
+                    let tid = task.id.clone();
                     let pp = "/tmp/proj".to_owned();
                     let mid = model_id.to_owned();
                     let tracker = attempted_models_clone.clone();
@@ -7614,7 +7655,14 @@ mod monitored_reopen_no_eligible_model_tests {
             // dispatch is accepted but no real work happens.
             std::sync::Arc::new(|_slot_id, _model_id, _event_tx, _app_state, kill| {
                 let runner: djinn_slot::TestLifecycleRunner = std::sync::Arc::new(
-                    move |_task_id, _project_path, _model_id, _app_state, kill, _pause, _resume| {
+                    move |_task_id,
+                          _execution_generation,
+                          _project_path,
+                          _model_id,
+                          _app_state,
+                          kill,
+                          _pause,
+                          _resume| {
                         Box::pin(async move {
                             let _ = kill.cancelled().await;
                             Ok(())
@@ -8108,6 +8156,7 @@ mod build_admission_route_tests {
                     let releases = releases.clone();
                     let runner: djinn_slot::TestLifecycleRunner = StdArc::new(
                         move |task_id,
+                              _execution_generation,
                               _project_path,
                               _model_id,
                               _app_state,

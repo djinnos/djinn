@@ -20,6 +20,7 @@ type LifecycleFuture = Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + 
 type LifecycleRunner = Arc<
     dyn Fn(
             String,
+            i64,
             String,
             String,
             SlotContext,
@@ -191,9 +192,10 @@ impl SlotActor {
                     }
                     cmd = self.receiver.recv() => {
                         match cmd {
-                            Some(SlotCommand::RunTask { task_id, project_path, respond_to }) => {
+                            Some(SlotCommand::RunTask { task_id, execution_generation, project_path, respond_to }) => {
                                 let lifecycle = self.start_lifecycle(
                                     task_id,
+                                    execution_generation,
                                     project_path,
                                     None,
                                 );
@@ -202,12 +204,14 @@ impl SlotActor {
                             }
                             Some(SlotCommand::RunTaskWithResume {
                                 task_id,
+                                execution_generation,
                                 project_path,
                                 resume_lifecycle_metadata,
                                 respond_to,
                             }) => {
                                 let lifecycle = self.start_lifecycle(
                                     task_id,
+                                    execution_generation,
                                     project_path,
                                     resume_lifecycle_metadata,
                                 );
@@ -233,6 +237,7 @@ impl SlotActor {
     fn start_lifecycle(
         &self,
         task_id: String,
+        execution_generation: i64,
         project_path: String,
         resume_lifecycle_metadata: Option<serde_json::Value>,
     ) -> ActiveLifecycle {
@@ -247,6 +252,7 @@ impl SlotActor {
         );
         let run = (self.runner)(
             task_id.clone(),
+            execution_generation,
             project_path,
             self.model_id.clone(),
             self.app_state.clone(),
@@ -391,9 +397,17 @@ impl SlotHandle {
         // `lifecycle_tests.rs` which exercises it directly.  Task #8 will
         // delete the worktree/lifecycle code entirely after soak.
         let runner: LifecycleRunner = Arc::new(
-            |task_id, project_path, model_id, app_state, kill, pause, resume_lifecycle_metadata| {
+            |task_id,
+             execution_generation,
+             project_path,
+             model_id,
+             app_state,
+             kill,
+             pause,
+             resume_lifecycle_metadata| {
                 Box::pin(run_supervisor_dispatch(
                     task_id,
+                    execution_generation,
                     project_path,
                     model_id,
                     app_state,
@@ -469,8 +483,14 @@ impl SlotHandle {
         skip(self, project_path),
         fields(slot_id = self.id, model_id = %self.model_id, task_id = %task_id)
     )]
-    pub async fn run_task(&self, task_id: String, project_path: String) -> Result<(), SlotError> {
-        self.run_task_with_resume(task_id, project_path, None).await
+    pub async fn run_task(
+        &self,
+        task_id: String,
+        execution_generation: i64,
+        project_path: String,
+    ) -> Result<(), SlotError> {
+        self.run_task_with_resume(task_id, execution_generation, project_path, None)
+            .await
     }
     /// Additive re-dispatch path used by the coordinator's
     /// `DispatchWithResume` slot-pool message. The `resume_lifecycle_metadata`
@@ -492,6 +512,7 @@ impl SlotHandle {
     pub async fn run_task_with_resume(
         &self,
         task_id: String,
+        execution_generation: i64,
         project_path: String,
         resume_lifecycle_metadata: Option<serde_json::Value>,
     ) -> Result<(), SlotError> {
@@ -499,12 +520,14 @@ impl SlotHandle {
         let cmd = match resume_lifecycle_metadata {
             Some(metadata) => SlotCommand::RunTaskWithResume {
                 task_id,
+                execution_generation,
                 project_path,
                 resume_lifecycle_metadata: Some(metadata),
                 respond_to: tx,
             },
             None => SlotCommand::RunTask {
                 task_id,
+                execution_generation,
                 project_path,
                 respond_to: tx,
             },
@@ -588,7 +611,7 @@ mod tests {
         };
 
         let result = handle
-            .run_task_with_resume("task-1".to_string(), "/tmp/proj".to_string(), None)
+            .run_task_with_resume("task-1".to_string(), 1, "/tmp/proj".to_string(), None)
             .await;
 
         match result {
@@ -719,6 +742,7 @@ mod tests {
         let (event_tx, mut event_rx) = mpsc::channel(4);
         let runner: LifecycleRunner = Arc::new(
             |_task_id,
+             _execution_generation,
              _project_path,
              _model_id,
              _app_state,
@@ -739,7 +763,7 @@ mod tests {
             cancel,
             runner,
         );
-        slot.run_task("task-123".to_string(), "/tmp/project".to_string())
+        slot.run_task("task-123".to_string(), 101, "/tmp/project".to_string())
             .await
             .expect("dispatch should be accepted");
         let evt = tokio::time::timeout(Duration::from_secs(1), event_rx.recv())
@@ -794,6 +818,7 @@ mod tests {
         let (event_tx, mut event_rx) = mpsc::channel(4);
         let runner: LifecycleRunner = Arc::new(
             |_task_id,
+             _execution_generation,
              _project_path,
              _model_id,
              _app_state,
@@ -814,7 +839,7 @@ mod tests {
             cancel,
             runner,
         );
-        slot.run_task("task-kill".to_string(), "/tmp/project".to_string())
+        slot.run_task("task-kill".to_string(), 102, "/tmp/project".to_string())
             .await
             .expect("dispatch should be accepted");
         slot.kill().await.expect("kill should be accepted");
@@ -851,23 +876,22 @@ mod tests {
             Some("test/kill-model")
         );
     }
-    /// Additive re-dispatch path: the slot actor must hand the optional
-    /// resume-via-git lifecycle metadata blob to the lifecycle runner so it
-    /// lands on `TaskRunSpec::resume_lifecycle_metadata`. The runner records
-    /// the metadata it received; the assertion catches the "selector was
-    /// invoked and then dropped" failure mode (the bug the prior review
-    /// flagged in the dispatch path).
+    /// A resume command must carry its admitted generation and metadata all
+    /// the way to the lifecycle runner, which constructs the TaskRunSpec.
     #[tokio::test(flavor = "current_thread")]
-    async fn run_task_with_resume_forwards_metadata_to_runner() {
+    async fn run_task_with_resume_forwards_generation_and_metadata_to_runner() {
         let _tracing_guard = tracing_lock().await;
         let (app_state, cancel, _temp) = test_app_state();
         let (event_tx, mut event_rx) = mpsc::channel(4);
         // Shared slot to capture what the runner received.
-        let observed: std::sync::Arc<std::sync::Mutex<Option<serde_json::Value>>> =
-            std::sync::Arc::new(std::sync::Mutex::new(None));
+        #[allow(clippy::type_complexity)]
+        let observed: std::sync::Arc<
+            std::sync::Mutex<Option<(String, i64, Option<serde_json::Value>)>>,
+        > = std::sync::Arc::new(std::sync::Mutex::new(None));
         let observed_clone = observed.clone();
         let runner: LifecycleRunner = Arc::new(
-            move |_task_id,
+            move |task_id,
+                  execution_generation,
                   _project_path,
                   _model_id,
                   _app_state,
@@ -876,7 +900,8 @@ mod tests {
                   resume_lifecycle_metadata| {
                 let observed = observed_clone.clone();
                 Box::pin(async move {
-                    *observed.lock().expect("observed mutex") = resume_lifecycle_metadata;
+                    *observed.lock().expect("observed mutex") =
+                        Some((task_id, execution_generation, resume_lifecycle_metadata));
                     Ok(())
                 })
             },
@@ -906,36 +931,43 @@ mod tests {
         });
         slot.run_task_with_resume(
             "task-resume".to_string(),
+            4242,
             "/tmp/project".to_string(),
             Some(metadata.clone()),
         )
         .await
         .expect("dispatch with resume metadata should be accepted");
         // Wait for the lifecycle to complete (the runner returns Ok(()) on its
-        // own after recording the metadata).
-        let _ = tokio::time::timeout(Duration::from_secs(1), event_rx.recv()).await;
+        // own after recording the metadata). Do not merely discard the result:
+        // the assertion below must observe the runner after the resume command
+        // has traversed the actor mailbox.
+        tokio::time::timeout(Duration::from_secs(1), event_rx.recv())
+            .await
+            .expect("resume lifecycle completion event should arrive")
+            .expect("resume lifecycle event channel should stay open");
         let recorded = observed.lock().expect("observed mutex").clone();
         assert_eq!(
             recorded,
-            Some(metadata),
-            "slot pipeline must hand the resume metadata blob to the lifecycle runner \
-             so downstream `TaskRunSpec::resume_lifecycle_metadata` carries the full selection"
+            Some(("task-resume".to_string(), 4242, Some(metadata))),
+            "resume command must preserve its admitted generation and metadata through \
+             the lifecycle runner for the downstream TaskRunSpec"
         );
     }
-    /// Default/off path: the legacy `run_task` entry point must thread
-    /// `None` for the resume metadata, preserving the byte-for-byte
-    /// existing dispatch contract. A bug here would silently resume tasks
-    /// that the coordinator did not select for resume.
+    /// A plain command must preserve its admitted generation and thread no
+    /// resume metadata to the lifecycle runner.
     #[tokio::test(flavor = "current_thread")]
-    async fn run_task_default_off_threads_no_resume_metadata() {
+    async fn run_task_forwards_admitted_generation_without_resume_metadata() {
         let _tracing_guard = tracing_lock().await;
         let (app_state, cancel, _temp) = test_app_state();
         let (event_tx, mut event_rx) = mpsc::channel(4);
-        let observed: std::sync::Arc<std::sync::Mutex<Option<serde_json::Value>>> =
-            std::sync::Arc::new(std::sync::Mutex::new(None));
+        #[allow(clippy::type_complexity)]
+        let observed: std::sync::Arc<
+            std::sync::Mutex<Option<(String, i64, Option<serde_json::Value>)>>,
+        > = std::sync::Arc::new(std::sync::Mutex::new(None));
         let observed_clone = observed.clone();
         let runner: LifecycleRunner = Arc::new(
-            move |_task_id,
+            move |task_id,
+                  execution_generation,
                   _project_path,
                   _model_id,
                   _app_state,
@@ -944,7 +976,8 @@ mod tests {
                   resume_lifecycle_metadata| {
                 let observed = observed_clone.clone();
                 Box::pin(async move {
-                    *observed.lock().expect("observed mutex") = resume_lifecycle_metadata;
+                    *observed.lock().expect("observed mutex") =
+                        Some((task_id, execution_generation, resume_lifecycle_metadata));
                     Ok(())
                 })
             },
@@ -957,15 +990,24 @@ mod tests {
             cancel,
             runner,
         );
-        slot.run_task("task-default".to_string(), "/tmp/project".to_string())
+        slot.run_task(
+            "task-default".to_string(),
+            31337,
+            "/tmp/project".to_string(),
+        )
+        .await
+        .expect("legacy dispatch should be accepted");
+        // The completion event establishes that the plain RunTask command was
+        // consumed and its captured generation reached the lifecycle runner.
+        tokio::time::timeout(Duration::from_secs(1), event_rx.recv())
             .await
-            .expect("legacy dispatch should be accepted");
-        let _ = tokio::time::timeout(Duration::from_secs(1), event_rx.recv()).await;
+            .expect("plain lifecycle completion event should arrive")
+            .expect("plain lifecycle event channel should stay open");
         let recorded = observed.lock().expect("observed mutex").clone();
         assert_eq!(
-            recorded, None,
-            "legacy run_task must thread `None` for resume metadata; \
-             the disabled/default-off path must not silently inject selections"
+            recorded,
+            Some(("task-default".to_string(), 31337, None)),
+            "plain command must preserve the admitted generation and no resume metadata"
         );
     }
     // ── Compaction-aware deferral tests ────────────────────────────────
@@ -991,6 +1033,7 @@ mod tests {
         let compacted2 = compacted.clone();
         let runner: LifecycleRunner = Arc::new(
             move |_task_id,
+                  _execution_generation,
                   _project_path,
                   _model_id,
                   app_state: SlotContext,
@@ -1016,7 +1059,7 @@ mod tests {
             cancel,
             runner,
         );
-        slot.run_task("task-ck".to_string(), "/tmp/project".to_string())
+        slot.run_task("task-ck".to_string(), 103, "/tmp/project".to_string())
             .await
             .expect("dispatch accepted");
         // Wait until the runner has entered the compaction guard.
@@ -1057,6 +1100,7 @@ mod tests {
         let compacted2 = compacted.clone();
         let runner: LifecycleRunner = Arc::new(
             move |_task_id,
+                  _execution_generation,
                   _project_path,
                   _model_id,
                   app_state: SlotContext,
@@ -1080,7 +1124,7 @@ mod tests {
             cancel,
             runner,
         );
-        slot.run_task("task-cd".to_string(), "/tmp/project".to_string())
+        slot.run_task("task-cd".to_string(), 104, "/tmp/project".to_string())
             .await
             .expect("dispatch accepted");
         tokio::time::timeout(Duration::from_secs(1), compacted.notified())
@@ -1123,6 +1167,7 @@ mod tests {
         let observed = pause_token_observed.clone();
         let runner: LifecycleRunner = Arc::new(
             move |_task_id,
+                  _execution_generation,
                   _project_path,
                   _model_id,
                   app_state: SlotContext,
@@ -1150,7 +1195,7 @@ mod tests {
             cancel,
             runner,
         );
-        slot.run_task("task-cp".to_string(), "/tmp/project".to_string())
+        slot.run_task("task-cp".to_string(), 105, "/tmp/project".to_string())
             .await
             .expect("dispatch accepted");
         tokio::time::timeout(Duration::from_secs(1), compacted.notified())
@@ -1180,6 +1225,7 @@ mod tests {
         // Runner waits for the kill token without entering compaction.
         let runner: LifecycleRunner = Arc::new(
             |_task_id,
+             _execution_generation,
              _project_path,
              _model_id,
              _app_state,
@@ -1200,7 +1246,7 @@ mod tests {
             cancel,
             runner,
         );
-        slot.run_task("task-nck".to_string(), "/tmp/project".to_string())
+        slot.run_task("task-nck".to_string(), 106, "/tmp/project".to_string())
             .await
             .expect("dispatch accepted");
         // No compaction active — kill must be applied immediately.

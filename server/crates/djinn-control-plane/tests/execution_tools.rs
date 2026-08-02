@@ -66,6 +66,7 @@ fn controlled_completion_slot_factory(
         let signal_tx = signal_tx.clone();
         let runner: djinn_agent::actors::slot::TestLifecycleRunner = Arc::new(
             move |task_id,
+                  _execution_generation,
                   _project_path,
                   _model_id,
                   app_state,
@@ -854,6 +855,7 @@ fn test_slot_factory(
         let signal_tx = signal_tx.clone();
         let runner: djinn_agent::actors::slot::TestLifecycleRunner = Arc::new(
             move |task_id,
+                  _execution_generation,
                   _project_path,
                   _model_id,
                   _app_state,

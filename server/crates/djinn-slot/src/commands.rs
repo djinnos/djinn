@@ -10,6 +10,7 @@ pub enum SlotCommand {
     /// Run a task lifecycle in this slot.
     RunTask {
         task_id: String,
+        execution_generation: i64,
         project_path: String,
         respond_to: oneshot::Sender<Result<(), SlotError>>,
     },
@@ -21,6 +22,7 @@ pub enum SlotCommand {
     /// callers (and tests) keep using the plain `RunTask` variant.
     RunTaskWithResume {
         task_id: String,
+        execution_generation: i64,
         project_path: String,
         resume_lifecycle_metadata: Option<serde_json::Value>,
         respond_to: oneshot::Sender<Result<(), SlotError>>,

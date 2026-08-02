@@ -19,6 +19,7 @@ type LifecycleFuture =
 pub type TestLifecycleRunner = Arc<
     dyn Fn(
             String,
+            i64,
             String,
             String,
             AgentContext,
@@ -68,6 +69,7 @@ impl SlotHandle {
         let agent_state = app_state.clone();
         let canonical_runner: djinn_slot::TestLifecycleRunner = Arc::new(
             move |task_id,
+                  execution_generation,
                   project_path,
                   model_id,
                   _slot_ctx,
@@ -76,6 +78,7 @@ impl SlotHandle {
                   resume_lifecycle_metadata| {
                 runner(
                     task_id,
+                    execution_generation,
                     project_path,
                     model_id,
                     agent_state.clone(),
@@ -105,9 +108,12 @@ impl SlotHandle {
     pub async fn run_task(
         &self,
         task_id: String,
+        execution_generation: i64,
         project_path: String,
     ) -> Result<(), djinn_slot::SlotError> {
-        self.inner.run_task(task_id, project_path).await
+        self.inner
+            .run_task(task_id, execution_generation, project_path)
+            .await
     }
     pub async fn kill(&self) -> Result<(), djinn_slot::SlotError> {
         self.inner.kill().await
