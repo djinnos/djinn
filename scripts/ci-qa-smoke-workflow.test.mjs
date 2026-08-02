@@ -226,7 +226,7 @@ test('qa-smoke consumes the routed output and is event-safe', () => {
   assert.doesNotMatch(condition, /github\.event_name\s*==\s*['"]push['"]/, 'qa-smoke must not run on push');
 });
 
-test('qa-smoke owns only a restore-only test cache and a disposable database', () => {
+test('qa-smoke owns only a restore-only test cache and a disposable host database', () => {
   const qa = parseJobs(readFileSync(WORKFLOW, 'utf8')).jobs.get('qa-smoke');
   assert.ok(qa, 'qa-smoke job must exist');
   const source = blockCode(qa);
@@ -234,12 +234,12 @@ test('qa-smoke owns only a restore-only test cache and a disposable database', (
   assert.match(source, /Swatinem\/rust-cache@v2/, 'qa-smoke must restore Rust build inputs');
   assert.match(source, /^ {10}shared-key:\s*server-test\s*$/m, 'qa-smoke must use the server-test cache family');
   assert.match(source, /^ {10}save-if:\s*false\s*$/m, 'qa-smoke must remain a restore-only cache consumer');
-  const postgres = jobService(qa, 'postgres');
-  assert.ok(postgres, 'qa-smoke must own a local postgres service');
-  assert.match(postgres, /^ {8}image:\s*public\.ecr\.aws\/docker\/library\/postgres:16\s*$/m,
-    'qa-smoke postgres service must use the intended Postgres image');
-  assert.match(postgres, /^ {10}-\s*5433:5432\s*$/m,
-    'qa-smoke postgres service must expose the isolated 5433 host port');
+  assert.equal(jobService(qa, 'postgres'), undefined,
+    'qa-smoke must not pull a registry-backed Postgres service before checkout');
+  assert.match(source, /^ {4}runs-on:\s*ubuntu-24\.04\s*$/m,
+    'qa-smoke must pin the runner image that provides PostgreSQL 16');
+  assert.match(source, /run:\s*\.\/scripts\/ci-start-postgres\.sh/,
+    'qa-smoke must start the runner-provided PostgreSQL 16 installation');
   assert.match(source, /^ {6}DJINN_TEST_DATABASE_URL:\s*postgres:\/\/postgres:postgres@127\.0\.0\.1:5433\/postgres\s*$/m,
     'clone ownership must use the disposable maintenance database');
   assert.match(source, /^ {6}DATABASE_URL:\s*postgres:\/\/postgres:postgres@127\.0\.0\.1:5433\/djinn_test_template\s*$/m,
