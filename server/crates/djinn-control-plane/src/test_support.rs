@@ -208,6 +208,12 @@ impl SlotPoolOps for StubSlotPool {
     async fn terminate_session(&self, _task_id: &str) -> std::result::Result<(), String> {
         Err("stub: SlotPoolOps::terminate_session not implemented".into())
     }
+    async fn reconcile_terminate(
+        &self,
+        _task_id: &str,
+    ) -> std::result::Result<crate::bridge::ReconcileTerminateSnapshot, String> {
+        Err("stub: SlotPoolOps::reconcile_terminate not implemented".into())
+    }
     async fn session_for_task(
         &self,
         _task_id: &str,

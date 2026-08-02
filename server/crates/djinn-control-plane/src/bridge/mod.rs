@@ -46,4 +46,4 @@ pub use self::memory_enrichment_bridge::{
     MemoryEnrichmentOps,
 };
 pub use self::runtime_bridge::{RuntimeDispatchError, RuntimeOps, TaskrunJobRef};
-pub use self::slot_pool_bridge::{ModelPoolStatus, PoolStatus, RunningTaskInfo, SlotPoolOps};
+pub use self::slot_pool_bridge::{ModelPoolStatus, PoolStatus, ReconcileTerminateExecution, ReconcileTerminateKind, ReconcileTerminateObservations, ReconcileTerminateSnapshot, RunningTaskInfo, SlotPoolOps};

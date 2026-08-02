@@ -636,6 +636,12 @@ pub mod stubs {
         async fn terminate_session(&self, _: &str) -> Result<(), String> {
             Err("slot pool not initialized".into())
         }
+        async fn reconcile_terminate(
+            &self,
+            _: &str,
+        ) -> Result<crate::bridge::ReconcileTerminateSnapshot, String> {
+            Err("slot pool reconciliation not initialized".into())
+        }
         async fn session_for_task(&self, _: &str) -> Result<Option<RunningTaskInfo>, String> {
             Err("slot pool not initialized".into())
         }

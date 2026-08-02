@@ -9,6 +9,7 @@
 use rmcp::{Json, handler::server::wrapper::Parameters, schemars, tool, tool_router};
 use serde::{Deserialize, Serialize};
 
+use crate::bridge::{ReconcileTerminateExecution, ReconcileTerminateKind, ReconcileTerminateObservations, ReconcileTerminateSnapshot};
 use crate::server::DjinnMcpServer;
 use djinn_db::{LivenessEvidenceSnapshot, LivenessRepository, SessionRepository, TaskRepository};
 
@@ -28,11 +29,134 @@ pub struct SessionForTaskParams {
     pub project: String,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionKillTaskKind {
+    GenuinelyAbsent,
+    Terminated,
+    DesyncReconciled,
+    TeardownFailed,
+    SettlementFailed,
+    ReconciliationIncomplete,
+    TaskNotFound,
+    ProjectNotFound,
+    PoolUnavailable,
+    PoolError,
+    AuditFailed,
+}
+
+impl From<ReconcileTerminateKind> for ExecutionKillTaskKind {
+    fn from(kind: ReconcileTerminateKind) -> Self {
+        match kind {
+            ReconcileTerminateKind::GenuinelyAbsent => Self::GenuinelyAbsent,
+            ReconcileTerminateKind::Terminated => Self::Terminated,
+            ReconcileTerminateKind::DesyncReconciled => Self::DesyncReconciled,
+            ReconcileTerminateKind::TeardownFailed => Self::TeardownFailed,
+            ReconcileTerminateKind::SettlementFailed => Self::SettlementFailed,
+            ReconcileTerminateKind::ReconciliationIncomplete => Self::ReconciliationIncomplete,
+        }
+    }
+}
+
+#[derive(Clone, Serialize, schemars::JsonSchema)]
+pub struct ExecutionKillTaskExecution {
+    pub session_id: String,
+    pub task_run_id: Option<String>,
+    pub teardown_owner: bool,
+    pub teardown_attempted: bool,
+    pub teardown_error: Option<String>,
+    pub settlement_attempted: bool,
+    pub settlement_error: Option<String>,
+}
+
+impl From<ReconcileTerminateExecution> for ExecutionKillTaskExecution {
+    fn from(execution: ReconcileTerminateExecution) -> Self {
+        Self {
+            session_id: execution.session_id,
+            task_run_id: execution.task_run_id,
+            teardown_owner: execution.teardown_owner,
+            teardown_attempted: execution.teardown_attempted,
+            teardown_error: execution.teardown_error,
+            settlement_attempted: execution.settlement_attempted,
+            settlement_error: execution.settlement_error,
+        }
+    }
+}
+
+#[derive(Clone, Serialize, schemars::JsonSchema)]
+pub struct ExecutionKillTaskObservations {
+    pub initial_non_terminal_ids: Vec<String>,
+    pub initial_mapping_slot_id: Option<usize>,
+    pub initial_pending_teardown: bool,
+    pub initial_compacting: bool,
+    pub fenced_generation: Option<i64>,
+    pub initial_capture_error: Option<String>,
+    pub final_non_terminal_ids: Vec<String>,
+    pub final_mapping_slot_id: Option<usize>,
+    pub final_pending_teardown: bool,
+    pub final_reread_error: Option<String>,
+    pub pool_cleanup_error: Option<String>,
+    pub completion_source: String,
+    pub underlying_kind: Option<ExecutionKillTaskKind>,
+}
+
+impl From<ReconcileTerminateObservations> for ExecutionKillTaskObservations {
+    fn from(observations: ReconcileTerminateObservations) -> Self {
+        Self {
+            initial_non_terminal_ids: observations.initial_non_terminal_ids,
+            initial_mapping_slot_id: observations.initial_mapping_slot_id,
+            initial_pending_teardown: observations.initial_pending_teardown,
+            initial_compacting: observations.initial_compacting,
+            fenced_generation: observations.fenced_generation,
+            initial_capture_error: observations.initial_capture_error,
+            final_non_terminal_ids: observations.final_non_terminal_ids,
+            final_mapping_slot_id: observations.final_mapping_slot_id,
+            final_pending_teardown: observations.final_pending_teardown,
+            final_reread_error: observations.final_reread_error,
+            pool_cleanup_error: observations.pool_cleanup_error,
+            completion_source: observations.completion_source,
+            underlying_kind: observations.underlying_kind.map(Into::into),
+        }
+    }
+}
+
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct ExecutionKillTaskResponse {
     pub ok: bool,
+    pub kind: ExecutionKillTaskKind,
     pub task_id: Option<String>,
+    pub executions: Vec<ExecutionKillTaskExecution>,
+    pub observations: Option<ExecutionKillTaskObservations>,
+    pub underlying_kind: Option<ExecutionKillTaskKind>,
     pub error: Option<String>,
+}
+
+fn response_from_snapshot(snapshot: ReconcileTerminateSnapshot) -> ExecutionKillTaskResponse {
+    ExecutionKillTaskResponse {
+        ok: snapshot.ok,
+        kind: snapshot.kind.into(),
+        task_id: Some(snapshot.task_id),
+        executions: snapshot.executions.into_iter().map(Into::into).collect(),
+        observations: Some(snapshot.observations.into()),
+        underlying_kind: None,
+        error: None,
+    }
+}
+
+fn unresolved_kill_response(
+    kind: ExecutionKillTaskKind,
+    task_id: Option<String>,
+    error: impl Into<String>,
+) -> Json<ExecutionKillTaskResponse> {
+    Json(ExecutionKillTaskResponse {
+        ok: false,
+        kind,
+        task_id,
+        executions: Vec::new(),
+        observations: None,
+        underlying_kind: None,
+        error: Some(error.into()),
+    })
 }
 
 #[derive(Serialize, schemars::JsonSchema)]
@@ -59,172 +183,94 @@ impl DjinnMcpServer {
         &self,
         Parameters(p): Parameters<ExecutionKillTaskParams>,
     ) -> Json<ExecutionKillTaskResponse> {
-        // ── Liveness pre-checks: terminal task or no active session → kill_noop ──
         if let Some(path) = &p.project
             && self.project_id_for_path(path).await.is_none()
         {
-            return Json(ExecutionKillTaskResponse {
-                ok: false,
-                task_id: None,
-                error: Some(format!("project not found: {path}")),
-            });
+            return unresolved_kill_response(
+                ExecutionKillTaskKind::ProjectNotFound,
+                None,
+                format!("project not found: {path}"),
+            );
         }
+
+        let task_repo = TaskRepository::new(self.state.db().clone(), self.state.event_bus());
+        let task = match task_repo.resolve(&p.task_id).await {
+            Ok(Some(task)) => task,
+            Ok(None) => {
+                return unresolved_kill_response(
+                    ExecutionKillTaskKind::TaskNotFound,
+                    None,
+                    format!("task not found: {}", p.task_id),
+                );
+            }
+            Err(error) => {
+                return unresolved_kill_response(ExecutionKillTaskKind::PoolError, None, error.to_string());
+            }
+        };
+        let canonical_task_id = task.id;
         let Some(pool) = self.state.pool().await else {
-            return Json(ExecutionKillTaskResponse {
-                ok: false,
-                task_id: None,
-                error: Some("slot pool actor not initialized".to_string()),
-            });
+            return unresolved_kill_response(
+                ExecutionKillTaskKind::PoolUnavailable,
+                Some(canonical_task_id),
+                "slot pool actor not initialized",
+            );
         };
 
-        // Check if the task is already terminal — killing a terminal task is a
-        // no-op that should record kill_noop evidence rather than claiming success.
-        let task_repo = TaskRepository::new(self.state.db().clone(), self.state.event_bus());
-        let session_repo = SessionRepository::new(self.state.db().clone(), self.state.event_bus());
-        let liveness_repo = LivenessRepository::new(self.state.db().clone());
-
-        let task = task_repo.get(&p.task_id).await.ok().flatten();
-        let task_is_terminal = task
-            .as_ref()
-            .is_some_and(|t| t.status == "closed" || t.status == "force_closed");
-
-        if task_is_terminal {
-            // Task is already terminal — no live work to free. Record task-scoped
-            // kill_noop evidence, retaining scalar ownership only when available.
-            let active_session = session_repo
-                .active_for_task(&p.task_id)
-                .await
-                .ok()
-                .flatten();
-            let any_session = if active_session.is_some() {
-                None // don't query again if we already have one
-            } else {
-                session_repo
-                    .list_for_task(&p.task_id)
-                    .await
-                    .ok()
-                    .and_then(|sessions| sessions.into_iter().next())
-            };
-            let evidence_session = active_session.as_ref().or(any_session.as_ref());
-            let snapshot = LivenessEvidenceSnapshot {
-                session_id: evidence_session.map(|session| session.id.clone()),
-                task_id: Some(p.task_id.clone()),
-                task_run_id: evidence_session.and_then(|session| session.task_run_id.clone()),
-                verdict: "live".to_owned(), // verdict is moot for terminal tasks
-                outcome_kind: Some("kill_noop".to_owned()),
-                outcome_reason: None,
-                evidence: serde_json::json!({
-                    "reason": "task_already_terminal",
-                    "task_status": task.as_ref().map(|t| t.status.as_str()).unwrap_or("unknown"),
-                    "kill_source": "execution_kill_task",
-                }),
-            };
-            let _ = liveness_repo.persist_evidence(&snapshot).await;
-            return Json(ExecutionKillTaskResponse {
-                ok: false,
-                task_id: Some(p.task_id),
-                error: Some("task is already terminal; no session to kill (kill_noop)".to_string()),
-            });
-        }
-
-        // Check if there is a DB-active session to kill. If no session exists,
-        // the kill would be a no-op — record kill_noop evidence.
-        // Pool errors are treated as "assume session exists" (fail-open) so
-        // we still attempt the kill rather than silently skipping it.
-        let active_session = session_repo
-            .active_for_task(&p.task_id)
-            .await
-            .ok()
-            .flatten();
-        let has_pool_session = pool.has_session(&p.task_id).await.unwrap_or(true);
-        if active_session.is_none() && !has_pool_session {
-            // No live work to free. This is task-scoped evidence unless a
-            // single historical session is available as its scalar owner.
-            let any_session = session_repo
-                .list_for_task(&p.task_id)
-                .await
-                .ok()
-                .and_then(|sessions| sessions.into_iter().next());
-            let snapshot = LivenessEvidenceSnapshot {
-                session_id: any_session.as_ref().map(|session| session.id.clone()),
-                task_id: Some(p.task_id.clone()),
-                task_run_id: any_session.and_then(|session| session.task_run_id),
-                verdict: "live".to_owned(),
-                outcome_kind: Some("kill_noop".to_owned()),
-                outcome_reason: None,
-                evidence: serde_json::json!({
-                    "reason": "no_active_session",
-                    "kill_source": "execution_kill_task",
-                }),
-            };
-            let _ = liveness_repo.persist_evidence(&snapshot).await;
-            return Json(ExecutionKillTaskResponse {
-                ok: false,
-                task_id: Some(p.task_id),
-                error: Some("no active session to kill (kill_noop)".to_string()),
-            });
-        }
-
-        if let Err(e) = pool.terminate_session(&p.task_id).await {
-            return Json(ExecutionKillTaskResponse {
-                ok: false,
-                task_id: Some(p.task_id),
-                error: Some(e.to_string()),
-            });
-        }
-
-        match pool.has_session(&p.task_id).await {
-            Ok(false) => {
-                // Terminate succeeded and session is gone — work was freed.
-                // Record dead_reclaimed evidence with the session/task_run that
-                // was reclaimed.
-                let snapshot = LivenessEvidenceSnapshot {
-                    session_id: active_session.as_ref().map(|s| s.id.clone()),
-                    task_id: Some(p.task_id.clone()),
-                    task_run_id: active_session.as_ref().and_then(|s| s.task_run_id.clone()),
-                    verdict: "dead".to_owned(),
-                    outcome_kind: Some("dead_reclaimed".to_owned()),
+        let snapshot = match pool.reconcile_terminate(&canonical_task_id).await {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                let evidence = LivenessEvidenceSnapshot {
+                    session_id: None,
+                    task_id: Some(canonical_task_id.clone()),
+                    task_run_id: None,
+                    verdict: "protocol_violation".to_owned(),
+                    outcome_kind: Some("reconciliation_incomplete".to_owned()),
                     outcome_reason: None,
-                    evidence: serde_json::json!({
-                        "reason": "explicit_kill",
-                        "kill_source": "execution_kill_task",
-                        "had_pool_session": has_pool_session,
-                    }),
+                    evidence: serde_json::json!({ "transport_error": error.to_string() }),
                 };
-                if let Err(e) = liveness_repo.persist_evidence(&snapshot).await {
-                    tracing::warn!(
-                        task_id = %p.task_id,
-                        error = %e,
-                        "execution_kill_task: failed to persist dead_reclaimed evidence"
-                    );
-                }
+                let audit_error = LivenessRepository::new(self.state.db().clone())
+                    .persist_evidence(&evidence)
+                    .await
+                    .err();
+                return unresolved_kill_response(
+                    if audit_error.is_some() {
+                        ExecutionKillTaskKind::AuditFailed
+                    } else {
+                        ExecutionKillTaskKind::PoolError
+                    },
+                    Some(canonical_task_id),
+                    audit_error.map_or_else(|| error.to_string(), |audit| audit.to_string()),
+                );
             }
-            Ok(true) => {
-                return Json(ExecutionKillTaskResponse {
-                    ok: false,
-                    task_id: Some(p.task_id),
-                    error: Some(
-                        "termination confirmation failed: task still has an active slot pool session"
-                            .to_string(),
-                    ),
-                });
-            }
-            Err(e) => {
-                return Json(ExecutionKillTaskResponse {
-                    ok: false,
-                    task_id: Some(p.task_id),
-                    error: Some(format!(
-                        "termination confirmation failed while checking active session: {e}"
-                    )),
-                });
-            }
-        }
+        };
 
-        Json(ExecutionKillTaskResponse {
-            ok: true,
-            task_id: Some(p.task_id),
-            error: None,
-        })
+        let scalar_execution = (snapshot.executions.len() == 1).then(|| &snapshot.executions[0]);
+        let outcome_kind = serde_json::to_value(snapshot.kind)
+            .expect("reconciliation kind serializes")
+            .as_str()
+            .expect("reconciliation kind is a string")
+            .to_owned();
+        let evidence = LivenessEvidenceSnapshot {
+            session_id: scalar_execution.map(|execution| execution.session_id.clone()),
+            task_id: Some(snapshot.task_id.clone()),
+            task_run_id: scalar_execution.and_then(|execution| execution.task_run_id.clone()),
+            verdict: if snapshot.ok { "dead" } else { "protocol_violation" }.to_owned(),
+            outcome_kind: Some(outcome_kind),
+            outcome_reason: None,
+            evidence: serde_json::to_value(&snapshot).expect("reconciliation snapshot serializes"),
+        };
+        let audit_error = LivenessRepository::new(self.state.db().clone())
+            .persist_evidence(&evidence)
+            .await
+            .err();
+        let mut response = response_from_snapshot(snapshot);
+        if let Some(error) = audit_error {
+            response.ok = false;
+            response.underlying_kind = Some(response.kind);
+            response.kind = ExecutionKillTaskKind::AuditFailed;
+            response.error = Some(error.to_string());
+        }
+        Json(response)
     }
 
     /// Get the session ID and worktree path for a running task.

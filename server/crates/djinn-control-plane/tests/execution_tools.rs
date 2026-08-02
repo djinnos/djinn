@@ -22,7 +22,7 @@ use djinn_agent::file_time::FileTime;
 use djinn_agent::lsp::LspManager;
 use djinn_agent::roles::RoleRegistry;
 use djinn_control_plane::bridge::{
-    ModelPoolStatus, PoolStatus, RunningTaskInfo, RuntimeOps, SlotPoolOps,
+    ModelPoolStatus, PoolStatus, ReconcileTerminateExecution, ReconcileTerminateKind, ReconcileTerminateObservations, ReconcileTerminateSnapshot, RunningTaskInfo, RuntimeOps, SlotPoolOps,
 };
 use djinn_control_plane::state::McpState;
 use djinn_control_plane::test_support::{
@@ -1019,6 +1019,15 @@ impl SlotPoolOps for RealSlotPoolBridge {
             .terminate_session(task_id)
             .await
             .map_err(|e| e.to_string())
+    }
+
+    async fn reconcile_terminate(
+        &self,
+        task_id: &str,
+    ) -> Result<ReconcileTerminateSnapshot, String> {
+        let snapshot = self.0.reconcile_terminate(task_id).await.map_err(|e| e.to_string())?;
+        let kind = |kind| match kind { djinn_slot::pool::ReconcileTerminateKind::GenuinelyAbsent => ReconcileTerminateKind::GenuinelyAbsent, djinn_slot::pool::ReconcileTerminateKind::Terminated => ReconcileTerminateKind::Terminated, djinn_slot::pool::ReconcileTerminateKind::DesyncReconciled => ReconcileTerminateKind::DesyncReconciled, djinn_slot::pool::ReconcileTerminateKind::TeardownFailed => ReconcileTerminateKind::TeardownFailed, djinn_slot::pool::ReconcileTerminateKind::SettlementFailed => ReconcileTerminateKind::SettlementFailed, djinn_slot::pool::ReconcileTerminateKind::ReconciliationIncomplete => ReconcileTerminateKind::ReconciliationIncomplete };
+        Ok(ReconcileTerminateSnapshot { ok: snapshot.ok, kind: kind(snapshot.kind), task_id: snapshot.task_id, executions: snapshot.executions.into_iter().map(|e| ReconcileTerminateExecution { session_id:e.session_id, task_run_id:e.task_run_id, teardown_owner:e.teardown_owner, teardown_attempted:e.teardown_attempted, teardown_error:e.teardown_error, settlement_attempted:e.settlement_attempted, settlement_error:e.settlement_error }).collect(), observations: ReconcileTerminateObservations { initial_non_terminal_ids:snapshot.observations.initial_non_terminal_ids, initial_mapping_slot_id:snapshot.observations.initial_mapping_slot_id, initial_pending_teardown:snapshot.observations.initial_pending_teardown, initial_compacting:snapshot.observations.initial_compacting, fenced_generation:snapshot.observations.fenced_generation, initial_capture_error:snapshot.observations.initial_capture_error, final_non_terminal_ids:snapshot.observations.final_non_terminal_ids, final_mapping_slot_id:snapshot.observations.final_mapping_slot_id, final_pending_teardown:snapshot.observations.final_pending_teardown, final_reread_error:snapshot.observations.final_reread_error, pool_cleanup_error:snapshot.observations.pool_cleanup_error, completion_source:snapshot.observations.completion_source, underlying_kind:snapshot.observations.underlying_kind.map(kind) } })
     }
 
     async fn session_for_task(&self, task_id: &str) -> Result<Option<RunningTaskInfo>, String> {
