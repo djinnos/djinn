@@ -1280,13 +1280,14 @@ impl SupervisorServices for DirectServices {
             cost_basis: Some(cost_basis),
         };
         let created = match (params.task_id.as_deref(), params.execution_generation) {
-            (Some(task_id), Some(execution_generation)) => repo
-                .create_task_execution_session(CreateTaskExecutionSessionParams {
+            (Some(task_id), Some(execution_generation)) => {
+                repo.create_task_execution_session(CreateTaskExecutionSessionParams {
                     task_id,
                     execution_generation,
                     session,
                 })
-                .await,
+                .await
+            }
             (_, None) => repo.create(session).await,
             (None, Some(_)) => {
                 return Err("task-execution session requires canonical task_id".to_string());
