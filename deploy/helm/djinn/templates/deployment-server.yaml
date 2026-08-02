@@ -1,5 +1,16 @@
 {{- $githubAppConfigAttempted := include "djinn.githubAppConfigAttempted" . -}}
 {{- $server := .Values.server -}}
+{{- $capacity := .Values.kueue.capacity -}}
+{{- $dedicatedNodePool := and (eq $capacity.source "nodepool-limits") $capacity.nodePool.dedicated (ne $capacity.nodePool.name "") -}}
+{{- $taskNodeSelector := deepCopy .Values.resources.taskrun.nodeSelector -}}
+{{- $taskTolerations := deepCopy .Values.resources.taskrun.tolerations -}}
+{{- if eq $capacity.source "nodepool-limits" -}}
+  {{- if not $capacity.nodePool.dedicated -}}{{- fail "kueue.capacity.source=nodepool-limits requires kueue.capacity.nodePool.dedicated=true" -}}{{- end -}}
+  {{- if empty $capacity.nodePool.name -}}{{- fail "kueue.capacity.source=nodepool-limits requires a non-empty kueue.capacity.nodePool.name" -}}{{- end -}}
+  {{- if and (hasKey $taskNodeSelector "karpenter.sh/nodepool") (ne (index $taskNodeSelector "karpenter.sh/nodepool") $capacity.nodePool.name) -}}{{- fail "kueue.capacity.nodePool.name must match resources.taskrun.nodeSelector.karpenter.sh/nodepool" -}}{{- end -}}
+  {{- $_ := set $taskNodeSelector "karpenter.sh/nodepool" $capacity.nodePool.name -}}
+  {{- $taskTolerations = append $taskTolerations (dict "key" "djinn.io/task-pool" "operator" "Equal" "value" $capacity.nodePool.name "effect" "NoSchedule") -}}
+{{- end -}}
 {{- $migrationOperatorSecret := default "" .Values.migration.designatedOperatorSecret -}}
 {{- if .Release.IsInstall -}}
   {{- $migrationOperatorSecret = required "migration.designatedOperatorSecret is required on fresh installs to bootstrap the caller-owned designated operator" .Values.migration.designatedOperatorSecret -}}
@@ -23,8 +34,8 @@ always renders, so both checks fire regardless of `--show-only`.
     {{- fail "kueue.armed=true with cgroupLauncher.mode=required requires cgroupWritable.taskRuns.enabled=true (required cgroup launcher requires runtimeClassName: djinn-cgroup-writable). The task-run renderer asserts this at djinn-k8s/src/job.rs:242 and panics the coordinator otherwise; arming Kueue on top of it wedges all dispatch. Enable cgroupWritable.taskRuns (and cgroupWritable.runtimeClass), or set cgroupLauncher.mode=disabled." -}}
   {{- end -}}
 {{- end -}}
-{{- if .Values.kueue.capacity.enabled -}}
-  {{- if or (empty .Values.kueue.capacity.nodeSelector.key) (empty .Values.kueue.capacity.nodeSelector.value) -}}
+{{- if $capacity.enabled -}}
+  {{- if and (eq $capacity.source "node-sum") (or (empty $capacity.nodeSelector.key) (empty $capacity.nodeSelector.value)) -}}
     {{- fail "kueue.capacity.enabled=true requires capacity.nodeSelector key and value; node identity may not depend on API list order" -}}
   {{- end -}}
   {{- if not .Values.kueue.enabled -}}
@@ -537,7 +548,23 @@ spec:
             - name: DJINN_CAPACITY_ENABLED
               value: {{ .Values.kueue.capacity.enabled | quote }}
             - name: DJINN_CAPACITY_QUEUE_NAME
-              value: {{ default (printf "%s-kueue" (include "djinn.fullname" .) | trunc 63 | trimSuffix "-") .Values.kueue.capacity.queueName | quote }}
+              value: {{ default (printf "%s-kueue" (include "djinn.fullname" .) | trunc 63 | trimSuffix "-") $capacity.queueName | quote }}
+            - name: DJINN_CAPACITY_SOURCE
+              value: {{ $capacity.source | quote }}
+            - name: DJINN_CAPACITY_STATIC_CPU
+              value: {{ $capacity.staticFallback.cpu | quote }}
+            - name: DJINN_CAPACITY_STATIC_MEMORY
+              value: {{ $capacity.staticFallback.memory | quote }}
+            - name: DJINN_CAPACITY_STATIC_PODS
+              value: {{ $capacity.staticFallback.pods | quote }}
+            {{- if $dedicatedNodePool }}
+            - name: DJINN_CAPACITY_NODEPOOL_NAME
+              value: {{ $capacity.nodePool.name | quote }}
+            - name: DJINN_CAPACITY_NODEPOOL_DEDICATED
+              value: "true"
+            - name: DJINN_CAPACITY_FLAVOR_SELECTOR
+              value: {{ dict "karpenter.sh/nodepool" $capacity.nodePool.name | toJson | quote }}
+            {{- end }}
             - name: DJINN_CAPACITY_NODE_SELECTOR_KEY
               value: {{ .Values.kueue.capacity.nodeSelector.key | quote }}
             - name: DJINN_CAPACITY_NODE_SELECTOR_VALUE
@@ -558,11 +585,11 @@ spec:
             # `with` blocks omit the env var entirely when the values are
             # empty defaults, leaving the controller on its built-in fallback
             # (no scheduling hints — matches pre-feature behavior).
-            {{- with .Values.resources.taskrun.nodeSelector }}
+            {{- with $taskNodeSelector }}
             - name: DJINN_K8S_NODE_SELECTOR
               value: {{ toJson . | quote }}
             {{- end }}
-            {{- with .Values.resources.taskrun.tolerations }}
+            {{- with $taskTolerations }}
             - name: DJINN_K8S_TOLERATIONS
               value: {{ toJson . | quote }}
             {{- end }}
