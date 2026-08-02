@@ -9,6 +9,15 @@ use std::time::{Duration, Instant};
 
 type CapturedJobs = Arc<Mutex<Vec<(String, Job)>>>;
 
+struct ObservedAttempt {
+    attempt_id: String,
+    deadline_at: String,
+    job_name: String,
+    revision: String,
+}
+
+type ObservedAttempts = Arc<Mutex<Vec<ObservedAttempt>>>;
+
 struct RecordingDispatcher {
     captured: CapturedJobs,
     count: Arc<AtomicUsize>,
@@ -47,6 +56,68 @@ impl WarmJobDispatcher for RecordingDispatcher {
     }
 }
 
+/// Dispatcher seam which reads the durable attempt *during* the POST call.
+/// This makes the order assertion independent of scheduling the terminal
+/// watcher: dispatch cannot reach this mock until the producer has committed
+/// the row and projected its exact identity into the manifest.
+struct AttemptInspectingDispatcher {
+    db: Database,
+    result: Result<String, String>,
+    seen: ObservedAttempts,
+}
+
+impl AttemptInspectingDispatcher {
+    fn new(db: Database, result: Result<String, String>) -> (Self, ObservedAttempts) {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        (
+            Self {
+                db,
+                result,
+                seen: seen.clone(),
+            },
+            seen,
+        )
+    }
+}
+
+#[async_trait]
+impl WarmJobDispatcher for AttemptInspectingDispatcher {
+    async fn dispatch(&self, _namespace: &str, job: Job) -> Result<String, String> {
+        let container = &job
+            .spec
+            .as_ref()
+            .expect("warm Job spec")
+            .template
+            .spec
+            .as_ref()
+            .expect("warm Pod spec")
+            .containers[0];
+        let env = container.env.as_ref().expect("warm Job env");
+        let env_value = |key| {
+            env.iter()
+                .find(|entry| entry.name == key)
+                .and_then(|entry| entry.value.clone())
+                .unwrap_or_else(|| panic!("warm Job missing {key}"))
+        };
+        let attempt_id = env_value(crate::warm_job::ENV_WARM_ATTEMPT_ID);
+        let deadline_at = env_value(crate::warm_job::ENV_WARM_ATTEMPT_DEADLINE_AT);
+        let row = WarmGraphAttemptRepository::new(self.db.clone())
+            .get_attempt(&attempt_id)
+            .await
+            .expect("read attempt while dispatching")
+            .expect("attempt is committed before dispatcher POST");
+        assert_eq!(row.status, WarmGraphAttemptStatus::Running);
+        assert_eq!(row.deadline_at, deadline_at);
+        self.seen.lock().await.push(ObservedAttempt {
+            attempt_id,
+            deadline_at,
+            job_name: job.metadata.name.clone().expect("deterministic Job name"),
+            revision: row.revision,
+        });
+        self.result.clone()
+    }
+}
+
 /// A watcher that blocks on a [`Notify`] until the test decides the
 /// watched Job has completed. Uses a permit-bearing [`Notify`] so a
 /// `notify_one` issued before the watcher has started awaiting still
@@ -61,6 +132,20 @@ impl WarmJobWatcher for ControlledWatcher {
     async fn wait_terminal(&self, _namespace: &str, _job_name: &str) -> WarmTerminalOutcome {
         self.release.notified().await;
         WarmTerminalOutcome::Succeeded
+    }
+}
+
+/// Failure counterpart to [`ControlledWatcher`], used to make a worker/watcher
+/// terminal race deterministic without a Kubernetes API server.
+struct ControlledFailureWatcher {
+    release: Arc<Notify>,
+}
+
+#[async_trait]
+impl WarmJobWatcher for ControlledFailureWatcher {
+    async fn wait_terminal(&self, _namespace: &str, _job_name: &str) -> WarmTerminalOutcome {
+        self.release.notified().await;
+        WarmTerminalOutcome::Failed
     }
 }
 
@@ -1093,6 +1178,37 @@ impl WarmAdmission for AdmissionRecording {
     }
 }
 
+/// Deletes the project after authorization and before `start_attempt`, making
+/// the attempt repository's existing foreign-key write fail without raw SQL.
+struct ProjectDeletingAdmission {
+    db: Database,
+    project_id: String,
+}
+
+#[async_trait]
+impl WarmAdmission for ProjectDeletingAdmission {
+    async fn admit(
+        &self,
+        _request: WarmAdmissionRequest,
+    ) -> Result<WarmAdmissionPermit, WarmAdmissionError> {
+        Ok(WarmAdmissionPermit::new())
+    }
+
+    async fn transition(
+        &self,
+        _permit: &WarmAdmissionPermit,
+        transition: WarmAdmissionTransition,
+    ) -> Result<(), WarmAdmissionError> {
+        if transition == WarmAdmissionTransition::CreateStarted {
+            ProjectRepository::new(self.db.clone(), EventBus::noop())
+                .delete(&self.project_id)
+                .await
+                .expect("delete project before durable attempt insert");
+        }
+        Ok(())
+    }
+}
+
 pub(super) struct LifecycleRecordingDispatcher {
     pub(super) events: Arc<Mutex<Vec<String>>>,
     pub(super) result: Result<String, String>,
@@ -1292,6 +1408,166 @@ async fn no_admission_bypasses_admission_and_posts_once() {
         *events.lock().await,
         vec!["post"],
         "Off mode must bypass admission and dispatch exactly one warm Job"
+    );
+}
+
+#[tokio::test]
+async fn durable_attempt_is_committed_before_post_with_its_exact_manifest_identity() {
+    let db = Database::open_in_memory().expect("in-memory db");
+    let project_id = seed_project_with_ready_image(&db, "proj-attempt-before-post").await;
+    let (dispatcher, seen) = AttemptInspectingDispatcher::new(db.clone(), Ok("warm-posted".into()));
+    let warmer = K8sGraphWarmer::with_dispatcher(
+        test_config(),
+        db,
+        Arc::new(dispatcher),
+        Arc::new(NoopJobWatcher),
+    );
+
+    warmer.trigger(&project_id).await;
+
+    let seen = seen.lock().await;
+    assert_eq!(seen.len(), 1, "one authorized warm reaches the POST seam");
+    let observed = &seen[0];
+    assert!(!observed.attempt_id.is_empty());
+    assert_eq!(
+        observed.revision, "unknown",
+        "the single unreadable mirror head is retained"
+    );
+    assert_eq!(
+        observed.job_name,
+        crate::warm_job::warm_job_name(&project_id, &observed.revision),
+        "stamping an attempt must not rename the deterministic Job"
+    );
+    time::OffsetDateTime::parse(
+        &observed.deadline_at,
+        &time::format_description::well_known::Rfc3339,
+    )
+    .expect("attempt deadline projected as RFC3339");
+}
+
+#[tokio::test]
+async fn attempt_insert_failure_is_fail_closed_before_dispatch() {
+    let db = Database::open_in_memory().expect("in-memory db");
+    let project_id = seed_project_with_ready_image(&db, "proj-attempt-insert-failure").await;
+    let (dispatcher, _captured, calls) = RecordingDispatcher::new("must-not-post");
+    let warmer = K8sGraphWarmer::with_dispatcher(
+        test_config(),
+        db.clone(),
+        Arc::new(dispatcher),
+        Arc::new(NoopJobWatcher),
+    )
+    .with_warm_admission(Arc::new(ProjectDeletingAdmission {
+        db,
+        project_id: project_id.clone(),
+    }));
+
+    warmer.trigger(&project_id).await;
+
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "a missing durable-attempt write suppresses the Kubernetes POST"
+    );
+}
+
+#[tokio::test]
+async fn definitive_create_failure_terminalizes_only_its_attempt_but_ambiguous_does_not() {
+    for (error, expected_status) in [
+        (
+            "Forbidden: status code 403",
+            WarmGraphAttemptStatus::DispatchFailed,
+        ),
+        (
+            "connection reset after POST",
+            WarmGraphAttemptStatus::Running,
+        ),
+    ] {
+        let db = Database::open_in_memory().expect("in-memory db");
+        let project_id = seed_project_with_ready_image(&db, "proj-attempt-create-outcome").await;
+        let (dispatcher, seen) =
+            AttemptInspectingDispatcher::new(db.clone(), Err(error.to_string()));
+        let warmer = K8sGraphWarmer::with_dispatcher(
+            test_config(),
+            db.clone(),
+            Arc::new(dispatcher),
+            Arc::new(NoopJobWatcher),
+        );
+
+        warmer.trigger(&project_id).await;
+
+        let seen = seen.lock().await;
+        assert_eq!(seen.len(), 1, "the POST observes its committed attempt");
+        let attempt_id = seen[0].attempt_id.clone();
+        drop(seen);
+        let row = WarmGraphAttemptRepository::new(db)
+            .get_attempt(&attempt_id)
+            .await
+            .expect("read attempted dispatch")
+            .expect("attempt row survives dispatcher error");
+        assert_eq!(row.status, expected_status, "{error}");
+    }
+}
+
+#[tokio::test]
+async fn watcher_failure_cas_cannot_overwrite_worker_terminal_winner() {
+    let db = Database::open_in_memory().expect("in-memory db");
+    let project_id = seed_project_with_ready_image(&db, "proj-attempt-terminal-race").await;
+    let release = Arc::new(Notify::new());
+    let (dispatcher, seen) = AttemptInspectingDispatcher::new(db.clone(), Ok("warm-posted".into()));
+    let warmer = K8sGraphWarmer::with_dispatcher(
+        test_config(),
+        db.clone(),
+        Arc::new(dispatcher),
+        Arc::new(ControlledFailureWatcher {
+            release: release.clone(),
+        }),
+    );
+
+    warmer.trigger(&project_id).await;
+    let attempt_id = seen.lock().await[0].attempt_id.clone();
+    let attempts = WarmGraphAttemptRepository::new(db.clone());
+    assert!(
+        attempts
+            .finish_attempt_if_running(
+                &attempt_id,
+                WarmGraphAttemptStatus::PublishedComplete,
+                Some("worker published before watcher observed terminal Job"),
+            )
+            .await
+            .expect("worker terminal CAS")
+    );
+
+    release.notify_one();
+    for _ in 0..20 {
+        if !warmer
+            .dispatch
+            .in_flight
+            .lock()
+            .await
+            .contains_key(&project_id)
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert!(
+        !warmer
+            .dispatch
+            .in_flight
+            .lock()
+            .await
+            .contains_key(&project_id),
+        "released failure watcher completed its terminal CAS"
+    );
+    let row = attempts
+        .get_attempt(&attempt_id)
+        .await
+        .expect("read raced attempt")
+        .expect("attempt remains");
+    assert_eq!(
+        row.status,
+        WarmGraphAttemptStatus::PublishedComplete,
+        "watcher failure is a running-only CAS and cannot overwrite worker publication"
     );
 }
 
