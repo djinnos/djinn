@@ -360,7 +360,7 @@ impl SlotPool {
                 .await
                 .map_err(|error| PoolError::ExecutionGenerationAllocation {
                     task_id: task_id.to_string(),
-                    source: error.to_string(),
+                    details: error.to_string(),
                 })?;
         // Elastic: there is no fixed per-model ceiling. Admission is gated
         // per-user by the coordinator (each user's per-model cap); if that gate

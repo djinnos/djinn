@@ -243,6 +243,7 @@ fn test_slot_factory(
         let signal_tx = signal_tx.clone();
         let runner: super::super::actor::TestLifecycleRunner = Arc::new(
             move |task_id,
+                  _execution_generation,
                   _project_path,
                   _model_id,
                   _app_state,
@@ -281,6 +282,7 @@ fn blocking_cancel_slot_factory(
         let release_after_cancel = release_after_cancel.clone();
         let runner: super::super::actor::TestLifecycleRunner = Arc::new(
             move |task_id,
+                  _execution_generation,
                   _project_path,
                   _model_id,
                   _app_state,
@@ -2167,6 +2169,7 @@ fn compaction_capturing_slot_factory(
         let signal_tx = signal_tx.clone();
         let runner: super::super::actor::TestLifecycleRunner = Arc::new(
             move |task_id,
+                  _execution_generation,
                   _project_path,
                   _model_id,
                   _app_state,
