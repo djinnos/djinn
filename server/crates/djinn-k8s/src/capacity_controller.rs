@@ -29,6 +29,7 @@ pub const BINDING_RESOURCE_ANNOTATION: &str = "djinn.io/binding-resource";
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NodeObservation {
     pub name: String,
+    pub labels: BTreeMap<String, String>,
     pub selector_matches: bool,
     pub ready: bool,
     pub unschedulable: bool,
@@ -408,6 +409,7 @@ pub fn observe_node(node: &Node, selector_key: &str, selector_value: &str) -> No
         .and_then(|status| status.allocatable.as_ref());
     NodeObservation {
         name: node.metadata.name.clone().unwrap_or_default(),
+        labels: node.metadata.labels.clone().unwrap_or_default(),
         selector_matches: node
             .metadata
             .labels
@@ -617,6 +619,8 @@ pub struct CapacityControllerConfig {
     pub fail_safe: FailSafeCapacity,
     pub expected_protected_pods: usize,
     pub static_fallback: ResourceVector,
+    /// JSON selector rendered by Helm for explicit flavor ownership.
+    pub flavor_selector: Option<BTreeMap<String, String>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -654,6 +658,11 @@ impl CapacityControllerConfig {
             Some("node-sum") => CapacitySource::NodeSum,
             _ => CapacitySource::Invalid,
         };
+        let flavor_selector = match std::env::var("DJINN_CAPACITY_FLAVOR_SELECTOR") {
+            Ok(value) => Some(serde_json::from_str(&value).ok()?),
+            Err(std::env::VarError::NotPresent) => None,
+            Err(_) => return None,
+        };
         let build_job = controller_build_job();
         Some(Self {
             source,
@@ -679,6 +688,7 @@ impl CapacityControllerConfig {
                 .parse()
                 .ok()?,
             static_fallback,
+            flavor_selector,
         })
     }
 }
@@ -789,14 +799,15 @@ pub async fn run_capacity_controller(
     let mut tick = tokio::time::interval(Duration::from_secs(30));
     loop {
         tick.tick().await;
-        // This explicit branch is intentionally before all Node/Pod APIs: a
-        // served Karpenter endpoint can never alter static source behavior.
+        // The queue identity is the only universally permitted read.  Source
+        // routing below is explicit and never discovers Karpenter APIs.
+        let queue = queues
+            .get(&config.queue_name)
+            .await
+            .ok()
+            .and_then(|queue| observe_queue(queue, &config.queue_name));
+        // This branch is before all Node/Pod APIs.
         if config.source != CapacitySource::NodeSum {
-            let queue = queues
-                .get(&config.queue_name)
-                .await
-                .ok()
-                .and_then(|queue| observe_queue(queue, &config.queue_name));
             let _ = snapshots.send(CapacityVector {
                 binding: BindingQuota::Pods(config.fail_safe.pods),
                 compile_slots: config.fail_safe.compile_slots,
@@ -851,10 +862,7 @@ pub async fn run_capacity_controller(
                 return None;
             }
             let protected = protected_requests_on_nodes(&protected.items, &nodes.names).ok()?;
-            let observation = observe_queue(
-                queues.get(&config.queue_name).await.ok()?,
-                &config.queue_name,
-            )?;
+            let observation = queue.clone()?;
             let podset_cost =
                 podset_cost_from_pod_spec(rendered_pod_spec(&config.build_job)?).ok()?;
             let ResourceVectorOutcome::Derived(vector) =
@@ -884,14 +892,43 @@ pub async fn run_capacity_controller(
                 memory: vector.raw.memory,
                 pods: vector.admitted_podsets,
             };
-            let targets = observation
+            let selector = config.flavor_selector.clone().unwrap_or_else(|| {
+                BTreeMap::from([(
+                    config.node_selector_key.clone(),
+                    config.node_selector_value.clone(),
+                )])
+            });
+            let owned: Vec<_> = observation
                 .flavors
                 .iter()
-                .map(|flavor| FlavorQuotaTarget {
+                .map(|flavor| OwnedFlavor {
                     flavor_name: flavor.name.clone(),
-                    vector: target_vector,
+                    selector: Some(selector.clone()),
+                    static_fallback: config.static_fallback,
                 })
-                .collect::<Vec<_>>();
+                .collect();
+            let objects: Vec<_> = node_observations
+                .iter()
+                .filter(|node| {
+                    node.selector_matches && node.ready && !node.unschedulable && !node.terminating
+                })
+                .map(|node| CapacityObjectObservation {
+                    effective_labels: node.labels.clone(),
+                    vector: ResourceVector {
+                        cpu: node.allocatable_cpu?,
+                        memory: node.allocatable_memory?,
+                        pods: node.allocatable_pods?,
+                    },
+                })
+                .collect::<Option<Vec<_>>>()?;
+            let targets = match derive_flavor_ownership(&owned, &objects) {
+                Ok(ownership) if ownership.targets.len() == 1 => vec![FlavorQuotaTarget {
+                    flavor_name: ownership.targets[0].flavor_name.clone(),
+                    vector: target_vector,
+                }],
+                Ok(ownership) => ownership.targets,
+                Err(_) => return None,
+            };
             Some((
                 observation,
                 targets,
@@ -908,6 +945,29 @@ pub async fn run_capacity_controller(
                 binding: BindingQuota::Pods(config.fail_safe.pods),
                 compile_slots: config.fail_safe.compile_slots,
             });
+            if let Some(queue) = queue {
+                let targets = queue
+                    .flavors
+                    .iter()
+                    .map(|flavor| FlavorQuotaTarget {
+                        flavor_name: flavor.name.clone(),
+                        vector: config.static_fallback,
+                    })
+                    .collect::<Vec<_>>();
+                if let FlavorActuationDecision::Patch { patch } =
+                    flavor_vector_patch_decision(&queue, &config.queue_name, &targets)
+                {
+                    let _ = queues
+                        .patch(
+                            &config.queue_name,
+                            &PatchParams::default(),
+                            &Patch::Json::<()>(
+                                serde_json::from_value(patch).expect("valid internal JSON patch"),
+                            ),
+                        )
+                        .await;
+                }
+            }
             continue;
         };
         let _ = snapshots.send(snapshot);
@@ -1614,6 +1674,7 @@ mod tests {
                 fail_safe: safe(),
                 expected_protected_pods: 5,
                 static_fallback: resources(12_000, 48 * 1024 * 1024 * 1024, 3),
+                flavor_selector: None,
             };
             let (tx, _rx) = watch::channel(CapacityVector {
                 binding: BindingQuota::Pods(3),
@@ -1641,6 +1702,80 @@ mod tests {
                 json!({"op":"test", "path":"/metadata/resourceVersion", "value":"42"})
             );
             assert_eq!(patch.as_array().unwrap().len(), 4);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn capacity_source_selection() {
+        use crate::runtime_fixture::capacity_controller_cluster;
+
+        for source in [CapacitySource::Static, CapacitySource::NodeSum] {
+            let (client, recorder) = capacity_controller_cluster("default", "pods");
+            let config = CapacityControllerConfig {
+                source,
+                queue_name: "djinn-kueue".into(),
+                node_selector_key: "kubernetes.io/hostname".into(),
+                node_selector_value: "worker-1".into(),
+                idle_cost: CpuMillicores::new(750).unwrap(),
+                compile_cost: CpuMillicores::new(2_800).unwrap(),
+                headroom: ResourceVector::ZERO,
+                build_job: controller_build_job(),
+                fail_safe: safe(),
+                expected_protected_pods: 5,
+                static_fallback: resources(9_000, 8_192, 9),
+                flavor_selector: None,
+            };
+            let (tx, _) = watch::channel(CapacityVector {
+                binding: BindingQuota::Pods(3),
+                compile_slots: 2,
+            });
+            let task = tokio::spawn(run_capacity_controller(
+                client,
+                config,
+                Arc::new(|| true),
+                tx,
+            ));
+            for _ in 0..8 {
+                tokio::time::advance(Duration::from_secs(30)).await;
+                tokio::task::yield_now().await;
+                if !recorder.mutations().is_empty() {
+                    break;
+                }
+            }
+            task.abort();
+            let requests = recorder.all();
+            let paths: Vec<_> = requests
+                .iter()
+                .map(|request| (request.method.as_str(), request.path.as_str()))
+                .collect();
+            assert!(
+                paths.iter().all(|(_, path)| !path.contains("karpenter")),
+                "no CRD presence probe: {paths:?}"
+            );
+            if source == CapacitySource::Static {
+                assert_eq!(
+                    paths,
+                    vec![
+                        (
+                            "GET",
+                            "/apis/kueue.x-k8s.io/v1beta1/clusterqueues/djinn-kueue"
+                        ),
+                        (
+                            "PATCH",
+                            "/apis/kueue.x-k8s.io/v1beta1/clusterqueues/djinn-kueue"
+                        ),
+                    ]
+                );
+                let patch: Value = serde_json::from_str(&recorder.mutations()[0].body).unwrap();
+                assert_eq!(patch[0]["path"], "/metadata/resourceVersion");
+                assert_eq!(patch[1]["value"], "9000m");
+                assert_eq!(patch[2]["value"], "8192");
+                assert_eq!(patch[3]["value"], "9");
+            } else {
+                assert!(paths.iter().any(|entry| *entry == ("GET", "/api/v1/nodes")));
+                assert!(paths.iter().any(|entry| *entry == ("GET", "/api/v1/pods")));
+                assert_eq!(recorder.mutations().len(), 1);
+            }
         }
     }
 
@@ -1711,6 +1846,7 @@ mod tests {
     fn quota_controller_node_selection_requires_one_stable_identity() {
         let node = |name: &str, matches| NodeObservation {
             name: name.into(),
+            labels: BTreeMap::new(),
             selector_matches: matches,
             ready: true,
             unschedulable: false,
@@ -1855,6 +1991,7 @@ mod tests {
             fail_safe: safe(),
             expected_protected_pods: 5,
             static_fallback: resources(12_000, 48 * 1024 * 1024 * 1024, 3),
+            flavor_selector: None,
         };
         let (tx, mut rx) = watch::channel(CapacityVector {
             binding: BindingQuota::Pods(99),
@@ -1901,6 +2038,7 @@ mod tests {
                 fail_safe: safe(),
                 expected_protected_pods: 5,
                 static_fallback: resources(12_000, 48 * 1024 * 1024 * 1024, 3),
+                flavor_selector: None,
             };
             let (tx, mut rx) = watch::channel(CapacityVector {
                 binding: BindingQuota::Pods(99),
@@ -1915,7 +2053,16 @@ mod tests {
             tokio::task::yield_now().await;
             rx.changed().await.unwrap();
             assert_eq!(rx.borrow_and_update().compile_slots, 2);
-            assert!(recorder.mutations().is_empty());
+            let mutations = recorder.mutations();
+            assert_eq!(
+                mutations.len(),
+                1,
+                "incomplete node-sum restores static capacity"
+            );
+            let patch: Value = serde_json::from_str(&mutations[0].body).unwrap();
+            assert_eq!(patch[0]["path"], "/metadata/resourceVersion");
+            assert_eq!(patch[1]["value"], "12000m");
+            assert_eq!(patch[3]["value"], "3");
             task.abort();
         }
     }
