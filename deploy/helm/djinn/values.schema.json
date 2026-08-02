@@ -48,13 +48,32 @@
     "kueue": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["enabled", "buildPods", "bindingResource", "armed", "namespaceLabelledExternally"],
+      "required": ["enabled", "buildPods", "bindingResource", "armed", "namespaceLabelledExternally", "capacity"],
       "properties": {
         "enabled": { "type": "boolean" },
         "buildPods": { "type": "integer", "minimum": 1 },
         "bindingResource": { "type": "string", "enum": ["pods", "cpu"] },
         "armed": { "type": "boolean" },
-        "namespaceLabelledExternally": { "type": "boolean" }
+        "namespaceLabelledExternally": { "type": "boolean" },
+        "capacity": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["enabled", "queueName", "nodeSelector", "idleCpu", "compileCpu", "failSafePods", "failSafeCompileSlots"],
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "queueName": { "type": "string" },
+            "nodeSelector": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["key", "value"],
+              "properties": { "key": { "type": "string" }, "value": { "type": "string" } }
+            },
+            "idleCpu": { "type": "string", "pattern": "^[1-9][0-9]*m$" },
+            "compileCpu": { "type": "string", "pattern": "^[1-9][0-9]*m$" },
+            "failSafePods": { "type": "integer", "minimum": 1 },
+            "failSafeCompileSlots": { "type": "integer", "minimum": 1 }
+          }
+        }
       }
     },
     "logCollector": {

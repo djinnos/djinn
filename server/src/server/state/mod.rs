@@ -2066,6 +2066,61 @@ impl AppState {
     pub async fn become_leader(&self) {
         tracing::info!("become_leader: starting active coordinator subsystems");
 
+        if let Some(capacity_config) =
+            djinn_k8s::capacity_controller::CapacityControllerConfig::from_env()
+        {
+            match djinn_k8s::try_default_client().await {
+                Ok(client) => {
+                    let launcher = KubernetesConfig::from_env().cgroup_launcher_mode;
+                    let authority = InvocationLeaseAuthorityRepository::new(self.db().clone())
+                        .read()
+                        .await
+                        .map(|row| row.map(|r| r.mode))
+                        .map_err(|_| ());
+                    let launcher_required = matches!(
+                        djinn_coordinator::build_lease::compile_bound_precondition(
+                            Some(launcher),
+                            authority
+                        ),
+                        djinn_coordinator::build_lease::CompileBoundPrecondition::Armed
+                    );
+                    let initial = djinn_k8s::capacity_damping::CapacityVector {
+                        binding: djinn_k8s::capacity_damping::BindingQuota::Pods(
+                            capacity_config.fail_safe.pods,
+                        ),
+                        compile_slots: capacity_config.fail_safe.compile_slots,
+                    };
+                    let (snapshot_tx, mut snapshot_rx) = tokio::sync::watch::channel(initial);
+                    let lease = self.inner.build_lease.clone();
+                    let live_precondition_lease = self.inner.build_lease.clone();
+                    let compile_bound_armed: Arc<dyn Fn() -> bool + Send + Sync> =
+                        Arc::new(move || {
+                            launcher_required && live_precondition_lease.dispatch_enforcing()
+                        });
+                    tokio::spawn(async move {
+                        while snapshot_rx.changed().await.is_ok() {
+                            let slots = snapshot_rx.borrow_and_update().compile_slots;
+                            lease.adopt_capacity_snapshot(
+                                djinn_coordinator::build_lease::DampedCapacitySnapshot::Capacity { compile_slots: slots }
+                            ).await;
+                        }
+                        let _ = lease.adopt_capacity_snapshot(
+                            djinn_coordinator::build_lease::DampedCapacitySnapshot::Conservative { fail_safe_compile_slots: initial.compile_slots }
+                        ).await;
+                    });
+                    tokio::spawn(djinn_k8s::capacity_controller::run_capacity_controller(
+                        client,
+                        capacity_config,
+                        compile_bound_armed,
+                        snapshot_tx,
+                    ));
+                }
+                Err(error) => {
+                    tracing::error!(%error, "capacity controller: Kubernetes client unavailable; controller remains fail-safe")
+                }
+            }
+        }
+
         // Observe-only disk dimension (proposal nquz). Leader-only because it
         // writes the shared run-dir ledger and inventories the shared cache
         // PVC. It never mutates the volume and never changes a grant.

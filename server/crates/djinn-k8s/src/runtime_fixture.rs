@@ -48,6 +48,10 @@ pub struct RecordedRequest {
 pub struct RecordedApiserver(Arc<Mutex<Vec<RecordedRequest>>>);
 
 impl RecordedApiserver {
+    #[must_use]
+    pub fn new() -> Self {
+        Self(Arc::new(Mutex::new(Vec::new())))
+    }
     /// Every request, in issue order.
     #[must_use]
     pub fn all(&self) -> Vec<RecordedRequest> {
@@ -81,6 +85,12 @@ impl RecordedApiserver {
     }
 }
 
+impl Default for RecordedApiserver {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// A runtime over an apiserver that holds **no** task-run Jobs and **no** Pods.
 ///
 /// Reads are answered with genuinely empty typed lists, so
@@ -105,7 +115,7 @@ pub fn empty_task_run_cluster(namespace: &str) -> (Arc<KubernetesRuntime>, Recor
 }
 
 /// Build a client whose every request lands in `recorder`.
-fn recording_client(recorder: &RecordedApiserver, namespace: &str) -> kube::Client {
+pub fn recording_client(recorder: &RecordedApiserver, namespace: &str) -> kube::Client {
     use http::Response;
     use http_body_util::BodyExt as _;
     use kube::client::Body;
@@ -193,4 +203,97 @@ fn recording_client(recorder: &RecordedApiserver, namespace: &str) -> kube::Clie
         }),
         namespace.to_owned(),
     )
+}
+
+/// Scripted capacity-controller cluster: one 12-core Node, a complete set of
+/// protected Pods totalling 4200m, and an owned ClusterQueue.
+#[must_use]
+pub fn capacity_controller_cluster(
+    namespace: &str,
+    binding_resource: &str,
+) -> (kube::Client, RecordedApiserver) {
+    capacity_controller_cluster_with_pods(namespace, binding_resource, CapacityPods::Complete)
+}
+
+#[derive(Clone, Copy)]
+pub enum CapacityPods {
+    Complete,
+    Empty,
+    ReadFailure,
+}
+
+#[must_use]
+pub fn capacity_controller_cluster_with_pods(
+    namespace: &str,
+    binding_resource: &str,
+    pod_mode: CapacityPods,
+) -> (kube::Client, RecordedApiserver) {
+    use http::Response;
+    use http_body_util::BodyExt as _;
+    use kube::client::Body;
+    use tower::service_fn;
+
+    let recorder = RecordedApiserver::new();
+    let captured = recorder.clone();
+    let binding = binding_resource.to_owned();
+    let client = kube::Client::new(
+        service_fn(move |request: http::Request<Body>| {
+            let captured = captured.clone();
+            let binding = binding.clone();
+            async move {
+                let method = request.method().to_string();
+                let path = request.uri().path().to_string();
+                let uri_parameters = request
+                    .uri()
+                    .path_and_query()
+                    .and_then(|value| value.as_str().split_once('?').map(|(_, tail)| tail))
+                    .unwrap_or_default()
+                    .to_string();
+                let body = request.into_body().collect().await.unwrap().to_bytes();
+                captured.0.lock().unwrap().push(RecordedRequest {
+                    method: method.clone(),
+                    path: path.clone(),
+                    body: String::from_utf8_lossy(&body).into_owned(),
+                });
+                let payload = if method == "PATCH" {
+                    serde_json::json!({"apiVersion":"v1","kind":"Status","status":"Failure","reason":"Forbidden","code":403})
+                } else if path == "/api/v1/nodes" && uri_parameters.contains("bad") {
+                    serde_json::json!({"apiVersion":"v1","kind":"Status","status":"Failure","reason":"Invalid","code":422})
+                } else if path == "/api/v1/nodes" {
+                    serde_json::json!({"apiVersion":"v1","kind":"NodeList","metadata":{"resourceVersion":"1"},"items":[{"apiVersion":"v1","kind":"Node","metadata":{"name":"worker-1"},"status":{"allocatable":{"cpu":"12"}}}]})
+                } else if path == "/api/v1/pods" {
+                    if matches!(pod_mode, CapacityPods::ReadFailure) {
+                        serde_json::json!({"apiVersion":"v1","kind":"Status","status":"Failure","reason":"InternalError","code":500})
+                    } else {
+                        let requests = if matches!(pod_mode, CapacityPods::Empty) {
+                            Vec::new()
+                        } else {
+                            [1000, 1000, 1000, 700, 500].into_iter().map(|cpu| serde_json::json!({"apiVersion":"v1","kind":"Pod","metadata":{"name":format!("protected-{cpu}"),"labels":{"djinn.io/capacity-reserved":"true"}},"spec":{"containers":[{"name":"main","resources":{"requests":{"cpu":format!("{cpu}m")}}}]}})).collect()
+                        };
+                        serde_json::json!({"apiVersion":"v1","kind":"PodList","metadata":{"resourceVersion":"1"},"items":requests})
+                    }
+                } else {
+                    serde_json::json!({"apiVersion":"kueue.x-k8s.io/v1beta1","kind":"ClusterQueue","metadata":{"name":"djinn-kueue","resourceVersion":"42","labels":{"djinn.io/quota-owner":"derived-capacity"},"annotations":{"djinn.io/binding-resource":binding}},"spec":{"resourceGroups":[{"flavors":[{"name":"default","resources":[{"name":"pods","nominalQuota":"3"},{"name":"cpu","nominalQuota":"3000m"},{"name":"memory","nominalQuota":"100Gi"}]}]}]}})
+                };
+                Ok::<_, std::io::Error>(
+                    Response::builder()
+                        .status(if method == "PATCH" {
+                            403
+                        } else if (path == "/api/v1/nodes" && uri_parameters.contains("bad"))
+                            || (path == "/api/v1/pods"
+                                && matches!(pod_mode, CapacityPods::ReadFailure))
+                        {
+                            422
+                        } else {
+                            200
+                        })
+                        .header("content-type", "application/json")
+                        .body(Body::from(serde_json::to_vec(&payload).unwrap()))
+                        .unwrap(),
+                )
+            }
+        }),
+        namespace.to_owned(),
+    );
+    (client, recorder)
 }

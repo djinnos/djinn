@@ -23,6 +23,14 @@ always renders, so both checks fire regardless of `--show-only`.
     {{- fail "kueue.armed=true with cgroupLauncher.mode=required requires cgroupWritable.taskRuns.enabled=true (required cgroup launcher requires runtimeClassName: djinn-cgroup-writable). The task-run renderer asserts this at djinn-k8s/src/job.rs:242 and panics the coordinator otherwise; arming Kueue on top of it wedges all dispatch. Enable cgroupWritable.taskRuns (and cgroupWritable.runtimeClass), or set cgroupLauncher.mode=disabled." -}}
   {{- end -}}
 {{- end -}}
+{{- if .Values.kueue.capacity.enabled -}}
+  {{- if or (empty .Values.kueue.capacity.nodeSelector.key) (empty .Values.kueue.capacity.nodeSelector.value) -}}
+    {{- fail "kueue.capacity.enabled=true requires capacity.nodeSelector key and value; node identity may not depend on API list order" -}}
+  {{- end -}}
+  {{- if not .Values.kueue.enabled -}}
+    {{- fail "kueue.capacity.enabled=true requires kueue.enabled=true so the owned ClusterQueue exists" -}}
+  {{- end -}}
+{{- end -}}
 {{- if and (eq .Values.imagePipeline.controller.launcherAuthorityProtocol "resize-v2") (ne .Values.cgroupLauncher.mode "required") -}}
   {{- fail (printf "launcherAuthorityProtocol=%s with cgroupLauncher.mode=%s renders no cgroup-launcher sidecar and therefore no quota mechanism; resize-v2 requires cgroupLauncher.mode=required" .Values.imagePipeline.controller.launcherAuthorityProtocol .Values.cgroupLauncher.mode) -}}
 {{- end -}}
@@ -80,6 +88,7 @@ spec:
         checksum/secret-vault-key: {{ include (print $.Template.BasePath "/secret-vault-key.yaml") . | sha256sum }}
       labels:
         {{- include "djinn.server.selectorLabels" . | nindent 8 }}
+        djinn.io/capacity-reserved: "true"
     spec:
       serviceAccountName: {{ include "djinn.serviceAccountName.controller" . }}
       # Give the binary's shutdown path (HTTP drain → RPC drain → SQLx
@@ -523,6 +532,24 @@ spec:
             # `djinn_k8s::launcher::CgroupLauncherMode`.
             - name: DJINN_K8S_CGROUP_LAUNCHER_MODE
               value: {{ .Values.cgroupLauncher.mode | quote }}
+            - name: DJINN_CAPACITY_ENABLED
+              value: {{ .Values.kueue.capacity.enabled | quote }}
+            - name: DJINN_CAPACITY_QUEUE_NAME
+              value: {{ default (printf "%s-kueue" (include "djinn.fullname" .) | trunc 63 | trimSuffix "-") .Values.kueue.capacity.queueName | quote }}
+            - name: DJINN_CAPACITY_NODE_SELECTOR_KEY
+              value: {{ .Values.kueue.capacity.nodeSelector.key | quote }}
+            - name: DJINN_CAPACITY_NODE_SELECTOR_VALUE
+              value: {{ .Values.kueue.capacity.nodeSelector.value | quote }}
+            - name: DJINN_CAPACITY_IDLE_CPU
+              value: {{ .Values.kueue.capacity.idleCpu | quote }}
+            - name: DJINN_CAPACITY_COMPILE_CPU
+              value: {{ .Values.kueue.capacity.compileCpu | quote }}
+            - name: DJINN_CAPACITY_FAIL_SAFE_PODS
+              value: {{ .Values.kueue.capacity.failSafePods | quote }}
+            - name: DJINN_CAPACITY_FAIL_SAFE_COMPILE_SLOTS
+              value: {{ .Values.kueue.capacity.failSafeCompileSlots | quote }}
+            - name: DJINN_CAPACITY_EXPECTED_PROTECTED_PODS
+              value: {{ add 1 (ternary 1 0 .Values.postgres.enabled) (ternary 1 0 .Values.qdrant.enabled) (ternary 1 0 .Values.imagePipeline.enabled) (ternary 1 0 (and .Values.imagePipeline.enabled .Values.imagePipeline.zot.enabled)) | quote }}
             # Pod scheduling for task-run + warm Jobs. JSON-encoded so the
             # controller can deserialize directly into k8s_openapi types
             # without bringing a YAML parser into the dispatch path. The

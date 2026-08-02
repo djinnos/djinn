@@ -209,6 +209,9 @@ pub struct BuildLeaseService {
     /// production writer of a durable cap (`admin epoch set-cap`) is guarded by
     /// the authority row's positive-cap CHECK constraint and cannot store `0`.
     configured_cap: i64,
+    /// Latest damped controller fallback. Private so raw observations cannot
+    /// bypass damping or durable override precedence.
+    derived_fallback: AtomicI64,
     /// Rendered CPU facts the per-row weight is derived from. See
     /// [`BuildSlotWeights`]; the default matches the default manifest render.
     weights: BuildSlotWeights,
@@ -267,6 +270,7 @@ impl BuildLeaseService {
             telemetry,
             cap: AtomicI64::new(cap.max(0)),
             configured_cap: cap.max(0),
+            derived_fallback: AtomicI64::new(cap.max(0)),
             weights: BuildSlotWeights::default(),
             recovered: AtomicBool::new(false),
             authority: None,
@@ -1038,6 +1042,7 @@ fn status(row: &BuildLeaseRow) -> LeaseStatus {
 /// state, split into its own file only for the source-size guard.
 #[path = "build_lease_cap.rs"]
 mod cap;
+pub use cap::{CompileBoundPrecondition, DampedCapacitySnapshot, compile_bound_precondition};
 
 #[cfg(test)]
 mod tests {
