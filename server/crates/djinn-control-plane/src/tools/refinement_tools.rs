@@ -818,8 +818,17 @@ impl DjinnMcpServer {
         // Returns the Judge task id on success.
         let judge_task_id =
             match validate_demand_evidence(&repo, &task_repo, &proposal, &refinement, &p).await {
-                Ok(id) => id,
+                Ok(id) => {
+                    djinn_telemetry::evidence_metrics::record(
+                        djinn_telemetry::evidence_metrics::EvidenceStage::Demand,
+                        djinn_telemetry::evidence_metrics::EvidenceOutcome::Accepted,
+                    );
+                    id
+                }
                 Err(e) => {
+                    djinn_telemetry::evidence_metrics::reject(
+                        djinn_telemetry::evidence_metrics::EvidenceRejection::Validation,
+                    );
                     return Json(NeedsEvidenceDemandResponse {
                         proposal_id: Some(proposal.id),
                         accepted: false,

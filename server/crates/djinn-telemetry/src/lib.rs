@@ -2264,6 +2264,8 @@ pub mod failover {
     }
 }
 
+pub mod evidence_metrics;
+
 pub mod liveness_metrics {
     //! Zero-output / stall wall-clock observability metrics.
     //!

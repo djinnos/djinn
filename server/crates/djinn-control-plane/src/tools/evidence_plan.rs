@@ -162,6 +162,10 @@ pub async fn capture_evidence_plan(
         })
         .await
         .map_err(|error| EvidencePlanError::Persistence(error.to_string()))?;
+    djinn_telemetry::evidence_metrics::record(
+        djinn_telemetry::evidence_metrics::EvidenceStage::Plan,
+        djinn_telemetry::evidence_metrics::EvidenceOutcome::Captured,
+    );
     Ok(plan.id)
 }
 
