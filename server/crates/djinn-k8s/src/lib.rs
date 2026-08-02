@@ -89,8 +89,9 @@ pub use scip_job::{
     build_scip_index_job, scip_index_job_name,
 };
 pub use scip_schedule::{
-    KubeClientScipJobInventory, ScipIndexDecision, ScipIndexScheduler, ScipJobInventory,
-    ScipJobObservation, decide as decide_scip_index, observe_from_jobs,
+    KubeClientScipJobInventory, RepositoryWarmOutcomeSource, ScipIndexDecision, ScipIndexScheduler,
+    ScipJobInventory, ScipJobObservation, WarmOutcomeSource, decide as decide_scip_index,
+    observe_from_jobs,
 };
 pub use token_review::TokenReviewer;
 pub use warm_job::{build_leased_warm_job, build_warm_job, warm_job_name};
