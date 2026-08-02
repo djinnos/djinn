@@ -549,6 +549,7 @@ mod tests {
     fn builds_scip_index_job_with_expected_shape() {
         let mut cfg = KubernetesConfig::for_testing();
         cfg.database_url = Some("postgres://djinn@djinn-postgres:5432/djinn".into());
+        cfg.warm_job_termination_grace_period_seconds = 47;
         let job = job(&cfg);
 
         assert_eq!(
