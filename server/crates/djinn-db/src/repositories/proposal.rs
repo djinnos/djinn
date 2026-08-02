@@ -2915,43 +2915,43 @@ impl ProposalRepository {
         } else {
             None
         };
-        let (event_kind, metadata, outcome) = if let Some((entry_id, findings_metadata, derived_outcome)) = findings
-        {
-            (
-                evidence_lifecycle_kind::EVIDENCE_RECEIVED,
-                EvidenceLifecycleMetadata::received_with_findings(
-                    proposal_id,
-                    spike_task_id,
-                    &judge_task_id,
-                    round,
-                    against_revision_seq,
-                    Some(&entry_id),
-                    Some(&findings_metadata),
-                    derived_outcome,
+        let (event_kind, metadata, outcome) =
+            if let Some((entry_id, findings_metadata, derived_outcome)) = findings {
+                (
+                    evidence_lifecycle_kind::EVIDENCE_RECEIVED,
+                    EvidenceLifecycleMetadata::received_with_findings(
+                        proposal_id,
+                        spike_task_id,
+                        &judge_task_id,
+                        round,
+                        against_revision_seq,
+                        Some(&entry_id),
+                        Some(&findings_metadata),
+                        derived_outcome,
+                    )
+                    .to_event_metadata(),
+                    TerminalLinkedEvidenceSpikeOutcome::EvidenceReceived { derived_outcome },
                 )
-                .to_event_metadata(),
-                TerminalLinkedEvidenceSpikeOutcome::EvidenceReceived { derived_outcome },
-            )
-        } else {
-            let reason = if success {
-                "missing_valid_findings".to_owned()
             } else {
-                evidence_spike_failure_reason(spike_task_status, spike_task_close_reason)
-            };
-            (
-                evidence_lifecycle_kind::EVIDENCE_FAILED,
-                EvidenceLifecycleMetadata::failed(
-                    proposal_id,
-                    spike_task_id,
-                    &judge_task_id,
-                    round,
-                    against_revision_seq,
-                    &reason,
+                let reason = if success {
+                    "missing_valid_findings".to_owned()
+                } else {
+                    evidence_spike_failure_reason(spike_task_status, spike_task_close_reason)
+                };
+                (
+                    evidence_lifecycle_kind::EVIDENCE_FAILED,
+                    EvidenceLifecycleMetadata::failed(
+                        proposal_id,
+                        spike_task_id,
+                        &judge_task_id,
+                        round,
+                        against_revision_seq,
+                        &reason,
+                    )
+                    .to_event_metadata(),
+                    TerminalLinkedEvidenceSpikeOutcome::EvidenceFailed { reason },
                 )
-                .to_event_metadata(),
-                TerminalLinkedEvidenceSpikeOutcome::EvidenceFailed { reason },
-            )
-        };
+            };
         self.insert_lightweight_lifecycle_event_in_tx(
             &mut tx,
             proposal_id,
@@ -2984,7 +2984,9 @@ impl ProposalRepository {
             let outcome = sqlx::query_scalar::<_, String>(
                 "SELECT f.payload->>'outcome' FROM evidence_plans p JOIN evidence_finalized_projections f ON f.plan_id = p.id WHERE p.spike_task_id = $1 AND f.version = 1 AND f.payload->>'schema_version' = '1' AND f.payload->>'plan_id' = p.id AND jsonb_typeof(f.payload->'checks') = 'array' AND jsonb_typeof(f.payload->'findings') = 'array' AND jsonb_typeof(f.payload->'gaps') = 'array' ORDER BY f.created_at DESC, f.id DESC LIMIT 1")
                 .bind(spike_task_id).fetch_optional(&mut **tx).await?;
-            let Some(outcome) = outcome.and_then(|value| EvidenceDerivedOutcome::parse_stored(&value)) else {
+            let Some(outcome) =
+                outcome.and_then(|value| EvidenceDerivedOutcome::parse_stored(&value))
+            else {
                 return Ok(None);
             };
             Some(outcome)

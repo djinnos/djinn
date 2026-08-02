@@ -34,6 +34,7 @@ use crate::refinement_dispatch::refinement_cap_tests::{
 };
 use djinn_core::events::{DjinnEventEnvelope, EventBus};
 use djinn_core::models::NeedsEvidenceClaim;
+use djinn_db::repositories::proposal::TerminalLinkedEvidenceSpikeOutcome;
 use djinn_db::repositories::test_support::{UsageTestSessionSeed, seed_session_row_with_id};
 use djinn_db::{
     EffectiveCreatorProvenance, EvidenceRepository, InsertEvidenceFinalizedProjection,
@@ -407,9 +408,10 @@ async fn valid_evidence_completion_clears_link_and_resumes_advocate_with_finding
     );
 }
 
-/// The lifecycle fixture is behavioral: every row drives the actual
-/// event-driven persistence and resume path. Typed outcomes are read from
-/// finalized V1 projections rather than inferred by this test.
+/// The lifecycle fixture is behavioral: every row first calls the production
+/// persistence primitive, then redelivers through the coordinator event path.
+/// Typed outcomes are read from finalized V1 projections rather than inferred
+/// by this test.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn evidence_rollout_contract_executes_every_lifecycle_case() {
     let contract: EvidenceLifecycleFixture =
@@ -441,11 +443,52 @@ async fn evidence_rollout_contract_executes_every_lifecycle_case() {
 
         // Missing completion has a frozen plan but no V1 projection; malformed
         // completion has the authoritative shape with an invalid outcome.
-        let projection_outcome = match case.structured_completion.as_deref() {
-            Some("missing") | None => None,
-            value => value,
-        };
+        let projection_outcome = case
+            .structured_completion
+            .as_deref()
+            .filter(|outcome| *outcome != "missing");
         seed_v1_completion(&db, &fixture, &spike_task_id, projection_outcome).await;
+
+        // Exercise the repository's authoritative V1 classification directly.
+        // This is deliberately before coordinator delivery to model a crash
+        // after receipt persistence and before the linked spike is cleared.
+        let persisted = proposal_repo
+            .persist_terminal_linked_spike_evidence_lifecycle(
+                &fixture.proposal_id,
+                &spike_task_id,
+                "closed",
+                if terminal_failure {
+                    Some("failed")
+                } else {
+                    Some("completed")
+                },
+            )
+            .await
+            .expect("persist lifecycle through production repository path");
+        match persisted {
+            TerminalLinkedEvidenceSpikeOutcome::EvidenceReceived { derived_outcome } => {
+                assert!(
+                    case.terminal_success,
+                    "{} must not classify as a typed receipt",
+                    case.name
+                );
+                assert_eq!(
+                    serde_json::to_value(derived_outcome).expect("serialize derived outcome"),
+                    serde_json::json!(case.structured_completion),
+                    "{} typed outcome must come from the V1 projection",
+                    case.name
+                );
+            }
+            TerminalLinkedEvidenceSpikeOutcome::EvidenceFailed { .. } => assert!(
+                !case.terminal_success,
+                "{} must produce a typed receipt",
+                case.name
+            ),
+            other => panic!(
+                "{} first production persistence must classify a terminal spike, got {other:?}",
+                case.name
+            ),
+        }
 
         let mut actor = build_refinement_actor(&db, &events_tx, spawn_test_pool(&db, 4));
         seed_refinement_state(
@@ -463,6 +506,8 @@ async fn evidence_rollout_contract_executes_every_lifecycle_case() {
             .await
             .expect("read spike")
             .expect("spike exists");
+        // Redelivery takes the production event-driven AlreadyRecorded branch.
+        // That branch must hydrate the same receipt and resume only successes.
         actor
             .persist_terminal_linked_spike_evidence_from_closed_task(&task)
             .await;
