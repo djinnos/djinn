@@ -2983,7 +2983,7 @@ impl ProposalRepository {
         .await?;
         let derived_outcome = if has_plan {
             let outcome = sqlx::query_scalar::<_, String>(
-                "SELECT f.payload->>'outcome' FROM evidence_plans p JOIN evidence_finalized_projections f ON f.plan_id = p.id WHERE p.spike_task_id = $1 AND f.version = 1 AND f.payload->>'schema_version' = '1' AND f.payload->>'plan_id' = p.id AND jsonb_typeof(f.payload->'checks') = 'array' AND jsonb_typeof(f.payload->'findings') = 'array' AND jsonb_typeof(f.payload->'gaps') = 'array' ORDER BY f.created_at DESC, f.id DESC LIMIT 1")
+                "SELECT f.payload->>'outcome' FROM evidence_plans p JOIN evidence_finalized_projections f ON f.plan_id = p.id WHERE p.spike_task_id = $1 AND f.version = 1 AND f.payload->>'schema_version' = '1' AND f.payload->>'plan_id' = p.id AND jsonb_typeof(f.payload->'checks') = 'array' AND jsonb_typeof(f.payload->'findings') = 'array' AND jsonb_typeof(f.payload->'gaps') = 'array' ORDER BY f.finalized_at DESC, f.id DESC LIMIT 1")
                 .bind(spike_task_id).fetch_optional(&mut **tx).await?;
             let Some(outcome) =
                 outcome.and_then(|value| EvidenceDerivedOutcome::parse_stored(&value))
