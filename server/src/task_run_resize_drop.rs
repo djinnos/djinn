@@ -562,6 +562,20 @@ impl TaskRunResizeDrop {
                 );
                 return FenceOutcome::Retry(DegradedUnleasedReason::LiftPodAbsent);
             }
+            // The kubelet has not published the launcher's init-container status
+            // yet. A drop CONFIRMS through that array, so there is nothing to
+            // read — but nothing is wrong with the Pod either, and quarantining
+            // it for a status the kubelet simply has not written yet would
+            // condemn a healthy launcher for being observed early. Retry inside
+            // the confirmation budget; the budget's own expiry still quarantines.
+            Err(LauncherObservationError::StatusNotPopulated { .. }) => {
+                warn!(
+                    task_run_id = %subject.task_run_id,
+                    "task_run_resize_drop: launcher init-container status is not populated yet; \
+                     retrying"
+                );
+                return FenceOutcome::Retry(DegradedUnleasedReason::LiftPodAbsent);
+            }
             Err(LauncherObservationError::Ambiguous(_)) => {
                 return FenceOutcome::Quarantine(DegradedUnleasedReason::LiftIdentityAmbiguous);
             }

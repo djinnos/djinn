@@ -2190,10 +2190,16 @@ pub struct ObservedLauncherSidecar {
 
 /// Why a stored Pod could not be flattened into an [`ObservedLauncherSidecar`].
 ///
-/// Both variants are failures, but they are not the same failure: `Incomplete`
-/// describes a Pod that has not finished being admitted and may complete on the
-/// next read, while `Ambiguous` describes a Pod whose launcher cannot be *named*
-/// and never will be by waiting.
+/// These are failures, but they are not the *same* failure, and the difference
+/// decides whether a caller waits or gives up:
+///
+/// * `Incomplete` — the Pod has not finished being admitted; may complete on the
+///   next read.
+/// * `StatusNotPopulated` — the Pod exists and its spec names the launcher, but
+///   the kubelet has not written `status.initContainerStatuses` yet. **A wait,
+///   not a verdict.** See the variant's own docs.
+/// * `Ambiguous` — the launcher cannot be *named*, and no amount of waiting will
+///   change that.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum LauncherObservationError {
     /// A `metadata` field the fence depends on is not populated yet.
@@ -2202,12 +2208,65 @@ pub enum LauncherObservationError {
         /// The absent metadata field.
         field: &'static str,
     },
+    /// `status.initContainerStatuses` carries **zero** launcher entries, while
+    /// `spec.initContainers` names exactly one.
+    ///
+    /// # Why this is not `Ambiguous`
+    ///
+    /// A Pod's `spec` is written by the Job controller at creation; its
+    /// `status.initContainerStatuses` array is written by the kubelet, later,
+    /// after the Pod is bound to a node. Between those two events the launcher
+    /// is named in the spec and absent from the status — for seconds, routinely.
+    ///
+    /// Folding that window into `Ambiguous` is what production charged for on
+    /// 2026-08-02: the resize birth gate read a Pod three seconds after Kueue
+    /// unsuspended its Job, saw `found: 0` at the status site, refused
+    /// *permanently*, and left the Pod running at its full rendered `4` CPU with
+    /// no permit governing it and nothing that would ever retry. The launcher
+    /// was perfectly nameable one second later.
+    ///
+    /// Two or more entries is a different animal and stays [`Self::Ambiguous`]:
+    /// that one really cannot be resolved by waiting, and resolving it by
+    /// positional index would address the wrong container.
+    ///
+    /// The Pod identity is carried because the caller needs it precisely when it
+    /// gives up: a Pod that never became governable must be *destroyed*, and an
+    /// unfenced delete could destroy a replacement Pod some other actor owns.
+    #[error(
+        "launcher `{launcher_container_name}` is named in spec.initContainers but \
+         status.initContainerStatuses is not populated yet"
+    )]
+    StatusNotPopulated {
+        /// `metadata.uid` of the Pod that was read. Fences a delete.
+        pod_uid: String,
+        /// `metadata.name` of the Pod that was read.
+        pod_name: String,
+        /// The launcher container name located in `spec.initContainers`.
+        launcher_container_name: String,
+    },
     /// The launcher is not uniquely identifiable in the stored Pod.
     #[error("{0}")]
     Ambiguous(#[from] crate::pod_resize::PodResizeError),
     /// The apiserver read itself failed, or resolved to more than one Pod.
     #[error("{0}")]
     Api(String),
+}
+
+impl LauncherObservationError {
+    /// The Pod this failed observation read, when it read one and knows its UID.
+    ///
+    /// Only [`Self::StatusNotPopulated`] can answer: every other variant either
+    /// never reached a Pod object or could not establish which container it was
+    /// talking about.
+    #[must_use]
+    pub fn fenceable_pod(&self) -> Option<(&str, &str)> {
+        match self {
+            Self::StatusNotPopulated {
+                pod_uid, pod_name, ..
+            } => Some((pod_uid.as_str(), pod_name.as_str())),
+            _ => None,
+        }
+    }
 }
 
 /// Flatten a stored Pod into the launcher facts the resize bootstrap needs.
@@ -2232,7 +2291,23 @@ pub fn observe_launcher_sidecar(
         .ok_or(LauncherObservationError::Incomplete { field: "uid" })?;
 
     let spec = crate::pod_resize::locate_launcher_spec(pod)?;
-    let status = crate::pod_resize::locate_launcher_status(pod)?;
+    // Zero status entries is the kubelet being late, not the launcher being
+    // unnameable — the spec above just named it. Only that exact shape is a
+    // wait; two or more entries falls through to `Ambiguous` unchanged.
+    let status = match crate::pod_resize::locate_launcher_status(pod) {
+        Ok(status) => status,
+        Err(crate::pod_resize::PodResizeError::LauncherIdentityAmbiguous {
+            site: crate::pod_resize::LauncherIdentitySite::StatusInitContainerStatuses,
+            found: 0,
+        }) => {
+            return Err(LauncherObservationError::StatusNotPopulated {
+                pod_uid,
+                pod_name,
+                launcher_container_name: spec.name.clone(),
+            });
+        }
+        Err(error) => return Err(LauncherObservationError::Ambiguous(error)),
+    };
 
     // The declared limit is read through `declared_launcher_cpu_limit`, which is
     // documented as a spec read and explicitly NOT confirmation of anything. It
@@ -4471,6 +4546,82 @@ mod tests {
                     crate::pod_resize::PodResizeError::LauncherIdentityAmbiguous { found: 2, .. }
                 ))
             ));
+        }
+
+        /// The 2026-08-02 defect, at the layer that produced it.
+        ///
+        /// A Pod whose `spec.initContainers` names the launcher but whose
+        /// `status.initContainerStatuses` the kubelet has not written yet is a
+        /// **wait**, and must be reported as one. Folding it into `Ambiguous`
+        /// made the resize birth gate refuse permanently and leave the Pod
+        /// running at its full rendered ceiling.
+        ///
+        /// Non-vacuity: restore `let status = locate_launcher_status(pod)?;` in
+        /// `observe_launcher_sidecar` and this test fails — the error comes back
+        /// as `Ambiguous(LauncherIdentityAmbiguous { found: 0 })`, which is
+        /// precisely the production shape.
+        #[test]
+        fn an_unpopulated_status_array_is_a_wait_carrying_the_pod_identity() {
+            let observed = observe_launcher_sidecar(&pod(
+                vec![container(
+                    LAUNCHER_CONTAINER_NAME,
+                    Some("4000m"),
+                    Some("resize-v2"),
+                )],
+                vec![container("worker", Some("4"), None)],
+                // The kubelet has published nothing at all yet.
+                vec![],
+            ));
+            let Err(LauncherObservationError::StatusNotPopulated {
+                pod_uid,
+                pod_name,
+                launcher_container_name,
+            }) = observed
+            else {
+                panic!("expected StatusNotPopulated, got {observed:?}");
+            };
+            assert_eq!(launcher_container_name, LAUNCHER_CONTAINER_NAME);
+            // The identity must survive the failure: it is what lets a caller
+            // that gives up UID-fence a delete instead of leaving the Pod
+            // running ungoverned.
+            assert_eq!(pod_uid, "pod-uid-1");
+            assert_eq!(pod_name, "taskrun-pod");
+        }
+
+        /// The other half of the distinction, and the half that must NOT become
+        /// a wait: two entries carrying the launcher name cannot be resolved by
+        /// waiting, and resolving them by index would address the wrong
+        /// container.
+        ///
+        /// Non-vacuity: widen the new arm's guard from `found: 0` to any count
+        /// and this test fails.
+        #[test]
+        fn two_status_entries_stay_a_permanent_ambiguity() {
+            let observed = observe_launcher_sidecar(&pod(
+                vec![container(LAUNCHER_CONTAINER_NAME, Some("4000m"), None)],
+                vec![],
+                vec![
+                    status(LAUNCHER_CONTAINER_NAME, Some("c1"), Some("i")),
+                    status(LAUNCHER_CONTAINER_NAME, Some("c2"), Some("i")),
+                ],
+            ));
+            assert!(
+                matches!(
+                    observed,
+                    Err(LauncherObservationError::Ambiguous(
+                        crate::pod_resize::PodResizeError::LauncherIdentityAmbiguous {
+                            found: 2,
+                            ..
+                        }
+                    ))
+                ),
+                "two entries must remain a permanent refusal, got {observed:?}"
+            );
+            assert_eq!(
+                observed.expect_err("ambiguous").fenceable_pod(),
+                None,
+                "a genuinely unnameable launcher offers nothing to fence a delete against"
+            );
         }
 
         #[test]

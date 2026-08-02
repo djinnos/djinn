@@ -1341,6 +1341,253 @@ async fn a_dispatch_that_was_never_queued_confirms_without_consulting_the_job() 
     assert_eq!(bridge.gate().dispatches_before_birth_confirmation(), 0);
 }
 
+// ── The 2026-08-02 defect: a late kubelet is a wait, not a verdict ────────
+//
+// Production ran 0.7.36 with 70 unreleased `build_pod_permits` rows, every one
+// of them `pod_uid IS NULL`, against three live task-run Jobs. The server logged
+//
+//   refused by the resize birth gate (pod_deleted=false): launcher identity is
+//   unusable: launcher identity ambiguous: expected exactly one `cgroup-launcher`
+//   entry in status.initContainerStatuses, found 0
+//
+// three seconds after Kueue unsuspended the Job. The Pod that refusal condemned
+// was read again minutes later and carried exactly one `cgroup-launcher` status
+// entry, `restartCount: 0`, `limits.cpu: 4` — never clamped, never governed, and
+// nothing anywhere retried it.
+
+/// A cluster whose kubelet publishes `status.initContainerStatuses` late.
+///
+/// It counts launcher observations and publishes on the Nth, so "the gate waited
+/// for the kubelet" is a call count rather than a wall-clock guess. Serving the
+/// *same* Pod before and after — see
+/// [`StoredTaskRunPod::kubelet_publishes_status`] — is what makes this a test
+/// about timing rather than about two differently-shaped fixtures.
+struct LateKubeletSurface {
+    cluster: StoredTaskRunPod,
+    publish_after: usize,
+    ceiling: &'static str,
+    launcher_observations: Arc<AtomicUsize>,
+}
+
+impl LateKubeletSurface {
+    fn new(cluster: &StoredTaskRunPod, publish_after: usize, ceiling: &'static str) -> Self {
+        Self {
+            cluster: cluster.clone(),
+            publish_after,
+            ceiling,
+            launcher_observations: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    /// A kubelet that never publishes at all.
+    fn never_publishes(cluster: &StoredTaskRunPod) -> Self {
+        Self {
+            cluster: cluster.clone(),
+            publish_after: usize::MAX,
+            ceiling: RENDERED_CEILING,
+            launcher_observations: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    fn launcher_observations(&self) -> usize {
+        self.launcher_observations.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl TaskRunPodSurface for LateKubeletSurface {
+    async fn observe_launcher(
+        &self,
+        _task_run_id: &str,
+    ) -> Result<Option<ObservedLauncherSidecar>, LauncherObservationError> {
+        let seen = self.launcher_observations.fetch_add(1, Ordering::SeqCst) + 1;
+        if seen >= self.publish_after {
+            self.cluster.kubelet_publishes_status(self.ceiling);
+        }
+        self.cluster.observe_launcher()
+    }
+
+    async fn resize_launcher_cpu(
+        &self,
+        pod_name: &str,
+        target_millicores: u64,
+    ) -> Result<(), PodResizeError> {
+        self.cluster
+            .resize_launcher_cpu(pod_name, target_millicores)
+            .await
+    }
+
+    async fn observe_job_admission(&self, _task_run_id: &str) -> JobAdmission {
+        self.cluster.job_admission()
+    }
+
+    async fn uid_fenced_delete(&self, task_run_id: &str, pod_uid: &str) -> Result<(), String> {
+        self.cluster.uid_fenced_delete(task_run_id, pod_uid)
+    }
+}
+
+/// **The defect.** A Pod observed before its kubelet published
+/// `status.initContainerStatuses` is waited for, not refused — and when the
+/// statuses appear the launcher is clamped and the run dispatches.
+///
+/// Every assertion here is about state the mechanism *produced*: the launcher's
+/// actual CPU limit read back off the Pod, and the durable permit row's state
+/// and captured identity. No log line and no config value is asserted anywhere.
+///
+/// **Named mutation.** In `TaskRunResizeBootstrap::bootstrap`, replace the
+/// `Err(LauncherObservationError::StatusNotPopulated { .. })` arm's body with
+/// `BootstrapOutcome::Refused { reason:
+/// RefusalReason::LauncherNotNameable(error.to_string()), disposition:
+/// PodDisposition::Retained }` — `main`'s behaviour, one shared refusal for both
+/// counts. This test then fails at `drive_seam`, which returns the refusal
+/// instead of dispatching: `attaches()` is 0, the launcher is still at `4`, and
+/// the permit row is stuck at `job_created` with no identity — the exact
+/// production shape. Verified: under that mutation this test and
+/// `a_pod_that_never_becomes_governable_is_destroyed_rather_than_left_at_full_cpu`
+/// fail while all fourteen pre-existing tests in this file stay green, which is
+/// why the defect shipped.
+///
+/// *Deleting* the arm outright does not compile — the match on
+/// `observe_launcher` is exhaustive, so the enum split is additionally enforced
+/// by the type system.
+#[tokio::test]
+async fn a_pod_whose_kubelet_has_not_published_statuses_is_waited_for_and_then_clamped() {
+    const POD_UID: &str = "pod-uid-late-kubelet";
+    const JOB_UID: &str = "job-uid-late-kubelet";
+    /// Enough passes that a gate which refused on the first observation could
+    /// not possibly reach the clamp by accident.
+    const PUBLISH_AFTER: usize = 12;
+
+    let db = Database::ephemeral().await.expect("ephemeral db");
+    let seeded = seed(&db, "latekubelet").await;
+    let cluster = StoredTaskRunPod::resize_v2_status_not_populated(POD_UID, RENDERED_CEILING);
+
+    // The premise, established against the REAL observation function: this Pod
+    // exists, and reading it right now cannot name the launcher's status.
+    let premise = cluster.observe_launcher();
+    assert!(
+        matches!(
+            premise,
+            Err(LauncherObservationError::StatusNotPopulated { .. })
+        ),
+        "the fixture must actually model an unpopulated status array, got {premise:?}"
+    );
+
+    let surface = Arc::new(LateKubeletSurface::new(
+        &cluster,
+        PUBLISH_AFTER,
+        RENDERED_CEILING,
+    ));
+    let bridge = bridge_over(
+        &db,
+        surface.clone() as Arc<dyn TaskRunPodSurface>,
+        CONFIRMING_BUDGET,
+        PATIENT_QUEUE_BUDGET,
+    );
+    let context = context_with(&db, &bridge);
+    let runtime = RecordingRuntime::new(Some(JOB_UID), Some(LauncherAuthorityProtocol::ResizeV2));
+
+    drive_seam(runtime.clone(), &seeded, &context)
+        .await
+        .expect("a Pod whose kubelet is late must not be refused as unnameable");
+
+    // The gate genuinely waited across the window rather than winning a race.
+    assert!(
+        surface.launcher_observations() >= PUBLISH_AFTER,
+        "the gate must have re-observed the Pod at least {PUBLISH_AFTER} times; saw {}",
+        surface.launcher_observations()
+    );
+
+    // THE CLAMP. Read off the Pod, not off a constant: 250m, not the rendered 4.
+    assert_eq!(
+        CpuLimit::parse(
+            &cluster
+                .launcher_status_cpu()
+                .expect("the launcher reports a cpu limit")
+        )
+        .expect("the reported quantity parses")
+        .millis(),
+        BIRTH_MILLICORES,
+        "the launcher must end at the birth limit, not at the rendered ceiling"
+    );
+
+    // THE LEDGER. `job_created` with a NULL pod_uid is the production symptom;
+    // this row must be past it.
+    let row = BuildPodPermitRepository::new(db.clone())
+        .active(&seeded.spec.task_run_id)
+        .await
+        .expect("read permit")
+        .expect("the seam acquired a permit");
+    assert_eq!(row.state, BuildPodPermitState::BirthConfirmed);
+    let identity = row
+        .resize_identity
+        .expect("a birth-confirmed permit carries the captured identity");
+    assert_eq!(identity.pod_uid, POD_UID);
+    assert_eq!(
+        identity.admitted_cpu_millicores,
+        i64::try_from(
+            CpuLimit::parse(RENDERED_CEILING)
+                .expect("rendered ceiling parses")
+                .millis()
+        )
+        .expect("ceiling fits"),
+        "the captured ceiling is the admitted value the Pod declared"
+    );
+    assert_eq!(runtime.attaches(), 1, "the worker session started");
+    assert_eq!(bridge.gate().dispatches_before_birth_confirmation(), 0);
+}
+
+/// **Do not silently un-clamp.** A kubelet that never publishes leaves a Pod
+/// nothing can govern. The run is refused *and the Pod is destroyed*, rather
+/// than left alive holding its full rendered ceiling.
+///
+/// This is the half of the production defect that the retry alone does not fix:
+/// every refused run on 2026-08-02 logged `pod_deleted=false`, and those Pods
+/// were still running at `4` CPU hours later.
+///
+/// **Named mutation.** In `TaskRunResizeBootstrap::abandon`, delete the
+/// `Err(ref error) if error.fenceable_pod().is_some()` arm so an unreadable
+/// observation falls through to `PodDisposition::Retained`. The dispatch still
+/// fails, so a test asserting only the refusal stays green — this one fails on
+/// `deletes()`, which is empty, and on the surviving `4` CPU limit.
+#[tokio::test]
+async fn a_pod_that_never_becomes_governable_is_destroyed_rather_than_left_at_full_cpu() {
+    const POD_UID: &str = "pod-uid-mute-kubelet";
+    const JOB_UID: &str = "job-uid-mute-kubelet";
+
+    let db = Database::ephemeral().await.expect("ephemeral db");
+    let seeded = seed(&db, "mutekubelet").await;
+    let cluster = StoredTaskRunPod::resize_v2_status_not_populated(POD_UID, RENDERED_CEILING);
+    let surface = Arc::new(LateKubeletSurface::never_publishes(&cluster));
+    let bridge = bridge_over(
+        &db,
+        surface.clone() as Arc<dyn TaskRunPodSurface>,
+        GIVE_UP_BUDGET,
+        PATIENT_QUEUE_BUDGET,
+    );
+    let context = context_with(&db, &bridge);
+    let runtime = RecordingRuntime::new(Some(JOB_UID), Some(LauncherAuthorityProtocol::ResizeV2));
+
+    let refused = drive_seam(runtime.clone(), &seeded, &context)
+        .await
+        .expect_err("a launcher that never becomes observable must not dispatch");
+    let rendered = format!("{refused:#}");
+    assert!(
+        rendered.contains("not populated"),
+        "the refusal must name the unpopulated status, not a generic ambiguity: {rendered}"
+    );
+
+    // THE POINT. The ungovernable Pod is gone, UID-fenced to exactly the Pod
+    // that was observed.
+    assert_eq!(
+        cluster.deletes(),
+        vec![(seeded.spec.task_run_id.clone(), POD_UID.to_owned())],
+        "an unclampable Pod must be UID-fenced deleted, not left running ungoverned"
+    );
+    assert_eq!(runtime.attaches(), 0, "no worker session may have started");
+    assert_eq!(bridge.gate().dispatches_before_birth_confirmation(), 0);
+}
+
 /// The bootstrap type is still constructible and still composes — a compile-time
 /// statement only, kept so a refactor that changes its shape is caught here
 /// rather than in the bridge's private guts.

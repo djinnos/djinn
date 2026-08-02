@@ -982,6 +982,15 @@ fn observation_failure(error: &LauncherObservationError) -> ResizeApplyFailure {
         // An incomplete `metadata` is the same answer as no Pod: there is
         // nothing to fence a resize against.
         LauncherObservationError::Incomplete { .. } => DegradedUnleasedReason::LiftPodAbsent,
+        // The kubelet has not (re)published the launcher's init-container
+        // status. Reaching this during a LIFT means the status went away after
+        // the birth capture read it — a Pod being replaced underneath us — so it
+        // is classified with the other "no Pod to fence against" answers rather
+        // than as an identity fault. It is not `LiftStatusStale`: nothing stale
+        // was read, there was nothing to read.
+        LauncherObservationError::StatusNotPopulated { .. } => {
+            DegradedUnleasedReason::LiftPodAbsent
+        }
         LauncherObservationError::Ambiguous(inner) => return apply_failure(inner),
         LauncherObservationError::Api(_) => DegradedUnleasedReason::ResizeSurfaceUnavailable,
     };
