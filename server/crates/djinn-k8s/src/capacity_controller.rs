@@ -666,6 +666,22 @@ mod tests {
             binding_for(&q, "djinn-kueue", derived()),
             Err(ConservativeReason::AmbiguousBindingResource)
         );
+        let mut partial_oru9 = queue("cpu");
+        partial_oru9
+            .resources
+            .retain(|resource| resource.name != "cpu");
+        assert_eq!(
+            binding_for(&partial_oru9, "djinn-kueue", derived()),
+            Err(ConservativeReason::AmbiguousBindingResource)
+        );
+        let mut warm_9cbn = queue("pods");
+        warm_9cbn.name = "djinn-warm".into();
+        warm_9cbn.owner = Some("warm-borrow".into());
+        assert_eq!(
+            binding_for(&warm_9cbn, "djinn-kueue", derived()),
+            Err(ConservativeReason::QueueNameMismatch),
+            "the additional warm queue cannot become the configured writer"
+        );
     }
 
     #[test]
@@ -688,7 +704,8 @@ mod tests {
         assert!(select_node(&[missing]).is_err());
 
         let first = node("a", true);
-        let second = node("b", true);
+        let mut second = node("b", true);
+        second.allocatable_cpu = Some(CpuMillicores::new(48_000).unwrap());
         assert_eq!(
             select_node(&[first.clone(), second.clone()]),
             select_node(&[second, first]),
