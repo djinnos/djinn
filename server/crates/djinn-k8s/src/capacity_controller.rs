@@ -9,13 +9,17 @@ use kube::{
     api::{ApiResource, DynamicObject, GroupVersionKind, ListParams, Patch, PatchParams},
 };
 use serde_json::{Value, json};
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::watch;
 use tokio::time::Instant;
 
-use crate::capacity::{CapacityOutcome, CpuMillicores, DerivedCapacity, FailSafeCapacity};
-use crate::capacity::{DerivationInputs, derive, scheduler_effective_request};
+use crate::capacity::{
+    CapacityOutcome, CpuMillicores, DerivedCapacity, FailSafeCapacity, MemoryBytes, PodCount,
+    ResourceVector, ResourceVectorInput,
+};
+use crate::capacity::{DerivationInputs, derive};
 use crate::capacity_damping::{BindingQuota, CapacityVector};
 use crate::capacity_damping::{CapacityDamper, SampleKind};
 
@@ -27,8 +31,182 @@ pub const BINDING_RESOURCE_ANNOTATION: &str = "djinn.io/binding-resource";
 pub struct NodeObservation {
     pub name: String,
     pub selector_matches: bool,
+    pub ready: bool,
+    pub unschedulable: bool,
     pub terminating: bool,
     pub allocatable_cpu: Option<CpuMillicores>,
+    pub allocatable_memory: Option<MemoryBytes>,
+    pub allocatable_pods: Option<PodCount>,
+}
+
+/// Checked aggregate of all schedulable, selected nodes. Names accompany the
+/// sum so protected workload accounting cannot charge another pool.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EligibleNodeCapacity {
+    pub allocatable: ResourceVector,
+    pub names: BTreeSet<String>,
+}
+
+fn pod_resource_vector(pod: &Pod) -> Option<ResourceVector> {
+    let spec = pod.spec.as_ref()?;
+    let request = |container: &k8s_openapi::api::core::v1::Container| {
+        let requests = container.resources.as_ref()?.requests.as_ref()?;
+        Some((
+            cpu_quantity(&requests.get("cpu")?.0)?,
+            memory_quantity(&requests.get("memory")?.0)?,
+        ))
+    };
+    let sum = |values: Vec<(CpuMillicores, MemoryBytes)>| {
+        values
+            .into_iter()
+            .try_fold((0_i64, 0_i64), |(cpu, memory), (next_cpu, next_memory)| {
+                Some((
+                    cpu.checked_add(next_cpu.get())?,
+                    memory.checked_add(next_memory.get())?,
+                ))
+            })
+    };
+    let regular = sum(spec
+        .containers
+        .iter()
+        .map(request)
+        .collect::<Option<Vec<_>>>()?)?;
+    let init = spec
+        .init_containers
+        .iter()
+        .flatten()
+        .map(request)
+        .collect::<Option<Vec<_>>>()?
+        .into_iter()
+        .fold((0_i64, 0_i64), |maximum, value| {
+            (maximum.0.max(value.0.get()), maximum.1.max(value.1.get()))
+        });
+    Some(ResourceVector {
+        cpu: CpuMillicores::new(regular.0.max(init.0)).ok()?,
+        memory: MemoryBytes::new(regular.1.max(init.1)).ok()?,
+        pods: PodCount::new(1).ok()?,
+    })
+}
+
+/// Fold only labeled protected Pods actually assigned to an eligible node.
+pub fn protected_requests_on_nodes(
+    pods: &[Pod],
+    eligible_node_names: &BTreeSet<String>,
+) -> Result<ResourceVector, ConservativeReason> {
+    pods.iter()
+        .filter(|pod| {
+            pod.metadata
+                .labels
+                .as_ref()
+                .and_then(|labels| labels.get("djinn.io/capacity-reserved"))
+                .is_some_and(|value| value == "true")
+                && pod
+                    .spec
+                    .as_ref()
+                    .and_then(|spec| spec.node_name.as_ref())
+                    .is_some_and(|node| eligible_node_names.contains(node))
+        })
+        .try_fold(ResourceVector::ZERO, |sum, pod| {
+            sum.checked_add(pod_resource_vector(pod).ok_or(ConservativeReason::ObservationFailed)?)
+                .map_err(|_| ConservativeReason::ObservationFailed)
+        })
+}
+
+fn memory_quantity(value: &str) -> Option<MemoryBytes> {
+    let (number, multiplier) = [
+        ("Ki", 1_i64 << 10),
+        ("Mi", 1_i64 << 20),
+        ("Gi", 1_i64 << 30),
+        ("Ti", 1_i64 << 40),
+        ("Pi", 1_i64 << 50),
+        ("Ei", 1_i64 << 60),
+        ("K", 1_000),
+        ("M", 1_000_000),
+        ("G", 1_000_000_000),
+        ("T", 1_000_000_000_000),
+        ("P", 1_000_000_000_000_000),
+        ("E", 1_000_000_000_000_000_000),
+    ]
+    .into_iter()
+    .find_map(|(suffix, multiplier)| value.strip_suffix(suffix).map(|n| (n, multiplier)))
+    .unwrap_or((value, 1));
+    MemoryBytes::new(number.parse::<i64>().ok()?.checked_mul(multiplier)?).ok()
+}
+
+fn pod_quantity(value: &str) -> Option<PodCount> {
+    PodCount::new(value.parse().ok()?).ok()
+}
+
+/// Convert a Kubernetes Node into the additive observation seam. A missing
+/// Ready condition is deliberately not treated as Ready.
+pub fn observe_node(node: &Node, selector_key: &str, selector_value: &str) -> NodeObservation {
+    let allocatable = node
+        .status
+        .as_ref()
+        .and_then(|status| status.allocatable.as_ref());
+    NodeObservation {
+        name: node.metadata.name.clone().unwrap_or_default(),
+        selector_matches: node
+            .metadata
+            .labels
+            .as_ref()
+            .and_then(|labels| labels.get(selector_key))
+            .is_some_and(|value| value == selector_value),
+        ready: node
+            .status
+            .as_ref()
+            .and_then(|status| status.conditions.as_ref())
+            .is_some_and(|conditions| {
+                conditions
+                    .iter()
+                    .any(|c| c.type_ == "Ready" && c.status == "True")
+            }),
+        unschedulable: node.spec.as_ref().and_then(|spec| spec.unschedulable) == Some(true),
+        terminating: node.metadata.deletion_timestamp.is_some(),
+        allocatable_cpu: allocatable
+            .and_then(|resources| resources.get("cpu"))
+            .and_then(|quantity| cpu_quantity(&quantity.0)),
+        allocatable_memory: allocatable
+            .and_then(|resources| resources.get("memory"))
+            .and_then(|quantity| memory_quantity(&quantity.0)),
+        allocatable_pods: allocatable
+            .and_then(|resources| resources.get("pods"))
+            .and_then(|quantity| pod_quantity(&quantity.0)),
+    }
+}
+
+/// Sum all eligible node vectors. A node that otherwise belongs to the pool
+/// but lacks a dimension is invalid, rather than a zero-sized node.
+pub fn aggregate_eligible_nodes(
+    nodes: &[NodeObservation],
+) -> Result<EligibleNodeCapacity, ConservativeReason> {
+    let mut result = EligibleNodeCapacity {
+        allocatable: ResourceVector::ZERO,
+        names: BTreeSet::new(),
+    };
+    for node in nodes.iter().filter(|node| {
+        node.selector_matches && node.ready && !node.unschedulable && !node.terminating
+    }) {
+        let vector = ResourceVectorInput {
+            cpu: node.allocatable_cpu,
+            memory: node.allocatable_memory,
+            pods: node.allocatable_pods,
+        };
+        let complete = match (vector.cpu, vector.memory, vector.pods) {
+            (Some(cpu), Some(memory), Some(pods)) if !node.name.is_empty() => {
+                ResourceVector { cpu, memory, pods }
+            }
+            _ => return Err(ConservativeReason::ConservativeNodeIdentity),
+        };
+        result.allocatable = result
+            .allocatable
+            .checked_add(complete)
+            .map_err(|_| ConservativeReason::ConservativeNodeIdentity)?;
+        result.names.insert(node.name.clone());
+    }
+    (!result.names.is_empty())
+        .then_some(result)
+        .ok_or(ConservativeReason::ConservativeNodeIdentity)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -127,31 +305,6 @@ fn cpu_quantity(value: &str) -> Option<CpuMillicores> {
     CpuMillicores::new(value.parse::<i64>().ok()?.checked_mul(1_000)?).ok()
 }
 
-fn pod_request(pod: &Pod) -> Option<CpuMillicores> {
-    let spec = pod.spec.as_ref()?;
-    let requests = |container: &k8s_openapi::api::core::v1::Container| {
-        container
-            .resources
-            .as_ref()?
-            .requests
-            .as_ref()?
-            .get("cpu")
-            .and_then(|q| cpu_quantity(&q.0))
-    };
-    scheduler_effective_request(
-        spec.containers
-            .iter()
-            .map(requests)
-            .collect::<Option<Vec<_>>>()?,
-        spec.init_containers
-            .iter()
-            .flatten()
-            .map(requests)
-            .collect::<Option<Vec<_>>>()?,
-    )
-    .ok()
-}
-
 fn queue_api(client: Client) -> Api<DynamicObject> {
     let resource = ApiResource::from_gvk(&GroupVersionKind::gvk(
         "kueue.x-k8s.io",
@@ -188,17 +341,15 @@ pub async fn run_capacity_controller(
             let node_observations: Vec<_> = node_list
                 .items
                 .into_iter()
-                .map(|node| NodeObservation {
-                    name: node.metadata.name.unwrap_or_default(),
-                    selector_matches: true,
-                    terminating: node.metadata.deletion_timestamp.is_some(),
-                    allocatable_cpu: node
-                        .status
-                        .and_then(|s| s.allocatable)
-                        .and_then(|a| a.get("cpu").and_then(|q| cpu_quantity(&q.0))),
+                .map(|node| {
+                    observe_node(
+                        &node,
+                        &config.node_selector_key,
+                        &config.node_selector_value,
+                    )
                 })
                 .collect();
-            let node = select_node(&node_observations).ok()?;
+            let nodes = aggregate_eligible_nodes(&node_observations).ok()?;
             let protected = pods
                 .list(&ListParams::default().labels("djinn.io/capacity-reserved=true"))
                 .await
@@ -206,10 +357,7 @@ pub async fn run_capacity_controller(
             if protected.items.len() < config.expected_protected_pods {
                 return None;
             }
-            let protected_cpu = protected
-                .items
-                .iter()
-                .try_fold(0_i64, |sum, pod| sum.checked_add(pod_request(pod)?.get()))?;
+            let protected = protected_requests_on_nodes(&protected.items, &nodes.names).ok()?;
             let queue = queues.get(&config.queue_name).await.ok()?;
             let data = queue.data;
             let resources = data
@@ -243,8 +391,8 @@ pub async fn run_capacity_controller(
             let capacity = derive(
                 DerivationInputs {
                     protected_population_complete: true,
-                    allocatable: node.allocatable_cpu?,
-                    protected: CpuMillicores::new(protected_cpu).ok()?,
+                    allocatable: nodes.allocatable.cpu,
+                    protected: protected.cpu,
                     idle_cost: config.idle_cost,
                     compile_cost: config.compile_cost,
                 },
@@ -689,8 +837,12 @@ mod tests {
         let node = |name: &str, matches| NodeObservation {
             name: name.into(),
             selector_matches: matches,
+            ready: true,
+            unschedulable: false,
             terminating: false,
             allocatable_cpu: Some(CpuMillicores::new(12_000).unwrap()),
+            allocatable_memory: Some(MemoryBytes::new(48 << 30).unwrap()),
+            allocatable_pods: Some(PodCount::new(110).unwrap()),
         };
         assert_eq!(select_node(&[node("a", true)]).unwrap().name, "a");
         assert!(select_node(&[]).is_err());
