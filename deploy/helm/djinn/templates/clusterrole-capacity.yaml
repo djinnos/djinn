@@ -15,6 +15,11 @@ rules:
   - apiGroups: ["kueue.x-k8s.io"]
     resources: ["clusterqueues"]
     verbs: ["get", "list", "watch", "patch"]
+  {{- if and (eq .Values.kueue.capacity.source "nodepool-limits") .Values.kueue.capacity.nodePool.dedicated (ne .Values.kueue.capacity.nodePool.name "") }}
+  - apiGroups: ["karpenter.sh"]
+    resources: ["nodepools"]
+    verbs: ["get", "list", "watch"]
+  {{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
