@@ -17,7 +17,11 @@ use super::types::{
 };
 
 enum ParkedDispatch {
-    Plain { project_path: String, model_id: String, respond_to: super::types::Reply<()> },
+    Plain {
+        project_path: String,
+        model_id: String,
+        respond_to: super::types::Reply<()>,
+    },
     Resume {
         project_path: String,
         model_id: String,
@@ -556,7 +560,12 @@ impl SlotPool {
                 // killed mid-flow never reaches its own end-of-session flush, so
                 // its row would sit `running` and keep over-counting the per-user
                 // concurrency cap.
-                if killed && owns_task_mapping {
+                // A reconciliation continuation exclusively owns teardown and
+                // exact-session settlement for its captured rows. The legacy
+                // Killed backstop is task-wide, so it must not run first.
+                let reconciliation_owned =
+                    killed && self.pending_reconciliations.contains_key(&task_id);
+                if killed && owns_task_mapping && !reconciliation_owned {
                     self.teardown_taskrun_jobs_for_task(&task_id, "slot_event_killed")
                         .await;
                     // The idempotent in-flight turn flush (djxg) runs inside
@@ -581,34 +590,149 @@ impl SlotPool {
                 // Killed is the deferred reconciliation completion boundary.
                 if killed {
                     if let Some(mut pending) = self.pending_reconciliations.remove(&task_id) {
-                        let repo = SessionRepository::new(self.ctx.db.clone(), self.ctx.event_bus.clone());
+                        let repo =
+                            SessionRepository::new(self.ctx.db.clone(), self.ctx.event_bus.clone());
                         for execution in &mut pending.snapshot.executions {
                             if execution.teardown_owner {
                                 match (&self.ctx.runtime_ops, execution.task_run_id.as_deref()) {
-                                    (Some(runtime), Some(run)) => { execution.teardown_attempted = true; if let Err(error) = runtime.teardown_taskrun_job(run).await { execution.teardown_error = Some(error); } }
-                                    (None, Some(_)) => execution.teardown_error = Some("runtime operations unavailable for task-run teardown".to_owned()),
+                                    (Some(runtime), Some(run)) => {
+                                        execution.teardown_attempted = true;
+                                        if let Err(error) = runtime.teardown_taskrun_job(run).await
+                                        {
+                                            execution.teardown_error = Some(error);
+                                        }
+                                    }
+                                    (None, Some(_)) => {
+                                        execution.teardown_error = Some(
+                                            "runtime operations unavailable for task-run teardown"
+                                                .to_owned(),
+                                        )
+                                    }
                                     _ => {}
                                 }
                             }
                             execution.settlement_attempted = true;
-                            if let Err(error) = repo.settle_non_terminal_by_id(&execution.session_id).await { execution.settlement_error = Some(error.to_string()); }
+                            if let Err(error) =
+                                repo.settle_non_terminal_by_id(&execution.session_id).await
+                            {
+                                execution.settlement_error = Some(error.to_string());
+                            }
                         }
                         match repo.reread_non_terminal_for_task(&task_id).await {
-                            Ok(rows) => pending.snapshot.observations.final_non_terminal_ids = rows.into_iter().map(|row| row.id).collect(),
-                            Err(error) => pending.snapshot.observations.final_reread_error = Some(error.to_string()),
+                            Ok(rows) => {
+                                pending.snapshot.observations.final_non_terminal_ids =
+                                    rows.into_iter().map(|row| row.id).collect()
+                            }
+                            Err(error) => {
+                                pending.snapshot.observations.final_reread_error =
+                                    Some(error.to_string())
+                            }
                         }
-                        pending.snapshot.observations.final_mapping_slot_id = self.task_to_slot.get(&task_id).copied();
-                        pending.snapshot.observations.final_pending_teardown = self.pending_teardown_tasks.contains(&task_id);
-                        pending.snapshot.observations.completion_source = "slot_event_killed".to_owned();
-                        let teardown_failed = pending.snapshot.executions.iter().any(|x| x.teardown_error.is_some());
-                        let settlement_failed = pending.snapshot.executions.iter().any(|x| x.settlement_error.is_some());
-                        pending.snapshot.kind = if teardown_failed { ReconcileTerminateKind::TeardownFailed } else if settlement_failed { ReconcileTerminateKind::SettlementFailed } else if pending.snapshot.observations.final_reread_error.is_some() || !pending.snapshot.observations.final_non_terminal_ids.is_empty() || pending.snapshot.observations.final_mapping_slot_id.is_some() { ReconcileTerminateKind::ReconciliationIncomplete } else { ReconcileTerminateKind::Terminated };
-                        pending.snapshot.ok = matches!(pending.snapshot.kind, ReconcileTerminateKind::Terminated | ReconcileTerminateKind::DesyncReconciled | ReconcileTerminateKind::GenuinelyAbsent);
-                        for waiter in pending.waiters { let _ = waiter.send(Ok(pending.snapshot.clone())); }
+                        pending.snapshot.observations.final_mapping_slot_id =
+                            self.task_to_slot.get(&task_id).copied();
+                        pending.snapshot.observations.final_pending_teardown =
+                            self.pending_teardown_tasks.contains(&task_id);
+                        pending.snapshot.observations.completion_source =
+                            "slot_event_killed".to_owned();
+                        let teardown_failed = pending
+                            .snapshot
+                            .executions
+                            .iter()
+                            .any(|x| x.teardown_error.is_some());
+                        let settlement_failed = pending
+                            .snapshot
+                            .executions
+                            .iter()
+                            .any(|x| x.settlement_error.is_some());
+                        let residual = pending.snapshot.observations.fenced_generation.is_none()
+                            || pending
+                                .snapshot
+                                .observations
+                                .initial_capture_error
+                                .is_some()
+                            || pending.snapshot.observations.final_reread_error.is_some()
+                            || pending.snapshot.observations.pool_cleanup_error.is_some()
+                            || !pending
+                                .snapshot
+                                .observations
+                                .final_non_terminal_ids
+                                .is_empty()
+                            || pending
+                                .snapshot
+                                .observations
+                                .final_mapping_slot_id
+                                .is_some()
+                            || pending.snapshot.observations.final_pending_teardown;
+                        pending.snapshot.observations.underlying_kind = if teardown_failed {
+                            Some(ReconcileTerminateKind::TeardownFailed)
+                        } else if settlement_failed {
+                            Some(ReconcileTerminateKind::SettlementFailed)
+                        } else {
+                            None
+                        };
+                        pending.snapshot.kind = pending
+                            .snapshot
+                            .observations
+                            .underlying_kind
+                            .unwrap_or_else(|| {
+                                if residual {
+                                    ReconcileTerminateKind::ReconciliationIncomplete
+                                } else if pending.snapshot.executions.is_empty()
+                                    && pending
+                                        .snapshot
+                                        .observations
+                                        .initial_mapping_slot_id
+                                        .is_none()
+                                {
+                                    ReconcileTerminateKind::GenuinelyAbsent
+                                } else if pending.snapshot.executions.is_empty()
+                                    || pending
+                                        .snapshot
+                                        .observations
+                                        .initial_mapping_slot_id
+                                        .is_none()
+                                {
+                                    ReconcileTerminateKind::DesyncReconciled
+                                } else {
+                                    ReconcileTerminateKind::Terminated
+                                }
+                            });
+                        pending.snapshot.ok = matches!(
+                            pending.snapshot.kind,
+                            ReconcileTerminateKind::Terminated
+                                | ReconcileTerminateKind::DesyncReconciled
+                                | ReconcileTerminateKind::GenuinelyAbsent
+                        );
+                        for waiter in pending.waiters {
+                            let _ = waiter.send(Ok(pending.snapshot.clone()));
+                        }
                         for dispatch in pending.parked_dispatches {
                             match dispatch {
-                                ParkedDispatch::Plain { project_path, model_id, respond_to } => { let _ = respond_to.send(self.dispatch(&task_id, &project_path, &model_id).await); }
-                                ParkedDispatch::Resume { project_path, model_id, resume_lifecycle_metadata, respond_to } => { let _ = respond_to.send(self.dispatch_with_resume(&task_id, &project_path, &model_id, resume_lifecycle_metadata).await); }
+                                ParkedDispatch::Plain {
+                                    project_path,
+                                    model_id,
+                                    respond_to,
+                                } => {
+                                    let _ = respond_to.send(
+                                        self.dispatch(&task_id, &project_path, &model_id).await,
+                                    );
+                                }
+                                ParkedDispatch::Resume {
+                                    project_path,
+                                    model_id,
+                                    resume_lifecycle_metadata,
+                                    respond_to,
+                                } => {
+                                    let _ = respond_to.send(
+                                        self.dispatch_with_resume(
+                                            &task_id,
+                                            &project_path,
+                                            &model_id,
+                                            resume_lifecycle_metadata,
+                                        )
+                                        .await,
+                                    );
+                                }
                             }
                         }
                     }
@@ -711,24 +835,50 @@ impl SlotPool {
             })
             .collect();
         if initial_compacting || initial_pending_teardown {
-            let snapshot = ReconcileTerminateSnapshot {
-                ok: false, kind: ReconcileTerminateKind::ReconciliationIncomplete, task_id: task_id.to_owned(), executions,
+            let mut snapshot = ReconcileTerminateSnapshot {
+                ok: false,
+                kind: ReconcileTerminateKind::ReconciliationIncomplete,
+                task_id: task_id.to_owned(),
+                executions,
                 observations: ReconcileTerminateObservations {
-                    initial_non_terminal_ids, initial_mapping_slot_id, initial_pending_teardown, initial_compacting,
-                    fenced_generation: fence, initial_capture_error, final_non_terminal_ids: Vec::new(),
-                    final_mapping_slot_id: initial_mapping_slot_id, final_pending_teardown: true,
-                    final_reread_error: None, pool_cleanup_error: None, completion_source: "deferred".to_owned(), underlying_kind: None,
+                    initial_non_terminal_ids,
+                    initial_mapping_slot_id,
+                    initial_pending_teardown,
+                    initial_compacting,
+                    fenced_generation: fence,
+                    initial_capture_error,
+                    final_non_terminal_ids: Vec::new(),
+                    final_mapping_slot_id: initial_mapping_slot_id,
+                    final_pending_teardown: true,
+                    final_reread_error: None,
+                    pool_cleanup_error: None,
+                    completion_source: "deferred".to_owned(),
+                    underlying_kind: None,
                 },
             };
             if !initial_pending_teardown {
                 if let Some(slot_id) = initial_mapping_slot_id {
-                    if let Ok(slot) = self.slot(slot_id) { let _ = slot.kill().await; }
+                    match self.slot(slot_id) {
+                        Ok(slot) => {
+                            if let Err(error) = slot.kill().await {
+                                snapshot.observations.pool_cleanup_error = Some(error.to_string());
+                            }
+                        }
+                        Err(error) => {
+                            snapshot.observations.pool_cleanup_error = Some(error.to_string())
+                        }
+                    }
                 }
                 self.pending_teardown_tasks.insert(task_id.to_owned());
             }
-            self.pending_reconciliations.insert(task_id.to_owned(), PendingReconciliation {
-                snapshot: snapshot.clone(), waiters: Vec::new(), parked_dispatches: Vec::new(),
-            });
+            self.pending_reconciliations.insert(
+                task_id.to_owned(),
+                PendingReconciliation {
+                    snapshot: snapshot.clone(),
+                    waiters: Vec::new(),
+                    parked_dispatches: Vec::new(),
+                },
+            );
             return snapshot;
         }
         for execution in &mut executions {

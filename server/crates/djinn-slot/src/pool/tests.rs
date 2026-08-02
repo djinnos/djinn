@@ -2802,3 +2802,136 @@ async fn reconcile_terminate_without_runtime_fails_closed_after_settlement() {
             .is_empty()
     );
 }
+
+/// Deferred reconciliation owns its captured teardown until Killed, attaches
+/// every waiter, and releases the dispatch gate only after the final snapshot.
+#[tokio::test]
+async fn deferred_reconcile_attaches_waiters_and_replays_parked_dispatches() {
+    let (mut app_state, cancel, _temp) = test_app_state();
+    let runtime = RecordingRuntimeOps::new(false);
+    app_state.runtime_ops = Some(Arc::new(runtime.clone()));
+    let task_id =
+        seed_running_session_with_task_run(&app_state, "deferred reconcile", "run-deferred").await;
+    let unrelated_task = create_dispatch_task_ids(&app_state, 1).await.remove(0);
+    let cses: Arc<
+        Mutex<HashMap<usize, crate::reply_loop::compaction_guard::CompactionCriticalSection>>,
+    > = Arc::new(Mutex::new(HashMap::new()));
+    let (signal_tx, mut signal_rx) = mpsc::unbounded_channel();
+    let (_tx, rx) = mpsc::channel(16);
+    let mut pool = SlotPool::new_with_factory(
+        rx,
+        app_state,
+        cancel,
+        make_config(
+            vec![model("model-a", 1, &["worker"])],
+            &[("worker", vec!["model-a"])],
+        ),
+        compaction_capturing_slot_factory(Duration::from_secs(3600), signal_tx, cses.clone()),
+    );
+    pool.test_assign_busy(&task_id, 0);
+    let guard = cses.lock().unwrap().get(&0).unwrap().clone().guard();
+    let (first_tx, mut first_rx) = tokio::sync::oneshot::channel();
+    pool.test_handle_message(PoolMessage::ReconcileTerminate {
+        task_id: task_id.clone(),
+        respond_to: first_tx,
+    })
+    .await;
+    let (second_tx, mut second_rx) = tokio::sync::oneshot::channel();
+    pool.test_handle_message(PoolMessage::ReconcileTerminate {
+        task_id: task_id.clone(),
+        respond_to: second_tx,
+    })
+    .await;
+    let (dropped_tx, dropped_rx) = tokio::sync::oneshot::channel();
+    pool.test_handle_message(PoolMessage::ReconcileTerminate {
+        task_id: task_id.clone(),
+        respond_to: dropped_tx,
+    })
+    .await;
+    drop(dropped_rx);
+    assert!(
+        first_rx.try_recv().is_err() && second_rx.try_recv().is_err(),
+        "deferred waiters must not receive an early snapshot"
+    );
+
+    let (plain_tx, mut plain_rx) = tokio::sync::oneshot::channel();
+    pool.test_handle_message(PoolMessage::Dispatch {
+        task_id: task_id.clone(),
+        project_path: "/tmp/project".to_owned(),
+        model_id: "model-a".to_owned(),
+        respond_to: plain_tx,
+    })
+    .await;
+    let (resume_tx, mut resume_rx) = tokio::sync::oneshot::channel();
+    pool.test_handle_message(PoolMessage::DispatchWithResume {
+        task_id: task_id.clone(),
+        project_path: "/tmp/project".to_owned(),
+        model_id: "model-a".to_owned(),
+        resume_lifecycle_metadata: Some(serde_json::json!({"resume": true})),
+        respond_to: resume_tx,
+    })
+    .await;
+    assert!(
+        plain_rx.try_recv().is_err() && resume_rx.try_recv().is_err(),
+        "both same-task variants stay parked"
+    );
+
+    let (unrelated_tx, unrelated_rx) = tokio::sync::oneshot::channel();
+    pool.test_handle_message(PoolMessage::Dispatch {
+        task_id: unrelated_task.clone(),
+        project_path: "/tmp/project".to_owned(),
+        model_id: "model-a".to_owned(),
+        respond_to: unrelated_tx,
+    })
+    .await;
+    unrelated_rx
+        .await
+        .expect("unrelated reply")
+        .expect("unrelated dispatch progresses while gate is held");
+
+    drop(guard);
+    pool.test_handle_slot_event(SlotEvent::Killed {
+        slot_id: 0,
+        model_id: "model-a".to_owned(),
+        task_id: task_id.clone(),
+    })
+    .await;
+    let first = first_rx
+        .await
+        .expect("first reply")
+        .expect("first snapshot");
+    let second = second_rx
+        .await
+        .expect("second reply")
+        .expect("second snapshot");
+    assert_eq!(
+        first, second,
+        "all live waiters receive the same final snapshot"
+    );
+    assert_eq!(first.observations.completion_source, "slot_event_killed");
+    assert_eq!(first.kind, ReconcileTerminateKind::Terminated);
+    assert_eq!(
+        runtime.calls(),
+        vec!["run-deferred"],
+        "captured task-run tears down exactly once"
+    );
+    plain_rx
+        .await
+        .expect("plain replay reply")
+        .expect("first parked dispatch replays");
+    assert!(
+        matches!(
+            resume_rx.await.expect("resume replay reply"),
+            Err(PoolError::SessionAlreadyActive { .. })
+        ),
+        "FIFO replay preserves the second dispatch rather than admitting it before the first"
+    );
+    assert_eq!(
+        pool.test_slot_of(&task_id),
+        Some(0),
+        "replayed task owns the released slot"
+    );
+    assert!(
+        matches!(signal_rx.recv().await, Some(RunnerSignal::Started(id)) if id == unrelated_task)
+    );
+}
