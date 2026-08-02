@@ -4504,7 +4504,6 @@ mod tests {
 
     static CARGO_INSTRUMENT_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-
     const WARM_TEST_PROJECT: &str = "warm-worker-project";
     const WARM_TEST_REVISION: &str = "warm-worker-revision";
     const WARM_TEST_DEADLINE: &str = "2099-01-01T00:00:00.000Z";
@@ -4529,11 +4528,13 @@ mod tests {
 
     async fn persist_warm_publication(db: &Database, coverage_status: Option<&str>) {
         djinn_db::repositories::repo_graph_cache::RepoGraphCacheRepository::new(db.clone())
-            .upsert(djinn_db::repositories::repo_graph_cache::RepoGraphCacheInsert {
-                project_id: WARM_TEST_PROJECT,
-                commit_sha: WARM_TEST_REVISION,
-                graph_blob: b"graph",
-            })
+            .upsert(
+                djinn_db::repositories::repo_graph_cache::RepoGraphCacheInsert {
+                    project_id: WARM_TEST_PROJECT,
+                    commit_sha: WARM_TEST_REVISION,
+                    graph_blob: b"graph",
+                },
+            )
             .await
             .expect("persist graph generation");
         if let Some(status) = coverage_status {
@@ -4559,7 +4560,10 @@ mod tests {
     async fn worker_finishes_exact_attempt_as_complete_or_partial_after_publication() {
         for (coverage_status, expected) in [
             (None, djinn_db::WarmGraphAttemptStatus::PublishedComplete),
-            (Some("timed_out"), djinn_db::WarmGraphAttemptStatus::PublishedPartial),
+            (
+                Some("timed_out"),
+                djinn_db::WarmGraphAttemptStatus::PublishedPartial,
+            ),
         ] {
             let (db, attempt_id, attempt) = warm_attempt_fixture().await;
             persist_warm_publication(&db, coverage_status).await;
@@ -4584,10 +4588,12 @@ mod tests {
         assert!(error.to_string().contains("canonical graph fixture failed"));
         let stored = warm_attempt_status(&db, &attempt_id).await;
         assert_eq!(stored.status, djinn_db::WarmGraphAttemptStatus::Failed);
-        assert!(stored
-            .detail
-            .as_deref()
-            .is_some_and(|detail| detail.contains("canonical graph fixture failed")));
+        assert!(
+            stored
+                .detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("canonical graph fixture failed"))
+        );
     }
 
     #[tokio::test]
@@ -4596,23 +4602,31 @@ mod tests {
         let deadline = DateTime::parse_from_rfc3339(WARM_TEST_DEADLINE)
             .expect("fixture deadline")
             .with_timezone(&Utc);
-        assert!(validate_projected_warm_attempt(
-            &db,
-            WARM_TEST_PROJECT,
-            &uuid::Uuid::now_v7().to_string(),
-            WARM_TEST_REVISION,
-            deadline,
-        )
-        .await
-        .is_err());
+        assert!(
+            validate_projected_warm_attempt(
+                &db,
+                WARM_TEST_PROJECT,
+                &uuid::Uuid::now_v7().to_string(),
+                WARM_TEST_REVISION,
+                deadline,
+            )
+            .await
+            .is_err()
+        );
         for (project, revision, deadline) in [
             ("other-project", WARM_TEST_REVISION, deadline),
             (WARM_TEST_PROJECT, "other-revision", deadline),
-            (WARM_TEST_PROJECT, WARM_TEST_REVISION, deadline + chrono::Duration::seconds(1)),
+            (
+                WARM_TEST_PROJECT,
+                WARM_TEST_REVISION,
+                deadline + chrono::Duration::seconds(1),
+            ),
         ] {
-            assert!(validate_projected_warm_attempt(&db, project, &attempt_id, revision, deadline)
-                .await
-                .is_err());
+            assert!(
+                validate_projected_warm_attempt(&db, project, &attempt_id, revision, deadline)
+                    .await
+                    .is_err()
+            );
         }
         assert_eq!(
             warm_attempt_status(&db, &attempt_id).await.status,
@@ -4624,14 +4638,16 @@ mod tests {
     async fn worker_lost_terminal_cas_race_preserves_first_status() {
         let (db, attempt_id, attempt) = warm_attempt_fixture().await;
         persist_warm_publication(&db, None).await;
-        assert!(djinn_db::WarmGraphAttemptRepository::new(db.clone())
-            .finish_attempt_if_running(
-                &attempt_id,
-                djinn_db::WarmGraphAttemptStatus::TimedOut,
-                Some("watcher won"),
-            )
-            .await
-            .expect("watcher terminal CAS"));
+        assert!(
+            djinn_db::WarmGraphAttemptRepository::new(db.clone())
+                .finish_attempt_if_running(
+                    &attempt_id,
+                    djinn_db::WarmGraphAttemptStatus::TimedOut,
+                    Some("watcher won"),
+                )
+                .await
+                .expect("watcher terminal CAS")
+        );
         finish_warm_attempt_after_pipeline(&db, WARM_TEST_PROJECT, &attempt, Ok(()))
             .await
             .expect("lost CAS is idempotent");
