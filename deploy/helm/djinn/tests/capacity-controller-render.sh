@@ -35,7 +35,12 @@ helm template capacity-nodepool "$CHART_DIR" --is-upgrade \
   --set-string kueue.capacity.staticFallback.cpu=12 \
   --set-string kueue.capacity.staticFallback.memory=48Gi \
   --set kueue.capacity.staticFallback.pods=3 >"$WORK/nodepool-with-api.yaml"
-cmp "$WORK/nodepool.yaml" "$WORK/nodepool-with-api.yaml"
+
+# `--api-versions` legitimately changes Helm's advertised capability list (the
+# prerequisite guard consumes that list for a separate install-time refusal).
+# Compare the capacity resources themselves: Karpenter discovery must not alter
+# the source-selected flavor, watcher RBAC, controller configuration, or task
+# scheduling identity.
 
 helm template capacity-static "$CHART_DIR" --is-upgrade \
   --set kueue.enabled=true \
@@ -85,7 +90,7 @@ assert (('karpenter.sh',),('nodepools',)) not in rules
 assert all('*' not in groups+resources and '*' not in verbs for (groups,resources),verbs in rules.items())
 PY
 
-python3 - "$WORK/nodepool.yaml" "$WORK/static.yaml" <<'PY'
+python3 - "$WORK/nodepool.yaml" "$WORK/nodepool-with-api.yaml" "$WORK/static.yaml" <<'PY'
 import json, sys, yaml
 
 def docs(path): return [d for d in yaml.safe_load_all(open(path)) if d]
@@ -96,7 +101,7 @@ def one(items, kind, suffix=None):
 def env(deployment):
     return {e['name']: e['value'] for e in deployment['spec']['template']['spec']['containers'][0]['env'] if 'value' in e}
 
-nodepool, static = docs(sys.argv[1]), docs(sys.argv[2])
+nodepool, nodepool_with_api, static = (docs(path) for path in sys.argv[1:])
 pool = 'task-pool'
 assert one(nodepool, 'ResourceFlavor')['spec'] == {'nodeLabels': {'karpenter.sh/nodepool': pool}}
 role = one(nodepool, 'ClusterRole', '-capacity')
@@ -110,6 +115,18 @@ assert settings['DJINN_CAPACITY_NODEPOOL_DEDICATED'] == 'true'
 assert json.loads(settings['DJINN_CAPACITY_FLAVOR_SELECTOR']) == {'karpenter.sh/nodepool': pool}
 assert json.loads(settings['DJINN_K8S_NODE_SELECTOR']) == {'karpenter.sh/nodepool': pool}
 assert {'key': 'djinn.io/task-pool', 'operator': 'Equal', 'value': pool, 'effect': 'NoSchedule'} in json.loads(settings['DJINN_K8S_TOLERATIONS'])
+
+# Supplying a Karpenter API version is not an activation signal. All
+# Karpenter-related resources and controller/task identity remain value-driven.
+api_role = one(nodepool_with_api, 'ClusterRole', '-capacity')
+api_settings = env(one(nodepool_with_api, 'Deployment', '-server'))
+assert one(nodepool_with_api, 'ResourceFlavor')['spec'] == one(nodepool, 'ResourceFlavor')['spec']
+assert [r for r in api_role['rules'] if r['apiGroups'] == ['karpenter.sh']] == [r for r in role['rules'] if r['apiGroups'] == ['karpenter.sh']]
+for name in ('DJINN_CAPACITY_SOURCE', 'DJINN_CAPACITY_NODEPOOL_NAME',
+             'DJINN_CAPACITY_NODEPOOL_DEDICATED', 'DJINN_CAPACITY_FLAVOR_SELECTOR',
+             'DJINN_K8S_NODE_SELECTOR', 'DJINN_K8S_TOLERATIONS'):
+    assert api_settings[name] == settings[name], name
+assert not any(d['kind'] == 'NodePool' for d in nodepool), 'the chart must not own a Karpenter NodePool'
 
 assert one(static, 'ResourceFlavor')['spec'] == {}
 static_role = one(static, 'ClusterRole', '-capacity')
