@@ -78,6 +78,20 @@ pub fn flavor_vector_patch_decision(
             reason: ConservativeReason::MissingFlavorVector,
         };
     }
+    // A repeated target would otherwise generate two independently complete
+    // vectors for the same flavor. Refuse it before constructing any patch so a
+    // caller cannot accidentally make the last target win.
+    if targets
+        .iter()
+        .map(|target| &target.flavor_name)
+        .collect::<BTreeSet<_>>()
+        .len()
+        != targets.len()
+    {
+        return FlavorActuationDecision::NoMutation {
+            reason: ConservativeReason::AmbiguousFlavorVector,
+        };
+    }
     let mut operations = vec![json!({
         "op": "test",
         "path": "/metadata/resourceVersion",
@@ -907,6 +921,52 @@ mod tests {
     fn outcome() -> CapacityOutcome {
         CapacityOutcome::Derived(derived())
     }
+
+    fn flavor(name: &str, resource_group_index: usize, flavor_index: usize) -> QueueFlavor {
+        QueueFlavor {
+            name: name.into(),
+            resource_group_index,
+            flavor_index,
+            // Deliberately not cpu-first: vector actuation must resolve these
+            // indexes from the names below.
+            resources: vec![
+                QueueResource {
+                    name: "memory".into(),
+                    nominal_quota: "1".into(),
+                },
+                QueueResource {
+                    name: "pods".into(),
+                    nominal_quota: "1".into(),
+                },
+                QueueResource {
+                    name: "cpu".into(),
+                    nominal_quota: "1m".into(),
+                },
+            ],
+        }
+    }
+
+    fn vector_queue(flavors: Vec<QueueFlavor>) -> QueueObservation {
+        QueueObservation {
+            name: "djinn-kueue".into(),
+            resource_version: "vector-rv".into(),
+            owner: Some(DERIVED_CAPACITY_OWNER.into()),
+            binding_resource: None,
+            resources: flavors[0].resources.clone(),
+            flavors,
+        }
+    }
+
+    fn apply_patch_to_live_queue(live: &mut Value, patch: &Value) {
+        for operation in patch.as_array().expect("JSON patch is an array") {
+            if operation["op"] == "replace" {
+                let path = operation["path"].as_str().expect("replace has path");
+                *live.pointer_mut(path).expect("replacement path exists") =
+                    operation["value"].clone();
+            }
+        }
+    }
+
     fn safe() -> FailSafeCapacity {
         FailSafeCapacity {
             pods: 3,
@@ -1011,77 +1071,209 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn quota_controller_wire_records_exactly_one_fenced_patch_per_surface() {
+    async fn quota_controller_wire() {
         use crate::runtime_fixture::{RecordedApiserver, recording_client};
 
-        for (surface, damped, expected) in [
-            (
-                "pods",
-                CapacityVector {
-                    binding: BindingQuota::Pods(10),
-                    compile_slots: 2,
-                },
-                "\"value\":\"10\"",
-            ),
-            (
-                "cpu",
-                CapacityVector {
-                    binding: BindingQuota::CpuMillicores(7_500),
-                    compile_slots: 2,
-                },
-                "\"value\":\"7500m\"",
-            ),
-        ] {
-            let decision = patch_decision(
-                &queue(surface),
+        let queue = vector_queue(vec![flavor("default", 0, 0)]);
+        let target = FlavorQuotaTarget {
+            flavor_name: "default".into(),
+            // Raw cpu/memory and the limiting PodSet count from the normative
+            // vector derivation are serialized without a legacy binding choice.
+            vector: resources(7_500, 8_192, 7),
+        };
+        let FlavorActuationDecision::Patch { patch } =
+            flavor_vector_patch_decision(&queue, "djinn-kueue", &[target])
+        else {
+            panic!("complete vector target must patch")
+        };
+        let expected = json!([
+            {"op":"test", "path":"/metadata/resourceVersion", "value":"vector-rv"},
+            {"op":"replace", "path":"/spec/resourceGroups/0/flavors/0/resources/2/nominalQuota", "value":"7500m"},
+            {"op":"replace", "path":"/spec/resourceGroups/0/flavors/0/resources/0/nominalQuota", "value":"8192"},
+            {"op":"replace", "path":"/spec/resourceGroups/0/flavors/0/resources/1/nominalQuota", "value":"7"},
+        ]);
+        assert_eq!(
+            patch, expected,
+            "all three named vector dimensions are required"
+        );
+
+        let recorder = RecordedApiserver::new();
+        let api = queue_api(recording_client(&recorder, "default"));
+        let result = api
+            .patch(
                 "djinn-kueue",
-                outcome(),
-                damped,
-                true,
-                safe(),
-            );
-            let ActuationDecision::Patch { patch, .. } = decision else {
-                panic!("derived fixture must patch")
-            };
-            let recorder = RecordedApiserver::new();
-            let api = queue_api(recording_client(&recorder, "default"));
-            let result = api
-                .patch(
-                    "djinn-kueue",
-                    &PatchParams::default(),
-                    &Patch::Json::<()>(serde_json::from_value(patch).unwrap()),
+                &PatchParams::default(),
+                &Patch::Json::<()>(serde_json::from_value(patch.clone()).unwrap()),
+            )
+            .await;
+        assert!(result.is_err(), "fixture refuses after recording the wire");
+        let mutations = recorder.mutations();
+        assert_eq!(mutations.len(), 1);
+        assert_eq!(mutations[0].method, "PATCH");
+        assert_eq!(
+            serde_json::from_str::<Value>(&mutations[0].body).unwrap(),
+            expected
+        );
+
+        let mut live = json!({"metadata":{"resourceVersion":"vector-rv"},"spec":{"resourceGroups":[{"flavors":[{"resources":[{"name":"memory","nominalQuota":"1"},{"name":"pods","nominalQuota":"1"},{"name":"cpu","nominalQuota":"1m"}]}]}]}});
+        apply_patch_to_live_queue(&mut live, &patch);
+        assert_eq!(
+            live.pointer("/spec/resourceGroups/0/flavors/0/resources/2/nominalQuota"),
+            Some(&json!("7500m"))
+        );
+        assert_eq!(
+            live.pointer("/spec/resourceGroups/0/flavors/0/resources/0/nominalQuota"),
+            Some(&json!("8192"))
+        );
+        assert_eq!(
+            live.pointer("/spec/resourceGroups/0/flavors/0/resources/1/nominalQuota"),
+            Some(&json!("7"))
+        );
+    }
+
+    #[test]
+    fn quota_controller_flavor_addressing() {
+        let queue = vector_queue(vec![flavor("spot", 0, 0), flavor("on-demand", 0, 1)]);
+        let targets = [
+            FlavorQuotaTarget {
+                flavor_name: "spot".into(),
+                vector: resources(4_000, 8_192, 5),
+            },
+            FlavorQuotaTarget {
+                flavor_name: "on-demand".into(),
+                vector: resources(6_000, 16_384, 8),
+            },
+        ];
+        let FlavorActuationDecision::Patch { patch } =
+            flavor_vector_patch_decision(&queue, "djinn-kueue", &targets)
+        else {
+            panic!("two complete flavor vectors must patch")
+        };
+        // Both flavors have memory,pods,cpu ordering. These paths prove name,
+        // rather than positional, addressing for each resource and flavor.
+        assert_eq!(
+            patch[1]["path"],
+            "/spec/resourceGroups/0/flavors/0/resources/2/nominalQuota"
+        );
+        assert_eq!(
+            patch[2]["path"],
+            "/spec/resourceGroups/0/flavors/0/resources/0/nominalQuota"
+        );
+        assert_eq!(
+            patch[3]["path"],
+            "/spec/resourceGroups/0/flavors/0/resources/1/nominalQuota"
+        );
+        assert_eq!(
+            patch[4]["path"],
+            "/spec/resourceGroups/0/flavors/1/resources/2/nominalQuota"
+        );
+        assert_eq!(
+            patch[5]["path"],
+            "/spec/resourceGroups/0/flavors/1/resources/0/nominalQuota"
+        );
+        assert_eq!(
+            patch[6]["path"],
+            "/spec/resourceGroups/0/flavors/1/resources/1/nominalQuota"
+        );
+
+        let mut live = json!({"spec":{"resourceGroups":[{"flavors":[
+            {"resources":[{"name":"memory","nominalQuota":"1"},{"name":"pods","nominalQuota":"1"},{"name":"cpu","nominalQuota":"1m"}]},
+            {"resources":[{"name":"memory","nominalQuota":"1"},{"name":"pods","nominalQuota":"1"},{"name":"cpu","nominalQuota":"1m"}]}
+        ]}]}});
+        apply_patch_to_live_queue(&mut live, &patch);
+        let flavors = live
+            .pointer("/spec/resourceGroups/0/flavors")
+            .unwrap()
+            .as_array()
+            .unwrap();
+        let totals = flavors.iter().fold((0_i64, 0_i64, 0_i64), |sum, flavor| {
+            let resources = flavor["resources"].as_array().unwrap();
+            (
+                sum.0
+                    + resources[2]["nominalQuota"]
+                        .as_str()
+                        .unwrap()
+                        .strip_suffix('m')
+                        .unwrap()
+                        .parse::<i64>()
+                        .unwrap(),
+                sum.1
+                    + resources[0]["nominalQuota"]
+                        .as_str()
+                        .unwrap()
+                        .parse::<i64>()
+                        .unwrap(),
+                sum.2
+                    + resources[1]["nominalQuota"]
+                        .as_str()
+                        .unwrap()
+                        .parse::<i64>()
+                        .unwrap(),
+            )
+        });
+        assert_eq!(totals, (10_000, 24_576, 13));
+        let per_flavor: Vec<_> = flavors
+            .iter()
+            .map(|flavor| {
+                let resources = flavor["resources"].as_array().unwrap();
+                (
+                    resources[2]["nominalQuota"].as_str().unwrap(),
+                    resources[0]["nominalQuota"].as_str().unwrap(),
+                    resources[1]["nominalQuota"].as_str().unwrap(),
                 )
-                .await;
-            assert!(result.is_err(), "fixture refuses after recording the wire");
-            let mutations = recorder.mutations();
-            assert_eq!(mutations.len(), 1);
-            assert_eq!(mutations[0].method, "PATCH");
-            assert!(mutations[0].path.ends_with("/clusterqueues/djinn-kueue"));
-            assert!(mutations[0].body.contains("resourceVersion"));
-            assert!(mutations[0].body.contains(expected));
-            assert!(mutations[0].body.contains("memory"));
-        }
+            })
+            .collect();
+        assert_eq!(
+            per_flavor,
+            vec![("4000m", "8192", "5"), ("6000m", "16384", "8")]
+        );
+
+        let mut missing = queue.clone();
+        missing.flavors[0]
+            .resources
+            .retain(|resource| resource.name != "pods");
+        assert!(matches!(
+            flavor_vector_patch_decision(&missing, "djinn-kueue", &targets),
+            FlavorActuationDecision::NoMutation {
+                reason: ConservativeReason::MissingFlavorVector
+            }
+        ));
+        let mut duplicate = queue.clone();
+        duplicate.flavors[1].resources.push(QueueResource {
+            name: "cpu".into(),
+            nominal_quota: "1m".into(),
+        });
+        assert!(matches!(
+            flavor_vector_patch_decision(&duplicate, "djinn-kueue", &targets),
+            FlavorActuationDecision::NoMutation {
+                reason: ConservativeReason::AmbiguousFlavorVector
+            }
+        ));
+        let mut duplicate_flavor = queue.clone();
+        duplicate_flavor.flavors.push(flavor("spot", 1, 0));
+        assert!(matches!(
+            flavor_vector_patch_decision(&duplicate_flavor, "djinn-kueue", &targets),
+            FlavorActuationDecision::NoMutation {
+                reason: ConservativeReason::AmbiguousFlavorVector
+            }
+        ));
+        let repeated_targets = [targets[0].clone(), targets[0].clone()];
+        assert!(matches!(
+            flavor_vector_patch_decision(&queue, "djinn-kueue", &repeated_targets),
+            FlavorActuationDecision::NoMutation {
+                reason: ConservativeReason::AmbiguousFlavorVector
+            }
+        ));
     }
 
     #[tokio::test(start_paused = true)]
     async fn quota_controller_wire_drives_full_recorded_observation_and_actuation() {
+        // The focused two-flavor fixture above covers the exact vector wire
+        // body; this integration fixture continues to cover the controller
+        // observation loop.
         use crate::runtime_fixture::capacity_controller_cluster;
         let build_job = controller_build_job();
-        let build_pod = rendered_pod_spec(&build_job).unwrap();
-        let CapacityOutcome::Derived(expected_capacity) = derive_capacity_from_rendered_build_job(
-            resources(12_000, 48 * 1024 * 1024 * 1024, 110),
-            resources(4_200, 5 * 1024 * 1024, 5),
-            ResourceVector::ZERO,
-            build_pod,
-            CpuMillicores::new(2_800).unwrap(),
-            safe(),
-        ) else {
-            panic!("complete recorded observation must derive")
-        };
-        for (surface, expected) in [
-            ("pods", expected_capacity.pods.to_string()),
-            ("cpu", format!("{}m", expected_capacity.binding_cpu.get())),
-        ] {
+        for surface in ["pods", "cpu"] {
             let (client, recorder) = capacity_controller_cluster("default", surface);
             let config = CapacityControllerConfig {
                 queue_name: "djinn-kueue".into(),
@@ -1114,13 +1306,12 @@ mod tests {
             task.abort();
             let mutations = recorder.mutations();
             assert_eq!(mutations.len(), 1);
-            assert!(
-                mutations[0]
-                    .body
-                    .contains(&format!("\"value\":\"{expected}\""))
+            let patch: Value = serde_json::from_str(&mutations[0].body).unwrap();
+            assert_eq!(
+                patch[0],
+                json!({"op":"test", "path":"/metadata/resourceVersion", "value":"42"})
             );
-            assert!(mutations[0].body.contains("resourceVersion"));
-            assert!(mutations[0].body.contains("memory"));
+            assert_eq!(patch.as_array().unwrap().len(), 4);
         }
     }
 
