@@ -2480,13 +2480,28 @@ mod tests {
                 }
             }
 
+            // A killed descendant is not enough: `/proc` retains a zombie until
+            // its parent (or the worker's subreaper) has waited for it. Poll its
+            // proc entry rather than `is_process_running`, which intentionally
+            // treats `Z` as not running. This proves the descendant was reaped,
+            // not merely signalled.
             let observed = std::time::Instant::now();
-            while is_process_running(descendant_pid) && observed.elapsed() < Duration::from_secs(5)
+            while process_state(descendant_pid).is_some()
+                && observed.elapsed() < Duration::from_secs(5)
             {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
-            assert!(!is_process_running(descendant_pid));
-            assert!(observed.elapsed() < Duration::from_secs(5));
+            assert!(
+                process_state(descendant_pid).is_none(),
+                "descendant {descendant_pid} in group {shell_pid} remained after cleanup \
+                 (state {:?}, group {:?})",
+                process_state(descendant_pid),
+                process_group_of(descendant_pid),
+            );
+            assert!(
+                observed.elapsed() < Duration::from_secs(5),
+                "descendant {descendant_pid} was not reaped within five seconds"
+            );
             assert!(is_process_running(sentinel_pid));
         }
 
