@@ -85,6 +85,15 @@ fn capacity_node_observation() {
         aggregate_eligible_nodes(&[missing]).is_err(),
         "missing dimensions fail closed"
     );
+    let malformed = observe_node(
+        &node("malformed", "4", "not-a-quantity", "20"),
+        "pool",
+        "build",
+    );
+    assert!(
+        aggregate_eligible_nodes(&[malformed]).is_err(),
+        "malformed allocatable dimensions from a Node fail closed"
+    );
     let mut overflow = observed[0].clone();
     overflow.allocatable_cpu = Some(CpuMillicores::new(i64::MAX).unwrap());
     assert!(
