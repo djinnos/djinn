@@ -132,6 +132,9 @@ kueue:
   # namespace is Kueue-managed. Arming is the separate `armed` flag below.
   enabled: false
   buildPods: 3
+  # Admission's binding resource. `cpu` is supported for the oru9-compatible
+  # topology; buildPods is then interpreted as the nominal CPU quantity.
+  bindingResource: pods
 
   # Arm Kueue admission for build Jobs (cutover epic 4c9q, slice S1).
   #

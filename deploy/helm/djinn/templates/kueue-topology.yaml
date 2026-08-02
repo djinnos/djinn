@@ -28,6 +28,7 @@ state `deploy/kueue/zero-capture-gate.sh` verifies. `armed` implies `enabled`;
 */ -}}
 {{- if .Values.kueue.enabled -}}
 {{- $kueue := .Values.kueue -}}
+{{- $bindingResource := $kueue.bindingResource | default "pods" -}}
 {{- if not (kindIs "float64" $kueue.buildPods) -}}
 {{- if not (kindIs "int64" $kueue.buildPods) -}}
 {{- fail "kueue.enabled is true but kueue.buildPods is not a number. It is the pods nominalQuota for the ClusterQueue; set a positive integer, or set kueue.enabled=false if the Kueue prerequisite (deploy/helm/djinn-prereqs) is not installed." -}}
@@ -128,9 +129,17 @@ spec:
         - name: {{ printf "%s-kueue" (include "djinn.fullname" .) | trunc 63 | trimSuffix "-" }}
           resources:
             - name: pods
+              {{- if eq $bindingResource "pods" }}
               nominalQuota: {{ $kueue.buildPods }}
+              {{- else }}
+              nominalQuota: 10000
+              {{- end }}
             - name: cpu
+              {{- if eq $bindingResource "cpu" }}
+              nominalQuota: {{ $kueue.buildPods }}
+              {{- else }}
               nominalQuota: 10k
+              {{- end }}
             - name: memory
               nominalQuota: 100Ti
 ---
@@ -160,10 +169,19 @@ spec:
         - name: {{ printf "%s-kueue" (include "djinn.fullname" .) | trunc 63 | trimSuffix "-" }}
           resources:
             - name: pods
+              {{- if eq $bindingResource "pods" }}
               nominalQuota: 0
               borrowingLimit: 1
+              {{- else }}
+              nominalQuota: 10000
+              {{- end }}
             - name: cpu
+              {{- if eq $bindingResource "cpu" }}
+              nominalQuota: 0
+              borrowingLimit: 1
+              {{- else }}
               nominalQuota: 10k
+              {{- end }}
             - name: memory
               nominalQuota: 100Ti
 ---
@@ -203,10 +221,19 @@ spec:
         - name: {{ printf "%s-kueue" (include "djinn.fullname" .) | trunc 63 | trimSuffix "-" }}
           resources:
             - name: pods
+              {{- if eq $bindingResource "pods" }}
               nominalQuota: 0
               borrowingLimit: 1
+              {{- else }}
+              nominalQuota: 10000
+              {{- end }}
             - name: cpu
+              {{- if eq $bindingResource "cpu" }}
+              nominalQuota: 0
+              borrowingLimit: 1
+              {{- else }}
               nominalQuota: 10k
+              {{- end }}
             - name: memory
               nominalQuota: 100Ti
 ---

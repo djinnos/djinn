@@ -11,6 +11,7 @@ use super::*;
 fn builds_warm_job_manifest_with_expected_shape() {
     let mut cfg = KubernetesConfig::for_testing();
     cfg.database_url = Some("postgres://djinn@djinn-postgres:5432/djinn".into());
+    cfg.warm_job_termination_grace_period_seconds = 47;
     let job = build_warm_job(
         &cfg,
         "proj-xyz",
@@ -51,7 +52,7 @@ fn builds_warm_job_manifest_with_expected_shape() {
             .as_ref()
             .unwrap()
             .termination_grace_period_seconds,
-        Some(30),
+        Some(47),
     );
 
     let pod = spec.template.spec.as_ref().expect("pod");

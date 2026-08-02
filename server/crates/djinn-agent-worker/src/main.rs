@@ -2355,6 +2355,8 @@ impl WarmStepResult {
 const WARM_GRAPH_SHUTDOWN_BOUND: Duration = Duration::from_secs(4);
 #[cfg(target_os = "linux")]
 const WARM_GRAPH_TERM_GRACE: Duration = Duration::from_secs(2);
+#[cfg(target_os = "linux")]
+const WARM_INTERRUPTED_CLEANUP_BOUND: Duration = Duration::from_secs(4);
 
 #[cfg(target_os = "linux")]
 #[derive(Clone, Copy)]
@@ -2385,7 +2387,8 @@ impl WarmOutputInventory {
         Ok(Some(Self { root, existing }))
     }
 
-    fn cleanup_new_paths(self) -> Result<()> {
+    #[allow(clippy::disallowed_methods)] // blocking filesystem deadline needs a wall Instant
+    fn cleanup_new_paths(self, deadline: std::time::Instant) -> Result<()> {
         let canonical_root = std::fs::canonicalize(&self.root)
             .context("re-canonicalize warm output root before cleanup")?;
         anyhow::ensure!(
@@ -2400,6 +2403,10 @@ impl WarmOutputInventory {
             .collect::<Vec<_>>();
         created.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
         for path in created {
+            anyhow::ensure!(
+                std::time::Instant::now() < deadline,
+                "interrupted warm cleanup exceeded its deadline; residue preserved"
+            );
             anyhow::ensure!(
                 path.starts_with(&self.root),
                 "cleanup candidate escaped warm root"
@@ -2511,7 +2518,6 @@ where
     // have no checkpoint RPC, but SIGTERM must still make their body return so
     // the shared lifecycle owner can stop and reap every process group before
     // kubelet's grace expires.
-    let inventory = WarmOutputInventory::capture_from_env()?;
     let cancel = CancellationToken::new();
     let signal_cancel = cancel.clone();
     let signal_listener = tokio::spawn(async move {
@@ -2523,29 +2529,58 @@ where
         }
         signal_cancel.cancel();
     });
+    let result = run_linux_warm_graph_with_initializer_and_cancel(
+        project_id, reaper, admission, body_fn, cancel,
+    )
+    .await;
+    signal_listener.abort();
+    result
+}
+
+#[cfg(target_os = "linux")]
+#[allow(clippy::disallowed_methods)] // establishes the blocking cleanup's wall deadline
+async fn run_linux_warm_graph_with_initializer_and_cancel<F, Fut>(
+    project_id: &str,
+    reaper: &'static djinn_graph::child_reaper::ChildReaper,
+    admission: djinn_graph::child_reaper::Admission,
+    body_fn: F,
+    cancel: CancellationToken,
+) -> Result<()>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<()>>,
+{
+    let inventory = WarmOutputInventory::capture_from_env()?;
     let (body, interrupted) = tokio::select! {
         result = body_fn() => (result, false),
         _ = cancel.cancelled() => (Err(anyhow::anyhow!(
             "warm lifecycle cancelled by termination signal"
         )), true),
     };
-    signal_listener.abort();
     admission.release();
     let cleanup = shutdown_linux_warm_lifecycle(reaper).await;
+    if cleanup.is_ok() && interrupted {
+        #[cfg(test)]
+        warm_cargo_test_phase("child-reaped");
+        info!(
+            project_id,
+            event = "warm_children_reaped",
+            "warm child processes stopped and reaped"
+        );
+    }
     let interrupted_cleanup = if interrupted {
+        #[cfg(test)]
+        warm_cargo_test_phase("termination-cleanup");
         match inventory {
-            Some(inventory) => match tokio::time::timeout(
-                Duration::from_secs(4),
-                tokio::task::spawn_blocking(move || inventory.cleanup_new_paths()),
-            )
-            .await
-            {
-                Ok(Ok(result)) => result,
-                Ok(Err(error)) => Err(anyhow::Error::new(error)),
-                Err(_) => Err(anyhow::anyhow!(
-                    "interrupted warm cleanup exceeded 4s budget"
-                )),
-            },
+            Some(inventory) => {
+                let deadline = std::time::Instant::now() + WARM_INTERRUPTED_CLEANUP_BOUND;
+                match tokio::task::spawn_blocking(move || inventory.cleanup_new_paths(deadline))
+                    .await
+                {
+                    Ok(result) => result,
+                    Err(error) => Err(anyhow::Error::new(error)),
+                }
+            }
             None => Ok(()),
         }
     } else {
@@ -2553,7 +2588,16 @@ where
     };
 
     let body = match interrupted_cleanup {
-        Ok(()) => body,
+        Ok(()) => {
+            if interrupted {
+                info!(
+                    project_id,
+                    event = "warm_interrupted_cleanup_complete",
+                    "interrupted warm cleanup completed"
+                );
+            }
+            body
+        }
         Err(cleanup_error) => {
             Err(cleanup_error.context(body.err().map(|e| e.to_string()).unwrap_or_default()))
         }
@@ -6308,7 +6352,7 @@ warning: something
     /// Unix-only for the `chmod`ed stub `cargo` the stamp step invokes.
     #[cfg(unix)]
     #[test]
-    fn truncated_warm_step_records_timeout_and_suppresses_the_tail_sweep() {
+    fn interrupted_warm_preserves_sweep_guard() {
         use std::os::unix::fs::PermissionsExt;
         let _serial = WARM_LIFECYCLE_TEST_MUTEX.blocking_lock();
         let fixture = tempfile::tempdir().expect("workspace fixture");
@@ -6727,6 +6771,7 @@ warning: something
 
     #[cfg(target_os = "linux")]
     #[test]
+    #[allow(clippy::disallowed_methods)]
     fn interrupted_warm_cleanup_preserves_inventory() {
         let root = tempfile::tempdir().expect("temp root");
         let old = root.path().join("debug/deps/old.rlib");
@@ -6742,7 +6787,9 @@ warning: something
 
         let new = root.path().join("debug/deps/interrupted.rmeta");
         std::fs::write(&new, b"partial").unwrap();
-        inventory.cleanup_new_paths().unwrap();
+        inventory
+            .cleanup_new_paths(std::time::Instant::now() + Duration::from_secs(1))
+            .unwrap();
 
         assert_eq!(std::fs::read(old).unwrap(), b"known-good");
         assert!(!new.exists(), "post-inventory output must be removed");
@@ -6750,6 +6797,7 @@ warning: something
 
     #[cfg(target_os = "linux")]
     #[test]
+    #[allow(clippy::disallowed_methods)]
     fn interrupted_warm_cleanup_safety() {
         let root = tempfile::tempdir().expect("temp root");
         let outside = tempfile::tempdir().expect("outside root");
@@ -6763,13 +6811,28 @@ warning: something
         let protected = outside.path().join("protected");
         std::fs::write(&protected, b"outside").unwrap();
 
-        inventory.cleanup_new_paths().unwrap();
+        inventory
+            .cleanup_new_paths(std::time::Instant::now() + Duration::from_secs(1))
+            .unwrap();
 
         assert_eq!(std::fs::read(protected).unwrap(), b"outside");
         assert!(
             !link.exists(),
             "the symlink itself is removable; its target is not traversed"
         );
+
+        let bounded_root = tempfile::tempdir().expect("bounded root");
+        let residue = bounded_root.path().join("partial-output");
+        std::fs::write(&residue, b"leave on uncertainty").unwrap();
+        let inventory = WarmOutputInventory {
+            root: std::fs::canonicalize(bounded_root.path()).unwrap(),
+            existing: HashSet::new(),
+        };
+        let error = inventory
+            .cleanup_new_paths(std::time::Instant::now())
+            .expect_err("expired cleanup must stop without widening deletion");
+        assert!(error.to_string().contains("deadline"));
+        assert_eq!(std::fs::read(residue).unwrap(), b"leave on uncertainty");
     }
 
     #[cfg(target_os = "linux")]
@@ -6853,6 +6916,61 @@ warning: something
         assert!(reaper.wait_for_supervisors_idle(Duration::ZERO));
         assert!(reaper.wait_for_adopted_idle(Duration::ZERO));
         // Restore the process-global admission gate this case closed.
+        restore_warm_lifecycle_admission(reaper);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn warm_sigterm_cancels_child() {
+        let _serial = WARM_LIFECYCLE_TEST_MUTEX.lock().await;
+        let reaper = test_warm_reaper();
+        let admission = reaper.admit("warm-sigterm-test").unwrap();
+        let cancel = CancellationToken::new();
+        assert!(
+            WARM_GRAPH_SHUTDOWN_BOUND + WARM_INTERRUPTED_CLEANUP_BOUND < Duration::from_secs(30),
+            "internal stop plus cleanup budgets must fit the rendered default grace"
+        );
+        WARM_CARGO_PHASES.lock().expect("recorder").clear();
+
+        let run = run_linux_warm_graph_with_initializer_and_cancel(
+            "sigterm-test",
+            reaper,
+            admission,
+            || async {
+                warm_cargo_test_phase("compile");
+                let mut command = std::process::Command::new("sh");
+                command.args(["-c", "trap '' TERM; exec sleep 30"]);
+                djinn_graph::process::output_with_timeout(command, Duration::from_secs(30)).await?;
+                Ok(())
+            },
+            cancel.clone(),
+        );
+        tokio::pin!(run);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if !reaper.supervisors().is_empty() {
+                    break;
+                }
+                tokio::select! {
+                    result = &mut run => panic!("warm body ended before cancellation: {result:?}"),
+                    _ = tokio::time::sleep(Duration::from_millis(10)) => {}
+                }
+            }
+        })
+        .await
+        .expect("long-lived warm child must start");
+        cancel.cancel();
+
+        let error = tokio::time::timeout(Duration::from_secs(8), &mut run)
+            .await
+            .expect("warm cancellation must stay bounded")
+            .expect_err("termination must return non-zero");
+        assert!(error.to_string().contains("cancelled"), "{error:#}");
+        assert!(reaper.supervisors().is_empty(), "child must be reaped");
+        assert_eq!(
+            *WARM_CARGO_PHASES.lock().expect("recorder"),
+            ["compile", "child-reaped", "termination-cleanup"],
+        );
         restore_warm_lifecycle_admission(reaper);
     }
 
