@@ -643,12 +643,18 @@ mod tests {
         seed_project(&db, "proj", "proj").await;
         let attempts = WarmGraphAttemptRepository::new(db.clone());
         let tick = Duration::from_secs(300);
+        // `start_attempt` records `started_at` with PostgreSQL's transaction
+        // clock, so use a deadline safely after that real clock. Derive all
+        // reconciliation instants from it to keep this boundary fixture
+        // deterministic without sleeping.
+        let deadline_at = Utc::now() + TimeDelta::days(1);
+        let deadline = deadline_at.to_rfc3339();
         let running = attempts
-            .start_attempt("proj", HEAD, "2026-01-01T00:00:00.000Z")
+            .start_attempt("proj", HEAD, &deadline)
             .await
             .expect("persist running attempt");
         let failed = attempts
-            .start_attempt("proj", OLD, "2026-01-01T00:00:00.000Z")
+            .start_attempt("proj", OLD, &deadline)
             .await
             .expect("persist terminal attempt");
         assert!(
@@ -663,9 +669,13 @@ mod tests {
         );
 
         let heads = vec![("proj".to_string(), HEAD.to_string())];
-        for now in ["2026-01-01T00:04:59.999Z", "2026-01-01T00:05:00.000Z"] {
+        let timeout_boundary = deadline_at + TimeDelta::seconds(tick.as_secs() as i64);
+        for now in [
+            timeout_boundary - TimeDelta::milliseconds(1),
+            timeout_boundary,
+        ] {
             assert!(
-                reconcile_warm_attempts_for_heads(db.clone(), &heads, now, tick)
+                reconcile_warm_attempts_for_heads(db.clone(), &heads, &now.to_rfc3339(), tick)
                     .await
                     .expect("reconcile absent Job")
                     .is_empty()
@@ -684,22 +694,24 @@ mod tests {
             reconcile_warm_attempts_for_heads(
                 db.clone(),
                 &heads,
-                "2026-01-01T00:05:00.001Z",
+                &(timeout_boundary + TimeDelta::milliseconds(1)).to_rfc3339(),
                 tick,
             )
             .await
             .expect("post-boundary reconcile"),
             vec![running.clone()],
         );
-        assert!(reconcile_warm_attempts_for_heads(
-            db.clone(),
-            &heads,
-            "2026-01-01T00:10:00.000Z",
-            tick,
-        )
-        .await
-        .expect("idempotent reconcile")
-        .is_empty());
+        assert!(
+            reconcile_warm_attempts_for_heads(
+                db.clone(),
+                &heads,
+                &(timeout_boundary + TimeDelta::seconds(tick.as_secs() as i64)).to_rfc3339(),
+                tick,
+            )
+            .await
+            .expect("idempotent reconcile")
+            .is_empty()
+        );
         assert_eq!(
             attempts
                 .get_attempt(&running)
