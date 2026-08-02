@@ -52,6 +52,9 @@ metadata:
   name: {{ $taskQueueName }}
   labels:
     {{- include "djinn.labels" . | nindent 4 }}
+    djinn.io/quota-owner: derived-capacity
+  annotations:
+    djinn.io/binding-resource: pods
 spec:
   cohort: {{ $cohortName }}
   preemption:

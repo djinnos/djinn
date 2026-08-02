@@ -1,0 +1,33 @@
+{{- if .Values.kueue.capacity.enabled }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "djinn.fullname" . }}-capacity
+  labels:
+    {{- include "djinn.server.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["kueue.x-k8s.io"]
+    resources: ["clusterqueues"]
+    verbs: ["get", "list", "watch", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "djinn.fullname" . }}-capacity
+  labels:
+    {{- include "djinn.server.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "djinn.serviceAccountName.controller" . }}
+    namespace: {{ include "djinn.namespace" . }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "djinn.fullname" . }}-capacity
+{{- end }}

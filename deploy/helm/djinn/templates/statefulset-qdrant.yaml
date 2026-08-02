@@ -16,6 +16,7 @@ spec:
     metadata:
       labels:
         {{- include "djinn.qdrant.selectorLabels" . | nindent 8 }}
+        djinn.io/capacity-reserved: "true"
       annotations:
         # Qdrant holds the note/code embedding vectors. Protect it from
         # Karpenter consolidation eviction (observed on staging:

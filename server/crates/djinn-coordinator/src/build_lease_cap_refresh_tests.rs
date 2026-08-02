@@ -21,7 +21,7 @@ use djinn_supervisor::services::{
     GraphWarmLeaseIdentity, LeaseDeadlines, LeaseIdentity, LeaseQueueRequest, LeaseResult,
 };
 
-use crate::build_lease::BuildLeaseService;
+use crate::build_lease::{BuildLeaseService, DampedCapacitySnapshot};
 use crate::invocation_lease_control::InvocationLeaseControl;
 
 const PROJECT: &str = "019ea3bd-a305-73e3-806c-4edcc96ebfe2";
@@ -204,4 +204,56 @@ async fn a_refresh_before_recovery_never_moves_the_enforced_cap() {
         "an unrecovered service keeps its configured cap rather than adopting an \
          epoch it has not yet reconciled occupancy against"
     );
+}
+
+#[tokio::test]
+async fn build_lease_cap_refresh_adopts_damped_fallback_without_restart() {
+    let db = Database::open_in_memory().unwrap();
+    db.ensure_initialized().await.unwrap();
+    let authority = Arc::new(InvocationLeaseAuthorityRepository::new(db.clone()));
+    authority
+        .set_mode_and_cap(0, InvocationLeaseMode::Enforce, None)
+        .await
+        .unwrap();
+    let service = BuildLeaseService::new(Arc::new(BuildLeaseRepository::new(db)), 2)
+        .with_invocation_lease_authority(authority);
+    assert!(matches!(service.recover().await, LeaseResult::Status(_)));
+    assert_eq!(
+        service
+            .adopt_capacity_snapshot(DampedCapacitySnapshot::Capacity { compile_slots: 12 })
+            .await,
+        Some(12)
+    );
+    assert_eq!(service.cap(), 12);
+    assert_eq!(
+        service
+            .adopt_capacity_snapshot(DampedCapacitySnapshot::Conservative {
+                fail_safe_compile_slots: 2
+            })
+            .await,
+        Some(2)
+    );
+    assert_eq!(service.cap(), 2);
+}
+
+#[tokio::test]
+async fn build_lease_cap_durable_override_remains_authoritative() {
+    let fixture = running_process(7).await;
+    assert_eq!(
+        fixture
+            .service
+            .adopt_capacity_snapshot(DampedCapacitySnapshot::Capacity { compile_slots: 12 })
+            .await,
+        Some(7)
+    );
+    assert_eq!(
+        fixture
+            .service
+            .adopt_capacity_snapshot(DampedCapacitySnapshot::Conservative {
+                fail_safe_compile_slots: 2
+            })
+            .await,
+        Some(7)
+    );
+    assert_eq!(fixture.service.cap(), 7);
 }
