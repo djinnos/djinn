@@ -796,6 +796,102 @@ fn lead_stage_outcome(
     }
 }
 
+/// Test-only synchronization for the accepted, pre-session lifecycle boundary.
+///
+/// The gate is reached after a stage has begun (and therefore after its slot
+/// command was accepted) but before the guarded session-service call. It is
+/// compiled only for unit tests and the `test-support` feature used by worker
+/// integration tests; production has neither the global state nor a wait.
+#[cfg(any(test, feature = "test-support"))]
+pub mod pre_session_create_test_support {
+    use std::sync::{Arc, Mutex, OnceLock};
+
+    use tokio::sync::watch;
+
+    /// Deterministic two-phase gate for the accepted, pre-session boundary.
+    /// `watch` retains both transitions, so a fast lifecycle cannot lose a
+    /// notification before its test begins waiting.
+    pub struct PreSessionCreateGate {
+        reached_tx: watch::Sender<bool>,
+        release_tx: watch::Sender<bool>,
+    }
+
+    impl PreSessionCreateGate {
+        pub fn new() -> Arc<Self> {
+            let (reached_tx, _) = watch::channel(false);
+            let (release_tx, _) = watch::channel(false);
+            Arc::new(Self {
+                reached_tx,
+                release_tx,
+            })
+        }
+
+        pub async fn wait_until_reached(&self) {
+            let mut reached = self.reached_tx.subscribe();
+            if !*reached.borrow() {
+                reached
+                    .changed()
+                    .await
+                    .expect("pre-session gate remains installed");
+            }
+        }
+
+        pub fn release(&self) {
+            let _ = self.release_tx.send(true);
+        }
+
+        async fn pause(&self) {
+            let _ = self.reached_tx.send(true);
+            let mut release = self.release_tx.subscribe();
+            if !*release.borrow() {
+                release
+                    .changed()
+                    .await
+                    .expect("pre-session gate remains installed");
+            }
+        }
+    }
+
+    fn installed_gate() -> &'static Mutex<Option<Arc<PreSessionCreateGate>>> {
+        static GATE: OnceLock<Mutex<Option<Arc<PreSessionCreateGate>>>> = OnceLock::new();
+        GATE.get_or_init(|| Mutex::new(None))
+    }
+
+    /// Install one gate. Tests sharing this process-global seam are serialized
+    /// by the installation assertion, and dropping the guard removes it.
+    pub fn install(gate: Arc<PreSessionCreateGate>) -> PreSessionCreateGateGuard {
+        let mut installed = installed_gate()
+            .lock()
+            .expect("pre-session gate mutex poisoned");
+        assert!(
+            installed.is_none(),
+            "a pre-session create gate is already installed"
+        );
+        *installed = Some(gate);
+        PreSessionCreateGateGuard {}
+    }
+
+    pub struct PreSessionCreateGateGuard {}
+
+    impl Drop for PreSessionCreateGateGuard {
+        fn drop(&mut self) {
+            *installed_gate()
+                .lock()
+                .expect("pre-session gate mutex poisoned") = None;
+        }
+    }
+
+    pub(crate) async fn pause_before_session_creation() {
+        let gate = installed_gate()
+            .lock()
+            .expect("pre-session gate mutex poisoned")
+            .clone();
+        if let Some(gate) = gate {
+            gate.pause().await;
+        }
+    }
+}
+
 /// Execute one role stage against the shared workspace.
 ///
 /// Resolves the role → model credential → project setup config →
@@ -950,6 +1046,8 @@ pub(crate) async fn execute_stage(
     let _ = services
         .report_stage_step(djinn_runtime::stage_step::SESSION_CREATE)
         .await;
+    #[cfg(any(test, feature = "test-support"))]
+    pre_session_create_test_support::pause_before_session_creation().await;
     let session_record = services
         .create_session(
             djinn_supervisor::services::SerializableCreateSessionParams {
@@ -1690,6 +1788,28 @@ fn worker_stage_outcome(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn pre_session_gate_blocks_until_explicit_release() {
+        use pre_session_create_test_support::{
+            PreSessionCreateGate, install, pause_before_session_creation,
+        };
+
+        let gate = PreSessionCreateGate::new();
+        let _installed = install(gate.clone());
+        let paused = tokio::spawn(async move {
+            pause_before_session_creation().await;
+            "released"
+        });
+
+        gate.wait_until_reached().await;
+        assert!(
+            !paused.is_finished(),
+            "the lifecycle must remain paused until the test explicitly releases it"
+        );
+        gate.release();
+        assert_eq!(paused.await.unwrap(), "released");
+    }
 
     /// Wrap a `ProviderError` the way the reply loop surfaces it: as the source
     /// of an `anyhow::Error` carrying a readable context line.
