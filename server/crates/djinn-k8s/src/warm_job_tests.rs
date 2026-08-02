@@ -381,6 +381,36 @@ fn builds_warm_job_manifest_with_expected_shape() {
 /// launcher is ever added to the warm path this test fails, and the uid
 /// choice above must be revisited in the same change.
 #[test]
+fn durable_attempt_stamp_reaches_leased_and_unleased_pods_without_renaming_them() {
+    let cfg = KubernetesConfig::for_testing();
+    let mut plain = build_warm_job(&cfg, "proj-xyz", "deadbeef", "example/warm:latest", None);
+    let mut leased = build_leased_warm_job(
+        &cfg,
+        "proj-xyz",
+        "example/warm:latest",
+        None,
+        &LeasedWarmJobIdentity::new("proj-xyz", "req-1", "rev-1", 7),
+    );
+
+    for job in [&mut plain, &mut leased] {
+        let name = job.metadata.name.clone();
+        stamp_warm_attempt(job, "019fc384-c2d5-7460-aeed-5a168b112b03", "2026-08-02T17:30:00Z");
+        assert_eq!(job.metadata.name, name, "attempt data must not alter deterministic Job identity");
+        let env = job
+            .spec
+            .as_ref()
+            .and_then(|spec| spec.template.spec.as_ref())
+            .and_then(|spec| spec.containers.first())
+            .and_then(|container| container.env.as_ref())
+            .expect("warmer env");
+        assert!(env.iter().any(|entry| entry.name == ENV_WARM_ATTEMPT_ID
+            && entry.value.as_deref() == Some("019fc384-c2d5-7460-aeed-5a168b112b03")));
+        assert!(env.iter().any(|entry| entry.name == ENV_WARM_ATTEMPT_DEADLINE_AT
+            && entry.value.as_deref() == Some("2026-08-02T17:30:00Z")));
+    }
+}
+
+#[test]
 fn warm_pod_never_renders_a_launcher_sidecar() {
     let cfg = KubernetesConfig::for_testing();
     let plain = build_warm_job(&cfg, "proj-xyz", "deadbeef", "example/warm:latest", None);
