@@ -689,6 +689,10 @@ pub enum ScipIndexOutcome {
     /// The indexers ran; `artifacts` semantic artifacts are now in the shared
     /// content-addressed cache.
     Indexed { artifacts: usize },
+    /// The cargo target base the Rust indexer would use has not been warmed
+    /// with compiled fingerprints, so this standalone recovery run did
+    /// nothing. The warm path remains responsible for building that base.
+    SkippedColdCargoBase { target_dir: PathBuf },
     /// Another live process holds the semantic-index claim for this exact tree,
     /// so this run did nothing. Nothing was published either way — this Job
     /// never touches `repo_graph_cache`, `repo_graph_generation` or
@@ -702,9 +706,20 @@ impl ScipIndexOutcome {
     pub fn reason(&self) -> &'static str {
         match self {
             Self::Indexed { .. } => "indexed",
+            Self::SkippedColdCargoBase { .. } => "skipped_cold_cargo_base",
             Self::SkippedConcurrentIndex { .. } => "skipped_concurrent_index",
         }
     }
+}
+
+/// Whether a cargo target base has at least one completed compilation
+/// fingerprint. Cargo creates `.fingerprint` before it has compiled anything,
+/// so merely finding that directory is not enough to authorize standalone
+/// recovery indexing.
+fn has_populated_cargo_fingerprint(target_dir: &Path) -> bool {
+    std::fs::read_dir(target_dir.join(".fingerprint"))
+        .ok()
+        .is_some_and(|entries| entries.flatten().next().is_some())
 }
 
 /// Scratch directory for one indexer run's raw `.scip` output.
@@ -829,10 +844,11 @@ pub async fn run_scip_index_command<C: WarmContext>(
     // into the identical content-addressed cache, so its artifacts are the ones
     // this run would have produced.
     //
-    // Exiting 0 (rather than failing) is deliberate: the scheduler's ledger is
-    // the retained succeeded-Job set, so a skip records this revision as
-    // covered — which it is, by the holder. If the holder's run fails, the warm
-    // path re-indexes inline exactly as it does today.
+    // This contention skip is safe because the holder is covering this exact
+    // tree. A later cold-base skip is distinct: it means no indexer ran and
+    // therefore must not be treated as evidence that this revision is covered.
+    // If the holder's run fails, the warm path re-indexes inline exactly as it
+    // does today.
     let cache_store = crate::scip_indexer::cache::ScipCacheStore::from_environment();
     let claim =
         crate::semantic_index_claim::try_claim(cache_store.cache_root(), project_id, &commit_sha);
@@ -863,10 +879,29 @@ pub async fn run_scip_index_command<C: WarmContext>(
         crate::semantic_index_claim::ClaimOutcome::Held(guard) => Some(guard),
     };
 
+    // Resolve the concrete target directory the indexer will use. In a warm
+    // Pod the override is intentionally `None` so the indexer inherits the
+    // ambient warmed CARGO_TARGET_DIR; elsewhere it receives the isolated
+    // index-tree target explicitly.
+    let target_dir_override = handle.indexer_target_dir_override();
+    let target_dir = target_dir_override.clone().unwrap_or_else(|| {
+        PathBuf::from(
+            std::env::var_os("CARGO_TARGET_DIR")
+                .expect("pod target-dir inheritance requires CARGO_TARGET_DIR"),
+        )
+    });
+    if !has_populated_cargo_fingerprint(&target_dir) {
+        tracing::info!(
+            project_id,
+            commit_sha,
+            target_dir = %target_dir.display(),
+            "run_scip_index_command: cargo target base is cold; skipping standalone semantic index"
+        );
+        return Ok(ScipIndexOutcome::SkippedColdCargoBase { target_dir });
+    }
+
     let output_temp =
         indexer_output_tempdir("djinn-scip-index-").context("create scip-index tempdir")?;
-
-    let target_dir = handle.indexer_target_dir_override();
     let stack_filter = resolve_stack_indexer_filter(ctx, project_id).await;
     let declared_workspaces = resolve_declared_workspaces(ctx, project_id).await;
     let timing_priors = load_indexer_timing_priors(ctx, project_id).await;
@@ -876,7 +911,7 @@ pub async fn run_scip_index_command<C: WarmContext>(
     let run = crate::scip_indexer::run_indexers_already_locked(
         handle.path(),
         output_temp.path(),
-        target_dir.as_deref(),
+        target_dir_override.as_deref(),
         stack_filter.as_deref(),
         declared_workspaces.as_deref(),
         Some(&timing_priors),
@@ -4769,6 +4804,13 @@ edition = "2024"
         project_root
     }
 
+    fn populate_cargo_fingerprint(target_dir: &std::path::Path) {
+        let fingerprint_dir = target_dir.join(".fingerprint");
+        std::fs::create_dir_all(&fingerprint_dir).expect("create cargo fingerprint directory");
+        std::fs::write(fingerprint_dir.join("fixture"), b"compiled")
+            .expect("write compiled fingerprint fixture");
+    }
+
     /// **The standalone SCIP Job must not duplicate an index another Pod is
     /// already running.**
     ///
@@ -4799,6 +4841,9 @@ edition = "2024"
         let cache_root = tmp.path().join("scip-cache");
         let _cache_guard = EnvVarGuard::set("DJINN_SCIP_CACHE_DIR", &cache_root);
         let _root_guard = EnvVarGuard::set("DJINN_PROJECT_ROOT", &project_root);
+        let cargo_target = tmp.path().join("cargo-target");
+        populate_cargo_fingerprint(&cargo_target);
+        let _target_guard = EnvVarGuard::set("CARGO_TARGET_DIR", &cargo_target);
 
         let db = create_test_db();
         let ctx = TestWarmContext::new(db.clone());
@@ -4859,6 +4904,86 @@ edition = "2024"
                 .expect("query graph cache")
                 .is_none(),
             "indexing must still not publish a graph — that is the warm path's job"
+        );
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn scip_index_refuses_a_cold_cargo_base() {
+        let _env_lock = lock_pipeline_env().await;
+        let tmp = workspace_tempdir("scip-cold-cargo-base-");
+        let project_root = make_rust_project(tmp.path()).await;
+        let (fake_bin, fixture_path) = write_fake_rust_analyzer(tmp.path());
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let joined_path =
+            std::env::join_paths(std::iter::once(fake_bin).chain(std::env::split_paths(&path)))
+                .expect("join PATH");
+        let _path_guard = EnvVarGuard::set("PATH", joined_path);
+        let _fixture_guard = EnvVarGuard::set("DJINN_TEST_SCIP_FIXTURE", &fixture_path);
+        let invocations = tmp.path().join("indexer-invocations");
+        let _invocation_guard = EnvVarGuard::set("DJINN_TEST_SCIP_INVOCATIONS", &invocations);
+
+        let cache_root = tmp.path().join("scip-cache");
+        let _cache_guard = EnvVarGuard::set("DJINN_SCIP_CACHE_DIR", &cache_root);
+        let _root_guard = EnvVarGuard::set("DJINN_PROJECT_ROOT", &project_root);
+        let cargo_target = tmp.path().join("cargo-target");
+        let _target_guard = EnvVarGuard::set("CARGO_TARGET_DIR", &cargo_target);
+
+        let db = create_test_db();
+        let ctx = TestWarmContext::new(db.clone());
+        let project = ProjectRepository::new(db.clone(), EventBus::noop())
+            .create("test-scip-cold-base", "test", "test-scip-cold-base")
+            .await
+            .expect("create project");
+
+        for setup in [
+            "absent target",
+            "target without fingerprint",
+            "empty fingerprint directory",
+        ] {
+            if setup == "target without fingerprint" {
+                std::fs::create_dir_all(&cargo_target).expect("create target without fingerprint");
+            } else if setup == "empty fingerprint directory" {
+                std::fs::create_dir_all(cargo_target.join(".fingerprint"))
+                    .expect("create empty fingerprint directory");
+            }
+            let outcome = run_scip_index_command(&ctx, &project.id)
+                .await
+                .expect("cold scip-index command");
+            assert!(
+                matches!(&outcome, ScipIndexOutcome::SkippedColdCargoBase { target_dir } if target_dir == &cargo_target),
+                "{setup} must skip indexing, got {outcome:?}"
+            );
+            assert_eq!(outcome.reason(), "skipped_cold_cargo_base");
+            assert!(
+                !invocations.exists(),
+                "{setup} must invoke the semantic indexer zero times"
+            );
+        }
+
+        populate_cargo_fingerprint(&cargo_target);
+        let outcome = run_scip_index_command(&ctx, &project.id)
+            .await
+            .expect("warmed scip-index command");
+        assert!(
+            matches!(outcome, ScipIndexOutcome::Indexed { artifacts } if artifacts > 0),
+            "a populated fingerprint base must reach the indexer, got {outcome:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&invocations).expect("read indexer invocations"),
+            "x",
+            "only the populated base may invoke the semantic indexer"
+        );
+        let commit_sha = djinn_git::head_commit_sha(&project_root)
+            .await
+            .expect("resolve HEAD commit");
+        assert!(
+            RepoGraphCacheRepository::new(db)
+                .get(&project.id, &commit_sha)
+                .await
+                .expect("query graph cache")
+                .is_none(),
+            "standalone indexing must not write served-graph state"
         );
     }
 
@@ -5029,6 +5154,9 @@ done
 if [ -z "$out" ]; then
   echo "missing --output" >&2
   exit 2
+fi
+if [ -n "${DJINN_TEST_SCIP_INVOCATIONS:-}" ]; then
+  printf x >> "$DJINN_TEST_SCIP_INVOCATIONS"
 fi
 mkdir -p "$(dirname "$out")"
 cp "$DJINN_TEST_SCIP_FIXTURE" "$out"
