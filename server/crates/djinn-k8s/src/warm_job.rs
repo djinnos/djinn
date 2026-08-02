@@ -369,6 +369,7 @@ exec {bin} warm-graph "{project_id}"
         volumes: Some(volumes),
         node_selector,
         tolerations,
+        termination_grace_period_seconds: Some(config.warm_job_termination_grace_period_seconds),
         // Why CHILD_UID (1001), not WORKER_UID (1000). The rule for this field
         // is not "match the task-run pod": it is that every actor which CREATES
         // CONTENT in the shared `/cache/cargo-target` tree must be the same uid.

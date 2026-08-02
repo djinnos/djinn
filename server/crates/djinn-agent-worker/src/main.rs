@@ -2364,6 +2364,82 @@ struct WarmGraphShutdownConfig {
 }
 
 #[cfg(target_os = "linux")]
+#[derive(Debug)]
+struct WarmOutputInventory {
+    root: PathBuf,
+    existing: HashSet<PathBuf>,
+}
+
+#[cfg(target_os = "linux")]
+impl WarmOutputInventory {
+    fn capture_from_env() -> Result<Option<Self>> {
+        let Ok(configured) = std::env::var(CARGO_TARGET_DIR_ENV) else {
+            return Ok(None);
+        };
+        std::fs::create_dir_all(&configured)
+            .with_context(|| format!("create warm output root {configured}"))?;
+        let root = std::fs::canonicalize(&configured)
+            .with_context(|| format!("canonicalize warm output root {configured}"))?;
+        let mut existing = HashSet::new();
+        collect_warm_output_paths(&root, &root, &mut existing)?;
+        Ok(Some(Self { root, existing }))
+    }
+
+    fn cleanup_new_paths(self) -> Result<()> {
+        let canonical_root = std::fs::canonicalize(&self.root)
+            .context("re-canonicalize warm output root before cleanup")?;
+        anyhow::ensure!(
+            canonical_root == self.root,
+            "warm output root changed during run"
+        );
+        let mut current = HashSet::new();
+        collect_warm_output_paths(&self.root, &self.root, &mut current)?;
+        let mut created = current
+            .difference(&self.existing)
+            .cloned()
+            .collect::<Vec<_>>();
+        created.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
+        for path in created {
+            anyhow::ensure!(
+                path.starts_with(&self.root),
+                "cleanup candidate escaped warm root"
+            );
+            let metadata = std::fs::symlink_metadata(&path)?;
+            if metadata.is_dir() {
+                match std::fs::remove_dir(&path) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::DirectoryNotEmpty => {}
+                    Err(error) => {
+                        return Err(error).with_context(|| format!("remove {}", path.display()));
+                    }
+                }
+            } else {
+                std::fs::remove_file(&path)
+                    .with_context(|| format!("remove {}", path.display()))?;
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn collect_warm_output_paths(root: &Path, dir: &Path, paths: &mut HashSet<PathBuf>) -> Result<()> {
+    for entry in std::fs::read_dir(dir).with_context(|| format!("read {}", dir.display()))? {
+        let entry = entry?;
+        let path = entry.path();
+        anyhow::ensure!(
+            path.starts_with(root),
+            "inventory candidate escaped warm root"
+        );
+        paths.insert(path.clone());
+        if entry.file_type()?.is_dir() {
+            collect_warm_output_paths(root, &path, paths)?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
 const WARM_GRAPH_SHUTDOWN_CONFIG: WarmGraphShutdownConfig = WarmGraphShutdownConfig {
     bound: WARM_GRAPH_SHUTDOWN_BOUND,
     term_grace: WARM_GRAPH_TERM_GRACE,
@@ -2431,9 +2507,57 @@ where
     let admission = reaper
         .admit(format!("warm-graph:{project_id}"))
         .context("admit warm-graph lifecycle")?;
-    let body = body_fn().await;
+    // Warm and SCIP are reclaimable cohort borrowers. Unlike task-runs they
+    // have no checkpoint RPC, but SIGTERM must still make their body return so
+    // the shared lifecycle owner can stop and reap every process group before
+    // kubelet's grace expires.
+    let inventory = WarmOutputInventory::capture_from_env()?;
+    let cancel = CancellationToken::new();
+    let signal_cancel = cancel.clone();
+    let signal_listener = tokio::spawn(async move {
+        let mut terminate = signal(SignalKind::terminate()).expect("install warm SIGTERM listener");
+        let mut interrupt = signal(SignalKind::interrupt()).expect("install warm SIGINT listener");
+        tokio::select! {
+            _ = terminate.recv() => {}
+            _ = interrupt.recv() => {}
+        }
+        signal_cancel.cancel();
+    });
+    let (body, interrupted) = tokio::select! {
+        result = body_fn() => (result, false),
+        _ = cancel.cancelled() => (Err(anyhow::anyhow!(
+            "warm lifecycle cancelled by termination signal"
+        )), true),
+    };
+    signal_listener.abort();
     admission.release();
     let cleanup = shutdown_linux_warm_lifecycle(reaper).await;
+    let interrupted_cleanup = if interrupted {
+        match inventory {
+            Some(inventory) => match tokio::time::timeout(
+                Duration::from_secs(4),
+                tokio::task::spawn_blocking(move || inventory.cleanup_new_paths()),
+            )
+            .await
+            {
+                Ok(Ok(result)) => result,
+                Ok(Err(error)) => Err(anyhow::Error::new(error)),
+                Err(_) => Err(anyhow::anyhow!(
+                    "interrupted warm cleanup exceeded 4s budget"
+                )),
+            },
+            None => Ok(()),
+        }
+    } else {
+        Ok(())
+    };
+
+    let body = match interrupted_cleanup {
+        Ok(()) => body,
+        Err(cleanup_error) => {
+            Err(cleanup_error.context(body.err().map(|e| e.to_string()).unwrap_or_default()))
+        }
+    };
 
     match (body, cleanup) {
         (Ok(()), Ok(())) => Ok(()),
@@ -6600,6 +6724,53 @@ warning: something
         assert!(reaper.wait_for_adopted_idle(Duration::ZERO));
         reaper.reopen_after_idle_for_test();
         reaper
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn interrupted_warm_cleanup_preserves_inventory() {
+        let root = tempfile::tempdir().expect("temp root");
+        let old = root.path().join("debug/deps/old.rlib");
+        std::fs::create_dir_all(old.parent().unwrap()).unwrap();
+        std::fs::write(&old, b"known-good").unwrap();
+        let canonical_root = std::fs::canonicalize(root.path()).unwrap();
+        let mut existing = HashSet::new();
+        collect_warm_output_paths(&canonical_root, &canonical_root, &mut existing).unwrap();
+        let inventory = WarmOutputInventory {
+            root: canonical_root,
+            existing,
+        };
+
+        let new = root.path().join("debug/deps/interrupted.rmeta");
+        std::fs::write(&new, b"partial").unwrap();
+        inventory.cleanup_new_paths().unwrap();
+
+        assert_eq!(std::fs::read(old).unwrap(), b"known-good");
+        assert!(!new.exists(), "post-inventory output must be removed");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn interrupted_warm_cleanup_safety() {
+        let root = tempfile::tempdir().expect("temp root");
+        let outside = tempfile::tempdir().expect("outside root");
+        let link = root.path().join("escape");
+        std::os::unix::fs::symlink(outside.path(), &link).unwrap();
+        let canonical_root = std::fs::canonicalize(root.path()).unwrap();
+        let inventory = WarmOutputInventory {
+            root: canonical_root,
+            existing: HashSet::new(),
+        };
+        let protected = outside.path().join("protected");
+        std::fs::write(&protected, b"outside").unwrap();
+
+        inventory.cleanup_new_paths().unwrap();
+
+        assert_eq!(std::fs::read(protected).unwrap(), b"outside");
+        assert!(
+            !link.exists(),
+            "the symlink itself is removable; its target is not traversed"
+        );
     }
 
     #[cfg(target_os = "linux")]
