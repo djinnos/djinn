@@ -588,20 +588,24 @@ impl SlotPool {
             .await
     }
     async fn reconcile_terminate(&mut self, task_id: &str) -> ReconcileTerminateSnapshot {
+        // Fence before observing either pool or durable state. A dispatch
+        // admitted after this receives a newer generation and cannot be
+        // mistaken for this termination request.
+        let fence = djinn_db::TaskRepository::new(self.ctx.db.clone(), self.ctx.event_bus.clone())
+            .fence_execution_generation_for_kill(task_id)
+            .await
+            .ok();
         let initial_mapping_slot_id = self.task_to_slot.get(task_id).copied();
         let initial_pending_teardown = self.pending_teardown_tasks.contains(task_id);
         let initial_compacting = initial_mapping_slot_id
             .and_then(|id| self.slots.get(id))
             .is_some_and(|slot| slot.is_compacting());
-        let fence = djinn_db::TaskRepository::new(self.ctx.db.clone(), self.ctx.event_bus.clone())
-            .fence_execution_generation_for_kill(task_id)
-            .await
-            .ok();
         let repo = SessionRepository::new(self.ctx.db.clone(), self.ctx.event_bus.clone());
-        let captured = repo
-            .list_non_terminal_for_task(task_id)
-            .await
-            .unwrap_or_default();
+        let (captured, initial_capture_error) =
+            match repo.list_non_terminal_for_task(task_id).await {
+                Ok(rows) => (rows, None),
+                Err(error) => (Vec::new(), Some(error.to_string())),
+            };
         let initial_non_terminal_ids = captured.iter().map(|row| row.id.clone()).collect();
         let mut seen = HashSet::new();
         let mut executions: Vec<ReconcileTerminateExecution> = captured
@@ -629,13 +633,18 @@ impl SlotPool {
             .collect();
         for execution in &mut executions {
             if execution.teardown_owner {
-                execution.teardown_attempted = true;
-                if let (Some(runtime), Some(run)) =
-                    (&self.ctx.runtime_ops, execution.task_run_id.as_deref())
-                {
-                    if let Err(error) = runtime.teardown_taskrun_job(run).await {
-                        execution.teardown_error = Some(error);
+                match (&self.ctx.runtime_ops, execution.task_run_id.as_deref()) {
+                    (Some(runtime), Some(run)) => {
+                        execution.teardown_attempted = true;
+                        if let Err(error) = runtime.teardown_taskrun_job(run).await {
+                            execution.teardown_error = Some(error);
+                        }
                     }
+                    (None, Some(_)) => {
+                        execution.teardown_error =
+                            Some("runtime operations unavailable for task-run teardown".to_owned());
+                    }
+                    _ => {}
                 }
             }
         }
@@ -645,11 +654,17 @@ impl SlotPool {
                 execution.settlement_error = Some(error.to_string());
             }
         }
+        let mut pool_cleanup_error = None;
         let completion_source = if initial_compacting || initial_pending_teardown {
             "deferred".to_owned()
         } else if let Some(slot_id) = initial_mapping_slot_id {
-            if let Ok(slot) = self.slot(slot_id) {
-                let _ = slot.kill().await;
+            match self.slot(slot_id) {
+                Ok(slot) => {
+                    if let Err(error) = slot.kill().await {
+                        pool_cleanup_error = Some(error.to_string());
+                    }
+                }
+                Err(error) => pool_cleanup_error = Some(error.to_string()),
             }
             self.task_to_slot.remove(task_id);
             self.task_started.remove(task_id);
@@ -660,16 +675,21 @@ impl SlotPool {
         } else {
             "none".to_owned()
         };
-        let final_rows = repo
-            .reread_non_terminal_for_task(task_id)
-            .await
-            .unwrap_or_else(|_| captured.clone());
-        let final_non_terminal_ids = final_rows.iter().map(|row| row.id.clone()).collect();
+        let (final_rows, final_reread_error) =
+            match repo.reread_non_terminal_for_task(task_id).await {
+                Ok(rows) => (rows, None),
+                Err(error) => (Vec::new(), Some(error.to_string())),
+            };
+        let final_non_terminal_ids: Vec<String> =
+            final_rows.iter().map(|row| row.id.clone()).collect();
         let final_mapping_slot_id = self.task_to_slot.get(task_id).copied();
         let final_pending_teardown = self.pending_teardown_tasks.contains(task_id);
         let teardown_failed = executions.iter().any(|x| x.teardown_error.is_some());
         let settlement_failed = executions.iter().any(|x| x.settlement_error.is_some());
         let residual = fence.is_none()
+            || initial_capture_error.is_some()
+            || final_reread_error.is_some()
+            || pool_cleanup_error.is_some()
             || !final_non_terminal_ids.is_empty()
             || final_mapping_slot_id.is_some()
             || final_pending_teardown;
@@ -707,9 +727,12 @@ impl SlotPool {
                 initial_pending_teardown,
                 initial_compacting,
                 fenced_generation: fence,
+                initial_capture_error,
                 final_non_terminal_ids,
                 final_mapping_slot_id,
                 final_pending_teardown,
+                final_reread_error,
+                pool_cleanup_error,
                 completion_source,
                 underlying_kind,
             },
@@ -1200,6 +1223,13 @@ impl SlotPool {
     #[cfg(test)]
     pub(super) async fn test_terminate_session(&mut self, task_id: &str) -> Result<(), PoolError> {
         self.terminate_session(task_id).await
+    }
+    #[cfg(test)]
+    pub(super) async fn test_reconcile_terminate(
+        &mut self,
+        task_id: &str,
+    ) -> ReconcileTerminateSnapshot {
+        self.reconcile_terminate(task_id).await
     }
     #[cfg(test)]
     pub(super) fn test_slot_of(&self, task_id: &str) -> Option<usize> {

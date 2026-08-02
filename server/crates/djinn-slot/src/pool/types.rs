@@ -154,9 +154,19 @@ pub struct ReconcileTerminateObservations {
     pub initial_pending_teardown: bool,
     pub initial_compacting: bool,
     pub fenced_generation: Option<i64>,
+    /// Failure to obtain the authoritative initial durable session snapshot.
+    /// A reconciliation that cannot observe its input fails closed.
+    pub initial_capture_error: Option<String>,
     pub final_non_terminal_ids: Vec<String>,
     pub final_mapping_slot_id: Option<usize>,
     pub final_pending_teardown: bool,
+    /// Failure to obtain the mandatory final durable session reread. This is
+    /// distinct from an empty reread so callers cannot infer success from
+    /// stale initial observations.
+    pub final_reread_error: Option<String>,
+    /// Failure to submit the mapped slot's immediate kill command. The mapping
+    /// is still released; the later Killed event remains capacity owner.
+    pub pool_cleanup_error: Option<String>,
     pub completion_source: String,
     pub underlying_kind: Option<ReconcileTerminateKind>,
 }
