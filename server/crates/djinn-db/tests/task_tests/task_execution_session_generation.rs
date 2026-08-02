@@ -146,6 +146,18 @@ async fn guarded_create_lock_first_commits_before_later_fence() {
         session_count, 1,
         "the committed pre-fence session remains visible"
     );
+    let reconciled = sessions
+        .reread_non_terminal_for_task(&task_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        reconciled
+            .iter()
+            .map(|session| session.id.as_str())
+            .collect::<Vec<_>>(),
+        vec![created.id.as_str()],
+        "the complete reconciliation listing retains the exact pre-fence session"
+    );
     let task_run_status: String = sqlx::query_scalar("SELECT status FROM task_runs WHERE id = $1")
         .bind(&task_run_id)
         .fetch_one(db.pool())
@@ -214,4 +226,27 @@ async fn fence_lock_first_rejects_stale_guarded_create_without_side_effects() {
         .await
         .unwrap();
     assert_eq!(task_run_status, "starting");
+}
+
+#[tokio::test]
+async fn non_task_session_creation_remains_unrestricted() {
+    let (_db, _tasks, sessions, _task_id, project_id, _task_run_id, _generation) =
+        guarded_fixture().await;
+
+    let created = sessions
+        .create(CreateSessionParams {
+            project_id: &project_id,
+            task_id: None,
+            model: "extraction-model",
+            agent_type: "extraction",
+            metadata_json: None,
+            task_run_id: None,
+            pricing: None,
+            cost_basis: None,
+        })
+        .await
+        .unwrap();
+
+    assert!(created.task_id.is_none());
+    assert_eq!(created.status, "running");
 }

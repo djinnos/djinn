@@ -47,6 +47,12 @@ use djinn_provider::provider::LlmProvider;
 /// `resolve_model_and_credential`.
 pub use crate::supervisor_impl::stage::derive_billing_signal;
 
+/// Test-only synchronization seam for lifecycle race tests. It is unavailable
+/// from production builds and pauses only after an accepted stage reports the
+/// session-create boundary, immediately before guarded session creation.
+#[cfg(feature = "test-support")]
+pub use crate::supervisor_impl::stage::pre_session_create_test_support;
+
 /// Build a `SupervisorServices` pre-wired with the in-tree `djinn-agent`
 /// lifecycle bodies.
 ///
