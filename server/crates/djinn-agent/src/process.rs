@@ -1655,9 +1655,11 @@ fn cleanup_and_reap(
     let _ = signal_process_group(pgid, libc::SIGTERM);
     std::thread::sleep(Duration::from_millis(200));
 
-    if child.try_wait()?.is_none() {
-        let _ = signal_process_group(pgid, libc::SIGKILL);
-    }
+    // The direct child can already have exited while descendants in its group
+    // still run (for example, `sh -c 'sleep 300 &'`). Escalate the *group*
+    // regardless of whether `child` has been observed, so every terminal path
+    // reaps those descendants without changing the direct child's status.
+    let _ = signal_process_group(pgid, libc::SIGKILL);
 
     // Reap the child. On the normal path this returns immediately. On the
     // timed-out/cancelled path the SIGKILL above usually reaps it within
@@ -1734,7 +1736,13 @@ pub(crate) async fn output_with_kill_cancellable(
                 .wait_timeout(wait_for)
                 .map_err(ProcessRunError::Started)?
             {
-                Some(status) => break (status, ProcessTermination::Exited),
+                Some(status) => {
+                    // `wait_timeout` has already captured the direct child's
+                    // status. Clean up any descendants that outlived it, but
+                    // deliberately retain that original status for callers.
+                    cleanup_and_reap(&mut child, pgid).map_err(ProcessRunError::Started)?;
+                    break (status, ProcessTermination::Exited);
+                }
                 None => continue,
             }
         };
@@ -2369,5 +2377,120 @@ mod tests {
             !sleep_alive,
             "sleep {sleep_pid} in group {shell_pid} should have been killed by cancellation"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn descendant_reap_all_terminals() {
+        #[derive(Clone, Copy, Debug)]
+        enum Terminal {
+            Normal,
+            NonZero,
+            Timeout,
+            Cancellation,
+        }
+
+        let mut sentinel_cmd = Command::new("sleep");
+        sentinel_cmd.arg("300");
+        isolate_process_group(&mut sentinel_cmd);
+        let mut sentinel = sentinel_cmd.spawn().expect("unrelated sentinel starts");
+        let sentinel_pid = sentinel.id() as i32;
+
+        for terminal in [
+            Terminal::Normal,
+            Terminal::NonZero,
+            Terminal::Timeout,
+            Terminal::Cancellation,
+        ] {
+            let pid_file = tempfile::NamedTempFile::new().expect("temp pid file");
+            let pid_path = pid_file.path().to_path_buf();
+            let pid_path_str = pid_path.to_str().expect("path is utf8");
+            let (finish, expected_output) = match terminal {
+                Terminal::Normal => ("sleep 0.1; exit 0", "normal-output"),
+                Terminal::NonZero => ("sleep 0.1; exit 37", "nonzero-output"),
+                Terminal::Timeout => ("wait", "timeout-output"),
+                Terminal::Cancellation => ("wait", "cancellation-output"),
+            };
+            let mut cmd = Command::new("sh");
+            cmd.arg("-c").arg(format!(
+                "sleep 300 & descendant=$!; printf '%s\n%s\n' \"$$\" \"$descendant\" > {pid_path_str}; printf '{expected_output}'; {finish}"
+            ));
+            cmd.stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped());
+            isolate_process_group(&mut cmd);
+
+            let cancel = CancellationToken::new();
+            let handle = tokio::spawn(output_with_kill_cancellable(
+                cmd,
+                Duration::from_millis(if matches!(terminal, Terminal::Timeout) {
+                    150
+                } else {
+                    10_000
+                }),
+                cancel.clone(),
+            ));
+            let pids = tokio::task::spawn_blocking(move || {
+                let start = std::time::Instant::now();
+                loop {
+                    if let Ok(content) = std::fs::read_to_string(&pid_path) {
+                        let lines: Vec<&str> = content.lines().collect();
+                        if lines.len() >= 2 {
+                            if let (Ok(shell), Ok(descendant)) =
+                                (lines[0].parse::<i32>(), lines[1].parse::<i32>())
+                            {
+                                return Some((shell, descendant));
+                            }
+                        }
+                    }
+                    if start.elapsed() >= Duration::from_secs(5) {
+                        return None;
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            })
+            .await
+            .expect("pid observer completes")
+            .expect("shell writes descendant PID");
+            let (shell_pid, descendant_pid) = pids;
+            assert_eq!(process_group_of(descendant_pid), Some(shell_pid));
+
+            if matches!(terminal, Terminal::Cancellation) {
+                cancel.cancel();
+            }
+            let result = handle
+                .await
+                .expect("runner joins")
+                .expect("runner completes cleanup");
+            assert!(String::from_utf8_lossy(&result.output.stdout).contains(expected_output));
+            match terminal {
+                Terminal::Normal => {
+                    assert_eq!(result.termination, ProcessTermination::Exited);
+                    assert_eq!(result.output.status.code(), Some(0));
+                }
+                Terminal::NonZero => {
+                    assert_eq!(result.termination, ProcessTermination::Exited);
+                    assert_eq!(result.output.status.code(), Some(37));
+                }
+                Terminal::Timeout => {
+                    assert_eq!(result.termination, ProcessTermination::TimedOut);
+                    assert!(!result.output.status.success());
+                }
+                Terminal::Cancellation => {
+                    assert_eq!(result.termination, ProcessTermination::Cancelled);
+                    assert!(!result.output.status.success());
+                }
+            }
+
+            let observed = std::time::Instant::now();
+            while is_process_running(descendant_pid) && observed.elapsed() < Duration::from_secs(5)
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            assert!(!is_process_running(descendant_pid));
+            assert!(observed.elapsed() < Duration::from_secs(5));
+            assert!(is_process_running(sentinel_pid));
+        }
+
+        sentinel.kill().expect("stop unrelated sentinel");
+        sentinel.wait().expect("reap unrelated sentinel");
     }
 }
