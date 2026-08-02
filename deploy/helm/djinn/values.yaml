@@ -425,6 +425,7 @@ resources:
   taskrun:
     requests:
       cpu: "1"
+      lightCpu: "300m"
       memory: "2Gi"
     limits:
       # CARGO_BUILD_JOBS / NEXTEST_TEST_THREADS derive from this CPU limit
