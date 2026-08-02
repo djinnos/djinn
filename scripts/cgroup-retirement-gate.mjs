@@ -3,13 +3,16 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { everyInput as retentionInputs } from './resize-cutover-retention-manifest.mjs';
 
 const args = process.argv.slice(2);
 const fail = (message, code = 1) => { process.stderr.write(`REJECT cgroup-retirement gate: ${message}\n`); process.exit(code); };
 const usage = () => fail('usage: --prep BASE HEAD | --retire PHASE BASE HEAD | --deploy|--release|--withdraw-node --candidate NAME --inputs FILE', 2);
 const repo = resolve(process.env.CGROUP_RETIREMENT_GATE_ROOT || process.cwd());
 const scriptDir = dirname(new URL(import.meta.url).pathname);
-const inventoryPath = resolve(scriptDir, 'cgroup-retirement-assets.json');
+// Resolve the declaration from the checked tree rather than this executable's
+// checkout, so fixture repositories exercise the same inventory contract.
+const inventoryPath = resolve(repo, 'scripts', 'cgroup-retirement-assets.json');
 
 const expandBraces = (pattern) => {
     const match = pattern.match(/\{([^{}]+)\}/);
@@ -49,14 +52,14 @@ const prepAllowed = (path) =>
     path === 'server/crates/djinn-cgroup-launcher/src/env.rs' ||
     path === 'server/crates/djinn-cgroup-launcher/src/git_trust.rs' ||
     /^server\/crates\/djinn-sandbox\//.test(path) ||
-    /^scripts\/(?:check-cgroup-retirement-gate\.sh|cgroup-retirement-gate\.mjs|test-cgroup-retirement-gate\.sh|verify-cgroup-retirement-evidence\.(?:sh|mjs)|test-verify-cgroup-retirement-evidence\.sh|fixtures\/cgroup-retirement\/)/.test(path);
+    /^scripts\/(?:check-cgroup-retirement-gate\.sh|cgroup-retirement-gate\.mjs|cgroup-retirement-assets\.json|test-cgroup-retirement-gate\.sh|verify-cgroup-retirement-evidence\.(?:sh|mjs)|test-verify-cgroup-retirement-evidence\.sh|fixtures\/cgroup-retirement\/)/.test(path);
 
 const git = (gitArgs) => spawnSync('git', gitArgs, { cwd: repo, encoding: 'utf8' });
 const checkedInventory = () => {
     if (!existsSync(inventoryPath)) fail('asset inventory is missing', 2);
     let definition;
     try { definition = JSON.parse(readFileSync(inventoryPath, 'utf8')); } catch (error) { fail(`asset inventory is invalid JSON (${error.message})`, 2); }
-    if (definition?.version !== 1 || !Array.isArray(definition.candidates) || !Array.isArray(definition.preserved)) fail('asset inventory has an invalid schema', 2);
+    if (definition?.version !== 1 || !Array.isArray(definition.candidates) || !Array.isArray(definition.preserved) || !Array.isArray(definition.guard_work)) fail('asset inventory has an invalid schema', 2);
     const listed = git(['ls-files']);
     if (listed.status !== 0) fail(`cannot list tracked inventory paths: ${listed.stderr.trim()}`, 2);
     const tracked = listed.stdout.split('\n').filter(Boolean);
@@ -77,6 +80,12 @@ const checkedInventory = () => {
         candidate.paths.forEach((path) => add('candidate', candidate.phase, path));
     }
     definition.preserved.forEach((path) => add('preserved', null, path));
+    definition.guard_work.forEach((path) => add('guard_work', null, path));
+    // Compose the older no-retirement inventory. A new declaration that omits
+    // one of its concrete inputs is invalid rather than a weaker replacement.
+    for (const path of retentionInputs()) {
+        if (!classified.has(path)) fail(`retention input is unclassified by asset inventory: ${path}`, 2);
+    }
     return classified;
 };
 const changedPaths = (base, head) => {
@@ -349,7 +358,12 @@ const runPrep = (base, head) => {
     for (const { path, status } of changes) {
         const asset = inventory.get(path);
         if (asset?.kind === 'preserved') fail(`PREP range edits non-deletable preserved asset: ${path}`);
-        if (asset?.kind === 'candidate') fail(`PREP range edits retirement candidate assigned to ${asset.phase}: ${path}`);
+        // The process-broker environment adapter has PREP hardening work; its
+        // eventual removal remains RETIRE_BASE and deletion is still protected.
+        if (asset?.kind === 'candidate' && !(environmentPolicyPaths.has(path) && !/^D/.test(status))) {
+            fail(`PREP range edits retirement candidate assigned to ${asset.phase}: ${path}`);
+        }
+        if (asset?.kind === 'guard_work') continue;
         if (protectedPath(path, status)) fail(`PREP range touches protected launcher/render/RuntimeClass/node/broker/cgroup-kill/credential boundary: ${path}`);
         if (!prepAllowed(path)) fail(`PREP range contains out-of-phase change: ${path}`);
     }
