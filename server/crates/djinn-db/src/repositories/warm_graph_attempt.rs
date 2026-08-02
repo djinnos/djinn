@@ -199,17 +199,7 @@ impl WarmGraphAttemptRepository {
             ));
         }
         self.db.ensure_initialized().await?;
-        // PostgreSQL intervals have microsecond precision. Do not silently
-        // truncate a caller's fractional grace period while converting it for
-        // SQL: reject durations that cannot be represented exactly instead.
-        let microseconds = grace.num_microseconds().ok_or_else(|| {
-            DbError::InvalidData("warm graph attempt grace is out of range".into())
-        })?;
-        if Duration::microseconds(microseconds) != grace {
-            return Err(DbError::InvalidData(
-                "warm graph attempt grace must have microsecond precision".into(),
-            ));
-        }
+        let microseconds = grace_as_microseconds(grace)?;
         let rows = sqlx::query(
             "UPDATE warm_graph_attempt \
              SET status = 'timed_out', detail = 'deadline exceeded', \
@@ -224,6 +214,25 @@ impl WarmGraphAttemptRepository {
         .await?;
         Ok(rows.into_iter().map(|row| row.get("attempt_id")).collect())
     }
+}
+
+/// Convert grace to the exact precision PostgreSQL intervals can represent.
+///
+/// `chrono::Duration` also accepts nanoseconds, which PostgreSQL would round
+/// when used in interval arithmetic. Reject that input rather than allowing a
+/// timeout to occur earlier or later than the caller's requested boundary.
+fn grace_as_microseconds(grace: Duration) -> DbResult<i64> {
+    // PostgreSQL intervals have microsecond precision. Do not silently
+    // truncate a caller's fractional grace period while converting it for SQL.
+    let microseconds = grace
+        .num_microseconds()
+        .ok_or_else(|| DbError::InvalidData("warm graph attempt grace is out of range".into()))?;
+    if Duration::microseconds(microseconds) != grace {
+        return Err(DbError::InvalidData(
+            "warm graph attempt grace must have microsecond precision".into(),
+        ));
+    }
+    Ok(microseconds)
 }
 
 const ATTEMPT_SELECT: &str = "SELECT attempt_id::text AS attempt_id, project_id, revision, status, \
@@ -420,6 +429,15 @@ mod tests {
                 .unwrap(),
             vec![id]
         );
+    }
+
+    #[test]
+    fn grace_conversion_preserves_fractional_seconds_without_rounding() {
+        assert_eq!(
+            grace_as_microseconds(Duration::milliseconds(1500)).unwrap(),
+            1_500_000
+        );
+        assert!(grace_as_microseconds(Duration::nanoseconds(1)).is_err());
     }
 
     #[tokio::test]
