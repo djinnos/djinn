@@ -199,6 +199,11 @@ impl SerializableDjinnEvent {
 pub struct SerializableCreateSessionParams {
     pub project_id: String,
     pub task_id: Option<String>,
+    /// Dispatch-admission generation for task-execution sessions. A value
+    /// routes creation through the host's generation guard; `None` retains
+    /// unrestricted creation for chat and other non-task sessions.
+    #[serde(default)]
+    pub execution_generation: Option<i64>,
     pub model: String,
     pub agent_type: String,
     pub metadata_json: Option<String>,
@@ -1229,6 +1234,7 @@ mod tests {
         let params = SerializableCreateSessionParams {
             project_id: "p1".into(),
             task_id: Some("t1".into()),
+            execution_generation: Some(17),
             model: "anthropic/claude-opus-4-7".into(),
             agent_type: "planner".into(),
             metadata_json: None,
@@ -1248,6 +1254,7 @@ mod tests {
         match back.payload {
             FramePayload::Rpc(ServiceRpcRequest::CreateSession { params: got }) => {
                 assert_eq!(got, params);
+                assert_eq!(got.execution_generation, Some(17));
             }
             other => panic!("unexpected: {other:?}"),
         }

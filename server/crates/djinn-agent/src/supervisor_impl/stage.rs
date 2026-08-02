@@ -955,6 +955,7 @@ pub(crate) async fn execute_stage(
             djinn_supervisor::services::SerializableCreateSessionParams {
                 project_id: task.project_id.clone(),
                 task_id: Some(task.id.clone()),
+                execution_generation: Some(spec.execution_generation),
                 model: model_id.clone(),
                 agent_type: runtime_role_name.to_string(),
                 metadata_json: None,
