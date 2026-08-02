@@ -4052,7 +4052,7 @@ mod stale_pod_session_rpc_persistence_tests {
             .await
             .expect_err("stale worker generation must be rejected by the host");
         assert_eq!(
-            error, "rpc transport: dispatch_generation_revoked",
+            error, "dispatch_generation_revoked",
             "worker receives the stable typed revoked-generation code"
         );
 
