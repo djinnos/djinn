@@ -318,7 +318,7 @@ pub(crate) fn command_spec(command: Command) -> io::Result<CommandSpec> {
         .get_current_dir()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "command cwd is required"))?;
     let cwd = text(cwd.as_os_str(), "cwd")?;
-    let environment = child_environment(&command)?;
+    let environment = crate::environment::admitted_child_environment(&command)?;
     let program = resolve_program(&named, &environment)?;
     let spec = CommandSpec {
         program,
@@ -445,64 +445,6 @@ fn is_executable_file(candidate: &str) -> bool {
 #[cfg(not(unix))]
 fn is_executable_file(candidate: &str) -> bool {
     std::fs::metadata(candidate).is_ok_and(|metadata| !metadata.is_dir())
-}
-
-/// The environment a brokered child is given.
-///
-/// # Why the worker's own environment has to be forwarded (task 7deu, defect 2)
-///
-/// The launcher execs the child with **exactly** the environment in the
-/// [`CommandSpec`] — never the broker's. That is the right isolation property,
-/// but `Command::get_envs()` returns only the variables a caller explicitly set
-/// on the command, not the ones the process inherited. Under the in-process
-/// path the child inherits the pod's environment; under the broker path it got
-/// nothing. So a brokered build ran with no `CARGO_TARGET_DIR` (a cold build, in
-/// the wrong directory, missing the warm cache), no `CARGO_BUILD_RUSTFLAGS` (no
-/// mold linker), no `RUSTUP_HOME`, and no `CARGO_BUILD_JOBS` — the last of which
-/// silently reverted the load-103 fix.
-///
-/// Compilation is 60-90% of task wall clock, so that is not a rough edge; it is
-/// the feature making the thing it governs dramatically slower.
-///
-/// The fix keeps the allow-list closed and forwards through it:
-/// `djinn_cgroup_launcher::is_allowed_environment_key` is the single predicate,
-/// applied here as a convenience. The actual control is inside the privileged
-/// broker, in `CommandSpec::validate`, and it is the strictly stronger
-/// `is_allowed_environment_entry`: one forwardable name (`GIT_CONFIG_SYSTEM`)
-/// points at a *configuration file*, so it is judged by its value and not its
-/// key. Explicit per-command values win over inherited ones; the launcher then
-/// overrides the parallelism pins — and the git trust anchor — with values it
-/// derives itself, because only it knows the quota the leaf will really run at
-/// and only it owns a git config file that is safe to point a child at.
-fn child_environment(command: &Command) -> io::Result<Vec<(String, String)>> {
-    use std::collections::BTreeMap;
-
-    let mut environment: BTreeMap<String, String> = std::env::vars()
-        .filter(|(key, _)| djinn_cgroup_launcher::is_allowed_environment_key(key))
-        .collect();
-
-    for (key, value) in command.get_envs() {
-        let key = key.to_str().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "environment key must be UTF-8")
-        })?;
-        match value {
-            // `Command::env_remove` is represented as a `None` value.
-            None => {
-                environment.remove(key);
-            }
-            Some(value) => {
-                let value = value.to_str().ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "environment value must be UTF-8",
-                    )
-                })?;
-                environment.insert(key.to_owned(), value.to_owned());
-            }
-        }
-    }
-
-    Ok(environment.into_iter().collect())
 }
 
 /// The containment a launcher double owes the fixture children it spawns.

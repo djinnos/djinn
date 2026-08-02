@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "evidence_id": "cgroup-retirement/RETIRE_HEAD",
+  "prep_head": "PREP_HEAD",
+  "identity_digests": {
+    "reservation": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+    "quota": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+    "kueue_width": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+    "evidence": "sha256:4444444444444444444444444444444444444444444444444444444444444444"
+  },
+  "subject": {
+    "run_id": "production-final-001",
+    "pod_name": "djinn-task-run-final",
+    "pod_uid": "11111111-1111-4111-8111-111111111111",
+    "image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "node_name": "production-worker-a"
+  },
+  "runs": [
+    {"role":"canary-1","run_id":"production-canary-1","pod_name":"djinn-canary-1","pod_uid":"00000000-0000-4000-8000-000000000001","image_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","node_name":"production-worker-a","cgroup_path":"/kubepods/pod-canary-1","memory_events_oom_kill_before":"7","memory_events_oom_kill_after":"7","sum_bytes":"2147483648","ceiling_bytes":"2684354560"},
+    {"role":"canary-2","run_id":"production-canary-2","pod_name":"djinn-canary-2","pod_uid":"00000000-0000-4000-8000-000000000002","image_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","node_name":"production-worker-a","cgroup_path":"/kubepods/pod-canary-2","memory_events_oom_kill_before":"8","memory_events_oom_kill_after":"8","sum_bytes":"2147483648","ceiling_bytes":"2684354560"},
+    {"role":"canary-3","run_id":"production-canary-3","pod_name":"djinn-canary-3","pod_uid":"00000000-0000-4000-8000-000000000003","image_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","node_name":"production-worker-a","cgroup_path":"/kubepods/pod-canary-3","memory_events_oom_kill_before":"9","memory_events_oom_kill_after":"9","sum_bytes":"2147483648","ceiling_bytes":"2684354560"},
+    {"role":"canary-4","run_id":"production-canary-4","pod_name":"djinn-canary-4","pod_uid":"00000000-0000-4000-8000-000000000004","image_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","node_name":"production-worker-a","cgroup_path":"/kubepods/pod-canary-4","memory_events_oom_kill_before":"10","memory_events_oom_kill_after":"10","sum_bytes":"2147483648","ceiling_bytes":"2684354560"},
+    {"role":"canary-5","run_id":"production-canary-5","pod_name":"djinn-canary-5","pod_uid":"00000000-0000-4000-8000-000000000005","image_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","node_name":"production-worker-a","cgroup_path":"/kubepods/pod-canary-5","memory_events_oom_kill_before":"11","memory_events_oom_kill_after":"11","sum_bytes":"2147483648","ceiling_bytes":"2684354560"},
+    {"role":"final","run_id":"production-final-001","pod_name":"djinn-task-run-final","pod_uid":"11111111-1111-4111-8111-111111111111","image_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","node_name":"production-worker-a","cgroup_path":"/kubepods/pod-final","memory_events_oom_kill_before":"12","memory_events_oom_kill_after":"12","sum_bytes":"2147483648","ceiling_bytes":"2684354560"}
+  ],
+  "node_fit": {"allocatable_bytes":"8589934592","system_reservation_bytes":"536870912","kube_reservation_bytes":"536870912","eviction_reservation_bytes":"536870912","other_pod_requests_bytes":"3758096384","candidate_request_bytes":"2147483648"}
+}

@@ -194,6 +194,11 @@ pub(crate) async fn call_shell(
         // sequence targets a process group that does not exist — a timed-out or
         // cancelled command would simply keep running.
         crate::process::isolate_process_group(&mut cmd);
+        // The launcher-free path must not inherit the worker's ambient
+        // environment. The broker validates a complete `CommandSpec`; mirror
+        // that boundary here before the direct `spawn`.
+        crate::environment::clear_and_admit_child_environment(&mut cmd)
+            .map_err(|error| error.to_string())?;
         crate::process::output_with_kill_cancellable(
             cmd,
             Duration::from_millis(timeout_ms),
