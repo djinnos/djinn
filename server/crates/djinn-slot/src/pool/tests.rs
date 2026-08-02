@@ -32,6 +32,23 @@ fn test_app_state() -> (
     (app_state, cancel, temp)
 }
 
+async fn create_dispatch_task_ids(
+    app_state: &crate::host::SlotContext,
+    count: usize,
+) -> Vec<String> {
+    if count == 0 {
+        return Vec::new();
+    }
+    let project = test_helpers::create_test_project(&app_state.db).await;
+    let epic = test_helpers::create_test_epic(&app_state.db, &project.id).await;
+    let mut task_ids = Vec::with_capacity(count);
+    for _ in 0..count {
+        let task = test_helpers::create_test_task(&app_state.db, &project.id, &epic.id).await;
+        task_ids.push(task.id);
+    }
+    task_ids
+}
+
 #[derive(Clone)]
 struct RecordingRuntimeOps {
     calls: Arc<Mutex<Vec<String>>>,
@@ -386,8 +403,12 @@ fn inject_stale_busy_free_slot(pool: &mut SlotPool, task_id: &str, model_id: &st
     slot_id
 }
 
-fn new_white_box_pool(slot_count: u32) -> (SlotPool, TempDir) {
+async fn new_white_box_pool(
+    slot_count: u32,
+    dispatch_task_count: usize,
+) -> (SlotPool, Vec<String>, TempDir) {
     let (app_state, cancel, temp) = test_app_state();
+    let task_ids = create_dispatch_task_ids(&app_state, dispatch_task_count).await;
     let (signal_tx, _signal_rx) = mpsc::unbounded_channel();
     let config = make_config(
         vec![model("model-a", slot_count, &["worker"])],
@@ -403,12 +424,12 @@ fn new_white_box_pool(slot_count: u32) -> (SlotPool, TempDir) {
         // white-box hooks below, never by sleeps or natural completion.
         test_slot_factory(Duration::from_secs(3600), signal_tx),
     );
-    (pool, temp)
+    (pool, task_ids, temp)
 }
 
 #[tokio::test]
 async fn snapshot_reports_free_busy_and_draining_slots() {
-    let (mut pool, _temp) = new_white_box_pool(3);
+    let (mut pool, _task_ids, _temp) = new_white_box_pool(3, 0).await;
     pool.test_set_slot_model(0, "model-a");
     pool.test_set_slot_model(1, "model-a");
     pool.test_set_slot_model(2, "model-b");
@@ -484,24 +505,29 @@ struct LifecyclePermutation {
 }
 
 async fn run_lifecycle_permutation(case: LifecyclePermutation) {
-    let (mut pool, _temp) = new_white_box_pool(1);
+    let (mut pool, canonical_task_ids, _temp) = new_white_box_pool(1, 2).await;
+    let canonical_by_label = HashMap::from([
+        ("task-a", canonical_task_ids[0].as_str()),
+        ("task-b", canonical_task_ids[1].as_str()),
+    ]);
     let mut task_slots: HashMap<&'static str, usize> = HashMap::new();
     assert_slot_pool_invariants_after(&pool, &format!("{}: initial spawn", case.name));
     for (idx, step) in case.steps.iter().copied().enumerate() {
         let label = format!("{} step {idx} {step:?}", case.name);
         match step {
             LifecycleStep::Dispatch(task_id) => {
-                pool.test_dispatch(task_id, "/tmp/project", "model-a")
+                let canonical_task_id = canonical_by_label[task_id];
+                pool.test_dispatch(canonical_task_id, "/tmp/project", "model-a")
                     .await
                     .unwrap_or_else(|err| panic!("{label}: dispatch {task_id} failed: {err:?}"));
                 let slot_id = pool
-                    .test_slot_of(task_id)
+                    .test_slot_of(canonical_task_id)
                     .unwrap_or_else(|| panic!("{label}: {task_id} should hold a slot"));
                 task_slots.insert(task_id, slot_id);
                 assert_slot_pool_invariants_after(&pool, &label);
             }
             LifecycleStep::Terminate(task_id) => {
-                pool.test_terminate_session(task_id)
+                pool.test_terminate_session(canonical_by_label[task_id])
                     .await
                     .unwrap_or_else(|err| panic!("{label}: terminate {task_id} failed: {err:?}"));
                 assert_slot_pool_invariants_after(&pool, &label);
@@ -511,7 +537,7 @@ async fn run_lifecycle_permutation(case: LifecyclePermutation) {
                 let slot_id = *task_slots
                     .get(task_id)
                     .unwrap_or_else(|| panic!("{label}: no recorded slot for {task_id}"));
-                pool.test_handle_slot_event(kind.event(slot_id, task_id))
+                pool.test_handle_slot_event(kind.event(slot_id, canonical_by_label[task_id]))
                     .await;
                 assert_slot_pool_invariants_after(&pool, &label);
             }
@@ -533,20 +559,24 @@ async fn run_lifecycle_permutation(case: LifecyclePermutation) {
                 poisoned_task,
                 next_task,
             } => {
-                let poisoned_slot =
-                    inject_stale_busy_free_slot(&mut pool, poisoned_task, "model-a");
+                let poisoned_slot = inject_stale_busy_free_slot(
+                    &mut pool,
+                    canonical_by_label[poisoned_task],
+                    "model-a",
+                );
                 assert!(
                     pool.test_free_slots("model-a").contains(&poisoned_slot),
                     "{label}: poisoned busy slot should be present on the free list before self-heal"
                 );
-                pool.test_dispatch(next_task, "/tmp/project", "model-a")
+                let canonical_next_task = canonical_by_label[next_task];
+                pool.test_dispatch(canonical_next_task, "/tmp/project", "model-a")
                     .await
                     .unwrap_or_else(|err| {
                         panic!("{label}: dispatch {next_task} after poison failed: {err:?}")
                     });
                 assert_slot_pool_invariants_after(&pool, &label);
                 let next_slot = pool
-                    .test_slot_of(next_task)
+                    .test_slot_of(canonical_next_task)
                     .unwrap_or_else(|| panic!("{label}: {next_task} should hold a slot"));
                 assert_ne!(
                     next_slot, poisoned_slot,
@@ -681,6 +711,7 @@ async fn dispatch_for_role(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn parallel_completions_finish_concurrently() {
     let (app_state, cancel, _temp) = test_app_state();
+    let task_ids = create_dispatch_task_ids(&app_state, 4).await;
     let (signal_tx, _signal_rx) = mpsc::unbounded_channel();
     let config = make_config(
         vec![model("model-a", 4, &["worker"])],
@@ -692,7 +723,7 @@ async fn parallel_completions_finish_concurrently() {
         config,
         test_slot_factory(Duration::from_millis(120), signal_tx),
     );
-    let task_ids: Vec<String> = (0..4).map(|i| format!("parallel-{i}")).collect();
+    // Canonical persisted IDs are required by generation admission.
     for task_id in &task_ids {
         pool.dispatch(task_id, "/tmp/project", "model-a")
             .await
@@ -711,6 +742,7 @@ async fn parallel_completions_finish_concurrently() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn elastic_pool_spawns_on_demand_without_capacity_fallback() {
     let (app_state, cancel, _temp) = test_app_state();
+    let task_ids = create_dispatch_task_ids(&app_state, 4).await;
     let (signal_tx, _signal_rx) = mpsc::unbounded_channel();
     let config = make_config(
         vec![
@@ -732,7 +764,7 @@ async fn elastic_pool_spawns_on_demand_without_capacity_fallback() {
     );
     let m1 = dispatch_for_role(
         &pool,
-        "task-1",
+        &task_ids[0],
         "/tmp/project",
         "worker",
         &role_priorities,
@@ -742,7 +774,7 @@ async fn elastic_pool_spawns_on_demand_without_capacity_fallback() {
     .expect("first dispatch should succeed");
     let m2 = dispatch_for_role(
         &pool,
-        "task-2",
+        &task_ids[1],
         "/tmp/project",
         "worker",
         &role_priorities,
@@ -752,7 +784,7 @@ async fn elastic_pool_spawns_on_demand_without_capacity_fallback() {
     .expect("second dispatch should succeed");
     let m3 = dispatch_for_role(
         &pool,
-        "task-3",
+        &task_ids[2],
         "/tmp/project",
         "worker",
         &role_priorities,
@@ -769,7 +801,7 @@ async fn elastic_pool_spawns_on_demand_without_capacity_fallback() {
     assert_eq!(m3, "model-a");
     let fourth = dispatch_for_role(
         &pool,
-        "task-4",
+        &task_ids[3],
         "/tmp/project",
         "worker",
         &role_priorities,
@@ -783,21 +815,13 @@ async fn elastic_pool_spawns_on_demand_without_capacity_fallback() {
     pool.interrupt_all("test cleanup")
         .await
         .expect("interrupt_all should succeed");
-    wait_until_no_sessions(
-        &pool,
-        &[
-            "task-1".into(),
-            "task-2".into(),
-            "task-3".into(),
-            "task-4".into(),
-        ],
-    )
-    .await;
+    wait_until_no_sessions(&pool, &task_ids).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn role_isolation_skips_models_that_do_not_serve_role() {
     let (app_state, cancel, _temp) = test_app_state();
+    let task_ids = create_dispatch_task_ids(&app_state, 2).await;
     let (signal_tx, _signal_rx) = mpsc::unbounded_channel();
     let config = make_config(
         vec![
@@ -822,7 +846,7 @@ async fn role_isolation_skips_models_that_do_not_serve_role() {
     );
     let first = dispatch_for_role(
         &pool,
-        "worker-1",
+        &task_ids[0],
         "/tmp/project",
         "worker",
         &role_priorities,
@@ -835,7 +859,7 @@ async fn role_isolation_skips_models_that_do_not_serve_role() {
     assert_eq!(status.per_model.get("opus").map(|s| s.free), Some(1));
     let second = dispatch_for_role(
         &pool,
-        "worker-2",
+        &task_ids[1],
         "/tmp/project",
         "worker",
         &role_priorities,
@@ -858,12 +882,13 @@ async fn role_isolation_skips_models_that_do_not_serve_role() {
     pool.interrupt_all("test cleanup")
         .await
         .expect("interrupt_all should succeed");
-    wait_until_no_sessions(&pool, &["worker-1".into(), "worker-2".into()]).await;
+    wait_until_no_sessions(&pool, &task_ids).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reconfigure_scale_up_adds_free_slots_for_dispatch() {
     let (app_state, cancel, _temp) = test_app_state();
+    let task_ids = create_dispatch_task_ids(&app_state, 4).await;
     let (signal_tx, _signal_rx) = mpsc::unbounded_channel();
     let config = make_config(
         vec![model("model-a", 2, &["worker"])],
@@ -875,10 +900,10 @@ async fn reconfigure_scale_up_adds_free_slots_for_dispatch() {
         config,
         test_slot_factory(Duration::from_secs(10), signal_tx),
     );
-    pool.dispatch("up-1", "/tmp/project", "model-a")
+    pool.dispatch(&task_ids[0], "/tmp/project", "model-a")
         .await
         .expect("dispatch 1 should succeed");
-    pool.dispatch("up-2", "/tmp/project", "model-a")
+    pool.dispatch(&task_ids[1], "/tmp/project", "model-a")
         .await
         .expect("dispatch 2 should succeed");
     // (No AtCapacity check at the pre-warm count of 2 — the pool is elastic.
@@ -897,25 +922,22 @@ async fn reconfigure_scale_up_adds_free_slots_for_dispatch() {
     assert_eq!(status.total_slots, 4);
     assert_eq!(per_model.active, 2);
     assert_eq!(per_model.free, 2);
-    pool.dispatch("up-3", "/tmp/project", "model-a")
+    pool.dispatch(&task_ids[2], "/tmp/project", "model-a")
         .await
         .expect("dispatch 3 should succeed after scale-up");
-    pool.dispatch("up-4", "/tmp/project", "model-a")
+    pool.dispatch(&task_ids[3], "/tmp/project", "model-a")
         .await
         .expect("dispatch 4 should succeed after scale-up");
     pool.interrupt_all("test cleanup")
         .await
         .expect("interrupt_all should succeed");
-    wait_until_no_sessions(
-        &pool,
-        &["up-1".into(), "up-2".into(), "up-3".into(), "up-4".into()],
-    )
-    .await;
+    wait_until_no_sessions(&pool, &task_ids).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reconfigure_scale_down_drains_busy_slots_then_retires_them() {
     let (app_state, cancel, _temp) = test_app_state();
+    let task_ids = create_dispatch_task_ids(&app_state, 7).await;
     let (signal_tx, _signal_rx) = mpsc::unbounded_channel();
     let config = make_config(
         vec![model("model-a", 4, &["worker"])],
@@ -927,8 +949,7 @@ async fn reconfigure_scale_down_drains_busy_slots_then_retires_them() {
         config,
         test_slot_factory(Duration::from_secs(10), signal_tx),
     );
-    let task_ids: Vec<String> = (0..4).map(|i| format!("down-{i}")).collect();
-    for task_id in &task_ids {
+    for task_id in &task_ids[..4] {
         pool.dispatch(task_id, "/tmp/project", "model-a")
             .await
             .expect("dispatch should succeed");
@@ -946,33 +967,25 @@ async fn reconfigure_scale_down_drains_busy_slots_then_retires_them() {
     pool.interrupt_all("test drain")
         .await
         .expect("interrupt_all should succeed");
-    wait_until_no_sessions(&pool, &task_ids).await;
+    wait_until_no_sessions(&pool, &task_ids[..4]).await;
     // Scale-down still drained the idle slots back to the pre-warm count of 2.
     let status_after = pool.get_status().await.expect("status should succeed");
     assert_eq!(status_after.total_slots, 2);
     // Elastic: the 2 retained slots are reused, and a 3rd dispatch spawns a new
     // slot on demand — there is no per-model capacity ceiling anymore.
-    pool.dispatch("down-next-1", "/tmp/project", "model-a")
+    pool.dispatch(&task_ids[4], "/tmp/project", "model-a")
         .await
         .expect("dispatch should succeed");
-    pool.dispatch("down-next-2", "/tmp/project", "model-a")
+    pool.dispatch(&task_ids[5], "/tmp/project", "model-a")
         .await
         .expect("dispatch should succeed");
-    pool.dispatch("down-next-3", "/tmp/project", "model-a")
+    pool.dispatch(&task_ids[6], "/tmp/project", "model-a")
         .await
         .expect("elastic dispatch spawns a slot on demand");
     pool.interrupt_all("test cleanup")
         .await
         .expect("interrupt_all should succeed");
-    wait_until_no_sessions(
-        &pool,
-        &[
-            "down-next-1".into(),
-            "down-next-2".into(),
-            "down-next-3".into(),
-        ],
-    )
-    .await;
+    wait_until_no_sessions(&pool, &task_ids[4..]).await;
 }
 
 /// Sum the per-(user, model) running-session counts the coordinator uses to
@@ -1135,6 +1148,9 @@ async fn stall_kill_settles_session_row_and_clears_from_per_user_cap() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn kill_and_pause_are_routed_to_the_correct_task_slot() {
     let (app_state, cancel, _temp) = test_app_state();
+    let task_ids = create_dispatch_task_ids(&app_state, 2).await;
+    let kill_task = &task_ids[0];
+    let pause_task = &task_ids[1];
     let (signal_tx, mut signal_rx) = mpsc::unbounded_channel();
     let config = make_config(
         vec![model("model-a", 2, &["worker"])],
@@ -1146,20 +1162,20 @@ async fn kill_and_pause_are_routed_to_the_correct_task_slot() {
         config,
         test_slot_factory(Duration::from_secs(10), signal_tx),
     );
-    pool.dispatch("task-kill", "/tmp/project", "model-a")
+    pool.dispatch(kill_task, "/tmp/project", "model-a")
         .await
         .expect("kill task dispatch should succeed");
-    pool.dispatch("task-pause", "/tmp/project", "model-a")
+    pool.dispatch(pause_task, "/tmp/project", "model-a")
         .await
         .expect("pause task dispatch should succeed");
     let kill_slot = pool
-        .session_for_task("task-kill")
+        .session_for_task(kill_task)
         .await
         .expect("session lookup should succeed")
         .expect("kill task should have active session")
         .slot_id;
     let pause_slot = pool
-        .session_for_task("task-pause")
+        .session_for_task(pause_task)
         .await
         .expect("session lookup should succeed")
         .expect("pause task should have active session")
@@ -1168,10 +1184,10 @@ async fn kill_and_pause_are_routed_to_the_correct_task_slot() {
         kill_slot, pause_slot,
         "tasks should be running in different slots"
     );
-    pool.kill_session("task-kill")
+    pool.kill_session(kill_task)
         .await
         .expect("kill should succeed");
-    pool.pause_session("task-pause")
+    pool.pause_session(pause_task)
         .await
         .expect("pause should succeed");
     let deadline = Instant::now() + Duration::from_secs(2);
@@ -1187,13 +1203,13 @@ async fn kill_and_pause_are_routed_to_the_correct_task_slot() {
             .expect("signal read should not timeout")
         {
             match signal {
-                RunnerSignal::Killed(task_id) if task_id == "task-kill" => saw_kill = true,
-                RunnerSignal::Paused(task_id) if task_id == "task-pause" => saw_pause = true,
+                RunnerSignal::Killed(task_id) if &task_id == kill_task => saw_kill = true,
+                RunnerSignal::Paused(task_id) if &task_id == pause_task => saw_pause = true,
                 _ => {}
             }
         }
     }
-    wait_until_no_sessions(&pool, &["task-kill".into(), "task-pause".into()]).await;
+    wait_until_no_sessions(&pool, &task_ids).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1509,6 +1525,9 @@ async fn interrupt_all_tears_down_each_running_taskrun_job() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dispatch_recovers_from_stale_busy_free_slot() {
     let (app_state, cancel, _temp) = test_app_state();
+    let task_ids = create_dispatch_task_ids(&app_state, 2).await;
+    let task_a = &task_ids[0];
+    let task_b = &task_ids[1];
     let (signal_tx, _signal_rx) = mpsc::unbounded_channel();
     let config = make_config(
         vec![model("model-a", 1, &["worker"])],
@@ -1523,19 +1542,19 @@ async fn dispatch_recovers_from_stale_busy_free_slot() {
         // Long runtime: the slot stays genuinely busy for the whole test.
         test_slot_factory(Duration::from_secs(3600), signal_tx),
     );
-    pool.test_dispatch("task-a", "/tmp/project", "model-a")
+    pool.test_dispatch(task_a, "/tmp/project", "model-a")
         .await
         .expect("first dispatch should occupy a slot");
     assert_slot_pool_invariants_after(&pool, "dispatch task-a");
     // Inject the exact desync: the still-busy slot back on the free list.
-    let slot_a = inject_stale_busy_free_slot(&mut pool, "task-a", "model-a");
+    let slot_a = inject_stale_busy_free_slot(&mut pool, task_a, "model-a");
     // Must self-heal: drop the stale entry and spawn a fresh slot — NOT wedge.
-    pool.test_dispatch("task-b", "/tmp/project", "model-a")
+    pool.test_dispatch(task_b, "/tmp/project", "model-a")
         .await
         .expect("second dispatch must recover instead of wedging on the busy slot");
     assert_slot_pool_invariants_after(&pool, "dispatch task-b after stale busy free-list entry");
     let slot_b = pool
-        .test_slot_of("task-b")
+        .test_slot_of(task_b)
         .expect("task-b should hold a slot");
     assert_ne!(
         slot_b, slot_a,
@@ -1555,6 +1574,9 @@ async fn dispatch_recovers_from_stale_busy_free_slot() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn invariant_harness_accepts_stale_busy_slot_self_heal() {
     let (app_state, cancel, _temp) = test_app_state();
+    let task_ids = create_dispatch_task_ids(&app_state, 2).await;
+    let task_a = &task_ids[0];
+    let task_b = &task_ids[1];
     let (signal_tx, _signal_rx) = mpsc::unbounded_channel();
     let config = make_config(
         vec![model("model-a", 1, &["worker"])],
@@ -1569,11 +1591,11 @@ async fn invariant_harness_accepts_stale_busy_slot_self_heal() {
         test_slot_factory(Duration::from_secs(3600), signal_tx),
     );
     assert_slot_pool_invariants_after(&pool, "initial spawn");
-    pool.test_dispatch("task-a", "/tmp/project", "model-a")
+    pool.test_dispatch(task_a, "/tmp/project", "model-a")
         .await
         .expect("first dispatch should occupy the pre-warmed slot");
-    let stale_slot = inject_stale_busy_free_slot(&mut pool, "task-a", "model-a");
-    pool.test_dispatch("task-b", "/tmp/project", "model-a")
+    let stale_slot = inject_stale_busy_free_slot(&mut pool, task_a, "model-a");
+    pool.test_dispatch(task_b, "/tmp/project", "model-a")
         .await
         .expect("dispatch should self-heal the stale busy free-list entry");
     assert_slot_pool_invariants_after(&pool, "self-healed dispatch after stale busy injection");
@@ -1656,6 +1678,7 @@ async fn lifecycle_permutations_preserve_slot_pool_invariants() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mark_slot_free_is_idempotent_and_skips_retired() {
     let (app_state, cancel, _temp) = test_app_state();
+    let task_id = create_dispatch_task_ids(&app_state, 1).await.remove(0);
     let (signal_tx, _signal_rx) = mpsc::unbounded_channel();
     let config = make_config(
         vec![model("model-a", 1, &["worker"])],
@@ -1681,11 +1704,11 @@ async fn mark_slot_free_is_idempotent_and_skips_retired() {
         "mark_slot_free must not duplicate an already-free slot"
     );
     // Take slot 0 out of the free list (as a dispatch would), then retire it.
-    pool.test_dispatch("task-a", "/tmp/project", "model-a")
+    pool.test_dispatch(&task_id, "/tmp/project", "model-a")
         .await
         .expect("dispatch should occupy slot 0");
     assert_slot_pool_invariants_after(&pool, "dispatch before retire");
-    assert_eq!(pool.test_slot_of("task-a"), Some(0));
+    assert_eq!(pool.test_slot_of(&task_id), Some(0));
     assert!(!pool.test_free_slots("model-a").contains(&0));
     pool.test_retire(0);
     assert_slot_pool_invariants_after(&pool, "manual retire while busy");
@@ -2087,6 +2110,7 @@ async fn terminate_session_with_no_slot_mapping_returns_task_not_found() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn terminate_session_does_not_return_non_draining_slot_to_free_list() {
     let (app_state, cancel, _temp) = test_app_state();
+    let task_id = create_dispatch_task_ids(&app_state, 1).await.remove(0);
     let (signal_tx, _signal_rx) = mpsc::unbounded_channel();
     let config = make_config(
         vec![model("model-a", 1, &["worker"])],
@@ -2100,30 +2124,30 @@ async fn terminate_session_does_not_return_non_draining_slot_to_free_list() {
         config,
         test_slot_factory(Duration::from_secs(3600), signal_tx),
     );
-    pool.test_dispatch("task-terminate", "/tmp/project", "model-a")
+    pool.test_dispatch(&task_id, "/tmp/project", "model-a")
         .await
         .expect("dispatch should occupy slot 0");
     let slot_id = pool
-        .test_slot_of("task-terminate")
+        .test_slot_of(&task_id)
         .expect("task should hold a slot");
     assert_eq!(slot_id, 0);
     assert!(
         pool.test_free_slots("model-a").is_empty(),
         "busy slot should not be on the free list before termination"
     );
-    pool.test_terminate_session("task-terminate")
+    pool.test_terminate_session(&task_id)
         .await
         .expect("terminate_session should reclaim the task mapping");
-    assert_eq!(pool.test_slot_of("task-terminate"), None);
+    assert_eq!(pool.test_slot_of(&task_id), None);
     assert!(
         pool.test_free_slots("model-a").is_empty(),
         "terminate_session must not synchronously append a non-draining slot to the free list"
     );
-    pool.test_dispatch("task-terminate", "/tmp/project", "model-a")
+    pool.test_dispatch(&task_id, "/tmp/project", "model-a")
         .await
         .expect("terminated task should be immediately redispatchable before Killed event");
     let redispatched_slot = pool
-        .test_slot_of("task-terminate")
+        .test_slot_of(&task_id)
         .expect("redispatched task should hold a new slot mapping");
     assert_ne!(
         redispatched_slot, slot_id,
@@ -2136,7 +2160,7 @@ async fn terminate_session_does_not_return_non_draining_slot_to_free_list() {
     pool.test_handle_slot_event(super::super::SlotEvent::Killed {
         slot_id,
         model_id: "model-a".to_string(),
-        task_id: "task-terminate".to_string(),
+        task_id: task_id.clone(),
     })
     .await;
     assert_eq!(
@@ -2145,7 +2169,7 @@ async fn terminate_session_does_not_return_non_draining_slot_to_free_list() {
         "the later lifecycle event is the single authority that frees the slot"
     );
     assert_eq!(
-        pool.test_slot_of("task-terminate"),
+        pool.test_slot_of(&task_id),
         Some(redispatched_slot),
         "stale Killed event from the terminated slot must not remove the redispatched task mapping"
     );
