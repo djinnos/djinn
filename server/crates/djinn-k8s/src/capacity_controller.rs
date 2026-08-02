@@ -724,7 +724,7 @@ mod tests {
     }
 
     #[test]
-    fn quota_controller_failsafe_returns_no_mutation_on_conservative_input() {
+    fn quota_controller_failsafe_decision_returns_no_mutation_on_conservative_input() {
         assert_eq!(cpu_quantity("bogus"), None);
         assert_eq!(cpu_quantity("-1m"), None);
         assert_eq!(cpu_quantity("9223372036854775807"), None);
@@ -749,5 +749,43 @@ mod tests {
                 reason: ConservativeReason::ObservationFailed
             }
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn quota_controller_failsafe_read_failure_publishes_known_k_and_writes_nothing() {
+        use crate::runtime_fixture::{RecordedApiserver, recording_client};
+
+        let recorder = RecordedApiserver::new();
+        let client = recording_client(&recorder, "default");
+        let config = CapacityControllerConfig {
+            queue_name: "djinn-kueue".into(),
+            node_selector_key: "kubernetes.io/hostname".into(),
+            node_selector_value: "worker-1".into(),
+            idle_cost: CpuMillicores::new(750).unwrap(),
+            compile_cost: CpuMillicores::new(2_800).unwrap(),
+            fail_safe: safe(),
+            expected_protected_pods: 5,
+        };
+        let (tx, mut rx) = watch::channel(CapacityVector {
+            binding: BindingQuota::Pods(99),
+            compile_slots: 99,
+        });
+        let controller = tokio::spawn(run_capacity_controller(
+            client,
+            config,
+            Arc::new(|| true),
+            tx,
+        ));
+        tokio::task::yield_now().await;
+        rx.changed().await.unwrap();
+        assert_eq!(
+            *rx.borrow_and_update(),
+            CapacityVector {
+                binding: BindingQuota::Pods(3),
+                compile_slots: 2,
+            }
+        );
+        assert!(recorder.mutations().is_empty());
+        controller.abort();
     }
 }
