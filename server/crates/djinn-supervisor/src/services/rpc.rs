@@ -2022,6 +2022,55 @@ mod tests {
         let _ = server_task.await;
     }
 
+    /// A stale task-generation rejection must survive the pod worker RPC boundary.
+    #[tokio::test]
+    async fn create_session_roundtrip_preserves_generation_revocation() {
+        use crate::services::SerializableCreateSessionParams;
+        let (client, server) = UnixStream::pair().expect("pair");
+        let server_task = tokio::spawn(async move {
+            let (mut read, mut write) = server.into_split();
+            let frame: Frame = read_frame(&mut read).await.expect("read request");
+            match frame.payload {
+                FramePayload::Rpc(ServiceRpcRequest::CreateSession { params }) => {
+                    assert_eq!(params.task_id.as_deref(), Some("task-fenced"));
+                    assert_eq!(params.execution_generation, Some(0));
+                    let reply = Frame {
+                        correlation_id: frame.correlation_id,
+                        payload: FramePayload::RpcReply(ServiceRpcResponse::CreateSession(Err(
+                            "dispatch_generation_revoked: task_id=task-fenced supplied_generation=0 current_generation=1".into(),
+                        ))),
+                    };
+                    write_frame(&mut write, &reply)
+                        .await
+                        .expect("write rejection");
+                }
+                other => panic!("unexpected: {other:?}"),
+            }
+        });
+        let cancel = CancellationToken::new();
+        let (services, bg) = RpcServices::from_unix_stream(client, cancel.clone());
+        let error = services
+            .create_session(SerializableCreateSessionParams {
+                project_id: "p1".into(),
+                task_id: Some("task-fenced".into()),
+                execution_generation: Some(0),
+                model: "test-model".into(),
+                agent_type: "worker".into(),
+                metadata_json: None,
+                task_run_id: Some("run-fenced".into()),
+                cost_basis_hint: None,
+                billing_source: None,
+            })
+            .await
+            .expect_err("fenced session creation must be rejected");
+        assert!(error.contains("dispatch_generation_revoked"));
+        drop(services);
+        cancel.cancel();
+        let _ = bg.reader.await;
+        let _ = bg.writer.await;
+        let _ = server_task.await;
+    }
+
     /// Round-trip a `publish_session_message` RPC through an in-memory Unix pair.
     #[tokio::test]
     async fn publish_session_message_roundtrip_over_unixpair() {
