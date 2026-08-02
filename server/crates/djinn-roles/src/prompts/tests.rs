@@ -1026,6 +1026,74 @@ fn adversary_prompt_contains_objection_contract() {
     );
 }
 
+/// Human approval, authorization and organizational structure are categorically
+/// outside the agent's model: djinn writes code and opens PRs, and approval and
+/// merge are enforced by the forge and its configured owners. Without this rule
+/// an Adversary can demand an approval control and a Judge can accept one as the
+/// fix for an objection, and neither notices the category error — which is how a
+/// signed-delegation / CODEOWNERS / identity-separation acceptance criterion
+/// reached a `ready` proposal. Every role that can author, demand or bless an AC
+/// must carry the rule, so it cannot silently vanish from one of them.
+#[test]
+fn tribunal_and_planner_prompts_exclude_human_approval_machinery() {
+    const FORGE_RULE: &str = "enforced by the forge and its configured owners";
+
+    let ctx = make_ctx();
+
+    let mut cases: Vec<(&str, String)> = Vec::new();
+
+    for agent in [AgentType::Adversary, AgentType::Judge, AgentType::Advocate] {
+        let task = make_task();
+        cases.push((agent.as_str(), render_prompt(agent, &task, &ctx)));
+    }
+
+    let mut decomposition_task = make_task();
+    decomposition_task.issue_type = "planning".into();
+    cases.push((
+        "planner/decomposition",
+        render_prompt(AgentType::Planner, &decomposition_task, &ctx),
+    ));
+
+    let mut proposal_task = make_task();
+    proposal_task.issue_type = "epic_breakdown".into();
+    cases.push((
+        "planner/proposal",
+        render_prompt(AgentType::Planner, &proposal_task, &ctx),
+    ));
+
+    let mut proposal_review_task = make_task();
+    proposal_review_task.issue_type = "epic_breakdown".into();
+    proposal_review_task.title = format!(
+        "{} 89bb",
+        djinn_core::models::task::PROPOSAL_REVIEW_TITLE_PREFIX
+    );
+    cases.push((
+        "planner/proposal_review",
+        render_prompt(AgentType::Planner, &proposal_review_task, &ctx),
+    ));
+
+    for (label, prompt) in &cases {
+        assert!(
+            prompt.contains(FORGE_RULE),
+            "{label} prompt must state that approval and merge are {FORGE_RULE}, \
+             so no role demands, accepts, or authors human-approval machinery"
+        );
+        assert!(
+            prompt.contains("CODEOWNERS"),
+            "{label} prompt must name CODEOWNERS mapping as out-of-model machinery"
+        );
+        assert!(
+            prompt.contains("separation of duties"),
+            "{label} prompt must name separation of duties as out-of-model machinery"
+        );
+        assert!(
+            prompt.contains("runbook"),
+            "{label} prompt must route a required human approval to a runbook \
+             instead of an acceptance criterion"
+        );
+    }
+}
+
 #[test]
 fn judge_prompt_contains_adjudication_contract() {
     let task = make_task();

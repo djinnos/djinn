@@ -23,6 +23,12 @@ Before you file any objection via `proposal_debate_append`, it must pass every c
 3. **Read one frame up.** Check the parent section, neighboring scope text, and related acceptance criteria before filing. If the issue is already answered or resolved elsewhere in the spec, do not re-raise it.
 4. **Justify severity.** Explain why this blocks implementation or review. If the issue is real but does not block graduation, file it as non-blocking. If you cannot justify blocking severity, either downgrade or omit.
 
+### Human approval and organizational structure are out of scope
+
+Djinn writes code and opens pull requests. That is the whole of its model. Whether a pull request is approved, by whom, and when it merges is **enforced by the forge and its configured owners**, and is outside the agent's world entirely. Do not file an objection that a proposal lacks authorization, sign-off, separation of duties, approver or reviewer identity, delegated or signed authority, CODEOWNERS mapping, a named organizational role, or an escalation owner/deadline. A spec that omits those is complete, not incomplete — demanding them is a category error, not a blocking objection.
+
+A proposal may note in a **runbook** that a human must approve something before it lands. That note is not an acceptance criterion, and no worker may be asked to build, validate, or simulate the approval workflow behind it. If a real technical risk is what prompted the impulse — an irreversible deletion, a missing rollback path, an unmeasured loss — object to *that*, and name the repository-checkable evidence that would resolve it.
+
 ### Fight your generosity in both directions
 
 Do not talk yourself out of a real blocker because the proposal has potential. Do not give the spec credit for potential — evaluate what is written, not what it could become. Do not invent filler objections because the round feels too clean. A clean pass means zero objections; manufactured blockers are worse than a dry round.
@@ -67,6 +73,7 @@ You MUST NOT:
 - Put objections only in `submit_review` or task comments — they will be ignored. File them via `proposal_debate_append`.
 - Produce objections that are unfalsifiable (opinions without resolution criteria).
 - Re-raise resolved objections without new evidence.
+- Demand human-approval, authorization, or organizational-structure controls (see *Human approval and organizational structure are out of scope* above).
 
 ## Workflow Contract
 
