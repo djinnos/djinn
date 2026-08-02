@@ -1,0 +1,85 @@
+{{- /*
+CLUSTER PREREQUISITE GUARD — fail the INSTALL, not the thousandth dispatch.
+
+# Why this exists
+
+The stock values of this chart are fully armed: `cgroupLauncher.mode: required`
+with `cgroupWritable.{runtimeClass,taskRuns}.enabled: true`, and
+`kueue.{enabled,armed}: true`. Both stacks have prerequisites that live OUTSIDE
+this chart, and both fail SILENTLY when they are absent:
+
+  * `RuntimeClass/djinn-cgroup-writable` carries
+    `scheduling.nodeSelector: djinn.io/cgroup-writable=true`. The RuntimeClass
+    admission controller merges that selector into every task-run Pod. On a
+    cluster with no node carrying the label, every task-run Pod is unschedulable
+    forever. `helm install` reports success; the deployment creates Jobs whose
+    Pods never start.
+  * `kueue.armed` renders every task-run, warm and SCIP Job `suspend: true` and
+    hands admission to Kueue. Without the Kueue CRDs the install fails at the
+    API server with "no matches for kind ResourceFlavor" — diagnosable, but it
+    names neither the prerequisite nor how to install it.
+
+The related outage is on the record: `cgroupLauncher.mode: required` paired with
+`cgroupWritable.taskRuns.enabled: false` was refused at dispatch as
+`RenderValidationError::MissingDelegatedRuntimeClass`, produced ZERO Jobs, and
+took production down on 2026-07-29 while every test stayed green. That
+particular pairing is now refused at render time by
+templates/deployment-server.yaml. This guard covers the half a values check
+never could: the cluster.
+
+# What is checkable WHERE
+
+  render time, values only   the coherent-pairing rules
+                             (templates/deployment-server.yaml, values.schema.json)
+  render time, cluster       THIS FILE — node labels + live API discovery
+  render + dispatch validator deploy/preflight/render-gate.sh (values, not cluster)
+  node runtime               deploy/node/k3s/djinn-cgroup-writable-conformance.sh
+
+# Why `lookup` and not `.Capabilities` alone
+
+`lookup` returns nothing when there is no cluster connection: under
+`helm template` (what Tilt and every chart contract test uses) and under a
+client-side `--dry-run`. That is precisely the signal this guard needs, so the
+Node list doubles as the liveness probe: an EMPTY node list means "this render
+cannot see a cluster" and the guard stands down entirely. A non-empty node list
+means the answers below are real, and only then is `.Capabilities.APIVersions`
+consulted — during a real install it is live discovery, while under
+`helm template` it is a stub that would report every optional API missing.
+
+Failing OPEN when the cluster is invisible is deliberate: an operator whose
+credentials cannot list Nodes gets no guard rather than a false refusal.
+
+# The probe line
+
+The single line below marked `djinn-prereq-probe` is the ONLY place this
+template touches the cluster. deploy/helm/djinn/tests/prereq-guard-render.sh
+substitutes it with literal fixtures to drive every branch of the decision
+underneath, which is the only way a `lookup` guard can be tested without a
+cluster. Keep it on one line, keep the marker, and keep every decision below it
+a pure function of `$facts`.
+*/ -}}
+{{- $facts := dict "nodes" ((lookup "v1" "Node" "" "").items | default (list)) "kueueApi" (.Capabilities.APIVersions.Has "kueue.x-k8s.io/v1beta1") -}}{{/* djinn-prereq-probe */}}
+{{- if $facts.nodes -}}
+{{- $missing := list -}}
+
+{{- if .Values.cgroupWritable.taskRuns.enabled -}}
+{{- $writable := 0 -}}
+{{- range $node := $facts.nodes -}}
+{{- $labels := default (dict) (default (dict) $node.metadata).labels -}}
+{{- if eq (toString (get $labels "djinn.io/cgroup-writable")) "true" -}}
+{{- $writable = add1 $writable -}}
+{{- end -}}
+{{- end -}}
+{{- if eq $writable 0 -}}
+{{- $missing = append $missing (printf "NO NODE CARRIES djinn.io/cgroup-writable=true (checked %d node(s)).\n    cgroupWritable.taskRuns.enabled=true assigns RuntimeClass/djinn-cgroup-writable to every\n    task-run Pod, and that class carries scheduling.nodeSelector djinn.io/cgroup-writable=true.\n    With no eligible node every task-run Pod stays Pending forever and the deployment runs zero\n    tasks while looking healthy.\n    Fix, on each node that should run task-runs:\n      sudo deploy/node/k3s/djinn-cgroup-writable-conformance.sh\n    That script is the single owner of this marker: it installs the containerd\n    runc-cgroupwritable handler the RuntimeClass names, proves the node can actually delegate a\n    writable cgroup, and applies the marker itself only once the node passes. Do not apply the\n    marker by hand — an unproven node that carries it is an unschedulable Pod's slower cousin, a\n    Pod that starts and then cannot get a cgroup leaf." (len $facts.nodes)) -}}
+{{- end -}}
+{{- end -}}
+
+{{- if and .Values.kueue.enabled (not $facts.kueueApi) -}}
+{{- $missing = append $missing "THE KUEUE API (kueue.x-k8s.io/v1beta1) IS NOT SERVED BY THIS CLUSTER.\n    kueue.enabled=true renders ResourceFlavor/ClusterQueue/LocalQueue objects the API server\n    would reject, and kueue.armed=true additionally renders every task-run, warm and SCIP Job\n    suspend: true with nothing able to unsuspend it.\n    Fix:\n      helm install djinn-prereqs deploy/helm/djinn-prereqs --namespace kueue-system --create-namespace --wait\n    --wait matters: ClusterQueue and LocalQueue carry a conversion webhook, so applying even a\n    v1beta1 object needs the webhook service already serving. Requires Kubernetes >= 1.30.\n    See deploy/kueue/README.md." -}}
+{{- end -}}
+
+{{- if $missing -}}
+{{- fail (printf "\n\ndjinn: REFUSING TO INSTALL. This cluster is missing prerequisites that the stock (fully armed)\nchart defaults require. Installing anyway would report success and then dispatch nothing.\n\n  * %s\n\nBOOTSTRAPPING A FRESH CLUSTER — read this before reaching for the opt-out.\nNode conformance needs RuntimeClass/djinn-cgroup-writable-probe, and THIS chart is the only\nthing that renders it, so a cluster cannot be conformed before djinn is installed at all.\nInstall the preparation profile first: it still renders both RuntimeClasses, it just does not\nassign one to task-run Pods yet, so this guard does not fire.\n\n  1. helm upgrade --install djinn ... \\\n       --set cgroupLauncher.mode=disabled \\\n       --set cgroupWritable.taskRuns.enabled=false \\\n       --set imagePipeline.controller.launcherAuthorityProtocol=leaf-v1\n     (leave cgroupWritable.runtimeClass.enabled at its default true — that is what\n      renders the probe class conformance needs)\n  2. run deploy/node/k3s/djinn-cgroup-writable-conformance.sh on each node\n  3. helm upgrade --install djinn ...   # stock values; this guard now passes\n\nOr, for a cluster that will NEVER have these prerequisites (kind, a laptop, a direct-worker\nprofile), opt out of the armed profile permanently:\n\n  --set cgroupLauncher.mode=disabled \\\n  --set cgroupWritable.runtimeClass.enabled=false \\\n  --set cgroupWritable.taskRuns.enabled=false \\\n  --set imagePipeline.controller.launcherAuthorityProtocol=leaf-v1 \\\n  --set kueue.enabled=false \\\n  --set kueue.armed=false\n\n(deploy/helm/djinn/values.local.yaml is exactly that profile, for kind and laptops.)\n" (join "\n\n  * " $missing)) -}}
+{{- end -}}
+{{- end -}}

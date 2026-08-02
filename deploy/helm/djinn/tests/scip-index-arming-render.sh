@@ -107,6 +107,31 @@ for name in switches:
     value = env_value(name)
     assert value != "", f"{name} renders an empty value, which the server cannot parse"
 
+# THE SECOND HALF OF THE CONTRACT: the surface must ship ARMED.
+#
+# Every switch on this list is fail-closed in the BINARY — `KubernetesConfig::
+# for_testing` defaults it off, and the Rust probe
+# `fail_closed_arming_switches_are_all_off_by_default` keeps that true. That
+# makes this chart the ONLY thing that can arm any of them, which is exactly why
+# a rendered "false" is not a conservative default here: it is the shipped-and-
+# never-ran defect this whole file exists to catch, one step further along. The
+# standalone SCIP-index Job had a surface for a while and still never created a
+# Job in production, because the surface rendered `false`.
+#
+# The set is derived from the Rust, never enumerated: a switch added to
+# FAIL_CLOSED_ARMING_SWITCHES that the chart ships disarmed fails HERE, forcing
+# an explicit decision instead of another silently inert feature.
+ARMED = {"1", "true", "yes", "on"}
+disarmed = [name for name in switches if env_value(name).strip().lower() not in ARMED]
+assert not disarmed, (
+    f"these fail-closed arming switches ship DISARMED from the chart: {disarmed}. "
+    "The binary defaults every one of them off, so the chart is their only "
+    "activation surface; rendering `false` ships a feature no deployment will "
+    "ever run. Arm it in deploy/helm/djinn/values.yaml, or — if it genuinely "
+    "must ship off — remove it from FAIL_CLOSED_ARMING_SWITCHES and say why "
+    "there."
+)
+
 print(f"checked {len(switches)} fail-closed arming switch(es): {', '.join(switches)}")
 PY
 }
@@ -165,24 +190,37 @@ echo "=== every fail-closed arming switch has a chart surface ==="
 render "$TMPDIR_RENDER/defaults.yaml"
 assert_every_arming_switch_is_rendered "$TMPDIR_RENDER/defaults.yaml"
 
-echo "=== shipped defaults render the SCIP Job disarmed, explicitly ==="
+echo "=== shipped defaults render the SCIP Job ARMED, with its measured cadence ==="
+# The stock profile is the production profile. The inline index was 3644s of a
+# measured 5442s warm — 67% of the warm's wall clock — and the split that
+# removes it only runs when this renders armed.
 assert_env_values "$TMPDIR_RENDER/defaults.yaml" \
-    DJINN_K8S_SCIP_INDEX_ENABLED=false \
+    DJINN_K8S_SCIP_INDEX_ENABLED=true \
     DJINN_K8S_SCIP_INDEX_INTERVAL_SECONDS=10800 \
     DJINN_K8S_SCIP_QUIESCENCE_SECONDS=3523 \
     DJINN_K8S_SCIP_CLAIM_WAIT_SECONDS=900
 
-echo "=== an operator can arm it and retune every gate ==="
-render "$TMPDIR_RENDER/armed.yaml" \
-    --set scipIndex.enabled=true \
+echo "=== the OTHER fail-closed switch also ships armed ==="
+# Named explicitly as well as derived: the derived check above proves the rule,
+# this proves the instance, and the two fail differently if the chart or the
+# Rust list drifts apart.
+assert_env_values "$TMPDIR_RENDER/defaults.yaml" DJINN_KUEUE_ARMED=true
+
+echo "=== an operator can disarm it and retune every gate ==="
+render "$TMPDIR_RENDER/retuned.yaml" \
+    --set scipIndex.enabled=false \
     --set scipIndex.intervalSeconds=3600 \
     --set scipIndex.quiescenceSeconds=0 \
     --set scipIndex.claimWaitSeconds=0
-assert_env_values "$TMPDIR_RENDER/armed.yaml" \
-    DJINN_K8S_SCIP_INDEX_ENABLED=true \
+assert_env_values "$TMPDIR_RENDER/retuned.yaml" \
+    DJINN_K8S_SCIP_INDEX_ENABLED=false \
     DJINN_K8S_SCIP_INDEX_INTERVAL_SECONDS=3600 \
     DJINN_K8S_SCIP_QUIESCENCE_SECONDS=0 \
     DJINN_K8S_SCIP_CLAIM_WAIT_SECONDS=0
+
+echo "=== an explicit re-arm is still a supported flip ==="
+render "$TMPDIR_RENDER/armed.yaml" --set scipIndex.enabled=true
+assert_env_values "$TMPDIR_RENDER/armed.yaml" DJINN_K8S_SCIP_INDEX_ENABLED=true
 
 expect_rejected negative-interval --set scipIndex.intervalSeconds=-1
 expect_rejected negative-quiescence --set scipIndex.quiescenceSeconds=-1

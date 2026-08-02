@@ -19,13 +19,21 @@ use crate::launcher::CgroupLauncherMode;
 /// followed by the whole warm.
 pub const MEASURED_FULL_WARM_SECONDS: i64 = 5_442;
 
-/// One operator lever whose default is OFF, so an unset environment variable
-/// leaves the feature permanently inert.
+/// One operator lever whose BINARY default is OFF, so an unset environment
+/// variable leaves the feature permanently inert.
+///
+/// "Default" here means the binary's own default — [`KubernetesConfig::for_testing`],
+/// which is what [`KubernetesConfig::from_env`] falls back to for anything unset.
+/// It deliberately does NOT mean the Helm chart's default: the chart ships every
+/// switch on this list ARMED, and that is precisely what makes membership
+/// meaningful rather than redundant. A switch is on this list because the only
+/// thing standing between it and permanent inertness is a chart rendering it,
+/// so the chart owes it a surface.
 ///
 /// The `armed` probe is what makes membership checkable rather than declared:
 /// [`fail_closed_arming_switches_are_all_off_by_default`] reads it against
-/// [`KubernetesConfig::for_testing`], so a switch listed here that is actually
-/// on by default fails the build instead of quietly overstating the contract.
+/// [`KubernetesConfig::for_testing`], so a switch listed here whose BINARY
+/// default is on fails the build instead of quietly overstating the contract.
 #[derive(Clone, Copy, Debug)]
 pub struct ArmingSwitch {
     /// Environment variable the server reads to arm the feature.
@@ -55,6 +63,31 @@ pub struct ArmingSwitch {
 /// a member. Adding a switch here without a chart surface fails that test;
 /// deleting the chart surface of an existing one fails it too. The list is the
 /// contract, the chart is the obligation.
+///
+/// # Why a chart that ships these ARMED does not retire the list
+///
+/// The chart's stock values now arm every switch below — `scipIndex.enabled`
+/// and `kueue.armed` both ship `true`, matching the production VPS. That could
+/// look like it dissolves the contract ("a switch that is on by default needs
+/// no chart surface to be reachable"), and it does not, because the two
+/// defaults are different defaults. The BINARY still fails closed: delete the
+/// env block from `deployment-server.yaml` and `from_env` falls back to
+/// `for_testing`, which is `false`, and the feature is unreachable again with
+/// nothing anywhere reporting a problem. The chart is not one activation path
+/// among several — it is the only one. That makes the render obligation
+/// stronger than it was when the chart shipped these disarmed, not weaker.
+///
+/// The obligation therefore has two halves, and the shell test checks both:
+///
+///   1. every member is RENDERED onto the server Deployment with a value the
+///      server can parse (a missing surface is an unreachable feature);
+///   2. every member is rendered ARMED (a surface that ships `false` is the
+///      same shipped-and-never-ran defect, one step further along — the SCIP
+///      Job had a surface for a release and still created zero Jobs).
+///
+/// Half 2 is why a switch that genuinely must ship off does not belong here:
+/// it would have to leave this list, with the reason written down, rather than
+/// quietly weaken what the list promises.
 pub const FAIL_CLOSED_ARMING_SWITCHES: &[ArmingSwitch] = &[
     ArmingSwitch {
         env: "DJINN_K8S_SCIP_INDEX_ENABLED",
@@ -1017,6 +1050,14 @@ pub(crate) mod tests {
     /// so listing it here would inflate the contract with an entry whose
     /// absence from the chart costs nothing — and the next reader would trust
     /// the list less. Probing the config is what keeps the list honest.
+    ///
+    /// "By default" is [`KubernetesConfig::for_testing`], the fallback
+    /// [`KubernetesConfig::from_env`] uses for anything unset — i.e. the
+    /// BINARY's default, not the chart's. The Helm chart ships every one of
+    /// these armed; that is the obligation being discharged, not a reason to
+    /// retire it. If this probe ever starts failing because a binary default
+    /// flipped on, the honest fix is to remove that switch from the list (it no
+    /// longer needs a chart to be reachable), never to relax the probe.
     #[test]
     fn fail_closed_arming_switches_are_all_off_by_default() {
         let cfg = KubernetesConfig::for_testing();

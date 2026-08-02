@@ -210,16 +210,49 @@ by a Postgres advisory lock rather than by replica count.
 `buildAdmission.mode=enforce` and `server.replicas=3` and asserts the render
 succeeds with neither environment variable present.
 
-## Writable cgroup preparation rollout
+## Standalone SCIP index
+
+`scipIndex.enabled` defaults to **`true`**, so a stock install dispatches the
+standalone SCIP-index Job. The binary still defaults it off, which makes this
+chart the only thing that arms it. Budget for the extra Pod it schedules, sized
+by `resources.scip` (a 16Gi memory limit against a measured ~10 GB peak); what
+it buys back is the inline index every graph-warm otherwise pays — measured
+2026-07-27 at 3644s of a 5442s warm. The cadence gates
+(`intervalSeconds`, `quiescenceSeconds`, `claimWaitSeconds`) are unchanged;
+read `djinn_k8s::scip_schedule::decide` before disarming it.
+
+## Writable cgroup rollout
 
 `cgroupWritable.runtimeClass.enabled` and `cgroupWritable.taskRuns.enabled`
-both default to `false`. The preparation release may set only
-`cgroupWritable.runtimeClass.enabled=true` after the node conformance process
-has labeled eligible nodes. That installs `RuntimeClass/djinn-cgroup-writable`
-with its existing handler and node selector, but does not assign it to task-run
-Pods or change launcher privileges.
+both default to **`true`**, alongside `cgroupLauncher.mode: required` — the
+stock profile is the production VPS profile, fully armed. That installs
+`RuntimeClass/djinn-cgroup-writable` with its handler and node selector *and*
+assigns it to task-run Pods.
 
-The same value also installs `RuntimeClass/djinn-cgroup-writable-probe`: the
+Setting only `cgroupWritable.runtimeClass.enabled=true` (with
+`taskRuns.enabled=false`) remains a valid staging step for a cluster mid-rollout:
+the RuntimeClass exists and nothing is assigned to it yet.
+
+That arming has a prerequisite this chart cannot render: nodes must carry
+`djinn.io/cgroup-writable=true`, which
+`deploy/node/k3s/djinn-cgroup-writable-conformance.sh` applies itself once a
+node has proven it can delegate a writable cgroup. Never apply the label by
+hand. `templates/prereq-guard.yaml` refuses an install when no node carries it
+(and, symmetrically, when `kueue.x-k8s.io/v1beta1` is not served while
+`kueue.enabled` is true), because both failures used to be silent: `helm
+install` reported success and every task-run Pod then stayed Pending forever.
+The guard is deliberately inert under `helm template` and client-side
+`--dry-run`, where Helm's `lookup` sees no cluster, and it fails open when the
+credentials cannot list Nodes.
+
+Keep the layers straight: values coherence is a render-time check in
+`templates/deployment-server.yaml`; cluster facts are an install-time check in
+`templates/prereq-guard.yaml`; `deploy/preflight/render-gate.sh` is
+render-only and inspects values, not a cluster; node runtime capability is the
+conformance script's job.
+
+`cgroupWritable.runtimeClass.enabled` also installs
+`RuntimeClass/djinn-cgroup-writable-probe`: the
 same `runc-cgroupwritable` handler with no `scheduling` block. The two always
 appear and disappear together. Node conformance uses the probe class because it
 runs on a node that does not yet carry `djinn.io/cgroup-writable=true`; the
@@ -230,7 +263,7 @@ could never be admitted, and conformance could never pass. Task-run Pods use
 
 `cgroupWritable.taskRuns.enabled=true` requires
 `cgroupWritable.runtimeClass.enabled=true`; Helm rejects the unsafe inverse
-pair. Task-run assignment is reserved for the later activation release.
+pair, which would assign a RuntimeClass the release never created.
 
 ## Node prerequisites
 
