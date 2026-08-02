@@ -509,6 +509,12 @@ fn failing_directive_names_the_ranked_lane_and_shows_its_annotation() {
             "No space left on device",
             "_diag/Worker_20260724-105745-utc.log",
             // And the worker is told what to do with an infra failure.
+            "context deadline exceeded",
+            "docker pull failed",
+            "toomanyrequests",
+            "registry 5xx",
+            "TLS/handshake timeout",
+            "Initialize containers",
             "retrigger CI and report the infrastructure failure",
         ],
     );
