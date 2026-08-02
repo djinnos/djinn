@@ -279,7 +279,7 @@ pub fn capacity_controller_cluster_with_pods(
                     Response::builder()
                         .status(if method == "PATCH" {
                             403
-                        } else if (path == "/api/v1/nodes" && query.contains("bad"))
+                        } else if (path == "/api/v1/nodes" && uri_parameters.contains("bad"))
                             || (path == "/api/v1/pods"
                                 && matches!(pod_mode, CapacityPods::ReadFailure))
                         {
