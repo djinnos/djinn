@@ -108,10 +108,7 @@ fn podset_cost_rejects_missing_malformed_and_overflowing_requests() {
         containers: vec![Container {
             name: "missing-cpu".into(),
             resources: Some(ResourceRequirements {
-                requests: Some(BTreeMap::from([(
-                    "memory".into(),
-                    Quantity("1Mi".into()),
-                )])),
+                requests: Some(BTreeMap::from([("memory".into(), Quantity("1Mi".into()))])),
                 ..ResourceRequirements::default()
             }),
             ..Container::default()
@@ -139,5 +136,8 @@ fn podset_cost_rejects_missing_malformed_and_overflowing_requests() {
         ],
         ..PodSpec::default()
     };
-    assert_eq!(podset_cost_from_pod_spec(&overflow), Err(CapacityError::Overflow));
+    assert_eq!(
+        podset_cost_from_pod_spec(&overflow),
+        Err(CapacityError::Overflow)
+    );
 }

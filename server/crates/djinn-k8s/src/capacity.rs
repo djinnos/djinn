@@ -427,9 +427,17 @@ fn parse_cpu_millicores(quantity: &str) -> Result<CpuMillicores, CapacityError> 
 }
 
 fn parse_binary_memory_bytes(quantity: &str) -> Result<MemoryBytes, CapacityError> {
-    let parsed = [("Ki", 1_i64 << 10), ("Mi", 1_i64 << 20), ("Gi", 1_i64 << 30)]
-        .into_iter()
-        .find_map(|(suffix, multiplier)| quantity.strip_suffix(suffix).map(|value| (value, multiplier)));
+    let parsed = [
+        ("Ki", 1_i64 << 10),
+        ("Mi", 1_i64 << 20),
+        ("Gi", 1_i64 << 30),
+    ]
+    .into_iter()
+    .find_map(|(suffix, multiplier)| {
+        quantity
+            .strip_suffix(suffix)
+            .map(|value| (value, multiplier))
+    });
     let value = match parsed {
         Some((number, multiplier)) => number
             .parse::<i64>()
