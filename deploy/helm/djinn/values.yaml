@@ -237,14 +237,14 @@ kueue:
 # is lifted to the pod's full CPU limit only once it demonstrates it is actually
 # CPU-hungry.
 #
-#   required            — render the cgroup-launcher sidecar. The launcher
+#   required  (default) — render the cgroup-launcher sidecar. The launcher
 #                         establishes its own delegated cgroup v2 root at
 #                         startup, which needs `SYS_ADMIN` plus an AppArmor
 #                         opt-out for the duration of that bootstrap; it drops
 #                         the capability irreversibly out of its bounding set
 #                         before the broker accepts any work, which is the only
 #                         layer under it and is verified at runtime.
-#   disabled  (default) — explicit local/development compatibility: no sidecar,
+#   disabled            — explicit local/development compatibility: no sidecar,
 #                         cgroup leaf, or lease; shell commands run in-process
 #                         at the pod's own quota.
 #
@@ -425,6 +425,7 @@ resources:
   taskrun:
     requests:
       cpu: "1"
+      lightCpu: "300m"
       memory: "2Gi"
     limits:
       # CARGO_BUILD_JOBS / NEXTEST_TEST_THREADS derive from this CPU limit
