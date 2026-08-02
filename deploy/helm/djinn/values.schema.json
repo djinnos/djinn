@@ -48,10 +48,11 @@
     "kueue": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["enabled", "buildPods", "armed", "namespaceLabelledExternally"],
+      "required": ["enabled", "buildPods", "bindingResource", "armed", "namespaceLabelledExternally"],
       "properties": {
         "enabled": { "type": "boolean" },
         "buildPods": { "type": "integer", "minimum": 1 },
+        "bindingResource": { "type": "string", "enum": ["pods", "cpu"] },
         "armed": { "type": "boolean" },
         "namespaceLabelledExternally": { "type": "boolean" }
       }

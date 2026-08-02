@@ -573,13 +573,13 @@ python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print("renderers:",
 # `keys_json` is the derived renderer request set; it defaults to the real one
 # and is overridden only by the non-vacuity section at the bottom.
 assert_topology() {
-    local manifest=$1 expected_pods=$2 expected_managed=$3 keys_json=${4:-$RENDERER_KEYS}
-    python3 - "$manifest" "$expected_pods" "$expected_managed" "$keys_json" <<'PY'
+    local manifest=$1 expected_quota=$2 expected_managed=$3 keys_json=${4:-$RENDERER_KEYS} expected_binding=${5:-pods}
+    python3 - "$manifest" "$expected_quota" "$expected_managed" "$keys_json" "$expected_binding" <<'PY'
 import json
 import sys
 import yaml
 
-manifest, expected_pods, expected_managed, keys_json = sys.argv[1:]
+manifest, expected_quota, expected_managed, keys_json, expected_binding = sys.argv[1:]
 derived = json.load(open(keys_json, encoding="utf-8"))
 docs = [doc for doc in yaml.safe_load_all(open(manifest, encoding="utf-8")) if doc]
 
@@ -659,11 +659,16 @@ assert set(resources) == set(covered), (
     f"every covered resource needs a quota and vice versa; covered={sorted(covered)} "
     f"quota={sorted(resources)}"
 )
-assert resources["pods"] == int(expected_pods), "pods quota must render buildPods verbatim"
+assert resources[expected_binding] == int(expected_quota), (
+    f"{expected_binding} quota must render buildPods verbatim"
+)
 # Non-binding by construction: 10k cores and 100Ti are ~1000x any cluster Djinn
 # runs on. If either ever became a real bound, `pods` would stop being the thing
 # that limits concurrency and the whole topology would mean something else.
-assert resources["cpu"] == "10k", f"cpu quota must stay non-binding, got {resources['cpu']}"
+if expected_binding == "pods":
+    assert resources["cpu"] == "10k", f"cpu quota must stay non-binding, got {resources['cpu']}"
+else:
+    assert resources["pods"] == 10000, f"pods quota must stay non-binding, got {resources['pods']}"
 assert resources["memory"] == "100Ti", f"memory quota must stay non-binding, got {resources['memory']}"
 
 for background_name in ["kueue-topology-test-djinn-warm", "kueue-topology-test-djinn-scip"]:
@@ -679,11 +684,14 @@ for background_name in ["kueue-topology-test-djinn-warm", "kueue-topology-test-d
     bg_entries = bg_groups[0]["flavors"][0]["resources"]
     bg_resources = {entry["name"]: entry for entry in bg_entries}
     assert set(bg_resources) == set(covered)
-    assert bg_resources["pods"].get("nominalQuota") == 0
-    assert bg_resources["pods"].get("borrowingLimit") == 1
-    assert bg_resources["cpu"].get("nominalQuota") == "10k"
+    assert bg_resources[expected_binding].get("nominalQuota") == 0
+    assert bg_resources[expected_binding].get("borrowingLimit") == 1
+    nonbinding = "cpu" if expected_binding == "pods" else "pods"
+    expected_nonbinding = "10k" if nonbinding == "cpu" else 10000
+    assert bg_resources[nonbinding].get("nominalQuota") == expected_nonbinding
     assert bg_resources["memory"].get("nominalQuota") == "100Ti"
-    assert all("borrowingLimit" not in bg_resources[name] for name in ["cpu", "memory"])
+    assert "borrowingLimit" not in bg_resources[nonbinding]
+    assert "borrowingLimit" not in bg_resources["memory"]
 
 assert "withinClusterQueue" not in spec.get("preemption", {})
 assert "stopPolicy" not in spec
@@ -781,6 +789,10 @@ assert_topology "$WORK/valid.yaml" 7 no
 echo "=== armed state: enabled=true, armed=true ==="
 render_enabled "$WORK/armed.yaml" --set kueue.buildPods=7 --set kueue.armed=true
 assert_topology "$WORK/armed.yaml" 7 yes
+
+echo "=== CPU-bound cohort render composes without a pods assumption ==="
+render_enabled "$WORK/cpu-bound.yaml" --set kueue.buildPods=7 --set kueue.bindingResource=cpu
+assert_topology "$WORK/cpu-bound.yaml" 7 no "$RENDERER_KEYS" cpu
 
 # ---------------------------------------------------------------------------
 # THE COVERAGE CHECK MUST FAIL IN BOTH DIRECTIONS, INDEPENDENTLY.
