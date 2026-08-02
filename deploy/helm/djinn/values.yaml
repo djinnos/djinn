@@ -149,22 +149,35 @@ kueue:
   # Set both this and `armed` false for a cluster that will never run Kueue
   # (see values.local.yaml, the kind/local-dev profile).
   enabled: true
+  # The finite admission vector. These are Kubernetes quantities rather than
+  # inferred from one binding resource: every admitted build Pod consumes cpu,
+  # memory, and one pod from the declared ceiling.
+  buildCpu: "12"
+  buildMemory: "48Gi"
   buildPods: 3
-  # Admission's binding resource. `cpu` is supported for the oru9-compatible
-  # topology; buildPods is then interpreted as the nominal CPU quantity.
-  bindingResource: pods
-  # Runtime-derived capacity controller. It never uses these fail-safe values
-  # as clamps over a successful derivation.
+  # Runtime-derived capacity controller inputs. `source` selects where the
+  # controller observes the vector; `staticFallback` is the finite fail-closed
+  # vector available to static and dedicated-NodePool deployments.
   capacity:
     enabled: false
+    source: node-sum
     queueName: ""
     nodeSelector:
       key: ""
       value: ""
-    idleCpu: 750m
-    compileCpu: 2800m
-    failSafePods: 3
-    failSafeCompileSlots: 2
+    headroom:
+      cpu: "750m"
+      memory: "1Gi"
+      pods: 0
+    staticFallback:
+      cpu: "12"
+      memory: "48Gi"
+      pods: 3
+    nodePool:
+      # `nodepool-limits` is valid only for an explicitly dedicated pool. Helm
+      # enforces this assertion and a non-empty name in values.schema.json.
+      dedicated: false
+      name: ""
 
   # Arm Kueue admission for build Jobs (cutover epic 4c9q, slice S1).
   #
