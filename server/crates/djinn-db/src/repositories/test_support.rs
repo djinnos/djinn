@@ -708,6 +708,29 @@ pub async fn seed_project(db: &Database, project_id: &str, name: &str) {
     .expect("failed to seed project");
 }
 
+/// Persist one workspace coverage fixture for cross-crate publication tests.
+///
+/// **Not for production use.** Panics on SQL errors.
+pub async fn seed_workspace_coverage_for_test(
+    db: &Database,
+    project_id: &str,
+    revision: &str,
+    status: &str,
+) {
+    db.ensure_initialized().await.unwrap();
+    sqlx::query(
+        "INSERT INTO project_workspace_coverage \
+         (project_id, workspace_slug, language, status, commit_sha) \
+         VALUES ($1, 'workspace', 'rust', $2, $3)",
+    )
+    .bind(project_id)
+    .bind(status)
+    .bind(revision)
+    .execute(db.pool())
+    .await
+    .expect("failed to seed workspace coverage");
+}
+
 /// Restore the pre-cutover launcher-authority seed for rollout integration
 /// tests that deliberately exercise the leaf-v1 -> resize-v2 transition.
 /// Fresh-database tests must not call this helper: migration 171 owns their

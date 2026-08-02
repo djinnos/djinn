@@ -93,6 +93,7 @@ use cargo_target_seed::{
     CargoTargetSeedFallback, CargoTargetSeedResult, cargo_build_jobs_variant, run_target_dir,
     seed_cargo_target_dir, teardown_run_dir, warm_base_dir_for_current_jobs,
 };
+use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand};
 use djinn_agent::context::{AgentContext, ReconciliationSweepConfig, ShellLaunchContext};
 use djinn_agent::file_time::FileTime;
@@ -175,6 +176,11 @@ const CHECKPOINT_TIMEOUT: Duration = Duration::from_secs(20);
 const PERIODIC_PUSH_INTERVAL: Duration = Duration::from_secs(180);
 
 const CARGO_TARGET_DIR_ENV: &str = "CARGO_TARGET_DIR";
+
+/// The durable warm-attempt projection is deliberately environment-only. A
+/// missing projection is an error, never permission to infer a newest attempt.
+const ENV_WARM_GRAPH_ATTEMPT_ID: &str = "DJINN_WARM_GRAPH_ATTEMPT_ID";
+const ENV_WARM_GRAPH_ATTEMPT_DEADLINE: &str = "DJINN_WARM_GRAPH_ATTEMPT_DEADLINE";
 
 use worker_services::WorkerSupervisorServices;
 
@@ -4019,113 +4025,270 @@ async fn run_warm_graph_body(project_id: &str) -> Result<()> {
     )?;
 
     let db = bootstrap_warm_database().await?;
+    let attempt = projected_warm_attempt(&db, project_id, &warm_project_root).await?;
     let ctx = WorkerWarmContext {
         db,
         indexer_lock: Arc::new(tokio::sync::Mutex::new(())),
     };
 
-    // Run the customer's `.devcontainer/devcontainer.json` lifecycle hooks
-    // (onCreateCommand, postCreateCommand, updateContentCommand,
-    // postStartCommand) before invoking the canonical-graph pipeline. These
-    // hooks carry per-project setup — e.g. `rustup component add
-    // rust-analyzer` for a pinned toolchain — without which the SCIP
-    // indexers can fail with "Unknown binary" inside the warm Pod. Resolved
-    // against DJINN_PROJECT_ROOT (set by build_warm_job).
-    //
-    // Non-fatal on purpose: the status quo before this runner existed was
-    // zero hook execution, so any partial success is strictly additive; a
-    // broken hook shouldn't wedge the graph build. Errors are logged with
-    // full context so they surface in kubectl logs.
-    let lifecycle_root = std::env::var("DJINN_PROJECT_ROOT")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("/workspace"));
+    let result = async {
+        // Run the customer's `.devcontainer/devcontainer.json` lifecycle hooks
+        // (onCreateCommand, postCreateCommand, updateContentCommand,
+        // postStartCommand) before invoking the canonical-graph pipeline. These
+        // hooks carry per-project setup — e.g. `rustup component add
+        // rust-analyzer` for a pinned toolchain — without which the SCIP
+        // indexers can fail with "Unknown binary" inside the warm Pod. Resolved
+        // against DJINN_PROJECT_ROOT (set by build_warm_job).
+        //
+        // Non-fatal on purpose: the status quo before this runner existed was
+        // zero hook execution, so any partial success is strictly additive; a
+        // broken hook shouldn't wedge the graph build. Errors are logged with
+        // full context so they surface in kubectl logs.
+        let lifecycle_root = std::env::var("DJINN_PROJECT_ROOT")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("/workspace"));
 
-    // Load the project's EnvironmentConfig from the ConfigMap mount and
-    // run `pre_anything` hooks (which run in every Pod djinn starts)
-    // before the canonical-graph pipeline. An absent mount is fine — the
-    // warm Pod runs without hooks, matching pre-cut-over behaviour.
-    let env_config_path = PathBuf::from(lifecycle::ENV_CONFIG_MOUNT_FILE);
-    let env_config = match lifecycle::load_environment_config(&env_config_path).await {
-        Ok(Some(cfg)) => {
-            tracing::info!(
-                project_id,
-                schema_version = cfg.schema_version,
-                workspace_count = cfg.workspaces.len(),
-                pre_anything_hooks = cfg.lifecycle.pre_anything.len(),
-                "environment_config loaded from {}",
-                env_config_path.display()
-            );
-            if let Err(e) =
-                lifecycle::run_phase(&lifecycle_root, "pre_anything", &cfg.lifecycle.pre_anything)
-                    .await
-            {
+        // Load the project's EnvironmentConfig from the ConfigMap mount and
+        // run `pre_anything` hooks (which run in every Pod djinn starts)
+        // before the canonical-graph pipeline. An absent mount is fine — the
+        // warm Pod runs without hooks, matching pre-cut-over behaviour.
+        let env_config_path = PathBuf::from(lifecycle::ENV_CONFIG_MOUNT_FILE);
+        let env_config = match lifecycle::load_environment_config(&env_config_path).await {
+            Ok(Some(cfg)) => {
+                tracing::info!(
+                    project_id,
+                    schema_version = cfg.schema_version,
+                    workspace_count = cfg.workspaces.len(),
+                    pre_anything_hooks = cfg.lifecycle.pre_anything.len(),
+                    "environment_config loaded from {}",
+                    env_config_path.display()
+                );
+                if let Err(e) = lifecycle::run_phase(
+                    &lifecycle_root,
+                    "pre_anything",
+                    &cfg.lifecycle.pre_anything,
+                )
+                .await
+                {
+                    warn!(
+                        project_id,
+                        project_root = %lifecycle_root.display(),
+                        error = %format!("{e:#}"),
+                        "pre_anything hook failed; continuing with warm-graph anyway"
+                    );
+                }
+                Some(cfg)
+            }
+            Ok(None) => {
+                tracing::debug!(
+                    project_id,
+                    "no environment_config mounted at {} — continuing without hooks",
+                    env_config_path.display()
+                );
+                None
+            }
+            Err(e) => {
                 warn!(
                     project_id,
-                    project_root = %lifecycle_root.display(),
                     error = %format!("{e:#}"),
-                    "pre_anything hook failed; continuing with warm-graph anyway"
+                    "environment_config present but failed to load; ignoring"
                 );
+                None
             }
-            Some(cfg)
-        }
-        Ok(None) => {
-            tracing::debug!(
-                project_id,
-                "no environment_config mounted at {} — continuing without hooks",
-                env_config_path.display()
-            );
-            None
-        }
-        Err(e) => {
-            warn!(
-                project_id,
-                error = %format!("{e:#}"),
-                "environment_config present but failed to load; ignoring"
-            );
-            None
-        }
+        };
+
+        // Warm the cargo target base from `main` so task-run pods seed
+        // it and recompile only their delta incrementally. This runs in the worker
+        // (not the warm-Job shell) so we can normalize tracked-file mtimes to commit
+        // times FIRST — the SAME normalization task-run applies before it
+        // compiles. Cargo freshness keys on mtimes, so without matching them the
+        // base's fingerprints would never match task-run's fresh clone and reuse
+        // would never hit (the bug this fixes). `lifecycle_root` is
+        // `DJINN_PROJECT_ROOT` = the cloned `main` tree; `resolve_cargo_workspace_dir`
+        // lands on `<root>/server` — the exact dir task-run's `cd server`
+        // compiles in. Best-effort: never fails the graph warm.
+        djinn_workspace::normalize_mtimes_at(&lifecycle_root).await;
+        let policy =
+            cargo_cache_policy::resolve_cargo_cache_policy(&lifecycle_root, env_config.as_ref())
+                .unwrap_or_default();
+        // Price the tail reserve from what indexing this project ACTUALLY costs.
+        // Read before the cargo phase starts, because the reserve is what bounds
+        // that phase: with a constant 900s reserve, cargo was allowed to run to
+        // 6300s of a 7200s Job while the graph phase needed 3644s, so a long cargo
+        // phase SIGKILLs the Pod mid-SCIP and loses the whole graph.
+        let observed_indexing = observed_indexing_cost(&ctx.db, project_id).await;
+        warm_cargo_and_continue(
+            project_id,
+            &lifecycle_root,
+            &policy,
+            observed_indexing,
+            async || release_warm_build_lease_at_graph_boundary(project_id, &ctx.db).await,
+            || async {
+                // Architect-only warm path: this subcommand binary is dispatched
+                // exclusively by `K8sGraphWarmer`, which is wired into the
+                // architect-only `GraphWarmerService::trigger` pipeline.
+                djinn_graph::canonical_graph::run_warm_graph_command(
+                    &ctx,
+                    project_id,
+                    djinn_graph::architect::ArchitectWarmToken::new(),
+                )
+                .await
+                .with_context(|| format!("run_warm_graph_command({project_id})"))
+            },
+        )
+        .await
     };
 
-    // Warm the cargo target base from `main` so task-run pods seed
-    // it and recompile only their delta incrementally. This runs in the worker
-    // (not the warm-Job shell) so we can normalize tracked-file mtimes to commit
-    // times FIRST — the SAME normalization task-run applies before it
-    // compiles. Cargo freshness keys on mtimes, so without matching them the
-    // base's fingerprints would never match task-run's fresh clone and reuse
-    // would never hit (the bug this fixes). `lifecycle_root` is
-    // `DJINN_PROJECT_ROOT` = the cloned `main` tree; `resolve_cargo_workspace_dir`
-    // lands on `<root>/server` — the exact dir task-run's `cd server`
-    // compiles in. Best-effort: never fails the graph warm.
-    djinn_workspace::normalize_mtimes_at(&lifecycle_root).await;
-    let policy =
-        cargo_cache_policy::resolve_cargo_cache_policy(&lifecycle_root, env_config.as_ref())
-            .unwrap_or_default();
-    // Price the tail reserve from what indexing this project ACTUALLY costs.
-    // Read before the cargo phase starts, because the reserve is what bounds
-    // that phase: with a constant 900s reserve, cargo was allowed to run to
-    // 6300s of a 7200s Job while the graph phase needed 3644s, so a long cargo
-    // phase SIGKILLs the Pod mid-SCIP and loses the whole graph.
-    let observed_indexing = observed_indexing_cost(&ctx.db, project_id).await;
-    warm_cargo_and_continue(
-        project_id,
-        &lifecycle_root,
-        &policy,
-        observed_indexing,
-        async || release_warm_build_lease_at_graph_boundary(project_id, &ctx.db).await,
-        || async {
-            // Architect-only warm path: this subcommand binary is dispatched
-            // exclusively by `K8sGraphWarmer`, which is wired into the
-            // architect-only `GraphWarmerService::trigger` pipeline.
-            djinn_graph::canonical_graph::run_warm_graph_command(
-                &ctx,
-                project_id,
-                djinn_graph::architect::ArchitectWarmToken::new(),
+    finish_warm_attempt_after_pipeline(&ctx.db, project_id, &attempt, result.await).await
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProjectedWarmAttempt {
+    attempt_id: String,
+    revision: String,
+}
+
+/// Validate the precise row this Pod may terminalize against both the immutable
+/// environment projection and the clone which will be published.
+async fn projected_warm_attempt(
+    db: &Database,
+    project_id: &str,
+    project_root: &Path,
+) -> Result<ProjectedWarmAttempt> {
+    let attempt_id = required_warm_environment(ENV_WARM_GRAPH_ATTEMPT_ID)?;
+    let deadline = required_warm_environment(ENV_WARM_GRAPH_ATTEMPT_DEADLINE)?;
+    let projected_deadline = DateTime::parse_from_rfc3339(&deadline)
+        .with_context(|| format!("{ENV_WARM_GRAPH_ATTEMPT_DEADLINE} must be RFC3339"))?
+        .with_timezone(&Utc);
+    let checked_out_revision = djinn_git::head_commit_sha(project_root)
+        .await
+        .with_context(|| {
+            format!(
+                "resolve checked-out warm revision at {}",
+                project_root.display()
             )
-            .await
-            .with_context(|| format!("run_warm_graph_command({project_id})"))
-        },
+        })?;
+    validate_projected_warm_attempt(
+        db,
+        project_id,
+        &attempt_id,
+        &checked_out_revision,
+        projected_deadline,
     )
     .await
+}
+
+/// Check the immutable identity supplied by the Job before this worker obtains
+/// permission to terminalize its row. Keeping the database part separate makes
+/// the no-Kubernetes worker fixtures exercise the same authorization boundary.
+async fn validate_projected_warm_attempt(
+    db: &Database,
+    project_id: &str,
+    attempt_id: &str,
+    checked_out_revision: &str,
+    projected_deadline: DateTime<Utc>,
+) -> Result<ProjectedWarmAttempt> {
+    let attempt = djinn_db::WarmGraphAttemptRepository::new(db.clone())
+        .get_attempt(attempt_id)
+        .await
+        .context("load projected warm graph attempt")?
+        .ok_or_else(|| {
+            anyhow::anyhow!("projected warm graph attempt {attempt_id} does not exist")
+        })?;
+    let stored_deadline = DateTime::parse_from_rfc3339(&attempt.deadline_at)
+        .context("stored warm graph attempt deadline is malformed")?
+        .with_timezone(&Utc);
+    if attempt.project_id != project_id
+        || attempt.revision != checked_out_revision
+        || stored_deadline != projected_deadline
+    {
+        anyhow::bail!(
+            "projected warm attempt does not match project, checked-out revision, and immutable deadline"
+        );
+    }
+    Ok(ProjectedWarmAttempt {
+        attempt_id: attempt_id.to_string(),
+        revision: checked_out_revision.to_string(),
+    })
+}
+
+/// Preserve the pipeline's original error while best-effort recording the one
+/// projected row as failed. This is deliberately the sole post-bootstrap exit
+/// boundary, so tests can cover it without invoking Kubernetes or cargo.
+async fn finish_warm_attempt_after_pipeline(
+    db: &Database,
+    project_id: &str,
+    attempt: &ProjectedWarmAttempt,
+    result: Result<()>,
+) -> Result<()> {
+    match result {
+        Ok(()) => match finish_published_warm_attempt(db, project_id, attempt).await {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                finish_failed_warm_attempt(db, project_id, attempt, &error).await;
+                Err(error)
+            }
+        },
+        Err(error) => {
+            finish_failed_warm_attempt(db, project_id, attempt, &error).await;
+            Err(error)
+        }
+    }
+}
+
+async fn finish_published_warm_attempt(
+    db: &Database,
+    project_id: &str,
+    attempt: &ProjectedWarmAttempt,
+) -> Result<()> {
+    let attempts = djinn_db::WarmGraphAttemptRepository::new(db.clone());
+    let status = attempts
+        .publication_status_for_revision(project_id, &attempt.revision)
+        .await
+        .context("classify exact-revision warm publication")?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "warm graph completed without an exact publication for projected revision {}",
+                attempt.revision
+            )
+        })?;
+    let changed = attempts
+        .finish_attempt_if_running(&attempt.attempt_id, status, None)
+        .await
+        .context("finish projected warm attempt after publication")?;
+    if !changed {
+        info!(project_id, attempt_id = %attempt.attempt_id,
+            "warm attempt was already terminal; preserving concurrent terminal writer");
+    }
+    Ok(())
+}
+
+async fn finish_failed_warm_attempt(
+    db: &Database,
+    project_id: &str,
+    attempt: &ProjectedWarmAttempt,
+    error: &anyhow::Error,
+) {
+    let attempts = djinn_db::WarmGraphAttemptRepository::new(db.clone());
+    if let Err(finish_error) = attempts
+        .finish_attempt_if_running(
+            &attempt.attempt_id,
+            djinn_db::WarmGraphAttemptStatus::Failed,
+            Some(&format!("{error:#}")),
+        )
+        .await
+    {
+        warn!(project_id, attempt_id = %attempt.attempt_id, error = %finish_error,
+            "could not record projected warm attempt failure");
+    }
+}
+
+fn required_warm_environment(key: &str) -> Result<String> {
+    let value = std::env::var(key).with_context(|| format!("{key} must be set for warm graph"))?;
+    if value.trim().is_empty() {
+        anyhow::bail!("{key} must not be blank for warm graph");
+    }
+    Ok(value)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4340,6 +4503,158 @@ mod tests {
     use tracing::dispatcher::Dispatch;
 
     static CARGO_INSTRUMENT_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    const WARM_TEST_PROJECT: &str = "warm-worker-project";
+    const WARM_TEST_REVISION: &str = "warm-worker-revision";
+    const WARM_TEST_DEADLINE: &str = "2099-01-01T00:00:00.000Z";
+
+    async fn warm_attempt_fixture() -> (Database, String, ProjectedWarmAttempt) {
+        let db = Database::open_in_memory().expect("warm worker database");
+        djinn_db::test_support::seed_project(&db, WARM_TEST_PROJECT, "warm worker fixture").await;
+        let attempts = djinn_db::WarmGraphAttemptRepository::new(db.clone());
+        let attempt_id = attempts
+            .start_attempt(WARM_TEST_PROJECT, WARM_TEST_REVISION, WARM_TEST_DEADLINE)
+            .await
+            .expect("start warm attempt");
+        (
+            db,
+            attempt_id.clone(),
+            ProjectedWarmAttempt {
+                attempt_id,
+                revision: WARM_TEST_REVISION.to_string(),
+            },
+        )
+    }
+
+    async fn persist_warm_publication(db: &Database, coverage_status: Option<&str>) {
+        djinn_db::repositories::repo_graph_cache::RepoGraphCacheRepository::new(db.clone())
+            .upsert(
+                djinn_db::repositories::repo_graph_cache::RepoGraphCacheInsert {
+                    project_id: WARM_TEST_PROJECT,
+                    commit_sha: WARM_TEST_REVISION,
+                    graph_blob: b"graph",
+                },
+            )
+            .await
+            .expect("persist graph generation");
+        if let Some(status) = coverage_status {
+            djinn_db::test_support::seed_workspace_coverage_for_test(
+                db,
+                WARM_TEST_PROJECT,
+                WARM_TEST_REVISION,
+                status,
+            )
+            .await;
+        }
+    }
+
+    async fn warm_attempt_status(db: &Database, attempt_id: &str) -> djinn_db::WarmGraphAttempt {
+        djinn_db::WarmGraphAttemptRepository::new(db.clone())
+            .get_attempt(attempt_id)
+            .await
+            .expect("load warm attempt")
+            .expect("warm attempt exists")
+    }
+
+    #[tokio::test]
+    async fn worker_finishes_exact_attempt_as_complete_or_partial_after_publication() {
+        for (coverage_status, expected) in [
+            (None, djinn_db::WarmGraphAttemptStatus::PublishedComplete),
+            (
+                Some("timed_out"),
+                djinn_db::WarmGraphAttemptStatus::PublishedPartial,
+            ),
+        ] {
+            let (db, attempt_id, attempt) = warm_attempt_fixture().await;
+            persist_warm_publication(&db, coverage_status).await;
+            finish_warm_attempt_after_pipeline(&db, WARM_TEST_PROJECT, &attempt, Ok(()))
+                .await
+                .expect("publication terminalization");
+            assert_eq!(warm_attempt_status(&db, &attempt_id).await.status, expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn worker_records_failure_without_replacing_pipeline_error() {
+        let (db, attempt_id, attempt) = warm_attempt_fixture().await;
+        let error = finish_warm_attempt_after_pipeline(
+            &db,
+            WARM_TEST_PROJECT,
+            &attempt,
+            Err(anyhow::anyhow!("canonical graph fixture failed")),
+        )
+        .await
+        .expect_err("pipeline failure remains the returned error");
+        assert!(error.to_string().contains("canonical graph fixture failed"));
+        let stored = warm_attempt_status(&db, &attempt_id).await;
+        assert_eq!(stored.status, djinn_db::WarmGraphAttemptStatus::Failed);
+        assert!(
+            stored
+                .detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("canonical graph fixture failed"))
+        );
+    }
+
+    #[tokio::test]
+    async fn worker_rejects_mismatched_identity_and_preserves_running_row() {
+        let (db, attempt_id, _attempt) = warm_attempt_fixture().await;
+        let deadline = DateTime::parse_from_rfc3339(WARM_TEST_DEADLINE)
+            .expect("fixture deadline")
+            .with_timezone(&Utc);
+        assert!(
+            validate_projected_warm_attempt(
+                &db,
+                WARM_TEST_PROJECT,
+                &uuid::Uuid::now_v7().to_string(),
+                WARM_TEST_REVISION,
+                deadline,
+            )
+            .await
+            .is_err()
+        );
+        for (project, revision, deadline) in [
+            ("other-project", WARM_TEST_REVISION, deadline),
+            (WARM_TEST_PROJECT, "other-revision", deadline),
+            (
+                WARM_TEST_PROJECT,
+                WARM_TEST_REVISION,
+                deadline + chrono::Duration::seconds(1),
+            ),
+        ] {
+            assert!(
+                validate_projected_warm_attempt(&db, project, &attempt_id, revision, deadline)
+                    .await
+                    .is_err()
+            );
+        }
+        assert_eq!(
+            warm_attempt_status(&db, &attempt_id).await.status,
+            djinn_db::WarmGraphAttemptStatus::Running
+        );
+    }
+
+    #[tokio::test]
+    async fn worker_lost_terminal_cas_race_preserves_first_status() {
+        let (db, attempt_id, attempt) = warm_attempt_fixture().await;
+        persist_warm_publication(&db, None).await;
+        assert!(
+            djinn_db::WarmGraphAttemptRepository::new(db.clone())
+                .finish_attempt_if_running(
+                    &attempt_id,
+                    djinn_db::WarmGraphAttemptStatus::TimedOut,
+                    Some("watcher won"),
+                )
+                .await
+                .expect("watcher terminal CAS")
+        );
+        finish_warm_attempt_after_pipeline(&db, WARM_TEST_PROJECT, &attempt, Ok(()))
+            .await
+            .expect("lost CAS is idempotent");
+        let stored = warm_attempt_status(&db, &attempt_id).await;
+        assert_eq!(stored.status, djinn_db::WarmGraphAttemptStatus::TimedOut);
+        assert_eq!(stored.detail.as_deref(), Some("watcher won"));
+    }
 
     #[test]
     fn disabled_launcher_profile_selects_only_the_local_direct_path() {
