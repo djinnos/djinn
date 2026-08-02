@@ -3,7 +3,8 @@
 //! Observation and actuation are kept separate so every ambiguous read has a
 //! closed, testable outcome and cannot accidentally become a PATCH.
 
-use k8s_openapi::api::core::v1::{Node, Pod};
+use k8s_openapi::api::batch::v1::Job;
+use k8s_openapi::api::core::v1::{Node, Pod, PodSpec};
 use kube::{
     Api, Client,
     api::{ApiResource, DynamicObject, GroupVersionKind, ListParams, Patch, PatchParams},
@@ -17,9 +18,9 @@ use tokio::time::Instant;
 
 use crate::capacity::{
     CapacityOutcome, CpuMillicores, DerivedCapacity, FailSafeCapacity, MemoryBytes, PodCount,
-    ResourceVector, ResourceVectorInput,
+    ResourceVector, ResourceVectorDerivationInputs, ResourceVectorInput, ResourceVectorOutcome,
+    derive_resource_vector, podset_cost_from_pod_spec,
 };
-use crate::capacity::{DerivationInputs, derive};
 use crate::capacity_damping::{BindingQuota, CapacityVector};
 use crate::capacity_damping::{CapacityDamper, SampleKind};
 
@@ -175,6 +176,68 @@ pub fn observe_node(node: &Node, selector_key: &str, selector_value: &str) -> No
     }
 }
 
+/// Derive legacy controller actuation values from complete vector observations
+/// and the actual rendered build-capable task Pod. Any omitted or malformed
+/// dimension becomes the established conservative/no-mutation outcome.
+pub fn derive_capacity_from_rendered_build_job(
+    allocatable: ResourceVector,
+    protected: ResourceVector,
+    headroom: ResourceVector,
+    build_pod: &PodSpec,
+    compile_cost: CpuMillicores,
+    fail_safe: FailSafeCapacity,
+) -> CapacityOutcome {
+    let podset_cost = match podset_cost_from_pod_spec(build_pod) {
+        Ok(cost) => cost,
+        Err(reason) => {
+            return CapacityOutcome::Conservative {
+                capacity: fail_safe,
+                reason,
+            };
+        }
+    };
+    let vector = match derive_resource_vector(ResourceVectorDerivationInputs {
+        protected_population_complete: true,
+        allocatable: ResourceVectorInput::complete(allocatable),
+        protected: ResourceVectorInput::complete(protected),
+        headroom: ResourceVectorInput::complete(headroom),
+        podset_cost: ResourceVectorInput::complete(podset_cost),
+    }) {
+        ResourceVectorOutcome::Derived(vector) => vector,
+        ResourceVectorOutcome::Conservative { reason, .. } => {
+            return CapacityOutcome::Conservative {
+                capacity: fail_safe,
+                reason,
+            };
+        }
+    };
+    let Some(binding_cpu) = vector
+        .admitted_podsets
+        .get()
+        .checked_mul(podset_cost.cpu.get())
+    else {
+        return CapacityOutcome::Conservative {
+            capacity: fail_safe,
+            reason: crate::capacity::CapacityError::Overflow,
+        };
+    };
+    if compile_cost.get() == 0 {
+        return CapacityOutcome::Conservative {
+            capacity: fail_safe,
+            reason: crate::capacity::CapacityError::ZeroCost,
+        };
+    }
+    CapacityOutcome::Derived(DerivedCapacity {
+        pods: vector.admitted_podsets.get(),
+        binding_cpu: CpuMillicores::new(binding_cpu).expect("checked non-negative product"),
+        compile_slots: vector.raw.cpu.get() / compile_cost.get(),
+    })
+}
+
+fn rendered_pod_spec(job: &Job) -> Option<&PodSpec> {
+    job.spec.as_ref()?.template.spec.as_ref()
+}
+
 /// Sum all eligible node vectors. A node that otherwise belongs to the pool
 /// but lacks a dimension is invalid, rather than a zero-sized node.
 pub fn aggregate_eligible_nodes(
@@ -257,6 +320,12 @@ pub struct CapacityControllerConfig {
     pub node_selector_value: String,
     pub idle_cost: CpuMillicores,
     pub compile_cost: CpuMillicores,
+    /// Explicit resources retained from the eligible aggregate before admitting
+    /// build-capable task PodSets. Every dimension is required.
+    pub headroom: ResourceVector,
+    /// The real rendered build-capable task Job used for scheduler-effective
+    /// PodSet accounting on every observation tick.
+    pub build_job: Job,
     pub fail_safe: FailSafeCapacity,
     pub expected_protected_pods: usize,
 }
@@ -274,12 +343,20 @@ impl CapacityControllerConfig {
                 .ok()
                 .and_then(|v| CpuMillicores::new(v).ok())
         };
+        let headroom = ResourceVector {
+            cpu: parse_cpu("DJINN_CAPACITY_HEADROOM_CPU")?,
+            memory: memory_quantity(&std::env::var("DJINN_CAPACITY_HEADROOM_MEMORY").ok()?)?,
+            pods: pod_quantity(&std::env::var("DJINN_CAPACITY_HEADROOM_PODS").ok()?)?,
+        };
+        let build_job = controller_build_job();
         Some(Self {
             queue_name: std::env::var("DJINN_CAPACITY_QUEUE_NAME").ok()?,
             node_selector_key: std::env::var("DJINN_CAPACITY_NODE_SELECTOR_KEY").ok()?,
             node_selector_value: std::env::var("DJINN_CAPACITY_NODE_SELECTOR_VALUE").ok()?,
             idle_cost: parse_cpu("DJINN_CAPACITY_IDLE_CPU")?,
             compile_cost: parse_cpu("DJINN_CAPACITY_COMPILE_CPU")?,
+            headroom,
+            build_job,
             fail_safe: FailSafeCapacity {
                 pods: std::env::var("DJINN_CAPACITY_FAIL_SAFE_PODS")
                     .ok()?
@@ -296,6 +373,21 @@ impl CapacityControllerConfig {
                 .ok()?,
         })
     }
+}
+
+fn controller_build_job() -> Job {
+    let render_config = crate::config::KubernetesConfig::from_env();
+    crate::job::build_task_run_job(
+        &render_config,
+        &uuid::Uuid::nil(),
+        "capacity-controller",
+        "capacity-controller",
+        &render_config.image,
+        &[],
+        None,
+        false,
+        Some(djinn_runtime::RoleKind::Worker),
+    )
 }
 
 fn cpu_quantity(value: &str) -> Option<CpuMillicores> {
@@ -388,14 +480,12 @@ pub async fn run_capacity_controller(
                     })
                     .collect::<Option<Vec<_>>>()?,
             };
-            let capacity = derive(
-                DerivationInputs {
-                    protected_population_complete: true,
-                    allocatable: nodes.allocatable.cpu,
-                    protected: protected.cpu,
-                    idle_cost: config.idle_cost,
-                    compile_cost: config.compile_cost,
-                },
+            let capacity = derive_capacity_from_rendered_build_job(
+                nodes.allocatable,
+                protected,
+                config.headroom,
+                rendered_pod_spec(&config.build_job)?,
+                config.compile_cost,
                 config.fail_safe,
             );
             let CapacityOutcome::Derived(raw) = capacity else {
@@ -603,6 +693,27 @@ pub fn patch_decision(
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn resources(cpu: i64, memory: i64, pods: i64) -> ResourceVector {
+        ResourceVector {
+            cpu: CpuMillicores::new(cpu).unwrap(),
+            memory: MemoryBytes::new(memory).unwrap(),
+            pods: PodCount::new(pods).unwrap(),
+        }
+    }
+    fn rendered_job(role: djinn_runtime::RoleKind) -> Job {
+        let config = crate::config::KubernetesConfig::for_testing();
+        crate::job::build_task_run_job(
+            &config,
+            &uuid::Uuid::nil(),
+            "capacity-controller",
+            "capacity-controller",
+            "registry.example/djinn:capacity",
+            &[],
+            None,
+            false,
+            Some(role),
+        )
+    }
     fn derived() -> DerivedCapacity {
         DerivedCapacity {
             pods: 10,
@@ -640,6 +751,48 @@ mod tests {
             pods: 3,
             compile_slots: 2,
         }
+    }
+
+    #[test]
+    fn memory_binding_boundary() {
+        let worker = rendered_job(djinn_runtime::RoleKind::Worker);
+        let light = rendered_job(djinn_runtime::RoleKind::Planner);
+        let worker_pod = rendered_pod_spec(&worker).unwrap();
+        let light_pod = rendered_pod_spec(&light).unwrap();
+        let worker_cost = podset_cost_from_pod_spec(worker_pod).unwrap();
+        let light_cost = podset_cost_from_pod_spec(light_pod).unwrap();
+        let vps = resources(12_000, 48 * 1024 * 1024 * 1024, 110);
+        let CapacityOutcome::Derived(cpu_bound) = derive_capacity_from_rendered_build_job(
+            vps,
+            resources(0, 0, 0),
+            resources(0, 0, 0),
+            worker_pod,
+            CpuMillicores::new(2_800).unwrap(),
+            safe(),
+        ) else {
+            panic!("complete VPS observation must derive")
+        };
+        assert_eq!(cpu_bound.pods, vps.cpu.get() / worker_cost.cpu.get());
+        assert!(cpu_bound.pods < vps.memory.get() / worker_cost.memory.get());
+        let two_gib_per_core = resources(12_000, 24 * 1024 * 1024 * 1024, 110);
+        let CapacityOutcome::Derived(memory_bound) = derive_capacity_from_rendered_build_job(
+            two_gib_per_core,
+            resources(0, 0, 0),
+            resources(0, 0, 0),
+            light_pod,
+            CpuMillicores::new(2_800).unwrap(),
+            safe(),
+        ) else {
+            panic!("complete 2Gi/core observation must derive")
+        };
+        let expected = (two_gib_per_core.cpu.get() / light_cost.cpu.get())
+            .min(two_gib_per_core.memory.get() / light_cost.memory.get())
+            .min(two_gib_per_core.pods.get() / light_cost.pods.get());
+        assert_eq!(memory_bound.pods, expected);
+        assert_eq!(
+            memory_bound.pods,
+            two_gib_per_core.memory.get() / light_cost.memory.get()
+        );
     }
 
     #[test]
@@ -740,6 +893,8 @@ mod tests {
                 node_selector_value: "worker-1".into(),
                 idle_cost: CpuMillicores::new(750).unwrap(),
                 compile_cost: CpuMillicores::new(2_800).unwrap(),
+                headroom: ResourceVector::ZERO,
+                build_job: controller_build_job(),
                 fail_safe: safe(),
                 expected_protected_pods: 5,
             };
@@ -974,6 +1129,8 @@ mod tests {
             node_selector_value: "worker-1".into(),
             idle_cost: CpuMillicores::new(750).unwrap(),
             compile_cost: CpuMillicores::new(2_800).unwrap(),
+            headroom: ResourceVector::ZERO,
+            build_job: controller_build_job(),
             fail_safe: safe(),
             expected_protected_pods: 5,
         };
@@ -1016,6 +1173,8 @@ mod tests {
                 node_selector_value: "worker-1".into(),
                 idle_cost: CpuMillicores::new(750).unwrap(),
                 compile_cost: CpuMillicores::new(2_800).unwrap(),
+                headroom: ResourceVector::ZERO,
+                build_job: controller_build_job(),
                 fail_safe: safe(),
                 expected_protected_pods: 5,
             };
