@@ -154,21 +154,6 @@ impl Sandbox for FallbackSandbox {
     }
 }
 
-fn is_temp_path(path: &Path) -> bool {
-    if path.starts_with("/var/tmp") {
-        return true;
-    }
-    // Accept the djinn agent scratch dir under the user's cache directory.
-    // Resolve env vars at check time since this is a pure path validator
-    // and we have no filesystem state to rely on.
-    if let Some(cache) = djinn_cache_dir()
-        && path.starts_with(&cache)
-    {
-        return true;
-    }
-    false
-}
-
 /// Resolve the djinn agent scratch cache directory.
 ///
 /// Returns `$XDG_CACHE_HOME/djinn` if `XDG_CACHE_HOME` is set, else
@@ -186,16 +171,6 @@ pub fn djinn_cache_dir() -> Option<PathBuf> {
         .ok()
         .filter(|h| !h.is_empty())
         .map(|h| PathBuf::from(h).join(".cache").join("djinn"))
-}
-
-fn is_worktree_path(path: &Path) -> bool {
-    let parts: Vec<String> = path
-        .components()
-        .map(|c| c.as_os_str().to_string_lossy().to_string())
-        .collect();
-    parts
-        .windows(2)
-        .any(|w| w[0] == ".task-runtime" && w[1] == "worktrees")
 }
 
 // ─── Git worktree metadata resolution ─────────────────────────────────────────
@@ -373,19 +348,6 @@ mod tests {
     }
 
     #[test]
-    fn worktree_path_rejects_retired_legacy_paths() {
-        assert!(is_worktree_path(Path::new(
-            "/projects/acme/repo/.task-runtime/worktrees/task-1"
-        )));
-        assert!(!is_worktree_path(Path::new(
-            "/projects/acme/repo/.djinn/worktrees/task-1"
-        )));
-        assert!(!is_worktree_path(Path::new(
-            "/projects/acme/repo/.task-runtime/read-sources/other"
-        )));
-    }
-
-    #[test]
     fn read_source_scope_rejects_cwd_outside_owner_cache() {
         // The process temp directory is intentionally writable in both OS
         // policies. Put this fixture under the test working directory so the
@@ -432,31 +394,6 @@ mod tests {
         assert!(
             !sentinel.exists(),
             "apply must refuse before the command can be spawned"
-        );
-    }
-
-    #[test]
-    fn is_temp_path_rejects_slash_tmp() {
-        with_env(
-            &[("XDG_CACHE_HOME", None), ("HOME", Some("/home/carol"))],
-            || {
-                assert!(!is_temp_path(Path::new("/tmp")));
-                assert!(!is_temp_path(Path::new("/tmp/foo")));
-            },
-        );
-    }
-
-    #[test]
-    fn is_temp_path_accepts_var_tmp_and_cache_dir() {
-        with_env(
-            &[("XDG_CACHE_HOME", None), ("HOME", Some("/home/dave"))],
-            || {
-                assert!(is_temp_path(Path::new("/var/tmp")));
-                assert!(is_temp_path(Path::new("/var/tmp/scratch")));
-                assert!(is_temp_path(Path::new("/home/dave/.cache/djinn")));
-                assert!(is_temp_path(Path::new("/home/dave/.cache/djinn/x")));
-                assert!(!is_temp_path(Path::new("/home/dave/.cache/other")));
-            },
         );
     }
 }
