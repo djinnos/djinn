@@ -162,6 +162,7 @@ metadata:
   name: {{ $warmQueueName }}
   labels:
     {{- include "djinn.labels" . | nindent 4 }}
+    djinn.io/quota-owner: warm-borrow
 spec:
   cohort: {{ $cohortName }}
   namespaceSelector: {}
@@ -214,6 +215,7 @@ metadata:
   name: {{ $scipQueueName }}
   labels:
     {{- include "djinn.labels" . | nindent 4 }}
+    djinn.io/quota-owner: warm-borrow
 spec:
   cohort: {{ $cohortName }}
   namespaceSelector: {}

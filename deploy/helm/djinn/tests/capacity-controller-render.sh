@@ -22,7 +22,10 @@ for d in docs: by_kind.setdefault(d.get("kind"), []).append(d)
 queue=by_kind["ClusterQueue"][0]
 assert queue["metadata"]["labels"]["djinn.io/quota-owner"] == "derived-capacity"
 assert queue["metadata"]["annotations"]["djinn.io/binding-resource"] == "pods"
-assert "preemption" not in queue["spec"] and "stopPolicy" not in queue["spec"]
+assert "stopPolicy" not in queue["spec"]
+assert "withinClusterQueue" not in queue["spec"].get("preemption", {})
+for background in by_kind["ClusterQueue"][1:]:
+  assert background["metadata"]["labels"]["djinn.io/quota-owner"] == "warm-borrow"
 
 seen=set()
 for kind in ("Deployment","StatefulSet"):
