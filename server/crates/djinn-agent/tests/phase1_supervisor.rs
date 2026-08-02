@@ -392,13 +392,6 @@ impl ScriptedProvider {
             system_prompts: Arc::new(StdMutex::new(Vec::new())),
         }
     }
-
-    fn system_prompts(&self) -> Vec<String> {
-        self.system_prompts
-            .lock()
-            .expect("recorded system prompts mutex")
-            .clone()
-    }
 }
 
 impl LlmProvider for ScriptedProvider {
