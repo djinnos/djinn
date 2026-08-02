@@ -3970,7 +3970,10 @@ mod stale_pod_session_rpc_persistence_tests {
         let task = crate::test_helpers::create_test_task(&db, &project.id, &epic.id).await;
         let context =
             crate::test_helpers::agent_context_from_db(db.clone(), CancellationToken::new());
-        let host = Arc::new(DirectServices::new(context.clone(), CancellationToken::new()));
+        let host = Arc::new(DirectServices::new(
+            context.clone(),
+            CancellationToken::new(),
+        ));
 
         // Model a dispatched pod: capture its admitted generation, create the
         // one pre-session `starting` run, then advance the task fence before
@@ -3994,7 +3997,10 @@ mod stale_pod_session_rpc_persistence_tests {
         })
         .await
         .expect("create pre-session task run");
-        let before_runs = runs.list_for_task(&task.id).await.expect("read pre-request runs");
+        let before_runs = runs
+            .list_for_task(&task.id)
+            .await
+            .expect("read pre-request runs");
         assert_eq!(before_runs.len(), 1, "fixture has exactly one task run");
         let before_run = before_runs.into_iter().next().expect("pre-request run");
         assert_eq!(before_run.id, run_id);
@@ -4023,7 +4029,9 @@ mod stale_pod_session_rpc_persistence_tests {
             .tempdir_in("/var/tmp")
             .expect("short unix socket directory");
         let socket = dir.path().join("supervisor.sock");
-        let server = serve_on_unix_socket(&socket, host).await.expect("serve host");
+        let server = serve_on_unix_socket(&socket, host)
+            .await
+            .expect("serve host");
         let cancel = CancellationToken::new();
         let (worker_rpc, background) = RpcServices::connect_unix(&socket, cancel.clone())
             .await
@@ -4044,8 +4052,7 @@ mod stale_pod_session_rpc_persistence_tests {
             .await
             .expect_err("stale worker generation must be rejected by the host");
         assert_eq!(
-            error,
-            "rpc transport: dispatch_generation_revoked",
+            error, "rpc transport: dispatch_generation_revoked",
             "worker receives the stable typed revoked-generation code"
         );
 
@@ -4061,8 +4068,15 @@ mod stale_pod_session_rpc_persistence_tests {
                 .is_empty(),
             "stale request inserted no task session"
         );
-        let after_runs = runs.list_for_task(&task.id).await.expect("reread task runs");
-        assert_eq!(after_runs.len(), 1, "stale request created no additional run");
+        let after_runs = runs
+            .list_for_task(&task.id)
+            .await
+            .expect("reread task runs");
+        assert_eq!(
+            after_runs.len(),
+            1,
+            "stale request created no additional run"
+        );
         assert_eq!(after_runs[0].id, before_run.id);
         assert_eq!(after_runs[0].status, before_run.status);
 
