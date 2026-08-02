@@ -602,6 +602,7 @@ pub enum ActuationDecision {
 
 #[derive(Clone, Debug)]
 pub struct CapacityControllerConfig {
+    pub source: CapacitySource,
     pub queue_name: String,
     pub node_selector_key: String,
     pub node_selector_value: String,
@@ -615,6 +616,14 @@ pub struct CapacityControllerConfig {
     pub build_job: Job,
     pub fail_safe: FailSafeCapacity,
     pub expected_protected_pods: usize,
+    pub static_fallback: ResourceVector,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CapacitySource {
+    Static,
+    NodeSum,
+    Invalid,
 }
 
 impl CapacityControllerConfig {
@@ -635,8 +644,19 @@ impl CapacityControllerConfig {
             memory: memory_quantity(&std::env::var("DJINN_CAPACITY_HEADROOM_MEMORY").ok()?)?,
             pods: pod_quantity(&std::env::var("DJINN_CAPACITY_HEADROOM_PODS").ok()?)?,
         };
+        let static_fallback = ResourceVector {
+            cpu: cpu_quantity(&std::env::var("DJINN_CAPACITY_STATIC_CPU").ok()?)?,
+            memory: memory_quantity(&std::env::var("DJINN_CAPACITY_STATIC_MEMORY").ok()?)?,
+            pods: pod_quantity(&std::env::var("DJINN_CAPACITY_STATIC_PODS").ok()?)?,
+        };
+        let source = match std::env::var("DJINN_CAPACITY_SOURCE").ok().as_deref() {
+            Some("static") => CapacitySource::Static,
+            Some("node-sum") => CapacitySource::NodeSum,
+            _ => CapacitySource::Invalid,
+        };
         let build_job = controller_build_job();
         Some(Self {
+            source,
             queue_name: std::env::var("DJINN_CAPACITY_QUEUE_NAME").ok()?,
             node_selector_key: std::env::var("DJINN_CAPACITY_NODE_SELECTOR_KEY").ok()?,
             node_selector_value: std::env::var("DJINN_CAPACITY_NODE_SELECTOR_VALUE").ok()?,
@@ -658,6 +678,7 @@ impl CapacityControllerConfig {
                 .ok()?
                 .parse()
                 .ok()?,
+            static_fallback,
         })
     }
 }
@@ -768,6 +789,43 @@ pub async fn run_capacity_controller(
     let mut tick = tokio::time::interval(Duration::from_secs(30));
     loop {
         tick.tick().await;
+        // This explicit branch is intentionally before all Node/Pod APIs: a
+        // served Karpenter endpoint can never alter static source behavior.
+        if config.source != CapacitySource::NodeSum {
+            let queue = queues
+                .get(&config.queue_name)
+                .await
+                .ok()
+                .and_then(|queue| observe_queue(queue, &config.queue_name));
+            let _ = snapshots.send(CapacityVector {
+                binding: BindingQuota::Pods(config.fail_safe.pods),
+                compile_slots: config.fail_safe.compile_slots,
+            });
+            if let Some(queue) = queue {
+                let targets = queue
+                    .flavors
+                    .iter()
+                    .map(|flavor| FlavorQuotaTarget {
+                        flavor_name: flavor.name.clone(),
+                        vector: config.static_fallback,
+                    })
+                    .collect::<Vec<_>>();
+                if let FlavorActuationDecision::Patch { patch } =
+                    flavor_vector_patch_decision(&queue, &config.queue_name, &targets)
+                {
+                    let _ = queues
+                        .patch(
+                            &config.queue_name,
+                            &PatchParams::default(),
+                            &Patch::Json::<()>(
+                                serde_json::from_value(patch).expect("valid internal JSON patch"),
+                            ),
+                        )
+                        .await;
+                }
+            }
+            continue;
+        }
         let observed = async {
             let node_list = nodes
                 .list(&ListParams::default().labels(&selector))
@@ -1545,6 +1603,7 @@ mod tests {
         for surface in ["pods", "cpu"] {
             let (client, recorder) = capacity_controller_cluster("default", surface);
             let config = CapacityControllerConfig {
+                source: CapacitySource::NodeSum,
                 queue_name: "djinn-kueue".into(),
                 node_selector_key: "kubernetes.io/hostname".into(),
                 node_selector_value: "worker-1".into(),
@@ -1554,6 +1613,7 @@ mod tests {
                 build_job: build_job.clone(),
                 fail_safe: safe(),
                 expected_protected_pods: 5,
+                static_fallback: resources(12_000, 48 * 1024 * 1024 * 1024, 3),
             };
             let (tx, _rx) = watch::channel(CapacityVector {
                 binding: BindingQuota::Pods(3),
@@ -1784,6 +1844,7 @@ mod tests {
         let recorder = RecordedApiserver::new();
         let client = recording_client(&recorder, "default");
         let config = CapacityControllerConfig {
+            source: CapacitySource::NodeSum,
             queue_name: "djinn-kueue".into(),
             node_selector_key: "kubernetes.io/hostname".into(),
             node_selector_value: "worker-1".into(),
@@ -1793,6 +1854,7 @@ mod tests {
             build_job: controller_build_job(),
             fail_safe: safe(),
             expected_protected_pods: 5,
+            static_fallback: resources(12_000, 48 * 1024 * 1024 * 1024, 3),
         };
         let (tx, mut rx) = watch::channel(CapacityVector {
             binding: BindingQuota::Pods(99),
@@ -1828,6 +1890,7 @@ mod tests {
             let (client, recorder) =
                 capacity_controller_cluster_with_pods("default", "pods", pod_mode);
             let config = CapacityControllerConfig {
+                source: CapacitySource::NodeSum,
                 queue_name: "djinn-kueue".into(),
                 node_selector_key: selector_key.into(),
                 node_selector_value: "worker-1".into(),
@@ -1837,6 +1900,7 @@ mod tests {
                 build_job: controller_build_job(),
                 fail_safe: safe(),
                 expected_protected_pods: 5,
+                static_fallback: resources(12_000, 48 * 1024 * 1024 * 1024, 3),
             };
             let (tx, mut rx) = watch::channel(CapacityVector {
                 binding: BindingQuota::Pods(99),

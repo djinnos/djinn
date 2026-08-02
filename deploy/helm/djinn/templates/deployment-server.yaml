@@ -557,6 +557,12 @@ spec:
               value: {{ $capacity.staticFallback.memory | quote }}
             - name: DJINN_CAPACITY_STATIC_PODS
               value: {{ $capacity.staticFallback.pods | quote }}
+            - name: DJINN_CAPACITY_HEADROOM_CPU
+              value: {{ $capacity.headroom.cpu | quote }}
+            - name: DJINN_CAPACITY_HEADROOM_MEMORY
+              value: {{ $capacity.headroom.memory | quote }}
+            - name: DJINN_CAPACITY_HEADROOM_PODS
+              value: {{ $capacity.headroom.pods | quote }}
             {{- if $dedicatedNodePool }}
             - name: DJINN_CAPACITY_NODEPOOL_NAME
               value: {{ $capacity.nodePool.name | quote }}
