@@ -433,6 +433,7 @@ impl EvidenceLifecycleMetadata {
 
     /// Build the metadata for `refinement_evidence_received`, including the
     /// exact valid findings row that caused receipt classification.
+    #[allow(clippy::too_many_arguments)]
     pub fn received_with_findings(
         proposal_id: &str,
         spike_task_id: &str,
