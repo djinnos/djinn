@@ -81,8 +81,7 @@ impl Fixture {
 /// A running process that has already recovered against an armed epoch cap,
 /// exactly as `AppState` composes it.
 async fn running_process(epoch_cap: i64) -> Fixture {
-    let db = Database::open_in_memory().unwrap();
-    db.ensure_initialized().await.unwrap();
+    let db = Database::ephemeral().await.unwrap();
     let authority = Arc::new(InvocationLeaseAuthorityRepository::new(db.clone()));
     let row = authority
         .set_mode_and_cap(0, InvocationLeaseMode::Enforce, Some(epoch_cap))

@@ -23,6 +23,7 @@ impl CpuMillicores {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DerivationInputs {
+    pub protected_population_complete: bool,
     pub allocatable: CpuMillicores,
     pub protected: CpuMillicores,
     pub idle_cost: CpuMillicores,
@@ -45,6 +46,7 @@ pub struct FailSafeCapacity {
 /// Named compatibility vector shared with the standalone SCIP regression.
 /// Production inputs are observed; these literals are test evidence only.
 pub const SCIP_CAPACITY_FIXTURE: DerivationInputs = DerivationInputs {
+    protected_population_complete: true,
     allocatable: CpuMillicores(12_000),
     protected: CpuMillicores(4_200),
     idle_cost: CpuMillicores(750),
@@ -92,6 +94,9 @@ pub fn derive(inputs: DerivationInputs, fail_safe: FailSafeCapacity) -> Capacity
         },
         reason,
     };
+    if !inputs.protected_population_complete {
+        return conservative(CapacityError::IncompleteProtectedPopulation);
+    }
     if inputs.idle_cost.get() == 0 || inputs.compile_cost.get() == 0 {
         return conservative(CapacityError::ZeroCost);
     }
@@ -136,6 +141,7 @@ mod tests {
     fn vector(a: i64, p: i64) -> DerivedCapacity {
         let CapacityOutcome::Derived(value) = derive(
             DerivationInputs {
+                protected_population_complete: true,
                 allocatable: CpuMillicores::new(a).unwrap(),
                 protected: CpuMillicores::new(p).unwrap(),
                 idle_cost: CpuMillicores::new(750).unwrap(),
@@ -209,6 +215,7 @@ mod tests {
         ] {
             let outcome = derive(
                 DerivationInputs {
+                    protected_population_complete: true,
                     allocatable: CpuMillicores(a),
                     protected: CpuMillicores(p),
                     idle_cost: CpuMillicores(i),
@@ -240,16 +247,22 @@ mod tests {
             ),
             Err(CapacityError::Overflow)
         );
+        let incomplete = derive(
+            DerivationInputs {
+                protected_population_complete: false,
+                allocatable: CpuMillicores(100),
+                protected: CpuMillicores(0),
+                idle_cost: CpuMillicores(1),
+                compile_cost: CpuMillicores(1),
+            },
+            fail,
+        );
         assert_eq!(
+            incomplete,
             CapacityOutcome::Conservative {
                 capacity: fail,
                 reason: CapacityError::IncompleteProtectedPopulation,
-            },
-            CapacityOutcome::Conservative {
-                capacity: fail,
-                reason: CapacityError::IncompleteProtectedPopulation,
-            },
-            "an empty/incomplete population has a closed typed outcome"
+            }
         );
     }
 }

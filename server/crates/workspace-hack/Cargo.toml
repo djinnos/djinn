@@ -73,6 +73,7 @@ tokio = { version = "1.52.3", features = ["full", "test-util"] }
 tokio-rustls = { version = "0.26.4", default-features = false, features = ["logging", "ring", "tls12"] }
 tokio-stream = { version = "0.1.18", features = ["fs", "net", "sync"] }
 tokio-util = { version = "0.7.18", features = ["codec", "io", "time"] }
+toml_datetime = { version = "1.1.1", features = ["serde"] }
 toml_parser = { version = "1.1.2" }
 tower-9fbad63c4bcf4a8f = { package = "tower", version = "0.4.13", features = ["balance", "buffer", "filter", "limit", "util"] }
 tower-d8f496e17d97b5cb = { package = "tower", version = "0.5.3", default-features = false, features = ["log", "make", "util"] }
@@ -127,6 +128,7 @@ time-macros = { version = "0.2.31", default-features = false, features = ["forma
 tokio = { version = "1.52.3", features = ["full", "test-util"] }
 tokio-stream = { version = "0.1.18", features = ["fs", "net", "sync"] }
 tokio-util = { version = "0.7.18", features = ["codec", "io", "time"] }
+toml_datetime = { version = "1.1.1", features = ["serde"] }
 toml_parser = { version = "1.1.2" }
 tracing = { version = "0.1.44", features = ["log"] }
 tracing-core = { version = "0.1.36" }

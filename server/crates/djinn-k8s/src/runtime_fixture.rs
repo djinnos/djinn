@@ -204,3 +204,55 @@ pub fn recording_client(recorder: &RecordedApiserver, namespace: &str) -> kube::
         namespace.to_owned(),
     )
 }
+
+/// Scripted capacity-controller cluster: one 12-core Node, a complete set of
+/// protected Pods totalling 4200m, and an owned ClusterQueue.
+#[must_use]
+pub fn capacity_controller_cluster(
+    namespace: &str,
+    binding_resource: &str,
+) -> (kube::Client, RecordedApiserver) {
+    use http::Response;
+    use http_body_util::BodyExt as _;
+    use kube::client::Body;
+    use tower::service_fn;
+
+    let recorder = RecordedApiserver::new();
+    let captured = recorder.clone();
+    let binding = binding_resource.to_owned();
+    let client = kube::Client::new(
+        service_fn(move |request: http::Request<Body>| {
+            let captured = captured.clone();
+            let binding = binding.clone();
+            async move {
+                let method = request.method().to_string();
+                let path = request.uri().path().to_string();
+                let body = request.into_body().collect().await.unwrap().to_bytes();
+                captured.0.lock().unwrap().push(RecordedRequest {
+                    method: method.clone(),
+                    path: path.clone(),
+                    body: String::from_utf8_lossy(&body).into_owned(),
+                });
+                let payload = if method == "PATCH" {
+                    serde_json::json!({"apiVersion":"v1","kind":"Status","status":"Failure","reason":"Forbidden","code":403})
+                } else if path == "/api/v1/nodes" {
+                    serde_json::json!({"apiVersion":"v1","kind":"NodeList","metadata":{"resourceVersion":"1"},"items":[{"apiVersion":"v1","kind":"Node","metadata":{"name":"worker-1"},"status":{"allocatable":{"cpu":"12"}}}]})
+                } else if path == "/api/v1/pods" {
+                    let requests = [1000, 1000, 1000, 700, 500].map(|cpu| serde_json::json!({"apiVersion":"v1","kind":"Pod","metadata":{"name":format!("protected-{cpu}"),"labels":{"djinn.io/capacity-reserved":"true"}},"spec":{"containers":[{"name":"main","resources":{"requests":{"cpu":format!("{cpu}m")}}}]}}));
+                    serde_json::json!({"apiVersion":"v1","kind":"PodList","metadata":{"resourceVersion":"1"},"items":requests})
+                } else {
+                    serde_json::json!({"apiVersion":"kueue.x-k8s.io/v1beta1","kind":"ClusterQueue","metadata":{"name":"djinn-kueue","resourceVersion":"42","labels":{"djinn.io/quota-owner":"derived-capacity"},"annotations":{"djinn.io/binding-resource":binding}},"spec":{"resourceGroups":[{"flavors":[{"name":"default","resources":[{"name":"pods","nominalQuota":"3"},{"name":"cpu","nominalQuota":"3000m"},{"name":"memory","nominalQuota":"100Gi"}]}]}]}})
+                };
+                Ok::<_, std::io::Error>(
+                    Response::builder()
+                        .status(if method == "PATCH" { 403 } else { 200 })
+                        .header("content-type", "application/json")
+                        .body(Body::from(serde_json::to_vec(&payload).unwrap()))
+                        .unwrap(),
+                )
+            }
+        }),
+        namespace.to_owned(),
+    );
+    (client, recorder)
+}

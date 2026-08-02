@@ -11,6 +11,7 @@
       "initContainers": [
         {
           "name": "cgroup-launcher",
+          "resizePolicy": [{"resourceName": "cpu", "restartPolicy": "NotRequired"}],
           "imageGeneration": "privileged",
           "env": {"DJINN_LAUNCHER_CGROUP_ROOT": "/run/djinn-cgroup"},
           "volumeMounts": [{"name": "launcher-cgroup", "mountPath": "/run/djinn-cgroup"}],

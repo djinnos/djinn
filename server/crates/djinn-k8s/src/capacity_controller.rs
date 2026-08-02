@@ -242,6 +242,7 @@ pub async fn run_capacity_controller(
             };
             let capacity = derive(
                 DerivationInputs {
+                    protected_population_complete: true,
                     allocatable: node.allocatable_cpu?,
                     protected: CpuMillicores::new(protected_cpu).ok()?,
                     idle_cost: config.idle_cost,
@@ -576,6 +577,46 @@ mod tests {
             assert!(mutations[0].path.ends_with("/clusterqueues/djinn-kueue"));
             assert!(mutations[0].body.contains("resourceVersion"));
             assert!(mutations[0].body.contains(expected));
+            assert!(!mutations[0].body.contains("memory"));
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn quota_controller_wire_drives_full_recorded_observation_and_actuation() {
+        use crate::runtime_fixture::capacity_controller_cluster;
+        for (surface, expected) in [("pods", "\"value\":\"10\""), ("cpu", "\"value\":\"7500m\"")] {
+            let (client, recorder) = capacity_controller_cluster("default", surface);
+            let config = CapacityControllerConfig {
+                queue_name: "djinn-kueue".into(),
+                node_selector_key: "kubernetes.io/hostname".into(),
+                node_selector_value: "worker-1".into(),
+                idle_cost: CpuMillicores::new(750).unwrap(),
+                compile_cost: CpuMillicores::new(2_800).unwrap(),
+                fail_safe: safe(),
+                expected_protected_pods: 5,
+            };
+            let (tx, _rx) = watch::channel(CapacityVector {
+                binding: BindingQuota::Pods(3),
+                compile_slots: 2,
+            });
+            let task = tokio::spawn(run_capacity_controller(
+                client,
+                config,
+                Arc::new(|| true),
+                tx,
+            ));
+            for _ in 0..12 {
+                tokio::time::advance(Duration::from_secs(30)).await;
+                tokio::task::yield_now().await;
+                if !recorder.mutations().is_empty() {
+                    break;
+                }
+            }
+            task.abort();
+            let mutations = recorder.mutations();
+            assert_eq!(mutations.len(), 1);
+            assert!(mutations[0].body.contains(expected));
+            assert!(mutations[0].body.contains("resourceVersion"));
             assert!(!mutations[0].body.contains("memory"));
         }
     }
