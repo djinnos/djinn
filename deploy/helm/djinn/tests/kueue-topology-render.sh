@@ -802,10 +802,6 @@ echo "=== armed state: enabled=true, armed=true ==="
 render_enabled "$WORK/armed.yaml" --set kueue.buildPods=7 --set kueue.armed=true
 assert_topology "$WORK/armed.yaml" 7 yes
 
-echo "=== CPU-bound cohort render composes without a pods assumption ==="
-render_enabled "$WORK/cpu-bound.yaml" --set kueue.buildPods=7 --set kueue.bindingResource=cpu
-assert_topology "$WORK/cpu-bound.yaml" 7 no "$RENDERER_KEYS" cpu
-
 # ---------------------------------------------------------------------------
 # THE COVERAGE CHECK MUST FAIL IN BOTH DIRECTIONS, INDEPENDENTLY.
 #

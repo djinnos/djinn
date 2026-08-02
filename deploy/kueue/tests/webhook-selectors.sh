@@ -147,6 +147,42 @@ check_render() {
         --namespace-name djinn --namespace-labels "${2:-$DJINN_NS_LABELS}"
 }
 
+# The policy is asserted from the manager ConfigMap in Helm's rendered output,
+# not from values.yaml, so this proves the artifact installed on a cluster.
+check_wait_for_pods_ready() {
+    python3 - "$1" <<'PY'
+import sys
+
+import yaml
+
+expected = {
+    "timeout": "30m",
+    "recoveryTimeout": "3m",
+    "blockAdmission": False,
+    "requeuingStrategy": {
+        "timestamp": "Eviction",
+        "backoffLimitCount": None,
+        "backoffBaseSeconds": 60,
+        "backoffMaxSeconds": 3600,
+    },
+}
+docs = [d for d in yaml.safe_load_all(open(sys.argv[1], encoding="utf-8")) if d]
+configs = [
+    d for d in docs
+    if d.get("kind") == "ConfigMap"
+    and d.get("metadata", {}).get("name", "").endswith("-manager-config")
+]
+if len(configs) != 1:
+    raise SystemExit(f"expected exactly one rendered manager ConfigMap, got {len(configs)}")
+raw = configs[0].get("data", {}).get("controller_manager_config.yaml")
+if raw is None:
+    raise SystemExit("rendered manager ConfigMap lacks controller_manager_config.yaml")
+actual = (yaml.safe_load(raw) or {}).get("waitForPodsReady")
+if actual != expected:
+    raise SystemExit(f"waitForPodsReady must be exactly {expected!r}, got {actual!r}")
+PY
+}
+
 expect_pass() {
     local label=$1 manifest=$2
     if ! check_render "$manifest"; then
@@ -178,6 +214,21 @@ expect_rejected() {
     printf 'PASS: checker rejected %s\n' "$label"
 }
 
+expect_wait_for_pods_ready_rejected() {
+    local label=$1 manifest=$2 expected=$3
+    local output status
+    set +e
+    output=$(check_wait_for_pods_ready "$manifest" 2>&1)
+    status=$?
+    set -e
+    [ "$status" -ne 0 ] || fail "$label: expected the rendered policy assertion to reject"
+    grep -Fq -- "$expected" <<<"$output" || {
+        printf '%s\n' "$output" >&2
+        fail "$label: rejected, but not for the expected reason: $expected"
+    }
+    printf 'PASS: rendered policy assertion rejected %s\n' "$label"
+}
+
 echo "=== shipped render: deploy/helm/djinn-prereqs brings nothing into scope on its own ==="
 # Evaluated against the DISARMED djinn namespace. This is the prerequisite
 # release's own contract: installing it must not put any djinn workload behind a
@@ -185,6 +236,9 @@ echo "=== shipped render: deploy/helm/djinn-prereqs brings nothing into scope on
 # the `djinn` chart applies only when armed — see the armed case below.
 render_prereqs "$WORK/shipped.yaml"
 expect_pass 'shipped render' "$WORK/shipped.yaml"
+check_wait_for_pods_ready "$WORK/shipped.yaml" ||
+    fail 'shipped render must contain the exact waitForPodsReady recovery policy'
+printf 'PASS: shipped render contains the exact waitForPodsReady recovery policy\n'
 
 echo "=== drift: manager config vs the pinned subchart's own default ==="
 python3 "$DRIFT_CHECKER" "$CHART" || fail 'manager config drifted from the pinned upstream default'
@@ -277,6 +331,39 @@ render_prereqs "$WORK/unfenced.yaml" \
 expect_rejected 'managedJobsNamespaceSelector removed' "$WORK/unfenced.yaml" \
     'namespaceSelector must be exactly'
 
+render_wait_for_pods_ready_mutation() {
+    local label=$1 mutation=$2
+    local config="$WORK/$label-manager-config.yaml"
+    python3 - "$CHART/values.yaml" "$config" "$mutation" <<'PY'
+import sys
+import yaml
+
+source, target, mutation = sys.argv[1:]
+values = yaml.safe_load(open(source, encoding="utf-8"))
+config = yaml.safe_load(values["kueue"]["managerConfig"]["controllerManagerConfigYaml"])
+if mutation == "absent":
+    del config["waitForPodsReady"]
+elif mutation == "29m":
+    config["waitForPodsReady"]["timeout"] = "29m"
+elif mutation == "requeue-timestamp":
+    config["waitForPodsReady"]["requeuingStrategy"]["timestamp"] = "Creation"
+elif mutation == "requeue-backoff":
+    config["waitForPodsReady"]["requeuingStrategy"]["backoffMaxSeconds"] = 3599
+else:
+    raise SystemExit(f"unknown mutation: {mutation}")
+open(target, "w", encoding="utf-8").write(yaml.safe_dump(config, sort_keys=False))
+PY
+    render_prereqs "$WORK/$label.yaml" \
+        --set-file "kueue.managerConfig.controllerManagerConfigYaml=$config"
+}
+
+echo "=== negative: wait-for-pods-ready recovery policy mutations ==="
+for mutation in absent 29m requeue-timestamp requeue-backoff; do
+    render_wait_for_pods_ready_mutation "$mutation" "$mutation"
+    expect_wait_for_pods_ready_rejected "$mutation waitForPodsReady policy" \
+        "$WORK/$mutation.yaml" 'waitForPodsReady must be exactly'
+done
+
 echo "=== negative: a checker fed a manifest with no webhooks must NOT pass ==="
 # kueue.enabled=false is a legitimate configuration, but it must not be able to
 # masquerade as a passing scoping proof. The checker has to say it asserted
@@ -298,7 +385,7 @@ path = sys.argv[1]
 values = yaml.safe_load(open(path, encoding="utf-8"))
 raw = values["kueue"]["managerConfig"]["controllerManagerConfigYaml"]
 config = yaml.safe_load(raw)
-# An edit outside the two sanctioned ones. This is exactly the class of change
+# An edit outside the three sanctioned ones. This is exactly the class of change
 # that a wholesale-restated upstream default lets in unnoticed.
 config["clientConnection"]["qps"] = 1
 values["kueue"]["managerConfig"]["controllerManagerConfigYaml"] = yaml.safe_dump(
@@ -310,7 +397,7 @@ if python3 "$DRIFT_CHECKER" "$DRIFT_CHART" >"$WORK/drift.out" 2>&1; then
     cat "$WORK/drift.out" >&2
     fail 'drift checker accepted an unsanctioned manager-config edit'
 fi
-grep -Fq 'drifted from upstream outside the two' "$WORK/drift.out" || {
+grep -Fq 'drifted from upstream outside the three' "$WORK/drift.out" || {
     cat "$WORK/drift.out" >&2
     fail 'drift checker rejected for the wrong reason'
 }
