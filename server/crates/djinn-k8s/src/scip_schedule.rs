@@ -1216,13 +1216,14 @@ mod tests {
     /// claims and only one of them is about the ledger.
     #[test]
     fn a_failed_index_does_not_advance_the_ledger_and_retries_after_the_cadence() {
-        let past_the_floor = observe_from_jobs(
+        let mut past_the_floor = observe_from_jobs(
             &[
                 scip_job(OLD, true, false, 40_000),
                 scip_job(HEAD, false, true, 20_000),
             ],
             now(),
         );
+        past_the_floor.warm_outcome = Some(recovery_outcome());
         assert_eq!(
             past_the_floor.last_indexed_revision.as_deref(),
             Some(OLD),
@@ -1248,13 +1249,14 @@ mod tests {
         // ...but not immediately. A failure 100s ago is still a dispatch for
         // cadence purposes, so a crash-looping index cannot re-create a
         // leaseless 16Gi Pod every tick.
-        let inside_the_floor = observe_from_jobs(
+        let mut inside_the_floor = observe_from_jobs(
             &[
                 scip_job(OLD, true, false, 40_000),
                 scip_job(HEAD, false, true, 100),
             ],
             now(),
         );
+        inside_the_floor.warm_outcome = Some(recovery_outcome());
         assert_eq!(inside_the_floor.last_indexed_revision.as_deref(), Some(OLD));
         assert!(matches!(
             decide(
