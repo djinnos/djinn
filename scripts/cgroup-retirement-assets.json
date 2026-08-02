@@ -1,9 +1,10 @@
 {
   "version": 1,
   "candidates": [
-    { "phase": "RETIRE_BASE", "paths": ["server/crates/djinn-cgroup-launcher/**", "server/crates/djinn-launcher-protocol/**", "server/crates/djinn-agent/src/process_broker.rs"] },
-    { "phase": "RETIRE_BASE", "paths": ["server/crates/djinn-k8s/src/job.rs", "server/crates/djinn-k8s/tests/{launcher_child_runtime_handoff.rs,kueue_governor_conformance.rs}"] },
-    { "phase": "RETIRE_HEAD", "paths": ["server/crates/djinn-image-builder/**", "server/docker/djinn-agent-runtime.Dockerfile", "server/crates/djinn-image-controller/tests/protocol_catalog_and_preservation.rs"] },
+    { "phase": "RETIRE_BASE", "paths": ["server/crates/djinn-cgroup-launcher/**", "server/crates/djinn-launcher-protocol/**", "server/crates/djinn-agent/src/process_broker.rs", "server/crates/djinn-agent-worker/src/launcher_handshake.rs"] },
+    { "phase": "RETIRE_BASE", "paths": ["server/crates/djinn-k8s/src/{job.rs,launcher_cpu.rs,runtime.rs,warm_job.rs,pod_resize.rs}", "server/crates/djinn-k8s/tests/{launcher_child_runtime_handoff.rs,kueue_governor_conformance.rs,kueue_admission_conformance.rs}"] },
+    { "phase": "RETIRE_BASE", "paths": ["server/crates/djinn-db/{migrations_postgres/{166_images_launcher_authority_protocol.sql,167_launcher_authority_mode.sql,171_launcher_authority_resize_v2_default.sql},src/{launcher_compatibility.rs,repositories/launcher_authority_mode.rs},tests/{launcher_admission_compatibility_matrix.rs,launcher_authority_mode_drain_fence.rs,launcher_protocol_database_agreement.rs}}", "server/crates/djinn-image-controller/{src/{build_job.rs,config.rs,controller.rs,declared_protocol_tests.rs,watcher.rs,watcher_protocol_tests.rs},tests/{chart_env_contract.rs,protocol_catalog_and_preservation.rs,unit.rs}}"] },
+    { "phase": "RETIRE_HEAD", "paths": ["server/crates/djinn-image-builder/**", "server/docker/djinn-agent-runtime.Dockerfile", "scripts/{tilt/build-binaries.sh,tilt/wrap-agent-runtime-image.sh,test-wrap-agent-runtime-image.sh}"] },
     { "phase": "RETIRE_HEAD", "paths": ["deploy/helm/djinn/templates/runtimeclass-cgroup-writable.yaml", "deploy/helm/djinn/{values.yaml,values.schema.json}", "deploy/node/k3s/**", "deploy/kueue/{README.md,zero-capture-gate.sh,tests/**}"] },
     { "phase": "RETIRE_HEAD", "paths": [".github/workflows/{quality-gate.yml,release.yml}", "server/Cargo.toml", "server/Cargo.lock"] }
   ],

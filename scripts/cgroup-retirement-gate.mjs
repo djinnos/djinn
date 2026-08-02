@@ -55,14 +55,19 @@ const prepAllowed = (path) =>
     /^scripts\/(?:check-cgroup-retirement-gate\.sh|cgroup-retirement-gate\.mjs|cgroup-retirement-assets\.json|test-cgroup-retirement-gate\.sh|verify-cgroup-retirement-evidence\.(?:sh|mjs)|test-verify-cgroup-retirement-evidence\.sh|fixtures\/cgroup-retirement\/)/.test(path);
 
 const git = (gitArgs) => spawnSync('git', gitArgs, { cwd: repo, encoding: 'utf8' });
-const checkedInventory = () => {
+const trackedAt = (revision) => {
+    const listed = git(['ls-tree', '-r', '--name-only', revision]);
+    if (listed.status !== 0) fail(`cannot list tracked inventory paths at ${revision}: ${listed.stderr.trim()}`, 2);
+    return listed.stdout.split('\n').filter(Boolean);
+};
+// A RETIRE deletion is absent at HEAD. Expand declarations over both trees so
+// the deletion remains classified, while still rejecting entries absent at both.
+const checkedInventory = (base, head) => {
     if (!existsSync(inventoryPath)) fail('asset inventory is missing', 2);
     let definition;
     try { definition = JSON.parse(readFileSync(inventoryPath, 'utf8')); } catch (error) { fail(`asset inventory is invalid JSON (${error.message})`, 2); }
     if (definition?.version !== 1 || !Array.isArray(definition.candidates) || !Array.isArray(definition.preserved) || !Array.isArray(definition.guard_work)) fail('asset inventory has an invalid schema', 2);
-    const listed = git(['ls-files']);
-    if (listed.status !== 0) fail(`cannot list tracked inventory paths: ${listed.stderr.trim()}`, 2);
-    const tracked = listed.stdout.split('\n').filter(Boolean);
+    const tracked = [...new Set([...trackedAt(base), ...trackedAt(head)])].sort();
     const classified = new Map();
     const add = (kind, phase, pattern) => {
         if (typeof pattern !== 'string') fail('asset inventory has a non-string path', 2);
@@ -352,7 +357,7 @@ const sandboxProofRemainsArmed = (head, changes) => {
 
 const runPrep = (base, head) => {
     if (!base || !head) usage();
-    const inventory = checkedInventory();
+    const inventory = checkedInventory(base, head);
     const changes = changedPaths(base, head);
     if (changes.length === 0) fail('PREP range is empty');
     for (const { path, status } of changes) {
@@ -373,7 +378,7 @@ const runPrep = (base, head) => {
 
 const runRetire = (phase, base, head) => {
     if (!/^RETIRE_[A-Z0-9_]+$/.test(phase) || !base || !head) usage();
-    const inventory = checkedInventory();
+    const inventory = checkedInventory(base, head);
     const changes = changedPaths(base, head);
     if (changes.length === 0) fail('RETIRE range is empty');
     for (const { path } of changes) {
