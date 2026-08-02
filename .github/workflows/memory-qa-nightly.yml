@@ -57,7 +57,7 @@ jobs:
       DJINN_MEMORY_QA_SKIP_JUDGE: ${{ github.event.inputs.qa_run_only == 'true' && '1' || '' }}
     services:
       postgres:
-        image: postgres:16
+        image: public.ecr.aws/docker/library/postgres:16
         env:
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: djinn
@@ -178,8 +178,9 @@ jobs:
 
       - name: Write Phase 2 job summary
         if: always()
+        working-directory: ${{ github.workspace }}
         run: |
-          SUMMARY="target/memory-eval/phase2-qa-summary.md"
+          SUMMARY="server/target/memory-eval/phase2-qa-summary.md"
           if [[ -f "$SUMMARY" ]]; then
             cat "$SUMMARY" >> "$GITHUB_STEP_SUMMARY"
           else
