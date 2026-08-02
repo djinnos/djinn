@@ -994,6 +994,21 @@ pub fn tool_schemas_judge() -> Vec<serde_json::Value> {
 ///   the active evidence-spike tool surface.)
 /// - Any proposal/debate mutation tools.
 pub fn tool_schemas_evidence_spike() -> Vec<serde_json::Value> {
+    tool_schemas_evidence_spike_with_evidence_advertisement(true)
+}
+
+/// Build the evidence-spike surface with the rollout-only evidence controls
+/// either advertised or withheld.
+///
+/// Rollback deliberately changes only the MCP advertisement: frozen plans,
+/// invocation provenance, finalized projections, and lifecycle receipts remain
+/// durable database records and are still readable by their owning APIs. The
+/// fallback surface keeps every pre-existing read/finalize capability while
+/// omitting exactly `evidence_plan` and `evidence_exec`; it performs neither a
+/// schema rewrite nor persisted-evidence cleanup.
+pub fn tool_schemas_evidence_spike_with_evidence_advertisement(
+    advertise_evidence_tools: bool,
+) -> Vec<serde_json::Value> {
     let mut tool_values = Vec::new();
 
     // ── Read-only inspection tools (from shared_base_tool_schemas) ─────
@@ -1067,14 +1082,16 @@ pub fn tool_schemas_evidence_spike() -> Vec<serde_json::Value> {
     // ── Grounded evidence controls ──────────────────────────────────────
     // Closed caller-owned schemas; authenticated identity/provenance and the
     // frozen-plan/read-only-sandbox boundaries remain server-owned.
-    tool_values.push(serialize_tool(
-        shared_schemas::tool_evidence_plan(),
-        read_only(),
-    ));
-    tool_values.push(serialize_tool(
-        shared_schemas::tool_evidence_exec(),
-        read_only(),
-    ));
+    if advertise_evidence_tools {
+        tool_values.push(serialize_tool(
+            shared_schemas::tool_evidence_plan(),
+            read_only(),
+        ));
+        tool_values.push(serialize_tool(
+            shared_schemas::tool_evidence_exec(),
+            read_only(),
+        ));
+    }
 
     // ── Finalize tool: evidence findings submission path ──────────────
     // This is the ONLY mutation-capable tool allowed — it is the spike's
