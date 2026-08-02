@@ -11,7 +11,10 @@ use djinn_db::SessionRepository;
 use djinn_orchestration_types::coordinator::DebugSlot;
 
 use super::super::{ModelSlotConfig, SlotError, SlotEvent, SlotHandle, SlotPoolConfig, SlotState};
-use super::types::{PoolError, PoolMessage, SlotFactory, now_unix_string};
+use super::types::{
+    PoolError, PoolMessage, ReconcileTerminateExecution, ReconcileTerminateKind,
+    ReconcileTerminateObservations, ReconcileTerminateSnapshot, SlotFactory, now_unix_string,
+};
 
 pub(super) struct SlotPool {
     pub(super) receiver: mpsc::Receiver<PoolMessage>,
@@ -224,6 +227,12 @@ impl SlotPool {
             } => {
                 let result = self.terminate_session(&task_id).await;
                 let _ = respond_to.send(result);
+            }
+            PoolMessage::ReconcileTerminate {
+                task_id,
+                respond_to,
+            } => {
+                let _ = respond_to.send(Ok(self.reconcile_terminate(&task_id).await));
             }
             PoolMessage::EvictSession {
                 task_id,
@@ -577,6 +586,134 @@ impl SlotPool {
     async fn terminate_session(&mut self, task_id: &str) -> Result<(), PoolError> {
         self.reclaim_session(task_id, "terminate_session", true)
             .await
+    }
+    async fn reconcile_terminate(&mut self, task_id: &str) -> ReconcileTerminateSnapshot {
+        let initial_mapping_slot_id = self.task_to_slot.get(task_id).copied();
+        let initial_pending_teardown = self.pending_teardown_tasks.contains(task_id);
+        let initial_compacting = initial_mapping_slot_id
+            .and_then(|id| self.slots.get(id))
+            .is_some_and(|slot| slot.is_compacting());
+        let fence = djinn_db::TaskRepository::new(self.ctx.db.clone(), self.ctx.event_bus.clone())
+            .fence_execution_generation_for_kill(task_id)
+            .await
+            .ok();
+        let repo = SessionRepository::new(self.ctx.db.clone(), self.ctx.event_bus.clone());
+        let captured = repo
+            .list_non_terminal_for_task(task_id)
+            .await
+            .unwrap_or_default();
+        let initial_non_terminal_ids = captured.iter().map(|row| row.id.clone()).collect();
+        let mut seen = HashSet::new();
+        let mut executions: Vec<ReconcileTerminateExecution> = captured
+            .iter()
+            .map(|row| {
+                let task_run_id = row
+                    .task_run_id
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|id| !id.is_empty())
+                    .map(str::to_owned);
+                let teardown_owner = task_run_id
+                    .as_ref()
+                    .is_some_and(|id| seen.insert(id.clone()));
+                ReconcileTerminateExecution {
+                    session_id: row.id.clone(),
+                    task_run_id,
+                    teardown_owner,
+                    teardown_attempted: false,
+                    teardown_error: None,
+                    settlement_attempted: false,
+                    settlement_error: None,
+                }
+            })
+            .collect();
+        for execution in &mut executions {
+            if execution.teardown_owner {
+                execution.teardown_attempted = true;
+                if let (Some(runtime), Some(run)) =
+                    (&self.ctx.runtime_ops, execution.task_run_id.as_deref())
+                {
+                    if let Err(error) = runtime.teardown_taskrun_job(run).await {
+                        execution.teardown_error = Some(error);
+                    }
+                }
+            }
+        }
+        for execution in &mut executions {
+            execution.settlement_attempted = true;
+            if let Err(error) = repo.settle_non_terminal_by_id(&execution.session_id).await {
+                execution.settlement_error = Some(error.to_string());
+            }
+        }
+        let completion_source = if initial_compacting || initial_pending_teardown {
+            "deferred".to_owned()
+        } else if let Some(slot_id) = initial_mapping_slot_id {
+            if let Ok(slot) = self.slot(slot_id) {
+                let _ = slot.kill().await;
+            }
+            self.task_to_slot.remove(task_id);
+            self.task_started.remove(task_id);
+            self.task_projects.remove(task_id);
+            self.task_activity_seed.remove(task_id);
+            self.ctx.deregister_activity(task_id);
+            "immediate".to_owned()
+        } else {
+            "none".to_owned()
+        };
+        let final_rows = repo
+            .reread_non_terminal_for_task(task_id)
+            .await
+            .unwrap_or_else(|_| captured.clone());
+        let final_non_terminal_ids = final_rows.iter().map(|row| row.id.clone()).collect();
+        let final_mapping_slot_id = self.task_to_slot.get(task_id).copied();
+        let final_pending_teardown = self.pending_teardown_tasks.contains(task_id);
+        let teardown_failed = executions.iter().any(|x| x.teardown_error.is_some());
+        let settlement_failed = executions.iter().any(|x| x.settlement_error.is_some());
+        let residual = fence.is_none()
+            || !final_non_terminal_ids.is_empty()
+            || final_mapping_slot_id.is_some()
+            || final_pending_teardown;
+        let underlying_kind = if teardown_failed {
+            Some(ReconcileTerminateKind::TeardownFailed)
+        } else if settlement_failed {
+            Some(ReconcileTerminateKind::SettlementFailed)
+        } else {
+            None
+        };
+        let kind = underlying_kind.unwrap_or_else(|| {
+            if residual {
+                ReconcileTerminateKind::ReconciliationIncomplete
+            } else if captured.is_empty() && initial_mapping_slot_id.is_none() {
+                ReconcileTerminateKind::GenuinelyAbsent
+            } else if captured.is_empty() || initial_mapping_slot_id.is_none() {
+                ReconcileTerminateKind::DesyncReconciled
+            } else {
+                ReconcileTerminateKind::Terminated
+            }
+        });
+        ReconcileTerminateSnapshot {
+            ok: matches!(
+                kind,
+                ReconcileTerminateKind::GenuinelyAbsent
+                    | ReconcileTerminateKind::Terminated
+                    | ReconcileTerminateKind::DesyncReconciled
+            ),
+            kind,
+            task_id: task_id.to_owned(),
+            executions,
+            observations: ReconcileTerminateObservations {
+                initial_non_terminal_ids,
+                initial_mapping_slot_id,
+                initial_pending_teardown,
+                initial_compacting,
+                fenced_generation: fence,
+                final_non_terminal_ids,
+                final_mapping_slot_id,
+                final_pending_teardown,
+                completion_source,
+                underlying_kind,
+            },
+        }
     }
     /// Forcibly reclaim a leaked task→slot mapping. The normal lifecycle frees a
     /// slot only when the worker emits `SlotEvent::Free`/`Killed`; a pod that

@@ -10,7 +10,9 @@ use super::super::SlotPoolConfig;
 use super::actor::SlotPool;
 #[cfg(any(test, feature = "test-support"))]
 use super::types::SlotFactory;
-use super::types::{PoolError, PoolMessage, PoolStatus, Reply, RunningTaskInfo};
+use super::types::{
+    PoolError, PoolMessage, PoolStatus, ReconcileTerminateSnapshot, Reply, RunningTaskInfo,
+};
 
 /// Upper bound on how long a single coordinator→pool ask may block on the
 /// pool actor's mailbox + reply before the caller gives up with
@@ -168,6 +170,16 @@ impl SlotPoolHandle {
     /// cleanup no-op.
     pub async fn terminate_session(&self, task_id: &str) -> Result<(), PoolError> {
         self.request(|tx| PoolMessage::TerminateSession {
+            task_id: task_id.to_owned(),
+            respond_to: tx,
+        })
+        .await
+    }
+    pub async fn reconcile_terminate(
+        &self,
+        task_id: &str,
+    ) -> Result<ReconcileTerminateSnapshot, PoolError> {
+        self.request(|tx| PoolMessage::ReconcileTerminate {
             task_id: task_id.to_owned(),
             respond_to: tx,
         })

@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
+use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::host::SlotContext;
@@ -126,6 +127,48 @@ pub struct PoolStatus {
     pub running_tasks: Vec<RunningTaskInfo>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReconcileTerminateKind {
+    GenuinelyAbsent,
+    Terminated,
+    DesyncReconciled,
+    TeardownFailed,
+    SettlementFailed,
+    ReconciliationIncomplete,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReconcileTerminateExecution {
+    pub session_id: String,
+    pub task_run_id: Option<String>,
+    pub teardown_owner: bool,
+    pub teardown_attempted: bool,
+    pub teardown_error: Option<String>,
+    pub settlement_attempted: bool,
+    pub settlement_error: Option<String>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReconcileTerminateObservations {
+    pub initial_non_terminal_ids: Vec<String>,
+    pub initial_mapping_slot_id: Option<usize>,
+    pub initial_pending_teardown: bool,
+    pub initial_compacting: bool,
+    pub fenced_generation: Option<i64>,
+    pub final_non_terminal_ids: Vec<String>,
+    pub final_mapping_slot_id: Option<usize>,
+    pub final_pending_teardown: bool,
+    pub completion_source: String,
+    pub underlying_kind: Option<ReconcileTerminateKind>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReconcileTerminateSnapshot {
+    pub ok: bool,
+    pub kind: ReconcileTerminateKind,
+    pub task_id: String,
+    pub executions: Vec<ReconcileTerminateExecution>,
+    pub observations: ReconcileTerminateObservations,
+}
+
 pub(super) type Reply<T> = oneshot::Sender<Result<T, PoolError>>;
 
 pub enum PoolMessage {
@@ -168,6 +211,10 @@ pub enum PoolMessage {
     TerminateSession {
         task_id: String,
         respond_to: Reply<()>,
+    },
+    ReconcileTerminate {
+        task_id: String,
+        respond_to: Reply<ReconcileTerminateSnapshot>,
     },
     EvictSession {
         task_id: String,
