@@ -1172,6 +1172,37 @@ impl WarmAdmission for AdmissionRecording {
     }
 }
 
+/// Deletes the project after authorization and before `start_attempt`, making
+/// the attempt repository's existing foreign-key write fail without raw SQL.
+struct ProjectDeletingAdmission {
+    db: Database,
+    project_id: String,
+}
+
+#[async_trait]
+impl WarmAdmission for ProjectDeletingAdmission {
+    async fn admit(
+        &self,
+        _request: WarmAdmissionRequest,
+    ) -> Result<WarmAdmissionPermit, WarmAdmissionError> {
+        Ok(WarmAdmissionPermit::new())
+    }
+
+    async fn transition(
+        &self,
+        _permit: &WarmAdmissionPermit,
+        transition: WarmAdmissionTransition,
+    ) -> Result<(), WarmAdmissionError> {
+        if transition == WarmAdmissionTransition::CreateStarted {
+            ProjectRepository::new(self.db.clone(), EventBus::noop())
+                .delete(&self.project_id)
+                .await
+                .expect("delete project before durable attempt insert");
+        }
+        Ok(())
+    }
+}
+
 pub(super) struct LifecycleRecordingDispatcher {
     pub(super) events: Arc<Mutex<Vec<String>>>,
     pub(super) result: Result<String, String>,
@@ -1409,20 +1440,17 @@ async fn durable_attempt_is_committed_before_post_with_its_exact_manifest_identi
 async fn attempt_insert_failure_is_fail_closed_before_dispatch() {
     let db = Database::open_in_memory().expect("in-memory db");
     let project_id = seed_project_with_ready_image(&db, "proj-attempt-insert-failure").await;
-    // The project/image gates have already initialized this isolated database.
-    // Removing only the attempt table makes the producer's insert fail at the
-    // exact persistence boundary without involving a cluster.
-    sqlx::query("DROP TABLE warm_graph_attempt")
-        .execute(db.pool())
-        .await
-        .expect("remove attempt table");
     let (dispatcher, _captured, calls) = RecordingDispatcher::new("must-not-post");
     let warmer = K8sGraphWarmer::with_dispatcher(
         test_config(),
-        db,
+        db.clone(),
         Arc::new(dispatcher),
         Arc::new(NoopJobWatcher),
-    );
+    )
+    .with_warm_admission(Arc::new(ProjectDeletingAdmission {
+        db,
+        project_id: project_id.clone(),
+    }));
 
     warmer.trigger(&project_id).await;
 
