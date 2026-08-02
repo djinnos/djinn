@@ -410,6 +410,7 @@ exec {bin} scip-index "{project_id}"
         volumes: Some(volumes),
         node_selector,
         tolerations,
+        termination_grace_period_seconds: Some(config.warm_job_termination_grace_period_seconds),
         // Same uid rationale as the warm Pod: this Pod CREATES content in the
         // shared `/cache` tree (the SCIP artifact cache, and whatever the
         // indexers spill into the cargo target base), and chmod/chown/utimes
@@ -588,6 +589,14 @@ mod tests {
         assert_eq!(
             spec.active_deadline_seconds,
             Some(cfg.scip_job_timeout_seconds)
+        );
+        assert_eq!(
+            spec.template
+                .spec
+                .as_ref()
+                .unwrap()
+                .termination_grace_period_seconds,
+            Some(cfg.warm_job_termination_grace_period_seconds),
         );
 
         let cmd = &container_of(&job).command.as_ref().expect("command")[2];

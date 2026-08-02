@@ -449,6 +449,9 @@ resources:
     # that outlives the deadline which would kill the Pod anyway; to give the
     # test-binary compile more room, raise this rather than a per-step override.
     jobTimeoutSeconds: 7200
+    # Shared graph-warm/SCIP SIGTERM window. Internal child stop/reap and
+    # inventory cleanup are bounded to 8s total and must finish before this.
+    terminationGracePeriodSeconds: 30
 
 # -----------------------------------------------------------------------------
 # Node-local durable pod-log collector (disabled until the host store exists)

@@ -45,6 +45,14 @@ fn builds_warm_job_manifest_with_expected_shape() {
         spec.active_deadline_seconds,
         Some(cfg.warm_job_timeout_seconds)
     );
+    assert_eq!(
+        spec.template
+            .spec
+            .as_ref()
+            .unwrap()
+            .termination_grace_period_seconds,
+        Some(30),
+    );
 
     let pod = spec.template.spec.as_ref().expect("pod");
     assert_eq!(pod.restart_policy.as_deref(), Some("Never"));
