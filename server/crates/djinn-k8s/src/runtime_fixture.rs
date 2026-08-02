@@ -243,7 +243,12 @@ pub fn capacity_controller_cluster_with_pods(
             async move {
                 let method = request.method().to_string();
                 let path = request.uri().path().to_string();
-                let query = request.uri().query().unwrap_or_default().to_string();
+                let uri_parameters = request
+                    .uri()
+                    .path_and_query()
+                    .and_then(|value| value.as_str().split_once('?').map(|(_, tail)| tail))
+                    .unwrap_or_default()
+                    .to_string();
                 let body = request.into_body().collect().await.unwrap().to_bytes();
                 captured.0.lock().unwrap().push(RecordedRequest {
                     method: method.clone(),
@@ -252,7 +257,7 @@ pub fn capacity_controller_cluster_with_pods(
                 });
                 let payload = if method == "PATCH" {
                     serde_json::json!({"apiVersion":"v1","kind":"Status","status":"Failure","reason":"Forbidden","code":403})
-                } else if path == "/api/v1/nodes" && query.contains("bad") {
+                } else if path == "/api/v1/nodes" && uri_parameters.contains("bad") {
                     serde_json::json!({"apiVersion":"v1","kind":"Status","status":"Failure","reason":"Invalid","code":422})
                 } else if path == "/api/v1/nodes" {
                     serde_json::json!({"apiVersion":"v1","kind":"NodeList","metadata":{"resourceVersion":"1"},"items":[{"apiVersion":"v1","kind":"Node","metadata":{"name":"worker-1"},"status":{"allocatable":{"cpu":"12"}}}]})
