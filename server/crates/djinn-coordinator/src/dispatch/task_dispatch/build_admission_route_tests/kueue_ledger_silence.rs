@@ -32,11 +32,14 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
 use djinn_core::events::EventBus;
-use djinn_db::{BuildLeaseRepository, Database, ImageRepository, ProjectRepository};
+use djinn_db::{
+    BuildLeaseRepository, Database, ImageRepository, ProjectRepository, WarmGraphAttempt,
+    WarmGraphAttemptStatus, WarmGraphOutcome,
+};
 use djinn_k8s::scip_schedule::MirrorHead;
 use djinn_k8s::{
     K8sGraphWarmer, KubernetesConfig, ScipIndexScheduler, ScipJobInventory, ScipJobObservation,
-    WarmJobDispatcher, WarmJobManifest, WarmJobWatcher, WarmTerminalOutcome,
+    WarmJobDispatcher, WarmJobManifest, WarmJobWatcher, WarmOutcomeSource, WarmTerminalOutcome,
 };
 
 use super::*;
@@ -57,6 +60,30 @@ async fn ledger_census(db: &Database) -> Vec<(&'static str, i64)> {
         ));
     }
     census
+}
+
+/// The durable lifecycle is separate from the empty Kubernetes Job inventory.
+/// This fixture represents the terminal warm failure that permits SCIP recovery.
+struct RecoverableWarmOutcome;
+
+#[async_trait]
+impl WarmOutcomeSource for RecoverableWarmOutcome {
+    async fn warm_outcome_for_head(
+        &self,
+        project_id: &str,
+        exact_head_revision: &str,
+    ) -> Result<WarmGraphOutcome, String> {
+        Ok(WarmGraphOutcome::TriedAndDidNotPublish(WarmGraphAttempt {
+            attempt_id: "failed-warm-attempt".to_owned(),
+            project_id: project_id.to_owned(),
+            revision: exact_head_revision.to_owned(),
+            status: WarmGraphAttemptStatus::Failed,
+            started_at: "2026-01-01T00:00:00Z".to_owned(),
+            deadline_at: "2026-01-01T01:00:00Z".to_owned(),
+            finished_at: Some("2026-01-01T00:30:00Z".to_owned()),
+            detail: Some("fixture warm failure".to_owned()),
+        }))
+    }
 }
 
 fn census_of(census: &[(&'static str, i64)], relation: &str) -> i64 {
@@ -296,7 +323,8 @@ async fn dispatch_one_scip() -> (Vec<(&'static str, i64)>, Vec<(&'static str, i6
         StdArc::new(CountingWarmDispatcher {
             posts: StdArc::clone(&posts),
         }),
-    );
+    )
+    .with_warm_outcome_source(StdArc::new(RecoverableWarmOutcome));
 
     // A head that has stood still far longer than the quiescence floor, so the
     // pure `decide` reaches `Dispatch` rather than a skip arm.
