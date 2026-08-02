@@ -221,7 +221,52 @@ fn writable_sandbox_roots(
             required: true,
         });
     }
+    // `PathFd::new` follows symlinks, and Landlock keys its rules by the
+    // resulting dentry. Store that same resolved path here, rather than the
+    // spelling supplied by the environment or a constant, so the invariant
+    // below evaluates precisely the rule that `apply_policy` installs.
     roots
+        .into_iter()
+        .map(|root| WritableSandboxRoot {
+            path: resolve_path_for_landlock(&root.path),
+            required: root.required,
+        })
+        .collect()
+}
+
+/// Resolve every existing component of a path as the kernel will for a
+/// `PathFd`, retaining a missing tail.
+///
+/// A production confidential mount may not be present on a developer or CI
+/// host, but `/var/run` normally is a symlink to `/run`. Full
+/// `canonicalize("/var/run/djinn")` fails when the mount is absent and would
+/// lose that alias. Resolving the deepest existing ancestor instead produces
+/// `/run/djinn`, allowing the static policy check to catch a writable `/run`
+/// rule before a Pod ever starts.
+fn resolve_path_for_landlock(path: &Path) -> PathBuf {
+    let mut candidate = path;
+    let mut missing_tail: Vec<std::ffi::OsString> = Vec::new();
+
+    loop {
+        if let Ok(resolved) = candidate.canonicalize() {
+            return missing_tail
+                .iter()
+                .rev()
+                .fold(resolved, |resolved, component| resolved.join(component));
+        }
+
+        let Some(component) = candidate.file_name() else {
+            // This can only occur for a malformed or non-absolute path whose
+            // ancestors cannot be resolved. Preserve it: `PathFd::new` will
+            // retain the existing required/optional failure behaviour.
+            return path.to_path_buf();
+        };
+        missing_tail.push(component.to_os_string());
+        let Some(parent) = candidate.parent() else {
+            return path.to_path_buf();
+        };
+        candidate = parent;
+    }
 }
 
 /// Landlock rules are additive, so a confidential root cannot be carved out of
@@ -231,12 +276,14 @@ fn ensure_confidential_roots_do_not_overlap_writable_roots(
     writable_roots: &[WritableSandboxRoot],
 ) -> Result<()> {
     for confidential_root in confidential_roots {
+        let confidential_root = resolve_path_for_landlock(confidential_root);
         for writable_root in writable_roots {
+            let writable_root = resolve_path_for_landlock(&writable_root.path);
             anyhow::ensure!(
-                !confidential_root.starts_with(&writable_root.path),
+                !confidential_root.starts_with(&writable_root),
                 "confidential root {} sits under writable sandbox root {}, whose full-access rule would grant ReadFile back",
                 confidential_root.display(),
-                writable_root.path.display(),
+                writable_root.display(),
             );
         }
     }
@@ -697,10 +744,40 @@ mod tests {
         .expect("production confidential roots must not sit below a full-access rule");
     }
 
-    /// Every returned root is both validated and installed as `full_access`.
-    /// This is intentionally lexical: it catches a mutation such as changing
-    /// `SANDBOX_TMPDIR` from `/var/tmp` to `/var` even on a CI host that has no
-    /// live `/var/run` secret mounts.
+    /// A missing confidential mount must still retain the aliases of its
+    /// existing ancestors. This models `/var/run/djinn` on images where
+    /// `/var/run` is a symlink to `/run`: a `full_access(/run)` rule would leak
+    /// the mount as soon as Kubernetes creates it.
+    #[test]
+    fn resolved_aliases_reject_confidential_roots_beneath_alias_target() {
+        let fixture = tempfile::tempdir_in("/var/tmp").expect("alias fixture");
+        let run = fixture.path().join("run");
+        let var_run = fixture.path().join("var-run");
+        std::fs::create_dir(&run).expect("run target");
+        std::os::unix::fs::symlink(&run, &var_run).expect("var/run alias");
+
+        // Deliberately do not create `djinn`: this is the CI/developer-host
+        // case where the production Secret mount is absent.
+        let confidential = var_run.join("djinn");
+        assert_eq!(resolve_path_for_landlock(&confidential), run.join("djinn"));
+        let writable_roots = [WritableSandboxRoot {
+            path: run,
+            required: true,
+        }];
+        assert!(
+            ensure_confidential_roots_do_not_overlap_writable_roots(
+                &[confidential],
+                &writable_roots,
+            )
+            .is_err(),
+            "a /var/run-style alias must not hide a confidential root below full_access(/run)"
+        );
+    }
+
+    /// Every returned root is both resolved, validated, and installed as
+    /// `full_access`. This catches additions to the central rule collection,
+    /// including a static `SANDBOX_TMPDIR` widened to an ancestor of a
+    /// confidential root.
     #[test]
     fn every_full_access_root_rejects_a_confidential_descendant() {
         let fixture = tempfile::tempdir_in("/var/tmp").expect("writable-root fixture");
