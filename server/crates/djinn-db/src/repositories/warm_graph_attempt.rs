@@ -388,10 +388,18 @@ mod tests {
     async fn reconciliation_preserves_fractional_grace_boundary() {
         let repo = fresh().await;
         seed_project(&repo.db, "p1", "p1").await;
-        let id = repo
-            .start_attempt("p1", "abc", "2026-01-01T00:00:00.000Z")
-            .await
-            .unwrap();
+        let id = uuid::Uuid::now_v7().to_string();
+        sqlx::query(
+            "INSERT INTO warm_graph_attempt \
+             (attempt_id, project_id, revision, status, started_at, deadline_at) \
+             VALUES ($1::uuid, 'p1', 'abc', 'running', \
+                     '2025-12-31T23:59:00.000Z'::timestamptz, \
+                     '2026-01-01T00:00:00.000Z'::timestamptz)",
+        )
+        .bind(&id)
+        .execute(repo.db.pool())
+        .await
+        .unwrap();
         let grace = Duration::milliseconds(1500);
 
         assert!(
