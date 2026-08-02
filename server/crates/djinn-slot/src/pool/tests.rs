@@ -2986,9 +2986,15 @@ async fn deferred_reconcile_existing_pending_returns_capacity_once() {
         respond_to: reply_tx,
     })
     .await;
+    let (second_reply_tx, mut second_reply_rx) = tokio::sync::oneshot::channel();
+    pool.test_handle_message(PoolMessage::ReconcileTerminate {
+        task_id: task_id.clone(),
+        respond_to: second_reply_tx,
+    })
+    .await;
     assert!(
-        reply_rx.try_recv().is_err(),
-        "existing pending reconciliation waits for Killed"
+        reply_rx.try_recv().is_err() && second_reply_rx.try_recv().is_err(),
+        "all waiters on an existing pending reconciliation wait for Killed"
     );
     assert!(
         pool.test_free_slots("model-a").is_empty(),
@@ -3002,6 +3008,11 @@ async fn deferred_reconcile_existing_pending_returns_capacity_once() {
     })
     .await;
     let snapshot = reply_rx.await.expect("reply").expect("snapshot");
+    let second_snapshot = second_reply_rx
+        .await
+        .expect("second reply")
+        .expect("second snapshot");
+    assert_eq!(snapshot, second_snapshot);
     assert!(snapshot.observations.initial_pending_teardown);
     assert_eq!(snapshot.observations.completion_source, "slot_event_killed");
     assert_eq!(runtime.calls(), vec!["run-pending"]);
