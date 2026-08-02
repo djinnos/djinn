@@ -5,7 +5,7 @@
 //! reaper use `status = 'running'` compare-and-set predicates so they cannot
 //! overwrite each other.
 
-use chrono::Duration;
+use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
 
@@ -214,6 +214,116 @@ impl WarmGraphAttemptRepository {
         .await?;
         Ok(rows.into_iter().map(|row| row.get("attempt_id")).collect())
     }
+
+    /// Classify recovery for `revision` from durable attempts and the current
+    /// graph inventory. An empty matching coverage set is complete: it denotes
+    /// a graph with no detected indexable workspaces.
+    pub async fn warm_outcome_for_head(
+        &self,
+        project_id: &str,
+        revision: &str,
+    ) -> DbResult<WarmGraphOutcome> {
+        self.db.ensure_initialized().await?;
+        let mut attempts = self.list_attempts(project_id, revision).await?;
+        let Some(latest) = attempts.first() else {
+            return Ok(WarmGraphOutcome::NotTriedYet);
+        };
+        if latest.status == WarmGraphAttemptStatus::DispatchFailed {
+            return Ok(WarmGraphOutcome::NotTriedYet);
+        }
+
+        let publication = self
+            .exact_revision_publication(project_id, revision)
+            .await?;
+        if let Some(is_complete) = publication {
+            // Publication can commit before the worker's final lifecycle write.
+            // The existing running predicate is the CAS that preserves any
+            // concurrent terminal writer's result.
+            let status = if is_complete {
+                WarmGraphAttemptStatus::PublishedComplete
+            } else {
+                WarmGraphAttemptStatus::PublishedPartial
+            };
+            for attempt in attempts
+                .iter()
+                .filter(|attempt| attempt.status == WarmGraphAttemptStatus::Running)
+            {
+                self.finish_attempt_if_running(&attempt.attempt_id, status, None)
+                    .await?;
+            }
+            attempts = self.list_attempts(project_id, revision).await?;
+        }
+
+        let latest = attempts
+            .first()
+            .expect("attempt history cannot disappear without deleting project");
+        match publication {
+            Some(true) => Ok(WarmGraphOutcome::Published(latest.clone())),
+            Some(false) => Ok(WarmGraphOutcome::TriedAndDidNotPublish(latest.clone())),
+            None if latest.status == WarmGraphAttemptStatus::Running
+                && attempt_is_non_stale(latest)? =>
+            {
+                Ok(WarmGraphOutcome::InProgress(latest.clone()))
+            }
+            None => Ok(WarmGraphOutcome::TriedAndDidNotPublish(latest.clone())),
+        }
+    }
+
+    /// Return `Some(complete)` only when the current generation is exactly the
+    /// requested revision. Coverage is a replace-set, not lifecycle history;
+    /// every row must agree with the current generation before it is used.
+    async fn exact_revision_publication(
+        &self,
+        project_id: &str,
+        revision: &str,
+    ) -> DbResult<Option<bool>> {
+        let current_revision: Option<String> = sqlx::query_scalar(
+            "SELECT g.commit_sha FROM repo_graph_current c \
+             JOIN repo_graph_generation g ON g.generation_id = c.generation_id \
+             WHERE c.project_id = $1",
+        )
+        .bind(project_id)
+        .fetch_optional(self.db.pool())
+        .await?;
+        let coverage = sqlx::query(
+            "SELECT commit_sha, status FROM project_workspace_coverage WHERE project_id = $1",
+        )
+        .bind(project_id)
+        .fetch_all(self.db.pool())
+        .await?;
+
+        let Some(current_revision) = current_revision else {
+            return Ok(None);
+        };
+        for row in &coverage {
+            let coverage_revision: String = row.get("commit_sha");
+            if coverage_revision != current_revision {
+                return Err(DbError::InvalidData(format!(
+                    "current graph revision `{current_revision}` disagrees with coverage revision `{coverage_revision}`"
+                )));
+            }
+        }
+        if current_revision != revision {
+            return Ok(None);
+        }
+        Ok(Some(!coverage.iter().any(|row| {
+            let status: String = row.get("status");
+            recovery_coverage_status_is_gap(&status)
+        })))
+    }
+}
+
+/// Unsupported languages are UI coverage gaps but complete for recovery: a
+/// retry cannot make an unavailable indexer succeed.
+fn recovery_coverage_status_is_gap(status: &str) -> bool {
+    matches!(status, "indexer_failed" | "timed_out")
+}
+
+fn attempt_is_non_stale(attempt: &WarmGraphAttempt) -> DbResult<bool> {
+    let deadline = DateTime::parse_from_rfc3339(&attempt.deadline_at).map_err(|error| {
+        DbError::InvalidData(format!("invalid warm graph attempt deadline: {error}"))
+    })?;
+    Ok(deadline >= Utc::now())
 }
 
 /// Convert grace to the exact precision PostgreSQL intervals can represent.
@@ -264,10 +374,204 @@ fn parse_attempt(row: sqlx::postgres::PgRow) -> DbResult<WarmGraphAttempt> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::repositories::repo_graph_cache::{RepoGraphCacheInsert, RepoGraphCacheRepository};
     use crate::repositories::test_support::seed_project;
 
     async fn fresh() -> WarmGraphAttemptRepository {
         WarmGraphAttemptRepository::new(Database::open_in_memory().expect("test database"))
+    }
+
+    async fn insert_outcome_attempt(
+        repo: &WarmGraphAttemptRepository,
+        revision: &str,
+        status: WarmGraphAttemptStatus,
+        started_at: &str,
+    ) -> String {
+        let id = uuid::Uuid::now_v7().to_string();
+        sqlx::query(
+            "INSERT INTO warm_graph_attempt \
+             (attempt_id, project_id, revision, status, started_at, deadline_at, finished_at) \
+             VALUES ($1::uuid, 'p1', $2, $3, $4::timestamptz, \
+                     '2099-01-01T00:00:00.000Z'::timestamptz, \
+                     CASE WHEN $5 THEN $4::timestamptz ELSE NULL END)",
+        )
+        .bind(&id)
+        .bind(revision)
+        .bind(status.as_str())
+        .bind(started_at)
+        .bind(status.is_terminal())
+        .execute(repo.db.pool())
+        .await
+        .unwrap();
+        id
+    }
+
+    async fn publish_current(repo: &WarmGraphAttemptRepository, revision: &str) {
+        RepoGraphCacheRepository::new(repo.db.clone())
+            .upsert(RepoGraphCacheInsert {
+                project_id: "p1",
+                commit_sha: revision,
+                graph_blob: b"graph",
+            })
+            .await
+            .unwrap();
+    }
+
+    async fn replace_coverage(repo: &WarmGraphAttemptRepository, revision: &str, status: &str) {
+        sqlx::query("DELETE FROM project_workspace_coverage WHERE project_id = 'p1'")
+            .execute(repo.db.pool())
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO project_workspace_coverage \
+             (project_id, workspace_slug, language, status, commit_sha) \
+             VALUES ('p1', 'workspace', 'rust', $1, $2)",
+        )
+        .bind(status)
+        .bind(revision)
+        .execute(repo.db.pool())
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn head_outcome_handles_no_attempt_dispatch_failure_and_running_attempt() {
+        let repo = fresh().await;
+        seed_project(&repo.db, "p1", "p1").await;
+        assert_eq!(
+            repo.warm_outcome_for_head("p1", "abc").await.unwrap(),
+            WarmGraphOutcome::NotTriedYet
+        );
+        insert_outcome_attempt(
+            &repo,
+            "abc",
+            WarmGraphAttemptStatus::DispatchFailed,
+            "2098-01-01T00:00:00.000Z",
+        )
+        .await;
+        assert_eq!(
+            repo.warm_outcome_for_head("p1", "abc").await.unwrap(),
+            WarmGraphOutcome::NotTriedYet
+        );
+        let id = repo
+            .start_attempt("p1", "running", "2099-01-01T00:00:00.000Z")
+            .await
+            .unwrap();
+        assert!(
+            matches!(repo.warm_outcome_for_head("p1", "running").await.unwrap(),
+            WarmGraphOutcome::InProgress(attempt) if attempt.attempt_id == id)
+        );
+    }
+
+    #[tokio::test]
+    async fn head_outcome_terminal_without_publication_is_recoverable() {
+        let repo = fresh().await;
+        seed_project(&repo.db, "p1", "p1").await;
+        let id = insert_outcome_attempt(
+            &repo,
+            "abc",
+            WarmGraphAttemptStatus::TimedOut,
+            "2098-01-01T00:00:00.000Z",
+        )
+        .await;
+        assert!(
+            matches!(repo.warm_outcome_for_head("p1", "abc").await.unwrap(),
+            WarmGraphOutcome::TriedAndDidNotPublish(attempt) if attempt.attempt_id == id)
+        );
+    }
+
+    #[tokio::test]
+    async fn head_outcome_uses_exact_revision_coverage() {
+        let repo = fresh().await;
+        seed_project(&repo.db, "p1", "p1").await;
+        insert_outcome_attempt(
+            &repo,
+            "abc",
+            WarmGraphAttemptStatus::Failed,
+            "2098-01-01T00:00:00.000Z",
+        )
+        .await;
+        publish_current(&repo, "abc").await;
+        replace_coverage(&repo, "abc", "indexed").await;
+        assert!(matches!(
+            repo.warm_outcome_for_head("p1", "abc").await.unwrap(),
+            WarmGraphOutcome::Published(_)
+        ));
+        replace_coverage(&repo, "abc", "indexer_failed").await;
+        assert!(matches!(
+            repo.warm_outcome_for_head("p1", "abc").await.unwrap(),
+            WarmGraphOutcome::TriedAndDidNotPublish(_)
+        ));
+        replace_coverage(&repo, "abc", "timed_out").await;
+        assert!(matches!(
+            repo.warm_outcome_for_head("p1", "abc").await.unwrap(),
+            WarmGraphOutcome::TriedAndDidNotPublish(_)
+        ));
+        replace_coverage(&repo, "abc", "unsupported_language").await;
+        assert!(matches!(
+            repo.warm_outcome_for_head("p1", "abc").await.unwrap(),
+            WarmGraphOutcome::Published(_)
+        ));
+        replace_coverage(&repo, "abc", "excluded").await;
+        assert!(matches!(
+            repo.warm_outcome_for_head("p1", "abc").await.unwrap(),
+            WarmGraphOutcome::Published(_)
+        ));
+        replace_coverage(&repo, "other", "indexed").await;
+        assert!(repo.warm_outcome_for_head("p1", "abc").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn publication_reconciliation_and_later_complete_retry_preserve_history() {
+        let repo = fresh().await;
+        seed_project(&repo.db, "p1", "p1").await;
+        let old = insert_outcome_attempt(
+            &repo,
+            "abc",
+            WarmGraphAttemptStatus::Failed,
+            "2098-01-01T00:00:00.000Z",
+        )
+        .await;
+        let running = insert_outcome_attempt(
+            &repo,
+            "abc",
+            WarmGraphAttemptStatus::Running,
+            "2098-01-02T00:00:00.000Z",
+        )
+        .await;
+        publish_current(&repo, "abc").await;
+        replace_coverage(&repo, "abc", "indexed").await;
+        assert!(
+            matches!(repo.warm_outcome_for_head("p1", "abc").await.unwrap(),
+            WarmGraphOutcome::Published(attempt) if attempt.attempt_id == running && attempt.status == WarmGraphAttemptStatus::PublishedComplete)
+        );
+        assert_eq!(repo.list_attempts("p1", "abc").await.unwrap().len(), 2);
+        assert_eq!(
+            repo.get_attempt(&old).await.unwrap().unwrap().status,
+            WarmGraphAttemptStatus::Failed
+        );
+        // Empty coverage is complete by the recovery contract.
+        sqlx::query("DELETE FROM project_workspace_coverage WHERE project_id = 'p1'")
+            .execute(repo.db.pool())
+            .await
+            .unwrap();
+        assert!(matches!(
+            repo.warm_outcome_for_head("p1", "abc").await.unwrap(),
+            WarmGraphOutcome::Published(_)
+        ));
+
+        let partial = repo
+            .start_attempt("p1", "partial", "2099-01-01T00:00:00.000Z")
+            .await
+            .unwrap();
+        publish_current(&repo, "partial").await;
+        replace_coverage(&repo, "partial", "timed_out").await;
+        assert!(matches!(
+            repo.warm_outcome_for_head("p1", "partial").await.unwrap(),
+            WarmGraphOutcome::TriedAndDidNotPublish(attempt)
+                if attempt.attempt_id == partial
+                    && attempt.status == WarmGraphAttemptStatus::PublishedPartial
+        ));
     }
 
     #[tokio::test]
