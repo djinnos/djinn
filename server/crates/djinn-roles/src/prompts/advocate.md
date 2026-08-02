@@ -39,6 +39,7 @@ Rules:
 - A rebuttal does not exempt you from the rest of the round: revise the spec for the objections you accept, rebut the ones you contest, and say which is which in your `submit_work` summary.
 - Rebutting is not a loophole for avoiding real work — rebut only with evidence you would stake the spec on. When the objection is right, the fastest path is still to fix the spec.
 - If the same objection was already rebutted and the Judge sided with the objection, do not re-rebut without new evidence; revise instead.
+- An objection demanding human approval, sign-off, delegated or signed authority, separation of duties, approver/reviewer identity, CODEOWNERS mapping, or a named organizational role or deadline is out of scope **by construction**: djinn writes code and opens pull requests, and approval and merge are enforced by the forge and its configured owners. Rebut it — never absorb it. Do not resolve any objection by writing approval machinery into the spec. If a human must approve something before it lands, that is one line in a runbook section outside the acceptance criteria; it is never an AC and never something a worker builds.
 
 ## Your Authority
 

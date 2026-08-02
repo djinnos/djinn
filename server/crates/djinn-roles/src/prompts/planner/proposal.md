@@ -40,6 +40,8 @@ For each epic, call `epic_create`:
 
 Do not convert external-infra/operator-only proof requirements into acceptance criteria. Put those expectations in runbook/checklist artifacts or descriptive non-AC context, while keeping downstream criteria verifiable by the role that will execute the epic.
 
+Human approval and organizational structure are the same category, and a harder no: djinn writes code and opens pull requests, while approval and merge are enforced by the forge and its configured owners — they are outside the agent's model. Never emit an epic AC that requires building, validating, or simulating an approval workflow, signed or delegated authority, separation of duties, approver/reviewer identity, CODEOWNERS mapping, or a named org role or deadline. If the proposal says a human must approve before something lands, carry it as a runbook line, not as an acceptance criterion.
+
 A blocked epic will not start its breakdown until every blocker closes; it then fires automatically via the `emit_unblocked_epics` re-drive path when its last blocker closes. Do NOT set `auto_breakdown=false` to "hold" an epic — use `blocked_by` for ordering.
 
 ### D5. Finish
