@@ -236,7 +236,7 @@ test('qa-smoke owns only a restore-only test cache and a disposable database', (
   assert.match(source, /^ {10}save-if:\s*false\s*$/m, 'qa-smoke must remain a restore-only cache consumer');
   const postgres = jobService(qa, 'postgres');
   assert.ok(postgres, 'qa-smoke must own a local postgres service');
-  assert.match(postgres, /^ {8}image:\s*postgres:16\s*$/m,
+  assert.match(postgres, /^ {8}image:\s*public\.ecr\.aws\/docker\/library\/postgres:16\s*$/m,
     'qa-smoke postgres service must use the intended Postgres image');
   assert.match(postgres, /^ {10}-\s*5433:5432\s*$/m,
     'qa-smoke postgres service must expose the isolated 5433 host port');
