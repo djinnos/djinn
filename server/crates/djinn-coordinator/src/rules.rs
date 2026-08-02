@@ -11,7 +11,9 @@ use super::*;
 use djinn_core::clock::{Clock, SystemClock};
 use djinn_core::models::IssueType;
 use djinn_core::models::task::{PRIORITY_CRITICAL, PROPOSAL_REVIEW_TITLE_PREFIX};
-use djinn_db::repositories::proposal::{EvidenceDerivedOutcome, TerminalLinkedEvidenceSpikeOutcome};
+use djinn_db::repositories::proposal::{
+    EvidenceDerivedOutcome, TerminalLinkedEvidenceSpikeOutcome,
+};
 use djinn_db::{EffectiveCreatorProvenance, EpicRepository, ProposalRepository};
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -27,9 +29,15 @@ pub(super) const PROPOSAL_RECONCILE_TITLE_PREFIX: &str = "Reconcile proposal";
 /// Emits only for the repository result that inserted a new durable receipt.
 pub(super) fn record_evidence_terminal_outcome(outcome: Option<EvidenceDerivedOutcome>) {
     let outcome = match outcome {
-        Some(EvidenceDerivedOutcome::Resolved) => djinn_telemetry::evidence_metrics::EvidenceOutcome::Resolved,
-        Some(EvidenceDerivedOutcome::Partial) => djinn_telemetry::evidence_metrics::EvidenceOutcome::Partial,
-        Some(EvidenceDerivedOutcome::Unresolved) => djinn_telemetry::evidence_metrics::EvidenceOutcome::Unresolved,
+        Some(EvidenceDerivedOutcome::Resolved) => {
+            djinn_telemetry::evidence_metrics::EvidenceOutcome::Resolved
+        }
+        Some(EvidenceDerivedOutcome::Partial) => {
+            djinn_telemetry::evidence_metrics::EvidenceOutcome::Partial
+        }
+        Some(EvidenceDerivedOutcome::Unresolved) => {
+            djinn_telemetry::evidence_metrics::EvidenceOutcome::Unresolved
+        }
         None => return,
     };
     djinn_telemetry::evidence_metrics::terminal(outcome);

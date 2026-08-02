@@ -4,16 +4,80 @@
 //! session, plan, invocation, commit, and worktree identifiers from labels.
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum EvidenceStage { Demand, Plan, Invocation, Terminal, Rejection }
-impl EvidenceStage { pub const fn label(self) -> &'static str { match self { Self::Demand => "demand", Self::Plan => "plan", Self::Invocation => "invocation", Self::Terminal => "terminal", Self::Rejection => "rejection" } } }
+pub enum EvidenceStage {
+    Demand,
+    Plan,
+    Invocation,
+    Terminal,
+    Rejection,
+}
+impl EvidenceStage {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Demand => "demand",
+            Self::Plan => "plan",
+            Self::Invocation => "invocation",
+            Self::Terminal => "terminal",
+            Self::Rejection => "rejection",
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum EvidenceOutcome { Accepted, Captured, Attempted, Ok, Degraded, Timeout, Error, Resolved, Partial, Unresolved, Failed }
-impl EvidenceOutcome { pub const fn label(self) -> &'static str { match self { Self::Accepted => "accepted", Self::Captured => "captured", Self::Attempted => "attempted", Self::Ok => "ok", Self::Degraded => "degraded", Self::Timeout => "timeout", Self::Error => "error", Self::Resolved => "resolved", Self::Partial => "partial", Self::Unresolved => "unresolved", Self::Failed => "failed" } } }
+pub enum EvidenceOutcome {
+    Accepted,
+    Captured,
+    Attempted,
+    Ok,
+    Degraded,
+    Timeout,
+    Error,
+    Resolved,
+    Partial,
+    Unresolved,
+    Failed,
+}
+impl EvidenceOutcome {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Accepted => "accepted",
+            Self::Captured => "captured",
+            Self::Attempted => "attempted",
+            Self::Ok => "ok",
+            Self::Degraded => "degraded",
+            Self::Timeout => "timeout",
+            Self::Error => "error",
+            Self::Resolved => "resolved",
+            Self::Partial => "partial",
+            Self::Unresolved => "unresolved",
+            Self::Failed => "failed",
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum EvidenceRejection { Validation, Persistence, NoFrozenPlan, AlreadyFinalized, UnknownCheck, MethodMismatch, InvalidAnchor }
-impl EvidenceRejection { pub const fn label(self) -> &'static str { match self { Self::Validation => "validation", Self::Persistence => "persistence", Self::NoFrozenPlan => "no_frozen_plan", Self::AlreadyFinalized => "already_finalized", Self::UnknownCheck => "unknown_check", Self::MethodMismatch => "method_mismatch", Self::InvalidAnchor => "invalid_anchor" } } }
+pub enum EvidenceRejection {
+    Validation,
+    Persistence,
+    NoFrozenPlan,
+    AlreadyFinalized,
+    UnknownCheck,
+    MethodMismatch,
+    InvalidAnchor,
+}
+impl EvidenceRejection {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Validation => "validation",
+            Self::Persistence => "persistence",
+            Self::NoFrozenPlan => "no_frozen_plan",
+            Self::AlreadyFinalized => "already_finalized",
+            Self::UnknownCheck => "unknown_check",
+            Self::MethodMismatch => "method_mismatch",
+            Self::InvalidAnchor => "invalid_anchor",
+        }
+    }
+}
 
 /// Every legal metric label set. This is not an independent-axis list: a
 /// nonsensical pair such as `demand/timeout` has no series in this contract.
@@ -37,22 +101,34 @@ pub const LABEL_CONTRACT: &[&[(&str, &str)]] = &[
     &[("stage", "rejection"), ("reason", "invalid_anchor")],
 ];
 
-pub fn record(stage: EvidenceStage, outcome: EvidenceOutcome) { metrics::counter!("djinn_evidence_rollout_total", "stage" => stage.label(), "outcome" => outcome.label()).increment(1); }
-pub fn reject(reason: EvidenceRejection) { metrics::counter!("djinn_evidence_rollout_total", "stage" => EvidenceStage::Rejection.label(), "reason" => reason.label()).increment(1); }
+pub fn record(stage: EvidenceStage, outcome: EvidenceOutcome) {
+    metrics::counter!("djinn_evidence_rollout_total", "stage" => stage.label(), "outcome" => outcome.label()).increment(1);
+}
+pub fn reject(reason: EvidenceRejection) {
+    metrics::counter!("djinn_evidence_rollout_total", "stage" => EvidenceStage::Rejection.label(), "reason" => reason.label()).increment(1);
+}
 
 /// Call only after a new durable lifecycle receipt was inserted. In particular,
 /// callers must not invoke this for an `AlreadyRecorded` recovery result.
 pub fn terminal(outcome: EvidenceOutcome) {
-    debug_assert!(matches!(outcome, EvidenceOutcome::Resolved | EvidenceOutcome::Partial | EvidenceOutcome::Unresolved));
+    debug_assert!(matches!(
+        outcome,
+        EvidenceOutcome::Resolved | EvidenceOutcome::Partial | EvidenceOutcome::Unresolved
+    ));
     record(EvidenceStage::Terminal, outcome);
 }
 
 /// Records the bounded result of a distinct durable invocation attempt.
 pub fn invocation_result(timed_out: bool, runner_failed: bool, exit_code: Option<i32>) {
-    let outcome = if timed_out { EvidenceOutcome::Timeout }
-    else if runner_failed { EvidenceOutcome::Error }
-    else if exit_code == Some(0) { EvidenceOutcome::Ok }
-    else { EvidenceOutcome::Degraded };
+    let outcome = if timed_out {
+        EvidenceOutcome::Timeout
+    } else if runner_failed {
+        EvidenceOutcome::Error
+    } else if exit_code == Some(0) {
+        EvidenceOutcome::Ok
+    } else {
+        EvidenceOutcome::Degraded
+    };
     record(EvidenceStage::Invocation, outcome);
 }
 
@@ -88,8 +164,16 @@ mod tests {
         for labels in LABEL_CONTRACT {
             assert_eq!(labels.iter().filter(|(key, _)| *key == "stage").count(), 1);
             for (key, value) in *labels {
-                assert!(!identity_bearing.iter().any(|forbidden| key.contains(forbidden)));
-                assert!(!identity_bearing.iter().any(|forbidden| value.contains(forbidden)));
+                assert!(
+                    !identity_bearing
+                        .iter()
+                        .any(|forbidden| key.contains(forbidden))
+                );
+                assert!(
+                    !identity_bearing
+                        .iter()
+                        .any(|forbidden| value.contains(forbidden))
+                );
                 assert!(!value.contains('='));
                 assert!(!value.chars().any(|character| character.is_ascii_digit()));
             }
