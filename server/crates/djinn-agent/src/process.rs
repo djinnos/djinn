@@ -2433,12 +2433,11 @@ mod tests {
                 loop {
                     if let Ok(content) = std::fs::read_to_string(&pid_path) {
                         let lines: Vec<&str> = content.lines().collect();
-                        if lines.len() >= 2 {
-                            if let (Ok(shell), Ok(descendant)) =
+                        if lines.len() >= 2
+                            && let (Ok(shell), Ok(descendant)) =
                                 (lines[0].parse::<i32>(), lines[1].parse::<i32>())
-                            {
-                                return Some((shell, descendant));
-                            }
+                        {
+                            return Some((shell, descendant));
                         }
                     }
                     if start.elapsed() >= Duration::from_secs(5) {
@@ -2486,13 +2485,15 @@ mod tests {
             // treats `Z` as not running. This proves the descendant was reaped,
             // not merely signalled.
             let observed = std::time::Instant::now();
-            while process_state(descendant_pid).is_some()
+            while (process_state(descendant_pid).is_some()
+                || process_group_of(descendant_pid).is_some())
                 && observed.elapsed() < Duration::from_secs(5)
             {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
             assert!(
-                process_state(descendant_pid).is_none(),
+                process_state(descendant_pid).is_none()
+                    && process_group_of(descendant_pid).is_none(),
                 "descendant {descendant_pid} in group {shell_pid} remained after cleanup \
                  (state {:?}, group {:?})",
                 process_state(descendant_pid),
