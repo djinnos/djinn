@@ -27,6 +27,7 @@ run_case() {
       kueue-width-mismatch) node -e 'let p=process.argv[1],x=require(p);x.identity_digests.kueue_width="sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";require("fs").writeFileSync(p,JSON.stringify(x))' "$root/candidates/RETIRE_HEAD.json" ;;
       stale-digest) node -e 'let p=process.argv[1],x=require(p);x.identity_digests.evidence="sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";require("fs").writeFileSync(p,JSON.stringify(x))' "$root/candidates/RETIRE_HEAD.json" ;;
       lost-fit) node -e 'let p=process.argv[1],x=require(p);x.node_fit.allocatable_bytes="7516192767";require("fs").writeFileSync(p,JSON.stringify(x))' "$root/candidates/RETIRE_HEAD.json" ;;
+      duplicate-canary) node -e 'let p=process.argv[1],x=require(p);x.runs[1]={...x.runs[0],role:"canary-2"};require("fs").writeFileSync(p,JSON.stringify(x))' "$root/candidates/RETIRE_HEAD.json" ;;
       missing-field) node -e 'let p=process.argv[1],x=require(p);delete x.runs[0].cgroup_path;require("fs").writeFileSync(p,JSON.stringify(x))' "$root/candidates/RETIRE_HEAD.json" ;;
       unknown-field) node -e 'let p=process.argv[1],x=require(p);x.runs[0].invented="never-default";require("fs").writeFileSync(p,JSON.stringify(x))' "$root/candidates/RETIRE_HEAD.json" ;;
       *) fail "$name has no mutation"; return ;;

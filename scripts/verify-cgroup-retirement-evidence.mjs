@@ -63,6 +63,12 @@ string(evidence.subject.node_name, 'subject node_name');
 if (!Array.isArray(evidence.runs) || evidence.runs.length !== 6) fail('runs', 'requires exactly five canaries and one final run');
 const wantedRoles = ['canary-1', 'canary-2', 'canary-3', 'canary-4', 'canary-5', 'final'];
 const seen = new Set();
+// Roles only name required positions. Stable run, Pod, and cgroup identities
+// establish that each position represents a separate captured observation.
+const seenRunIds = new Set();
+const seenPodNames = new Set();
+const seenPodUids = new Set();
+const seenCgroupPaths = new Set();
 let finalRun;
 for (const run of evidence.runs) {
     exactKeys(run, ['cgroup_path', 'ceiling_bytes', 'image_digest', 'memory_events_oom_kill_after', 'memory_events_oom_kill_before', 'node_name', 'pod_name', 'pod_uid', 'role', 'run_id', 'sum_bytes'], 'run');
@@ -75,6 +81,14 @@ for (const run of evidence.runs) {
     digest(run.image_digest, `${role} image_digest`);
     string(run.node_name, `${role} node_name`);
     string(run.cgroup_path, `${role} cgroup_path`, /^\/kubepods(?:\/|$)/);
+    if (seenRunIds.has(run.run_id) || seenPodNames.has(run.pod_name) ||
+        seenPodUids.has(run.pod_uid) || seenCgroupPaths.has(run.cgroup_path)) {
+        fail('runs', `duplicate run, Pod, or cgroup identity for ${role}`);
+    }
+    seenRunIds.add(run.run_id);
+    seenPodNames.add(run.pod_name);
+    seenPodUids.add(run.pod_uid);
+    seenCgroupPaths.add(run.cgroup_path);
     if (run.image_digest !== evidence.subject.image_digest || run.node_name !== evidence.subject.node_name) {
         fail(role, 'image or node identity does not match the declared production subject');
     }
