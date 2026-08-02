@@ -103,6 +103,37 @@ fn static_flavor_targets(owned_flavors: &[OwnedFlavor]) -> Vec<FlavorQuotaTarget
         .collect()
 }
 
+/// Split the scheduler-effective aggregate between exclusively owned flavors.
+/// The final flavor receives the remainder, preserving every derived component.
+fn derived_flavor_targets(
+    ownership: FlavorOwnershipTargets,
+    derived: ResourceVector,
+) -> Option<Vec<FlavorQuotaTarget>> {
+    let aggregate = ownership.assigned_aggregate;
+    let split = |total: i64, denominator: i64, weights: Vec<i64>| -> Option<Vec<i64>> {
+        if denominator <= 0 {
+            return None;
+        }
+        let last = weights.len().checked_sub(1)?;
+        let mut remainder = total;
+        weights.into_iter().enumerate().map(|(index, weight)| {
+            let value = if index == last { remainder } else {
+                i64::try_from((i128::from(total) * i128::from(weight)) / i128::from(denominator)).ok()?
+            };
+            remainder = remainder.checked_sub(value)?;
+            Some(value)
+        }).collect()
+    };
+    let cpus = split(derived.cpu.get(), aggregate.cpu.get(), ownership.targets.iter().map(|t| t.vector.cpu.get()).collect())?;
+    let memories = split(derived.memory.get(), aggregate.memory.get(), ownership.targets.iter().map(|t| t.vector.memory.get()).collect())?;
+    let pods = split(derived.pods.get(), aggregate.pods.get(), ownership.targets.iter().map(|t| t.vector.pods.get()).collect())?;
+    ownership.targets.into_iter().zip(cpus.into_iter().zip(memories).zip(pods)).map(|(target, ((cpu, memory), pods))| {
+        Some(FlavorQuotaTarget { flavor_name: target.flavor_name, vector: ResourceVector {
+            cpu: CpuMillicores::new(cpu).ok()?, memory: MemoryBytes::new(memory).ok()?, pods: PodCount::new(pods).ok()?,
+        }})
+    }).collect()
+}
+
 fn validate_owned_flavors(owned_flavors: &[OwnedFlavor]) -> Result<(), ConservativeReason> {
     if owned_flavors.is_empty()
         || owned_flavors.iter().any(|flavor| {
@@ -621,6 +652,9 @@ pub struct CapacityControllerConfig {
     pub static_fallback: ResourceVector,
     /// JSON selector rendered by Helm for explicit flavor ownership.
     pub flavor_selector: Option<BTreeMap<String, String>>,
+    /// Explicit per-flavor selectors for a multi-cohort ClusterQueue. The
+    /// chart's single-pool selector remains supported by `flavor_selector`.
+    pub flavor_selectors: BTreeMap<String, BTreeMap<String, String>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -658,9 +692,16 @@ impl CapacityControllerConfig {
             Some("node-sum") => CapacitySource::NodeSum,
             _ => CapacitySource::Invalid,
         };
-        let flavor_selector = match std::env::var("DJINN_CAPACITY_FLAVOR_SELECTOR") {
-            Ok(value) => Some(serde_json::from_str(&value).ok()?),
-            Err(std::env::VarError::NotPresent) => None,
+        let (flavor_selector, flavor_selectors) = match std::env::var("DJINN_CAPACITY_FLAVOR_SELECTOR") {
+            Ok(value) => {
+                let value: Value = serde_json::from_str(&value).ok()?;
+                if value.as_object()?.values().all(Value::is_string) {
+                    (Some(serde_json::from_value(value).ok()?), BTreeMap::new())
+                } else {
+                    (None, serde_json::from_value(value).ok()?)
+                }
+            }
+            Err(std::env::VarError::NotPresent) => (None, BTreeMap::new()),
             Err(_) => return None,
         };
         let build_job = controller_build_job();
@@ -689,6 +730,7 @@ impl CapacityControllerConfig {
                 .ok()?,
             static_fallback,
             flavor_selector,
+            flavor_selectors,
         })
     }
 }
@@ -782,7 +824,8 @@ fn observe_queue(queue: DynamicObject, configured_name: &str) -> Option<QueueObs
 }
 
 /// Leader-owned, 30-second observation and actuation loop. Any read/parsing or
-/// identity failure publishes fail-safe K and performs no queue write.
+/// identity failure publishes fail-safe K and restores the declared static
+/// vector through the resourceVersion-fenced patch seam.
 pub async fn run_capacity_controller(
     client: Client,
     config: CapacityControllerConfig,
@@ -808,6 +851,9 @@ pub async fn run_capacity_controller(
             .and_then(|queue| observe_queue(queue, &config.queue_name));
         // This branch is before all Node/Pod APIs.
         if config.source != CapacitySource::NodeSum {
+            if config.source == CapacitySource::Invalid {
+                tracing::warn!(reason = "CapacitySourceInvalid", "capacity controller static fallback");
+            }
             let _ = snapshots.send(CapacityVector {
                 binding: BindingQuota::Pods(config.fail_safe.pods),
                 compile_slots: config.fail_safe.compile_slots,
@@ -892,18 +938,19 @@ pub async fn run_capacity_controller(
                 memory: vector.raw.memory,
                 pods: vector.admitted_podsets,
             };
-            let selector = config.flavor_selector.clone().unwrap_or_else(|| {
-                BTreeMap::from([(
-                    config.node_selector_key.clone(),
-                    config.node_selector_value.clone(),
-                )])
-            });
             let owned: Vec<_> = observation
                 .flavors
                 .iter()
                 .map(|flavor| OwnedFlavor {
                     flavor_name: flavor.name.clone(),
-                    selector: Some(selector.clone()),
+                    selector: config.flavor_selectors.get(&flavor.name).cloned().or_else(|| {
+                        (observation.flavors.len() == 1).then(|| {
+                            config.flavor_selector.clone().unwrap_or_else(|| BTreeMap::from([(
+                                config.node_selector_key.clone(),
+                                config.node_selector_value.clone(),
+                            )]))
+                        })
+                    }),
                     static_fallback: config.static_fallback,
                 })
                 .collect();
@@ -912,23 +959,19 @@ pub async fn run_capacity_controller(
                 .filter(|node| {
                     node.selector_matches && node.ready && !node.unschedulable && !node.terminating
                 })
-                .map(|node| CapacityObjectObservation {
-                    effective_labels: node.labels.clone(),
-                    vector: ResourceVector {
-                        cpu: node.allocatable_cpu?,
-                        memory: node.allocatable_memory?,
-                        pods: node.allocatable_pods?,
-                    },
+                .map(|node| {
+                    Some(CapacityObjectObservation {
+                        effective_labels: node.labels.clone(),
+                        vector: ResourceVector {
+                            cpu: node.allocatable_cpu?,
+                            memory: node.allocatable_memory?,
+                            pods: node.allocatable_pods?,
+                        },
+                    })
                 })
                 .collect::<Option<Vec<_>>>()?;
-            let targets = match derive_flavor_ownership(&owned, &objects) {
-                Ok(ownership) if ownership.targets.len() == 1 => vec![FlavorQuotaTarget {
-                    flavor_name: ownership.targets[0].flavor_name.clone(),
-                    vector: target_vector,
-                }],
-                Ok(ownership) => ownership.targets,
-                Err(_) => return None,
-            };
+            let ownership = derive_flavor_ownership(&owned, &objects).ok()?;
+            let targets = derived_flavor_targets(ownership, target_vector)?;
             Some((
                 observation,
                 targets,
@@ -941,6 +984,7 @@ pub async fn run_capacity_controller(
         .await;
 
         let Some((queue, targets, snapshot)) = observed else {
+            tracing::warn!(reason = "NodeSumObservationFailed", "capacity controller static fallback");
             let _ = snapshots.send(CapacityVector {
                 binding: BindingQuota::Pods(config.fail_safe.pods),
                 compile_slots: config.fail_safe.compile_slots,
@@ -1675,6 +1719,7 @@ mod tests {
                 expected_protected_pods: 5,
                 static_fallback: resources(12_000, 48 * 1024 * 1024 * 1024, 3),
                 flavor_selector: None,
+                flavor_selectors: BTreeMap::new(),
             };
             let (tx, _rx) = watch::channel(CapacityVector {
                 binding: BindingQuota::Pods(3),
@@ -1724,6 +1769,7 @@ mod tests {
                 expected_protected_pods: 5,
                 static_fallback: resources(9_000, 8_192, 9),
                 flavor_selector: None,
+                flavor_selectors: BTreeMap::new(),
             };
             let (tx, _) = watch::channel(CapacityVector {
                 binding: BindingQuota::Pods(3),
@@ -1772,8 +1818,16 @@ mod tests {
                 assert_eq!(patch[2]["value"], "8192");
                 assert_eq!(patch[3]["value"], "9");
             } else {
-                assert!(paths.iter().any(|entry| *entry == ("GET", "/api/v1/nodes")));
-                assert!(paths.iter().any(|entry| *entry == ("GET", "/api/v1/pods")));
+                assert_eq!(
+                    paths,
+                    vec![
+                        ("GET", "/apis/kueue.x-k8s.io/v1beta1/clusterqueues/djinn-kueue"),
+                        ("GET", "/api/v1/nodes"),
+                        ("GET", "/api/v1/pods"),
+                        ("PATCH", "/apis/kueue.x-k8s.io/v1beta1/clusterqueues/djinn-kueue"),
+                    ],
+                    "node-sum permits only queue identity, Nodes, protected Pods, and the fenced patch"
+                );
                 assert_eq!(recorder.mutations().len(), 1);
             }
         }
@@ -1992,6 +2046,7 @@ mod tests {
             expected_protected_pods: 5,
             static_fallback: resources(12_000, 48 * 1024 * 1024 * 1024, 3),
             flavor_selector: None,
+            flavor_selectors: BTreeMap::new(),
         };
         let (tx, mut rx) = watch::channel(CapacityVector {
             binding: BindingQuota::Pods(99),
@@ -2039,6 +2094,7 @@ mod tests {
                 expected_protected_pods: 5,
                 static_fallback: resources(12_000, 48 * 1024 * 1024 * 1024, 3),
                 flavor_selector: None,
+                flavor_selectors: BTreeMap::new(),
             };
             let (tx, mut rx) = watch::channel(CapacityVector {
                 binding: BindingQuota::Pods(99),

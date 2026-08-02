@@ -274,6 +274,8 @@ pub fn capacity_controller_cluster_with_pods(
                     }
                 } else if path == "/apis/kueue.x-k8s.io/v1beta1/clusterqueues/djinn-kueue" {
                     serde_json::json!({"apiVersion":"kueue.x-k8s.io/v1beta1","kind":"ClusterQueue","metadata":{"name":"djinn-kueue","resourceVersion":"42","labels":{"djinn.io/quota-owner":"derived-capacity"},"annotations":{"djinn.io/binding-resource":binding}},"spec":{"resourceGroups":[{"flavors":[{"name":"default","resources":[{"name":"pods","nominalQuota":"3"},{"name":"cpu","nominalQuota":"3000m"},{"name":"memory","nominalQuota":"100Gi"}]}]}]}})
+                } else if path == "/apis/karpenter.sh/v1/nodepools" {
+                    serde_json::json!({"apiVersion":"karpenter.sh/v1","kind":"NodePoolList","metadata":{"resourceVersion":"1"},"items":[]})
                 } else {
                     serde_json::json!({"apiVersion":"v1","kind":"Status","status":"Failure","reason":"NotFound","code":404})
                 };
@@ -289,6 +291,7 @@ pub fn capacity_controller_cluster_with_pods(
                         } else if path == "/api/v1/nodes"
                             || path == "/api/v1/pods"
                             || path == "/apis/kueue.x-k8s.io/v1beta1/clusterqueues/djinn-kueue"
+                            || path == "/apis/karpenter.sh/v1/nodepools"
                         {
                             200
                         } else {
