@@ -10,7 +10,7 @@ use kube::{
     api::{ApiResource, DynamicObject, GroupVersionKind, ListParams, Patch, PatchParams},
 };
 use serde_json::{Value, json};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::watch;
@@ -45,6 +45,156 @@ pub enum FlavorActuationDecision {
     Patch { patch: Value },
     Noop,
     NoMutation { reason: ConservativeReason },
+}
+
+/// The configured ownership contract for one controller-owned ResourceFlavor.
+/// The selector is an exact label conjunction, so later source adapters supply
+/// effective labels without selecting a Node or NodePool API here.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OwnedFlavor {
+    pub flavor_name: String,
+    pub selector: Option<BTreeMap<String, String>>,
+    pub static_fallback: ResourceVector,
+}
+
+/// Source-neutral observation of one complete capacity-bearing object.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CapacityObjectObservation {
+    pub effective_labels: BTreeMap<String, String>,
+    pub vector: ResourceVector,
+}
+
+/// Successful ownership derivation preserves the assigned aggregate so callers
+/// can prove component-wise conservation across the resulting flavors.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FlavorOwnershipTargets {
+    pub targets: Vec<FlavorQuotaTarget>,
+    pub assigned_aggregate: ResourceVector,
+}
+
+/// Ownership failures retain static targets for the existing complete-vector
+/// patch builder, rather than copying a shared dynamic aggregate to flavors.
+#[derive(Clone, Debug, PartialEq)]
+pub enum FlavorOwnershipDecision {
+    Derived(FlavorOwnershipTargets),
+    Fenced {
+        reason: ConservativeReason,
+        decision: FlavorActuationDecision,
+    },
+}
+
+fn matches_flavor_selector(
+    labels: &BTreeMap<String, String>,
+    selector: &BTreeMap<String, String>,
+) -> bool {
+    selector
+        .iter()
+        .all(|(key, value)| labels.get(key) == Some(value))
+}
+
+fn static_flavor_targets(owned_flavors: &[OwnedFlavor]) -> Vec<FlavorQuotaTarget> {
+    owned_flavors
+        .iter()
+        .map(|flavor| FlavorQuotaTarget {
+            flavor_name: flavor.flavor_name.clone(),
+            vector: flavor.static_fallback,
+        })
+        .collect()
+}
+
+fn validate_owned_flavors(owned_flavors: &[OwnedFlavor]) -> Result<(), ConservativeReason> {
+    if owned_flavors.is_empty()
+        || owned_flavors.iter().any(|flavor| {
+            flavor.flavor_name.is_empty() || flavor.selector.as_ref().is_none_or(BTreeMap::is_empty)
+        })
+    {
+        return Err(ConservativeReason::MissingFlavorOwnership);
+    }
+    if owned_flavors
+        .iter()
+        .map(|flavor| &flavor.flavor_name)
+        .collect::<BTreeSet<_>>()
+        .len()
+        != owned_flavors.len()
+        || owned_flavors
+            .iter()
+            .map(|flavor| flavor.selector.as_ref().expect("selectors validated above"))
+            .collect::<BTreeSet<_>>()
+            .len()
+            != owned_flavors.len()
+    {
+        return Err(ConservativeReason::DuplicateFlavorOwnership);
+    }
+    Ok(())
+}
+
+/// Assign every observed vector to exactly one owned flavor. Unmatched objects
+/// are outside controller ownership. Multiple matches never use API list order
+/// as a tie breaker and instead fence the complete observation.
+pub fn derive_flavor_ownership(
+    owned_flavors: &[OwnedFlavor],
+    objects: &[CapacityObjectObservation],
+) -> Result<FlavorOwnershipTargets, ConservativeReason> {
+    validate_owned_flavors(owned_flavors)?;
+    let mut vectors = vec![ResourceVector::ZERO; owned_flavors.len()];
+    let mut assigned_aggregate = ResourceVector::ZERO;
+    for object in objects {
+        let matches: Vec<_> = owned_flavors
+            .iter()
+            .enumerate()
+            .filter(|(_, flavor)| {
+                matches_flavor_selector(
+                    &object.effective_labels,
+                    flavor.selector.as_ref().expect("selectors validated above"),
+                )
+            })
+            .map(|(index, _)| index)
+            .collect();
+        match matches.as_slice() {
+            [] => {}
+            [index] => {
+                vectors[*index] = vectors[*index]
+                    .checked_add(object.vector)
+                    .map_err(|_| ConservativeReason::FlavorOwnershipOverflow)?;
+                assigned_aggregate = assigned_aggregate
+                    .checked_add(object.vector)
+                    .map_err(|_| ConservativeReason::FlavorOwnershipOverflow)?;
+            }
+            _ => return Err(ConservativeReason::FlavorOwnershipAmbiguous),
+        }
+    }
+    Ok(FlavorOwnershipTargets {
+        targets: owned_flavors
+            .iter()
+            .zip(vectors)
+            .map(|(flavor, vector)| FlavorQuotaTarget {
+                flavor_name: flavor.flavor_name.clone(),
+                vector,
+            })
+            .collect(),
+        assigned_aggregate,
+    })
+}
+
+/// Fence every ownership failure through the established named, fenced vector
+/// patch builder using each owned flavor's own declared static fallback.
+pub fn flavor_ownership_patch_decision(
+    queue: &QueueObservation,
+    configured_name: &str,
+    owned_flavors: &[OwnedFlavor],
+    objects: &[CapacityObjectObservation],
+) -> FlavorOwnershipDecision {
+    match derive_flavor_ownership(owned_flavors, objects) {
+        Ok(targets) => FlavorOwnershipDecision::Derived(targets),
+        Err(reason) => FlavorOwnershipDecision::Fenced {
+            reason,
+            decision: flavor_vector_patch_decision(
+                queue,
+                configured_name,
+                &static_flavor_targets(owned_flavors),
+            ),
+        },
+    }
 }
 
 fn quota_quantities(vector: ResourceVector) -> [(&'static str, String); 3] {
@@ -429,6 +579,10 @@ pub enum ConservativeReason {
     CompileBoundDisarmed,
     MissingFlavorVector,
     AmbiguousFlavorVector,
+    MissingFlavorOwnership,
+    DuplicateFlavorOwnership,
+    FlavorOwnershipAmbiguous,
+    FlavorOwnershipOverflow,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1264,6 +1418,121 @@ mod tests {
                 reason: ConservativeReason::AmbiguousFlavorVector
             }
         ));
+    }
+
+    #[test]
+    fn capacity_flavor_ownership() {
+        let owned = [
+            OwnedFlavor {
+                flavor_name: "flavor-a".into(),
+                selector: Some(BTreeMap::from([("cohort".into(), "a".into())])),
+                static_fallback: resources(111, 222, 3),
+            },
+            OwnedFlavor {
+                flavor_name: "flavor-b".into(),
+                selector: Some(BTreeMap::from([("cohort".into(), "b".into())])),
+                static_fallback: resources(444, 555, 6),
+            },
+        ];
+        let assigned = [
+            CapacityObjectObservation {
+                effective_labels: BTreeMap::from([("cohort".into(), "a".into())]),
+                vector: resources(1_000, 2_000, 3),
+            },
+            CapacityObjectObservation {
+                effective_labels: BTreeMap::from([("cohort".into(), "a".into())]),
+                vector: resources(4_000, 5_000, 6),
+            },
+            CapacityObjectObservation {
+                effective_labels: BTreeMap::from([("cohort".into(), "b".into())]),
+                vector: resources(7_000, 8_000, 9),
+            },
+            CapacityObjectObservation {
+                effective_labels: BTreeMap::from([("cohort".into(), "unowned".into())]),
+                vector: resources(99_000, 99_000, 99),
+            },
+        ];
+        let derived = derive_flavor_ownership(&owned, &assigned).unwrap();
+        assert_eq!(derived.targets[0].vector, resources(5_000, 7_000, 9));
+        assert_eq!(derived.targets[1].vector, resources(7_000, 8_000, 9));
+        assert_eq!(derived.assigned_aggregate, resources(12_000, 15_000, 18));
+        assert_eq!(
+            derived
+                .targets
+                .iter()
+                .try_fold(ResourceVector::ZERO, |sum, target| sum
+                    .checked_add(target.vector)),
+            Ok(derived.assigned_aggregate),
+            "exclusive flavor outputs must conserve every assigned component"
+        );
+
+        let overlapping = [
+            OwnedFlavor {
+                flavor_name: "flavor-a".into(),
+                selector: Some(BTreeMap::from([("tier".into(), "general".into())])),
+                static_fallback: owned[0].static_fallback,
+            },
+            OwnedFlavor {
+                flavor_name: "flavor-b".into(),
+                selector: Some(BTreeMap::from([("region".into(), "east".into())])),
+                static_fallback: owned[1].static_fallback,
+            },
+        ];
+        let ambiguous_object = [CapacityObjectObservation {
+            effective_labels: BTreeMap::from([
+                ("tier".into(), "general".into()),
+                ("region".into(), "east".into()),
+            ]),
+            vector: resources(12_000, 15_000, 18),
+        }];
+        assert_eq!(
+            derive_flavor_ownership(&overlapping, &ambiguous_object),
+            Err(ConservativeReason::FlavorOwnershipAmbiguous),
+            "ownership cannot use first-match, last-match, or duplicate accounting"
+        );
+
+        let queue = vector_queue(vec![flavor("flavor-a", 0, 0), flavor("flavor-b", 0, 1)]);
+        let FlavorOwnershipDecision::Fenced { reason, decision } =
+            flavor_ownership_patch_decision(&queue, "djinn-kueue", &overlapping, &ambiguous_object)
+        else {
+            panic!("ambiguous ownership must fence every owned flavor")
+        };
+        assert_eq!(reason, ConservativeReason::FlavorOwnershipAmbiguous);
+        let FlavorActuationDecision::Patch { patch } = decision else {
+            panic!("static fallback must be a fenced JSON patch")
+        };
+        assert_eq!(
+            patch[0],
+            json!({"op":"test", "path":"/metadata/resourceVersion", "value":"vector-rv"})
+        );
+        assert_eq!(patch.as_array().unwrap().len(), 7);
+        let mut live = json!({"metadata":{"resourceVersion":"vector-rv"},"spec":{"resourceGroups":[{"flavors":[
+            {"resources":[{"name":"memory","nominalQuota":"1"},{"name":"pods","nominalQuota":"1"},{"name":"cpu","nominalQuota":"1m"}]},
+            {"resources":[{"name":"memory","nominalQuota":"1"},{"name":"pods","nominalQuota":"1"},{"name":"cpu","nominalQuota":"1m"}]}
+        ]}]}});
+        apply_patch_to_live_queue(&mut live, &patch);
+        assert_eq!(
+            live,
+            json!({"metadata":{"resourceVersion":"vector-rv"},"spec":{"resourceGroups":[{"flavors":[
+                {"resources":[{"name":"memory","nominalQuota":"222"},{"name":"pods","nominalQuota":"3"},{"name":"cpu","nominalQuota":"111m"}]},
+                {"resources":[{"name":"memory","nominalQuota":"555"},{"name":"pods","nominalQuota":"6"},{"name":"cpu","nominalQuota":"444m"}]}
+            ]}]}}),
+            "each flavor restores its own static vector, never the shared aggregate"
+        );
+
+        let duplicate = [owned[0].clone(), owned[0].clone()];
+        assert_eq!(
+            derive_flavor_ownership(&duplicate, &assigned),
+            Err(ConservativeReason::DuplicateFlavorOwnership)
+        );
+        let missing = [OwnedFlavor {
+            selector: None,
+            ..owned[0].clone()
+        }];
+        assert_eq!(
+            derive_flavor_ownership(&missing, &assigned),
+            Err(ConservativeReason::MissingFlavorOwnership)
+        );
     }
 
     #[tokio::test(start_paused = true)]
