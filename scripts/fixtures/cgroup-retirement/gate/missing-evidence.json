@@ -1,0 +1,7 @@
+{
+  "environment_policy": "green",
+  "descendant_reaping": "green",
+  "sandbox_proof": "green",
+  "evidence_schema": "green",
+  "range_guard": "green"
+}
