@@ -215,6 +215,8 @@ jobs:
         run: node --test scripts/ci-cache-policy.test.mjs
       - name: Verify qa-smoke workflow contract
         run: node --test scripts/ci-qa-smoke-workflow.test.mjs
+      - name: Verify host PostgreSQL workflow contract
+        run: node --test scripts/ci-host-postgres-workflow.test.mjs
       - name: Verify release image validation contract
         run: node --test scripts/ci-release-image-validation.test.mjs
       - name: Verify shard failure summary contract
@@ -1027,7 +1029,7 @@ jobs:
     # and the djinn-k8s crate, and every path that can change either lands in
     # the router's `rustCore` lane or fails closed into `unknown`.
     if: needs.preflight.outputs.clippy == 'true' && github.event_name != 'push'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # The deploy contract builds one binary and shells out to helm; the Rust
     # proofs need a migrated Postgres template. 30 leaves margin for a cold
     # djinn-k8s chain without hiding a hang.
@@ -1051,17 +1053,11 @@ jobs:
       DJINN_CUTOVER_EXPECTED_PROOFS: "18"
       # The drain-fence proofs open template-cloned per-test databases here.
       DJINN_TEST_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5433/postgres
-    services:
-      postgres:
-        image: public.ecr.aws/docker/library/postgres:16
-        env:
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: djinn
-        ports:
-          - 5433:5432
-        options: --health-cmd="pg_isready -U postgres" --health-interval=5s --health-timeout=3s --health-retries=20
     steps:
       - uses: actions/checkout@v4
+      - name: Start PostgreSQL 16
+        working-directory: ${{ github.workspace }}
+        run: ./scripts/ci-start-postgres.sh
       # Pinned to the same v3.12.3 deploy-render-gate installs — two lanes
       # rendering the same chart on different helm majors is a contract that
       # means nothing.
@@ -1664,7 +1660,7 @@ jobs:
     needs:
       - preflight
     if: needs.preflight.outputs.serverTest == 'true' && github.event_name != 'push'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 40
     strategy:
       fail-fast: false
@@ -1708,17 +1704,11 @@ jobs:
     defaults:
       run:
         working-directory: server
-    services:
-      postgres:
-        image: public.ecr.aws/docker/library/postgres:16
-        env:
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: djinn
-        ports:
-          - 5433:5432
-        options: --health-cmd="pg_isready -U postgres" --health-interval=5s --health-timeout=3s --health-retries=20
     steps:
       - uses: actions/checkout@v4
+      - name: Start PostgreSQL 16
+        working-directory: ${{ github.workspace }}
+        run: ./scripts/ci-start-postgres.sh
       - name: Reclaim runner disk for server test artifacts (background)
         run: |
           # The all-targets test build can exhaust the hosted runner after the
@@ -1731,15 +1721,6 @@ jobs:
             touch "$RUNNER_TEMP/disk-reclaim.done"
           ' > "$RUNNER_TEMP/disk-reclaim.log" 2>&1 &
           echo "disk reclaim started"
-      - name: Install PostgreSQL client tools
-        run: |
-          # The x64 hosted runner images preinstall postgresql-client; the
-          # arm64 images do not, and without it pg_isready/psql are missing
-          # and the template-database wait loop below spins forever. Guarded
-          # so it is a no-op wherever the client already exists.
-          if ! command -v pg_isready >/dev/null 2>&1; then
-            sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends postgresql-client
-          fi
       - name: Start fail-fast watcher (background)
         env:
           GH_TOKEN: ${{ github.token }}
@@ -2070,10 +2051,17 @@ jobs:
           # djinn-provider::stream_event_consumer_audit. The script is
           # exercised by scripts/ci-shard-failure-summary.test.mjs against
           # captured nextest output from that very run.
-          node "$GITHUB_WORKSPACE/scripts/ci-shard-failure-summary.mjs" \
-            --shard "${{ matrix.shard }}" \
-            --log "$RUNNER_TEMP/nextest-run.log" \
-            --summary "$GITHUB_STEP_SUMMARY"
+          summary_script="$GITHUB_WORKSPACE/scripts/ci-shard-failure-summary.mjs"
+          if [[ -f "$summary_script" ]]; then
+            node "$summary_script" \
+              --shard "${{ matrix.shard }}" \
+              --log "$RUNNER_TEMP/nextest-run.log" \
+              --summary "$GITHUB_STEP_SUMMARY"
+          else
+            message="Server Test (${{ matrix.shard }}) failed before checkout; inspect the earliest failing setup step in this job"
+            echo "::error title=Server shard failed before checkout::$message"
+            printf '### Server shard failure\n\n%s\n' "$message" >> "$GITHUB_STEP_SUMMARY"
+          fi
       - name: Upload retained shard timing data
         if: always() && steps.shard.outputs.active == 'true'
         uses: actions/upload-artifact@v4
@@ -2210,24 +2198,18 @@ jobs:
     name: Server sqlx Freshness
     needs: preflight
     if: needs.preflight.outputs.sqlxFreshness == 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     defaults:
       run:
         working-directory: server
     env:
       DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5433/djinn
-    services:
-      postgres:
-        image: public.ecr.aws/docker/library/postgres:16
-        env:
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: djinn
-        ports:
-          - 5433:5432
-        options: --health-cmd="pg_isready -U postgres" --health-interval=5s --health-timeout=3s --health-retries=20
     steps:
       - uses: actions/checkout@v4
+      - name: Start PostgreSQL 16
+        working-directory: ${{ github.workspace }}
+        run: ./scripts/ci-start-postgres.sh
       - run: rustup toolchain install
         working-directory: server
       - uses: Swatinem/rust-cache@v2
@@ -2304,24 +2286,18 @@ jobs:
     name: Memory Eval Phase 1
     needs: preflight
     if: needs.preflight.outputs.memoryEval == 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     defaults:
       run:
         working-directory: server
     env:
       SQLX_OFFLINE: "true"
-    services:
-      postgres:
-        image: public.ecr.aws/docker/library/postgres:16
-        env:
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: djinn
-        ports:
-          - 5433:5432
-        options: --health-cmd="pg_isready -U postgres" --health-interval=5s --health-timeout=3s --health-retries=20
     steps:
       - uses: actions/checkout@v4
+      - name: Start PostgreSQL 16
+        working-directory: ${{ github.workspace }}
+        run: ./scripts/ci-start-postgres.sh
       - run: rustup toolchain install
         working-directory: server
       - uses: Swatinem/rust-cache@v2
@@ -2439,7 +2415,7 @@ jobs:
     name: qa-smoke
     needs: preflight
     if: needs.preflight.outputs.qaSmoke == 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     defaults:
       run:
@@ -2449,25 +2425,11 @@ jobs:
     env:
       DJINN_TEST_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5433/postgres
       DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5433/djinn_test_template
-    services:
-      postgres:
-        image: public.ecr.aws/docker/library/postgres:16
-        env:
-          POSTGRES_PASSWORD: postgres
-        ports:
-          - 5433:5432
-        options: --health-cmd="pg_isready -U postgres" --health-interval=5s --health-timeout=3s --health-retries=20
     steps:
       - uses: actions/checkout@v4
-      - name: Install PostgreSQL client tools
-        run: |
-          # The x64 hosted runner images preinstall postgresql-client; the
-          # arm64 images do not, and without it pg_isready/psql are missing
-          # and the template-database wait loop below spins forever. Guarded
-          # so it is a no-op wherever the client already exists.
-          if ! command -v pg_isready >/dev/null 2>&1; then
-            sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends postgresql-client
-          fi
+      - name: Start PostgreSQL 16
+        working-directory: ${{ github.workspace }}
+        run: ./scripts/ci-start-postgres.sh
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
         with:
