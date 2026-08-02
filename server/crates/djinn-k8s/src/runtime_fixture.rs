@@ -260,7 +260,7 @@ pub fn capacity_controller_cluster_with_pods(
                 } else if path == "/api/v1/nodes" && uri_parameters.contains("bad") {
                     serde_json::json!({"apiVersion":"v1","kind":"Status","status":"Failure","reason":"Invalid","code":422})
                 } else if path == "/api/v1/nodes" {
-                    serde_json::json!({"apiVersion":"v1","kind":"NodeList","metadata":{"resourceVersion":"1"},"items":[{"apiVersion":"v1","kind":"Node","metadata":{"name":"worker-1"},"status":{"allocatable":{"cpu":"12"}}}]})
+                    serde_json::json!({"apiVersion":"v1","kind":"NodeList","metadata":{"resourceVersion":"1"},"items":[{"apiVersion":"v1","kind":"Node","metadata":{"name":"worker-1","labels":{"kubernetes.io/hostname":"worker-1"}},"status":{"conditions":[{"type":"Ready","status":"True"}],"allocatable":{"cpu":"12","memory":"48Gi","pods":"110"}}}]})
                 } else if path == "/api/v1/pods" {
                     if matches!(pod_mode, CapacityPods::ReadFailure) {
                         serde_json::json!({"apiVersion":"v1","kind":"Status","status":"Failure","reason":"InternalError","code":500})
@@ -268,7 +268,7 @@ pub fn capacity_controller_cluster_with_pods(
                         let requests = if matches!(pod_mode, CapacityPods::Empty) {
                             Vec::new()
                         } else {
-                            [1000, 1000, 1000, 700, 500].into_iter().map(|cpu| serde_json::json!({"apiVersion":"v1","kind":"Pod","metadata":{"name":format!("protected-{cpu}"),"labels":{"djinn.io/capacity-reserved":"true"}},"spec":{"containers":[{"name":"main","resources":{"requests":{"cpu":format!("{cpu}m")}}}]}})).collect()
+                            [1000, 1000, 1000, 700, 500].into_iter().map(|cpu| serde_json::json!({"apiVersion":"v1","kind":"Pod","metadata":{"name":format!("protected-{cpu}"),"labels":{"djinn.io/capacity-reserved":"true"}},"spec":{"nodeName":"worker-1","containers":[{"name":"main","resources":{"requests":{"cpu":format!("{cpu}m"),"memory":"1Mi"}}}]}})).collect()
                         };
                         serde_json::json!({"apiVersion":"v1","kind":"PodList","metadata":{"resourceVersion":"1"},"items":requests})
                     }
