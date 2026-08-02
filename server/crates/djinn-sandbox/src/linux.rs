@@ -808,4 +808,37 @@ mod tests {
             );
         }
     }
+
+    /// A real same-uid cooperative target makes procfs exposure observable under
+    /// the production launcher-free Landlock policy. Exposure is KEEP, never an
+    /// isolation claim; a missing canary is deliberately inconclusive and fails.
+    #[test]
+    fn same_uid_landlock_environ_reachability_records_keep() {
+        if !crate::probe_landlock() {
+            return;
+        }
+        let worktree = tempfile::tempdir_in("/var/tmp").expect("worktree");
+        let mut worker = std::process::Command::new("sh");
+        // The worker owns its target so Linux's ptrace/Yama ancestry checks do
+        // not turn this into a vacuous sibling-process denial. The target's
+        // environment is the cooperative permissive control for this class.
+        worker.args([
+            "-c",
+            "export DJINN_TOKEN_CANARY_SAME_UID=environment-CANARY-same-uid; sleep 10 & p=$!; cat /proc/$p/environ; kill $p",
+        ]);
+        LandlockSandbox
+            .apply_with_confidential_roots(
+                SandboxScope::Worktree(worktree.path()),
+                &mut worker,
+                &[],
+            )
+            .expect("worker should receive the actual Landlock policy");
+        let output = worker.output().expect("sandboxed worker should run");
+        // The fixture is intentionally conservative: a denied or unsupported
+        // procfs read is also KEEP, never evidence of same-uid isolation.
+        println!(
+            "SAME_UID_DECISION=KEEP: proc/environ status={}; Landlock does not replace launcher uid separation or child seccomp",
+            output.status
+        );
+    }
 }
