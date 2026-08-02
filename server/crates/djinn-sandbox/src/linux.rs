@@ -896,8 +896,8 @@ finally:p.kill();p.wait()
             || ["home", "gitconfig", "ssh", "etc_gitconfig", "var_run_djinn"]
                 .iter()
                 .any(|key| stdout.contains(&format!("write_{key}=EXPOSED:WRITE-CANARY-{key}")));
-        println!(
-            "SAME_UID_DECISION=KEEP: observed_exposure={exposure}; Landlock does not replace launcher uid separation or child seccomp"
+        let mut report = format!(
+            "SAME_UID_DECISION=KEEP: observed_exposure={exposure}; Landlock does not replace launcher uid separation or child seccomp\n"
         );
         // The companion is a privileged, real UID-1001 child test.  Consume its
         // explicit per-syscall denial contract here rather than reducing it to a
@@ -917,8 +917,12 @@ finally:p.kill();p.wait()
                 brokered.contains(&format!("\"{brokered_probe}\"")),
                 "the UID-1001 brokered denial baseline no longer covers {same_uid}"
             );
-            println!("UID_1001_BROKERED_{same_uid}=DENY:{brokered_probe}");
+            report.push_str(&format!(
+                "UID_1001_BROKERED_{same_uid}=DENY:{brokered_probe}\n"
+            ));
         }
+        std::io::Write::write_all(&mut std::io::stdout().lock(), report.as_bytes())
+            .expect("write same-uid measurement report");
         assert!(
             output.status.success(),
             "same-uid probe failed: {stdout}; stderr={}",
