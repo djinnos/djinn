@@ -949,14 +949,26 @@ impl WarmDispatch {
         // Start the durable row only after all gates authorize the POST. The
         // revision is the single mirror-head read shared by the Job identity.
         let deadline_at = time::OffsetDateTime::now_utc()
-            .checked_add(time::Duration::seconds(self.config.warm_job_timeout_seconds))
+            .checked_add(time::Duration::seconds(
+                self.config.warm_job_timeout_seconds,
+            ))
             .and_then(|deadline| {
                 deadline
-                    .format(&time::format_description::well_known::Rfc3339)
+                    // The repository reads this PostgreSQL timestamp back at
+                    // millisecond precision. Render that persisted precision
+                    // here as well, so the worker receives the exact immutable
+                    // deadline stored on its attempt rather than a differently
+                    // formatted equivalent instant.
+                    .format(&time::macros::format_description!(
+                        "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:3]Z"
+                    ))
                     .ok()
             });
         let Some(deadline_at) = deadline_at else {
-            warn!(project_id, "K8sGraphWarmer: could not derive warm attempt deadline; skipping Job POST");
+            warn!(
+                project_id,
+                "K8sGraphWarmer: could not derive warm attempt deadline; skipping Job POST"
+            );
             self.release_in_flight(project_id).await;
             return;
         };
@@ -1132,13 +1144,15 @@ impl WarmDispatch {
                 sink.on_warm_succeeded(&project_id_owned).await;
             }
             let terminal = match outcome {
-                WarmTerminalOutcome::Failed => attempts
-                    .finish_attempt_if_running(
-                        &attempt_id,
-                        WarmGraphAttemptStatus::Failed,
-                        Some("warm Job watcher observed terminal failure"),
-                    )
-                    .await,
+                WarmTerminalOutcome::Failed => {
+                    attempts
+                        .finish_attempt_if_running(
+                            &attempt_id,
+                            WarmGraphAttemptStatus::Failed,
+                            Some("warm Job watcher observed terminal failure"),
+                        )
+                        .await
+                }
                 // Exact-revision reconciliation recovers publication which
                 // committed before the worker wrote its final lifecycle state.
                 WarmTerminalOutcome::Succeeded => attempts

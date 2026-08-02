@@ -394,8 +394,15 @@ fn durable_attempt_stamp_reaches_leased_and_unleased_pods_without_renaming_them(
 
     for job in [&mut plain, &mut leased] {
         let name = job.metadata.name.clone();
-        stamp_warm_attempt(job, "019fc384-c2d5-7460-aeed-5a168b112b03", "2026-08-02T17:30:00Z");
-        assert_eq!(job.metadata.name, name, "attempt data must not alter deterministic Job identity");
+        stamp_warm_attempt(
+            job,
+            "019fc384-c2d5-7460-aeed-5a168b112b03",
+            "2026-08-02T17:30:00Z",
+        );
+        assert_eq!(
+            job.metadata.name, name,
+            "attempt data must not alter deterministic Job identity"
+        );
         let env = job
             .spec
             .as_ref()
@@ -405,8 +412,11 @@ fn durable_attempt_stamp_reaches_leased_and_unleased_pods_without_renaming_them(
             .expect("warmer env");
         assert!(env.iter().any(|entry| entry.name == ENV_WARM_ATTEMPT_ID
             && entry.value.as_deref() == Some("019fc384-c2d5-7460-aeed-5a168b112b03")));
-        assert!(env.iter().any(|entry| entry.name == ENV_WARM_ATTEMPT_DEADLINE_AT
-            && entry.value.as_deref() == Some("2026-08-02T17:30:00Z")));
+        assert!(
+            env.iter()
+                .any(|entry| entry.name == ENV_WARM_ATTEMPT_DEADLINE_AT
+                    && entry.value.as_deref() == Some("2026-08-02T17:30:00Z"))
+        );
     }
 }
 
