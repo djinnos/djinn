@@ -582,6 +582,14 @@ mod tests {
                 vector_inputs(valid, valid, resources(0, 0, 0), resources(0, 1, 1)),
                 CapacityError::ZeroCost,
             ),
+            (
+                vector_inputs(valid, valid, resources(0, 0, 0), resources(1, 0, 1)),
+                CapacityError::ZeroCost,
+            ),
+            (
+                vector_inputs(valid, valid, resources(0, 0, 0), resources(1, 1, 0)),
+                CapacityError::ZeroCost,
+            ),
         ] {
             assert_eq!(
                 derive_resource_vector(input),
