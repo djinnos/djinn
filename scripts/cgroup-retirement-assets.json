@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "candidates": [
+    { "phase": "RETIRE_BASE", "paths": ["server/crates/djinn-cgroup-launcher/**", "server/crates/djinn-launcher-protocol/**"] },
+    { "phase": "RETIRE_BASE", "paths": ["server/crates/djinn-k8s/src/job.rs", "server/crates/djinn-k8s/tests/{launcher_child_runtime_handoff.rs,kueue_governor_conformance.rs}"] },
+    { "phase": "RETIRE_HEAD", "paths": ["server/crates/djinn-image-builder/**", "server/docker/djinn-agent-runtime.Dockerfile", "server/crates/djinn-image-controller/tests/protocol_catalog_and_preservation.rs"] },
+    { "phase": "RETIRE_HEAD", "paths": ["deploy/helm/djinn/templates/runtimeclass-cgroup-writable.yaml", "deploy/helm/djinn/{values.yaml,values.schema.json}", "deploy/node/k3s/**", "deploy/kueue/{README.md,zero-capture-gate.sh,tests/**}"] },
+    { "phase": "RETIRE_HEAD", "paths": [".github/workflows/{quality-gate.yml,release.yml}", "server/Cargo.toml", "server/Cargo.lock"] }
+  ],
+  "preserved": [
+    "scripts/check-resize-cutover-retention.sh",
+    "scripts/resize-cutover-retention-manifest.mjs",
+    "scripts/test-resize-cutover-retention.mjs",
+    "scripts/test-deploy-contracts.sh",
+    "deploy/preflight/{render-gate.sh,cutover-preflight.sh}",
+    "deploy/preflight/tests/{render-gate.sh,cutover-preflight.sh,task-run-resize-rollout.sh}",
+    "server/crates/djinn-k8s/src/bin/render-gate.rs",
+    "server/crates/djinn-k8s/src/cutover_preflight.rs",
+    "deploy/kueue/preflight.sh",
+    "server/crates/djinn-k8s/src/{launcher.rs,launcher_child_fs.rs}",
+    "deploy/helm/djinn/tests/{cgroup-writable-render.sh,volume-ownership-render.sh}",
+    "scripts/fixtures/{cgroup-retirement/**,resize-cutover-retention/**}"
+  ]
+}

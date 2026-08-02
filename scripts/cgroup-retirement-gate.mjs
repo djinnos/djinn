@@ -6,9 +6,16 @@ import { spawnSync } from 'node:child_process';
 
 const args = process.argv.slice(2);
 const fail = (message, code = 1) => { process.stderr.write(`REJECT cgroup-retirement gate: ${message}\n`); process.exit(code); };
-const usage = () => fail('usage: --prep BASE HEAD | --deploy|--release|--withdraw-node --candidate NAME --inputs FILE', 2);
+const usage = () => fail('usage: --prep BASE HEAD | --retire PHASE BASE HEAD | --deploy|--release|--withdraw-node --candidate NAME --inputs FILE', 2);
 const repo = resolve(process.env.CGROUP_RETIREMENT_GATE_ROOT || process.cwd());
 const scriptDir = dirname(new URL(import.meta.url).pathname);
+const inventoryPath = resolve(scriptDir, 'cgroup-retirement-assets.json');
+
+const expandBraces = (pattern) => {
+    const match = pattern.match(/\{([^{}]+)\}/);
+    return match ? match[1].split(',').flatMap((part) => expandBraces(`${pattern.slice(0, match.index)}${part}${pattern.slice(match.index + match[0].length)}`)) : [pattern];
+};
+const globRegex = (pattern) => new RegExp(`^${pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*\*/g, '___DS___').replace(/\*/g, '[^/]*').replace(/___DS___/g, '.*')}$`);
 
 // PREP is intentionally a narrow additive safety/proof phase.  Protected paths
 // are listed first so a future broad allowlist cannot silently admit retirement.
@@ -45,6 +52,33 @@ const prepAllowed = (path) =>
     /^scripts\/(?:check-cgroup-retirement-gate\.sh|cgroup-retirement-gate\.mjs|test-cgroup-retirement-gate\.sh|verify-cgroup-retirement-evidence\.(?:sh|mjs)|test-verify-cgroup-retirement-evidence\.sh|fixtures\/cgroup-retirement\/)/.test(path);
 
 const git = (gitArgs) => spawnSync('git', gitArgs, { cwd: repo, encoding: 'utf8' });
+const checkedInventory = () => {
+    if (!existsSync(inventoryPath)) fail('asset inventory is missing', 2);
+    let definition;
+    try { definition = JSON.parse(readFileSync(inventoryPath, 'utf8')); } catch (error) { fail(`asset inventory is invalid JSON (${error.message})`, 2); }
+    if (definition?.version !== 1 || !Array.isArray(definition.candidates) || !Array.isArray(definition.preserved)) fail('asset inventory has an invalid schema', 2);
+    const listed = git(['ls-files']);
+    if (listed.status !== 0) fail(`cannot list tracked inventory paths: ${listed.stderr.trim()}`, 2);
+    const tracked = listed.stdout.split('\n').filter(Boolean);
+    const classified = new Map();
+    const add = (kind, phase, pattern) => {
+        if (typeof pattern !== 'string') fail('asset inventory has a non-string path', 2);
+        for (const expanded of expandBraces(pattern)) {
+            const matches = tracked.filter((path) => globRegex(expanded).test(path));
+            if (matches.length === 0) fail(`asset inventory entry is stale or unmatched: ${expanded}`, 2);
+            for (const path of matches) {
+                if (classified.has(path)) fail(`asset inventory duplicate classification for ${path}`, 2);
+                classified.set(path, { kind, phase });
+            }
+        }
+    };
+    for (const candidate of definition.candidates) {
+        if (!candidate || !/^RETIRE_[A-Z0-9_]+$/.test(candidate.phase) || !Array.isArray(candidate.paths)) fail('asset inventory has an invalid candidate phase', 2);
+        candidate.paths.forEach((path) => add('candidate', candidate.phase, path));
+    }
+    definition.preserved.forEach((path) => add('preserved', null, path));
+    return classified;
+};
 const changedPaths = (base, head) => {
     const result = git(['diff', '--name-status', '-M', `${base}..${head}`]);
     if (result.status !== 0) fail(`cannot inspect range ${base}..${head}: ${result.stderr.trim()}`, 2);
@@ -309,14 +343,32 @@ const sandboxProofRemainsArmed = (head, changes) => {
 
 const runPrep = (base, head) => {
     if (!base || !head) usage();
+    const inventory = checkedInventory();
     const changes = changedPaths(base, head);
     if (changes.length === 0) fail('PREP range is empty');
     for (const { path, status } of changes) {
+        const asset = inventory.get(path);
+        if (asset?.kind === 'preserved') fail(`PREP range edits non-deletable preserved asset: ${path}`);
+        if (asset?.kind === 'candidate') fail(`PREP range edits retirement candidate assigned to ${asset.phase}: ${path}`);
         if (protectedPath(path, status)) fail(`PREP range touches protected launcher/render/RuntimeClass/node/broker/cgroup-kill/credential boundary: ${path}`);
         if (!prepAllowed(path)) fail(`PREP range contains out-of-phase change: ${path}`);
     }
     sandboxProofRemainsArmed(head, changes);
     process.stdout.write(`check-cgroup-retirement-gate: PREP OK (${changes.length} changed paths; launcher remains armed)\n`);
+};
+
+const runRetire = (phase, base, head) => {
+    if (!/^RETIRE_[A-Z0-9_]+$/.test(phase) || !base || !head) usage();
+    const inventory = checkedInventory();
+    const changes = changedPaths(base, head);
+    if (changes.length === 0) fail('RETIRE range is empty');
+    for (const { path } of changes) {
+        const asset = inventory.get(path);
+        if (!asset) fail(`RETIRE range changes unclassified asset: ${path}`);
+        if (asset.kind === 'preserved') fail(`RETIRE range edits non-deletable preserved asset: ${path}`);
+        if (asset.phase !== phase) fail(`RETIRE range changes ${path} assigned to ${asset.phase}, not ${phase}`);
+    }
+    process.stdout.write(`check-cgroup-retirement-gate: ${phase} OK (${changes.length} classified candidate paths)\n`);
 };
 
 const mandatory = ['environment_policy', 'descendant_reaping', 'sandbox_proof', 'evidence_schema', 'range_guard', 'cgroup_evidence'];
@@ -345,6 +397,7 @@ const runInterlock = (action, candidate, inputs) => {
 };
 
 if (args[0] === '--prep' && args.length === 3) runPrep(args[1], args[2]);
+else if (args[0] === '--retire' && args.length === 4) runRetire(args[1], args[2], args[3]);
 else if (['--deploy', '--release', '--withdraw-node'].includes(args[0])) {
     const candidateAt = args.indexOf('--candidate');
     const inputsAt = args.indexOf('--inputs');
