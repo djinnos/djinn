@@ -2077,7 +2077,7 @@ impl AppState {
                         .await
                         .map(|row| row.map(|r| r.mode))
                         .map_err(|_| ());
-                    let initially_armed = matches!(
+                    let launcher_required = matches!(
                         djinn_coordinator::build_lease::compile_bound_precondition(
                             Some(launcher),
                             authority
@@ -2095,7 +2095,7 @@ impl AppState {
                     let live_precondition_lease = self.inner.build_lease.clone();
                     let compile_bound_armed: Arc<dyn Fn() -> bool + Send + Sync> =
                         Arc::new(move || {
-                            initially_armed && live_precondition_lease.dispatch_enforcing()
+                            launcher_required && live_precondition_lease.dispatch_enforcing()
                         });
                     tokio::spawn(async move {
                         while snapshot_rx.changed().await.is_ok() {

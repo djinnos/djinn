@@ -13,7 +13,7 @@ pub enum BindingQuota {
 }
 
 impl BindingQuota {
-    fn same_resource(self, other: Self) -> bool {
+    pub(crate) fn same_resource(self, other: Self) -> bool {
         matches!(
             (self, other),
             (Self::Pods(_), Self::Pods(_)) | (Self::CpuMillicores(_), Self::CpuMillicores(_))
@@ -71,9 +71,14 @@ impl CapacityDamper {
         self.enforced
     }
 
-    pub fn reset_after_error(&mut self, fail_safe_k: i64) -> CapacityVector {
+    pub fn reset_after_error(&mut self, fail_safe_k: i64, now: Instant) -> CapacityVector {
         self.candidate = None;
         self.agreeing = 0;
+        // A read/relist failure ends the current trustworthy observation
+        // epoch.  Growth after recovery must earn a fresh dwell; retaining the
+        // original leadership instant would allow three quick samples to
+        // widen immediately after a long outage.
+        self.leader_since = now;
         self.enforced.compile_slots = self.enforced.compile_slots.min(fail_safe_k);
         self.enforced
     }
@@ -172,6 +177,27 @@ mod tests {
             ),
             high
         );
+
+        let mut alternating = CapacityDamper::new(BindingQuota::Pods(8), 4, t0);
+        for n in 0..8 {
+            let value = CapacityVector {
+                binding: BindingQuota::Pods(if n % 2 == 0 { 10 } else { 11 }),
+                compile_slots: if n % 2 == 0 { 5 } else { 6 },
+            };
+            alternating.observe(
+                value,
+                SampleKind::Periodic,
+                t0 + MINIMUM_GROWTH_DWELL + Duration::from_secs(30 * n),
+            );
+        }
+        assert_eq!(
+            alternating.enforced(),
+            CapacityVector {
+                binding: BindingQuota::Pods(8),
+                compile_slots: 4,
+            },
+            "alternating observations never form a growth edge"
+        );
     }
 
     #[test]
@@ -190,7 +216,20 @@ mod tests {
             );
         }
         assert_eq!(d.enforced().compile_slots, 1);
-        assert_eq!(d.reset_after_error(1).compile_slots, 1);
+        let reset = t0 + MINIMUM_GROWTH_DWELL;
+        assert_eq!(d.reset_after_error(1, reset).compile_slots, 1);
+        for n in 0..3 {
+            assert_eq!(
+                d.observe(
+                    high,
+                    SampleKind::Periodic,
+                    reset + Duration::from_secs(30 * n),
+                )
+                .compile_slots,
+                1,
+                "agreement cannot bypass the fresh post-error dwell"
+            );
+        }
         let low = CapacityVector {
             binding: BindingQuota::CpuMillicores(6_000),
             compile_slots: 0,
@@ -216,7 +255,11 @@ mod tests {
             t0 + MINIMUM_GROWTH_DWELL + Duration::from_secs(30),
         );
         assert_eq!(d.enforced().compile_slots, 2);
-        assert_eq!(d.reset_after_error(2).compile_slots, 2);
+        assert_eq!(
+            d.reset_after_error(2, t0 + MINIMUM_GROWTH_DWELL)
+                .compile_slots,
+            2
+        );
         let contraction = CapacityVector {
             binding: BindingQuota::Pods(8),
             compile_slots: 1,

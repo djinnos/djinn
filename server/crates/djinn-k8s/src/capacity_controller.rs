@@ -267,7 +267,7 @@ pub async fn run_capacity_controller(
         let Some((queue, capacity, raw)) = observed else {
             let current = damper
                 .as_mut()
-                .map(|d| d.reset_after_error(config.fail_safe.compile_slots))
+                .map(|d| d.reset_after_error(config.fail_safe.compile_slots, Instant::now()))
                 .unwrap_or(CapacityVector {
                     binding: BindingQuota::Pods(config.fail_safe.pods),
                     compile_slots: config.fail_safe.compile_slots,
@@ -391,7 +391,35 @@ pub fn patch_decision(
     let damped_value = match damped.binding {
         BindingQuota::Pods(v) | BindingQuota::CpuMillicores(v) => v,
     };
-    if !compile_bound_armed && raw_value > fail_safe.pods && damped_value > fail_safe.pods {
+    if !raw_binding.same_resource(damped.binding) {
+        return ActuationDecision::NoMutation {
+            compile_slots: fail_safe.compile_slots,
+            reason: ConservativeReason::AmbiguousBindingResource,
+        };
+    }
+    // The compile-bound precondition gates widening relative to the live
+    // binding quota.  Comparing CPU millicores with fail_safe.pods mixed units
+    // after the oru9 surface migration and could authorize an unsafe raise.
+    let live_value = queue
+        .resources
+        .iter()
+        .find(|resource| {
+            resource.name
+                == match raw_binding {
+                    BindingQuota::Pods(_) => "pods",
+                    BindingQuota::CpuMillicores(_) => "cpu",
+                }
+        })
+        .and_then(|resource| {
+            resource
+                .nominal_quota
+                .strip_suffix('m')
+                .unwrap_or(&resource.nominal_quota)
+                .parse::<i64>()
+                .ok()
+        })
+        .unwrap_or(raw_value);
+    if !compile_bound_armed && damped_value > live_value {
         return ActuationDecision::NoMutation {
             compile_slots: fail_safe.compile_slots,
             reason: ConservativeReason::CompileBoundDisarmed,
@@ -526,6 +554,24 @@ mod tests {
             binding_for(&q, "djinn-kueue", derived()),
             Err(ConservativeReason::QueueNameMismatch)
         );
+        let mut q = queue("pods");
+        q.owner = None;
+        assert_eq!(
+            binding_for(&q, "djinn-kueue", derived()),
+            Err(ConservativeReason::QueueOwnerMismatch)
+        );
+        let mut q = queue("pods");
+        q.binding_resource = None;
+        assert_eq!(
+            binding_for(&q, "djinn-kueue", derived()),
+            Err(ConservativeReason::UnknownBindingResource)
+        );
+        let mut q = queue("pods");
+        q.resources.retain(|resource| resource.name != "pods");
+        assert_eq!(
+            binding_for(&q, "djinn-kueue", derived()),
+            Err(ConservativeReason::AmbiguousBindingResource)
+        );
     }
 
     #[test]
@@ -546,6 +592,14 @@ mod tests {
         let mut missing = node("a", true);
         missing.allocatable_cpu = None;
         assert!(select_node(&[missing]).is_err());
+
+        let first = node("a", true);
+        let second = node("b", true);
+        assert_eq!(
+            select_node(&[first.clone(), second.clone()]),
+            select_node(&[second, first]),
+            "ambiguous selection is independent of API list order"
+        );
     }
 
     #[test]
@@ -580,6 +634,40 @@ mod tests {
             safe(),
         );
         assert!(matches!(no_op, ActuationDecision::Noop { .. }));
+
+        let mut high_live = queue("pods");
+        high_live.resources[0].nominal_quota = "10".into();
+        let shrink = patch_decision(
+            &high_live,
+            "djinn-kueue",
+            outcome(),
+            CapacityVector {
+                binding: BindingQuota::Pods(3),
+                compile_slots: 2,
+            },
+            false,
+            safe(),
+        );
+        assert!(matches!(shrink, ActuationDecision::Patch { .. }));
+
+        let wrong_type = patch_decision(
+            &queue("cpu"),
+            "djinn-kueue",
+            outcome(),
+            CapacityVector {
+                binding: BindingQuota::Pods(10),
+                compile_slots: 2,
+            },
+            true,
+            safe(),
+        );
+        assert_eq!(
+            wrong_type,
+            ActuationDecision::NoMutation {
+                compile_slots: 2,
+                reason: ConservativeReason::AmbiguousBindingResource,
+            }
+        );
     }
 
     #[test]
