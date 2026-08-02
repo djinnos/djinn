@@ -3945,3 +3945,146 @@ mod dispatch_identity_rpc_persistence_tests {
         let _ = server.join.await;
     }
 }
+
+/// Production-shaped worker-to-host session-creation regression coverage.
+///
+/// The worker-facing `RpcServices` client must preserve the dispatch generation
+/// through the Unix RPC handler into `DirectServices`, where the real guarded
+/// repository write rejects stale admitted work without touching durable run or
+/// session state.
+#[cfg(test)]
+mod stale_pod_session_rpc_persistence_tests {
+    use super::DirectServices;
+    use djinn_db::repositories::task_run::CreateTaskRunParams;
+    use djinn_db::{SessionRepository, TaskRepository, TaskRunRepository};
+    use djinn_supervisor::services::SerializableCreateSessionParams;
+    use djinn_supervisor::{RpcServices, SupervisorServices, serve_on_unix_socket};
+    use std::sync::Arc;
+    use tokio_util::sync::CancellationToken;
+
+    #[tokio::test]
+    async fn stale_pod_session_rpc_rejects_without_durable_side_effects() {
+        let db = crate::test_helpers::create_test_db();
+        let project = crate::test_helpers::create_test_project(&db).await;
+        let epic = crate::test_helpers::create_test_epic(&db, &project.id).await;
+        let task = crate::test_helpers::create_test_task(&db, &project.id, &epic.id).await;
+        let context =
+            crate::test_helpers::agent_context_from_db(db.clone(), CancellationToken::new());
+        let host = Arc::new(DirectServices::new(
+            context.clone(),
+            CancellationToken::new(),
+        ));
+
+        // Model a dispatched pod: capture its admitted generation, create the
+        // one pre-session `starting` run, then advance the task fence before
+        // the worker sends its session request.
+        let tasks = TaskRepository::new(db.clone(), context.event_bus.clone());
+        let stale_generation = tasks
+            .allocate_execution_generation(&task.id)
+            .await
+            .expect("allocate dispatch generation");
+        let run_id = uuid::Uuid::now_v7().to_string();
+        let runs = TaskRunRepository::new(db.clone());
+        runs.create(CreateTaskRunParams {
+            id: &run_id,
+            project_id: &project.id,
+            task_id: &task.id,
+            trigger_type: "new_task",
+            status: Some("starting"),
+            workspace_path: None,
+            mirror_ref: None,
+            dispatch_group_id: None,
+        })
+        .await
+        .expect("create pre-session task run");
+        let before_runs = runs
+            .list_for_task(&task.id)
+            .await
+            .expect("read pre-request runs");
+        assert_eq!(before_runs.len(), 1, "fixture has exactly one task run");
+        let before_run = before_runs.into_iter().next().expect("pre-request run");
+        assert_eq!(before_run.id, run_id);
+        assert_eq!(before_run.status, "starting");
+        assert_eq!(
+            SessionRepository::new(db.clone(), context.event_bus.clone())
+                .list_for_task(&task.id)
+                .await
+                .expect("read pre-request sessions")
+                .len(),
+            0,
+            "fixture has no task session before stale request"
+        );
+        assert_eq!(
+            tasks
+                .fence_execution_generation_for_kill(&task.id)
+                .await
+                .expect("advance generation fence"),
+            stale_generation + 1
+        );
+
+        // Keep this socket under /var/tmp: Unix socket paths are limited to
+        // roughly 108 bytes and Cargo's test directory can exceed that limit.
+        let dir = tempfile::Builder::new()
+            .prefix("dj-stale-rpc-")
+            .tempdir_in("/var/tmp")
+            .expect("short unix socket directory");
+        let socket = dir.path().join("supervisor.sock");
+        let server = serve_on_unix_socket(&socket, host)
+            .await
+            .expect("serve host");
+        let cancel = CancellationToken::new();
+        let (worker_rpc, background) = RpcServices::connect_unix(&socket, cancel.clone())
+            .await
+            .expect("connect worker rpc");
+
+        let error = worker_rpc
+            .create_session(SerializableCreateSessionParams {
+                project_id: project.id.clone(),
+                task_id: Some(task.id.clone()),
+                execution_generation: Some(stale_generation),
+                model: "test/model".into(),
+                agent_type: "worker".into(),
+                metadata_json: None,
+                task_run_id: Some(run_id.clone()),
+                cost_basis_hint: None,
+                billing_source: None,
+            })
+            .await
+            .expect_err("stale worker generation must be rejected by the host");
+        assert_eq!(
+            error, "dispatch_generation_revoked",
+            "worker receives the stable typed revoked-generation code"
+        );
+
+        // Reread durable state after the real RPC request. The failed guarded
+        // insert must not create a session, transition the pre-session row, or
+        // create any additional task run.
+        let sessions = SessionRepository::new(db.clone(), context.event_bus.clone());
+        assert!(
+            sessions
+                .list_for_task(&task.id)
+                .await
+                .expect("reread task sessions")
+                .is_empty(),
+            "stale request inserted no task session"
+        );
+        let after_runs = runs
+            .list_for_task(&task.id)
+            .await
+            .expect("reread task runs");
+        assert_eq!(
+            after_runs.len(),
+            1,
+            "stale request created no additional run"
+        );
+        assert_eq!(after_runs[0].id, before_run.id);
+        assert_eq!(after_runs[0].status, before_run.status);
+
+        drop(worker_rpc);
+        cancel.cancel();
+        let _ = background.reader.await;
+        let _ = background.writer.await;
+        server.cancel();
+        let _ = server.join.await;
+    }
+}
