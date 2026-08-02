@@ -584,16 +584,20 @@ python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print("renderers:",
 # `keys_json` is the derived renderer request set; it defaults to the real one
 # and is overridden only by the non-vacuity section at the bottom.
 assert_topology() {
-    local manifest=$1 expected_quota=$2 expected_managed=$3 keys_json=${4:-$RENDERER_KEYS} expected_binding=${5:-pods}
-    python3 - "$manifest" "$expected_quota" "$expected_managed" "$keys_json" "$expected_binding" <<'PY'
+    local manifest=$1 expected_cpu=$2 expected_memory=$3 expected_pods=$4 expected_managed=$5 keys_json=${6:-$RENDERER_KEYS}
+    python3 - "$manifest" "$expected_cpu" "$expected_memory" "$expected_pods" "$expected_managed" "$keys_json" <<'PY'
 import json
 import sys
 import yaml
 
-manifest, expected_quota, expected_managed, keys_json, expected_binding = sys.argv[1:]
+manifest, expected_cpu, expected_memory, expected_pods, expected_managed, keys_json = sys.argv[1:]
+task_vector = {"cpu": expected_cpu, "memory": expected_memory, "pods": int(expected_pods)}
+singleton_borrowing = {
+    "kueue-topology-test-djinn-warm": {"cpu": "2", "memory": "2Gi", "pods": 1},
+    "kueue-topology-test-djinn-scip": {"cpu": "1", "memory": "4Gi", "pods": 1},
+}
 derived = json.load(open(keys_json, encoding="utf-8"))
 docs = [doc for doc in yaml.safe_load_all(open(manifest, encoding="utf-8")) if doc]
-
 def named(kind):
     return [doc for doc in docs if doc.get("kind") == kind]
 
@@ -605,6 +609,13 @@ assert flavor.get("spec") == {}, "ResourceFlavor must be empty"
 queues = named("ClusterQueue")
 assert len(queues) == 3, f"expected task-run, warm and scip ClusterQueues, got {len(queues)}"
 queue_by_name = {queue["metadata"]["name"]: queue for queue in queues}
+for queue_name, candidate in queue_by_name.items():
+    for entry in candidate["spec"]["resourceGroups"][0]["flavors"][0].get("resources", []):
+        for field in ("nominalQuota", "borrowingLimit"):
+            assert entry.get(field) not in ("100Ti", "10k", 10000, "10000"), (
+                f"{queue_name} {entry['name']} {field} contains a legacy quota sentinel: "
+                f"{entry.get(field)!r}"
+            )
 assert set(queue_by_name) == {
     "kueue-topology-test-djinn-kueue",
     "kueue-topology-test-djinn-warm",
@@ -664,24 +675,20 @@ assert not missing, (
 flavor_quotas = group.get("flavors")
 assert isinstance(flavor_quotas, list) and len(flavor_quotas) == 1, "exactly one flavor quota is required"
 assert flavor_quotas[0].get("name") == flavor["metadata"]["name"], "quota must use the empty flavor"
-resources = {entry["name"]: entry["nominalQuota"] for entry in flavor_quotas[0].get("resources", [])}
-# A covered resource with no nominalQuota is covered at zero, which is worse
-# than not covering it: Kueue assigns the flavor and then admits nothing.
+resources = {entry["name"]: entry for entry in flavor_quotas[0].get("resources", [])}
 assert set(resources) == set(covered), (
     f"every covered resource needs a quota and vice versa; covered={sorted(covered)} "
     f"quota={sorted(resources)}"
 )
-assert resources[expected_binding] == int(expected_quota), (
-    f"{expected_binding} quota must render buildPods verbatim"
-)
-# Non-binding by construction: 10k cores and 100Ti are ~1000x any cluster Djinn
-# runs on. If either ever became a real bound, `pods` would stop being the thing
-# that limits concurrency and the whole topology would mean something else.
-if expected_binding == "pods":
-    assert resources["cpu"] == "10k", f"cpu quota must stay non-binding, got {resources['cpu']}"
-else:
-    assert resources["pods"] == 10000, f"pods quota must stay non-binding, got {resources['pods']}"
-assert resources["memory"] == "100Ti", f"memory quota must stay non-binding, got {resources['memory']}"
+for dimension, declared in task_vector.items():
+    actual = resources[dimension].get("nominalQuota")
+    assert actual == declared, (
+        f"{queue['metadata']['name']} {dimension} nominalQuota must equal declared "
+        f"task vector {declared!r}, got {actual!r}"
+    )
+    assert "borrowingLimit" not in resources[dimension], (
+        f"{queue['metadata']['name']} {dimension} must own nominal capacity, not borrow it"
+    )
 
 for background_name in ["kueue-topology-test-djinn-warm", "kueue-topology-test-djinn-scip"]:
     background = queue_by_name[background_name]
@@ -696,14 +703,30 @@ for background_name in ["kueue-topology-test-djinn-warm", "kueue-topology-test-d
     bg_entries = bg_groups[0]["flavors"][0]["resources"]
     bg_resources = {entry["name"]: entry for entry in bg_entries}
     assert set(bg_resources) == set(covered)
-    assert bg_resources[expected_binding].get("nominalQuota") == 0
-    assert bg_resources[expected_binding].get("borrowingLimit") == 1
-    nonbinding = "cpu" if expected_binding == "pods" else "pods"
-    expected_nonbinding = "10k" if nonbinding == "cpu" else 10000
-    assert bg_resources[nonbinding].get("nominalQuota") == expected_nonbinding
-    assert bg_resources["memory"].get("nominalQuota") == "100Ti"
-    assert "borrowingLimit" not in bg_resources[nonbinding]
-    assert "borrowingLimit" not in bg_resources["memory"]
+    for dimension, expected_borrowing in singleton_borrowing[background_name].items():
+        actual_nominal = bg_resources[dimension].get("nominalQuota")
+        actual_borrowing = bg_resources[dimension].get("borrowingLimit")
+        assert actual_nominal == 0, (
+            f"{background_name} {dimension} nominalQuota must be zero, got {actual_nominal!r}"
+        )
+        assert actual_borrowing == expected_borrowing, (
+            f"{background_name} {dimension} borrowingLimit must match its singleton Job "
+            f"request {expected_borrowing!r}, got {actual_borrowing!r}"
+        )
+
+for dimension, declared in task_vector.items():
+    cohort_nominal = sum(
+        next(
+            entry["nominalQuota"]
+            for entry in candidate["spec"]["resourceGroups"][0]["flavors"][0]["resources"]
+            if entry["name"] == dimension
+        )
+        for candidate in queues
+    )
+    assert cohort_nominal == declared, (
+        f"cohort nominal sum for {dimension} must equal declared task vector {declared!r}; "
+        f"got {cohort_nominal!r} across {[candidate['metadata']['name'] for candidate in queues]}"
+    )
 
 assert "withinClusterQueue" not in spec.get("preemption", {})
 assert "stopPolicy" not in spec
@@ -795,12 +818,12 @@ PY
 echo "=== zero-capture-representable state: enabled=true, armed=false ==="
 # This is the configuration deploy/kueue/zero-capture-gate.sh exists to verify:
 # the whole topology present, the Namespace still unlabelled, nothing captured.
-render_enabled "$WORK/valid.yaml" --set kueue.buildPods=7
-assert_topology "$WORK/valid.yaml" 7 no
+render_enabled "$WORK/valid.yaml" --set kueue.buildCpu=15 --set kueue.buildMemory=60Gi --set kueue.buildPods=7
+assert_topology "$WORK/valid.yaml" 15 60Gi 7 no
 
 echo "=== armed state: enabled=true, armed=true ==="
-render_enabled "$WORK/armed.yaml" --set kueue.buildPods=7 --set kueue.armed=true
-assert_topology "$WORK/armed.yaml" 7 yes
+render_enabled "$WORK/armed.yaml" --set kueue.buildCpu=15 --set kueue.buildMemory=60Gi --set kueue.buildPods=7 --set kueue.armed=true
+assert_topology "$WORK/armed.yaml" 15 60Gi 7 yes
 
 # ---------------------------------------------------------------------------
 # THE COVERAGE CHECK MUST FAIL IN BOTH DIRECTIONS, INDEPENDENTLY.
@@ -810,10 +833,10 @@ assert_topology "$WORK/armed.yaml" 7 yes
 # require the guard to fail NAMING the resource that drifted.
 # ---------------------------------------------------------------------------
 expect_topology_rejected() {
-    local label=$1 manifest=$2 expected_pods=$3 expected_managed=$4 keys_json=$5 must_name=$6
+    local label=$1 manifest=$2 expected_cpu=$3 expected_memory=$4 expected_pods=$5 expected_managed=$6 keys_json=$7 must_name=$8
     local out="$WORK/nonvacuity-$label.out"
     set +e
-    assert_topology "$manifest" "$expected_pods" "$expected_managed" "$keys_json" >"$out" 2>&1
+    assert_topology "$manifest" "$expected_cpu" "$expected_memory" "$expected_pods" "$expected_managed" "$keys_json" >"$out" 2>&1
     local status=$?
     set -e
     if [ "$status" -eq 0 ]; then
@@ -833,7 +856,7 @@ echo "=== a renderer that requests an uncovered resource FAILS the guard ==="
 # becomes a fact about the chart.
 DRIFT_PROBE="djinn.io/uncovered-drift-probe"
 derive_renderer_request_keys "$WORK/renderer-keys-drifted.json" "$DRIFT_PROBE"
-expect_topology_rejected renderer-drift "$WORK/valid.yaml" 7 no \
+expect_topology_rejected renderer-drift "$WORK/valid.yaml" 15 60Gi 7 no \
     "$WORK/renderer-keys-drifted.json" "$DRIFT_PROBE"
 
 echo "=== a ClusterQueue that stops covering a requested resource FAILS the guard ==="
@@ -861,7 +884,7 @@ with open(destination, "w", encoding="utf-8") as output:
     yaml.safe_dump_all(docs, output)
 sys.stdout.write(victim)
 PY
-expect_topology_rejected coverage-dropped "$WORK/coverage-dropped.yaml" 7 no \
+expect_topology_rejected coverage-dropped "$WORK/coverage-dropped.yaml" 15 60Gi 7 no \
     "$RENDERER_KEYS" "$(cat "$WORK/dropped-resource.txt")"
 
 echo "=== chart defaults render the topology AND arm it ==="
@@ -876,7 +899,7 @@ echo "=== chart defaults render the topology AND arm it ==="
 # serve kueue.x-k8s.io/v1beta1, naming deploy/helm/djinn-prereqs. See
 # tests/prereq-guard-render.sh.
 render "$WORK/default.yaml"
-assert_topology "$WORK/default.yaml" 3 yes
+assert_topology "$WORK/default.yaml" 12 48Gi 3 yes
 
 echo "=== explicitly disabled omits the topology ==="
 render "$WORK/disabled.yaml" --set kueue.enabled=false --set kueue.armed=false --set kueue.buildPods=7
@@ -1013,7 +1036,7 @@ render "$WORK/disarmed-runtimeclass.yaml" \
     --set-string imagePipeline.controller.launcherAuthorityProtocol=leaf-v1 \
     --set cgroupWritable.taskRuns.enabled=false \
     --set kueue.armed=false
-assert_topology "$WORK/disarmed-runtimeclass.yaml" 3 no
+assert_topology "$WORK/disarmed-runtimeclass.yaml" 12 48Gi 3 no
 
 # ---------------------------------------------------------------------------
 # Arming requires a namespace the chart can actually label.
@@ -1110,13 +1133,13 @@ echo "=== the acknowledgement does NOT arm anything on its own ==="
 # It is an acknowledgement, not a second arming switch.
 render "$WORK/ack-without-armed.yaml" \
     --set kueue.enabled=true --set kueue.armed=false --set kueue.namespaceLabelledExternally=true
-assert_topology "$WORK/ack-without-armed.yaml" 3 no
+assert_topology "$WORK/ack-without-armed.yaml" 12 48Gi 3 no
 
 echo "=== the acknowledgement is inert when the chart owns the namespace ==="
 # namespace.create=true is unaffected by the new value in either direction.
 render "$WORK/ack-with-owned-ns.yaml" \
     --set kueue.enabled=true --set kueue.armed=true --set kueue.namespaceLabelledExternally=true
-assert_topology "$WORK/ack-with-owned-ns.yaml" 3 yes
+assert_topology "$WORK/ack-with-owned-ns.yaml" 12 48Gi 3 yes
 
 echo "=== the preflight's namespace RBAC is granted ==="
 # The render-time acknowledgement is an unverified claim; djinn-server re-checks

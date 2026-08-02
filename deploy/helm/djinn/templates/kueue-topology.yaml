@@ -28,7 +28,6 @@ state `deploy/kueue/zero-capture-gate.sh` verifies. `armed` implies `enabled`;
 */ -}}
 {{- if .Values.kueue.enabled -}}
 {{- $kueue := .Values.kueue -}}
-{{- $bindingResource := $kueue.bindingResource | default "pods" -}}
 {{- if not (kindIs "float64" $kueue.buildPods) -}}
 {{- if not (kindIs "int64" $kueue.buildPods) -}}
 {{- fail "kueue.enabled is true but kueue.buildPods is not a number. It is the pods nominalQuota for the ClusterQueue; set a positive integer, or set kueue.enabled=false if the Kueue prerequisite (deploy/helm/djinn-prereqs) is not installed." -}}
@@ -38,6 +37,12 @@ state `deploy/kueue/zero-capture-gate.sh` verifies. `armed` implies `enabled`;
 {{- $taskQueueName := printf "%s-kueue" (include "djinn.fullname" .) | trunc 63 | trimSuffix "-" -}}
 {{- $warmQueueName := printf "%s-warm" (include "djinn.fullname" .) | trunc 63 | trimSuffix "-" -}}
 {{- $scipQueueName := printf "%s-scip" (include "djinn.fullname" .) | trunc 63 | trimSuffix "-" -}}
+{{- /* Warm request values are projected by deployment-server.yaml. SCIP uses
+      its singleton Job defaults in djinn_k8s::config. */ -}}
+{{- $warmCpuRequest := .Values.resources.warm.requests.cpu -}}
+{{- $warmMemoryRequest := .Values.resources.warm.requests.memory -}}
+{{- $scipCpuRequest := "1" -}}
+{{- $scipMemoryRequest := "4Gi" -}}
 apiVersion: kueue.x-k8s.io/v1beta1
 kind: ResourceFlavor
 metadata:
@@ -93,58 +98,23 @@ spec:
   # cannot fit blocks every smaller Workload behind it; BestEffortFIFO lets the
   # rest through. Fairness across kinds is not a goal here — throughput is.
   queueingStrategy: BestEffortFIFO
-  # WHAT IS BOUNDED, AND WHY THREE RESOURCES ARE COVERED TO BOUND ONE.
+  # WHAT IS BOUNDED.
   #
-  # `pods` is the ONLY intended bound: N concurrent build Pods, whatever they
-  # ask for. `cpu` and `memory` appear here for a mechanical reason and are
-  # deliberately set to quotas no real cluster can reach.
-  #
-  # MEASURED on a live armed kind cluster (fbiy-B1, 2026-07-30) with only
-  # `pods` covered, a Job straight out of `build_task_run_job` was NEVER
-  # admitted:
-  #
-  #     QuotaReserved=False reason=Pending
-  #     "couldn't assign flavors to pod set main: resource cpu unavailable in
-  #      ClusterQueue"
-  #
-  # Kueue computes a Workload's request across EVERY resource its PodSet asks
-  # for and refuses to assign a flavor when any of them is outside the
-  # ClusterQueue's resourceGroups. Every task-run, warm and SCIP Pod requests
-  # cpu and memory (`KubernetesConfig::cpu_request` / `memory_request` and the
-  # per-kind equivalents), so a `pods`-only ClusterQueue admits nothing at all —
-  # it captures every build Job, suspends it, and never unsuspends one. Adding
-  # the two covered resources admitted the same Job within seconds on the same
-  # cluster.
-  #
-  # This is why a synthetic Job with no `resources:` block appeared to work
-  # while every real one did not, and why nothing but a live controller could
-  # have told the two apart.
-  #
-  # The quotas below are the "covered but unbounded" idiom: 10k cores and 100Ti
-  # are ~1000x any cluster Djinn will run on, so neither can ever be the binding
-  # constraint and `pods` stays the sole admission bound. They are NOT a
-  # capacity statement and must not be tuned as one — if a real CPU bound is
-  # ever wanted, that is a design change with its own task, not an edit to these
-  # numbers.
+  # The declared finite vector is this cohort's complete nominal capacity.
+  # Background singleton queues own zero and borrow their Pod requests.
+  # Kueue computes a Workload's request across every resource its PodSet asks
+  # for, so all three request dimensions need one named flavor.
   resourceGroups:
     - coveredResources: ["pods", "cpu", "memory"]
       flavors:
         - name: {{ printf "%s-kueue" (include "djinn.fullname" .) | trunc 63 | trimSuffix "-" }}
           resources:
             - name: pods
-              {{- if eq $bindingResource "pods" }}
               nominalQuota: {{ $kueue.buildPods }}
-              {{- else }}
-              nominalQuota: 10000
-              {{- end }}
             - name: cpu
-              {{- if eq $bindingResource "cpu" }}
-              nominalQuota: {{ $kueue.buildPods }}
-              {{- else }}
-              nominalQuota: 10k
-              {{- end }}
+              nominalQuota: {{ $kueue.buildCpu }}
             - name: memory
-              nominalQuota: 100Ti
+              nominalQuota: {{ $kueue.buildMemory }}
 ---
 apiVersion: kueue.x-k8s.io/v1beta1
 kind: LocalQueue
@@ -173,21 +143,14 @@ spec:
         - name: {{ printf "%s-kueue" (include "djinn.fullname" .) | trunc 63 | trimSuffix "-" }}
           resources:
             - name: pods
-              {{- if eq $bindingResource "pods" }}
               nominalQuota: 0
               borrowingLimit: 1
-              {{- else }}
-              nominalQuota: 10000
-              {{- end }}
             - name: cpu
-              {{- if eq $bindingResource "cpu" }}
               nominalQuota: 0
-              borrowingLimit: 1
-              {{- else }}
-              nominalQuota: 10k
-              {{- end }}
+              borrowingLimit: {{ $warmCpuRequest }}
             - name: memory
-              nominalQuota: 100Ti
+              nominalQuota: 0
+              borrowingLimit: {{ $warmMemoryRequest }}
 ---
 apiVersion: kueue.x-k8s.io/v1beta1
 kind: LocalQueue
@@ -235,21 +198,14 @@ spec:
         - name: {{ printf "%s-kueue" (include "djinn.fullname" .) | trunc 63 | trimSuffix "-" }}
           resources:
             - name: pods
-              {{- if eq $bindingResource "pods" }}
               nominalQuota: 0
               borrowingLimit: 1
-              {{- else }}
-              nominalQuota: 10000
-              {{- end }}
             - name: cpu
-              {{- if eq $bindingResource "cpu" }}
               nominalQuota: 0
-              borrowingLimit: 1
-              {{- else }}
-              nominalQuota: 10k
-              {{- end }}
+              borrowingLimit: {{ $scipCpuRequest }}
             - name: memory
-              nominalQuota: 100Ti
+              nominalQuota: 0
+              borrowingLimit: {{ $scipMemoryRequest }}
 ---
 apiVersion: kueue.x-k8s.io/v1beta1
 kind: LocalQueue
