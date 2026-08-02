@@ -42,6 +42,7 @@ use djinn_agent::lsp::LspManager;
 use djinn_agent::roles::RoleRegistry;
 use djinn_agent::supervisor::{
     SupervisorError, SupervisorFlow, TaskRunOutcome, TaskRunSpec, TaskRunSupervisor,
+    pre_session_create_test_support::{PreSessionCreateGate, install},
     services_for_agent_context, services_for_agent_context_with_provider_override,
 };
 use djinn_core::events::EventBus;
@@ -678,7 +679,19 @@ async fn supervisor_spike_runs_to_close_with_stubbed_provider() {
     let telemetry = EventCaptureLayer::default();
     let subscriber = tracing_subscriber::registry().with(telemetry.clone());
     let _subscriber_guard = tracing::subscriber::set_default(subscriber);
-    let report = match supervisor.run(spec).await {
+    // Drive the production-shaped supervisor lifecycle into the seam. At this
+    // point the task-run has been admitted and the stage reported SESSION_CREATE;
+    // only the guarded session-service insert remains.
+    let gate = PreSessionCreateGate::new();
+    let _gate_installation = install(gate.clone());
+    let lifecycle = tokio::spawn(async move { supervisor.run(spec).await });
+    gate.wait_until_reached().await;
+    assert!(
+        !lifecycle.is_finished(),
+        "accepted supervisor lifecycle must remain paused before session creation"
+    );
+    gate.release();
+    let report = match lifecycle.await.expect("supervisor lifecycle join") {
         Ok(r) => r,
         Err(e) => panic!("supervisor run failed: {e:?}"),
     };
