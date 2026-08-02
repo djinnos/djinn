@@ -2250,9 +2250,16 @@ mod tests {
                 "incomplete node-sum restores static capacity"
             );
             let patch: Value = serde_json::from_str(&mutations[0].body).unwrap();
-            assert_eq!(patch[0]["path"], "/metadata/resourceVersion");
-            assert_eq!(patch[1]["value"], "12000m");
-            assert_eq!(patch[3]["value"], "3");
+            assert_eq!(
+                patch,
+                json!([
+                    {"op":"test","path":"/metadata/resourceVersion","value":"42"},
+                    {"op":"replace","path":"/spec/resourceGroups/0/flavors/0/resources/1/nominalQuota","value":"12000m"},
+                    {"op":"replace","path":"/spec/resourceGroups/0/flavors/0/resources/2/nominalQuota","value":"51539607552"}
+                ])
+            );
+            // The fixture already declares the fail-safe Pod quota of three, so
+            // the fenced fallback correctly omits a redundant Pods replacement.
             task.abort();
         }
     }
