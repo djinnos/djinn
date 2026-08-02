@@ -840,11 +840,11 @@ PY
 echo "=== zero-capture-representable state: enabled=true, armed=false ==="
 # This is the configuration deploy/kueue/zero-capture-gate.sh exists to verify:
 # the whole topology present, the Namespace still unlabelled, nothing captured.
-render_enabled "$WORK/valid.yaml" --set kueue.buildCpu=15 --set kueue.buildMemory=60Gi --set kueue.buildPods=7
+render_enabled "$WORK/valid.yaml" --set-string kueue.buildCpu=15 --set kueue.buildMemory=60Gi --set kueue.buildPods=7
 assert_topology "$WORK/valid.yaml" 15 60Gi 7 no
 
 echo "=== armed state: enabled=true, armed=true ==="
-render_enabled "$WORK/armed.yaml" --set kueue.buildCpu=15 --set kueue.buildMemory=60Gi --set kueue.buildPods=7 --set kueue.armed=true
+render_enabled "$WORK/armed.yaml" --set-string kueue.buildCpu=15 --set kueue.buildMemory=60Gi --set kueue.buildPods=7 --set kueue.armed=true
 assert_topology "$WORK/armed.yaml" 15 60Gi 7 yes
 
 # ---------------------------------------------------------------------------
