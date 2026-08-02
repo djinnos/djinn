@@ -441,33 +441,6 @@ impl LlmProvider for ScriptedProvider {
     }
 }
 
-/// Assert a task_runs row exists for `task_id` and its status matches one of
-/// the allowed values.  Returns the run id.
-async fn assert_task_run_with_status(
-    task_runs: &TaskRunRepository,
-    task_id: &str,
-    allowed_statuses: &[&str],
-) -> String {
-    let runs = task_runs
-        .list_for_task(task_id)
-        .await
-        .expect("list task_runs");
-    assert_eq!(
-        runs.len(),
-        1,
-        "expected exactly one task_run row for task {task_id}, got {}",
-        runs.len()
-    );
-    let run = &runs[0];
-    assert!(
-        allowed_statuses.contains(&run.status.as_str()),
-        "task_run.status = {} (expected one of {:?})",
-        run.status,
-        allowed_statuses
-    );
-    run.id.clone()
-}
-
 // ──────────────────────────────────────────────────────────────────────────────
 // Full-fidelity e2e test: Spike flow runs through the supervisor, stubbed LLM
 // emits a `submit_work` finalize, supervisor reaches TaskRunOutcome::Closed,
@@ -611,6 +584,26 @@ async fn supervisor_rejects_fenced_generation_after_pre_session_pause() {
         !lifecycle.is_finished(),
         "accepted supervisor lifecycle must remain paused before session creation"
     );
+    // Snapshot the exact row established before the guarded session creation.
+    // The post-fence assertion intentionally compares this identity as well as
+    // the status, so a delete-and-replace with another `starting` row fails.
+    let pre_fence_runs = task_runs
+        .list_for_task(&task.id)
+        .await
+        .expect("list pre-fence task_runs");
+    assert_eq!(
+        pre_fence_runs.len(),
+        1,
+        "expected exactly one pre-fence task_run row for task {}, got {}",
+        task.id,
+        pre_fence_runs.len()
+    );
+    let pre_fence_run_id = pre_fence_runs[0].id.clone();
+    let pre_fence_run_status = pre_fence_runs[0].status.clone();
+    assert_eq!(
+        pre_fence_run_status, "starting",
+        "pre-fence task_run status must remain starting before session creation"
+    );
     // The accepted lifecycle has reported SESSION_CREATE but has not attempted
     // the guarded insert. Fence its generation before explicitly resuming it.
     assert_eq!(
@@ -642,7 +635,25 @@ async fn supervisor_rejects_fenced_generation_after_pre_session_pause() {
         sessions.is_empty(),
         "fenced lifecycle must not insert a non-terminal session"
     );
-    assert_task_run_with_status(task_runs.as_ref(), &task.id, &["starting"]).await;
+    let post_fence_runs = task_runs
+        .list_for_task(&task.id)
+        .await
+        .expect("list post-fence task_runs");
+    assert_eq!(
+        post_fence_runs.len(),
+        1,
+        "expected exactly one post-fence task_run row for task {}, got {}",
+        task.id,
+        post_fence_runs.len()
+    );
+    assert_eq!(
+        post_fence_runs[0].id, pre_fence_run_id,
+        "fenced lifecycle must retain the exact pre-session task_run row"
+    );
+    assert_eq!(
+        post_fence_runs[0].status, pre_fence_run_status,
+        "fenced lifecycle must retain the pre-session task_run status"
+    );
 
     // ── (c) no worktrees anywhere under the test-controlled roots ────────────
     assert_no_worktrees(source_dir.path());

@@ -1057,6 +1057,10 @@ impl SlotPool {
         self.dispatch(task_id, project_path, model_id).await
     }
     #[cfg(test)]
+    pub(super) async fn test_handle_message(&mut self, message: PoolMessage) {
+        self.handle_message(message).await;
+    }
+    #[cfg(test)]
     pub(super) async fn test_terminate_session(&mut self, task_id: &str) -> Result<(), PoolError> {
         self.terminate_session(task_id).await
     }
