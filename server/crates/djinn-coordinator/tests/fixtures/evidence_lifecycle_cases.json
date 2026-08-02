@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "cases": [
+    {"name":"resolved","structured_completion":"resolved","terminal_success":true,"resume_refinement":true},
+    {"name":"partial","structured_completion":"partial","terminal_success":true,"resume_refinement":true},
+    {"name":"unresolved","structured_completion":"unresolved","terminal_success":true,"resume_refinement":true},
+    {"name":"malformed","structured_completion":"malformed","terminal_success":false,"resume_refinement":false},
+    {"name":"missing","structured_completion":"missing","terminal_success":false,"resume_refinement":false},
+    {"name":"task_failure","structured_completion":null,"terminal_success":false,"resume_refinement":false}
+  ],
+  "idempotency": ["repeated_delivery", "restart_after_persistence", "already_recorded"]
+}
