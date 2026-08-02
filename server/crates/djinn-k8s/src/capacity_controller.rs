@@ -847,4 +847,41 @@ mod tests {
         assert!(recorder.mutations().is_empty());
         controller.abort();
     }
+
+    #[tokio::test(start_paused = true)]
+    async fn quota_controller_failsafe_protected_pod_failure_empty_and_malformed_selector() {
+        use crate::runtime_fixture::{CapacityPods, capacity_controller_cluster_with_pods};
+        for (pod_mode, selector_key) in [
+            (CapacityPods::ReadFailure, "kubernetes.io/hostname"),
+            (CapacityPods::Empty, "kubernetes.io/hostname"),
+            (CapacityPods::Complete, "bad selector key"),
+        ] {
+            let (client, recorder) =
+                capacity_controller_cluster_with_pods("default", "pods", pod_mode);
+            let config = CapacityControllerConfig {
+                queue_name: "djinn-kueue".into(),
+                node_selector_key: selector_key.into(),
+                node_selector_value: "worker-1".into(),
+                idle_cost: CpuMillicores::new(750).unwrap(),
+                compile_cost: CpuMillicores::new(2_800).unwrap(),
+                fail_safe: safe(),
+                expected_protected_pods: 5,
+            };
+            let (tx, mut rx) = watch::channel(CapacityVector {
+                binding: BindingQuota::Pods(99),
+                compile_slots: 99,
+            });
+            let task = tokio::spawn(run_capacity_controller(
+                client,
+                config,
+                Arc::new(|| true),
+                tx,
+            ));
+            tokio::task::yield_now().await;
+            rx.changed().await.unwrap();
+            assert_eq!(rx.borrow_and_update().compile_slots, 2);
+            assert!(recorder.mutations().is_empty());
+            task.abort();
+        }
+    }
 }
