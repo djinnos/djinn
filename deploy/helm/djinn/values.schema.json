@@ -48,19 +48,21 @@
     "kueue": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["enabled", "buildPods", "bindingResource", "armed", "namespaceLabelledExternally", "capacity"],
+      "required": ["enabled", "buildCpu", "buildMemory", "buildPods", "armed", "namespaceLabelledExternally", "capacity"],
       "properties": {
         "enabled": { "type": "boolean" },
+        "buildCpu": { "$ref": "#/definitions/quantity" },
+        "buildMemory": { "$ref": "#/definitions/quantity" },
         "buildPods": { "type": "integer", "minimum": 1 },
-        "bindingResource": { "type": "string", "enum": ["pods", "cpu"] },
         "armed": { "type": "boolean" },
         "namespaceLabelledExternally": { "type": "boolean" },
         "capacity": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["enabled", "queueName", "nodeSelector", "idleCpu", "compileCpu", "failSafePods", "failSafeCompileSlots"],
+          "required": ["enabled", "source", "queueName", "nodeSelector", "headroom", "staticFallback", "nodePool"],
           "properties": {
             "enabled": { "type": "boolean" },
+            "source": { "type": "string", "enum": ["node-sum", "nodepool-limits", "static"] },
             "queueName": { "type": "string" },
             "nodeSelector": {
               "type": "object",
@@ -68,10 +70,9 @@
               "required": ["key", "value"],
               "properties": { "key": { "type": "string" }, "value": { "type": "string" } }
             },
-            "idleCpu": { "type": "string", "pattern": "^[1-9][0-9]*m$" },
-            "compileCpu": { "type": "string", "pattern": "^[1-9][0-9]*m$" },
-            "failSafePods": { "type": "integer", "minimum": 1 },
-            "failSafeCompileSlots": { "type": "integer", "minimum": 1 }
+            "headroom": {"type":"object","additionalProperties":false,"required":["cpu","memory","pods"],"properties":{"cpu":{"$ref":"#/definitions/quantity"},"memory":{"$ref":"#/definitions/quantity"},"pods":{"type":"integer","minimum":0}}},
+            "staticFallback": {"type":"object","additionalProperties":false,"required":["cpu","memory","pods"],"properties":{"cpu":{"$ref":"#/definitions/quantity"},"memory":{"$ref":"#/definitions/quantity"},"pods":{"type":"integer","minimum":1}}},
+            "nodePool": {"type":"object","additionalProperties":false,"required":["dedicated","name"],"properties":{"dedicated":{"type":"boolean"},"name":{"type":"string"}}}
           }
         }
       }
@@ -182,9 +183,53 @@
       }
     }
   },
+  "definitions": {
+    "quantity": {
+      "type": "string",
+      "pattern": "^(?:[0-9]+(?:\\.[0-9]+)?|\\.[0-9]+)(?:[eE][+-]?[0-9]+|[numkKMGTPE]|(?:Ki|Mi|Gi|Ti|Pi|Ei))?$"
+    }
+  },
   "required": ["kueue"],
   "allOf": [
     {"if":{"properties":{"monitoring":{"properties":{"enabled":{"const":true}},"required":["enabled"]}}},"then":{"properties":{"monitoring":{"properties":{"alertmanager":{"properties":{"webhookSecret":{"properties":{"name":{"minLength":1}},"required":["name","key"]}},"required":["webhookSecret"]}},"required":["alertmanager"]}}}},
+    {
+      "if": {
+        "properties": {
+          "kueue": {
+            "properties": {
+              "capacity": {
+                "properties": { "source": { "const": "nodepool-limits" } },
+                "required": ["source"]
+              }
+            },
+            "required": ["capacity"]
+          }
+        },
+        "required": ["kueue"]
+      },
+      "then": {
+        "properties": {
+          "kueue": {
+            "properties": {
+              "capacity": {
+                "required": ["staticFallback", "nodePool"],
+                "properties": {
+                  "staticFallback": { "required": ["cpu", "memory", "pods"] },
+                  "nodePool": {
+                    "required": ["dedicated", "name"],
+                    "properties": {
+                      "dedicated": { "const": true },
+                      "name": { "minLength": 1 }
+                    }
+                  }
+                }
+              }
+            },
+            "required": ["capacity"]
+          }
+        }
+      }
+    },
     {
       "if": {
         "properties": {
