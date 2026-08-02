@@ -259,6 +259,23 @@ pub enum NotReady {
         /// Which status field is still absent.
         field: &'static str,
     },
+    /// The Pod's `spec.initContainers` names the launcher but the kubelet has
+    /// not written `status.initContainerStatuses` yet.
+    ///
+    /// Distinct from [`Self::LauncherNotStarted`] — there the status *entry*
+    /// exists and its fields are blank; here the array has no entry at all — and
+    /// emphatically distinct from
+    /// [`RefusalReason::LauncherNotNameable`], which is the permanent verdict
+    /// this variant exists to stop being conflated with. Two or more entries is
+    /// still that refusal.
+    #[error("launcher status is not populated yet: {detail}")]
+    LauncherStatusNotPopulated {
+        /// The Pod whose status is still empty. Carried so an expired budget can
+        /// UID-fence a delete instead of leaving it running ungoverned.
+        pod_uid: String,
+        /// Rendered observation error.
+        detail: String,
+    },
     /// The PATCH was accepted but the fresh init-container status does not
     /// agree yet. Backoff and the 30s confirmation deadline belong to `0ppk`.
     #[error("birth downsize not confirmed yet: {0}")]
@@ -287,12 +304,33 @@ impl NotReady {
     /// unavailability variants mean the observation did not happen at all. For
     /// those the caller must ask the Job whether it is queued — an apiserver
     /// that did not answer is *not* proof of a Kueue queue.
+    ///
+    /// [`Self::LauncherStatusNotPopulated`] belongs to the first group and its
+    /// membership is load-bearing: that is the variant a Pod sits in for the
+    /// seconds before the kubelet writes its init-container statuses, and it is
+    /// the birth budget — not an unbounded retry — that must bound the wait.
     #[must_use]
     pub const fn observed_a_pod(&self) -> bool {
         matches!(
             self,
-            Self::PodIncomplete(_) | Self::LauncherNotStarted { .. } | Self::BirthUnconfirmed(_)
+            Self::PodIncomplete(_)
+                | Self::LauncherNotStarted { .. }
+                | Self::LauncherStatusNotPopulated { .. }
+                | Self::BirthUnconfirmed(_)
         )
+    }
+
+    /// The Pod this outcome is waiting on, when it knows which one.
+    ///
+    /// Feeds [`TaskRunResizeBootstrap::abandon`]: a Pod whose launcher never
+    /// became observable still has to be destroyed when the budget runs out, and
+    /// the observation that failed is the only thing that ever knew its UID.
+    #[must_use]
+    pub fn fenceable_pod_uid(&self) -> Option<&str> {
+        match self {
+            Self::LauncherStatusNotPopulated { pod_uid, .. } => Some(pod_uid.as_str()),
+            _ => None,
+        }
     }
 }
 
@@ -650,6 +688,17 @@ impl TaskRunResizeBootstrap {
             Err(LauncherObservationError::Api(error)) => {
                 return BootstrapOutcome::NotReady(NotReady::KubernetesUnavailable(error));
             }
+            // The kubelet has not written `status.initContainerStatuses` yet.
+            // This is a WAIT, and it is bounded by the birth budget rather than
+            // by this arm — see `NotReady::observed_a_pod`. Refusing here is the
+            // 2026-08-02 defect: it left Pods running at their full rendered
+            // ceiling with no permit governing them and nothing that retried.
+            Err(ref error @ LauncherObservationError::StatusNotPopulated { ref pod_uid, .. }) => {
+                return BootstrapOutcome::NotReady(NotReady::LauncherStatusNotPopulated {
+                    pod_uid: pod_uid.clone(),
+                    detail: error.to_string(),
+                });
+            }
             Err(error @ LauncherObservationError::Ambiguous(_)) => {
                 // No Pod UID is available here by construction — the launcher
                 // could not be named, so there is nothing to fence a delete to.
@@ -917,8 +966,19 @@ impl TaskRunResizeBootstrap {
     /// option, because an unfenced delete can destroy a *replacement* Pod that
     /// some other actor legitimately owns.
     pub async fn abandon(&self, permit: &PermitBinding, reason: &str) -> PodDisposition {
-        let observed = match self.surface.observe_launcher(&permit.task_run_id).await {
-            Ok(Some(observed)) => observed,
+        // A failed observation is not automatically an unfenceable one. The
+        // budget most often expires on a Pod whose launcher was never observable
+        // — that is the whole failure mode this path exists for — and such a Pod
+        // is exactly the one that must not survive: nothing downstream will ever
+        // clamp it, so leaving it alive leaves a task-run Pod holding its full
+        // rendered ceiling forever. `fenceable_pod` recovers the UID the failed
+        // observation read but could not use.
+        let pod_uid = match self.surface.observe_launcher(&permit.task_run_id).await {
+            Ok(Some(observed)) => observed.pod_uid,
+            Err(ref error) if error.fenceable_pod().is_some() => {
+                let (pod_uid, _) = error.fenceable_pod().expect("checked by the guard");
+                pod_uid.to_owned()
+            }
             Ok(None) | Err(_) => {
                 warn!(
                     task_run_id = %permit.task_run_id,
@@ -930,11 +990,11 @@ impl TaskRunResizeBootstrap {
         };
         let deleted = self
             .surface
-            .uid_fenced_delete(&permit.task_run_id, &observed.pod_uid)
+            .uid_fenced_delete(&permit.task_run_id, &pod_uid)
             .await;
         warn!(
             task_run_id = %permit.task_run_id,
-            pod_uid = %observed.pod_uid,
+            pod_uid = %pod_uid,
             reason,
             delete_failed = deleted.is_err(),
             "task_run_resize_bootstrap: abandoning dispatch and UID-fenced deleting the Pod"

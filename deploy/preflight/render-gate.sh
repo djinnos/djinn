@@ -22,10 +22,26 @@
 #
 # WHAT IT IS NOT
 # --------------
-# It is not a cluster check. It answers "would the server refuse this render at
-# dispatch", not "do the nodes satisfy the runtime prerequisites" — node
-# labels, the containerd handler, and cgroup delegation are the subject of
-# `deploy/node/k3s/djinn-cgroup-writable-conformance.sh`.
+# It is not a cluster check, and it structurally cannot become one: it drives
+# `helm template`, where Helm's `lookup` returns nothing and
+# `.Capabilities.APIVersions` is a stub. It answers "would the server refuse
+# this render at dispatch", not "do the nodes satisfy the runtime
+# prerequisites".
+#
+# The cluster half is covered where it can actually run:
+#
+#   deploy/helm/djinn/templates/prereq-guard.yaml
+#       On a real `helm install`/`helm upgrade` — the only place the cluster is
+#       visible — refuses the release when no node carries
+#       `djinn.io/cgroup-writable=true` or when `kueue.x-k8s.io/v1beta1` is not
+#       served, naming the prerequisite and how to install it. Inert here, by
+#       design; see tests/prereq-guard-render.sh.
+#   deploy/node/k3s/djinn-cgroup-writable-conformance.sh
+#       The node itself: containerd handler, cgroup delegation, and the
+#       `djinn.io/cgroup-writable` marker it applies only after the node passes.
+#
+# Now that the chart's stock values are fully armed, all three matter on a fresh
+# install and none substitutes for another.
 #
 # USAGE
 #   deploy/preflight/render-gate.sh <chart-dir> [helm template args...]

@@ -158,7 +158,7 @@ echo "=== full-chart render carries neither removed env var ==="
 helm template build-admission-test "$CHART_DIR" --is-upgrade \
     --set buildAdmission.mode=enforce \
     --set server.replicas=3 \
-    --set kueue.enabled=false \
+    --set kueue.enabled=false --set kueue.armed=false \
     > "$TMPDIR_RENDER/full.yaml"
 assert_no_removed_env "$TMPDIR_RENDER/full.yaml" "full chart"
 

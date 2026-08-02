@@ -174,6 +174,27 @@ pub const DEFAULT_ROW_BUDGET: Duration = Duration::from_secs(45);
 /// handler that owns it is still inside its own wait.
 pub const DROP_TRANSIT_GRACE: Duration = Duration::from_secs(DROP_GATE_BUDGET.as_secs() * 2);
 
+/// How long a permit may rest at `acquired` or `job_created` before this module
+/// is allowed to conclude that no dispatch will ever advance it.
+///
+/// Must exceed the dispatch path's own birth window, or the reaper would retire
+/// a permit out from under a bootstrap that is still legitimately waiting for
+/// the kubelet. That window is
+/// [`crate::task_run_resize_bootstrap::QUEUE_ADMISSION_BUDGET_DEFAULT`] (Kueue
+/// queue time) plus
+/// [`crate::task_run_resize_bootstrap::BIRTH_ADMISSION_BUDGET_DEFAULT`] (the
+/// launcher's own clock), so the grace is derived from both rather than written
+/// as a number — a longer queue budget must widen this automatically.
+///
+/// The margin on top is deliberate: being late to reap a dead row costs one
+/// row's worth of capacity accounting, while being early costs a live task run
+/// its permit.
+pub const PRE_BIRTH_STRAND_GRACE: Duration = Duration::from_secs(
+    crate::task_run_resize_bootstrap::QUEUE_ADMISSION_BUDGET_DEFAULT.as_secs()
+        + crate::task_run_resize_bootstrap::BIRTH_ADMISSION_BUDGET_DEFAULT.as_secs()
+        + 300,
+);
+
 /// Environment variable naming the reconciler's per-tick mode.
 pub const MODE_ENV: &str = "DJINN_RESIZE_RECONCILE";
 
@@ -331,6 +352,13 @@ pub struct ResizeReconcilePass {
     pub unsettled: usize,
     /// `true` when the durable scan itself failed.
     pub scan_failed: bool,
+    /// Rows `list_pre_birth_stranded` returned.
+    pub pre_birth_scanned: usize,
+    /// Pre-birth permits this pass released, because no dispatch will ever
+    /// advance them and nothing else scans that state.
+    pub pre_birth_reaped: usize,
+    /// `true` when the pre-birth scan itself failed.
+    pub pre_birth_scan_failed: bool,
 }
 
 // ── The reconciler ─────────────────────────────────────────────────────────
@@ -496,7 +524,113 @@ impl TaskRunResizeReconciler {
                 pass.leases_released += 1;
             }
         }
+        self.reap_pre_birth(&mut pass, mode).await;
         pass
+    }
+
+    /// Release permits that never reached the birth capture and never will.
+    ///
+    /// # Why this is a second scan and not a widened first one
+    ///
+    /// The rows above are resumed: they own a Pod, a captured ceiling and an
+    /// unreleased `build_leases` row, so acting on one means driving a drop. A
+    /// pre-birth row owns none of that — `pod_uid IS NULL` is in the durable
+    /// predicate — so there is nothing to drop and the only correct action is to
+    /// let the permit go. Running them through `resume` would ask the drop
+    /// bridge to PATCH a Pod the row cannot name.
+    ///
+    /// # What bounds it
+    ///
+    /// Two independent facts, both worker-independent, and both required:
+    ///
+    /// 1. The row has not moved for [`PRE_BIRTH_STRAND_GRACE`], which is wider
+    ///    than the whole dispatch birth window. A bootstrap still inside its
+    ///    budget is not visible to this scan at all.
+    /// 2. The owning task run has ended. A run that is still live may be between
+    ///    dispatch attempts, and its permit is the dispatch path's to hold.
+    ///
+    /// Requiring both is what stops this from becoming the "reaper that killed
+    /// live builds": neither an old row with a live owner nor a young row with a
+    /// dead one is touched.
+    async fn reap_pre_birth(&self, pass: &mut ResizeReconcilePass, mode: ResizeReconcileMode) {
+        let rows = match self
+            .permits
+            .list_pre_birth_stranded(PRE_BIRTH_STRAND_GRACE)
+            .await
+        {
+            Ok(rows) => rows,
+            Err(error) => {
+                warn!(
+                    %error,
+                    "task_run_resize_reconcile: the pre-birth permit scan failed; \
+                     stranded permits keep their capacity until the next tick"
+                );
+                pass.pre_birth_scan_failed = true;
+                return;
+            }
+        };
+        pass.pre_birth_scanned = rows.len();
+
+        for row in rows {
+            match self.owner_is_gone(&row.task_run_id).await {
+                Ok(true) => {}
+                // A live owner keeps its permit, however old the row is.
+                Ok(false) => {
+                    pass.skipped
+                        .push((row.task_run_id.clone(), SkipReason::OwnerLive));
+                    continue;
+                }
+                Err(()) => {
+                    pass.skipped
+                        .push((row.task_run_id.clone(), SkipReason::Unreadable));
+                    continue;
+                }
+            }
+            if !mode.acts() {
+                pass.would_resume += 1;
+                info!(
+                    task_run_id = %row.task_run_id,
+                    state = ?row.state,
+                    mode = mode.as_str(),
+                    state_age_secs = row.state_age().as_secs(),
+                    "task_run_resize_reconcile: would release this stranded pre-birth permit"
+                );
+                continue;
+            }
+            match self
+                .permits
+                .release(
+                    &row.task_run_id,
+                    &row.permit_id,
+                    row.fencing_token,
+                    "pre_birth_stranded",
+                )
+                .await
+            {
+                Ok(ReleaseBuildPodPermitResult::Released(_)) => {
+                    pass.pre_birth_reaped += 1;
+                    warn!(
+                        task_run_id = %row.task_run_id,
+                        state = ?row.state,
+                        state_age_secs = row.state_age().as_secs(),
+                        "task_run_resize_reconcile: released a permit that never reached the \
+                         resize birth capture; its dispatch is gone and no Pod was ever bound"
+                    );
+                }
+                Ok(ReleaseBuildPodPermitResult::AlreadyReleased(_)) => {}
+                Ok(ReleaseBuildPodPermitResult::Rejected) => {
+                    pass.skipped
+                        .push((row.task_run_id.clone(), SkipReason::ClaimLost));
+                }
+                Err(error) => {
+                    warn!(
+                        task_run_id = %row.task_run_id,
+                        %error,
+                        "task_run_resize_reconcile: the pre-birth permit could not be released"
+                    );
+                }
+            }
+        }
     }
 
     /// Retire the `build_pod_permits` row when nothing else ever will.

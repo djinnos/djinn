@@ -109,6 +109,17 @@ pub(crate) const NONTERMINAL_RESIZE_STATES: [BuildPodPermitState; 6] = [
     BuildPodPermitState::Quarantined,
 ];
 
+/// The two states a permit occupies *before* the resize birth capture.
+///
+/// Deliberately the complement of [`NONTERMINAL_RESIZE_STATES`] within the
+/// unreleased set: together the two lists cover every state a live permit can be
+/// in, so a row cannot fall between the reconciler's two scans and be reaped by
+/// neither.
+pub(crate) const PRE_BIRTH_STATES: [BuildPodPermitState; 2] = [
+    BuildPodPermitState::Acquired,
+    BuildPodPermitState::JobCreated,
+];
+
 /// Render states as a SQL literal list body, e.g. `'lifted', 'quarantined'`.
 ///
 /// The spellings come from [`BuildPodPermitState::as_str`], which migration
@@ -679,6 +690,45 @@ impl BuildPodPermitRepository {
              WHERE state IN ({nonterminal}) \
              ORDER BY acquired_at, task_run_id"
         ))
+        .fetch_all(self.db.pool())
+        .await?
+        .into_iter()
+        .map(TryInto::try_into)
+        .collect()
+    }
+
+    /// List permits that never reached the resize lifecycle and have not moved
+    /// for `older_than`.
+    ///
+    /// # The gap this closes
+    ///
+    /// [`Self::list_nonterminal_resize`] scans the six states from migration 164
+    /// — every one of which is *past* the birth capture. A permit that is
+    /// refused, or whose dispatch dies, before `capture_resize_identity` ever
+    /// succeeds never enters that set: it rests at `acquired` or `job_created`
+    /// with `pod_uid IS NULL` and is invisible to the reconciler forever. On
+    /// 2026-08-02 production held 70 such rows, the oldest ~10 hours, against
+    /// three live task-run Jobs, and nothing in the system could see them.
+    ///
+    /// `pod_uid IS NULL` is part of the predicate rather than an assumption: it
+    /// is what makes a returned row *provably* pre-capture, so a caller can
+    /// retire it without racing the resize lifecycle for a Pod it never owned.
+    ///
+    /// Ordered oldest-first so a bounded pass drains the worst backlog first.
+    pub async fn list_pre_birth_stranded(
+        &self,
+        older_than: Duration,
+    ) -> DbResult<Vec<BuildPodPermitRow>> {
+        self.db.ensure_initialized().await?;
+        let pre_birth = sql_state_list(&PRE_BIRTH_STATES);
+        sqlx::query_as::<_, DbRow>(&format!(
+            "SELECT {ROW_COLUMNS} FROM build_pod_permits \
+             WHERE state IN ({pre_birth}) \
+               AND pod_uid IS NULL \
+               AND state_changed_at <= now() - make_interval(secs => $1) \
+             ORDER BY state_changed_at, task_run_id"
+        ))
+        .bind(older_than.as_secs_f64())
         .fetch_all(self.db.pool())
         .await?
         .into_iter()

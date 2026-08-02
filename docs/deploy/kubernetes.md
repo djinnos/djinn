@@ -34,9 +34,21 @@ bits. Nothing in the chart is AWS-specific.
   schedule `buildkitd` (see [the hub](README.md#node-prerequisites)); on
   managed node images, set them via node group launch-template user data or a
   privileged DaemonSet.
-- **Optional: Kueue**, if you want the Djinn queue topology
-  (`kueue.enabled: true`). Kubernetes **>= 1.30** required. See
-  [the prerequisite release](#cluster-prerequisite-releases) below.
+- **Kueue** — required, not optional. `kueue.enabled` and `kueue.armed` both
+  default to `true`, so a stock install renders `kueue.x-k8s.io/v1beta1`
+  objects and hands build-Job admission to Kueue. Kubernetes **>= 1.30**
+  required. See [the prerequisite release](#cluster-prerequisite-releases)
+  below.
+- **Nodes that pass the writable-cgroup conformance.** `cgroupWritable.taskRuns`
+  is on by default, which assigns `RuntimeClass/djinn-cgroup-writable` to every
+  task-run Pod; that class carries `scheduling.nodeSelector:
+  djinn.io/cgroup-writable=true`. Run
+  `deploy/node/k3s/djinn-cgroup-writable-conformance.sh` on each node that
+  should run task-runs — it installs the containerd `runc-cgroupwritable`
+  handler, proves the node can delegate a writable cgroup, and applies the
+  marker label itself once the node passes. Never apply that label by hand: an
+  unproven node that carries it schedules Pods that then cannot get a cgroup
+  leaf.
 
 ### Cluster prerequisite releases
 
@@ -51,7 +63,8 @@ helm upgrade --install cert-manager jetstack/cert-manager \
 ```
 
 Kueue follows the same pattern, from a chart in this repository that pins the
-upstream OCI chart and applies Djinn's scoping as values:
+upstream OCI chart and applies Djinn's scoping as values. Unlike cert-manager
+it is **mandatory at stock values** — install it before `djinn`:
 
 ```bash
 helm upgrade --install djinn-prereqs deploy/helm/djinn-prereqs \
@@ -68,19 +81,76 @@ gates. Kueue 0.19 ships `KueueDRAIntegration` on, which needs
 `resource.k8s.io/v1` (GA in Kubernetes 1.34) and CrashLoopBackOffs below it.
 See [deploy/kueue/README.md](../../deploy/kueue/README.md#minimum-kubernetes-is-130-and-only-because-dra-is-disabled).
 
-The release is **inert**: Djinn's values set a *positive*
-`managedJobsNamespaceSelector` matching only namespaces labelled
-`djinn.io/kueue-managed=true`, and nothing labels one. No Workload is ever
-created. Read [deploy/kueue/README.md](../../deploy/kueue/README.md) — in
-particular the residual-risk section — before applying that label anywhere.
+Djinn's values set a *positive* `managedJobsNamespaceSelector` matching only
+namespaces labelled `djinn.io/kueue-managed=true`, so Kueue captures nothing
+until a namespace carries that label. At stock `djinn` values it does:
+`kueue.armed: true` labels the `djinn` Namespace and renders every task-run,
+warm and SCIP Job `suspend: true`, so Workloads **are** created and Kueue's
+`buildPods` quota is what bounds build concurrency. The release is inert only
+for a deployment that explicitly sets `kueue.armed: false`. Read
+[deploy/kueue/README.md](../../deploy/kueue/README.md) — in particular the
+residual-risk section — before changing where that label goes: with the
+namespace labelled, every `batch/v1` Job CREATE in it routes through a
+`failurePolicy: Fail` webhook, so a Kueue control-plane outage blocks them all.
 
-Skip this if you don't want the queue topology: the `djinn` chart defaults to
-`kueue.enabled: false` and installs fine on a cluster with no Kueue CRDs. Set
-`kueue.enabled: true` **only** after installing `djinn-prereqs`; the topology is
-`kueue.x-k8s.io/v1beta1`, so without it the install fails with `no matches for
-kind "ResourceFlavor"`. `ClusterQueue` and `LocalQueue` also carry a conversion
-webhook, so the Kueue controller must be **Ready**, not merely installed — hence
-the `--wait` above.
+Do **not** substitute stock upstream Kueue for `djinn-prereqs`. At upstream
+defaults the Pod/Deployment/StatefulSet webhooks are `failurePolicy: Fail` with
+a selector that covers `djinn`, so an unavailable Kueue controller stops
+`djinn-server`, Postgres, Qdrant and task-run Pods alike.
+`deploy/kueue/tests/webhook-selectors.sh` asserts Djinn's scoping on the
+rendered output.
+
+You cannot skip this and still install at stock values: the topology is
+`kueue.x-k8s.io/v1beta1`, so a cluster without Kueue is refused — by
+`templates/prereq-guard.yaml`, which consults live API discovery during a real
+`helm install` and names the missing prerequisite, rather than by the API
+server's bare `no matches for kind "ResourceFlavor"`. `ClusterQueue` and
+`LocalQueue` also carry a conversion webhook, so the Kueue controller must be
+**Ready**, not merely installed — hence the `--wait` above.
+
+The guard also refuses when no node carries `djinn.io/cgroup-writable=true`
+while `cgroupWritable.taskRuns.enabled` is true. It exists because both
+failures used to be silent: `helm install` reported success and the deployment
+then dispatched zero usable Jobs. It is deliberately inert under `helm
+template` and client-side `--dry-run` (Helm's `lookup` sees no cluster there),
+and it fails **open** if the credentials cannot list Nodes — an operator with
+restricted RBAC gets no guard rather than a false refusal.
+
+Bootstrapping order matters here: the conformance probe Pod names
+`RuntimeClass/djinn-cgroup-writable-probe`, which only this chart renders, so a
+fresh cluster needs one preparation install before conformance can run:
+
+```bash
+helm install djinn deploy/helm/djinn --namespace djinn --create-namespace \
+  --set cgroupWritable.taskRuns.enabled=false \
+  --set cgroupLauncher.mode=disabled \
+  --set imagePipeline.controller.launcherAuthorityProtocol=leaf-v1
+```
+
+All three move together — the armed launcher requires the task-run
+RuntimeClass, and `resize-v2` requires the armed launcher, so
+`deployment-server.yaml` refuses any subset. That state renders both
+RuntimeClasses, assigns neither to task-runs, and leaves the guard's node check
+inapplicable. Run the conformance script on each node, then `helm upgrade` back
+to stock values. `deploy/runbooks/cgroup-launcher-rearm.md` is the full staged
+order.
+
+For a cluster that will never have these prerequisites (kind, a laptop, a
+direct-worker profile), opt out of the whole armed profile explicitly — the
+switches only work together:
+
+```bash
+helm install djinn deploy/helm/djinn --namespace djinn --create-namespace \
+  --set cgroupLauncher.mode=disabled \
+  --set cgroupWritable.runtimeClass.enabled=false \
+  --set cgroupWritable.taskRuns.enabled=false \
+  --set imagePipeline.controller.launcherAuthorityProtocol=leaf-v1 \
+  --set kueue.enabled=false \
+  --set kueue.armed=false
+```
+
+`deploy/helm/djinn/values.local.yaml` ships exactly that profile, and Tilt uses
+it.
 
 For GitOps, `djinn-prereqs` is a separate Application/HelmRelease with a sync
 wave ahead of `djinn` — again, exactly like cert-manager.

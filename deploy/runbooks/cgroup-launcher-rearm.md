@@ -71,8 +71,17 @@ helm upgrade djinn deploy/helm/djinn \
   --reuse-values \
   --set cgroupWritable.runtimeClass.enabled=true \
   --set cgroupWritable.taskRuns.enabled=false \
-  --set cgroupLauncher.mode=disabled
+  --set cgroupLauncher.mode=disabled \
+  --set imagePipeline.controller.launcherAuthorityProtocol=leaf-v1
 ```
+
+The fourth flag is not optional. `imagePipeline.controller.launcherAuthorityProtocol`
+now defaults to `resize-v2`, and `templates/deployment-server.yaml` refuses any
+render that claims resize-v2 authority while `cgroupLauncher.mode` is not
+`required` — resize-v2 declares that Kubernetes in-place Pod resize owns CPU
+quota, and disarming the launcher renders no quota mechanism to own it. Without
+this flag the preparation upgrade fails at render time and the whole runbook
+stalls at step 0. Step 4 restores it by dropping the override.
 
 After this preparation upgrade both classes exist in the cluster, but no
 task-run is scheduled onto either (`cgroupWritable.taskRuns.enabled: false`)

@@ -159,6 +159,12 @@ if grep -Eq -- '(^|[[:space:]])apply -f ' "$SUCCESS_LOG"; then
 fi
 grep -Fq -- "upgrade --install djinn-inert-kueue-gate $CHART_DIR" "$SUCCESS_LOG" || fail 'success did not install inert Djinn chart'
 grep -Fq -- 'kueue.enabled=true' "$SUCCESS_LOG" || fail 'success did not request the Kueue queue topology, so it proved nothing about it'
+# The chart ships `kueue.armed: true`. A gate that inherited that default would
+# install a fully ARMED release — Namespace labelled djinn.io/kueue-managed,
+# every build Job suspended — and then fail its own inert-state check having
+# proved nothing about capture. The disarm must be on the install line, not left
+# to a chart default that has already moved once.
+grep -Fq -- 'kueue.armed=false' "$SUCCESS_LOG" || fail 'gate did not pin kueue.armed=false, so the inert state it verifies is not the state it installs'
 grep -Fq -- 'migration.designatedOperatorSecret=fake-designated-operator' "$SUCCESS_LOG" || fail 'success did not provide the fresh-install designated operator Secret'
 grep -Fq -- "apply -n djinn -f $SCRIPT_DIR/fixtures/precutover-task-run.yaml" "$SUCCESS_LOG" || fail 'success did not apply pre-cutover fixture'
 grep -Fq -- 'get workloads -n djinn' "$SUCCESS_LOG" || fail 'success did not query namespace Workloads'

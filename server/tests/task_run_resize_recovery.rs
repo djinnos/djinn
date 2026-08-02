@@ -97,8 +97,8 @@ use djinn_k8s::runtime::{JobAdmission, LauncherObservationError, ObservedLaunche
 use djinn_server::task_run_resize_bootstrap::TaskRunPodSurface;
 use djinn_server::task_run_resize_drop::{ResizeDropClock, TaskRunResizeDropBridge};
 use djinn_server::task_run_resize_reconcile::{
-    DROP_TRANSIT_GRACE, ResizeReconcileGate, ResizeReconcileMode, SkipReason,
-    TaskRunResizeReconciler, run_loop,
+    DROP_TRANSIT_GRACE, PRE_BIRTH_STRAND_GRACE, ResizeReconcileGate, ResizeReconcileMode,
+    SkipReason, TaskRunResizeReconciler, run_loop,
 };
 use djinn_supervisor::services::{
     LeaseDeadlines, LeaseFencingToken, LeaseGrantRequest, LeaseIdentity, LeaseQueueRequest,
@@ -2092,6 +2092,228 @@ async fn only_the_leader_reconciles_across_a_real_advisory_lock_race() {
 // ═══════════════════════════════════════════════════════════════════════════
 // Helpers
 // ═══════════════════════════════════════════════════════════════════════════
+
+// ═══════════════════════════════════════════════════════════════════════════
+// The pre-birth strand: permits that never reached the resize lifecycle
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// `list_nonterminal_resize` scans the six migration-164 states, every one of
+// them PAST the birth capture. A permit refused before `capture_resize_identity`
+// ever succeeded rests at `acquired` or `job_created` with `pod_uid IS NULL` and
+// is invisible to that scan forever. Production on 2026-08-02 held 70 such rows
+// — 58 `job_created`, 12 `acquired`, the oldest ~10 hours — against three live
+// task-run Jobs, and nothing in the system could see any of them.
+
+/// A reconciler for the pre-birth tests.
+///
+/// The drop bridge it carries is deliberately never exercised: a pre-birth row
+/// has no `pod_uid`, so there is no Pod to PATCH and the reaper must reach its
+/// decision without one. A test in which the bridge did work would be measuring
+/// the lifecycle path instead of the gap.
+fn pre_birth_reconciler(db: &Database) -> Arc<TaskRunResizeReconciler> {
+    let surface = Arc::new(CountingSurface::new(StoredTaskRunPod::resize_v2(
+        "pod-uid-never-observed",
+        "4",
+    )));
+    let bridge = Arc::new(TaskRunResizeDropBridge::with_surface(
+        db.clone(),
+        surface as Arc<dyn TaskRunPodSurface>,
+        Arc::new(RecordingClock::new()) as Arc<dyn ResizeDropClock>,
+    ));
+    Arc::new(TaskRunResizeReconciler::new(
+        db.clone(),
+        bridge,
+        None,
+        Arc::new(ArmedGate),
+    ))
+}
+
+/// Seed a permit that reached `job_created` and never captured an identity —
+/// the exact production shape, `pod_uid IS NULL` included.
+async fn pre_birth_permit(
+    permits: &BuildPodPermitRepository,
+    task_run_id: &str,
+) -> BuildPodPermitRow {
+    let row = match permits.acquire(task_run_id, 16).await {
+        AcquireBuildPodPermitResult::Acquired { row, .. } => row,
+        other => panic!("unexpected acquire outcome: {other:?}"),
+    };
+    let bound = match permits
+        .bind_or_refresh_job_uid(
+            task_run_id,
+            &row.permit_id,
+            row.fencing_token,
+            "job-uid-pre-birth",
+        )
+        .await
+        .expect("bind job uid")
+    {
+        BindBuildPodPermitResult::Bound(row) => row,
+        other => panic!("unexpected bind outcome: {other:?}"),
+    };
+    assert_eq!(bound.state, BuildPodPermitState::JobCreated);
+    assert!(
+        bound.resize_identity.is_none(),
+        "the fixture must model a permit that never captured an identity"
+    );
+    bound
+}
+
+/// A permit stranded before the birth capture, whose task run has ended, is
+/// released — and the capacity it was holding comes back.
+///
+/// **Named mutation.** Delete the `self.reap_pre_birth(&mut pass, mode).await;`
+/// call from `TaskRunResizeReconciler::run_pass` (or the `permits.release(..)`
+/// call inside `reap_pre_birth`). This test then fails on the row state, which
+/// stays `job_created` forever — which is precisely what production did for ten
+/// hours. Note the assertion is on the ROW, not on `pass.pre_birth_reaped`: a
+/// counter can be incremented by a body that does nothing.
+#[tokio::test]
+async fn a_permit_stranded_before_the_birth_capture_is_released_once_its_owner_is_gone() {
+    let db = Database::ephemeral().await.expect("ephemeral db");
+    let (_task_id, task_run_id) = seed_task_run(&db, "prebirth-reap").await;
+    let permits = BuildPodPermitRepository::new(db.clone());
+    let seeded = pre_birth_permit(&permits, &task_run_id).await;
+
+    // The two facts the reaper requires, both worker-independent.
+    kill_the_worker(&db, &task_run_id).await;
+    permits
+        .backdate_state_change_for_test(
+            &task_run_id,
+            PRE_BIRTH_STRAND_GRACE + Duration::from_secs(60),
+        )
+        .await
+        .expect("backdate the strand");
+
+    // The premise: this row is invisible to the lifecycle scan the reconciler
+    // has always had. If this ever stops holding, the reaper is redundant and
+    // this whole path should be reconsidered rather than kept.
+    assert!(
+        permits
+            .list_nonterminal_resize()
+            .await
+            .expect("nonterminal scan")
+            .iter()
+            .all(|row| row.task_run_id != task_run_id),
+        "a pre-birth permit must NOT be reachable through list_nonterminal_resize; \
+         if it is, this test is no longer measuring the gap it was written for"
+    );
+
+    let pass = pre_birth_reconciler(&db).run_pass().await;
+
+    assert_eq!(pass.pre_birth_reaped, 1, "one row was reaped");
+    assert!(!pass.pre_birth_scan_failed);
+
+    // THE STATE THE MECHANISM PRODUCED, read back from Postgres.
+    assert_eq!(
+        permit_state(&db, &task_run_id).await,
+        BuildPodPermitState::Released,
+        "the stranded permit must be released, not left at job_created"
+    );
+
+    // And the consequence that actually matters: the capacity it was holding is
+    // back. This is the number production had wrong — 70 permits occupying the
+    // pool against three live Jobs.
+    assert_eq!(
+        permits.active_count().await.expect("active count"),
+        0,
+        "a released permit must stop occupying build-pod capacity"
+    );
+
+    // The row is not resurrectable under the same task run, so the reap is
+    // final rather than a state a later actor can undo.
+    assert!(
+        matches!(
+            permits.acquire(&task_run_id, 16).await,
+            AcquireBuildPodPermitResult::AlreadyReleased { .. }
+        ),
+        "a reaped permit must stay released; the seeded token was {}",
+        seeded.fencing_token
+    );
+}
+
+/// The reaper is a WINDOW, not a blanket. A permit that is equally old but whose
+/// task run is still live belongs to the dispatch path, and is left alone.
+///
+/// Without this, "reap old pre-birth permits" would retire the permit of every
+/// run sitting in a long Kueue queue — the failure mode that turns a leak fix
+/// into an outage.
+///
+/// **Named mutation.** In `reap_pre_birth`, drop the `owner_is_gone` guard (make
+/// the `Ok(false)` arm fall through instead of `continue`). This test then fails:
+/// the live run's permit comes back `released`.
+#[tokio::test]
+async fn a_pre_birth_permit_whose_task_run_is_still_live_is_never_reaped() {
+    let db = Database::ephemeral().await.expect("ephemeral db");
+    let (_task_id, task_run_id) = seed_task_run(&db, "prebirth-live").await;
+    let permits = BuildPodPermitRepository::new(db.clone());
+    pre_birth_permit(&permits, &task_run_id).await;
+
+    // Old enough to be scanned — and deliberately NOT terminalised.
+    permits
+        .backdate_state_change_for_test(
+            &task_run_id,
+            PRE_BIRTH_STRAND_GRACE + Duration::from_secs(60),
+        )
+        .await
+        .expect("backdate the strand");
+
+    let pass = pre_birth_reconciler(&db).run_pass().await;
+
+    assert_eq!(
+        pass.pre_birth_scanned, 1,
+        "the row must actually have been scanned, or this test proves nothing about the guard"
+    );
+    assert_eq!(pass.pre_birth_reaped, 0);
+    assert_eq!(
+        permits
+            .active(&task_run_id)
+            .await
+            .expect("read permit")
+            .expect("permit row")
+            .state,
+        BuildPodPermitState::JobCreated,
+        "a live task run keeps its permit however old the row is"
+    );
+}
+
+/// A pre-birth permit younger than the grace is not even returned by the scan,
+/// whatever its owner's status.
+///
+/// The grace is wider than the whole dispatch birth window
+/// (`QUEUE_ADMISSION_BUDGET_DEFAULT + BIRTH_ADMISSION_BUDGET_DEFAULT`), so a
+/// bootstrap still legitimately waiting for a late kubelet cannot have its
+/// permit retired out from under it.
+///
+/// **Named mutation.** Remove the `state_changed_at <= now() - ...` predicate
+/// from `list_pre_birth_stranded`. This test then fails on `pre_birth_scanned`.
+#[tokio::test]
+async fn a_recent_pre_birth_permit_is_below_the_grace_and_is_not_scanned() {
+    let db = Database::ephemeral().await.expect("ephemeral db");
+    let (_task_id, task_run_id) = seed_task_run(&db, "prebirth-young").await;
+    let permits = BuildPodPermitRepository::new(db.clone());
+    pre_birth_permit(&permits, &task_run_id).await;
+    // Terminal owner, so the ONLY thing standing between this row and the
+    // reaper is its age.
+    kill_the_worker(&db, &task_run_id).await;
+
+    let pass = pre_birth_reconciler(&db).run_pass().await;
+
+    assert_eq!(
+        pass.pre_birth_scanned, 0,
+        "a permit inside the dispatch birth window must not be scanned at all"
+    );
+    assert_eq!(pass.pre_birth_reaped, 0);
+    assert_eq!(
+        permits
+            .active(&task_run_id)
+            .await
+            .expect("read permit")
+            .expect("permit row")
+            .state,
+        BuildPodPermitState::JobCreated
+    );
+}
 
 /// Poll `condition` until it holds, or fail the test after 30 seconds.
 async fn wait_until<F, Fut>(mut condition: F)

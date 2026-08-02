@@ -199,7 +199,16 @@ metadata:
 spec:
   clusterQueue: {{ $warmQueueName }}
 ---
-{{- /*
+{{/*
+The left-trim marker is deliberately absent here (`{{/*`, not `{{- /*`). With
+it, this comment swallowed the newline after the `---` above and the trailing
+`-}}` swallowed the one below it, rendering the literal `---apiVersion:` — not a
+document separator. `helm template` re-splits and re-emits documents so its
+output looked correct, but `helm lint` parses the rendered file directly and
+reported "invalid Yaml document separator". It was invisible while
+`kueue.enabled` shipped false, because the whole file rendered to nothing; it
+surfaced the moment the topology became a chart default.
+
 SCIP joins Kueue. rust-analyzer indexing is genuinely CPU-heavy — the measured
 SCIP phase of a production warm was 3644s — so leaving it outside the quota
 would make the ClusterQueue under-count the very load it exists to bound.

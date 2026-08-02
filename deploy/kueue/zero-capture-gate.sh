@@ -232,13 +232,27 @@ if ! "$KUBECTL" --context "$CONTEXT" get secret "$DESIGNATED_OPERATOR_SECRET" -n
 fi
 
 printf 'INFO: installing inert Djinn chart release %s\n' "$RELEASE"
-# kueue.enabled=true is what makes this gate meaningful: the Djinn queue
-# topology only renders on request, and the gate exists to prove that rendering
-# it alongside the prerequisite still captures nothing. It is set LAST so that
-# it also wins against any caller --set that slipped past reject_gate_owned_key.
+# BOTH halves of the Kueue contract are pinned here, and both are load-bearing.
+#
+# kueue.enabled=true is what makes this gate meaningful: the gate exists to prove
+# that rendering the Djinn queue topology alongside the prerequisite still
+# captures nothing, and a run with no topology would report "zero Workloads
+# captured" for the trivial reason that no queue exists.
+#
+# kueue.armed=false is what makes the inert state REACHABLE. The chart's stock
+# values ship `armed: true` (the production profile), which labels the Namespace
+# djinn.io/kueue-managed and renders every build Job `suspend: true`. Installing
+# the defaults would therefore hand this gate a fully armed release, and it would
+# fail on its own namespace-label check having proved nothing about capture.
+# Pinning it false here is the difference between "nothing was captured" and
+# "nothing could have been captured for a reason this gate did not choose".
+#
+# Both are set LAST so they also win against any caller --set that slipped past
+# reject_gate_owned_key.
 run_helm upgrade --install "$RELEASE" "$CHART" --namespace "$NAMESPACE" --create-namespace --wait --timeout "${INSTALL_TIMEOUT_SECONDS}s" \
     ${CHART_VALUE_ARGS[@]+"${CHART_VALUE_ARGS[@]}"} \
-    --set kueue.enabled=true --set-string "migration.designatedOperatorSecret=$DESIGNATED_OPERATOR_SECRET"
+    --set kueue.enabled=true --set kueue.armed=false \
+    --set-string "migration.designatedOperatorSecret=$DESIGNATED_OPERATOR_SECRET"
 
 namespace_label=$(run_kubectl get namespace "$NAMESPACE" -o 'jsonpath={.metadata.labels.djinn\.io/kueue-managed}')
 if [ "$namespace_label" = 'true' ]; then
