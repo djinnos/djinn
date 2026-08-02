@@ -31,6 +31,10 @@ enum ParkedDispatch {
 }
 
 struct PendingReconciliation {
+    /// The slot whose deferred Killed event owns this continuation. A task ID
+    /// alone cannot own completion because a late event from an older slot may
+    /// arrive after the task has been mapped to a newer slot.
+    owning_slot_id: usize,
     snapshot: ReconcileTerminateSnapshot,
     waiters: Vec<super::types::Reply<ReconcileTerminateSnapshot>>,
     parked_dispatches: Vec<ParkedDispatch>,
@@ -548,12 +552,23 @@ impl SlotPool {
                 task_id,
             } => {
                 let owns_task_mapping = self.task_to_slot.get(&task_id).copied() == Some(slot_id);
+                // A continuation is owned only by its captured slot while that
+                // slot still owns the current mapping. A stale Killed event
+                // must release only its own capacity, never a newer task slot.
+                let reconciliation_owned = killed
+                    && owns_task_mapping
+                    && self
+                        .pending_reconciliations
+                        .get(&task_id)
+                        .is_some_and(|pending| pending.owning_slot_id == slot_id);
                 // Remove any deferred-teardown tracking for this task.  For
                 // compacting sessions the pool deferred settlement in
                 // kill_session / reclaim_session; the actual settlement
                 // happens right here when the slot actor's Kill event arrives
                 // after compaction exits.
-                self.pending_teardown_tasks.remove(&task_id);
+                if owns_task_mapping {
+                    self.pending_teardown_tasks.remove(&task_id);
+                }
                 // On a killed lifecycle (stall-kill, interrupt_all/project,
                 // explicit Kill command) settle the session DB row to a terminal
                 // state *now*, at the moment the kill lands. A worker that is
@@ -563,8 +578,6 @@ impl SlotPool {
                 // A reconciliation continuation exclusively owns teardown and
                 // exact-session settlement for its captured rows. The legacy
                 // Killed backstop is task-wide, so it must not run first.
-                let reconciliation_owned =
-                    killed && self.pending_reconciliations.contains_key(&task_id);
                 if killed && owns_task_mapping && !reconciliation_owned {
                     self.teardown_taskrun_jobs_for_task(&task_id, "slot_event_killed")
                         .await;
@@ -588,7 +601,7 @@ impl SlotPool {
                     self.mark_slot_free(slot_id, model_id);
                 }
                 // Killed is the deferred reconciliation completion boundary.
-                if killed {
+                if killed && reconciliation_owned {
                     if let Some(mut pending) = self.pending_reconciliations.remove(&task_id) {
                         let repo =
                             SessionRepository::new(self.ctx.db.clone(), self.ctx.event_bus.clone());
@@ -871,14 +884,20 @@ impl SlotPool {
                 }
                 self.pending_teardown_tasks.insert(task_id.to_owned());
             }
-            self.pending_reconciliations.insert(
-                task_id.to_owned(),
-                PendingReconciliation {
-                    snapshot: snapshot.clone(),
-                    waiters: Vec::new(),
-                    parked_dispatches: Vec::new(),
-                },
-            );
+            // Pending teardown is created only for a mapped slot. If legacy
+            // state violates that invariant, do not install an unfinishable
+            // continuation gate; the returned snapshot remains fail-closed.
+            if let Some(owning_slot_id) = initial_mapping_slot_id {
+                self.pending_reconciliations.insert(
+                    task_id.to_owned(),
+                    PendingReconciliation {
+                        owning_slot_id,
+                        snapshot: snapshot.clone(),
+                        waiters: Vec::new(),
+                        parked_dispatches: Vec::new(),
+                    },
+                );
+            }
             return snapshot;
         }
         for execution in &mut executions {
