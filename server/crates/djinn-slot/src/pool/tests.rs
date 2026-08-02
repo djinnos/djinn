@@ -2452,3 +2452,93 @@ async fn reclaim_session_during_compaction_defers_settlement() {
     assert!(pool.test_pending_teardown_tasks().is_empty());
     assert_eq!(pool.test_slot_of("task-1"), None);
 }
+
+/// Drive a production pool message through the actor while retaining direct
+/// inspection of the pool's slot bookkeeping. A generation-admission failure
+/// must return before the pool asks a slot actor to start its lifecycle.
+async fn assert_failed_generation_admission_leaves_pool_unadmitted(
+    message: impl FnOnce(super::types::Reply<()>) -> PoolMessage,
+    task_id: &str,
+) {
+    let (app_state, cancel, _temp) = test_app_state();
+    let (signal_tx, mut signal_rx) = mpsc::unbounded_channel();
+    let config = make_config(
+        vec![model("model-a", 1, &["worker"])],
+        &[("worker", vec!["model-a"])],
+    );
+    let (_pool_tx, pool_rx) = mpsc::channel(1);
+    let mut pool = SlotPool::new_with_factory(
+        pool_rx,
+        app_state,
+        cancel.clone(),
+        config,
+        test_slot_factory(Duration::from_secs(3600), signal_tx),
+    );
+    let (respond_to, response) = tokio::sync::oneshot::channel();
+
+    pool.test_handle_message(message(respond_to)).await;
+
+    match response.await.expect("pool actor should reply") {
+        Err(PoolError::ExecutionGenerationAllocation {
+            task_id: failed_task_id,
+            ..
+        }) => assert_eq!(failed_task_id, task_id),
+        result => panic!("expected execution-generation admission error, got {result:?}"),
+    }
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), signal_rx.recv())
+            .await
+            .is_err(),
+        "generation admission failure must not send a slot run command or start a lifecycle"
+    );
+    assert_eq!(
+        pool.test_slot_of(task_id),
+        None,
+        "failed admission must not insert a task-to-slot mapping"
+    );
+    assert!(
+        pool.test_task_slots().is_empty(),
+        "failed admission must leave every task-to-slot mapping absent"
+    );
+    assert_eq!(
+        pool.test_free_slots("model-a"),
+        vec![0],
+        "failed admission must not consume the available slot"
+    );
+    assert!(
+        matches!(pool.test_slot_states().get(&0), Some(SlotState::Free)),
+        "failed admission must not mark the available slot busy"
+    );
+    cancel.cancel();
+}
+
+#[tokio::test]
+async fn dispatch_generation_allocation_failure_leaves_plain_dispatch_unadmitted() {
+    let task_id = "canonical-unknown-task-for-plain-dispatch".to_owned();
+    assert_failed_generation_admission_leaves_pool_unadmitted(
+        |respond_to| PoolMessage::Dispatch {
+            task_id: task_id.clone(),
+            project_path: "/tmp/project".to_owned(),
+            model_id: "model-a".to_owned(),
+            respond_to,
+        },
+        &task_id,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn dispatch_generation_allocation_failure_leaves_resume_dispatch_unadmitted() {
+    let task_id = "canonical-unknown-task-for-resume-dispatch".to_owned();
+    assert_failed_generation_admission_leaves_pool_unadmitted(
+        |respond_to| PoolMessage::DispatchWithResume {
+            task_id: task_id.clone(),
+            project_path: "/tmp/project".to_owned(),
+            model_id: "model-a".to_owned(),
+            resume_lifecycle_metadata: Some(serde_json::json!({"resume": "selected"})),
+            respond_to,
+        },
+        &task_id,
+    )
+    .await;
+}
