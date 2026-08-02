@@ -1454,7 +1454,8 @@ fn the_cutover_preflight_lane_is_wired_and_cannot_silently_skip() {
         "--run-ignored all",
         "DJINN_CUTOVER_EXPECTED_PROOFS",
         "azure/setup-helm@v4",
-        "postgres:16",
+        "runs-on: ubuntu-24.04",
+        "./scripts/ci-start-postgres.sh",
         // Without a database URL the driver reports the drain fence
         // UNOBSERVABLE, and the suite's clean case is never a genuine exit 0.
         "DJINN_DATABASE_URL:",
