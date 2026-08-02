@@ -9,6 +9,15 @@ use std::time::{Duration, Instant};
 
 type CapturedJobs = Arc<Mutex<Vec<(String, Job)>>>;
 
+struct ObservedAttempt {
+    attempt_id: String,
+    deadline_at: String,
+    job_name: String,
+    revision: String,
+}
+
+type ObservedAttempts = Arc<Mutex<Vec<ObservedAttempt>>>;
+
 struct RecordingDispatcher {
     captured: CapturedJobs,
     count: Arc<AtomicUsize>,
@@ -54,14 +63,11 @@ impl WarmJobDispatcher for RecordingDispatcher {
 struct AttemptInspectingDispatcher {
     db: Database,
     result: Result<String, String>,
-    seen: Arc<Mutex<Vec<(String, String, String, String)>>>,
+    seen: ObservedAttempts,
 }
 
 impl AttemptInspectingDispatcher {
-    fn new(
-        db: Database,
-        result: Result<String, String>,
-    ) -> (Self, Arc<Mutex<Vec<(String, String, String, String)>>>) {
+    fn new(db: Database, result: Result<String, String>) -> (Self, ObservedAttempts) {
         let seen = Arc::new(Mutex::new(Vec::new()));
         (
             Self {
@@ -102,12 +108,12 @@ impl WarmJobDispatcher for AttemptInspectingDispatcher {
             .expect("attempt is committed before dispatcher POST");
         assert_eq!(row.status, WarmGraphAttemptStatus::Running);
         assert_eq!(row.deadline_at, deadline_at);
-        self.seen.lock().await.push((
+        self.seen.lock().await.push(ObservedAttempt {
             attempt_id,
             deadline_at,
-            job.metadata.name.clone().expect("deterministic Job name"),
-            row.revision,
-        ));
+            job_name: job.metadata.name.clone().expect("deterministic Job name"),
+            revision: row.revision,
+        });
         self.result.clone()
     }
 }
@@ -1421,19 +1427,22 @@ async fn durable_attempt_is_committed_before_post_with_its_exact_manifest_identi
 
     let seen = seen.lock().await;
     assert_eq!(seen.len(), 1, "one authorized warm reaches the POST seam");
-    let (attempt_id, deadline_at, job_name, revision) = &seen[0];
-    assert!(!attempt_id.is_empty());
+    let observed = &seen[0];
+    assert!(!observed.attempt_id.is_empty());
     assert_eq!(
-        revision, "unknown",
+        observed.revision, "unknown",
         "the single unreadable mirror head is retained"
     );
     assert_eq!(
-        job_name,
-        &crate::warm_job::warm_job_name(&project_id, revision),
+        observed.job_name,
+        crate::warm_job::warm_job_name(&project_id, &observed.revision),
         "stamping an attempt must not rename the deterministic Job"
     );
-    time::OffsetDateTime::parse(deadline_at, &time::format_description::well_known::Rfc3339)
-        .expect("attempt deadline projected as RFC3339");
+    time::OffsetDateTime::parse(
+        &observed.deadline_at,
+        &time::format_description::well_known::Rfc3339,
+    )
+    .expect("attempt deadline projected as RFC3339");
 }
 
 #[tokio::test]
@@ -1488,7 +1497,7 @@ async fn definitive_create_failure_terminalizes_only_its_attempt_but_ambiguous_d
 
         let seen = seen.lock().await;
         assert_eq!(seen.len(), 1, "the POST observes its committed attempt");
-        let attempt_id = seen[0].0.clone();
+        let attempt_id = seen[0].attempt_id.clone();
         drop(seen);
         let row = WarmGraphAttemptRepository::new(db)
             .get_attempt(&attempt_id)
@@ -1515,7 +1524,7 @@ async fn watcher_failure_cas_cannot_overwrite_worker_terminal_winner() {
     );
 
     warmer.trigger(&project_id).await;
-    let attempt_id = seen.lock().await[0].0.clone();
+    let attempt_id = seen.lock().await[0].attempt_id.clone();
     let attempts = WarmGraphAttemptRepository::new(db.clone());
     assert!(
         attempts
