@@ -144,8 +144,6 @@ mod consolidation;
 pub mod dispatch;
 mod evidence;
 mod evidence_lifecycle_state;
-#[cfg(test)]
-mod evidence_rollout_contract;
 pub mod handle;
 mod health;
 pub mod messages;
