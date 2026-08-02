@@ -774,6 +774,26 @@ mod tests {
         };
         assert_eq!(cpu_bound.pods, vps.cpu.get() / worker_cost.cpu.get());
         assert!(cpu_bound.pods < vps.memory.get() / worker_cost.memory.get());
+        let CapacityOutcome::Derived(vps_light_memory_bound) =
+            derive_capacity_from_rendered_build_job(
+                vps,
+                resources(0, 0, 0),
+                resources(0, 0, 0),
+                light_pod,
+                CpuMillicores::new(2_800).unwrap(),
+                safe(),
+            )
+        else {
+            panic!("complete VPS observation must derive for the light role")
+        };
+        let vps_light_expected = (vps.cpu.get() / light_cost.cpu.get())
+            .min(vps.memory.get() / light_cost.memory.get())
+            .min(vps.pods.get() / light_cost.pods.get());
+        assert_eq!(vps_light_memory_bound.pods, vps_light_expected);
+        assert_eq!(
+            vps_light_memory_bound.pods,
+            vps.memory.get() / light_cost.memory.get()
+        );
         let two_gib_per_core = resources(12_000, 24 * 1024 * 1024 * 1024, 110);
         let CapacityOutcome::Derived(memory_bound) = derive_capacity_from_rendered_build_job(
             two_gib_per_core,
