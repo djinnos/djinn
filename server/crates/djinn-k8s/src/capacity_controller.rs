@@ -810,7 +810,8 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn quota_controller_failsafe_read_failure_publishes_known_k_and_writes_nothing() {
+    async fn quota_controller_failsafe_quota_damping_restart_read_failure_publishes_known_k_and_writes_nothing()
+     {
         use crate::runtime_fixture::{RecordedApiserver, recording_client};
 
         let recorder = RecordedApiserver::new();
