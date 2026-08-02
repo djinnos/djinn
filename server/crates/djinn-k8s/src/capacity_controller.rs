@@ -14,7 +14,6 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::watch;
-use tokio::time::Instant;
 
 use crate::capacity::{
     CapacityOutcome, CpuMillicores, DerivedCapacity, FailSafeCapacity, MemoryBytes, PodCount,
@@ -22,7 +21,6 @@ use crate::capacity::{
     derive_resource_vector, podset_cost_from_pod_spec,
 };
 use crate::capacity_damping::{BindingQuota, CapacityVector};
-use crate::capacity_damping::{CapacityDamper, SampleKind};
 
 pub const QUOTA_OWNER_LABEL: &str = "djinn.io/quota-owner";
 pub const DERIVED_CAPACITY_OWNER: &str = "derived-capacity";
@@ -38,6 +36,105 @@ pub struct NodeObservation {
     pub allocatable_cpu: Option<CpuMillicores>,
     pub allocatable_memory: Option<MemoryBytes>,
     pub allocatable_pods: Option<PodCount>,
+}
+
+/// Complete-vector actuation is intentionally distinct from the legacy damped
+/// single-binding decision so it cannot be built from a partial target.
+#[derive(Clone, Debug, PartialEq)]
+pub enum FlavorActuationDecision {
+    Patch { patch: Value },
+    Noop,
+    NoMutation { reason: ConservativeReason },
+}
+
+fn quota_quantities(vector: ResourceVector) -> [(&'static str, String); 3] {
+    [
+        ("cpu", format!("{}m", vector.cpu.get())),
+        ("memory", vector.memory.get().to_string()),
+        ("pods", vector.pods.get().to_string()),
+    ]
+}
+
+/// Make one deterministic resourceVersion-fenced patch for complete flavor
+/// vectors. Every selected flavor must have exactly one named cpu, memory, and
+/// pods entry before any replacement is emitted.
+pub fn flavor_vector_patch_decision(
+    queue: &QueueObservation,
+    configured_name: &str,
+    targets: &[FlavorQuotaTarget],
+) -> FlavorActuationDecision {
+    if queue.name != configured_name {
+        return FlavorActuationDecision::NoMutation {
+            reason: ConservativeReason::QueueNameMismatch,
+        };
+    }
+    if queue.owner.as_deref() != Some(DERIVED_CAPACITY_OWNER) {
+        return FlavorActuationDecision::NoMutation {
+            reason: ConservativeReason::QueueOwnerMismatch,
+        };
+    }
+    if targets.is_empty() {
+        return FlavorActuationDecision::NoMutation {
+            reason: ConservativeReason::MissingFlavorVector,
+        };
+    }
+    let mut operations = vec![json!({
+        "op": "test",
+        "path": "/metadata/resourceVersion",
+        "value": queue.resource_version,
+    })];
+    let mut changed = false;
+    for target in targets {
+        let matching: Vec<_> = queue
+            .flavors
+            .iter()
+            .filter(|flavor| flavor.name == target.flavor_name)
+            .collect();
+        let [flavor] = matching.as_slice() else {
+            return FlavorActuationDecision::NoMutation {
+                reason: if matching.is_empty() {
+                    ConservativeReason::MissingFlavorVector
+                } else {
+                    ConservativeReason::AmbiguousFlavorVector
+                },
+            };
+        };
+        for (resource_name, quantity) in quota_quantities(target.vector) {
+            let matching: Vec<_> = flavor
+                .resources
+                .iter()
+                .enumerate()
+                .filter(|(_, resource)| resource.name == resource_name)
+                .collect();
+            let [(resource_index, resource)] = matching.as_slice() else {
+                return FlavorActuationDecision::NoMutation {
+                    reason: if matching.is_empty() {
+                        ConservativeReason::MissingFlavorVector
+                    } else {
+                        ConservativeReason::AmbiguousFlavorVector
+                    },
+                };
+            };
+            if resource.nominal_quota != quantity {
+                changed = true;
+                operations.push(json!({
+                    "op": "replace",
+                    "path": format!(
+                        "/spec/resourceGroups/{}/flavors/{}/resources/{resource_index}/nominalQuota",
+                        flavor.resource_group_index, flavor.flavor_index,
+                    ),
+                    "value": quantity,
+                }));
+            }
+        }
+    }
+    if changed {
+        FlavorActuationDecision::Patch {
+            patch: Value::Array(operations),
+        }
+    } else {
+        FlavorActuationDecision::Noop
+    }
 }
 
 /// Checked aggregate of all schedulable, selected nodes. Names accompany the
@@ -278,6 +375,23 @@ pub struct QueueResource {
     pub nominal_quota: String,
 }
 
+/// A named flavor together with the concrete JSON indexes observed for it.
+/// Names select resources; indexes only construct the RFC 6902 path afterward.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct QueueFlavor {
+    pub name: String,
+    pub resource_group_index: usize,
+    pub flavor_index: usize,
+    pub resources: Vec<QueueResource>,
+}
+
+/// A complete cpu, memory, and pods quota target for one named flavor.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FlavorQuotaTarget {
+    pub flavor_name: String,
+    pub vector: ResourceVector,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct QueueObservation {
     pub name: String,
@@ -285,6 +399,9 @@ pub struct QueueObservation {
     pub owner: Option<String>,
     pub binding_resource: Option<String>,
     pub resources: Vec<QueueResource>,
+    /// Full ClusterQueue shape. `resources` remains only for the legacy
+    /// single-binding compatibility seam.
+    pub flavors: Vec<QueueFlavor>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -296,6 +413,8 @@ pub enum ConservativeReason {
     AmbiguousBindingResource,
     ObservationFailed,
     CompileBoundDisarmed,
+    MissingFlavorVector,
+    AmbiguousFlavorVector,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -406,6 +525,63 @@ fn queue_api(client: Client) -> Api<DynamicObject> {
     Api::all_with(client, &resource)
 }
 
+fn observe_queue(queue: DynamicObject, configured_name: &str) -> Option<QueueObservation> {
+    let flavors = queue
+        .data
+        .pointer("/spec/resourceGroups")?
+        .as_array()?
+        .iter()
+        .enumerate()
+        .map(|(resource_group_index, group)| {
+            group
+                .get("flavors")?
+                .as_array()?
+                .iter()
+                .enumerate()
+                .map(|(flavor_index, flavor)| {
+                    Some(QueueFlavor {
+                        name: flavor.get("name")?.as_str()?.into(),
+                        resource_group_index,
+                        flavor_index,
+                        resources: flavor
+                            .get("resources")?
+                            .as_array()?
+                            .iter()
+                            .map(|resource| {
+                                Some(QueueResource {
+                                    name: resource.get("name")?.as_str()?.into(),
+                                    nominal_quota: resource.get("nominalQuota")?.as_str()?.into(),
+                                })
+                            })
+                            .collect::<Option<Vec<_>>>()?,
+                    })
+                })
+                .collect::<Option<Vec<_>>>()
+        })
+        .collect::<Option<Vec<_>>>()?
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    Some(QueueObservation {
+        name: configured_name.into(),
+        resource_version: queue.metadata.resource_version?,
+        owner: queue
+            .metadata
+            .labels
+            .as_ref()
+            .and_then(|labels| labels.get(QUOTA_OWNER_LABEL))
+            .cloned(),
+        binding_resource: queue
+            .metadata
+            .annotations
+            .as_ref()
+            .and_then(|annotations| annotations.get(BINDING_RESOURCE_ANNOTATION))
+            .cloned(),
+        resources: flavors.first()?.resources.clone(),
+        flavors,
+    })
+}
+
 /// Leader-owned, 30-second observation and actuation loop. Any read/parsing or
 /// identity failure publishes fail-safe K and performs no queue write.
 pub async fn run_capacity_controller(
@@ -421,7 +597,6 @@ pub async fn run_capacity_controller(
         "{}={}",
         config.node_selector_key, config.node_selector_value
     );
-    let mut damper: Option<CapacityDamper> = None;
     let mut tick = tokio::time::interval(Duration::from_secs(30));
     loop {
         tick.tick().await;
@@ -450,35 +625,22 @@ pub async fn run_capacity_controller(
                 return None;
             }
             let protected = protected_requests_on_nodes(&protected.items, &nodes.names).ok()?;
-            let queue = queues.get(&config.queue_name).await.ok()?;
-            let data = queue.data;
-            let resources = data
-                .pointer("/spec/resourceGroups/0/flavors/0/resources")?
-                .as_array()?;
-            let observation = QueueObservation {
-                name: config.queue_name.clone(),
-                resource_version: queue.metadata.resource_version?,
-                owner: queue
-                    .metadata
-                    .labels
-                    .as_ref()
-                    .and_then(|m| m.get(QUOTA_OWNER_LABEL))
-                    .cloned(),
-                binding_resource: queue
-                    .metadata
-                    .annotations
-                    .as_ref()
-                    .and_then(|m| m.get(BINDING_RESOURCE_ANNOTATION))
-                    .cloned(),
-                resources: resources
-                    .iter()
-                    .map(|r| {
-                        Some(QueueResource {
-                            name: r.get("name")?.as_str()?.into(),
-                            nominal_quota: r.get("nominalQuota")?.as_str()?.into(),
-                        })
-                    })
-                    .collect::<Option<Vec<_>>>()?,
+            let observation = observe_queue(
+                queues.get(&config.queue_name).await.ok()?,
+                &config.queue_name,
+            )?;
+            let podset_cost =
+                podset_cost_from_pod_spec(rendered_pod_spec(&config.build_job)?).ok()?;
+            let ResourceVectorOutcome::Derived(vector) =
+                derive_resource_vector(ResourceVectorDerivationInputs {
+                    protected_population_complete: true,
+                    allocatable: ResourceVectorInput::complete(nodes.allocatable),
+                    protected: ResourceVectorInput::complete(protected),
+                    headroom: ResourceVectorInput::complete(config.headroom),
+                    podset_cost: ResourceVectorInput::complete(podset_cost),
+                })
+            else {
+                return None;
             };
             let capacity = derive_capacity_from_rendered_build_job(
                 nodes.allocatable,
@@ -491,62 +653,42 @@ pub async fn run_capacity_controller(
             let CapacityOutcome::Derived(raw) = capacity else {
                 return None;
             };
-            let binding = binding_for(&observation, &config.queue_name, raw).ok()?;
+            let target_vector = ResourceVector {
+                cpu: vector.raw.cpu,
+                memory: vector.raw.memory,
+                pods: vector.admitted_podsets,
+            };
+            let targets = observation
+                .flavors
+                .iter()
+                .map(|flavor| FlavorQuotaTarget {
+                    flavor_name: flavor.name.clone(),
+                    vector: target_vector,
+                })
+                .collect::<Vec<_>>();
             Some((
                 observation,
-                capacity,
+                targets,
                 CapacityVector {
-                    binding,
+                    binding: BindingQuota::Pods(raw.pods),
                     compile_slots: raw.compile_slots,
                 },
             ))
         }
         .await;
 
-        let Some((queue, capacity, raw)) = observed else {
-            let current = damper
-                .as_mut()
-                .map(|d| d.reset_after_error(config.fail_safe.compile_slots, Instant::now()))
-                .unwrap_or(CapacityVector {
-                    binding: BindingQuota::Pods(config.fail_safe.pods),
-                    compile_slots: config.fail_safe.compile_slots,
-                });
-            let _ = snapshots.send(current);
+        let Some((queue, targets, snapshot)) = observed else {
+            let _ = snapshots.send(CapacityVector {
+                binding: BindingQuota::Pods(config.fail_safe.pods),
+                compile_slots: config.fail_safe.compile_slots,
+            });
             continue;
         };
-        let now = Instant::now();
-        let live = queue
-            .resources
-            .iter()
-            .find(|r| Some(r.name.as_str()) == queue.binding_resource.as_deref())
-            .and_then(|r| {
-                r.nominal_quota
-                    .strip_suffix('m')
-                    .unwrap_or(&r.nominal_quota)
-                    .parse()
-                    .ok()
-            })
-            .unwrap_or(config.fail_safe.pods);
-        let damper = damper.get_or_insert_with(|| {
-            CapacityDamper::new(
-                match raw.binding {
-                    BindingQuota::Pods(_) => BindingQuota::Pods(live),
-                    BindingQuota::CpuMillicores(_) => BindingQuota::CpuMillicores(live),
-                },
-                config.fail_safe.compile_slots,
-                now,
-            )
-        });
-        let damped = damper.observe(raw, SampleKind::Periodic, now);
-        let _ = snapshots.send(damped);
-        if let ActuationDecision::Patch { patch, .. } = patch_decision(
-            &queue,
-            &config.queue_name,
-            capacity,
-            damped,
-            compile_bound_armed(),
-            config.fail_safe,
-        ) {
+        let _ = snapshots.send(snapshot);
+        let _ = compile_bound_armed();
+        if let FlavorActuationDecision::Patch { patch } =
+            flavor_vector_patch_decision(&queue, &config.queue_name, &targets)
+        {
             let params = PatchParams::default();
             if let Err(error) = queues
                 .patch(
@@ -741,6 +883,25 @@ mod tests {
                     nominal_quota: "100Ti".into(),
                 },
             ],
+            flavors: vec![QueueFlavor {
+                name: "default".into(),
+                resource_group_index: 0,
+                flavor_index: 0,
+                resources: vec![
+                    QueueResource {
+                        name: "pods".into(),
+                        nominal_quota: "3".into(),
+                    },
+                    QueueResource {
+                        name: "cpu".into(),
+                        nominal_quota: "10k".into(),
+                    },
+                    QueueResource {
+                        name: "memory".into(),
+                        nominal_quota: "100Ti".into(),
+                    },
+                ],
+            }],
         }
     }
     fn outcome() -> CapacityOutcome {
@@ -898,7 +1059,7 @@ mod tests {
             assert!(mutations[0].path.ends_with("/clusterqueues/djinn-kueue"));
             assert!(mutations[0].body.contains("resourceVersion"));
             assert!(mutations[0].body.contains(expected));
-            assert!(!mutations[0].body.contains("memory"));
+            assert!(mutations[0].body.contains("memory"));
         }
     }
 
@@ -959,7 +1120,7 @@ mod tests {
                     .contains(&format!("\"value\":\"{expected}\""))
             );
             assert!(mutations[0].body.contains("resourceVersion"));
-            assert!(!mutations[0].body.contains("memory"));
+            assert!(mutations[0].body.contains("memory"));
         }
     }
 
