@@ -6,6 +6,9 @@
 //! arrives in PR 3.
 
 pub mod build_resources;
+pub mod capacity;
+pub mod capacity_controller;
+pub mod capacity_damping;
 pub mod config;
 pub mod cutover_preflight;
 pub mod cutover_preflight_driver;

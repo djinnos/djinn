@@ -24,6 +24,35 @@
 use std::sync::atomic::Ordering;
 
 use super::BuildLeaseService;
+use djinn_db::repositories::invocation_lease_authority::InvocationLeaseMode;
+use djinn_k8s::launcher::CgroupLauncherMode;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CompileBoundPrecondition {
+    Armed,
+    Disarmed,
+}
+
+/// Fail-closed reusable predicate consumed by the capacity controller.
+#[must_use]
+pub fn compile_bound_precondition(
+    launcher: Option<CgroupLauncherMode>,
+    authority: Result<Option<InvocationLeaseMode>, ()>,
+) -> CompileBoundPrecondition {
+    if launcher == Some(CgroupLauncherMode::Required)
+        && matches!(authority, Ok(Some(InvocationLeaseMode::Enforce)))
+    {
+        CompileBoundPrecondition::Armed
+    } else {
+        CompileBoundPrecondition::Disarmed
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DampedCapacitySnapshot {
+    Capacity { compile_slots: i64 },
+    Conservative { fail_safe_compile_slots: i64 },
+}
 
 impl BuildLeaseService {
     /// The reference cap this service is currently enforcing.
@@ -54,7 +83,7 @@ impl BuildLeaseService {
                 "build lease: durable cap is unarmed (0); adopting the configured build-slot cap"
             );
         }
-        self.configured_cap
+        self.derived_fallback.load(Ordering::Acquire)
     }
 
     /// Read the durable invocation-lease authority and apply its reference cap.
@@ -154,5 +183,116 @@ impl BuildLeaseService {
             let _ = self.drain().await;
         }
         Some(cap)
+    }
+
+    /// Accept only a damped snapshot and converge through the one enforced-cap
+    /// writer. A durable authority cap remains authoritative.
+    pub async fn adopt_capacity_snapshot(&self, snapshot: DampedCapacitySnapshot) -> Option<i64> {
+        if !self.is_ready() {
+            return None;
+        }
+        let fallback = match snapshot {
+            DampedCapacitySnapshot::Capacity { compile_slots } => compile_slots,
+            DampedCapacitySnapshot::Conservative {
+                fail_safe_compile_slots,
+            } => fail_safe_compile_slots,
+        }
+        .max(0);
+        self.derived_fallback.store(fallback, Ordering::Release);
+        let _guard = self.operation.lock().await;
+        let previous = self.cap.load(Ordering::Acquire);
+        let adopted = self.adopt_authority_cap(fallback).await;
+        if adopted > previous {
+            let _ = self.drain().await;
+        }
+        Some(adopted)
+    }
+}
+
+#[cfg(test)]
+mod capacity_tests {
+    use super::*;
+    #[test]
+    fn compile_bound_precondition_exhausts_launcher_and_authority_modes() {
+        for launcher in [
+            None,
+            Some(CgroupLauncherMode::Disabled),
+            Some(CgroupLauncherMode::Required),
+        ] {
+            for authority in [
+                Ok(None),
+                Ok(Some(InvocationLeaseMode::Off)),
+                Ok(Some(InvocationLeaseMode::Shadow)),
+                Ok(Some(InvocationLeaseMode::Enforce)),
+                Err(()),
+            ] {
+                let expected = launcher == Some(CgroupLauncherMode::Required)
+                    && matches!(authority, Ok(Some(InvocationLeaseMode::Enforce)));
+                assert_eq!(
+                    compile_bound_precondition(launcher, authority),
+                    if expected {
+                        CompileBoundPrecondition::Armed
+                    } else {
+                        CompileBoundPrecondition::Disarmed
+                    }
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn build_lease_cap_api_visibility() {
+        use std::{fs, process::Command, time::SystemTime};
+
+        let deps = std::env::current_exe()
+            .expect("current test executable")
+            .parent()
+            .expect("target deps directory")
+            .to_owned();
+        let coordinator_rlib = fs::read_dir(&deps)
+            .expect("read target deps")
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("libdjinn_coordinator-")
+                    && entry.path().extension().is_some_and(|ext| ext == "rlib")
+            })
+            .max_by_key(|entry| {
+                entry
+                    .metadata()
+                    .and_then(|metadata| metadata.modified())
+                    .unwrap_or(SystemTime::UNIX_EPOCH)
+            })
+            .expect("djinn-coordinator rlib must accompany its unit tests")
+            .path();
+        let source = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/ui/build_lease_cap_private.rs"
+        );
+        let output_dir = tempfile::tempdir().expect("compile-fail output directory");
+        let output = Command::new("rustc")
+            .args(["--edition=2021", "--crate-type=bin"])
+            .arg(source)
+            .arg("--extern")
+            .arg(format!("djinn_coordinator={}", coordinator_rlib.display()))
+            .arg("-L")
+            .arg(format!("dependency={}", deps.display()))
+            .arg("--out-dir")
+            .arg(output_dir.path())
+            .output()
+            .expect("run rustc visibility probe");
+
+        assert!(
+            !output.status.success(),
+            "visibility probe unexpectedly compiled"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("field `cap` of struct `BuildLeaseService` is private"));
+        assert!(
+            stderr.contains("field `derived_fallback` of struct `BuildLeaseService` is private")
+        );
+        assert!(stderr.contains("no method named `set_cap_directly`"));
     }
 }

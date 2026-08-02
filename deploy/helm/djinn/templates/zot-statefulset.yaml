@@ -33,6 +33,7 @@ spec:
       labels:
         {{- include "djinn.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: zot
+        djinn.io/capacity-reserved: "true"
       annotations:
         # Rotate the pod whenever config or auth changes so live settings
         # take effect without a manual `kubectl delete pod`.

@@ -426,7 +426,7 @@ async fn repeated_unavailability_still_fails() {
 /// `grant_calls` climbs past 1 — the runner re-enters the grant arm on every
 /// poll and re-collects the same settled refusal for the life of the child.
 #[tokio::test]
-async fn a_refused_resize_authorization_degrades_once_and_never_re_asks() {
+async fn lease_invocation_denied_resize_keeps_child_alive_without_mutation() {
     let services = Arc::new(ScriptedServices::new(
         vec![granted(1)],
         vec![LeaseResult::DegradedUnleased {

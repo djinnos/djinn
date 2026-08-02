@@ -1519,6 +1519,7 @@ dependencies = [
  "futures",
  "http",
  "http-body-util",
+ "json-patch",
  "k8s-openapi",
  "kube",
  "rustls",

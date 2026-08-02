@@ -143,37 +143,7 @@ pub const MEASURED_SCIP_PEAK_MEMORY_BYTES: i64 = 10_000_000_000;
 /// 58m43s = 3523s.
 pub const MEASURED_SCIP_PHASE_SECONDS: i64 = 3_523;
 
-// ---- Proposal 8ixk capacity arithmetic ------------------------------------
-//
-// These are the *inputs* to 8ixk's derivation on the current deployment. The
-// budget assertion recomputes the formula from them rather than comparing the
-// rendered request against a hand-copied ceiling, so a change to any input
-// moves the proved budget.
-
-/// Allocatable CPU of the current production node, in millicores (12 cores).
-pub const VPS_ALLOCATABLE_MILLICORES: i64 = 12_000;
-/// Summed CPU request of the already-protected workloads on that node:
-/// djinn-server 2000m + djinn-postgres 1000m + djinn-buildkitd 1000m +
-/// djinn-qdrant 100m + djinn-zot 100m.
-pub const VPS_PROTECTED_MILLICORES: i64 = 4_200;
-/// `cores_per_slot_mcpu`, proposal 8ixk's default slot cost.
-pub const CORES_PER_SLOT_MILLICORES: i64 = 2_800;
-/// The derived build-slot cap 8ixk produces on this node *before* this Job
-/// exists: `floor((12000 - 4200) / 2800) = 2`.
-pub const VPS_DERIVED_CAP_SLOTS: i64 = 2;
-
-/// The largest CPU request this Job may declare without lowering the derived
-/// build-slot cap.
-///
-/// Solved from 8ixk's formula: the cap holds at [`VPS_DERIVED_CAP_SLOTS`] while
-/// `allocatable - protected - request >= cap * cores_per_slot`, i.e. while
-/// `request <= 12000 - 4200 - 2*2800 = 2200`. Raising this Job's request past
-/// 2200m costs the deployment a whole build slot — a third of its build
-/// concurrency — which is why the ceiling is a named, tested constant rather
-/// than a sentence in a PR description.
-pub const SCIP_PROTECTED_REQUEST_CEILING_MILLICORES: i64 = VPS_ALLOCATABLE_MILLICORES
-    - VPS_PROTECTED_MILLICORES
-    - VPS_DERIVED_CAP_SLOTS * CORES_PER_SLOT_MILLICORES;
+pub use crate::capacity::SCIP_PROTECTED_REQUEST_CEILING_MILLICORES;
 
 /// Deterministic Job name for one `(project, revision)` index run.
 ///
@@ -662,28 +632,43 @@ mod tests {
     /// Recomputes 8ixk's derivation from its inputs rather than comparing the
     /// rendered request against a copied number: with this Job's request folded
     /// into `protected_mcpu`, the derived cap must still be
-    /// [`VPS_DERIVED_CAP_SLOTS`].
+    /// the named Item 1 capacity fixture.
     #[test]
     fn scip_cpu_request_stays_inside_the_8ixk_protected_budget() {
         let cfg = KubernetesConfig::for_testing();
         let requested = cpu_millicores(&request(&job(&cfg), "cpu"));
         assert_eq!(requested, 1_000, "documented sizing is a 1 CPU request");
 
+        use crate::capacity::{
+            CapacityOutcome, CpuMillicores, FailSafeCapacity, SCIP_CAPACITY_FIXTURE,
+            SCIP_FIXTURE_COMPILE_SLOTS, derive as derive_capacity,
+        };
         let derive = |extra_protected: i64| -> i64 {
-            (VPS_ALLOCATABLE_MILLICORES - VPS_PROTECTED_MILLICORES - extra_protected).max(0)
-                / CORES_PER_SLOT_MILLICORES
+            let mut inputs = SCIP_CAPACITY_FIXTURE;
+            inputs.protected =
+                CpuMillicores::new(inputs.protected.get() + extra_protected).unwrap();
+            match derive_capacity(
+                inputs,
+                FailSafeCapacity {
+                    pods: 1,
+                    compile_slots: 1,
+                },
+            ) {
+                CapacityOutcome::Derived(value) => value.compile_slots,
+                CapacityOutcome::Conservative { capacity, .. } => capacity.compile_slots,
+            }
         };
 
         assert_eq!(
             derive(0),
-            VPS_DERIVED_CAP_SLOTS,
+            SCIP_FIXTURE_COMPILE_SLOTS,
             "8ixk baseline on this node"
         );
         assert_eq!(
             derive(requested),
-            VPS_DERIVED_CAP_SLOTS,
+            SCIP_FIXTURE_COMPILE_SLOTS,
             "rendering this Job at {requested}m must not lower the derived \
-             build-slot cap from {VPS_DERIVED_CAP_SLOTS}",
+             build-slot cap from {SCIP_FIXTURE_COMPILE_SLOTS}",
         );
 
         // The ceiling is the solved boundary, not an opinion: at exactly the
@@ -692,11 +677,11 @@ mod tests {
         assert_eq!(SCIP_PROTECTED_REQUEST_CEILING_MILLICORES, 2_200);
         assert_eq!(
             derive(SCIP_PROTECTED_REQUEST_CEILING_MILLICORES),
-            VPS_DERIVED_CAP_SLOTS
+            SCIP_FIXTURE_COMPILE_SLOTS
         );
         assert_eq!(
             derive(SCIP_PROTECTED_REQUEST_CEILING_MILLICORES + 1),
-            VPS_DERIVED_CAP_SLOTS - 1,
+            SCIP_FIXTURE_COMPILE_SLOTS - 1,
             "one millicore over the ceiling must provably cost a whole slot"
         );
         assert!(
