@@ -164,6 +164,9 @@ pub struct KubernetesConfig {
     /// (plus a small grace) so a long warm run is not declared failed while the
     /// Job is still legitimately running.
     pub warm_job_timeout_seconds: i64,
+    /// Grace shared by graph-warm and standalone SCIP Pods. The worker's
+    /// bounded TERM/KILL and interrupted-output cleanup budgets fit inside it.
+    pub warm_job_termination_grace_period_seconds: i64,
     /// MySQL DSN forwarded to the warm Pod so `djinn-agent-worker
     /// warm-graph` can reuse the server's backing MySQL instance.
     /// `None` leaves the warm binary to fall back to its built-in default
@@ -515,6 +518,7 @@ impl KubernetesConfig {
             server_addr: "djinn.djinn.svc.cluster.local:8443".into(),
             warm_job_ttl_seconds: 300,
             warm_job_timeout_seconds: 7200,
+            warm_job_termination_grace_period_seconds: 30,
             database_url: None,
             task_run_active_deadline_seconds: 10800,
             task_run_termination_grace_period_seconds: 60,
@@ -692,6 +696,17 @@ impl KubernetesConfig {
                     error = %e,
                     "DJINN_K8S_WARM_JOB_TIMEOUT_SECONDS not a valid i64 — keeping default"
                 ),
+            }
+        }
+        if let Ok(v) = std::env::var("DJINN_K8S_WARM_JOB_TERMINATION_GRACE_PERIOD_SECONDS") {
+            match v.parse::<i64>() {
+                Ok(n) if n > 8 => cfg.warm_job_termination_grace_period_seconds = n,
+                Ok(_) => tracing::warn!(
+                    "warm termination grace must exceed the 8s internal shutdown budget"
+                ),
+                Err(e) => {
+                    tracing::warn!(value = %v, error = %e, "invalid warm termination grace — keeping default")
+                }
             }
         }
         cfg.database_url = std::env::var("DJINN_DATABASE_URL")
