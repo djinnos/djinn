@@ -132,37 +132,25 @@ pub static SANDBOX: LazyLock<Box<dyn Sandbox>> = LazyLock::new(detect_backend);
 
 // ─── FallbackSandbox ─────────────────────────────────────────────────────────
 
-/// Fallback sandbox: heuristic path validation for kernels that do not support
-/// Landlock (< 5.13, WSL1) or non-Linux/macOS platforms.
+/// Stable refusal emitted when launcher-free execution lacks an OS sandbox.
 ///
-/// Validates that `worktree_path` is inside a Release N task-worktree subtree
-/// (`.task-runtime/worktrees/`) or a well-known temp directory. Does not apply OS-level access
-/// controls.
+/// The launcher previously supplied the credential boundary. A launcher-free
+/// child must therefore have Landlock (or the macOS backend) armed before it is
+/// spawned; heuristic path validation is not a credential boundary.
+pub const LAUNCHER_FREE_SANDBOX_REFUSAL: &str = "launcher-free-sandbox-required";
+
+/// Fallback backend for kernels that do not support Landlock (< 5.13, WSL1) or
+/// non-Linux/macOS platforms.
+///
+/// It deliberately refuses every launcher-free shell rather than attempting
+/// the old heuristic path validation. This error is returned by the caller's
+/// pre-spawn `apply` step, so no repository-controlled child can run unsandboxed.
 pub struct FallbackSandbox;
 
 impl Sandbox for FallbackSandbox {
     fn apply(&self, scope: SandboxScope<'_>, _cmd: &mut std::process::Command) -> Result<()> {
-        if matches!(scope, SandboxScope::ReadSource { .. }) {
-            return Err(anyhow::anyhow!(
-                "read-source shell requires an OS read-only sandbox"
-            ));
-        }
-        let SandboxScope::Worktree(worktree_path) = scope else {
-            unreachable!()
-        };
-        if !worktree_path.exists() || !worktree_path.is_dir() {
-            return Err(anyhow::anyhow!(
-                "workdir does not exist or is not a directory: {}",
-                worktree_path.display()
-            ));
-        }
-        if is_worktree_path(worktree_path) || is_temp_path(worktree_path) {
-            return Ok(());
-        }
-        Err(anyhow::anyhow!(
-            "workdir is outside task worktree: {}",
-            worktree_path.display()
-        ))
+        let _ = scope;
+        Err(anyhow::anyhow!(LAUNCHER_FREE_SANDBOX_REFUSAL))
     }
 }
 
@@ -251,11 +239,11 @@ pub fn git_dir(worktree: &Path) -> Option<PathBuf> {
 /// Probe the OS and return the best available sandbox backend.
 ///
 /// On Linux, attempts to create a Landlock ruleset to verify kernel support
-/// (≥ 5.13). If unavailable, returns `FallbackSandbox` with a warning.
+/// (≥ 5.13). If unavailable, returns a refusing `FallbackSandbox`.
 ///
 /// On macOS, returns the Seatbelt-based sandbox.
 ///
-/// On all other platforms, returns `FallbackSandbox`.
+/// On all other platforms, returns a refusing `FallbackSandbox`.
 ///
 /// This function should be called once at startup and the result stored in
 /// supervisor state.
@@ -271,7 +259,7 @@ fn _detect() -> Box<dyn Sandbox> {
     }
     tracing::warn!(
         "sandbox: Landlock unavailable (kernel < 5.13 or WSL1), \
-         falling back to FallbackSandbox heuristics"
+         refusing launcher-free shell execution"
     );
     Box::new(FallbackSandbox)
 }
@@ -284,7 +272,7 @@ fn _detect() -> Box<dyn Sandbox> {
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn _detect() -> Box<dyn Sandbox> {
-    tracing::warn!("sandbox: unsupported platform, falling back to FallbackSandbox heuristics");
+    tracing::warn!("sandbox: unsupported platform, refusing launcher-free shell execution");
     Box::new(FallbackSandbox)
 }
 
@@ -432,22 +420,18 @@ mod tests {
     }
 
     #[test]
-    fn fallback_rejects_read_source_scope() {
+    fn fallback_refuses_launcher_free_execution_before_child_spawn() {
         let root = tempfile::tempdir().expect("root");
-        let mut command = std::process::Command::new("true");
+        let sentinel = root.path().join("child-executed");
+        let mut command = std::process::Command::new("sh");
+        command.args(["-c", "touch \"$1\"", "--"]).arg(&sentinel);
         let error = FallbackSandbox
-            .apply(
-                SandboxScope::ReadSource {
-                    root: root.path(),
-                    cwd: root.path(),
-                },
-                &mut command,
-            )
-            .expect_err("fallback must reject a read-source scope");
+            .apply(SandboxScope::Worktree(root.path()), &mut command)
+            .expect_err("fallback must refuse launcher-free execution");
+        assert_eq!(error.to_string(), LAUNCHER_FREE_SANDBOX_REFUSAL);
         assert!(
-            error
-                .to_string()
-                .contains("requires an OS read-only sandbox")
+            !sentinel.exists(),
+            "apply must refuse before the command can be spawned"
         );
     }
 

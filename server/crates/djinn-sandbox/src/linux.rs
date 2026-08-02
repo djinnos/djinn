@@ -407,6 +407,7 @@ mod tests {
         assert!(worktree_content.exists());
     }
 
+    const SPEC_CANARY: &str = "TASK-SPEC-CANARY-jqvg";
     const CREDENTIAL_CANARY: &str = "PROVIDER-CREDENTIAL-CANARY-jqvg";
     const TOKEN_CANARY: &str = "SERVICE-ACCOUNT-TOKEN-CANARY-jqvg";
 
@@ -437,8 +438,10 @@ mod tests {
         let token_dir = root.join("var/run/secrets/tokens");
         std::fs::create_dir_all(&credentials_dir).expect("credentials mount");
         std::fs::create_dir_all(&token_dir).expect("token mount");
+        let spec = credentials_dir.join("spec.bin");
         let credentials = credentials_dir.join("credentials.bin");
         let token = token_dir.join("djinn");
+        std::fs::write(&spec, SPEC_CANARY).expect("spec");
         std::fs::write(&credentials, CREDENTIAL_CANARY).expect("credentials");
         std::fs::write(&token, TOKEN_CANARY).expect("token");
 
@@ -452,6 +455,7 @@ mod tests {
         let scope = SandboxScope::Worktree(worktree.path());
 
         for (label, secret, canary) in [
+            ("task spec", &spec, SPEC_CANARY),
             ("provider credentials", &credentials, CREDENTIAL_CANARY),
             ("projected ServiceAccount token", &token, TOKEN_CANARY),
         ] {
@@ -497,6 +501,58 @@ mod tests {
             String::from_utf8_lossy(&source_read.stderr)
         );
         assert!(String::from_utf8_lossy(&source_read.stdout).contains("djinn-sandbox"));
+
+        // Cargo build scripts are repository-controlled children of Cargo, not
+        // shell text. Each fixture succeeds only if its own mounted-path read
+        // was denied. A widened cover or omitted confidential root therefore
+        // prints the unique canary in Cargo output and fails this test.
+        for (index, (label, secret, canary)) in [
+            ("task spec", &spec, SPEC_CANARY),
+            ("provider credentials", &credentials, CREDENTIAL_CANARY),
+            ("projected ServiceAccount token", &token, TOKEN_CANARY),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let package = worktree.path().join(format!("build-script-{index}"));
+            std::fs::create_dir_all(package.join("src")).expect("build-script package");
+            std::fs::write(
+                package.join("Cargo.toml"),
+                format!("[package]\nname = \"landlock-canary-{index}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n"),
+            )
+            .expect("manifest");
+            std::fs::write(package.join("src/lib.rs"), "pub fn fixture() {}\n")
+                .expect("library source");
+            std::fs::write(
+                package.join("build.rs"),
+                "fn main() {\n    let path = std::env::var(\"DJINN_CANARY_PATH\").unwrap();\n    if let Ok(contents) = std::fs::read_to_string(path) {\n        println!(\"cargo:warning={contents}\");\n        panic!(\"confidential build-script read succeeded\");\n    }\n}\n",
+            )
+            .expect("build script");
+
+            let mut cargo = std::process::Command::new("cargo");
+            cargo
+                .arg("build")
+                .current_dir(&package)
+                .env("CARGO_TARGET_DIR", package.join("target"))
+                .env("DJINN_CANARY_PATH", secret);
+            LandlockSandbox
+                .apply_with_confidential_roots(scope, &mut cargo, &confidential_roots)
+                .expect("Cargo should receive the production Landlock policy");
+            let output = cargo.output().expect("sandboxed Cargo should spawn");
+            let captured = format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(
+                output.status.success(),
+                "Cargo build script read the {label}: {captured}"
+            );
+            assert!(
+                !captured.contains(canary),
+                "the {label} canary leaked through Cargo build-script output"
+            );
+        }
 
         // Directory listing stays granted everywhere, including at `/` and
         // inside the excluded mount — a filename is not the secret.
