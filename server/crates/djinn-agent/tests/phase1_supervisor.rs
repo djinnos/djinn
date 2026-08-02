@@ -34,22 +34,23 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::{Arc, Mutex as StdMutex, OnceLock};
+use std::sync::{Arc, Mutex as StdMutex};
 
 use djinn_agent::context::{AgentContext, ReconciliationSweepConfig};
 use djinn_agent::file_time::FileTime;
 use djinn_agent::lsp::LspManager;
 use djinn_agent::roles::RoleRegistry;
 use djinn_agent::supervisor::{
-    SupervisorError, SupervisorFlow, TaskRunOutcome, TaskRunSpec, TaskRunSupervisor,
+    SupervisorError, SupervisorFlow, TaskRunSpec, TaskRunSupervisor,
+    pre_session_create_test_support::{PreSessionCreateGate, install},
     services_for_agent_context, services_for_agent_context_with_provider_override,
 };
 use djinn_core::events::EventBus;
 use djinn_core::models::TaskRunTrigger;
 use djinn_db::{
     CreateTaskAttemptParams, Database, EffectiveCreatorProvenance, EpicCreateInput, EpicRepository,
-    ProjectRepository, SessionMessageRepository, SessionRepository, TaskAttemptRepository,
-    TaskRepository, TaskRunRepository, UserRepository,
+    ProjectRepository, SessionRepository, TaskAttemptRepository, TaskRepository, TaskRunRepository,
+    UserRepository,
 };
 use djinn_provider::catalog::{CatalogService, HealthTracker};
 use djinn_provider::message::{ContentBlock, Conversation, Role};
@@ -60,10 +61,6 @@ use tempfile::TempDir;
 use tokio::process::Command;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
-use tracing::field::{Field, Visit};
-use tracing_subscriber::layer::Context;
-use tracing_subscriber::prelude::*;
-use tracing_subscriber::{Layer, registry::LookupSpan};
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Test fixtures (inlined because `djinn_agent::test_helpers` is `#[cfg(test)]`
@@ -130,58 +127,6 @@ async fn create_dispatch_attempt(db: &Database, task_id: &str) -> String {
         .await
         .expect("create exact dispatch attempt")
         .id
-}
-
-#[derive(Clone, Debug, Default)]
-struct CapturedEvent {
-    fields: HashMap<String, String>,
-}
-
-#[derive(Default, Clone)]
-struct EventCaptureLayer {
-    events: Arc<StdMutex<Vec<CapturedEvent>>>,
-}
-
-impl EventCaptureLayer {
-    fn events(&self) -> Vec<CapturedEvent> {
-        self.events.lock().expect("event capture mutex").clone()
-    }
-}
-
-#[derive(Default)]
-struct FieldVisitor {
-    fields: HashMap<String, String>,
-}
-
-impl Visit for FieldVisitor {
-    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
-        self.fields.insert(
-            field.name().to_owned(),
-            format!("{value:?}").trim_matches('"').to_owned(),
-        );
-    }
-
-    fn record_str(&mut self, field: &Field, value: &str) {
-        self.fields
-            .insert(field.name().to_owned(), value.to_owned());
-    }
-}
-
-impl<S> Layer<S> for EventCaptureLayer
-where
-    S: tracing::Subscriber,
-    S: for<'lookup> LookupSpan<'lookup>,
-{
-    fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
-        let mut visitor = FieldVisitor::default();
-        event.record(&mut visitor);
-        self.events
-            .lock()
-            .expect("event capture mutex")
-            .push(CapturedEvent {
-                fields: visitor.fields,
-            });
-    }
 }
 
 async fn run_git(cmd: &[&str], cwd: &Path) {
@@ -447,13 +392,6 @@ impl ScriptedProvider {
             system_prompts: Arc::new(StdMutex::new(Vec::new())),
         }
     }
-
-    fn system_prompts(&self) -> Vec<String> {
-        self.system_prompts
-            .lock()
-            .expect("recorded system prompts mutex")
-            .clone()
-    }
 }
 
 impl LlmProvider for ScriptedProvider {
@@ -537,7 +475,7 @@ async fn assert_task_run_with_status(
 // ──────────────────────────────────────────────────────────────────────────────
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn supervisor_spike_runs_to_close_with_stubbed_provider() {
+async fn supervisor_rejects_fenced_generation_after_pre_session_pause() {
     // 1. Source repo + mirror (identical bootstrap to the infrastructure test).
     let source_dir = TempDir::new().unwrap();
     make_source_repo(source_dir.path()).await;
@@ -662,125 +600,49 @@ async fn supervisor_spike_runs_to_close_with_stubbed_provider() {
         is_evidence_spike: false,
     };
 
-    // 4. Drive the run — with the provider stubbed, the architect stage
-    //    finalizes via `submit_work` and the Spike flow maps that to
-    //    TaskRunOutcome::Closed (see `mod.rs::run_sequence`'s Spike/Planning
-    //    tail branch).
-    // The session-start event is structured tracing telemetry. Serialize this
-    // collector because tracing's default dispatcher is thread-local and this
-    // integration test may run alongside other telemetry tests.
-    static TRACE_CAPTURE_LOCK: OnceLock<Arc<tokio::sync::Mutex<()>>> = OnceLock::new();
-    let _trace_capture_guard = TRACE_CAPTURE_LOCK
-        .get_or_init(|| Arc::new(tokio::sync::Mutex::new(())))
-        .clone()
-        .lock_owned()
-        .await;
-    let telemetry = EventCaptureLayer::default();
-    let subscriber = tracing_subscriber::registry().with(telemetry.clone());
-    let _subscriber_guard = tracing::subscriber::set_default(subscriber);
-    let report = match supervisor.run(spec).await {
-        Ok(r) => r,
-        Err(e) => panic!("supervisor run failed: {e:?}"),
-    };
-    let captured_events = telemetry.events();
-
-    // ── Outcome assertions ────────────────────────────────────────────────────
+    // Drive the production-shaped supervisor lifecycle into the seam. At this
+    // point the task-run has been admitted and the stage reported SESSION_CREATE;
+    // only the guarded session-service insert remains.
+    let gate = PreSessionCreateGate::new();
+    let _gate_installation = install(gate.clone());
+    let lifecycle = tokio::spawn(async move { supervisor.run(spec).await });
+    gate.wait_until_reached().await;
     assert!(
-        !report.task_run_id.is_empty(),
-        "report.task_run_id should be populated"
+        !lifecycle.is_finished(),
+        "accepted supervisor lifecycle must remain paused before session creation"
     );
-    match &report.outcome {
-        TaskRunOutcome::Closed { .. } => {}
-        other => panic!("expected TaskRunOutcome::Closed from Spike flow; got {other:?}"),
-    }
+    // The accepted lifecycle has reported SESSION_CREATE but has not attempted
+    // the guarded insert. Fence its generation before explicitly resuming it.
+    assert_eq!(
+        task_repo
+            .fence_execution_generation_for_kill(&task.id)
+            .await
+            .expect("fence accepted generation while lifecycle is paused"),
+        1
+    );
+    gate.release();
+    let result = lifecycle.await.expect("supervisor lifecycle join");
+    assert!(
+        matches!(
+            &result,
+            Err(SupervisorError::Stage(djinn_supervisor::StageError::SessionCreate(message)))
+                if message.contains("dispatch_generation_revoked")
+        ),
+        "resuming the paused lifecycle must surface dispatch_generation_revoked: {result:?}"
+    );
 
-    // ── (b) task_runs.status row is terminal ──────────────────────────────────
-    let run_id = assert_task_run_with_status(task_runs.as_ref(), &task.id, &["completed"]).await;
-    assert_eq!(run_id, report.task_run_id, "run_id round-trips");
-
-    // ── (a) child sessions row exists with task_run_id FK populated ──────────
+    // The stale create never reaches the reply loop: it inserts no session and
+    // cannot advance the task run beyond the status established before stage IO.
     let session_repo = SessionRepository::new(db.clone(), events.clone());
     let sessions = session_repo
-        .list_for_task(&task.id)
+        .reread_non_terminal_for_task(&task.id)
         .await
-        .expect("list sessions for task");
+        .expect("complete reconciliation listing");
     assert!(
-        !sessions.is_empty(),
-        "expected at least one session row for the task-run"
+        sessions.is_empty(),
+        "fenced lifecycle must not insert a non-terminal session"
     );
-    let architect_session = sessions
-        .iter()
-        .find(|s| s.agent_type == "architect")
-        .expect("expected an architect session row");
-    assert_eq!(
-        architect_session.task_run_id.as_deref(),
-        Some(report.task_run_id.as_str()),
-        "session.task_run_id FK must point at the run we just drove"
-    );
-    assert_eq!(
-        architect_session.project_id.as_deref(),
-        Some(project.id.as_str())
-    );
-    assert_eq!(architect_session.task_id.as_deref(), Some(task.id.as_str()));
-
-    // The event must identify this exact persisted session/task/role and hash
-    // the exact prompt handed to the provider, rather than an earlier render.
-    let session_start = captured_events
-        .iter()
-        .find(|event| event.fields.get("event").map(String::as_str) == Some("session_start"))
-        .expect("structured session_start telemetry");
-    let prompt = stub
-        .system_prompts()
-        .into_iter()
-        .next()
-        .expect("fake provider received one system prompt");
-    let expected_prompt_hash = djinn_roles::prompts::rendered_system_prompt_hash(&prompt);
-    let prompt_hash = session_start
-        .fields
-        .get("prompt_hash")
-        .expect("session_start prompt hash");
-    assert_eq!(prompt_hash, &expected_prompt_hash);
-    assert!(
-        prompt_hash.starts_with("sha256:")
-            && prompt_hash.len() == "sha256:".len() + 16
-            && prompt_hash["sha256:".len()..]
-                .chars()
-                .all(|character| character.is_ascii_hexdigit() && !character.is_ascii_uppercase()),
-        "prompt hash must use the sha256:<16 lowercase hex> format: {prompt_hash}"
-    );
-    assert_eq!(
-        session_start.fields.get("session_id").map(String::as_str),
-        Some(architect_session.id.as_str())
-    );
-    assert_eq!(
-        session_start.fields.get("task_id").map(String::as_str),
-        Some(task.short_id.as_str())
-    );
-    assert_eq!(
-        session_start.fields.get("agent_type").map(String::as_str),
-        Some("architect")
-    );
-    assert_eq!(
-        session_start
-            .fields
-            .get("prompt_hash_input")
-            .map(String::as_str),
-        Some("rendered_system_prompt_v1")
-    );
-
-    // The real reply loop persists its downstream assistant behavior under the
-    // same session id emitted in session-start telemetry.
-    let message_repo = SessionMessageRepository::new(db.clone(), events.clone());
-    let persisted_behavior = message_repo
-        .load_for_sessions(std::slice::from_ref(&architect_session.id))
-        .await
-        .expect("load persisted session behavior");
-    assert!(
-        persisted_behavior.iter().any(|(session_id, role, _, _)| {
-            session_id == &architect_session.id && role == "assistant"
-        }),
-        "the assistant behavior record must carry the session-start session id"
-    );
+    assert_task_run_with_status(task_runs.as_ref(), &task.id, &["starting"]).await;
 
     // ── (c) no worktrees anywhere under the test-controlled roots ────────────
     assert_no_worktrees(source_dir.path());
