@@ -71,7 +71,6 @@ tempfile = "3"
 filetime = "0.2"
 insta = { version = "1", features = ["json"] }
 tracing-test = "0.2"
-trybuild = "1"
 djinn-slot = { path = "../djinn-slot", features = ["test-support"] }
 
 [lints.clippy]

@@ -242,7 +242,57 @@ mod capacity_tests {
 
     #[test]
     fn build_lease_cap_api_visibility() {
-        let cases = trybuild::TestCases::new();
-        cases.compile_fail("tests/ui/build_lease_cap_private.rs");
+        use std::{fs, process::Command, time::SystemTime};
+
+        let deps = std::env::current_exe()
+            .expect("current test executable")
+            .parent()
+            .expect("target deps directory")
+            .to_owned();
+        let coordinator_rlib = fs::read_dir(&deps)
+            .expect("read target deps")
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("libdjinn_coordinator-")
+                    && entry.path().extension().is_some_and(|ext| ext == "rlib")
+            })
+            .max_by_key(|entry| {
+                entry
+                    .metadata()
+                    .and_then(|metadata| metadata.modified())
+                    .unwrap_or(SystemTime::UNIX_EPOCH)
+            })
+            .expect("djinn-coordinator rlib must accompany its unit tests")
+            .path();
+        let source = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/ui/build_lease_cap_private.rs"
+        );
+        let output_dir = tempfile::tempdir().expect("compile-fail output directory");
+        let output = Command::new("rustc")
+            .args(["--edition=2021", "--crate-type=bin"])
+            .arg(source)
+            .arg("--extern")
+            .arg(format!("djinn_coordinator={}", coordinator_rlib.display()))
+            .arg("-L")
+            .arg(format!("dependency={}", deps.display()))
+            .arg("--out-dir")
+            .arg(output_dir.path())
+            .output()
+            .expect("run rustc visibility probe");
+
+        assert!(
+            !output.status.success(),
+            "visibility probe unexpectedly compiled"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("field `cap` of struct `BuildLeaseService` is private"));
+        assert!(
+            stderr.contains("field `derived_fallback` of struct `BuildLeaseService` is private")
+        );
+        assert!(stderr.contains("no method named `set_cap_directly`"));
     }
 }
