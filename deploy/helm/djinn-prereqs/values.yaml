@@ -68,7 +68,7 @@ kueue:
   # The upstream chart exposes both knobs only through this one opaque string,
   # so overriding either means restating the whole default. The body below is
   # upstream 0.19.0's default `managerConfig.controllerManagerConfigYaml`
-  # VERBATIM, comments included, with exactly two deliberate edits:
+  # VERBATIM, comments included, with exactly three deliberate edits:
   #
   #   1. `managedJobsNamespaceSelector` is uncommented and inverted from
   #      upstream's negative "every namespace except kube-system/kueue-system"
@@ -114,9 +114,14 @@ kueue:
   #      handler the manager did not enable. That is a worse failure than the
   #      unused entries.
   #
+  #   3. `waitForPodsReady` activates bounded readiness recovery for admitted
+  #      workloads. A 30m timeout gives pods a realistic scheduling window;
+  #      recovery waits 3m, does not block new admissions, and requeues by
+  #      eviction timestamp with infinite retries and a 60s-to-3600s backoff.
+  #
   # A drift check (deploy/kueue/tests/check-manager-config-drift.py) parses the
   # subchart's own default out of charts/kueue-<version>.tgz and fails if this
-  # string differs from it in any way other than those two edits. On a version
+  # string differs from it in any way other than those three edits. On a version
   # bump the check tells you exactly what upstream changed underneath you.
   managerConfig:
     controllerManagerConfigYaml: |-
@@ -144,19 +149,21 @@ kueue:
         qps: 300
         burst: 500
       #pprofBindAddress: :8083
-      #waitForPodsReady:
-      #  timeout: 5m
-      #  recoveryTimeout: 3m
-      #  blockAdmission: false
-      #  requeuingStrategy:
-      #    timestamp: Eviction
-      #    backoffLimitCount: null # null indicates infinite requeuing
-      #    backoffBaseSeconds: 60
-      #    backoffMaxSeconds: 3600
+      # DJINN EDIT 3 of 3: upstream leaves waitForPodsReady disabled. Enable
+      # bounded recovery for pods that do not become ready after admission.
+      waitForPodsReady:
+        timeout: 30m
+        recoveryTimeout: 3m
+        blockAdmission: false
+        requeuingStrategy:
+          timestamp: Eviction
+          backoffLimitCount: null # null indicates infinite requeuing
+          backoffBaseSeconds: 60
+          backoffMaxSeconds: 3600
       #manageJobsWithoutQueueName: true
       # See "Opt-in Namespace Management" for guidance on namespace management:
       # https://kueue.sigs.k8s.io/docs/tasks/manage/enforce_job_management/opt_in_namespace_management/
-      # DJINN EDIT 1 of 2: positive namespace fence, replacing upstream's
+      # DJINN EDIT 1 of 3: positive namespace fence, replacing upstream's
       # negative kube-system/kueue-system exclusion. Nothing in this repository
       # applies djinn.io/kueue-managed, so this selects zero namespaces.
       managedJobsNamespaceSelector:
@@ -182,7 +189,7 @@ kueue:
       #  - "kubeflow.org/jaxjob"
         - "workload.codeflare.dev/appwrapper"
       #  - "sparkoperator.k8s.io/sparkapplication"
-      # DJINN EDIT 2 of 2: upstream 0.19.0 ships "pod", "deployment" and
+      # DJINN EDIT 2 of 3: upstream 0.19.0 ships "pod", "deployment" and
       # "statefulset" ENABLED here. All three are removed so the manager enables
       # no handler for core Pod/Deployment/StatefulSet, and the chart renders
       # mpod/vpod, mdeployment/vdeployment and mstatefulset/vstatefulset with

@@ -112,8 +112,10 @@ fn build_ci_head_blocking_directive(task: &Task) -> Option<String> {
          > Blocking checks are listed in causal order. Later entries may be \
          cancelled siblings or aggregator jobs swept up by a run-level cancel; \
          fixing the first lane usually clears the rest. If the annotations \
-         above describe a runner-host problem rather than a code problem \
-         (for example `No space left on device`), the correct action is to \
+         above describe an infrastructure problem rather than a code problem \
+         (for example `No space left on device`, `context deadline exceeded`, \
+         `docker pull failed`, `toomanyrequests`, a registry 5xx or TLS/handshake \
+         timeout, or `Initialize containers` failing), the correct action is to \
          retrigger CI and report the infrastructure failure — NOT to change code."
     ))
 }
