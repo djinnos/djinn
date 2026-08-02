@@ -228,6 +228,24 @@ pub fn capacity_controller_cluster_with_pods(
     binding_resource: &str,
     pod_mode: CapacityPods,
 ) -> (kube::Client, RecordedApiserver) {
+    capacity_controller_cluster_fixture(namespace, binding_resource, pod_mode, false)
+}
+
+/// Two exclusively owned flavors, plus an eligible but unmatched Node.
+#[must_use]
+pub fn capacity_controller_multi_flavor_cluster(
+    namespace: &str,
+    binding_resource: &str,
+) -> (kube::Client, RecordedApiserver) {
+    capacity_controller_cluster_fixture(namespace, binding_resource, CapacityPods::Complete, true)
+}
+
+fn capacity_controller_cluster_fixture(
+    namespace: &str,
+    binding_resource: &str,
+    pod_mode: CapacityPods,
+    multi_flavor: bool,
+) -> (kube::Client, RecordedApiserver) {
     use http::Response;
     use http_body_util::BodyExt as _;
     use kube::client::Body;
@@ -260,7 +278,18 @@ pub fn capacity_controller_cluster_with_pods(
                 } else if path == "/api/v1/nodes" && uri_parameters.contains("bad") {
                     serde_json::json!({"apiVersion":"v1","kind":"Status","status":"Failure","reason":"Invalid","code":422})
                 } else if path == "/api/v1/nodes" {
-                    serde_json::json!({"apiVersion":"v1","kind":"NodeList","metadata":{"resourceVersion":"1"},"items":[{"apiVersion":"v1","kind":"Node","metadata":{"name":"worker-1","labels":{"kubernetes.io/hostname":"worker-1"}},"status":{"conditions":[{"type":"Ready","status":"True"}],"allocatable":{"cpu":"12","memory":"48Gi","pods":"110"}}}]})
+                    let items = if multi_flavor {
+                        vec![
+                            serde_json::json!({"apiVersion":"v1","kind":"Node","metadata":{"name":"worker-a","labels":{"djinn.io/capacity-pool":"a","djinn.io/eligible":"true"}},"status":{"conditions":[{"type":"Ready","status":"True"}],"allocatable":{"cpu":"12","memory":"48Gi","pods":"110"}}}),
+                            serde_json::json!({"apiVersion":"v1","kind":"Node","metadata":{"name":"worker-b","labels":{"djinn.io/capacity-pool":"b","djinn.io/eligible":"true"}},"status":{"conditions":[{"type":"Ready","status":"True"}],"allocatable":{"cpu":"8","memory":"32Gi","pods":"70"}}}),
+                            serde_json::json!({"apiVersion":"v1","kind":"Node","metadata":{"name":"worker-unmatched","labels":{"djinn.io/capacity-pool":"other","djinn.io/eligible":"true"}},"status":{"conditions":[{"type":"Ready","status":"True"}],"allocatable":{"cpu":"100","memory":"400Gi","pods":"500"}}}),
+                        ]
+                    } else {
+                        vec![
+                            serde_json::json!({"apiVersion":"v1","kind":"Node","metadata":{"name":"worker-1","labels":{"kubernetes.io/hostname":"worker-1"}},"status":{"conditions":[{"type":"Ready","status":"True"}],"allocatable":{"cpu":"12","memory":"48Gi","pods":"110"}}}),
+                        ]
+                    };
+                    serde_json::json!({"apiVersion":"v1","kind":"NodeList","metadata":{"resourceVersion":"1"},"items":items})
                 } else if path == "/api/v1/pods" {
                     if matches!(pod_mode, CapacityPods::ReadFailure) {
                         serde_json::json!({"apiVersion":"v1","kind":"Status","status":"Failure","reason":"InternalError","code":500})
@@ -268,12 +297,29 @@ pub fn capacity_controller_cluster_with_pods(
                         let requests = if matches!(pod_mode, CapacityPods::Empty) {
                             Vec::new()
                         } else {
-                            [1000, 1000, 1000, 700, 500].into_iter().map(|cpu| serde_json::json!({"apiVersion":"v1","kind":"Pod","metadata":{"name":format!("protected-{cpu}"),"labels":{"djinn.io/capacity-reserved":"true"}},"spec":{"nodeName":"worker-1","containers":[{"name":"main","resources":{"requests":{"cpu":format!("{cpu}m"),"memory":"1Mi"}}}]}})).collect()
+                            [1000, 1000, 1000, 700, 500, 90_000].into_iter().enumerate().filter(|(index, _)| multi_flavor || *index < 5).map(|(index, cpu)| {
+                                let node = if multi_flavor && index == 5 { "worker-unmatched" } else if multi_flavor && index < 3 { "worker-a" } else if multi_flavor { "worker-b" } else { "worker-1" };
+                                serde_json::json!({"apiVersion":"v1","kind":"Pod","metadata":{"name":format!("protected-{index}-{cpu}"),"labels":{"djinn.io/capacity-reserved":"true"}},"spec":{"nodeName":node,"containers":[{"name":"main","resources":{"requests":{"cpu":format!("{cpu}m"),"memory":"1Mi"}}}]}})
+                            }).collect()
                         };
                         serde_json::json!({"apiVersion":"v1","kind":"PodList","metadata":{"resourceVersion":"1"},"items":requests})
                     }
+                } else if path == "/apis/kueue.x-k8s.io/v1beta1/clusterqueues/djinn-kueue" {
+                    let flavors = if multi_flavor {
+                        vec![
+                            serde_json::json!({"name":"a","resources":[{"name":"pods","nominalQuota":"3"},{"name":"cpu","nominalQuota":"3000m"},{"name":"memory","nominalQuota":"100Gi"}]}),
+                            serde_json::json!({"name":"b","resources":[{"name":"pods","nominalQuota":"3"},{"name":"cpu","nominalQuota":"3000m"},{"name":"memory","nominalQuota":"100Gi"}]}),
+                        ]
+                    } else {
+                        vec![
+                            serde_json::json!({"name":"default","resources":[{"name":"pods","nominalQuota":"3"},{"name":"cpu","nominalQuota":"3000m"},{"name":"memory","nominalQuota":"100Gi"}]}),
+                        ]
+                    };
+                    serde_json::json!({"apiVersion":"kueue.x-k8s.io/v1beta1","kind":"ClusterQueue","metadata":{"name":"djinn-kueue","resourceVersion":"42","labels":{"djinn.io/quota-owner":"derived-capacity"},"annotations":{"djinn.io/binding-resource":binding}},"spec":{"resourceGroups":[{"flavors":flavors}]}})
+                } else if path == "/apis/karpenter.sh/v1/nodepools" {
+                    serde_json::json!({"apiVersion":"karpenter.sh/v1","kind":"NodePoolList","metadata":{"resourceVersion":"1"},"items":[]})
                 } else {
-                    serde_json::json!({"apiVersion":"kueue.x-k8s.io/v1beta1","kind":"ClusterQueue","metadata":{"name":"djinn-kueue","resourceVersion":"42","labels":{"djinn.io/quota-owner":"derived-capacity"},"annotations":{"djinn.io/binding-resource":binding}},"spec":{"resourceGroups":[{"flavors":[{"name":"default","resources":[{"name":"pods","nominalQuota":"3"},{"name":"cpu","nominalQuota":"3000m"},{"name":"memory","nominalQuota":"100Gi"}]}]}]}})
+                    serde_json::json!({"apiVersion":"v1","kind":"Status","status":"Failure","reason":"NotFound","code":404})
                 };
                 Ok::<_, std::io::Error>(
                     Response::builder()
@@ -284,8 +330,14 @@ pub fn capacity_controller_cluster_with_pods(
                                 && matches!(pod_mode, CapacityPods::ReadFailure))
                         {
                             422
-                        } else {
+                        } else if path == "/api/v1/nodes"
+                            || path == "/api/v1/pods"
+                            || path == "/apis/kueue.x-k8s.io/v1beta1/clusterqueues/djinn-kueue"
+                            || path == "/apis/karpenter.sh/v1/nodepools"
+                        {
                             200
+                        } else {
+                            404
                         })
                         .header("content-type", "application/json")
                         .body(Body::from(serde_json::to_vec(&payload).unwrap()))
