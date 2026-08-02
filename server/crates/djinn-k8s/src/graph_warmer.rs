@@ -1486,13 +1486,18 @@ impl K8sGraphWarmer {
     /// codebase has hit before.
     pub fn scip_index_scheduler(&self) -> Option<crate::scip_schedule::ScipIndexScheduler> {
         let client = self.client.clone()?;
-        Some(crate::scip_schedule::ScipIndexScheduler::new(
-            self.dispatch.config.clone(),
-            Arc::new(crate::scip_schedule::KubeClientScipJobInventory::new(
-                client.clone(),
+        Some(
+            crate::scip_schedule::ScipIndexScheduler::new(
+                self.dispatch.config.clone(),
+                Arc::new(crate::scip_schedule::KubeClientScipJobInventory::new(
+                    client.clone(),
+                )),
+                Arc::new(KubeClientDispatcher::new(client)),
+            )
+            .with_warm_outcome_source(Arc::new(
+                crate::scip_schedule::RepositoryWarmOutcomeSource::new(self.dispatch.db.clone()),
             )),
-            Arc::new(KubeClientDispatcher::new(client)),
-        ))
+        )
     }
 
     /// Override the merge-storm debounce policy (builder style). Production
