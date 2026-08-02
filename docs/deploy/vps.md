@@ -219,12 +219,16 @@ git clone https://github.com/djinnos/djinn
 cd djinn
 ```
 
-### Optional: install the Kueue prerequisite
+### Install the Kueue prerequisite (required)
 
 Same shape as cert-manager above — a cluster-scoped third-party release Djinn
-does not own. Only needed if you want the Kueue queue topology
-(`kueue.enabled: true` in your values below); the chart installs fine without
-it, and the topology is inert either way.
+does not own. It is **not optional**: the `djinn` chart defaults to
+`kueue.enabled: true` and `kueue.armed: true`, so a stock install renders
+`kueue.x-k8s.io/v1beta1` objects and hands build-Job admission to Kueue.
+Kueue's `buildPods` quota is also the only remaining bound on build
+concurrency, so turning the topology off instead would dispatch unbounded build
+Pods. Install this release first: `templates/prereq-guard.yaml` refuses the
+`djinn` release, naming this chart, if the Kueue API is not served.
 
 Requires **Kubernetes >= 1.30** — `k3s --version`. The upstream chart declares
 no `kubeVersion`, so Helm will not check this for you. The production VPS runs
@@ -241,9 +245,13 @@ helm install djinn-prereqs deploy/helm/djinn-prereqs \
 This pins Kueue `0.19.0` from `oci://registry.k8s.io/kueue/charts/kueue`, with
 Djinn's scoping applied as values: a *positive*
 `managedJobsNamespaceSelector` that only selects namespaces labelled
-`djinn.io/kueue-managed=true`. No namespace carries that label, so nothing is
-captured. Read [deploy/kueue/README.md](../../deploy/kueue/README.md) before
-labelling anything.
+`djinn.io/kueue-managed=true`. That fence is what keeps capture confined to
+Djinn's own namespace — and at stock `djinn` values the namespace **is**
+labelled (`kueue.armed: true` renders both the label and `suspend: true` Jobs),
+so Workloads are created and every `batch/v1` Job CREATE in `djinn` traverses a
+`failurePolicy: Fail` webhook. Read
+[deploy/kueue/README.md](../../deploy/kueue/README.md), especially the
+residual-risk section, before moving that label anywhere else.
 
 > **Do not install stock upstream Kueue on this box instead.** At its defaults
 > the Pod webhook is registered with `failurePolicy: Fail` and a selector that
@@ -255,6 +263,45 @@ labelling anything.
 
 Keep `--wait`: `ClusterQueue`/`LocalQueue` carry a conversion webhook, so the
 Kueue controller must be Ready before the `djinn` chart applies the topology.
+
+### Prepare the node for writable cgroups (required)
+
+The stock chart also arms the cgroup launcher (`cgroupLauncher.mode: required`,
+`cgroupWritable.{runtimeClass,taskRuns}.enabled: true`), which assigns
+`RuntimeClass/djinn-cgroup-writable` to every task-run Pod. That class carries
+`scheduling.nodeSelector: djinn.io/cgroup-writable=true`, so an unprepared node
+leaves every task-run Pod Pending forever while the release looks healthy:
+
+```bash
+sudo deploy/node/k3s/djinn-cgroup-writable-conformance.sh
+```
+
+That script is the single owner of the marker label: it installs the containerd
+`runc-cgroupwritable` handler the RuntimeClass names, proves the node can
+actually delegate a writable cgroup, and applies
+`djinn.io/cgroup-writable=true` itself only once the node passes. Do not apply
+the label by hand — a node that carries it unproven trades an unschedulable Pod
+for a Pod that starts and then cannot get a cgroup leaf.
+`templates/prereq-guard.yaml` refuses the `djinn` install if no node carries
+the marker.
+
+Chicken-and-egg on a brand-new box: the probe Pod names
+`RuntimeClass/djinn-cgroup-writable-probe`, which only the `djinn` chart
+renders. So run [step 4](#4-install) once as a *preparation* install with these
+three flags appended, run the conformance script, then re-run step 4 without
+them:
+
+```bash
+  --set cgroupWritable.taskRuns.enabled=false \
+  --set cgroupLauncher.mode=disabled \
+  --set imagePipeline.controller.launcherAuthorityProtocol=leaf-v1
+```
+
+The three move together: the armed launcher requires the task-run RuntimeClass
+and `resize-v2` requires the armed launcher, so the chart refuses any subset at
+render time. That state renders both RuntimeClasses, assigns neither to
+task-runs, and leaves the guard's node check inapplicable.
+`deploy/runbooks/cgroup-launcher-rearm.md` is the full staged order.
 
 Create `my-values.yaml` (a complete, working single-node profile — see
 [Configuration](configuration.md) for every knob):

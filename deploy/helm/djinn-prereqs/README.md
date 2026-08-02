@@ -34,10 +34,20 @@ controller. Do not remove those gates without moving this number to 1.34;
 
 ## What this release does and does not do
 
-It is **inert**. Djinn's values set a *positive*
-`managedJobsNamespaceSelector` requiring `djinn.io/kueue-managed: "true"`, and
-nothing in this repository applies that label. Kueue therefore selects no
-namespace and creates no Workload. Arming it belongs to cutover epic 4c9q.
+Djinn's values set a *positive* `managedJobsNamespaceSelector` requiring
+`djinn.io/kueue-managed: "true"`, so this release captures nothing on its own —
+a namespace must be labelled first. At stock values the `djinn` chart applies
+that label: `kueue.armed: true` renders it onto the Namespace
+(`djinn/templates/namespace.yaml`) and stamps `suspend: true` plus a queue name
+onto every task-run, warm and standalone-SCIP Job, so Workloads are created and
+Kueue's quota is what bounds build concurrency. This release is inert only
+against a `djinn` deployment that explicitly sets `kueue.armed: false`.
+
+That distinction matters when you reach for stock upstream Kueue instead of
+this chart: at upstream defaults the Pod/Deployment/StatefulSet webhooks are
+`failurePolicy: Fail` with a selector that covers `djinn`, so an unavailable
+Kueue controller stops `djinn-server`, Postgres, Qdrant and task-run Pods
+alike. This chart's values are what prevent that.
 
 `values.yaml` is the whole repository-owned policy; the subchart is untouched.
 It replaces `deploy/kueue/vendor/kueue-v0.10.0.yaml`, a 13,175-line
@@ -87,10 +97,20 @@ operator and belongs here.
 
 ## Then install Djinn
 
-The `djinn` chart's Kueue queue topology is off by default and must be
-requested explicitly once this prerequisite exists:
+The `djinn` chart renders its Kueue queue topology at stock values
+(`kueue.enabled: true`) and arms admission (`kueue.armed: true`), so this
+release is a prerequisite rather than an option — nothing extra to request:
 
 ```bash
 helm install djinn deploy/helm/djinn \
-  --namespace djinn --create-namespace --set kueue.enabled=true
+  --namespace djinn --create-namespace
 ```
+
+Install this release **first**. `djinn/templates/prereq-guard.yaml` consults
+live API discovery during a real install and refuses the release, naming this
+chart, when `kueue.x-k8s.io/v1beta1` is not served — otherwise the operator
+gets the API server's bare `no matches for kind "ResourceFlavor"`, which names
+no remedy. A cluster that will never run Kueue installs `djinn` with
+`--set kueue.enabled=false --set kueue.armed=false` (see
+`djinn/values.local.yaml` for the full local-dev opt-out, which also disables
+the cgroup launcher stack).

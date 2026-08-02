@@ -5,10 +5,14 @@ the sense cert-manager already is: you install it as its own release, before
 the `djinn` chart, and Djinn does not own its lifecycle. It is installed from
 `deploy/helm/djinn-prereqs`.
 
-It is deliberately **install and scope only**: nothing here labels the `djinn`
-namespace, changes any Djinn workload, task-run, warm job, or control-plane
-object, or activates Kueue admission for build Jobs. Arming it is the Kueue
-cutover epic **4c9q**.
+This release is deliberately **install and scope only**: nothing *here* labels
+the `djinn` namespace, changes any Djinn workload, task-run, warm job, or
+control-plane object, or activates Kueue admission for build Jobs. Arming is
+the `djinn` chart's job, and at stock values it does arm: `kueue.enabled` and
+`kueue.armed` both default to `true`, so the `djinn` chart labels its own
+Namespace `djinn.io/kueue-managed=true` and renders build Jobs `suspend: true`.
+Read that as a division of labour, not as "nothing is captured" — the scoping
+below is what bounds *where* capture can happen, not whether it happens.
 
 ## Provenance
 
@@ -58,8 +62,10 @@ anything older the process exits at startup:
 That is fatal, not degraded. `helm --wait` never returns, the Deployment
 CrashLoopBackOffs, and the release is left with all 11 CRDs Established and
 **both** webhook configurations registered with CA bundles injected, backed by
-a dead controller. Harmless today only because `mjob`/`vjob` are fenced to a
-label nothing applies — a fragile place to be.
+a dead controller. With the `djinn` chart at stock values that is not harmless:
+`kueue.armed: true` labels the `djinn` namespace, so `mjob`/`vjob`
+(`failurePolicy: Fail`) select it and a dead controller blocks every `batch/v1`
+Job CREATE there.
 
 Djinn uses no dynamic resource allocation, so `values.yaml` turns the
 integration off (all three gates: the two child gates declare a hard dependency
@@ -119,8 +125,11 @@ managedJobsNamespaceSelector:
 ```
 
 A namespace must be explicitly labelled before any Kueue admission webhook can
-select an object in it. **No asset in this repository applies that label.** That
-is what makes the release inert.
+select an object in it. This prerequisite release applies that label nowhere;
+the `djinn` chart applies it to its own Namespace when `kueue.armed` is true,
+which is the stock default (`deploy/helm/djinn/templates/namespace.yaml`). The
+fence therefore bounds capture to `djinn` rather than eliminating it, and a
+deployment with `kueue.armed: false` captures nothing at all.
 
 > `managedJobsNamespaceSelector` is **not** merely controller config. The 0.19.0
 > chart templates each webhook's own `namespaceSelector` from it:
@@ -190,7 +199,7 @@ For comparison, at **stock upstream defaults** all six would be
 namespace fence and the `Ignore` policy are Djinn values doing work; the
 contract proves it by rejecting the stock render.
 
-### Residual risk (input to 4c9q)
+### Residual risk (live at stock values)
 
 `mjob`/`vjob` keep upstream's `failurePolicy: Fail` and are now fenced by
 **namespace only**. In a namespace labelled `djinn.io/kueue-managed=true`, every
@@ -198,21 +207,20 @@ contract proves it by rejecting the stock render.
 outage blocks all of them — not just Djinn build Jobs. The fork's per-object
 label used to bound that set.
 
-Today the blast radius is **zero**, because no namespace carries the label —
-and that is *asserted*, not assumed: `tests/webhook-selectors.sh` extracts the
-labels the `djinn` chart actually renders onto its Namespace and evaluates every
-relevant webhook's `namespaceSelector` against them the way the API server
-would. The same test also runs the inverse case, so the cost of labelling
-`djinn` is printed as a failure rather than discovered in production.
+This is no longer hypothetical. The `djinn` chart defaults to
+`kueue.armed: true`, which labels the **`djinn` namespace itself**, so every
+Job in the control-plane namespace now sits behind that `Fail`-policy webhook.
+Treat Kueue controller availability as a dispatch dependency: budget for it in
+upgrades of the prerequisite release, and reach for
+`deploy/kueue/preflight.sh` (below) rather than flipping the label by hand.
+`tests/webhook-selectors.sh` extracts the labels the `djinn` chart really
+renders onto its Namespace and evaluates every relevant webhook's
+`namespaceSelector` against them the way the API server would, so the cost of
+that labelling is computed from the shipped render rather than guessed.
 
-The cutover epic **4c9q** must choose where that label goes with this in mind:
-
-- A **dedicated build-Job namespace** keeps the fenced set to build Jobs. This
-  is the option the residual risk argues for. It is deliberately *not*
-  implemented here — it belongs to 4c9q.
-- Labelling **`djinn` itself** would put every Job in the control-plane
-  namespace behind a `Fail`-policy webhook. Do not do this without deciding the
-  outage story first.
+A **dedicated build-Job namespace** would keep the fenced set to build Jobs
+instead of the whole control plane. That option is still open and still the one
+the residual risk argues for; it is not what ships today.
 
 Do **not** "fix" this by post-processing chart output to re-add an
 `objectSelector`. That is a fork with extra steps.
@@ -260,8 +268,12 @@ prove that installing the prerequisite alongside the inert chart captures
 nothing. `zero-capture-gate.sh` proves that on a real disposable cluster, and
 `deploy/runbooks/kueue-inert-release-zero-capture.md` makes a passing invocation
 a mandatory prerequisite for 4c9q. It installs `deploy/helm/djinn-prereqs`
-followed by the `djinn` chart with `kueue.enabled=true`, then requires
-`kubectl get workloads -n djinn` to return zero items.
+followed by the `djinn` chart with `kueue.enabled=true` **and
+`kueue.armed=false`**, then requires `kubectl get workloads -n djinn` to return
+zero items. The gate owns both of those `--set`s and rejects a caller that
+overrides either: since the chart now ships `kueue.armed: true`, a gate that
+inherited the default would install the armed state and so could never observe
+the unarmed one it claims to verify.
 
 `deploy/kueue/tests/zero-capture-gate.sh` is its hermetic fake-`kubectl`
 contract; it needs no cluster credentials.

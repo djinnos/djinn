@@ -71,9 +71,31 @@ render_prereqs() {
 # The availability assertion is only meaningful against the labels the `djinn`
 # chart REALLY puts on its Namespace. Extract them from a live render rather
 # than hard-coding a guess that could drift away from the chart.
+#
+# TWO renders, because the chart now has two materially different postures and
+# each answers a different question:
+#
+#   DISARMED (`kueue.armed=false`) — does the PREREQUISITE RELEASE, on its own,
+#     bring the djinn namespace into Kueue's webhook scope? It must not. This is
+#     the property `djinn-prereqs` is responsible for, and the only one it can
+#     be held to: it ships a positive `managedJobsNamespaceSelector` keyed on
+#     `djinn.io/kueue-managed`, so scope is decided by whoever applies that
+#     label, not by this chart.
+#
+#   ARMED (chart defaults) — what does arming COST? `kueue.armed: true` now
+#     ships as the default, so the djinn namespace carries the label and IS in
+#     scope. That is a deliberate, accepted coupling and it is asserted below,
+#     by name, rather than left to be discovered during an outage.
+#
+# Both are real renders. The armed set used to be synthesised here by editing
+# the disarmed one in python; reading it off the actual default render is
+# strictly stronger, because a chart that stopped applying the label would now
+# fail the armed case instead of quietly agreeing with a hand-built fixture.
 DJINN_CHART="$REPO_ROOT/deploy/helm/djinn"
+helm template djinn "$DJINN_CHART" --is-upgrade --set kueue.armed=false >"$WORK/djinn-disarmed.yaml"
 helm template djinn "$DJINN_CHART" --is-upgrade >"$WORK/djinn.yaml"
-DJINN_NS_LABELS=$(python3 - "$WORK/djinn.yaml" <<'PY'
+extract_ns_labels() {
+    python3 - "$1" <<'PY'
 import json
 import sys
 
@@ -90,17 +112,39 @@ labels = metadata.get("labels") or {}
 labels.setdefault("kubernetes.io/metadata.name", metadata["name"])
 print(json.dumps(labels, sort_keys=True))
 PY
-) || fail 'could not extract the djinn Namespace labels from a chart render'
-printf 'INFO: evaluating webhook namespaceSelectors against real djinn Namespace labels: %s\n' "$DJINN_NS_LABELS"
+}
+DJINN_NS_LABELS=$(extract_ns_labels "$WORK/djinn-disarmed.yaml") ||
+    fail 'could not extract the djinn Namespace labels from a disarmed chart render'
+DJINN_NS_LABELS_ARMED=$(extract_ns_labels "$WORK/djinn.yaml") ||
+    fail 'could not extract the djinn Namespace labels from the default chart render'
+printf 'INFO: evaluating webhook namespaceSelectors against real djinn Namespace labels\n'
+printf 'INFO:   disarmed (kueue.armed=false): %s\n' "$DJINN_NS_LABELS"
+printf 'INFO:   armed    (chart defaults):    %s\n' "$DJINN_NS_LABELS_ARMED"
 
 # Non-vacuity for the extraction itself: an empty label set would make the
 # selector evaluation trivially non-matching and quietly prove nothing.
 python3 -c 'import json,sys; d=json.loads(sys.argv[1]); sys.exit(0 if d.get("kubernetes.io/metadata.name") else 1)' "$DJINN_NS_LABELS" \
     || fail 'extracted djinn Namespace labels lack kubernetes.io/metadata.name; the selector evaluation would be vacuous'
 
+# The two renders must actually DIFFER on the fence label, or every case below
+# collapses into the same question asked twice.
+python3 - "$DJINN_NS_LABELS" "$DJINN_NS_LABELS_ARMED" <<'PY' || fail 'the armed and disarmed renders do not differ on djinn.io/kueue-managed; the cases below would be redundant'
+import json
+import sys
+
+disarmed, armed = (json.loads(arg) for arg in sys.argv[1:])
+assert "djinn.io/kueue-managed" not in disarmed, (
+    f"kueue.armed=false still labelled the namespace: {disarmed}"
+)
+assert armed.get("djinn.io/kueue-managed") == "true", (
+    "the chart's DEFAULT render must label the namespace djinn.io/kueue-managed=true "
+    f"(kueue.armed ships true); got {armed}"
+)
+PY
+
 check_render() {
     python3 "$SELECTOR_CHECKER" "$1" \
-        --namespace-name djinn --namespace-labels "$DJINN_NS_LABELS"
+        --namespace-name djinn --namespace-labels "${2:-$DJINN_NS_LABELS}"
 }
 
 expect_pass() {
@@ -134,7 +178,11 @@ expect_rejected() {
     printf 'PASS: checker rejected %s\n' "$label"
 }
 
-echo "=== shipped render: deploy/helm/djinn-prereqs ==="
+echo "=== shipped render: deploy/helm/djinn-prereqs brings nothing into scope on its own ==="
+# Evaluated against the DISARMED djinn namespace. This is the prerequisite
+# release's own contract: installing it must not put any djinn workload behind a
+# Kueue webhook. Scope is granted by the `djinn.io/kueue-managed` label, which
+# the `djinn` chart applies only when armed — see the armed case below.
 render_prereqs "$WORK/shipped.yaml"
 expect_pass 'shipped render' "$WORK/shipped.yaml"
 
@@ -152,25 +200,45 @@ expect_rejected 'upstream-default render' "$WORK/upstream-default.yaml" \
     "webhook mpod.kb.io: namespaceSelector SELECTS namespace 'djinn'" \
     "webhook vjob.kb.io: namespaceSelector SELECTS namespace 'djinn'"
 
-echo "=== negative: what labelling the djinn namespace would cost (4c9q input) ==="
-# The fence is correct; the namespace is not. This is the 4c9q decision made the
-# wrong way, and it must be visible as a failure here rather than discovered in
-# production. It also proves the selector evaluation is non-vacuous: the same
-# shipped render that passed above is rejected purely by changing the labels.
-LABELLED_NS=$(python3 -c 'import json,sys; d=json.loads(sys.argv[1]); d["djinn.io/kueue-managed"]="true"; print(json.dumps(d, sort_keys=True))' "$DJINN_NS_LABELS")
+echo "=== WHAT THE ARMED DEFAULT COSTS: the djinn namespace IS in Kueue's webhook scope ==="
+# THIS IS NOT A FAILURE. It is the accepted price of `kueue.armed: true`, pinned
+# here so it stays a named, deliberate coupling instead of an outage nobody
+# predicted. Kueue admission cannot exist without the webhooks that implement
+# it, so arming necessarily puts the djinn namespace behind them.
+#
+# What that buys: Kueue's pods quota, which is the ONLY remaining
+# build-concurrency bound (the in-process reservation authority was deleted in
+# #2822). An unarmed install has no bound at all.
+#
+# What it costs, precisely: `vjob.kb.io` carries `failurePolicy: Fail`, so while
+# the Kueue controller is UNAVAILABLE, Job CREATE in the djinn namespace is
+# rejected — i.e. task-run, warm and SCIP dispatch all stop until it recovers.
+# The Pod/Deployment/StatefulSet webhooks are `failurePolicy: Ignore` and
+# degrade instead of blocking, which is why djinn-server, Postgres and Qdrant
+# keep being schedulable through the same outage. Install the prerequisite with
+# `--wait`, and treat Kueue controller availability as a dispatch dependency.
+#
+# The assertion is on the checker's REPORT, not on a verdict: the same shipped
+# prereqs render that passed above is reported as in-scope purely by swapping in
+# the armed namespace labels, which is also what keeps the selector evaluation
+# non-vacuous in both directions.
 set +e
-LABELLED_OUT=$(python3 "$SELECTOR_CHECKER" "$WORK/shipped.yaml" --namespace-name djinn --namespace-labels "$LABELLED_NS" 2>&1)
+LABELLED_OUT=$(check_render "$WORK/shipped.yaml" "$DJINN_NS_LABELS_ARMED" 2>&1)
 LABELLED_STATUS=$?
 set -e
 [ "$LABELLED_STATUS" -eq 1 ] || {
     printf '%s\n' "$LABELLED_OUT" >&2
-    fail 'labelling the djinn namespace was not reported as bringing it into Kueue scope'
+    fail 'the armed default was not reported as bringing the djinn namespace into Kueue scope; either the chart stopped labelling the namespace or the checker stopped evaluating selectors'
 }
 grep -Fq -- "webhook vjob.kb.io: namespaceSelector SELECTS namespace 'djinn'" <<<"$LABELLED_OUT" || {
     printf '%s\n' "$LABELLED_OUT" >&2
-    fail 'expected the Job webhook to be reported as selecting a labelled djinn namespace'
+    fail 'expected the Job webhook to be reported as selecting the armed djinn namespace'
 }
-printf 'PASS: labelling djinn.io/kueue-managed on the djinn namespace is reported as bringing Job CREATE into a failurePolicy=Fail webhook\n'
+grep -Fq -- "failurePolicy 'Fail'" <<<"$LABELLED_OUT" || {
+    printf '%s\n' "$LABELLED_OUT" >&2
+    fail 'the report no longer names the failurePolicy that makes this a dispatch dependency'
+}
+printf 'PASS: the armed default is reported as bringing Job CREATE into a failurePolicy=Fail webhook — accepted, and named\n'
 
 echo "=== negative: 'pod' put back into integrations.frameworks ==="
 # Isolates the frameworks half: the namespace fence is left intact, so the only

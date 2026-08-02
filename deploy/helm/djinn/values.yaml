@@ -83,17 +83,20 @@ scipCache:
 # `<fullname>-scip` LocalQueue (templates/kueue-topology.yaml) to admit Jobs
 # that nothing could create.
 #
-# Arming this creates an additional Pod sized by `resources.scip` — a 16Gi
-# memory limit against a measured ~10 GB peak. Read the cadence gates in
-# `djinn_k8s::scip_schedule::decide` before arming: the Job is additionally
-# skipped while a warm Job is in flight and while the head has not stood still
-# for `quiescenceSeconds`, so on a repository that merges more often than it
-# indexes, arming it costs a Pod and returns little.
+# Armed by default. The switch costs an additional Pod sized by
+# `resources.scip` — a 16Gi memory limit against a measured ~10 GB peak — and
+# buys back the 67% of every warm that the inline index costs. Read the cadence
+# gates in `djinn_k8s::scip_schedule::decide` before disarming it: the Job is
+# additionally skipped while a warm Job is in flight and while the head has not
+# stood still for `quiescenceSeconds`, so on a repository that merges more often
+# than it indexes it already declines to run.
 scipIndex:
-  # Master arming switch. False renders the switch explicitly OFF — which is
-  # the point: an env var rendered as "false" is a lever an operator can find
-  # and flip; an absent one is a feature nobody can reach.
-  enabled: false
+  # Master arming switch. The BINARY still defaults this off
+  # (`KubernetesConfig::for_testing`), so this chart is the only thing that
+  # arms it — see `djinn_k8s::config::FAIL_CLOSED_ARMING_SWITCHES`, whose
+  # chart-render obligation `tests/scip-index-arming-render.sh` enforces in
+  # both directions (a surface must exist, and it must ship armed).
+  enabled: true
   # Cadence floor between dispatches, in seconds. Default 3h.
   intervalSeconds: 10800
   # How long the repository head must have stood still before an index is worth
@@ -107,30 +110,45 @@ scipIndex:
   claimWaitSeconds: 900
 
 # -----------------------------------------------------------------------------
-# Kueue prerequisite topology
+# Kueue build admission
 # -----------------------------------------------------------------------------
-# The exact pods quota for Kueue's inert prerequisite queues; task-run and warm
-# Jobs are not selected for Kueue admission until the later cutover release.
+# The pods quota Kueue admits build Jobs against. This is the ONLY remaining
+# build-concurrency bound — the in-process pods-quota reservation authority was
+# deleted in #2822 — so both flags below ship armed and an install that turns
+# them off has no bound on concurrent build Pods at all.
 kueue:
   # Render the ResourceFlavor / ClusterQueue / LocalQueue topology.
   #
-  # OFF by default because the topology is `kueue.x-k8s.io/v1beta1`, and a
-  # cluster without Kueue rejects those objects — which used to make this whole
-  # chart un-installable anywhere Kueue was absent. Install the prerequisite
-  # release first (`deploy/helm/djinn-prereqs`, see deploy/kueue/README.md and
-  # docs/deploy/kubernetes.md), then set this true. Note that the Kueue
-  # controller must be READY, not merely installed: ClusterQueue and LocalQueue
-  # carry a conversion webhook, so applying even a v1beta1 object needs the
-  # webhook service serving. Install the prerequisite with `--wait`.
+  # ON by default: Kueue's pods quota is the only remaining build-concurrency
+  # bound (the in-process pods-quota reservation authority was deleted in
+  # #2822), so a stock install that omitted the topology would dispatch
+  # unbounded build Pods.
   #
-  # This is an explicit value rather than a `.Capabilities.APIVersions` probe on
-  # purpose: capability probing is empty under `helm template` (what Tilt uses),
-  # so it would silently omit the topology in local dev. With this flag, a true
-  # value on a Kueue-less cluster fails the install loudly instead.
+  # `djinn-prereqs` IS THEREFORE A PREREQUISITE, NOT AN OPTION. The topology is
+  # `kueue.x-k8s.io/v1beta1`, and a cluster without Kueue rejects those objects.
+  # Install the prerequisite release first (`deploy/helm/djinn-prereqs`, see
+  # deploy/kueue/README.md and docs/deploy/kubernetes.md). The Kueue controller
+  # must be READY, not merely installed: ClusterQueue and LocalQueue carry a
+  # conversion webhook, so applying even a v1beta1 object needs the webhook
+  # service serving. Install the prerequisite with `--wait`.
+  #
+  # A cluster without it fails at INSTALL, by name: templates/prereq-guard.yaml
+  # checks `kueue.x-k8s.io/v1beta1` against live API discovery and stops the
+  # release with the prerequisite's path in the message, rather than letting the
+  # API server answer "no matches for kind ResourceFlavor" with no remedy.
+  #
+  # This stays an explicit value rather than a `.Capabilities.APIVersions` probe
+  # that decides what to render: capability probing is empty under `helm
+  # template` (what Tilt uses), so a probe would silently omit the topology in
+  # local dev and silently include it in a live install — two manifests from one
+  # chart. The guard uses discovery only to REFUSE, never to render less.
   #
   # Enabling it does NOT arm anything: no Job carries a queue name and no
   # namespace is Kueue-managed. Arming is the separate `armed` flag below.
-  enabled: false
+  #
+  # Set both this and `armed` false for a cluster that will never run Kueue
+  # (see values.local.yaml, the kind/local-dev profile).
+  enabled: true
   buildPods: 3
   # Admission's binding resource. `cpu` is supported for the oru9-compatible
   # topology; buildPods is then interpreted as the nominal CPU quantity.
@@ -149,6 +167,10 @@ kueue:
     failSafeCompileSlots: 2
 
   # Arm Kueue admission for build Jobs (cutover epic 4c9q, slice S1).
+  #
+  # ON by default. `enabled` alone renders queues nothing is admitted into; the
+  # quota only binds once the renderers hand their Jobs to Kueue, which is what
+  # this flag does. A stock install therefore ships the bound, not the scaffold.
   #
   # This single value drives BOTH halves of the capture contract, and they can
   # never be split onto separate flags:
@@ -175,7 +197,7 @@ kueue:
   # Image builds stay deliberately unarmed at every value of this flag: an image
   # build is an upstream dependency of a task-run, so sharing one ClusterQueue
   # creates a priority-inversion deadlock.
-  armed: false
+  armed: true
 
   # Operator acknowledgement that an EXTERNALLY MANAGED namespace already
   # carries `djinn.io/kueue-managed=true`.
@@ -240,31 +262,42 @@ kueue:
 # before a Job is submitted, and a launcher that cannot establish its delegation
 # exits non-zero before binding its socket.
 #
-# WHY THE DEFAULT IS `disabled` — READ BEFORE CHANGING IT
-# -------------------------------------------------------
-# `required` is not a value this chart can default to on its own, because an
-# armed launcher is only half of a pair. `validate_enforcement_render` refuses
-# to dispatch when `cgroupLauncher.mode: required` is paired with
+# WHY THE DEFAULT IS `required`, AND WHAT IT DEMANDS OF YOUR NODES
+# ----------------------------------------------------------------
+# An armed launcher is only half of a pair. `validate_enforcement_render`
+# refuses to dispatch when `cgroupLauncher.mode: required` is paired with
 # `cgroupWritable.taskRuns.enabled: false`, and that pairing was this file's
 # default through v0.7.25: a fresh `helm install` with stock values could not
 # dispatch a single task on any node, and production went down for exactly that
-# reason on 2026-07-29. The two knobs must move together or not at all.
-#
-# Arming is therefore an explicit, three-line act with node prerequisites:
+# reason on 2026-07-29. The two knobs must move together or not at all, so the
+# stock profile arms BOTH:
 #
 #   cgroupLauncher:  { mode: required }
 #   cgroupWritable:  { runtimeClass: { enabled: true }, taskRuns: { enabled: true } }
 #
-# and only after the nodes pass
-# `deploy/node/k3s/djinn-cgroup-writable-conformance.sh` and carry
-# `djinn.io/cgroup-writable=true` — otherwise the RuntimeClass assignment
-# leaves task-run Pods unschedulable, which is a slower failure but a failure
-# all the same. Defaulting the OTHER way (arming everything out of the box)
-# would ship precisely that.
+# That pairing is checked at render time — `templates/deployment-server.yaml`
+# refuses the incoherent halves by name — but the NODE half cannot be. The
+# task-run RuntimeClass carries `scheduling.nodeSelector:
+# djinn.io/cgroup-writable=true`, so on a cluster whose nodes have not passed
+# `deploy/node/k3s/djinn-cgroup-writable-conformance.sh` and been labelled,
+# every task-run Pod is simply unschedulable — a slower failure than the 07-29
+# outage but a failure all the same, and a silent one.
+#
+# `templates/prereq-guard.yaml` is what makes it loud: on a real install or
+# upgrade it lists the cluster's Nodes and refuses the release, naming the
+# label, the conformance script and the RuntimeClass, instead of installing
+# "successfully" onto a cluster that can never run a task. It is inert under
+# `helm template` (Helm's `lookup` returns nothing there), which is why the
+# render-only gate below still answers the render-shaped question.
 #
 # `deploy/preflight/render-gate.sh` runs the real dispatch validator against a
 # real render; run it against the values you are about to deploy before you
-# deploy them.
+# deploy them. It is deliberately NOT a cluster check — the node prerequisites
+# are the prereq guard's and the conformance script's business, not its.
+#
+# For a cluster that will never have prepared nodes (kind, a laptop, a
+# direct-worker profile), disable the complete stack explicitly — see
+# values.local.yaml, which does exactly that.
 cgroupLauncher:
   # Armed by default: a production render must include the quota mechanism
   # required by resize-v2 rather than silently dispatching ungoverned work.

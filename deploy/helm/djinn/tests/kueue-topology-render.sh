@@ -53,13 +53,24 @@ render_capture() {
     helm template kueue-topology-test "$CHART_DIR" --is-upgrade "$@" >"$output" 2>&1
 }
 
-# The topology is `kueue.x-k8s.io/v1beta1`, so it only renders when the operator
-# has declared the Kueue prerequisite installed. Everything below that asserts
-# topology shape therefore has to opt in explicitly.
+# Topology ON, arming OFF — the "Kueue installed, nothing captured" state.
+#
+# Both flags now SHIP true, so this harness has to re-establish that state
+# explicitly. `kueue.enabled=true` is redundant against the current defaults and
+# is kept deliberately: it is what these cases are about, and a future default
+# flip must not silently turn them into assertions about something else. The
+# disarm goes FIRST so a caller that wants the armed state can simply pass
+# `--set kueue.armed=true` after it — Helm applies `--set` in order and the last
+# one wins.
+#
+# Without this, "topology rendered, nothing captured" — the state
+# deploy/kueue/zero-capture-gate.sh exists to verify — would be unreachable from
+# here, and every `assert_topology ... no` below would be asserting a state the
+# chart can no longer produce.
 render_enabled() {
     local output=$1
     shift
-    render "$output" --set kueue.enabled=true "$@"
+    render "$output" --set kueue.enabled=true --set kueue.armed=false "$@"
 }
 
 # ---------------------------------------------------------------------------
@@ -856,28 +867,35 @@ PY
 expect_topology_rejected coverage-dropped "$WORK/coverage-dropped.yaml" 7 no \
     "$RENDERER_KEYS" "$(cat "$WORK/dropped-resource.txt")"
 
-echo "=== chart default omits the topology entirely ==="
-# Regression guard for the defect this flag fixes: the topology used to render
-# unconditionally, so `helm install djinn` failed on every cluster without the
-# Kueue CRDs (observed on the production VPS). The default must be installable.
+echo "=== chart defaults render the topology AND arm it ==="
+# The stock profile is the production profile. Kueue's pods quota is the only
+# remaining build-concurrency bound (the in-process reservation authority was
+# deleted in #2822), so a default that rendered no topology would ship an
+# unbounded fleet. `buildPods` ships 3, and the whole armed contract — Namespace
+# label included — is asserted here rather than only under an explicit `--set`.
+#
+# The prerequisite this creates is enforced where it can actually be checked:
+# templates/prereq-guard.yaml refuses an install against a cluster that does not
+# serve kueue.x-k8s.io/v1beta1, naming deploy/helm/djinn-prereqs. See
+# tests/prereq-guard-render.sh.
 render "$WORK/default.yaml"
-python3 - "$WORK/default.yaml" <<'PY'
+assert_topology "$WORK/default.yaml" 3 yes
+
+echo "=== explicitly disabled omits the topology ==="
+render "$WORK/disabled.yaml" --set kueue.enabled=false --set kueue.armed=false --set kueue.buildPods=7
+grep -q 'kueue.x-k8s.io/v1beta1' "$WORK/disabled.yaml" && {
+    echo "FAIL: kueue.enabled=false still rendered the v1beta1 topology" >&2
+    exit 1
+}
+python3 - "$WORK/disabled.yaml" <<'PY'
 import sys
 import yaml
 
 docs = [doc for doc in yaml.safe_load_all(open(sys.argv[1], encoding="utf-8")) if doc]
-topology = [
-    doc for doc in docs
-    if str(doc.get("apiVersion", "")).startswith("kueue.x-k8s.io/")
-]
-assert not topology, (
-    "chart defaults must render no kueue.x-k8s.io objects, got "
-    f"{[(d['kind'], d['metadata']['name']) for d in topology]}"
-)
 # Non-vacuity: the render must still be a real chart render, not an empty file
-# that trivially satisfies the assertion above.
+# that trivially satisfies the grep above.
 assert any(doc.get("kind") == "Deployment" for doc in docs), (
-    "default render produced no Deployment; the assertion above proved nothing"
+    "the disabled render produced no Deployment; the assertion above proved nothing"
 )
 # The controller's observation-only Workload RBAC is deliberately NOT gated:
 # it is inert without the CRDs and must not churn with the flag.
@@ -888,13 +906,6 @@ rules = [
 ]
 assert len(rules) == 1, f"expected the Workload RBAC rule to survive, got {rules}"
 PY
-
-echo "=== explicitly disabled omits the topology ==="
-render "$WORK/disabled.yaml" --set kueue.enabled=false --set kueue.buildPods=7
-grep -q 'kueue.x-k8s.io/v1beta1' "$WORK/disabled.yaml" && {
-    echo "FAIL: kueue.enabled=false still rendered the v1beta1 topology" >&2
-    exit 1
-}
 
 # ---------------------------------------------------------------------------
 # The topology flag alone arms nothing.
@@ -961,14 +972,14 @@ PY
 }
 
 echo "=== kueue.enabled alone arms nothing, at BOTH of its values ==="
-assert_disarmed_server "$WORK/default.yaml" "kueue.enabled=false"
+assert_disarmed_server "$WORK/disabled.yaml" "kueue.enabled=false"
 assert_disarmed_server "$WORK/valid.yaml" "kueue.enabled=true"
 
 # ---------------------------------------------------------------------------
 # armed implies enabled
 # ---------------------------------------------------------------------------
 echo "=== armed=true with enabled=false is rejected by name ==="
-if render_capture "$WORK/armed-without-enabled.out" --set kueue.armed=true; then
+if render_capture "$WORK/armed-without-enabled.out" --set kueue.enabled=false --set kueue.armed=true; then
     echo "FAIL: kueue.armed=true with kueue.enabled=false rendered successfully" >&2
     exit 1
 fi
@@ -1055,7 +1066,7 @@ echo "=== namespace.create=false alone still renders; only ARMING is gated ==="
 # Non-vacuity: an externally-managed namespace is a supported configuration and
 # must keep rendering. Without this the rejection above could be an unrelated
 # namespace.create=false breakage.
-render "$WORK/external-ns-disarmed.yaml" --set kueue.enabled=true --set namespace.create=false
+render "$WORK/external-ns-disarmed.yaml" --set kueue.enabled=true --set kueue.armed=false --set namespace.create=false
 assert_disarmed_server_no_namespace "$WORK/external-ns-disarmed.yaml" "namespace.create=false, armed=false"
 
 echo "=== the acknowledgement reopens the escape hatch ==="
@@ -1101,7 +1112,7 @@ PY
 echo "=== the acknowledgement does NOT arm anything on its own ==="
 # It is an acknowledgement, not a second arming switch.
 render "$WORK/ack-without-armed.yaml" \
-    --set kueue.enabled=true --set kueue.namespaceLabelledExternally=true
+    --set kueue.enabled=true --set kueue.armed=false --set kueue.namespaceLabelledExternally=true
 assert_topology "$WORK/ack-without-armed.yaml" 3 no
 
 echo "=== the acknowledgement is inert when the chart owns the namespace ==="
@@ -1242,20 +1253,27 @@ if helm template kueue-topology-test "$WORK/chart-without-kueue" --is-upgrade >"
     exit 1
 fi
 
-echo "=== kueue.armed ships false ==="
+echo "=== kueue ships enabled AND armed, and buildPods unchanged ==="
 python3 - "$CHART_DIR/values.yaml" <<'PY'
 import sys
 import yaml
 
 values = yaml.safe_load(open(sys.argv[1], encoding="utf-8"))
-assert values["kueue"]["armed"] is False, (
-    f"kueue.armed must ship false, got {values['kueue']['armed']!r}"
+# The stock profile is the production profile: everything armed on the
+# production VPS is the chart default. Kueue's pods quota is the ONLY remaining
+# build-concurrency bound, so a chart that shipped the topology disarmed would
+# ship no bound at all.
+assert values["kueue"]["enabled"] is True, (
+    f"kueue.enabled must ship true, got {values['kueue']['enabled']!r}"
 )
-assert values["kueue"]["enabled"] is False, (
-    f"kueue.enabled must ship false, got {values['kueue']['enabled']!r}"
+assert values["kueue"]["armed"] is True, (
+    f"kueue.armed must ship true, got {values['kueue']['armed']!r}. `enabled` "
+    "alone renders queues nothing is admitted into; only `armed` makes the "
+    "renderers hand their Jobs to Kueue, so the quota binds nothing without it."
 )
-# The escape hatch is opt-in too. Shipping it true would pre-acknowledge a claim
-# no operator ever made, which is exactly the silence this gate replaced.
+# The escape hatch stays opt-in. Shipping it true would pre-acknowledge a claim
+# no operator ever made — that an externally-managed namespace already carries
+# djinn.io/kueue-managed — which is exactly the silence that gate replaced.
 assert values["kueue"]["namespaceLabelledExternally"] is False, (
     "kueue.namespaceLabelledExternally must ship false, got "
     f"{values['kueue']['namespaceLabelledExternally']!r}"
@@ -1333,8 +1351,13 @@ PY
     fi
 }
 
-echo "=== zero-capture gate passes against the default render ==="
-run_gate_against_render default pass
+echo "=== zero-capture gate passes against the inert render the gate itself installs ==="
+# The gate owns `kueue.*` and pins BOTH halves on its own install line (see
+# deploy/kueue/zero-capture-gate.sh): topology on, arming off. Since `kueue.armed`
+# now ships TRUE, that pin is what keeps the inert state representable at all —
+# so this case reproduces the gate's own arguments rather than the bare chart
+# defaults, which are armed.
+run_gate_against_render inert pass --set kueue.enabled=true --set kueue.armed=false
 
 echo "=== zero-capture gate FAILS against an armed render ==="
 run_gate_against_render armed fail --set kueue.enabled=true --set kueue.armed=true
