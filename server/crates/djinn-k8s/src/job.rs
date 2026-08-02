@@ -1147,6 +1147,10 @@ fn volume_mount(name: &str, mount_path: &str, read_only: Option<bool>) -> Volume
 }
 
 #[cfg(test)]
+#[path = "job_role_cpu_tests.rs"]
+mod job_role_cpu_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
