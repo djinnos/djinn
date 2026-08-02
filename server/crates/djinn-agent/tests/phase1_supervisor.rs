@@ -649,7 +649,7 @@ async fn supervisor_rejects_fenced_generation_after_pre_session_pause() {
         sessions.is_empty(),
         "fenced lifecycle must not insert a non-terminal session"
     );
-    assert_task_run_with_status(task_runs.as_ref(), &task.id, &["running"]).await;
+    assert_task_run_with_status(task_runs.as_ref(), &task.id, &["starting"]).await;
 
     // ── (c) no worktrees anywhere under the test-controlled roots ────────────
     assert_no_worktrees(source_dir.path());
