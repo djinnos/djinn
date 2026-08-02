@@ -48,6 +48,10 @@ pub struct RecordedRequest {
 pub struct RecordedApiserver(Arc<Mutex<Vec<RecordedRequest>>>);
 
 impl RecordedApiserver {
+    #[must_use]
+    pub fn new() -> Self {
+        Self(Arc::new(Mutex::new(Vec::new())))
+    }
     /// Every request, in issue order.
     #[must_use]
     pub fn all(&self) -> Vec<RecordedRequest> {
@@ -81,6 +85,12 @@ impl RecordedApiserver {
     }
 }
 
+impl Default for RecordedApiserver {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// A runtime over an apiserver that holds **no** task-run Jobs and **no** Pods.
 ///
 /// Reads are answered with genuinely empty typed lists, so
@@ -105,7 +115,7 @@ pub fn empty_task_run_cluster(namespace: &str) -> (Arc<KubernetesRuntime>, Recor
 }
 
 /// Build a client whose every request lands in `recorder`.
-fn recording_client(recorder: &RecordedApiserver, namespace: &str) -> kube::Client {
+pub fn recording_client(recorder: &RecordedApiserver, namespace: &str) -> kube::Client {
     use http::Response;
     use http_body_util::BodyExt as _;
     use kube::client::Body;

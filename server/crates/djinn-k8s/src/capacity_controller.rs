@@ -494,7 +494,7 @@ mod tests {
     }
 
     #[test]
-    fn quota_controller_wire_serializes_resource_typed_values() {
+    fn quota_controller_wire_decision_serializes_resource_typed_values() {
         let p = patch_decision(
             &queue("pods"),
             "djinn-kueue",
@@ -525,6 +525,59 @@ mod tests {
             panic!()
         };
         assert_eq!(patch[1]["value"], "7500m");
+    }
+
+    #[tokio::test]
+    async fn quota_controller_wire_records_exactly_one_fenced_patch_per_surface() {
+        use crate::runtime_fixture::{RecordedApiserver, recording_client};
+
+        for (surface, damped, expected) in [
+            (
+                "pods",
+                CapacityVector {
+                    binding: BindingQuota::Pods(10),
+                    compile_slots: 2,
+                },
+                "\"value\":\"10\"",
+            ),
+            (
+                "cpu",
+                CapacityVector {
+                    binding: BindingQuota::CpuMillicores(7_500),
+                    compile_slots: 2,
+                },
+                "\"value\":\"7500m\"",
+            ),
+        ] {
+            let decision = patch_decision(
+                &queue(surface),
+                "djinn-kueue",
+                outcome(),
+                damped,
+                true,
+                safe(),
+            );
+            let ActuationDecision::Patch { patch, .. } = decision else {
+                panic!("derived fixture must patch")
+            };
+            let recorder = RecordedApiserver::new();
+            let api = queue_api(recording_client(&recorder, "default"));
+            let result = api
+                .patch(
+                    "djinn-kueue",
+                    &PatchParams::default(),
+                    &Patch::Json::<()>(serde_json::from_value(patch).unwrap()),
+                )
+                .await;
+            assert!(result.is_err(), "fixture refuses after recording the wire");
+            let mutations = recorder.mutations();
+            assert_eq!(mutations.len(), 1);
+            assert_eq!(mutations[0].method, "PATCH");
+            assert!(mutations[0].path.ends_with("/clusterqueues/djinn-kueue"));
+            assert!(mutations[0].body.contains("resourceVersion"));
+            assert!(mutations[0].body.contains(expected));
+            assert!(!mutations[0].body.contains("memory"));
+        }
     }
 
     #[test]
@@ -672,6 +725,9 @@ mod tests {
 
     #[test]
     fn quota_controller_failsafe_returns_no_mutation_on_conservative_input() {
+        assert_eq!(cpu_quantity("bogus"), None);
+        assert_eq!(cpu_quantity("-1m"), None);
+        assert_eq!(cpu_quantity("9223372036854775807"), None);
         let conservative = CapacityOutcome::Conservative {
             capacity: safe(),
             reason: crate::capacity::CapacityError::IncompleteProtectedPopulation,

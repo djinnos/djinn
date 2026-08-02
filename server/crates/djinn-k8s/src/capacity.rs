@@ -232,5 +232,24 @@ mod tests {
             .unwrap(),
             CpuMillicores(750)
         );
+        assert_eq!(CpuMillicores::new(-1), Err(CapacityError::NegativeCpu));
+        assert_eq!(
+            scheduler_effective_request(
+                [CpuMillicores(i64::MAX), CpuMillicores(1)],
+                std::iter::empty(),
+            ),
+            Err(CapacityError::Overflow)
+        );
+        assert_eq!(
+            CapacityOutcome::Conservative {
+                capacity: fail,
+                reason: CapacityError::IncompleteProtectedPopulation,
+            },
+            CapacityOutcome::Conservative {
+                capacity: fail,
+                reason: CapacityError::IncompleteProtectedPopulation,
+            },
+            "an empty/incomplete population has a closed typed outcome"
+        );
     }
 }
