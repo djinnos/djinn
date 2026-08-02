@@ -254,7 +254,7 @@ fn spawn_blocking_refinement_pool(
             let observed_tx = observed_tx.clone();
             let release = release_for_factory.clone();
             let runner: djinn_slot::TestLifecycleRunner =
-                Arc::new(move |task_id, _, _, _, kill, _, _| {
+                Arc::new(move |task_id, _, _, _, _, kill, _, _| {
                     let observed_tx = observed_tx.clone();
                     let release = release.clone();
                     Box::pin(async move {

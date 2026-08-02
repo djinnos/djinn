@@ -407,6 +407,7 @@ async fn global_pause_does_not_reap_or_kill_active_worker_sessions() {
         std::sync::Arc::new(|slot_id, model_id, event_tx, app_state, cancel| {
             let runner: djinn_slot::TestLifecycleRunner = std::sync::Arc::new(
                 |_task_id,
+                 _execution_generation,
                  _project_path,
                  _model_id,
                  _app_state,

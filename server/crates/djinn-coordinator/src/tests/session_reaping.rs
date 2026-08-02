@@ -530,6 +530,7 @@ async fn stall_timeout_tears_down_taskrun_job_through_slot_pool_kill_path() {
         std::sync::Arc::new(|slot_id, model_id, event_tx, app_state, cancel| {
             let runner: djinn_slot::TestLifecycleRunner = std::sync::Arc::new(
                 |_task_id,
+                 _execution_generation,
                  _project_path,
                  _model_id,
                  _app_state,
@@ -1839,6 +1840,7 @@ async fn budget_ceiling_kill_routes_loop_guard_without_tripping_breaker() {
         Arc::new(|slot_id, model_id, event_tx, app_state, cancel| {
             let runner: djinn_slot::TestLifecycleRunner = Arc::new(
                 |_task_id,
+                 _execution_generation,
                  _project_path,
                  _model_id,
                  _app_state,
@@ -2656,6 +2658,7 @@ async fn stall_kill_still_fires_without_db_progress() {
         std::sync::Arc::new(|slot_id, model_id, event_tx, app_state, cancel| {
             let runner: djinn_slot::TestLifecycleRunner = std::sync::Arc::new(
                 |_task_id,
+                 _execution_generation,
                  _project_path,
                  _model_id,
                  _app_state,
@@ -2783,6 +2786,7 @@ async fn dispatch_stalled_worker_session(
         std::sync::Arc::new(|slot_id, model_id, event_tx, app_state, cancel| {
             let runner: djinn_slot::TestLifecycleRunner = std::sync::Arc::new(
                 |_task_id,
+                 _execution_generation,
                  _project_path,
                  _model_id,
                  _app_state,
@@ -3243,6 +3247,7 @@ async fn long_tool_run_heartbeat_classified_slow_spares_zombie() {
         std::sync::Arc::new(|slot_id, model_id, event_tx, app_state, cancel| {
             let runner: djinn_slot::TestLifecycleRunner = std::sync::Arc::new(
                 |_task_id,
+                 _execution_generation,
                  _project_path,
                  _model_id,
                  _app_state,
@@ -3395,6 +3400,7 @@ async fn slow_extension_granted_with_evidence_and_claim_extension() {
         std::sync::Arc::new(|slot_id, model_id, event_tx, app_state, cancel| {
             let runner: djinn_slot::TestLifecycleRunner = std::sync::Arc::new(
                 |_task_id,
+                 _execution_generation,
                  _project_path,
                  _model_id,
                  _app_state,
@@ -4721,6 +4727,7 @@ async fn zero_token_running_session_classified_slow_not_dead() {
         std::sync::Arc::new(|slot_id, model_id, event_tx, app_state, cancel| {
             let runner: djinn_slot::TestLifecycleRunner = std::sync::Arc::new(
                 |_task_id,
+                 _execution_generation,
                  _project_path,
                  _model_id,
                  _app_state,
@@ -5133,6 +5140,7 @@ async fn ceiling_kill_terminalizes_attempt_as_loop_guard_tripped() {
         Arc::new(|slot_id, model_id, event_tx, app_state, cancel| {
             let runner: djinn_slot::TestLifecycleRunner = Arc::new(
                 |_task_id,
+                 _execution_generation,
                  _project_path,
                  _model_id,
                  _app_state,
@@ -5250,6 +5258,7 @@ async fn stall_timeout_terminalizes_attempt_as_timed_out() {
         Arc::new(|slot_id, model_id, event_tx, app_state, cancel| {
             let runner: djinn_slot::TestLifecycleRunner = Arc::new(
                 |_task_id,
+                 _execution_generation,
                  _project_path,
                  _model_id,
                  _app_state,
@@ -5977,6 +5986,7 @@ async fn slow_verdict_with_concurrent_terminal_transition_does_not_grant_extensi
         std::sync::Arc::new(|slot_id, model_id, event_tx, app_state, cancel| {
             let runner: djinn_slot::TestLifecycleRunner = std::sync::Arc::new(
                 |_task_id,
+                 _execution_generation,
                  _project_path,
                  _model_id,
                  _app_state,
@@ -6185,6 +6195,7 @@ async fn dead_verdict_with_fresh_db_activity_suppresses_reap() {
         std::sync::Arc::new(|slot_id, model_id, event_tx, app_state, cancel| {
             let runner: djinn_slot::TestLifecycleRunner = std::sync::Arc::new(
                 |_task_id,
+                 _execution_generation,
                  _project_path,
                  _model_id,
                  _app_state,

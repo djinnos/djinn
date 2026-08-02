@@ -3646,6 +3646,7 @@ mod inflight_ledger_tests {
                     let releases = releases.clone();
                     let runner: djinn_slot::TestLifecycleRunner = std::sync::Arc::new(
                         move |task_id,
+                              _execution_generation,
                               _project_path,
                               _model_id,
                               _app_state,
@@ -5035,7 +5036,14 @@ mod failover_chain_tests {
             Arc::new(move |_slot_id, model_id, _event_tx, _app_state, kill| {
                 let releases_inner = releases_clone.clone();
                 let runner: djinn_slot::TestLifecycleRunner = Arc::new(
-                    move |task_id, _project_path, _model_id, _app_state, kill, _pause, _resume| {
+                    move |task_id,
+                          _execution_generation,
+                          _project_path,
+                          _model_id,
+                          _app_state,
+                          kill,
+                          _pause,
+                          _resume| {
                         let releases_inner = releases_inner.clone();
                         Box::pin(async move {
                             let (release_tx, release_rx) = tokio::sync::oneshot::channel();
@@ -7614,7 +7622,14 @@ mod monitored_reopen_no_eligible_model_tests {
             // dispatch is accepted but no real work happens.
             std::sync::Arc::new(|_slot_id, _model_id, _event_tx, _app_state, kill| {
                 let runner: djinn_slot::TestLifecycleRunner = std::sync::Arc::new(
-                    move |_task_id, _project_path, _model_id, _app_state, kill, _pause, _resume| {
+                    move |_task_id,
+                          _execution_generation,
+                          _project_path,
+                          _model_id,
+                          _app_state,
+                          kill,
+                          _pause,
+                          _resume| {
                         Box::pin(async move {
                             let _ = kill.cancelled().await;
                             Ok(())
@@ -8108,6 +8123,7 @@ mod build_admission_route_tests {
                     let releases = releases.clone();
                     let runner: djinn_slot::TestLifecycleRunner = StdArc::new(
                         move |task_id,
+                              _execution_generation,
                               _project_path,
                               _model_id,
                               _app_state,
