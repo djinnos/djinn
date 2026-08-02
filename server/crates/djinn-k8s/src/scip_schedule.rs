@@ -57,7 +57,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use djinn_db::{Database, WarmGraphAttemptRepository};
+use djinn_db::{Database, WarmGraphAttemptRepository, WarmGraphOutcome};
 use k8s_openapi::api::batch::v1::Job;
 use k8s_openapi::chrono::{DateTime, Utc};
 use kube::api::{Api, ListParams};
@@ -88,6 +88,10 @@ pub enum ScipIndexDecision {
     /// here would put two ~10 GB indexers on one node to compute the same
     /// artifacts. See the gate's rationale on [`decide`].
     SkipWarmInFlight,
+    /// Durable warm publication already covers this exact mirror head.
+    SkipGraphAlreadyCoversHead,
+    /// Warm has not yet made a durable attempt for this exact mirror head.
+    SkipWarmNotYetAttempted,
     /// The last successful index already covers this exact revision. **This is
     /// the change-detection gate** and it is checked before the cadence, so an
     /// unchanged head never dispatches no matter how much time has passed.
@@ -121,6 +125,8 @@ impl ScipIndexDecision {
             Self::SkipInventoryUnavailable => "inventory_unavailable",
             Self::SkipInFlight => "in_flight",
             Self::SkipWarmInFlight => "warm_in_flight",
+            Self::SkipGraphAlreadyCoversHead => "graph_already_covers_head",
+            Self::SkipWarmNotYetAttempted => "warm_not_yet_attempted",
             Self::SkipHeadUnchanged { .. } => "head_unchanged",
             Self::SkipHeadNotQuiescent { .. } => "head_not_quiescent",
             Self::SkipCadence { .. } => "cadence",
@@ -145,6 +151,58 @@ pub struct ScipJobObservation {
     /// Age of the most recent SCIP Job of any outcome, from its
     /// `creationTimestamp`. `None` when none is retained.
     pub since_last_dispatch: Option<Duration>,
+    /// Durable warm lifecycle classification for the exact mirror head passed
+    /// to [`decide`]. `None` is an unavailable read and fails closed.
+    pub warm_outcome: Option<WarmGraphOutcome>,
+}
+
+/// Reads the durable warm lifecycle for the exact head being scheduled.
+#[async_trait]
+pub trait WarmOutcomeSource: Send + Sync {
+    async fn warm_outcome_for_head(
+        &self,
+        project_id: &str,
+        exact_head_revision: &str,
+    ) -> Result<WarmGraphOutcome, String>;
+}
+
+/// Production durable warm lifecycle source.
+pub struct RepositoryWarmOutcomeSource {
+    db: Database,
+}
+
+impl RepositoryWarmOutcomeSource {
+    #[must_use]
+    pub fn new(db: Database) -> Self {
+        Self { db }
+    }
+}
+
+#[async_trait]
+impl WarmOutcomeSource for RepositoryWarmOutcomeSource {
+    async fn warm_outcome_for_head(
+        &self,
+        project_id: &str,
+        exact_head_revision: &str,
+    ) -> Result<WarmGraphOutcome, String> {
+        WarmGraphAttemptRepository::new(self.db.clone())
+            .warm_outcome_for_head(project_id, exact_head_revision)
+            .await
+            .map_err(|error| error.to_string())
+    }
+}
+
+struct UnconfiguredWarmOutcomeSource;
+
+#[async_trait]
+impl WarmOutcomeSource for UnconfiguredWarmOutcomeSource {
+    async fn warm_outcome_for_head(
+        &self,
+        _project_id: &str,
+        _exact_head_revision: &str,
+    ) -> Result<WarmGraphOutcome, String> {
+        Err("durable warm outcome source is not configured".to_string())
+    }
 }
 
 /// Reads the retained SCIP-Job inventory that backs the change-detection gate.
@@ -182,7 +240,8 @@ pub trait MirrorHeadSource: Send + Sync {
 /// 3. **head-unchanged wins over the cadence**, because the requirement is
 ///    "every 3 hours *and only if* the head advanced", not "or";
 /// 4. **head-not-quiescent** skips — see below;
-/// 5. the cadence floor rate-limits an advancing head.
+/// 5. the cadence floor rate-limits an advancing head;
+/// 6. only a durable warm attempt that did not publish authorizes recovery.
 ///
 /// # Why an in-flight warm Job blocks a dispatch
 ///
@@ -276,8 +335,14 @@ pub fn decide(
             remaining: interval - elapsed,
         };
     }
-    ScipIndexDecision::Dispatch {
-        revision: head.to_string(),
+    match observation.warm_outcome.as_ref() {
+        Some(WarmGraphOutcome::Published(_)) => ScipIndexDecision::SkipGraphAlreadyCoversHead,
+        Some(WarmGraphOutcome::NotTriedYet) => ScipIndexDecision::SkipWarmNotYetAttempted,
+        Some(WarmGraphOutcome::InProgress(_)) => ScipIndexDecision::SkipWarmInFlight,
+        Some(WarmGraphOutcome::TriedAndDidNotPublish(_)) => ScipIndexDecision::Dispatch {
+            revision: head.to_string(),
+        },
+        None => ScipIndexDecision::SkipInventoryUnavailable,
     }
 }
 
@@ -288,6 +353,7 @@ pub fn decide(
 pub struct ScipIndexScheduler {
     config: KubernetesConfig,
     inventory: Arc<dyn ScipJobInventory>,
+    warm_outcomes: Arc<dyn WarmOutcomeSource>,
     dispatcher: Arc<dyn WarmJobDispatcher>,
 }
 
@@ -301,8 +367,17 @@ impl ScipIndexScheduler {
         Self {
             config,
             inventory,
+            warm_outcomes: Arc::new(UnconfiguredWarmOutcomeSource),
             dispatcher,
         }
+    }
+
+    /// Supply the durable warm lifecycle source. Production uses
+    /// [`RepositoryWarmOutcomeSource`]; tests can inject a deterministic seam.
+    #[must_use]
+    pub fn with_warm_outcome_source(mut self, warm_outcomes: Arc<dyn WarmOutcomeSource>) -> Self {
+        self.warm_outcomes = warm_outcomes;
+        self
     }
 
     /// The configured cadence floor.
@@ -344,6 +419,23 @@ impl ScipIndexScheduler {
                 );
                 None
             }
+        };
+        let observation = match (observation, head) {
+            (Some(mut observation), Some(head)) => match self
+                .warm_outcomes
+                .warm_outcome_for_head(project_id, &head.revision)
+                .await
+            {
+                Ok(outcome) => {
+                    observation.warm_outcome = Some(outcome);
+                    Some(observation)
+                }
+                Err(error) => {
+                    warn!(project_id, revision = %head.revision, %error, "scip-index: durable warm outcome unavailable; skipping this tick");
+                    None
+                }
+            },
+            (observation, _) => observation,
         };
         decide(
             head.map(|h| h.revision.as_str()),
@@ -618,7 +710,8 @@ pub fn observe_from_jobs(jobs: &[Job], now: DateTime<Utc>) -> ScipJobObservation
 mod tests {
     use super::*;
     use djinn_db::{
-        Database, WarmGraphAttemptRepository, WarmGraphAttemptStatus, test_support::seed_project,
+        Database, WarmGraphAttempt, WarmGraphAttemptRepository, WarmGraphAttemptStatus,
+        test_support::seed_project,
     };
     use k8s_openapi::api::batch::v1::JobStatus;
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::{ObjectMeta, Time};
@@ -633,6 +726,23 @@ mod tests {
     /// not about it.
     const QUIET: Option<Duration> = Some(Duration::from_secs(9_999));
     const QUIESCENCE: Duration = Duration::from_secs(3_523);
+
+    fn attempt(status: WarmGraphAttemptStatus) -> WarmGraphAttempt {
+        WarmGraphAttempt {
+            attempt_id: "attempt".to_string(),
+            project_id: "proj".to_string(),
+            revision: HEAD.to_string(),
+            status,
+            started_at: "2026-01-01T00:00:00Z".to_string(),
+            deadline_at: "2099-01-01T00:00:00Z".to_string(),
+            finished_at: None,
+            detail: None,
+        }
+    }
+
+    fn recovery_outcome() -> WarmGraphOutcome {
+        WarmGraphOutcome::TriedAndDidNotPublish(attempt(WarmGraphAttemptStatus::Failed))
+    }
 
     /// There are deliberately no Kubernetes Job fixtures here. Job retention
     /// is a hint only: normal terminal state survives its TTL and an absent Job
@@ -742,8 +852,59 @@ mod tests {
             in_flight,
             last_indexed_revision: last.map(str::to_string),
             since_last_dispatch: since,
+            warm_outcome: Some(recovery_outcome()),
             ..ScipJobObservation::default()
         }
+    }
+
+    #[test]
+    fn warm_outcome() {
+        let base = observed(false, Some(OLD), Some(THREE_HOURS));
+        for (outcome, expected) in [
+            (
+                WarmGraphOutcome::Published(attempt(WarmGraphAttemptStatus::PublishedComplete)),
+                ScipIndexDecision::SkipGraphAlreadyCoversHead,
+            ),
+            (
+                WarmGraphOutcome::NotTriedYet,
+                ScipIndexDecision::SkipWarmNotYetAttempted,
+            ),
+            (
+                WarmGraphOutcome::InProgress(attempt(WarmGraphAttemptStatus::Running)),
+                ScipIndexDecision::SkipWarmInFlight,
+            ),
+            (
+                recovery_outcome(),
+                ScipIndexDecision::Dispatch {
+                    revision: HEAD.to_string(),
+                },
+            ),
+        ] {
+            let mut observation = base.clone();
+            observation.warm_outcome = Some(outcome);
+            assert_eq!(
+                decide(
+                    Some(HEAD),
+                    QUIET,
+                    Some(&observation),
+                    THREE_HOURS,
+                    QUIESCENCE
+                ),
+                expected
+            );
+        }
+        let mut unavailable = base;
+        unavailable.warm_outcome = None;
+        assert_eq!(
+            decide(
+                Some(HEAD),
+                QUIET,
+                Some(&unavailable),
+                THREE_HOURS,
+                QUIESCENCE
+            ),
+            ScipIndexDecision::SkipInventoryUnavailable
+        );
     }
 
     /// **The change-detection gate.** An unchanged head skips, and it skips no
@@ -796,7 +957,7 @@ mod tests {
             decide(
                 Some(HEAD),
                 QUIET,
-                Some(&ScipJobObservation::default()),
+                Some(&observed(false, None, None)),
                 THREE_HOURS,
                 QUIESCENCE
             ),
@@ -1055,13 +1216,14 @@ mod tests {
     /// claims and only one of them is about the ledger.
     #[test]
     fn a_failed_index_does_not_advance_the_ledger_and_retries_after_the_cadence() {
-        let past_the_floor = observe_from_jobs(
+        let mut past_the_floor = observe_from_jobs(
             &[
                 scip_job(OLD, true, false, 40_000),
                 scip_job(HEAD, false, true, 20_000),
             ],
             now(),
         );
+        past_the_floor.warm_outcome = Some(recovery_outcome());
         assert_eq!(
             past_the_floor.last_indexed_revision.as_deref(),
             Some(OLD),
@@ -1087,13 +1249,14 @@ mod tests {
         // ...but not immediately. A failure 100s ago is still a dispatch for
         // cadence purposes, so a crash-looping index cannot re-create a
         // leaseless 16Gi Pod every tick.
-        let inside_the_floor = observe_from_jobs(
+        let mut inside_the_floor = observe_from_jobs(
             &[
                 scip_job(OLD, true, false, 40_000),
                 scip_job(HEAD, false, true, 100),
             ],
             now(),
         );
+        inside_the_floor.warm_outcome = Some(recovery_outcome());
         assert_eq!(inside_the_floor.last_indexed_revision.as_deref(), Some(OLD));
         assert!(matches!(
             decide(
@@ -1216,6 +1379,35 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn observation_reads_durable_warm_outcome() {
+        let dispatcher = Arc::new(RecordingDispatcher::default());
+        let scheduler = ScipIndexScheduler::new(
+            KubernetesConfig::for_testing(),
+            Arc::new(RecordingInventory(Ok(ScipJobObservation::default()))),
+            dispatcher,
+        )
+        .with_warm_outcome_source(Arc::new(FixedWarmOutcomeSource(Ok(recovery_outcome()))));
+        assert_eq!(
+            scheduler.evaluate("proj", Some(&quiescent(HEAD))).await,
+            ScipIndexDecision::Dispatch {
+                revision: HEAD.to_string()
+            }
+        );
+        let failing = ScipIndexScheduler::new(
+            KubernetesConfig::for_testing(),
+            Arc::new(RecordingInventory(Ok(ScipJobObservation::default()))),
+            Arc::new(RecordingDispatcher::default()),
+        )
+        .with_warm_outcome_source(Arc::new(FixedWarmOutcomeSource(Err(
+            "coverage inconsistent".to_string(),
+        ))));
+        assert_eq!(
+            failing.evaluate("proj", Some(&quiescent(HEAD))).await,
+            ScipIndexDecision::SkipInventoryUnavailable
+        );
+    }
+
     // ---- scheduler side effect --------------------------------------------
 
     struct RecordingInventory(Result<ScipJobObservation, String>);
@@ -1223,6 +1415,19 @@ mod tests {
     #[async_trait]
     impl ScipJobInventory for RecordingInventory {
         async fn observe(&self, _ns: &str, _p: &str) -> Result<ScipJobObservation, String> {
+            self.0.clone()
+        }
+    }
+
+    struct FixedWarmOutcomeSource(Result<WarmGraphOutcome, String>);
+
+    #[async_trait]
+    impl WarmOutcomeSource for FixedWarmOutcomeSource {
+        async fn warm_outcome_for_head(
+            &self,
+            _project_id: &str,
+            _head: &str,
+        ) -> Result<WarmGraphOutcome, String> {
             self.0.clone()
         }
     }
@@ -1257,7 +1462,8 @@ mod tests {
             KubernetesConfig::for_testing(),
             Arc::new(RecordingInventory(observation)),
             dispatcher.clone(),
-        );
+        )
+        .with_warm_outcome_source(Arc::new(FixedWarmOutcomeSource(Ok(recovery_outcome()))));
         let head = head.map(quiescent);
         let decision = scheduler
             .tick_project("proj", head.as_ref(), "img:tag", None)
