@@ -866,7 +866,7 @@ async fn broker_backed_shell_cancellation_kills_waits_empty_and_cleans_up() {
 }
 
 #[tokio::test]
-async fn below_threshold_broker_backed_shell_never_contacts_supervisor() {
+async fn lease_invocation_below_threshold_never_calls_queue_lease() {
     let services = Arc::new(ScriptedServices::new(vec![], vec![], vec![]));
     let launcher = Arc::new(BrokerBackedLauncher::running(0));
     let runner = Arc::new(LeaseInvocationRunner::new(
@@ -1122,7 +1122,7 @@ async fn ac1_light_fixtures_finish_unleased_with_zero_lease_calls() {
 // ─── AC 1: heavy fixtures queue exactly once after crossing the threshold ──
 
 #[tokio::test]
-async fn ac1_heavy_fixtures_queue_exactly_once_after_cpu_threshold() {
+async fn lease_invocation_measured_cpu_threshold_not_static_classification() {
     for fixture in HEAVY_FIXTURES {
         let services = Arc::new(ScriptedServices::new(
             vec![status(LeaseState::Queued, None)],

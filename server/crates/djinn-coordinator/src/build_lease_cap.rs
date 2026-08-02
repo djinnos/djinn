@@ -239,4 +239,10 @@ mod capacity_tests {
             }
         }
     }
+
+    #[test]
+    fn build_lease_cap_api_visibility() {
+        let cases = trybuild::TestCases::new();
+        cases.compile_fail("tests/ui/build_lease_cap_private.rs");
+    }
 }

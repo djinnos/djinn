@@ -31,6 +31,7 @@ struct Fixture {
     leases: Arc<BuildLeaseRepository>,
     operator: InvocationLeaseControl,
     epoch: i64,
+    authority: Arc<InvocationLeaseAuthorityRepository>,
 }
 
 impl Fixture {
@@ -104,8 +105,9 @@ async fn running_process(epoch_cap: i64) -> Fixture {
     Fixture {
         service,
         leases,
-        operator: InvocationLeaseControl::new(authority),
+        operator: InvocationLeaseControl::new(Arc::clone(&authority)),
         epoch: row.epoch,
+        authority,
     }
 }
 
@@ -237,6 +239,56 @@ async fn build_lease_cap_refresh_adopts_damped_fallback_without_restart() {
 }
 
 #[tokio::test]
+async fn build_lease_cap_refresh_requires_damped_48_core_agreement_and_dwell() {
+    use djinn_k8s::capacity_damping::{
+        BindingQuota, CapacityDamper, CapacityVector, MINIMUM_GROWTH_DWELL, SampleKind,
+    };
+    use tokio::time::Instant;
+
+    let db = Database::open_in_memory().unwrap();
+    db.ensure_initialized().await.unwrap();
+    let authority = Arc::new(InvocationLeaseAuthorityRepository::new(db.clone()));
+    authority
+        .set_mode_and_cap(0, InvocationLeaseMode::Enforce, None)
+        .await
+        .unwrap();
+    let service = BuildLeaseService::new(Arc::new(BuildLeaseRepository::new(db)), 2)
+        .with_invocation_lease_authority(authority);
+    assert!(matches!(service.recover().await, LeaseResult::Status(_)));
+
+    let start = Instant::now();
+    let mut damper = CapacityDamper::new(BindingQuota::Pods(10), 2, start);
+    let high = CapacityVector {
+        binding: BindingQuota::Pods(48),
+        compile_slots: 12,
+    };
+    let first = damper.observe(high, SampleKind::Periodic, start + MINIMUM_GROWTH_DWELL);
+    assert_eq!(first.compile_slots, 2, "one high snapshot cannot widen");
+    service
+        .adopt_capacity_snapshot(DampedCapacitySnapshot::Capacity {
+            compile_slots: first.compile_slots,
+        })
+        .await;
+    assert_eq!(service.cap(), 2);
+    damper.observe(
+        high,
+        SampleKind::Periodic,
+        start + MINIMUM_GROWTH_DWELL + std::time::Duration::from_secs(30),
+    );
+    let agreed = damper.observe(
+        high,
+        SampleKind::Periodic,
+        start + MINIMUM_GROWTH_DWELL + std::time::Duration::from_secs(60),
+    );
+    service
+        .adopt_capacity_snapshot(DampedCapacitySnapshot::Capacity {
+            compile_slots: agreed.compile_slots,
+        })
+        .await;
+    assert_eq!(service.cap(), 12);
+}
+
+#[tokio::test]
 async fn build_lease_cap_durable_override_remains_authoritative() {
     let fixture = running_process(7).await;
     assert_eq!(
@@ -256,4 +308,18 @@ async fn build_lease_cap_durable_override_remains_authoritative() {
         Some(7)
     );
     assert_eq!(fixture.service.cap(), 7);
+
+    fixture
+        .authority
+        .set_mode_and_cap(fixture.epoch, InvocationLeaseMode::Enforce, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        fixture
+            .service
+            .adopt_capacity_snapshot(DampedCapacitySnapshot::Capacity { compile_slots: 12 })
+            .await,
+        Some(12),
+        "clearing the operator override adopts the latest damped fallback"
+    );
 }
