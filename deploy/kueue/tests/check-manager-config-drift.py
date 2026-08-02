@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prove djinn-prereqs' Kueue manager config is upstream's, plus two edits.
+"""Prove djinn-prereqs' Kueue manager config is upstream's, plus three edits.
 
 The upstream Kueue chart exposes `managedJobsNamespaceSelector` and
 `integrations.frameworks` only inside one opaque string value
@@ -15,6 +15,8 @@ This check reads the subchart's own default out of the pinned
      positive `djinn.io/kueue-managed: "true"` matchLabels fence.
   2. `integrations.frameworks` — ours is upstream's list minus exactly
      {pod, deployment, statefulset}, order preserved.
+  3. `waitForPodsReady` — absent upstream, set by us to the exact bounded
+     readiness-recovery policy.
 
 Any other difference fails. On a bump, the diff it prints is the review.
 
@@ -39,6 +41,18 @@ CONFIG_PATH = ("managerConfig", "controllerManagerConfigYaml")
 SELECTOR_KEY = "managedJobsNamespaceSelector"
 EXPECTED_SELECTOR = {"matchLabels": {"djinn.io/kueue-managed": "true"}}
 REMOVED_FRAMEWORKS = ["pod", "deployment", "statefulset"]
+WAIT_FOR_PODS_READY_KEY = "waitForPodsReady"
+EXPECTED_WAIT_FOR_PODS_READY = {
+    "timeout": "30m",
+    "recoveryTimeout": "3m",
+    "blockAdmission": False,
+    "requeuingStrategy": {
+        "timestamp": "Eviction",
+        "backoffLimitCount": None,
+        "backoffBaseSeconds": 60,
+        "backoffMaxSeconds": 3600,
+    },
+}
 
 
 def dig(tree: Any, path: tuple[str, ...]) -> Any:
@@ -96,6 +110,18 @@ def main() -> int:
             f"{SELECTOR_KEY} must be {EXPECTED_SELECTOR!r}, got {ours.get(SELECTOR_KEY)!r}"
         )
 
+    if WAIT_FOR_PODS_READY_KEY in upstream:
+        failures.append(
+            f"upstream {tarball_name} now sets {WAIT_FOR_PODS_READY_KEY} itself "
+            f"({upstream[WAIT_FOR_PODS_READY_KEY]!r}); re-derive the override deliberately"
+        )
+    if ours.get(WAIT_FOR_PODS_READY_KEY) != EXPECTED_WAIT_FOR_PODS_READY:
+        failures.append(
+            f"{WAIT_FOR_PODS_READY_KEY} must be "
+            f"{EXPECTED_WAIT_FOR_PODS_READY!r}, got "
+            f"{ours.get(WAIT_FOR_PODS_READY_KEY)!r}"
+        )
+
     upstream_frameworks = (upstream.get("integrations") or {}).get("frameworks") or []
     our_frameworks = (ours.get("integrations") or {}).get("frameworks") or []
     expected_frameworks = [f for f in upstream_frameworks if f not in REMOVED_FRAMEWORKS]
@@ -116,6 +142,7 @@ def main() -> int:
     def stripped(tree: dict[str, Any]) -> dict[str, Any]:
         copy = dict(tree)
         copy.pop(SELECTOR_KEY, None)
+        copy.pop(WAIT_FOR_PODS_READY_KEY, None)
         integrations = dict(copy.get("integrations") or {})
         integrations.pop("frameworks", None)
         if integrations:
@@ -129,7 +156,7 @@ def main() -> int:
         only_upstream = {k: v for k, v in upstream_rest.items() if our_rest.get(k) != v}
         only_ours = {k: v for k, v in our_rest.items() if upstream_rest.get(k) != v}
         failures.append(
-            "controllerManagerConfigYaml drifted from upstream outside the two "
+            "controllerManagerConfigYaml drifted from upstream outside the three "
             f"sanctioned edits.\n         upstream-only/changed: {only_upstream}\n"
             f"         ours-only/changed:     {only_ours}"
         )
@@ -141,8 +168,8 @@ def main() -> int:
 
     print(
         f"PASS: {chart_dir.name} manager config equals {tarball_name}'s default "
-        f"plus exactly two edits ({SELECTOR_KEY} fence, frameworks minus "
-        f"{REMOVED_FRAMEWORKS})"
+        f"plus exactly three edits ({SELECTOR_KEY} fence, frameworks minus "
+        f"{REMOVED_FRAMEWORKS}, {WAIT_FOR_PODS_READY_KEY} recovery policy)"
     )
     return 0
 
