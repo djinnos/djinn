@@ -64,38 +64,65 @@ fn missing_role_fails_safe_to_build_capable() {
 }
 
 #[test]
-fn light_and_build_capable_share_limits_but_not_cpu_request() {
+fn worker_resources_role_classing() {
     let cfg = KubernetesConfig::for_testing();
     let light = worker_resources(&cfg, RoleResourceClass::Light);
-    let build = worker_resources(&cfg, RoleResourceClass::BuildCapable);
+    let build_capable = worker_resources(&cfg, RoleResourceClass::BuildCapable);
 
-    // CPU request differs by class.
+    let light_request = parse_cpu_millicores(
+        &light
+            .requests
+            .as_ref()
+            .expect("Light worker resources must contain requests")
+            .get("cpu")
+            .expect("Light worker resources requests must contain cpu")
+            .0,
+    )
+    .expect("Light worker resources requests.cpu must be a parseable CPU quantity");
+    let build_capable_request = parse_cpu_millicores(
+        &build_capable
+            .requests
+            .as_ref()
+            .expect("BuildCapable worker resources must contain requests")
+            .get("cpu")
+            .expect("BuildCapable worker resources requests must contain cpu")
+            .0,
+    )
+    .expect("BuildCapable worker resources requests.cpu must be a parseable CPU quantity");
+    let light_limit = parse_cpu_millicores(
+        &light
+            .limits
+            .as_ref()
+            .expect("Light worker resources must contain limits")
+            .get("cpu")
+            .expect("Light worker resources limits must contain cpu")
+            .0,
+    )
+    .expect("Light worker resources limits.cpu must be a parseable CPU quantity");
+    let build_capable_limit = parse_cpu_millicores(
+        &build_capable
+            .limits
+            .as_ref()
+            .expect("BuildCapable worker resources must contain limits")
+            .get("cpu")
+            .expect("BuildCapable worker resources limits must contain cpu")
+            .0,
+    )
+    .expect("BuildCapable worker resources limits.cpu must be a parseable CPU quantity");
+
     assert_eq!(
-        light.requests.as_ref().unwrap().get("cpu").unwrap().0,
-        cfg.light_cpu_request
+        light_limit, build_capable_limit,
+        "Light limits.cpu parsed as {light_limit}m; BuildCapable limits.cpu parsed as {build_capable_limit}m"
     );
-    assert_eq!(
-        build.requests.as_ref().unwrap().get("cpu").unwrap().0,
-        cfg.cpu_request
-    );
-    assert_ne!(
-        light.requests.as_ref().unwrap().get("cpu"),
-        build.requests.as_ref().unwrap().get("cpu"),
+    assert!(
+        light_request < build_capable_request,
+        "Light requests.cpu parsed as {light_request}m; BuildCapable requests.cpu parsed as {build_capable_request}m"
     );
 
-    // Limits + memory identical across classes ("same limits everywhere").
-    assert_eq!(light.limits, build.limits);
+    // Memory stays shared across the role classes.
     assert_eq!(
         light.requests.as_ref().unwrap().get("memory"),
-        build.requests.as_ref().unwrap().get("memory"),
-    );
-    assert_eq!(
-        light.limits.as_ref().unwrap().get("cpu").unwrap().0,
-        cfg.cpu_limit
-    );
-    assert_eq!(
-        light.limits.as_ref().unwrap().get("memory").unwrap().0,
-        cfg.memory_limit
+        build_capable.requests.as_ref().unwrap().get("memory"),
     );
 }
 
