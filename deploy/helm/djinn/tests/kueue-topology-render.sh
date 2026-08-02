@@ -591,10 +591,18 @@ import sys
 import yaml
 
 manifest, expected_cpu, expected_memory, expected_pods, expected_managed, keys_json = sys.argv[1:]
-task_vector = {"cpu": expected_cpu, "memory": expected_memory, "pods": int(expected_pods)}
+# Helm emits unquoted integral quantities as YAML integers while quantities with
+# units remain strings. Compare the quantity spelling consistently so the render
+# contract covers both forms (for example cpu=15 and memory=60Gi).
+quantity_text = str
+task_vector = {
+    "cpu": quantity_text(expected_cpu),
+    "memory": quantity_text(expected_memory),
+    "pods": quantity_text(expected_pods),
+}
 singleton_borrowing = {
-    "kueue-topology-test-djinn-warm": {"cpu": "2", "memory": "2Gi", "pods": 1},
-    "kueue-topology-test-djinn-scip": {"cpu": "1", "memory": "4Gi", "pods": 1},
+    "kueue-topology-test-djinn-warm": {"cpu": "2", "memory": "2Gi", "pods": "1"},
+    "kueue-topology-test-djinn-scip": {"cpu": "1", "memory": "4Gi", "pods": "1"},
 }
 derived = json.load(open(keys_json, encoding="utf-8"))
 docs = [doc for doc in yaml.safe_load_all(open(manifest, encoding="utf-8")) if doc]
@@ -681,7 +689,7 @@ assert set(resources) == set(covered), (
     f"quota={sorted(resources)}"
 )
 for dimension, declared in task_vector.items():
-    actual = resources[dimension].get("nominalQuota")
+    actual = quantity_text(resources[dimension].get("nominalQuota"))
     assert actual == declared, (
         f"{queue['metadata']['name']} {dimension} nominalQuota must equal declared "
         f"task vector {declared!r}, got {actual!r}"
@@ -704,9 +712,9 @@ for background_name in ["kueue-topology-test-djinn-warm", "kueue-topology-test-d
     bg_resources = {entry["name"]: entry for entry in bg_entries}
     assert set(bg_resources) == set(covered)
     for dimension, expected_borrowing in singleton_borrowing[background_name].items():
-        actual_nominal = bg_resources[dimension].get("nominalQuota")
-        actual_borrowing = bg_resources[dimension].get("borrowingLimit")
-        assert actual_nominal == 0, (
+        actual_nominal = quantity_text(bg_resources[dimension].get("nominalQuota"))
+        actual_borrowing = quantity_text(bg_resources[dimension].get("borrowingLimit"))
+        assert actual_nominal == "0", (
             f"{background_name} {dimension} nominalQuota must be zero, got {actual_nominal!r}"
         )
         assert actual_borrowing == expected_borrowing, (
@@ -715,17 +723,31 @@ for background_name in ["kueue-topology-test-djinn-warm", "kueue-topology-test-d
         )
 
 for dimension, declared in task_vector.items():
-    cohort_nominal = sum(
-        next(
+    cohort_nominals = {
+        candidate["metadata"]["name"]: quantity_text(next(
             entry["nominalQuota"]
             for entry in candidate["spec"]["resourceGroups"][0]["flavors"][0]["resources"]
             if entry["name"] == dimension
-        )
+        ))
         for candidate in queues
+    }
+    # Kubernetes quantities are dimensional strings, so Python cannot add
+    # values such as "60Gi" and 0. The two zero background entries are the
+    # additive identity: once named queues prove those zeros above, the cohort
+    # sum is precisely its sole non-zero task-queue term.
+    non_zero_nominals = {
+        queue_name: nominal
+        for queue_name, nominal in cohort_nominals.items()
+        if nominal != "0"
+    }
+    assert set(non_zero_nominals) == {queue["metadata"]["name"]}, (
+        f"cohort nominal sum for {dimension} must have exactly one non-zero owner "
+        f"({queue['metadata']['name']}); got {cohort_nominals!r}"
     )
+    cohort_nominal = non_zero_nominals[queue["metadata"]["name"]]
     assert cohort_nominal == declared, (
         f"cohort nominal sum for {dimension} must equal declared task vector {declared!r}; "
-        f"got {cohort_nominal!r} across {[candidate['metadata']['name'] for candidate in queues]}"
+        f"got {cohort_nominal!r} across {cohort_nominals!r}"
     )
 
 assert "withinClusterQueue" not in spec.get("preemption", {})
