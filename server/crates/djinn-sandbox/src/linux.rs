@@ -813,32 +813,92 @@ mod tests {
     /// the production launcher-free Landlock policy. Exposure is KEEP, never an
     /// isolation claim; a missing canary is deliberately inconclusive and fails.
     #[test]
-    fn same_uid_landlock_environ_reachability_records_keep() {
-        if !crate::probe_landlock() {
-            return;
-        }
+    fn same_uid_landlock_reachability_is_a_keep_measurement() {
+        assert!(
+            crate::probe_landlock(),
+            "Landlock unavailable: mandatory measurement is non-green"
+        );
         let worktree = tempfile::tempdir_in("/var/tmp").expect("worktree");
-        let mut worker = std::process::Command::new("sh");
-        // The worker owns its target so Linux's ptrace/Yama ancestry checks do
-        // not turn this into a vacuous sibling-process denial. The target's
-        // environment is the cooperative permissive control for this class.
-        worker.args([
-            "-c",
-            "export DJINN_TOKEN_CANARY_SAME_UID=environment-CANARY-same-uid; sleep 10 & p=$!; cat /proc/$p/environ; kill $p",
-        ]);
+        let home_fixture = tempfile::tempdir_in(std::env::current_dir().expect("test directory"))
+            .expect("unwritable home fixture");
+        let home = home_fixture.path();
+        std::fs::create_dir_all(home.join(".ssh")).expect("home fixture");
+        let fd_canary = worktree.path().join("fd-canary");
+        std::fs::write(&fd_canary, "FD-CANARY-same-uid").expect("fd fixture");
+        let probe = r#"
+import ctypes,os,subprocess,sys
+root,fd_path=sys.argv[1:]; target="""import ctypes,os,sys,time
+b=ctypes.create_string_buffer(b'MEM-CANARY-same-uid');f=open(sys.argv[1],'rb')
+print(os.getpid(),ctypes.addressof(b),flush=True);time.sleep(20)"""
+env=dict(os.environ);env['DJINN_TOKEN_CANARY_SAME_UID']='ENV-CANARY-same-uid'
+p=subprocess.Popen([sys.executable,'-c',target,fd_path],env=env,stdout=subprocess.PIPE,text=True)
+pid,address=map(int,p.stdout.readline().split());libc=ctypes.CDLL(None,use_errno=True)
+def emit(k,ok,d):print(k+'='+('OK:' if ok else 'ERR:')+d,flush=True)
+try:
+ emit('environ',b'ENV-CANARY-same-uid' in open(f'/proc/{pid}/environ','rb').read(),'ENV-CANARY-same-uid')
+ m=open(f'/proc/{pid}/mem','rb',buffering=0);m.seek(address);emit('mem',m.read(19)==b'MEM-CANARY-same-uid','MEM-CANARY-same-uid')
+ emit('maps',any('/python' in x for x in open(f'/proc/{pid}/maps')),'executed-path-control')
+ found=False
+ for e in os.listdir(f'/proc/{pid}/fd'):
+  try:found=found or 'fd-canary' in os.readlink(f'/proc/{pid}/fd/'+e)
+  except OSError:pass
+ emit('fd',found,'FD-CANARY-same-uid')
+ rc=libc.ptrace(16,pid,None,None);emit('ptrace_attach',rc==0,str(ctypes.get_errno()))
+ if rc==0:libc.ptrace(17,pid,None,None)
+ local=ctypes.create_string_buffer(19);liov=(ctypes.c_void_p*2)(ctypes.addressof(local),19);riov=(ctypes.c_void_p*2)(address,19)
+ rc=libc.syscall(310,pid,liov,1,riov,1,0);emit('process_vm_readv',rc==19 and local.raw==b'MEM-CANARY-same-uid',str(ctypes.get_errno()))
+ for name,path in [('home',os.environ['HOME']+'/home-write'),('gitconfig',os.environ['HOME']+'/.gitconfig'),('ssh',os.environ['HOME']+'/.ssh/write'),('etc_gitconfig','/etc/gitconfig'),('var_run_djinn','/var/run/djinn/write')]:
+  try:open(path,'w').write('WRITE-CANARY-'+name);emit('write_'+name,False,'unexpected-write')
+  except OSError as e:emit('write_'+name,e.errno in (1,13,30),str(e.errno))
+  control=os.path.join(root,'WRITE-CANARY-'+name);open(control,'w').write('WRITE-CANARY-'+name);emit('control_'+name,open(control).read()=='WRITE-CANARY-'+name,'WRITE-CANARY-'+name)
+finally:p.kill();p.wait()
+"#;
+        let mut worker = std::process::Command::new("python3");
+        worker
+            .args(["-c", probe])
+            .arg(worktree.path())
+            .arg(&fd_canary);
+        worker.env("HOME", home);
         LandlockSandbox
             .apply_with_confidential_roots(
                 SandboxScope::Worktree(worktree.path()),
                 &mut worker,
                 &[],
             )
-            .expect("worker should receive the actual Landlock policy");
+            .expect("worker should receive actual Landlock policy");
         let output = worker.output().expect("sandboxed worker should run");
-        // The fixture is intentionally conservative: a denied or unsupported
-        // procfs read is also KEEP, never evidence of same-uid isolation.
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success(),
+            "same-uid probe failed: {stdout}; stderr={}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        for key in [
+            "environ",
+            "mem",
+            "maps",
+            "fd",
+            "write_home",
+            "write_gitconfig",
+            "write_ssh",
+            "write_etc_gitconfig",
+            "write_var_run_djinn",
+            "control_home",
+            "control_gitconfig",
+            "control_ssh",
+            "control_etc_gitconfig",
+            "control_var_run_djinn",
+        ] {
+            assert!(
+                stdout
+                    .lines()
+                    .any(|line| line.starts_with(&format!("{key}=OK:"))),
+                "mandatory {key} probe was denied, unsupported, failed, or inconclusive: {stdout}"
+            );
+        }
+        println!("UID_1001_BROKERED_BASELINE=DENY (separate launcher/seccomp boundary comparison)");
         println!(
-            "SAME_UID_DECISION=KEEP: proc/environ status={}; Landlock does not replace launcher uid separation or child seccomp",
-            output.status
+            "SAME_UID_DECISION=KEEP: credential/token/executed-path probes succeeded; Landlock does not replace launcher uid separation or child seccomp"
         );
     }
 }
