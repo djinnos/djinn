@@ -64,26 +64,12 @@ env:
 jobs:
   resize-matrix:
     name: Three real image classes against four server modes
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 90
     # Belt and braces: the only trigger is workflow_dispatch, and this makes a
     # future edit that adds `pull_request` fail to turn this into a PR check by
     # accident.
     if: github.event_name == 'workflow_dispatch'
-
-    services:
-      postgres:
-        image: public.ecr.aws/docker/library/postgres:16
-        env:
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: djinn
-        ports:
-          - "5433:5432"
-        options: >-
-          --health-cmd="pg_isready -U postgres"
-          --health-interval=5s
-          --health-timeout=3s
-          --health-retries=20
 
     steps:
       # `fetch-depth: 0`: the legacy image is compiled from a pinned commit in a
@@ -92,6 +78,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - name: Start PostgreSQL 16
+        run: ./scripts/ci-start-postgres.sh
 
       - name: Install kind, kubectl and helm
         run: |
