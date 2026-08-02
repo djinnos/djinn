@@ -34,9 +34,29 @@ use crate::refinement_dispatch::refinement_cap_tests::{
 };
 use djinn_core::events::{DjinnEventEnvelope, EventBus};
 use djinn_core::models::NeedsEvidenceClaim;
+use djinn_db::repositories::proposal::TerminalLinkedEvidenceSpikeOutcome;
+use djinn_db::repositories::test_support::{UsageTestSessionSeed, seed_session_row_with_id};
 use djinn_db::{
-    EffectiveCreatorProvenance, ProposalDebateTrailCreateInput, ProposalRepository, TaskRepository,
+    EffectiveCreatorProvenance, EvidenceRepository, InsertEvidenceFinalizedProjection,
+    InsertEvidencePlan, InsertEvidencePlanCheck, ProposalDebateTrailCreateInput,
+    ProposalRepository, TaskRepository,
 };
+use serde::Deserialize;
+
+const LIFECYCLE_CASES: &str = include_str!("../tests/fixtures/evidence_lifecycle_cases.json");
+
+#[derive(Deserialize)]
+struct EvidenceLifecycleFixture {
+    cases: Vec<EvidenceLifecycleCase>,
+}
+
+#[derive(Deserialize)]
+struct EvidenceLifecycleCase {
+    name: String,
+    structured_completion: Option<String>,
+    terminal_success: bool,
+    resume_refinement: bool,
+}
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -156,6 +176,71 @@ async fn seed_linked_spike(
         .expect("set spike status");
 
     (spike_task_id, judge_task_id)
+}
+
+/// Seed the authoritative frozen plan and V1 projection consumed by the
+/// lifecycle repository. The production query validates these arrays and
+/// derives its typed receipt from `payload.outcome`.
+async fn seed_v1_completion(
+    db: &djinn_db::Database,
+    fixture: &crate::refinement_dispatch::refinement_cap_tests::RefinementFixture,
+    spike_task_id: &str,
+    outcome: Option<&str>,
+) {
+    let session_id = uuid::Uuid::now_v7().to_string();
+    seed_session_row_with_id(
+        db,
+        &session_id,
+        UsageTestSessionSeed {
+            project_id: &fixture.project_id,
+            model_id: TEST_MODEL,
+            agent_type: "worker",
+            started_at: "2025-01-01T00:00:00.000Z",
+            tokens_in: 0,
+            tokens_out: 0,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            cost_usd: None,
+            cost_basis: "unpriced",
+            task_id: Some(spike_task_id),
+        },
+    )
+    .await;
+    let plan_id = uuid::Uuid::now_v7().to_string();
+    let evidence = EvidenceRepository::new(db.clone());
+    evidence
+        .insert_plan(InsertEvidencePlan {
+            id: plan_id.clone(),
+            spike_task_id: spike_task_id.to_owned(),
+            session_id,
+            captured_commit_sha: "evidence-lifecycle-fixture".to_owned(),
+            worktree_fingerprint: "fixture-worktree".to_owned(),
+            checks: vec![InsertEvidencePlanCheck {
+                check_id: "lifecycle-check".to_owned(),
+                question: "Does the V1 completion reach the lifecycle receipt?".to_owned(),
+                method: "code".to_owned(),
+            }],
+        })
+        .await
+        .expect("insert frozen evidence plan");
+    if let Some(outcome) = outcome {
+        evidence
+            .insert_finalized_projection(InsertEvidenceFinalizedProjection {
+                id: uuid::Uuid::now_v7().to_string(),
+                plan_id: plan_id.clone(),
+                version: 1,
+                payload: serde_json::json!({
+                    "schema_version": 1,
+                    "plan_id": plan_id,
+                    "outcome": outcome,
+                    "checks": [],
+                    "findings": [],
+                    "gaps": []
+                }),
+            })
+            .await
+            .expect("insert finalized V1 projection");
+    }
 }
 
 /// Count the number of refinement tasks in the project with the given agent
@@ -321,6 +406,162 @@ async fn valid_evidence_completion_clears_link_and_resumes_advocate_with_finding
             .description
             .contains("FINDINGS-ANSWER-E2E valid")
     );
+}
+
+/// The lifecycle fixture is behavioral: every row first calls the production
+/// persistence primitive, then redelivers through the coordinator event path.
+/// Typed outcomes are read from finalized V1 projections rather than inferred
+/// by this test.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn evidence_rollout_contract_executes_every_lifecycle_case() {
+    let contract: EvidenceLifecycleFixture =
+        serde_json::from_str(LIFECYCLE_CASES).expect("valid lifecycle fixture");
+    assert_eq!(contract.cases.len(), 6, "fixture remains a closed contract");
+
+    for case in contract.cases {
+        let db = crate::test_helpers::create_test_db();
+        let fixture = seed_refinement_fixture(&db).await;
+        let (events_tx, _events_rx) = tokio::sync::broadcast::channel::<DjinnEventEnvelope>(256);
+        let task_repo = TaskRepository::new(db.clone(), EventBus::noop());
+        let proposal_repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let terminal_failure = case.name == "task_failure";
+        let (spike_task_id, _) = seed_linked_spike(
+            &db,
+            &fixture,
+            "closed",
+            Some(if terminal_failure {
+                "failed"
+            } else {
+                "completed"
+            }),
+            Some(sample_findings_metadata(&format!(
+                "{} V1 findings",
+                case.name
+            ))),
+        )
+        .await;
+
+        // Missing completion has a frozen plan but no V1 projection; malformed
+        // completion has the authoritative shape with an invalid outcome.
+        let projection_outcome = case
+            .structured_completion
+            .as_deref()
+            .filter(|outcome| *outcome != "missing");
+        seed_v1_completion(&db, &fixture, &spike_task_id, projection_outcome).await;
+
+        // Exercise the repository's authoritative V1 classification directly.
+        // This is deliberately before coordinator delivery to model a crash
+        // after receipt persistence and before the linked spike is cleared.
+        let persisted = proposal_repo
+            .persist_terminal_linked_spike_evidence_lifecycle(
+                &fixture.proposal_id,
+                &spike_task_id,
+                "closed",
+                if terminal_failure {
+                    Some("failed")
+                } else {
+                    Some("completed")
+                },
+            )
+            .await
+            .expect("persist lifecycle through production repository path");
+        match persisted {
+            TerminalLinkedEvidenceSpikeOutcome::EvidenceReceived { derived_outcome } => {
+                assert!(
+                    case.terminal_success,
+                    "{} must not classify as a typed receipt",
+                    case.name
+                );
+                assert_eq!(
+                    serde_json::to_value(derived_outcome).expect("serialize derived outcome"),
+                    serde_json::json!(case.structured_completion),
+                    "{} typed outcome must come from the V1 projection",
+                    case.name
+                );
+            }
+            TerminalLinkedEvidenceSpikeOutcome::EvidenceFailed { .. } => assert!(
+                !case.terminal_success,
+                "{} must produce a typed receipt",
+                case.name
+            ),
+            other => panic!(
+                "{} first production persistence must classify a terminal spike, got {other:?}",
+                case.name
+            ),
+        }
+
+        let mut actor = build_refinement_actor(&db, &events_tx, spawn_test_pool(&db, 4));
+        seed_refinement_state(
+            &mut actor,
+            &fixture.proposal_id,
+            Some(fixture.user_id.clone()),
+        );
+        actor
+            .active_refinements
+            .get_mut(&fixture.proposal_id)
+            .expect("state exists")
+            .record_needs_evidence();
+        let task = task_repo
+            .get(&spike_task_id)
+            .await
+            .expect("read spike")
+            .expect("spike exists");
+        // Redelivery takes the production event-driven AlreadyRecorded branch.
+        // That branch must hydrate the same receipt and resume only successes.
+        actor
+            .persist_terminal_linked_spike_evidence_from_closed_task(&task)
+            .await;
+
+        let revisions = proposal_repo
+            .revisions(&fixture.proposal_id)
+            .await
+            .expect("read lifecycle rows");
+        let received = revisions
+            .iter()
+            .find(|revision| revision.event_kind == "refinement_evidence_received");
+        let failed = revisions
+            .iter()
+            .find(|revision| revision.event_kind == "refinement_evidence_failed");
+        assert_eq!(
+            received.is_some(),
+            case.terminal_success,
+            "{} receipt classification must use production persistence",
+            case.name
+        );
+        assert_eq!(
+            failed.is_some(),
+            !case.terminal_success,
+            "{} failure",
+            case.name
+        );
+
+        if let Some(receipt) = received {
+            let metadata =
+                djinn_db::repositories::proposal::EvidenceLifecycleMetadata::parse_event_metadata(
+                    receipt.event_metadata.as_deref(),
+                )
+                .expect("read receipt metadata")
+                .expect("receipt metadata exists");
+            assert_eq!(
+                serde_json::to_value(metadata.derived_outcome).expect("serialize derived outcome"),
+                serde_json::json!(case.structured_completion),
+                "{} typed outcome persisted from V1 projection",
+                case.name
+            );
+        }
+
+        assert_eq!(
+            actor.refinement_sessions.contains_key(&fixture.proposal_id),
+            case.resume_refinement,
+            "{} must {} refinement through the production resume helper",
+            case.name,
+            if case.resume_refinement {
+                "resume"
+            } else {
+                "block"
+            }
+        );
+    }
 }
 
 // ── AC#3: missing/malformed findings and failed spikes block resume ──────────
