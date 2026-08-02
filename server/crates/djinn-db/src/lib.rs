@@ -319,5 +319,9 @@ pub use repositories::{
     user::{User, UserRepository},
     user_settings::UserSettingsRepository,
     warm_base_activity::{WarmBaseActivity, WarmBaseActivityRepository},
+    warm_graph_attempt::{
+        MAX_WARM_GRAPH_ATTEMPT_DETAIL_CHARS, WarmGraphAttempt, WarmGraphAttemptRepository,
+        WarmGraphAttemptStatus, WarmGraphOutcome,
+    },
 };
 pub use short_id::{ResolvedEntity, resolve_short_ids};
