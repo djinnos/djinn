@@ -199,17 +199,27 @@ impl WarmGraphAttemptRepository {
             ));
         }
         self.db.ensure_initialized().await?;
-        let seconds = grace.num_seconds();
+        // PostgreSQL intervals have microsecond precision. Do not silently
+        // truncate a caller's fractional grace period while converting it for
+        // SQL: reject durations that cannot be represented exactly instead.
+        let microseconds = grace.num_microseconds().ok_or_else(|| {
+            DbError::InvalidData("warm graph attempt grace is out of range".into())
+        })?;
+        if Duration::microseconds(microseconds) != grace {
+            return Err(DbError::InvalidData(
+                "warm graph attempt grace must have microsecond precision".into(),
+            ));
+        }
         let rows = sqlx::query(
             "UPDATE warm_graph_attempt \
              SET status = 'timed_out', detail = 'deadline exceeded', \
                  finished_at = $1::timestamptz \
              WHERE status = 'running' \
-               AND deadline_at + ($2::bigint * interval '1 second') < $1::timestamptz \
+               AND deadline_at + ($2::bigint * interval '1 microsecond') < $1::timestamptz \
              RETURNING attempt_id::text AS attempt_id",
         )
         .bind(now)
-        .bind(seconds)
+        .bind(microseconds)
         .fetch_all(self.db.pool())
         .await?;
         Ok(rows.into_iter().map(|row| row.get("attempt_id")).collect())
@@ -371,6 +381,36 @@ mod tests {
         assert_eq!(
             repo.get_attempt(&id).await.unwrap().unwrap().status,
             WarmGraphAttemptStatus::TimedOut
+        );
+    }
+
+    #[tokio::test]
+    async fn reconciliation_preserves_fractional_grace_boundary() {
+        let repo = fresh().await;
+        seed_project(&repo.db, "p1", "p1").await;
+        let id = repo
+            .start_attempt("p1", "abc", "2026-01-01T00:00:00.000Z")
+            .await
+            .unwrap();
+        let grace = Duration::milliseconds(1500);
+
+        assert!(
+            repo.reconcile_stale_attempts("2026-01-01T00:00:01.001Z", grace)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            repo.reconcile_stale_attempts("2026-01-01T00:00:01.500Z", grace)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            repo.reconcile_stale_attempts("2026-01-01T00:00:01.501Z", grace)
+                .await
+                .unwrap(),
+            vec![id]
         );
     }
 
