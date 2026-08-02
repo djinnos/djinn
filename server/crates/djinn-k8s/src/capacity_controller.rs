@@ -905,7 +905,22 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn quota_controller_wire_drives_full_recorded_observation_and_actuation() {
         use crate::runtime_fixture::capacity_controller_cluster;
-        for (surface, expected) in [("pods", "\"value\":\"10\""), ("cpu", "\"value\":\"7500m\"")] {
+        let build_job = controller_build_job();
+        let build_pod = rendered_pod_spec(&build_job).unwrap();
+        let CapacityOutcome::Derived(expected_capacity) = derive_capacity_from_rendered_build_job(
+            resources(12_000, 48 * 1024 * 1024 * 1024, 110),
+            resources(4_200, 5 * 1024 * 1024, 5),
+            ResourceVector::ZERO,
+            build_pod,
+            CpuMillicores::new(2_800).unwrap(),
+            safe(),
+        ) else {
+            panic!("complete recorded observation must derive")
+        };
+        for (surface, expected) in [
+            ("pods", expected_capacity.pods.to_string()),
+            ("cpu", format!("{}m", expected_capacity.binding_cpu.get())),
+        ] {
             let (client, recorder) = capacity_controller_cluster("default", surface);
             let config = CapacityControllerConfig {
                 queue_name: "djinn-kueue".into(),
@@ -914,7 +929,7 @@ mod tests {
                 idle_cost: CpuMillicores::new(750).unwrap(),
                 compile_cost: CpuMillicores::new(2_800).unwrap(),
                 headroom: ResourceVector::ZERO,
-                build_job: controller_build_job(),
+                build_job: build_job.clone(),
                 fail_safe: safe(),
                 expected_protected_pods: 5,
             };
@@ -938,7 +953,11 @@ mod tests {
             task.abort();
             let mutations = recorder.mutations();
             assert_eq!(mutations.len(), 1);
-            assert!(mutations[0].body.contains(expected));
+            assert!(
+                mutations[0]
+                    .body
+                    .contains(&format!("\"value\":\"{expected}\""))
+            );
             assert!(mutations[0].body.contains("resourceVersion"));
             assert!(!mutations[0].body.contains("memory"));
         }
