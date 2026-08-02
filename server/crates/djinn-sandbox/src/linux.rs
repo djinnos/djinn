@@ -105,19 +105,28 @@ impl LandlockSandbox {
         // Recomputed per spawn so a directory that appears mid-run is picked
         // up on the next command rather than being silently ungranted.
         let read_file_cover = confidential::read_file_cover(confidential_roots);
+        let cargo_build_dir = std::env::var("CARGO_HOME")
+            .or_else(|_| std::env::var("HOME").map(|home| format!("{home}/.cargo")))
+            .ok()
+            .map(|base| PathBuf::from(base).join("build"));
+        let writable_roots = writable_sandbox_roots(
+            writable_worktree.as_deref(),
+            git_meta.as_deref(),
+            cache_dir_for_rule.as_deref(),
+            cargo_build_dir.as_deref(),
+        );
+        ensure_confidential_roots_do_not_overlap_writable_roots(
+            confidential_roots,
+            &writable_roots,
+        )?;
 
         // Safety: pre_exec runs in the forked child process. The closure only
         // performs Landlock syscalls and open(2) calls, both of which are
         // async-signal-safe per POSIX.
         unsafe {
             cmd.pre_exec(move || {
-                apply_policy(
-                    writable_worktree.as_deref(),
-                    git_meta.as_deref(),
-                    cache_dir_for_rule.as_deref(),
-                    &read_file_cover,
-                )
-                .map_err(|e| io::Error::new(io::ErrorKind::PermissionDenied, e.to_string()))
+                apply_policy(&read_file_cover, &writable_roots)
+                    .map_err(|e| io::Error::new(io::ErrorKind::PermissionDenied, e.to_string()))
             });
         }
         Ok(())
@@ -145,6 +154,142 @@ fn prepare_cache_dir() -> Option<PathBuf> {
     }
 }
 
+/// A `full_access` rule and whether failure to open it must abort sandbox
+/// installation. This collection is shared with the confidential-root
+/// invariant so a new writable rule cannot bypass it.
+#[derive(Debug)]
+struct WritableSandboxRoot {
+    path: PathBuf,
+    required: bool,
+}
+
+/// Enumerate every path that can receive a `full_access` Landlock rule.
+fn writable_sandbox_roots(
+    worktree: Option<&Path>,
+    git_meta: Option<&Path>,
+    cache_dir: Option<&Path>,
+    cargo_build_dir: Option<&Path>,
+) -> Vec<WritableSandboxRoot> {
+    let mut roots = vec![
+        WritableSandboxRoot {
+            path: PathBuf::from(crate::SANDBOX_TMPDIR),
+            required: true,
+        },
+        WritableSandboxRoot {
+            path: PathBuf::from("/dev/null"),
+            required: true,
+        },
+        WritableSandboxRoot {
+            path: PathBuf::from("/dev/zero"),
+            required: true,
+        },
+        WritableSandboxRoot {
+            path: PathBuf::from("/dev/urandom"),
+            required: true,
+        },
+    ];
+    if let Some(worktree) = worktree {
+        roots.push(WritableSandboxRoot {
+            path: worktree.to_path_buf(),
+            required: true,
+        });
+    }
+    if let Some(dir) = cargo_build_dir.filter(|dir| dir.is_dir()) {
+        roots.push(WritableSandboxRoot {
+            path: dir.to_path_buf(),
+            required: true,
+        });
+    }
+    if let Some(dir) = cache_dir {
+        roots.push(WritableSandboxRoot {
+            path: dir.to_path_buf(),
+            required: false,
+        });
+    }
+    roots.push(WritableSandboxRoot {
+        path: PathBuf::from("/cache"),
+        required: false,
+    });
+    if let Some(dot_git) = worktree.and_then(git_dir).filter(|dir| dir.is_dir()) {
+        roots.push(WritableSandboxRoot {
+            path: dot_git,
+            required: true,
+        });
+    } else if let Some(meta) = git_meta {
+        roots.push(WritableSandboxRoot {
+            path: meta.to_path_buf(),
+            required: true,
+        });
+    }
+    // `PathFd::new` follows symlinks, and Landlock keys its rules by the
+    // resulting dentry. Store that same resolved path here, rather than the
+    // spelling supplied by the environment or a constant, so the invariant
+    // below evaluates precisely the rule that `apply_policy` installs.
+    roots
+        .into_iter()
+        .map(|root| WritableSandboxRoot {
+            path: resolve_path_for_landlock(&root.path),
+            required: root.required,
+        })
+        .collect()
+}
+
+/// Resolve every existing component of a path as the kernel will for a
+/// `PathFd`, retaining a missing tail.
+///
+/// A production confidential mount may not be present on a developer or CI
+/// host, but `/var/run` normally is a symlink to `/run`. Full
+/// `canonicalize("/var/run/djinn")` fails when the mount is absent and would
+/// lose that alias. Resolving the deepest existing ancestor instead produces
+/// `/run/djinn`, allowing the static policy check to catch a writable `/run`
+/// rule before a Pod ever starts.
+fn resolve_path_for_landlock(path: &Path) -> PathBuf {
+    let mut candidate = path;
+    let mut missing_tail: Vec<std::ffi::OsString> = Vec::new();
+
+    loop {
+        if let Ok(resolved) = candidate.canonicalize() {
+            return missing_tail
+                .iter()
+                .rev()
+                .fold(resolved, |resolved, component| resolved.join(component));
+        }
+
+        let Some(component) = candidate.file_name() else {
+            // This can only occur for a malformed or non-absolute path whose
+            // ancestors cannot be resolved. Preserve it: `PathFd::new` will
+            // retain the existing required/optional failure behaviour.
+            return path.to_path_buf();
+        };
+        missing_tail.push(component.to_os_string());
+        let Some(parent) = candidate.parent() else {
+            return path.to_path_buf();
+        };
+        candidate = parent;
+    }
+}
+
+/// Landlock rules are additive, so a confidential root cannot be carved out of
+/// a writable ancestor that grants `ReadFile` through `full_access`.
+fn ensure_confidential_roots_do_not_overlap_writable_roots(
+    confidential_roots: &[PathBuf],
+    writable_roots: &[WritableSandboxRoot],
+) -> Result<()> {
+    for confidential_root in confidential_roots {
+        let confidential_root = resolve_path_for_landlock(confidential_root);
+        for writable_root in writable_roots {
+            let writable_root = resolve_path_for_landlock(&writable_root.path);
+            anyhow::ensure!(
+                !confidential_root.starts_with(&writable_root),
+                "confidential root {} sits under writable sandbox root {}, whose full-access rule would grant ReadFile back",
+                confidential_root.display(),
+                writable_root.display(),
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Build and apply the Landlock policy in the current process.
 ///
 /// Called inside `pre_exec` (forked child) so it takes effect before exec.
@@ -153,10 +298,8 @@ fn prepare_cache_dir() -> Option<PathBuf> {
 /// logging, and any allocator-heavy work must happen in the parent before
 /// fork — see `LandlockSandbox::apply` and `prepare_cache_dir`.
 fn apply_policy(
-    worktree: Option<&Path>,
-    git_meta: Option<&Path>,
-    cache_dir: Option<&Path>,
     read_file_cover: &[PathBuf],
+    writable_roots: &[WritableSandboxRoot],
 ) -> anyhow::Result<()> {
     // Use V3 (Linux 5.19+). The probe in mod.rs verified the kernel supports
     // Landlock; V3 covers all practical kernels in 2026.
@@ -172,31 +315,13 @@ fn apply_policy(
     // dropping them would break `ls /` and every toolchain lookup.
     let traverse_exec = AccessFs::Execute | AccessFs::ReadDir;
 
-    // Cargo shared build cache: {CARGO_HOME}/build/ (default ~/.cargo/build/).
-    // Agents need write access so `cargo test`/`cargo clippy` can use the shared
-    // build-dir configured in .cargo/config.toml.
-    let cargo_build_dir = std::env::var("CARGO_HOME")
-        .or_else(|_| std::env::var("HOME").map(|h| format!("{h}/.cargo")))
-        .ok()
-        .map(|base| std::path::PathBuf::from(base).join("build"));
-
     let mut ruleset = Ruleset::default()
         .handle_access(full_access)?
         .create()?
         // Traverse, list and execute everywhere on the filesystem. File-content
         // reads are granted separately from `read_file_cover` below, which
         // covers all of `/` minus the confidential mounts (task jqvg).
-        .add_rule(PathBeneath::new(PathFd::new("/")?, traverse_exec))?
-        // Full access to /var/tmp (disk-backed) and /dev/null et al.
-        // /tmp is intentionally excluded: on Linux it's typically tmpfs and
-        // writes there can silently consume RAM.
-        .add_rule(PathBeneath::new(
-            PathFd::new(crate::SANDBOX_TMPDIR)?,
-            full_access,
-        ))?
-        .add_rule(PathBeneath::new(PathFd::new("/dev/null")?, full_access))?
-        .add_rule(PathBeneath::new(PathFd::new("/dev/zero")?, full_access))?
-        .add_rule(PathBeneath::new(PathFd::new("/dev/urandom")?, full_access))?;
+        .add_rule(PathBeneath::new(PathFd::new("/")?, traverse_exec))?;
 
     // File-content reads. `read_file_cover` is `["/"]` on any host without the
     // Pod secret mounts, which reproduces the historical blanket grant exactly;
@@ -215,24 +340,15 @@ fn apply_policy(
         }
     }
 
-    if let Some(worktree) = worktree {
-        ruleset = ruleset.add_rule(PathBeneath::new(PathFd::new(worktree)?, full_access))?;
-    }
-
-    // Cargo shared build cache directory.
-    if let Some(ref dir) = cargo_build_dir.filter(|d| d.is_dir()) {
-        ruleset = ruleset.add_rule(PathBeneath::new(PathFd::new(dir)?, full_access))?;
-    }
-
-    // Djinn agent scratch dir. The directory was already resolved and created
-    // in the parent (see `prepare_cache_dir`) so here we only need to open it
-    // and add the rule. If the open fails for any reason, silently skip: we
-    // cannot log safely from pre_exec, and the sandbox is still functional
-    // without the scratch allowance.
-    if let Some(dir) = cache_dir
-        && let Ok(fd) = PathFd::new(dir)
-    {
-        ruleset = ruleset.add_rule(PathBeneath::new(fd, full_access))?;
+    // These are the exact roots checked against confidential paths before
+    // fork. Required roots retain the historical fail-closed open behaviour;
+    // optional cache roots simply grant nothing when absent.
+    for writable_root in writable_roots {
+        match PathFd::new(&writable_root.path) {
+            Ok(fd) => ruleset = ruleset.add_rule(PathBeneath::new(fd, full_access))?,
+            Err(error) if writable_root.required => return Err(error.into()),
+            Err(_) => {}
+        }
     }
 
     // Shared cross-task cache PVC (`/cache`). The K8s task-run Pod env
@@ -250,22 +366,6 @@ fn apply_policy(
     // sccache → /cache/sccache, etc.). Only present in the K8s task-run Pod
     // (the PVC mount); a no-op elsewhere since the open fails. Guarded:
     // if the dir is absent we silently skip, same as the scratch dir above.
-    if let Ok(fd) = PathFd::new("/cache") {
-        ruleset = ruleset.add_rule(PathBeneath::new(fd, full_access))?;
-    }
-
-    // Full .git/ dir needs write access for merge operations: object writes
-    // (.git/objects/), ref updates (.git/refs/, .git/packed-refs), and
-    // per-worktree state (.git/worktrees/{id}/ORIG_HEAD.lock etc.).
-    if let Some(dot_git) = worktree.and_then(git_dir) {
-        if dot_git.is_dir() {
-            ruleset = ruleset.add_rule(PathBeneath::new(PathFd::new(&dot_git)?, full_access))?;
-        }
-    } else if let Some(meta) = git_meta {
-        // Fallback: at least allow the worktree metadata dir.
-        ruleset = ruleset.add_rule(PathBeneath::new(PathFd::new(meta)?, full_access))?;
-    }
-
     ruleset.restrict_self()?;
 
     Ok(())
@@ -407,6 +507,7 @@ mod tests {
         assert!(worktree_content.exists());
     }
 
+    const SPEC_CANARY: &str = "TASK-SPEC-CANARY-jqvg";
     const CREDENTIAL_CANARY: &str = "PROVIDER-CREDENTIAL-CANARY-jqvg";
     const TOKEN_CANARY: &str = "SERVICE-ACCOUNT-TOKEN-CANARY-jqvg";
 
@@ -437,8 +538,10 @@ mod tests {
         let token_dir = root.join("var/run/secrets/tokens");
         std::fs::create_dir_all(&credentials_dir).expect("credentials mount");
         std::fs::create_dir_all(&token_dir).expect("token mount");
+        let spec = credentials_dir.join("spec.bin");
         let credentials = credentials_dir.join("credentials.bin");
         let token = token_dir.join("djinn");
+        std::fs::write(&spec, SPEC_CANARY).expect("spec");
         std::fs::write(&credentials, CREDENTIAL_CANARY).expect("credentials");
         std::fs::write(&token, TOKEN_CANARY).expect("token");
 
@@ -452,6 +555,7 @@ mod tests {
         let scope = SandboxScope::Worktree(worktree.path());
 
         for (label, secret, canary) in [
+            ("task spec", &spec, SPEC_CANARY),
             ("provider credentials", &credentials, CREDENTIAL_CANARY),
             ("projected ServiceAccount token", &token, TOKEN_CANARY),
         ] {
@@ -497,6 +601,58 @@ mod tests {
             String::from_utf8_lossy(&source_read.stderr)
         );
         assert!(String::from_utf8_lossy(&source_read.stdout).contains("djinn-sandbox"));
+
+        // Cargo build scripts are repository-controlled children of Cargo, not
+        // shell text. Each fixture succeeds only if its own mounted-path read
+        // was denied. A widened cover or omitted confidential root therefore
+        // prints the unique canary in Cargo output and fails this test.
+        for (index, (label, secret, canary)) in [
+            ("task spec", &spec, SPEC_CANARY),
+            ("provider credentials", &credentials, CREDENTIAL_CANARY),
+            ("projected ServiceAccount token", &token, TOKEN_CANARY),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let package = worktree.path().join(format!("build-script-{index}"));
+            std::fs::create_dir_all(package.join("src")).expect("build-script package");
+            std::fs::write(
+                package.join("Cargo.toml"),
+                format!("[package]\nname = \"landlock-canary-{index}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n"),
+            )
+            .expect("manifest");
+            std::fs::write(package.join("src/lib.rs"), "pub fn fixture() {}\n")
+                .expect("library source");
+            std::fs::write(
+                package.join("build.rs"),
+                "fn main() {\n    let path = std::env::var(\"DJINN_CANARY_PATH\").unwrap();\n    if let Ok(contents) = std::fs::read_to_string(path) {\n        println!(\"cargo:warning={contents}\");\n        panic!(\"confidential build-script read succeeded\");\n    }\n}\n",
+            )
+            .expect("build script");
+
+            let mut cargo = std::process::Command::new("cargo");
+            cargo
+                .arg("build")
+                .current_dir(&package)
+                .env("CARGO_TARGET_DIR", package.join("target"))
+                .env("DJINN_CANARY_PATH", secret);
+            LandlockSandbox
+                .apply_with_confidential_roots(scope, &mut cargo, &confidential_roots)
+                .expect("Cargo should receive the production Landlock policy");
+            let output = cargo.output().expect("sandboxed Cargo should spawn");
+            let captured = format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(
+                output.status.success(),
+                "Cargo build script read the {label}: {captured}"
+            );
+            assert!(
+                !captured.contains(canary),
+                "the {label} canary leaked through Cargo build-script output"
+            );
+        }
 
         // Directory listing stays granted everywhere, including at `/` and
         // inside the excluded mount — a filename is not the secret.
@@ -577,15 +733,79 @@ mod tests {
     /// production set must never overlap them.
     #[test]
     fn confidential_roots_do_not_overlap_writable_sandbox_roots() {
-        let writable = ["/var/tmp", "/cache", "/tmp"];
-        for root in confidential::CONFIDENTIAL_ROOTS {
-            for writable_root in writable {
-                assert!(
-                    !Path::new(root).starts_with(writable_root),
-                    "{root} sits under the writable sandbox root {writable_root}, \
-                     whose full-access rule would grant ReadFile back"
-                );
-            }
+        let roots = confidential::CONFIDENTIAL_ROOTS
+            .iter()
+            .map(PathBuf::from)
+            .collect::<Vec<_>>();
+        ensure_confidential_roots_do_not_overlap_writable_roots(
+            &roots,
+            &writable_sandbox_roots(None, None, None, None),
+        )
+        .expect("production confidential roots must not sit below a full-access rule");
+    }
+
+    /// A missing confidential mount must still retain the aliases of its
+    /// existing ancestors. This models `/var/run/djinn` on images where
+    /// `/var/run` is a symlink to `/run`: a `full_access(/run)` rule would leak
+    /// the mount as soon as Kubernetes creates it.
+    #[test]
+    fn resolved_aliases_reject_confidential_roots_beneath_alias_target() {
+        let fixture = tempfile::tempdir_in("/var/tmp").expect("alias fixture");
+        let run = fixture.path().join("run");
+        let var_run = fixture.path().join("var-run");
+        std::fs::create_dir(&run).expect("run target");
+        std::os::unix::fs::symlink(&run, &var_run).expect("var/run alias");
+
+        // Deliberately do not create `djinn`: this is the CI/developer-host
+        // case where the production Secret mount is absent.
+        let confidential = var_run.join("djinn");
+        assert_eq!(resolve_path_for_landlock(&confidential), run.join("djinn"));
+        let writable_roots = [WritableSandboxRoot {
+            path: run,
+            required: true,
+        }];
+        assert!(
+            ensure_confidential_roots_do_not_overlap_writable_roots(
+                &[confidential],
+                &writable_roots,
+            )
+            .is_err(),
+            "a /var/run-style alias must not hide a confidential root below full_access(/run)"
+        );
+    }
+
+    /// Every returned root is both resolved, validated, and installed as
+    /// `full_access`. This catches additions to the central rule collection,
+    /// including a static `SANDBOX_TMPDIR` widened to an ancestor of a
+    /// confidential root.
+    #[test]
+    fn every_full_access_root_rejects_a_confidential_descendant() {
+        let fixture = tempfile::tempdir_in("/var/tmp").expect("writable-root fixture");
+        let worktree = fixture.path().join("worktree");
+        let cache = fixture.path().join("scratch");
+        let cargo_build = fixture.path().join("cargo-build");
+        let git_meta = fixture.path().join("git-meta");
+        for directory in [&worktree, &cache, &cargo_build, &git_meta] {
+            std::fs::create_dir_all(directory).expect("fixture directory");
+        }
+
+        let writable_roots = writable_sandbox_roots(
+            Some(&worktree),
+            Some(&git_meta),
+            Some(&cache),
+            Some(&cargo_build),
+        );
+        for writable_root in &writable_roots {
+            let confidential = vec![writable_root.path.join("confidential-canary")];
+            assert!(
+                ensure_confidential_roots_do_not_overlap_writable_roots(
+                    &confidential,
+                    &writable_roots,
+                )
+                .is_err(),
+                "the full-access root {} escaped overlap validation",
+                writable_root.path.display(),
+            );
         }
     }
 }
