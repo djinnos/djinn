@@ -4139,19 +4139,7 @@ async fn run_warm_graph_body(project_id: &str) -> Result<()> {
         .await
     };
 
-    match result {
-        Ok(()) => match finish_published_warm_attempt(&ctx.db, project_id, &attempt).await {
-            Ok(()) => Ok(()),
-            Err(error) => {
-                finish_failed_warm_attempt(&ctx.db, project_id, &attempt, &error).await;
-                Err(error)
-            }
-        },
-        Err(error) => {
-            finish_failed_warm_attempt(&ctx.db, project_id, &attempt, &error).await;
-            Err(error)
-        }
-    }
+    finish_warm_attempt_after_pipeline(&ctx.db, project_id, &attempt, result.await).await
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4180,9 +4168,28 @@ async fn projected_warm_attempt(
                 project_root.display()
             )
         })?;
-    let attempts = djinn_db::WarmGraphAttemptRepository::new(db.clone());
-    let attempt = attempts
-        .get_attempt(&attempt_id)
+    validate_projected_warm_attempt(
+        db,
+        project_id,
+        &attempt_id,
+        &checked_out_revision,
+        projected_deadline,
+    )
+    .await
+}
+
+/// Check the immutable identity supplied by the Job before this worker obtains
+/// permission to terminalize its row. Keeping the database part separate makes
+/// the no-Kubernetes worker fixtures exercise the same authorization boundary.
+async fn validate_projected_warm_attempt(
+    db: &Database,
+    project_id: &str,
+    attempt_id: &str,
+    checked_out_revision: &str,
+    projected_deadline: DateTime<Utc>,
+) -> Result<ProjectedWarmAttempt> {
+    let attempt = djinn_db::WarmGraphAttemptRepository::new(db.clone())
+        .get_attempt(attempt_id)
         .await
         .context("load projected warm graph attempt")?
         .ok_or_else(|| {
@@ -4200,9 +4207,33 @@ async fn projected_warm_attempt(
         );
     }
     Ok(ProjectedWarmAttempt {
-        attempt_id,
-        revision: checked_out_revision,
+        attempt_id: attempt_id.to_string(),
+        revision: checked_out_revision.to_string(),
     })
+}
+
+/// Preserve the pipeline's original error while best-effort recording the one
+/// projected row as failed. This is deliberately the sole post-bootstrap exit
+/// boundary, so tests can cover it without invoking Kubernetes or cargo.
+async fn finish_warm_attempt_after_pipeline(
+    db: &Database,
+    project_id: &str,
+    attempt: &ProjectedWarmAttempt,
+    result: Result<()>,
+) -> Result<()> {
+    match result {
+        Ok(()) => match finish_published_warm_attempt(db, project_id, attempt).await {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                finish_failed_warm_attempt(db, project_id, attempt, &error).await;
+                Err(error)
+            }
+        },
+        Err(error) => {
+            finish_failed_warm_attempt(db, project_id, attempt, &error).await;
+            Err(error)
+        }
+    }
 }
 
 async fn finish_published_warm_attempt(
@@ -4472,6 +4503,142 @@ mod tests {
     use tracing::dispatcher::Dispatch;
 
     static CARGO_INSTRUMENT_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+
+    const WARM_TEST_PROJECT: &str = "warm-worker-project";
+    const WARM_TEST_REVISION: &str = "warm-worker-revision";
+    const WARM_TEST_DEADLINE: &str = "2099-01-01T00:00:00.000Z";
+
+    async fn warm_attempt_fixture() -> (Database, String, ProjectedWarmAttempt) {
+        let db = Database::open_in_memory().expect("warm worker database");
+        djinn_db::test_support::seed_project(&db, WARM_TEST_PROJECT, "warm worker fixture").await;
+        let attempts = djinn_db::WarmGraphAttemptRepository::new(db.clone());
+        let attempt_id = attempts
+            .start_attempt(WARM_TEST_PROJECT, WARM_TEST_REVISION, WARM_TEST_DEADLINE)
+            .await
+            .expect("start warm attempt");
+        (
+            db,
+            attempt_id.clone(),
+            ProjectedWarmAttempt {
+                attempt_id,
+                revision: WARM_TEST_REVISION.to_string(),
+            },
+        )
+    }
+
+    async fn persist_warm_publication(db: &Database, coverage_status: Option<&str>) {
+        djinn_db::repositories::repo_graph_cache::RepoGraphCacheRepository::new(db.clone())
+            .upsert(djinn_db::repositories::repo_graph_cache::RepoGraphCacheInsert {
+                project_id: WARM_TEST_PROJECT,
+                commit_sha: WARM_TEST_REVISION,
+                graph_blob: b"graph",
+            })
+            .await
+            .expect("persist graph generation");
+        if let Some(status) = coverage_status {
+            djinn_db::test_support::seed_workspace_coverage_for_test(
+                db,
+                WARM_TEST_PROJECT,
+                WARM_TEST_REVISION,
+                status,
+            )
+            .await;
+        }
+    }
+
+    async fn warm_attempt_status(db: &Database, attempt_id: &str) -> djinn_db::WarmGraphAttempt {
+        djinn_db::WarmGraphAttemptRepository::new(db.clone())
+            .get_attempt(attempt_id)
+            .await
+            .expect("load warm attempt")
+            .expect("warm attempt exists")
+    }
+
+    #[tokio::test]
+    async fn worker_finishes_exact_attempt_as_complete_or_partial_after_publication() {
+        for (coverage_status, expected) in [
+            (None, djinn_db::WarmGraphAttemptStatus::PublishedComplete),
+            (Some("timed_out"), djinn_db::WarmGraphAttemptStatus::PublishedPartial),
+        ] {
+            let (db, attempt_id, attempt) = warm_attempt_fixture().await;
+            persist_warm_publication(&db, coverage_status).await;
+            finish_warm_attempt_after_pipeline(&db, WARM_TEST_PROJECT, &attempt, Ok(()))
+                .await
+                .expect("publication terminalization");
+            assert_eq!(warm_attempt_status(&db, &attempt_id).await.status, expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn worker_records_failure_without_replacing_pipeline_error() {
+        let (db, attempt_id, attempt) = warm_attempt_fixture().await;
+        let error = finish_warm_attempt_after_pipeline(
+            &db,
+            WARM_TEST_PROJECT,
+            &attempt,
+            Err(anyhow::anyhow!("canonical graph fixture failed")),
+        )
+        .await
+        .expect_err("pipeline failure remains the returned error");
+        assert!(error.to_string().contains("canonical graph fixture failed"));
+        let stored = warm_attempt_status(&db, &attempt_id).await;
+        assert_eq!(stored.status, djinn_db::WarmGraphAttemptStatus::Failed);
+        assert!(stored
+            .detail
+            .as_deref()
+            .is_some_and(|detail| detail.contains("canonical graph fixture failed")));
+    }
+
+    #[tokio::test]
+    async fn worker_rejects_mismatched_identity_and_preserves_running_row() {
+        let (db, attempt_id, _attempt) = warm_attempt_fixture().await;
+        let deadline = DateTime::parse_from_rfc3339(WARM_TEST_DEADLINE)
+            .expect("fixture deadline")
+            .with_timezone(&Utc);
+        assert!(validate_projected_warm_attempt(
+            &db,
+            WARM_TEST_PROJECT,
+            &uuid::Uuid::now_v7().to_string(),
+            WARM_TEST_REVISION,
+            deadline,
+        )
+        .await
+        .is_err());
+        for (project, revision, deadline) in [
+            ("other-project", WARM_TEST_REVISION, deadline),
+            (WARM_TEST_PROJECT, "other-revision", deadline),
+            (WARM_TEST_PROJECT, WARM_TEST_REVISION, deadline + chrono::Duration::seconds(1)),
+        ] {
+            assert!(validate_projected_warm_attempt(&db, project, &attempt_id, revision, deadline)
+                .await
+                .is_err());
+        }
+        assert_eq!(
+            warm_attempt_status(&db, &attempt_id).await.status,
+            djinn_db::WarmGraphAttemptStatus::Running
+        );
+    }
+
+    #[tokio::test]
+    async fn worker_lost_terminal_cas_race_preserves_first_status() {
+        let (db, attempt_id, attempt) = warm_attempt_fixture().await;
+        persist_warm_publication(&db, None).await;
+        assert!(djinn_db::WarmGraphAttemptRepository::new(db.clone())
+            .finish_attempt_if_running(
+                &attempt_id,
+                djinn_db::WarmGraphAttemptStatus::TimedOut,
+                Some("watcher won"),
+            )
+            .await
+            .expect("watcher terminal CAS"));
+        finish_warm_attempt_after_pipeline(&db, WARM_TEST_PROJECT, &attempt, Ok(()))
+            .await
+            .expect("lost CAS is idempotent");
+        let stored = warm_attempt_status(&db, &attempt_id).await;
+        assert_eq!(stored.status, djinn_db::WarmGraphAttemptStatus::TimedOut);
+        assert_eq!(stored.detail.as_deref(), Some("watcher won"));
+    }
 
     #[test]
     fn disabled_launcher_profile_selects_only_the_local_direct_path() {
