@@ -65,9 +65,11 @@ def karpenter_rules(items):
 
 vdocs, sdocs = docs(vector), docs(static)
 venv, senv = env(vdocs), env(sdocs)
-# Old controller + new chart: finite vector plus retained PR #2901 seam.
-for name in ("DJINN_CAPACITY_IDLE_CPU", "DJINN_CAPACITY_COMPILE_CPU", "DJINN_CAPACITY_FAIL_SAFE_PODS", "DJINN_CAPACITY_FAIL_SAFE_COMPILE_SLOTS"):
-    assert name in venv, name
+# Old controller + new chart: finite vector plus the exact non-empty PR #2901
+# parser inputs. Presence alone would let an empty Helm value silently break
+# both the old controller and the new controller's vector-v1 parser.
+legacy_names = ("DJINN_CAPACITY_IDLE_CPU", "DJINN_CAPACITY_COMPILE_CPU", "DJINN_CAPACITY_FAIL_SAFE_PODS", "DJINN_CAPACITY_FAIL_SAFE_COMPILE_SLOTS")
+assert {name: venv.get(name) for name in legacy_names} == {name: old_env[name] for name in legacy_names}
 vqueue = capacity_queue(vdocs)
 assert vqueue["metadata"]["annotations"]["djinn.io/binding-resource"] == "pods"
 vquotas = {r["name"]: str(r["nominalQuota"])

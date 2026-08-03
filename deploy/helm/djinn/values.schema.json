@@ -59,9 +59,13 @@
         "capacity": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["enabled", "contract", "source", "queueName", "nodeSelector", "flavorSelector", "headroom", "staticFallback", "nodePool"],
+          "required": ["enabled", "idleCpu", "compileCpu", "failSafePods", "failSafeCompileSlots", "contract", "source", "queueName", "nodeSelector", "flavorSelector", "headroom", "staticFallback", "nodePool"],
           "properties": {
             "enabled": { "type": "boolean" },
+            "idleCpu": { "type": "string", "pattern": "^[1-9][0-9]*m$" },
+            "compileCpu": { "type": "string", "pattern": "^[1-9][0-9]*m$" },
+            "failSafePods": { "type": "integer", "minimum": 1 },
+            "failSafeCompileSlots": { "type": "integer", "minimum": 1 },
             "contract": { "type": "string", "enum": ["", "vector-v1"] },
             "source": { "type": "string", "enum": ["node-sum", "nodepool-limits", "static"] },
             "queueName": { "type": "string" },
