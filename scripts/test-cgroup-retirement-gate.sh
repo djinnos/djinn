@@ -21,7 +21,10 @@ copy_production_asset() {
     # mutate the actual source rather than a marker-shaped stand-in.
     [ -f "$REPO_ROOT/$path" ] || { printf 'missing production asset: %s\n' "$path" >&2; return 1; }
     mkdir -p "$dir/$(dirname "$path")"
-    cp "$REPO_ROOT/$path" "$dir/$path"
+    # new_repo creates placeholders for every tracked path. A plain cp keeps
+    # an existing placeholder's mode, so preserve the production mode as well
+    # as its content (notably the executable deploy-contract harness).
+    cp -p "$REPO_ROOT/$path" "$dir/$path"
 }
 assert_one_production_token() {
     path=$1 token=$2
