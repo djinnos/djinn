@@ -2583,8 +2583,8 @@ fn required_completed_timed_out_check_classifies_as_causal_failing() {
     // classified `blocking` result above.
     let ranked = super::ci_triage::rank_blocking_checks(&blocking);
     let blocking_required_check_names = ranked.iter().map(|check| check.name.clone()).collect();
-    let primary_blocking_check = super::ci_triage::primary_blocking_check(&blocking)
-        .map(|check| check.name.clone());
+    let primary_blocking_check =
+        super::ci_triage::primary_blocking_check(&blocking).map(|check| check.name.clone());
     let (sections, _) = build_ci_failure_sections(None, &causal);
     let failure_fingerprint = Some(compute_ci_failure_fingerprint(&causal, &sections));
     let input = TaskPrCiSnapshotInput {
@@ -2617,7 +2617,10 @@ fn required_completed_timed_out_check_classifies_as_causal_failing() {
     );
     assert_eq!(snapshot.ci_status, CiStatus::Failing);
     assert_eq!(snapshot.blocking_required_check_names, vec!["Server Test"]);
-    assert_eq!(snapshot.primary_blocking_check.as_deref(), Some("Server Test"));
+    assert_eq!(
+        snapshot.primary_blocking_check.as_deref(),
+        Some("Server Test")
+    );
     assert!(snapshot.failure_fingerprint.is_some());
     assert!(snapshot.failure_annotations.is_none());
     assert_eq!(
