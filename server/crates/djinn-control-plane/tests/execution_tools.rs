@@ -203,6 +203,190 @@ async fn execution_kill_task_settles_live_run_through_control_plane_tool_route()
     harness.shutdown();
 }
 
+/// The MCP response is the actor's canonical reconciliation snapshot, not a
+/// latest-session projection. This fixture leaves two durable sessions under
+/// one live pool mapping and requires the one audit row to preserve the full
+/// ordered snapshot verbatim.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn execution_kill_task_mapped_duplicate_sessions_preserves_response_and_audit_evidence() {
+    let harness = RealPoolKillHarness::new().await;
+    let first = harness
+        .seed_running_session_with_task_run("mapped-duplicate-first-run")
+        .await;
+    let second = harness
+        .seed_duplicate_running_session(&first, "mapped-duplicate-second-run")
+        .await;
+    let sessions = SessionRepository::new(
+        harness.app_state.db.clone(),
+        harness.app_state.event_bus.clone(),
+    )
+    .list_non_terminal_for_task(&first.task_id)
+    .await
+    .expect("complete deterministic duplicate capture");
+    let initial_ids: Vec<_> = sessions.iter().map(|session| session.id.clone()).collect();
+    let initial_runs: Vec<_> = sessions
+        .iter()
+        .map(|session| {
+            session
+                .task_run_id
+                .clone()
+                .expect("duplicate fixture sessions have non-null task-run IDs")
+        })
+        .collect();
+    assert_eq!(initial_ids.len(), 2);
+    assert!(initial_ids.contains(&first.session_id));
+    assert!(initial_ids.contains(&second.session_id));
+    assert_ne!(initial_runs[0], initial_runs[1]);
+    let expected_executions = json!(
+        sessions
+            .iter()
+            .map(|session| json!({
+                "session_id": session.id,
+                "task_run_id": session.task_run_id,
+                "teardown_owner": true,
+                "teardown_attempted": true,
+                "teardown_error": null,
+                "settlement_attempted": true,
+                "settlement_error": null,
+            }))
+            .collect::<Vec<_>>()
+    );
+
+    harness.dispatch(&first.task_id).await;
+    harness.wait_for_runner_started(&first.task_id).await;
+    harness.wait_for_pool_session(&first.task_id).await;
+    assert!(harness.pool_has_session(&first.task_id).await);
+
+    let response = harness
+        .call_kill_tool(&first.task_id)
+        .await
+        .expect("mapped duplicate execution_kill_task should dispatch");
+
+    assert_eq!(response["ok"], true);
+    assert_eq!(response["kind"], "desync_reconciled");
+    assert_eq!(response["task_id"], first.task_id);
+    assert_eq!(response["error"], serde_json::Value::Null);
+    assert_eq!(response["executions"], expected_executions);
+    assert_eq!(
+        response["observations"]["initial_non_terminal_ids"],
+        json!(initial_ids)
+    );
+    assert_eq!(response["observations"]["initial_mapping_slot_id"], 0);
+    assert_eq!(
+        response["observations"]["final_non_terminal_ids"],
+        json!([])
+    );
+    assert_eq!(
+        response["observations"]["final_mapping_slot_id"],
+        serde_json::Value::Null
+    );
+    assert_eq!(response["observations"]["final_pending_teardown"], false);
+    assert_eq!(response["observations"]["completion_source"], "immediate");
+
+    harness.wait_for_runner_killed(&first.task_id).await;
+    assert!(!harness.pool_has_session(&first.task_id).await);
+    assert!(harness.running_task_ids().await.is_empty());
+    assert!(harness.active_sessions().await.is_empty());
+    assert_eq!(harness.runtime_teardown_calls(), initial_runs);
+    for session_id in [&first.session_id, &second.session_id] {
+        let session = harness.session(session_id).await;
+        assert_eq!(session.status, SessionStatus::Interrupted.as_str());
+        assert!(
+            session.ended_at.is_some(),
+            "captured session {session_id} is terminal"
+        );
+    }
+
+    let evidence = liveness_evidence_for_task_for_test(&harness.app_state.db, &first.task_id).await;
+    assert_eq!(
+        evidence.len(),
+        1,
+        "one outward invocation writes one audit row"
+    );
+    let audit = &evidence[0].1;
+    assert_eq!(audit["task_id"], response["task_id"]);
+    assert_eq!(audit["kind"], response["kind"]);
+    assert_eq!(audit["executions"], response["executions"]);
+    assert_eq!(audit["observations"], response["observations"]);
+    harness.shutdown();
+}
+
+/// Shared task-run rows still settle independently, but exactly one captured
+/// execution owns the runtime teardown for that run.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn execution_kill_task_mapped_duplicate_sessions_deduplicates_shared_run_teardown() {
+    let harness = RealPoolKillHarness::new().await;
+    let first = harness
+        .seed_running_session_with_task_run("mapped-duplicate-shared-run")
+        .await;
+    let second = harness
+        .seed_duplicate_session_for_existing_task_run(&first)
+        .await;
+
+    harness.dispatch(&first.task_id).await;
+    harness.wait_for_runner_started(&first.task_id).await;
+    harness.wait_for_pool_session(&first.task_id).await;
+    let response = harness
+        .call_kill_tool(&first.task_id)
+        .await
+        .expect("mapped shared-run duplicate execution_kill_task should dispatch");
+
+    assert_eq!(response["ok"], true);
+    assert_eq!(response["kind"], "desync_reconciled");
+    assert_eq!(response["observations"]["initial_mapping_slot_id"], 0);
+    assert_eq!(
+        response["observations"]["final_non_terminal_ids"],
+        json!([])
+    );
+    assert_eq!(
+        response["observations"]["final_mapping_slot_id"],
+        serde_json::Value::Null
+    );
+    assert_eq!(response["observations"]["final_pending_teardown"], false);
+    let executions = response["executions"]
+        .as_array()
+        .expect("shared-run response executions");
+    assert_eq!(executions.len(), 2);
+    assert!(executions.iter().all(|execution| {
+        execution["task_run_id"] == first.task_run_id
+            && execution["settlement_attempted"] == true
+            && execution["settlement_error"].is_null()
+    }));
+    assert_eq!(
+        executions
+            .iter()
+            .filter(|execution| execution["teardown_owner"] == true)
+            .count(),
+        1,
+        "one shared-run execution owns teardown"
+    );
+    assert_eq!(
+        executions
+            .iter()
+            .filter(|execution| execution["teardown_attempted"] == true)
+            .count(),
+        1,
+        "shared run is torn down once"
+    );
+
+    harness.wait_for_runner_killed(&first.task_id).await;
+    assert_eq!(
+        harness.runtime_teardown_calls(),
+        vec![first.task_run_id.clone()]
+    );
+    assert!(!harness.pool_has_session(&first.task_id).await);
+    for session_id in [&first.session_id, &second.session_id] {
+        let session = harness.session(session_id).await;
+        assert_eq!(session.status, SessionStatus::Interrupted.as_str());
+        assert!(session.ended_at.is_some());
+    }
+    let evidence = liveness_evidence_for_task_for_test(&harness.app_state.db, &first.task_id).await;
+    assert_eq!(evidence.len(), 1);
+    assert_eq!(evidence[0].1["executions"], response["executions"]);
+    assert_eq!(evidence[0].1["observations"], response["observations"]);
+    harness.shutdown();
+}
+
 /// The historical `yf6r` regression passed the raw short id to the pool, so
 /// the durable row and live mapping were observed under different task ids.
 /// This drives the real MCP route with that exact id and proves resolution
@@ -752,8 +936,13 @@ fn assert_truthful_harmless_second_kill_response(response: &serde_json::Value, t
 }
 
 struct SeededRun {
+    project_id: String,
     task_id: String,
     task_run_id: String,
+    session_id: String,
+}
+
+struct SeededExecution {
     session_id: String,
 }
 
@@ -974,8 +1163,70 @@ impl RealPoolKillHarness {
         self.runtime.publish_reapable_taskrun_job(task_run_id);
 
         SeededRun {
+            project_id: project.id,
             task_id: task.id,
             task_run_id: task_run_id.to_string(),
+            session_id: session.id,
+        }
+    }
+
+    async fn seed_duplicate_running_session(
+        &self,
+        seeded: &SeededRun,
+        task_run_id: &str,
+    ) -> SeededExecution {
+        TaskRunRepository::new(self.app_state.db.clone())
+            .create(CreateTaskRunParams {
+                id: task_run_id,
+                project_id: &seeded.project_id,
+                task_id: &seeded.task_id,
+                trigger_type: "test",
+                status: None,
+                workspace_path: self.project_path.to_str(),
+                mirror_ref: None,
+                dispatch_group_id: None,
+            })
+            .await
+            .expect("duplicate fixture task-run create should succeed");
+        let session =
+            SessionRepository::new(self.app_state.db.clone(), self.app_state.event_bus.clone())
+                .create(CreateSessionParams {
+                    project_id: &seeded.project_id,
+                    task_id: Some(&seeded.task_id),
+                    model: "model-a",
+                    agent_type: "worker",
+                    metadata_json: None,
+                    task_run_id: Some(task_run_id),
+                    pricing: None,
+                    cost_basis: None,
+                })
+                .await
+                .expect("duplicate fixture session create should succeed");
+        self.runtime.publish_reapable_taskrun_job(task_run_id);
+        SeededExecution {
+            session_id: session.id,
+        }
+    }
+
+    async fn seed_duplicate_session_for_existing_task_run(
+        &self,
+        seeded: &SeededRun,
+    ) -> SeededExecution {
+        let session =
+            SessionRepository::new(self.app_state.db.clone(), self.app_state.event_bus.clone())
+                .create(CreateSessionParams {
+                    project_id: &seeded.project_id,
+                    task_id: Some(&seeded.task_id),
+                    model: "model-a",
+                    agent_type: "worker",
+                    metadata_json: None,
+                    task_run_id: Some(&seeded.task_run_id),
+                    pricing: None,
+                    cost_basis: None,
+                })
+                .await
+                .expect("shared-run duplicate fixture session create should succeed");
+        SeededExecution {
             session_id: session.id,
         }
     }
