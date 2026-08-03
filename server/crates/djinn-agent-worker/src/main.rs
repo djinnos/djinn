@@ -3987,15 +3987,38 @@ async fn run_scip_index_body(project_id: &str) -> Result<()> {
     let outcome = djinn_graph::canonical_graph::run_scip_index_command(&ctx, project_id)
         .await
         .with_context(|| format!("run_scip_index_command({project_id})"))?;
-    // A skip is a success: the Job publishes nothing either way, and exiting 0
-    // lets the scheduler's retained-Job ledger record this revision as covered
-    // — which it is, by whichever Pod holds the claim.
     info!(
         project_id,
         outcome = outcome.reason(),
         "scip-index command finished"
     );
-    Ok(())
+    require_indexed_scip_outcome(outcome)
+}
+
+/// Translate the semantic pass outcome into the standalone Job completion
+/// contract.
+///
+/// A zero exit is the retained Job ledger's explicit proof that this run
+/// indexed its requested revision. Skips deliberately exit nonzero: neither a
+/// cold cargo base nor another claim holder produces artifacts attributable to
+/// this Job, so treating either as a successful Job would suppress the exact
+/// head's later recovery retry. This Job still never publishes served graph
+/// state; the warm pipeline remains the sole graph publisher.
+fn require_indexed_scip_outcome(
+    outcome: djinn_graph::canonical_graph::ScipIndexOutcome,
+) -> Result<()> {
+    match outcome {
+        djinn_graph::canonical_graph::ScipIndexOutcome::Indexed { .. } => Ok(()),
+        djinn_graph::canonical_graph::ScipIndexOutcome::SkippedColdCargoBase { target_dir } => {
+            anyhow::bail!(
+                "scip-index skipped: cargo base is cold at {}",
+                target_dir.display()
+            )
+        }
+        djinn_graph::canonical_graph::ScipIndexOutcome::SkippedConcurrentIndex { holder } => {
+            anyhow::bail!("scip-index skipped: semantic index claim is held by {holder}")
+        }
+    }
 }
 
 async fn run_warm_graph(project_id: &str) -> Result<()> {
@@ -4507,6 +4530,25 @@ mod tests {
     const WARM_TEST_PROJECT: &str = "warm-worker-project";
     const WARM_TEST_REVISION: &str = "warm-worker-revision";
     const WARM_TEST_DEADLINE: &str = "2099-01-01T00:00:00.000Z";
+
+    #[test]
+    fn only_an_indexed_scip_outcome_completes_successfully() {
+        use djinn_graph::canonical_graph::ScipIndexOutcome;
+
+        assert!(require_indexed_scip_outcome(ScipIndexOutcome::Indexed { artifacts: 1 }).is_ok());
+        assert!(
+            require_indexed_scip_outcome(ScipIndexOutcome::SkippedColdCargoBase {
+                target_dir: PathBuf::from("/cache/cargo-target/proj"),
+            })
+            .is_err()
+        );
+        assert!(
+            require_indexed_scip_outcome(ScipIndexOutcome::SkippedConcurrentIndex {
+                holder: "warm-graph".to_string(),
+            })
+            .is_err()
+        );
+    }
 
     async fn warm_attempt_fixture() -> (Database, String, ProjectedWarmAttempt) {
         let db = Database::open_in_memory().expect("warm worker database");
