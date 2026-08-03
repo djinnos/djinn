@@ -4143,18 +4143,191 @@
     },
     "outputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "required": [
-        "ok"
-      ],
+      "$defs": {
+        "ExecutionKillTaskKind": {
+          "type": "string",
+          "enum": [
+            "genuinely_absent",
+            "terminated",
+            "desync_reconciled",
+            "teardown_failed",
+            "settlement_failed",
+            "reconciliation_incomplete",
+            "task_not_found",
+            "project_not_found",
+            "pool_unavailable",
+            "pool_error",
+            "audit_failed"
+          ]
+        },
+        "ExecutionKillTaskExecution": {
+          "type": "object",
+          "properties": {
+            "session_id": {
+              "type": "string"
+            },
+            "task_run_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "teardown_owner": {
+              "type": "boolean"
+            },
+            "teardown_attempted": {
+              "type": "boolean"
+            },
+            "teardown_error": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "settlement_attempted": {
+              "type": "boolean"
+            },
+            "settlement_error": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "session_id",
+            "teardown_owner",
+            "teardown_attempted",
+            "settlement_attempted"
+          ]
+        },
+        "ExecutionKillTaskObservations": {
+          "type": "object",
+          "properties": {
+            "initial_non_terminal_ids": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "initial_mapping_slot_id": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint",
+              "minimum": 0
+            },
+            "initial_pending_teardown": {
+              "type": "boolean"
+            },
+            "initial_compacting": {
+              "type": "boolean"
+            },
+            "fenced_generation": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            },
+            "initial_capture_error": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "final_non_terminal_ids": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "final_mapping_slot_id": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint",
+              "minimum": 0
+            },
+            "final_pending_teardown": {
+              "type": "boolean"
+            },
+            "final_reread_error": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "pool_cleanup_error": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "completion_source": {
+              "type": "string"
+            },
+            "underlying_kind": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ExecutionKillTaskKind"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "initial_non_terminal_ids",
+            "initial_pending_teardown",
+            "initial_compacting",
+            "final_non_terminal_ids",
+            "final_pending_teardown",
+            "completion_source"
+          ]
+        }
+      },
       "type": "object",
       "properties": {
         "ok": {
           "type": "boolean"
         },
+        "kind": {
+          "$ref": "#/$defs/ExecutionKillTaskKind"
+        },
         "task_id": {
           "type": [
             "string",
             "null"
+          ]
+        },
+        "executions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ExecutionKillTaskExecution"
+          }
+        },
+        "observations": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExecutionKillTaskObservations"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "underlying_kind": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExecutionKillTaskKind"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "error": {
@@ -4163,7 +4336,12 @@
             "null"
           ]
         }
-      }
+      },
+      "required": [
+        "ok",
+        "kind",
+        "executions"
+      ]
     },
     "readOnly": false,
     "destructive": true,
