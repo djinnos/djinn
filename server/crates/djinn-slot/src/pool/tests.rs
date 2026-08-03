@@ -160,6 +160,49 @@ async fn seed_running_session_with_task_run(
     task_id
 }
 
+/// Add a captured row to an existing task. A duplicate may share a runtime
+/// owner, but its durable session must still be settled independently.
+async fn add_running_session_for_task(
+    app_state: &crate::host::SlotContext,
+    task_id: &str,
+    task_run_id: &str,
+    create_task_run: bool,
+) {
+    let task = djinn_db::TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone())
+        .get(task_id)
+        .await
+        .expect("task lookup")
+        .expect("seeded task");
+    if create_task_run {
+        djinn_db::TaskRunRepository::new(app_state.db.clone())
+            .create(djinn_db::CreateTaskRunParams {
+                id: task_run_id,
+                project_id: &task.project_id,
+                task_id,
+                trigger_type: "test",
+                status: None,
+                workspace_path: None,
+                mirror_ref: None,
+                dispatch_group_id: None,
+            })
+            .await
+            .expect("extra task run");
+    }
+    djinn_db::SessionRepository::new(app_state.db.clone(), app_state.event_bus.clone())
+        .create(djinn_db::CreateSessionParams {
+            project_id: &task.project_id,
+            task_id: Some(task_id),
+            model: "model-a",
+            agent_type: "worker",
+            metadata_json: None,
+            task_run_id: Some(task_run_id),
+            pricing: None,
+            cost_basis: None,
+        })
+        .await
+        .expect("extra running session");
+}
+
 async fn seed_running_session_with_task_run_in_project(
     app_state: &crate::host::SlotContext,
     project_id: &str,
@@ -3091,20 +3134,23 @@ async fn reconcile_terminate_residual_row_is_reconciliation_incomplete() {
 /// Deferred reconciliation owns its captured teardown until Killed, attaches
 /// every waiter, and releases the dispatch gate only after the final snapshot.
 #[tokio::test]
-async fn deferred_reconcile_attaches_waiters_and_replays_parked_dispatches() {
+async fn deferred_reconcile_duplicate_attaches_waiters_and_replays_parked_dispatches() {
     let (mut app_state, cancel, _temp) = test_app_state();
     let runtime = RecordingRuntimeOps::new(false);
     app_state.runtime_ops = Some(Arc::new(runtime.clone()));
     let task_id =
         seed_running_session_with_task_run(&app_state, "deferred reconcile", "run-deferred").await;
+    add_running_session_for_task(&app_state, &task_id, "run-deferred-second", true).await;
     let sessions =
         djinn_db::SessionRepository::new(app_state.db.clone(), app_state.event_bus.clone());
-    let captured_id = sessions
+    let captured_ids: Vec<_> = sessions
         .list_non_terminal_for_task(&task_id)
         .await
-        .expect("capture")[0]
-        .id
-        .clone();
+        .expect("ordered duplicate capture")
+        .into_iter()
+        .map(|row| row.id)
+        .collect();
+    assert_eq!(captured_ids.len(), 2, "fixture creates a mapped duplicate");
     let unrelated_task = create_dispatch_task_ids(&app_state, 1).await.remove(0);
     let cses: Arc<
         Mutex<HashMap<usize, crate::reply_loop::compaction_guard::CompactionCriticalSection>>,
@@ -3205,43 +3251,50 @@ async fn deferred_reconcile_attaches_waiters_and_replays_parked_dispatches() {
         "all live waiters receive the same final snapshot"
     );
     assert_eq!(first.observations.completion_source, "slot_event_killed");
-    assert_eq!(first.kind, ReconcileTerminateKind::Terminated);
+    assert_eq!(first.kind, ReconcileTerminateKind::DesyncReconciled);
     assert!(
         first.ok,
         "completed deferred reconciliation must not be false-success"
     );
-    assert_eq!(
-        first.observations.initial_non_terminal_ids,
-        vec![captured_id.clone()]
-    );
+    assert_eq!(first.observations.initial_non_terminal_ids, captured_ids);
     assert_eq!(first.observations.initial_mapping_slot_id, Some(0));
     assert!(first.observations.initial_compacting);
     assert!(!first.observations.initial_pending_teardown);
-    assert_eq!(first.executions.len(), 1);
-    assert_eq!(first.executions[0].session_id, captured_id);
-    assert!(first.executions[0].teardown_owner);
-    assert!(first.executions[0].teardown_attempted && first.executions[0].teardown_error.is_none());
-    assert!(
-        first.executions[0].settlement_attempted && first.executions[0].settlement_error.is_none()
+    assert_eq!(first.executions.len(), 2);
+    assert_eq!(
+        first
+            .executions
+            .iter()
+            .map(|entry| entry.session_id.clone())
+            .collect::<Vec<_>>(),
+        first.observations.initial_non_terminal_ids,
+        "duplicate actions preserve durable capture order"
     );
+    assert!(first.executions.iter().all(|entry| entry.teardown_owner
+        && entry.teardown_attempted
+        && entry.teardown_error.is_none()
+        && entry.settlement_attempted
+        && entry.settlement_error.is_none()));
     assert!(first.observations.final_non_terminal_ids.is_empty());
     assert_eq!(first.observations.final_mapping_slot_id, None);
     assert!(!first.observations.final_pending_teardown);
     assert!(first.observations.final_reread_error.is_none());
-    let settled = sessions
-        .get(&captured_id)
-        .await
-        .expect("deferred terminal lookup")
-        .expect("captured deferred session persists");
-    assert_eq!(settled.status, "interrupted");
-    assert!(
-        settled.ended_at.is_some(),
-        "deferred reconciliation must leave its captured durable row terminal"
-    );
+    for session_id in &first.observations.initial_non_terminal_ids {
+        let settled = sessions
+            .get(session_id)
+            .await
+            .expect("deferred terminal lookup")
+            .expect("captured deferred session persists");
+        assert_eq!(settled.status, "interrupted");
+        assert!(
+            settled.ended_at.is_some(),
+            "every duplicate row records ended_at"
+        );
+    }
     assert_eq!(
         runtime.calls(),
-        vec!["run-deferred"],
-        "captured task-run tears down exactly once"
+        vec!["run-deferred", "run-deferred-second"],
+        "each distinct captured task-run tears down exactly once in capture order"
     );
     let fence = first
         .observations
@@ -3273,6 +3326,383 @@ async fn deferred_reconcile_attaches_waiters_and_replays_parked_dispatches() {
     );
     assert!(
         matches!(signal_rx.recv().await, Some(RunnerSignal::Started(id)) if id == unrelated_task)
+    );
+
+    let unrelated_slot = pool
+        .test_slot_of(&unrelated_task)
+        .expect("unrelated task remains live during replayed-owner cleanup");
+    pool.test_handle_slot_event(SlotEvent::Killed {
+        slot_id: 0,
+        model_id: "model-a".to_owned(),
+        task_id: task_id.clone(),
+    })
+    .await;
+    assert_eq!(
+        pool.test_slot_of(&task_id),
+        None,
+        "the replayed same-task owner mapping is removed"
+    );
+    assert!(
+        !pool.test_pending_teardown_tasks().contains(&task_id),
+        "the reconciled task has no stale pending continuation"
+    );
+    assert_eq!(
+        pool.test_slot_of(&unrelated_task),
+        Some(unrelated_slot),
+        "replayed-owner cleanup preserves the unrelated live mapping"
+    );
+    let free_slots_after_cleanup = pool.test_free_slots("model-a");
+    assert_eq!(free_slots_after_cleanup, vec![0]);
+
+    pool.test_handle_slot_event(SlotEvent::Killed {
+        slot_id: 0,
+        model_id: "model-a".to_owned(),
+        task_id,
+    })
+    .await;
+    assert_eq!(
+        pool.test_free_slots("model-a"),
+        free_slots_after_cleanup,
+        "a duplicate Killed event must not return replayed-owner capacity twice"
+    );
+    assert_eq!(
+        pool.test_slot_of(&unrelated_task),
+        Some(unrelated_slot),
+        "the duplicate event must not disturb the unrelated live mapping"
+    );
+}
+
+/// Deferred continuations require an owning mapping so they can receive Killed;
+/// the immediate matrix above intentionally covers unmapped zero/one/duplicate.
+#[tokio::test]
+async fn deferred_reconcile_mapped_zero_rows_completes_from_killed() {
+    let (mut app_state, cancel, _temp) = test_app_state();
+    let runtime = RecordingRuntimeOps::new(false);
+    app_state.runtime_ops = Some(Arc::new(runtime.clone()));
+    let task_id = create_dispatch_task_ids(&app_state, 1).await.remove(0);
+    let unrelated_task = create_dispatch_task_ids(&app_state, 1).await.remove(0);
+    let cses = Arc::new(Mutex::new(HashMap::new()));
+    let (signal_tx, mut signal_rx) = mpsc::unbounded_channel();
+    let (_tx, rx) = mpsc::channel(16);
+    let mut pool = SlotPool::new_with_factory(
+        rx,
+        app_state,
+        cancel,
+        make_config(
+            vec![model("model-a", 1, &["worker"])],
+            &[("worker", vec!["model-a"])],
+        ),
+        compaction_capturing_slot_factory(Duration::from_secs(3600), signal_tx, cses.clone()),
+    );
+    pool.test_assign_busy(&task_id, 0);
+    let compaction = cses.lock().unwrap().get(&0).unwrap().clone();
+    let guard = compaction.guard();
+    let (first_tx, mut first_rx) = tokio::sync::oneshot::channel();
+    pool.test_handle_message(PoolMessage::ReconcileTerminate {
+        task_id: task_id.clone(),
+        respond_to: first_tx,
+    })
+    .await;
+    let (second_tx, mut second_rx) = tokio::sync::oneshot::channel();
+    pool.test_handle_message(PoolMessage::ReconcileTerminate {
+        task_id: task_id.clone(),
+        respond_to: second_tx,
+    })
+    .await;
+    assert!(
+        first_rx.try_recv().is_err() && second_rx.try_recv().is_err(),
+        "waiters receive no early response"
+    );
+    let (parked_tx, mut parked_rx) = tokio::sync::oneshot::channel();
+    pool.test_handle_message(PoolMessage::Dispatch {
+        task_id: task_id.clone(),
+        project_path: "/tmp/project".to_owned(),
+        model_id: "model-a".to_owned(),
+        respond_to: parked_tx,
+    })
+    .await;
+    assert!(
+        parked_rx.try_recv().is_err(),
+        "same-task dispatch remains gated"
+    );
+    let (unrelated_tx, unrelated_rx) = tokio::sync::oneshot::channel();
+    pool.test_handle_message(PoolMessage::Dispatch {
+        task_id: unrelated_task.clone(),
+        project_path: "/tmp/project".to_owned(),
+        model_id: "model-a".to_owned(),
+        respond_to: unrelated_tx,
+    })
+    .await;
+    unrelated_rx
+        .await
+        .expect("unrelated reply")
+        .expect("unrelated task progresses");
+    drop(guard);
+    pool.test_handle_slot_event(SlotEvent::Killed {
+        slot_id: 0,
+        model_id: "model-a".to_owned(),
+        task_id: task_id.clone(),
+    })
+    .await;
+    let snapshot = first_rx.await.expect("first reply").expect("snapshot");
+    assert_eq!(
+        snapshot,
+        second_rx.await.expect("second reply").expect("snapshot")
+    );
+    assert!(snapshot.ok);
+    assert_eq!(snapshot.kind, ReconcileTerminateKind::DesyncReconciled);
+    assert!(snapshot.observations.initial_non_terminal_ids.is_empty());
+    assert_eq!(snapshot.observations.initial_mapping_slot_id, Some(0));
+    assert!(
+        snapshot.observations.initial_compacting && !snapshot.observations.initial_pending_teardown
+    );
+    assert_eq!(snapshot.observations.completion_source, "slot_event_killed");
+    assert!(
+        snapshot.executions.is_empty() && snapshot.observations.final_non_terminal_ids.is_empty()
+    );
+    assert_eq!(snapshot.observations.final_mapping_slot_id, None);
+    assert!(
+        !snapshot.observations.final_pending_teardown
+            && snapshot.observations.final_reread_error.is_none()
+    );
+    // `handle_event` delivers the clean reconciliation snapshot before it
+    // synchronously replays parked dispatches. The snapshot above is therefore
+    // the authoritative final-reread assertion for the reconciled mapping;
+    // the live mapping below belongs to the intentionally replayed dispatch.
+    assert!(
+        !pool.test_pending_teardown_tasks().contains(&task_id),
+        "the reconciled continuation must not remain pending after Killed"
+    );
+    assert_eq!(
+        pool.test_slot_of(&task_id),
+        Some(0),
+        "the first parked same-task dispatch replays after snapshot delivery"
+    );
+    assert_eq!(runtime.calls(), Vec::<String>::new());
+    parked_rx
+        .await
+        .expect("parked reply")
+        .expect("dispatch replays after snapshot");
+    assert!(
+        matches!(signal_rx.recv().await, Some(RunnerSignal::Started(id)) if id == unrelated_task)
+    );
+    pool.test_handle_slot_event(SlotEvent::Killed {
+        slot_id: 0,
+        model_id: "model-a".to_owned(),
+        task_id,
+    })
+    .await;
+    assert_eq!(pool.test_free_slots("model-a"), vec![0]);
+    pool.test_handle_slot_event(SlotEvent::Killed {
+        slot_id: 0,
+        model_id: "model-a".to_owned(),
+        task_id: "stale-zero".to_owned(),
+    })
+    .await;
+    assert_eq!(
+        pool.test_free_slots("model-a"),
+        vec![0],
+        "capacity returns exactly once"
+    );
+}
+
+/// A deferred duplicate still settles each exact durable row, but two rows that
+/// share a task run must have exactly one outward teardown owner.
+#[tokio::test]
+async fn deferred_reconcile_duplicate_shared_run_deduplicates_teardown() {
+    let (mut app_state, cancel, _temp) = test_app_state();
+    let runtime = RecordingRuntimeOps::new(false);
+    app_state.runtime_ops = Some(Arc::new(runtime.clone()));
+    let task_id =
+        seed_running_session_with_task_run(&app_state, "deferred shared", "run-deferred-shared")
+            .await;
+    add_running_session_for_task(&app_state, &task_id, "run-deferred-shared", false).await;
+    let sessions =
+        djinn_db::SessionRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+    let captured_ids: Vec<_> = sessions
+        .list_non_terminal_for_task(&task_id)
+        .await
+        .expect("ordered duplicate capture")
+        .into_iter()
+        .map(|row| row.id)
+        .collect();
+    assert_eq!(captured_ids.len(), 2);
+    let unrelated_task = create_dispatch_task_ids(&app_state, 1).await.remove(0);
+    let cses = Arc::new(Mutex::new(HashMap::new()));
+    let (signal_tx, mut signal_rx) = mpsc::unbounded_channel();
+    let (_tx, rx) = mpsc::channel(16);
+    let mut pool = SlotPool::new_with_factory(
+        rx,
+        app_state,
+        cancel,
+        make_config(
+            vec![model("model-a", 1, &["worker"])],
+            &[("worker", vec!["model-a"])],
+        ),
+        compaction_capturing_slot_factory(Duration::from_secs(3600), signal_tx, cses.clone()),
+    );
+    pool.test_assign_busy(&task_id, 0);
+    let compaction = cses.lock().unwrap().get(&0).unwrap().clone();
+    let guard = compaction.guard();
+    let (first_tx, mut first_rx) = tokio::sync::oneshot::channel();
+    pool.test_handle_message(PoolMessage::ReconcileTerminate {
+        task_id: task_id.clone(),
+        respond_to: first_tx,
+    })
+    .await;
+    let (second_tx, mut second_rx) = tokio::sync::oneshot::channel();
+    pool.test_handle_message(PoolMessage::ReconcileTerminate {
+        task_id: task_id.clone(),
+        respond_to: second_tx,
+    })
+    .await;
+    assert!(
+        first_rx.try_recv().is_err() && second_rx.try_recv().is_err(),
+        "waiters receive no early response"
+    );
+    let (plain_tx, mut plain_rx) = tokio::sync::oneshot::channel();
+    pool.test_handle_message(PoolMessage::Dispatch {
+        task_id: task_id.clone(),
+        project_path: "/tmp/project".to_owned(),
+        model_id: "model-a".to_owned(),
+        respond_to: plain_tx,
+    })
+    .await;
+    let (resume_tx, mut resume_rx) = tokio::sync::oneshot::channel();
+    pool.test_handle_message(PoolMessage::DispatchWithResume {
+        task_id: task_id.clone(),
+        project_path: "/tmp/project".to_owned(),
+        model_id: "model-a".to_owned(),
+        resume_lifecycle_metadata: Some(serde_json::json!({"resume": true})),
+        respond_to: resume_tx,
+    })
+    .await;
+    assert!(
+        plain_rx.try_recv().is_err() && resume_rx.try_recv().is_err(),
+        "same-task FIFO dispatches remain gated"
+    );
+    let (unrelated_tx, unrelated_rx) = tokio::sync::oneshot::channel();
+    pool.test_handle_message(PoolMessage::Dispatch {
+        task_id: unrelated_task.clone(),
+        project_path: "/tmp/project".to_owned(),
+        model_id: "model-a".to_owned(),
+        respond_to: unrelated_tx,
+    })
+    .await;
+    unrelated_rx
+        .await
+        .expect("unrelated reply")
+        .expect("unrelated task progresses");
+    drop(guard);
+    pool.test_handle_slot_event(SlotEvent::Killed {
+        slot_id: 0,
+        model_id: "model-a".to_owned(),
+        task_id: task_id.clone(),
+    })
+    .await;
+    let snapshot = first_rx.await.expect("first reply").expect("snapshot");
+    assert_eq!(
+        snapshot,
+        second_rx.await.expect("second reply").expect("snapshot")
+    );
+    assert!(snapshot.ok);
+    assert_eq!(snapshot.kind, ReconcileTerminateKind::DesyncReconciled);
+    assert_eq!(snapshot.observations.completion_source, "slot_event_killed");
+    assert_eq!(snapshot.observations.initial_non_terminal_ids, captured_ids);
+    assert_eq!(snapshot.observations.initial_mapping_slot_id, Some(0));
+    assert!(
+        snapshot.observations.initial_compacting && !snapshot.observations.initial_pending_teardown
+    );
+    assert_eq!(
+        snapshot
+            .executions
+            .iter()
+            .map(|entry| entry.session_id.clone())
+            .collect::<Vec<_>>(),
+        snapshot.observations.initial_non_terminal_ids
+    );
+    assert_eq!(
+        snapshot
+            .executions
+            .iter()
+            .filter(|entry| entry.teardown_owner)
+            .count(),
+        1,
+        "shared run has one teardown owner"
+    );
+    assert!(
+        snapshot
+            .executions
+            .iter()
+            .all(|entry| entry.settlement_attempted && entry.settlement_error.is_none())
+    );
+    assert!(
+        snapshot
+            .executions
+            .iter()
+            .filter(|entry| entry.teardown_owner)
+            .all(|entry| entry.teardown_attempted && entry.teardown_error.is_none())
+    );
+    assert_eq!(
+        runtime.calls(),
+        vec!["run-deferred-shared"],
+        "shared run tears down once"
+    );
+    assert!(snapshot.observations.final_non_terminal_ids.is_empty());
+    assert_eq!(snapshot.observations.final_mapping_slot_id, None);
+    assert!(
+        !snapshot.observations.final_pending_teardown
+            && snapshot.observations.final_reread_error.is_none()
+    );
+    // Final-reread state is captured in `snapshot` before `handle_event`
+    // replays the parked FIFO dispatches. Do not mistake the replayed mapping
+    // (or the unrelated live mapping) for stale reconciliation ownership.
+    assert!(
+        !pool.test_pending_teardown_tasks().contains(&task_id),
+        "the shared-run continuation must not remain pending after Killed"
+    );
+    assert_eq!(
+        pool.test_slot_of(&task_id),
+        Some(0),
+        "the first parked same-task dispatch replays after snapshot delivery"
+    );
+    for id in &snapshot.observations.initial_non_terminal_ids {
+        let row = sessions
+            .get(id)
+            .await
+            .expect("terminal lookup")
+            .expect("captured row persists");
+        assert_eq!(row.status, "interrupted");
+        assert!(row.ended_at.is_some(), "every exact row records ended_at");
+    }
+    plain_rx
+        .await
+        .expect("plain replay")
+        .expect("first FIFO dispatch replays");
+    assert!(matches!(
+        resume_rx.await.expect("resume replay"),
+        Err(PoolError::SessionAlreadyActive { .. })
+    ));
+    assert!(
+        matches!(signal_rx.recv().await, Some(RunnerSignal::Started(id)) if id == unrelated_task)
+    );
+    pool.test_handle_slot_event(SlotEvent::Killed {
+        slot_id: 0,
+        model_id: "model-a".to_owned(),
+        task_id,
+    })
+    .await;
+    assert_eq!(pool.test_free_slots("model-a"), vec![0]);
+    pool.test_handle_slot_event(SlotEvent::Killed {
+        slot_id: 0,
+        model_id: "model-a".to_owned(),
+        task_id: "stale-shared".to_owned(),
+    })
+    .await;
+    assert_eq!(
+        pool.test_free_slots("model-a"),
+        vec![0],
+        "capacity returns exactly once"
     );
 }
 
