@@ -160,6 +160,49 @@ async fn seed_running_session_with_task_run(
     task_id
 }
 
+/// Add a captured row to an existing task. A duplicate may share a runtime
+/// owner, but its durable session must still be settled independently.
+async fn add_running_session_for_task(
+    app_state: &crate::host::SlotContext,
+    task_id: &str,
+    task_run_id: &str,
+    create_task_run: bool,
+) {
+    let task = djinn_db::TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone())
+        .get(task_id)
+        .await
+        .expect("task lookup")
+        .expect("seeded task");
+    if create_task_run {
+        djinn_db::TaskRunRepository::new(app_state.db.clone())
+            .create(djinn_db::CreateTaskRunParams {
+                id: task_run_id,
+                project_id: &task.project_id,
+                task_id,
+                trigger_type: "test",
+                status: None,
+                workspace_path: None,
+                mirror_ref: None,
+                dispatch_group_id: None,
+            })
+            .await
+            .expect("extra task run");
+    }
+    djinn_db::SessionRepository::new(app_state.db.clone(), app_state.event_bus.clone())
+        .create(djinn_db::CreateSessionParams {
+            project_id: &task.project_id,
+            task_id: Some(task_id),
+            model: "model-a",
+            agent_type: "worker",
+            metadata_json: None,
+            task_run_id: Some(task_run_id),
+            pricing: None,
+            cost_basis: None,
+        })
+        .await
+        .expect("extra running session");
+}
+
 async fn seed_running_session_with_task_run_in_project(
     app_state: &crate::host::SlotContext,
     project_id: &str,
@@ -3091,20 +3134,23 @@ async fn reconcile_terminate_residual_row_is_reconciliation_incomplete() {
 /// Deferred reconciliation owns its captured teardown until Killed, attaches
 /// every waiter, and releases the dispatch gate only after the final snapshot.
 #[tokio::test]
-async fn deferred_reconcile_attaches_waiters_and_replays_parked_dispatches() {
+async fn deferred_reconcile_duplicate_attaches_waiters_and_replays_parked_dispatches() {
     let (mut app_state, cancel, _temp) = test_app_state();
     let runtime = RecordingRuntimeOps::new(false);
     app_state.runtime_ops = Some(Arc::new(runtime.clone()));
     let task_id =
         seed_running_session_with_task_run(&app_state, "deferred reconcile", "run-deferred").await;
+    add_running_session_for_task(&app_state, &task_id, "run-deferred-second", true).await;
     let sessions =
         djinn_db::SessionRepository::new(app_state.db.clone(), app_state.event_bus.clone());
-    let captured_id = sessions
+    let captured_ids: Vec<_> = sessions
         .list_non_terminal_for_task(&task_id)
         .await
-        .expect("capture")[0]
-        .id
-        .clone();
+        .expect("ordered duplicate capture")
+        .into_iter()
+        .map(|row| row.id)
+        .collect();
+    assert_eq!(captured_ids.len(), 2, "fixture creates a mapped duplicate");
     let unrelated_task = create_dispatch_task_ids(&app_state, 1).await.remove(0);
     let cses: Arc<
         Mutex<HashMap<usize, crate::reply_loop::compaction_guard::CompactionCriticalSection>>,
@@ -3205,43 +3251,50 @@ async fn deferred_reconcile_attaches_waiters_and_replays_parked_dispatches() {
         "all live waiters receive the same final snapshot"
     );
     assert_eq!(first.observations.completion_source, "slot_event_killed");
-    assert_eq!(first.kind, ReconcileTerminateKind::Terminated);
+    assert_eq!(first.kind, ReconcileTerminateKind::DesyncReconciled);
     assert!(
         first.ok,
         "completed deferred reconciliation must not be false-success"
     );
-    assert_eq!(
-        first.observations.initial_non_terminal_ids,
-        vec![captured_id.clone()]
-    );
+    assert_eq!(first.observations.initial_non_terminal_ids, captured_ids);
     assert_eq!(first.observations.initial_mapping_slot_id, Some(0));
     assert!(first.observations.initial_compacting);
     assert!(!first.observations.initial_pending_teardown);
-    assert_eq!(first.executions.len(), 1);
-    assert_eq!(first.executions[0].session_id, captured_id);
-    assert!(first.executions[0].teardown_owner);
-    assert!(first.executions[0].teardown_attempted && first.executions[0].teardown_error.is_none());
-    assert!(
-        first.executions[0].settlement_attempted && first.executions[0].settlement_error.is_none()
+    assert_eq!(first.executions.len(), 2);
+    assert_eq!(
+        first
+            .executions
+            .iter()
+            .map(|entry| entry.session_id.clone())
+            .collect::<Vec<_>>(),
+        first.observations.initial_non_terminal_ids,
+        "duplicate actions preserve durable capture order"
     );
+    assert!(first.executions.iter().all(|entry| entry.teardown_owner
+        && entry.teardown_attempted
+        && entry.teardown_error.is_none()
+        && entry.settlement_attempted
+        && entry.settlement_error.is_none()));
     assert!(first.observations.final_non_terminal_ids.is_empty());
     assert_eq!(first.observations.final_mapping_slot_id, None);
     assert!(!first.observations.final_pending_teardown);
     assert!(first.observations.final_reread_error.is_none());
-    let settled = sessions
-        .get(&captured_id)
-        .await
-        .expect("deferred terminal lookup")
-        .expect("captured deferred session persists");
-    assert_eq!(settled.status, "interrupted");
-    assert!(
-        settled.ended_at.is_some(),
-        "deferred reconciliation must leave its captured durable row terminal"
-    );
+    for session_id in &first.observations.initial_non_terminal_ids {
+        let settled = sessions
+            .get(session_id)
+            .await
+            .expect("deferred terminal lookup")
+            .expect("captured deferred session persists");
+        assert_eq!(settled.status, "interrupted");
+        assert!(
+            settled.ended_at.is_some(),
+            "every duplicate row records ended_at"
+        );
+    }
     assert_eq!(
         runtime.calls(),
-        vec!["run-deferred"],
-        "captured task-run tears down exactly once"
+        vec!["run-deferred", "run-deferred-second"],
+        "each distinct captured task-run tears down exactly once in capture order"
     );
     let fence = first
         .observations
