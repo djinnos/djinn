@@ -10,6 +10,17 @@ MANIFEST="$REPO_ROOT/deploy/helm/djinn/capacity-release-contract.yaml"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
+# CI checks pull-request merge refs with a depth-one checkout. The recorded
+# #2901 commit is outside that shallow boundary, so make the ancestry evidence
+# available before the required merge-base check. Mutation cases deliberately
+# use invalid object IDs and remain unfetched/rejected by the validator below.
+if [ "$(git -C "$REPO_ROOT" rev-parse --is-shallow-repository)" = "true" ]; then
+  if ! git -C "$REPO_ROOT" fetch --no-tags --unshallow origin; then
+    echo "FAIL: ANCESTRY_HISTORY_UNAVAILABLE: cannot deepen shallow checkout for #2901" >&2
+    exit 1
+  fi
+fi
+
 # PyYAML is the repository's existing YAML mechanism used by the neighboring
 # Helm contract scripts and Kueue drift checks. Keeping validation in Python
 # makes nested mutations structural instead of line-oriented grep substitutions.
