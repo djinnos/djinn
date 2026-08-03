@@ -15,9 +15,57 @@ expect_ok() {
     label=$1; shift
     if "$@" >/dev/null 2>&1; then pass "$label"; else fail "$label"; fi
 }
+copy_production_asset() {
+    dir=$1 path=$2
+    # The inventory needs the whole tracked shape, but preservation cases must
+    # mutate the actual source rather than a marker-shaped stand-in.
+    [ -f "$REPO_ROOT/$path" ] || { printf 'missing production asset: %s\n' "$path" >&2; return 1; }
+    mkdir -p "$dir/$(dirname "$path")"
+    cp "$REPO_ROOT/$path" "$dir/$path"
+}
+assert_one_production_token() {
+    path=$1 token=$2
+    node - "$REPO_ROOT/$path" "$token" <<'NODE'
+const fs = require('fs');
+const [path, token] = process.argv.slice(2);
+const count = fs.readFileSync(path, 'utf8').split(token).length - 1;
+if (count !== 1) throw new Error(`${path}: expected production token exactly once, found ${count}: ${token}`);
+NODE
+}
+replace_one_token() {
+    path=$1 token=$2 replacement=$3
+    node - "$path" "$token" "$replacement" <<'NODE'
+const fs = require('fs');
+const [path, token, replacement] = process.argv.slice(2);
+const source = fs.readFileSync(path, 'utf8');
+const count = source.split(token).length - 1;
+if (count !== 1) throw new Error(`${path}: expected fixture token exactly once, found ${count}: ${token}`);
+const mutated = source.replace(token, replacement);
+if (mutated === source || mutated.includes(token)) throw new Error(`${path}: token mutation was a no-op`);
+fs.writeFileSync(path, mutated);
+NODE
+}
+retire_source_mutation_case() {
+    name=$1 path=$2 token=$3 replacement=$4 phase=$5 expect=$6
+    repo="$SCRATCH/retire-$name"; new_repo "$repo"
+    assert_one_production_token "$path" "$token"
+    copy_production_asset "$repo" "$path"
+    git -C "$repo" add "$path" && git -C "$repo" commit -qm "$name-base"
+    base=$(git -C "$repo" rev-parse HEAD)
+    replace_one_token "$repo/$path" "$token" "$replacement"
+    git -C "$repo" add "$path" && git -C "$repo" commit -qm "mutate-$name"
+    if [ "$expect" = ok ]; then
+        expect_ok "RETIRE accepts correctly phased $name edit" env CGROUP_RETIREMENT_GATE_ROOT="$repo" "$GATE" --retire "$phase" "$base" "$(git -C "$repo" rev-parse HEAD)"
+    else
+        expect_reject "RETIRE rejects $name edit" env CGROUP_RETIREMENT_GATE_ROOT="$repo" "$GATE" --retire "$phase" "$base" "$(git -C "$repo" rev-parse HEAD)"
+    fi
+}
 retire_deletion_case() {
-    name=$1 path=$2 phase=$3 expect=$4
+    name=$1 path=$2 token=$3 phase=$4 expect=$5
     repo="$SCRATCH/delete-$name"; new_repo "$repo"
+    assert_one_production_token "$path" "$token"
+    copy_production_asset "$repo" "$path"
+    git -C "$repo" add "$path" && git -C "$repo" commit -qm "$name-base"
     base=$(git -C "$repo" rev-parse HEAD)
     git -C "$repo" rm -q "$path" && git -C "$repo" commit -qm "delete-$name"
     if [ "$expect" = ok ]; then
@@ -25,6 +73,17 @@ retire_deletion_case() {
     else
         expect_reject "RETIRE rejects $name deletion" env CGROUP_RETIREMENT_GATE_ROOT="$repo" "$GATE" --retire "$phase" "$base" "$(git -C "$repo" rev-parse HEAD)"
     fi
+}
+preserved_rename_case() {
+    name=$1 path=$2 token=$3
+    repo="$SCRATCH/rename-$name"; new_repo "$repo"
+    assert_one_production_token "$path" "$token"
+    copy_production_asset "$repo" "$path"
+    git -C "$repo" add "$path" && git -C "$repo" commit -qm "$name-base"
+    base=$(git -C "$repo" rev-parse HEAD)
+    git -C "$repo" mv "$path" "$path.retired"
+    git -C "$repo" commit -qm "retarget-$name"
+    expect_reject "RETIRE rejects preserved $name rename/retarget" env CGROUP_RETIREMENT_GATE_ROOT="$repo" "$GATE" --retire RETIRE_BASE "$base" "$(git -C "$repo" rev-parse HEAD)"
 }
 expect_reject() {
     label=$1; shift
@@ -210,33 +269,51 @@ protected_deletion_case() {
     # protectedPath must still win if a later change broadens PREP allow paths.
     expect_reject "PREP $name deletion is protected" env CGROUP_RETIREMENT_GATE_ROOT="$repo" "$GATE" --prep "$base" "$(git -C "$repo" rev-parse HEAD)"
 }
-retire_mutation_case() {
-    name=$1 path=$2 phase=$3 expect=$4
-    repo="$SCRATCH/retire-$name"; new_repo "$repo"
+empty_deploy_roster_case() {
+    repo="$SCRATCH/empty-deploy-roster"; new_repo "$repo"
+    path=scripts/test-deploy-contracts.sh
+    token='DEFAULT_DIRS=(
+    deploy/helm/djinn-prereqs/tests
+    deploy/kueue/tests
+    deploy/node/k3s/tests
+    deploy/runbooks/tests
+)'
+    assert_one_production_token "$path" "$token"
+    copy_production_asset "$repo" "$path"
+    [ -x "$repo/$path" ] || { printf 'copied deploy-contract harness is not executable\n' >&2; return 1; }
+    # Positive control: the copied harness runs an explicit non-empty roster;
+    # this proves the fixture does not merely reject every copied shell runner.
+    mkdir -p "$repo/harness"
+    printf '#!/bin/sh\nexit 0\n' > "$repo/harness/contract.sh"
+    expect_ok 'production deploy-contract harness accepts a non-empty roster' bash "$repo/$path" "$repo/harness"
+    git -C "$repo" add "$path" && git -C "$repo" commit -qm deploy-roster-base
     base=$(git -C "$repo" rev-parse HEAD)
-    commit_file "$repo" "$path" "fixture mutation: $name"
-    if [ "$expect" = ok ]; then
-        expect_ok "RETIRE $name is assigned to $phase" env CGROUP_RETIREMENT_GATE_ROOT="$repo" "$GATE" --retire "$phase" "$base" "$(git -C "$repo" rev-parse HEAD)"
-    else
-        expect_reject "RETIRE rejects $name" env CGROUP_RETIREMENT_GATE_ROOT="$repo" "$GATE" --retire "$phase" "$base" "$(git -C "$repo" rev-parse HEAD)"
-    fi
+    replace_one_token "$repo/$path" "$token" 'DEFAULT_DIRS=()'
+    git -C "$repo" add "$path" && git -C "$repo" commit -qm empty-deploy-roster
+    expect_reject 'RETIRE rejects an empty deploy-contract roster' env CGROUP_RETIREMENT_GATE_ROOT="$repo" "$GATE" --retire RETIRE_BASE "$base" "$(git -C "$repo" rev-parse HEAD)"
 }
 
 printf 'Testing cgroup-retirement PREP range and fail-closed action gates\n'
-retire_mutation_case production-broker server/crates/djinn-agent/src/process_broker.rs RETIRE_BASE ok
-retire_mutation_case wrong-phase-broker server/crates/djinn-agent/src/process_broker.rs RETIRE_HEAD reject
-retire_deletion_case production-broker server/crates/djinn-agent/src/process_broker.rs RETIRE_BASE ok
-retire_deletion_case wrong-phase-broker server/crates/djinn-agent/src/process_broker.rs RETIRE_HEAD reject
-retire_deletion_case preserved-launcher server/crates/djinn-k8s/src/launcher.rs RETIRE_BASE reject
-# These mutate real preserved surfaces, proving the preservation assertions are
-# not fixture-only stand-ins.
-retire_mutation_case render-gate deploy/preflight/render-gate.sh RETIRE_BASE reject
-retire_mutation_case cutover-preflight deploy/preflight/cutover-preflight.sh RETIRE_BASE reject
-retire_mutation_case k8s-render-gate server/crates/djinn-k8s/src/bin/render-gate.rs RETIRE_BASE reject
-retire_mutation_case kueue-preflight deploy/kueue/preflight.sh RETIRE_BASE reject
-retire_mutation_case deploy-contract-roster scripts/test-deploy-contracts.sh RETIRE_BASE reject
-retire_mutation_case launcher-uid-gid server/crates/djinn-k8s/src/launcher.rs RETIRE_BASE reject
-retire_mutation_case pvc-fsgroup server/crates/djinn-k8s/src/launcher_child_fs.rs RETIRE_BASE reject
+retire_source_mutation_case production-broker server/crates/djinn-agent/src/process_broker.rs 'pub(crate) fn birth_authority' 'pub(crate) fn candidate_birth_authority' RETIRE_BASE ok
+retire_source_mutation_case wrong-phase-broker server/crates/djinn-agent/src/process_broker.rs 'pub(crate) fn birth_authority' 'pub(crate) fn candidate_birth_authority' RETIRE_HEAD reject
+retire_deletion_case production-broker server/crates/djinn-agent/src/process_broker.rs 'pub(crate) fn birth_authority' RETIRE_BASE ok
+retire_deletion_case wrong-phase-broker server/crates/djinn-agent/src/process_broker.rs 'pub(crate) fn birth_authority' RETIRE_HEAD reject
+retire_deletion_case preserved-launcher server/crates/djinn-k8s/src/launcher.rs 'pub const LAUNCHER_UID: i64 = 0;' RETIRE_BASE reject
+# The three dispatch/preflight surfaces are copied from production, checked for
+# their actual construct, then tested as both removal and rename/retarget.
+retire_deletion_case k8s-render-gate server/crates/djinn-k8s/src/bin/render-gate.rs 'fn main() -> ExitCode {' RETIRE_BASE reject
+preserved_rename_case k8s-render-gate server/crates/djinn-k8s/src/bin/render-gate.rs 'fn main() -> ExitCode {'
+retire_deletion_case cutover-preflight server/crates/djinn-k8s/src/cutover_preflight.rs 'pub const RESIZE_RULE_RESOURCE: &str = "pods/resize";' RETIRE_BASE reject
+preserved_rename_case cutover-preflight server/crates/djinn-k8s/src/cutover_preflight.rs 'pub const RESIZE_RULE_RESOURCE: &str = "pods/resize";'
+retire_deletion_case kueue-preflight deploy/kueue/preflight.sh "RUNTIME_CLASS='djinn-cgroup-writable'" RETIRE_BASE reject
+preserved_rename_case kueue-preflight deploy/kueue/preflight.sh "RUNTIME_CLASS='djinn-cgroup-writable'"
+empty_deploy_roster_case
+# Mutate each production launcher preservation contract in launcher.rs itself;
+# launcher_child_fs.rs is deliberately not a substitute for the PVC fsGroup case.
+retire_source_mutation_case launcher-uid server/crates/djinn-k8s/src/launcher.rs 'pub const LAUNCHER_UID: i64 = 0;' 'pub const LAUNCHER_UID: i64 = 1000;' RETIRE_BASE reject
+retire_source_mutation_case launcher-gid server/crates/djinn-k8s/src/launcher.rs 'run_as_group: Some(LAUNCHER_UID),' 'run_as_group: Some(i64::from(ARTIFACT_GID)),' RETIRE_BASE reject
+retire_source_mutation_case pvc-fsgroup server/crates/djinn-k8s/src/launcher.rs 'fs_group: Some(i64::from(ARTIFACT_GID)),' 'fs_group: None,' RETIRE_BASE reject
+retire_source_mutation_case pvc-fsgroup-policy server/crates/djinn-k8s/src/launcher.rs 'fs_group_change_policy: Some("OnRootMismatch".to_string()),' 'fs_group_change_policy: Some("Always".to_string()),' RETIRE_BASE reject
 set -- $(prep_foundation_case)
 expect_ok 'PREP environment/reaping/sandbox/schema/guard range passes' env CGROUP_RETIREMENT_GATE_ROOT="$1" "$GATE" --prep "$2" "$3"
 set -- $(sandbox_credential_proof_case)
