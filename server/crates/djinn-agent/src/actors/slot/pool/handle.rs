@@ -74,6 +74,12 @@ impl SlotPoolHandle {
     pub async fn terminate_session(&self, task_id: &str) -> Result<(), PoolError> {
         self.inner.terminate_session(task_id).await
     }
+    pub async fn reconcile_terminate(
+        &self,
+        task_id: &str,
+    ) -> Result<djinn_slot::pool::ReconcileTerminateSnapshot, PoolError> {
+        self.inner.reconcile_terminate(task_id).await
+    }
     pub async fn evict_session(&self, task_id: &str) -> Result<(), PoolError> {
         self.inner.evict_session(task_id).await
     }
