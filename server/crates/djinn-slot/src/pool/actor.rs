@@ -81,6 +81,9 @@ pub(super) struct SlotPool {
     slot_factory: SlotFactory,
     #[cfg(any(test, feature = "test-support"))]
     test_token_overrides: HashMap<String, (u64, u64)>,
+    #[cfg(any(test, feature = "test-support"))]
+    test_pending_reconciliation_observers:
+        HashMap<String, Vec<(usize, super::types::Reply<usize>)>>,
 }
 
 impl SlotPool {
@@ -124,6 +127,8 @@ impl SlotPool {
             slot_factory,
             #[cfg(any(test, feature = "test-support"))]
             test_token_overrides: HashMap::new(),
+            #[cfg(any(test, feature = "test-support"))]
+            test_pending_reconciliation_observers: HashMap::new(),
         };
         pool.spawn_slots_for_config(&config);
         pool
@@ -277,10 +282,14 @@ impl SlotPool {
             } => {
                 if let Some(pending) = self.pending_reconciliations.get_mut(&task_id) {
                     pending.waiters.push(respond_to);
+                    #[cfg(any(test, feature = "test-support"))]
+                    self.notify_test_pending_reconciliation_observers(&task_id);
                 } else {
                     let snapshot = self.reconcile_terminate(&task_id).await;
                     if let Some(pending) = self.pending_reconciliations.get_mut(&task_id) {
                         pending.waiters.push(respond_to);
+                        #[cfg(any(test, feature = "test-support"))]
+                        self.notify_test_pending_reconciliation_observers(&task_id);
                     } else {
                         let _ = respond_to.send(Ok(snapshot));
                     }
@@ -312,6 +321,47 @@ impl SlotPool {
                 self.test_token_overrides
                     .insert(task_id, (token_count, turn_count));
             }
+            #[cfg(any(test, feature = "test-support"))]
+            PoolMessage::TestWaitForPendingReconciliationWaiters {
+                task_id,
+                expected_waiters,
+                respond_to,
+            } => {
+                let waiter_count = self
+                    .pending_reconciliations
+                    .get(&task_id)
+                    .map_or(0, |pending| pending.waiters.len());
+                if waiter_count >= expected_waiters {
+                    let _ = respond_to.send(Ok(waiter_count));
+                } else {
+                    self.test_pending_reconciliation_observers
+                        .entry(task_id)
+                        .or_default()
+                        .push((expected_waiters, respond_to));
+                }
+            }
+        }
+    }
+    #[cfg(any(test, feature = "test-support"))]
+    fn notify_test_pending_reconciliation_observers(&mut self, task_id: &str) {
+        let waiter_count = self
+            .pending_reconciliations
+            .get(task_id)
+            .map_or(0, |pending| pending.waiters.len());
+        let Some(observers) = self.test_pending_reconciliation_observers.remove(task_id) else {
+            return;
+        };
+        let mut remaining = Vec::new();
+        for (expected, respond_to) in observers {
+            if waiter_count >= expected {
+                let _ = respond_to.send(Ok(waiter_count));
+            } else {
+                remaining.push((expected, respond_to));
+            }
+        }
+        if !remaining.is_empty() {
+            self.test_pending_reconciliation_observers
+                .insert(task_id.to_owned(), remaining);
         }
     }
     /// Whether a real worker liveness signal has landed for `task_id` since the

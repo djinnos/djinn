@@ -33,10 +33,14 @@ use djinn_control_plane::test_support::{
 };
 use djinn_core::events::EventBus;
 use djinn_core::models::{DjinnSettings, SessionStatus};
+use djinn_db::test_support::{
+    liveness_evidence_for_task_for_test, reject_task_liveness_evidence_for_test,
+    set_task_short_id_for_test,
+};
 use djinn_db::{
     CreateSessionParams, CreateTaskRunParams, Database, EffectiveCreatorProvenance,
-    EpicCreateInput, EpicRepository, ProjectRepository, SessionRepository, TaskRepository,
-    TaskRunRepository, UserRepository,
+    EpicCreateInput, EpicRepository, LivenessRepository, ProjectRepository, SessionRepository,
+    TaskRepository, TaskRunRepository, UserRepository,
 };
 use djinn_provider::catalog::{CatalogService, HealthTracker};
 use serde_json::json;
@@ -199,6 +203,221 @@ async fn execution_kill_task_settles_live_run_through_control_plane_tool_route()
     harness.shutdown();
 }
 
+/// The historical `yf6r` regression passed the raw short id to the pool, so
+/// the durable row and live mapping were observed under different task ids.
+/// This drives the real MCP route with that exact id and proves resolution
+/// happens before actor-owned reconciliation.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn execution_kill_task_yf6r_short_id_and_uuid_share_authoritative_task() {
+    let harness = RealPoolKillHarness::new().await;
+    let seeded = harness
+        .seed_running_session_with_task_run("yf6r-authoritative-run")
+        .await;
+    set_task_short_id_for_test(&harness.app_state.db, &seeded.task_id, "yf6r").await;
+
+    let tasks = TaskRepository::new(
+        harness.app_state.db.clone(),
+        harness.app_state.event_bus.clone(),
+    );
+    assert_eq!(
+        tasks
+            .resolve("yf6r")
+            .await
+            .expect("short-id resolution")
+            .expect("task")
+            .id,
+        seeded.task_id,
+        "yf6r must resolve to the same canonical UUID as the UUID form"
+    );
+    assert_eq!(
+        tasks
+            .resolve(&seeded.task_id)
+            .await
+            .expect("uuid resolution")
+            .expect("task")
+            .id,
+        seeded.task_id
+    );
+
+    harness.dispatch(&seeded.task_id).await;
+    harness.wait_for_runner_started(&seeded.task_id).await;
+    harness.wait_for_pool_session(&seeded.task_id).await;
+    let short_response = harness
+        .call_kill_tool("yf6r")
+        .await
+        .expect("short-id kill should dispatch");
+    assert_eq!(short_response["ok"], true);
+    assert_eq!(short_response["kind"], "terminated");
+    assert_eq!(short_response["task_id"], seeded.task_id);
+    assert_eq!(short_response["observations"]["initial_mapping_slot_id"], 0);
+    assert_eq!(
+        short_response["observations"]["initial_non_terminal_ids"],
+        json!([seeded.session_id.clone()]),
+        "the short-id request must retain the complete durable capture"
+    );
+    assert_eq!(
+        short_response["observations"]["final_non_terminal_ids"],
+        json!([])
+    );
+    assert_eq!(
+        short_response["observations"]["final_mapping_slot_id"],
+        serde_json::Value::Null
+    );
+    assert_eq!(
+        short_response["observations"]["completion_source"],
+        "immediate"
+    );
+    assert_eq!(
+        short_response["executions"].as_array().map(Vec::len),
+        Some(1)
+    );
+    assert_eq!(
+        short_response["executions"][0]["session_id"],
+        seeded.session_id
+    );
+    assert_eq!(
+        short_response["executions"][0]["task_run_id"],
+        seeded.task_run_id
+    );
+    assert_eq!(short_response["executions"][0]["teardown_attempted"], true);
+    assert_eq!(
+        short_response["executions"][0]["settlement_attempted"],
+        true
+    );
+
+    harness.wait_for_runner_killed(&seeded.task_id).await;
+    harness
+        .assert_single_terminal_session(&seeded.task_id, SessionStatus::Interrupted)
+        .await;
+    assert_eq!(
+        harness.runtime_teardown_calls(),
+        vec![seeded.task_run_id.clone()]
+    );
+    assert!(!harness.pool_has_session(&seeded.task_id).await);
+    let audit_json = liveness_evidence_for_task_for_test(&harness.app_state.db, &seeded.task_id)
+        .await
+        .into_iter()
+        .next()
+        .expect("short-id call audit JSON")
+        .1;
+    assert_eq!(audit_json["task_id"], seeded.task_id);
+    assert_eq!(audit_json["kind"], "terminated");
+    assert_eq!(
+        audit_json["observations"]["initial_non_terminal_ids"],
+        json!([seeded.session_id.clone()]),
+        "audit retains the verbatim authoritative snapshot"
+    );
+
+    // A UUID invocation after the short-id call must still be attributed to
+    // the canonical task and contributes one, separate outward-call audit row.
+    let uuid_response = harness
+        .call_kill_tool(&seeded.task_id)
+        .await
+        .expect("uuid kill");
+    assert_eq!(uuid_response["task_id"], seeded.task_id);
+    assert_eq!(uuid_response["kind"], "genuinely_absent");
+    assert_eq!(uuid_response["ok"], true);
+    assert_eq!(
+        LivenessRepository::new(harness.app_state.db.clone())
+            .count_evidence_for_task(&seeded.task_id)
+            .await
+            .expect("audit evidence count"),
+        2,
+        "each resolved short-id/UUID invocation writes exactly one audit row"
+    );
+    harness.shutdown();
+}
+
+/// Audit persistence is deliberately failed at the real repository boundary,
+/// after the real pool has reconciled and settled the captured execution. The
+/// outward failure must retain the actor's complete authoritative snapshot.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn execution_kill_task_audit_failure_retains_real_pool_snapshot() {
+    let harness = RealPoolKillHarness::new().await;
+    let seeded = harness
+        .seed_running_session_with_task_run("audit-failure-run")
+        .await;
+    harness.dispatch(&seeded.task_id).await;
+    harness.wait_for_runner_started(&seeded.task_id).await;
+    harness.wait_for_pool_session(&seeded.task_id).await;
+
+    // Fail the append-only evidence insert without replacing SlotPoolHandle or
+    // its reconciliation bridge with a mock.
+    reject_task_liveness_evidence_for_test(&harness.app_state.db).await;
+
+    let response = harness
+        .call_kill_tool(&seeded.task_id)
+        .await
+        .expect("audit failure remains a tool response");
+    assert_eq!(response["ok"], false);
+    assert_eq!(response["kind"], "audit_failed");
+    assert_eq!(response["underlying_kind"], "terminated");
+    assert_eq!(response["task_id"], seeded.task_id);
+    assert_eq!(
+        response["executions"],
+        json!([{
+            "session_id": seeded.session_id,
+            "task_run_id": seeded.task_run_id,
+            "teardown_owner": true,
+            "teardown_attempted": true,
+            "teardown_error": null,
+            "settlement_attempted": true,
+            "settlement_error": null
+        }]),
+        "audit_failed must retain the ordered actor execution evidence"
+    );
+    let observations = response["observations"]
+        .as_object()
+        .expect("audit failure retains observations");
+    assert_eq!(
+        observations.len(),
+        13,
+        "all observation fields are retained"
+    );
+    assert_eq!(
+        observations["initial_non_terminal_ids"],
+        json!([seeded.session_id])
+    );
+    assert_eq!(observations["initial_mapping_slot_id"], 0);
+    assert_eq!(observations["initial_pending_teardown"], false);
+    assert_eq!(observations["initial_compacting"], false);
+    assert!(observations["fenced_generation"].as_i64().is_some());
+    assert_eq!(
+        observations["initial_capture_error"],
+        serde_json::Value::Null
+    );
+    assert_eq!(observations["final_non_terminal_ids"], json!([]));
+    assert_eq!(
+        observations["final_mapping_slot_id"],
+        serde_json::Value::Null
+    );
+    assert_eq!(observations["final_pending_teardown"], false);
+    assert_eq!(observations["final_reread_error"], serde_json::Value::Null);
+    assert_eq!(observations["pool_cleanup_error"], serde_json::Value::Null);
+    assert_eq!(observations["completion_source"], "immediate");
+    assert_eq!(observations["underlying_kind"], serde_json::Value::Null);
+    assert!(
+        response["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("reject_execution_kill_evidence"))
+    );
+    assert_eq!(
+        LivenessRepository::new(harness.app_state.db.clone())
+            .count_evidence_for_task(&seeded.task_id)
+            .await
+            .expect("failed audit leaves no row"),
+        0
+    );
+    harness.wait_for_runner_killed(&seeded.task_id).await;
+    assert_settled_after_kill(&harness, &seeded).await;
+    assert_eq!(
+        harness.runtime_teardown_calls(),
+        vec![seeded.task_run_id.clone()],
+        "the underlying real-pool reconciliation completed before audit failed"
+    );
+    harness.shutdown();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn execution_kill_task_racing_natural_completion_settles_once_and_releases_capacity() {
     let race = CompletionRaceControl::default();
@@ -331,6 +550,14 @@ async fn execution_kill_task_double_kill_is_harmless_and_leaves_capacity_availab
         .expect("second execution_kill_task should still return a tool response");
 
     assert_truthful_harmless_second_kill_response(&second_response, &seeded.task_id);
+    assert_eq!(
+        LivenessRepository::new(harness.app_state.db.clone())
+            .count_evidence_for_task(&seeded.task_id)
+            .await
+            .expect("evidence count"),
+        2,
+        "each resolved outward kill invocation writes exactly one audit row"
+    );
     assert_settled_after_kill(&harness, &seeded).await;
     assert_eq!(
         harness.runtime_teardown_calls(),
@@ -351,6 +578,122 @@ async fn execution_kill_task_double_kill_is_harmless_and_leaves_capacity_availab
         harness.running_count_for_cap().await,
         0,
         "redispatching the same DB session fixture must not resurrect an active DB session row"
+    );
+    harness.shutdown();
+}
+
+/// Two outward MCP calls attach to one actor-owned deferred reconciliation.
+/// Neither call may write evidence or reply until the compacting slot emits its
+/// single Killed completion; each invocation must then append its own audit row.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_deferred_execution_kills_each_write_audit_evidence() {
+    let controlled_slots = Arc::new(Mutex::new(HashMap::new()));
+    let harness = RealPoolKillHarness::new_with_slot_factory({
+        let controlled_slots = controlled_slots.clone();
+        move |signal_tx| compaction_capturing_slot_factory(signal_tx, controlled_slots)
+    })
+    .await;
+    let seeded = harness
+        .seed_running_session_with_task_run("concurrent-deferred-run")
+        .await;
+
+    harness.dispatch(&seeded.task_id).await;
+    harness.wait_for_runner_started(&seeded.task_id).await;
+    harness.wait_for_pool_session(&seeded.task_id).await;
+    let (compaction, controlled_slot) = controlled_slots
+        .lock()
+        .expect("controlled slot map")
+        .get(&0)
+        .expect("slot zero control")
+        .clone();
+    let guard = compaction.guard();
+    assert!(
+        compaction.is_compacting(),
+        "fixture must hold real slot compaction before either MCP call starts"
+    );
+
+    let first = harness.call_kill_tool(&seeded.task_id);
+    let second = harness.call_kill_tool(&seeded.task_id);
+    let canonical_pool = harness
+        .pool
+        .clone()
+        .try_into_djinn_slot()
+        .expect("canonical pool handle");
+    let attached = canonical_pool.test_wait_for_pending_reconciliation_waiters(&seeded.task_id, 2);
+    tokio::pin!(first, second, attached);
+    tokio::select! {
+        response = &mut first => panic!("first outward kill replied before Killed: {response:?}"),
+        response = &mut second => panic!("second outward kill replied before Killed: {response:?}"),
+        waiter_count = &mut attached => assert_eq!(waiter_count.expect("waiter barrier"), 2),
+    }
+    assert!(
+        controlled_slot
+            .test_deferred_kill_parked()
+            .await
+            .expect("deferred-kill barrier"),
+        "the production kill must be parked before compaction release"
+    );
+    assert_eq!(
+        LivenessRepository::new(harness.app_state.db.clone())
+            .count_evidence_for_task(&seeded.task_id)
+            .await
+            .expect("pre-completion evidence count"),
+        0,
+        "pending outward calls must not audit an unfinished reconciliation"
+    );
+
+    guard.release();
+    controlled_slot
+        .test_release_deferred_kill()
+        .await
+        .expect("release exactly one parked kill");
+    let (first, second) = tokio::join!(first, second);
+    let first = first.expect("first deferred outward kill");
+    let second = second.expect("second deferred outward kill");
+    assert_eq!(
+        first, second,
+        "all attached waiters receive equivalent snapshots"
+    );
+    assert_eq!(
+        first["ok"], true,
+        "released deferred reconciliation must succeed: {first}"
+    );
+    assert_eq!(first["kind"], "terminated");
+    assert_eq!(first["task_id"], seeded.task_id);
+    assert_eq!(first["observations"]["initial_compacting"], true);
+    assert_eq!(
+        first["observations"]["completion_source"],
+        "slot_event_killed"
+    );
+    assert_eq!(
+        first["observations"]["initial_non_terminal_ids"],
+        json!([seeded.session_id.clone()])
+    );
+    assert_eq!(first["observations"]["final_non_terminal_ids"], json!([]));
+    assert_eq!(first["executions"].as_array().map(Vec::len), Some(1));
+    assert_eq!(first["executions"][0]["session_id"], seeded.session_id);
+    assert_eq!(first["executions"][0]["task_run_id"], seeded.task_run_id);
+    assert_eq!(first["executions"][0]["teardown_attempted"], true);
+    assert_eq!(first["executions"][0]["settlement_attempted"], true);
+
+    harness.wait_for_runner_killed(&seeded.task_id).await;
+    assert_settled_after_kill(&harness, &seeded).await;
+    let evidence_ids: Vec<String> =
+        liveness_evidence_for_task_for_test(&harness.app_state.db, &seeded.task_id)
+            .await
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+    assert_eq!(
+        evidence_ids.len(),
+        2,
+        "one durable row per outward invocation"
+    );
+    assert_ne!(evidence_ids[0], evidence_ids[1], "audit rows are distinct");
+    assert_eq!(
+        harness.runtime_teardown_calls(),
+        vec![seeded.task_run_id.clone()],
+        "attached waiters share one authoritative teardown"
     );
     harness.shutdown();
 }
@@ -849,6 +1192,37 @@ impl CompletionRaceControl {
     fn allow_natural_settlement(&self) {
         self.allow_natural_settlement.notify_waiters();
     }
+}
+
+fn compaction_capturing_slot_factory(
+    signal_tx: mpsc::UnboundedSender<RunnerSignal>,
+    controlled_slots: Arc<
+        Mutex<
+            HashMap<
+                usize,
+                (
+                    djinn_slot::reply_loop::CompactionCriticalSection,
+                    djinn_slot::SlotHandle,
+                ),
+            >,
+        >,
+    >,
+) -> SlotFactory {
+    let factory = test_slot_factory(Duration::from_secs(3600), signal_tx);
+    Arc::new(move |slot_id, model_id, event_tx, app_state, cancel| {
+        let handle = factory(slot_id, model_id, event_tx, app_state, cancel);
+        controlled_slots
+            .lock()
+            .expect("controlled slot map")
+            .insert(
+                slot_id,
+                (
+                    handle.test_compaction_cs().clone(),
+                    handle.clone().into_djinn_slot(),
+                ),
+            );
+        handle
+    })
 }
 
 fn test_slot_factory(

@@ -33,6 +33,16 @@ pub enum SlotCommand {
     Pause,
     /// Finish current task then shut down (for capacity reduction).
     Drain,
+    /// Test-only barrier proving the actor consumed the production kill and
+    /// parked it behind an active compaction guard.
+    #[cfg(any(test, feature = "test-support"))]
+    TestDeferredKillParked { respond_to: oneshot::Sender<bool> },
+    /// Test-only continuation trigger used after a fixture releases its
+    /// compaction guard. Normal lifecycle completion still emits `Killed`.
+    #[cfg(any(test, feature = "test-support"))]
+    TestReleaseDeferredKill {
+        respond_to: oneshot::Sender<Result<(), SlotError>>,
+    },
 }
 
 #[derive(Debug, Error, Clone)]

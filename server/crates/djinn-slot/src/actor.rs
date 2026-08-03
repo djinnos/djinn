@@ -177,6 +177,35 @@ impl SlotActor {
                                     active = Some(running);
                                 }
                             }
+                            #[cfg(any(test, feature = "test-support"))]
+                            Some(SlotCommand::TestDeferredKillParked { respond_to }) => {
+                                let _ = respond_to.send(running.pending_kill);
+                                active = Some(running);
+                            }
+                            #[cfg(any(test, feature = "test-support"))]
+                            Some(SlotCommand::TestReleaseDeferredKill { respond_to }) => {
+                                let result = if running.compaction_cs.is_compacting() {
+                                    Err(SlotError::SessionFailed(
+                                        "test attempted to release deferred kill while compacting"
+                                            .to_owned(),
+                                    ))
+                                } else if !running.pending_kill {
+                                    Err(SlotError::SessionFailed(
+                                        "test attempted to release a kill that was not deferred"
+                                            .to_owned(),
+                                    ))
+                                } else {
+                                    self.apply_deferred_lifecycle_intent(
+                                        &mut running,
+                                        &mut drain_requested,
+                                    )
+                                    .await;
+                                    running.pending_kill = false;
+                                    Ok(())
+                                };
+                                let _ = respond_to.send(result);
+                                active = Some(running);
+                            }
                             None => {
                                 running.kill.cancel();
                                 let _ = running.join.await;
@@ -220,6 +249,17 @@ impl SlotActor {
                             }
                             Some(SlotCommand::Kill) | Some(SlotCommand::Pause) => {
                                 // No active lifecycle; command is a no-op.
+                            }
+                            #[cfg(any(test, feature = "test-support"))]
+                            Some(SlotCommand::TestDeferredKillParked { respond_to }) => {
+                                let _ = respond_to.send(false);
+                            }
+                            #[cfg(any(test, feature = "test-support"))]
+                            Some(SlotCommand::TestReleaseDeferredKill { respond_to }) => {
+                                let _ = respond_to.send(Err(SlotError::SessionFailed(
+                                    "test attempted to release deferred kill without an active lifecycle"
+                                        .to_owned(),
+                                )));
                             }
                             Some(SlotCommand::Drain) | None => {
                                 break;
@@ -565,6 +605,30 @@ impl SlotHandle {
             .send(SlotCommand::Kill)
             .await
             .map_err(|_| SlotError::SessionFailed("slot actor channel closed".to_string()))
+    }
+    /// Deterministic test barrier for compaction-deferred kill fixtures.
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn test_deferred_kill_parked(&self) -> Result<bool, SlotError> {
+        let (respond_to, response) = oneshot::channel();
+        self.sender
+            .send(SlotCommand::TestDeferredKillParked { respond_to })
+            .await
+            .map_err(|_| SlotError::SessionFailed("slot actor channel closed".to_string()))?;
+        response.await.map_err(|_| {
+            SlotError::SessionFailed("slot actor dropped deferred-kill barrier".to_string())
+        })
+    }
+    /// Deterministically consume one parked kill after compaction is released.
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn test_release_deferred_kill(&self) -> Result<(), SlotError> {
+        let (respond_to, response) = oneshot::channel();
+        self.sender
+            .send(SlotCommand::TestReleaseDeferredKill { respond_to })
+            .await
+            .map_err(|_| SlotError::SessionFailed("slot actor channel closed".to_string()))?;
+        response.await.map_err(|_| {
+            SlotError::SessionFailed("slot actor dropped deferred-kill release ACK".to_string())
+        })?
     }
     pub async fn pause(&self) -> Result<(), SlotError> {
         self.sender

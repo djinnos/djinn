@@ -185,6 +185,22 @@ impl SlotPoolHandle {
         })
         .await
     }
+    /// Test-only barrier proving real asks share one pending continuation.
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn test_wait_for_pending_reconciliation_waiters(
+        &self,
+        task_id: &str,
+        expected_waiters: usize,
+    ) -> Result<usize, PoolError> {
+        self.request(
+            |respond_to| PoolMessage::TestWaitForPendingReconciliationWaiters {
+                task_id: task_id.to_owned(),
+                expected_waiters,
+                respond_to,
+            },
+        )
+        .await
+    }
     /// Forcibly evict a leaked task→slot mapping whose `Killed`/`Free` event
     /// never arrived (dead/evicted/OOM-killed pod, stuck RPC stream). Unlike
     /// [`kill_session`], this does not depend on the pod responding — it
