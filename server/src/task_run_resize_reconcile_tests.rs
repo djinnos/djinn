@@ -11,7 +11,117 @@
 //! nothing?"
 
 use super::*;
+use std::collections::BTreeMap;
 use std::sync::atomic::AtomicUsize;
+use std::sync::{Arc as StdArc, Mutex as StdMutex};
+use tracing::field::{Field, Visit};
+use tracing_subscriber::Layer;
+use tracing_subscriber::layer::Context;
+use tracing_subscriber::prelude::*;
+
+#[derive(Clone, Debug, Default)]
+struct CapturedEvent {
+    fields: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Default)]
+struct EventCapture(StdArc<StdMutex<Vec<CapturedEvent>>>);
+
+impl EventCapture {
+    fn events(&self) -> Vec<CapturedEvent> {
+        self.0.lock().expect("captured events mutex").clone()
+    }
+}
+
+#[derive(Default)]
+struct EventFieldRecorder(CapturedEvent);
+
+impl Visit for EventFieldRecorder {
+    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+        self.0.fields.insert(
+            field.name().to_owned(),
+            format!("{value:?}").trim_matches('"').to_owned(),
+        );
+    }
+
+    fn record_str(&mut self, field: &Field, value: &str) {
+        self.0
+            .fields
+            .insert(field.name().to_owned(), value.to_owned());
+    }
+}
+
+impl<S: tracing::Subscriber> Layer<S> for EventCapture {
+    fn on_event(&self, event: &tracing::Event<'_>, _context: Context<'_, S>) {
+        let mut recorder = EventFieldRecorder::default();
+        event.record(&mut recorder);
+        self.0
+            .lock()
+            .expect("captured events mutex")
+            .push(recorder.0);
+    }
+}
+
+#[test]
+fn lifecycle_and_lease_summaries_name_and_count_their_own_ledgers() {
+    let captured = EventCapture::default();
+    let subscriber = tracing_subscriber::registry().with(captured.clone());
+    let pass = ResizeReconcilePass {
+        mode: Some(ResizeReconcileMode::Enforce),
+        scanned: 11,
+        resumed: 7,
+        would_resume: 4,
+        permits_retired: 5,
+        pre_birth_scanned: 3,
+        pre_birth_reaped: 2,
+        leases_released: 1,
+        unsettled: 1,
+        ..ResizeReconcilePass::default()
+    };
+
+    tracing::subscriber::with_default(subscriber, || emit_pass_summaries(&pass));
+
+    let events = captured.events();
+    assert_eq!(events.len(), 2, "one structured summary per mutated ledger");
+    let lifecycle = events
+        .iter()
+        .find(|event| event.fields.get("ledger") == Some(&"build_pod_permits".to_owned()))
+        .expect("captured build_pod_permits lifecycle summary");
+    assert_eq!(lifecycle.fields.get("scanned"), Some(&"11".to_owned()));
+    assert_eq!(lifecycle.fields.get("resumed"), Some(&"7".to_owned()));
+    assert_eq!(
+        lifecycle.fields.get("would_resume"),
+        Some(&"4".to_owned()),
+        "observe-only work remains a lifecycle count"
+    );
+    assert_eq!(
+        lifecycle.fields.get("permits_retired"),
+        Some(&"5".to_owned()),
+        "the lifecycle event reports the exact retired-permit count"
+    );
+    assert_eq!(
+        lifecycle.fields.get("pre_birth_scanned"),
+        Some(&"3".to_owned())
+    );
+    assert_eq!(
+        lifecycle.fields.get("pre_birth_reaped"),
+        Some(&"2".to_owned())
+    );
+
+    let leases = events
+        .iter()
+        .find(|event| event.fields.get("ledger") == Some(&"build_leases".to_owned()))
+        .expect("captured build_leases release summary");
+    assert_eq!(leases.fields.get("leases_released"), Some(&"1".to_owned()));
+    assert!(
+        !leases.fields.contains_key("permits_retired"),
+        "a permit retirement is not lease reclamation"
+    );
+    assert!(
+        !leases.fields.contains_key("scanned"),
+        "lease reporting must not relabel permit scans as lease scans"
+    );
+}
 
 /// The drop-transit grace must stay ANCHORED to the handler budget it is
 /// protecting, not to a number somebody typed once.
