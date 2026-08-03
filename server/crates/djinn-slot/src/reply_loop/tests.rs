@@ -4332,6 +4332,83 @@ async fn run_reply_loop_preserves_supervisor_shutdown_cancellation_origin() {
     );
 }
 
+/// A provider error selected at the real stream-init seam must remain the
+/// provider error even if the session is cancelled afterwards. The ordering is
+/// explicit: `run_reply_loop` has returned its error before this test cancels
+/// the token, so no timing or final-token-state observation is involved.
+#[tokio::test]
+async fn provider_error_wins_before_later_session_cancellation() {
+    use djinn_provider::provider::ProviderError;
+
+    let provider = MockProvider::new(vec![MockResponse {
+        text: None,
+        tool_calls: vec![],
+        input_tokens: 0,
+        output_tokens: 0,
+        _error: Some(anyhow::Error::new(ProviderError::ProviderInternal {
+            status: 599,
+        })),
+    }]);
+    let mut harness = ReplyLoopHarness::new().await;
+    let (result, _, _, _, _, _) = harness.run(&provider, &[]).await;
+    let error = result.expect_err("the controlled provider error must win");
+
+    // Deliberately later than the reply-loop result. This is not an assertion
+    // about token state; it models shutdown racing after the error was selected.
+    harness.cancel.cancel();
+
+    assert_eq!(
+        error.downcast_ref::<ProviderError>(),
+        Some(&ProviderError::ProviderInternal { status: 599 }),
+        "later cancellation must not reclassify the selected provider error"
+    );
+    assert!(
+        error.downcast_ref::<ReplyLoopCancelled>().is_none(),
+        "the selected provider error must not become a cancellation"
+    );
+}
+
+/// A non-provider harness error selected at the stream-init seam likewise
+/// remains typed when shutdown is signalled only after the reply-loop returns.
+#[tokio::test]
+async fn harness_error_wins_before_later_supervisor_cancellation() {
+    #[derive(Debug)]
+    struct HarnessError;
+
+    impl std::fmt::Display for HarnessError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("controlled reply-loop harness failure")
+        }
+    }
+
+    impl std::error::Error for HarnessError {}
+
+    let provider = MockProvider::new(vec![MockResponse {
+        text: None,
+        tool_calls: vec![],
+        input_tokens: 0,
+        output_tokens: 0,
+        _error: Some(anyhow::Error::new(HarnessError)),
+    }]);
+    let mut harness = ReplyLoopHarness::new().await;
+    let (result, _, _, _, _, _) = harness.run(&provider, &[]).await;
+    let error = result.expect_err("the controlled harness error must win");
+
+    // `ReplyLoopHarness::run` uses the same token for session and supervisor
+    // cancellation. Cancelling only after it returned keeps the ordering exact
+    // without inspecting the token's final state.
+    harness.cancel.cancel();
+
+    assert!(
+        error.downcast_ref::<HarnessError>().is_some(),
+        "later shutdown must preserve the selected harness error"
+    );
+    assert!(
+        error.downcast_ref::<ReplyLoopCancelled>().is_none(),
+        "the selected harness error must not become a cancellation"
+    );
+}
+
 /// Regression: the pre-rotation conversation snapshot in the DB is not mutated
 /// by a later compaction.  Messages persisted before compaction (e.g. the
 /// initial user task and a tool round) remain in the raw history, and
