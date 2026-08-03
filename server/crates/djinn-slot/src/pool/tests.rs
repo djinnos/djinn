@@ -2654,7 +2654,12 @@ async fn assert_immediate_reconcile_matrix_case(
             .executions
             .iter()
             .filter(|entry| entry.teardown_owner)
-            .map(|entry| entry.task_run_id.as_deref())
+            .map(|entry| {
+                entry
+                    .task_run_id
+                    .as_deref()
+                    .expect("teardown owner has a task run id")
+            })
             .collect::<Vec<_>>(),
         expected_teardowns
             .iter()
