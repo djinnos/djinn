@@ -15,8 +15,9 @@ async fn migration_173_preserves_legacy_feedback_and_enforces_generation_contrac
         uuid::Uuid::now_v7().simple()
     );
     let admin = format!("{prefix}/postgres");
+    let mut admin_connection = sqlx::postgres::PgConnection::connect(&admin).await.unwrap();
     sqlx::query(&format!(r#"CREATE DATABASE "{name}""#))
-        .execute(&sqlx::postgres::PgConnection::connect(&admin).await.unwrap())
+        .execute(&mut admin_connection)
         .await
         .unwrap();
     let url = format!("{prefix}/{name}");
@@ -30,7 +31,7 @@ async fn migration_173_preserves_legacy_feedback_and_enforces_generation_contrac
         .execute(&pool)
         .await
         .unwrap();
-    sqlx::query("INSERT INTO proposal_feedback (id,proposal_id,body) VALUES ('root','p','legacy feedback'),('reply','p','reply')").execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO proposal_feedback (id,proposal_id,body) VALUES ('root','p','legacy feedback'),('root2','p','second root'),('reply','p','reply')").execute(&pool).await.unwrap();
     let severity: String =
         sqlx::query_scalar("SELECT severity FROM proposal_feedback WHERE id='root'")
             .fetch_one(&pool)
@@ -43,10 +44,18 @@ async fn migration_173_preserves_legacy_feedback_and_enforces_generation_contrac
             .await
             .is_err()
     );
-    sqlx::query("INSERT INTO proposal_debate_trail (id,proposal_id,kind) VALUES ('debate','p','human_feedback')").execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO proposal_debate_trail (id,proposal_id,kind) VALUES ('debate','p','human_feedback'),('debate2','p','human_feedback')").execute(&pool).await.unwrap();
     let insert = "INSERT INTO proposal_feedback_refinement_injections (id,proposal_id,root_feedback_id,generation,cutoff_at,cutoff_feedback_id,round,debate_entry_id) VALUES ($1,'p','root',1,'2025-01-01T00:00:00Z','reply',1,'debate')";
     sqlx::query(insert).bind("i1").execute(&pool).await.unwrap();
-    assert!(sqlx::query(insert).bind("i2").execute(&pool).await.is_err());
+    let duplicate_generation = "INSERT INTO proposal_feedback_refinement_injections (id,proposal_id,root_feedback_id,generation,cutoff_at,cutoff_feedback_id,round,debate_entry_id) VALUES ('i2','p','root',1,'2025-01-01T00:00:00Z','reply',1,'debate2')";
+    assert!(
+        sqlx::query(duplicate_generation)
+            .execute(&pool)
+            .await
+            .is_err()
+    );
+    let duplicate_debate = "INSERT INTO proposal_feedback_refinement_injections (id,proposal_id,root_feedback_id,generation,cutoff_at,cutoff_feedback_id,round,debate_entry_id) VALUES ('i3','p','root2',1,'2025-01-01T00:00:00Z','reply',1,'debate')";
+    assert!(sqlx::query(duplicate_debate).execute(&pool).await.is_err());
     sqlx::query("INSERT INTO proposal_feedback_refinement_sources (injection_id,source_feedback_id,source_ordinal,source_author_kind,source_body,source_severity,source_created_at,captured_at) VALUES ('i1','root',1,'user','verbatim','blocking','2025-01-01T00:00:00Z','2025-01-01T00:00:00Z')").execute(&pool).await.unwrap();
     assert!(sqlx::query("INSERT INTO proposal_feedback_refinement_sources (injection_id,source_feedback_id,source_ordinal,source_author_kind,source_body,source_severity,source_created_at,captured_at) VALUES ('i1','reply',1,'user','verbatim','blocking','2025-01-01T00:00:00Z','2025-01-01T00:00:00Z')").execute(&pool).await.is_err());
     pool.close().await;
