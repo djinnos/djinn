@@ -37,7 +37,7 @@ pub use provider::{CustomProvider, Model, Pricing, Provider, SeedModel};
 pub use rejected_submission_integrity::{
     RejectedVerdictKind, TaskRejectedSubmissionIntegrityRecord,
 };
-pub use session::{CostBasis, SessionRecord, SessionStatus};
+pub use session::{CostBasis, SessionFailureCause, SessionRecord, SessionStatus};
 pub use session_message::SessionMessage;
 pub use settings::{
     DispatchPause, DispatchPauseScope, DispatchPauseState, DjinnSettings, KnowledgeInjectionConfig,
