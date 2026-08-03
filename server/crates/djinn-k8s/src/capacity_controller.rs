@@ -14,13 +14,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::watch;
+use tokio::time::Instant;
 
 use crate::capacity::{
     CapacityOutcome, CpuMillicores, DerivedCapacity, FailSafeCapacity, MemoryBytes, PodCount,
     ResourceVector, ResourceVectorDerivationInputs, ResourceVectorInput, ResourceVectorOutcome,
     derive_resource_vector, podset_cost_from_pod_spec,
 };
-use crate::capacity_damping::{BindingQuota, CapacityVector};
+use crate::capacity_damping::{BindingQuota, CapacityDamper, CapacityVector, SampleKind};
 
 pub const QUOTA_OWNER_LABEL: &str = "djinn.io/quota-owner";
 pub const DERIVED_CAPACITY_OWNER: &str = "derived-capacity";
@@ -683,6 +684,8 @@ pub enum ActuationDecision {
 
 #[derive(Clone, Debug)]
 pub struct CapacityControllerConfig {
+    /// The release marker is the sole selector for complete-vector writes.
+    pub contract: CapacityContract,
     pub source: CapacitySource,
     pub queue_name: String,
     pub node_selector_key: String,
@@ -717,6 +720,14 @@ pub enum CapacitySource {
     Invalid,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CapacityContract {
+    /// The one-release PR #2901 compatibility protocol.
+    Legacy,
+    /// The explicit complete-vector protocol.
+    VectorV1,
+}
+
 impl CapacityControllerConfig {
     pub fn from_env() -> Option<Self> {
         if std::env::var("DJINN_CAPACITY_ENABLED").ok().as_deref() != Some("true") {
@@ -730,42 +741,87 @@ impl CapacityControllerConfig {
                 .ok()
                 .and_then(|v| CpuMillicores::new(v).ok())
         };
-        let headroom = ResourceVector {
-            cpu: parse_cpu("DJINN_CAPACITY_HEADROOM_CPU")?,
-            memory: memory_quantity(&std::env::var("DJINN_CAPACITY_HEADROOM_MEMORY").ok()?)?,
-            pods: pod_quantity(&std::env::var("DJINN_CAPACITY_HEADROOM_PODS").ok()?)?,
+        let contract = match std::env::var("DJINN_CAPACITY_CONTRACT") {
+            Err(std::env::VarError::NotPresent) => CapacityContract::Legacy,
+            Ok(value) if value == "vector-v1" => CapacityContract::VectorV1,
+            // An unknown marker cannot silently activate either writer.
+            Ok(_) | Err(_) => return None,
         };
-        let static_fallback = ResourceVector {
-            cpu: cpu_quantity(&std::env::var("DJINN_CAPACITY_STATIC_CPU").ok()?)?,
-            memory: memory_quantity(&std::env::var("DJINN_CAPACITY_STATIC_MEMORY").ok()?)?,
-            pods: pod_quantity(&std::env::var("DJINN_CAPACITY_STATIC_PODS").ok()?)?,
+        // Old charts supplied an idle CPU reserve, rather than the new complete
+        // headroom vector. Keep that lane independent of vector-only inputs.
+        let idle_cost = parse_cpu("DJINN_CAPACITY_IDLE_CPU")?;
+        let headroom = if contract == CapacityContract::VectorV1 {
+            ResourceVector {
+                cpu: parse_cpu("DJINN_CAPACITY_HEADROOM_CPU")?,
+                memory: memory_quantity(&std::env::var("DJINN_CAPACITY_HEADROOM_MEMORY").ok()?)?,
+                pods: pod_quantity(&std::env::var("DJINN_CAPACITY_HEADROOM_PODS").ok()?)?,
+            }
+        } else {
+            ResourceVector {
+                cpu: idle_cost,
+                ..ResourceVector::ZERO
+            }
         };
-        let source = match std::env::var("DJINN_CAPACITY_SOURCE").ok().as_deref() {
-            Some("static") => CapacitySource::Static,
-            Some("node-sum") => CapacitySource::NodeSum,
-            Some("nodepool-limits") => CapacitySource::NodePoolLimits,
-            _ => CapacitySource::Invalid,
+        let source = if contract == CapacityContract::Legacy {
+            // Old charts did not declare a source; retain their Node/Pod lane.
+            CapacitySource::NodeSum
+        } else {
+            match std::env::var("DJINN_CAPACITY_SOURCE").ok().as_deref() {
+                Some("static") => CapacitySource::Static,
+                Some("node-sum") => CapacitySource::NodeSum,
+                Some("nodepool-limits") => CapacitySource::NodePoolLimits,
+                _ => CapacitySource::Invalid,
+            }
         };
         let (flavor_selector, flavor_selectors) =
             match std::env::var("DJINN_CAPACITY_FLAVOR_SELECTOR") {
                 Ok(value) => {
                     let value: Value = serde_json::from_str(&value).ok()?;
-                    if value.as_object()?.values().all(Value::is_string) {
+                    let selector = value.as_object()?;
+                    if selector.is_empty() {
+                        return None;
+                    }
+                    if selector.values().all(Value::is_string) {
                         (Some(serde_json::from_value(value).ok()?), BTreeMap::new())
                     } else {
-                        (None, serde_json::from_value(value).ok()?)
+                        let selectors: BTreeMap<String, BTreeMap<String, String>> =
+                            serde_json::from_value(value).ok()?;
+                        if selectors
+                            .iter()
+                            .any(|(name, selector)| name.is_empty() || selector.is_empty())
+                        {
+                            return None;
+                        }
+                        (None, selectors)
                     }
                 }
                 Err(std::env::VarError::NotPresent) => (None, BTreeMap::new()),
                 Err(_) => return None,
             };
+        let static_fallback = if contract == CapacityContract::VectorV1 {
+            ResourceVector {
+                cpu: cpu_quantity(&std::env::var("DJINN_CAPACITY_STATIC_CPU").ok()?)?,
+                memory: memory_quantity(&std::env::var("DJINN_CAPACITY_STATIC_MEMORY").ok()?)?,
+                pods: pod_quantity(&std::env::var("DJINN_CAPACITY_STATIC_PODS").ok()?)?,
+            }
+        } else {
+            // Never derive a vector from legacy sentinel-shaped quotas.
+            ResourceVector::ZERO
+        };
+        if contract == CapacityContract::VectorV1
+            && (source == CapacitySource::Invalid
+                || (flavor_selector.is_none() && flavor_selectors.is_empty()))
+        {
+            return None;
+        }
         let build_job = controller_build_job();
         Some(Self {
+            contract,
             source,
             queue_name: std::env::var("DJINN_CAPACITY_QUEUE_NAME").ok()?,
             node_selector_key: std::env::var("DJINN_CAPACITY_NODE_SELECTOR_KEY").ok()?,
             node_selector_value: std::env::var("DJINN_CAPACITY_NODE_SELECTOR_VALUE").ok()?,
-            idle_cost: parse_cpu("DJINN_CAPACITY_IDLE_CPU")?,
+            idle_cost,
             compile_cost: parse_cpu("DJINN_CAPACITY_COMPILE_CPU")?,
             headroom,
             build_job,
@@ -957,6 +1013,9 @@ pub async fn run_capacity_controller(
         "{}={}",
         config.node_selector_key, config.node_selector_value
     );
+    // Legacy and vector-v1 have deliberately separate stabilization contracts.
+    // This state is consulted only by the absent-marker legacy branch below.
+    let mut legacy_damper: Option<CapacityDamper> = None;
     let mut tick = tokio::time::interval(Duration::from_secs(30));
     loop {
         tick.tick().await;
@@ -967,6 +1026,131 @@ pub async fn run_capacity_controller(
             .await
             .ok()
             .and_then(|queue| observe_queue(queue, &config.queue_name));
+        // PR #2901's annotated binding is a separate wire protocol. The
+        // absent release marker reaches this branch before any vector source
+        // routing, so old sentinel quotas can never become a static vector.
+        if config.contract == CapacityContract::Legacy {
+            let observed = async {
+                let queue = queue.clone()?;
+                let node_list = nodes
+                    .list(&ListParams::default().labels(&selector))
+                    .await
+                    .ok()?;
+                let node_observations: Vec<_> = node_list
+                    .items
+                    .iter()
+                    .map(|node| {
+                        observe_node(node, &config.node_selector_key, &config.node_selector_value)
+                    })
+                    .collect();
+                let node = select_node(&node_observations).ok()?;
+                let allocatable = ResourceVector {
+                    cpu: node.allocatable_cpu?,
+                    memory: node.allocatable_memory?,
+                    pods: node.allocatable_pods?,
+                };
+                let protected_pods = pods
+                    .list(&ListParams::default().labels("djinn.io/capacity-reserved=true"))
+                    .await
+                    .ok()?;
+                if protected_pods.items.len() < config.expected_protected_pods {
+                    return None;
+                }
+                let protected = protected_requests_on_nodes(
+                    &protected_pods.items,
+                    &BTreeSet::from([node.name.clone()]),
+                )
+                .ok()?;
+                let capacity = derive_capacity_from_rendered_build_job(
+                    allocatable,
+                    protected,
+                    config.headroom,
+                    rendered_pod_spec(&config.build_job)?,
+                    config.compile_cost,
+                    config.fail_safe,
+                );
+                let CapacityOutcome::Derived(raw) = capacity else {
+                    return None;
+                };
+                let binding = binding_for(&queue, &config.queue_name, raw).ok()?;
+                Some((
+                    queue,
+                    capacity,
+                    CapacityVector {
+                        binding,
+                        compile_slots: raw.compile_slots,
+                    },
+                ))
+            }
+            .await;
+            let Some((queue, capacity, snapshot)) = observed else {
+                let current = legacy_damper
+                    .as_mut()
+                    .map(|damper| {
+                        damper.reset_after_error(config.fail_safe.compile_slots, Instant::now())
+                    })
+                    .unwrap_or(CapacityVector {
+                        binding: BindingQuota::Pods(config.fail_safe.pods),
+                        compile_slots: config.fail_safe.compile_slots,
+                    });
+                let _ = snapshots.send(current);
+                continue;
+            };
+            // Preserve PR #2901's sentinel-safe initialization: an old queue
+            // quantity that cannot be parsed as a plain integer (for example
+            // `10k`) starts from the configured fail-safe live fallback. Growth
+            // then requires both agreeing periodic samples and the dwell.
+            let now = Instant::now();
+            let live = queue
+                .resources
+                .iter()
+                .find(|resource| Some(resource.name.as_str()) == queue.binding_resource.as_deref())
+                .and_then(|resource| {
+                    resource
+                        .nominal_quota
+                        .strip_suffix('m')
+                        .unwrap_or(&resource.nominal_quota)
+                        .parse()
+                        .ok()
+                })
+                .unwrap_or(config.fail_safe.pods);
+            let damper = legacy_damper.get_or_insert_with(|| {
+                CapacityDamper::new(
+                    match snapshot.binding {
+                        BindingQuota::Pods(_) => BindingQuota::Pods(live),
+                        BindingQuota::CpuMillicores(_) => BindingQuota::CpuMillicores(live),
+                    },
+                    config.fail_safe.compile_slots,
+                    now,
+                )
+            });
+            let damped = damper.observe(snapshot, SampleKind::Periodic, now);
+            let _ = snapshots.send(damped);
+            // A growth candidate is observable, but not writable, until the
+            // damper promotes its binding component after agreement and dwell.
+            if damped.binding != snapshot.binding {
+                continue;
+            }
+            if let ActuationDecision::Patch { patch, .. } = patch_decision(
+                &queue,
+                &config.queue_name,
+                capacity,
+                damped,
+                compile_bound_armed(),
+                config.fail_safe,
+            ) {
+                let _ = queues
+                    .patch(
+                        &config.queue_name,
+                        &PatchParams::default(),
+                        &Patch::Json::<()>(
+                            serde_json::from_value(patch).expect("valid internal JSON patch"),
+                        ),
+                    )
+                    .await;
+            }
+            continue;
+        }
         if config.source == CapacitySource::NodePoolLimits {
             let result: Result<Vec<FlavorQuotaTarget>, ConservativeReason> = async {
                 if !config.nodepool_dedicated || config.nodepool_name.is_empty() {
@@ -1934,6 +2118,7 @@ mod tests {
         for surface in ["pods", "cpu"] {
             let (client, recorder) = capacity_controller_cluster("default", surface);
             let config = CapacityControllerConfig {
+                contract: CapacityContract::VectorV1,
                 source: CapacitySource::NodeSum,
                 queue_name: "djinn-kueue".into(),
                 node_selector_key: "kubernetes.io/hostname".into(),
@@ -2129,6 +2314,7 @@ mod tests {
         ] {
             let (client, recorder, live) = capacity_controller_nodepool_cluster("default", fixture);
             let config = CapacityControllerConfig {
+                contract: CapacityContract::VectorV1,
                 source: CapacitySource::NodePoolLimits,
                 queue_name: "djinn-kueue".into(),
                 node_selector_key: "unused".into(),
@@ -2224,6 +2410,7 @@ mod tests {
             let (client, recorder, _live) =
                 capacity_controller_nodepool_cluster("default", NodePoolFixture::Valid);
             let config = CapacityControllerConfig {
+                contract: CapacityContract::VectorV1,
                 source: CapacitySource::NodePoolLimits,
                 queue_name: "djinn-kueue".into(),
                 node_selector_key: "unused".into(),
@@ -2300,6 +2487,7 @@ mod tests {
                 BTreeMap::new()
             };
             let config = CapacityControllerConfig {
+                contract: CapacityContract::VectorV1,
                 source,
                 queue_name: "djinn-kueue".into(),
                 node_selector_key: if source == CapacitySource::NodeSum {
@@ -2614,6 +2802,7 @@ mod tests {
         let recorder = RecordedApiserver::new();
         let client = recording_client(&recorder, "default");
         let config = CapacityControllerConfig {
+            contract: CapacityContract::VectorV1,
             source: CapacitySource::NodeSum,
             queue_name: "djinn-kueue".into(),
             node_selector_key: "kubernetes.io/hostname".into(),
@@ -2664,6 +2853,7 @@ mod tests {
             let (client, recorder) =
                 capacity_controller_cluster_with_pods("default", "pods", pod_mode);
             let config = CapacityControllerConfig {
+                contract: CapacityContract::VectorV1,
                 source: CapacitySource::NodeSum,
                 queue_name: "djinn-kueue".into(),
                 node_selector_key: selector_key.into(),
@@ -2711,6 +2901,154 @@ mod tests {
             // The fixture already declares the fail-safe Pod quota of three, so
             // the fenced fallback correctly omits a redundant Pods replacement.
             task.abort();
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn capacity_mixed_version_contract() {
+        use crate::runtime_fixture::{
+            capacity_controller_cluster, capacity_controller_legacy_sentinel_cluster,
+        };
+
+        // This fixture owns its process environment because it verifies the
+        // startup contract, rather than constructing a config by hand.
+        let set = |name: &str, value: &str| unsafe { std::env::set_var(name, value) };
+        let unset = |name: &str| unsafe { std::env::remove_var(name) };
+        for (name, value) in [
+            ("DJINN_CAPACITY_ENABLED", "true"),
+            ("DJINN_CAPACITY_IDLE_CPU", "750m"),
+            ("DJINN_CAPACITY_HEADROOM_CPU", "0m"),
+            ("DJINN_CAPACITY_HEADROOM_MEMORY", "0"),
+            ("DJINN_CAPACITY_HEADROOM_PODS", "0"),
+            ("DJINN_CAPACITY_SOURCE", "static"),
+            ("DJINN_CAPACITY_FLAVOR_SELECTOR", r#"{"pool":"default"}"#),
+            ("DJINN_CAPACITY_STATIC_CPU", "12000m"),
+            ("DJINN_CAPACITY_STATIC_MEMORY", "8192"),
+            ("DJINN_CAPACITY_STATIC_PODS", "9"),
+            ("DJINN_CAPACITY_QUEUE_NAME", "djinn-kueue"),
+            ("DJINN_CAPACITY_NODE_SELECTOR_KEY", "kubernetes.io/hostname"),
+            ("DJINN_CAPACITY_NODE_SELECTOR_VALUE", "worker-1"),
+            ("DJINN_CAPACITY_COMPILE_CPU", "2800m"),
+            ("DJINN_CAPACITY_FAIL_SAFE_PODS", "3"),
+            ("DJINN_CAPACITY_FAIL_SAFE_COMPILE_SLOTS", "2"),
+            ("DJINN_CAPACITY_EXPECTED_PROTECTED_PODS", "5"),
+        ] {
+            set(name, value);
+        }
+
+        // Absent marker is the old-chart lane, even with all new inputs and
+        // sentinel-shaped topology present. It only changes the annotation
+        // selected binding resource.
+        unset("DJINN_CAPACITY_CONTRACT");
+        let legacy = CapacityControllerConfig::from_env().expect("legacy chart config");
+        assert_eq!(legacy.contract, CapacityContract::Legacy);
+        assert_eq!(legacy.static_fallback, ResourceVector::ZERO);
+        let (client, recorder) = capacity_controller_legacy_sentinel_cluster("default", "pods");
+        let (tx, _) = watch::channel(CapacityVector {
+            binding: BindingQuota::Pods(3),
+            compile_slots: 2,
+        });
+        let task = tokio::spawn(run_capacity_controller(
+            client,
+            legacy,
+            Arc::new(|| true),
+            tx,
+        ));
+        for _ in 0..4 {
+            tokio::time::advance(Duration::from_secs(30)).await;
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            recorder.mutations().is_empty(),
+            "legacy growth must not write before the five-minute dwell"
+        );
+        for _ in 0..8 {
+            tokio::time::advance(Duration::from_secs(30)).await;
+            tokio::task::yield_now().await;
+            if !recorder.mutations().is_empty() {
+                break;
+            }
+        }
+        task.abort();
+        let mutations = recorder.mutations();
+        assert_eq!(
+            mutations.len(),
+            1,
+            "legacy widening is a single fenced write"
+        );
+        let legacy_patch: Value = serde_json::from_str(&mutations[0].body).unwrap();
+        assert_eq!(
+            legacy_patch,
+            json!([
+                {"op":"test","path":"/metadata/resourceVersion","value":"42"},
+                {"op":"replace","path":"/spec/resourceGroups/0/flavors/0/resources/0/nominalQuota","value":"6"}
+            ])
+        );
+        assert!(!mutations[0].body.contains("10000"));
+        assert!(!mutations[0].body.contains("100Ti"));
+
+        // A complete explicit vector declaration takes the landed named,
+        // resourceVersion-fenced all-resource wire path.
+        set("DJINN_CAPACITY_CONTRACT", "vector-v1");
+        let vector = CapacityControllerConfig::from_env().expect("complete vector contract");
+        assert_eq!(vector.contract, CapacityContract::VectorV1);
+        let (client, recorder) = capacity_controller_cluster("default", "pods");
+        let (tx, _) = watch::channel(CapacityVector {
+            binding: BindingQuota::Pods(3),
+            compile_slots: 2,
+        });
+        let task = tokio::spawn(run_capacity_controller(
+            client,
+            vector,
+            Arc::new(|| true),
+            tx,
+        ));
+        for _ in 0..4 {
+            tokio::time::advance(Duration::from_secs(30)).await;
+            tokio::task::yield_now().await;
+            if !recorder.mutations().is_empty() {
+                break;
+            }
+        }
+        let patch: Value = serde_json::from_str(&recorder.mutations()[0].body).unwrap();
+        task.abort();
+        assert_eq!(
+            patch,
+            json!([
+                {"op":"test","path":"/metadata/resourceVersion","value":"42"},
+                {"op":"replace","path":"/spec/resourceGroups/0/flavors/0/resources/1/nominalQuota","value":"12000m"},
+                {"op":"replace","path":"/spec/resourceGroups/0/flavors/0/resources/2/nominalQuota","value":"8192"},
+                {"op":"replace","path":"/spec/resourceGroups/0/flavors/0/resources/0/nominalQuota","value":"9"}
+            ])
+        );
+
+        // None of these activation defects produces a controller config, hence
+        // no recorded fixture mutation and no partial-vector write.
+        for (name, value) in [
+            ("DJINN_CAPACITY_STATIC_CPU", None),
+            ("DJINN_CAPACITY_STATIC_MEMORY", None),
+            ("DJINN_CAPACITY_STATIC_PODS", None),
+            ("DJINN_CAPACITY_FLAVOR_SELECTOR", None),
+            ("DJINN_CAPACITY_FLAVOR_SELECTOR", Some("{}")),
+            ("DJINN_CAPACITY_FLAVOR_SELECTOR", Some(r#"{"default":{}}"#)),
+            ("DJINN_CAPACITY_STATIC_CPU", Some("NaN")),
+            ("DJINN_CAPACITY_CONTRACT", Some("vector-v2")),
+        ] {
+            set("DJINN_CAPACITY_CONTRACT", "vector-v1");
+            set("DJINN_CAPACITY_STATIC_CPU", "12000m");
+            set("DJINN_CAPACITY_STATIC_MEMORY", "8192");
+            set("DJINN_CAPACITY_STATIC_PODS", "9");
+            set("DJINN_CAPACITY_FLAVOR_SELECTOR", r#"{"pool":"default"}"#);
+            match value {
+                Some(value) => set(name, value),
+                None => unset(name),
+            }
+            let (_client, recorder) = capacity_controller_cluster("default", "pods");
+            assert!(
+                CapacityControllerConfig::from_env().is_none(),
+                "{name}={value:?} must fail closed"
+            );
+            assert!(recorder.mutations().is_empty());
         }
     }
 }
