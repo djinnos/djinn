@@ -112,17 +112,18 @@ scipIndex:
 # -----------------------------------------------------------------------------
 # Kueue build admission
 # -----------------------------------------------------------------------------
-# The pods quota Kueue admits build Jobs against. This is the ONLY remaining
-# build-concurrency bound — the in-process pods-quota reservation authority was
-# deleted in #2822 — so both flags below ship armed and an install that turns
-# them off has no bound on concurrent build Pods at all.
+# Kueue is the resource-admission authority for build Jobs; the in-process
+# pods-quota reservation authority was deleted in #2822. Static mode uses the
+# finite vector below. Dynamic vector-v1 deployments replace it from eligible
+# Node capacity and fit each Job's actual CPU/memory request, with Pods retained
+# only as the real post-reserve Kubernetes ceiling.
 kueue:
   # Render the ResourceFlavor / ClusterQueue / LocalQueue topology.
   #
-  # ON by default: Kueue's pods quota is the only remaining build-concurrency
-  # bound (the in-process pods-quota reservation authority was deleted in
-  # #2822), so a stock install that omitted the topology would dispatch
-  # unbounded build Pods.
+  # ON by default: Kueue's complete finite resource vector is the remaining
+  # build-resource admission layer, so a stock install that omitted the
+  # topology would remove CPU/memory/Pod admission and leave only upstream
+  # policy/session limits.
   #
   # `djinn-prereqs` IS THEREFORE A PREREQUISITE, NOT AN OPTION. The topology is
   # `kueue.x-k8s.io/v1beta1`, and a cluster without Kueue rejects those objects.
@@ -149,9 +150,12 @@ kueue:
   # Set both this and `armed` false for a cluster that will never run Kueue
   # (see values.local.yaml, the kind/local-dev profile).
   enabled: true
-  # The finite admission vector. These are Kubernetes quantities rather than
-  # inferred from one binding resource: every admitted build Pod consumes cpu,
-  # memory, and one pod from the declared ceiling.
+  # The finite static admission vector. These values are active when the
+  # runtime capacity controller below is disabled, and are its fail-closed
+  # starting/fallback values while a dynamic controller converges. Under the
+  # vector-v1 contract the controller replaces CPU and memory from eligible
+  # Node capacity and replaces Pods with the real post-reserve Kubernetes Pod
+  # ceiling; buildPods is not a runtime concurrency-slot count in that mode.
   buildCpu: "12"
   buildMemory: "48Gi"
   buildPods: 3

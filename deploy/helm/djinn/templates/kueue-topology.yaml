@@ -105,11 +105,13 @@ spec:
   # namespace alone. A third, independently-settable copy of that same fence is
   # exactly what wedged admission here without a single error anywhere.
   namespaceSelector: {}
-  # BestEffortFIFO, not StrictFIFO. Three kinds (task-run, warm, SCIP) share a
-  # queue whose default nominal quota is 3 pods, and a warm Pod is long-lived
-  # (measured 5442s end to end). Under StrictFIFO one head-of-line Workload that
-  # cannot fit blocks every smaller Workload behind it; BestEffortFIFO lets the
-  # rest through. Fairness across kinds is not a goal here — throughput is.
+  # BestEffortFIFO, not StrictFIFO. Three Workload kinds (task-run, warm, SCIP)
+  # share this queue, and a warm Pod is long-lived (measured 5442s end to end).
+  # Under StrictFIFO one head-of-line Workload that cannot fit the current
+  # CPU/memory/Pods vector blocks every smaller Workload behind it;
+  # BestEffortFIFO lets smaller fits through. In vector-v1, Pods is the real
+  # Node ceiling rather than a three-slot cap. Fairness across kinds is not a
+  # goal here — throughput is.
   queueingStrategy: BestEffortFIFO
   # WHAT IS BOUNDED.
   #

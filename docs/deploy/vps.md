@@ -225,9 +225,13 @@ Same shape as cert-manager above — a cluster-scoped third-party release Djinn
 does not own. It is **not optional**: the `djinn` chart defaults to
 `kueue.enabled: true` and `kueue.armed: true`, so a stock install renders
 `kueue.x-k8s.io/v1beta1` objects and hands build-Job admission to Kueue.
-Kueue's `buildPods` quota is also the only remaining bound on build
-concurrency, so turning the topology off instead would dispatch unbounded build
-Pods. Install this release first: `templates/prereq-guard.yaml` refuses the
+The production VPS enables `kueue.capacity.contract: vector-v1`: its controller
+derives CPU and memory from the eligible Node and fits each Job's actual
+requests, while Pods is the real post-reserve Kubernetes Pod ceiling. The
+chart's `buildPods` remains only the finite static/fallback value; it is not the
+VPS's build-shaped concurrency cap. Turning Kueue off removes this resource
+admission layer, leaving only upstream policy/session limits. Install the
+prerequisite first: `templates/prereq-guard.yaml` refuses the
 `djinn` release, naming this chart, if the Kueue API is not served.
 
 Requires **Kubernetes >= 1.30** — `k3s --version`. The upstream chart declares

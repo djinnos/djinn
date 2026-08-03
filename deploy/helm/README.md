@@ -24,8 +24,12 @@ Phase 2 installs Djinn on top of Kubernetes via three charts:
   [deploy/kueue/README.md](../kueue/README.md#minimum-kubernetes-is-130-and-only-because-dra-is-disabled)).
   This is a hard prerequisite, not an option: the `djinn` chart defaults to
   `kueue.enabled: true` and `kueue.armed: true`, so it renders
-  `kueue.x-k8s.io/v1beta1` objects and Kueue's `buildPods` quota is what bounds
-  build concurrency. Without it the `djinn` install is refused by
+  `kueue.x-k8s.io/v1beta1` objects and Kueue admits Jobs against the configured
+  CPU/memory/Pods vector. At stock static values, `buildPods` is one finite
+  fallback bound; with `kueue.capacity.contract: vector-v1`, the controller
+  replaces the vector from eligible Nodes, and Pods becomes their real
+  post-reserve Kubernetes Pod ceiling rather than a build-shaped concurrency
+  limit. Without Kueue the `djinn` install is refused by
   `djinn/templates/prereq-guard.yaml`, which names this chart in the error.
 - Nodes that have passed
   `deploy/node/k3s/djinn-cgroup-writable-conformance.sh`. Task-run writable
