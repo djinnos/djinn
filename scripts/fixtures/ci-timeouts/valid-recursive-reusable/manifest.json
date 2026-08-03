@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "terminalRoots": [
+    ".github/workflows/root.yml#quality-gate"
+  ],
+  "covered": [
+    ".github/workflows/root.yml#quality-gate",
+    ".github/workflows/root.yml#quality-gate=>.github/workflows/a.yml#call",
+    ".github/workflows/root.yml#quality-gate=>.github/workflows/a.yml#call=>.github/workflows/b.yml#test"
+  ]
+}
