@@ -740,16 +740,26 @@ impl CapacityControllerConfig {
                 .ok()
                 .and_then(|v| CpuMillicores::new(v).ok())
         };
-        let headroom = ResourceVector {
-            cpu: parse_cpu("DJINN_CAPACITY_HEADROOM_CPU")?,
-            memory: memory_quantity(&std::env::var("DJINN_CAPACITY_HEADROOM_MEMORY").ok()?)?,
-            pods: pod_quantity(&std::env::var("DJINN_CAPACITY_HEADROOM_PODS").ok()?)?,
-        };
         let contract = match std::env::var("DJINN_CAPACITY_CONTRACT") {
             Err(std::env::VarError::NotPresent) => CapacityContract::Legacy,
             Ok(value) if value == "vector-v1" => CapacityContract::VectorV1,
             // An unknown marker cannot silently activate either writer.
             Ok(_) | Err(_) => return None,
+        };
+        // Old charts supplied an idle CPU reserve, rather than the new complete
+        // headroom vector. Keep that lane independent of vector-only inputs.
+        let idle_cost = parse_cpu("DJINN_CAPACITY_IDLE_CPU")?;
+        let headroom = if contract == CapacityContract::VectorV1 {
+            ResourceVector {
+                cpu: parse_cpu("DJINN_CAPACITY_HEADROOM_CPU")?,
+                memory: memory_quantity(&std::env::var("DJINN_CAPACITY_HEADROOM_MEMORY").ok()?)?,
+                pods: pod_quantity(&std::env::var("DJINN_CAPACITY_HEADROOM_PODS").ok()?)?,
+            }
+        } else {
+            ResourceVector {
+                cpu: idle_cost,
+                ..ResourceVector::ZERO
+            }
         };
         let source = if contract == CapacityContract::Legacy {
             // Old charts did not declare a source; retain their Node/Pod lane.
@@ -798,7 +808,7 @@ impl CapacityControllerConfig {
             queue_name: std::env::var("DJINN_CAPACITY_QUEUE_NAME").ok()?,
             node_selector_key: std::env::var("DJINN_CAPACITY_NODE_SELECTOR_KEY").ok()?,
             node_selector_value: std::env::var("DJINN_CAPACITY_NODE_SELECTOR_VALUE").ok()?,
-            idle_cost: parse_cpu("DJINN_CAPACITY_IDLE_CPU")?,
+            idle_cost,
             compile_cost: parse_cpu("DJINN_CAPACITY_COMPILE_CPU")?,
             headroom,
             build_job,
@@ -1000,6 +1010,91 @@ pub async fn run_capacity_controller(
             .await
             .ok()
             .and_then(|queue| observe_queue(queue, &config.queue_name));
+        // PR #2901's annotated binding is a separate wire protocol. The
+        // absent release marker reaches this branch before any vector source
+        // routing, so old sentinel quotas can never become a static vector.
+        if config.contract == CapacityContract::Legacy {
+            let observed = async {
+                let queue = queue.clone()?;
+                let node_list = nodes
+                    .list(&ListParams::default().labels(&selector))
+                    .await
+                    .ok()?;
+                let node_observations: Vec<_> = node_list
+                    .items
+                    .iter()
+                    .map(|node| {
+                        observe_node(node, &config.node_selector_key, &config.node_selector_value)
+                    })
+                    .collect();
+                let node = select_node(&node_observations).ok()?;
+                let allocatable = ResourceVector {
+                    cpu: node.allocatable_cpu?,
+                    memory: node.allocatable_memory?,
+                    pods: node.allocatable_pods?,
+                };
+                let protected_pods = pods
+                    .list(&ListParams::default().labels("djinn.io/capacity-reserved=true"))
+                    .await
+                    .ok()?;
+                if protected_pods.items.len() < config.expected_protected_pods {
+                    return None;
+                }
+                let protected = protected_requests_on_nodes(
+                    &protected_pods.items,
+                    &BTreeSet::from([node.name.clone()]),
+                )
+                .ok()?;
+                let capacity = derive_capacity_from_rendered_build_job(
+                    allocatable,
+                    protected,
+                    config.headroom,
+                    rendered_pod_spec(&config.build_job)?,
+                    config.compile_cost,
+                    config.fail_safe,
+                );
+                let CapacityOutcome::Derived(raw) = capacity else {
+                    return None;
+                };
+                let binding = binding_for(&queue, &config.queue_name, raw).ok()?;
+                Some((
+                    queue,
+                    capacity,
+                    CapacityVector {
+                        binding,
+                        compile_slots: raw.compile_slots,
+                    },
+                ))
+            }
+            .await;
+            let Some((queue, capacity, snapshot)) = observed else {
+                let _ = snapshots.send(CapacityVector {
+                    binding: BindingQuota::Pods(config.fail_safe.pods),
+                    compile_slots: config.fail_safe.compile_slots,
+                });
+                continue;
+            };
+            let _ = snapshots.send(snapshot);
+            if let ActuationDecision::Patch { patch, .. } = patch_decision(
+                &queue,
+                &config.queue_name,
+                capacity,
+                snapshot,
+                compile_bound_armed(),
+                config.fail_safe,
+            ) {
+                let _ = queues
+                    .patch(
+                        &config.queue_name,
+                        &PatchParams::default(),
+                        &Patch::Json::<()>(
+                            serde_json::from_value(patch).expect("valid internal JSON patch"),
+                        ),
+                    )
+                    .await;
+            }
+            continue;
+        }
         if config.source == CapacitySource::NodePoolLimits {
             let result: Result<Vec<FlavorQuotaTarget>, ConservativeReason> = async {
                 if !config.nodepool_dedicated || config.nodepool_name.is_empty() {
@@ -2336,6 +2431,7 @@ mod tests {
                 BTreeMap::new()
             };
             let config = CapacityControllerConfig {
+                contract: CapacityContract::VectorV1,
                 source,
                 queue_name: "djinn-kueue".into(),
                 node_selector_key: if source == CapacitySource::NodeSum {
@@ -2750,5 +2846,109 @@ mod tests {
             // the fenced fallback correctly omits a redundant Pods replacement.
             task.abort();
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn capacity_mixed_version_contract() {
+        use crate::runtime_fixture::capacity_controller_cluster;
+
+        // An old chart's absent marker uses the binding annotation writer even
+        // when its non-binding quotas look like removed vector sentinels.
+        let (client, recorder) = capacity_controller_cluster("default", "pods");
+        let config = CapacityControllerConfig {
+            contract: CapacityContract::Legacy,
+            source: CapacitySource::NodeSum,
+            queue_name: "djinn-kueue".into(),
+            node_selector_key: "kubernetes.io/hostname".into(),
+            node_selector_value: "worker-1".into(),
+            idle_cost: CpuMillicores::new(750).unwrap(),
+            compile_cost: CpuMillicores::new(2_800).unwrap(),
+            headroom: ResourceVector {
+                cpu: CpuMillicores::new(750).unwrap(),
+                ..ResourceVector::ZERO
+            },
+            build_job: controller_build_job(),
+            fail_safe: safe(),
+            expected_protected_pods: 5,
+            static_fallback: ResourceVector::ZERO,
+            flavor_selector: None,
+            flavor_selectors: BTreeMap::new(),
+            nodepool_name: String::new(),
+            nodepool_dedicated: false,
+        };
+        let (tx, _) = watch::channel(CapacityVector {
+            binding: BindingQuota::Pods(3),
+            compile_slots: 2,
+        });
+        let task = tokio::spawn(run_capacity_controller(
+            client,
+            config,
+            Arc::new(|| true),
+            tx,
+        ));
+        for _ in 0..4 {
+            tokio::time::advance(Duration::from_secs(30)).await;
+            tokio::task::yield_now().await;
+            if !recorder.mutations().is_empty() {
+                break;
+            }
+        }
+        task.abort();
+        let patch: Value = serde_json::from_str(&recorder.mutations()[0].body).unwrap();
+        assert_eq!(
+            patch.as_array().unwrap().len(),
+            2,
+            "legacy writes only its annotation-selected binding"
+        );
+        assert_eq!(
+            patch[1]["path"],
+            "/spec/resourceGroups/0/flavors/0/resources/0/nominalQuota"
+        );
+        assert!(!recorder.mutations()[0].body.contains("memory"));
+
+        let mut sentinel = queue("pods");
+        sentinel.resources = vec![
+            QueueResource {
+                name: "pods".into(),
+                nominal_quota: "10k".into(),
+            },
+            QueueResource {
+                name: "cpu".into(),
+                nominal_quota: "10000".into(),
+            },
+            QueueResource {
+                name: "memory".into(),
+                nominal_quota: "100Ti".into(),
+            },
+        ];
+        let legacy = patch_decision(
+            &sentinel,
+            "djinn-kueue",
+            outcome(),
+            CapacityVector {
+                binding: BindingQuota::Pods(3),
+                compile_slots: 2,
+            },
+            true,
+            safe(),
+        );
+        assert!(
+            matches!(legacy, ActuationDecision::Patch { ref patch, .. } if patch.as_array().unwrap().len() == 2)
+        );
+
+        // Vector mode alone can use the complete named-resource seam; malformed
+        // or incomplete activation never produces a target for that seam.
+        let vector = flavor_vector_patch_decision(
+            &sentinel,
+            "djinn-kueue",
+            &[FlavorQuotaTarget {
+                flavor_name: "default".into(),
+                vector: resources(12_000, 8_192, 9),
+            }],
+        );
+        assert!(matches!(vector, FlavorActuationDecision::Patch { .. }));
+        assert!(cpu_quantity("NaN").is_none());
+        assert!(memory_quantity("NaN").is_none());
+        assert!(pod_quantity("NaN").is_none());
     }
 }
