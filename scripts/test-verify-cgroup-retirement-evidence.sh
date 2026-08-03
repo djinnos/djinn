@@ -61,7 +61,8 @@ case 'rule-mismatch': x.review.rule_snapshot.effective_required_approvals=3; bre
 case 'bypass': x.review.no_bypass.direct_push=true; break;
 case 'duplicate-approval': x.review.reviews[1].actor=x.review.reviews[0].actor; x.review.configured_owners=['owner-a']; x.review.rule_snapshot.configured_owners=['owner-a']; break;
 case 'self-certification': x.review.reviews[0].actor='author'; break;
-case 'incomplete-payload': x.review.reviewed_payload.untested_replacements=['installer']; break;
+case 'incomplete-payload': delete x.review.reviewed_payload.child_seccomp_boundary; break;
+case 'untested-replacement': x.review.reviewed_payload.untested_replacements=['installer']; break;
 case 'image-digest': x.deployment.image.digest='sha256:'+m+'eeeeeeeeeeeeeeeeeeeeeeee'; break;
 case 'render-digest': x.deployment.render_digest.digest='sha256:'+m+'eeeeeeeeeeeeeeeeeeeeeeee'; break;
 case 'node-digest': x.deployment.node_digest.digest='sha256:'+m+'eeeeeeeeeeeeeeeeeeeeeeee'; break;
@@ -87,7 +88,7 @@ printf 'Testing immutable cgroup-retirement evidence fixtures\n'
 if "$CHECKER" --candidate RETIRE_HEAD >/dev/null; then pass 'positive RETIRE_HEAD fixture'; else fail 'positive RETIRE_HEAD fixture'; fi
 for fixture in "$FIXTURES"/*.json; do run_case "$(basename "$fixture" .json)"; done
 if "$CHECKER" --landing 0123456789abcdef0123456789abcdef01234567 >/dev/null; then pass 'complete commit-bound landing fixture'; else fail 'complete commit-bound landing fixture'; fi
-for case_name in no-approval changes-requested dismissal stale-head missing-owner rule-mismatch bypass duplicate-approval self-certification incomplete-payload image-digest render-digest node-digest workload-digest pod-annotation dispatch proof-failure rollback-fault aggregate-restoration-failed node-restoration-failed launcher-restoration-failed; do run_landing_case "$case_name"; done
+for case_name in no-approval changes-requested dismissal stale-head missing-owner rule-mismatch bypass duplicate-approval self-certification incomplete-payload untested-replacement image-digest render-digest node-digest workload-digest pod-annotation dispatch proof-failure rollback-fault aggregate-restoration-failed node-restoration-failed launcher-restoration-failed; do run_landing_case "$case_name"; done
 out=$(node "$SCRIPT_DIR/cgroup-retirement-outcome.mjs" "$SCRIPT_DIR/fixtures/cgroup-retirement/landing/0123456789abcdef0123456789abcdef01234567.outcome.json")
 printf '%s' "$out" | grep -F 'RETIRE one-container-dispatch-authorized' >/dev/null && pass 'all-green state retires' || fail 'all-green state retires'
 node - "$SCRIPT_DIR/fixtures/cgroup-retirement/landing/0123456789abcdef0123456789abcdef01234567.outcome.json" "$SCRATCH/keep.json" <<'NODE'
