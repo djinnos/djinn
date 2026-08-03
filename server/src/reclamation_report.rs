@@ -29,4 +29,11 @@ mod tests {
     fn lifecycle_and_lease_ledgers_are_distinct() {
         assert_ne!(RESIZE_LIFECYCLE_LEDGER, LEASE_RECLAMATION_LEDGER);
     }
+
+    #[test]
+    fn stable_ledger_identifier_contract_is_exact_and_distinct() {
+        assert_eq!(RESIZE_LIFECYCLE_LEDGER, "build_pod_permits");
+        assert_eq!(LEASE_RECLAMATION_LEDGER, "build_leases");
+        assert_ne!(RESIZE_LIFECYCLE_LEDGER, LEASE_RECLAMATION_LEDGER);
+    }
 }
