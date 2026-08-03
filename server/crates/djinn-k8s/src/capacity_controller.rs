@@ -683,6 +683,8 @@ pub enum ActuationDecision {
 
 #[derive(Clone, Debug)]
 pub struct CapacityControllerConfig {
+    /// The release marker is the sole selector for complete-vector writes.
+    pub contract: CapacityContract,
     pub source: CapacitySource,
     pub queue_name: String,
     pub node_selector_key: String,
@@ -717,6 +719,14 @@ pub enum CapacitySource {
     Invalid,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CapacityContract {
+    /// The one-release PR #2901 compatibility protocol.
+    Legacy,
+    /// The explicit complete-vector protocol.
+    VectorV1,
+}
+
 impl CapacityControllerConfig {
     pub fn from_env() -> Option<Self> {
         if std::env::var("DJINN_CAPACITY_ENABLED").ok().as_deref() != Some("true") {
@@ -735,16 +745,22 @@ impl CapacityControllerConfig {
             memory: memory_quantity(&std::env::var("DJINN_CAPACITY_HEADROOM_MEMORY").ok()?)?,
             pods: pod_quantity(&std::env::var("DJINN_CAPACITY_HEADROOM_PODS").ok()?)?,
         };
-        let static_fallback = ResourceVector {
-            cpu: cpu_quantity(&std::env::var("DJINN_CAPACITY_STATIC_CPU").ok()?)?,
-            memory: memory_quantity(&std::env::var("DJINN_CAPACITY_STATIC_MEMORY").ok()?)?,
-            pods: pod_quantity(&std::env::var("DJINN_CAPACITY_STATIC_PODS").ok()?)?,
+        let contract = match std::env::var("DJINN_CAPACITY_CONTRACT") {
+            Err(std::env::VarError::NotPresent) => CapacityContract::Legacy,
+            Ok(value) if value == "vector-v1" => CapacityContract::VectorV1,
+            // An unknown marker cannot silently activate either writer.
+            Ok(_) | Err(_) => return None,
         };
-        let source = match std::env::var("DJINN_CAPACITY_SOURCE").ok().as_deref() {
-            Some("static") => CapacitySource::Static,
-            Some("node-sum") => CapacitySource::NodeSum,
-            Some("nodepool-limits") => CapacitySource::NodePoolLimits,
-            _ => CapacitySource::Invalid,
+        let source = if contract == CapacityContract::Legacy {
+            // Old charts did not declare a source; retain their Node/Pod lane.
+            CapacitySource::NodeSum
+        } else {
+            match std::env::var("DJINN_CAPACITY_SOURCE").ok().as_deref() {
+                Some("static") => CapacitySource::Static,
+                Some("node-sum") => CapacitySource::NodeSum,
+                Some("nodepool-limits") => CapacitySource::NodePoolLimits,
+                _ => CapacitySource::Invalid,
+            }
         };
         let (flavor_selector, flavor_selectors) =
             match std::env::var("DJINN_CAPACITY_FLAVOR_SELECTOR") {
@@ -759,8 +775,25 @@ impl CapacityControllerConfig {
                 Err(std::env::VarError::NotPresent) => (None, BTreeMap::new()),
                 Err(_) => return None,
             };
+        let static_fallback = if contract == CapacityContract::VectorV1 {
+            ResourceVector {
+                cpu: cpu_quantity(&std::env::var("DJINN_CAPACITY_STATIC_CPU").ok()?)?,
+                memory: memory_quantity(&std::env::var("DJINN_CAPACITY_STATIC_MEMORY").ok()?)?,
+                pods: pod_quantity(&std::env::var("DJINN_CAPACITY_STATIC_PODS").ok()?)?,
+            }
+        } else {
+            // Never derive a vector from legacy sentinel-shaped quotas.
+            ResourceVector::ZERO
+        };
+        if contract == CapacityContract::VectorV1
+            && (source == CapacitySource::Invalid
+                || (flavor_selector.is_none() && flavor_selectors.is_empty()))
+        {
+            return None;
+        }
         let build_job = controller_build_job();
         Some(Self {
+            contract,
             source,
             queue_name: std::env::var("DJINN_CAPACITY_QUEUE_NAME").ok()?,
             node_selector_key: std::env::var("DJINN_CAPACITY_NODE_SELECTOR_KEY").ok()?,
@@ -1934,6 +1967,7 @@ mod tests {
         for surface in ["pods", "cpu"] {
             let (client, recorder) = capacity_controller_cluster("default", surface);
             let config = CapacityControllerConfig {
+                contract: CapacityContract::VectorV1,
                 source: CapacitySource::NodeSum,
                 queue_name: "djinn-kueue".into(),
                 node_selector_key: "kubernetes.io/hostname".into(),
@@ -2129,6 +2163,7 @@ mod tests {
         ] {
             let (client, recorder, live) = capacity_controller_nodepool_cluster("default", fixture);
             let config = CapacityControllerConfig {
+                contract: CapacityContract::VectorV1,
                 source: CapacitySource::NodePoolLimits,
                 queue_name: "djinn-kueue".into(),
                 node_selector_key: "unused".into(),
@@ -2224,6 +2259,7 @@ mod tests {
             let (client, recorder, _live) =
                 capacity_controller_nodepool_cluster("default", NodePoolFixture::Valid);
             let config = CapacityControllerConfig {
+                contract: CapacityContract::VectorV1,
                 source: CapacitySource::NodePoolLimits,
                 queue_name: "djinn-kueue".into(),
                 node_selector_key: "unused".into(),
@@ -2614,6 +2650,7 @@ mod tests {
         let recorder = RecordedApiserver::new();
         let client = recording_client(&recorder, "default");
         let config = CapacityControllerConfig {
+            contract: CapacityContract::VectorV1,
             source: CapacitySource::NodeSum,
             queue_name: "djinn-kueue".into(),
             node_selector_key: "kubernetes.io/hostname".into(),
@@ -2664,6 +2701,7 @@ mod tests {
             let (client, recorder) =
                 capacity_controller_cluster_with_pods("default", "pods", pod_mode);
             let config = CapacityControllerConfig {
+                contract: CapacityContract::VectorV1,
                 source: CapacitySource::NodeSum,
                 queue_name: "djinn-kueue".into(),
                 node_selector_key: selector_key.into(),
