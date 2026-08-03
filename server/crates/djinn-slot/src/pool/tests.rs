@@ -3327,6 +3327,49 @@ async fn deferred_reconcile_duplicate_attaches_waiters_and_replays_parked_dispat
     assert!(
         matches!(signal_rx.recv().await, Some(RunnerSignal::Started(id)) if id == unrelated_task)
     );
+
+    let unrelated_slot = pool
+        .test_slot_of(&unrelated_task)
+        .expect("unrelated task remains live during replayed-owner cleanup");
+    pool.test_handle_slot_event(SlotEvent::Killed {
+        slot_id: 0,
+        model_id: "model-a".to_owned(),
+        task_id: task_id.clone(),
+    })
+    .await;
+    assert_eq!(
+        pool.test_slot_of(&task_id),
+        None,
+        "the replayed same-task owner mapping is removed"
+    );
+    assert!(
+        !pool.test_pending_teardown_tasks().contains(&task_id),
+        "the reconciled task has no stale pending continuation"
+    );
+    assert_eq!(
+        pool.test_slot_of(&unrelated_task),
+        Some(unrelated_slot),
+        "replayed-owner cleanup preserves the unrelated live mapping"
+    );
+    let free_slots_after_cleanup = pool.test_free_slots("model-a");
+    assert_eq!(free_slots_after_cleanup, vec![0]);
+
+    pool.test_handle_slot_event(SlotEvent::Killed {
+        slot_id: 0,
+        model_id: "model-a".to_owned(),
+        task_id,
+    })
+    .await;
+    assert_eq!(
+        pool.test_free_slots("model-a"),
+        free_slots_after_cleanup,
+        "a duplicate Killed event must not return replayed-owner capacity twice"
+    );
+    assert_eq!(
+        pool.test_slot_of(&unrelated_task),
+        Some(unrelated_slot),
+        "the duplicate event must not disturb the unrelated live mapping"
+    );
 }
 
 /// Deferred continuations require an owning mapping so they can receive Killed;
