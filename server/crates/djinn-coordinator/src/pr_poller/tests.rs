@@ -2576,8 +2576,52 @@ fn required_completed_timed_out_check_classifies_as_causal_failing() {
     assert_ne!(ci_status, CiStatus::Pending);
     assert_ne!(ci_status, CiStatus::Unknown);
     assert_ne!(ci_status, CiStatus::Inconclusive);
+
+    // Construct the same evidence-bearing input that `record_ci_snapshot`
+    // writes after its required-context filtering and causal ranking. Do not
+    // hand-author the blocking name or primary check: both must come from the
+    // classified `blocking` result above.
+    let ranked = super::ci_triage::rank_blocking_checks(&blocking);
+    let blocking_required_check_names = ranked.iter().map(|check| check.name.clone()).collect();
+    let primary_blocking_check = super::ci_triage::primary_blocking_check(&blocking)
+        .map(|check| check.name.clone());
+    let (sections, _) = build_ci_failure_sections(None, &causal);
+    let failure_fingerprint = Some(compute_ci_failure_fingerprint(&causal, &sections));
+    let input = TaskPrCiSnapshotInput {
+        task_id: "timed-out-required-context".to_string(),
+        pr_number: 424,
+        head_sha: "timed-out-head".to_string(),
+        ci_status,
+        blocking_required_check_names,
+        primary_blocking_check,
+        // Annotation retrieval is best-effort and happens asynchronously in
+        // record_ci_snapshot; the synchronous input contract carries None when
+        // no annotation response is available.
+        failure_annotations: None,
+        failure_fingerprint,
+        same_signature_count: 0,
+        last_remediation_base_sha: None,
+    };
+    assert_eq!(input.ci_status, CiStatus::Failing);
+    assert_eq!(input.blocking_required_check_names, vec!["Server Test"]);
+    assert_eq!(input.primary_blocking_check.as_deref(), Some("Server Test"));
+    assert!(input.failure_fingerprint.is_some());
+
+    // `from_input` is the snapshot model contract used by repository writes.
+    // The required timed-out context and its causal primary evidence must
+    // remain available to the downstream remediation path after conversion.
+    let snapshot = TaskPrCiSnapshot::from_input(
+        input,
+        "2026-08-03T00:00:00.000Z".to_string(),
+        "2026-08-03T00:00:00.000Z".to_string(),
+    );
+    assert_eq!(snapshot.ci_status, CiStatus::Failing);
+    assert_eq!(snapshot.blocking_required_check_names, vec!["Server Test"]);
+    assert_eq!(snapshot.primary_blocking_check.as_deref(), Some("Server Test"));
+    assert!(snapshot.failure_fingerprint.is_some());
+    assert!(snapshot.failure_annotations.is_none());
     assert_eq!(
-        decide_pr_draft_ci_action(ci_status, true),
+        decide_pr_draft_ci_action(snapshot.ci_status, true),
         PrDraftCiAction::RouteToRemediation
     );
 }
