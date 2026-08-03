@@ -78,7 +78,10 @@ async fn race(
     });
     let right = tokio::spawn(async move {
         barrier.wait().await;
-        right.acquire_turn(right_input).await.expect("right acquire")
+        right
+            .acquire_turn(right_input)
+            .await
+            .expect("right acquire")
     });
     [
         left.await.expect("left task"),
