@@ -99,7 +99,7 @@ Djinn is a Rust control plane (`djinn-server`) that acts as a Kubernetes control
    └───────────────────────────────────────────────────┘
 ```
 
-Each task routes to an **agent role** by type — Architect (read-only spikes), Planner, Developer, Reviewer, Lead — and Djinn runs its own LLM agent loop (no external runtime), resolving the model per task with precedence **user → project → global** from a live [models.dev](https://models.dev) catalog. The only admission control is each user's per-model concurrency cap.
+Each task routes to an **agent role** by type — Architect (read-only spikes), Planner, Developer, Reviewer, Lead — and Djinn runs its own LLM agent loop (no external runtime), resolving the model per task with precedence **user → project → global** from a live [models.dev](https://models.dev) catalog. Per-user/per-model concurrency caps bound policy-level fan-out; on Kubernetes, Kueue independently admits each Job against its actual CPU and memory request. Dynamic deployments derive that capacity from eligible Nodes, with Pods retained only as the real post-reserve Kubernetes Pod ceiling.
 
 ## Deploy
 
