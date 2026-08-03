@@ -3422,7 +3422,19 @@ async fn deferred_reconcile_mapped_zero_rows_completes_from_killed() {
         !snapshot.observations.final_pending_teardown
             && snapshot.observations.final_reread_error.is_none()
     );
-    assert!(pool.test_task_slots().is_empty() && pool.test_pending_teardown_tasks().is_empty());
+    // `handle_event` delivers the clean reconciliation snapshot before it
+    // synchronously replays parked dispatches. The snapshot above is therefore
+    // the authoritative final-reread assertion for the reconciled mapping;
+    // the live mapping below belongs to the intentionally replayed dispatch.
+    assert!(
+        !pool.test_pending_teardown_tasks().contains(&task_id),
+        "the reconciled continuation must not remain pending after Killed"
+    );
+    assert_eq!(
+        pool.test_slot_of(&task_id),
+        Some(0),
+        "the first parked same-task dispatch replays after snapshot delivery"
+    );
     assert_eq!(runtime.calls(), Vec::<String>::new());
     parked_rx
         .await
@@ -3599,7 +3611,18 @@ async fn deferred_reconcile_duplicate_shared_run_deduplicates_teardown() {
         !snapshot.observations.final_pending_teardown
             && snapshot.observations.final_reread_error.is_none()
     );
-    assert!(pool.test_task_slots().is_empty() && pool.test_pending_teardown_tasks().is_empty());
+    // Final-reread state is captured in `snapshot` before `handle_event`
+    // replays the parked FIFO dispatches. Do not mistake the replayed mapping
+    // (or the unrelated live mapping) for stale reconciliation ownership.
+    assert!(
+        !pool.test_pending_teardown_tasks().contains(&task_id),
+        "the shared-run continuation must not remain pending after Killed"
+    );
+    assert_eq!(
+        pool.test_slot_of(&task_id),
+        Some(0),
+        "the first parked same-task dispatch replays after snapshot delivery"
+    );
     for id in &snapshot.observations.initial_non_terminal_ids {
         let row = sessions
             .get(id)
@@ -3620,7 +3643,6 @@ async fn deferred_reconcile_duplicate_shared_run_deduplicates_teardown() {
     assert!(
         matches!(signal_rx.recv().await, Some(RunnerSignal::Started(id)) if id == unrelated_task)
     );
-    assert_eq!(pool.test_slot_of(&task_id), Some(0));
     pool.test_handle_slot_event(SlotEvent::Killed {
         slot_id: 0,
         model_id: "model-a".to_owned(),
