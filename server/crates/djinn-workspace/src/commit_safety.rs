@@ -76,10 +76,6 @@ pub const DEFAULT_EXCLUDED_PATH_PATTERNS: &[&str] = &[
     "*.swp",
     "*.bak",
     "*.lock.json",
-    "package-lock.json",
-    "yarn.lock",
-    "pnpm-lock.yaml",
-    "Cargo.lock",
     "*.lcov",
     "*.profdata",
     "*.profraw",
@@ -664,6 +660,37 @@ mod tests {
         assert_eq!(
             classify_path("src/main.rs", &config),
             PathClassification::Allowed
+        );
+    }
+
+    #[test]
+    fn classify_dependency_lockfiles_are_allowed_while_artifacts_remain_excluded() {
+        let config = default_config();
+
+        for path in [
+            "package-lock.json",
+            "web/package-lock.json",
+            "yarn.lock",
+            "web/yarn.lock",
+            "pnpm-lock.yaml",
+            "web/pnpm-lock.yaml",
+            "Cargo.lock",
+            "crates/example/Cargo.lock",
+        ] {
+            assert_eq!(
+                classify_path(path, &config),
+                PathClassification::Allowed,
+                "dependency lockfile {path} must be eligible for preservation"
+            );
+        }
+
+        assert_eq!(
+            classify_path("scratch.lock.json", &config),
+            PathClassification::Excluded(PathExclusionReason::GeneratedPath)
+        );
+        assert_eq!(
+            classify_path("target/debug/output", &config),
+            PathClassification::Excluded(PathExclusionReason::GeneratedPath)
         );
     }
 
