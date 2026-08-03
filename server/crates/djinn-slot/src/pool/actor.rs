@@ -749,16 +749,16 @@ impl SlotPool {
                                     .is_none()
                             {
                                 ReconcileTerminateKind::GenuinelyAbsent
-                            } else if pending.snapshot.executions.is_empty()
-                                || pending
+                            } else if pending.snapshot.executions.len() == 1
+                                && pending
                                     .snapshot
                                     .observations
                                     .initial_mapping_slot_id
-                                    .is_none()
+                                    .is_some()
                             {
-                                ReconcileTerminateKind::DesyncReconciled
-                            } else {
                                 ReconcileTerminateKind::Terminated
+                            } else {
+                                ReconcileTerminateKind::DesyncReconciled
                             }
                         });
                     pending.snapshot.ok = matches!(
@@ -1023,10 +1023,10 @@ impl SlotPool {
                 ReconcileTerminateKind::ReconciliationIncomplete
             } else if captured.is_empty() && initial_mapping_slot_id.is_none() {
                 ReconcileTerminateKind::GenuinelyAbsent
-            } else if captured.is_empty() || initial_mapping_slot_id.is_none() {
-                ReconcileTerminateKind::DesyncReconciled
-            } else {
+            } else if captured.len() == 1 && initial_mapping_slot_id.is_some() {
                 ReconcileTerminateKind::Terminated
+            } else {
+                ReconcileTerminateKind::DesyncReconciled
             }
         });
         ReconcileTerminateSnapshot {
