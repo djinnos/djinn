@@ -2656,7 +2656,10 @@ async fn assert_immediate_reconcile_matrix_case(
             .filter(|entry| entry.teardown_owner)
             .map(|entry| entry.task_run_id.as_deref())
             .collect::<Vec<_>>(),
-        expected_teardowns.iter().map(String::as_str).collect::<Vec<_>>(),
+        expected_teardowns
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
         "{label}: execution ownership deduplicates shared task runs"
     );
     assert!(
@@ -2774,6 +2777,20 @@ async fn reconcile_terminate_unmapped_duplicate_rows_deduplicate_shared_run() {
     )
     .await;
 }
+
+/// A mapped duplicate capture must retain the same deduplicated runtime owner
+/// behavior as the unmapped desync case while draining its sole pool mapping.
+#[tokio::test]
+async fn reconcile_terminate_mapped_duplicate_rows_deduplicate_shared_run() {
+    assert_immediate_reconcile_matrix_case(
+        "mapped duplicate shared",
+        &["run-mapped-shared", "run-mapped-shared"],
+        true,
+        ReconcileTerminateKind::DesyncReconciled,
+    )
+    .await;
+}
+
 #[tokio::test]
 async fn reconcile_terminate_mapped_duplicate_rows_tear_down_distinct_runs() {
     assert_immediate_reconcile_matrix_case(
