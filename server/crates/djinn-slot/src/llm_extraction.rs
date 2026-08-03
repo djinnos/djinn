@@ -429,6 +429,26 @@ fn build_extraction_prompt(
     )
 }
 
+/// Keep both the beginning and outcome-bearing end of an interesting tool
+/// result without splitting a Unicode scalar value.
+fn take_interesting_tool_result_chars(s: &str) -> String {
+    const INTERESTING_TOOL_RESULT_CHARS: usize = 1_500;
+    const TOOL_RESULT_OMISSION_MARKER: &str = "…[omitted]…";
+
+    let char_count = s.chars().count();
+    if char_count <= INTERESTING_TOOL_RESULT_CHARS {
+        return s.to_owned();
+    }
+
+    let marker_chars = TOOL_RESULT_OMISSION_MARKER.chars().count();
+    let retained_chars = INTERESTING_TOOL_RESULT_CHARS - marker_chars;
+    let head_chars = retained_chars * 40 / 100;
+    let tail_chars = retained_chars - head_chars;
+    let head: String = s.chars().take(head_chars).collect();
+    let tail: String = s.chars().skip(char_count - tail_chars).collect();
+    format!("{head}{TOOL_RESULT_OMISSION_MARKER}{tail}")
+}
+
 /// Render a compact transcript excerpt for the extraction prompt: assistant
 /// reasoning, tool actions, and (truncated) tool results, capped to `max_chars`
 /// and tail-biased so the session's outcome/conclusions are retained. The
@@ -437,6 +457,7 @@ fn build_extraction_prompt(
 /// arrays every time).
 fn build_transcript_excerpt(messages: &[djinn_core::message::Message], max_chars: usize) -> String {
     use djinn_core::message::{ContentBlock, Role};
+    const CLEARED_TOOL_RESULT_PREFIX: &str = "[Cleared — tool result from turn ";
     fn take_chars(s: &str, n: usize) -> String {
         if s.chars().count() > n {
             let mut t: String = s.chars().take(n).collect();
@@ -457,31 +478,43 @@ fn build_transcript_excerpt(messages: &[djinn_core::message::Message], max_chars
             .collect::<Vec<_>>()
             .join(" ")
     }
+    let total_tool_results = messages
+        .iter()
+        .flat_map(|message| &message.content)
+        .filter(|block| matches!(block, ContentBlock::ToolResult { .. }))
+        .count();
+    let mut tool_result_ordinal = 0;
     let mut lines: Vec<String> = Vec::new();
     for msg in messages {
         let role = match msg.role {
-            Role::System => continue,
-            Role::User => "user",
-            Role::Assistant => "assistant",
+            Role::System => None,
+            Role::User => Some("user"),
+            Role::Assistant => Some("assistant"),
         };
         for block in &msg.content {
             match block {
-                ContentBlock::Text { text } => {
-                    let t = text.trim();
-                    if !t.is_empty() {
-                        lines.push(format!("{role}: {t}"));
-                    }
-                }
-                ContentBlock::ToolUse { name, input, .. } => {
-                    lines.push(format!(
-                        "{role} → {name}({})",
-                        take_chars(&input.to_string(), 200)
-                    ));
-                }
                 ContentBlock::ToolResult {
                     content, is_error, ..
                 } => {
-                    let body = take_chars(&blocks_text(content), 600);
+                    let ordinal = tool_result_ordinal;
+                    tool_result_ordinal += 1;
+                    if role.is_none() {
+                        continue;
+                    }
+                    let is_cleared_placeholder = matches!(
+                        content.first(),
+                        Some(ContentBlock::Text { text })
+                            if text.starts_with(CLEARED_TOOL_RESULT_PREFIX)
+                    );
+                    let raw_body = blocks_text(content);
+                    let is_interesting = *is_error || ordinal + 5 >= total_tool_results;
+                    let body = if is_cleared_placeholder {
+                        raw_body
+                    } else if is_interesting {
+                        take_interesting_tool_result_chars(&raw_body)
+                    } else {
+                        take_chars(&raw_body, 600)
+                    };
                     if !body.is_empty() {
                         let tag = if *is_error {
                             "tool error"
@@ -490,6 +523,24 @@ fn build_transcript_excerpt(messages: &[djinn_core::message::Message], max_chars
                         };
                         lines.push(format!("{tag}: {body}"));
                     }
+                }
+                ContentBlock::Text { text } => {
+                    let Some(role) = role else {
+                        continue;
+                    };
+                    let t = text.trim();
+                    if !t.is_empty() {
+                        lines.push(format!("{role}: {t}"));
+                    }
+                }
+                ContentBlock::ToolUse { name, input, .. } => {
+                    let Some(role) = role else {
+                        continue;
+                    };
+                    lines.push(format!(
+                        "{role} → {name}({})",
+                        take_chars(&input.to_string(), 200)
+                    ));
                 }
                 _ => {}
             }
@@ -3411,6 +3462,48 @@ mod tests {
         assert!(out.contains("assistant → edit("));
         assert!(out.contains("tool error: No such file or directory"));
     }
+
+    #[test]
+    fn interesting_tool_result_slice_keeps_head_marker_and_tail_within_cap() {
+        let input = format!("head:{}:tail", "x".repeat(1_600));
+        let sliced = take_interesting_tool_result_chars(&input);
+
+        assert_eq!(sliced.chars().count(), 1_500);
+        assert!(sliced.starts_with("head:"));
+        assert!(sliced.contains("…[omitted]…"));
+        assert!(sliced.ends_with(":tail"));
+        assert_eq!(
+            take_interesting_tool_result_chars("short result"),
+            "short result"
+        );
+    }
+
+    #[test]
+    fn transcript_excerpt_tail_slices_long_error_results() {
+        use djinn_core::message::{ContentBlock, Message, Role};
+
+        let body = format!("ERROR_HEAD:{}:TAIL_DIAGNOSTIC", "x".repeat(1_600));
+        let messages = vec![Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "failed-tool".into(),
+                content: vec![ContentBlock::text(body)],
+                is_error: true,
+            }],
+            metadata: None,
+        }];
+
+        let out = build_transcript_excerpt(&messages, 12_000);
+        let error_line = out
+            .lines()
+            .find(|line| line.starts_with("tool error: "))
+            .expect("error result should be rendered");
+        let head = error_line.find("ERROR_HEAD:").unwrap();
+        let omitted = error_line.find("…[omitted]…").unwrap();
+        let tail = error_line.find(":TAIL_DIAGNOSTIC").unwrap();
+        assert!(head < omitted && omitted < tail);
+    }
+
     #[test]
     fn transcript_excerpt_tail_biased_truncation() {
         use djinn_core::message::{ContentBlock, Message, Role};
