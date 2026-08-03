@@ -2512,6 +2512,123 @@ fn ci_status_classifies_completed_checks_with_blocking_failure_as_failing() {
     assert_eq!(ci_status, CiStatus::Failing);
 }
 
+/// A required GitHub check that completed with `timed_out` follows the same
+/// causal hard-failure path as an ordinary failed check. This mirrors the
+/// completed-check branch in `record_ci_snapshot` without assigning a status
+/// before the provider payload has passed the failure, required-context, and
+/// causal-evidence filters.
+#[test]
+fn required_completed_timed_out_check_classifies_as_causal_failing() {
+    let timed_out = CheckRun {
+        id: 4242,
+        run_id: Some(424),
+        name: "Server Test".to_string(),
+        status: "completed".to_string(),
+        conclusion: Some("timed_out".to_string()),
+        html_url: "https://github.com/djinnos/djinn/actions/runs/424/jobs/4242".to_string(),
+        ..Default::default()
+    };
+    let required_contexts = vec!["Server Test".to_string()];
+    let checks = [&timed_out];
+
+    // This is the completed-check entry condition in record_ci_snapshot.
+    assert!(checks.iter().all(|check| check.status == "completed"));
+    let failed: Vec<&CheckRun> = checks
+        .iter()
+        .copied()
+        .filter(|check| super::is_failing_conclusion(check.conclusion.as_deref()))
+        .collect();
+    assert_eq!(failed.len(), 1);
+    assert_eq!(failed[0].id, timed_out.id);
+
+    // Use the authoritative required-context list, not heuristic mode.
+    let blocking = blocking_failed_checks(&failed, Some(&required_contexts));
+    assert_eq!(blocking.len(), 1);
+    assert_eq!(blocking[0].id, timed_out.id);
+    assert_eq!(blocking[0].name, required_contexts[0]);
+
+    // `timed_out` is a hard failure with causal evidence, so it cannot take
+    // the all-cancelled/never-executed inconclusive branch.
+    assert_eq!(
+        super::ci_triage::check_evidence(&timed_out),
+        super::ci_triage::CheckEvidence::Causal
+    );
+    let causal = super::ci_triage::causal_checks(&blocking);
+    assert_eq!(causal.len(), 1);
+    assert_eq!(causal[0].id, timed_out.id);
+    assert_eq!(
+        super::ci_triage::primary_blocking_check(&blocking).map(|check| check.id),
+        Some(timed_out.id)
+    );
+    assert!(!super::ci_triage::is_inconclusive(&blocking));
+
+    // Mirror record_ci_snapshot's final triage decision after the real helper
+    // outputs above; do not preselect CiStatus::Failing for this fixture.
+    let ci_status = if blocking.is_empty() {
+        CiStatus::Passing
+    } else if super::ci_triage::primary_blocking_check(&blocking).is_some() {
+        CiStatus::Failing
+    } else {
+        CiStatus::Inconclusive
+    };
+    assert_eq!(ci_status, CiStatus::Failing);
+    assert_ne!(ci_status, CiStatus::Passing);
+    assert_ne!(ci_status, CiStatus::Pending);
+    assert_ne!(ci_status, CiStatus::Unknown);
+    assert_ne!(ci_status, CiStatus::Inconclusive);
+
+    // Construct the same evidence-bearing input that `record_ci_snapshot`
+    // writes after its required-context filtering and causal ranking. Do not
+    // hand-author the blocking name or primary check: both must come from the
+    // classified `blocking` result above.
+    let ranked = super::ci_triage::rank_blocking_checks(&blocking);
+    let blocking_required_check_names = ranked.iter().map(|check| check.name.clone()).collect();
+    let primary_blocking_check =
+        super::ci_triage::primary_blocking_check(&blocking).map(|check| check.name.clone());
+    let (sections, _) = build_ci_failure_sections(None, &causal);
+    let failure_fingerprint = Some(compute_ci_failure_fingerprint(&causal, &sections));
+    let input = TaskPrCiSnapshotInput {
+        task_id: "timed-out-required-context".to_string(),
+        pr_number: 424,
+        head_sha: "timed-out-head".to_string(),
+        ci_status,
+        blocking_required_check_names,
+        primary_blocking_check,
+        // Annotation retrieval is best-effort and happens asynchronously in
+        // record_ci_snapshot; the synchronous input contract carries None when
+        // no annotation response is available.
+        failure_annotations: None,
+        failure_fingerprint,
+        same_signature_count: 0,
+        last_remediation_base_sha: None,
+    };
+    assert_eq!(input.ci_status, CiStatus::Failing);
+    assert_eq!(input.blocking_required_check_names, vec!["Server Test"]);
+    assert_eq!(input.primary_blocking_check.as_deref(), Some("Server Test"));
+    assert!(input.failure_fingerprint.is_some());
+
+    // `from_input` is the snapshot model contract used by repository writes.
+    // The required timed-out context and its causal primary evidence must
+    // remain available to the downstream remediation path after conversion.
+    let snapshot = TaskPrCiSnapshot::from_input(
+        input,
+        "2026-08-03T00:00:00.000Z".to_string(),
+        "2026-08-03T00:00:00.000Z".to_string(),
+    );
+    assert_eq!(snapshot.ci_status, CiStatus::Failing);
+    assert_eq!(snapshot.blocking_required_check_names, vec!["Server Test"]);
+    assert_eq!(
+        snapshot.primary_blocking_check.as_deref(),
+        Some("Server Test")
+    );
+    assert!(snapshot.failure_fingerprint.is_some());
+    assert!(snapshot.failure_annotations.is_none());
+    assert_eq!(
+        decide_pr_draft_ci_action(snapshot.ci_status, true),
+        PrDraftCiAction::RouteToRemediation
+    );
+}
+
 #[test]
 fn ci_status_classifies_advisory_only_failures_as_passing() {
     // When only advisory checks (Vercel previews) fail and no required checks

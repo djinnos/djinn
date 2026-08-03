@@ -34,6 +34,7 @@ mod turn_budget;
 
 pub use budget::SessionBudgetPolicy;
 pub use compaction_guard::CompactionCriticalSection;
+pub use error_handling::{ReplyLoopCancellationOrigin, ReplyLoopCancelled};
 pub use phase::{SessionPhase, SessionPhaseRole, SessionPhaseTracker};
 pub use turn::{ReplyLoopContext, run_reply_loop};
 
