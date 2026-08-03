@@ -1,0 +1,40 @@
+# Auditable release gate for the coordinated vector-capacity rollout.
+# This is deliberately data, not documentation: capacity-release-contract.sh
+# validates this complete shape and mutates it to prove every safety edge fails
+# closed before CI accepts a partial rollback.
+pr2901Merge: deade196e6f6bc14dea3f0c2ebfcb45a6481f3f1
+oru9OwnedItems: [1, 2]
+capacityContract:
+  active: vector-v1
+  staticFallback:
+    cpu: finite
+    memory: finite
+    pods: finite
+  ownership:
+    selector: required
+    dedicationOrIdentity: required
+  legacyCompatibility: one-release
+sentinelRemoval:
+  policy: vector-v1-complete-only
+requiredPaths:
+  controller:
+    - server/crates/djinn-k8s/src/capacity_controller.rs
+  chartValues:
+    - deploy/helm/djinn/values.yaml
+  schema:
+    - deploy/helm/djinn/values.schema.json
+  serverTemplate:
+    - deploy/helm/djinn/templates/deployment-server.yaml
+  topology:
+    - deploy/helm/djinn/templates/kueue-topology.yaml
+  rbac:
+    - deploy/helm/djinn/templates/clusterrole-capacity.yaml
+  mixedVersionTests:
+    - deploy/helm/djinn/tests/capacity-mixed-version-contract.sh
+    - deploy/helm/djinn/tests/fixtures/capacity-old-chart-pr2901.yaml
+  releaseTests:
+    - deploy/helm/djinn/tests/capacity-release-contract.sh
+  prereqsConfiguration:
+    - deploy/helm/djinn-prereqs/values.yaml
+  driftChecker:
+    - deploy/kueue/tests/check-manager-config-drift.py
