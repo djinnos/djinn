@@ -4,6 +4,7 @@
 //! independent repository handles. No provider or coordinator caller is needed
 //! to establish the database fencing contract.
 
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use djinn_db::{
@@ -13,6 +14,8 @@ use djinn_db::{
     ModelTurnLeaseLifecycle, ModelTurnLeaseMutationOutcome, ModelTurnLeaseReconciliationInput,
     ModelTurnLeaseTerminalOutcome,
 };
+use sqlx::postgres::PgConnection;
+use sqlx::{Connection, Executor};
 use tokio::sync::Barrier;
 
 const ALL_BUCKETS: [ModelTurnBucketKind; 4] = [
@@ -419,6 +422,127 @@ async fn credential_rotation_replacement_and_identity_phases_preserve_the_contra
             .expect("colliding admission"),
         ModelTurnAcquireOutcome::Rejected(ModelTurnAdmissionRejection::ShadowOnly)
     ));
+}
+
+#[tokio::test]
+async fn legacy_initialization_preserves_resident_admission_and_is_additive() {
+    const OPERATOR_ID: &str = "00000000-0000-7000-8000-000000000173";
+    let base_url = djinn_db::test_database_base_url();
+    let prefix = base_url
+        .rsplit_once('/')
+        .map(|(prefix, _)| prefix)
+        .unwrap_or(&base_url)
+        .trim_end_matches('/');
+    let database_name = format!("djinn_model_turn_legacy_{}", uuid::Uuid::now_v7().simple());
+    let database_url = format!("{prefix}/{database_name}");
+    let admin_url = format!("{prefix}/postgres");
+    let mut admin = PgConnection::connect(&admin_url)
+        .await
+        .expect("connect migration fixture admin");
+    admin
+        .execute(format!(r#"CREATE DATABASE "{database_name}""#).as_str())
+        .await
+        .expect("create migration fixture database");
+    admin.close().await.expect("close migration fixture admin");
+
+    djinn_db::migrations::bootstrap_designated_operator(
+        &database_url,
+        &djinn_db::migrations::DesignatedOperatorBootstrap {
+            user_id: OPERATOR_ID.to_owned(),
+            github_id: 9_000_000_173,
+            github_login: "model-turn-legacy-operator".to_owned(),
+            github_name: None,
+            github_avatar_url: None,
+        },
+    )
+    .await
+    .expect("bootstrap pre-model-turn schema");
+    let mut connection = PgConnection::connect(&database_url)
+        .await
+        .expect("connect migration fixture database");
+    sqlx::query("SET statement_timeout = 0")
+        .execute(&mut connection)
+        .await
+        .expect("disable fixture migration timeout");
+    sqlx::query("SELECT set_config('djinn.migration_designated_operator_user_id', $1, false)")
+        .bind(OPERATOR_ID)
+        .execute(&mut connection)
+        .await
+        .expect("configure migration operator");
+    let embedded = sqlx::migrate!("./migrations_postgres");
+    let pre_model_turn = sqlx::migrate::Migrator {
+        migrations: Cow::Owned(
+            embedded
+                .migrations
+                .iter()
+                .filter(|migration| migration.version <= 172)
+                .cloned()
+                .collect(),
+        ),
+        ..sqlx::migrate::Migrator::DEFAULT
+    };
+    pre_model_turn
+        .run_direct(&mut connection)
+        .await
+        .expect("apply migrations through the pre-model-turn version");
+    sqlx::query("INSERT INTO settings (key, value) VALUES ('resident-admission', 'unchanged')")
+        .execute(&mut connection)
+        .await
+        .expect("seed legacy resident admission setting");
+
+    djinn_db::migrations::run_postgres_migrations_on_connection(
+        &mut connection,
+        &djinn_db::migrations::MigrationContext {
+            designated_operator_user_id: Some(OPERATOR_ID.to_owned()),
+        },
+    )
+    .await
+    .expect("apply additive model-turn migrations");
+    let migrated: (i64, String, i64) = sqlx::query_as(
+        "SELECT \
+             (SELECT version FROM model_turn_admission_schema WHERE marker = 'model_turn_admission_schema'), \
+             (SELECT value FROM settings WHERE key = 'resident-admission'), \
+             (SELECT count(*) FROM model_turn_pools) + \
+             (SELECT count(*) FROM model_turn_bucket_bindings) + \
+             (SELECT count(*) FROM model_turn_reservations) + \
+             (SELECT count(*) FROM model_turn_reservation_buckets) + \
+             (SELECT count(*) FROM model_turn_leases) + \
+             (SELECT count(*) FROM model_turn_lease_terminals) + \
+             (SELECT count(*) FROM model_turn_controller_windows) + \
+             (SELECT count(*) FROM model_turn_pool_capabilities) + \
+             (SELECT count(*) FROM model_turn_observations) + \
+             (SELECT count(*) FROM model_turn_capability_discoveries)",
+    )
+    .fetch_one(&mut connection)
+    .await
+    .expect("read upgraded legacy state");
+    assert_eq!(
+        migrated,
+        (1, "unchanged".to_owned(), 0),
+        "model-turn migrations preserve legacy resident admission state and create no runtime rows"
+    );
+    connection
+        .close()
+        .await
+        .expect("close migration fixture connection");
+
+    let mut admin = PgConnection::connect(&admin_url)
+        .await
+        .expect("reconnect migration fixture admin");
+    admin
+        .execute(
+            format!(
+                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity \
+                 WHERE datname = '{database_name}' AND pid <> pg_backend_pid()"
+            )
+            .as_str(),
+        )
+        .await
+        .expect("terminate migration fixture sessions");
+    admin
+        .execute(format!(r#"DROP DATABASE "{database_name}""#).as_str())
+        .await
+        .expect("drop migration fixture database");
 }
 
 #[tokio::test]
