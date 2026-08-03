@@ -144,7 +144,9 @@ async fn apply_migration_173(conn: &mut PgConnection) {
 }
 
 async fn insert_session(pool: &PgPool, id: &str) {
-    let project_id = format!("failure-cause-project-{id}");
+    // projects.id is VARCHAR(36); use a compact unique identifier rather than
+    // deriving it from the descriptive session fixture ID.
+    let project_id = format!("fc-{}", uuid::Uuid::now_v7().simple());
     sqlx::query(
         "INSERT INTO projects (id, name, github_owner, github_repo) VALUES ($1, $2, $3, $4)",
     )
