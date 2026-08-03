@@ -129,6 +129,7 @@ use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
+use crate::reclamation_report::{LEASE_RECLAMATION_LEDGER, RESIZE_LIFECYCLE_LEDGER};
 use crate::server::AppState;
 use crate::task_run_resize_drop::{
     DROP_GATE_BUDGET, ResizeDropCause, ResizeDropOutcome, ResizeDropRequest,
@@ -359,6 +360,49 @@ pub struct ResizeReconcilePass {
     pub pre_birth_reaped: usize,
     /// `true` when the pre-birth scan itself failed.
     pub pre_birth_scan_failed: bool,
+}
+
+/// Emit completed-pass summaries separately for each durable ledger.
+///
+/// A pass advances the `build_pod_permits` lifecycle before it may release a
+/// `build_leases` row. This narrow seam preserves that distinction in structured
+/// reporting and lets its event contract be captured without an [`AppState`] or
+/// ticker.
+fn emit_pass_summaries(pass: &ResizeReconcilePass) {
+    let lifecycle_activity = pass.scanned > 0
+        || pass.resumed > 0
+        || pass.would_resume > 0
+        || pass.permits_retired > 0
+        || pass.unsettled > 0
+        || pass.scan_failed
+        || pass.pre_birth_scanned > 0
+        || pass.pre_birth_reaped > 0
+        || pass.pre_birth_scan_failed;
+    if lifecycle_activity {
+        info!(
+            ledger = RESIZE_LIFECYCLE_LEDGER,
+            mode = pass.mode.map(ResizeReconcileMode::as_str),
+            scanned = pass.scanned,
+            resumed = pass.resumed,
+            would_resume = pass.would_resume,
+            permits_retired = pass.permits_retired,
+            pre_birth_scanned = pass.pre_birth_scanned,
+            pre_birth_reaped = pass.pre_birth_reaped,
+            unsettled = pass.unsettled,
+            skipped = pass.skipped.len(),
+            scan_failed = pass.scan_failed,
+            pre_birth_scan_failed = pass.pre_birth_scan_failed,
+            "task_run_resize_reconcile: build_pod_permits lifecycle sweep"
+        );
+    }
+
+    if pass.leases_released > 0 {
+        info!(
+            ledger = LEASE_RECLAMATION_LEDGER,
+            leases_released = pass.leases_released,
+            "task_run_resize_reconcile: build_leases release summary"
+        );
+    }
 }
 
 // ── The reconciler ─────────────────────────────────────────────────────────
@@ -1036,18 +1080,7 @@ pub fn spawn(state: AppState) {
             let reconciler = Arc::clone(&reconciler);
             async move {
                 let pass = reconciler.run_pass().await;
-                if pass.resumed > 0 || pass.would_resume > 0 || pass.scan_failed {
-                    info!(
-                        mode = pass.mode.map(ResizeReconcileMode::as_str),
-                        scanned = pass.scanned,
-                        resumed = pass.resumed,
-                        would_resume = pass.would_resume,
-                        leases_released = pass.leases_released,
-                        unsettled = pass.unsettled,
-                        scan_failed = pass.scan_failed,
-                        "task_run_resize_reconcile: sweep"
-                    );
-                }
+                emit_pass_summaries(&pass);
             }
         })
         .await;
