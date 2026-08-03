@@ -2107,6 +2107,36 @@ mod tests {
         );
     }
 
+    /// A tracked dependency lockfile is a source-of-truth input: an ordinary
+    /// unstaged update must survive the WorkerDone auto-commit path.
+    #[tokio::test]
+    async fn commit_preserves_unstaged_tracked_package_lockfile() {
+        let (_origin, clone, ws) = fixture();
+        let cp = clone.path();
+        let original = "{\"lockfileVersion\": 1}\n";
+        let updated = "{\"lockfileVersion\": 2}\n";
+
+        write(cp, "package-lock.json", original);
+        git(cp, &["add", "package-lock.json"]);
+        git(cp, &["commit", "-m", "track package lockfile"]);
+        write(cp, "package-lock.json", updated);
+
+        let outcome = ws
+            .commit("update dependency lockfile", TEST_IDENT)
+            .await
+            .expect("auto-commit");
+        assert!(outcome.committed(), "tracked lockfile update must commit");
+        assert_eq!(
+            git(cp, &["show", "HEAD:package-lock.json"]),
+            updated,
+            "HEAD must contain the updated lockfile bytes"
+        );
+        assert!(
+            git(cp, &["status", "--porcelain"]).trim().is_empty(),
+            "auto-commit must leave the worktree clean"
+        );
+    }
+
     // ── Filtered-staging regression tests ──────────────────────────────────
 
     /// Legitimate source edit plus root-level scratch files: only the
