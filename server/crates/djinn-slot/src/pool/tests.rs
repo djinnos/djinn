@@ -2649,6 +2649,16 @@ async fn assert_immediate_reconcile_matrix_case(
         expected_teardowns,
         "{label}: distinct runs tear down once in capture order"
     );
+    assert_eq!(
+        snapshot
+            .executions
+            .iter()
+            .filter(|entry| entry.teardown_owner)
+            .map(|entry| entry.task_run_id.as_deref())
+            .collect::<Vec<_>>(),
+        expected_teardowns.iter().map(String::as_str).collect::<Vec<_>>(),
+        "{label}: execution ownership deduplicates shared task runs"
+    );
     assert!(
         snapshot
             .executions
@@ -2674,6 +2684,7 @@ async fn assert_immediate_reconcile_matrix_case(
     assert!(
         !snapshot.observations.final_pending_teardown
             && snapshot.observations.final_reread_error.is_none()
+            && snapshot.observations.pool_cleanup_error.is_none()
     );
     assert_eq!(
         snapshot.observations.completion_source,
@@ -2707,6 +2718,10 @@ async fn assert_immediate_reconcile_matrix_case(
             "{label}: immediate cleanup must not return the draining slot"
         );
     }
+    assert!(
+        pool.test_task_slots().is_empty(),
+        "{label}: reconciliation leaves no task-owned pool mapping"
+    );
 }
 
 #[tokio::test]
@@ -2765,7 +2780,7 @@ async fn reconcile_terminate_mapped_duplicate_rows_tear_down_distinct_runs() {
         "mapped duplicate distinct",
         &["run-mapped-first", "run-mapped-second"],
         true,
-        ReconcileTerminateKind::Terminated,
+        ReconcileTerminateKind::DesyncReconciled,
     )
     .await;
 }
