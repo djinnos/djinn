@@ -462,6 +462,14 @@ async fn execution_kill_task_double_kill_is_harmless_and_leaves_capacity_availab
         .expect("second execution_kill_task should still return a tool response");
 
     assert_truthful_harmless_second_kill_response(&second_response, &seeded.task_id);
+    assert_eq!(
+        LivenessRepository::new(harness.app_state.db.clone())
+            .count_evidence_for_task(&seeded.task_id)
+            .await
+            .expect("evidence count"),
+        2,
+        "each resolved outward kill invocation writes exactly one audit row"
+    );
     assert_settled_after_kill(&harness, &seeded).await;
     assert_eq!(
         harness.runtime_teardown_calls(),
