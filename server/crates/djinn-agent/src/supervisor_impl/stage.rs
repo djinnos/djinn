@@ -90,7 +90,7 @@ use crate::actors::slot::lifecycle::role_overrides::{
 use crate::actors::slot::lifecycle::setup::{SetupContext, SetupError, resolve_setup_context};
 use crate::actors::slot::lifecycle::task_classifier::classify_native_skill_trigger;
 use crate::actors::slot::lifecycle::teardown::{PostSessionParams, spawn_post_session_work};
-use crate::actors::slot::reply_loop::error_handling::BudgetWindDownIgnored;
+use crate::actors::slot::reply_loop::error_handling::{BudgetWindDownIgnored, ReplyLoopCancelled};
 use crate::actors::slot::reply_loop::loop_guard::{
     LoopGuardError, LoopGuardKind as ReplyLoopGuardKind,
 };
@@ -142,6 +142,28 @@ async fn mark_session_failed(services: &dyn SupervisorServices, session_id: &str
 /// reset window. This is the floor only — a longer escalating cooldown still
 /// wins via `max()`.
 const CODEX_EMPTY_QUOTA_RETRY_AFTER_MS: u64 = 20 * 60 * 1000;
+
+/// The terminal reply-loop error class whose identity must survive until
+/// session settlement can record a durable failure cause.
+///
+/// This deliberately examines only the returned error chain. In particular,
+/// callers must not infer cancellation from a token that may have been
+/// cancelled after a provider or harness error was already returned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReplyLoopFailureClass {
+    Cancelled,
+    Other,
+}
+
+/// Classify reply-loop cancellation by its concrete public error type, never
+/// by display text or current cancellation-token state.
+fn classify_reply_loop_failure(err: &anyhow::Error) -> ReplyLoopFailureClass {
+    if err.downcast_ref::<ReplyLoopCancelled>().is_some() {
+        ReplyLoopFailureClass::Cancelled
+    } else {
+        ReplyLoopFailureClass::Other
+    }
+}
 
 /// Classify a reply-loop terminal error into the breaker-relevant
 /// [`ProviderFailureClass`] the host should act on, or `None` when the host
@@ -1506,6 +1528,13 @@ pub(crate) async fn execute_stage(
                 stage_outcome_for_runtime_loop_guard_trip(trip)
             } else if let Some(guard_error) = e.downcast_ref::<LoopGuardError>() {
                 stage_outcome_for_reply_loop_guard_error(guard_error)
+            } else if classify_reply_loop_failure(&e) == ReplyLoopFailureClass::Cancelled {
+                // Preserve the established diagnostic and wire shape while making
+                // the typed cancellation seam explicit for durable settlement.
+                StageOutcome::Failed {
+                    reason: format!("reply loop error: {e}"),
+                    provider_failure: None,
+                }
             } else {
                 StageOutcome::Failed {
                     reason: format!("reply loop error: {e}"),
@@ -2062,6 +2091,55 @@ mod tests {
         // no `ProviderError` source → must never trip the breaker.
         let untyped = anyhow::anyhow!("worker failed to push task_branch to mirror");
         assert_eq!(classify_provider_failure(&untyped), None);
+    }
+
+    #[test]
+    fn reply_loop_cancellation_classifier_requires_the_typed_error() {
+        let typed_cancellation = anyhow::Error::new(ReplyLoopCancelled::session())
+            .context("reply loop stopped while waiting for a provider event");
+        assert_eq!(
+            classify_reply_loop_failure(&typed_cancellation),
+            ReplyLoopFailureClass::Cancelled,
+            "the public ReplyLoopCancelled source must survive context wrapping",
+        );
+
+        let cancellation_looking_text =
+            anyhow::anyhow!("reply loop error: session cancelled by a provider response");
+        assert_eq!(
+            classify_reply_loop_failure(&cancellation_looking_text),
+            ReplyLoopFailureClass::Other,
+            "cancellation-looking display text must not classify as cancellation",
+        );
+    }
+
+    #[test]
+    fn reply_loop_cancellation_classifier_ignores_later_token_cancellation() {
+        // These are the errors actually returned by the reply loop before an
+        // unrelated cancellation race fires. The classifier intentionally takes
+        // no token, so it cannot rewrite either error based on later state.
+        let provider_error = anyhow::Error::new(ProviderError::Transport)
+            .context("provider stream closed unexpectedly");
+        let harness_error = anyhow::anyhow!("tool harness failed to write result");
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        cancellation.cancel();
+
+        assert_eq!(
+            classify_reply_loop_failure(&provider_error),
+            ReplyLoopFailureClass::Other,
+            "a typed provider error remains non-cancellation after token cancellation",
+        );
+        assert_eq!(
+            classify_reply_loop_failure(&harness_error),
+            ReplyLoopFailureClass::Other,
+            "a harness error remains non-cancellation after token cancellation",
+        );
+        assert_eq!(
+            classify_provider_failure(&provider_error),
+            Some(ProviderFailureClass::Transient {
+                retry_after_ms: None,
+            }),
+            "cancellation classification must not change provider-breaker behavior",
+        );
     }
 
     #[test]

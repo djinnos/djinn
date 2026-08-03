@@ -257,34 +257,82 @@ async fn observation_retention_serializes_concurrent_pool_inserts() {
                 .bind(pool_id).bind(sequence).execute(&mut setup).await.expect("seed observation");
         }
 
-        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
-        let inserted = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        // Synchronize both transactions before either can invoke the trigger.
+        // The first successful insert keeps the pool-row lock until the test
+        // explicitly releases it; the other backend must then report that it
+        // is blocked by the lock holder rather than merely losing a scheduling
+        // race in this test process.
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(3));
+        let (ready_tx, mut ready_rx) = tokio::sync::mpsc::channel(2);
+        let (inserted_tx, mut inserted_rx) = tokio::sync::mpsc::channel(2);
         let release = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let release_notification = std::sync::Arc::new(tokio::sync::Notify::new());
         let mut tasks = Vec::new();
         for sequence in [255_i64, 256] {
             let url = database_url.clone();
             let barrier = barrier.clone();
-            let inserted = inserted.clone();
+            let ready_tx = ready_tx.clone();
+            let inserted_tx = inserted_tx.clone();
             let release = release.clone();
+            let release_notification = release_notification.clone();
             tasks.push(tokio::spawn(async move {
                 let mut connection = PgConnection::connect(&url).await.expect("connect racer");
+                let backend_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                    .fetch_one(&mut connection)
+                    .await
+                    .expect("read racer backend pid");
                 let mut transaction = connection.begin().await.expect("begin racer");
+                ready_tx.send(backend_pid).await.expect("report ready racer");
                 barrier.wait().await;
                 sqlx::query("INSERT INTO model_turn_observations (pool_id, sequence, kind) VALUES ($1, $2, 'usage')")
                     .bind(pool_id).bind(sequence).execute(&mut *transaction).await.expect("insert racer");
-                inserted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                inserted_tx.send(backend_pid).await.expect("report inserted racer");
                 while !release.load(std::sync::atomic::Ordering::SeqCst) {
-                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                    release_notification.notified().await;
                 }
                 transaction.commit().await.expect("commit racer");
             }));
         }
-        for _ in 0..20 {
-            if inserted.load(std::sync::atomic::Ordering::SeqCst) != 0 { break; }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-        assert_eq!(inserted.load(std::sync::atomic::Ordering::SeqCst), 1, "per-pool retention must serialize concurrent triggers");
+        let first_pid = ready_rx.recv().await.expect("first ready racer");
+        let second_pid = ready_rx.recv().await.expect("second ready racer");
+        barrier.wait().await;
+
+        let lock_holder_pid = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            inserted_rx.recv(),
+        )
+        .await
+        .expect("one racer must pass the retention trigger before the timeout")
+        .expect("a racer must report its successful insert");
+        let blocked_pid = if lock_holder_pid == first_pid {
+            second_pid
+        } else {
+            first_pid
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let blocked: bool = sqlx::query_scalar(
+                    "SELECT $1::int = ANY(pg_blocking_pids($2::int))",
+                )
+                .bind(lock_holder_pid)
+                .bind(blocked_pid)
+                .fetch_one(&mut setup)
+                .await
+                .expect("inspect racer lock wait");
+                if blocked {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("same-pool peer must remain blocked by the trigger lock holder");
+        assert!(
+            matches!(inserted_rx.try_recv(), Err(tokio::sync::mpsc::error::TryRecvError::Empty)),
+            "exactly one racer must pass the retention trigger while its peer is blocked"
+        );
         release.store(true, std::sync::atomic::Ordering::SeqCst);
+        release_notification.notify_one();
         for task in tasks { task.await.expect("racer task"); }
         let count: i64 = sqlx::query_scalar("SELECT count(*) FROM model_turn_observations WHERE pool_id = $1")
             .bind(pool_id).fetch_one(&mut setup).await.expect("count observations");
