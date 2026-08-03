@@ -1,0 +1,2 @@
+jobs:
+  quality-gate: {runs-on: x, timeout-minutes: 1, timeout-minutes: 2, steps: [{run: x}]}

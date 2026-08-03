@@ -1,0 +1,3 @@
+on: {workflow_call: null}
+jobs:
+  call: {uses: ./.github/workflows/root.yml}
