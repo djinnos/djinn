@@ -358,17 +358,12 @@ impl ModelTurnAdmissionRepository {
         };
         sqlx::query("UPDATE model_turn_leases SET lifecycle = 'expired', terminal_at = $2::timestamptz WHERE lease_id = $1::uuid AND generation = $3 AND request_id = $4")
             .bind(&input.identity.lease_id).bind(&input.boundary_at).bind(input.identity.generation).bind(&input.identity.request_id).execute(&mut *tx).await?;
-        sqlx::query("INSERT INTO model_turn_lease_terminals (lease_id, generation, request_id, outcome) VALUES ($1::uuid, $2, $3, 'expired')")
-            .bind(&input.identity.lease_id).bind(input.identity.generation).bind(&input.identity.request_id).execute(&mut *tx).await?;
+        let unsent = lifecycle == "reserved";
+        sqlx::query("INSERT INTO model_turn_lease_terminals (lease_id, generation, request_id, outcome, accounting_state) VALUES ($1::uuid, $2, $3, 'expired', $4)")
+            .bind(&input.identity.lease_id).bind(input.identity.generation).bind(&input.identity.request_id).bind(if unsent { "refunded" } else { "quarantined" }).execute(&mut *tx).await?;
         sqlx::query("UPDATE model_turn_reservations SET state = 'expired', terminal_at = $2::timestamptz WHERE id = $1::uuid").bind(&reservation_id).bind(&input.boundary_at).execute(&mut *tx).await?;
-        self.release_accounting(
-            &mut tx,
-            pool_id,
-            &reservation_id,
-            lifecycle == "reserved",
-            None,
-        )
-        .await?;
+        self.release_accounting(&mut tx, pool_id, &reservation_id, unsent, None)
+            .await?;
         tx.commit().await?;
         Ok(ModelTurnLeaseMutationOutcome::Applied)
     }
@@ -410,18 +405,35 @@ impl ModelTurnAdmissionRepository {
         let Some((pool_id, reservation_id, lifecycle)) = lease else {
             return Ok(ModelTurnLeaseMutationOutcome::Fenced);
         };
-        let terminal: Option<String> = sqlx::query_scalar("SELECT outcome FROM model_turn_lease_terminals WHERE lease_id = $1::uuid AND generation = $2 AND request_id = $3").bind(&input.identity.lease_id).bind(input.identity.generation).bind(&input.identity.request_id).fetch_optional(&mut *tx).await?;
-        if let Some(existing) = terminal {
-            return Ok(if existing == terminal_outcome_name(input.outcome) {
-                ModelTurnLeaseMutationOutcome::Idempotent
-            } else {
-                ModelTurnLeaseMutationOutcome::Fenced
-            });
+        let terminal: Option<(String, String)> = sqlx::query_as("SELECT outcome, accounting_state FROM model_turn_lease_terminals WHERE lease_id = $1::uuid AND generation = $2 AND request_id = $3 FOR UPDATE").bind(&input.identity.lease_id).bind(input.identity.generation).bind(&input.identity.request_id).fetch_optional(&mut *tx).await?;
+        if let Some((existing, accounting_state)) = terminal {
+            if existing != terminal_outcome_name(input.outcome) {
+                return Ok(ModelTurnLeaseMutationOutcome::Fenced);
+            }
+            if let Some(usage) = input.authoritative_usage.as_ref()
+                && accounting_state == "quarantined"
+            {
+                self.resolve_quarantined_usage(&mut tx, pool_id, &reservation_id, usage)
+                    .await?;
+                sqlx::query("UPDATE model_turn_lease_terminals SET accounting_state = 'authoritative' WHERE lease_id = $1::uuid AND generation = $2 AND request_id = $3 AND accounting_state = 'quarantined'")
+                    .bind(&input.identity.lease_id).bind(input.identity.generation).bind(&input.identity.request_id).execute(&mut *tx).await?;
+                tx.commit().await?;
+                return Ok(ModelTurnLeaseMutationOutcome::Applied);
+            }
+            return Ok(ModelTurnLeaseMutationOutcome::Idempotent);
         }
         if !matches!(lifecycle.as_str(), "reserved" | "dispatching" | "active") {
             return Ok(ModelTurnLeaseMutationOutcome::Fenced);
         }
-        sqlx::query("INSERT INTO model_turn_lease_terminals (lease_id, generation, request_id, outcome, detail) VALUES ($1::uuid, $2, $3, $4, $5)").bind(&input.identity.lease_id).bind(input.identity.generation).bind(&input.identity.request_id).bind(terminal_outcome_name(input.outcome)).bind(&input.detail).execute(&mut *tx).await?;
+        let unsent = lifecycle == "reserved";
+        let accounting_state = if unsent {
+            "refunded"
+        } else if input.authoritative_usage.is_some() {
+            "authoritative"
+        } else {
+            "quarantined"
+        };
+        sqlx::query("INSERT INTO model_turn_lease_terminals (lease_id, generation, request_id, outcome, detail, accounting_state) VALUES ($1::uuid, $2, $3, $4, $5, $6)").bind(&input.identity.lease_id).bind(input.identity.generation).bind(&input.identity.request_id).bind(terminal_outcome_name(input.outcome)).bind(&input.detail).bind(accounting_state).execute(&mut *tx).await?;
         sqlx::query("UPDATE model_turn_leases SET lifecycle = 'reconciled', terminal_at = now() WHERE lease_id = $1::uuid AND generation = $2 AND request_id = $3").bind(&input.identity.lease_id).bind(input.identity.generation).bind(&input.identity.request_id).execute(&mut *tx).await?;
         let state = if input.outcome == ModelTurnLeaseTerminalOutcome::Cancelled {
             "cancelled"
@@ -433,7 +445,7 @@ impl ModelTurnAdmissionRepository {
             &mut tx,
             pool_id,
             &reservation_id,
-            lifecycle == "reserved",
+            unsent,
             input.authoritative_usage.as_ref(),
         )
         .await?;
@@ -679,6 +691,24 @@ impl ModelTurnAdmissionRepository {
             } else {
                 sqlx::query("UPDATE model_turn_bucket_bindings SET quarantined_units = quarantined_units + $3, updated_at = now() WHERE pool_id = $1 AND bucket_kind = $2").bind(pool_id).bind(&kind).bind(reserved).execute(&mut **tx).await?;
             }
+        }
+        Ok(())
+    }
+
+    /// Replace a previously quarantined reservation debit exactly once. The
+    /// terminal row is locked by the caller, so a replay cannot credit twice.
+    async fn resolve_quarantined_usage(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        pool_id: i64,
+        reservation_id: &str,
+        usage: &ModelTurnAuthoritativeUsage,
+    ) -> Result<()> {
+        let buckets: Vec<(String, i64)> = sqlx::query_as("SELECT bucket_kind, reserved_units FROM model_turn_reservation_buckets WHERE reservation_id = $1::uuid ORDER BY bucket_kind FOR UPDATE")
+            .bind(reservation_id).fetch_all(&mut **tx).await?;
+        for (kind, reserved) in buckets {
+            sqlx::query("UPDATE model_turn_bucket_bindings SET available_units = LEAST(capacity_units, GREATEST(0, available_units + $3 - $4)), quarantined_units = GREATEST(0, quarantined_units - $3), updated_at = now() WHERE pool_id = $1 AND bucket_kind = $2")
+                .bind(pool_id).bind(&kind).bind(reserved).bind(usage_for_kind(usage, &kind)).execute(&mut **tx).await?;
         }
         Ok(())
     }
