@@ -35,8 +35,8 @@ use djinn_core::events::EventBus;
 use djinn_core::models::{DjinnSettings, SessionStatus};
 use djinn_db::{
     CreateSessionParams, CreateTaskRunParams, Database, EffectiveCreatorProvenance,
-    EpicCreateInput, EpicRepository, ProjectRepository, SessionRepository, TaskRepository,
-    TaskRunRepository, UserRepository,
+    EpicCreateInput, EpicRepository, LivenessRepository, ProjectRepository, SessionRepository,
+    TaskRepository, TaskRunRepository, UserRepository,
 };
 use djinn_provider::catalog::{CatalogService, HealthTracker};
 use serde_json::json;
@@ -196,6 +196,137 @@ async fn execution_kill_task_settles_live_run_through_control_plane_tool_route()
         "terminated task should be redispatchable through the real pool"
     );
     harness.assert_pool_capacity(1, 0).await;
+    harness.shutdown();
+}
+
+/// The historical `yf6r` regression passed the raw short id to the pool, so
+/// the durable row and live mapping were observed under different task ids.
+/// This drives the real MCP route with that exact id and proves resolution
+/// happens before actor-owned reconciliation.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn execution_kill_task_yf6r_short_id_and_uuid_share_authoritative_task() {
+    let harness = RealPoolKillHarness::new().await;
+    let seeded = harness
+        .seed_running_session_with_task_run("yf6r-authoritative-run")
+        .await;
+    sqlx::query("UPDATE tasks SET short_id = $1 WHERE id = $2")
+        .bind("yf6r")
+        .bind(&seeded.task_id)
+        .execute(harness.app_state.db.pool())
+        .await
+        .expect("fixture must reserve the historical short id");
+
+    let tasks = TaskRepository::new(
+        harness.app_state.db.clone(),
+        harness.app_state.event_bus.clone(),
+    );
+    assert_eq!(
+        tasks
+            .resolve("yf6r")
+            .await
+            .expect("short-id resolution")
+            .expect("task")
+            .id,
+        seeded.task_id,
+        "yf6r must resolve to the same canonical UUID as the UUID form"
+    );
+    assert_eq!(
+        tasks
+            .resolve(&seeded.task_id)
+            .await
+            .expect("uuid resolution")
+            .expect("task")
+            .id,
+        seeded.task_id
+    );
+
+    harness.dispatch(&seeded.task_id).await;
+    harness.wait_for_runner_started(&seeded.task_id).await;
+    harness.wait_for_pool_session(&seeded.task_id).await;
+    let short_response = harness
+        .call_kill_tool("yf6r")
+        .await
+        .expect("short-id kill should dispatch");
+    assert_eq!(short_response["ok"], true);
+    assert_eq!(short_response["kind"], "terminated");
+    assert_eq!(short_response["task_id"], seeded.task_id);
+    assert_eq!(short_response["observations"]["initial_mapping_slot_id"], 0);
+    assert_eq!(
+        short_response["observations"]["initial_non_terminal_ids"],
+        json!([seeded.session_id.clone()]),
+        "the short-id request must retain the complete durable capture"
+    );
+    assert_eq!(
+        short_response["observations"]["final_non_terminal_ids"],
+        json!([])
+    );
+    assert_eq!(
+        short_response["observations"]["final_mapping_slot_id"],
+        serde_json::Value::Null
+    );
+    assert_eq!(
+        short_response["observations"]["completion_source"],
+        "immediate"
+    );
+    assert_eq!(
+        short_response["executions"].as_array().map(Vec::len),
+        Some(1)
+    );
+    assert_eq!(
+        short_response["executions"][0]["session_id"],
+        seeded.session_id
+    );
+    assert_eq!(
+        short_response["executions"][0]["task_run_id"],
+        seeded.task_run_id
+    );
+    assert_eq!(short_response["executions"][0]["teardown_attempted"], true);
+    assert_eq!(
+        short_response["executions"][0]["settlement_attempted"],
+        true
+    );
+
+    harness.wait_for_runner_killed(&seeded.task_id).await;
+    harness
+        .assert_single_terminal_session(&seeded.task_id, SessionStatus::Interrupted)
+        .await;
+    assert_eq!(
+        harness.runtime_teardown_calls(),
+        vec![seeded.task_run_id.clone()]
+    );
+    assert!(!harness.pool_has_session(&seeded.task_id).await);
+    let audit_json: serde_json::Value = sqlx::query_scalar(
+        "SELECT evidence FROM liveness_evidence WHERE task_id = $1 ORDER BY created_at ASC LIMIT 1",
+    )
+    .bind(&seeded.task_id)
+    .fetch_one(harness.app_state.db.pool())
+    .await
+    .expect("short-id call audit JSON");
+    assert_eq!(audit_json["task_id"], seeded.task_id);
+    assert_eq!(audit_json["kind"], "terminated");
+    assert_eq!(
+        audit_json["observations"]["initial_non_terminal_ids"],
+        json!([seeded.session_id.clone()]),
+        "audit retains the verbatim authoritative snapshot"
+    );
+
+    // A UUID invocation after the short-id call must still be attributed to
+    // the canonical task and contributes one, separate outward-call audit row.
+    let uuid_response = harness
+        .call_kill_tool(&seeded.task_id)
+        .await
+        .expect("uuid kill");
+    assert_eq!(uuid_response["task_id"], seeded.task_id);
+    assert_eq!(uuid_response["kind"], "genuinely_absent");
+    assert_eq!(uuid_response["ok"], true);
+    assert_eq!(
+        LivenessRepository::new(harness.app_state.db.clone())
+            .count_evidence_for_task(&seeded.task_id)
+            .await
+            .expect("audit evidence count"),
+        2,
+        "each resolved short-id/UUID invocation writes exactly one audit row"
+    );
     harness.shutdown();
 }
 
