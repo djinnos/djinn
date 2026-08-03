@@ -1100,24 +1100,34 @@ pub struct BoardHealthBuildCapacity {
     pub note: String,
 }
 
-/// The dispatcher's OWN recorded denial for this task.
+/// A legacy denial row's cause and streak evidence, enriched with the live
+/// global build-lease capacity projection at report time.
 ///
-/// Every other field on `dispatch_gate` is a re-derivation of what the
-/// dispatcher probably decided. This one is what it actually decided, written
-/// by the process that decided it (`build_admission_denials`, migration 161).
+/// The persisted denial row establishes only why and how often the historical
+/// decision was denied. `scope`, `authority`, `occupancy`, and `cap` are not
+/// historical row values: they are supplied by the live `build_leases` ledger
+/// projection. Kueue admission is a separate authority reported in
+/// [`BoardHealthKueueAdmission`].
 ///
-/// Before that table existed, `DenialCause` was consumed at exactly one site —
-/// a `tracing::info!` line — and thrown away. On 2026-07-29 the dispatcher knew
-/// on every tick, for five hours, precisely why it was refusing every task, and
-/// `board_health` reported `unexplained` the whole time.
-///
-/// **No writer remains.** The Kueue cutover deleted the process that recorded
-/// these rows, so an absent block is now the steady state and says nothing
-/// about whether Kueue admitted the Job. Legacy rows are still surfaced, and a
-/// new writer must not be added — a denial recorded against a deleted authority
-/// would be the replayed tombstone of #2661 in a new table.
+/// **No writer remains.** Legacy rows can still be surfaced, but their absence
+/// is the steady state and says nothing about whether Kueue admitted a Job.
 #[derive(Serialize, Deserialize, schemars::JsonSchema, Default)]
 pub struct BoardHealthBuildAdmissionDenial {
+    /// Always `global`: occupancy and cap cover every project and consumer in
+    /// the shared build-lease pool, not only the denied task's project.
+    ///
+    /// Defaults to `global` when deserializing payloads emitted before this
+    /// additive field existed.
+    #[serde(default = "global_build_admission_denial_scope")]
+    pub scope: String,
+    /// Always `build_leases`: the live lease ledger is the authority for this
+    /// report's occupancy and cap. It is neither the retired denial writer nor
+    /// Kueue.
+    ///
+    /// Defaults to `build_leases` when deserializing payloads emitted before
+    /// this additive field existed.
+    #[serde(default = "build_leases_build_admission_denial_authority")]
+    pub authority: String,
     /// `at_capacity`, `controller_not_admitting` or `authority_unavailable`.
     pub cause: String,
     /// The closed readiness gate, for `controller_not_admitting`. This is the
@@ -1127,11 +1137,14 @@ pub struct BoardHealthBuildAdmissionDenial {
     /// The capacity authority's own words, for `authority_unavailable`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
-    /// Occupancy as MEASURED. `null` — never `0` — when the denial never
-    /// consulted it, which is true of every readiness denial.
+    /// Report-time global weighted occupancy from `build_leases`, summed across
+    /// every occupying lease and every project. `null` — never `0` — when the
+    /// denial report has no live lease-ledger measurement.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub occupancy: Option<i64>,
-    /// The cap that would have been enforced.
+    /// The singleton global `build_lease_caps.cap` paired with the report-time
+    /// ledger-wide weighted occupancy; never a historical or project-scoped
+    /// denial-row cap.
     pub cap: i64,
     /// The deciding process's admission epoch.
     #[serde(default)]
@@ -1154,6 +1167,14 @@ pub struct BoardHealthBuildAdmissionDenial {
     pub freshness_window_seconds: i64,
     #[serde(default)]
     pub note: String,
+}
+
+fn global_build_admission_denial_scope() -> String {
+    "global".to_owned()
+}
+
+fn build_leases_build_admission_denial_authority() -> String {
+    "build_leases".to_owned()
 }
 
 /// One row of the Kueue admission projection (migration 165) — Kueue's own
