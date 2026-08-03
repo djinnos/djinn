@@ -384,12 +384,18 @@ impl ModelTurnAdmissionRepository {
                 .bind(&input.owner_pod_uid)
                 .fetch_one(&mut *tx)
                 .await?;
-                return commit_outcome(ModelTurnAcquireOutcome::Wait(
+                let outcome = ModelTurnAcquireOutcome::Wait(
                     ModelTurnAdmissionWait::DiscoveryRequired {
                         is_owner: owner_request_id == input.request_id,
                         owner_request_id,
                     },
-                ));
+                );
+                // Unlike the other wait/rejection paths, electing discovery
+                // ownership mutates durable cross-process coordination. Commit
+                // it before reporting the owner so another connection cannot
+                // subsequently elect itself after this transaction drops.
+                tx.commit().await?;
+                return Ok(outcome);
             }
             state
             @ (ModelTurnCapabilityState::Unsupported | ModelTurnCapabilityState::Degraded) => {
