@@ -195,6 +195,14 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Verify finite CI timeout contract
+        run: |
+          npm ci --ignore-scripts
+          node --test scripts/check-ci-timeouts.test.mjs
+          node scripts/check-ci-timeouts.mjs
       - name: Verify mold Debian snapshot contracts
         run: |
           ./scripts/test-mold-debian-snapshot-contract.sh

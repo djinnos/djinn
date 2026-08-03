@@ -1,0 +1,3 @@
+jobs:
+  quality-gate:
+    uses: owner/repo/x.yml@main
