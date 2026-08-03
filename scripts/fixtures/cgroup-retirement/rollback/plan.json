@@ -1,0 +1,38 @@
+{
+  "schema": "djinn-cgroup-retirement-rollback-rehearsal/v1",
+  "ordered_phases": ["RETIRE_BASE", "RETIRE_HEAD"],
+  "assets": [
+    {
+      "path": "server/crates/djinn-agent/src/process_broker.rs",
+      "phase": "RETIRE_BASE",
+      "role": "source",
+      "content": "brokered launcher candidate source\n",
+      "forced_pair": "broker-lift"
+    },
+    {
+      "path": "server/crates/djinn-agent/src/process/tests/process_lease_broker_lift_tests.rs",
+      "phase": "RETIRE_BASE",
+      "role": "test",
+      "content": "brokered launcher candidate test\n",
+      "forced_pair": "broker-lift"
+    },
+    {
+      "path": "deploy/node/k3s/containerd/config.toml.tmpl",
+      "phase": "RETIRE_HEAD",
+      "role": "node",
+      "content": "[plugins.deterministic-node]\nlauncher = true\n"
+    },
+    {
+      "path": "server/crates/djinn-k8s/src/launcher.rs",
+      "phase": "preserved",
+      "role": "launcher",
+      "content": "launcher fixture v1: cgroup leaf owner\n"
+    }
+  ],
+  "launcher_leaf": {
+    "launcher_path": "server/crates/djinn-k8s/src/launcher.rs",
+    "source_sha256": "a7c9f9ea40530f5b7513b1ce8cdfb3cf64acea89c25ddd20fa7c6323c768f033",
+    "cpu_max": "400000 100000",
+    "recorded_by": "deterministic-fixture-v1"
+  }
+}
