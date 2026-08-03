@@ -279,13 +279,23 @@ async fn observation_retention_serializes_concurrent_pool_inserts() {
                 transaction.commit().await.expect("commit racer");
             }));
         }
-        for _ in 0..20 {
-            if inserted.load(std::sync::atomic::Ordering::SeqCst) != 0 { break; }
+        // Migration-heavy database tests can take longer than the former
+        // 200ms polling allowance to schedule both fresh connections. Wait
+        // for the first trigger to acquire the parent-row lock without
+        // weakening the assertion that exactly one insert can pass it.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        while inserted.load(std::sync::atomic::Ordering::SeqCst) == 0
+            && tokio::time::Instant::now() < deadline
+        {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
-        assert_eq!(inserted.load(std::sync::atomic::Ordering::SeqCst), 1, "per-pool retention must serialize concurrent triggers");
+        let inserted_before_release = inserted.load(std::sync::atomic::Ordering::SeqCst);
         release.store(true, std::sync::atomic::Ordering::SeqCst);
         for task in tasks { task.await.expect("racer task"); }
+        assert_eq!(
+            inserted_before_release, 1,
+            "per-pool retention must serialize concurrent triggers"
+        );
         let count: i64 = sqlx::query_scalar("SELECT count(*) FROM model_turn_observations WHERE pool_id = $1")
             .bind(pool_id).fetch_one(&mut setup).await.expect("count observations");
         assert_eq!(count, 256, "concurrent observation retention must remain bounded");
