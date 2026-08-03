@@ -145,6 +145,9 @@ deny = [
 		"djinn-core",
 		"djinn-db",
 		"djinn-memory",
+			# PostgreSQL-only pool reconciliation fault fixtures use sqlx as a
+			# dev-dependency; production persistence remains owned by djinn-db.
+			"djinn-slot",
 	] },
 
 	# git2: NOT ratcheted via cargo-deny.
