@@ -1377,7 +1377,14 @@ pub async fn run_capacity_controller(
             let target_vector = ResourceVector {
                 cpu: vector.raw.cpu,
                 memory: vector.raw.memory,
-                pods: vector.admitted_podsets,
+                // CPU and memory already describe the finite capacity Kueue
+                // must fit each workload against. Rounding Pods down by the
+                // build-capable PodSet cost turns that workload shape into a
+                // second, artificial concurrency cap and strands light roles.
+                // Keep Pods as the real post-reserve node ceiling instead;
+                // Kueue still requires one Pod plus the actual CPU/memory
+                // request for every admitted workload.
+                pods: vector.raw.pods,
             };
             let targets = derived_flavor_targets(ownership, target_vector)?;
             Some((
@@ -2583,20 +2590,22 @@ mod tests {
                         {"op":"test","path":"/metadata/resourceVersion","value":"42"},
                         {"op":"replace","path":"/spec/resourceGroups/0/flavors/0/resources/1/nominalQuota","value":"9480m"},
                         {"op":"replace","path":"/spec/resourceGroups/0/flavors/0/resources/2/nominalQuota","value":"51536461824"},
-                        {"op":"replace","path":"/spec/resourceGroups/0/flavors/0/resources/0/nominalQuota","value":"9"},
+                        {"op":"replace","path":"/spec/resourceGroups/0/flavors/0/resources/0/nominalQuota","value":"106"},
                         {"op":"replace","path":"/spec/resourceGroups/0/flavors/1/resources/1/nominalQuota","value":"6320m"},
                         {"op":"replace","path":"/spec/resourceGroups/0/flavors/1/resources/2/nominalQuota","value":"34357641216"},
-                        {"op":"replace","path":"/spec/resourceGroups/0/flavors/1/resources/0/nominalQuota","value":"6"}
+                        {"op":"replace","path":"/spec/resourceGroups/0/flavors/1/resources/0/nominalQuota","value":"69"}
                     ])
                 );
                 // 20 cores, 80 GiB and 180 Pods are exclusively assigned. The
                 // five assigned protected Pods, configured deductions, and
-                // rendered PodSet cost produce this conserved global target;
+                // rendered PodSet cost produces the CPU/memory target. Pods
+                // retain the real post-reserve Node ceiling, so light roles
+                // are not capped at the build-capable whole-PodSet fit;
                 // the 100-core unmatched Node and its 90-core protected Pod do
                 // not enter either side of the derivation.
                 assert_eq!(9_480 + 6_320, 15_800);
                 assert_eq!(51_536_461_824_i64 + 34_357_641_216, 85_894_103_040);
-                assert_eq!(9 + 6, 15);
+                assert_eq!(106 + 69, 175);
             }
         }
     }
