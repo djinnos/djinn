@@ -350,8 +350,15 @@ impl ModelTurnAdmissionRepository {
         input: ModelTurnLeaseExpiryInput,
     ) -> Result<ModelTurnLeaseMutationOutcome> {
         self.db.ensure_initialized().await?;
+        // A watchdog may only terminalize an in-flight observation. Never let
+        // a replay present a terminal state as its expected state: terminal
+        // accounting already happened, so a second insert is neither safe nor
+        // an idempotent expiry operation.
+        if !is_in_flight_lifecycle(input.observed_lifecycle) {
+            return Ok(ModelTurnLeaseMutationOutcome::Fenced);
+        }
         let mut tx = self.db.pool().begin().await?;
-        let lease: Option<(i64, String, String)> = sqlx::query_as("SELECT pool_id, reservation_id::text, lifecycle FROM model_turn_leases WHERE lease_id = $1::uuid AND generation = $2 AND request_id = $3 AND lifecycle = $4 AND heartbeat_at IS NOT DISTINCT FROM $5::timestamptz AND COALESCE(heartbeat_at, reserved_at) <= $6::timestamptz - interval '90 seconds' FOR UPDATE")
+        let lease: Option<(i64, String, String)> = sqlx::query_as("SELECT pool_id, reservation_id::text, lifecycle FROM model_turn_leases WHERE lease_id = $1::uuid AND generation = $2 AND request_id = $3 AND lifecycle = $4 AND lifecycle IN ('reserved', 'dispatching', 'active') AND heartbeat_at IS NOT DISTINCT FROM $5::timestamptz AND COALESCE(heartbeat_at, reserved_at) <= $6::timestamptz - interval '90 seconds' FOR UPDATE")
             .bind(&input.identity.lease_id).bind(input.identity.generation).bind(&input.identity.request_id).bind(lease_lifecycle_name(input.observed_lifecycle)).bind(&input.observed_heartbeat_at).bind(&input.boundary_at).fetch_optional(&mut *tx).await?;
         let Some((pool_id, reservation_id, lifecycle)) = lease else {
             return Ok(ModelTurnLeaseMutationOutcome::Fenced);
@@ -722,6 +729,15 @@ fn lease_lifecycle_name(lifecycle: ModelTurnLeaseLifecycle) -> &'static str {
         ModelTurnLeaseLifecycle::Reconciled => "reconciled",
         ModelTurnLeaseLifecycle::Expired => "expired",
     }
+}
+
+fn is_in_flight_lifecycle(lifecycle: ModelTurnLeaseLifecycle) -> bool {
+    matches!(
+        lifecycle,
+        ModelTurnLeaseLifecycle::Reserved
+            | ModelTurnLeaseLifecycle::Dispatching
+            | ModelTurnLeaseLifecycle::Active
+    )
 }
 
 fn terminal_outcome_name(outcome: ModelTurnLeaseTerminalOutcome) -> &'static str {

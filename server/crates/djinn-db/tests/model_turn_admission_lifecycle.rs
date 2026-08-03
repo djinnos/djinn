@@ -121,6 +121,13 @@ async fn target_two_expiry_fences_a_and_preserves_b_generation_and_accounting() 
     );
     assert_eq!(
         repository
+            .mark_dispatching(&lease_a.identity)
+            .await
+            .expect("late dispatch A"),
+        ModelTurnLeaseMutationOutcome::Fenced
+    );
+    assert_eq!(
+        repository
             .reconcile_lease(ModelTurnLeaseReconciliationInput {
                 identity: lease_a.identity.clone(),
                 outcome: ModelTurnLeaseTerminalOutcome::Completed,
@@ -130,6 +137,30 @@ async fn target_two_expiry_fences_a_and_preserves_b_generation_and_accounting() 
             .await
             .expect("late reconciliation A"),
         ModelTurnLeaseMutationOutcome::Fenced
+    );
+
+    let before_expiry_replay: (i64, i64, i64, String, i64, Option<String>) = sqlx::query_as("SELECT p.in_flight, request_bucket.available_units, request_bucket.quarantined_units, b.lifecycle, b.generation, b.heartbeat_at::text FROM model_turn_pools p JOIN model_turn_bucket_bindings request_bucket ON request_bucket.pool_id = p.id AND request_bucket.bucket_kind = 'request' JOIN model_turn_leases b ON b.lease_id = $2::uuid WHERE p.id = $1")
+        .bind(pool_id).bind(&lease_b.identity.lease_id).fetch_one(db.pool()).await.expect("snapshot before expiry replay");
+    assert_eq!(
+        repository
+            .expire_lease(ModelTurnLeaseExpiryInput {
+                identity: lease_a.identity.clone(),
+                observed_lifecycle: ModelTurnLeaseLifecycle::Expired,
+                observed_heartbeat_at: None,
+                boundary_at: sqlx::query_scalar("SELECT (now() + interval '182 seconds')::text")
+                    .fetch_one(db.pool())
+                    .await
+                    .expect("replay boundary"),
+            })
+            .await
+            .expect("replayed expiry A"),
+        ModelTurnLeaseMutationOutcome::Fenced
+    );
+    let after_expiry_replay: (i64, i64, i64, String, i64, Option<String>) = sqlx::query_as("SELECT p.in_flight, request_bucket.available_units, request_bucket.quarantined_units, b.lifecycle, b.generation, b.heartbeat_at::text FROM model_turn_pools p JOIN model_turn_bucket_bindings request_bucket ON request_bucket.pool_id = p.id AND request_bucket.bucket_kind = 'request' JOIN model_turn_leases b ON b.lease_id = $2::uuid WHERE p.id = $1")
+        .bind(pool_id).bind(&lease_b.identity.lease_id).fetch_one(db.pool()).await.expect("snapshot after expiry replay");
+    assert_eq!(
+        after_expiry_replay, before_expiry_replay,
+        "replayed expiry must not alter A accounting or B"
     );
 
     assert_eq!(
