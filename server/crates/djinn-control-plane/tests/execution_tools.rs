@@ -608,6 +608,10 @@ async fn concurrent_deferred_execution_kills_each_write_audit_evidence() {
         .expect("slot zero compaction section")
         .clone();
     let guard = compaction.guard();
+    assert!(
+        compaction.is_compacting(),
+        "fixture must hold real slot compaction before either MCP call starts"
+    );
 
     let first = harness.call_kill_tool(&seeded.task_id);
     let second = harness.call_kill_tool(&seeded.task_id);
@@ -615,7 +619,12 @@ async fn concurrent_deferred_execution_kills_each_write_audit_evidence() {
     tokio::select! {
         response = &mut first => panic!("first outward kill replied before Killed: {response:?}"),
         response = &mut second => panic!("second outward kill replied before Killed: {response:?}"),
-        _ = tokio::time::sleep(Duration::from_millis(100)) => {}
+        // Both calls resolve through the real repository before reaching the
+        // actor. Loaded CI shards can take longer than 100ms to do that; keep
+        // polling both futures long enough to ensure this remains a two-waiter
+        // deferred fixture rather than accidentally releasing into the
+        // immediate path.
+        _ = tokio::time::sleep(Duration::from_secs(2)) => {}
     }
     assert_eq!(
         LivenessRepository::new(harness.app_state.db.clone())
@@ -634,7 +643,10 @@ async fn concurrent_deferred_execution_kills_each_write_audit_evidence() {
         first, second,
         "all attached waiters receive equivalent snapshots"
     );
-    assert_eq!(first["ok"], true);
+    assert_eq!(
+        first["ok"], true,
+        "released deferred reconciliation must succeed: {first}"
+    );
     assert_eq!(first["kind"], "terminated");
     assert_eq!(first["task_id"], seeded.task_id);
     assert_eq!(first["observations"]["initial_compacting"], true);
