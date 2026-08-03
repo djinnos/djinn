@@ -2,7 +2,7 @@
 
 use djinn_db::Database;
 
-async fn seed(db: &Database) -> (String, String, String) {
+async fn seed(db: &Database) -> (String, String, String, String) {
     let project_id = uuid::Uuid::now_v7().to_string();
     sqlx::query(
         "INSERT INTO projects (id, name, github_owner, github_repo) VALUES ($1, $2, 'djinnos', $3)",
@@ -14,14 +14,26 @@ async fn seed(db: &Database) -> (String, String, String) {
     .await
     .unwrap();
 
+    let creator_id = uuid::Uuid::now_v7().to_string();
+    let github_id = (uuid::Uuid::now_v7().as_u128() & i64::MAX as u128) as i64;
+    sqlx::query("INSERT INTO users (id, github_id, github_login) VALUES ($1, $2, $3)")
+        .bind(&creator_id)
+        .bind(github_id)
+        .bind(format!("typed-evidence-{creator_id}"))
+        .execute(db.pool())
+        .await
+        .unwrap();
+
     let task_id = uuid::Uuid::now_v7().to_string();
     sqlx::query(
-        "INSERT INTO tasks (id, project_id, short_id, title, description, design, labels, acceptance_criteria, memory_refs) \
-         VALUES ($1, $2, $3, 'typed evidence', '', '', '[]'::jsonb, '[]'::jsonb, '[]'::jsonb)",
+        "INSERT INTO tasks \
+         (id, project_id, short_id, title, description, design, labels, acceptance_criteria, memory_refs, created_by_user_id) \
+         VALUES ($1, $2, $3, 'typed evidence', '', '', '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, $4)",
     )
     .bind(&task_id)
     .bind(&project_id)
     .bind(task_id.replace('-', ""))
+    .bind(&creator_id)
     .execute(db.pool())
     .await
     .unwrap();
@@ -36,7 +48,7 @@ async fn seed(db: &Database) -> (String, String, String) {
     .execute(db.pool())
     .await
     .unwrap();
-    (proposal_id, task_id, project_id)
+    (proposal_id, task_id, project_id, creator_id)
 }
 
 async fn insert_finding(
@@ -65,7 +77,7 @@ async fn insert_finding(
 async fn typed_evidence_schema_retains_legacy_columns_and_enforces_identities() {
     let db = Database::open_in_memory().unwrap();
     db.ensure_initialized().await.unwrap();
-    let (proposal_id, task_id, project_id) = seed(&db).await;
+    let (proposal_id, task_id, project_id, creator_id) = seed(&db).await;
 
     let legacy_columns: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM information_schema.columns WHERE table_name = 'proposals' \
@@ -110,12 +122,14 @@ async fn typed_evidence_schema_retains_legacy_columns_and_enforces_identities() 
 
     let second_task = uuid::Uuid::now_v7().to_string();
     sqlx::query(
-        "INSERT INTO tasks (id, project_id, short_id, title, description, design, labels, acceptance_criteria, memory_refs) \
-         VALUES ($1, $2, $3, 'second', '', '', '[]'::jsonb, '[]'::jsonb, '[]'::jsonb)",
+        "INSERT INTO tasks \
+         (id, project_id, short_id, title, description, design, labels, acceptance_criteria, memory_refs, created_by_user_id) \
+         VALUES ($1, $2, $3, 'second', '', '', '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, $4)",
     )
     .bind(&second_task)
     .bind(&project_id)
     .bind(second_task.replace('-', ""))
+    .bind(&creator_id)
     .execute(db.pool())
     .await
     .unwrap();
