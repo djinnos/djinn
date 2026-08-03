@@ -21,3 +21,10 @@ test('called-job timeout diagnostic is caller-qualified', () => {
   const result = spawnSync(process.execPath, [checker, '--root', root, '--manifest', 'manifest.json'], { encoding: 'utf8' });
   assert.match(result.stderr, /root\.yml#quality-gate=>\.github\/workflows\/called\.yml#test/);
 });
+test('parser diagnostics include one-based source locations', () => {
+  for (const name of ['duplicate-job', 'duplicate-job-field', 'malformed-yaml']) {
+    const result = spawnSync(process.execPath, [checker, '--root', join(fixtures, name), '--manifest', 'manifest.json'], { encoding: 'utf8' });
+    assert.equal(result.status, 1, result.stderr);
+    assert.match(result.stderr, /\.github\/workflows\/root\.yml:\d+:\d+: (?:DUPLICATE_KEY|YAML_SYNTAX):/);
+  }
+});

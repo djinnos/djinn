@@ -6,8 +6,18 @@ import { parseDocument, isAlias, isMap, isScalar, isSeq } from 'yaml';
 
 const JOB = /^[A-Za-z_][A-Za-z0-9_-]*$/;
 const LOCAL = /^\.\/\.github\/workflows\/[A-Za-z0-9_.-]+\.(?:yml|yaml)$/;
+const WORKFLOW_PATH = /^\.github\/workflows\/[A-Za-z0-9_.-]+\.(?:yml|yaml)$/;
 const errors = [];
-function fail(where, code, message, node) { errors.push({ where, code, message, pos: node?.range?.[0] ?? -1 }); }
+function position(source, value) {
+  const offset = Array.isArray(value) ? value[0] : value;
+  if (!Number.isInteger(offset) || offset < 0) return null;
+  const before = source.slice(0, offset);
+  return { line: before.split('\n').length, column: offset - before.lastIndexOf('\n') };
+}
+function fail(where, code, message, node) {
+  const loc = node?.line && node?.column ? node : null;
+  errors.push({ where, code, message, line: loc?.line, column: loc?.column });
+}
 function text(node) { return isScalar(node) && !node.tag && typeof node.value === 'string' ? node.value : null; }
 function field(map, name) { return isMap(map) ? map.items.find((item) => text(item.key) === name)?.value : undefined; }
 function mapField(map, name) { const node = field(map, name); return isMap(node) ? node : null; }
@@ -24,7 +34,10 @@ function parseWorkflow(root, path) {
   let source;
   try { source = readFileSync(filename, 'utf8'); } catch { fail(path, 'UNRESOLVED_WORKFLOW', 'workflow file cannot be read'); return null; }
   const document = parseDocument(source, { strict: true, uniqueKeys: true, prettyErrors: false, merge: false, schema: 'core' });
-  for (const error of document.errors) fail(path, error.code === 'DUPLICATE_KEY' ? 'DUPLICATE_KEY' : 'YAML_SYNTAX', 'invalid YAML document', { range: error.pos });
+  for (const error of document.errors) {
+    const loc = position(source, error.pos);
+    fail(path, error.code === 'DUPLICATE_KEY' ? 'DUPLICATE_KEY' : 'YAML_SYNTAX', 'invalid YAML document', loc);
+  }
   if (document.errors.length) return null;
   if (!isMap(document.contents) || document.contents.anchor || document.contents.tag) { fail(path, 'YAML_SYNTAX', 'workflow root must be an untagged mapping', document.contents); return null; }
   return { path, root: document.contents };
@@ -56,6 +69,14 @@ function readManifest(root, path) {
   return valid ? manifest : null;
 }
 function validTimeout(node) { return isScalar(node) && !node.tag && typeof node.value === 'number' && Number.isInteger(node.value) && Number.isFinite(node.value) && node.value >= 1 && node.value <= 120 && /^\d+$/.test(String(node.source ?? '')); }
+function canonicalIdentity(value, allowCalls) {
+  const parts = value.split('=>');
+  if ((!allowCalls && parts.length !== 1) || parts.some((part) => {
+    const marker = part.lastIndexOf('#');
+    return marker < 1 || part.indexOf('#') !== marker || !WORKFLOW_PATH.test(part.slice(0, marker)) || !JOB.test(part.slice(marker + 1));
+  })) return false;
+  return true;
+}
 function validateJob(wf, node, identity, root, cache, callFiles) {
   const needsNode = field(node, 'needs'); let needs = [];
   if (needsNode !== undefined) {
@@ -105,9 +126,10 @@ function main() {
     if (node) { const result = validateJob(wf, node, identity, root, cache, callFiles); for (const need of [...result.needs].sort()) if (wf.jobs.has(need)) visit(wf, need, prefix, callFiles); for (const call of result.calls) visit(call.wf, call.id, `${identity}=>`, call.callFiles); }
     active.pop();
   }
-  for (const rootId of manifest.terminalRoots) { const marker = rootId.lastIndexOf('#'); const path = rootId.slice(0, marker); const id = rootId.slice(marker + 1); if (marker < 1 || !JOB.test(id) || !path.startsWith('.github/workflows/')) { fail(rootId, 'MANIFEST_SCHEMA', 'terminal root must be a canonical identity'); continue; } const wf = loadWorkflow(root, path, cache); if (!wf || !wf.jobs.has(id)) fail(rootId, 'UNRESOLVED_WORKFLOW', 'terminal root does not resolve'); else visit(wf, id, '', [path]); }
+  for (const identity of [...manifest.terminalRoots, ...manifest.covered]) if (!canonicalIdentity(identity, true)) fail(identity, 'MANIFEST_SCHEMA', 'identity must use canonical workflow paths and job IDs');
+  for (const rootId of manifest.terminalRoots) { const marker = rootId.lastIndexOf('#'); const path = rootId.slice(0, marker); const id = rootId.slice(marker + 1); if (!canonicalIdentity(rootId, false)) { fail(rootId, 'MANIFEST_SCHEMA', 'terminal root must be a canonical identity'); continue; } const wf = loadWorkflow(root, path, cache); if (!wf || !wf.jobs.has(id)) fail(rootId, 'UNRESOLVED_WORKFLOW', 'terminal root does not resolve'); else visit(wf, id, '', [path]); }
   for (const identity of [...seen].filter((identity) => !manifest.covered.includes(identity)).sort()) fail(identity, 'MISSING_COVERED', 'missing covered identity');
   for (const identity of manifest.covered.filter((identity) => !seen.has(identity)).sort()) fail(identity, 'EXTRA_COVERED', 'extra covered identity'); finish();
 }
-function finish() { if (!errors.length) console.log('ci-timeouts: OK'); else { errors.sort((left, right) => left.where.localeCompare(right.where) || left.code.localeCompare(right.code) || left.message.localeCompare(right.message)); for (const error of errors) console.error(`ci-timeouts: ${error.where}: ${error.code}: ${error.message}`); process.exitCode = 1; } }
+function finish() { if (!errors.length) console.log('ci-timeouts: OK'); else { errors.sort((left, right) => left.where.localeCompare(right.where) || left.code.localeCompare(right.code) || left.message.localeCompare(right.message)); for (const error of errors) console.error(`ci-timeouts: ${error.where}${error.line ? `:${error.line}:${error.column}` : ''}: ${error.code}: ${error.message}`); process.exitCode = 1; } }
 main();
