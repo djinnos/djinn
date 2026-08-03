@@ -2,6 +2,7 @@
 {{- $server := .Values.server -}}
 {{- $capacity := .Values.kueue.capacity -}}
 {{- $dedicatedNodePool := and (eq $capacity.source "nodepool-limits") $capacity.nodePool.dedicated (ne $capacity.nodePool.name "") -}}
+{{- $vectorV1 := eq $capacity.contract "vector-v1" -}}
 {{- $taskNodeSelector := deepCopy .Values.resources.taskrun.nodeSelector -}}
 {{- $taskTolerations := deepCopy .Values.resources.taskrun.tolerations -}}
 {{- if eq $capacity.source "nodepool-limits" -}}
@@ -10,6 +11,10 @@
   {{- if and (hasKey $taskNodeSelector "karpenter.sh/nodepool") (ne (index $taskNodeSelector "karpenter.sh/nodepool") $capacity.nodePool.name) -}}{{- fail "kueue.capacity.nodePool.name must match resources.taskrun.nodeSelector.karpenter.sh/nodepool" -}}{{- end -}}
   {{- $_ := set $taskNodeSelector "karpenter.sh/nodepool" $capacity.nodePool.name -}}
   {{- $taskTolerations = append $taskTolerations (dict "key" "djinn.io/task-pool" "operator" "Equal" "value" $capacity.nodePool.name "effect" "NoSchedule") -}}
+{{- end -}}
+{{- if $vectorV1 -}}
+  {{- if not $capacity.enabled -}}{{- fail "kueue.capacity.contract=vector-v1 requires kueue.capacity.enabled=true" -}}{{- end -}}
+  {{- if and (not $dedicatedNodePool) (or (empty $capacity.flavorSelector.key) (empty $capacity.flavorSelector.value)) -}}{{- fail "kueue.capacity.contract=vector-v1 requires flavorSelector key and value for static or node-sum ownership" -}}{{- end -}}
 {{- end -}}
 {{- $migrationOperatorSecret := default "" .Values.migration.designatedOperatorSecret -}}
 {{- if .Release.IsInstall -}}
@@ -547,6 +552,10 @@ spec:
               value: {{ .Values.cgroupLauncher.mode | quote }}
             - name: DJINN_CAPACITY_ENABLED
               value: {{ .Values.kueue.capacity.enabled | quote }}
+            {{- if $vectorV1 }}
+            - name: DJINN_CAPACITY_CONTRACT
+              value: "vector-v1"
+            {{- end }}
             - name: DJINN_CAPACITY_QUEUE_NAME
               value: {{ default (printf "%s-kueue" (include "djinn.fullname" .) | trunc 63 | trimSuffix "-") $capacity.queueName | quote }}
             - name: DJINN_CAPACITY_SOURCE
@@ -570,6 +579,9 @@ spec:
               value: "true"
             - name: DJINN_CAPACITY_FLAVOR_SELECTOR
               value: {{ dict "karpenter.sh/nodepool" $capacity.nodePool.name | toJson | quote }}
+            {{- else if $vectorV1 }}
+            - name: DJINN_CAPACITY_FLAVOR_SELECTOR
+              value: {{ dict $capacity.flavorSelector.key $capacity.flavorSelector.value | toJson | quote }}
             {{- end }}
             - name: DJINN_CAPACITY_NODE_SELECTOR_KEY
               value: {{ .Values.kueue.capacity.nodeSelector.key | quote }}

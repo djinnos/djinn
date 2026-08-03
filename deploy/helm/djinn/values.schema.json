@@ -59,12 +59,19 @@
         "capacity": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["enabled", "source", "queueName", "nodeSelector", "headroom", "staticFallback", "nodePool"],
+          "required": ["enabled", "contract", "source", "queueName", "nodeSelector", "flavorSelector", "headroom", "staticFallback", "nodePool"],
           "properties": {
             "enabled": { "type": "boolean" },
+            "contract": { "type": "string", "enum": ["", "vector-v1"] },
             "source": { "type": "string", "enum": ["node-sum", "nodepool-limits", "static"] },
             "queueName": { "type": "string" },
             "nodeSelector": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["key", "value"],
+              "properties": { "key": { "type": "string" }, "value": { "type": "string" } }
+            },
+            "flavorSelector": {
               "type": "object",
               "additionalProperties": false,
               "required": ["key", "value"],
@@ -192,6 +199,15 @@
   "required": ["kueue"],
   "allOf": [
     {"if":{"properties":{"monitoring":{"properties":{"enabled":{"const":true}},"required":["enabled"]}}},"then":{"properties":{"monitoring":{"properties":{"alertmanager":{"properties":{"webhookSecret":{"properties":{"name":{"minLength":1}},"required":["name","key"]}},"required":["webhookSecret"]}},"required":["alertmanager"]}}}},
+    {
+      "if": {
+        "properties": {"kueue":{"properties":{"capacity":{"properties":{"contract":{"const":"vector-v1"}},"required":["contract"]}},"required":["capacity"]}},
+        "required": ["kueue"]
+      },
+      "then": {
+        "properties": {"kueue":{"properties":{"capacity":{"properties":{"enabled":{"const":true},"staticFallback":{"required":["cpu","memory","pods"]}},"required":["enabled","source","staticFallback","nodePool","flavorSelector"]}},"required":["capacity"]}}
+      }
+    },
     {
       "if": {
         "properties": {
