@@ -86,7 +86,11 @@ namespaces labelled `djinn.io/kueue-managed=true`, so Kueue captures nothing
 until a namespace carries that label. At stock `djinn` values it does:
 `kueue.armed: true` labels the `djinn` Namespace and renders every task-run,
 warm and SCIP Job `suspend: true`, so Workloads **are** created and Kueue's
-`buildPods` quota is what bounds build concurrency. The release is inert only
+complete CPU/memory/Pods vector governs admission. Stock static values retain
+`buildPods` as a finite fallback bound. With
+`kueue.capacity.contract: vector-v1`, CPU and memory fit each Workload's actual
+requests while Pods is the eligible Nodes' real post-reserve Kubernetes ceiling,
+not a build-shaped concurrency number. The release is inert only
 for a deployment that explicitly sets `kueue.armed: false`. Read
 [deploy/kueue/README.md](../../deploy/kueue/README.md) — in particular the
 residual-risk section — before changing where that label goes: with the
