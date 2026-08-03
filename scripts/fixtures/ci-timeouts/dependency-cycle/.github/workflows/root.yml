@@ -1,0 +1,4 @@
+jobs:
+  a: {runs-on: x, timeout-minutes: 1, needs: b, steps: [{run: x}]}
+  b: {runs-on: x, timeout-minutes: 1, needs: a, steps: [{run: x}]}
+  quality-gate: {runs-on: x, timeout-minutes: 1, needs: a, steps: [{run: x}]}

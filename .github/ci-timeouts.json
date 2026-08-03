@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "terminalRoots": [
+    ".github/workflows/quality-gate.yml#quality-gate"
+  ],
+  "covered": [
+    ".github/workflows/quality-gate.yml#ci-contracts",
+    ".github/workflows/quality-gate.yml#cutover-preflight",
+    ".github/workflows/quality-gate.yml#deploy-render-gate",
+    ".github/workflows/quality-gate.yml#local-dev-contracts",
+    ".github/workflows/quality-gate.yml#memory-eval",
+    ".github/workflows/quality-gate.yml#nextest-plan",
+    ".github/workflows/quality-gate.yml#nextest-timing-publish",
+    ".github/workflows/quality-gate.yml#preflight",
+    ".github/workflows/quality-gate.yml#qa-smoke",
+    ".github/workflows/quality-gate.yml#quality-gate",
+    ".github/workflows/quality-gate.yml#server-aarch64-check",
+    ".github/workflows/quality-gate.yml#server-clippy",
+    ".github/workflows/quality-gate.yml#server-guards",
+    ".github/workflows/quality-gate.yml#server-sqlx-freshness",
+    ".github/workflows/quality-gate.yml#server-test",
+    ".github/workflows/quality-gate.yml#ui-frontend"
+  ]
+}
