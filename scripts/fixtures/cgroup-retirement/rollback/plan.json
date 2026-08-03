@@ -1,0 +1,38 @@
+{
+  "schema": "djinn-cgroup-retirement-rollback-rehearsal/v1",
+  "ordered_phases": ["RETIRE_BASE", "RETIRE_HEAD"],
+  "assets": [
+    {
+      "path": "server/crates/djinn-agent/src/process_broker.rs",
+      "phase": "RETIRE_BASE",
+      "role": "source",
+      "content": "brokered launcher candidate source\n",
+      "forced_pair": "broker-lift"
+    },
+    {
+      "path": "server/crates/djinn-agent/src/process/tests/process_lease_broker_lift_tests.rs",
+      "phase": "RETIRE_BASE",
+      "role": "test",
+      "content": "brokered launcher candidate test\n",
+      "forced_pair": "broker-lift"
+    },
+    {
+      "path": "deploy/node/k3s/containerd/config.toml.tmpl",
+      "phase": "RETIRE_HEAD",
+      "role": "node",
+      "content": "[plugins.deterministic-node]\nlauncher = true\n"
+    },
+    {
+      "path": "server/crates/djinn-k8s/src/launcher.rs",
+      "phase": "preserved",
+      "role": "launcher",
+      "content": "#!/bin/sh\n# Deterministic restored-launcher fixture: emit the cgroup v2 leaf record.\nprintf '%s\n' '400000 100000'\n"
+    }
+  ],
+  "launcher_leaf": {
+    "launcher_path": "server/crates/djinn-k8s/src/launcher.rs",
+    "source_sha256": "b2aa7af2d4ece1944519b97e115037dcd7e67248fa84446f76950b88e0ecce8e",
+    "cpu_max": "400000 100000",
+    "recorded_by": "deterministic-fixture-v1"
+  }
+}

@@ -265,7 +265,7 @@
     "scripts/fixtures/resize-cutover-retention/**"
   ],
   "guard_work": [
-    "scripts/{check-cgroup-retirement-gate.sh,cgroup-retirement-gate.mjs,cgroup-retirement-assets.json,test-cgroup-retirement-gate.sh}",
-    "scripts/fixtures/cgroup-retirement/gate/**"
+    "scripts/{check-cgroup-retirement-gate.sh,cgroup-retirement-gate.mjs,cgroup-retirement-assets.json,test-cgroup-retirement-gate.sh,rehearse-cgroup-retirement-rollback.sh,rehearse-cgroup-retirement-rollback.mjs,test-rehearse-cgroup-retirement-rollback.sh}",
+    "scripts/fixtures/cgroup-retirement/{gate/**,rollback/**}"
   ]
 }
