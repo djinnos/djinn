@@ -144,9 +144,12 @@ pub struct ScipJobObservation {
     /// dispatcher itself uses ([`crate::graph_warmer::WarmJobLister`]), so the
     /// two populations cannot drift apart in what "in flight" means.
     pub warm_in_flight: bool,
-    /// Revision of the most recently *succeeded* SCIP Job, read off its
-    /// [`ANNOTATION_SCIP_REVISION`] annotation. `None` when no succeeded Job is
-    /// retained — first run, or the ledger aged out.
+    /// Revision of the most recently *verified indexed* SCIP Job, read off its
+    /// [`ANNOTATION_SCIP_REVISION`] annotation. The standalone worker's
+    /// completion contract makes Job success an explicit `Indexed` proof;
+    /// cold-base and contention skips exit nonzero and cannot advance this
+    /// ledger. `None` when no verified Job is retained — first run, or the
+    /// ledger aged out.
     pub last_indexed_revision: Option<String>,
     /// Age of the most recent SCIP Job of any outcome, from its
     /// `creationTimestamp`. `None` when none is retained.
@@ -677,9 +680,12 @@ pub fn observe_from_jobs(jobs: &[Job], now: DateTime<Utc>) -> ScipJobObservation
         if !succeeded {
             continue;
         }
-        // Only a SUCCEEDED Job advances the ledger. A failed index leaves the
-        // last known-good revision in place, so the next tick still sees the
-        // head as advanced and retries.
+        // Only a SUCCEEDED Job advances the ledger. The standalone worker exits
+        // zero only for `ScipIndexOutcome::Indexed`; cold-base and contention
+        // skips intentionally fail the Job. Thus success is an explicit proof
+        // of indexing rather than a generic process-completed signal. Any
+        // non-success leaves the last known-good revision in place so the next
+        // tick still sees the head as advanced and retries.
         let Some(revision) = job
             .metadata
             .annotations
@@ -1298,6 +1304,56 @@ mod tests {
         );
         assert!(running.in_flight);
         assert_eq!(running.last_indexed_revision, None);
+    }
+
+    /// The worker maps both no-artifact outcomes to a failed Job, while it maps
+    /// `Indexed` to success. The retained Job projection must preserve that
+    /// completion contract: skips consume cadence like every dispatch, but do
+    /// not claim the exact head is covered and therefore remain retryable.
+    #[test]
+    fn skipped_recovery_does_not_advance_revision() {
+        for skipped in ["cold cargo base", "concurrent index claim"] {
+            let mut observation = observe_from_jobs(
+                &[
+                    scip_job(OLD, true, false, 40_000),
+                    scip_job(HEAD, false, true, 20_000),
+                ],
+                now(),
+            );
+            observation.warm_outcome = Some(recovery_outcome());
+
+            assert_eq!(
+                observation.last_indexed_revision.as_deref(),
+                Some(OLD),
+                "a {skipped} skip must not claim the head was indexed"
+            );
+            assert_eq!(
+                decide(
+                    Some(HEAD),
+                    QUIET,
+                    Some(&observation),
+                    THREE_HOURS,
+                    QUIESCENCE
+                ),
+                ScipIndexDecision::Dispatch {
+                    revision: HEAD.to_string()
+                },
+                "a {skipped} skip remains eligible after the cadence floor"
+            );
+        }
+
+        let indexed = observe_from_jobs(
+            &[
+                scip_job(OLD, true, false, 40_000),
+                scip_job(HEAD, true, false, 20_000),
+            ],
+            now(),
+        );
+        assert_eq!(
+            indexed.last_indexed_revision.as_deref(),
+            Some(HEAD),
+            "the Indexed completion complement closes the exact-head gate"
+        );
     }
 
     #[test]
