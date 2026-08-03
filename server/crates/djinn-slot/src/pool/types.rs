@@ -267,6 +267,14 @@ pub enum PoolMessage {
         token_count: u64,
         turn_count: u64,
     },
+    /// Test-only barrier that resolves after one task-scoped continuation owns
+    /// at least `expected_waiters` real ask responders.
+    #[cfg(any(test, feature = "test-support"))]
+    TestWaitForPendingReconciliationWaiters {
+        task_id: String,
+        expected_waiters: usize,
+        respond_to: Reply<usize>,
+    },
 }
 
 /// Format the current unix-seconds timestamp (read through the shared clock

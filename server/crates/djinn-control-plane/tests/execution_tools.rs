@@ -587,11 +587,10 @@ async fn execution_kill_task_double_kill_is_harmless_and_leaves_capacity_availab
 /// single Killed completion; each invocation must then append its own audit row.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn concurrent_deferred_execution_kills_each_write_audit_evidence() {
-    let compactions: Arc<Mutex<HashMap<usize, djinn_slot::reply_loop::CompactionCriticalSection>>> =
-        Arc::new(Mutex::new(HashMap::new()));
+    let controlled_slots = Arc::new(Mutex::new(HashMap::new()));
     let harness = RealPoolKillHarness::new_with_slot_factory({
-        let compactions = compactions.clone();
-        move |signal_tx| compaction_capturing_slot_factory(signal_tx, compactions)
+        let controlled_slots = controlled_slots.clone();
+        move |signal_tx| compaction_capturing_slot_factory(signal_tx, controlled_slots)
     })
     .await;
     let seeded = harness
@@ -601,11 +600,11 @@ async fn concurrent_deferred_execution_kills_each_write_audit_evidence() {
     harness.dispatch(&seeded.task_id).await;
     harness.wait_for_runner_started(&seeded.task_id).await;
     harness.wait_for_pool_session(&seeded.task_id).await;
-    let compaction = compactions
+    let (compaction, controlled_slot) = controlled_slots
         .lock()
-        .expect("compaction map")
+        .expect("controlled slot map")
         .get(&0)
-        .expect("slot zero compaction section")
+        .expect("slot zero control")
         .clone();
     let guard = compaction.guard();
     assert!(
@@ -615,17 +614,25 @@ async fn concurrent_deferred_execution_kills_each_write_audit_evidence() {
 
     let first = harness.call_kill_tool(&seeded.task_id);
     let second = harness.call_kill_tool(&seeded.task_id);
-    tokio::pin!(first, second);
+    let canonical_pool = harness
+        .pool
+        .clone()
+        .try_into_djinn_slot()
+        .expect("canonical pool handle");
+    let attached = canonical_pool.test_wait_for_pending_reconciliation_waiters(&seeded.task_id, 2);
+    tokio::pin!(first, second, attached);
     tokio::select! {
         response = &mut first => panic!("first outward kill replied before Killed: {response:?}"),
         response = &mut second => panic!("second outward kill replied before Killed: {response:?}"),
-        // Both calls resolve through the real repository before reaching the
-        // actor. Loaded CI shards can take longer than 100ms to do that; keep
-        // polling both futures long enough to ensure this remains a two-waiter
-        // deferred fixture rather than accidentally releasing into the
-        // immediate path.
-        _ = tokio::time::sleep(Duration::from_secs(2)) => {}
+        waiter_count = &mut attached => assert_eq!(waiter_count.expect("waiter barrier"), 2),
     }
+    assert!(
+        controlled_slot
+            .test_deferred_kill_parked()
+            .await
+            .expect("deferred-kill barrier"),
+        "the production kill must be parked before compaction release"
+    );
     assert_eq!(
         LivenessRepository::new(harness.app_state.db.clone())
             .count_evidence_for_task(&seeded.task_id)
@@ -636,6 +643,10 @@ async fn concurrent_deferred_execution_kills_each_write_audit_evidence() {
     );
 
     guard.release();
+    controlled_slot
+        .test_release_deferred_kill()
+        .await
+        .expect("release exactly one parked kill");
     let (first, second) = tokio::join!(first, second);
     let first = first.expect("first deferred outward kill");
     let second = second.expect("second deferred outward kill");
@@ -1185,15 +1196,31 @@ impl CompletionRaceControl {
 
 fn compaction_capturing_slot_factory(
     signal_tx: mpsc::UnboundedSender<RunnerSignal>,
-    compactions: Arc<Mutex<HashMap<usize, djinn_slot::reply_loop::CompactionCriticalSection>>>,
+    controlled_slots: Arc<
+        Mutex<
+            HashMap<
+                usize,
+                (
+                    djinn_slot::reply_loop::CompactionCriticalSection,
+                    djinn_slot::SlotHandle,
+                ),
+            >,
+        >,
+    >,
 ) -> SlotFactory {
     let factory = test_slot_factory(Duration::from_secs(3600), signal_tx);
     Arc::new(move |slot_id, model_id, event_tx, app_state, cancel| {
         let handle = factory(slot_id, model_id, event_tx, app_state, cancel);
-        compactions
+        controlled_slots
             .lock()
-            .expect("compaction map")
-            .insert(slot_id, handle.test_compaction_cs().clone());
+            .expect("controlled slot map")
+            .insert(
+                slot_id,
+                (
+                    handle.test_compaction_cs().clone(),
+                    handle.clone().into_djinn_slot(),
+                ),
+            );
         handle
     })
 }
