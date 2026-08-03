@@ -840,19 +840,21 @@ fn nodepool_observation(
         .filter(|name| !name.is_empty())
         .ok_or(ConservativeReason::NodePoolLimitsMissing)?;
     // CR metadata labels are deliberately ignored: only template labels reach Nodes.
-    let mut labels = pool
-        .data
-        .pointer("/spec/template/metadata/labels")
-        .and_then(Value::as_object)
-        .ok_or(ConservativeReason::NodePoolLimitsMissing)?
-        .iter()
-        .map(|(key, value)| {
-            value
-                .as_str()
-                .map(|value| (key.clone(), value.to_owned()))
-                .ok_or(ConservativeReason::NodePoolLimitsMalformed)
-        })
-        .collect::<Result<BTreeMap<_, _>, _>>()?;
+    let mut labels = match pool.data.pointer("/spec/template/metadata/labels") {
+        // A dedicated pool can be selected solely by its generated identity.
+        None => BTreeMap::new(),
+        Some(labels) => labels
+            .as_object()
+            .ok_or(ConservativeReason::NodePoolLimitsMalformed)?
+            .iter()
+            .map(|(key, value)| {
+                value
+                    .as_str()
+                    .map(|value| (key.clone(), value.to_owned()))
+                    .ok_or(ConservativeReason::NodePoolLimitsMalformed)
+            })
+            .collect::<Result<BTreeMap<_, _>, _>>()?,
+    };
     let limit = |resource: &str| {
         pool.data
             .pointer(&format!("/spec/limits/{resource}"))
@@ -981,6 +983,9 @@ pub async fn run_capacity_controller(
                     .filter(|pool| pool.metadata.name.as_deref() == Some(&config.nodepool_name))
                     .map(nodepool_observation)
                     .collect::<Result<Vec<_>, _>>()?;
+                if objects.is_empty() {
+                    return Err(ConservativeReason::NodePoolLimitsMissing);
+                }
                 let owned = queue
                     .flavors
                     .iter()
@@ -1969,6 +1974,195 @@ mod tests {
                 json!({"op":"test", "path":"/metadata/resourceVersion", "value":"42"})
             );
             assert_eq!(patch.as_array().unwrap().len(), 4);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn capacity_nodepool_source() {
+        use crate::runtime_fixture::{NodePoolFixture, capacity_controller_nodepool_cluster};
+
+        let pool: DynamicObject = serde_json::from_value(json!({
+            "apiVersion":"karpenter.sh/v1", "kind":"NodePool",
+            "metadata":{"name":"dedicated","labels":{"cohort":"wrong"}},
+            "spec":{"template":{"metadata":{"labels":{"cohort":"right"}}},"limits":{"cpu":"12","memory":"16Gi","pods":"42"}}
+        })).unwrap();
+        let observed = nodepool_observation(pool).unwrap();
+        assert_eq!(
+            observed.effective_labels.get("cohort"),
+            Some(&"right".into())
+        );
+        assert_eq!(
+            observed.effective_labels.get("karpenter.sh/nodepool"),
+            Some(&"dedicated".into())
+        );
+        assert_eq!(
+            observed.vector,
+            resources(12_000, 16 * 1024 * 1024 * 1024, 42)
+        );
+        let identity_only: DynamicObject = serde_json::from_value(json!({"apiVersion":"karpenter.sh/v1","kind":"NodePool","metadata":{"name":"identity"},"spec":{"template":{"metadata":{}},"limits":{"cpu":"1","memory":"1","pods":"1"}}})).unwrap();
+        assert_eq!(
+            nodepool_observation(identity_only)
+                .unwrap()
+                .effective_labels
+                .get("karpenter.sh/nodepool"),
+            Some(&"identity".into())
+        );
+        for (limits, reason) in [
+            (json!({}), ConservativeReason::NodePoolLimitsMissing),
+            (
+                json!({"cpu":"bad","memory":"1","pods":"1"}),
+                ConservativeReason::NodePoolLimitsMalformed,
+            ),
+            (
+                json!({"cpu":"1","memory":"1"}),
+                ConservativeReason::NodePoolLimitsMissing,
+            ),
+            (
+                json!({"cpu":"-1","memory":"1","pods":"1"}),
+                ConservativeReason::NodePoolLimitsMalformed,
+            ),
+            (
+                json!({"cpu":"9223372036854775807","memory":"1","pods":"1"}),
+                ConservativeReason::NodePoolLimitsMalformed,
+            ),
+        ] {
+            let pool: DynamicObject = serde_json::from_value(json!({"apiVersion":"karpenter.sh/v1","kind":"NodePool","metadata":{"name":"dedicated"},"spec":{"template":{"metadata":{}},"limits":limits}})).unwrap();
+            assert_eq!(nodepool_observation(pool), Err(reason));
+        }
+        for fixture in [
+            NodePoolFixture::Valid,
+            NodePoolFixture::Missing,
+            NodePoolFixture::Malformed,
+            NodePoolFixture::Incomplete,
+            NodePoolFixture::Negative,
+            NodePoolFixture::Overflow,
+            NodePoolFixture::NotFound,
+            NodePoolFixture::Forbidden,
+        ] {
+            let (client, recorder) = capacity_controller_nodepool_cluster("default", fixture);
+            let config = CapacityControllerConfig {
+                source: CapacitySource::NodePoolLimits,
+                queue_name: "djinn-kueue".into(),
+                node_selector_key: "unused".into(),
+                node_selector_value: "unused".into(),
+                idle_cost: CpuMillicores::new(1).unwrap(),
+                compile_cost: CpuMillicores::new(1).unwrap(),
+                headroom: ResourceVector::ZERO,
+                build_job: controller_build_job(),
+                fail_safe: safe(),
+                expected_protected_pods: 0,
+                static_fallback: resources(9_000, 8_192, 9),
+                flavor_selector: Some(BTreeMap::from([("cohort".into(), "right".into())])),
+                flavor_selectors: BTreeMap::new(),
+                nodepool_name: "dedicated".into(),
+                nodepool_dedicated: true,
+            };
+            let (tx, _) = watch::channel(CapacityVector {
+                binding: BindingQuota::Pods(0),
+                compile_slots: 0,
+            });
+            let task = tokio::spawn(run_capacity_controller(
+                client,
+                config,
+                Arc::new(|| true),
+                tx,
+            ));
+            for _ in 0..4 {
+                tokio::time::advance(Duration::from_secs(30)).await;
+                tokio::task::yield_now().await;
+                if !recorder.mutations().is_empty() {
+                    break;
+                }
+            }
+            task.abort();
+            let paths: Vec<_> = recorder
+                .all()
+                .iter()
+                .map(|r| (r.method.as_str(), r.path.as_str()))
+                .collect();
+            assert_eq!(
+                paths[0],
+                (
+                    "GET",
+                    "/apis/kueue.x-k8s.io/v1beta1/clusterqueues/djinn-kueue"
+                )
+            );
+            assert_eq!(paths[1], ("GET", "/apis/karpenter.sh/v1/nodepools"));
+            assert!(
+                !paths
+                    .iter()
+                    .any(|(_, path)| *path == "/api/v1/nodes" || *path == "/api/v1/pods")
+            );
+            let patch: Value = serde_json::from_str(&recorder.mutations()[0].body).unwrap();
+            let values: Vec<_> = patch
+                .as_array()
+                .unwrap()
+                .iter()
+                .skip(1)
+                .map(|op| op["value"].as_str().unwrap())
+                .collect();
+            if matches!(fixture, NodePoolFixture::Valid) {
+                assert_eq!(values, ["12000m", "17179869184", "42"]);
+            } else {
+                assert_eq!(values, ["9000m", "8192", "9"]);
+            }
+            assert_eq!(
+                patch[0],
+                json!({"op":"test","path":"/metadata/resourceVersion","value":"nodepool-rv"})
+            );
+        }
+        // An unasserted dedication (including an empty configured identity) must
+        // fence before the Karpenter request while retaining the complete vector.
+        for (dedicated, name) in [(false, "dedicated"), (true, "")] {
+            let (client, recorder) =
+                capacity_controller_nodepool_cluster("default", NodePoolFixture::Valid);
+            let config = CapacityControllerConfig {
+                source: CapacitySource::NodePoolLimits,
+                queue_name: "djinn-kueue".into(),
+                node_selector_key: "unused".into(),
+                node_selector_value: "unused".into(),
+                idle_cost: CpuMillicores::new(1).unwrap(),
+                compile_cost: CpuMillicores::new(1).unwrap(),
+                headroom: ResourceVector::ZERO,
+                build_job: controller_build_job(),
+                fail_safe: safe(),
+                expected_protected_pods: 0,
+                static_fallback: resources(9_000, 8_192, 9),
+                flavor_selector: Some(BTreeMap::from([("cohort".into(), "right".into())])),
+                flavor_selectors: BTreeMap::new(),
+                nodepool_name: name.into(),
+                nodepool_dedicated: dedicated,
+            };
+            let (tx, _) = watch::channel(CapacityVector {
+                binding: BindingQuota::Pods(0),
+                compile_slots: 0,
+            });
+            let task = tokio::spawn(run_capacity_controller(
+                client,
+                config,
+                Arc::new(|| true),
+                tx,
+            ));
+            for _ in 0..4 {
+                tokio::time::advance(Duration::from_secs(30)).await;
+                tokio::task::yield_now().await;
+                if !recorder.mutations().is_empty() {
+                    break;
+                }
+            }
+            task.abort();
+            assert!(
+                !recorder
+                    .all()
+                    .iter()
+                    .any(|request| request.path.contains("karpenter"))
+            );
+            let patch: Value = serde_json::from_str(&recorder.mutations()[0].body).unwrap();
+            assert_eq!(patch.as_array().unwrap().len(), 4);
+            assert_eq!(
+                patch[0],
+                json!({"op":"test","path":"/metadata/resourceVersion","value":"nodepool-rv"})
+            );
         }
     }
 

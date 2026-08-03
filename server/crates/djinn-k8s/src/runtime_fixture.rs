@@ -240,6 +240,107 @@ pub fn capacity_controller_multi_flavor_cluster(
     capacity_controller_cluster_fixture(namespace, binding_resource, CapacityPods::Complete, true)
 }
 
+/// Scripted NodePool-list responses used by the explicit Karpenter source test.
+#[derive(Clone, Copy)]
+pub enum NodePoolFixture {
+    Valid,
+    Missing,
+    Malformed,
+    Incomplete,
+    Negative,
+    Overflow,
+    NotFound,
+    Forbidden,
+}
+
+/// Recorded NodePool source fixture with stale cpu, memory, and pods quotas.
+#[must_use]
+pub fn capacity_controller_nodepool_cluster(
+    namespace: &str,
+    fixture: NodePoolFixture,
+) -> (kube::Client, RecordedApiserver) {
+    use http::Response;
+    use http_body_util::BodyExt as _;
+    use kube::client::Body;
+    use tower::service_fn;
+
+    let recorder = RecordedApiserver::new();
+    let captured = recorder.clone();
+    let client = kube::Client::new(
+        service_fn(move |request: http::Request<Body>| {
+            let captured = captured.clone();
+            async move {
+                let method = request.method().to_string();
+                let path = request.uri().path().to_string();
+                let body = request.into_body().collect().await.unwrap().to_bytes();
+                captured.0.lock().unwrap().push(RecordedRequest {
+                    method: method.clone(),
+                    path: path.clone(),
+                    body: String::from_utf8_lossy(&body).into_owned(),
+                });
+                let (status, payload) = if method == "PATCH" {
+                    (
+                        403,
+                        serde_json::json!({"kind":"Status","apiVersion":"v1","status":"Failure","reason":"Forbidden","code":403}),
+                    )
+                } else if path == "/apis/kueue.x-k8s.io/v1beta1/clusterqueues/djinn-kueue" {
+                    (
+                        200,
+                        serde_json::json!({"apiVersion":"kueue.x-k8s.io/v1beta1","kind":"ClusterQueue","metadata":{"name":"djinn-kueue","resourceVersion":"nodepool-rv","labels":{"djinn.io/quota-owner":"derived-capacity"}},"spec":{"resourceGroups":[{"flavors":[{"name":"pool","resources":[{"name":"pods","nominalQuota":"1"},{"name":"cpu","nominalQuota":"1m"},{"name":"memory","nominalQuota":"1"}]}]}]}}),
+                    )
+                } else if path == "/apis/karpenter.sh/v1/nodepools" {
+                    let limits = match fixture {
+                        NodePoolFixture::Valid => {
+                            serde_json::json!({"cpu":"12","memory":"16Gi","pods":"42"})
+                        }
+                        NodePoolFixture::Missing => serde_json::json!({}),
+                        NodePoolFixture::Malformed => {
+                            serde_json::json!({"cpu":"bogus","memory":"16Gi","pods":"42"})
+                        }
+                        NodePoolFixture::Incomplete => {
+                            serde_json::json!({"cpu":"12","memory":"16Gi"})
+                        }
+                        NodePoolFixture::Negative => {
+                            serde_json::json!({"cpu":"-1","memory":"16Gi","pods":"42"})
+                        }
+                        NodePoolFixture::Overflow => {
+                            serde_json::json!({"cpu":"9223372036854775807","memory":"16Gi","pods":"42"})
+                        }
+                        NodePoolFixture::NotFound | NodePoolFixture::Forbidden => {
+                            serde_json::json!({})
+                        }
+                    };
+                    let status = match fixture {
+                        NodePoolFixture::NotFound => 404,
+                        NodePoolFixture::Forbidden => 403,
+                        _ => 200,
+                    };
+                    let payload = if status == 200 {
+                        serde_json::json!({"apiVersion":"karpenter.sh/v1","kind":"NodePoolList","metadata":{"resourceVersion":"1"},"items":[{"apiVersion":"karpenter.sh/v1","kind":"NodePool","metadata":{"name":"dedicated","labels":{"cohort":"wrong"}},"spec":{"template":{"metadata":{"labels":{"cohort":"right"}}},"limits":limits}}]})
+                    } else {
+                        serde_json::json!({"kind":"Status","apiVersion":"v1","status":"Failure","reason":if status == 404 {"NotFound"} else {"Forbidden"},"code":status})
+                    };
+                    (status, payload)
+                } else {
+                    (
+                        404,
+                        serde_json::json!({"kind":"Status","apiVersion":"v1","status":"Failure","reason":"NotFound","code":404}),
+                    )
+                };
+                Ok::<_, std::io::Error>(
+                    Response::builder()
+                        .status(status)
+                        .header("content-type", "application/json")
+                        .body(Body::from(serde_json::to_vec(&payload).unwrap()))
+                        .unwrap(),
+                )
+            }
+        }),
+        namespace.to_owned(),
+    );
+    (client, recorder)
+}
+
 fn capacity_controller_cluster_fixture(
     namespace: &str,
     binding_resource: &str,
