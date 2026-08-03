@@ -26,12 +26,12 @@
       "path": "server/crates/djinn-k8s/src/launcher.rs",
       "phase": "preserved",
       "role": "launcher",
-      "content": "launcher fixture v1: cgroup leaf owner\n"
+      "content": "#!/bin/sh\n# Deterministic restored-launcher fixture: emit the cgroup v2 leaf record.\nprintf '%s\n' '400000 100000'\n"
     }
   ],
   "launcher_leaf": {
     "launcher_path": "server/crates/djinn-k8s/src/launcher.rs",
-    "source_sha256": "a7c9f9ea40530f5b7513b1ce8cdfb3cf64acea89c25ddd20fa7c6323c768f033",
+    "source_sha256": "b2aa7af2d4ece1944519b97e115037dcd7e67248fa84446f76950b88e0ecce8e",
     "cpu_max": "400000 100000",
     "recorded_by": "deterministic-fixture-v1"
   }
