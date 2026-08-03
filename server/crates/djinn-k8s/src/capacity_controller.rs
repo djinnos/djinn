@@ -2069,11 +2069,20 @@ mod tests {
                     owned[0].clone(),
                     OwnedFlavor {
                         flavor_name: "overlap".into(),
-                        selector: Some(BTreeMap::from([("cohort".into(), "a".into())])),
+                        selector: Some(BTreeMap::from([
+                            ("cohort".into(), "a".into()),
+                            ("zone".into(), "shared".into()),
+                        ])),
                         static_fallback: ResourceVector::ZERO
                     }
                 ],
-                &pools
+                &[CapacityObjectObservation {
+                    effective_labels: BTreeMap::from([
+                        ("cohort".into(), "a".into()),
+                        ("zone".into(), "shared".into()),
+                    ]),
+                    vector: resources(1_000, 1, 1),
+                }]
             ),
             Err(ConservativeReason::FlavorOwnershipAmbiguous)
         );
@@ -2155,8 +2164,8 @@ mod tests {
                 }
             }
             task.abort();
-            let paths: Vec<_> = recorder
-                .all()
+            let requests = recorder.all();
+            let paths: Vec<_> = requests
                 .iter()
                 .map(|r| (r.method.as_str(), r.path.as_str()))
                 .collect();
@@ -2200,13 +2209,14 @@ mod tests {
             } else {
                 ["9", "9000m", "8192"]
             };
-            let final_values: Vec<_> = live.lock().unwrap()["spec"]["resourceGroups"][0]["flavors"]
-                [0]["resources"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|r| r["nominalQuota"].as_str().unwrap())
-                .collect();
+            let final_queue = live.lock().unwrap();
+            let final_values: Vec<_> =
+                final_queue["spec"]["resourceGroups"][0]["flavors"][0]["resources"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|r| r["nominalQuota"].as_str().unwrap())
+                    .collect();
             assert_eq!(final_values, expected);
         }
         // An unasserted dedication (including an empty configured identity) must
