@@ -17,7 +17,10 @@ const cpuMax = (value) => {
     // cpu.max accepts a positive quota (or `max`) and a kernel-valid,
     // canonical period from one millisecond through one second.
     if (!Number.isSafeInteger(periodValue) || periodValue < 1000 || periodValue > 1_000_000) return null;
-    if (quota !== 'max' && !Number.isSafeInteger(Number(quota))) return null;
+    // cgroup v2 rejects finite quotas below one millisecond too. Treating a
+    // syntactically positive value such as `1 100000` as evidence would let a
+    // launcher leaf attest to a setting it cannot install.
+    if (quota !== 'max' && (!Number.isSafeInteger(Number(quota)) || Number(quota) < 1000)) return null;
     return value;
 };
 const safeAssetPath = (path) => {
