@@ -177,6 +177,12 @@ spec:
                 chown {{ .Values.storage.ownership.ownerUid }}:{{ .Values.storage.ownership.artifactGid }} "$d"
                 chmod {{ .Values.storage.ownership.dirMode }} "$d"
               done
+          # Capacity-vector accounting fails closed when any protected Pod
+          # container omits a CPU or memory request. Reuse the server contract:
+          # this init container never overlaps the app container, so the
+          # scheduler-effective Pod request remains their per-dimension max.
+          resources:
+            {{- toYaml .Values.resources.server | nindent 12 }}
           volumeMounts:
             - name: mirrors
               mountPath: /var/lib/djinn/mirrors
