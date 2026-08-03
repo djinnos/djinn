@@ -66,6 +66,29 @@ fn task_with_merge_commit_sha(merge_commit_sha: Option<&str>) -> Task {
 }
 
 #[test]
+fn build_admission_denial_defaults_new_global_contract_fields_for_legacy_payloads() {
+    let denial: BoardHealthBuildAdmissionDenial = serde_json::from_value(serde_json::json!({
+        "cause": "at_capacity",
+        "occupancy": 5,
+        "cap": 5,
+        "denial_count": 2,
+        "age_seconds": 4,
+        "fresh": true,
+        "freshness_window_seconds": 300
+    }))
+    .expect("legacy denial payload remains deserializable");
+
+    assert_eq!(denial.scope, "global");
+    assert_eq!(denial.authority, "build_leases");
+
+    let serialized = serde_json::to_value(denial).unwrap();
+    assert_eq!(serialized["scope"], "global");
+    assert_eq!(serialized["authority"], "build_leases");
+    assert_eq!(serialized["occupancy"], 5);
+    assert_eq!(serialized["cap"], 5);
+}
+
+#[test]
 fn task_list_item_serialization_preserves_merge_commit_sha() {
     let sha = "abc123def4567890abc123def4567890abc123de";
     let task = task_with_merge_commit_sha(Some(sha));
