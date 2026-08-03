@@ -126,6 +126,49 @@ async fn fresh_initialization_installs_v1_marker_and_enforces_credential_identit
         .execute(&pool)
         .await
         .expect("seed reservation");
+        let second_pool_id: i64 = sqlx::query_scalar(
+            "INSERT INTO model_turn_pools (credential_id, provider_id, model_id) \
+             VALUES ('credential-1', 'provider', 'other-model') RETURNING id",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("create a distinct scoped pool");
+        for binding_pool_id in [pool_id, second_pool_id] {
+            sqlx::query(
+                "INSERT INTO model_turn_bucket_bindings \
+                 (pool_id, bucket_kind, capacity_units, available_units) \
+                 VALUES ($1, 'request', 1, 1)",
+            )
+            .bind(binding_pool_id)
+            .execute(&pool)
+            .await
+            .expect("seed request binding");
+        }
+        let cross_pool_bucket = sqlx::query(
+            "INSERT INTO model_turn_reservation_buckets \
+             (reservation_id, pool_id, bucket_kind, reserved_units) \
+             VALUES ('00000000-0000-4000-8000-000000000001', $1, 'request', 1)",
+        )
+        .bind(second_pool_id)
+        .execute(&pool)
+        .await;
+        assert!(
+            cross_pool_bucket.is_err(),
+            "a reservation debit must use its reservation's pool"
+        );
+        let cross_pool_lease = sqlx::query(
+            "INSERT INTO model_turn_leases \
+             (lease_id, generation, pool_id, reservation_id, request_id) \
+             VALUES ('00000000-0000-4000-8000-000000000003', 1, $1, \
+                     '00000000-0000-4000-8000-000000000001', 'request-1')",
+        )
+        .bind(second_pool_id)
+        .execute(&pool)
+        .await;
+        assert!(
+            cross_pool_lease.is_err(),
+            "a lease must use its reservation's pool and request"
+        );
         sqlx::query(
             "INSERT INTO model_turn_leases \
              (lease_id, generation, pool_id, reservation_id, request_id) \
@@ -200,4 +243,51 @@ fn migration_has_bounded_non_secret_observation_contract() {
         !migration.contains("encrypted_value"),
         "admission storage must not duplicate credential material"
     );
+}
+
+#[tokio::test]
+async fn observation_retention_serializes_concurrent_pool_inserts() {
+    with_temp_database("observation_race", |database_url| async move {
+        djinn_db::test_support::apply_all_migrations_to_fresh_database(&database_url).await;
+        let mut setup = PgConnection::connect(&database_url).await.expect("connect setup");
+        setup.execute("INSERT INTO credentials (id, provider_id, key_name, encrypted_value) VALUES ('credential-race', 'provider', 'key-name-race', decode('00', 'hex'))").await.expect("seed credential");
+        let pool_id: i64 = sqlx::query_scalar("INSERT INTO model_turn_pools (credential_id, provider_id, model_id) VALUES ('credential-race', 'provider', 'model') RETURNING id").fetch_one(&mut setup).await.expect("seed pool");
+        for sequence in 0_i64..255 {
+            sqlx::query("INSERT INTO model_turn_observations (pool_id, sequence, kind) VALUES ($1, $2, 'usage')")
+                .bind(pool_id).bind(sequence).execute(&mut setup).await.expect("seed observation");
+        }
+
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+        let inserted = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let release = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut tasks = Vec::new();
+        for sequence in [255_i64, 256] {
+            let url = database_url.clone();
+            let barrier = barrier.clone();
+            let inserted = inserted.clone();
+            let release = release.clone();
+            tasks.push(tokio::spawn(async move {
+                let mut connection = PgConnection::connect(&url).await.expect("connect racer");
+                let mut transaction = connection.begin().await.expect("begin racer");
+                barrier.wait().await;
+                sqlx::query("INSERT INTO model_turn_observations (pool_id, sequence, kind) VALUES ($1, $2, 'usage')")
+                    .bind(pool_id).bind(sequence).execute(&mut *transaction).await.expect("insert racer");
+                inserted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                while !release.load(std::sync::atomic::Ordering::SeqCst) {
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+                transaction.commit().await.expect("commit racer");
+            }));
+        }
+        for _ in 0..20 {
+            if inserted.load(std::sync::atomic::Ordering::SeqCst) != 0 { break; }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(inserted.load(std::sync::atomic::Ordering::SeqCst), 1, "per-pool retention must serialize concurrent triggers");
+        release.store(true, std::sync::atomic::Ordering::SeqCst);
+        for task in tasks { task.await.expect("racer task"); }
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM model_turn_observations WHERE pool_id = $1")
+            .bind(pool_id).fetch_one(&mut setup).await.expect("count observations");
+        assert_eq!(count, 256, "concurrent observation retention must remain bounded");
+    }).await;
 }

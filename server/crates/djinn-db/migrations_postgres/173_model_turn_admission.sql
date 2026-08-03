@@ -59,6 +59,10 @@ CREATE TABLE model_turn_reservations (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     terminal_at TIMESTAMPTZ,
     CONSTRAINT model_turn_reservations_pool_request_unique UNIQUE (pool_id, request_id),
+    -- These composite identities fence the duplicated pool/request columns in
+    -- bucket debits and leases to this reservation's own pool and request.
+    CONSTRAINT model_turn_reservations_id_pool_unique UNIQUE (id, pool_id),
+    CONSTRAINT model_turn_reservations_id_pool_request_unique UNIQUE (id, pool_id, request_id),
     CONSTRAINT model_turn_reservations_request_nonempty CHECK (btrim(request_id) <> ''),
     CONSTRAINT model_turn_reservations_state_valid CHECK (state IN ('reserved', 'dispatched', 'reconciled', 'expired', 'cancelled')),
     CONSTRAINT model_turn_reservations_terminal_lifecycle CHECK (
@@ -67,11 +71,13 @@ CREATE TABLE model_turn_reservations (
     )
 );
 CREATE TABLE model_turn_reservation_buckets (
-    reservation_id UUID NOT NULL REFERENCES model_turn_reservations(id) ON DELETE CASCADE,
+    reservation_id UUID NOT NULL,
     pool_id BIGINT NOT NULL,
     bucket_kind VARCHAR(16) NOT NULL,
     reserved_units BIGINT NOT NULL,
     PRIMARY KEY (reservation_id, bucket_kind),
+    CONSTRAINT model_turn_reservation_buckets_reservation_pool_fk
+        FOREIGN KEY (reservation_id, pool_id) REFERENCES model_turn_reservations(id, pool_id) ON DELETE CASCADE,
     CONSTRAINT model_turn_reservation_buckets_binding_fk
         FOREIGN KEY (pool_id, bucket_kind) REFERENCES model_turn_bucket_bindings(pool_id, bucket_kind) ON DELETE RESTRICT,
     CONSTRAINT model_turn_reservation_buckets_units_nonnegative CHECK (reserved_units >= 0)
@@ -81,7 +87,7 @@ CREATE TABLE model_turn_leases (
     lease_id UUID PRIMARY KEY,
     generation BIGINT NOT NULL,
     pool_id BIGINT NOT NULL REFERENCES model_turn_pools(id) ON DELETE RESTRICT,
-    reservation_id UUID NOT NULL UNIQUE REFERENCES model_turn_reservations(id) ON DELETE RESTRICT,
+    reservation_id UUID NOT NULL UNIQUE,
     request_id VARCHAR(128) NOT NULL,
     owner_pod_uid VARCHAR(255),
     lifecycle VARCHAR(16) NOT NULL DEFAULT 'reserved',
@@ -90,6 +96,9 @@ CREATE TABLE model_turn_leases (
     active_at TIMESTAMPTZ,
     heartbeat_at TIMESTAMPTZ,
     terminal_at TIMESTAMPTZ,
+    CONSTRAINT model_turn_leases_reservation_identity_fk
+        FOREIGN KEY (reservation_id, pool_id, request_id)
+        REFERENCES model_turn_reservations(id, pool_id, request_id) ON DELETE RESTRICT,
     CONSTRAINT model_turn_leases_generation_positive CHECK (generation > 0),
     CONSTRAINT model_turn_leases_request_nonempty CHECK (btrim(request_id) <> ''),
     CONSTRAINT model_turn_leases_lifecycle_valid CHECK (lifecycle IN ('reserved', 'dispatching', 'active', 'reconciled', 'expired')),
@@ -161,6 +170,10 @@ CREATE INDEX model_turn_observations_pool_observed_idx ON model_turn_observation
 -- after older observations are trimmed.
 CREATE OR REPLACE FUNCTION trim_model_turn_observations() RETURNS trigger AS $$
 BEGIN
+    -- Locking the parent serializes every per-pool trim. Without it, concurrent
+    -- AFTER INSERT triggers can each see only their own uncommitted row and
+    -- collectively retain more than the 256-row bound.
+    PERFORM 1 FROM model_turn_pools WHERE id = NEW.pool_id FOR UPDATE;
     DELETE FROM model_turn_observations
      WHERE pool_id = NEW.pool_id
        AND sequence IN (
