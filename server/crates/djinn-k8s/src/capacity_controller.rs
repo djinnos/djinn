@@ -1025,20 +1025,19 @@ pub async fn run_capacity_controller(
                 binding: BindingQuota::Pods(config.fail_safe.pods),
                 compile_slots: config.fail_safe.compile_slots,
             });
-            if let Some(queue) = queue {
-                if let FlavorActuationDecision::Patch { patch } =
+            if let Some(queue) = queue
+                && let FlavorActuationDecision::Patch { patch } =
                     flavor_vector_patch_decision(&queue, &config.queue_name, &targets)
-                {
-                    let _ = queues
-                        .patch(
-                            &config.queue_name,
-                            &PatchParams::default(),
-                            &Patch::Json::<()>(
-                                serde_json::from_value(patch).expect("valid internal JSON patch"),
-                            ),
-                        )
-                        .await;
-                }
+            {
+                let _ = queues
+                    .patch(
+                        &config.queue_name,
+                        &PatchParams::default(),
+                        &Patch::Json::<()>(
+                            serde_json::from_value(patch).expect("valid internal JSON patch"),
+                        ),
+                    )
+                    .await;
             }
             continue;
         }
