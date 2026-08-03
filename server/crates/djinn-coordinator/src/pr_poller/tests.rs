@@ -2576,6 +2576,11 @@ fn required_completed_timed_out_check_classifies_as_causal_failing() {
     assert_ne!(ci_status, CiStatus::Pending);
     assert_ne!(ci_status, CiStatus::Unknown);
     assert_ne!(ci_status, CiStatus::Inconclusive);
+    assert_eq!(
+        decide_pr_draft_ci_action(ci_status, true),
+        PrDraftCiAction::RouteToRemediation,
+        "the classified completed timed_out required check takes the existing failure route"
+    );
 
     // Construct the same evidence-bearing input that `record_ci_snapshot`
     // writes after its required-context filtering and causal ranking. Do not
@@ -2625,7 +2630,8 @@ fn required_completed_timed_out_check_classifies_as_causal_failing() {
     assert!(snapshot.failure_annotations.is_none());
     assert_eq!(
         decide_pr_draft_ci_action(snapshot.ci_status, true),
-        PrDraftCiAction::RouteToRemediation
+        PrDraftCiAction::RouteToRemediation,
+        "the persisted timed_out failure retains the existing remediation route"
     );
 }
 
