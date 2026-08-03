@@ -74,7 +74,10 @@ async fn typed_evidence_schema_retains_legacy_columns_and_enforces_identities() 
     .fetch_one(db.pool())
     .await
     .unwrap();
-    assert_eq!(legacy_columns, 2, "migration 82 compatibility columns remain");
+    assert_eq!(
+        legacy_columns, 2,
+        "migration 82 compatibility columns remain"
+    );
 
     let finding_id = uuid::Uuid::now_v7().to_string();
     insert_finding(&db, &finding_id, &proposal_id, &task_id, "demanded")
@@ -93,11 +96,12 @@ async fn typed_evidence_schema_retains_legacy_columns_and_enforces_identities() 
         "a proposal admits only one unresolved finding"
     );
 
+    let attempt_id = uuid::Uuid::now_v7().to_string();
     sqlx::query(
         "INSERT INTO typed_evidence_attempts (id, finding_id, sequence, spike_task_id) \
          VALUES ($1, $2, 1, $3)",
     )
-    .bind(uuid::Uuid::now_v7().to_string())
+    .bind(&attempt_id)
     .bind(&finding_id)
     .bind(&task_id)
     .execute(db.pool())
@@ -140,5 +144,31 @@ async fn typed_evidence_schema_retains_legacy_columns_and_enforces_identities() 
         .await
         .is_err(),
         "a spike task can bind to only one attempt"
+    );
+
+    let update_error =
+        sqlx::query("UPDATE typed_evidence_attempts SET spike_task_id = $1 WHERE id = $2")
+            .bind(&second_task)
+            .bind(&attempt_id)
+            .execute(db.pool())
+            .await
+            .unwrap_err();
+    assert!(
+        update_error
+            .to_string()
+            .contains("typed evidence attempts are append-only"),
+        "attempt history rejects direct updates"
+    );
+
+    let delete_error = sqlx::query("DELETE FROM typed_evidence_attempts WHERE id = $1")
+        .bind(&attempt_id)
+        .execute(db.pool())
+        .await
+        .unwrap_err();
+    assert!(
+        delete_error
+            .to_string()
+            .contains("typed evidence attempts are append-only"),
+        "attempt history rejects direct deletes"
     );
 }

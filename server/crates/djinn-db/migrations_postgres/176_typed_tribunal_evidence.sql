@@ -151,8 +151,18 @@ CREATE TABLE typed_evidence_retry_idempotency (
     PRIMARY KEY (finding_id, failed_transition_id)
 );
 
--- Lifecycle history is forensic evidence. Transition rows cannot be rewritten
--- or deleted even by direct SQL; later repositories append a new transition.
+-- Attempts and lifecycle history are forensic evidence. Neither may be rewritten
+-- or deleted even by direct SQL; later repositories append a new attempt or
+-- transition instead.
+CREATE OR REPLACE FUNCTION reject_typed_evidence_attempt_mutation() RETURNS trigger AS $$
+BEGIN
+    RAISE EXCEPTION 'typed evidence attempts are append-only';
+END;
+$$ LANGUAGE plpgsql;
+CREATE TRIGGER typed_evidence_attempts_append_only
+    BEFORE UPDATE OR DELETE ON typed_evidence_attempts
+    FOR EACH ROW EXECUTE FUNCTION reject_typed_evidence_attempt_mutation();
+
 CREATE OR REPLACE FUNCTION reject_typed_evidence_transition_mutation() RETURNS trigger AS $$
 BEGIN
     RAISE EXCEPTION 'typed evidence transitions are append-only';

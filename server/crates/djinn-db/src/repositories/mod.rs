@@ -64,7 +64,6 @@ pub mod task_attempt_tests;
 pub mod task_rejected_submission_integrity;
 pub mod task_run;
 pub mod task_run_outcome;
-pub mod typed_evidence;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 #[cfg(any(test, feature = "test-support"))]
@@ -74,6 +73,7 @@ pub mod tool_call_evaluator;
 pub mod tool_call_evaluator_tests;
 pub mod tool_call_export;
 pub mod tool_call_metrics;
+pub mod typed_evidence;
 pub mod usage_analytics;
 pub mod user;
 pub mod user_settings;
