@@ -426,18 +426,36 @@ fn pod_resource_vector(pod: &Pod) -> Option<ResourceVector> {
     })
 }
 
-/// Fold only labeled protected Pods actually assigned to an eligible node.
+/// Whether a protected Pod can still consume Node resources.
+///
+/// Kubernetes keeps terminal Pods assigned to their former Node until garbage
+/// collection removes the API object. Their containers cannot consume CPU or
+/// memory, so retaining their requests in the protected vector leaks capacity
+/// for the entire retention window. Unknown/missing phases remain live by
+/// default; only Kubernetes' two explicit terminal phases release capacity.
+fn protected_pod_consumes_resources(pod: &Pod) -> bool {
+    !matches!(
+        pod.status
+            .as_ref()
+            .and_then(|status| status.phase.as_deref()),
+        Some("Succeeded" | "Failed")
+    )
+}
+
+/// Fold only live labeled protected Pods actually assigned to an eligible node.
 pub fn protected_requests_on_nodes(
     pods: &[Pod],
     eligible_node_names: &BTreeSet<String>,
 ) -> Result<ResourceVector, ConservativeReason> {
     pods.iter()
         .filter(|pod| {
-            pod.metadata
-                .labels
-                .as_ref()
-                .and_then(|labels| labels.get("djinn.io/capacity-reserved"))
-                .is_some_and(|value| value == "true")
+            protected_pod_consumes_resources(pod)
+                && pod
+                    .metadata
+                    .labels
+                    .as_ref()
+                    .and_then(|labels| labels.get("djinn.io/capacity-reserved"))
+                    .is_some_and(|value| value == "true")
                 && pod
                     .spec
                     .as_ref()
@@ -1053,7 +1071,13 @@ pub async fn run_capacity_controller(
                     .list(&ListParams::default().labels("djinn.io/capacity-reserved=true"))
                     .await
                     .ok()?;
-                if protected_pods.items.len() < config.expected_protected_pods {
+                if protected_pods
+                    .items
+                    .iter()
+                    .filter(|pod| protected_pod_consumes_resources(pod))
+                    .count()
+                    < config.expected_protected_pods
+                {
                     return None;
                 }
                 let protected = protected_requests_on_nodes(
@@ -1346,7 +1370,13 @@ pub async fn run_capacity_controller(
                 .list(&ListParams::default().labels("djinn.io/capacity-reserved=true"))
                 .await
                 .ok()?;
-            if protected.items.len() < config.expected_protected_pods {
+            if protected
+                .items
+                .iter()
+                .filter(|pod| protected_pod_consumes_resources(pod))
+                .count()
+                < config.expected_protected_pods
+            {
                 return None;
             }
             let protected = protected_requests_on_nodes(&protected.items, &assigned_names).ok()?;
@@ -1583,6 +1613,53 @@ pub fn patch_decision(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn protected_pod(name: &str, phase: Option<&str>) -> Pod {
+        let mut pod: Pod = serde_json::from_value(json!({
+            "metadata": {
+                "name": name,
+                "labels": {"djinn.io/capacity-reserved": "true"}
+            },
+            "spec": {
+                "nodeName": "worker-1",
+                "containers": [{
+                    "name": "protected",
+                    "resources": {"requests": {"cpu": "1", "memory": "4Gi"}}
+                }]
+            }
+        }))
+        .unwrap();
+        if let Some(phase) = phase {
+            pod.status = serde_json::from_value(json!({"phase": phase})).unwrap();
+        }
+        pod
+    }
+
+    #[test]
+    fn terminal_protected_pods_release_their_node_capacity() {
+        let pods = [
+            protected_pod("unknown", None),
+            protected_pod("pending", Some("Pending")),
+            protected_pod("running", Some("Running")),
+            protected_pod("succeeded", Some("Succeeded")),
+            protected_pod("failed", Some("Failed")),
+        ];
+        let eligible = BTreeSet::from(["worker-1".to_string()]);
+
+        assert_eq!(
+            protected_requests_on_nodes(&pods, &eligible).unwrap(),
+            resources(3_000, 12 * 1024 * 1024 * 1024, 3),
+            "unknown, Pending, and Running remain conservative; terminal Pods consume nothing"
+        );
+        assert_eq!(
+            pods.iter()
+                .filter(|pod| protected_pod_consumes_resources(pod))
+                .count(),
+            3,
+            "the protected-population completeness fence must use the same live predicate"
+        );
+    }
+
     fn resources(cpu: i64, memory: i64, pods: i64) -> ResourceVector {
         ResourceVector {
             cpu: CpuMillicores::new(cpu).unwrap(),
