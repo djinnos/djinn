@@ -19,7 +19,8 @@ use djinn_provider::provider::{LlmProvider, ProviderError, StreamEvent, ToolChoi
 
 use super::budget::record_provider_usage;
 use super::error_handling::{
-    MAX_COMPACTION_RETRIES, is_context_length_error, is_orphaned_tool_call_error,
+    MAX_COMPACTION_RETRIES, ReplyLoopCancelled, is_context_length_error,
+    is_orphaned_tool_call_error,
 };
 use super::tool_dispatch::{
     MAX_TOOL_CONCURRENCY, ToolDispatchContext, ToolRuntimeMetadataMap, is_side_query_tool,
@@ -125,7 +126,7 @@ pub struct StreamTurnState {
     pub turn_cache_read: u32,
     pub turn_cache_write: u32,
     pub turn_reasoning_out: u32,
-    pub interrupted: Option<&'static str>,
+    pub interrupted: Option<ReplyLoopCancelled>,
     pub saw_round_event: bool,
     pub needs_reactive_compaction: bool,
     pub streaming_results: Vec<(usize, ContentBlock)>,
@@ -406,11 +407,11 @@ pub(super) async fn consume_provider_stream(
         tokio::select! {
             biased;
             _ = ctx.cancel.cancelled() => {
-                state.interrupted = Some("session cancelled");
+                state.interrupted = Some(ReplyLoopCancelled::session());
                 break;
             }
             _ = ctx.global_cancel.cancelled() => {
-                state.interrupted = Some("supervisor shutting down");
+                state.interrupted = Some(ReplyLoopCancelled::supervisor_shutdown());
                 break;
             }
             Some(result) = streaming_inflight.next() => {
@@ -466,11 +467,11 @@ pub(super) async fn consume_provider_stream(
                             tokio::select! {
                                 biased;
                                 _ = ctx.cancel.cancelled() => {
-                                    state.interrupted = Some("session cancelled");
+                                    state.interrupted = Some(ReplyLoopCancelled::session());
                                     break;
                                 }
                                 _ = ctx.global_cancel.cancelled() => {
-                                    state.interrupted = Some("supervisor shutting down");
+                                    state.interrupted = Some(ReplyLoopCancelled::supervisor_shutdown());
                                     break;
                                 }
                                 _ = tokio::time::sleep(delay) => {}
