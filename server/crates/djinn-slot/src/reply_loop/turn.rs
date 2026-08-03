@@ -31,13 +31,13 @@ use super::budget::{
 };
 use super::compaction_guard::CompactionCriticalSection;
 use super::error_handling::{
-    BudgetWindDownIgnored, MAX_COMPACTION_RETRIES, TransportCompactionRecoveryGuard,
-    empty_start_streak_feeds_breaker, empty_turn_backoff, empty_turn_is_reasoning_only,
-    is_context_length_error, is_orphaned_tool_call_error, is_oversized_transport_payload,
-    is_provider_failure_prose, next_nudge_message, reasoning_only_nudge_message,
-    should_retry_after_tool_call_compaction, should_retry_empty_assistant_turn,
-    should_retry_empty_stream, soft_budget_converge_message, tool_choice_for_turn,
-    wind_down_message,
+    BudgetWindDownIgnored, MAX_COMPACTION_RETRIES, ReplyLoopCancelled,
+    TransportCompactionRecoveryGuard, empty_start_streak_feeds_breaker, empty_turn_backoff,
+    empty_turn_is_reasoning_only, is_context_length_error, is_orphaned_tool_call_error,
+    is_oversized_transport_payload, is_provider_failure_prose, next_nudge_message,
+    reasoning_only_nudge_message, should_retry_after_tool_call_compaction,
+    should_retry_empty_assistant_turn, should_retry_empty_stream, soft_budget_converge_message,
+    tool_choice_for_turn, wind_down_message,
 };
 use super::loop_guard::{
     AssistantOutputSignature, LoopGuardCondition, LoopGuardError, LoopGuardReason, LoopGuardState,
@@ -1175,8 +1175,8 @@ pub async fn run_reply_loop(
                     llm.end_ok();
                 }
             }
-            if let Some(reason) = interrupted {
-                return Err(anyhow::anyhow!(reason));
+            if let Some(cancelled) = interrupted {
+                return Err(anyhow::Error::new(cancelled));
             }
             // AC3: When the provider stream ended early (without StreamEvent::Done)
             // and partial content was produced, the truncated turn must not be
@@ -2761,7 +2761,7 @@ mod tests {
         .await
         .expect("consume provider stream");
 
-        assert_eq!(state.interrupted, Some("session cancelled"));
+        assert_eq!(state.interrupted, Some(ReplyLoopCancelled::session()));
         flush_in_flight_turn(&msg_repo, &session_id, &task_id, 0, &mut state).await;
 
         let loaded = msg_repo
