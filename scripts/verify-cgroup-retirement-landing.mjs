@@ -34,7 +34,10 @@ if (review.approval_state !== 'approved') fail('approval', 'PR approval state is
 if (!Array.isArray(review.configured_owners) || review.configured_owners.length === 0 || new Set(review.configured_owners).size !== review.configured_owners.length) fail('owner coverage', 'configured owners must be a unique non-empty list');
 review.configured_owners.forEach((owner) => text(owner, 'configured owner', /^[A-Za-z0-9_.-]+$/));
 if (!Array.isArray(review.reviews) || review.reviews.length < review.effective_required_approvals) fail('review payload', 'has fewer reviews than the effective required count');
-let approvals = 0; const covered = new Set();
+// A review record is an effective approval only once per actor. Rejecting a
+// duplicate makes this snapshot unambiguous rather than silently selecting a
+// record when an actor's evidence conflicts with itself.
+const approvers = new Set(); const covered = new Set();
 for (const item of review.reviews) {
   exact(item, ['actor', 'head', 'state'], 'review entry');
   text(item.actor, 'review actor', /^[A-Za-z0-9_.-]+$/);
@@ -42,9 +45,10 @@ for (const item of review.reviews) {
   if (item.head !== commit) fail('stale-head approval', 'review is not bound to the current landing head');
   if (item.state === 'changes_requested' || item.state === 'dismissed') fail('approval', `review state is ${item.state}`);
   if (item.state !== 'approved') fail('approval', `review state is ${item.state}`);
-  approvals += 1; if (review.configured_owners.includes(item.actor)) covered.add(item.actor);
+  if (approvers.has(item.actor)) fail('review payload', `duplicate effective review from ${item.actor}`);
+  approvers.add(item.actor); if (review.configured_owners.includes(item.actor)) covered.add(item.actor);
 }
-if (approvals < review.effective_required_approvals) fail('approval', 'effective required approving-review count is not met');
+if (approvers.size < review.effective_required_approvals) fail('approval', 'effective required approving-review count is not met');
 if (covered.size !== review.configured_owners.length) fail('owner coverage', 'not every configured owner approved the landing commit');
 exact(review.rule_snapshot, ['commit', 'configured_owners', 'effective_required_approvals'], 'rule snapshot');
 if (review.rule_snapshot.commit !== commit || review.rule_snapshot.effective_required_approvals !== review.effective_required_approvals || JSON.stringify(review.rule_snapshot.configured_owners) !== JSON.stringify(review.configured_owners)) fail('rule snapshot', 'effective rules do not match the bound landing rules');

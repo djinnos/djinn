@@ -59,6 +59,7 @@ case 'stale-head': x.review.reviews[1].head=m; break;
 case 'missing-owner': x.review.configured_owners.push('owner-c'); x.review.rule_snapshot.configured_owners.push('owner-c'); break;
 case 'rule-mismatch': x.review.rule_snapshot.effective_required_approvals=3; break;
 case 'bypass': x.review.no_bypass.direct_push=true; break;
+case 'duplicate-approval': x.review.reviews[1].actor=x.review.reviews[0].actor; x.review.configured_owners=['owner-a']; x.review.rule_snapshot.configured_owners=['owner-a']; break;
 case 'self-certification': x.review.reviews[0].actor='author'; break;
 case 'incomplete-payload': x.review.reviewed_payload.untested_replacements=['installer']; break;
 case 'image-digest': x.deployment.image.oci_revision=m; break;
@@ -69,6 +70,9 @@ case 'pod-annotation': x.deployment.pod_annotation.commit=m; break;
 case 'dispatch': x.deployment.final_dispatch.container_count=2; break;
 case 'proof-failure': {const y=JSON.parse(fs.readFileSync(outcome));y.pre_landing.candidate_proofs='failed';fs.writeFileSync(outcome,JSON.stringify(y));} break;
 case 'rollback-fault': {const y=JSON.parse(fs.readFileSync(outcome));y.candidate_fault=true;y.restoration.node_assets='failed';fs.writeFileSync(outcome,JSON.stringify(y));} break;
+case 'aggregate-restoration-failed': {const y=JSON.parse(fs.readFileSync(outcome));y.restoration.aggregate_tree='failed';fs.writeFileSync(outcome,JSON.stringify(y));} break;
+case 'node-restoration-failed': {const y=JSON.parse(fs.readFileSync(outcome));y.restoration.node_assets='failed';fs.writeFileSync(outcome,JSON.stringify(y));} break;
+case 'launcher-restoration-failed': {const y=JSON.parse(fs.readFileSync(outcome));y.restoration.launcher_leaf='failed';fs.writeFileSync(outcome,JSON.stringify(y));} break;
 default: throw Error(n);
 } fs.writeFileSync(p,JSON.stringify(x));
 NODE
@@ -83,7 +87,7 @@ printf 'Testing immutable cgroup-retirement evidence fixtures\n'
 if "$CHECKER" --candidate RETIRE_HEAD >/dev/null; then pass 'positive RETIRE_HEAD fixture'; else fail 'positive RETIRE_HEAD fixture'; fi
 for fixture in "$FIXTURES"/*.json; do run_case "$(basename "$fixture" .json)"; done
 if "$CHECKER" --landing 0123456789abcdef0123456789abcdef01234567 >/dev/null; then pass 'complete commit-bound landing fixture'; else fail 'complete commit-bound landing fixture'; fi
-for case_name in no-approval changes-requested dismissal stale-head missing-owner rule-mismatch bypass self-certification incomplete-payload image-digest render-digest node-digest workload-digest pod-annotation dispatch proof-failure rollback-fault; do run_landing_case "$case_name"; done
+for case_name in no-approval changes-requested dismissal stale-head missing-owner rule-mismatch bypass duplicate-approval self-certification incomplete-payload image-digest render-digest node-digest workload-digest pod-annotation dispatch proof-failure rollback-fault aggregate-restoration-failed node-restoration-failed launcher-restoration-failed; do run_landing_case "$case_name"; done
 out=$(node "$SCRIPT_DIR/cgroup-retirement-outcome.mjs" "$SCRIPT_DIR/fixtures/cgroup-retirement/landing/0123456789abcdef0123456789abcdef01234567.outcome.json")
 printf '%s' "$out" | grep -F 'RETIRE one-container-dispatch-authorized' >/dev/null && pass 'all-green state retires' || fail 'all-green state retires'
 node - "$SCRIPT_DIR/fixtures/cgroup-retirement/landing/0123456789abcdef0123456789abcdef01234567.outcome.json" "$SCRATCH/keep.json" <<'NODE'
@@ -96,5 +100,12 @@ const fs=require('fs'),x=JSON.parse(fs.readFileSync(process.argv[2]));x.candidat
 NODE
 out=$(node "$SCRIPT_DIR/cgroup-retirement-outcome.mjs" "$SCRATCH/recovery.json")
 printf '%s' "$out" | grep -F 'RECOVERY dispatch-paused' >/dev/null && pass 'fault enters RECOVERY until restoration green' || fail 'fault enters RECOVERY until restoration green'
+for proof in aggregate_tree node_assets launcher_leaf; do
+    node - "$SCRIPT_DIR/fixtures/cgroup-retirement/landing/0123456789abcdef0123456789abcdef01234567.outcome.json" "$SCRATCH/restoration-$proof.json" "$proof" <<'NODE'
+const fs=require('fs'), [source,target,proof]=process.argv.slice(2),x=JSON.parse(fs.readFileSync(source));x.restoration[proof]='failed';fs.writeFileSync(target,JSON.stringify(x));
+NODE
+    out=$(node "$SCRIPT_DIR/cgroup-retirement-outcome.mjs" "$SCRATCH/restoration-$proof.json")
+    printf '%s' "$out" | grep -F 'RECOVERY dispatch-paused' >/dev/null && pass "red $proof proof enters RECOVERY without fault flag" || fail "red $proof proof enters RECOVERY without fault flag"
+done
 printf '%s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

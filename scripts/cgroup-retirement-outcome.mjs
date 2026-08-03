@@ -20,7 +20,9 @@ const restored = Object.values(state.restoration).every((status) => status === '
 const fault = state.candidate_fault || state.post_deploy_fault;
 const preGreen = Object.values(state.pre_landing).every((status) => status === 'green');
 let outcome;
-if (fault && !restored) outcome = 'RECOVERY';
+// A red restoration proof is a recovery condition in its own right. A false
+// fault flag cannot turn an internally inconsistent record into RETIRE.
+if (!restored) outcome = 'RECOVERY';
 else if (!preGreen || fault) outcome = 'KEEP';
 else outcome = 'RETIRE';
 const armed = outcome === 'KEEP' ? 'preserved-assets-armed' : outcome === 'RECOVERY' ? 'dispatch-paused' : 'one-container-dispatch-authorized';
