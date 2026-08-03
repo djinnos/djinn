@@ -1,0 +1,3 @@
+jobs:
+  quality-gate:
+    uses: ./.github/workflows/a.yml
