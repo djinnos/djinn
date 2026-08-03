@@ -637,8 +637,9 @@ assert spec.get("preemption") == {"reclaimWithinCohort": "Never"}, (
     "kueue-topology-test-djinn-kueue must let admitted background work run to completion "
     f"with reclaimWithinCohort Never, got {spec.get('preemption')}"
 )
-# BestEffortFIFO, not StrictFIFO: three kinds share a 3-slot queue, so one
-# head-of-line Workload that cannot fit would block everything behind it.
+# BestEffortFIFO, not StrictFIFO: three kinds share one resource vector, so one
+# long-lived Workload that cannot fit CPU/memory must not block smaller work.
+# In vector-v1, Pods is the real Node ceiling rather than a 3-slot cap.
 assert spec.get("queueingStrategy") == "BestEffortFIFO", (
     f"ClusterQueue must use BestEffortFIFO, got {spec.get('queueingStrategy')}"
 )
@@ -910,11 +911,13 @@ expect_topology_rejected coverage-dropped "$WORK/coverage-dropped.yaml" 15 60Gi 
     "$RENDERER_KEYS" "$(cat "$WORK/dropped-resource.txt")"
 
 echo "=== chart defaults render the topology AND arm it ==="
-# The stock profile is the production profile. Kueue's pods quota is the only
-# remaining build-concurrency bound (the in-process reservation authority was
-# deleted in #2822), so a default that rendered no topology would ship an
-# unbounded fleet. `buildPods` ships 3, and the whole armed contract — Namespace
-# label included — is asserted here rather than only under an explicit `--set`.
+# The stock profile is the production profile. Kueue's finite resource vector
+# is the build-admission bound (the in-process reservation authority was deleted
+# in #2822), so a default that rendered no topology would remove resource
+# admission. Static mode ships a finite buildPods fallback; vector-v1 replaces
+# it with the eligible Nodes' real post-reserve Pod ceiling. The whole armed
+# contract — Namespace label included — is asserted here rather than only under
+# an explicit `--set`.
 #
 # The prerequisite this creates is enforced where it can actually be checked:
 # templates/prereq-guard.yaml refuses an install against a cluster that does not

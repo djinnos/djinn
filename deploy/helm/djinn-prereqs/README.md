@@ -40,7 +40,10 @@ a namespace must be labelled first. At stock values the `djinn` chart applies
 that label: `kueue.armed: true` renders it onto the Namespace
 (`djinn/templates/namespace.yaml`) and stamps `suspend: true` plus a queue name
 onto every task-run, warm and standalone-SCIP Job, so Workloads are created and
-Kueue's quota is what bounds build concurrency. This release is inert only
+Kueue admits them against the ClusterQueue's complete CPU/memory/Pods vector.
+Static installs use the chart's finite values; `vector-v1` installs replace the
+vector from eligible Node capacity and use Pods only as the real post-reserve
+Node ceiling. This release is inert only
 against a `djinn` deployment that explicitly sets `kueue.armed: false`.
 
 That distinction matters when you reach for stock upstream Kueue instead of
