@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "landing_id": "cgroup-retirement/landing/0123456789abcdef0123456789abcdef01234567",
+  "commit": "0123456789abcdef0123456789abcdef01234567",
+  "candidate": "RETIRE_HEAD",
+  "review": {
+    "implementer": "author",
+    "effective_required_approvals": 2,
+    "configured_owners": ["owner-a", "owner-b"],
+    "approval_state": "approved",
+    "pull_request": {"identity": "4242", "reviewed_head": "0123456789abcdef0123456789abcdef01234567"},
+    "reviews": [{"actor":"owner-a","state":"approved","head":"0123456789abcdef0123456789abcdef01234567"},{"actor":"owner-b","state":"approved","head":"0123456789abcdef0123456789abcdef01234567"}],
+    "rule_snapshot": {"commit":"0123456789abcdef0123456789abcdef01234567","effective_required_approvals":2,"configured_owners":["owner-a","owner-b"]},
+    "no_bypass": {"commit":"0123456789abcdef0123456789abcdef01234567","direct_push":false,"merged_through_pull_request":true},
+    "reviewed_payload": {"launcher_uid_separation":"lost","child_seccomp_boundary":"lost-complete","second_in_worker_seccomp_installer":"not-claimed","untested_replacements":[]}
+  },
+  "deployment": {
+    "image":{"oci_revision":"0123456789abcdef0123456789abcdef01234567","digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+    "render_digest":{"commit":"0123456789abcdef0123456789abcdef01234567","digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+    "node_digest":{"commit":"0123456789abcdef0123456789abcdef01234567","digest":"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"},
+    "workload_digest":{"commit":"0123456789abcdef0123456789abcdef01234567","digest":"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"},
+    "pod_annotation":{"key":"djinn.dev/revision","commit":"0123456789abcdef0123456789abcdef01234567"},
+    "final_dispatch":{"commit":"0123456789abcdef0123456789abcdef01234567","container_count":1,"confirmed":true}
+  },
+  "losses":{"launcher_uid_separation":"lost","child_seccomp_boundary":"lost-complete"}
+}
