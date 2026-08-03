@@ -105,6 +105,14 @@ impl SlotHandle {
     pub fn model_id(&self) -> &str {
         self.inner.model_id()
     }
+    /// Test-only access to the canonical compaction critical section so real
+    /// facade/pool integration fixtures can deterministically hold completion.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn test_compaction_cs(
+        &self,
+    ) -> &djinn_slot::reply_loop::compaction_guard::CompactionCriticalSection {
+        self.inner.test_compaction_cs()
+    }
     pub async fn run_task(
         &self,
         task_id: String,

@@ -2892,12 +2892,13 @@ async fn reconcile_terminate_runtime_error_still_settles_every_captured_row() {
     }
 }
 
-/// Force the durable exact-id update to fail. The mandatory final reread must
-/// retain the live id even though `settlement_failed` takes typed precedence.
+/// Force both runtime teardown and the durable exact-id update to fail. The
+/// mandatory final reread must retain the live id, every independent action is
+/// still attempted, and `teardown_failed` takes deterministic precedence.
 #[tokio::test]
-async fn reconcile_terminate_settlement_error_retains_residual_ids_after_final_reread() {
+async fn reconcile_terminate_combined_failures_retain_residual_ids_after_final_reread() {
     let (mut app_state, cancel, _temp) = test_app_state();
-    let runtime = RecordingRuntimeOps::new(false);
+    let runtime = RecordingRuntimeOps::new(true);
     app_state.runtime_ops = Some(Arc::new(runtime.clone()));
     let task_id = seed_running_session_with_task_run(
         &app_state,
@@ -2907,19 +2908,49 @@ async fn reconcile_terminate_settlement_error_retains_residual_ids_after_final_r
     .await;
     let sessions =
         djinn_db::SessionRepository::new(app_state.db.clone(), app_state.event_bus.clone());
-    let captured_id = sessions
+    let task = djinn_db::TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone())
+        .get(&task_id)
+        .await
+        .expect("task lookup")
+        .expect("seeded task");
+    djinn_db::TaskRunRepository::new(app_state.db.clone())
+        .create(djinn_db::CreateTaskRunParams {
+            id: "run-settlement-failure-second",
+            project_id: &task.project_id,
+            task_id: &task_id,
+            trigger_type: "test",
+            status: None,
+            workspace_path: None,
+            mirror_ref: None,
+            dispatch_group_id: None,
+        })
+        .await
+        .expect("second task run");
+    sessions
+        .create(djinn_db::CreateSessionParams {
+            project_id: &task.project_id,
+            task_id: Some(&task_id),
+            model: "model-a",
+            agent_type: "worker",
+            metadata_json: None,
+            task_run_id: Some("run-settlement-failure-second"),
+            pricing: None,
+            cost_basis: None,
+        })
+        .await
+        .expect("second running session");
+    let captured = sessions
         .list_non_terminal_for_task(&task_id)
         .await
-        .expect("capture")[0]
-        .id
-        .clone();
-    sqlx::query(
-        "CREATE TRIGGER reject_reconcile_settlement BEFORE UPDATE OF status ON sessions \
-         WHEN NEW.status = 'interrupted' BEGIN SELECT RAISE(ABORT, 'synthetic settlement failure'); END",
-    )
+        .expect("capture");
+    let captured_id = captured[0].id.clone();
+    sqlx::query(&format!(
+        "ALTER TABLE sessions ADD CONSTRAINT reject_reconcile_settlement \
+         CHECK (id <> '{captured_id}' OR status <> 'interrupted')"
+    ))
     .execute(app_state.db.pool())
     .await
-    .expect("install settlement failure trigger");
+    .expect("install PostgreSQL settlement failure constraint");
     let (_tx, rx) = mpsc::channel(1);
     let mut pool = SlotPool::new(
         rx,
@@ -2931,13 +2962,24 @@ async fn reconcile_terminate_settlement_error_retains_residual_ids_after_final_r
         ),
     );
     let snapshot = pool.test_reconcile_terminate(&task_id).await;
-    assert_eq!(snapshot.kind, ReconcileTerminateKind::SettlementFailed);
+    assert_eq!(snapshot.kind, ReconcileTerminateKind::TeardownFailed);
     assert!(!snapshot.ok);
-    assert_eq!(runtime.calls(), vec!["run-settlement-failure"]);
-    assert!(snapshot.executions[0].teardown_attempted);
-    assert!(snapshot.executions[0].teardown_error.is_none());
-    assert!(snapshot.executions[0].settlement_attempted);
+    assert_eq!(
+        runtime.calls(),
+        vec!["run-settlement-failure", "run-settlement-failure-second"],
+        "the first combined failure must not short-circuit later teardown"
+    );
+    assert_eq!(snapshot.executions.len(), captured.len());
+    assert!(snapshot.executions.iter().all(|execution| {
+        execution.teardown_attempted
+            && execution.teardown_error.is_some()
+            && execution.settlement_attempted
+    }));
     assert!(snapshot.executions[0].settlement_error.is_some());
+    assert!(
+        snapshot.executions[1].settlement_error.is_none(),
+        "the later independent exact settlement still runs"
+    );
     assert_eq!(
         snapshot.observations.final_non_terminal_ids,
         vec![captured_id.clone()]
@@ -2972,14 +3014,25 @@ async fn reconcile_terminate_residual_row_is_reconciliation_incomplete() {
         .clone();
     let residual_id = uuid::Uuid::now_v7().to_string();
     sqlx::query(&format!(
-        "CREATE TRIGGER inject_reconcile_residual AFTER UPDATE OF status ON sessions \
-         WHEN OLD.id = '{captured_id}' AND NEW.status = 'interrupted' BEGIN \
-         INSERT INTO sessions (id, project_id, task_id, model_id, agent_type, status, task_run_id, cost_basis) \
-         VALUES ('{residual_id}', OLD.project_id, OLD.task_id, OLD.model_id, OLD.agent_type, 'running', OLD.task_run_id, 'unpriced'); END"
+        "CREATE FUNCTION inject_reconcile_residual() RETURNS trigger LANGUAGE plpgsql AS $$ \
+         BEGIN \
+           IF OLD.id = '{captured_id}' AND NEW.status = 'interrupted' THEN \
+             INSERT INTO sessions (id, project_id, task_id, model_id, agent_type, status, task_run_id, cost_basis) \
+             VALUES ('{residual_id}', OLD.project_id, OLD.task_id, OLD.model_id, OLD.agent_type, 'running', OLD.task_run_id, 'unpriced'); \
+           END IF; \
+           RETURN NEW; \
+         END $$"
     ))
     .execute(app_state.db.pool())
     .await
-    .expect("install residual injection trigger");
+    .expect("install PostgreSQL residual injection function");
+    sqlx::query(
+        "CREATE TRIGGER inject_reconcile_residual AFTER UPDATE OF status ON sessions \
+         FOR EACH ROW EXECUTE FUNCTION inject_reconcile_residual()",
+    )
+    .execute(app_state.db.pool())
+    .await
+    .expect("install PostgreSQL residual injection trigger");
     let (_tx, rx) = mpsc::channel(1);
     let mut pool = SlotPool::new(
         rx,
