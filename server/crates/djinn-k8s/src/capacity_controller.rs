@@ -659,6 +659,11 @@ pub enum ConservativeReason {
     DuplicateFlavorOwnership,
     FlavorOwnershipAmbiguous,
     FlavorOwnershipOverflow,
+    NodePoolDedicationUnasserted,
+    NodePoolApiNotFound,
+    NodePoolApiForbidden,
+    NodePoolLimitsMissing,
+    NodePoolLimitsMalformed,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -698,12 +703,17 @@ pub struct CapacityControllerConfig {
     /// Explicit per-flavor selectors for a multi-cohort ClusterQueue. The
     /// chart's single-pool selector remains supported by `flavor_selector`.
     pub flavor_selectors: BTreeMap<String, BTreeMap<String, String>>,
+    /// Helm-declared dedicated NodePool identity, never a discovery hint.
+    pub nodepool_name: String,
+    /// The rendered dedicated-pool assertion required by nodepool-limits.
+    pub nodepool_dedicated: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CapacitySource {
     Static,
     NodeSum,
+    NodePoolLimits,
     Invalid,
 }
 
@@ -733,6 +743,7 @@ impl CapacityControllerConfig {
         let source = match std::env::var("DJINN_CAPACITY_SOURCE").ok().as_deref() {
             Some("static") => CapacitySource::Static,
             Some("node-sum") => CapacitySource::NodeSum,
+            Some("nodepool-limits") => CapacitySource::NodePoolLimits,
             _ => CapacitySource::Invalid,
         };
         let (flavor_selector, flavor_selectors) =
@@ -775,6 +786,11 @@ impl CapacityControllerConfig {
             static_fallback,
             flavor_selector,
             flavor_selectors,
+            nodepool_name: std::env::var("DJINN_CAPACITY_NODEPOOL_NAME").unwrap_or_default(),
+            nodepool_dedicated: std::env::var("DJINN_CAPACITY_NODEPOOL_DEDICATED")
+                .ok()
+                .as_deref()
+                == Some("true"),
         })
     }
 }
@@ -808,6 +824,53 @@ fn queue_api(client: Client) -> Api<DynamicObject> {
         "ClusterQueue",
     ));
     Api::all_with(client, &resource)
+}
+
+fn nodepool_api(client: Client) -> Api<DynamicObject> {
+    let resource = ApiResource::from_gvk(&GroupVersionKind::gvk("karpenter.sh", "v1", "NodePool"));
+    Api::all_with(client, &resource)
+}
+
+fn nodepool_observation(
+    pool: DynamicObject,
+) -> Result<CapacityObjectObservation, ConservativeReason> {
+    let name = pool
+        .metadata
+        .name
+        .filter(|name| !name.is_empty())
+        .ok_or(ConservativeReason::NodePoolLimitsMissing)?;
+    // CR metadata labels are deliberately ignored: only template labels reach Nodes.
+    let mut labels = pool
+        .data
+        .pointer("/spec/template/metadata/labels")
+        .and_then(Value::as_object)
+        .ok_or(ConservativeReason::NodePoolLimitsMissing)?
+        .iter()
+        .map(|(key, value)| {
+            value
+                .as_str()
+                .map(|value| (key.clone(), value.to_owned()))
+                .ok_or(ConservativeReason::NodePoolLimitsMalformed)
+        })
+        .collect::<Result<BTreeMap<_, _>, _>>()?;
+    let limit = |resource: &str| {
+        pool.data
+            .pointer(&format!("/spec/limits/{resource}"))
+            .ok_or(ConservativeReason::NodePoolLimitsMissing)?
+            .as_str()
+            .ok_or(ConservativeReason::NodePoolLimitsMalformed)
+    };
+    let vector = ResourceVector {
+        cpu: cpu_quantity(limit("cpu")?).ok_or(ConservativeReason::NodePoolLimitsMalformed)?,
+        memory: memory_quantity(limit("memory")?)
+            .ok_or(ConservativeReason::NodePoolLimitsMalformed)?,
+        pods: pod_quantity(limit("pods")?).ok_or(ConservativeReason::NodePoolLimitsMalformed)?,
+    };
+    labels.insert("karpenter.sh/nodepool".into(), name);
+    Ok(CapacityObjectObservation {
+        effective_labels: labels,
+        vector,
+    })
 }
 
 fn observe_queue(queue: DynamicObject, configured_name: &str) -> Option<QueueObservation> {
@@ -878,6 +941,7 @@ pub async fn run_capacity_controller(
 ) {
     let nodes: Api<Node> = Api::all(client.clone());
     let pods: Api<Pod> = Api::all(client.clone());
+    let nodepools = nodepool_api(client.clone());
     let queues = queue_api(client);
     let selector = format!(
         "{}={}",
@@ -893,6 +957,83 @@ pub async fn run_capacity_controller(
             .await
             .ok()
             .and_then(|queue| observe_queue(queue, &config.queue_name));
+        if config.source == CapacitySource::NodePoolLimits {
+            let result: Result<Vec<FlavorQuotaTarget>, ConservativeReason> = async {
+                if !config.nodepool_dedicated || config.nodepool_name.is_empty() {
+                    return Err(ConservativeReason::NodePoolDedicationUnasserted);
+                }
+                let queue = queue.clone().ok_or(ConservativeReason::ObservationFailed)?;
+                let pools = nodepools
+                    .list(&ListParams::default())
+                    .await
+                    .map_err(|error| match error {
+                        kube::Error::Api(response) if response.code == 404 => {
+                            ConservativeReason::NodePoolApiNotFound
+                        }
+                        kube::Error::Api(response) if response.code == 403 => {
+                            ConservativeReason::NodePoolApiForbidden
+                        }
+                        _ => ConservativeReason::ObservationFailed,
+                    })?;
+                let objects = pools
+                    .items
+                    .into_iter()
+                    .filter(|pool| pool.metadata.name.as_deref() == Some(&config.nodepool_name))
+                    .map(nodepool_observation)
+                    .collect::<Result<Vec<_>, _>>()?;
+                let owned = queue
+                    .flavors
+                    .iter()
+                    .map(|flavor| OwnedFlavor {
+                        flavor_name: flavor.name.clone(),
+                        selector: config
+                            .flavor_selectors
+                            .get(&flavor.name)
+                            .cloned()
+                            .or_else(|| config.flavor_selector.clone()),
+                        static_fallback: config.static_fallback,
+                    })
+                    .collect::<Vec<_>>();
+                Ok(derive_flavor_ownership(&owned, &objects)?.targets)
+            }
+            .await;
+            let targets = result.unwrap_or_else(|reason| {
+                tracing::warn!(reason = ?reason, "capacity controller static fallback");
+                queue
+                    .as_ref()
+                    .map(|queue| {
+                        queue
+                            .flavors
+                            .iter()
+                            .map(|flavor| FlavorQuotaTarget {
+                                flavor_name: flavor.name.clone(),
+                                vector: config.static_fallback,
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            });
+            let _ = snapshots.send(CapacityVector {
+                binding: BindingQuota::Pods(config.fail_safe.pods),
+                compile_slots: config.fail_safe.compile_slots,
+            });
+            if let Some(queue) = queue {
+                if let FlavorActuationDecision::Patch { patch } =
+                    flavor_vector_patch_decision(&queue, &config.queue_name, &targets)
+                {
+                    let _ = queues
+                        .patch(
+                            &config.queue_name,
+                            &PatchParams::default(),
+                            &Patch::Json::<()>(
+                                serde_json::from_value(patch).expect("valid internal JSON patch"),
+                            ),
+                        )
+                        .await;
+                }
+            }
+            continue;
+        }
         // This branch is before all Node/Pod APIs.
         if config.source != CapacitySource::NodeSum {
             if config.source == CapacitySource::Invalid {
@@ -1799,6 +1940,8 @@ mod tests {
                 static_fallback: resources(12_000, 48 * 1024 * 1024 * 1024, 3),
                 flavor_selector: None,
                 flavor_selectors: BTreeMap::new(),
+                nodepool_name: String::new(),
+                nodepool_dedicated: false,
             };
             let (tx, _rx) = watch::channel(CapacityVector {
                 binding: BindingQuota::Pods(3),
@@ -1877,6 +2020,8 @@ mod tests {
                 static_fallback: resources(9_000, 8_192, 9),
                 flavor_selector: None,
                 flavor_selectors,
+                nodepool_name: String::new(),
+                nodepool_dedicated: false,
             };
             let (tx, _) = watch::channel(CapacityVector {
                 binding: BindingQuota::Pods(3),
@@ -2181,6 +2326,8 @@ mod tests {
             static_fallback: resources(12_000, 48 * 1024 * 1024 * 1024, 3),
             flavor_selector: None,
             flavor_selectors: BTreeMap::new(),
+            nodepool_name: String::new(),
+            nodepool_dedicated: false,
         };
         let (tx, mut rx) = watch::channel(CapacityVector {
             binding: BindingQuota::Pods(99),
@@ -2229,6 +2376,8 @@ mod tests {
                 static_fallback: resources(12_000, 48 * 1024 * 1024 * 1024, 3),
                 flavor_selector: None,
                 flavor_selectors: BTreeMap::new(),
+                nodepool_name: String::new(),
+                nodepool_dedicated: false,
             };
             let (tx, mut rx) = watch::channel(CapacityVector {
                 binding: BindingQuota::Pods(99),
