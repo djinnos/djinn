@@ -313,17 +313,20 @@ fn build_capacity_cannot_be_mistaken_for_the_admission_authority() {
 /// `unexplained` with an empty `reasons` the entire time.
 #[test]
 fn a_recorded_denial_is_the_dispatchers_own_reason() {
+    let mut denial = denial_row(
+        "controller_not_admitting",
+        Some("create_unknown_health"),
+        30,
+    );
+    // Legacy decision measurements can differ from the report-time global
+    // ledger snapshot and must never become the rendered global capacity.
+    denial.detail = Some("controller is warming".to_owned());
+    denial.occupancy = Some(0);
+    denial.cap = 0;
     let ledger = observed_full(
         Vec::new(),
-        capacity(1, 3, true),
-        denials(vec![(
-            "task-1",
-            denial_row(
-                "controller_not_admitting",
-                Some("create_unknown_health"),
-                30,
-            ),
-        )]),
+        capacity(7, 11, true),
+        denials(vec![("task-1", denial)]),
     );
     let gate = gate(&ledger, "task-1");
     assert_eq!(gate["gate_verdict"], VERDICT_BLOCKED);
@@ -337,15 +340,22 @@ fn a_recorded_denial_is_the_dispatchers_own_reason() {
         "reasons: {:?}",
         gate["reasons"]
     );
+    let denial = &gate["build_admission_denial"];
+    assert_eq!(denial["scope"], "global");
+    assert_eq!(denial["authority"], "build_leases");
+    assert_eq!(denial["occupancy"], 7);
+    assert_eq!(denial["cap"], 11);
+    // Persisted decision evidence remains intact even though legacy capacity
+    // measurements are deliberately not rendered.
+    assert_eq!(denial["cause"], "controller_not_admitting");
     // The `readiness=` field that lived only in container logs.
-    assert_eq!(
-        gate["build_admission_denial"]["readiness"],
-        "create_unknown_health"
-    );
-    assert_eq!(gate["build_admission_denial"]["denial_count"], 152);
-    assert_eq!(gate["build_admission_denial"]["fresh"], true);
-    // A readiness denial measures nothing. `null`, never 0.
-    assert!(gate["build_admission_denial"]["occupancy"].is_null());
+    assert_eq!(denial["readiness"], "create_unknown_health");
+    assert_eq!(denial["detail"], "controller is warming");
+    assert_eq!(denial["server_epoch"], "epoch-1");
+    assert_eq!(denial["first_denied_at"], "2026-07-29T06:22:57.000Z");
+    assert_eq!(denial["denied_at"], "2026-07-29T11:30:00.000Z");
+    assert_eq!(denial["denial_count"], 152);
+    assert_eq!(denial["fresh"], true);
 }
 
 /// Each cause maps to its own reason, so `at_capacity` and

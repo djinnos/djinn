@@ -238,9 +238,13 @@ pub(super) struct DenialRow {
     pub readiness: Option<String>,
     /// The capacity authority's own words, for `authority_unavailable`.
     pub detail: Option<String>,
-    /// Occupancy as MEASURED. `None` means the denial never consulted it,
-    /// which is true of every readiness denial.
+    /// Historical occupancy measured when this denial was recorded. Retained
+    /// for legacy rows, but never rendered as the report-time global value.
+    #[allow(dead_code)]
     pub occupancy: Option<i64>,
+    /// Historical cap measured when this denial was recorded. Retained for
+    /// legacy rows, but never rendered as the report-time global value.
+    #[allow(dead_code)]
     pub cap: i64,
     /// The deciding process's admission epoch.
     pub server_epoch: String,
@@ -446,11 +450,11 @@ async fn load_denials(pool: &sqlx::PgPool) -> Option<HashMap<String, DenialRow>>
 
 /// Apply the persisted-denial gate to one task.
 ///
-/// This is the only gate in this module that reports the dispatcher's OWN
-/// decision rather than a re-derivation of it, so it is the only one that can
-/// never disagree with what actually happened.
+/// This reports the dispatcher's OWN persisted decision evidence alongside the
+/// authoritative report-time global lease capacity snapshot.
 fn denial_gate(
     denials: Option<&HashMap<String, DenialRow>>,
+    capacity: &LeaseCapacity,
     task_id: &str,
 ) -> (
     serde_json::Value,
@@ -481,14 +485,15 @@ fn denial_gate(
 
     let fresh = row.age_seconds <= DENIAL_FRESHNESS_SECONDS;
     let payload = serde_json::json!({
+        "scope":            "global",
+        "authority":        "build_leases",
         "cause":            row.cause,
         "readiness":        row.readiness,
         "detail":           row.detail,
-        // `null`, never 0. A readiness denial measures no occupancy at all,
-        // and the fabricated zero is what made a tombstoned lease read as a
-        // full pool for forty minutes (#2661).
-        "occupancy":        row.occupancy,
-        "cap":              row.cap,
+        // This is the same ledger-wide weighted snapshot as `build_capacity`,
+        // not the historical measurement persisted with the denial decision.
+        "occupancy":        capacity.occupancy,
+        "cap":              capacity.cap,
         "server_epoch":     row.server_epoch,
         "first_denied_at":  row.first_denied_at,
         "denied_at":        row.denied_at,
@@ -502,6 +507,9 @@ fn denial_gate(
                  denial. A record older than `freshness_window_seconds` is reported \
                  but not blamed: the dispatcher retries a stranded task every tick, \
                  so a stale row belongs to a task it has stopped considering. \
+                 `occupancy` and `cap` are the report-time global weighted \
+                 `build_leases` capacity, while the remaining fields are \
+                 persisted decision evidence. \
                  The Kueue cutover deleted the pre-create controller that WROTE \
                  these rows, so any record you see here predates it; a `null` is \
                  now the steady state and is NOT evidence that Kueue admitted \
@@ -553,9 +561,10 @@ pub(super) fn lease_gate(ledger: &LeaseLedger, task_id: &str) -> LeaseGateOutcom
         } => (by_task, capacity, denials.as_ref()),
     };
 
-    // The dispatcher's own recorded decision for THIS task.
+    // The dispatcher's own recorded decision for THIS task, rendered with this
+    // same authoritative global capacity snapshot as `build_capacity`.
     let (build_admission_denial, denial_reasons, denial_evaluated, denial_unevaluated_detail) =
-        denial_gate(denials, task_id);
+        denial_gate(denials, capacity, task_id);
 
     let at_capacity = capacity.cap > 0 && capacity.occupancy >= capacity.cap;
     // `enforcing` used to be the bare field name. During the 2026-07-29 outage

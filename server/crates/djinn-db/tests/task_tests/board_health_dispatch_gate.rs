@@ -424,7 +424,8 @@ async fn a_persisted_denial_cause_becomes_the_reason_for_a_stranded_task() {
             cause: "controller_not_admitting".to_owned(),
             readiness: Some("create_unknown_health".to_owned()),
             detail: None,
-            // A readiness denial measures nothing.
+            // Historical decision measurement. The projection must instead
+            // render the current global lease-ledger capacity.
             occupancy: None,
             cap: 3,
             server_epoch: "epoch-under-test".to_owned(),
@@ -451,10 +452,13 @@ async fn a_persisted_denial_cause_becomes_the_reason_for_a_stranded_task() {
     assert_eq!(denial["server_epoch"], "epoch-under-test");
     assert_eq!(denial["denial_count"], 1);
     assert_eq!(denial["fresh"], true);
-    assert!(
-        denial["occupancy"].is_null(),
-        "a readiness denial measured no occupancy; `null`, never 0"
+    assert_eq!(denial["scope"], "global");
+    assert_eq!(denial["authority"], "build_leases");
+    assert_eq!(
+        denial["occupancy"], 0,
+        "the empty global lease ledger, not the historical denial measurement"
     );
+    assert_eq!(denial["cap"], 3);
 
     // A repeat denial keeps the streak start and counts the tick.
     djinn_db::BuildAdmissionDenialRepository::new(db.clone())
@@ -510,7 +514,14 @@ async fn clearing_a_denial_stops_it_being_reported_as_a_reason() {
         .unwrap();
     let gate = gate_for(&repo, &task.id).await;
     assert_eq!(gate["gate_verdict"], "blocked");
-    assert_eq!(gate["build_admission_denial"]["occupancy"], 3);
+    let denial = &gate["build_admission_denial"];
+    assert_eq!(denial["scope"], "global");
+    assert_eq!(denial["authority"], "build_leases");
+    assert_eq!(
+        denial["occupancy"], 0,
+        "the persisted denial's historical full-pool measurement is not current capacity"
+    );
+    assert_eq!(denial["cap"], 3);
 
     // The permitted path.
     denials.clear("task_dispatch", &task.id).await.unwrap();
