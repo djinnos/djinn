@@ -4215,8 +4215,7 @@
                 "integer",
                 "null"
               ],
-              "format": "uint",
-              "minimum": 0
+              "format": "int64"
             },
             "initial_pending_teardown": {
               "type": "boolean"
@@ -4248,8 +4247,7 @@
                 "integer",
                 "null"
               ],
-              "format": "uint",
-              "minimum": 0
+              "format": "int64"
             },
             "final_pending_teardown": {
               "type": "boolean"

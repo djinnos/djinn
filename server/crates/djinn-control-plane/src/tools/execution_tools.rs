@@ -89,12 +89,14 @@ impl From<ReconcileTerminateExecution> for ExecutionKillTaskExecution {
 #[derive(Clone, Serialize, schemars::JsonSchema)]
 pub struct ExecutionKillTaskObservations {
     pub initial_non_terminal_ids: Vec<String>,
+    #[schemars(with = "Option<i64>")]
     pub initial_mapping_slot_id: Option<usize>,
     pub initial_pending_teardown: bool,
     pub initial_compacting: bool,
     pub fenced_generation: Option<i64>,
     pub initial_capture_error: Option<String>,
     pub final_non_terminal_ids: Vec<String>,
+    #[schemars(with = "Option<i64>")]
     pub final_mapping_slot_id: Option<usize>,
     pub final_pending_teardown: bool,
     pub final_reread_error: Option<String>,

@@ -4184,8 +4184,7 @@ expression: signatures
               ]
             },
             "final_mapping_slot_id": {
-              "format": "uint",
-              "minimum": 0,
+              "format": "int64",
               "type": [
                 "integer",
                 "null"
@@ -4216,8 +4215,7 @@ expression: signatures
               "type": "boolean"
             },
             "initial_mapping_slot_id": {
-              "format": "uint",
-              "minimum": 0,
+              "format": "int64",
               "type": [
                 "integer",
                 "null"
