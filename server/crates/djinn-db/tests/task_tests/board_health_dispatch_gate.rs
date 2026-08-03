@@ -485,6 +485,102 @@ async fn a_persisted_denial_cause_becomes_the_reason_for_a_stranded_task() {
     );
 }
 
+/// A legacy denial is evidence about an earlier admission decision, not the
+/// authority for the capacity it reports today. In particular, inspecting a
+/// task in one project must not scope its denial's occupancy to that project:
+/// the build-lease ledger and cap are global.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn persisted_denial_reports_global_weighted_occupancy_from_other_projects() {
+    use djinn_db::{
+        BuildLeaseConsumerKind, BuildLeaseKey, BuildLeaseRepository, GrantNextBuildLeaseResult,
+        QueueBuildLeaseInput,
+    };
+
+    let db = create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let repo = TaskRepository::new(db.clone(), event_bus_for(&tx));
+    let inspected = stranded_task(&db, &repo, "Inspected project denial").await;
+    // `stranded_task` creates a new project on every call, so these occupants
+    // unambiguously belong to a different project from the inspected task.
+    let outside_project_first = stranded_task(&db, &repo, "Outside project build one").await;
+    let outside_project_second = stranded_task(&db, &repo, "Outside project build two").await;
+    assert_ne!(inspected.project_id, outside_project_first.project_id);
+    assert_ne!(inspected.project_id, outside_project_second.project_id);
+
+    const GLOBAL_CAP: i64 = 7;
+    const WEIGHTED_HELD: i64 = 5;
+    arm_lease_authority(&db, GLOBAL_CAP).await;
+
+    // Exercise the real ledger repository, not a raw fixture insert. Two
+    // occupying rows with weights 2 and 3 prove the projection uses SUM(weight)
+    // rather than row count; neither identity names the inspected task.
+    let leases = BuildLeaseRepository::new(db.clone());
+    for (task, invocation_id, weight) in [
+        (&outside_project_first, "outside-project-invocation-one", 2),
+        (&outside_project_second, "outside-project-invocation-two", 3),
+    ] {
+        leases
+            .queue(&QueueBuildLeaseInput {
+                key: BuildLeaseKey {
+                    consumer_kind: BuildLeaseConsumerKind::TaskInvocation,
+                    consumer_id: invocation_id.to_owned(),
+                },
+                immutable_identity: format!("task:{}:run-{invocation_id}:{invocation_id}", task.id),
+                queue_deadline: None,
+                launch_deadline: None,
+                weight,
+            })
+            .await
+            .unwrap();
+        assert!(matches!(
+            leases
+                .grant_next(GLOBAL_CAP, "2026-01-01T00:00:00Z", None)
+                .await
+                .unwrap(),
+            GrantNextBuildLeaseResult::Granted(_)
+        ));
+    }
+    let snapshot = leases.snapshot().await.unwrap();
+    assert_eq!(snapshot.occupied, WEIGHTED_HELD);
+    assert_eq!(
+        snapshot.rows.iter().filter(|row| row.weight > 0).count(),
+        2,
+        "the held weighted occupancy must differ from the occupying row count"
+    );
+    assert!(
+        snapshot
+            .rows
+            .iter()
+            .all(|row| !row.immutable_identity.contains(&inspected.id)),
+        "the inspected project owns no occupying lease, so a project-scoped ledger would be zero"
+    );
+
+    // Persist an intentionally stale, project-scoped-looking measurement. The
+    // renderer must replace both values with the live global ledger snapshot.
+    djinn_db::BuildAdmissionDenialRepository::new(db.clone())
+        .record(&djinn_db::BuildAdmissionDenialRecord {
+            consumer_kind: "task_dispatch".to_owned(),
+            consumer_id: inspected.id.clone(),
+            cause: "at_capacity".to_owned(),
+            readiness: None,
+            detail: None,
+            occupancy: Some(0),
+            cap: 1,
+            server_epoch: "legacy-scoped-measurement".to_owned(),
+        })
+        .await
+        .unwrap();
+
+    let gate = gate_for(&repo, &inspected.id).await;
+    let denial = &gate["build_admission_denial"];
+    assert_eq!(denial["scope"], "global");
+    assert_eq!(denial["authority"], "build_leases");
+    assert_eq!(denial["occupancy"], WEIGHTED_HELD);
+    assert_eq!(denial["cap"], GLOBAL_CAP);
+    assert_ne!(denial["occupancy"], 0, "must not use project-scoped zero");
+    assert_ne!(denial["cap"], 1, "must not use the persisted stale cap");
+}
+
 /// **Neutralisation guard: this table must not become the #2661 tombstone.**
 ///
 /// #2661 was a spent row replayed forever. A denial record that outlived its
