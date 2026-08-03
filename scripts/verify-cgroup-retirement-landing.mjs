@@ -58,10 +58,18 @@ exact(review.reviewed_payload, ['child_seccomp_boundary', 'launcher_uid_separati
 if (review.reviewed_payload.launcher_uid_separation !== 'lost' || review.reviewed_payload.child_seccomp_boundary !== 'lost-complete' || review.reviewed_payload.second_in_worker_seccomp_installer !== 'not-claimed' || !Array.isArray(review.reviewed_payload.untested_replacements) || review.reviewed_payload.untested_replacements.length !== 0) fail('reviewed payload', 'must honestly record uid and complete child-seccomp losses without an untested replacement');
 
 exact(evidence.deployment, ['final_dispatch', 'image', 'node_digest', 'pod_annotation', 'render_digest', 'workload_digest'], 'deployment');
-exact(evidence.deployment.image, ['oci_revision', 'digest'], 'image');
+exact(evidence.deployment.image, ['digest', 'expected_digest', 'oci_revision'], 'image');
 digest(evidence.deployment.image.digest, 'image digest');
+digest(evidence.deployment.image.expected_digest, 'expected image digest');
 if (evidence.deployment.image.oci_revision !== commit) fail('image OCI revision', 'does not bind the landing commit');
-for (const key of ['render_digest', 'node_digest', 'workload_digest']) { exact(evidence.deployment[key], ['commit', 'digest'], key); digest(evidence.deployment[key].digest, key); if (evidence.deployment[key].commit !== commit) fail(key, 'does not bind the landing commit'); }
+if (evidence.deployment.image.digest !== evidence.deployment.image.expected_digest) fail('image digest', 'captured digest does not match the immutable expected digest');
+for (const key of ['render_digest', 'node_digest', 'workload_digest']) {
+  exact(evidence.deployment[key], ['commit', 'digest', 'expected_digest'], key);
+  digest(evidence.deployment[key].digest, key);
+  digest(evidence.deployment[key].expected_digest, `expected ${key}`);
+  if (evidence.deployment[key].commit !== commit) fail(key, 'does not bind the landing commit');
+  if (evidence.deployment[key].digest !== evidence.deployment[key].expected_digest) fail(key, 'captured digest does not match the immutable expected digest');
+}
 exact(evidence.deployment.pod_annotation, ['commit', 'key'], 'Pod annotation');
 if (evidence.deployment.pod_annotation.commit !== commit || evidence.deployment.pod_annotation.key !== 'djinn.dev/revision') fail('Pod annotation', 'does not bind the landing commit');
 exact(evidence.deployment.final_dispatch, ['commit', 'container_count', 'confirmed'], 'final dispatch');
