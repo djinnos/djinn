@@ -1,0 +1,27 @@
+# Minimal checked-in old-chart fixture derived from PR #2901 merge
+apiVersion: v1
+# The document is intentionally data-only: it captures the wire contract an old
+# chart gave a new controller without downloading another release.
+oldControllerEnvironment:
+  DJINN_CAPACITY_ENABLED: "true"
+  DJINN_CAPACITY_QUEUE_NAME: djinn-kueue
+  DJINN_CAPACITY_NODE_SELECTOR_KEY: kubernetes.io/hostname
+  DJINN_CAPACITY_NODE_SELECTOR_VALUE: worker-1
+  DJINN_CAPACITY_IDLE_CPU: 750m
+  DJINN_CAPACITY_COMPILE_CPU: 2800m
+  DJINN_CAPACITY_FAIL_SAFE_PODS: "3"
+  DJINN_CAPACITY_FAIL_SAFE_COMPILE_SLOTS: "2"
+clusterQueue:
+  metadata:
+    annotations:
+      djinn.io/binding-resource: pods
+  spec:
+    resourceGroups:
+      - flavors:
+          - resources:
+              - name: pods
+                nominalQuota: 3
+              - name: cpu
+                nominalQuota: 10k
+              - name: memory
+                nominalQuota: 100Ti

@@ -1,0 +1,1 @@
+{"pre_landing":{"review":"green","owner_coverage":"green","range_gate":"green","candidate_proofs":"green","rollback":"green","deployment_binding":"green"},"candidate_fault":false,"post_deploy_fault":false,"restoration":{"aggregate_tree":"green","node_assets":"green","launcher_leaf":"green"}}

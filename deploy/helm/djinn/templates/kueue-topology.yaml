@@ -30,6 +30,7 @@ state `deploy/kueue/zero-capture-gate.sh` verifies. `armed` implies `enabled`;
 {{- $kueue := .Values.kueue -}}
 {{- $capacity := $kueue.capacity -}}
 {{- $dedicatedNodePool := and (eq $capacity.source "nodepool-limits") $capacity.nodePool.dedicated (ne $capacity.nodePool.name "") -}}
+{{- $vectorV1 := eq $capacity.contract "vector-v1" -}}
 {{- if not (kindIs "float64" $kueue.buildPods) -}}
 {{- if not (kindIs "int64" $kueue.buildPods) -}}
 {{- fail "kueue.enabled is true but kueue.buildPods is not a number. It is the pods nominalQuota for the ClusterQueue; set a positive integer, or set kueue.enabled=false if the Kueue prerequisite (deploy/helm/djinn-prereqs) is not installed." -}}
@@ -55,6 +56,10 @@ metadata:
 spec:
   nodeLabels:
     karpenter.sh/nodepool: {{ $capacity.nodePool.name | quote }}
+{{- else if $vectorV1 }}
+spec:
+  nodeLabels:
+    {{ $capacity.flavorSelector.key }}: {{ $capacity.flavorSelector.value | quote }}
 {{- else }}
 spec: {}
 {{- end }}
