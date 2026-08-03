@@ -460,4 +460,18 @@ impl LivenessRepository {
 
         Ok(count)
     }
+
+    /// Count task-owned reconciliation evidence rows. This supports callers
+    /// whose snapshots name zero or multiple executions and therefore cannot
+    /// safely select a scalar session owner.
+    pub async fn count_evidence_for_task(&self, task_id: &str) -> DbResult<i64> {
+        self.db.ensure_initialized().await?;
+
+        let count = sqlx::query_scalar("SELECT COUNT(*) FROM liveness_evidence WHERE task_id = $1")
+            .bind(task_id)
+            .fetch_one(self.db.pool())
+            .await?;
+
+        Ok(count)
+    }
 }
