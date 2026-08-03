@@ -175,6 +175,13 @@ pub use repositories::{
         ModelTurnLeaseTerminalOutcome, ModelTurnObservation, ModelTurnPool, ModelTurnReservation,
         ModelTurnReservationBucket, ModelTurnReservationState,
     },
+    typed_evidence::{
+        AllocateTypedEvidenceAttemptInput, AllocateTypedEvidenceRetryInput,
+        AppendTypedEvidenceTransitionInput, DemandTypedEvidenceInput,
+        PersistTypedEvidenceValidationInput, PlannedTypedEvidenceCheckInput,
+        TypedEvidenceAttemptAllocation, TypedEvidenceDispositionProjection,
+        TypedEvidenceFindingProjection,
+    },
     models::ModelsRepository,
     note::{
         AnchorProposerKind, BackfillRetrievalAnchorOptions, BackfillRetrievalAnchorReport,

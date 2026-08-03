@@ -64,6 +64,7 @@ pub mod task_attempt_tests;
 pub mod task_rejected_submission_integrity;
 pub mod task_run;
 pub mod task_run_outcome;
+pub mod typed_evidence;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 #[cfg(any(test, feature = "test-support"))]
