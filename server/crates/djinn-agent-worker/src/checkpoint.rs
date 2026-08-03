@@ -1436,6 +1436,45 @@ mod tests {
         assert!(result.staged_files.contains(&"src/main.rs".to_string()));
     }
 
+    /// The checkpoint reset followed by targeted adds must preserve a modified
+    /// tracked dependency lockfile rather than treating it as generated output.
+    #[tokio::test]
+    async fn checkpoint_preserves_tracked_package_lockfile_through_targeted_add() {
+        let (_origin, clone) = setup_test_repos().await;
+        let cp = clone.path();
+        let original = "{\"lockfileVersion\": 1}\n";
+        let updated = "{\"lockfileVersion\": 2}\n";
+
+        std::fs::write(cp.join("package-lock.json"), original).unwrap();
+        git(cp, &["add", "package-lock.json"]).await;
+        git(cp, &["commit", "-m", "track package lockfile"]).await;
+        std::fs::write(cp.join("package-lock.json"), updated).unwrap();
+
+        let meta = test_metadata("task/test-branch", CheckpointReason::Terminal);
+        let result = preserve_checkpoint(cp, &meta, None).await;
+
+        assert!(
+            result.commit_succeeded,
+            "checkpoint must commit: {result:?}"
+        );
+        assert!(
+            result
+                .staged_files
+                .contains(&"package-lock.json".to_string()),
+            "safety scan must approve the tracked lockfile: {:?}",
+            result.staged_files
+        );
+        assert_eq!(
+            git(cp, &["show", "HEAD:package-lock.json"]).await,
+            updated,
+            "checkpoint HEAD must contain the updated lockfile bytes"
+        );
+        assert!(
+            git(cp, &["status", "--porcelain"]).await.trim().is_empty(),
+            "checkpoint commit must leave the worktree clean"
+        );
+    }
+
     #[tokio::test]
     async fn wip_commit_message_in_repo() {
         let (_origin, clone) = setup_test_repos().await;

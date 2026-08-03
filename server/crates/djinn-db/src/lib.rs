@@ -165,8 +165,10 @@ pub use repositories::{
         LlmCallAttemptRepository, LlmCallOutcome,
     },
     model_turn_admission::{
-        MODEL_TURN_ADMISSION_SCHEMA_VERSION, ModelTurnAdmissionPhase, ModelTurnAdmissionRepository,
-        ModelTurnAdmissionSchemaReadiness, ModelTurnBucketBinding, ModelTurnBucketKind,
+        MODEL_TURN_ADMISSION_SCHEMA_VERSION, ModelTurnAcquireInput, ModelTurnAcquireOutcome,
+        ModelTurnAcquireTurnInput, ModelTurnAdmissionPhase, ModelTurnAdmissionRejection,
+        ModelTurnAdmissionRepository, ModelTurnAdmissionSchemaReadiness, ModelTurnAdmissionWait,
+        ModelTurnBucketBinding, ModelTurnBucketDebit, ModelTurnBucketKind,
         ModelTurnCapabilityState, ModelTurnControllerWindow, ModelTurnIdentityState,
         ModelTurnLease, ModelTurnLeaseIdentity, ModelTurnLeaseLifecycle,
         ModelTurnLeaseTerminalOutcome, ModelTurnObservation, ModelTurnPool, ModelTurnReservation,

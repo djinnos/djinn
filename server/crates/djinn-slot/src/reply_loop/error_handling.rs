@@ -8,6 +8,56 @@ use djinn_provider::message::Message;
 use djinn_provider::provider::ToolChoice;
 use std::fmt;
 
+/// The cancellation source that stopped a reply loop.
+///
+/// This is deliberately separate from the error's display text so callers can
+/// distinguish a user/session cancellation from a supervisor shutdown without
+/// parsing diagnostics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplyLoopCancellationOrigin {
+    /// The reply-loop session's own cancellation token was cancelled.
+    Session,
+    /// The supervisor-wide cancellation token was cancelled.
+    SupervisorShutdown,
+}
+
+/// Typed terminal error returned when a reply loop is cancelled.
+///
+/// `run_reply_loop` returns this through its existing `anyhow::Result`, so
+/// downstream callers can use `anyhow::Error::downcast_ref` to inspect
+/// [`Self::origin`] while retaining the established user-facing diagnostic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReplyLoopCancelled {
+    pub origin: ReplyLoopCancellationOrigin,
+}
+
+impl ReplyLoopCancelled {
+    pub const fn session() -> Self {
+        Self {
+            origin: ReplyLoopCancellationOrigin::Session,
+        }
+    }
+
+    pub const fn supervisor_shutdown() -> Self {
+        Self {
+            origin: ReplyLoopCancellationOrigin::SupervisorShutdown,
+        }
+    }
+}
+
+impl fmt::Display for ReplyLoopCancelled {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.origin {
+            ReplyLoopCancellationOrigin::Session => f.write_str("session cancelled"),
+            ReplyLoopCancellationOrigin::SupervisorShutdown => {
+                f.write_str("supervisor shutting down")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ReplyLoopCancelled {}
+
 // Re-export provider-layer classifiers so callers in the reply loop can import
 // them from this module as before.
 pub use djinn_provider::error_classify::{is_context_length_error, is_orphaned_tool_call_error};

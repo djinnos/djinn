@@ -12,6 +12,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::db::runtime::{DatabaseRuntimeHealth, DatabaseRuntimeManager};
 use crate::events::DjinnEventEnvelope;
+use crate::reclamation_report::LEASE_RECLAMATION_LEDGER;
 use djinn_agent::actors::coordinator::CoordinatorHandle;
 use djinn_agent::actors::slot::{SlotPoolConfig, SlotPoolHandle};
 use djinn_agent::file_time::FileTime;
@@ -19,7 +20,7 @@ use djinn_agent::lsp::LspManager;
 use djinn_agent::roles::RoleRegistry;
 use djinn_agent::runtime_bridge::{K8sTokenReviewValidator, RuntimeKind, runtime_kind};
 use djinn_coordinator::build_lease::BuildLeaseService;
-use djinn_coordinator::build_lease_reclaim::BuildLeaseReclaimer;
+use djinn_coordinator::build_lease_reclaim::{BuildLeaseReclaimReport, BuildLeaseReclaimer};
 use djinn_coordinator::graph_warm_lease::BuildLeaseGraphWarmAdapter;
 use djinn_coordinator::run_dir_observe::{RunDirObserveSeams, arm_disk_observation};
 use djinn_core::clock::{Clock, SystemClock as SystemClockTrait};
@@ -60,6 +61,33 @@ const MODEL_HEALTH_STATE_KEY: &str = "model_health.state";
 /// How often every pod re-reads the durable invocation-lease authority to adopt
 /// an operator cap change without a restart.
 const BUILD_EPOCH_INTERVAL: Duration = Duration::from_secs(5 * 60);
+
+/// Emit the standalone build-lease reclaimer's activity report.
+///
+/// This path describes only rows from the `build_leases` ledger. Resize
+/// lifecycle reconciliation has its own `build_pod_permits` report and must
+/// not be inferred from these counts.
+fn emit_build_lease_reclamation_summary(report: &BuildLeaseReclaimReport) {
+    if report.reclaimed > 0
+        || report.fenced > 0
+        || report.failure_count > 0
+        || !report.blockers.is_empty()
+    {
+        tracing::warn!(
+            ledger = LEASE_RECLAMATION_LEDGER,
+            lease_rows_examined = report.examined,
+            lease_rows_without_owner = report.absent,
+            ownerless_dispatch_lease_rows = report.ownerless_dispatch,
+            finished_object_lease_rows = report.finished_object,
+            leases_reclaimed = report.reclaimed,
+            fenced_lease_rows = report.fenced,
+            lease_reclaim_failure_count = report.failure_count,
+            named_lease_reclaim_failures = ?report.failures,
+            lease_reclaim_blockers = ?report.blockers,
+            "build_lease: standalone reclamation pass over build lease rows"
+        );
+    }
+}
 
 /// Pre-recovery fallback for the build-slot FIFO's reference cap.
 ///
@@ -1039,24 +1067,7 @@ impl AppState {
                                 continue;
                             };
                             let report = reclaimer.reclaim().await;
-                            if report.reclaimed > 0
-                                || report.fenced > 0
-                                || report.failure_count > 0
-                                || !report.blockers.is_empty()
-                            {
-                                tracing::warn!(
-                                    examined = report.examined,
-                                    absent = report.absent,
-                                    ownerless_dispatch = report.ownerless_dispatch,
-                                    finished_object = report.finished_object,
-                                    reclaimed = report.reclaimed,
-                                    fenced = report.fenced,
-                                    failures = report.failure_count,
-                                    named_failures = ?report.failures,
-                                    blockers = ?report.blockers,
-                                    "build_lease: reclamation pass over nonterminal leases"
-                                );
-                            }
+                            emit_build_lease_reclamation_summary(&report);
                         }
                     });
                     warmer as Arc<dyn GraphWarmerService>
@@ -3061,6 +3072,96 @@ fn build_in_process_graph_warmer(state: AppState) -> djinn_agent::warmer::InProc
         project_root,
         is_fresh,
     })
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod build_lease_reclamation_report_tests {
+    use std::io::{self, Write};
+    use std::sync::{Arc, Mutex};
+
+    use super::*;
+    use serde_json::Value;
+    use tracing_subscriber::fmt::MakeWriter;
+
+    #[derive(Clone)]
+    struct CapturedLog(Arc<Mutex<Vec<u8>>>);
+
+    struct CapturedLogWriter(CapturedLog);
+
+    impl Write for CapturedLogWriter {
+        fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+            self.0
+                .0
+                .lock()
+                .expect("capture lock")
+                .extend_from_slice(buffer);
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> MakeWriter<'a> for CapturedLog {
+        type Writer = CapturedLogWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            CapturedLogWriter(self.clone())
+        }
+    }
+
+    #[test]
+    fn standalone_reclamation_event_identifies_and_counts_only_build_leases() {
+        let captured = CapturedLog(Arc::new(Mutex::new(Vec::new())));
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::WARN)
+            .with_writer(captured.clone())
+            .finish();
+        let report = BuildLeaseReclaimReport {
+            examined: 11,
+            absent: 2,
+            ownerless_dispatch: 3,
+            finished_object: 5,
+            reclaimed: 7,
+            fenced: 13,
+            failures: vec!["lease-a: database conflict".into()],
+            failure_count: 17,
+            blockers: vec!["inventory unavailable".into()],
+        };
+
+        tracing::subscriber::with_default(subscriber, || {
+            emit_build_lease_reclamation_summary(&report);
+        });
+
+        let serialized = String::from_utf8(captured.0.lock().expect("capture lock").clone())
+            .expect("structured event is UTF-8");
+        let event: Value = serde_json::from_str(&serialized).expect("one JSON structured event");
+        let fields = &event["fields"];
+
+        assert_eq!(fields["ledger"], LEASE_RECLAMATION_LEDGER);
+        assert_eq!(fields["lease_rows_examined"], 11);
+        assert_eq!(fields["lease_rows_without_owner"], 2);
+        assert_eq!(fields["ownerless_dispatch_lease_rows"], 3);
+        assert_eq!(fields["finished_object_lease_rows"], 5);
+        assert_eq!(fields["leases_reclaimed"], 7);
+        assert_eq!(fields["fenced_lease_rows"], 13);
+        assert_eq!(fields["lease_reclaim_failure_count"], 17);
+        assert!(
+            fields["lease_reclaim_blockers"]
+                .as_str()
+                .expect("debug blockers field")
+                .contains("inventory unavailable")
+        );
+        assert!(!serialized.contains("build_pod_permits"));
+        assert!(!serialized.contains("lifecycle"));
+        assert!(!serialized.contains("permit"));
+        assert!(fields.get("reclaimed").is_none());
+        assert!(fields.get("examined").is_none());
+    }
 }
 
 #[cfg(test)]
