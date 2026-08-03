@@ -14,13 +14,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::watch;
+use tokio::time::Instant;
 
 use crate::capacity::{
     CapacityOutcome, CpuMillicores, DerivedCapacity, FailSafeCapacity, MemoryBytes, PodCount,
     ResourceVector, ResourceVectorDerivationInputs, ResourceVectorInput, ResourceVectorOutcome,
     derive_resource_vector, podset_cost_from_pod_spec,
 };
-use crate::capacity_damping::{BindingQuota, CapacityVector};
+use crate::capacity_damping::{BindingQuota, CapacityDamper, CapacityVector, SampleKind};
 
 pub const QUOTA_OWNER_LABEL: &str = "djinn.io/quota-owner";
 pub const DERIVED_CAPACITY_OWNER: &str = "derived-capacity";
@@ -1012,6 +1013,9 @@ pub async fn run_capacity_controller(
         "{}={}",
         config.node_selector_key, config.node_selector_value
     );
+    // Legacy and vector-v1 have deliberately separate stabilization contracts.
+    // This state is consulted only by the absent-marker legacy branch below.
+    let mut legacy_damper: Option<CapacityDamper> = None;
     let mut tick = tokio::time::interval(Duration::from_secs(30));
     loop {
         tick.tick().await;
@@ -1080,18 +1084,58 @@ pub async fn run_capacity_controller(
             }
             .await;
             let Some((queue, capacity, snapshot)) = observed else {
-                let _ = snapshots.send(CapacityVector {
-                    binding: BindingQuota::Pods(config.fail_safe.pods),
-                    compile_slots: config.fail_safe.compile_slots,
-                });
+                let current = legacy_damper
+                    .as_mut()
+                    .map(|damper| {
+                        damper.reset_after_error(config.fail_safe.compile_slots, Instant::now())
+                    })
+                    .unwrap_or(CapacityVector {
+                        binding: BindingQuota::Pods(config.fail_safe.pods),
+                        compile_slots: config.fail_safe.compile_slots,
+                    });
+                let _ = snapshots.send(current);
                 continue;
             };
-            let _ = snapshots.send(snapshot);
+            // Preserve PR #2901's sentinel-safe initialization: an old queue
+            // quantity that cannot be parsed as a plain integer (for example
+            // `10k`) starts from the configured fail-safe live fallback. Growth
+            // then requires both agreeing periodic samples and the dwell.
+            let now = Instant::now();
+            let live = queue
+                .resources
+                .iter()
+                .find(|resource| Some(resource.name.as_str()) == queue.binding_resource.as_deref())
+                .and_then(|resource| {
+                    resource
+                        .nominal_quota
+                        .strip_suffix('m')
+                        .unwrap_or(&resource.nominal_quota)
+                        .parse()
+                        .ok()
+                })
+                .unwrap_or(config.fail_safe.pods);
+            let damper = legacy_damper.get_or_insert_with(|| {
+                CapacityDamper::new(
+                    match snapshot.binding {
+                        BindingQuota::Pods(_) => BindingQuota::Pods(live),
+                        BindingQuota::CpuMillicores(_) => BindingQuota::CpuMillicores(live),
+                    },
+                    config.fail_safe.compile_slots,
+                    now,
+                )
+            });
+            let damped = damper.observe(snapshot, SampleKind::Periodic, now);
+            let _ = snapshots.send(damped);
+            // A growth candidate is observable, but not writable, until the
+            // damper promotes its binding component after agreement and dwell.
+            if damped.binding != snapshot.binding {
+                continue;
+            }
             if let ActuationDecision::Patch { patch, .. } = patch_decision(
                 &queue,
                 &config.queue_name,
                 capacity,
-                snapshot,
+                damped,
                 compile_bound_armed(),
                 config.fail_safe,
             ) {
@@ -2913,23 +2957,35 @@ mod tests {
         for _ in 0..4 {
             tokio::time::advance(Duration::from_secs(30)).await;
             tokio::task::yield_now().await;
+        }
+        assert!(
+            recorder.mutations().is_empty(),
+            "legacy growth must not write before the five-minute dwell"
+        );
+        for _ in 0..8 {
+            tokio::time::advance(Duration::from_secs(30)).await;
+            tokio::task::yield_now().await;
             if !recorder.mutations().is_empty() {
                 break;
             }
         }
         task.abort();
-        let legacy_patch: Value = serde_json::from_str(&recorder.mutations()[0].body).unwrap();
+        let mutations = recorder.mutations();
         assert_eq!(
-            legacy_patch[0],
-            json!({"op":"test","path":"/metadata/resourceVersion","value":"42"})
+            mutations.len(),
+            1,
+            "legacy widening is a single fenced write"
         );
-        assert_eq!(legacy_patch.as_array().unwrap().len(), 2);
+        let legacy_patch: Value = serde_json::from_str(&mutations[0].body).unwrap();
         assert_eq!(
-            legacy_patch[1]["path"],
-            "/spec/resourceGroups/0/flavors/0/resources/0/nominalQuota"
+            legacy_patch,
+            json!([
+                {"op":"test","path":"/metadata/resourceVersion","value":"42"},
+                {"op":"replace","path":"/spec/resourceGroups/0/flavors/0/resources/0/nominalQuota","value":"6"}
+            ])
         );
-        assert!(!recorder.mutations()[0].body.contains("10000"));
-        assert!(!recorder.mutations()[0].body.contains("100Ti"));
+        assert!(!mutations[0].body.contains("10000"));
+        assert!(!mutations[0].body.contains("100Ti"));
 
         // A complete explicit vector declaration takes the landed named,
         // resourceVersion-fenced all-resource wire path.
