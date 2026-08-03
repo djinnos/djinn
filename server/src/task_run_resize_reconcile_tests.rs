@@ -76,6 +76,9 @@ fn lifecycle_and_lease_summaries_name_and_count_their_own_ledgers() {
         pre_birth_reaped: 2,
         leases_released: 1,
         unsettled: 1,
+        skipped: vec![("live-owner".to_owned(), SkipReason::OwnerLive)],
+        scan_failed: true,
+        pre_birth_scan_failed: true,
         ..ResizeReconcilePass::default()
     };
 
@@ -108,6 +111,20 @@ fn lifecycle_and_lease_summaries_name_and_count_their_own_ledgers() {
         Some(&"2".to_owned())
     );
 
+    assert_eq!(
+        lifecycle.fields.get("skipped"),
+        Some(&"1".to_owned()),
+        "the lifecycle event retains its own observe/skip population"
+    );
+    assert_eq!(
+        lifecycle.fields.get("scan_failed"),
+        Some(&"true".to_owned())
+    );
+    assert_eq!(
+        lifecycle.fields.get("pre_birth_scan_failed"),
+        Some(&"true".to_owned())
+    );
+
     let leases = events
         .iter()
         .find(|event| event.fields.get("ledger") == Some(&"build_leases".to_owned()))
@@ -120,6 +137,12 @@ fn lifecycle_and_lease_summaries_name_and_count_their_own_ledgers() {
     assert!(
         !leases.fields.contains_key("scanned"),
         "lease reporting must not relabel permit scans as lease scans"
+    );
+    assert!(
+        !leases.fields.contains_key("resumed")
+            && !leases.fields.contains_key("pre_birth_reaped")
+            && !leases.fields.contains_key("scan_failed"),
+        "lease reporting must not carry lifecycle work or lifecycle failures"
     );
 }
 
