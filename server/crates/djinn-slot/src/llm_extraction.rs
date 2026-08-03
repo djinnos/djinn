@@ -501,12 +501,8 @@ fn build_transcript_excerpt(messages: &[djinn_core::message::Message], max_chars
                     if role.is_none() {
                         continue;
                     }
-                    let is_cleared_placeholder = matches!(
-                        content.first(),
-                        Some(ContentBlock::Text { text })
-                            if text.starts_with(CLEARED_TOOL_RESULT_PREFIX)
-                    );
                     let raw_body = blocks_text(content);
+                    let is_cleared_placeholder = raw_body.starts_with(CLEARED_TOOL_RESULT_PREFIX);
                     let is_interesting = *is_error || ordinal + 5 >= total_tool_results;
                     let body = if is_cleared_placeholder {
                         raw_body
