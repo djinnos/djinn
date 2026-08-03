@@ -1,9 +1,9 @@
-//! Contract coverage for migration 174's dormant feedback-refinement storage.
+//! Contract coverage for migration 175's dormant feedback-refinement storage.
 use sqlx::Connection;
 use sqlx::postgres::PgPoolOptions;
 
 #[tokio::test]
-async fn migration_174_preserves_legacy_feedback_and_enforces_generation_contract() {
+async fn migration_175_preserves_legacy_feedback_and_enforces_generation_contract() {
     let base = djinn_db::test_database_base_url();
     let prefix = base
         .rsplit_once('/')
