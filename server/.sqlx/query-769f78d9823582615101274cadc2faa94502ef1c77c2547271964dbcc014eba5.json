@@ -1,0 +1,106 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id, proposal_id, parent_id, author_kind, author_user_id, author_model,\n                    body, severity, withdrawn_at, withdrawn_by_user_id,\n                    resolved_at, resolved_revision_seq, resolved_by_user_id, created_at, updated_at\n             FROM proposal_feedback WHERE id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 1,
+        "name": "proposal_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 2,
+        "name": "parent_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "author_kind",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 4,
+        "name": "author_user_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 5,
+        "name": "author_model",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 6,
+        "name": "body",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "severity",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 8,
+        "name": "withdrawn_at",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 9,
+        "name": "withdrawn_by_user_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 10,
+        "name": "resolved_at",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 11,
+        "name": "resolved_revision_seq",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 12,
+        "name": "resolved_by_user_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 13,
+        "name": "created_at",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 14,
+        "name": "updated_at",
+        "type_info": "Varchar"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false,
+      true,
+      true,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "769f78d9823582615101274cadc2faa94502ef1c77c2547271964dbcc014eba5"
+}
