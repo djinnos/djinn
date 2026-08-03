@@ -2057,10 +2057,42 @@ export namespace ExecutionKillTaskInputSchema {
 }
 export type ExecutionKillTaskInput = ExecutionKillTaskInputSchema.ExecutionKillTaskInput;
 export namespace ExecutionKillTaskOutputSchema {
+  export type ExecutionKillTaskKind = ("genuinely_absent" | "terminated" | "desync_reconciled" | "teardown_failed" | "settlement_failed" | "reconciliation_incomplete" | "task_not_found" | "project_not_found" | "pool_unavailable" | "pool_error" | "audit_failed")
+
   export interface ExecutionKillTaskOutput {
   error?: string
+  executions: ExecutionKillTaskExecution[]
+  kind: ExecutionKillTaskKind
+  observations?: (ExecutionKillTaskObservations | null)
   ok: boolean
   task_id?: string
+  underlying_kind?: (ExecutionKillTaskKind | null)
+  [k: string]: any
+  }
+  export interface ExecutionKillTaskExecution {
+  session_id: string
+  settlement_attempted: boolean
+  settlement_error?: string
+  task_run_id?: string
+  teardown_attempted: boolean
+  teardown_error?: string
+  teardown_owner: boolean
+  [k: string]: any
+  }
+  export interface ExecutionKillTaskObservations {
+  completion_source: string
+  fenced_generation?: number
+  final_mapping_slot_id?: number
+  final_non_terminal_ids: string[]
+  final_pending_teardown: boolean
+  final_reread_error?: string
+  initial_capture_error?: string
+  initial_compacting: boolean
+  initial_mapping_slot_id?: number
+  initial_non_terminal_ids: string[]
+  initial_pending_teardown: boolean
+  pool_cleanup_error?: string
+  underlying_kind?: (ExecutionKillTaskKind | null)
   [k: string]: any
   }
 
