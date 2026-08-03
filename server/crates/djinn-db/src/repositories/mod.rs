@@ -27,6 +27,7 @@ pub mod launcher_authority_mode;
 pub mod legacy_settings_import;
 pub mod liveness;
 pub mod llm_call_attempt;
+pub mod model_turn_admission;
 pub mod models;
 pub mod note;
 pub mod oauth;
