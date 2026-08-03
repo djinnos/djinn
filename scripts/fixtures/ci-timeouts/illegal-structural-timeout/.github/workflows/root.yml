@@ -1,0 +1,4 @@
+jobs:
+  quality-gate:
+    uses: ./.github/workflows/called.yml
+    timeout-minutes: 1

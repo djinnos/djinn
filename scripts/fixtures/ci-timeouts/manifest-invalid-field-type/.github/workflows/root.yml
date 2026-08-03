@@ -1,0 +1,2 @@
+jobs:
+  quality-gate: {runs-on: ubuntu-latest, timeout-minutes: 1, steps: [{run: true}]}
