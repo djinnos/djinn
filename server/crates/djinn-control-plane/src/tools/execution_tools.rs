@@ -566,7 +566,7 @@ mod tests {
         }
     }
     #[tokio::test]
-    async fn execution_kill_task_resolves_short_id_and_passes_snapshot_verbatim() {
+    async fn execution_kill_task_resolves_uuid_and_short_id_to_canonical_snapshot() {
         let db = djinn_db::Database::open_in_memory().expect("db");
         let (task_id, short_id) = create_task(&db).await;
         let pool = Arc::new(RecordingSlotPool {
@@ -577,23 +577,42 @@ mod tests {
                 true,
             ))),
         });
-        let Json(response) = server_with_pool(db, Some(pool.clone()))
+
+        let Json(short_response) = server_with_pool(db.clone(), Some(pool.clone()))
             .execution_kill_task(Parameters(ExecutionKillTaskParams {
                 task_id: short_id,
                 project: None,
             }))
             .await;
-        assert!(response.ok);
-        assert!(matches!(response.kind, ExecutionKillTaskKind::Terminated));
-        assert_eq!(response.task_id.as_deref(), Some(task_id.as_str()));
-        assert_eq!(pool.reconciled(), vec![task_id]);
-        assert_eq!(response.executions[0].session_id, "second");
+        let Json(uuid_response) = server_with_pool(db.clone(), Some(pool.clone()))
+            .execution_kill_task(Parameters(ExecutionKillTaskParams {
+                task_id: task_id.clone(),
+                project: None,
+            }))
+            .await;
+
+        for response in [&short_response, &uuid_response] {
+            assert!(response.ok);
+            assert!(matches!(response.kind, ExecutionKillTaskKind::Terminated));
+            assert_eq!(response.task_id.as_deref(), Some(task_id.as_str()));
+        }
+        assert_eq!(pool.reconciled(), vec![task_id.clone(), task_id.clone()]);
+        assert_eq!(short_response.executions[0].session_id, "second");
         assert_eq!(
-            response
+            short_response
                 .observations
+                .as_ref()
                 .expect("observations")
                 .initial_non_terminal_ids,
             vec!["second", "first"]
+        );
+        assert_eq!(
+            LivenessRepository::new(db)
+                .count_evidence_for_task(&task_id)
+                .await
+                .expect("evidence count"),
+            2,
+            "each outward invocation records its own evidence row"
         );
     }
     #[tokio::test]
@@ -607,8 +626,8 @@ mod tests {
             .await;
         assert!(!response.ok);
         assert!(matches!(response.kind, ExecutionKillTaskKind::TaskNotFound));
-        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM liveness_evidence")
-            .fetch_one(db.pool())
+        let count = LivenessRepository::new(db)
+            .count_evidence_for_task("missing")
             .await
             .expect("count");
         assert_eq!(count, 0);
@@ -627,12 +646,10 @@ mod tests {
             response.kind,
             ExecutionKillTaskKind::PoolUnavailable
         ));
-        let count: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM liveness_evidence WHERE task_id = $1")
-                .bind(&task_id)
-                .fetch_one(db.pool())
-                .await
-                .expect("count");
+        let count = LivenessRepository::new(db)
+            .count_evidence_for_task(&task_id)
+            .await
+            .expect("count");
         assert_eq!(count, 1);
     }
     #[tokio::test]
@@ -672,10 +689,24 @@ mod tests {
                 false,
             ))),
         });
-        sqlx::query("DROP TABLE liveness_evidence")
-            .execute(db.pool())
-            .await
-            .expect("disable audit table");
+        // A scalar execution is eligible for scalar FK persistence. A missing
+        // session ID makes that insert fail while leaving the schema untouched.
+        *pool.result.lock().expect("pool mutex") = Ok(ReconcileTerminateSnapshot {
+            executions: vec![ReconcileTerminateExecution {
+                session_id: "missing-session".into(),
+                task_run_id: None,
+                teardown_owner: true,
+                teardown_attempted: true,
+                teardown_error: None,
+                settlement_attempted: true,
+                settlement_error: None,
+            }],
+            ..snapshot(
+                task_id.clone(),
+                ReconcileTerminateKind::TeardownFailed,
+                false,
+            )
+        });
         let Json(response) = server_with_pool(db, Some(pool))
             .execution_kill_task(Parameters(ExecutionKillTaskParams {
                 task_id,
@@ -688,7 +719,7 @@ mod tests {
             response.underlying_kind,
             Some(ExecutionKillTaskKind::TeardownFailed)
         ));
-        assert_eq!(response.executions[0].session_id, "second");
+        assert_eq!(response.executions[0].session_id, "missing-session");
         assert_eq!(
             response
                 .observations
