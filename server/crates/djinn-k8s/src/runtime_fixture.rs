@@ -215,6 +215,21 @@ pub fn capacity_controller_cluster(
     capacity_controller_cluster_with_pods(namespace, binding_resource, CapacityPods::Complete)
 }
 
+/// Old-chart queue shape with historical sentinel-looking non-binding quotas.
+#[must_use]
+pub fn capacity_controller_legacy_sentinel_cluster(
+    namespace: &str,
+    binding_resource: &str,
+) -> (kube::Client, RecordedApiserver) {
+    capacity_controller_cluster_fixture(
+        namespace,
+        binding_resource,
+        CapacityPods::Complete,
+        false,
+        true,
+    )
+}
+
 #[derive(Clone, Copy)]
 pub enum CapacityPods {
     Complete,
@@ -228,7 +243,7 @@ pub fn capacity_controller_cluster_with_pods(
     binding_resource: &str,
     pod_mode: CapacityPods,
 ) -> (kube::Client, RecordedApiserver) {
-    capacity_controller_cluster_fixture(namespace, binding_resource, pod_mode, false)
+    capacity_controller_cluster_fixture(namespace, binding_resource, pod_mode, false, false)
 }
 
 /// Two exclusively owned flavors, plus an eligible but unmatched Node.
@@ -237,7 +252,13 @@ pub fn capacity_controller_multi_flavor_cluster(
     namespace: &str,
     binding_resource: &str,
 ) -> (kube::Client, RecordedApiserver) {
-    capacity_controller_cluster_fixture(namespace, binding_resource, CapacityPods::Complete, true)
+    capacity_controller_cluster_fixture(
+        namespace,
+        binding_resource,
+        CapacityPods::Complete,
+        true,
+        false,
+    )
 }
 
 /// Scripted NodePool-list responses used by the explicit Karpenter source test.
@@ -359,6 +380,7 @@ fn capacity_controller_cluster_fixture(
     binding_resource: &str,
     pod_mode: CapacityPods,
     multi_flavor: bool,
+    sentinel_quotas: bool,
 ) -> (kube::Client, RecordedApiserver) {
     use http::Response;
     use http_body_util::BodyExt as _;
@@ -426,7 +448,7 @@ fn capacity_controller_cluster_fixture(
                         ]
                     } else {
                         vec![
-                            serde_json::json!({"name":"default","resources":[{"name":"pods","nominalQuota":"3"},{"name":"cpu","nominalQuota":"3000m"},{"name":"memory","nominalQuota":"100Gi"}]}),
+                            serde_json::json!({"name":"default","resources":[{"name":"pods","nominalQuota":if sentinel_quotas {"10k"} else {"3"}},{"name":"cpu","nominalQuota":if sentinel_quotas {"10000"} else {"3000m"}},{"name":"memory","nominalQuota":if sentinel_quotas {"100Ti"} else {"100Gi"}}]}),
                         ]
                     };
                     serde_json::json!({"apiVersion":"kueue.x-k8s.io/v1beta1","kind":"ClusterQueue","metadata":{"name":"djinn-kueue","resourceVersion":"42","labels":{"djinn.io/quota-owner":"derived-capacity"},"annotations":{"djinn.io/binding-resource":binding}},"spec":{"resourceGroups":[{"flavors":flavors}]}})
