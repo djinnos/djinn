@@ -258,7 +258,11 @@ pub enum NodePoolFixture {
 pub fn capacity_controller_nodepool_cluster(
     namespace: &str,
     fixture: NodePoolFixture,
-) -> (kube::Client, RecordedApiserver) {
+) -> (
+    kube::Client,
+    RecordedApiserver,
+    Arc<Mutex<serde_json::Value>>,
+) {
     use http::Response;
     use http_body_util::BodyExt as _;
     use kube::client::Body;
@@ -266,9 +270,12 @@ pub fn capacity_controller_nodepool_cluster(
 
     let recorder = RecordedApiserver::new();
     let captured = recorder.clone();
+    let live = Arc::new(Mutex::new(nodepool_queue(fixture)));
+    let captured_live = live.clone();
     let client = kube::Client::new(
         service_fn(move |request: http::Request<Body>| {
             let captured = captured.clone();
+            let captured_live = captured_live.clone();
             async move {
                 let method = request.method().to_string();
                 let path = request.uri().path().to_string();
@@ -279,15 +286,17 @@ pub fn capacity_controller_nodepool_cluster(
                     body: String::from_utf8_lossy(&body).into_owned(),
                 });
                 let (status, payload) = if method == "PATCH" {
-                    (
-                        403,
-                        serde_json::json!({"kind":"Status","apiVersion":"v1","status":"Failure","reason":"Forbidden","code":403}),
-                    )
+                    let patch: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                    let mut live = captured_live.lock().unwrap();
+                    for op in patch.as_array().unwrap() {
+                        if op["op"] == "replace" {
+                            *live.pointer_mut(op["path"].as_str().unwrap()).unwrap() =
+                                op["value"].clone();
+                        }
+                    }
+                    (200, live.clone())
                 } else if path == "/apis/kueue.x-k8s.io/v1beta1/clusterqueues/djinn-kueue" {
-                    (
-                        200,
-                        serde_json::json!({"apiVersion":"kueue.x-k8s.io/v1beta1","kind":"ClusterQueue","metadata":{"name":"djinn-kueue","resourceVersion":"nodepool-rv","labels":{"djinn.io/quota-owner":"derived-capacity"}},"spec":{"resourceGroups":[{"flavors":[{"name":"pool","resources":[{"name":"pods","nominalQuota":"1"},{"name":"cpu","nominalQuota":"1m"},{"name":"memory","nominalQuota":"1"}]}]}]}}),
-                    )
+                    (200, captured_live.lock().unwrap().clone())
                 } else if path == "/apis/karpenter.sh/v1/nodepools" {
                     let limits = match fixture {
                         NodePoolFixture::Valid => {
@@ -338,7 +347,11 @@ pub fn capacity_controller_nodepool_cluster(
         }),
         namespace.to_owned(),
     );
-    (client, recorder)
+    (client, recorder, live)
+}
+
+fn nodepool_queue(_fixture: NodePoolFixture) -> serde_json::Value {
+    serde_json::json!({"apiVersion":"kueue.x-k8s.io/v1beta1","kind":"ClusterQueue","metadata":{"name":"djinn-kueue","resourceVersion":"nodepool-rv","labels":{"djinn.io/quota-owner":"derived-capacity"}},"spec":{"resourceGroups":[{"flavors":[{"name":"pool","resources":[{"name":"pods","nominalQuota":"1"},{"name":"cpu","nominalQuota":"1m"},{"name":"memory","nominalQuota":"1"}]}]}]}})
 }
 
 fn capacity_controller_cluster_fixture(

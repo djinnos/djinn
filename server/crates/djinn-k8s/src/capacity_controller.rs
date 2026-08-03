@@ -831,6 +831,14 @@ fn nodepool_api(client: Client) -> Api<DynamicObject> {
     Api::all_with(client, &resource)
 }
 
+fn nodepool_api_reason(status: u16) -> ConservativeReason {
+    match status {
+        404 => ConservativeReason::NodePoolApiNotFound,
+        403 => ConservativeReason::NodePoolApiForbidden,
+        _ => ConservativeReason::ObservationFailed,
+    }
+}
+
 fn nodepool_observation(
     pool: DynamicObject,
 ) -> Result<CapacityObjectObservation, ConservativeReason> {
@@ -969,12 +977,7 @@ pub async fn run_capacity_controller(
                     .list(&ListParams::default())
                     .await
                     .map_err(|error| match error {
-                        kube::Error::Api(response) if response.code == 404 => {
-                            ConservativeReason::NodePoolApiNotFound
-                        }
-                        kube::Error::Api(response) if response.code == 403 => {
-                            ConservativeReason::NodePoolApiForbidden
-                        }
+                        kube::Error::Api(response) => nodepool_api_reason(response.code),
                         _ => ConservativeReason::ObservationFailed,
                     })?;
                 let objects = pools
@@ -2007,6 +2010,74 @@ mod tests {
                 .get("karpenter.sh/nodepool"),
             Some(&"identity".into())
         );
+        let owned = [
+            OwnedFlavor {
+                flavor_name: "a".into(),
+                selector: Some(BTreeMap::from([("cohort".into(), "a".into())])),
+                static_fallback: ResourceVector::ZERO,
+            },
+            OwnedFlavor {
+                flavor_name: "b".into(),
+                selector: Some(BTreeMap::from([("cohort".into(), "b".into())])),
+                static_fallback: ResourceVector::ZERO,
+            },
+        ];
+        let pools = [
+            CapacityObjectObservation {
+                effective_labels: BTreeMap::from([("cohort".into(), "a".into())]),
+                vector: resources(12_000, 16 * 1024 * 1024 * 1024, 42),
+            },
+            CapacityObjectObservation {
+                effective_labels: BTreeMap::from([("cohort".into(), "b".into())]),
+                vector: resources(8_000, 8 * 1024 * 1024 * 1024, 20),
+            },
+            CapacityObjectObservation {
+                effective_labels: BTreeMap::from([("cohort".into(), "unmatched".into())]),
+                vector: resources(99_000, 99, 99),
+            },
+        ];
+        let ownership = derive_flavor_ownership(&owned, &pools).unwrap();
+        assert_eq!(
+            ownership.targets,
+            vec![
+                FlavorQuotaTarget {
+                    flavor_name: "a".into(),
+                    vector: resources(12_000, 16 * 1024 * 1024 * 1024, 42)
+                },
+                FlavorQuotaTarget {
+                    flavor_name: "b".into(),
+                    vector: resources(8_000, 8 * 1024 * 1024 * 1024, 20)
+                },
+            ]
+        );
+        assert_eq!(
+            ownership.assigned_aggregate,
+            resources(20_000, 24 * 1024 * 1024 * 1024, 62)
+        );
+        assert_eq!(
+            ownership
+                .targets
+                .iter()
+                .fold(ResourceVector::ZERO, |sum, target| sum
+                    .checked_add(target.vector)
+                    .unwrap()),
+            ownership.assigned_aggregate
+        );
+        assert_eq!(
+            derive_flavor_ownership(
+                &[
+                    owned[0].clone(),
+                    OwnedFlavor {
+                        flavor_name: "overlap".into(),
+                        selector: Some(BTreeMap::from([("cohort".into(), "a".into())])),
+                        static_fallback: ResourceVector::ZERO
+                    }
+                ],
+                &pools
+            ),
+            Err(ConservativeReason::FlavorOwnershipAmbiguous)
+        );
+
         for (limits, reason) in [
             (json!({}), ConservativeReason::NodePoolLimitsMissing),
             (
@@ -2029,6 +2100,15 @@ mod tests {
             let pool: DynamicObject = serde_json::from_value(json!({"apiVersion":"karpenter.sh/v1","kind":"NodePool","metadata":{"name":"dedicated"},"spec":{"template":{"metadata":{}},"limits":limits}})).unwrap();
             assert_eq!(nodepool_observation(pool), Err(reason));
         }
+        assert_eq!(
+            nodepool_api_reason(404),
+            ConservativeReason::NodePoolApiNotFound
+        );
+        assert_eq!(
+            nodepool_api_reason(403),
+            ConservativeReason::NodePoolApiForbidden
+        );
+
         for fixture in [
             NodePoolFixture::Valid,
             NodePoolFixture::Missing,
@@ -2039,7 +2119,7 @@ mod tests {
             NodePoolFixture::NotFound,
             NodePoolFixture::Forbidden,
         ] {
-            let (client, recorder) = capacity_controller_nodepool_cluster("default", fixture);
+            let (client, recorder, live) = capacity_controller_nodepool_cluster("default", fixture);
             let config = CapacityControllerConfig {
                 source: CapacitySource::NodePoolLimits,
                 queue_name: "djinn-kueue".into(),
@@ -2107,14 +2187,32 @@ mod tests {
                 assert_eq!(values, ["9000m", "8192", "9"]);
             }
             assert_eq!(
-                patch[0],
-                json!({"op":"test","path":"/metadata/resourceVersion","value":"nodepool-rv"})
+                patch,
+                json!([
+                    {"op":"test","path":"/metadata/resourceVersion","value":"nodepool-rv"},
+                    {"op":"replace","path":"/spec/resourceGroups/0/flavors/0/resources/1/nominalQuota","value":if matches!(fixture, NodePoolFixture::Valid) {"12000m"} else {"9000m"}},
+                    {"op":"replace","path":"/spec/resourceGroups/0/flavors/0/resources/2/nominalQuota","value":if matches!(fixture, NodePoolFixture::Valid) {"17179869184"} else {"8192"}},
+                    {"op":"replace","path":"/spec/resourceGroups/0/flavors/0/resources/0/nominalQuota","value":if matches!(fixture, NodePoolFixture::Valid) {"42"} else {"9"}}
+                ])
             );
+            let expected = if matches!(fixture, NodePoolFixture::Valid) {
+                ["42", "12000m", "17179869184"]
+            } else {
+                ["9", "9000m", "8192"]
+            };
+            let final_values: Vec<_> = live.lock().unwrap()["spec"]["resourceGroups"][0]["flavors"]
+                [0]["resources"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|r| r["nominalQuota"].as_str().unwrap())
+                .collect();
+            assert_eq!(final_values, expected);
         }
         // An unasserted dedication (including an empty configured identity) must
         // fence before the Karpenter request while retaining the complete vector.
         for (dedicated, name) in [(false, "dedicated"), (true, "")] {
-            let (client, recorder) =
+            let (client, recorder, _live) =
                 capacity_controller_nodepool_cluster("default", NodePoolFixture::Valid);
             let config = CapacityControllerConfig {
                 source: CapacitySource::NodePoolLimits,
