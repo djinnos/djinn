@@ -150,6 +150,41 @@ pub enum ModelTurnLeaseTerminalOutcome {
     Failed,
 }
 
+/// Result of a fenced lease mutation. `Fenced` never changes another lease.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ModelTurnLeaseMutationOutcome {
+    Applied,
+    Idempotent,
+    Fenced,
+}
+
+/// The exact observation a watchdog must compare before expiring a lease.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelTurnLeaseExpiryInput {
+    pub identity: ModelTurnLeaseIdentity,
+    pub observed_lifecycle: ModelTurnLeaseLifecycle,
+    pub observed_heartbeat_at: Option<String>,
+    pub boundary_at: String,
+}
+
+/// Provider usage which replaces the reservation estimate at reconciliation.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelTurnAuthoritativeUsage {
+    pub request_units: i64,
+    pub input_units: i64,
+    pub output_units: i64,
+    pub combined_units: i64,
+}
+
+/// One fenced terminal decision. Missing usage quarantines possibly-sent spend.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelTurnLeaseReconciliationInput {
+    pub identity: ModelTurnLeaseIdentity,
+    pub outcome: ModelTurnLeaseTerminalOutcome,
+    pub authoritative_usage: Option<ModelTurnAuthoritativeUsage>,
+    pub detail: Option<String>,
+}
+
 /// A pool is keyed exclusively by the durable credential row and provider/model
 /// scope. It intentionally carries neither credential material nor user IDs.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -274,6 +309,136 @@ impl ModelTurnAdmissionRepository {
                 model_turn_admission_schema,
             },
         ))
+    }
+
+    /// Commit the pre-send fence before a caller sends provider network bytes.
+    pub async fn mark_dispatching(
+        &self,
+        identity: &ModelTurnLeaseIdentity,
+    ) -> Result<ModelTurnLeaseMutationOutcome> {
+        self.transition(identity, "reserved", "dispatching", true)
+            .await
+    }
+
+    /// Move the same fenced lease from dispatching to active.
+    pub async fn mark_active(
+        &self,
+        identity: &ModelTurnLeaseIdentity,
+    ) -> Result<ModelTurnLeaseMutationOutcome> {
+        self.transition(identity, "dispatching", "active", false)
+            .await
+    }
+
+    /// Persist a heartbeat only for the identity which still owns an in-flight lease.
+    pub async fn heartbeat(
+        &self,
+        identity: &ModelTurnLeaseIdentity,
+    ) -> Result<ModelTurnLeaseMutationOutcome> {
+        self.db.ensure_initialized().await?;
+        let changed = sqlx::query("UPDATE model_turn_leases SET heartbeat_at = now() WHERE lease_id = $1::uuid AND generation = $2 AND request_id = $3 AND lifecycle IN ('dispatching', 'active')")
+            .bind(&identity.lease_id).bind(identity.generation).bind(&identity.request_id).execute(self.db.pool()).await?;
+        Ok(if changed.rows_affected() == 1 {
+            ModelTurnLeaseMutationOutcome::Applied
+        } else {
+            ModelTurnLeaseMutationOutcome::Fenced
+        })
+    }
+
+    /// Compare-and-swap only the watchdog's stale observation after 90 seconds.
+    pub async fn expire_lease(
+        &self,
+        input: ModelTurnLeaseExpiryInput,
+    ) -> Result<ModelTurnLeaseMutationOutcome> {
+        self.db.ensure_initialized().await?;
+        let mut tx = self.db.pool().begin().await?;
+        let lease: Option<(i64, String, String)> = sqlx::query_as("SELECT pool_id, reservation_id::text, lifecycle FROM model_turn_leases WHERE lease_id = $1::uuid AND generation = $2 AND request_id = $3 AND lifecycle = $4 AND heartbeat_at IS NOT DISTINCT FROM $5::timestamptz AND COALESCE(heartbeat_at, reserved_at) <= $6::timestamptz - interval '90 seconds' FOR UPDATE")
+            .bind(&input.identity.lease_id).bind(input.identity.generation).bind(&input.identity.request_id).bind(lease_lifecycle_name(input.observed_lifecycle)).bind(&input.observed_heartbeat_at).bind(&input.boundary_at).fetch_optional(&mut *tx).await?;
+        let Some((pool_id, reservation_id, lifecycle)) = lease else {
+            return Ok(ModelTurnLeaseMutationOutcome::Fenced);
+        };
+        sqlx::query("UPDATE model_turn_leases SET lifecycle = 'expired', terminal_at = $2::timestamptz WHERE lease_id = $1::uuid AND generation = $3 AND request_id = $4")
+            .bind(&input.identity.lease_id).bind(&input.boundary_at).bind(input.identity.generation).bind(&input.identity.request_id).execute(&mut *tx).await?;
+        sqlx::query("INSERT INTO model_turn_lease_terminals (lease_id, generation, request_id, outcome) VALUES ($1::uuid, $2, $3, 'expired')")
+            .bind(&input.identity.lease_id).bind(input.identity.generation).bind(&input.identity.request_id).execute(&mut *tx).await?;
+        sqlx::query("UPDATE model_turn_reservations SET state = 'expired', terminal_at = $2::timestamptz WHERE id = $1::uuid").bind(&reservation_id).bind(&input.boundary_at).execute(&mut *tx).await?;
+        self.release_accounting(
+            &mut tx,
+            pool_id,
+            &reservation_id,
+            lifecycle == "reserved",
+            None,
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(ModelTurnLeaseMutationOutcome::Applied)
+    }
+
+    /// Alias for the sole terminal reconciliation/accounting path.
+    pub async fn reconcile(
+        &self,
+        input: ModelTurnLeaseReconciliationInput,
+    ) -> Result<ModelTurnLeaseMutationOutcome> {
+        self.reconcile_lease(input).await
+    }
+
+    /// Alias for callers which model expiry as the terminal action itself.
+    pub async fn expire(
+        &self,
+        input: ModelTurnLeaseExpiryInput,
+    ) -> Result<ModelTurnLeaseMutationOutcome> {
+        self.expire_lease(input).await
+    }
+
+    /// Record one terminal outcome and apply reservation accounting at most once.
+    pub async fn reconcile_lease(
+        &self,
+        input: ModelTurnLeaseReconciliationInput,
+    ) -> Result<ModelTurnLeaseMutationOutcome> {
+        self.db.ensure_initialized().await?;
+        if input.detail.as_ref().is_some_and(|v| v.len() > 1024)
+            || input
+                .authoritative_usage
+                .as_ref()
+                .is_some_and(usage_is_negative)
+        {
+            return Err(crate::Error::InvalidData(
+                "invalid model-turn reconciliation".to_owned(),
+            ));
+        }
+        let mut tx = self.db.pool().begin().await?;
+        let lease: Option<(i64, String, String)> = sqlx::query_as("SELECT pool_id, reservation_id::text, lifecycle FROM model_turn_leases WHERE lease_id = $1::uuid AND generation = $2 AND request_id = $3 FOR UPDATE").bind(&input.identity.lease_id).bind(input.identity.generation).bind(&input.identity.request_id).fetch_optional(&mut *tx).await?;
+        let Some((pool_id, reservation_id, lifecycle)) = lease else {
+            return Ok(ModelTurnLeaseMutationOutcome::Fenced);
+        };
+        let terminal: Option<String> = sqlx::query_scalar("SELECT outcome FROM model_turn_lease_terminals WHERE lease_id = $1::uuid AND generation = $2 AND request_id = $3").bind(&input.identity.lease_id).bind(input.identity.generation).bind(&input.identity.request_id).fetch_optional(&mut *tx).await?;
+        if let Some(existing) = terminal {
+            return Ok(if existing == terminal_outcome_name(input.outcome) {
+                ModelTurnLeaseMutationOutcome::Idempotent
+            } else {
+                ModelTurnLeaseMutationOutcome::Fenced
+            });
+        }
+        if !matches!(lifecycle.as_str(), "reserved" | "dispatching" | "active") {
+            return Ok(ModelTurnLeaseMutationOutcome::Fenced);
+        }
+        sqlx::query("INSERT INTO model_turn_lease_terminals (lease_id, generation, request_id, outcome, detail) VALUES ($1::uuid, $2, $3, $4, $5)").bind(&input.identity.lease_id).bind(input.identity.generation).bind(&input.identity.request_id).bind(terminal_outcome_name(input.outcome)).bind(&input.detail).execute(&mut *tx).await?;
+        sqlx::query("UPDATE model_turn_leases SET lifecycle = 'reconciled', terminal_at = now() WHERE lease_id = $1::uuid AND generation = $2 AND request_id = $3").bind(&input.identity.lease_id).bind(input.identity.generation).bind(&input.identity.request_id).execute(&mut *tx).await?;
+        let state = if input.outcome == ModelTurnLeaseTerminalOutcome::Cancelled {
+            "cancelled"
+        } else {
+            "reconciled"
+        };
+        sqlx::query("UPDATE model_turn_reservations SET state = $2, terminal_at = now() WHERE id = $1::uuid").bind(&reservation_id).bind(state).execute(&mut *tx).await?;
+        self.release_accounting(
+            &mut tx,
+            pool_id,
+            &reservation_id,
+            lifecycle == "reserved",
+            input.authoritative_usage.as_ref(),
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(ModelTurnLeaseMutationOutcome::Applied)
     }
 
     /// Atomically acquire learned concurrency and every supplied bucket debit.
@@ -467,6 +632,91 @@ impl ModelTurnAdmissionRepository {
             },
             idempotent: false,
         })
+    }
+
+    async fn transition(
+        &self,
+        identity: &ModelTurnLeaseIdentity,
+        from: &str,
+        to: &str,
+        dispatch: bool,
+    ) -> Result<ModelTurnLeaseMutationOutcome> {
+        self.db.ensure_initialized().await?;
+        let mut tx = self.db.pool().begin().await?;
+        let changed = sqlx::query("UPDATE model_turn_leases SET lifecycle = $4, dispatching_at = CASE WHEN $5 THEN now() ELSE dispatching_at END, active_at = CASE WHEN NOT $5 THEN now() ELSE active_at END WHERE lease_id = $1::uuid AND generation = $2 AND request_id = $3 AND lifecycle = $6")
+            .bind(&identity.lease_id).bind(identity.generation).bind(&identity.request_id).bind(to).bind(dispatch).bind(from).execute(&mut *tx).await?;
+        if changed.rows_affected() == 1 {
+            if dispatch {
+                sqlx::query("UPDATE model_turn_reservations SET state = 'dispatched' WHERE id = (SELECT reservation_id FROM model_turn_leases WHERE lease_id = $1::uuid)").bind(&identity.lease_id).execute(&mut *tx).await?;
+            }
+            tx.commit().await?;
+            return Ok(ModelTurnLeaseMutationOutcome::Applied);
+        }
+        let lifecycle: Option<String> = sqlx::query_scalar("SELECT lifecycle FROM model_turn_leases WHERE lease_id = $1::uuid AND generation = $2 AND request_id = $3")
+            .bind(&identity.lease_id).bind(identity.generation).bind(&identity.request_id).fetch_optional(&mut *tx).await?;
+        Ok(if lifecycle.as_deref() == Some(to) {
+            ModelTurnLeaseMutationOutcome::Idempotent
+        } else {
+            ModelTurnLeaseMutationOutcome::Fenced
+        })
+    }
+
+    async fn release_accounting(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        pool_id: i64,
+        reservation_id: &str,
+        unsent: bool,
+        usage: Option<&ModelTurnAuthoritativeUsage>,
+    ) -> Result<()> {
+        sqlx::query("UPDATE model_turn_pools SET in_flight = GREATEST(0, in_flight - 1), updated_at = now() WHERE id = $1").bind(pool_id).execute(&mut **tx).await?;
+        let buckets: Vec<(String, i64)> = sqlx::query_as("SELECT bucket_kind, reserved_units FROM model_turn_reservation_buckets WHERE reservation_id = $1::uuid ORDER BY bucket_kind FOR UPDATE").bind(reservation_id).fetch_all(&mut **tx).await?;
+        for (kind, reserved) in buckets {
+            if unsent {
+                sqlx::query("UPDATE model_turn_bucket_bindings SET available_units = LEAST(capacity_units, available_units + $3), updated_at = now() WHERE pool_id = $1 AND bucket_kind = $2").bind(pool_id).bind(&kind).bind(reserved).execute(&mut **tx).await?;
+            } else if let Some(usage) = usage {
+                sqlx::query("UPDATE model_turn_bucket_bindings SET available_units = LEAST(capacity_units, GREATEST(0, available_units + $3 - $4)), updated_at = now() WHERE pool_id = $1 AND bucket_kind = $2").bind(pool_id).bind(&kind).bind(reserved).bind(usage_for_kind(usage, &kind)).execute(&mut **tx).await?;
+            } else {
+                sqlx::query("UPDATE model_turn_bucket_bindings SET quarantined_units = quarantined_units + $3, updated_at = now() WHERE pool_id = $1 AND bucket_kind = $2").bind(pool_id).bind(&kind).bind(reserved).execute(&mut **tx).await?;
+            }
+        }
+        Ok(())
+    }
+}
+
+fn lease_lifecycle_name(lifecycle: ModelTurnLeaseLifecycle) -> &'static str {
+    match lifecycle {
+        ModelTurnLeaseLifecycle::Reserved => "reserved",
+        ModelTurnLeaseLifecycle::Dispatching => "dispatching",
+        ModelTurnLeaseLifecycle::Active => "active",
+        ModelTurnLeaseLifecycle::Reconciled => "reconciled",
+        ModelTurnLeaseLifecycle::Expired => "expired",
+    }
+}
+
+fn terminal_outcome_name(outcome: ModelTurnLeaseTerminalOutcome) -> &'static str {
+    match outcome {
+        ModelTurnLeaseTerminalOutcome::Completed => "completed",
+        ModelTurnLeaseTerminalOutcome::Cancelled => "cancelled",
+        ModelTurnLeaseTerminalOutcome::Expired => "expired",
+        ModelTurnLeaseTerminalOutcome::Failed => "failed",
+    }
+}
+
+fn usage_is_negative(usage: &ModelTurnAuthoritativeUsage) -> bool {
+    usage.request_units < 0
+        || usage.input_units < 0
+        || usage.output_units < 0
+        || usage.combined_units < 0
+}
+
+fn usage_for_kind(usage: &ModelTurnAuthoritativeUsage, kind: &str) -> i64 {
+    match kind {
+        "request" => usage.request_units,
+        "input" => usage.input_units,
+        "output" => usage.output_units,
+        "combined" => usage.combined_units,
+        _ => 0,
     }
 }
 
