@@ -31,7 +31,8 @@ pub use org_ai_policy::{LockLevel, OrgAiPolicy, OrgDefaultLanes};
 pub use project::Project;
 pub use proposal::{
     EvidenceFindings, NeedsEvidenceClaim, Proposal, ProposalDebateTrail, ProposalFeedback,
-    ProposalRevision, ProposalSignoff, ProposalTarget,
+    ProposalFeedbackRefinementInjection, ProposalFeedbackRefinementSource, ProposalRevision,
+    ProposalSignoff, ProposalTarget,
 };
 pub use provider::{CustomProvider, Model, Pricing, Provider, SeedModel};
 pub use rejected_submission_integrity::{
