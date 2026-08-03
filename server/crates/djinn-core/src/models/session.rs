@@ -1,4 +1,6 @@
-use serde::{Deserialize, Serialize};
+use std::fmt;
+
+use serde::{Deserialize, Deserializer, Serialize};
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -59,6 +61,90 @@ impl CostBasis {
             "projected" => Self::Projected,
             _ => Self::Unpriced,
         }
+    }
+}
+
+/// Stable, coarse-grained cause for a failed or interrupted session.
+///
+/// The seven durable variants are the only values allowed in
+/// `sessions.failure_cause`. [`Self::LegacyUnclassified`] is a virtual
+/// read/report interpretation for failed or interrupted rows from before the
+/// column existed; it must never be written to the column. Reason and
+/// diagnostic text intentionally do not belong in this taxonomy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionFailureCause {
+    Cancelled,
+    Provider,
+    Harness,
+    Infrastructure,
+    Protocol,
+    Finalization,
+    Unknown,
+    LegacyUnclassified,
+}
+
+impl SessionFailureCause {
+    /// Return the stable report/wire label for this cause.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Cancelled => "cancelled",
+            Self::Provider => "provider",
+            Self::Harness => "harness",
+            Self::Infrastructure => "infrastructure",
+            Self::Protocol => "protocol",
+            Self::Finalization => "finalization",
+            Self::Unknown => "unknown",
+            Self::LegacyUnclassified => "legacy_unclassified",
+        }
+    }
+
+    /// Parse a durable database label defensively.
+    ///
+    /// Noncanonical values, including `legacy_unclassified`, are never
+    /// retained and instead become [`Self::Unknown`]. The legacy variant is
+    /// assigned only by status-aware read logic for a NULL legacy column.
+    pub fn from_db(value: &str) -> Self {
+        match value {
+            "cancelled" => Self::Cancelled,
+            "provider" => Self::Provider,
+            "harness" => Self::Harness,
+            "infrastructure" => Self::Infrastructure,
+            "protocol" => Self::Protocol,
+            "finalization" => Self::Finalization,
+            "unknown" => Self::Unknown,
+            _ => Self::Unknown,
+        }
+    }
+
+    /// Return the label permitted in the durable `sessions.failure_cause`
+    /// column, or `None` for the read-only legacy interpretation.
+    pub fn durable_label(self) -> Option<&'static str> {
+        match self {
+            Self::LegacyUnclassified => None,
+            cause => Some(cause.as_str()),
+        }
+    }
+}
+
+impl fmt::Display for SessionFailureCause {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for SessionFailureCause {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Ok(match value.as_str() {
+            // `legacy_unclassified` is a report-only wire value, never a
+            // database label. Database parsing remains strict in `from_db`.
+            "legacy_unclassified" => Self::LegacyUnclassified,
+            value => Self::from_db(value),
+        })
     }
 }
 
@@ -148,7 +234,64 @@ fn default_cost_basis() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::SessionRecord;
+    use super::{SessionFailureCause, SessionRecord};
+
+    #[test]
+    fn session_failure_causes_round_trip_through_durable_labels_and_serde() {
+        let cases = [
+            (SessionFailureCause::Cancelled, "cancelled"),
+            (SessionFailureCause::Provider, "provider"),
+            (SessionFailureCause::Harness, "harness"),
+            (SessionFailureCause::Infrastructure, "infrastructure"),
+            (SessionFailureCause::Protocol, "protocol"),
+            (SessionFailureCause::Finalization, "finalization"),
+            (SessionFailureCause::Unknown, "unknown"),
+        ];
+
+        for (cause, label) in cases {
+            assert_eq!(cause.as_str(), label);
+            assert_eq!(cause.durable_label(), Some(label));
+            assert_eq!(SessionFailureCause::from_db(label), cause);
+            assert_eq!(cause.to_string(), label);
+
+            let encoded = serde_json::to_string(&cause).unwrap();
+            assert_eq!(encoded, format!("\"{label}\""));
+            let decoded: SessionFailureCause = serde_json::from_str(&encoded).unwrap();
+            assert_eq!(decoded, cause);
+        }
+    }
+
+    #[test]
+    fn session_failure_cause_discards_unknown_durable_and_wire_labels() {
+        let future_label = "provider_timeout: request 123";
+
+        assert_eq!(
+            SessionFailureCause::from_db(future_label),
+            SessionFailureCause::Unknown
+        );
+        let decoded: SessionFailureCause =
+            serde_json::from_str(&format!("\"{future_label}\"")).unwrap();
+        assert_eq!(decoded, SessionFailureCause::Unknown);
+        assert_eq!(decoded.as_str(), "unknown");
+        assert_eq!(
+            SessionFailureCause::from_db("legacy_unclassified"),
+            SessionFailureCause::Unknown
+        );
+    }
+
+    #[test]
+    fn session_failure_cause_legacy_interpretation_is_not_persistable() {
+        let legacy = SessionFailureCause::LegacyUnclassified;
+
+        assert_eq!(legacy.as_str(), "legacy_unclassified");
+        assert_eq!(legacy.durable_label(), None);
+        assert_eq!(legacy.to_string(), "legacy_unclassified");
+
+        let encoded = serde_json::to_string(&legacy).unwrap();
+        assert_eq!(encoded, "\"legacy_unclassified\"");
+        let decoded: SessionFailureCause = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, legacy);
+    }
 
     fn session_record(parked_reason: Option<String>) -> SessionRecord {
         SessionRecord {
