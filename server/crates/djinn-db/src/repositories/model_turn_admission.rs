@@ -1,8 +1,7 @@
-//! Inert v1 records and schema readiness for model-turn admission.
+//! Durable model-turn admission records, acquisition, and schema readiness.
 //!
-//! This module deliberately has no acquisition or lifecycle mutation methods.
-//! Later phases own serializable admission, provider normalization, and fenced
-//! reconciliation; Phase A only establishes stable typed storage vocabulary.
+//! Admission serializes through Postgres; provider normalization and fenced
+//! reconciliation remain owned by later phases.
 
 use std::collections::BTreeMap;
 
@@ -54,7 +53,13 @@ pub enum ModelTurnAdmissionWait {
         bucket_kind: ModelTurnBucketKind,
         reset_at: String,
     },
-    DiscoveryRequired,
+    /// Capability discovery is durably assigned to exactly one request while
+    /// the pool remains unknown. The owner must publish a capability result;
+    /// non-owners retry after that state changes.
+    DiscoveryRequired {
+        owner_request_id: String,
+        is_owner: bool,
+    },
     Draining,
     BindingUnavailable {
         bucket_kind: ModelTurnBucketKind,
@@ -362,8 +367,28 @@ impl ModelTurnAdmissionRepository {
         }
         match parse_capability(&capability_state)? {
             ModelTurnCapabilityState::Unknown => {
+                // The pool row is locked above, so this insert elects one
+                // durable owner across independent processes/connections.
+                // Discovery completion changes `capability_state`; until then
+                // all non-owners have an explicit durable retry condition.
+                let owner_request_id: String = sqlx::query_scalar(
+                    "INSERT INTO model_turn_capability_discoveries \
+                     (pool_id, owner_request_id, owner_pod_uid) \
+                     VALUES ($1, $2, $3) \
+                     ON CONFLICT (pool_id) DO UPDATE \
+                     SET owner_request_id = model_turn_capability_discoveries.owner_request_id \
+                     RETURNING owner_request_id",
+                )
+                .bind(input.pool_id)
+                .bind(&input.request_id)
+                .bind(&input.owner_pod_uid)
+                .fetch_one(&mut *tx)
+                .await?;
                 return commit_outcome(ModelTurnAcquireOutcome::Wait(
-                    ModelTurnAdmissionWait::DiscoveryRequired,
+                    ModelTurnAdmissionWait::DiscoveryRequired {
+                        is_owner: owner_request_id == input.request_id,
+                        owner_request_id,
+                    },
                 ));
             }
             state
