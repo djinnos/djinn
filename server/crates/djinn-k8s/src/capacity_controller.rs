@@ -776,10 +776,22 @@ impl CapacityControllerConfig {
             match std::env::var("DJINN_CAPACITY_FLAVOR_SELECTOR") {
                 Ok(value) => {
                     let value: Value = serde_json::from_str(&value).ok()?;
-                    if value.as_object()?.values().all(Value::is_string) {
+                    let selector = value.as_object()?;
+                    if selector.is_empty() {
+                        return None;
+                    }
+                    if selector.values().all(Value::is_string) {
                         (Some(serde_json::from_value(value).ok()?), BTreeMap::new())
                     } else {
-                        (None, serde_json::from_value(value).ok()?)
+                        let selectors: BTreeMap<String, BTreeMap<String, String>> =
+                            serde_json::from_value(value).ok()?;
+                        if selectors
+                            .iter()
+                            .any(|(name, selector)| name.is_empty() || selector.is_empty())
+                        {
+                            return None;
+                        }
+                        (None, selectors)
                     }
                 }
                 Err(std::env::VarError::NotPresent) => (None, BTreeMap::new()),
@@ -2850,39 +2862,51 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn capacity_mixed_version_contract() {
-        use crate::runtime_fixture::capacity_controller_cluster;
-
-        // An old chart's absent marker uses the binding annotation writer even
-        // when its non-binding quotas look like removed vector sentinels.
-        let (client, recorder) = capacity_controller_cluster("default", "pods");
-        let config = CapacityControllerConfig {
-            contract: CapacityContract::Legacy,
-            source: CapacitySource::NodeSum,
-            queue_name: "djinn-kueue".into(),
-            node_selector_key: "kubernetes.io/hostname".into(),
-            node_selector_value: "worker-1".into(),
-            idle_cost: CpuMillicores::new(750).unwrap(),
-            compile_cost: CpuMillicores::new(2_800).unwrap(),
-            headroom: ResourceVector {
-                cpu: CpuMillicores::new(750).unwrap(),
-                ..ResourceVector::ZERO
-            },
-            build_job: controller_build_job(),
-            fail_safe: safe(),
-            expected_protected_pods: 5,
-            static_fallback: ResourceVector::ZERO,
-            flavor_selector: None,
-            flavor_selectors: BTreeMap::new(),
-            nodepool_name: String::new(),
-            nodepool_dedicated: false,
+        use crate::runtime_fixture::{
+            capacity_controller_cluster, capacity_controller_legacy_sentinel_cluster,
         };
+
+        // This fixture owns its process environment because it verifies the
+        // startup contract, rather than constructing a config by hand.
+        let set = |name: &str, value: &str| unsafe { std::env::set_var(name, value) };
+        let unset = |name: &str| unsafe { std::env::remove_var(name) };
+        for (name, value) in [
+            ("DJINN_CAPACITY_ENABLED", "true"),
+            ("DJINN_CAPACITY_IDLE_CPU", "750m"),
+            ("DJINN_CAPACITY_HEADROOM_CPU", "0m"),
+            ("DJINN_CAPACITY_HEADROOM_MEMORY", "0"),
+            ("DJINN_CAPACITY_HEADROOM_PODS", "0"),
+            ("DJINN_CAPACITY_SOURCE", "static"),
+            ("DJINN_CAPACITY_FLAVOR_SELECTOR", r#"{"pool":"default"}"#),
+            ("DJINN_CAPACITY_STATIC_CPU", "12000m"),
+            ("DJINN_CAPACITY_STATIC_MEMORY", "8192"),
+            ("DJINN_CAPACITY_STATIC_PODS", "9"),
+            ("DJINN_CAPACITY_QUEUE_NAME", "djinn-kueue"),
+            ("DJINN_CAPACITY_NODE_SELECTOR_KEY", "kubernetes.io/hostname"),
+            ("DJINN_CAPACITY_NODE_SELECTOR_VALUE", "worker-1"),
+            ("DJINN_CAPACITY_COMPILE_CPU", "2800m"),
+            ("DJINN_CAPACITY_FAIL_SAFE_PODS", "3"),
+            ("DJINN_CAPACITY_FAIL_SAFE_COMPILE_SLOTS", "2"),
+            ("DJINN_CAPACITY_EXPECTED_PROTECTED_PODS", "5"),
+        ] {
+            set(name, value);
+        }
+
+        // Absent marker is the old-chart lane, even with all new inputs and
+        // sentinel-shaped topology present. It only changes the annotation
+        // selected binding resource.
+        unset("DJINN_CAPACITY_CONTRACT");
+        let legacy = CapacityControllerConfig::from_env().expect("legacy chart config");
+        assert_eq!(legacy.contract, CapacityContract::Legacy);
+        assert_eq!(legacy.static_fallback, ResourceVector::ZERO);
+        let (client, recorder) = capacity_controller_legacy_sentinel_cluster("default", "pods");
         let (tx, _) = watch::channel(CapacityVector {
             binding: BindingQuota::Pods(3),
             compile_slots: 2,
         });
         let task = tokio::spawn(run_capacity_controller(
             client,
-            config,
+            legacy,
             Arc::new(|| true),
             tx,
         ));
@@ -2894,61 +2918,81 @@ mod tests {
             }
         }
         task.abort();
-        let patch: Value = serde_json::from_str(&recorder.mutations()[0].body).unwrap();
+        let legacy_patch: Value = serde_json::from_str(&recorder.mutations()[0].body).unwrap();
         assert_eq!(
-            patch.as_array().unwrap().len(),
-            2,
-            "legacy writes only its annotation-selected binding"
+            legacy_patch[0],
+            json!({"op":"test","path":"/metadata/resourceVersion","value":"42"})
         );
+        assert_eq!(legacy_patch.as_array().unwrap().len(), 2);
         assert_eq!(
-            patch[1]["path"],
+            legacy_patch[1]["path"],
             "/spec/resourceGroups/0/flavors/0/resources/0/nominalQuota"
         );
-        assert!(!recorder.mutations()[0].body.contains("memory"));
+        assert!(!recorder.mutations()[0].body.contains("10000"));
+        assert!(!recorder.mutations()[0].body.contains("100Ti"));
 
-        let mut sentinel = queue("pods");
-        sentinel.resources = vec![
-            QueueResource {
-                name: "pods".into(),
-                nominal_quota: "10k".into(),
-            },
-            QueueResource {
-                name: "cpu".into(),
-                nominal_quota: "10000".into(),
-            },
-            QueueResource {
-                name: "memory".into(),
-                nominal_quota: "100Ti".into(),
-            },
-        ];
-        let legacy = patch_decision(
-            &sentinel,
-            "djinn-kueue",
-            outcome(),
-            CapacityVector {
-                binding: BindingQuota::Pods(3),
-                compile_slots: 2,
-            },
-            true,
-            safe(),
-        );
-        assert!(
-            matches!(legacy, ActuationDecision::Patch { ref patch, .. } if patch.as_array().unwrap().len() == 2)
+        // A complete explicit vector declaration takes the landed named,
+        // resourceVersion-fenced all-resource wire path.
+        set("DJINN_CAPACITY_CONTRACT", "vector-v1");
+        let vector = CapacityControllerConfig::from_env().expect("complete vector contract");
+        assert_eq!(vector.contract, CapacityContract::VectorV1);
+        let (client, recorder) = capacity_controller_cluster("default", "pods");
+        let (tx, _) = watch::channel(CapacityVector {
+            binding: BindingQuota::Pods(3),
+            compile_slots: 2,
+        });
+        let task = tokio::spawn(run_capacity_controller(
+            client,
+            vector,
+            Arc::new(|| true),
+            tx,
+        ));
+        for _ in 0..4 {
+            tokio::time::advance(Duration::from_secs(30)).await;
+            tokio::task::yield_now().await;
+            if !recorder.mutations().is_empty() {
+                break;
+            }
+        }
+        let patch: Value = serde_json::from_str(&recorder.mutations()[0].body).unwrap();
+        task.abort();
+        assert_eq!(
+            patch,
+            json!([
+                {"op":"test","path":"/metadata/resourceVersion","value":"42"},
+                {"op":"replace","path":"/spec/resourceGroups/0/flavors/0/resources/1/nominalQuota","value":"12000m"},
+                {"op":"replace","path":"/spec/resourceGroups/0/flavors/0/resources/2/nominalQuota","value":"8192"},
+                {"op":"replace","path":"/spec/resourceGroups/0/flavors/0/resources/0/nominalQuota","value":"9"}
+            ])
         );
 
-        // Vector mode alone can use the complete named-resource seam; malformed
-        // or incomplete activation never produces a target for that seam.
-        let vector = flavor_vector_patch_decision(
-            &sentinel,
-            "djinn-kueue",
-            &[FlavorQuotaTarget {
-                flavor_name: "default".into(),
-                vector: resources(12_000, 8_192, 9),
-            }],
-        );
-        assert!(matches!(vector, FlavorActuationDecision::Patch { .. }));
-        assert!(cpu_quantity("NaN").is_none());
-        assert!(memory_quantity("NaN").is_none());
-        assert!(pod_quantity("NaN").is_none());
+        // None of these activation defects produces a controller config, hence
+        // no recorded fixture mutation and no partial-vector write.
+        for (name, value) in [
+            ("DJINN_CAPACITY_STATIC_CPU", None),
+            ("DJINN_CAPACITY_STATIC_MEMORY", None),
+            ("DJINN_CAPACITY_STATIC_PODS", None),
+            ("DJINN_CAPACITY_FLAVOR_SELECTOR", None),
+            ("DJINN_CAPACITY_FLAVOR_SELECTOR", Some("{}")),
+            ("DJINN_CAPACITY_FLAVOR_SELECTOR", Some(r#"{"default":{}}"#)),
+            ("DJINN_CAPACITY_STATIC_CPU", Some("NaN")),
+            ("DJINN_CAPACITY_CONTRACT", Some("vector-v2")),
+        ] {
+            set("DJINN_CAPACITY_CONTRACT", "vector-v1");
+            set("DJINN_CAPACITY_STATIC_CPU", "12000m");
+            set("DJINN_CAPACITY_STATIC_MEMORY", "8192");
+            set("DJINN_CAPACITY_STATIC_PODS", "9");
+            set("DJINN_CAPACITY_FLAVOR_SELECTOR", r#"{"pool":"default"}"#);
+            match value {
+                Some(value) => set(name, value),
+                None => unset(name),
+            }
+            let (_client, recorder) = capacity_controller_cluster("default", "pods");
+            assert!(
+                CapacityControllerConfig::from_env().is_none(),
+                "{name}={value:?} must fail closed"
+            );
+            assert!(recorder.mutations().is_empty());
+        }
     }
 }
