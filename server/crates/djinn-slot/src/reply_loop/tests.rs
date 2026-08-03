@@ -1,5 +1,6 @@
 use super::error_handling::{
-    BudgetWindDownIgnored, empty_turn_backoff, supports_tool_choice_required,
+    BudgetWindDownIgnored, ReplyLoopCancellationOrigin, ReplyLoopCancelled, empty_turn_backoff,
+    supports_tool_choice_required,
 };
 // djinn:allow-oversize — integration tests for the entire reply_loop module.
 // The file already exceeded the 1500-line / 51.2KB size-guard thresholds
@@ -4252,13 +4253,82 @@ async fn compaction_cs_released_on_cancel_exit() {
     )
     .await;
 
-    // The result should be an error (cancelled).
-    assert!(result.is_err(), "expected cancel error, got: {result:?}");
+    // The canonical reply-loop result must retain session cancellation's
+    // structural identity, rather than converting it into a display string.
+    let error = result.expect_err("expected session cancellation error");
+    assert_eq!(
+        error.downcast_ref::<ReplyLoopCancelled>(),
+        Some(&ReplyLoopCancelled::session())
+    );
+    assert_eq!(
+        error
+            .downcast_ref::<ReplyLoopCancelled>()
+            .expect("session cancellation must be downcastable")
+            .origin,
+        ReplyLoopCancellationOrigin::Session
+    );
 
     // The guard must be released.
     assert!(
         !shared_cs.is_compacting(),
         "CompactionCriticalSection must be released on cancel exit"
+    );
+}
+
+/// A supervisor shutdown must remain distinct from a session cancellation at
+/// the public `run_reply_loop` error boundary.
+#[tokio::test]
+async fn run_reply_loop_preserves_supervisor_shutdown_cancellation_origin() {
+    let provider = MockProvider::new(vec![MockResponse::text_only("unused", 100)]);
+    let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
+    let global_cancel = CancellationToken::new();
+    let worktree_path = std::path::PathBuf::from("/tmp");
+    let compaction_cs = CompactionCriticalSection::new();
+    let mut conv = Conversation::new();
+    conv.push(Message::system("You are a worker."));
+    conv.push(Message::user("Do the task."));
+
+    // Only the supervisor token is cancelled, so the selected origin cannot be
+    // inferred from a shared token or from the error's display diagnostic.
+    global_cancel.cancel();
+    let (result, _, _, _, _, _) = run_reply_loop(
+        ReplyLoopContext {
+            session_budget: None,
+            compaction_cs: &compaction_cs,
+            provider: &provider,
+            tools: &[],
+            task_id: &task_id,
+            task_short_id: "t1",
+            session_id: &session_id,
+            project_path: &project_path,
+            worktree_path: &worktree_path,
+            role_name: "worker",
+            finalize_tool_names: &["submit_work", "request_planner"],
+            context_window: 10_000,
+            model_id: "test/mock-model",
+            cancel: &cancel,
+            global_cancel: &global_cancel,
+            ctx: &slot_ctx,
+            active_skill_names: &[],
+            active_mcp_server_names: &[],
+            max_turns_override: None,
+        },
+        &mut conv,
+        false,
+    )
+    .await;
+
+    let error = result.expect_err("expected supervisor shutdown error");
+    assert_eq!(
+        error.downcast_ref::<ReplyLoopCancelled>(),
+        Some(&ReplyLoopCancelled::supervisor_shutdown())
+    );
+    assert_eq!(
+        error
+            .downcast_ref::<ReplyLoopCancelled>()
+            .expect("supervisor shutdown must be downcastable")
+            .origin,
+        ReplyLoopCancellationOrigin::SupervisorShutdown
     );
 }
 

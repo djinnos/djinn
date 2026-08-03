@@ -1175,8 +1175,8 @@ pub async fn run_reply_loop(
                     llm.end_ok();
                 }
             }
-            if let Some(reason) = interrupted {
-                return Err(anyhow::anyhow!(reason));
+            if let Some(cancelled) = interrupted {
+                return Err(anyhow::Error::new(cancelled));
             }
             // AC3: When the provider stream ended early (without StreamEvent::Done)
             // and partial content was produced, the truncated turn must not be
@@ -2031,6 +2031,7 @@ fn inline_tool_results(conversation: &Conversation) -> Vec<PreCompactionToolResu
 
 #[cfg(test)]
 mod tests {
+    use super::super::error_handling::ReplyLoopCancelled;
     use super::*;
     use djinn_provider::provider::ProviderError;
     #[test]
@@ -2761,7 +2762,7 @@ mod tests {
         .await
         .expect("consume provider stream");
 
-        assert_eq!(state.interrupted, Some("session cancelled"));
+        assert_eq!(state.interrupted, Some(ReplyLoopCancelled::session()));
         flush_in_flight_turn(&msg_repo, &session_id, &task_id, 0, &mut state).await;
 
         let loaded = msg_repo
