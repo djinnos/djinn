@@ -160,9 +160,26 @@ kueue:
   # vector available to static and dedicated-NodePool deployments.
   capacity:
     enabled: false
+    # Retained for one release so a #2901 controller can continue to parse
+    # the chart's capacity environment while operators roll forward. These
+    # are the legacy lane's actual admission inputs, not vector fallbacks.
+    idleCpu: "750m"
+    compileCpu: "2800m"
+    failSafePods: 3
+    failSafeCompileSlots: 2
+    # `vector-v1` is an explicit release declaration, not an inference from a
+    # source or static values. Leave it empty to retain the one-release #2901
+    # single-binding compatibility lane for an older controller.
+    contract: ""
     source: node-sum
     queueName: ""
     nodeSelector:
+      key: ""
+      value: ""
+    # Static and node-sum vector mode require an explicit ResourceFlavor
+    # ownership identity. NodePool mode derives the same identity from the
+    # dedicated pool name instead.
+    flavorSelector:
       key: ""
       value: ""
     headroom:
