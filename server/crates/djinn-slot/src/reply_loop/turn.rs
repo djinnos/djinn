@@ -32,12 +32,12 @@ use super::budget::{
 use super::compaction_guard::CompactionCriticalSection;
 use super::error_handling::{
     BudgetWindDownIgnored, MAX_COMPACTION_RETRIES, TransportCompactionRecoveryGuard,
-    empty_start_streak_feeds_breaker, empty_turn_backoff,
-    empty_turn_is_reasoning_only, is_context_length_error, is_orphaned_tool_call_error,
-    is_oversized_transport_payload, is_provider_failure_prose, next_nudge_message,
-    reasoning_only_nudge_message, should_retry_after_tool_call_compaction,
-    should_retry_empty_assistant_turn, should_retry_empty_stream, soft_budget_converge_message,
-    tool_choice_for_turn, wind_down_message,
+    empty_start_streak_feeds_breaker, empty_turn_backoff, empty_turn_is_reasoning_only,
+    is_context_length_error, is_orphaned_tool_call_error, is_oversized_transport_payload,
+    is_provider_failure_prose, next_nudge_message, reasoning_only_nudge_message,
+    should_retry_after_tool_call_compaction, should_retry_empty_assistant_turn,
+    should_retry_empty_stream, soft_budget_converge_message, tool_choice_for_turn,
+    wind_down_message,
 };
 use super::loop_guard::{
     AssistantOutputSignature, LoopGuardCondition, LoopGuardError, LoopGuardReason, LoopGuardState,
@@ -2031,8 +2031,8 @@ fn inline_tool_results(conversation: &Conversation) -> Vec<PreCompactionToolResu
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::error_handling::ReplyLoopCancelled;
+    use super::*;
     use djinn_provider::provider::ProviderError;
     #[test]
     fn empty_turn_terminal_error_is_breaker_classifiable() {
