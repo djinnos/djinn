@@ -2944,13 +2944,7 @@ async fn reconcile_terminate_combined_failures_retain_residual_ids_after_final_r
         .await
         .expect("capture");
     let captured_id = captured[0].id.clone();
-    sqlx::query(&format!(
-        "ALTER TABLE sessions ADD CONSTRAINT reject_reconcile_settlement \
-         CHECK (id <> '{captured_id}' OR status <> 'interrupted')"
-    ))
-    .execute(app_state.db.pool())
-    .await
-    .expect("install PostgreSQL settlement failure constraint");
+    djinn_db::test_support::reject_interrupted_session_for_test(&app_state.db, &captured_id).await;
     let (_tx, rx) = mpsc::channel(1);
     let mut pool = SlotPool::new(
         rx,
@@ -3013,26 +3007,12 @@ async fn reconcile_terminate_residual_row_is_reconciliation_incomplete() {
         .id
         .clone();
     let residual_id = uuid::Uuid::now_v7().to_string();
-    sqlx::query(&format!(
-        "CREATE FUNCTION inject_reconcile_residual() RETURNS trigger LANGUAGE plpgsql AS $$ \
-         BEGIN \
-           IF OLD.id = '{captured_id}' AND NEW.status = 'interrupted' THEN \
-             INSERT INTO sessions (id, project_id, task_id, model_id, agent_type, status, task_run_id, cost_basis) \
-             VALUES ('{residual_id}', OLD.project_id, OLD.task_id, OLD.model_id, OLD.agent_type, 'running', OLD.task_run_id, 'unpriced'); \
-           END IF; \
-           RETURN NEW; \
-         END $$"
-    ))
-    .execute(app_state.db.pool())
-    .await
-    .expect("install PostgreSQL residual injection function");
-    sqlx::query(
-        "CREATE TRIGGER inject_reconcile_residual AFTER UPDATE OF status ON sessions \
-         FOR EACH ROW EXECUTE FUNCTION inject_reconcile_residual()",
+    djinn_db::test_support::inject_residual_session_after_settlement_for_test(
+        &app_state.db,
+        &captured_id,
+        &residual_id,
     )
-    .execute(app_state.db.pool())
-    .await
-    .expect("install PostgreSQL residual injection trigger");
+    .await;
     let (_tx, rx) = mpsc::channel(1);
     let mut pool = SlotPool::new(
         rx,

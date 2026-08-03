@@ -33,6 +33,10 @@ use djinn_control_plane::test_support::{
 };
 use djinn_core::events::EventBus;
 use djinn_core::models::{DjinnSettings, SessionStatus};
+use djinn_db::test_support::{
+    liveness_evidence_for_task_for_test, reject_task_liveness_evidence_for_test,
+    set_task_short_id_for_test,
+};
 use djinn_db::{
     CreateSessionParams, CreateTaskRunParams, Database, EffectiveCreatorProvenance,
     EpicCreateInput, EpicRepository, LivenessRepository, ProjectRepository, SessionRepository,
@@ -209,12 +213,7 @@ async fn execution_kill_task_yf6r_short_id_and_uuid_share_authoritative_task() {
     let seeded = harness
         .seed_running_session_with_task_run("yf6r-authoritative-run")
         .await;
-    sqlx::query("UPDATE tasks SET short_id = $1 WHERE id = $2")
-        .bind("yf6r")
-        .bind(&seeded.task_id)
-        .execute(harness.app_state.db.pool())
-        .await
-        .expect("fixture must reserve the historical short id");
+    set_task_short_id_for_test(&harness.app_state.db, &seeded.task_id, "yf6r").await;
 
     let tasks = TaskRepository::new(
         harness.app_state.db.clone(),
@@ -295,13 +294,12 @@ async fn execution_kill_task_yf6r_short_id_and_uuid_share_authoritative_task() {
         vec![seeded.task_run_id.clone()]
     );
     assert!(!harness.pool_has_session(&seeded.task_id).await);
-    let audit_json: serde_json::Value = sqlx::query_scalar(
-        "SELECT evidence FROM liveness_evidence WHERE task_id = $1 ORDER BY created_at ASC LIMIT 1",
-    )
-    .bind(&seeded.task_id)
-    .fetch_one(harness.app_state.db.pool())
-    .await
-    .expect("short-id call audit JSON");
+    let audit_json = liveness_evidence_for_task_for_test(&harness.app_state.db, &seeded.task_id)
+        .await
+        .into_iter()
+        .next()
+        .expect("short-id call audit JSON")
+        .1;
     assert_eq!(audit_json["task_id"], seeded.task_id);
     assert_eq!(audit_json["kind"], "terminated");
     assert_eq!(
@@ -345,14 +343,7 @@ async fn execution_kill_task_audit_failure_retains_real_pool_snapshot() {
 
     // Fail the append-only evidence insert without replacing SlotPoolHandle or
     // its reconciliation bridge with a mock.
-    sqlx::query(&format!(
-        "ALTER TABLE liveness_evidence ADD CONSTRAINT reject_execution_kill_evidence \
-         CHECK (task_id IS DISTINCT FROM '{}')",
-        seeded.task_id
-    ))
-    .execute(harness.app_state.db.pool())
-    .await
-    .expect("install evidence insertion failure constraint");
+    reject_task_liveness_evidence_for_test(&harness.app_state.db).await;
 
     let response = harness
         .call_kill_tool(&seeded.task_id)
@@ -664,13 +655,12 @@ async fn concurrent_deferred_execution_kills_each_write_audit_evidence() {
 
     harness.wait_for_runner_killed(&seeded.task_id).await;
     assert_settled_after_kill(&harness, &seeded).await;
-    let evidence_ids: Vec<String> = sqlx::query_scalar(
-        "SELECT id FROM liveness_evidence WHERE task_id = $1 ORDER BY created_at, id",
-    )
-    .bind(&seeded.task_id)
-    .fetch_all(harness.app_state.db.pool())
-    .await
-    .expect("deferred evidence rows");
+    let evidence_ids: Vec<String> =
+        liveness_evidence_for_task_for_test(&harness.app_state.db, &seeded.task_id)
+            .await
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
     assert_eq!(
         evidence_ids.len(),
         2,

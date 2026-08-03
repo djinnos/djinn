@@ -10,6 +10,99 @@ mod refinement_read_only;
 
 pub use refinement_read_only::*;
 
+/// Override a task short id for identifier-resolution regressions.
+///
+/// **Not for production use.** Panics on SQL errors.
+pub async fn set_task_short_id_for_test(db: &Database, task_id: &str, short_id: &str) {
+    db.ensure_initialized().await.unwrap();
+    sqlx::query("UPDATE tasks SET short_id = $1 WHERE id = $2")
+        .bind(short_id)
+        .bind(task_id)
+        .execute(db.pool())
+        .await
+        .expect("failed to override task short id");
+}
+
+/// Return task-owned liveness rows in durable insertion order.
+///
+/// **Not for production use.** Panics on SQL errors.
+pub async fn liveness_evidence_for_task_for_test(
+    db: &Database,
+    task_id: &str,
+) -> Vec<(String, serde_json::Value)> {
+    db.ensure_initialized().await.unwrap();
+    sqlx::query_as(
+        "SELECT id, evidence FROM liveness_evidence \
+         WHERE task_id = $1 ORDER BY created_at, id",
+    )
+    .bind(task_id)
+    .fetch_all(db.pool())
+    .await
+    .expect("failed to load task liveness evidence")
+}
+
+/// Reject task-owned liveness evidence inserts at the repository boundary.
+///
+/// **Not for production use.** Panics on SQL errors.
+pub async fn reject_task_liveness_evidence_for_test(db: &Database) {
+    db.ensure_initialized().await.unwrap();
+    sqlx::query(
+        "ALTER TABLE liveness_evidence ADD CONSTRAINT reject_execution_kill_evidence \
+         CHECK (task_id IS NULL)",
+    )
+    .execute(db.pool())
+    .await
+    .expect("failed to install task liveness evidence fault");
+}
+
+/// Reject one exact interrupted-session settlement while allowing later rows.
+///
+/// **Not for production use.** Panics on SQL errors.
+pub async fn reject_interrupted_session_for_test(db: &Database, session_id: &str) {
+    db.ensure_initialized().await.unwrap();
+    let session_id = uuid::Uuid::parse_str(session_id).expect("session id must be a UUID");
+    sqlx::query(&format!(
+        "ALTER TABLE sessions ADD CONSTRAINT reject_reconcile_settlement \
+         CHECK (id <> '{session_id}' OR status <> 'interrupted')"
+    ))
+    .execute(db.pool())
+    .await
+    .expect("failed to install exact settlement fault");
+}
+
+/// Inject one new running row after an exact session settlement.
+///
+/// **Not for production use.** Panics on SQL errors.
+pub async fn inject_residual_session_after_settlement_for_test(
+    db: &Database,
+    captured_id: &str,
+    residual_id: &str,
+) {
+    db.ensure_initialized().await.unwrap();
+    let captured_id = uuid::Uuid::parse_str(captured_id).expect("captured id must be a UUID");
+    let residual_id = uuid::Uuid::parse_str(residual_id).expect("residual id must be a UUID");
+    sqlx::query(&format!(
+        "CREATE FUNCTION inject_reconcile_residual() RETURNS trigger LANGUAGE plpgsql AS $$ \
+         BEGIN \
+           IF OLD.id = '{captured_id}' AND NEW.status = 'interrupted' THEN \
+             INSERT INTO sessions (id, project_id, task_id, model_id, agent_type, status, task_run_id, cost_basis) \
+             VALUES ('{residual_id}', OLD.project_id, OLD.task_id, OLD.model_id, OLD.agent_type, 'running', OLD.task_run_id, 'unpriced'); \
+           END IF; \
+           RETURN NEW; \
+         END $$"
+    ))
+    .execute(db.pool())
+    .await
+    .expect("failed to install residual injection function");
+    sqlx::query(
+        "CREATE TRIGGER inject_reconcile_residual AFTER UPDATE OF status ON sessions \
+         FOR EACH ROW EXECUTE FUNCTION inject_reconcile_residual()",
+    )
+    .execute(db.pool())
+    .await
+    .expect("failed to install residual injection trigger");
+}
+
 /// Durable rows written by the structured evidence hand-off.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StructuredEvidenceHandoffCountsForTest {
