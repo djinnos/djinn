@@ -1,0 +1,10 @@
+jobs:
+  qa-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps: [{run: true}]
+  quality-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: qa-smoke
+    steps: [{run: true}]

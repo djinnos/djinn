@@ -1,0 +1,4 @@
+jobs:
+  quality-gate:
+    runs-on: ubuntu-latest
+    steps: [{run: true}]
