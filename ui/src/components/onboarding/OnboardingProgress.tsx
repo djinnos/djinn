@@ -7,6 +7,7 @@ const STEPS = [
   { key: "repository", label: "Repository" },
   { key: "models", label: "Models" },
   { key: "environment", label: "Environment" },
+  { key: "proposal", label: "First proposal" },
 ] as const;
 
 export type OnboardingProgressStep = (typeof STEPS)[number]["key"];

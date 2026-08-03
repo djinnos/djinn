@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Route, Routes } from "react-router-dom";
 import { callMcpTool } from "@/api/mcpClient";
 import { fetchUsers, type OrgUser } from "@/api/users";
+import { proposalDetailTourStorageKey } from "@/components/proposals/proposalTourStorage";
 import type {
   Proposal,
   ProposalEpic,
@@ -195,6 +196,30 @@ describe("ProposalsPage", () => {
     scrollIntoViewMock.mockReset();
     Element.prototype.scrollIntoView = scrollIntoViewMock;
     window.history.pushState({}, "", "/");
+    window.localStorage.setItem(
+      proposalDetailTourStorageKey("user-1"),
+      "seen",
+    );
+  });
+
+  it("can force the first-visit proposal feature tour", async () => {
+    const proposal = makeProposal({
+      id: "proposal-tour",
+      short_id: "tour",
+      title: "Tour proposal",
+      status: "draft",
+      author_user_id: "user-1",
+    });
+    mockProposalShow(proposal);
+
+    renderProposalsRoute("/proposals/proposal-tour?tour=1");
+
+    expect(
+      await screen.findByRole("dialog", { name: "The proposal brief" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Tour this proposal page" }),
+    ).toBeInTheDocument();
   });
 
   it("scrolls to and temporarily highlights an MDX block from the block query param", async () => {

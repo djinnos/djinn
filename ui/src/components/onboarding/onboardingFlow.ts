@@ -5,9 +5,11 @@ export type OnboardingDestination =
   | "checking"
   | "connection-error"
   | "project-error"
+  | "proposal-error"
   | "repository"
   | "models"
   | "image"
+  | "proposal"
   | "app";
 
 /**
@@ -21,6 +23,8 @@ export function resolveOnboardingDestination({
   hasModels,
   projectNeedingImage,
   projectError,
+  hasProposal,
+  proposalError,
   serverStatus,
 }: {
   hasProject: boolean | null;
@@ -28,6 +32,8 @@ export function resolveOnboardingDestination({
   hasModels: boolean | null;
   projectNeedingImage: Project | null;
   projectError: string | null;
+  hasProposal: boolean | null;
+  proposalError: string | null;
   serverStatus: ConnectionStatus;
 }): OnboardingDestination {
   if (serverStatus === "loading") return "checking";
@@ -41,7 +47,9 @@ export function resolveOnboardingDestination({
       hasProvider === true &&
       hasModels === true &&
       projectNeedingImage === null &&
-      projectError === null;
+      projectError === null &&
+      hasProposal === true &&
+      proposalError === null;
     return setupWasComplete ? "app" : "connection-error";
   }
 
@@ -54,5 +62,9 @@ export function resolveOnboardingDestination({
   if (!hasProvider || !hasModels) return "models";
 
   if (projectNeedingImage) return "image";
+  if (hasProposal === null) {
+    return proposalError ? "proposal-error" : "checking";
+  }
+  if (!hasProposal) return "proposal";
   return "app";
 }

@@ -1,8 +1,7 @@
 /**
- * Onboarding/OnboardingProgress — the 3-step stepper (Repository → Models →
- * Environment) shown at the top of every full-screen onboarding gate. Each
- * story pins the `current` step; the final one shows the `complete` state the
- * environment gate renders after an image is assigned.
+ * Onboarding/OnboardingProgress — the 4-step stepper (Repository → Models →
+ * Environment → First proposal) shown at the top of every full-screen
+ * onboarding gate.
  */
 
 import type { Meta, StoryObj } from "@storybook/react-vite";
@@ -28,4 +27,5 @@ type Story = StoryObj<typeof meta>;
 export const RepositoryStep: Story = { args: { current: "repository" } };
 export const ModelsStep: Story = { args: { current: "models" } };
 export const EnvironmentStep: Story = { args: { current: "environment" } };
-export const Complete: Story = { args: { current: "environment", complete: true } };
+export const FirstProposalStep: Story = { args: { current: "proposal" } };
+export const Complete: Story = { args: { current: "proposal", complete: true } };

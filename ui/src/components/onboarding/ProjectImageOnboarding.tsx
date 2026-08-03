@@ -1,4 +1,4 @@
-import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ArrowRight01Icon,
@@ -8,7 +8,6 @@ import {
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 
-import logoSvg from "@/assets/logo.svg";
 import type { Project } from "@/api/server";
 import {
   createImage,
@@ -38,7 +37,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { InlineError } from "@/components/InlineError";
-import { OnboardingProgress } from "@/components/onboarding/OnboardingProgress";
+import { OnboardingShell } from "@/components/onboarding/OnboardingShell";
 
 import {
   catalogConfigFromStack,
@@ -225,7 +224,7 @@ export function ProjectImageOnboarding({
 
   if (phase === "assigned") {
     return (
-      <OnboardingShell complete>
+      <OnboardingShell current="environment">
         <div className="flex flex-col items-center gap-5 text-center">
           <div className="flex h-12 w-12 items-center justify-center rounded-full bg-primary/15">
             <HugeiconsIcon
@@ -243,15 +242,19 @@ export function ProjectImageOnboarding({
               Environment assigned
             </h1>
             <p className="mt-1 text-sm text-muted-foreground">
-              {assignedName} is assigned to {project.name}. You can enter Djinn
-              now. Djinn will finish any required build in the background, and
-              agents become available when it is ready.
+              {assignedName} is assigned to {project.name}. Djinn will finish
+              any required build in the background while you create the first
+              proposal.
             </p>
           </div>
           <Button className="px-8" onClick={() => void onFinished()}>
-            Enter Djinn
+            Continue to first proposal
             <HugeiconsIcon icon={ArrowRight01Icon} size={15} />
           </Button>
+          <p className="text-xs text-muted-foreground">
+            Change this later from Repositories → gear → Environment, or manage
+            shared images under Repositories → Images.
+          </p>
         </div>
       </OnboardingShell>
     );
@@ -264,7 +267,7 @@ export function ProjectImageOnboarding({
   const canPrepareDetectedImage = Boolean(stackQuery.data?.stack);
 
   return (
-    <OnboardingShell>
+    <OnboardingShell current="environment">
       <div className="flex flex-col gap-6">
         <div className="text-center">
           <h1
@@ -467,32 +470,4 @@ function ImageStatusBadge({ status }: { status: ImageBuildStatus }) {
     default:
       return <Badge variant="outline">Not built</Badge>;
   }
-}
-
-function OnboardingShell({
-  children,
-  complete = false,
-}: {
-  children: ReactNode;
-  complete?: boolean;
-}) {
-  return (
-    <main className="flex min-h-screen flex-col items-center justify-center bg-background px-6 py-12 text-foreground">
-      <div className="flex w-full max-w-2xl flex-col items-center gap-8">
-        <div className="relative">
-          <div
-            className="pointer-events-none absolute left-1/2 top-1/2 h-16 w-16 -translate-x-1/2 -translate-y-1/2 rounded-full bg-purple-400/40"
-            style={{ filter: "blur(40px)" }}
-          />
-          <img
-            src={logoSvg}
-            alt="Djinn"
-            className="relative h-16 w-auto drop-shadow-[0_0_40px_rgba(168,139,250,0.35)]"
-          />
-        </div>
-        <OnboardingProgress current="environment" complete={complete} />
-        <div className="w-full">{children}</div>
-      </div>
-    </main>
-  );
 }

@@ -8,24 +8,25 @@ describe("OnboardingProgress", () => {
     const { rerender } = render(<OnboardingProgress current="models" />);
 
     expect(screen.getByLabelText("Onboarding progress")).toBeInTheDocument();
-    expect(screen.getByRole("status")).toHaveTextContent("Step 2 of 3: Models");
+    expect(screen.getByRole("status")).toHaveTextContent("Step 2 of 4: Models");
     expect(screen.getByText("Models").previousElementSibling).toHaveAttribute(
       "aria-current",
       "step",
     );
     expect(screen.getByText("Environment")).toBeInTheDocument();
+    expect(screen.getByText("First proposal")).toBeInTheDocument();
 
-    rerender(<OnboardingProgress current="environment" />);
+    rerender(<OnboardingProgress current="proposal" />);
     expect(screen.getByRole("status")).toHaveTextContent(
-      "Step 3 of 3: Environment",
+      "Step 4 of 4: First proposal",
     );
   });
 
   it("marks every step complete on the final confirmation screen", () => {
-    render(<OnboardingProgress current="environment" complete />);
+    render(<OnboardingProgress current="proposal" complete />);
 
     expect(screen.getByRole("status")).toHaveTextContent("Onboarding complete");
     expect(screen.queryByRole("listitem", { current: "step" })).not.toBeInTheDocument();
-    expect(screen.getAllByRole("listitem")).toHaveLength(3);
+    expect(screen.getAllByRole("listitem")).toHaveLength(4);
   });
 });
