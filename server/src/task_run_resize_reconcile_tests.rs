@@ -79,7 +79,6 @@ fn lifecycle_and_lease_summaries_name_and_count_their_own_ledgers() {
         skipped: vec![("live-owner".to_owned(), SkipReason::OwnerLive)],
         scan_failed: true,
         pre_birth_scan_failed: true,
-        ..ResizeReconcilePass::default()
     };
 
     tracing::subscriber::with_default(subscriber, || emit_pass_summaries(&pass));
