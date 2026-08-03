@@ -1009,10 +1009,14 @@ pub async fn run_reply_loop(
                     }
                     let diag = runtime_fs_diagnostics(project_path, worktree_path);
                     let env_diag = runtime_env_diagnostics(session_id, project_path, worktree_path);
-                    return Err(anyhow::anyhow!(
-                        "provider stream init failed: display={} debug={:?}; {}; {}",
-                        e, e, diag, env_diag
-                    ));
+                    // Keep the concrete provider (or harness) error in the
+                    // anyhow chain. Formatting it into a new anyhow error here
+                    // would discard its type and make a later cancellation
+                    // indistinguishable from the error that won this race.
+                    let detail = format!(
+                        "provider stream init failed: display={e} debug={e:?}; {diag}; {env_diag}"
+                    );
+                    return Err(e.context(detail));
                 }
             };
             let dispatch_ctx = ToolDispatchContext {
