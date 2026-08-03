@@ -2819,6 +2819,37 @@ async fn reconcile_terminate_runtime_error_still_settles_every_captured_row() {
     .await;
     let sessions =
         djinn_db::SessionRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+    let task = djinn_db::TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone())
+        .get(&task_id)
+        .await
+        .expect("task lookup")
+        .expect("seeded task");
+    djinn_db::TaskRunRepository::new(app_state.db.clone())
+        .create(djinn_db::CreateTaskRunParams {
+            id: "run-runtime-failure-second",
+            project_id: &task.project_id,
+            task_id: &task_id,
+            trigger_type: "test",
+            status: None,
+            workspace_path: None,
+            mirror_ref: None,
+            dispatch_group_id: None,
+        })
+        .await
+        .expect("second task run");
+    sessions
+        .create(djinn_db::CreateSessionParams {
+            project_id: &task.project_id,
+            task_id: Some(&task_id),
+            model: "model-a",
+            agent_type: "worker",
+            metadata_json: None,
+            task_run_id: Some("run-runtime-failure-second"),
+            pricing: None,
+            cost_basis: None,
+        })
+        .await
+        .expect("second running session");
     let captured = sessions
         .list_non_terminal_for_task(&task_id)
         .await
@@ -2836,7 +2867,11 @@ async fn reconcile_terminate_runtime_error_still_settles_every_captured_row() {
     let snapshot = pool.test_reconcile_terminate(&task_id).await;
     assert_eq!(snapshot.kind, ReconcileTerminateKind::TeardownFailed);
     assert!(!snapshot.ok);
-    assert_eq!(runtime.calls(), vec!["run-runtime-failure"]);
+    assert_eq!(
+        runtime.calls(),
+        vec!["run-runtime-failure", "run-runtime-failure-second"],
+        "a failed teardown must not short-circuit later independent teardowns"
+    );
     assert_eq!(snapshot.executions.len(), captured.len());
     assert!(snapshot.executions.iter().all(|execution| {
         execution.teardown_attempted
@@ -2905,11 +2940,82 @@ async fn reconcile_terminate_settlement_error_retains_residual_ids_after_final_r
     assert!(snapshot.executions[0].settlement_error.is_some());
     assert_eq!(
         snapshot.observations.final_non_terminal_ids,
-        vec![captured_id]
+        vec![captured_id.clone()]
     );
     assert!(snapshot.observations.final_reread_error.is_none());
     assert_eq!(snapshot.observations.final_mapping_slot_id, None);
     assert!(!snapshot.observations.final_pending_teardown);
+}
+
+/// A successful teardown and exact settlement can still leave a newly observed
+/// durable row behind. That residual must be typed, named, and fail closed;
+/// it must never be hidden behind a success kind merely because every recorded
+/// outward call succeeded.
+#[tokio::test]
+async fn reconcile_terminate_residual_row_is_reconciliation_incomplete() {
+    let (mut app_state, cancel, _temp) = test_app_state();
+    let runtime = RecordingRuntimeOps::new(false);
+    app_state.runtime_ops = Some(Arc::new(runtime.clone()));
+    let task_id = seed_running_session_with_task_run(
+        &app_state,
+        "reconcile residual row",
+        "run-residual-row",
+    )
+    .await;
+    let sessions =
+        djinn_db::SessionRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+    let captured_id = sessions
+        .list_non_terminal_for_task(&task_id)
+        .await
+        .expect("capture")[0]
+        .id
+        .clone();
+    let residual_id = uuid::Uuid::now_v7().to_string();
+    sqlx::query(&format!(
+        "CREATE TRIGGER inject_reconcile_residual AFTER UPDATE OF status ON sessions \
+         WHEN OLD.id = '{captured_id}' AND NEW.status = 'interrupted' BEGIN \
+         INSERT INTO sessions (id, project_id, task_id, model_id, agent_type, status, task_run_id, cost_basis) \
+         VALUES ('{residual_id}', OLD.project_id, OLD.task_id, OLD.model_id, OLD.agent_type, 'running', OLD.task_run_id, 'unpriced'); END"
+    ))
+    .execute(app_state.db.pool())
+    .await
+    .expect("install residual injection trigger");
+    let (_tx, rx) = mpsc::channel(1);
+    let mut pool = SlotPool::new(
+        rx,
+        app_state,
+        cancel,
+        make_config(
+            vec![model("model-a", 1, &["worker"])],
+            &[("worker", vec!["model-a"])],
+        ),
+    );
+    let snapshot = pool.test_reconcile_terminate(&task_id).await;
+    assert_eq!(
+        snapshot.kind,
+        ReconcileTerminateKind::ReconciliationIncomplete
+    );
+    assert!(!snapshot.ok);
+    assert_eq!(runtime.calls(), vec!["run-residual-row"]);
+    assert_eq!(snapshot.executions.len(), 1);
+    assert!(snapshot.executions[0].teardown_attempted);
+    assert!(snapshot.executions[0].teardown_error.is_none());
+    assert!(snapshot.executions[0].settlement_attempted);
+    assert!(snapshot.executions[0].settlement_error.is_none());
+    assert_eq!(
+        snapshot.observations.final_non_terminal_ids,
+        vec![residual_id]
+    );
+    assert_eq!(snapshot.observations.final_mapping_slot_id, None);
+    assert!(!snapshot.observations.final_pending_teardown);
+    assert!(snapshot.observations.final_reread_error.is_none());
+    let captured = sessions
+        .get(&captured_id)
+        .await
+        .expect("captured lookup")
+        .expect("captured row persists");
+    assert_eq!(captured.status, "interrupted");
+    assert!(captured.ended_at.is_some());
 }
 
 /// Deferred reconciliation owns its captured teardown until Killed, attaches
@@ -3052,6 +3158,16 @@ async fn deferred_reconcile_attaches_waiters_and_replays_parked_dispatches() {
     assert_eq!(first.observations.final_mapping_slot_id, None);
     assert!(!first.observations.final_pending_teardown);
     assert!(first.observations.final_reread_error.is_none());
+    let settled = sessions
+        .get(&captured_id)
+        .await
+        .expect("deferred terminal lookup")
+        .expect("captured deferred session persists");
+    assert_eq!(settled.status, "interrupted");
+    assert!(
+        settled.ended_at.is_some(),
+        "deferred reconciliation must leave its captured durable row terminal"
+    );
     assert_eq!(
         runtime.calls(),
         vec!["run-deferred"],
@@ -3164,7 +3280,7 @@ async fn deferred_reconcile_existing_pending_returns_capacity_once() {
     assert_eq!(snapshot.kind, ReconcileTerminateKind::Terminated);
     assert_eq!(
         snapshot.observations.initial_non_terminal_ids,
-        vec![captured_id]
+        vec![captured_id.clone()]
     );
     assert_eq!(snapshot.observations.initial_mapping_slot_id, Some(0));
     assert!(snapshot.observations.initial_pending_teardown);
@@ -3185,6 +3301,16 @@ async fn deferred_reconcile_existing_pending_returns_capacity_once() {
     assert!(!snapshot.observations.final_pending_teardown);
     assert!(snapshot.observations.final_reread_error.is_none());
     assert_eq!(runtime.calls(), vec!["run-pending"]);
+    let settled = sessions
+        .get(&captured_id)
+        .await
+        .expect("existing-pending terminal lookup")
+        .expect("captured existing-pending session persists");
+    assert_eq!(settled.status, "interrupted");
+    assert!(
+        settled.ended_at.is_some(),
+        "existing-pending reconciliation must leave its captured durable row terminal"
+    );
     assert_eq!(pool.test_free_slots("model-a"), vec![0]);
     pool.test_handle_slot_event(SlotEvent::Killed {
         slot_id: 0,
