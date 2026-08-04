@@ -357,15 +357,29 @@ mod tests {
         let fixture: serde_json::Value = serde_json::from_str(CI_TIMEOUT_RUNTIME_EVIDENCE_FIXTURE)
             .expect("checked-in CI timeout fixture must be valid JSON");
         let jobs = fixture["jobs"].as_array().unwrap();
+        let expected = &fixture["expectations"];
         let fresh = fixture["assessment_times"]["fresh_unix"].as_i64().unwrap();
         let aged = fixture["assessment_times"]["aged_unix"].as_i64().unwrap();
         let stable_key = provider_key(&jobs[0]);
 
         let durations = valid_durations(jobs, &stable_key, fresh);
-        assert_eq!(durations, vec![300, 330, 360, 390, 420, 450, 480, 510, 540, 600]);
+        let expected_durations = expected["successful_durations_seconds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|duration| duration.as_i64().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(durations, expected_durations);
+        assert_eq!(durations.len(), 10);
         let p95 = durations[((95 * durations.len() + 99) / 100) - 1];
         let recommendation = ((3 * p95 + 119) / 120).clamp(5, 120);
-        assert_eq!((p95, recommendation), (600, 15));
+        assert_eq!(p95, 600, "nearest-rank p95 must remain independently calculated");
+        assert_eq!(recommendation, 15, "recommendation must remain independently calculated");
+        assert_eq!(p95, expected["nearest_rank_p95_seconds"].as_i64().unwrap());
+        assert_eq!(
+            recommendation,
+            expected["recommended_timeout_minutes"].as_i64().unwrap()
+        );
 
         let canary = provider_key(&jobs[10]);
         let nightly = provider_key(&jobs[11]);
@@ -380,12 +394,33 @@ mod tests {
         assert_eq!(collisions.len(), 2);
         assert_eq!(provider_key(collisions[0]), provider_key(collisions[1]));
         assert_eq!(valid_durations(jobs, &stable_key, fresh).len(), 10);
-        let duplicate_key = provider_key(&jobs[22]);
+        assert_eq!(
+            expected["collision_exclusion"],
+            "ambiguous-provider-job-identity"
+        );
+
+        let duplicate_key = provider_key(
+            jobs.iter()
+                .find(|job| job["workflow_run_id"] == "duplicate")
+                .unwrap(),
+        );
         assert_eq!(valid_durations(jobs, &duplicate_key, fresh).len(), 1);
-        assert!(jobs.iter().any(|job| job["run_attempt"] != 1));
+        assert_eq!(
+            jobs.iter()
+                .filter(|job| job["workflow_run_id"] == "duplicate")
+                .count(),
+            2,
+            "the provider-job tuple fixture must exercise deduplication"
+        );
+        assert_eq!(expected["rerun_exclusion"], "run_attempt != 1");
+        assert!(
+            jobs.iter()
+                .any(|job| job["workflow_run_id"] == "rerun-01" && job["run_attempt"] != 1)
+        );
 
         for run_id in [
-            "missing-time",
+            "missing-timestamps",
+            "stale",
             "non-positive",
             "failed",
             "cancelled",
@@ -397,9 +432,17 @@ mod tests {
             assert!(jobs.iter().any(|job| job["workflow_run_id"] == run_id));
         }
         assert!(valid_durations(jobs, &canary, fresh).len() < 10);
+        assert_eq!(
+            expected["advisory_evidence_gaps"].as_array().unwrap().len(),
+            9,
+            "invalid, stale, and insufficient-sample cases must remain explicit advisory gaps"
+        );
 
         assert!(valid_durations(jobs, &stable_key, aged).is_empty());
-        assert_eq!(fixture["offline_checker"]["result"], "pass");
+        assert_eq!(expected["fresh_recommendation_confidence"], "high");
+        assert_eq!(expected["aged_recommendation_confidence"], "evidence-gap");
+        assert_eq!(fixture["offline_checker"]["fresh_result"], "pass");
+        assert_eq!(fixture["offline_checker"]["aged_result"], "pass");
         assert!(fixture["source"].as_str().unwrap().contains("no live API request"));
     }
 
