@@ -16,6 +16,7 @@ pub(crate) mod budget;
 pub mod compaction_guard;
 pub mod error_handling;
 pub mod loop_guard;
+pub mod model_turn_admission;
 #[cfg(any(test, feature = "test-support"))]
 pub mod persistence;
 #[cfg(not(any(test, feature = "test-support")))]

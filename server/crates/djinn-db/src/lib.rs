@@ -168,6 +168,7 @@ pub use repositories::{
         MODEL_TURN_ADMISSION_SCHEMA_VERSION, ModelTurnAcquireInput, ModelTurnAcquireOutcome,
         ModelTurnAcquireTurnInput, ModelTurnAdmissionPhase, ModelTurnAdmissionRejection,
         ModelTurnAdmissionRepository, ModelTurnAdmissionSchemaReadiness, ModelTurnAdmissionWait,
+        ModelTurnDecisionKind, ModelTurnDecisionRecordInput,
         ModelTurnAuthoritativeUsage, ModelTurnBucketBinding, ModelTurnBucketDebit,
         ModelTurnBucketKind, ModelTurnCapabilityState, ModelTurnControllerWindow,
         ModelTurnIdentityState, ModelTurnLease, ModelTurnLeaseExpiryInput, ModelTurnLeaseIdentity,

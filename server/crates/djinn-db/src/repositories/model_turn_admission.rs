@@ -283,6 +283,25 @@ pub struct ModelTurnAdmissionSchemaReadiness {
     pub model_turn_admission_schema: i64,
 }
 
+/// A bounded, redaction-safe record written at the slot send boundary.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelTurnDecisionRecordInput {
+    pub pool_id: i64,
+    pub request_fingerprint: String,
+    pub generation: i64,
+    pub decision: ModelTurnDecisionKind,
+    pub diagnostic: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelTurnDecisionKind {
+    ShadowPermit,
+    EnforceAdmitted,
+    Wait,
+    Rejected,
+}
+
 /// Durable repository surface for the additive v1 schema.
 #[derive(Clone)]
 pub struct ModelTurnAdmissionRepository {
@@ -309,6 +328,33 @@ impl ModelTurnAdmissionRepository {
                 model_turn_admission_schema,
             },
         ))
+    }
+
+    /// Resolve an existing Phase A pool without creating a second ledger.
+    pub async fn resolve_pool(&self, credential_id: &str, provider_id: &str, model_id: &str) -> Result<Option<ModelTurnPool>> {
+        self.db.ensure_initialized().await?;
+        let row: Option<(i64, String, String, String, String, String, String, i64, i64)> = sqlx::query_as(
+            "SELECT id, credential_id, provider_id, model_id, phase, identity_state, capability_state, learned_concurrency, in_flight FROM model_turn_pools WHERE credential_id = $1 AND provider_id = $2 AND model_id = $3",
+        ).bind(credential_id).bind(provider_id).bind(model_id).fetch_optional(self.db.pool()).await?;
+        row.map(|(id, credential_id, provider_id, model_id, phase, identity_state, capability_state, learned_concurrency, in_flight)| Ok(ModelTurnPool {
+            id, credential_id, provider_id, model_id, phase: parse_phase(&phase)?,
+            identity_state: parse_identity(&identity_state)?, capability_state: parse_capability(&capability_state)?,
+            learned_concurrency, in_flight,
+        })).transpose()
+    }
+
+    /// Persist a decision before returning a shadow send permit. Inputs contain
+    /// only a one-way request fingerprint and bounded diagnostic vocabulary.
+    pub async fn record_decision(&self, input: ModelTurnDecisionRecordInput) -> Result<()> {
+        self.db.ensure_initialized().await?;
+        if input.pool_id <= 0 || input.generation <= 0 || !is_sha256_fingerprint(&input.request_fingerprint)
+            || input.diagnostic.as_ref().is_some_and(|value| !is_bounded_diagnostic(value)) {
+            return Err(crate::Error::InvalidData("invalid model-turn decision record".to_owned()));
+        }
+        sqlx::query("INSERT INTO model_turn_decisions (pool_id, request_fingerprint, generation, decision, diagnostic) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (pool_id, request_fingerprint, generation) DO NOTHING")
+            .bind(input.pool_id).bind(input.request_fingerprint).bind(input.generation)
+            .bind(decision_kind_name(input.decision)).bind(input.diagnostic).execute(self.db.pool()).await?;
+        Ok(())
     }
 
     /// Commit the pre-send fence before a caller sends provider network bytes.
@@ -774,6 +820,10 @@ fn bucket_kind_name(kind: ModelTurnBucketKind) -> &'static str {
         ModelTurnBucketKind::Combined => "combined",
     }
 }
+
+fn decision_kind_name(kind: ModelTurnDecisionKind) -> &'static str { match kind { ModelTurnDecisionKind::ShadowPermit => "shadow_permit", ModelTurnDecisionKind::EnforceAdmitted => "enforce_admitted", ModelTurnDecisionKind::Wait => "wait", ModelTurnDecisionKind::Rejected => "rejected" } }
+fn is_sha256_fingerprint(value: &str) -> bool { value.len() == 71 && value.starts_with("sha256:") && value.as_bytes()[7..].iter().all(u8::is_ascii_hexdigit) }
+fn is_bounded_diagnostic(value: &str) -> bool { !value.is_empty() && value.len() <= 128 && value.bytes().all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_' || byte == b'-') }
 
 fn canonical_debits(debits: &[ModelTurnBucketDebit]) -> Result<BTreeMap<ModelTurnBucketKind, i64>> {
     let mut result = BTreeMap::new();
