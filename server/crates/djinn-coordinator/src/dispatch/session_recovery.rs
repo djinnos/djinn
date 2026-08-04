@@ -3,8 +3,8 @@ use super::super::*;
 use crate::pr_poller::pr_cleanup::CloseKind;
 use djinn_core::clock::{Clock, SystemClock};
 use djinn_core::job_retention::{JobRetentionEvidence, SessionEvidence};
-use djinn_core::models::{SessionStatus, TransitionAction};
 use djinn_core::models::task_attempt::TaskAttemptOutcome;
+use djinn_core::models::{SessionStatus, TransitionAction};
 use djinn_db::{
     ClaimExtensionRecord, CurrentLivenessState, LivenessEvidenceSnapshot, LivenessRepository,
 };
@@ -39,9 +39,7 @@ fn db_session_status_from_persisted(status: &str) -> Option<DbSessionStatus> {
     match status {
         value if value == SessionStatus::Running.as_str() => Some(DbSessionStatus::Running),
         value if value == SessionStatus::Completed.as_str() => Some(DbSessionStatus::Completed),
-        value if value == SessionStatus::Interrupted.as_str() => {
-            Some(DbSessionStatus::Interrupted)
-        }
+        value if value == SessionStatus::Interrupted.as_str() => Some(DbSessionStatus::Interrupted),
         value if value == SessionStatus::Failed.as_str() => Some(DbSessionStatus::Failed),
         value if value == SessionStatus::Paused.as_str() => Some(DbSessionStatus::Paused),
         _ => None,
@@ -2981,7 +2979,9 @@ impl CoordinatorActor {
                 return None;
             }
         };
-        let persisted_session_status = match db_session_status_from_persisted(&addressed_session.status) {
+        let persisted_session_status = match db_session_status_from_persisted(
+            &addressed_session.status,
+        ) {
             Some(status) => status,
             None => {
                 tracing::warn!(task_id = %task_id, session_id = %session_id,
