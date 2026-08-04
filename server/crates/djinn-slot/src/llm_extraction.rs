@@ -3505,6 +3505,139 @@ mod tests {
     }
 
     #[test]
+    fn transcript_excerpt_tail_biases_final_five_tool_results_by_result_ordinal() {
+        use djinn_core::message::{ContentBlock, Message, Role};
+
+        let long_result = |index: usize| {
+            format!(
+                "result-{index}-head:{}:tail-only-result-{index}",
+                "x".repeat(1_600)
+            )
+        };
+        let mut messages = vec![Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::text("before the tool results"),
+                ContentBlock::ToolUse {
+                    id: "setup".into(),
+                    name: "setup".into(),
+                    input: serde_json::json!({"step": "initial"}),
+                },
+            ],
+            metadata: None,
+        }];
+
+        for index in 1..=6 {
+            messages.push(Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: format!("tool-{index}"),
+                    content: vec![ContentBlock::text(long_result(index))],
+                    is_error: false,
+                }],
+                metadata: None,
+            });
+            // These intervening transcript messages and blocks ensure selecting
+            // the final five by message position would produce a different set.
+            messages.push(Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::text(format!("intervening assistant message {index}")),
+                    ContentBlock::ToolUse {
+                        id: format!("intervening-{index}"),
+                        name: "observe".into(),
+                        input: serde_json::json!({"result": index}),
+                    },
+                ],
+                metadata: None,
+            });
+            messages.push(Message {
+                role: Role::User,
+                content: vec![ContentBlock::text(format!("intervening user message {index}"))],
+                metadata: None,
+            });
+        }
+
+        let out = build_transcript_excerpt(&messages, 20_000);
+        let result_lines: Vec<_> = out
+            .lines()
+            .filter(|line| line.starts_with("tool result: "))
+            .collect();
+        assert_eq!(result_lines.len(), 6);
+        assert!(result_lines[0].contains("result-1-head:"));
+        assert_eq!(
+            result_lines[0]
+                .strip_prefix("tool result: ")
+                .expect("result line label")
+                .chars()
+                .count(),
+            601,
+            "ordinary results retain 600 head characters plus the legacy ellipsis"
+        );
+        assert!(result_lines[0].ends_with('…'));
+        assert!(
+            !result_lines[0].contains("tail-only-result-1"),
+            "the ordinary result must retain the existing 600-character head-only slice"
+        );
+        for (index, line) in (2..=6).zip(&result_lines[1..]) {
+            assert!(line.contains(&format!("result-{index}-head:")));
+            assert!(line.contains("…[omitted]…"));
+            assert!(
+                line.ends_with(&format!("tail-only-result-{index}")),
+                "final-five result {index} must retain its tail-only sentinel"
+            );
+        }
+    }
+
+    #[test]
+    fn transcript_excerpt_preserves_complete_cleared_placeholder_lines() {
+        use djinn_core::message::{ContentBlock, Message, Role};
+
+        let result_placeholder =
+            "[Cleared — tool result from turn 17] result body is retained verbatim";
+        let error_placeholder =
+            "[Cleared — tool result from turn 18] error body is retained verbatim";
+        let messages = vec![
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "cleared-result".into(),
+                    content: vec![ContentBlock::text(result_placeholder)],
+                    is_error: false,
+                }],
+                metadata: None,
+            },
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::text("intervening non-tool message")],
+                metadata: None,
+            },
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "cleared-error".into(),
+                    content: vec![ContentBlock::text(error_placeholder)],
+                    is_error: true,
+                }],
+                metadata: None,
+            },
+        ];
+
+        let out = build_transcript_excerpt(&messages, 12_000);
+        let placeholder_lines: Vec<_> = out
+            .lines()
+            .filter(|line| line.starts_with("tool result: ") || line.starts_with("tool error: "))
+            .collect();
+        assert_eq!(
+            placeholder_lines,
+            vec![
+                format!("tool result: {result_placeholder}"),
+                format!("tool error: {error_placeholder}"),
+            ]
+        );
+    }
+
+    #[test]
     fn cleared_placeholder_prefix_after_leading_space_does_not_bypass_slicing() {
         use djinn_core::message::{ContentBlock, Message, Role};
 
