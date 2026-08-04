@@ -1,5 +1,5 @@
 use djinn_core::message::{CacheBreakpoint, Conversation, Message};
-use djinn_provider::provider::client::ApiClient;
+use djinn_provider::provider::client::{ApiClient, ProviderAttemptContextV1};
 use djinn_provider::provider::format::anthropic::AnthropicProvider;
 use djinn_provider::provider::format::google::GoogleProvider;
 use djinn_provider::provider::format::openai::OpenAIProvider;
@@ -10,6 +10,8 @@ use djinn_provider::provider::{
 use futures::StreamExt;
 use reqwest::header::HeaderMap;
 use serde_json::{Value, json};
+use std::sync::{Arc, Mutex};
+use std::time::SystemTime;
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -27,6 +29,20 @@ fn openai_config(base_url: String, auth: AuthMethod) -> ProviderConfig {
         reasoning_effort: None,
         tool_schema_compat: None,
     }
+}
+
+fn attempt_context(sequence: u64) -> ProviderAttemptContextV1 {
+    ProviderAttemptContextV1::new(
+        sequence,
+        djinn_provider::ProviderAdmissionPolicyV1::Proactive,
+        Arc::new(Mutex::new(djinn_provider::ProviderApiKeyNormalizerV1::new(
+            djinn_provider::ProviderAdmissionPolicyV1::Proactive,
+        ))),
+        || djinn_provider::ProviderReceiptTimeV1 {
+            wall: SystemTime::UNIX_EPOCH,
+            monotonic_ms: 100,
+        },
+    )
 }
 
 fn anthropic_config(base_url: String, auth: AuthMethod) -> ProviderConfig {
@@ -976,4 +992,457 @@ async fn google_native_no_quirk_emits_function_declarations_envelope() {
         body.get("toolConfig").is_none(),
         "Auto tool choice on the native path must not emit toolConfig"
     );
+}
+
+// These fixtures cross the public LlmProvider boundary rather than calling a
+// reporter directly. They pin the adapter-selected request route, credentials,
+// serialization, terminal usage, token timestamps, and exactly-one-send policy.
+#[tokio::test]
+async fn admission_launch_openai_chat_uses_exact_route_auth_body_and_usage() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST")).and(path("/chat/completions")).respond_with(ResponseTemplate::new(200).insert_header("content-type", "text/event-stream").set_body_string("data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\ndata: {\"choices\":[],\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":4}}\n\ndata: [DONE]\n\n")).mount(&server).await;
+    let provider = OpenAIProvider::new(openai_config(
+        server.uri(),
+        AuthMethod::BearerToken("chat-secret".into()),
+    ));
+    let conversation = conversation();
+    let mut attempt = provider
+        .start_sse_attempt_v1(
+            &conversation,
+            &tool_definition(),
+            Some(ToolChoice::Required),
+            attempt_context(101),
+        )
+        .expect("covered chat route");
+    let outcome = attempt.outcome().await;
+    assert_eq!(
+        outcome.terminal,
+        djinn_provider::ProviderAttemptTerminalV1::Completed
+    );
+    assert_eq!(
+        outcome
+            .authoritative_usage
+            .expect("chat usage")
+            .combined_units,
+        16
+    );
+    assert_eq!(outcome.token_emission.first_token_monotonic_ms, Some(100));
+    let requests = server.received_requests().await.expect("one send");
+    assert_eq!(requests.len(), 1, "admission launch must not retry");
+    assert_eq!(
+        requests[0]
+            .headers
+            .get("authorization")
+            .and_then(|v| v.to_str().ok()),
+        Some("Bearer chat-secret")
+    );
+    let body: Value = serde_json::from_slice(&requests[0].body).unwrap();
+    assert_eq!(body["model"], "gpt-4o-mini");
+    assert_eq!(body["tool_choice"], "required");
+}
+
+#[tokio::test]
+async fn admission_launch_anthropic_preserves_headers_usage_and_text_emission() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST")).and(path("/v1/messages")).respond_with(ResponseTemplate::new(200).insert_header("content-type", "text/event-stream").set_body_string("data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":7}}}\n\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}\n\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":3}}\n\ndata: {\"type\":\"message_stop\"}\n\n")).mount(&server).await;
+    let provider = AnthropicProvider::new(anthropic_config(
+        server.uri(),
+        AuthMethod::ApiKeyHeader {
+            header: "x-api-key".into(),
+            key: "anthropic-secret".into(),
+        },
+    ));
+    let conversation = conversation();
+    let mut attempt = provider
+        .start_sse_attempt_v1(
+            &conversation,
+            &tool_definition(),
+            Some(ToolChoice::Required),
+            attempt_context(102),
+        )
+        .expect("covered anthropic route");
+    let outcome = attempt.outcome().await;
+    assert_eq!(
+        outcome.terminal,
+        djinn_provider::ProviderAttemptTerminalV1::Completed
+    );
+    assert_eq!(
+        outcome
+            .authoritative_usage
+            .expect("anthropic usage")
+            .combined_units,
+        10
+    );
+    assert_eq!(outcome.token_emission.first_token_monotonic_ms, Some(100));
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0]
+            .headers
+            .get("x-api-key")
+            .and_then(|v| v.to_str().ok()),
+        Some("anthropic-secret")
+    );
+    assert_eq!(
+        requests[0]
+            .headers
+            .get("anthropic-version")
+            .and_then(|v| v.to_str().ok()),
+        Some("2023-06-01")
+    );
+    let body: Value = serde_json::from_slice(&requests[0].body).unwrap();
+    assert_eq!(body["model"], "claude-3-5-sonnet");
+}
+
+#[tokio::test]
+async fn admission_launch_openai_responses_uses_exact_route_auth_body_and_usage() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST")).and(path("/responses")).respond_with(ResponseTemplate::new(200).insert_header("content-type", "text/event-stream").set_body_string("data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"output\":[{\"type\":\"message\"}],\"usage\":{\"input_tokens\":5,\"output_tokens\":2}}}\n\n")).mount(&server).await;
+    let provider = OpenAIResponsesProvider::new(openai_responses_config(
+        server.uri(),
+        AuthMethod::BearerToken("responses-secret".into()),
+    ));
+    let conversation = conversation();
+    let mut attempt = provider
+        .start_sse_attempt_v1(
+            &conversation,
+            &tool_definition(),
+            Some(ToolChoice::Required),
+            attempt_context(103),
+        )
+        .expect("covered responses route");
+    let outcome = attempt.outcome().await;
+    assert_eq!(
+        outcome.terminal,
+        djinn_provider::ProviderAttemptTerminalV1::Completed
+    );
+    assert_eq!(
+        outcome
+            .authoritative_usage
+            .expect("responses usage")
+            .combined_units,
+        7
+    );
+    assert_eq!(outcome.token_emission.first_token_monotonic_ms, Some(100));
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0]
+            .headers
+            .get("authorization")
+            .and_then(|v| v.to_str().ok()),
+        Some("Bearer responses-secret")
+    );
+    let body: Value = serde_json::from_slice(&requests[0].body).unwrap();
+    assert_eq!(body["model"], "gpt-5.1-codex");
+    assert_eq!(body["stream"], true);
+}
+
+#[tokio::test]
+async fn admission_launch_google_uses_exact_route_auth_body_and_usage() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST")).and(path("/v1beta/models/gemini-2.5-pro:streamGenerateContent")).respond_with(ResponseTemplate::new(200).insert_header("content-type", "text/event-stream").set_body_string("data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"ok\"}],\"role\":\"model\"}}]}\n\ndata: {\"candidates\":[{\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":8,\"candidatesTokenCount\":6}}\n\n")).mount(&server).await;
+    let provider = GoogleProvider::new(google_config(
+        server.uri(),
+        AuthMethod::BearerToken("google-secret".into()),
+    ));
+    let conversation = conversation();
+    let mut attempt = provider
+        .start_sse_attempt_v1(
+            &conversation,
+            &tool_definition(),
+            Some(ToolChoice::Required),
+            attempt_context(104),
+        )
+        .expect("covered google route");
+    let outcome = attempt.outcome().await;
+    assert_eq!(
+        outcome.terminal,
+        djinn_provider::ProviderAttemptTerminalV1::Completed
+    );
+    assert_eq!(
+        outcome
+            .authoritative_usage
+            .expect("google usage")
+            .combined_units,
+        14
+    );
+    assert_eq!(outcome.token_emission.first_token_monotonic_ms, Some(100));
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0]
+            .headers
+            .get("authorization")
+            .and_then(|v| v.to_str().ok()),
+        Some("Bearer google-secret")
+    );
+    let body: Value = serde_json::from_slice(&requests[0].body).unwrap();
+    assert!(body["contents"].is_array());
+    assert_eq!(body["toolConfig"]["functionCallingConfig"]["mode"], "ANY");
+}
+
+#[tokio::test]
+async fn admission_launch_format_malformed_failures_are_protocol_terminal_once() {
+    let cases = [
+        ("openai", "/chat/completions"),
+        ("anthropic", "/v1/messages"),
+        ("responses", "/responses"),
+        (
+            "google",
+            "/v1beta/models/gemini-2.5-pro:streamGenerateContent",
+        ),
+    ];
+
+    for (index, (format, route)) in cases.into_iter().enumerate() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(route))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string("data: not-json\n\n"),
+            )
+            .mount(&server)
+            .await;
+        let conversation = conversation();
+        let mut attempt = match format {
+            "openai" => OpenAIProvider::new(openai_config(server.uri(), AuthMethod::NoAuth))
+                .start_sse_attempt_v1(
+                    &conversation,
+                    &[],
+                    None,
+                    attempt_context(200 + index as u64),
+                ),
+            "anthropic" => {
+                AnthropicProvider::new(anthropic_config(server.uri(), AuthMethod::NoAuth))
+                    .start_sse_attempt_v1(
+                        &conversation,
+                        &[],
+                        None,
+                        attempt_context(200 + index as u64),
+                    )
+            }
+            "responses" => OpenAIResponsesProvider::new(openai_responses_config(
+                server.uri(),
+                AuthMethod::NoAuth,
+            ))
+            .start_sse_attempt_v1(
+                &conversation,
+                &[],
+                None,
+                attempt_context(200 + index as u64),
+            ),
+            "google" => GoogleProvider::new(google_config(server.uri(), AuthMethod::NoAuth))
+                .start_sse_attempt_v1(
+                    &conversation,
+                    &[],
+                    None,
+                    attempt_context(200 + index as u64),
+                ),
+            _ => unreachable!(),
+        }
+        .expect("all covered adapters launch at their public boundary");
+
+        let outcome = attempt.outcome().await;
+        assert_eq!(
+            outcome.terminal,
+            djinn_provider::ProviderAttemptTerminalV1::Failed(
+                djinn_provider::ProviderAttemptLossV1::Protocol
+            ),
+            "{format} malformed SSE must be terminal rather than a retryable transport loss"
+        );
+        assert_eq!(
+            server
+                .received_requests()
+                .await
+                .expect("captured request")
+                .len(),
+            1,
+            "{format} admission launch must not retry"
+        );
+    }
+}
+
+#[tokio::test]
+async fn admission_launch_anthropic_error_uses_stream_classifier_and_tool_delta_is_not_token() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(
+                    "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":2}}}\n\n\
+                     data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"call_1\",\"name\":\"shell\"}}\n\n\
+                     data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{}\"}}\n\n\
+                     data: {\"type\":\"content_block_stop\",\"index\":0}\n\n\
+                     data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":1}}\n\n\
+                     data: {\"type\":\"message_stop\"}\n\n",
+                ),
+        )
+        .mount(&server)
+        .await;
+    let provider = AnthropicProvider::new(anthropic_config(server.uri(), AuthMethod::NoAuth));
+    let conversation = conversation();
+    let mut attempt = provider
+        .start_sse_attempt_v1(&conversation, &[], None, attempt_context(210))
+        .expect("covered anthropic route");
+    let outcome = attempt.outcome().await;
+    assert_eq!(
+        outcome.terminal,
+        djinn_provider::ProviderAttemptTerminalV1::Completed
+    );
+    assert_eq!(outcome.token_emission.first_token_monotonic_ms, None);
+    assert_eq!(
+        server
+            .received_requests()
+            .await
+            .expect("captured request")
+            .len(),
+        1
+    );
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(
+                    "data: {\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\",\"message\":\"over quota\"}}\n\n",
+                ),
+        )
+        .mount(&server)
+        .await;
+    let provider = AnthropicProvider::new(anthropic_config(server.uri(), AuthMethod::NoAuth));
+    let mut attempt = provider
+        .start_sse_attempt_v1(&conversation, &[], None, attempt_context(211))
+        .expect("covered anthropic route");
+    assert_eq!(
+        attempt.outcome().await.terminal,
+        djinn_provider::ProviderAttemptTerminalV1::Failed(
+            djinn_provider::ProviderAttemptLossV1::RateLimited
+        )
+    );
+    assert_eq!(
+        server
+            .received_requests()
+            .await
+            .expect("captured request")
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn admission_launch_429_normalizes_retry_deadline_once_and_redacts_diagnostics() {
+    let credential = "credential-like-token-123";
+    let provider_secret = "provider-supplied-secret-456";
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(429)
+                .insert_header("retry-after", "7")
+                .set_body_string(format!(
+                    "{{\"error\":{{\"message\":\"{credential} {provider_secret}\"}}}}"
+                )),
+        )
+        .mount(&server)
+        .await;
+    let provider = OpenAIProvider::new(openai_config(
+        server.uri(),
+        AuthMethod::BearerToken(credential.into()),
+    ));
+    let conversation = conversation();
+    let mut attempt = provider
+        .start_sse_attempt_v1(&conversation, &[], None, attempt_context(220))
+        .expect("covered chat route");
+    let outcome = attempt.outcome().await;
+    assert_eq!(
+        outcome.terminal,
+        djinn_provider::ProviderAttemptTerminalV1::Failed(
+            djinn_provider::ProviderAttemptLossV1::RateLimited
+        )
+    );
+    assert_eq!(
+        outcome
+            .observation
+            .as_ref()
+            .and_then(|observation| observation.retry_after_deadline_monotonic_ms),
+        Some(7_100)
+    );
+    let diagnostics = serde_json::to_string(&outcome).expect("redaction-safe outcome JSON");
+    assert!(!diagnostics.contains(credential));
+    assert!(!diagnostics.contains(provider_secret));
+    assert_eq!(
+        server
+            .received_requests()
+            .await
+            .expect("captured request")
+            .len(),
+        1,
+        "429 must be returned to the reply-loop retry owner without a hidden retry"
+    );
+}
+
+#[tokio::test]
+async fn admission_launch_openai_responses_errors_use_production_stream_classifier() {
+    let cases = [
+        (
+            "response.failed quota",
+            "data: {\"type\":\"response.failed\",\"error\":{\"code\":\"insufficient_quota\",\"message\":\"quota\"}}\n\n",
+            djinn_provider::ProviderAttemptLossV1::RateLimited,
+        ),
+        (
+            "error server failure",
+            "data: {\"type\":\"error\",\"error\":{\"code\":\"server_error\",\"message\":\"backend failed\"}}\n\n",
+            djinn_provider::ProviderAttemptLossV1::Transport,
+        ),
+        (
+            "response.failed invalid request",
+            "data: {\"type\":\"response.failed\",\"error\":{\"code\":\"invalid_request\",\"message\":\"bad input\"}}\n\n",
+            djinn_provider::ProviderAttemptLossV1::ProviderRejected,
+        ),
+    ];
+
+    for (sequence, (name, body, expected_loss)) in cases.into_iter().enumerate() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/responses"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(body),
+            )
+            .mount(&server)
+            .await;
+        let provider =
+            OpenAIResponsesProvider::new(openai_responses_config(server.uri(), AuthMethod::NoAuth));
+        let conversation = conversation();
+        let mut attempt = provider
+            .start_sse_attempt_v1(
+                &conversation,
+                &[],
+                None,
+                attempt_context(230 + sequence as u64),
+            )
+            .expect("covered Responses route");
+
+        assert_eq!(
+            attempt.outcome().await.terminal,
+            djinn_provider::ProviderAttemptTerminalV1::Failed(expected_loss),
+            "{name} must retain the production stream error classification"
+        );
+        assert_eq!(
+            server
+                .received_requests()
+                .await
+                .expect("captured request")
+                .len(),
+            1,
+            "{name} must be a single admission-owned send"
+        );
+    }
 }
