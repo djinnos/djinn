@@ -331,25 +331,59 @@ impl ModelTurnAdmissionRepository {
     }
 
     /// Resolve an existing Phase A pool without creating a second ledger.
-    pub async fn resolve_pool(&self, credential_id: &str, provider_id: &str, model_id: &str) -> Result<Option<ModelTurnPool>> {
+    pub async fn resolve_pool(
+        &self,
+        credential_id: &str,
+        provider_id: &str,
+        model_id: &str,
+    ) -> Result<Option<ModelTurnPool>> {
         self.db.ensure_initialized().await?;
         let row: Option<(i64, String, String, String, String, String, String, i64, i64)> = sqlx::query_as(
             "SELECT id, credential_id, provider_id, model_id, phase, identity_state, capability_state, learned_concurrency, in_flight FROM model_turn_pools WHERE credential_id = $1 AND provider_id = $2 AND model_id = $3",
         ).bind(credential_id).bind(provider_id).bind(model_id).fetch_optional(self.db.pool()).await?;
-        row.map(|(id, credential_id, provider_id, model_id, phase, identity_state, capability_state, learned_concurrency, in_flight)| Ok(ModelTurnPool {
-            id, credential_id, provider_id, model_id, phase: parse_phase(&phase)?,
-            identity_state: parse_identity(&identity_state)?, capability_state: parse_capability(&capability_state)?,
-            learned_concurrency, in_flight,
-        })).transpose()
+        row.map(
+            |(
+                id,
+                credential_id,
+                provider_id,
+                model_id,
+                phase,
+                identity_state,
+                capability_state,
+                learned_concurrency,
+                in_flight,
+            )| {
+                Ok(ModelTurnPool {
+                    id,
+                    credential_id,
+                    provider_id,
+                    model_id,
+                    phase: parse_phase(&phase)?,
+                    identity_state: parse_identity(&identity_state)?,
+                    capability_state: parse_capability(&capability_state)?,
+                    learned_concurrency,
+                    in_flight,
+                })
+            },
+        )
+        .transpose()
     }
 
     /// Persist a decision before returning a shadow send permit. Inputs contain
     /// only a one-way request fingerprint and bounded diagnostic vocabulary.
     pub async fn record_decision(&self, input: ModelTurnDecisionRecordInput) -> Result<()> {
         self.db.ensure_initialized().await?;
-        if input.pool_id <= 0 || input.generation <= 0 || !is_sha256_fingerprint(&input.request_fingerprint)
-            || input.diagnostic.as_ref().is_some_and(|value| !is_bounded_diagnostic(value)) {
-            return Err(crate::Error::InvalidData("invalid model-turn decision record".to_owned()));
+        if input.pool_id <= 0
+            || input.generation <= 0
+            || !is_sha256_fingerprint(&input.request_fingerprint)
+            || input
+                .diagnostic
+                .as_ref()
+                .is_some_and(|value| !is_bounded_diagnostic(value))
+        {
+            return Err(crate::Error::InvalidData(
+                "invalid model-turn decision record".to_owned(),
+            ));
         }
         sqlx::query("INSERT INTO model_turn_decisions (pool_id, request_fingerprint, generation, decision, diagnostic) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (pool_id, request_fingerprint, generation) DO NOTHING")
             .bind(input.pool_id).bind(input.request_fingerprint).bind(input.generation)
@@ -442,6 +476,34 @@ impl ModelTurnAdmissionRepository {
         &self,
         input: ModelTurnLeaseReconciliationInput,
     ) -> Result<ModelTurnLeaseMutationOutcome> {
+        self.reconcile_lease_with_unsent_dispatching(input, false)
+            .await
+    }
+
+    /// Cancel an attempt which has not been handed to provider I/O. The slot
+    /// fence may already be `dispatching`; that state alone must not quarantine
+    /// a permit which was dropped before it could be sent.
+    pub async fn cancel_before_send(
+        &self,
+        identity: ModelTurnLeaseIdentity,
+    ) -> Result<ModelTurnLeaseMutationOutcome> {
+        self.reconcile_lease_with_unsent_dispatching(
+            ModelTurnLeaseReconciliationInput {
+                identity,
+                outcome: ModelTurnLeaseTerminalOutcome::Cancelled,
+                authoritative_usage: None,
+                detail: None,
+            },
+            true,
+        )
+        .await
+    }
+
+    async fn reconcile_lease_with_unsent_dispatching(
+        &self,
+        input: ModelTurnLeaseReconciliationInput,
+        dispatching_is_definitely_unsent: bool,
+    ) -> Result<ModelTurnLeaseMutationOutcome> {
         self.db.ensure_initialized().await?;
         if input.detail.as_ref().is_some_and(|v| v.len() > 1024)
             || input
@@ -478,7 +540,8 @@ impl ModelTurnAdmissionRepository {
         if !matches!(lifecycle.as_str(), "reserved" | "dispatching" | "active") {
             return Ok(ModelTurnLeaseMutationOutcome::Fenced);
         }
-        let unsent = lifecycle == "reserved";
+        let unsent = lifecycle == "reserved"
+            || (dispatching_is_definitely_unsent && lifecycle == "dispatching");
         let accounting_state = if unsent {
             "refunded"
         } else if input.authoritative_usage.is_some() {
@@ -821,9 +884,26 @@ fn bucket_kind_name(kind: ModelTurnBucketKind) -> &'static str {
     }
 }
 
-fn decision_kind_name(kind: ModelTurnDecisionKind) -> &'static str { match kind { ModelTurnDecisionKind::ShadowPermit => "shadow_permit", ModelTurnDecisionKind::EnforceAdmitted => "enforce_admitted", ModelTurnDecisionKind::Wait => "wait", ModelTurnDecisionKind::Rejected => "rejected" } }
-fn is_sha256_fingerprint(value: &str) -> bool { value.len() == 71 && value.starts_with("sha256:") && value.as_bytes()[7..].iter().all(u8::is_ascii_hexdigit) }
-fn is_bounded_diagnostic(value: &str) -> bool { !value.is_empty() && value.len() <= 128 && value.bytes().all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_' || byte == b'-') }
+fn decision_kind_name(kind: ModelTurnDecisionKind) -> &'static str {
+    match kind {
+        ModelTurnDecisionKind::ShadowPermit => "shadow_permit",
+        ModelTurnDecisionKind::EnforceAdmitted => "enforce_admitted",
+        ModelTurnDecisionKind::Wait => "wait",
+        ModelTurnDecisionKind::Rejected => "rejected",
+    }
+}
+fn is_sha256_fingerprint(value: &str) -> bool {
+    value.len() == 71
+        && value.starts_with("sha256:")
+        && value.as_bytes()[7..].iter().all(u8::is_ascii_hexdigit)
+}
+fn is_bounded_diagnostic(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_' || byte == b'-'
+        })
+}
 
 fn canonical_debits(debits: &[ModelTurnBucketDebit]) -> Result<BTreeMap<ModelTurnBucketKind, i64>> {
     let mut result = BTreeMap::new();

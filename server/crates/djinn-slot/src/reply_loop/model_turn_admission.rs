@@ -16,6 +16,9 @@ use djinn_provider::{ProviderAttemptPlanV1, ProviderAttemptTerminalV1, ProviderO
 use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 
+#[cfg(test)]
+use tokio::sync::Notify;
+
 #[derive(Clone, Debug)]
 pub struct ModelTurnAdmissionRequest {
     pub credential_id: String,
@@ -50,6 +53,14 @@ pub enum ModelTurnPreparation {
 pub struct ModelTurnAdmissionCoordinator {
     repository: ModelTurnAdmissionRepository,
     pending: Arc<Mutex<BTreeMap<String, ModelTurnLeaseIdentity>>>,
+    #[cfg(test)]
+    post_dispatching_hook: Option<Arc<PrepareCancellationHook>>,
+}
+
+#[cfg(test)]
+struct PrepareCancellationHook {
+    reached: Notify,
+    release: Notify,
 }
 
 impl ModelTurnAdmissionCoordinator {
@@ -58,6 +69,20 @@ impl ModelTurnAdmissionCoordinator {
         Self {
             repository,
             pending: Arc::new(Mutex::new(BTreeMap::new())),
+            #[cfg(test)]
+            post_dispatching_hook: None,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_prepare_cancellation_hook(
+        repository: ModelTurnAdmissionRepository,
+        hook: Arc<PrepareCancellationHook>,
+    ) -> Self {
+        Self {
+            repository,
+            pending: Arc::new(Mutex::new(BTreeMap::new())),
+            post_dispatching_hook: Some(hook),
         }
     }
 
@@ -126,10 +151,14 @@ impl ModelTurnAdmissionCoordinator {
                         .await
                         .insert(request.request_id, identity.clone());
                     let outcome = self.repository.mark_dispatching(&identity).await?;
+                    #[cfg(test)]
+                    if let Some(hook) = &self.post_dispatching_hook {
+                        hook.reached.notify_one();
+                        hook.release.notified().await;
+                    }
                     match outcome {
                         ModelTurnLeaseMutationOutcome::Applied
                         | ModelTurnLeaseMutationOutcome::Idempotent => {
-                            self.pending.lock().await.remove(&identity.request_id);
                             Ok(ModelTurnPreparation::Permit(ModelTurnSendPermit {
                                 lease: Some(identity),
                             }))
@@ -143,24 +172,15 @@ impl ModelTurnAdmissionCoordinator {
         }
     }
 
-    /// Cancellation owner for the acquisition-to-fence window. Repeating it is
-    /// harmless; Phase A's terminal row makes the durable operation idempotent.
+    /// Cancellation owner until `mark_active` hands the permit to provider I/O.
+    /// A pending dispatching lease is definitely unsent and can be refunded.
     pub async fn cancel_pending(
         &self,
         request_id: &str,
     ) -> djinn_db::Result<Option<ModelTurnLeaseMutationOutcome>> {
         let identity = self.pending.lock().await.remove(request_id);
         match identity {
-            Some(identity) => self
-                .repository
-                .reconcile_lease(ModelTurnLeaseReconciliationInput {
-                    identity,
-                    outcome: ModelTurnLeaseTerminalOutcome::Cancelled,
-                    authoritative_usage: None,
-                    detail: None,
-                })
-                .await
-                .map(Some),
+            Some(identity) => self.repository.cancel_before_send(identity).await.map(Some),
             None => Ok(None),
         }
     }
@@ -169,7 +189,17 @@ impl ModelTurnAdmissionCoordinator {
         &self,
         identity: &ModelTurnLeaseIdentity,
     ) -> djinn_db::Result<ModelTurnLeaseMutationOutcome> {
-        self.repository.mark_active(identity).await
+        // Serialize hand-off against cancellation. Once active commits, the
+        // permit is possibly sent and only `reconcile` may terminalize it.
+        let mut pending = self.pending.lock().await;
+        let outcome = self.repository.mark_active(identity).await?;
+        if matches!(
+            outcome,
+            ModelTurnLeaseMutationOutcome::Applied | ModelTurnLeaseMutationOutcome::Idempotent
+        ) {
+            pending.remove(&identity.request_id);
+        }
+        Ok(outcome)
     }
 
     /// Sole coordinator reconciliation path. Missing authoritative usage is
@@ -275,6 +305,31 @@ mod tests {
         assert_eq!(row.0, request_fingerprint("raw-secret-request"));
         assert_eq!(row.0.len(), 71);
         assert_eq!(row.1, None);
+        for diagnostic in ["credential=raw-secret".to_owned(), "a".repeat(129)] {
+            assert!(
+                repository(&db)
+                    .record_decision(ModelTurnDecisionRecordInput {
+                        pool_id: pool,
+                        request_fingerprint: request_fingerprint("another-secret-request"),
+                        generation: 2,
+                        decision: ModelTurnDecisionKind::ShadowPermit,
+                        diagnostic: Some(diagnostic),
+                    })
+                    .await
+                    .is_err()
+            );
+        }
+        let count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM model_turn_decisions WHERE pool_id = $1")
+                .bind(pool)
+                .fetch_one(db.pool())
+                .await
+                .expect("decision count");
+        assert_eq!(count, 1, "unsafe diagnostics are never persisted");
+    }
+
+    fn repository(db: &Database) -> ModelTurnAdmissionRepository {
+        ModelTurnAdmissionRepository::new(db.clone())
     }
 
     #[tokio::test]
@@ -299,40 +354,55 @@ mod tests {
             .execute(db.pool())
             .await
             .expect("support");
-        assert!(matches!(
-            coordinator
-                .prepare(&plan(), request("fenced"))
+        let lease = match coordinator
+            .prepare(&plan(), request("fenced"))
+            .await
+            .expect("prepare")
+        {
+            ModelTurnPreparation::Permit(ModelTurnSendPermit {
+                lease: Some(identity),
+            }) => identity,
+            other => panic!("permit must follow a dispatch fence, got {other:?}"),
+        };
+        let lifecycle: String =
+            sqlx::query_scalar("SELECT lifecycle FROM model_turn_leases WHERE lease_id = $1::uuid")
+                .bind(&lease.lease_id)
+                .fetch_one(db.pool())
                 .await
-                .expect("prepare"),
-            ModelTurnPreparation::Permit(ModelTurnSendPermit { lease: Some(_) })
-        ));
+                .expect("fenced lease");
+        assert_eq!(lifecycle, "dispatching", "permit follows durable fence");
+        coordinator.cancel_pending("fenced").await.expect("cleanup");
     }
 
     #[tokio::test]
-    async fn pending_cancellation_refunds_unsent_and_sent_failure_quarantines_idempotently() {
+    async fn cancelling_actual_prepare_after_dispatch_fence_refunds_unsent() {
         let db = Database::ephemeral().await.expect("db");
         let pool = seed(&db, "enforce", "supported", 2).await;
-        let repository = ModelTurnAdmissionRepository::new(db.clone());
-        let coordinator = ModelTurnAdmissionCoordinator::new(repository.clone());
-        let acquired = repository
-            .acquire_turn(ModelTurnAcquireInput {
-                pool_id: pool,
-                request_id: "cancelled".into(),
-                owner_pod_uid: Some("pod".into()),
-                generation: 1,
-                debits: plan().debits,
-            })
-            .await
-            .expect("acquire");
-        let identity = match acquired {
-            ModelTurnAcquireOutcome::Admitted { lease, .. } => lease.identity,
-            _ => panic!("expected admission"),
-        };
-        coordinator
-            .pending
-            .lock()
-            .await
-            .insert("cancelled".into(), identity);
+        let hook = Arc::new(PrepareCancellationHook {
+            reached: Notify::new(),
+            release: Notify::new(),
+        });
+        let coordinator = Arc::new(
+            ModelTurnAdmissionCoordinator::with_prepare_cancellation_hook(
+                repository(&db),
+                hook.clone(),
+            ),
+        );
+        let reached = hook.reached.notified();
+        let task = tokio::spawn({
+            let coordinator = coordinator.clone();
+            async move { coordinator.prepare(&plan(), request("cancelled")).await }
+        });
+        reached.await;
+        let lifecycle: String = sqlx::query_scalar(
+            "SELECT lifecycle FROM model_turn_leases WHERE request_id = 'cancelled'",
+        )
+        .fetch_one(db.pool())
+        .await
+        .expect("fence committed before cancellation");
+        assert_eq!(lifecycle, "dispatching");
+        task.abort();
+        let _ = task.await;
         assert_eq!(
             coordinator
                 .cancel_pending("cancelled")
@@ -342,6 +412,20 @@ mod tests {
         );
         let refunded: (i64, i64, i64) = sqlx::query_as("SELECT p.in_flight, b.available_units, b.quarantined_units FROM model_turn_pools p JOIN model_turn_bucket_bindings b ON b.pool_id = p.id WHERE p.id = $1").bind(pool).fetch_one(db.pool()).await.expect("refund");
         assert_eq!(refunded, (0, 2, 0));
+        assert_eq!(
+            coordinator
+                .cancel_pending("cancelled")
+                .await
+                .expect("replay"),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn active_sent_failure_quarantines_idempotently() {
+        let db = Database::ephemeral().await.expect("db");
+        let pool = seed(&db, "enforce", "supported", 2).await;
+        let coordinator = ModelTurnAdmissionCoordinator::new(repository(&db));
         let lease = match coordinator
             .prepare(&plan(), request("sent"))
             .await
@@ -352,6 +436,10 @@ mod tests {
             }) => identity,
             _ => panic!("expected permit after fence"),
         };
+        assert_eq!(
+            coordinator.mark_active(&lease).await.expect("active"),
+            ModelTurnLeaseMutationOutcome::Applied
+        );
         let outcome = ProviderOutcomeV1 {
             terminal: ProviderAttemptTerminalV1::Failed(
                 djinn_provider::ProviderAttemptLossV1::Transport,
