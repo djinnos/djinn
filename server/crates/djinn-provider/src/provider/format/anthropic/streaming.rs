@@ -9,7 +9,7 @@ use crate::model_turn_admission::{
     ProviderAttemptCapabilitiesV1, ProviderAttemptLossV1, ProviderUsageObservationV1,
 };
 use crate::provider::client::{
-    ApiClient, ProviderAttemptContextV1, ProviderFormatReportV1, ProviderSseAttemptV1,
+    ProviderAttemptContextV1, ProviderFormatReportV1, ProviderSseAttemptV1,
     ProviderSseTerminalReporterV1, SseFrame,
 };
 use crate::provider::{
@@ -58,6 +58,10 @@ enum PendingContentBlock {
 #[derive(Default)]
 pub struct AnthropicTerminalReporterV1 {
     usage: ProviderUsageObservationV1,
+    block_acc: ContentBlockAcc,
+    input_tokens: u32,
+    cache_read: u32,
+    cache_write: u32,
 }
 impl ProviderSseTerminalReporterV1 for AnthropicTerminalReporterV1 {
     fn report(&mut self, frame: &SseFrame) -> ProviderFormatReportV1 {
@@ -67,8 +71,11 @@ impl ProviderSseTerminalReporterV1 for AnthropicTerminalReporterV1 {
         let Ok(v) = serde_json::from_str::<Value>(data) else {
             return ProviderFormatReportV1::Malformed;
         };
-        match v.get("type").and_then(Value::as_str) {
-            Some("error") => ProviderFormatReportV1::Failed(
+        let Some(event_type) = v.get("type").and_then(Value::as_str) else {
+            return ProviderFormatReportV1::Malformed;
+        };
+        if event_type == "error" {
+            return ProviderFormatReportV1::Failed(
                 // This is the same typed classifier used by `stream`; overload
                 // and API failures must remain retryable breaker failures.
                 match classify_anthropic_error_event(data).0 {
@@ -82,30 +89,44 @@ impl ProviderSseTerminalReporterV1 for AnthropicTerminalReporterV1 {
                     | ProviderError::InvalidRequest
                     | ProviderError::InvalidOutput => ProviderAttemptLossV1::ProviderRejected,
                 },
-            ),
-            Some("message_delta") => {
-                if let Some(u) = v.get("usage") {
-                    let o = u.get("output_tokens").and_then(Value::as_i64);
-                    self.usage.output_units = o;
-                    self.usage.combined_units = self
-                        .usage
-                        .input_units
-                        .zip(o)
-                        .and_then(|(a, b)| a.checked_add(b));
+            );
+        }
+
+        // Keep admission token and usage reporting on the production parser.
+        // A tool `input_json_delta` is not a text token, and a structurally
+        // incomplete delta must not manufacture a first-token timestamp.
+        let events = parse_anthropic_event(
+            event_type,
+            data,
+            &mut self.block_acc,
+            &mut self.input_tokens,
+            &mut self.cache_read,
+            &mut self.cache_write,
+        );
+        let mut emitted = false;
+        let mut completed = false;
+        for event in events {
+            match event {
+                StreamEvent::Usage(usage) => {
+                    self.usage = ProviderUsageObservationV1 {
+                        input_units: Some(i64::from(usage.input)),
+                        output_units: Some(i64::from(usage.output)),
+                        combined_units: Some(i64::from(usage.input) + i64::from(usage.output)),
+                    };
                 }
-                ProviderFormatReportV1::Continue
+                StreamEvent::Delta(ContentBlock::Text { .. })
+                | StreamEvent::Thinking(_)
+                | StreamEvent::ThinkingDelta { .. } => emitted = true,
+                StreamEvent::Done => completed = true,
+                _ => {}
             }
-            Some("message_start") => {
-                let i = v
-                    .pointer("/message/usage/input_tokens")
-                    .and_then(Value::as_i64);
-                self.usage.input_units = i;
-                ProviderFormatReportV1::Continue
-            }
-            Some("message_stop") => ProviderFormatReportV1::Completed(self.usage),
-            Some("content_block_delta") => ProviderFormatReportV1::TokenEmitted,
-            Some(_) => ProviderFormatReportV1::Continue,
-            None => ProviderFormatReportV1::Malformed,
+        }
+        if completed {
+            ProviderFormatReportV1::Completed(self.usage)
+        } else if emitted {
+            ProviderFormatReportV1::TokenEmitted
+        } else {
+            ProviderFormatReportV1::Continue
         }
     }
 }
