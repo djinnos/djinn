@@ -2,8 +2,8 @@ import { Github, ArrowRight } from "lucide-react";
 
 export default function HeroActions() {
   return (
-    <div className="flex flex-col items-center gap-5">
-      <div className="flex flex-col sm:flex-row gap-3 justify-center items-center">
+    <div className="flex flex-col items-start gap-5">
+      <div className="flex flex-col sm:flex-row gap-3 justify-start items-stretch sm:items-center">
         <a
           href="https://github.com/djinnos/djinn#deploy-kubernetes--a-single-vps-counts"
           className="group px-7 py-3.5 bg-text-primary text-bg-page rounded-lg font-semibold text-base flex items-center gap-2.5 hover:bg-white transition-colors"
@@ -20,8 +20,10 @@ export default function HeroActions() {
         </a>
       </div>
 
-      <div className="font-mono text-xs text-text-muted">
-        free to self-host · runs on a single VPS (k3s) or EKS / GKE / AKS
+      <div className="font-mono text-[0.8125rem] text-text-secondary">
+        <span className="text-text-primary font-bold">free to self-host</span>
+        {" · "}
+        runs on a single VPS (k3s) or EKS / GKE / AKS
       </div>
     </div>
   );

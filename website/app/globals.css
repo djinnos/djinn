@@ -90,38 +90,6 @@ body {
 
 /* ——— System chrome ————————————————————————————————— */
 
-/* Mono status chip: `✓ signed off — product` */
-.chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.5rem;
-  font-family: var(--font-mono);
-  font-size: 0.75rem;
-  letter-spacing: 0.02em;
-  padding: 0.3rem 0.75rem;
-  border: 1px solid var(--color-border);
-  border-radius: 9999px;
-  background: var(--color-bg-surface);
-  color: var(--color-text-secondary);
-  white-space: nowrap;
-}
-
-.dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 9999px;
-  flex-shrink: 0;
-}
-
-.dot-pulse {
-  animation: dot-pulse 1.8s ease-in-out infinite;
-}
-
-@keyframes dot-pulse {
-  0%, 100% { opacity: 1; box-shadow: 0 0 0 0 color-mix(in srgb, currentColor 45%, transparent); }
-  50% { opacity: 0.55; box-shadow: 0 0 0 5px transparent; }
-}
-
 /* Inline code, rendered-markdown style */
 code.tick {
   font-family: var(--font-mono);
@@ -156,6 +124,53 @@ code.tick {
   color: var(--color-text-muted);
 }
 
+/* The flame canvas rises far above the video; mask it so the tips dissolve
+   into the hero instead of ending in a hard, saturated band. */
+.flame-fade > canvas[aria-hidden] {
+  -webkit-mask-image: linear-gradient(
+    to bottom,
+    transparent 0%,
+    rgba(0, 0, 0, 0.18) 34%,
+    rgba(0, 0, 0, 0.6) 58%,
+    #000 78%
+  );
+  mask-image: linear-gradient(
+    to bottom,
+    transparent 0%,
+    rgba(0, 0, 0, 0.18) 34%,
+    rgba(0, 0, 0, 0.6) 58%,
+    #000 78%
+  );
+}
+
+/* Figures break out of the 6xl track toward the viewport edge, keeping a
+   6vw gutter so the margin grows with the window instead of staying a fixed
+   sliver on wide screens. min(0px, …) stops it turning positive — and
+   shrinking the figure — at widths where the track already fills the page. */
+@media (min-width: 768px) {
+  .bleed-left {
+    margin-left: min(0px, calc((min(72rem, 100vw - 3rem) - 100vw) / 2 + 6vw));
+  }
+
+  .bleed-right {
+    margin-right: min(0px, calc((min(72rem, 100vw - 3rem) - 100vw) / 2 + 6vw));
+  }
+}
+
+/* Hero copy column, sized so the fold cuts the video below it in half.
+   The width term mirrors the video's own track (max-w-6xl inside px-6), so
+   `× 9/32` is half of its 16:9 height. The trailing rem is the hero's top
+   padding plus the video's mt-20. */
+.hero-copy {
+  min-height: calc(100svh - min(72rem, 100vw - 3rem) * 9 / 32 - 11rem);
+}
+
+@media (min-width: 768px) {
+  .hero-copy {
+    min-height: calc(100svh - min(72rem, 100vw - 3rem) * 9 / 32 - 12rem);
+  }
+}
+
 /* ——— Entrance choreography (hero only) ————————————— */
 
 @media (prefers-reduced-motion: no-preference) {
@@ -174,29 +189,6 @@ code.tick {
 @keyframes rise {
   from { opacity: 0; transform: translateY(18px); }
   to { opacity: 1; transform: translateY(0); }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .dot-pulse { animation: none; }
-}
-
-/* ——— Pipeline rail ————————————————————————————————— */
-
-.rail {
-  background: linear-gradient(
-    to bottom,
-    transparent,
-    color-mix(in srgb, var(--color-brand-purple) 28%, var(--color-border)) 8%,
-    color-mix(in srgb, var(--color-brand-purple) 28%, var(--color-border)) 92%,
-    transparent
-  );
-  width: 1px;
-}
-
-.rail-node {
-  border: 1px solid var(--color-border);
-  background: var(--color-bg-surface-elevated);
-  font-family: var(--font-mono);
 }
 
 /* Headline underline stroke */
