@@ -148,13 +148,108 @@ const ALLOWED_PREFIXES: &[&str] = &[
     "POETRY_",
 ];
 
+/// Keys the `DJINN_` prefix would otherwise admit, and must not.
+///
+/// # Why a deny-set inside an allow-list is not a contradiction
+///
+/// `DJINN_` is a *prefix* entry on [`ALLOWED_PREFIXES`], so it is open by
+/// default: every variable the pod renders into that namespace reaches the
+/// child. That is right for the rendered build/runtime configuration it was
+/// added for, and wrong for the handful of entries in the same namespace that
+/// are platform secrets rather than configuration. Naming them here keeps the
+/// open prefix (a new `DJINN_CAPACITY_*` knob still reaches the child without a
+/// code change) while closing the entries that must never cross.
+///
+/// # `DJINN_DATABASE_URL` (measured, 2026-08-04)
+///
+/// This is the **platform** Postgres DSN — the control-plane database holding
+/// `tasks`, `sessions`, `credentials` and `_sqlx_migrations` — and it is
+/// DDL-capable. It is rendered onto the task-run Pod's worker container because
+/// the worker *binary* needs it (`bootstrap_warm_database()` opens it, and the
+/// durable invocation-lease authority is read from it). Nothing the agent
+/// spawns needs it: the project's own database is the pod-local `svc-postgres`
+/// sidecar on `DATABASE_URL`/`TEST_POSTGRES_URL`, which is a different server
+/// and is not on this allow-list at all. Forwarding it put a DDL-capable
+/// connection string in the environment of every `bash -lc` the model runs.
+///
+/// The worker also strips this key from its **own** process environment at
+/// startup so no child of any spawn path inherits it; this entry is the
+/// second, independent control at the boundary the broker exists to establish.
+///
+/// # The credential paths
+///
+/// `DJINN_CREDENTIALS_PATH`, `DJINN_LAUNCHER_CREDENTIAL_PATH` and
+/// `DJINN_TOKEN_PATH` name files under the `/var/run/djinn` and
+/// `/var/run/secrets` mounts that
+/// [`djinn_sandbox::confidential`](../../djinn-sandbox/src/confidential.rs)
+/// already withholds from repository-controlled code. Withholding the *names*
+/// too costs nothing — no child reads them; they are consumed by the worker's
+/// own argv (`Cli`) and by the launcher process — and means the read denial is
+/// not the only thing standing between a spawned command and the secret's
+/// location.
+const DENIED_KEYS: &[&str] = &[
+    "DJINN_DATABASE_URL",
+    "DJINN_MYSQL_URL",
+    "DJINN_CREDENTIALS_PATH",
+    "DJINN_LAUNCHER_CREDENTIAL_PATH",
+    "DJINN_TOKEN_PATH",
+];
+
+/// URI schemes whose values carry a database credential when they embed
+/// userinfo. Used by [`is_allowed_environment_entry`]'s shape rule.
+///
+/// Deliberately database-only. A registry variable on an allowed prefix
+/// (`NPM_CONFIG_REGISTRY`, `PIP_INDEX_URL`, `UV_INDEX_URL`) may legitimately
+/// carry `https://user:token@host`, and a private-registry build must keep
+/// working.
+const CREDENTIALED_URI_SCHEMES: &[&str] = &[
+    "postgres://",
+    "postgresql://",
+    "mysql://",
+    "mariadb://",
+    "mongodb://",
+    "mongodb+srv://",
+    "redis://",
+    "rediss://",
+];
+
+/// Does `value` look like a database URI that embeds a username and password?
+///
+/// The point is to catch the *class* rather than the names in [`DENIED_KEYS`]:
+/// a variable added later that carries a platform DSN is refused by shape even
+/// if nobody remembers to name it above. Matching requires userinfo containing
+/// a `:` — a bare `postgres://host/db` names no credential and is not what this
+/// is protecting.
+fn is_credentialed_database_uri(value: &str) -> bool {
+    let Some(rest) = CREDENTIALED_URI_SCHEMES
+        .iter()
+        .find_map(|scheme| value.strip_prefix(scheme))
+    else {
+        return false;
+    };
+    // Userinfo is everything before the first `@`, and must not run past the
+    // authority (a `/`, `?` or `#` ends it).
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority = &rest[..authority_end];
+    match authority.split_once('@') {
+        Some((userinfo, _)) => userinfo.contains(':'),
+        None => false,
+    }
+}
+
 /// Is `key` forwardable to a launched child?
 ///
 /// This is the single predicate behind both ends of the hop: the worker filters
 /// its own environment with it before building a [`CommandSpec`](crate::CommandSpec),
 /// and `CommandSpec::validate` re-checks it inside the privileged broker. The
 /// worker-side filter is a convenience; the broker-side check is the control.
+///
+/// [`DENIED_KEYS`] is consulted FIRST so a denied name cannot be re-admitted by
+/// [`ALLOWED_PREFIXES`].
 pub fn is_allowed_environment_key(key: &str) -> bool {
+    if DENIED_KEYS.contains(&key) {
+        return false;
+    }
     ALLOWED_KEYS.contains(&key)
         || ALLOWED_PREFIXES
             .iter()
@@ -177,10 +272,18 @@ pub fn is_allowed_environment_key(key: &str) -> bool {
 /// process wrote. A caller cannot name it usefully (the launcher overwrites the
 /// value on every spawn regardless) and cannot name anything else at all.
 ///
+/// A value that is a credentialed database URI is refused whatever its key, for
+/// the same reason [`DENIED_KEYS`] exists: the leak that motivated both was a
+/// DDL-capable platform DSN reaching `bash -lc`, and the next one will arrive
+/// under a name nobody thought to deny. See [`is_credentialed_database_uri`].
+///
 /// Every other key is judged by name, as before.
 pub fn is_allowed_environment_entry(key: &str, value: &str) -> bool {
     if key == GIT_TRUST_ANCHOR_KEY {
         return crate::git_trust::is_anchor_value(value);
+    }
+    if is_credentialed_database_uri(value) {
+        return false;
     }
     is_allowed_environment_key(key)
 }
@@ -305,6 +408,90 @@ mod tests {
                 "{denied} must not be forwardable"
             );
         }
+    }
+
+    /// The platform DSN and the credential paths sit inside the OPEN `DJINN_`
+    /// prefix, so they were forwarded to every child until they were named.
+    /// Measured on a live task-run Job spec on 2026-08-04: the worker container
+    /// carried `DJINN_DATABASE_URL` pointing at the production platform
+    /// database, and the agent's `bash -lc` inherited it.
+    #[test]
+    fn the_platform_secrets_inside_the_open_djinn_prefix_are_denied() {
+        for denied in [
+            "DJINN_DATABASE_URL",
+            "DJINN_MYSQL_URL",
+            "DJINN_CREDENTIALS_PATH",
+            "DJINN_LAUNCHER_CREDENTIAL_PATH",
+            "DJINN_TOKEN_PATH",
+        ] {
+            assert!(
+                !is_allowed_environment_key(denied),
+                "{denied} must not be forwardable by name"
+            );
+            assert!(
+                !is_allowed_environment_entry(denied, "postgres://u:p@host:5432/djinn"),
+                "{denied} must not be forwardable as an entry"
+            );
+            assert!(
+                denied.starts_with("DJINN_"),
+                "{denied} only needs denying because the DJINN_ prefix would admit it"
+            );
+        }
+    }
+
+    /// The deny-set closes the names we measured; this closes the class. A DSN
+    /// added later under a name nobody thought to deny is refused by shape.
+    #[test]
+    fn a_credentialed_database_uri_is_refused_whatever_its_key_is() {
+        for value in [
+            "postgres://djinn:hunter2@djinn-postgres.djinn.svc.cluster.local:5432/djinn",
+            "postgresql://djinn:hunter2@127.0.0.1:5432/djinn?sslmode=require",
+            "mysql://root:root@db:3306/app",
+            "redis://default:secret@cache:6379",
+            "mongodb+srv://user:pw@cluster0.example.net/db",
+        ] {
+            assert!(
+                !is_allowed_environment_entry("DJINN_SOME_FUTURE_URL", value),
+                "a credentialed database URI must not be forwardable: {value}"
+            );
+            assert!(
+                !is_allowed_environment_entry("RUST_LOG", value),
+                "the shape rule is key-independent: {value}"
+            );
+        }
+    }
+
+    /// The shape rule must not become a private-registry outage. A token in an
+    /// `https://` index URL on an allowed prefix keeps working, and a
+    /// credential-free database URI is judged by its key like anything else.
+    #[test]
+    fn the_shape_rule_does_not_reach_registry_urls_or_credential_free_dsns() {
+        assert!(
+            is_allowed_environment_entry(
+                "PIP_INDEX_URL",
+                "https://user:token@pypi.example.com/simple"
+            ),
+            "a private package index must keep working"
+        );
+        assert!(
+            is_allowed_environment_entry(
+                "NPM_CONFIG_REGISTRY",
+                "https://build:token@npm.example.com/"
+            ),
+            "a private npm registry must keep working"
+        );
+        assert!(
+            !is_credentialed_database_uri("postgres://localhost:5432/app_test"),
+            "a DSN with no userinfo names no credential"
+        );
+        assert!(
+            !is_credentialed_database_uri("postgres://user@localhost:5432/app_test"),
+            "userinfo with no password is not a credential"
+        );
+        assert!(
+            !is_credentialed_database_uri("postgres://localhost:5432/db?opts=a:b@c"),
+            "a `:`+`@` in the path or query is not userinfo"
+        );
     }
 
     #[test]
