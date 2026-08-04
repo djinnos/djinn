@@ -609,29 +609,29 @@ const DEFAULT_TEST_DATABASE_URL: &str = "postgres://postgres:postgres@127.0.0.1:
 /// Base URL of the Postgres server that integration tests should use.
 ///
 /// Resolution order is `TEST_POSTGRES_URL`, then `DJINN_TEST_DATABASE_URL`,
-/// then `DJINN_DATABASE_URL`, then [`DEFAULT_TEST_DATABASE_URL`]. **The order
-/// matters and is not arbitrary:**
+/// then [`DEFAULT_TEST_DATABASE_URL`]. **The order matters and is not
+/// arbitrary:**
 ///
 /// - Task-run Pods inject `TEST_POSTGRES_URL` pointing at the in-Pod
 ///   `svc-postgres` sidecar on `127.0.0.1:5432`.
-/// - CI and local development can select a dedicated service through
-///   `DJINN_TEST_DATABASE_URL`.
-/// - Some task-run images expose their injected Postgres service only as
-///   `DJINN_DATABASE_URL`. The test harness still creates an isolated clone
-///   from `djinn_test_template`; it never connects tests to that URL's named
-///   database.
+/// - `server/.cargo/config.toml` bakes `DJINN_TEST_DATABASE_URL` at `:5433`
+///   for local development, and CI sets the same value explicitly.
 ///
-/// `TEST_POSTGRES_URL` remains first so an explicitly injected test sidecar
-/// always wins over the task database URL. The `DJINN_DATABASE_URL` fallback
-/// makes task-run tests work when it is the sole injected Postgres service,
-/// while local development without either injected variable still uses :5433.
+/// Cargo's `[env]` table applies to every process cargo launches, so when
+/// `DJINN_TEST_DATABASE_URL` was checked first, `cargo test` inside a Pod
+/// always dialled `:5433` — where nothing listens — while running the
+/// compiled test binary directly worked, because cargo was not in the loop to
+/// inject the variable. That split is what made in-Pod database tests look
+/// intermittently flaky when they were in fact deterministic.
+///
+/// Checking `TEST_POSTGRES_URL` first is correct everywhere: neither CI nor
+/// local development sets it, so both fall through to `:5433` unchanged.
 ///
 /// Every integration test must use this helper rather than reading the
 /// environment directly, so the precedence exists in exactly one place.
 pub fn test_database_base_url() -> String {
     std::env::var("TEST_POSTGRES_URL")
         .or_else(|_| std::env::var("DJINN_TEST_DATABASE_URL"))
-        .or_else(|_| std::env::var("DJINN_DATABASE_URL"))
         .unwrap_or_else(|_| DEFAULT_TEST_DATABASE_URL.to_owned())
 }
 
