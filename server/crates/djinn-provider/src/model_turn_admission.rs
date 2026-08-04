@@ -253,6 +253,10 @@ pub fn plan_provider_attempt_v1(
 }
 
 /// Build a v1 plan with its predictive-capacity policy made explicit.
+// The individual fields deliberately mirror the admission boundary: keeping
+// them separate makes it impossible for an adapter to replace exact wire bytes
+// or route capabilities with an opaque request object.
+#[allow(clippy::too_many_arguments)]
 pub fn plan_provider_attempt_with_policy_v1(
     scope: ProviderAttemptScopeV1,
     serialized_request_utf8: Option<&[u8]>,
