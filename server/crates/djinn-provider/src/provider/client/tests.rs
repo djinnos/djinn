@@ -1,4 +1,8 @@
 use super::*;
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 async fn serve_one_sse_response(payload: &'static str) -> String {
@@ -17,6 +21,88 @@ async fn serve_one_sse_response(payload: &'static str) -> String {
         socket.shutdown().await.unwrap();
     });
     format!("http://{address}")
+}
+
+#[tokio::test]
+async fn admission_attempt_sends_retryable_response_once_and_normalizes_retry_after() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let sends = Arc::new(AtomicUsize::new(0));
+    let count = sends.clone();
+    tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        count.fetch_add(1, Ordering::SeqCst);
+        let mut request = [0; 4096];
+        let _ = socket.read(&mut request).await.unwrap();
+        socket.write_all(b"HTTP/1.1 429 Too Many Requests\r\nretry-after: 7\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await.unwrap();
+    });
+    let mut attempt = ApiClient::new().start_sse_attempt_v1(
+        &url,
+        serde_json::json!({"model":"fixture"}),
+        &AuthMethod::NoAuth,
+        HeaderMap::new(),
+    );
+    let outcome = attempt.outcome().await;
+    assert_eq!(sends.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        outcome.terminal,
+        ProviderAttemptTerminalV1::Failed(ProviderAttemptLossV1::RateLimited)
+    );
+    let deadline = outcome
+        .observation
+        .unwrap()
+        .retry_after_deadline_monotonic_ms
+        .expect("retry-after deadline");
+    assert!((7000..=7100).contains(&deadline));
+    assert_eq!(
+        ProviderSseAttemptV1::capabilities().hidden_retries,
+        ProviderHiddenRetryCapabilityV1::Disabled
+    );
+}
+
+#[tokio::test]
+async fn admission_attempt_abort_is_idempotent_and_terminal() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut request = [0; 4096];
+        let _ = socket.read(&mut request).await.unwrap();
+        socket
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n")
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    });
+    let mut attempt = ApiClient::new().start_sse_attempt_v1(
+        &url,
+        serde_json::json!({"model":"fixture"}),
+        &AuthMethod::NoAuth,
+        HeaderMap::new(),
+    );
+    attempt.abort.abort();
+    attempt.abort.abort();
+    let outcome = tokio::time::timeout(Duration::from_secs(1), attempt.outcome())
+        .await
+        .unwrap();
+    assert_eq!(outcome.terminal, ProviderAttemptTerminalV1::Aborted);
+    assert_eq!(outcome.abort, ProviderAttemptAbortResultV1::Confirmed);
+}
+
+#[tokio::test]
+async fn admission_attempt_maps_codex_empty_stream() {
+    let url = serve_one_sse_response("data: [DONE]\n\n").await;
+    let mut attempt = ApiClient::new().start_sse_attempt_v1_with_empty_turn_loss(
+        &url,
+        serde_json::json!({"model":"fixture"}),
+        &AuthMethod::NoAuth,
+        HeaderMap::new(),
+        ProviderAttemptLossV1::CodexEmptyTurn,
+    );
+    assert_eq!(
+        attempt.outcome().await.terminal,
+        ProviderAttemptTerminalV1::Failed(ProviderAttemptLossV1::CodexEmptyTurn)
+    );
 }
 
 fn assert_unexpected_eof(error: &anyhow::Error, expected_request_bytes: usize) {
@@ -293,7 +379,7 @@ fn rate_limit_status_matches_429_and_529_only() {
 
 // ─── Outbound-request debug logger (DJINN_DEBUG_PROVIDER_REQUEST) ─────────
 
-use std::sync::{Arc, Mutex as StdMutex, OnceLock};
+use std::sync::{Mutex as StdMutex, OnceLock};
 use tracing::field::{Field, Visit};
 use tracing_subscriber::Layer;
 use tracing_subscriber::layer::Context;

@@ -190,6 +190,8 @@ pub struct ProviderAttemptPlanV1 {
 pub struct ProviderOutcomeV1 {
     pub terminal: ProviderAttemptTerminalV1,
     pub authoritative_usage: Option<ModelTurnAuthoritativeUsage>,
+    /// Sanitized response metadata captured at the provider boundary.
+    pub observation: Option<ProviderNormalizedObservationV1>,
     pub abort: ProviderAttemptAbortResultV1,
     pub token_emission: ProviderTokenEmissionV1,
 }
@@ -956,6 +958,7 @@ mod tests {
         let outcome = ProviderOutcomeV1 {
             terminal: ProviderAttemptTerminalV1::Failed(ProviderAttemptLossV1::CodexEmptyTurn),
             authoritative_usage: None,
+            observation: None,
             abort: ProviderAttemptAbortResultV1::NotRequested,
             token_emission: ProviderTokenEmissionV1::default(),
         };
