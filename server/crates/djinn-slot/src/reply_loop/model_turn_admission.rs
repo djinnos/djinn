@@ -338,6 +338,12 @@ fn request_fingerprint(request_id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use djinn_db::test_support::{
+        model_turn_accounting_fixture, model_turn_decision_count_fixture,
+        model_turn_decision_fixture, model_turn_lease_lifecycle_fixture,
+        model_turn_request_lifecycle_fixture, model_turn_terminal_fixture,
+        seed_model_turn_admission_fixture, set_model_turn_capability_fixture,
+    };
     use djinn_db::{Database, ModelTurnBucketDebit, ModelTurnBucketKind};
     use djinn_provider::{
         ProviderAbortCapabilityV1, ProviderAdmissionPolicyV1, ProviderAttemptAbortHandleV1,
@@ -347,11 +353,7 @@ mod tests {
     };
 
     async fn seed(db: &Database, phase: &str, capability: &str, available: i64) -> i64 {
-        db.ensure_initialized().await.expect("initialize");
-        sqlx::query("INSERT INTO credentials (id, provider_id, key_name, encrypted_value) VALUES ('credential-slot', 'provider', 'key-slot', decode('00', 'hex'))").execute(db.pool()).await.expect("credential");
-        let pool = sqlx::query_scalar("INSERT INTO model_turn_pools (credential_id, provider_id, model_id, phase, capability_state, learned_concurrency) VALUES ('credential-slot', 'provider', 'model', $1, $2, 1) RETURNING id").bind(phase).bind(capability).fetch_one(db.pool()).await.expect("pool");
-        sqlx::query("INSERT INTO model_turn_bucket_bindings (pool_id, bucket_kind, capacity_units, available_units) VALUES ($1, 'request', 2, $2)").bind(pool).bind(available).execute(db.pool()).await.expect("bucket");
-        pool
+        seed_model_turn_admission_fixture(db, phase, capability, available).await
     }
     fn plan() -> ProviderAttemptPlanV1 {
         ProviderAttemptPlanV1 {
@@ -400,13 +402,7 @@ mod tests {
                 .expect("prepare"),
             ModelTurnPreparation::Permit(ModelTurnSendPermit { lease: None, .. })
         ));
-        let row: (String, Option<String>) = sqlx::query_as(
-            "SELECT request_fingerprint, diagnostic FROM model_turn_decisions WHERE pool_id = $1",
-        )
-        .bind(pool)
-        .fetch_one(db.pool())
-        .await
-        .expect("record");
+        let row = model_turn_decision_fixture(&db, pool).await;
         assert_eq!(row.0, request_fingerprint("raw-secret-request"));
         assert_eq!(row.0.len(), 71);
         assert_eq!(row.1, None);
@@ -416,12 +412,7 @@ mod tests {
             djinn_db::ModelTurnDecisionDiagnostic::PoolUnavailable.code(),
             "pool_unavailable"
         );
-        let count: i64 =
-            sqlx::query_scalar("SELECT count(*) FROM model_turn_decisions WHERE pool_id = $1")
-                .bind(pool)
-                .fetch_one(db.pool())
-                .await
-                .expect("decision count");
+        let count = model_turn_decision_count_fixture(&db, pool).await;
         assert_eq!(count, 1, "unsafe diagnostics are never persisted");
     }
 
@@ -444,13 +435,9 @@ mod tests {
                 ModelTurnAdmissionRejection::UnsupportedCapability { .. }
             )
         ));
-        let before: (i64, i64) = sqlx::query_as("SELECT p.in_flight, b.available_units FROM model_turn_pools p JOIN model_turn_bucket_bindings b ON b.pool_id = p.id WHERE p.id = $1").bind(pool).fetch_one(db.pool()).await.expect("accounting");
-        assert_eq!(before, (0, 2));
-        sqlx::query("UPDATE model_turn_pools SET capability_state = 'supported' WHERE id = $1")
-            .bind(pool)
-            .execute(db.pool())
-            .await
-            .expect("support");
+        let before = model_turn_accounting_fixture(&db, pool).await;
+        assert_eq!(before, (0, 2, 0));
+        set_model_turn_capability_fixture(&db, pool, "supported").await;
         let permit = match coordinator
             .prepare(&plan(), request("fenced"))
             .await
@@ -460,12 +447,7 @@ mod tests {
             other => panic!("permit must follow a dispatch fence, got {other:?}"),
         };
         let lease = permit.lease.clone().expect("enforced lease");
-        let lifecycle: String =
-            sqlx::query_scalar("SELECT lifecycle FROM model_turn_leases WHERE lease_id = $1::uuid")
-                .bind(&lease.lease_id)
-                .fetch_one(db.pool())
-                .await
-                .expect("fenced lease");
+        let lifecycle = model_turn_lease_lifecycle_fixture(&db, &lease.lease_id).await;
         assert_eq!(lifecycle, "dispatching", "permit follows durable fence");
         drop(permit);
         coordinator.wait_for_cleanup().await;
@@ -491,17 +473,12 @@ mod tests {
             async move { coordinator.prepare(&plan(), request("cancelled")).await }
         });
         reached.await;
-        let lifecycle: String = sqlx::query_scalar(
-            "SELECT lifecycle FROM model_turn_leases WHERE request_id = 'cancelled'",
-        )
-        .fetch_one(db.pool())
-        .await
-        .expect("fence committed before cancellation");
+        let lifecycle = model_turn_request_lifecycle_fixture(&db, "cancelled").await;
         assert_eq!(lifecycle, "dispatching");
         task.abort();
         let _ = task.await;
         coordinator.wait_for_cleanup().await;
-        let refunded: (i64, i64, i64) = sqlx::query_as("SELECT p.in_flight, b.available_units, b.quarantined_units FROM model_turn_pools p JOIN model_turn_bucket_bindings b ON b.pool_id = p.id WHERE p.id = $1").bind(pool).fetch_one(db.pool()).await.expect("refund");
+        let refunded = model_turn_accounting_fixture(&db, pool).await;
         assert_eq!(refunded, (0, 2, 0));
     }
 
@@ -527,12 +504,7 @@ mod tests {
         // refund the now possibly-sent active lease.
         drop(permit);
         coordinator.wait_for_cleanup().await;
-        let lifecycle: String =
-            sqlx::query_scalar("SELECT lifecycle FROM model_turn_leases WHERE lease_id = $1::uuid")
-                .bind(&lease.lease_id)
-                .fetch_one(db.pool())
-                .await
-                .expect("active lease retained");
+        let lifecycle = model_turn_lease_lifecycle_fixture(&db, &lease.lease_id).await;
         assert_eq!(lifecycle, "active");
         let outcome = ProviderOutcomeV1 {
             terminal: ProviderAttemptTerminalV1::Failed(
@@ -557,8 +529,8 @@ mod tests {
                 .expect("replay"),
             ModelTurnLeaseMutationOutcome::Idempotent
         );
-        let quarantined: (i64, i64) = sqlx::query_as("SELECT available_units, quarantined_units FROM model_turn_bucket_bindings WHERE pool_id = $1").bind(pool).fetch_one(db.pool()).await.expect("quarantine");
-        assert_eq!(quarantined, (1, 1));
+        let quarantined = model_turn_accounting_fixture(&db, pool).await;
+        assert_eq!(quarantined, (0, 1, 1));
     }
 
     #[tokio::test]
@@ -624,19 +596,11 @@ mod tests {
                 | ModelTurnLeaseMutationOutcome::Fenced
         ));
 
-        let accounting: (i64, i64, i64) = sqlx::query_as("SELECT p.in_flight, b.available_units, b.quarantined_units FROM model_turn_pools p JOIN model_turn_bucket_bindings b ON b.pool_id = p.id WHERE p.id = $1")
-            .bind(pool)
-            .fetch_one(db.pool())
-            .await
-            .expect("active attempt is never refunded");
+        let accounting = model_turn_accounting_fixture(&db, pool).await;
         assert_eq!(accounting, (0, 1, 1));
-        let terminal: (String, String) = sqlx::query_as("SELECT outcome, accounting_state FROM model_turn_lease_terminals WHERE lease_id = $1::uuid AND generation = $2 AND request_id = $3")
-            .bind(&lease.lease_id)
-            .bind(lease.generation)
-            .bind(&lease.request_id)
-            .fetch_one(db.pool())
-            .await
-            .expect("terminal uses the exact lease identity");
+        let terminal =
+            model_turn_terminal_fixture(&db, &lease.lease_id, lease.generation, &lease.request_id)
+                .await;
         assert!(matches!(terminal.0.as_str(), "failed" | "cancelled"));
         assert_eq!(terminal.1, "quarantined");
     }
