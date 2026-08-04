@@ -49,17 +49,27 @@ fn normalizer_reconciles_usage_and_rejects_out_of_order_capacity_growth() {
     assert_eq!(first.available_capacity.unwrap().request_units, 2);
     assert_eq!(first.discovery, ProviderDiscoveryOwnershipV1::Known);
 
-    let stale = normalizer.observe(
+    let stale_growth = normalizer.observe(
         0,
         &headers("10", "99"),
         ProviderUsageObservationV1::default(),
         receipt(),
     );
     assert_eq!(
-        stale.ignored,
+        stale_growth.ignored,
         Some(ProviderObservationIgnoreReasonV1::Stale)
     );
-    assert_eq!(stale.available_capacity, None);
+    assert_eq!(stale_growth.available_capacity, None);
+    // An older response may lower capacity, but it must not move the sequence
+    // watermark backwards or permit its other fields to grow capacity.
+    let stale_decrease = normalizer.observe(
+        0,
+        &headers("10", "1"),
+        ProviderUsageObservationV1::default(),
+        receipt(),
+    );
+    assert_eq!(stale_decrease.ignored, None);
+    assert_eq!(stale_decrease.available_capacity.unwrap().request_units, 1);
     let decreased = normalizer.observe(
         2,
         &headers("10", "1"),
@@ -151,6 +161,22 @@ fn reset_bad_sets_retry_and_gemini_reactive_behavior_are_deterministic() {
         },
     );
     assert_eq!(overflow.retry_after_deadline_monotonic_ms, None);
+    assert_eq!(
+        overflow.ignored,
+        Some(ProviderObservationIgnoreReasonV1::Impossible)
+    );
+    assert_eq!(overflow.diagnostics.impossible, 2);
+    let malformed_retry_after = normalizer.observe(
+        13,
+        &[("retry-after", "banana")],
+        ProviderUsageObservationV1::default(),
+        receipt(),
+    );
+    assert_eq!(
+        malformed_retry_after.ignored,
+        Some(ProviderObservationIgnoreReasonV1::Malformed)
+    );
+    assert_eq!(malformed_retry_after.diagnostics.malformed, 2);
 
     let mut gemini =
         ProviderApiKeyNormalizerV1::new(ProviderAdmissionPolicyV1::ReactiveOnlyTarget1);

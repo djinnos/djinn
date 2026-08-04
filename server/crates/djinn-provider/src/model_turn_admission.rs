@@ -363,7 +363,10 @@ impl ProviderApiKeyNormalizerV1 {
         usage: ProviderUsageObservationV1,
         receipt: ProviderReceiptTimeV1,
     ) -> ProviderNormalizedObservationV1 {
-        let retry_after_deadline_monotonic_ms = retry_after_deadline(headers, receipt);
+        let retry_after_deadline_monotonic_ms = match retry_after_deadline(headers, receipt) {
+            Ok(value) => value,
+            Err(reason) => return self.ignored(reason, None),
+        };
         let authoritative_usage = match normalize_usage(usage) {
             Ok(value) => value,
             Err(reason) => return self.ignored(reason, retry_after_deadline_monotonic_ms),
@@ -372,15 +375,6 @@ impl ProviderApiKeyNormalizerV1 {
             Ok(value) => value,
             Err(reason) => return self.ignored(reason, retry_after_deadline_monotonic_ms),
         };
-        if self
-            .last_sequence
-            .is_some_and(|last| request_sequence <= last)
-        {
-            return self.ignored(
-                ProviderObservationIgnoreReasonV1::Stale,
-                retry_after_deadline_monotonic_ms,
-            );
-        }
         if let Some((epoch, _)) = parsed
             && self.reset_epoch.is_some_and(|previous| epoch < previous)
         {
@@ -391,14 +385,45 @@ impl ProviderApiKeyNormalizerV1 {
         }
 
         if let Some((epoch, candidate)) = parsed {
-            // A reset transition is explicit and monotonic. Within an epoch,
-            // accepted response sequences are strictly increasing, so lower
-            // availability applies immediately while increases require a newer
-            // response and cannot be created by an out-of-order response.
-            self.reset_epoch = Some(epoch);
-            self.last_sequence = Some(request_sequence);
-            if !self.reactive_only {
-                self.capacity = Some(candidate);
+            let reset_transition = self.reset_epoch != Some(epoch);
+            if reset_transition {
+                // A larger explicit epoch authoritatively starts a new window;
+                // its capacity is not compared to the preceding window.
+                self.reset_epoch = Some(epoch);
+                self.last_sequence = Some(request_sequence);
+                if !self.reactive_only {
+                    self.capacity = Some(candidate);
+                    self.discovery = None;
+                }
+            } else if self
+                .last_sequence
+                .is_none_or(|last| request_sequence > last)
+            {
+                // A newer response may report either direction for every
+                // bucket. Keep its sequence as the epoch's growth watermark.
+                self.last_sequence = Some(request_sequence);
+                if !self.reactive_only {
+                    self.capacity = Some(candidate);
+                    self.discovery = None;
+                }
+            } else if self.reactive_only {
+                return self.ignored(
+                    ProviderObservationIgnoreReasonV1::Stale,
+                    retry_after_deadline_monotonic_ms,
+                );
+            } else {
+                // An out-of-order response cannot increase enforceable
+                // capacity, but each bucket may still safely decrease. Do not
+                // move the growth watermark backwards after applying a lower
+                // observation.
+                let capacity = self.capacity.unwrap_or(candidate);
+                if !capacity_decreases(candidate, capacity) {
+                    return self.ignored(
+                        ProviderObservationIgnoreReasonV1::Stale,
+                        retry_after_deadline_monotonic_ms,
+                    );
+                }
+                self.capacity = Some(capacity_min(candidate, capacity));
                 self.discovery = None;
             }
         }
@@ -439,6 +464,28 @@ impl ProviderApiKeyNormalizerV1 {
             diagnostics: self.diagnostics,
             discovery: self.discovery_ownership(),
         }
+    }
+}
+
+fn capacity_decreases(
+    candidate: ProviderAvailableCapacityV1,
+    current: ProviderAvailableCapacityV1,
+) -> bool {
+    candidate.request_units < current.request_units
+        || candidate.input_units < current.input_units
+        || candidate.output_units < current.output_units
+        || candidate.combined_units < current.combined_units
+}
+
+fn capacity_min(
+    candidate: ProviderAvailableCapacityV1,
+    current: ProviderAvailableCapacityV1,
+) -> ProviderAvailableCapacityV1 {
+    ProviderAvailableCapacityV1 {
+        request_units: candidate.request_units.min(current.request_units),
+        input_units: candidate.input_units.min(current.input_units),
+        output_units: candidate.output_units.min(current.output_units),
+        combined_units: candidate.combined_units.min(current.combined_units),
     }
 }
 
@@ -519,22 +566,42 @@ fn parse_capacity_headers(
     Ok(Some((epoch, capacity)))
 }
 
-fn retry_after_deadline(headers: &[(&str, &str)], receipt: ProviderReceiptTimeV1) -> Option<u64> {
+fn retry_after_deadline(
+    headers: &[(&str, &str)],
+    receipt: ProviderReceiptTimeV1,
+) -> Result<Option<u64>, ProviderObservationIgnoreReasonV1> {
     let value = headers
         .iter()
-        .find_map(|(name, value)| name.eq_ignore_ascii_case("retry-after").then_some(*value))?;
+        .find_map(|(name, value)| name.eq_ignore_ascii_case("retry-after").then_some(*value));
+    let Some(value) = value else {
+        return Ok(None);
+    };
     let delay_ms = if let Ok(seconds) = value.parse::<u64>() {
-        seconds.checked_mul(1_000)
+        seconds
+            .checked_mul(1_000)
+            .ok_or(ProviderObservationIgnoreReasonV1::Impossible)?
     } else {
-        let date = OffsetDateTime::parse(value, &Rfc2822).ok()?;
+        let date = OffsetDateTime::parse(value, &Rfc2822)
+            .map_err(|_| ProviderObservationIgnoreReasonV1::Malformed)?;
         let date_ms = u64::try_from(date.unix_timestamp())
-            .ok()?
-            .checked_mul(1_000)?;
-        let receipt_ms =
-            u64::try_from(receipt.wall.duration_since(UNIX_EPOCH).ok()?.as_millis()).ok()?;
-        Some(date_ms.saturating_sub(receipt_ms))
-    }?;
-    receipt.monotonic_ms.checked_add(delay_ms)
+            .map_err(|_| ProviderObservationIgnoreReasonV1::Impossible)?
+            .checked_mul(1_000)
+            .ok_or(ProviderObservationIgnoreReasonV1::Impossible)?;
+        let receipt_ms = u64::try_from(
+            receipt
+                .wall
+                .duration_since(UNIX_EPOCH)
+                .map_err(|_| ProviderObservationIgnoreReasonV1::Impossible)?
+                .as_millis(),
+        )
+        .map_err(|_| ProviderObservationIgnoreReasonV1::Impossible)?;
+        date_ms.saturating_sub(receipt_ms)
+    };
+    receipt
+        .monotonic_ms
+        .checked_add(delay_ms)
+        .map(Some)
+        .ok_or(ProviderObservationIgnoreReasonV1::Impossible)
 }
 
 /// Build a v1 plan from the exact serialized UTF-8 body sent by a provider
