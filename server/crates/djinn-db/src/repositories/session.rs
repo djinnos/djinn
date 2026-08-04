@@ -120,6 +120,7 @@ impl SessionRepository {
                 status AS "status!", tokens_in, tokens_out,
                 cache_read_tokens, cache_write_tokens, task_run_id, title,
                 parked_reason AS "parked_reason?",
+                failure_cause AS "failure_cause?: djinn_core::models::SessionFailureCause",
                 cost_usd, input_price_per_million_snapshot,
                 output_price_per_million_snapshot,
                 cache_read_price_per_million_snapshot,
@@ -216,6 +217,7 @@ impl SessionRepository {
                 status AS "status!", tokens_in, tokens_out,
                 cache_read_tokens, cache_write_tokens, task_run_id, title,
                 parked_reason AS "parked_reason?",
+                failure_cause AS "failure_cause?: djinn_core::models::SessionFailureCause",
                 cost_usd, input_price_per_million_snapshot,
                 output_price_per_million_snapshot,
                 cache_read_price_per_million_snapshot,
@@ -268,6 +270,7 @@ impl SessionRepository {
                 status AS "status!", tokens_in, tokens_out,
                 cache_read_tokens, cache_write_tokens, task_run_id, title,
                 parked_reason AS "parked_reason?",
+                failure_cause AS "failure_cause?: djinn_core::models::SessionFailureCause",
                 cost_usd, input_price_per_million_snapshot,
                 output_price_per_million_snapshot,
                 cache_read_price_per_million_snapshot,
@@ -291,6 +294,7 @@ impl SessionRepository {
                 status AS "status!", tokens_in, tokens_out,
                 cache_read_tokens, cache_write_tokens, task_run_id, title,
                 parked_reason AS "parked_reason?",
+                failure_cause AS "failure_cause?: djinn_core::models::SessionFailureCause",
                 cost_usd, input_price_per_million_snapshot,
                 output_price_per_million_snapshot,
                 cache_read_price_per_million_snapshot,
@@ -395,6 +399,7 @@ impl SessionRepository {
                 status AS "status!", tokens_in, tokens_out,
                 cache_read_tokens, cache_write_tokens, task_run_id, title,
                 parked_reason AS "parked_reason?",
+                failure_cause AS "failure_cause?: djinn_core::models::SessionFailureCause",
                 cost_usd, input_price_per_million_snapshot,
                 output_price_per_million_snapshot,
                 cache_read_price_per_million_snapshot,
@@ -452,6 +457,7 @@ impl SessionRepository {
                 status, tokens_in, tokens_out,
                 cache_read_tokens, cache_write_tokens, task_run_id, title,
                 parked_reason,
+                failure_cause,
                 cost_usd, input_price_per_million_snapshot,
                 output_price_per_million_snapshot,
                 cache_read_price_per_million_snapshot,
@@ -499,6 +505,7 @@ impl SessionRepository {
                 status AS "status!", tokens_in, tokens_out,
                 cache_read_tokens, cache_write_tokens, task_run_id, title,
                 parked_reason AS "parked_reason?",
+                failure_cause AS "failure_cause?: djinn_core::models::SessionFailureCause",
                 cost_usd, input_price_per_million_snapshot,
                 output_price_per_million_snapshot,
                 cache_read_price_per_million_snapshot,
@@ -540,6 +547,7 @@ impl SessionRepository {
                 status AS "status!", tokens_in, tokens_out,
                 cache_read_tokens, cache_write_tokens, task_run_id, title,
                 parked_reason AS "parked_reason?",
+                failure_cause AS "failure_cause?: djinn_core::models::SessionFailureCause",
                 cost_usd, input_price_per_million_snapshot,
                 output_price_per_million_snapshot,
                 cache_read_price_per_million_snapshot,
@@ -565,6 +573,7 @@ impl SessionRepository {
                 status AS "status!", tokens_in, tokens_out,
                 cache_read_tokens, cache_write_tokens, task_run_id, title,
                 parked_reason AS "parked_reason?",
+                failure_cause AS "failure_cause?: djinn_core::models::SessionFailureCause",
                 cost_usd, input_price_per_million_snapshot,
                 output_price_per_million_snapshot,
                 cache_read_price_per_million_snapshot,
@@ -587,6 +596,7 @@ impl SessionRepository {
                 status AS "status!", tokens_in, tokens_out,
                 cache_read_tokens, cache_write_tokens, task_run_id, title,
                 parked_reason AS "parked_reason?",
+                failure_cause AS "failure_cause?: djinn_core::models::SessionFailureCause",
                 cost_usd, input_price_per_million_snapshot,
                 output_price_per_million_snapshot,
                 cache_read_price_per_million_snapshot,
@@ -611,6 +621,7 @@ impl SessionRepository {
                 status, tokens_in, tokens_out,
                 cache_read_tokens, cache_write_tokens, task_run_id, title,
                 parked_reason,
+                failure_cause,
                 cost_usd, input_price_per_million_snapshot,
                 output_price_per_million_snapshot,
                 cache_read_price_per_million_snapshot,
@@ -662,6 +673,7 @@ impl SessionRepository {
                 status, tokens_in, tokens_out,
                 cache_read_tokens, cache_write_tokens, task_run_id, title,
                 parked_reason,
+                failure_cause,
                 cost_usd, input_price_per_million_snapshot,
                 output_price_per_million_snapshot,
                 cache_read_price_per_million_snapshot,
@@ -687,6 +699,7 @@ impl SessionRepository {
                 status AS "status!", tokens_in, tokens_out,
                 cache_read_tokens, cache_write_tokens, task_run_id, title,
                 parked_reason AS "parked_reason?",
+                failure_cause AS "failure_cause?: djinn_core::models::SessionFailureCause",
                 cost_usd, input_price_per_million_snapshot,
                 output_price_per_million_snapshot,
                 cache_read_price_per_million_snapshot,
@@ -710,6 +723,7 @@ impl SessionRepository {
                 status AS "status!", tokens_in, tokens_out,
                 cache_read_tokens, cache_write_tokens, task_run_id, title,
                 parked_reason AS "parked_reason?",
+                failure_cause AS "failure_cause?: djinn_core::models::SessionFailureCause",
                 cost_usd, input_price_per_million_snapshot,
                 output_price_per_million_snapshot,
                 cache_read_price_per_million_snapshot,
@@ -813,6 +827,7 @@ impl SessionRepository {
                 status AS "status!", tokens_in, tokens_out,
                 cache_read_tokens, cache_write_tokens, task_run_id, title,
                 parked_reason AS "parked_reason?",
+                failure_cause AS "failure_cause?: djinn_core::models::SessionFailureCause",
                 cost_usd, input_price_per_million_snapshot,
                 output_price_per_million_snapshot,
                 cache_read_price_per_million_snapshot,
@@ -841,6 +856,7 @@ impl SessionRepository {
                     s.cache_read_tokens, s.cache_write_tokens,
                     s.task_run_id, s.title,
                     s.parked_reason AS "parked_reason?",
+                    s.failure_cause AS "failure_cause?: djinn_core::models::SessionFailureCause",
                     s.cost_usd, s.input_price_per_million_snapshot,
                     s.output_price_per_million_snapshot,
                     s.cache_read_price_per_million_snapshot,
@@ -865,6 +881,7 @@ impl SessionRepository {
                 status AS "status!", tokens_in, tokens_out,
                 cache_read_tokens, cache_write_tokens, task_run_id, title,
                 parked_reason AS "parked_reason?",
+                failure_cause AS "failure_cause?: djinn_core::models::SessionFailureCause",
                 cost_usd, input_price_per_million_snapshot,
                 output_price_per_million_snapshot,
                 cache_read_price_per_million_snapshot,
@@ -1035,6 +1052,7 @@ impl SessionRepository {
                 status AS "status!", tokens_in, tokens_out,
                 cache_read_tokens, cache_write_tokens, task_run_id, title,
                 parked_reason AS "parked_reason?",
+                failure_cause AS "failure_cause?: djinn_core::models::SessionFailureCause",
                 cost_usd, input_price_per_million_snapshot,
                 output_price_per_million_snapshot,
                 cache_read_price_per_million_snapshot,
@@ -1120,6 +1138,7 @@ impl SessionRepository {
                 status AS "status!", tokens_in, tokens_out,
                 cache_read_tokens, cache_write_tokens, task_run_id, title,
                 parked_reason AS "parked_reason?",
+                failure_cause AS "failure_cause?: djinn_core::models::SessionFailureCause",
                 cost_usd, input_price_per_million_snapshot,
                 output_price_per_million_snapshot,
                 cache_read_price_per_million_snapshot,
@@ -1190,6 +1209,7 @@ impl SessionRepository {
                 status AS "status!", tokens_in, tokens_out,
                 cache_read_tokens, cache_write_tokens, task_run_id, title,
                 parked_reason AS "parked_reason?",
+                failure_cause AS "failure_cause?: djinn_core::models::SessionFailureCause",
                 cost_usd, input_price_per_million_snapshot,
                 output_price_per_million_snapshot,
                 cache_read_price_per_million_snapshot,
@@ -1256,6 +1276,7 @@ impl SessionRepository {
                 status AS "status!", tokens_in, tokens_out,
                 cache_read_tokens, cache_write_tokens, task_run_id, title,
                 parked_reason AS "parked_reason?",
+                failure_cause AS "failure_cause?: djinn_core::models::SessionFailureCause",
                 cost_usd, input_price_per_million_snapshot,
                 output_price_per_million_snapshot,
                 cache_read_price_per_million_snapshot,
@@ -1285,6 +1306,7 @@ impl SessionRepository {
                     s.cache_read_tokens, s.cache_write_tokens,
                     s.task_run_id, s.title,
                     s.parked_reason AS "parked_reason?",
+                    s.failure_cause AS "failure_cause?: djinn_core::models::SessionFailureCause",
                     s.cost_usd, s.input_price_per_million_snapshot,
                     s.output_price_per_million_snapshot,
                     s.cache_read_price_per_million_snapshot,
@@ -1324,6 +1346,7 @@ impl SessionRepository {
                     s.cache_read_tokens, s.cache_write_tokens,
                     s.task_run_id, s.title,
                     s.parked_reason AS "parked_reason?",
+                    s.failure_cause AS "failure_cause?: djinn_core::models::SessionFailureCause",
                     s.cost_usd, s.input_price_per_million_snapshot,
                     s.output_price_per_million_snapshot,
                     s.cache_read_price_per_million_snapshot,
@@ -1753,7 +1776,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use djinn_core::events::{DjinnEventEnvelope, EventBus};
-    use djinn_core::models::SessionRecord;
+    use djinn_core::models::{SessionFailureCause, SessionRecord};
 
     use super::*;
     use crate::repositories::epic::EpicRepository;
@@ -2237,6 +2260,69 @@ mod tests {
 
         let fetched = repo.get(&created.id).await.unwrap().unwrap();
         assert_eq!(fetched.parked_reason.as_deref(), Some("budget"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn session_record_projects_typed_and_legacy_failure_causes() {
+        let db = test_db();
+        let (project_id, task_id) = create_task(&db, EventBus::noop()).await;
+        let repo = SessionRepository::new(db.clone(), EventBus::noop());
+
+        let created = repo
+            .create(CreateSessionParams {
+                project_id: &project_id,
+                task_id: Some(&task_id),
+                model: "openai/gpt-5",
+                agent_type: "worker",
+                metadata_json: None,
+                task_run_id: None,
+                pricing: None,
+                cost_basis: None,
+            })
+            .await
+            .unwrap();
+        assert!(created.failure_cause.is_none());
+        assert_eq!(created.interpreted_failure_cause(), None);
+
+        // This raw fixture write validates the read projection; production
+        // settlement APIs deliberately do not write failure causes yet.
+        sqlx::query(
+            "UPDATE sessions SET status = 'failed', failure_cause = 'provider' WHERE id = $1",
+        )
+        .bind(&created.id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+        let fetched = repo.get(&created.id).await.unwrap().unwrap();
+        assert_eq!(fetched.failure_cause, Some(SessionFailureCause::Provider));
+        assert_eq!(
+            fetched.interpreted_failure_cause(),
+            Some(SessionFailureCause::Provider)
+        );
+        let serialized = serde_json::to_value(&fetched).unwrap();
+        assert_eq!(serialized["failure_cause"], "provider");
+
+        sqlx::query(
+            "UPDATE sessions SET status = 'interrupted', failure_cause = NULL WHERE id = $1",
+        )
+        .bind(&created.id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+        let legacy = repo.get(&created.id).await.unwrap().unwrap();
+        assert!(legacy.failure_cause.is_none());
+        assert_eq!(
+            legacy.interpreted_failure_cause(),
+            Some(SessionFailureCause::LegacyUnclassified)
+        );
+
+        sqlx::query("UPDATE sessions SET status = 'completed' WHERE id = $1")
+            .bind(&created.id)
+            .execute(db.pool())
+            .await
+            .unwrap();
+        let completed = repo.get(&created.id).await.unwrap().unwrap();
+        assert_eq!(completed.interpreted_failure_cause(), None);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

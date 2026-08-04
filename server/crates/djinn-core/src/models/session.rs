@@ -148,6 +148,27 @@ impl<'de> Deserialize<'de> for SessionFailureCause {
     }
 }
 
+#[cfg(feature = "sqlx")]
+impl sqlx::Type<sqlx::Postgres> for SessionFailureCause {
+    fn type_info() -> sqlx::postgres::PgTypeInfo {
+        <String as sqlx::Type<sqlx::Postgres>>::type_info()
+    }
+
+    fn compatible(ty: &sqlx::postgres::PgTypeInfo) -> bool {
+        <String as sqlx::Type<sqlx::Postgres>>::compatible(ty)
+    }
+}
+
+#[cfg(feature = "sqlx")]
+impl<'r> sqlx::Decode<'r, sqlx::Postgres> for SessionFailureCause {
+    fn decode(
+        value: sqlx::postgres::PgValueRef<'r>,
+    ) -> std::result::Result<Self, sqlx::error::BoxDynError> {
+        let value = <String as sqlx::Decode<sqlx::Postgres>>::decode(value)?;
+        Ok(Self::from_db(&value))
+    }
+}
+
 /// Persisted lifecycle record for a supervisor-run agent session.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "sqlx", derive(sqlx::FromRow))]
@@ -187,6 +208,12 @@ pub struct SessionRecord {
     /// being treated as an ordinary completion/failure. Added in migration 59.
     #[serde(default)]
     pub parked_reason: Option<String>,
+    /// Stable, coarse-grained terminal failure cause. This is nullable for
+    /// legacy rows and sessions without a failure; it intentionally contains
+    /// only taxonomy labels, never parked reasons or diagnostics.
+    /// Added in migration 183.
+    #[serde(default)]
+    pub failure_cause: Option<SessionFailureCause>,
     /// Total cost of the session in USD, derived from the per-million snapshot
     /// rates and the session's token counts. `NULL` until pricing logic is
     /// wired up (unpriced/uncatalogued sessions stay NULL, never $0).
@@ -226,6 +253,20 @@ pub struct SessionRecord {
     /// credential foreign key is introduced. Added in migration 88.
     #[serde(default)]
     pub billing_source: Option<String>,
+}
+
+impl SessionRecord {
+    /// Return the status-aware failure cause suitable for reporting.
+    ///
+    /// A durable value always wins. Failed and interrupted rows predating the
+    /// nullable column are classified as `legacy_unclassified`; NULL remains
+    /// cause-free for completed (and non-terminal) rows.
+    pub fn interpreted_failure_cause(&self) -> Option<SessionFailureCause> {
+        self.failure_cause.or(match self.status.as_str() {
+            "failed" | "interrupted" => Some(SessionFailureCause::LegacyUnclassified),
+            _ => None,
+        })
+    }
 }
 
 fn default_cost_basis() -> String {
@@ -310,6 +351,7 @@ mod tests {
             task_run_id: None,
             title: None,
             parked_reason,
+            failure_cause: None,
             cost_usd: None,
             input_price_per_million_snapshot: None,
             output_price_per_million_snapshot: None,
@@ -364,6 +406,7 @@ mod tests {
         let decoded: SessionRecord = serde_json::from_value(json).unwrap();
 
         assert!(decoded.parked_reason.is_none());
+        assert!(decoded.failure_cause.is_none());
         assert!(decoded.cost_usd.is_none());
         assert!(decoded.input_price_per_million_snapshot.is_none());
         assert!(decoded.output_price_per_million_snapshot.is_none());
@@ -371,5 +414,30 @@ mod tests {
         assert!(decoded.cache_write_price_per_million_snapshot.is_none());
         assert_eq!(decoded.cost_basis, "unpriced");
         assert!(decoded.billing_source.is_none());
+    }
+
+    #[test]
+    fn session_record_interprets_durable_and_legacy_failure_causes() {
+        let mut record = session_record(None);
+
+        assert_eq!(record.interpreted_failure_cause(), None);
+
+        record.status = "failed".to_owned();
+        assert_eq!(
+            record.interpreted_failure_cause(),
+            Some(SessionFailureCause::LegacyUnclassified)
+        );
+
+        record.status = "interrupted".to_owned();
+        assert_eq!(
+            record.interpreted_failure_cause(),
+            Some(SessionFailureCause::LegacyUnclassified)
+        );
+
+        record.failure_cause = Some(SessionFailureCause::Provider);
+        assert_eq!(
+            record.interpreted_failure_cause(),
+            Some(SessionFailureCause::Provider)
+        );
     }
 }
