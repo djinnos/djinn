@@ -1112,9 +1112,14 @@ impl ProposalRepository {
             }
             grouped.entry(root.to_owned()).or_default().push(row);
         }
-        let queued_round: Option<i32> = sqlx::query_scalar(
-            "SELECT max(round) FROM proposal_feedback_refinement_injections WHERE proposal_id=$1 AND state='queued'",
-        ).bind(proposal_id).fetch_one(&mut *tx).await?;
+        // A queued row is a durable claim, not a request to allocate another
+        // generation. Migration 182 permits it to lack sources and/or debate.
+        let queued: Vec<ProposalFeedbackRefinementInjection> = sqlx::query_as(
+            r#"SELECT id,proposal_id,root_feedback_id,generation,state,cutoff_at,cutoff_feedback_id,round,debate_entry_id,accepted_disposition,accepted_revision_seq,accepted_at,accepted_by_user_id,created_at,updated_at
+                FROM proposal_feedback_refinement_injections
+                WHERE proposal_id=$1 AND state='queued' ORDER BY root_feedback_id,generation"#,
+        ).bind(proposal_id).fetch_all(&mut *tx).await?;
+        let queued_round = queued.iter().map(|injection| injection.round).max();
         let round = match queued_round {
             Some(v) => v,
             None => {
@@ -1133,14 +1138,20 @@ impl ProposalRepository {
             .filter(|(_, rs)| rs.iter().any(|r| r.severity == "blocking"))
             .map(|(root, _)| root.clone())
             .collect();
+        roots.extend(
+            queued
+                .iter()
+                .map(|injection| injection.root_feedback_id.clone()),
+        );
         roots.sort();
+        roots.dedup();
         if roots.is_empty() {
             let existing: Vec<ProposalFeedbackRefinementInjection> = sqlx::query_as(
                 r#"SELECT DISTINCT ON (root_feedback_id) id, proposal_id, root_feedback_id, generation,
                     state, cutoff_at, cutoff_feedback_id, round, debate_entry_id, accepted_disposition,
                     accepted_revision_seq, accepted_at, accepted_by_user_id, created_at, updated_at
                     FROM proposal_feedback_refinement_injections
-                    WHERE proposal_id=$1 AND state IN ('queued','injected')
+                    WHERE proposal_id=$1 AND state='injected' AND debate_entry_id IS NOT NULL
                     ORDER BY root_feedback_id, generation DESC"#,
             ).bind(proposal_id).fetch_all(&mut *tx).await?;
             let mut captures = Vec::with_capacity(existing.len());
@@ -1152,7 +1163,12 @@ impl ProposalRepository {
                         reopened_at, reopened_by_user_id, created_at, updated_at
                         FROM proposal_debate_trail WHERE id=$1"#,
                 )
-                .bind(injection.debate_entry_id.as_deref())
+                .bind(
+                    injection
+                        .debate_entry_id
+                        .as_deref()
+                        .expect("filtered non-null debate link"),
+                )
                 .fetch_one(&mut *tx)
                 .await?;
                 let sources: Vec<ProposalFeedbackRefinementSource> = sqlx::query_as(
@@ -1171,16 +1187,41 @@ impl ProposalRepository {
         }
         let mut captures = Vec::with_capacity(roots.len());
         for root in roots {
-            let mut sources = grouped.remove(&root).expect("root was grouped");
+            let queued_injection = queued
+                .iter()
+                .find(|injection| injection.root_feedback_id == root)
+                .cloned();
+            let mut sources = grouped.remove(&root).unwrap_or_default();
+            if let Some(queued) = &queued_injection {
+                // Recovery preserves the claimed cutoff; later rows remain
+                // available to form the next root generation.
+                sources.retain(|source| {
+                    source.created_at <= queued.cutoff_at && source.id <= queued.cutoff_feedback_id
+                });
+            }
             sources.sort_by(|a, b| {
                 a.created_at
                     .cmp(&b.created_at)
                     .then_with(|| a.id.cmp(&b.id))
             });
-            let generation = sqlx::query_scalar::<_, Option<i32>>(
-                "SELECT max(generation) FROM proposal_feedback_refinement_injections WHERE root_feedback_id=$1",
-            ).bind(&root).fetch_one(&mut *tx).await?.unwrap_or(0) + 1;
-            let injection_id = uuid::Uuid::now_v7().to_string();
+            let generation = match &queued_injection {
+                Some(injection) => injection.generation,
+                None => sqlx::query_scalar::<_, Option<i32>>(
+                    "SELECT max(generation) FROM proposal_feedback_refinement_injections WHERE root_feedback_id=$1",
+                ).bind(&root).fetch_one(&mut *tx).await?.unwrap_or(0) + 1,
+            };
+            let injection_id = queued_injection
+                .as_ref()
+                .map(|injection| injection.id.clone())
+                .unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
+            let existing_sources: Vec<ProposalFeedbackRefinementSource> = if queued_injection
+                .is_some()
+            {
+                sqlx::query_as("SELECT injection_id,source_feedback_id,source_ordinal,source_parent_id,source_author_kind,source_author_user_id,source_author_model,source_body,source_severity,source_created_at,captured_at FROM proposal_feedback_refinement_sources WHERE injection_id=$1 ORDER BY source_ordinal")
+                    .bind(&injection_id).fetch_all(&mut *tx).await?
+            } else {
+                Vec::new()
+            };
             let root_body = rows
                 .iter()
                 .find(|r| r.id == root)
@@ -1195,14 +1236,26 @@ impl ProposalRepository {
                 resolved_at,resolved_by_user_id,reopened_at,reopened_by_user_id,created_at,updated_at"#)
                 .bind(uuid::Uuid::now_v7().to_string()).bind(proposal_id).bind(root_body)
                 .bind(revision_seq).bind(round).bind(&metadata).fetch_one(&mut *tx).await?;
-            let injection: ProposalFeedbackRefinementInjection = sqlx::query_as(r#"INSERT INTO proposal_feedback_refinement_injections
-                (id,proposal_id,root_feedback_id,generation,state,cutoff_at,cutoff_feedback_id,round,debate_entry_id)
-                VALUES ($1,$2,$3,$4,'injected',$5,$6,$7,$8)
-                RETURNING id,proposal_id,root_feedback_id,generation,state,cutoff_at,cutoff_feedback_id,round,
-                debate_entry_id,accepted_disposition,accepted_revision_seq,accepted_at,accepted_by_user_id,created_at,updated_at"#)
-                .bind(&injection_id).bind(proposal_id).bind(&root).bind(generation).bind(&cutoff_at)
-                .bind(&cutoff_id).bind(round).bind(&debate.id).fetch_one(&mut *tx).await?;
+            let injection: ProposalFeedbackRefinementInjection = if let Some(queued) =
+                &queued_injection
+            {
+                sqlx::query_as(r#"UPDATE proposal_feedback_refinement_injections SET state='injected',debate_entry_id=$1,
+                    updated_at=to_char(transaction_timestamp() AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+                    WHERE id=$2 AND state='queued'
+                    RETURNING id,proposal_id,root_feedback_id,generation,state,cutoff_at,cutoff_feedback_id,round,debate_entry_id,accepted_disposition,accepted_revision_seq,accepted_at,accepted_by_user_id,created_at,updated_at"#)
+                    .bind(&debate.id).bind(&queued.id).fetch_one(&mut *tx).await?
+            } else {
+                sqlx::query_as(r#"INSERT INTO proposal_feedback_refinement_injections
+                    (id,proposal_id,root_feedback_id,generation,state,cutoff_at,cutoff_feedback_id,round,debate_entry_id)
+                    VALUES ($1,$2,$3,$4,'injected',$5,$6,$7,$8)
+                    RETURNING id,proposal_id,root_feedback_id,generation,state,cutoff_at,cutoff_feedback_id,round,debate_entry_id,accepted_disposition,accepted_revision_seq,accepted_at,accepted_by_user_id,created_at,updated_at"#)
+                    .bind(&injection_id).bind(proposal_id).bind(&root).bind(generation).bind(&cutoff_at)
+                    .bind(&cutoff_id).bind(round).bind(&debate.id).fetch_one(&mut *tx).await?
+            };
             for (ordinal, source) in sources.iter().enumerate() {
+                if !existing_sources.is_empty() {
+                    break;
+                }
                 sqlx::query(r#"INSERT INTO proposal_feedback_refinement_sources
                     (injection_id,source_feedback_id,source_ordinal,source_parent_id,source_author_kind,
                      source_author_user_id,source_author_model,source_body,source_severity,source_created_at,captured_at)
@@ -1228,7 +1281,7 @@ impl ProposalRepository {
                 injection,
                 sources: snapshots,
                 debate_entry: debate,
-                reused_generation: false,
+                reused_generation: queued_injection.is_some(),
                 reused_round: queued_round.is_some(),
             });
         }
@@ -4555,6 +4608,83 @@ mod tests {
 
         repo.remove_target(&p.id, &proj).await.unwrap();
         assert!(repo.targets(&p.id).await.unwrap().is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn feedback_boundary_materializes_queued_claims_and_retries_them() {
+        let db = test_db();
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let p = repo
+            .create(create_input("Queued feedback boundary"))
+            .await
+            .unwrap();
+        let root = repo
+            .add_feedback(ProposalFeedbackCreateInput {
+                proposal_id: &p.id,
+                parent_id: None,
+                author_kind: "user",
+                author_model: None,
+                body: "verbatim root",
+            })
+            .await
+            .unwrap();
+        let queued_id = uuid::Uuid::now_v7().to_string();
+        sqlx::query("INSERT INTO proposal_feedback_refinement_injections (id,proposal_id,root_feedback_id,generation,state,cutoff_at,cutoff_feedback_id,round) VALUES ($1,$2,$3,1,'queued','9999-01-01T00:00:00.000Z',$3,7)")
+            .bind(&queued_id).bind(&p.id).bind(&root.id).execute(db.pool()).await.unwrap();
+
+        let first = repo
+            .capture_feedback_refinement_boundary(&p.id)
+            .await
+            .unwrap();
+        assert_eq!(first.captures.len(), 1);
+        assert_eq!(first.captures[0].injection.id, queued_id);
+        assert_eq!(first.captures[0].injection.generation, 1);
+        assert!(first.captures[0].reused_generation);
+        assert_eq!(first.captures[0].sources.len(), 1);
+        assert_eq!(first.captures[0].sources[0].source_body, "verbatim root");
+
+        let second = repo
+            .capture_feedback_refinement_boundary(&p.id)
+            .await
+            .unwrap();
+        assert_eq!(second.captures.len(), 1);
+        assert_eq!(second.captures[0].injection.id, queued_id);
+        assert_eq!(sqlx::query_scalar::<_, i64>("SELECT count(*) FROM proposal_debate_trail WHERE proposal_id=$1 AND kind='human_feedback'")
+            .bind(&p.id).fetch_one(db.pool()).await.unwrap(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn feedback_boundary_materializes_queued_claim_with_existing_sources() {
+        let db = test_db();
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let p = repo
+            .create(create_input("Queued captured source"))
+            .await
+            .unwrap();
+        let root = repo
+            .add_feedback(ProposalFeedbackCreateInput {
+                proposal_id: &p.id,
+                parent_id: None,
+                author_kind: "user",
+                author_model: None,
+                body: "already captured",
+            })
+            .await
+            .unwrap();
+        let queued_id = uuid::Uuid::now_v7().to_string();
+        sqlx::query("INSERT INTO proposal_feedback_refinement_injections (id,proposal_id,root_feedback_id,generation,state,cutoff_at,cutoff_feedback_id,round) VALUES ($1,$2,$3,1,'queued','9999-01-01T00:00:00.000Z',$3,3)")
+            .bind(&queued_id).bind(&p.id).bind(&root.id).execute(db.pool()).await.unwrap();
+        sqlx::query("INSERT INTO proposal_feedback_refinement_sources (injection_id,source_feedback_id,source_ordinal,source_author_kind,source_body,source_severity,source_created_at,captured_at) VALUES ($1,$2,1,'user','already captured','blocking','2000-01-01T00:00:00.000Z','2000-01-01T00:00:00.000Z')")
+            .bind(&queued_id).bind(&root.id).execute(db.pool()).await.unwrap();
+
+        let result = repo
+            .capture_feedback_refinement_boundary(&p.id)
+            .await
+            .unwrap();
+        assert_eq!(result.captures.len(), 1);
+        assert_eq!(result.captures[0].injection.id, queued_id);
+        assert_eq!(result.captures[0].sources.len(), 1);
+        assert!(result.captures[0].injection.debate_entry_id.is_some());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
