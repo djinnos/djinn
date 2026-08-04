@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,\n                status AS \"status!\", tokens_in, tokens_out,\n                cache_read_tokens, cache_write_tokens, task_run_id, title,\n                parked_reason AS \"parked_reason?\",\n                cost_usd, input_price_per_million_snapshot,\n                output_price_per_million_snapshot,\n                cache_read_price_per_million_snapshot,\n                cache_write_price_per_million_snapshot,\n                cost_basis,\n                billing_source\n             FROM sessions\n             WHERE task_id = $1 AND status = 'paused' ORDER BY started_at DESC LIMIT 1",
+  "query": "SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,\n                status AS \"status!\", tokens_in, tokens_out,\n                cache_read_tokens, cache_write_tokens, task_run_id, title,\n                parked_reason AS \"parked_reason?\",\n                failure_cause AS \"failure_cause?: djinn_core::models::SessionFailureCause\",\n                cost_usd, input_price_per_million_snapshot,\n                output_price_per_million_snapshot,\n                cache_read_price_per_million_snapshot,\n                cache_write_price_per_million_snapshot,\n                cost_basis,\n                billing_source\n             FROM sessions\n             WHERE task_id = $1 AND status = 'paused' ORDER BY started_at DESC LIMIT 1",
   "describe": {
     "columns": [
       {
@@ -80,36 +80,41 @@
       },
       {
         "ordinal": 15,
+        "name": "failure_cause?: djinn_core::models::SessionFailureCause",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 16,
         "name": "cost_usd",
         "type_info": "Float8"
       },
       {
-        "ordinal": 16,
+        "ordinal": 17,
         "name": "input_price_per_million_snapshot",
         "type_info": "Float8"
       },
       {
-        "ordinal": 17,
+        "ordinal": 18,
         "name": "output_price_per_million_snapshot",
         "type_info": "Float8"
       },
       {
-        "ordinal": 18,
+        "ordinal": 19,
         "name": "cache_read_price_per_million_snapshot",
         "type_info": "Float8"
       },
       {
-        "ordinal": 19,
+        "ordinal": 20,
         "name": "cache_write_price_per_million_snapshot",
         "type_info": "Float8"
       },
       {
-        "ordinal": 20,
+        "ordinal": 21,
         "name": "cost_basis",
         "type_info": "Text"
       },
       {
-        "ordinal": 21,
+        "ordinal": 22,
         "name": "billing_source",
         "type_info": "Text"
       }
@@ -140,9 +145,10 @@
       true,
       true,
       true,
+      true,
       false,
       true
     ]
   },
-  "hash": "8bce5e4d55b6fc885abf129aa19ee2f80fe5436a652376acb1c0ded73732c7d0"
+  "hash": "ff2035af7eaa21243ad4a1c2a4c43e806f67c8b4c63addf0a75721aefbb9d5e4"
 }

@@ -1776,6 +1776,7 @@ async fn completed_budget_park_sessions_clear_recovery_backoff_without_fault_rou
             task_run_id: Some(format!("run-{label}")),
             title: None,
             parked_reason: Some("budget".to_owned()),
+            failure_cause: None,
             cost_usd: None,
             input_price_per_million_snapshot: None,
             output_price_per_million_snapshot: None,

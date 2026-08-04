@@ -1973,6 +1973,7 @@ mod tests {
                         task_run_id: params.task_run_id.clone(),
                         title: None,
                         parked_reason: None,
+                        failure_cause: None,
                         cost_usd: None,
                         input_price_per_million_snapshot: None,
                         output_price_per_million_snapshot: None,

@@ -718,6 +718,7 @@ fn session_record(
         task_run_id: None,
         title: None,
         parked_reason: None,
+        failure_cause: None,
         cost_usd: None,
         input_price_per_million_snapshot: None,
         output_price_per_million_snapshot: None,
