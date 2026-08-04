@@ -475,6 +475,96 @@ mod tests {
         assert!(!project_has_indexable_code(&db, "p1").await);
     }
 
+    /// Serialises the tests below: they mutate the process environment, which
+    /// every thread in this test binary shares.
+    static CHILD_ENVIRONMENT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// The platform DSN must not reach a process the agent's shell path spawns.
+    ///
+    /// Asserted on the child's ACTUAL environment — the bytes a `bash -lc`
+    /// prints — rather than on the fact that a filter was called. `bash -lc`
+    /// with `printenv` is the exact shape
+    /// `extension::handlers::workspace::run_shell` builds, and
+    /// `clear_and_admit_child_environment` is the exact call it makes on the
+    /// launcher-free path.
+    ///
+    /// Measured on a live task-run Job spec, 2026-08-04: the worker container
+    /// carries `DJINN_DATABASE_URL` pointing at the production platform
+    /// database, and it reached this child because the launcher allow-list
+    /// admits the whole `DJINN_` prefix.
+    #[test]
+    #[cfg(unix)]
+    fn the_agent_shell_child_cannot_observe_the_platform_dsn() {
+        const DSN: &str =
+            "postgres://djinn:hunter2@djinn-postgres.djinn.svc.cluster.local:5432/djinn";
+        let _guard = CHILD_ENVIRONMENT_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        // SAFETY: serialised by `_guard`.
+        unsafe {
+            std::env::set_var("DJINN_DATABASE_URL", DSN);
+            // A sibling on the same open `DJINN_` prefix that is NOT a secret:
+            // it must still reach the child, or this would be a scrub of the
+            // whole namespace wearing a narrower name.
+            std::env::set_var("DJINN_TASK_RUN_ID", "task-run-fixture");
+            std::env::set_var("PATH", "/usr/local/bin:/usr/bin:/bin");
+        }
+
+        let probe = "printf %s \"${DJINN_DATABASE_URL-}|${DJINN_TASK_RUN_ID-}\"";
+
+        // The launcher-free production path.
+        let mut command = Command::new("bash");
+        command
+            .arg("-lc")
+            .arg(probe)
+            .current_dir("/")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null());
+        clear_and_admit_child_environment(&mut command).expect("admit the child environment");
+        let output = command.output().expect("spawn the probe child");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            "|task-run-fixture",
+            "the platform DSN must be absent from the child's environment, and the \
+             non-secret DJINN_ sibling must still be present"
+        );
+
+        // The brokered production path builds a `CommandSpec` instead of
+        // spawning directly, and the privileged broker re-checks the same
+        // predicate before `execve`. Drive the REAL conversion.
+        let mut brokered = Command::new("bash");
+        // `CommandSpec::validate` restricts the cwd to the mounts a task-run Pod
+        // actually has; `/workspace` is the one `run_shell` uses.
+        brokered.arg("-lc").arg(probe).current_dir("/workspace");
+        let spec = crate::process::command_spec(brokered).expect("build the brokered spec");
+        assert!(
+            !spec
+                .environment
+                .iter()
+                .any(|(key, _)| key == "DJINN_DATABASE_URL"),
+            "the brokered child's environment must not carry the platform DSN"
+        );
+        assert!(
+            !spec
+                .environment
+                .iter()
+                .any(|(_, value)| value.contains(DSN)),
+            "and it must not carry the DSN under any other key either"
+        );
+        assert!(
+            spec.environment
+                .iter()
+                .any(|(key, value)| key == "DJINN_TASK_RUN_ID" && value == "task-run-fixture"),
+            "the non-secret DJINN_ namespace must still reach a brokered child"
+        );
+
+        // SAFETY: serialised by `_guard`.
+        unsafe {
+            std::env::remove_var("DJINN_DATABASE_URL");
+            std::env::remove_var("DJINN_TASK_RUN_ID");
+        }
+    }
+
     #[test]
     fn hook_commands_to_specs_handles_shell_form() {
         let hooks = vec![
