@@ -384,7 +384,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(durations, expected_durations);
         assert_eq!(durations.len(), 10);
-        let p95 = durations[((95 * durations.len() + 99) / 100) - 1];
+        let p95 = durations[(95 * durations.len()).div_ceil(100) - 1];
         let recommendation = ((3 * p95 + 119) / 120).clamp(5, 120);
         assert_eq!(
             p95, 600,
