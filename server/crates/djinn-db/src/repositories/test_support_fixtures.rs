@@ -15,6 +15,81 @@ use crate::repositories::note::NoteRepository;
 use crate::repositories::test_support::{event_bus_for, make_project, seed_test_user};
 use djinn_memory::Note;
 
+/// Seed the canonical model-turn admission rows used by slot-boundary tests.
+pub async fn seed_model_turn_admission_fixture(
+    db: &Database,
+    phase: &str,
+    capability: &str,
+    available: i64,
+) -> i64 {
+    db.ensure_initialized().await.unwrap();
+    sqlx::query("INSERT INTO credentials (id, provider_id, key_name, encrypted_value) VALUES ('credential-slot', 'provider', 'key-slot', decode('00', 'hex'))")
+        .execute(db.pool()).await.unwrap();
+    let pool = sqlx::query_scalar("INSERT INTO model_turn_pools (credential_id, provider_id, model_id, phase, capability_state, learned_concurrency) VALUES ('credential-slot', 'provider', 'model', $1, $2, 1) RETURNING id")
+        .bind(phase).bind(capability).fetch_one(db.pool()).await.unwrap();
+    sqlx::query("INSERT INTO model_turn_bucket_bindings (pool_id, bucket_kind, capacity_units, available_units) VALUES ($1, 'request', 2, $2)")
+        .bind(pool).bind(available).execute(db.pool()).await.unwrap();
+    pool
+}
+
+pub async fn model_turn_decision_fixture(db: &Database, pool_id: i64) -> (String, Option<String>) {
+    sqlx::query_as(
+        "SELECT request_fingerprint, diagnostic FROM model_turn_decisions WHERE pool_id = $1",
+    )
+    .bind(pool_id)
+    .fetch_one(db.pool())
+    .await
+    .unwrap()
+}
+
+pub async fn model_turn_decision_count_fixture(db: &Database, pool_id: i64) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM model_turn_decisions WHERE pool_id = $1")
+        .bind(pool_id)
+        .fetch_one(db.pool())
+        .await
+        .unwrap()
+}
+
+pub async fn model_turn_accounting_fixture(db: &Database, pool_id: i64) -> (i64, i64, i64) {
+    sqlx::query_as("SELECT p.in_flight, b.available_units, b.quarantined_units FROM model_turn_pools p JOIN model_turn_bucket_bindings b ON b.pool_id = p.id WHERE p.id = $1")
+        .bind(pool_id).fetch_one(db.pool()).await.unwrap()
+}
+
+pub async fn set_model_turn_capability_fixture(db: &Database, pool_id: i64, capability: &str) {
+    sqlx::query("UPDATE model_turn_pools SET capability_state = $2 WHERE id = $1")
+        .bind(pool_id)
+        .bind(capability)
+        .execute(db.pool())
+        .await
+        .unwrap();
+}
+
+pub async fn model_turn_lease_lifecycle_fixture(db: &Database, lease_id: &str) -> String {
+    sqlx::query_scalar("SELECT lifecycle FROM model_turn_leases WHERE lease_id = $1::uuid")
+        .bind(lease_id)
+        .fetch_one(db.pool())
+        .await
+        .unwrap()
+}
+
+pub async fn model_turn_request_lifecycle_fixture(db: &Database, request_id: &str) -> String {
+    sqlx::query_scalar("SELECT lifecycle FROM model_turn_leases WHERE request_id = $1")
+        .bind(request_id)
+        .fetch_one(db.pool())
+        .await
+        .unwrap()
+}
+
+pub async fn model_turn_terminal_fixture(
+    db: &Database,
+    lease_id: &str,
+    generation: i64,
+    request_id: &str,
+) -> (String, String) {
+    sqlx::query_as("SELECT outcome, accounting_state FROM model_turn_lease_terminals WHERE lease_id = $1::uuid AND generation = $2 AND request_id = $3")
+        .bind(lease_id).bind(generation).bind(request_id).fetch_one(db.pool()).await.unwrap()
+}
+
 #[derive(Clone, Debug)]
 pub struct HousekeepingFixtureExpectedCounts {
     pub prune_associations: u64,
