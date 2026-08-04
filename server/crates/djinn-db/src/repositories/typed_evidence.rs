@@ -389,6 +389,10 @@ impl TypedEvidenceRepository {
         for f in &payload.findings {
             let p = expected[f.check_id.as_str()];
             let finding_id = uuid::Uuid::now_v7().to_string();
+            // The anchor FK is immediate, but this outer transaction remains
+            // atomic: create the normalized parent before its hydrated rows.
+            sqlx::query("INSERT INTO typed_evidence_return_findings (id,validation_result_id,planned_check_id,conclusion,usable) VALUES ($1,$2,$3,$4,FALSE)")
+                .bind(&finding_id).bind(&validation_id).bind(&p.id).bind(&f.conclusion).execute(&mut **tx).await?;
             let mut positive = false;
             for a in &f.anchors {
                 let hydrated = hydrate_anchor(tx, &payload.attempt_id, p, a).await?;
@@ -396,8 +400,11 @@ impl TypedEvidenceRepository {
                 sqlx::query("INSERT INTO typed_evidence_return_finding_anchors (id,finding_id,method,locator,health,immutable_identity,detail,method_compatible) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)")
                     .bind(uuid::Uuid::now_v7().to_string()).bind(&finding_id).bind(&a.method).bind(&a.locator).bind(hydrated.health()).bind(&hydrated.identity).bind(&hydrated.detail).bind(hydrated.method_compatible).execute(&mut **tx).await?;
             }
-            sqlx::query("INSERT INTO typed_evidence_return_findings (id,validation_result_id,planned_check_id,conclusion,usable) VALUES ($1,$2,$3,$4,$5)")
-                .bind(&finding_id).bind(&validation_id).bind(&p.id).bind(&f.conclusion).bind(positive).execute(&mut **tx).await?;
+            sqlx::query("UPDATE typed_evidence_return_findings SET usable=$1 WHERE id=$2")
+                .bind(positive)
+                .bind(&finding_id)
+                .execute(&mut **tx)
+                .await?;
         }
         let result_outcome = derive_outcome(&payload.checks, &check_healthy);
         sqlx::query("UPDATE typed_evidence_validation_results SET outcome=$1,validator_facts=$2 WHERE id=$3").bind(outcome(result_outcome)).bind(serde_json::json!({"validator_version":"TribunalEvidenceReturnV1","raw_payload_sha256":hash,"server_hydrated":true,"outcome":outcome(result_outcome)})).bind(&validation_id).execute(&mut **tx).await?;
