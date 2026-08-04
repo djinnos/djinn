@@ -445,12 +445,30 @@ const HANDOFF_ACTOR_ROLE: &str = "respawn_guard";
 /// transitioned to `pr_review`.
 ///
 /// Every successful handoff records a `pr_terminal_handoff` activity keyed by
-/// reason and head SHA. Re-entry for the same head is a durable no-op, while a
-/// new head records a new handoff marker.
+/// reason and head SHA. Re-entry for the same head does not duplicate that
+/// marker row, while a new head records a new one.
 ///
-/// Returns `true` when the handoff is established, including when the durable
-/// marker proves it was already established for this head, and an `Err` when
-/// persistence fails.
+/// # Ownership is decided by STATUS, never by a marker row
+///
+/// The two concerns below are deliberately separated and must stay that way:
+///
+/// 1. **Ownership** — whether the task must be moved into `pr_review`. This is
+///    decided *solely* from `current_status`. `pr_review` is the only no-op.
+/// 2. **Audit** — whether a duplicate `pr_terminal_handoff` marker row would be
+///    written. This may only ever suppress the row, never the transition.
+///
+/// Conflating them is the livelock this function was rewritten to kill: the
+/// dedupe used to run *before* the transition and early-return `Ok(true)`, so
+/// once any marker row existed the task was never moved again. A durable marker
+/// proves a handoff *was once written*; it does NOT prove the task is
+/// poller-owned *now* — the startup reaper, an escalation, or any reopen can put
+/// it back in `open` long after the marker landed. Tasks z8i8 (PR #2972) and
+/// zkas (PR #2970) then sat in `open` for 9.5h/11.7h with green CI and an
+/// approved PR: the pollers scan `pr_draft` / `pr_review` / `needs_task_review`,
+/// so an `open` task carrying a mergeable PR is owned by nobody.
+///
+/// Returns `true` when the handoff is established (ownership asserted, marker
+/// present) and an `Err` when the transition or the marker write fails.
 pub async fn handoff_pr_to_poller(
     task_repo: &TaskRepository,
     task_id: &str,
@@ -459,22 +477,7 @@ pub async fn handoff_pr_to_poller(
     reason: &str,
     head_sha: Option<&str>,
 ) -> std::result::Result<bool, String> {
-    let already_handed_off = task_repo
-        .list_activity(task_id)
-        .await
-        .map_err(|e| e.to_string())?
-        .iter()
-        .filter(|entry| entry.event_type == "pr_terminal_handoff")
-        .filter_map(|entry| serde_json::from_str::<serde_json::Value>(&entry.payload).ok())
-        .any(|payload| {
-            payload.get("head_sha").and_then(|value| value.as_str()) == head_sha
-                && payload.get("reason").and_then(|value| value.as_str()) == Some(reason)
-        });
-    if already_handed_off {
-        tracing::debug!(task_id = %task_id, ?head_sha, "respawn_guard: terminal PR handoff already recorded for head");
-        return Ok(true);
-    }
-
+    // ── 1. Ownership: state-gated, never row-gated. ──────────────────────
     if current_status == TaskStatus::PrReview.as_str() {
         tracing::debug!(task_id = %task_id, current_status = %current_status, "respawn_guard: task already in pr_review — handoff is an idempotent no-op");
     } else if let Err(e) = task_repo
@@ -490,6 +493,20 @@ pub async fn handoff_pr_to_poller(
     {
         tracing::warn!(task_id = %task_id, pr_url = %pr_url, error = %e, "respawn_guard: failed to hand PR off to poller");
         return Err(e.to_string());
+    }
+
+    // ── 2. Audit: dedupe the marker ROW only. Ownership is already
+    // established above, so returning early here cannot skip a state change.
+    //
+    // A `None` head is not an identity and must never match a stored `null`:
+    // the old predicate compared `Option<&str>` to `Option<&str>`, so
+    // `None == None` held for every adoption (which always passed `None`),
+    // collapsing the key to the per-PR-deterministic `reason` alone.
+    if let Some(head_sha) = head_sha
+        && marker_recorded_for_head(task_repo, task_id, reason, head_sha).await?
+    {
+        tracing::debug!(task_id = %task_id, head_sha, "respawn_guard: terminal PR handoff marker already recorded for head");
+        return Ok(true);
     }
 
     let payload = serde_json::json!({
@@ -514,13 +531,45 @@ pub async fn handoff_pr_to_poller(
     Ok(true)
 }
 
+/// True when a `pr_terminal_handoff` marker already exists for this exact
+/// (`reason`, `head_sha`) pair.
+///
+/// Audit-only: callers must have settled ownership before consulting this. The
+/// head is a `&str`, not an `Option<&str>`, so an absent head cannot be
+/// compared at all — a stored `null` head has no identity to match against.
+async fn marker_recorded_for_head(
+    task_repo: &TaskRepository,
+    task_id: &str,
+    reason: &str,
+    head_sha: &str,
+) -> std::result::Result<bool, String> {
+    Ok(task_repo
+        .list_activity(task_id)
+        .await
+        .map_err(|e| e.to_string())?
+        .iter()
+        .filter(|entry| entry.event_type == "pr_terminal_handoff")
+        .filter_map(|entry| serde_json::from_str::<serde_json::Value>(&entry.payload).ok())
+        .any(|payload| {
+            payload.get("head_sha").and_then(|value| value.as_str()) == Some(head_sha)
+                && payload.get("reason").and_then(|value| value.as_str()) == Some(reason)
+        }))
+}
+
 /// Compatibility wrapper for the respawn-guard adoption path. The terminal
 /// gate uses [`handoff_pr_to_poller`] directly so it can fail safe on errors.
+///
+/// `head_sha` is the task's current head (`ci_github_head_sha` falling back to
+/// `ci_head_sha`). It must be forwarded, not hardcoded to `None`: the marker
+/// dedupe key is (`reason`, `head_sha`), and the adoption `reason` is
+/// deterministic per PR, so a `None` head leaves the key with no varying
+/// component at all.
 pub async fn handoff_adopted_pr_to_poller(
     task_repo: &TaskRepository,
     task_id: &str,
     current_status: &str,
     pr_url: &str,
+    head_sha: Option<&str>,
 ) -> bool {
     let reason =
         format!("respawn_guard: adopted open PR {pr_url} — handing off to PR poller (pr_review)");
@@ -544,9 +593,16 @@ pub async fn handoff_adopted_pr_to_poller(
             .await
             .is_ok();
     }
-    handoff_pr_to_poller(task_repo, task_id, current_status, pr_url, &reason, None)
-        .await
-        .unwrap_or(false)
+    handoff_pr_to_poller(
+        task_repo,
+        task_id,
+        current_status,
+        pr_url,
+        &reason,
+        head_sha,
+    )
+    .await
+    .unwrap_or(false)
 }
 
 #[cfg(test)]

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, proposal_id, parent_id, author_kind, author_user_id, author_model,\n                    body, resolved_at, resolved_revision_seq, resolved_by_user_id, created_at, updated_at\n             FROM proposal_feedback WHERE proposal_id = $1 ORDER BY created_at",
+  "query": "SELECT id, proposal_id, parent_id, author_kind, author_user_id, author_model,\n                    body, severity, withdrawn_at, withdrawn_by_user_id,\n                    resolved_at, resolved_revision_seq, resolved_by_user_id, created_at, updated_at\n             FROM proposal_feedback WHERE proposal_id = $1 ORDER BY created_at",
   "describe": {
     "columns": [
       {
@@ -40,26 +40,41 @@
       },
       {
         "ordinal": 7,
-        "name": "resolved_at",
+        "name": "severity",
         "type_info": "Varchar"
       },
       {
         "ordinal": 8,
-        "name": "resolved_revision_seq",
-        "type_info": "Int4"
+        "name": "withdrawn_at",
+        "type_info": "Varchar"
       },
       {
         "ordinal": 9,
-        "name": "resolved_by_user_id",
+        "name": "withdrawn_by_user_id",
         "type_info": "Varchar"
       },
       {
         "ordinal": 10,
-        "name": "created_at",
+        "name": "resolved_at",
         "type_info": "Varchar"
       },
       {
         "ordinal": 11,
+        "name": "resolved_revision_seq",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 12,
+        "name": "resolved_by_user_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 13,
+        "name": "created_at",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 14,
         "name": "updated_at",
         "type_info": "Varchar"
       }
@@ -77,6 +92,9 @@
       true,
       true,
       false,
+      false,
+      true,
+      true,
       true,
       true,
       true,
@@ -84,5 +102,5 @@
       false
     ]
   },
-  "hash": "034e7492d5bfc0390186e6b44f6b3ca5f9cd64dff9be1ddb616b2f5bf46a4c6a"
+  "hash": "8c0d793c59e94aae88ef1999a9b3ad7c9be9e67150b14c1543577f20621b8b4f"
 }
