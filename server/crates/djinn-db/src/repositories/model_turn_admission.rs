@@ -290,7 +290,9 @@ pub struct ModelTurnDecisionRecordInput {
     pub request_fingerprint: String,
     pub generation: i64,
     pub decision: ModelTurnDecisionKind,
-    pub diagnostic: Option<String>,
+    /// Closed diagnostic vocabulary; arbitrary diagnostic text is deliberately
+    /// unrepresentable at this durable boundary.
+    pub diagnostic: Option<ModelTurnDecisionDiagnostic>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -300,6 +302,31 @@ pub enum ModelTurnDecisionKind {
     EnforceAdmitted,
     Wait,
     Rejected,
+}
+
+/// Stable, non-identifying decision diagnostics persisted by their canonical
+/// code. There is intentionally no string/catch-all variant.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelTurnDecisionDiagnostic {
+    CapabilityUnknown,
+    CapabilityUnsupported,
+    PoolUnavailable,
+    PolicyDraining,
+    RequestInvalid,
+}
+
+impl ModelTurnDecisionDiagnostic {
+    #[must_use]
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::CapabilityUnknown => "capability_unknown",
+            Self::CapabilityUnsupported => "capability_unsupported",
+            Self::PoolUnavailable => "pool_unavailable",
+            Self::PolicyDraining => "policy_draining",
+            Self::RequestInvalid => "request_invalid",
+        }
+    }
 }
 
 /// Durable repository surface for the additive v1 schema.
@@ -376,10 +403,6 @@ impl ModelTurnAdmissionRepository {
         if input.pool_id <= 0
             || input.generation <= 0
             || !is_sha256_fingerprint(&input.request_fingerprint)
-            || input
-                .diagnostic
-                .as_ref()
-                .is_some_and(|value| !is_bounded_diagnostic(value))
         {
             return Err(crate::Error::InvalidData(
                 "invalid model-turn decision record".to_owned(),
@@ -387,7 +410,9 @@ impl ModelTurnAdmissionRepository {
         }
         sqlx::query("INSERT INTO model_turn_decisions (pool_id, request_fingerprint, generation, decision, diagnostic) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (pool_id, request_fingerprint, generation) DO NOTHING")
             .bind(input.pool_id).bind(input.request_fingerprint).bind(input.generation)
-            .bind(decision_kind_name(input.decision)).bind(input.diagnostic).execute(self.db.pool()).await?;
+            .bind(decision_kind_name(input.decision))
+            .bind(input.diagnostic.map(ModelTurnDecisionDiagnostic::code))
+            .execute(self.db.pool()).await?;
         Ok(())
     }
 
@@ -897,14 +922,6 @@ fn is_sha256_fingerprint(value: &str) -> bool {
         && value.starts_with("sha256:")
         && value.as_bytes()[7..].iter().all(u8::is_ascii_hexdigit)
 }
-fn is_bounded_diagnostic(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 128
-        && value.bytes().all(|byte| {
-            byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_' || byte == b'-'
-        })
-}
-
 fn canonical_debits(debits: &[ModelTurnBucketDebit]) -> Result<BTreeMap<ModelTurnBucketKind, i64>> {
     let mut result = BTreeMap::new();
     for debit in debits {
@@ -1049,5 +1066,22 @@ mod tests {
     #[test]
     fn schema_version_is_v1() {
         assert_eq!(MODEL_TURN_ADMISSION_SCHEMA_VERSION, 1);
+    }
+
+    #[test]
+    fn decision_diagnostics_have_only_fixed_non_identifying_codes() {
+        let codes = [
+            ModelTurnDecisionDiagnostic::CapabilityUnknown.code(),
+            ModelTurnDecisionDiagnostic::CapabilityUnsupported.code(),
+            ModelTurnDecisionDiagnostic::PoolUnavailable.code(),
+            ModelTurnDecisionDiagnostic::PolicyDraining.code(),
+            ModelTurnDecisionDiagnostic::RequestInvalid.code(),
+        ];
+        assert!(codes.iter().all(|code| {
+            code.len() <= 32
+                && code
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
+        }));
     }
 }
