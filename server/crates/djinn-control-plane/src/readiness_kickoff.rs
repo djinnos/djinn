@@ -16,7 +16,7 @@ use djinn_db::{
 /// The only native skill a readiness kickoff may use.
 pub const READINESS_SKILL_NAME: &str = "agent-readiness-guardrails";
 /// The immutable native-skill version required by this readiness protocol.
-pub const READINESS_SKILL_VERSION: &str = "1.0.0";
+pub const READINESS_SKILL_VERSION: &str = "1.1.0";
 
 /// Client-controlled values accepted by readiness kickoff.
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -592,13 +592,13 @@ fn marked_architect_readiness_task_injects_guardrails_and_unmarked_task_does_not
     }
 
     let mut marked = make_task();
-    marked.title = "Analyze readiness with agent-readiness-guardrails 1.0.0".into();
-    marked.description = "Readiness analysis must use agent-readiness-guardrails 1.0.0.".into();
+    marked.title = "Analyze readiness with agent-readiness-guardrails 1.1.0".into();
+    marked.description = "Readiness analysis must use agent-readiness-guardrails 1.1.0.".into();
     marked.labels = "[\"readiness\"]".into();
     marked.execution_context = Some(
         djinn_core::models::TaskExecutionContext::readiness_guardrail_analysis(
             "agent-readiness-guardrails",
-            "1.0.0",
+            "1.1.0",
         )
         .unwrap(),
     );
@@ -616,7 +616,7 @@ fn marked_architect_readiness_task_injects_guardrails_and_unmarked_task_does_not
         ),
         Some(NativeSkillTrigger::ReadinessGuardrail {
             skill_name: "agent-readiness-guardrails".into(),
-            skill_version: "1.0.0".into(),
+            skill_version: "1.1.0".into(),
         })
     );
     assert_eq!(
