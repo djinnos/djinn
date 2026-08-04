@@ -91,6 +91,16 @@ async fn rows(db: &Database, t: &str) -> i64 {
         .await
         .unwrap()
 }
+async fn normalized_counts(db: &Database) -> (i64, i64, i64, i64, i64, i64) {
+    (
+        rows(db, "typed_evidence_validation_results").await,
+        rows(db, "typed_evidence_check_results").await,
+        rows(db, "typed_evidence_return_findings").await,
+        rows(db, "typed_evidence_issues").await,
+        rows(db, "typed_evidence_anchors").await,
+        rows(db, "typed_evidence_return_finding_anchors").await,
+    )
+}
 fn check(id: &str, m: &str, s: &str) -> Value {
     let mut v = json!({"check_id":id,"method":m,"status":s,"anchors":[]});
     if s != "passed" {
@@ -186,6 +196,14 @@ async fn assert_rejection_state(db: &Database, a: &A, error: String, code: &str)
             .unwrap();
     assert_eq!(lifecycle, "failed");
     assert_eq!(rows(db, "typed_evidence_transitions").await, 1);
+    let transition: String = sqlx::query_scalar(
+        "SELECT to_lifecycle FROM typed_evidence_transitions WHERE finding_id=$1",
+    )
+    .bind(&a.finding)
+    .fetch_one(db.pool())
+    .await
+    .unwrap();
+    assert_eq!(transition, "failed");
 }
 
 #[tokio::test]
@@ -669,4 +687,119 @@ async fn tribunal_evidence_return_v1_two_kib_free_form_strings_are_exact_and_ato
         rejected[issues] = json!([{"check_id":"c".repeat(2049),"code":"f","detail":"d"}]);
         assert_rejected_without_children(&db, &a, rejected, "invalid_issue").await;
     }
+}
+
+#[tokio::test]
+async fn tribunal_evidence_return_v1_persists_terminal_lifecycle_and_replays_once() {
+    // One payload carries every normalized child family, making parent/child
+    // FK ordering and the terminal replay fence observable together.
+    let (db, a) = setup_named(&[
+        ("code".into(), "code".into()),
+        ("graph".into(), "graph".into()),
+        ("command".into(), "command".into()),
+    ])
+    .await;
+    let payload = json!({
+        "version": "TribunalEvidenceReturnV1",
+        "finding_id": a.finding,
+        "spike_task_id": a.task,
+        "attempt_id": a.attempt,
+        "conclusion": "all normalized families",
+        "checks": [
+            {"check_id":"code","method":"code","status":"passed","anchors":[{"method":"code","locator":"code:src/lib.rs@abcdef1#L1-2"}]},
+            {"check_id":"graph","method":"graph","status":"failed","detail":"graph unavailable","anchors":[{"method":"graph","locator":"graph:00000000-0000-0000-0000-000000000000"}]},
+            {"check_id":"command","method":"command","status":"not_run","detail":"command unavailable","anchors":[]}
+        ],
+        "findings": [{"check_id":"code","conclusion":"code observation","anchors":[{"method":"code","locator":"code:src/lib.rs@abcdef1#L1-2"}]}],
+        "failures": [{"check_id":"graph","code":"graph_unavailable","detail":"graph unavailable"}],
+        "gaps": [{"check_id":"command","code":"not_run","detail":"command unavailable"}]
+    });
+    let bytes = serde_json::to_vec(&payload).unwrap();
+    let repository = TypedEvidenceRepository::new(db.clone());
+    let first = repository.submit_return_v1(&bytes).await.unwrap();
+    assert!(!first.replayed);
+    assert_eq!(normalized_counts(&db).await, (1, 3, 1, 2, 2, 1));
+    let outcome: String =
+        sqlx::query_scalar("SELECT outcome FROM typed_evidence_validation_results")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+    assert_eq!(outcome, "unresolved");
+    let fk_safe_checks: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM typed_evidence_check_results c \
+         JOIN typed_evidence_validation_results v ON v.id=c.validation_result_id",
+    )
+    .fetch_one(db.pool())
+    .await
+    .unwrap();
+    assert_eq!(fk_safe_checks, 3, "all check children reference the parent");
+    let transitions: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT from_lifecycle,to_lifecycle,actor_task_id FROM typed_evidence_transitions WHERE finding_id=$1 ORDER BY ordinal",
+    )
+    .bind(&a.finding)
+    .fetch_all(db.pool())
+    .await
+    .unwrap();
+    assert_eq!(
+        transitions,
+        vec![(
+            "spike_active".into(),
+            "evidence_received".into(),
+            a.task.clone()
+        )]
+    );
+
+    let replay = repository.submit_return_v1(&bytes).await.unwrap();
+    assert!(replay.replayed);
+    assert_eq!(replay.validation_id, first.validation_id);
+    let before_conflict = normalized_counts(&db).await;
+    let mut conflicting = payload;
+    conflicting["conclusion"] = json!("different terminal payload");
+    let error = repository
+        .submit_return_v1(&serde_json::to_vec(&conflicting).unwrap())
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("replay_payload_conflict"), "{error}");
+    assert_eq!(normalized_counts(&db).await, before_conflict);
+    assert_eq!(rows(&db, "typed_evidence_transitions").await, 1);
+}
+
+#[tokio::test]
+async fn tribunal_evidence_return_v1_injected_child_write_failure_rolls_back_parent() {
+    let (db, a) = setup_named(&[("code".into(), "code".into())]).await;
+    // Fail after validation-parent insertion to prove actual FK-ordered writes
+    // roll back rather than merely rejecting a shape before persistence.
+    sqlx::query(
+        "CREATE OR REPLACE FUNCTION tribunal_evidence_return_fail_child_for_test() \
+         RETURNS trigger AS $$ BEGIN RAISE EXCEPTION 'injected child write failure'; END; $$ LANGUAGE plpgsql",
+    )
+    .execute(db.pool())
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE TRIGGER tribunal_evidence_return_fail_child_for_test \
+         BEFORE INSERT ON typed_evidence_check_results FOR EACH ROW \
+         EXECUTE FUNCTION tribunal_evidence_return_fail_child_for_test()",
+    )
+    .execute(db.pool())
+    .await
+    .unwrap();
+    let error = TypedEvidenceRepository::new(db.clone())
+        .submit_return_v1(
+            &serde_json::to_vec(&payload(&a, check("code", "code", "passed"))).unwrap(),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("injected child write failure"), "{error}");
+    assert_eq!(normalized_counts(&db).await, (0, 0, 0, 0, 0, 0));
+    assert_eq!(rows(&db, "typed_evidence_transitions").await, 0);
+    let lifecycle: String =
+        sqlx::query_scalar("SELECT lifecycle FROM typed_evidence_findings WHERE id=$1")
+            .bind(&a.finding)
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+    assert_eq!(lifecycle, "spike_active");
 }
