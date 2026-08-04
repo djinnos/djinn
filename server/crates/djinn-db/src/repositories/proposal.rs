@@ -5927,7 +5927,9 @@ mod tests {
             2
         );
         assert_eq!(
-            repo.list_summaries(&[proposal.id.clone()]).await.unwrap()[&proposal.id]
+            repo.list_summaries(std::slice::from_ref(&proposal.id))
+                .await
+                .unwrap()[&proposal.id]
                 .unresolved_blocking_count,
             2
         );
@@ -5996,7 +5998,9 @@ mod tests {
             1
         );
         assert_eq!(
-            repo.list_summaries(&[proposal.id.clone()]).await.unwrap()[&proposal.id]
+            repo.list_summaries(std::slice::from_ref(&proposal.id))
+                .await
+                .unwrap()[&proposal.id]
                 .unresolved_blocking_count,
             1
         );
@@ -6062,7 +6066,10 @@ mod tests {
                 .threads
                 .is_empty()
         );
-        let summary = repo.list_summaries(&[proposal.id.clone()]).await.unwrap();
+        let summary = repo
+            .list_summaries(std::slice::from_ref(&proposal.id))
+            .await
+            .unwrap();
         assert_eq!(summary[&proposal.id].unresolved_blocking_count, 0);
         assert_eq!(
             summary[&proposal.id].latest_judge_verdict_body.as_deref(),
