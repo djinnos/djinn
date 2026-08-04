@@ -1931,11 +1931,11 @@ impl ProposalRepository {
         let rows = sqlx::query_as::<_, (String, String, Option<String>)>(
             r#"WITH RECURSIVE ancestry AS (
                     SELECT f.proposal_id, f.id AS feedback_id, f.id AS root_feedback_id,
-                           f.parent_id, ARRAY[f.id] AS path
+                           f.parent_id, ARRAY[f.id::VARCHAR]::VARCHAR[] AS path
                     FROM proposal_feedback f WHERE f.proposal_id = ANY($1)
                   UNION ALL
                     SELECT a.proposal_id, a.feedback_id, parent.id, parent.parent_id,
-                           a.path || parent.id
+                           a.path || parent.id::VARCHAR
                     FROM ancestry a JOIN proposal_feedback parent
                       ON parent.id = a.parent_id AND parent.proposal_id = a.proposal_id
                     WHERE NOT parent.id = ANY(a.path)
