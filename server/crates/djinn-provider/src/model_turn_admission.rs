@@ -220,7 +220,6 @@ pub struct ProviderTokenEmissionV1 {
 /// format. `None` means serialization was unavailable and is explicitly
 /// uncovered. The provider estimate is optional because the byte fallback is
 /// always conservative enough to cover formats without a tokenizer estimate.
-#[must_use]
 pub fn plan_provider_attempt_v1(
     scope: ProviderAttemptScopeV1,
     serialized_request_utf8: Option<&[u8]>,
