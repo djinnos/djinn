@@ -335,6 +335,19 @@ pub struct ModelTurnAdmissionRepository {
     db: Database,
 }
 
+#[derive(sqlx::FromRow)]
+struct ModelTurnPoolRow {
+    id: i64,
+    credential_id: String,
+    provider_id: String,
+    model_id: String,
+    phase: String,
+    identity_state: String,
+    capability_state: String,
+    learned_concurrency: i64,
+    in_flight: i64,
+}
+
 impl ModelTurnAdmissionRepository {
     #[must_use]
     pub fn new(db: Database) -> Self {
@@ -365,34 +378,22 @@ impl ModelTurnAdmissionRepository {
         model_id: &str,
     ) -> Result<Option<ModelTurnPool>> {
         self.db.ensure_initialized().await?;
-        let row: Option<(i64, String, String, String, String, String, String, i64, i64)> = sqlx::query_as(
+        let row: Option<ModelTurnPoolRow> = sqlx::query_as(
             "SELECT id, credential_id, provider_id, model_id, phase, identity_state, capability_state, learned_concurrency, in_flight FROM model_turn_pools WHERE credential_id = $1 AND provider_id = $2 AND model_id = $3",
         ).bind(credential_id).bind(provider_id).bind(model_id).fetch_optional(self.db.pool()).await?;
-        row.map(
-            |(
-                id,
-                credential_id,
-                provider_id,
-                model_id,
-                phase,
-                identity_state,
-                capability_state,
-                learned_concurrency,
-                in_flight,
-            )| {
-                Ok(ModelTurnPool {
-                    id,
-                    credential_id,
-                    provider_id,
-                    model_id,
-                    phase: parse_phase(&phase)?,
-                    identity_state: parse_identity(&identity_state)?,
-                    capability_state: parse_capability(&capability_state)?,
-                    learned_concurrency,
-                    in_flight,
-                })
-            },
-        )
+        row.map(|row| {
+            Ok(ModelTurnPool {
+                id: row.id,
+                credential_id: row.credential_id,
+                provider_id: row.provider_id,
+                model_id: row.model_id,
+                phase: parse_phase(&row.phase)?,
+                identity_state: parse_identity(&row.identity_state)?,
+                capability_state: parse_capability(&row.capability_state)?,
+                learned_concurrency: row.learned_concurrency,
+                in_flight: row.in_flight,
+            })
+        })
         .transpose()
     }
 
