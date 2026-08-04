@@ -501,15 +501,19 @@ fn build_transcript_excerpt(messages: &[djinn_core::message::Message], max_chars
                     if role.is_none() {
                         continue;
                     }
-                    let raw_body = blocks_text(content);
-                    let is_cleared_placeholder = raw_body.starts_with(CLEARED_TOOL_RESULT_PREFIX);
+                    let is_cleared_placeholder = matches!(
+                        content.first(),
+                        Some(ContentBlock::Text { text })
+                            if text.starts_with(CLEARED_TOOL_RESULT_PREFIX)
+                    );
+                    let normalized_body = blocks_text(content);
                     let is_interesting = *is_error || ordinal + 5 >= total_tool_results;
                     let body = if is_cleared_placeholder {
-                        raw_body
+                        normalized_body
                     } else if is_interesting {
-                        take_interesting_tool_result_chars(&raw_body)
+                        take_interesting_tool_result_chars(&normalized_body)
                     } else {
-                        take_chars(&raw_body, 600)
+                        take_chars(&normalized_body, 600)
                     };
                     if !body.is_empty() {
                         let tag = if *is_error {
@@ -3498,6 +3502,34 @@ mod tests {
         let omitted = error_line.find("…[omitted]…").unwrap();
         let tail = error_line.find(":TAIL_DIAGNOSTIC").unwrap();
         assert!(head < omitted && omitted < tail);
+    }
+
+    #[test]
+    fn cleared_placeholder_prefix_after_leading_space_does_not_bypass_slicing() {
+        use djinn_core::message::{ContentBlock, Message, Role};
+
+        let body = format!(
+            " [Cleared — tool result from turn 7] {}:TAIL_DIAGNOSTIC",
+            "x".repeat(1_600)
+        );
+        let messages = vec![Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "cleared-like-tool".into(),
+                content: vec![ContentBlock::text(body)],
+                is_error: false,
+            }],
+            metadata: None,
+        }];
+
+        let out = build_transcript_excerpt(&messages, 12_000);
+        let result_line = out
+            .lines()
+            .find(|line| line.starts_with("tool result: "))
+            .expect("tool result should be rendered");
+        assert!(result_line.contains("[Cleared — tool result from turn 7]"));
+        assert!(result_line.contains("…[omitted]…"));
+        assert!(result_line.ends_with(":TAIL_DIAGNOSTIC"));
     }
 
     #[test]
