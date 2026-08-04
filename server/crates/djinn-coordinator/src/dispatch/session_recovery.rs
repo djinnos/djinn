@@ -57,9 +57,17 @@ enum ExitAttemptAccounting {
 }
 
 impl ExitAttemptAccounting {
-    fn for_exit(session_status: &str, outcome: Option<LivenessOutcome>) -> Self {
-        if matches!(session_status, "failed" | "interrupted")
-            && outcome != Some(LivenessOutcome::KillNoop)
+    /// Decide from the addressed row's durable status, never the potentially
+    /// late or mismatched exit event. The event still supplies pod facts, but
+    /// it cannot turn persisted completion into a failed attempt.
+    fn for_persisted_exit(
+        session_status: DbSessionStatus,
+        outcome: Option<LivenessOutcome>,
+    ) -> Self {
+        if matches!(
+            session_status,
+            DbSessionStatus::Failed | DbSessionStatus::Interrupted
+        ) && outcome != Some(LivenessOutcome::KillNoop)
         {
             Self::TerminalizeLiveAttempt
         } else {
@@ -3077,7 +3085,8 @@ impl CoordinatorActor {
 
         // ── 3. Classify ────────────────────────────────────────────────
         let result = super::liveness::classify(&evidence);
-        let attempt_accounting = ExitAttemptAccounting::for_exit(session_status, result.outcome);
+        let attempt_accounting =
+            ExitAttemptAccounting::for_persisted_exit(persisted_session_status, result.outcome);
 
         tracing::info!(
             task_id = %task_id,
@@ -3188,7 +3197,7 @@ impl CoordinatorActor {
                      mid-flight stream death) while task nonterminal — environmental \
                      non-attempt, retry when the provider recovers",
                     )
-                } else if session_status == "interrupted" {
+                } else if persisted_session_status == DbSessionStatus::Interrupted {
                     (
                         TaskAttemptOutcome::Interrupted,
                         "environmental_interrupt",
@@ -3571,23 +3580,28 @@ mod liveness_foundation_tests {
     #[test]
     fn exit_attempt_accounting_labels_match_mutation_decision() {
         assert_eq!(
-            ExitAttemptAccounting::for_exit("completed", None),
+            ExitAttemptAccounting::for_persisted_exit(DbSessionStatus::Completed, None),
             ExitAttemptAccounting::EvidenceOnly
         );
         assert_eq!(
-            ExitAttemptAccounting::for_exit("completed", None).warning_label(),
+            ExitAttemptAccounting::for_persisted_exit(DbSessionStatus::Completed, None)
+                .warning_label(),
             "evidence only — no attempt accounting"
         );
         assert_eq!(
-            ExitAttemptAccounting::for_exit("failed", None),
+            ExitAttemptAccounting::for_persisted_exit(DbSessionStatus::Failed, None),
             ExitAttemptAccounting::TerminalizeLiveAttempt
         );
         assert_eq!(
-            ExitAttemptAccounting::for_exit("interrupted", None).warning_label(),
+            ExitAttemptAccounting::for_persisted_exit(DbSessionStatus::Interrupted, None)
+                .warning_label(),
             "terminalizes the live attempt"
         );
         assert_eq!(
-            ExitAttemptAccounting::for_exit("failed", Some(LivenessOutcome::KillNoop)),
+            ExitAttemptAccounting::for_persisted_exit(
+                DbSessionStatus::Failed,
+                Some(LivenessOutcome::KillNoop),
+            ),
             ExitAttemptAccounting::EvidenceOnly
         );
     }

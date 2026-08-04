@@ -8381,7 +8381,43 @@ async fn terminal_persisted_exit_rows_cover_every_task_status() {
                 .update(&session.id, persisted, 1, 1, 0, 0, None)
                 .await
                 .unwrap();
+            // Exercise all live shapes through the real repository adapter:
+            // completed rows get pending, submitted, and already-terminal
+            // attempts; failed/interrupted rows also prove submitted advances.
             let attempt_id = seed_pending_attempt(&db, &task.id, "worker").await;
+            if (event == "completed" && task_status == "in_progress")
+                || (matches!(event, "failed" | "interrupted") && task_status == "in_progress")
+            {
+                attempts
+                    .advance_to_submitted(djinn_db::SubmitTaskAttemptParams {
+                        id: &attempt_id,
+                        submit_ref: Some("ref-before-exit"),
+                        checkpoint_ref: None,
+                        mirror_head_sha: None,
+                        github_head_sha: None,
+                        summary: Some("submitted before terminal session observation"),
+                        summary_json: None,
+                        log_tail: None,
+                    })
+                    .await
+                    .unwrap();
+            } else if event == "completed" && task_status == "needs_task_review" {
+                attempts
+                    .advance_to_terminal(djinn_db::TerminalTaskAttemptParams {
+                        id: &attempt_id,
+                        outcome: djinn_core::models::task_attempt::TaskAttemptOutcome::Crashed,
+                        pr_url: None,
+                        submit_ref: None,
+                        checkpoint_ref: None,
+                        mirror_head_sha: None,
+                        github_head_sha: None,
+                        summary: Some("terminal before completed observation"),
+                        summary_json: None,
+                        log_tail: None,
+                    })
+                    .await
+                    .unwrap();
+            }
             let before = attempts.get(&attempt_id).await.unwrap().unwrap();
             let result = actor
                 .classify_session_exit_liveness(&session.id, &task.id, None, event, "worker")
@@ -8401,13 +8437,18 @@ async fn terminal_persisted_exit_rows_cover_every_task_status() {
             let expected_outcome = match (event, task_status == "closed") {
                 ("failed", false) => "crashed",
                 ("interrupted", false) => "interrupted",
+                ("completed", false) if task_status == "needs_task_review" => "crashed",
+                ("completed", false) if task_status == "in_progress" => "submitted",
                 _ => "pending",
             };
             let after = attempts.get(&attempt_id).await.unwrap().unwrap();
             assert_eq!(after.outcome, expected_outcome);
-            if expected_outcome == "pending" {
-                assert_eq!(after.terminal_at, before.terminal_at);
-                assert_eq!(after.summary_json, before.summary_json);
+            if event == "completed" || task_status == "closed" {
+                assert_eq!(
+                    serde_json::to_value(&after).unwrap(),
+                    serde_json::to_value(&before).unwrap(),
+                    "evidence-only {event} must leave every attempt row field unchanged"
+                );
             } else {
                 assert!(after.terminal_at.is_some());
             }
@@ -8415,7 +8456,10 @@ async fn terminal_persisted_exit_rows_cover_every_task_status() {
                 .classify_session_exit_liveness(&session.id, &task.id, None, event, "worker")
                 .await
                 .expect("repeated persisted terminal classification must succeed");
-            assert_ne!(repeated.verdict, crate::dispatch::liveness::Verdict::ProtocolViolation);
+            assert_ne!(
+                repeated.verdict,
+                crate::dispatch::liveness::Verdict::ProtocolViolation
+            );
             let after_repeat = attempts.get(&attempt_id).await.unwrap().unwrap();
             assert_eq!(after_repeat.outcome, after.outcome);
             assert_eq!(after_repeat.terminal_at, after.terminal_at);
@@ -8483,6 +8527,9 @@ async fn mismatched_exit_event_uses_persisted_status_and_persists_evidence() {
         .update(&session.id, SessionStatus::Completed, 1, 1, 0, 0, None)
         .await
         .unwrap();
+    let attempts = djinn_db::TaskAttemptRepository::new(db.clone());
+    let attempt_id = seed_pending_attempt(&db, &task.id, "worker").await;
+    let before = attempts.get(&attempt_id).await.unwrap().unwrap();
     let result = coordinator_actor_for_tests(&db, &tx)
         .classify_session_exit_liveness(&session.id, &task.id, None, "failed", "worker")
         .await
@@ -8500,6 +8547,13 @@ async fn mismatched_exit_event_uses_persisted_status_and_persists_evidence() {
         Some(crate::dispatch::liveness::PodPhase::Failed)
     );
     assert_eq!(result.evidence.exit_code, Some(1));
+    let after = attempts.get(&attempt_id).await.unwrap().unwrap();
+    assert_eq!(
+        serde_json::to_value(&after).unwrap(),
+        serde_json::to_value(&before).unwrap(),
+        "a late failed event must not terminalize a persisted completed session's live attempt"
+    );
+    assert_eq!(attempts.list_for_task(&task.id).await.unwrap().len(), 1);
     assert!(
         djinn_db::LivenessRepository::new(db)
             .count_evidence_for_session(&session.id, None)
