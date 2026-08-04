@@ -8328,3 +8328,158 @@ async fn expired_owner_group_reap_redispatches_after_reaping_each_eligible_group
         .unwrap();
     assert_eq!(refreshed.status, "open");
 }
+
+/// Repository-backed counterpart to the pure status matrix: the exit adapter
+/// must read terminal truth from each addressed session row for every task
+/// status, append evidence, and never manufacture a protocol violation.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn terminal_persisted_exit_rows_cover_every_task_status() {
+    use djinn_core::models::SessionStatus;
+    use djinn_db::{CreateSessionParams, SessionRepository};
+
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let actor = coordinator_actor_for_tests(&db, &tx);
+    let sessions = SessionRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+    let tasks = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+    let evidence = djinn_db::LivenessRepository::new(db.clone());
+    for (persisted, event) in [
+        (SessionStatus::Completed, "completed"),
+        (SessionStatus::Failed, "failed"),
+        (SessionStatus::Interrupted, "interrupted"),
+    ] {
+        for task_status in [
+            "open",
+            "in_progress",
+            "needs_task_review",
+            "in_task_review",
+            "approved",
+            "pr_draft",
+            "pr_review",
+            "needs_lead_intervention",
+            "in_lead_intervention",
+            "closed",
+        ] {
+            let (task, _) =
+                create_task_with_note(&db, &tx, &format!("persisted-{event}-{task_status}")).await;
+            tasks.set_status(&task.id, task_status).await.unwrap();
+            let session = sessions
+                .create(CreateSessionParams {
+                    project_id: &task.project_id,
+                    task_id: Some(&task.id),
+                    model: "openai/gpt-5.5",
+                    agent_type: "worker",
+                    metadata_json: None,
+                    task_run_id: None,
+                    pricing: None,
+                    cost_basis: None,
+                })
+                .await
+                .unwrap();
+            sessions
+                .update(&session.id, persisted, 1, 1, 0, 0, None)
+                .await
+                .unwrap();
+            let result = actor
+                .classify_session_exit_liveness(&session.id, &task.id, None, event, "worker")
+                .await
+                .expect("persisted terminal row must classify");
+            assert_ne!(
+                result.verdict,
+                crate::dispatch::liveness::Verdict::ProtocolViolation,
+                "persisted {event} with task {task_status}"
+            );
+            if task_status == "closed" {
+                assert_eq!(
+                    result.outcome,
+                    Some(crate::dispatch::liveness::LivenessOutcome::KillNoop)
+                );
+            }
+            assert!(
+                evidence
+                    .count_evidence_for_session(&session.id, None)
+                    .await
+                    .unwrap()
+                    >= 1
+            );
+        }
+    }
+}
+
+/// Missing addressed rows are observable no-ops, not synthetic Running rows.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn missing_addressed_exit_row_returns_none_without_evidence() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let (task, _) = create_task_with_note(&db, &tx, "missing-addressed-exit").await;
+    let missing = "00000000-0000-0000-0000-000000000001";
+    assert!(
+        coordinator_actor_for_tests(&db, &tx)
+            .classify_session_exit_liveness(missing, &task.id, None, "completed", "worker")
+            .await
+            .is_none()
+    );
+    assert_eq!(
+        djinn_db::LivenessRepository::new(db)
+            .count_evidence_for_session(missing, None)
+            .await
+            .unwrap(),
+        0
+    );
+}
+
+/// Mismatches retain event-derived pod facts while classification uses persisted truth.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mismatched_exit_event_uses_persisted_status_and_persists_evidence() {
+    use djinn_core::models::SessionStatus;
+    use djinn_db::{CreateSessionParams, SessionRepository};
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let (task, _) = create_task_with_note(&db, &tx, "mismatched-exit").await;
+    TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx))
+        .set_status(&task.id, "in_progress")
+        .await
+        .unwrap();
+    let sessions = SessionRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+    let session = sessions
+        .create(CreateSessionParams {
+            project_id: &task.project_id,
+            task_id: Some(&task.id),
+            model: "openai/gpt-5.5",
+            agent_type: "worker",
+            metadata_json: None,
+            task_run_id: None,
+            pricing: None,
+            cost_basis: None,
+        })
+        .await
+        .unwrap();
+    sessions
+        .update(&session.id, SessionStatus::Completed, 1, 1, 0, 0, None)
+        .await
+        .unwrap();
+    let result = coordinator_actor_for_tests(&db, &tx)
+        .classify_session_exit_liveness(&session.id, &task.id, None, "failed", "worker")
+        .await
+        .expect("mismatch must classify");
+    assert_ne!(
+        result.verdict,
+        crate::dispatch::liveness::Verdict::ProtocolViolation
+    );
+    assert_eq!(
+        result.evidence.db_session_status,
+        Some(crate::dispatch::liveness::DbSessionStatus::Completed)
+    );
+    assert_eq!(
+        result.evidence.pod_phase,
+        Some(crate::dispatch::liveness::PodPhase::Failed)
+    );
+    assert_eq!(result.evidence.exit_code, Some(1));
+    assert!(
+        djinn_db::LivenessRepository::new(db)
+            .count_evidence_for_session(&session.id, None)
+            .await
+            .unwrap()
+            >= 1
+    );
+}
