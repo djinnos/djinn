@@ -631,6 +631,31 @@ impl SupervisorServices for WorkerSupervisorServices {
             .await
     }
 
+    async fn update_session_status_v2(
+        &self,
+        session_id: String,
+        status: SessionStatus,
+        tokens_in: i64,
+        tokens_out: i64,
+        cache_read: i64,
+        cache_write: i64,
+        parked_reason: Option<String>,
+        failure_cause: Option<SessionFailureCause>,
+    ) -> Result<(), String> {
+        self.rpc
+            .update_session_status_v2(
+                session_id,
+                status,
+                tokens_in,
+                tokens_out,
+                cache_read,
+                cache_write,
+                parked_reason,
+                failure_cause,
+            )
+            .await
+    }
+
     async fn flush_session_tokens(
         &self,
         session_id: String,

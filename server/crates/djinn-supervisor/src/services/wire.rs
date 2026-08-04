@@ -32,7 +32,7 @@
 //! helpers live in `djinn-runtime::wire` so both the launcher server side and
 //! the worker client side use the same reader/writer pair.
 
-use djinn_core::models::{SessionRecord, SessionStatus, Task, TaskRunStatus};
+use djinn_core::models::{SessionFailureCause, SessionRecord, SessionStatus, Task, TaskRunStatus};
 use djinn_runtime::wire::{ControlMsg, WorkerEvent, WorkspaceRef};
 use serde::{Deserialize, Serialize};
 
@@ -561,6 +561,18 @@ pub enum ServiceRpcRequest {
     ReleaseLease { request: LeaseReleaseRequest },
     /// Exact immutable Pod watchdog termination. Appended for bincode stability.
     TerminateWatchdogPod { request: WatchdogTerminationRequest },
+    /// V2 session-status update. Appended at the tail so every legacy request,
+    /// including `UpdateSessionStatus`, retains its positional-bincode shape.
+    UpdateSessionStatusV2 {
+        session_id: String,
+        status: SessionStatus,
+        tokens_in: i64,
+        tokens_out: i64,
+        cache_read: i64,
+        cache_write: i64,
+        parked_reason: Option<String>,
+        failure_cause: Option<SessionFailureCause>,
+    },
 }
 
 /// Typed response variants — one per [`ServiceRpcRequest`] variant.
@@ -665,6 +677,8 @@ pub enum ServiceRpcResponse {
     CancelLease(LeaseResult),
     ReleaseLease(LeaseResult),
     TerminateWatchdogPod(Result<(), String>),
+    /// V2 session-status acknowledgement, tail-appended with its request.
+    UpdateSessionStatusV2(Result<(), String>),
 }
 
 #[cfg(test)]

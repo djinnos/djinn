@@ -782,6 +782,38 @@ impl SupervisorServices for RpcServices {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
+    async fn update_session_status_v2(
+        &self,
+        session_id: String,
+        status: djinn_core::models::SessionStatus,
+        tokens_in: i64,
+        tokens_out: i64,
+        cache_read: i64,
+        cache_write: i64,
+        parked_reason: Option<String>,
+        failure_cause: Option<djinn_core::models::SessionFailureCause>,
+    ) -> Result<(), String> {
+        match self
+            .roundtrip(ServiceRpcRequest::UpdateSessionStatusV2 {
+                session_id,
+                status,
+                tokens_in,
+                tokens_out,
+                cache_read,
+                cache_write,
+                parked_reason,
+                failure_cause,
+            })
+            .await
+        {
+            Ok(ServiceRpcResponse::UpdateSessionStatusV2(result)) => result,
+            Ok(ServiceRpcResponse::Err(e)) => Err(format!("rpc transport: {e}")),
+            Ok(other) => Err(format!("rpc protocol: unexpected reply {other:?}")),
+            Err(e) => Err(e),
+        }
+    }
+
     async fn flush_session_tokens(
         &self,
         session_id: String,
