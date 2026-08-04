@@ -428,11 +428,13 @@ async fn tribunal_evidence_return_v1_two_kib_strings_and_payload_boundary() {
     let mut value = payload(&a, check("check-0", "code", "passed"));
     value["checks"] = json!(checks_for(&checks));
     value["findings"] = json!((0..30)
-        .map(|i| json!({"check_id":format!("check-{i}"),"conclusion":"x".repeat(8192),"anchors":[]}))
+        .map(
+            |i| json!({"check_id":format!("check-{i}"),"conclusion":"x".repeat(8192),"anchors":[]})
+        )
         .collect::<Vec<_>>());
     let mut bytes = serde_json::to_vec(&value).unwrap();
     assert!(bytes.len() <= 256 * 1024);
-    bytes.extend(std::iter::repeat(b' ').take(256 * 1024 - bytes.len()));
+    bytes.extend(std::iter::repeat_n(b' ', 256 * 1024 - bytes.len()));
     assert_eq!(bytes.len(), 256 * 1024);
     TypedEvidenceRepository::new(db)
         .submit_return_v1(&bytes)
@@ -444,7 +446,7 @@ async fn tribunal_evidence_return_v1_two_kib_strings_and_payload_boundary() {
     value["spike_task_id"] = json!(a.task);
     value["attempt_id"] = json!(a.attempt);
     let mut bytes = serde_json::to_vec(&value).unwrap();
-    bytes.extend(std::iter::repeat(b' ').take(256 * 1024 + 1 - bytes.len()));
+    bytes.extend(std::iter::repeat_n(b' ', 256 * 1024 + 1 - bytes.len()));
     let error = TypedEvidenceRepository::new(db.clone())
         .submit_return_v1(&bytes)
         .await
@@ -461,11 +463,10 @@ async fn tribunal_evidence_return_v1_cardinality_boundaries_are_exact_and_atomic
         let mut accepted = payload(&a, check("check-0", "code", "passed"));
         accepted["checks"] = json!(checks_for(&all[..exact]));
         if dimension == "findings" {
-            accepted["findings"] = json!(
-                (0..exact)
-                    .map(|i| json!({"check_id":format!("check-{i}"),"conclusion":"x","anchors":[]}))
-                    .collect::<Vec<_>>()
-            );
+            accepted["findings"] =
+                json!((0..exact)
+                .map(|i| json!({"check_id":format!("check-{i}"),"conclusion":"x","anchors":[]}))
+                .collect::<Vec<_>>());
         } else if dimension == "gaps" {
             accepted["checks"] = json!(
                 (0..exact)
@@ -487,11 +488,10 @@ async fn tribunal_evidence_return_v1_cardinality_boundaries_are_exact_and_atomic
         let mut rejected = payload(&a, check("check-0", "code", "passed"));
         rejected["checks"] = json!(checks_for(&all[..exact]));
         if dimension == "findings" {
-            rejected["findings"] = json!(
-                (0..over)
-                    .map(|i| json!({"check_id":format!("check-{i}"),"conclusion":"x","anchors":[]}))
-                    .collect::<Vec<_>>()
-            );
+            rejected["findings"] =
+                json!((0..over)
+                .map(|i| json!({"check_id":format!("check-{i}"),"conclusion":"x","anchors":[]}))
+                .collect::<Vec<_>>());
         } else if dimension == "gaps" {
             rejected["checks"] = json!(
                 (0..exact)
