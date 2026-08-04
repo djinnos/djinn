@@ -262,7 +262,7 @@ impl SessionRecord {
     /// nullable column are classified as `legacy_unclassified`; NULL remains
     /// cause-free for completed (and non-terminal) rows.
     pub fn interpreted_failure_cause(&self) -> Option<SessionFailureCause> {
-        self.failure_cause.or_else(|| match self.status.as_str() {
+        self.failure_cause.or(match self.status.as_str() {
             "failed" | "interrupted" => Some(SessionFailureCause::LegacyUnclassified),
             _ => None,
         })
