@@ -20,7 +20,7 @@ use async_trait::async_trait;
 use djinn_coordinator::build_lease::BuildLeaseService;
 use djinn_core::events::DjinnEventEnvelope;
 use djinn_core::models::SessionRecord;
-use djinn_core::models::{Task, TaskRunStatus};
+use djinn_core::models::{SessionFailureCause, SessionStatus, Task, TaskRunStatus};
 use djinn_db::repositories::llm_call_attempt::{
     CreateLlmCallAttemptParams, FinalizeLlmCallAttemptParams, LlmCallAttemptRepository,
     LlmCallOutcome,
@@ -1614,7 +1614,13 @@ impl SupervisorServices for DirectServices {
     ) -> Result<(), String> {
         let ctx = &self.callbacks.agent_context;
         let repo = SessionRepository::new(ctx.db.clone(), ctx.event_bus.clone());
-        repo.update(
+        let failure_cause = match status {
+            SessionStatus::Failed | SessionStatus::Interrupted => {
+                Some(SessionFailureCause::Unknown)
+            }
+            _ => None,
+        };
+        repo.update_with_failure_cause(
             &session_id,
             status,
             tokens_in,
@@ -1622,10 +1628,45 @@ impl SupervisorServices for DirectServices {
             cache_read,
             cache_write,
             parked_reason,
+            failure_cause,
         )
         .await
         .map(|_record| ())
         .map_err(|e| e.to_string())
+    }
+
+    async fn update_session_status_v2(
+        &self,
+        session_id: String,
+        status: SessionStatus,
+        tokens_in: i64,
+        tokens_out: i64,
+        cache_read: i64,
+        cache_write: i64,
+        parked_reason: Option<String>,
+        failure_cause: Option<SessionFailureCause>,
+    ) -> Result<(), String> {
+        let ctx = &self.callbacks.agent_context;
+        SessionRepository::new(ctx.db.clone(), ctx.event_bus.clone())
+            .update_with_failure_cause(
+                &session_id,
+                status,
+                tokens_in,
+                tokens_out,
+                cache_read,
+                cache_write,
+                parked_reason,
+                failure_cause.map(|cause| {
+                    if cause == SessionFailureCause::LegacyUnclassified {
+                        SessionFailureCause::Unknown
+                    } else {
+                        cause
+                    }
+                }),
+            )
+            .await
+            .map(|_record| ())
+            .map_err(|e| e.to_string())
     }
 
     async fn flush_session_tokens(
