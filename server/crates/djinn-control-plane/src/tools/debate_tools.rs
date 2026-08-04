@@ -6,6 +6,7 @@
 
 use rmcp::{Json, handler::server::wrapper::Parameters, schemars, tool, tool_router};
 use serde::Deserialize;
+use serde_json::{Value, json};
 
 use crate::server::DjinnMcpServer;
 use crate::tools::proposal_ops::{
@@ -19,6 +20,96 @@ use djinn_db::{
 
 fn debate_not_found_error(id: &str) -> String {
     format!("debate trail entry not found: {id}")
+}
+
+// `proposal_debate_append` deliberately accepts caller-provided speaker and
+// body text. A feedback disposition therefore cannot use either field as its
+// authority boundary: only this tool writes the structured marker below (the
+// generic append surface always writes `body_metadata: None`).
+const FEEDBACK_DISPOSITION_METADATA_KIND: &str = "human_feedback_disposition_v1";
+const FEEDBACK_DISPOSITION_REJECTION_METADATA_KIND: &str =
+    "human_feedback_disposition_rejection_v1";
+
+fn feedback_disposition_metadata(
+    feedback_entry_id: &str,
+    disposition: &FeedbackRefinementDisposition,
+) -> Value {
+    match disposition {
+        FeedbackRefinementDisposition::FixedRevision { revision_seq } => json!({
+            "kind": FEEDBACK_DISPOSITION_METADATA_KIND,
+            "human_feedback_entry_id": feedback_entry_id,
+            "disposition": "fixed_by_revision",
+            "fixed_by_revision": revision_seq,
+        }),
+        FeedbackRefinementDisposition::WontFix { reason } => json!({
+            "kind": FEEDBACK_DISPOSITION_METADATA_KIND,
+            "human_feedback_entry_id": feedback_entry_id,
+            "disposition": "wont_fix",
+            "reason": reason,
+        }),
+    }
+}
+
+fn feedback_disposition_from_entry(
+    row: &djinn_core::models::ProposalDebateTrail,
+    feedback_entry_id: &str,
+) -> Option<FeedbackRefinementDisposition> {
+    let metadata: Value = serde_json::from_str(row.body_metadata.as_deref()?).ok()?;
+    let object = metadata.as_object()?;
+    if object.get("kind")?.as_str()? != FEEDBACK_DISPOSITION_METADATA_KIND
+        || object.get("human_feedback_entry_id")?.as_str()? != feedback_entry_id
+    {
+        return None;
+    }
+    match object.get("disposition")?.as_str()? {
+        "fixed_by_revision" => object
+            .get("fixed_by_revision")?
+            .as_i64()?
+            .try_into()
+            .ok()
+            .map(|revision_seq| FeedbackRefinementDisposition::FixedRevision { revision_seq }),
+        "wont_fix" => object
+            .get("reason")?
+            .as_str()
+            .filter(|reason| !reason.trim().is_empty())
+            .map(|reason| FeedbackRefinementDisposition::WontFix {
+                reason: reason.trim().to_owned(),
+            }),
+        _ => None,
+    }
+}
+
+fn rejected_feedback_disposition_id(
+    row: &djinn_core::models::ProposalDebateTrail,
+    feedback_entry_id: &str,
+) -> Option<&str> {
+    let metadata: Value = serde_json::from_str(row.body_metadata.as_deref()?).ok()?;
+    let object = metadata.as_object()?;
+    (object.get("kind")?.as_str()? == FEEDBACK_DISPOSITION_REJECTION_METADATA_KIND
+        && object.get("human_feedback_entry_id")?.as_str()? == feedback_entry_id)
+        .then(|| object.get("rejected_disposition_entry_id")?.as_str())
+        .flatten()
+}
+
+fn pending_feedback_disposition<'a>(
+    rows: &'a [djinn_core::models::ProposalDebateTrail],
+    feedback_entry_id: &str,
+) -> Option<(
+    &'a djinn_core::models::ProposalDebateTrail,
+    FeedbackRefinementDisposition,
+)> {
+    let rejected: std::collections::HashSet<&str> = rows
+        .iter()
+        .filter_map(|row| rejected_feedback_disposition_id(row, feedback_entry_id))
+        .collect();
+    rows.iter()
+        .filter_map(|row| {
+            (!rejected.contains(row.id.as_str()))
+                .then(|| feedback_disposition_from_entry(row, feedback_entry_id))
+                .flatten()
+                .map(|disposition| (row, disposition))
+        })
+        .max_by_key(|(row, _)| (&row.created_at, &row.id))
 }
 
 async fn debate_model(
@@ -264,7 +355,7 @@ impl DjinnMcpServer {
                 "feedback disposition requires an unresolved human_feedback entry",
             ));
         }
-        let payload = match p.disposition.as_str() {
+        let disposition = match p.disposition.as_str() {
             "fixed_by_revision" => {
                 let Some(seq) = p.fixed_by_revision else {
                     return Json(err_debate("fixed_by_revision is required"));
@@ -276,7 +367,7 @@ impl DjinnMcpServer {
                 }
                 match repo.revisions(&entry.proposal_id).await {
                     Ok(rows) if rows.iter().any(|row| row.seq == seq) => {
-                        format!("fixed_by_revision:{seq}")
+                        FeedbackRefinementDisposition::FixedRevision { revision_seq: seq }
                     }
                     Ok(_) => {
                         return Json(err_debate(
@@ -287,7 +378,9 @@ impl DjinnMcpServer {
                 }
             }
             "wont_fix" => match p.reason.filter(|reason| !reason.trim().is_empty()) {
-                Some(reason) => format!("wont_fix:{}", reason.trim()),
+                Some(reason) => FeedbackRefinementDisposition::WontFix {
+                    reason: reason.trim().to_owned(),
+                },
                 None => return Json(err_debate("wont_fix requires nonblank reasoning")),
             },
             _ => {
@@ -296,7 +389,18 @@ impl DjinnMcpServer {
                 ));
             }
         };
-        let body = format!("feedback_disposition:{}:{payload}", entry.id);
+        let body = match &disposition {
+            FeedbackRefinementDisposition::FixedRevision { revision_seq } => {
+                format!(
+                    "feedback_disposition:{}:fixed_by_revision:{revision_seq}",
+                    entry.id
+                )
+            }
+            FeedbackRefinementDisposition::WontFix { reason } => {
+                format!("feedback_disposition:{}:wont_fix:{reason}", entry.id)
+            }
+        };
+        let metadata = feedback_disposition_metadata(&entry.id, &disposition);
         match repo
             .add_debate_trail_entry(ProposalDebateTrailCreateInput {
                 proposal_id: &entry.proposal_id,
@@ -309,7 +413,7 @@ impl DjinnMcpServer {
                 source_task_id: None,
                 against_revision_seq: entry.against_revision_seq,
                 round: entry.round,
-                body_metadata: None,
+                body_metadata: Some(&metadata),
             })
             .await
         {
@@ -356,7 +460,18 @@ impl DjinnMcpServer {
                 let Some(reason) = p.reason.filter(|reason| !reason.trim().is_empty()) else {
                     return Json(err_debate("reject requires needs-work reasoning"));
                 };
+                let rows = match repo.debate_trail(&entry.proposal_id).await {
+                    Ok(rows) => rows,
+                    Err(e) => return Json(err_debate(e.to_string())),
+                };
+                let rejected_disposition_entry_id = pending_feedback_disposition(&rows, &entry.id)
+                    .map(|(candidate, _)| candidate.id.clone());
                 let body = format!("needs-work: {reason}");
+                let metadata = json!({
+                    "kind": FEEDBACK_DISPOSITION_REJECTION_METADATA_KIND,
+                    "human_feedback_entry_id": entry.id,
+                    "rejected_disposition_entry_id": rejected_disposition_entry_id,
+                });
                 return match repo
                     .add_debate_trail_entry(ProposalDebateTrailCreateInput {
                         proposal_id: &entry.proposal_id,
@@ -369,7 +484,7 @@ impl DjinnMcpServer {
                         source_task_id: None,
                         against_revision_seq: entry.against_revision_seq,
                         round: entry.round,
-                        body_metadata: None,
+                        body_metadata: Some(&metadata),
                     })
                     .await
                 {
@@ -385,33 +500,32 @@ impl DjinnMcpServer {
                     "human_feedback verdict must be accept or reject",
                 ));
             }
-            let prefix = format!("feedback_disposition:{}:", entry.id);
             let rows = match repo.debate_trail(&entry.proposal_id).await {
                 Ok(rows) => rows,
                 Err(e) => return Json(err_debate(e.to_string())),
             };
-            let Some(candidate) = rows
-                .iter()
-                .rev()
-                .find(|row| row.agent_role == "advocate" && row.body.starts_with(&prefix))
+            let Some((_candidate, disposition)) = pending_feedback_disposition(&rows, &entry.id)
             else {
                 return Json(err_debate(
                     "human_feedback has no pending Advocate disposition",
                 ));
             };
-            let payload = &candidate.body[prefix.len()..];
-            let disposition = if let Some(seq) = payload
-                .strip_prefix("fixed_by_revision:")
-                .and_then(|v| v.parse().ok())
-            {
-                FeedbackRefinementDisposition::FixedRevision { revision_seq: seq }
-            } else if let Some(reason) = payload.strip_prefix("wont_fix:") {
-                FeedbackRefinementDisposition::WontFix {
-                    reason: reason.to_owned(),
+            if let FeedbackRefinementDisposition::FixedRevision { revision_seq } = &disposition {
+                if *revision_seq <= entry.against_revision_seq {
+                    return Json(err_debate(
+                        "fixed_by_revision must be newer than against_revision_seq",
+                    ));
                 }
-            } else {
-                return Json(err_debate("invalid pending Advocate disposition"));
-            };
+                match repo.revisions(&entry.proposal_id).await {
+                    Ok(rows) if rows.iter().any(|row| row.seq == *revision_seq) => {}
+                    Ok(_) => {
+                        return Json(err_debate(
+                            "fixed_by_revision does not exist on this proposal",
+                        ));
+                    }
+                    Err(e) => return Json(err_debate(e.to_string())),
+                }
+            }
             let Some(generation) = repo
                 .feedback_refinement_generation_for_debate(&entry.id)
                 .await
@@ -788,6 +902,65 @@ mod tests {
                 .len(),
             0
         );
+    }
+
+    fn disposition_row(
+        id: &str,
+        metadata: Option<Value>,
+    ) -> djinn_core::models::ProposalDebateTrail {
+        djinn_core::models::ProposalDebateTrail {
+            id: id.to_owned(),
+            proposal_id: "proposal".to_owned(),
+            kind: "rebuttal".to_owned(),
+            body: format!("feedback_disposition:feedback:fixed_by_revision:2"),
+            blocking: false,
+            agent_role: "advocate".to_owned(),
+            author_kind: "agent".to_owned(),
+            author_user_id: None,
+            author_model: None,
+            source_task_id: None,
+            against_revision_seq: 1,
+            round: 1,
+            body_metadata: metadata.map(|value| value.to_string()),
+            resolved_at: None,
+            resolved_by_user_id: None,
+            reopened_at: None,
+            reopened_by_user_id: None,
+            created_at: id.to_owned(),
+            updated_at: id.to_owned(),
+        }
+    }
+
+    #[test]
+    fn pending_disposition_requires_control_plane_metadata() {
+        let forged = disposition_row("forged", None);
+        assert!(pending_feedback_disposition(&[forged], "feedback").is_none());
+    }
+
+    #[test]
+    fn rejected_disposition_cannot_be_accepted_without_a_new_proposal() {
+        let disposition = FeedbackRefinementDisposition::FixedRevision { revision_seq: 2 };
+        let rejected = disposition_row(
+            "rejected",
+            Some(feedback_disposition_metadata("feedback", &disposition)),
+        );
+        let rejection = disposition_row(
+            "verdict",
+            Some(json!({
+                "kind": FEEDBACK_DISPOSITION_REJECTION_METADATA_KIND,
+                "human_feedback_entry_id": "feedback",
+                "rejected_disposition_entry_id": "rejected",
+            })),
+        );
+        assert!(pending_feedback_disposition(&[rejected.clone(), rejection], "feedback").is_none());
+
+        let replacement = disposition_row(
+            "replacement",
+            Some(feedback_disposition_metadata("feedback", &disposition)),
+        );
+        let pending = pending_feedback_disposition(&[rejected, replacement], "feedback")
+            .expect("a replacement disposition should be pending");
+        assert_eq!(pending.0.id, "replacement");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
