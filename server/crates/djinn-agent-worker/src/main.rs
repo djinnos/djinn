@@ -183,6 +183,18 @@ const CARGO_TARGET_DIR_ENV: &str = "CARGO_TARGET_DIR";
 const ENV_WARM_GRAPH_ATTEMPT_ID: &str = "DJINN_WARM_GRAPH_ATTEMPT_ID";
 const ENV_WARM_GRAPH_ATTEMPT_DEADLINE: &str = "DJINN_WARM_GRAPH_ATTEMPT_DEADLINE";
 
+/// Every environment key `warm-graph` cannot start without.
+///
+/// These sit behind `std::env::var` rather than clap, so the argv-only warm
+/// contract in [`crate::rendered_job_env_contract`] cannot derive them from the
+/// parser the way it derives `task-run`'s. This list is that derivation: adding
+/// a required warm environment key here fails the renderer contract until
+/// `djinn-k8s` projects it, which is the check that was missing when the
+/// producer (#2941) and the consumer (#2942) landed under different names and
+/// every warm Pod exited before warming anything.
+const REQUIRED_WARM_GRAPH_ENVIRONMENT: &[&str] =
+    &[ENV_WARM_GRAPH_ATTEMPT_ID, ENV_WARM_GRAPH_ATTEMPT_DEADLINE];
+
 use worker_services::WorkerSupervisorServices;
 
 /// Top-level arg parser for the worker binary.
@@ -4319,6 +4331,16 @@ async fn finish_failed_warm_attempt(
 }
 
 fn required_warm_environment(key: &str) -> Result<String> {
+    // Every key read here must also be declared in
+    // `REQUIRED_WARM_GRAPH_ENVIRONMENT`, because that list — not this call site
+    // — is what `rendered_job_env_contract` checks the renderer against. A key
+    // required here but absent from the list is a requirement no test can see,
+    // which is precisely how the warm Pod came to fail closed in production.
+    debug_assert!(
+        REQUIRED_WARM_GRAPH_ENVIRONMENT.contains(&key),
+        "`{key}` is required for warm graph but is not declared in \
+         REQUIRED_WARM_GRAPH_ENVIRONMENT, so no test proves any renderer supplies it"
+    );
     let value = std::env::var(key).with_context(|| format!("{key} must be set for warm graph"))?;
     if value.trim().is_empty() {
         anyhow::bail!("{key} must not be blank for warm graph");

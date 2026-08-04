@@ -99,8 +99,8 @@ impl WarmJobDispatcher for AttemptInspectingDispatcher {
                 .and_then(|entry| entry.value.clone())
                 .unwrap_or_else(|| panic!("warm Job missing {key}"))
         };
-        let attempt_id = env_value(crate::warm_job::ENV_WARM_ATTEMPT_ID);
-        let deadline_at = env_value(crate::warm_job::ENV_WARM_ATTEMPT_DEADLINE_AT);
+        let attempt_id = env_value(crate::warm_job::ENV_WARM_GRAPH_ATTEMPT_ID);
+        let deadline_at = env_value(crate::warm_job::ENV_WARM_GRAPH_ATTEMPT_DEADLINE);
         let row = WarmGraphAttemptRepository::new(self.db.clone())
             .get_attempt(&attempt_id)
             .await

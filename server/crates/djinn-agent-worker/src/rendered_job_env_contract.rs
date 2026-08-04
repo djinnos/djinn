@@ -38,9 +38,9 @@ use uuid::Uuid;
 
 use djinn_k8s::config::KubernetesConfig;
 use djinn_k8s::job::build_task_run_job;
-use djinn_k8s::warm_job::{WARM_COMMAND_BIN, build_warm_job};
+use djinn_k8s::warm_job::{WARM_COMMAND_BIN, build_warm_job, stamp_warm_attempt};
 
-use crate::Cli;
+use crate::{Cli, REQUIRED_WARM_GRAPH_ENVIRONMENT};
 
 /// An argument the process cannot start without: clap marked it required and no
 /// default value can stand in for a missing one.
@@ -399,5 +399,67 @@ fn the_unleased_warm_job_renders_no_build_lease_identity() {
             assert_ne!(entry.name, ENV_WARM_LEASE_CONSUMER_ID);
             assert_ne!(entry.name, ENV_WARM_LEASE_FENCING_TOKEN);
         }
+    }
+}
+
+/// **The contract, warm environment path.** Every environment key the
+/// `warm-graph` subcommand cannot start without is present, and non-empty, in
+/// the warm Job the production dispatcher actually posts.
+///
+/// The argv test above is deliberately blind to this: it proves the command
+/// line parses, and asserts only that no *clap* requirement hides behind the
+/// environment. `warm-graph`'s durable attempt projection is read straight from
+/// `std::env::var`, so it never appeared in `Cli::command()` and no assertion
+/// on either side of the boundary compared the two spellings.
+///
+/// That is exactly how this broke. #2941 taught the renderer to project the
+/// attempt as `DJINN_WARM_ATTEMPT_ID`; #2942, merged eleven minutes earlier,
+/// taught the worker to require `DJINN_WARM_GRAPH_ATTEMPT_ID`. Both suites
+/// passed — each asserted its own constant — and every warm Pod for the next
+/// day and a half exited before touching cargo or an indexer, with the graph
+/// frozen at the deploy that shipped them.
+///
+/// The manifest here is stamped the way `K8sGraphWarmer` stamps it, so the
+/// assertion runs against the bytes the apiserver receives.
+#[test]
+fn every_required_warm_graph_environment_key_is_rendered_into_the_job() {
+    let mut job = build_warm_job(
+        &KubernetesConfig::for_testing(),
+        "proj-opsu",
+        "deadbeef",
+        "registry.example/djinn-project:opsu",
+        None,
+    );
+    stamp_warm_attempt(
+        &mut job,
+        "019fc384-c2d5-7460-aeed-5a168b112b03",
+        "2026-08-02T17:30:00Z",
+    );
+
+    let pod = job
+        .spec
+        .as_ref()
+        .and_then(|spec| spec.template.spec.as_ref())
+        .expect("rendered warm Job has a pod spec");
+    let rendered: BTreeMap<&str, &str> = pod
+        .containers
+        .iter()
+        .flat_map(|container| container.env.iter().flatten())
+        .filter_map(|entry| Some((entry.name.as_str(), entry.value.as_deref()?)))
+        .collect();
+
+    for key in REQUIRED_WARM_GRAPH_ENVIRONMENT {
+        let value = rendered.get(key).copied().unwrap_or_else(|| {
+            panic!(
+                "warm-graph cannot start without `{key}`, and the rendered warm Job does not \
+                 project it. Rendered keys: {:?}\nEvery warm Pod dispatched with this manifest \
+                 fails closed before warming anything, and the graph stops advancing.",
+                rendered.keys().collect::<Vec<_>>()
+            )
+        });
+        assert!(
+            !value.trim().is_empty(),
+            "warm-graph rejects a blank `{key}`, but the rendered warm Job projects one"
+        );
     }
 }
