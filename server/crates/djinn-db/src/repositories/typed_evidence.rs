@@ -40,6 +40,13 @@ pub struct TribunalEvidenceReturnV1 {
     #[serde(default)]
     pub gaps: Vec<TribunalEvidenceReturnGapV1>,
 }
+/// Minimal identity recovered independently of full V1 decoding so a malformed
+/// but attributable return still records the required failed lifecycle fact.
+#[derive(serde::Deserialize)]
+struct TribunalEvidenceReturnEnvelopeV1 {
+    #[serde(default)]
+    attempt_id: Option<String>,
+}
 #[derive(Clone, Debug, serde::Deserialize)]
 pub struct TribunalEvidenceReturnCheckV1 {
     pub check_id: String,
@@ -172,7 +179,13 @@ impl TypedEvidenceRepository {
         &self,
         payload_bytes: &[u8],
     ) -> Result<TribunalEvidenceReturnResultV1> {
-        let candidate = serde_json::from_slice::<TribunalEvidenceReturnV1>(payload_bytes).ok();
+        // Required fields may be missing in a malformed body while its attempt
+        // remains authoritative and must receive one failure transition.
+        let rejection_attempt_id =
+            serde_json::from_slice::<TribunalEvidenceReturnEnvelopeV1>(payload_bytes)
+                .ok()
+                .and_then(|envelope| envelope.attempt_id)
+                .filter(|attempt_id| !attempt_id.trim().is_empty());
         let mut tx = self.db.pool().begin().await?;
         match Self::submit_return_v1_in_transaction(&mut tx, payload_bytes).await {
             Ok(result) => {
@@ -181,30 +194,28 @@ impl TypedEvidenceRepository {
             }
             Err(error) => {
                 tx.rollback().await?;
-                if let (Some(candidate), Error::InvalidData(code)) = (candidate, &error) {
-                    self.record_rejected_return(&candidate, code).await?;
+                if let (Some(attempt_id), Error::InvalidData(code)) =
+                    (&rejection_attempt_id, &error)
+                {
+                    self.record_rejected_return(attempt_id, code).await?;
                 }
                 Err(error)
             }
         }
     }
 
-    async fn record_rejected_return(
-        &self,
-        payload: &TribunalEvidenceReturnV1,
-        code: &str,
-    ) -> Result<()> {
+    async fn record_rejected_return(&self, attempt_id: &str, code: &str) -> Result<()> {
         // The attempt is the only caller-supplied identity required to locate
         // the authoritative finding/task pair. An incorrect claimed binding
         // must not suppress the required failed lifecycle fact.
-        if payload.attempt_id.trim().is_empty() {
+        if attempt_id.trim().is_empty() {
             return Ok(());
         }
         let mut tx = self.db.pool().begin().await?;
         let attempt = sqlx::query(
             "SELECT finding_id,spike_task_id FROM typed_evidence_attempts WHERE id=$1 FOR UPDATE",
         )
-        .bind(&payload.attempt_id)
+        .bind(attempt_id)
         .fetch_optional(&mut *tx)
         .await?;
         let Some(attempt) = attempt else {
@@ -214,7 +225,7 @@ impl TypedEvidenceRepository {
         let already_terminal: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM typed_evidence_validation_results WHERE attempt_id=$1)",
         )
-        .bind(&payload.attempt_id)
+        .bind(attempt_id)
         .fetch_one(&mut *tx)
         .await?;
         if already_terminal {
@@ -921,5 +932,21 @@ mod tests {
         assert!(!Demanded.is_terminal());
         assert!(Resolved.is_terminal());
         assert!(Withdrawn.is_terminal());
+    }
+
+    #[test]
+    fn malformed_return_envelope_retains_attempt_identity() {
+        let malformed = br#"{
+            "version":"TribunalEvidenceReturnV1",
+            "finding_id":"finding",
+            "spike_task_id":"task",
+            "attempt_id":"attempt",
+            "checks":[{"check_id":"check","method":"code"}]
+        }"#;
+
+        assert!(serde_json::from_slice::<TribunalEvidenceReturnV1>(malformed).is_err());
+        let envelope = serde_json::from_slice::<TribunalEvidenceReturnEnvelopeV1>(malformed)
+            .expect("minimal envelope must decode despite malformed V1 body");
+        assert_eq!(envelope.attempt_id.as_deref(), Some("attempt"));
     }
 }
