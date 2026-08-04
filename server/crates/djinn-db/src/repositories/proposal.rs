@@ -4691,22 +4691,96 @@ mod tests {
     async fn feedback_boundary_captures_blocking_threads_with_advisory_context() {
         let db = test_db();
         let repo = ProposalRepository::new(db.clone(), EventBus::noop());
-        let proposal = repo.create(create_input("Mixed feedback boundary")).await.unwrap();
-        let root = repo.add_feedback(ProposalFeedbackCreateInput { proposal_id: &proposal.id, parent_id: None, author_kind: "user", author_model: None, body: "blocking root" }).await.unwrap();
-        let advisory = repo.add_feedback(ProposalFeedbackCreateInput { proposal_id: &proposal.id, parent_id: Some(&root.id), author_kind: "user", author_model: None, body: "advisory context" }).await.unwrap();
-        sqlx::query("UPDATE proposal_feedback SET severity='advisory' WHERE id=$1").bind(&advisory.id).execute(db.pool()).await.unwrap();
-        let reply = repo.add_feedback(ProposalFeedbackCreateInput { proposal_id: &proposal.id, parent_id: Some(&root.id), author_kind: "user", author_model: None, body: "blocking reply" }).await.unwrap();
+        let proposal = repo
+            .create(create_input("Mixed feedback boundary"))
+            .await
+            .unwrap();
+        let root = repo
+            .add_feedback(ProposalFeedbackCreateInput {
+                proposal_id: &proposal.id,
+                parent_id: None,
+                author_kind: "user",
+                author_model: None,
+                body: "blocking root",
+            })
+            .await
+            .unwrap();
+        let advisory = repo
+            .add_feedback(ProposalFeedbackCreateInput {
+                proposal_id: &proposal.id,
+                parent_id: Some(&root.id),
+                author_kind: "user",
+                author_model: None,
+                body: "advisory context",
+            })
+            .await
+            .unwrap();
+        sqlx::query("UPDATE proposal_feedback SET severity='advisory' WHERE id=$1")
+            .bind(&advisory.id)
+            .execute(db.pool())
+            .await
+            .unwrap();
+        let reply = repo
+            .add_feedback(ProposalFeedbackCreateInput {
+                proposal_id: &proposal.id,
+                parent_id: Some(&root.id),
+                author_kind: "user",
+                author_model: None,
+                body: "blocking reply",
+            })
+            .await
+            .unwrap();
 
         // A resolved root remains the thread key for its unresolved child.
-        let resolved_root = repo.add_feedback(ProposalFeedbackCreateInput { proposal_id: &proposal.id, parent_id: None, author_kind: "user", author_model: None, body: "resolved root" }).await.unwrap();
-        let resolved_reply = repo.add_feedback(ProposalFeedbackCreateInput { proposal_id: &proposal.id, parent_id: Some(&resolved_root.id), author_kind: "user", author_model: None, body: "unresolved reply" }).await.unwrap();
-        repo.set_feedback_resolved(&resolved_root.id, Some(1)).await.unwrap();
-        let advisory_only = repo.add_feedback(ProposalFeedbackCreateInput { proposal_id: &proposal.id, parent_id: None, author_kind: "user", author_model: None, body: "advisory only" }).await.unwrap();
-        sqlx::query("UPDATE proposal_feedback SET severity='advisory' WHERE id=$1").bind(&advisory_only.id).execute(db.pool()).await.unwrap();
+        let resolved_root = repo
+            .add_feedback(ProposalFeedbackCreateInput {
+                proposal_id: &proposal.id,
+                parent_id: None,
+                author_kind: "user",
+                author_model: None,
+                body: "resolved root",
+            })
+            .await
+            .unwrap();
+        let resolved_reply = repo
+            .add_feedback(ProposalFeedbackCreateInput {
+                proposal_id: &proposal.id,
+                parent_id: Some(&resolved_root.id),
+                author_kind: "user",
+                author_model: None,
+                body: "unresolved reply",
+            })
+            .await
+            .unwrap();
+        repo.set_feedback_resolved(&resolved_root.id, Some(1))
+            .await
+            .unwrap();
+        let advisory_only = repo
+            .add_feedback(ProposalFeedbackCreateInput {
+                proposal_id: &proposal.id,
+                parent_id: None,
+                author_kind: "user",
+                author_model: None,
+                body: "advisory only",
+            })
+            .await
+            .unwrap();
+        sqlx::query("UPDATE proposal_feedback SET severity='advisory' WHERE id=$1")
+            .bind(&advisory_only.id)
+            .execute(db.pool())
+            .await
+            .unwrap();
 
-        let captured = repo.capture_feedback_refinement_boundary(&proposal.id).await.unwrap();
+        let captured = repo
+            .capture_feedback_refinement_boundary(&proposal.id)
+            .await
+            .unwrap();
         assert_eq!(captured.captures.len(), 2);
-        let first = captured.captures.iter().find(|c| c.injection.root_feedback_id == root.id).unwrap();
+        let first = captured
+            .captures
+            .iter()
+            .find(|c| c.injection.root_feedback_id == root.id)
+            .unwrap();
         assert_eq!(first.debate_entry.kind, "human_feedback");
         assert!(first.debate_entry.blocking);
         assert_eq!(first.sources.len(), 3);
@@ -4714,24 +4788,54 @@ mod tests {
         assert_eq!(first.sources[0].source_parent_id, None);
         assert_eq!(first.sources[0].source_body, "blocking root");
         assert_eq!(first.sources[1].source_feedback_id, advisory.id);
-        assert_eq!(first.sources[1].source_parent_id.as_deref(), Some(root.id.as_str()));
+        assert_eq!(
+            first.sources[1].source_parent_id.as_deref(),
+            Some(root.id.as_str())
+        );
         assert_eq!(first.sources[1].source_body, "advisory context");
         assert_eq!(first.sources[1].source_severity, "advisory");
         assert_eq!(first.sources[2].source_feedback_id, reply.id);
         assert_eq!(first.sources[2].source_body, "blocking reply");
-        let resolved_thread = captured.captures.iter().find(|c| c.injection.root_feedback_id == resolved_root.id).unwrap();
+        let resolved_thread = captured
+            .captures
+            .iter()
+            .find(|c| c.injection.root_feedback_id == resolved_root.id)
+            .unwrap();
         assert_eq!(resolved_thread.sources.len(), 1);
-        assert_eq!(resolved_thread.sources[0].source_feedback_id, resolved_reply.id);
-        assert_eq!(resolved_thread.sources[0].source_parent_id.as_deref(), Some(resolved_root.id.as_str()));
-        assert!(!captured.captures.iter().any(|c| c.injection.root_feedback_id == advisory_only.id));
+        assert_eq!(
+            resolved_thread.sources[0].source_feedback_id,
+            resolved_reply.id
+        );
+        assert_eq!(
+            resolved_thread.sources[0].source_parent_id.as_deref(),
+            Some(resolved_root.id.as_str())
+        );
+        assert!(
+            !captured
+                .captures
+                .iter()
+                .any(|c| c.injection.root_feedback_id == advisory_only.id)
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn feedback_boundary_late_identical_feedback_forms_a_later_generation() {
         let db = test_db();
         let repo = ProposalRepository::new(db.clone(), EventBus::noop());
-        let proposal = repo.create(create_input("Cutoff feedback boundary")).await.unwrap();
-        let root = repo.add_feedback(ProposalFeedbackCreateInput { proposal_id: &proposal.id, parent_id: None, author_kind: "user", author_model: None, body: "same verbatim body" }).await.unwrap();
+        let proposal = repo
+            .create(create_input("Cutoff feedback boundary"))
+            .await
+            .unwrap();
+        let root = repo
+            .add_feedback(ProposalFeedbackCreateInput {
+                proposal_id: &proposal.id,
+                parent_id: None,
+                author_kind: "user",
+                author_model: None,
+                body: "same verbatim body",
+            })
+            .await
+            .unwrap();
         // The injection trigger runs after the repository has selected its
         // database timestamp and ID cutoff. It gives a separate connection a
         // deterministic window to commit feedback after that boundary.
@@ -4748,10 +4852,22 @@ mod tests {
 
         // V1 uses source identity, not body hashes: an identical post-cutoff
         // reply must remain eligible for the next root generation.
-        let late = repo.add_feedback(ProposalFeedbackCreateInput { proposal_id: &proposal.id, parent_id: Some(&root.id), author_kind: "user", author_model: None, body: "same verbatim body" }).await.unwrap();
+        let late = repo
+            .add_feedback(ProposalFeedbackCreateInput {
+                proposal_id: &proposal.id,
+                parent_id: Some(&root.id),
+                author_kind: "user",
+                author_model: None,
+                body: "same verbatim body",
+            })
+            .await
+            .unwrap();
         let first = first_task.await.unwrap().unwrap();
         sqlx::query("DROP TRIGGER pause_feedback_boundary_for_test ON proposal_feedback_refinement_injections").execute(db.pool()).await.unwrap();
-        let second = repo.capture_feedback_refinement_boundary(&proposal.id).await.unwrap();
+        let second = repo
+            .capture_feedback_refinement_boundary(&proposal.id)
+            .await
+            .unwrap();
         assert_eq!(second.captures.len(), 1);
         assert_eq!(first.captures[0].injection.generation, 1);
         assert_eq!(first.captures[0].sources.len(), 1);
@@ -4760,24 +4876,54 @@ mod tests {
         assert_eq!(second.captures[0].injection.generation, 2);
         assert_eq!(second.captures[0].sources.len(), 1);
         assert_eq!(second.captures[0].sources[0].source_feedback_id, late.id);
-        assert_eq!(second.captures[0].sources[0].source_body, "same verbatim body");
+        assert_eq!(
+            second.captures[0].sources[0].source_body,
+            "same verbatim body"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn feedback_boundary_concurrent_calls_share_one_materialization() {
         let db = test_db();
         let setup = ProposalRepository::new(db.clone(), EventBus::noop());
-        let proposal = setup.create(create_input("Concurrent feedback boundary")).await.unwrap();
-        setup.add_feedback(ProposalFeedbackCreateInput { proposal_id: &proposal.id, parent_id: None, author_kind: "user", author_model: None, body: "one concurrent objection" }).await.unwrap();
+        let proposal = setup
+            .create(create_input("Concurrent feedback boundary"))
+            .await
+            .unwrap();
+        setup
+            .add_feedback(ProposalFeedbackCreateInput {
+                proposal_id: &proposal.id,
+                parent_id: None,
+                author_kind: "user",
+                author_model: None,
+                body: "one concurrent objection",
+            })
+            .await
+            .unwrap();
         let left = ProposalRepository::new(db.clone(), EventBus::noop());
         let right = ProposalRepository::new(db.clone(), EventBus::noop());
-        let (left, right) = tokio::join!(left.capture_feedback_refinement_boundary(&proposal.id), right.capture_feedback_refinement_boundary(&proposal.id));
+        let (left, right) = tokio::join!(
+            left.capture_feedback_refinement_boundary(&proposal.id),
+            right.capture_feedback_refinement_boundary(&proposal.id)
+        );
         let left = left.unwrap();
         let right = right.unwrap();
         assert_eq!(left.captures.len(), 1);
         assert_eq!(right.captures.len(), 1);
-        assert_eq!(left.captures[0].injection.id, right.captures[0].injection.id);
-        assert_eq!(sqlx::query_scalar::<_, i64>("SELECT count(*) FROM proposal_feedback_refinement_injections WHERE proposal_id=$1").bind(&proposal.id).fetch_one(db.pool()).await.unwrap(), 1);
+        assert_eq!(
+            left.captures[0].injection.id,
+            right.captures[0].injection.id
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM proposal_feedback_refinement_injections WHERE proposal_id=$1"
+            )
+            .bind(&proposal.id)
+            .fetch_one(db.pool())
+            .await
+            .unwrap(),
+            1
+        );
         assert_eq!(sqlx::query_scalar::<_, i64>("SELECT count(*) FROM proposal_debate_trail WHERE proposal_id=$1 AND kind='human_feedback'").bind(&proposal.id).fetch_one(db.pool()).await.unwrap(), 1);
     }
 
@@ -4785,13 +4931,37 @@ mod tests {
     async fn feedback_boundary_rolls_back_claim_sources_debate_and_lifecycle() {
         let db = test_db();
         let repo = ProposalRepository::new(db.clone(), EventBus::noop());
-        let proposal = repo.create(create_input("Rollback feedback boundary")).await.unwrap();
-        repo.add_feedback(ProposalFeedbackCreateInput { proposal_id: &proposal.id, parent_id: None, author_kind: "user", author_model: None, body: "must not be claimed on failure" }).await.unwrap();
+        let proposal = repo
+            .create(create_input("Rollback feedback boundary"))
+            .await
+            .unwrap();
+        repo.add_feedback(ProposalFeedbackCreateInput {
+            proposal_id: &proposal.id,
+            parent_id: None,
+            author_kind: "user",
+            author_model: None,
+            body: "must not be claimed on failure",
+        })
+        .await
+        .unwrap();
         sqlx::query("CREATE FUNCTION reject_feedback_boundary_for_test() RETURNS trigger AS $$ BEGIN RAISE EXCEPTION 'injected feedback boundary failure'; END; $$ LANGUAGE plpgsql").execute(db.pool()).await.unwrap();
         sqlx::query("CREATE TRIGGER reject_feedback_boundary_for_test BEFORE INSERT ON proposal_debate_trail FOR EACH ROW EXECUTE FUNCTION reject_feedback_boundary_for_test()").execute(db.pool()).await.unwrap();
 
-        assert!(repo.capture_feedback_refinement_boundary(&proposal.id).await.is_err());
-        assert_eq!(sqlx::query_scalar::<_, i64>("SELECT count(*) FROM proposal_feedback_refinement_injections WHERE proposal_id=$1").bind(&proposal.id).fetch_one(db.pool()).await.unwrap(), 0);
+        assert!(
+            repo.capture_feedback_refinement_boundary(&proposal.id)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM proposal_feedback_refinement_injections WHERE proposal_id=$1"
+            )
+            .bind(&proposal.id)
+            .fetch_one(db.pool())
+            .await
+            .unwrap(),
+            0
+        );
         assert_eq!(sqlx::query_scalar::<_, i64>("SELECT count(*) FROM proposal_feedback_refinement_sources s JOIN proposal_feedback_refinement_injections i ON i.id=s.injection_id WHERE i.proposal_id=$1").bind(&proposal.id).fetch_one(db.pool()).await.unwrap(), 0);
         assert_eq!(sqlx::query_scalar::<_, i64>("SELECT count(*) FROM proposal_debate_trail WHERE proposal_id=$1 AND kind='human_feedback'").bind(&proposal.id).fetch_one(db.pool()).await.unwrap(), 0);
         assert_eq!(sqlx::query_scalar::<_, i64>("SELECT count(*) FROM proposal_revisions WHERE proposal_id=$1 AND event_kind='feedback_refinement_materialized'").bind(&proposal.id).fetch_one(db.pool()).await.unwrap(), 0);
