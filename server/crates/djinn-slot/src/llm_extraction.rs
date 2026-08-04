@@ -3479,6 +3479,32 @@ mod tests {
     }
 
     #[test]
+    fn interesting_tool_result_slice_handles_multibyte_scalars_at_and_over_cap() {
+        let at_cap = "🦀漢é".repeat(500);
+        assert_eq!(at_cap.chars().count(), 1_500);
+        assert_eq!(
+            take_interesting_tool_result_chars(&at_cap),
+            at_cap,
+            "an input at the scalar-value cap must pass through unchanged"
+        );
+
+        let over_cap = format!("開始{}終端診断", "🦀漢é".repeat(501));
+        let sliced = take_interesting_tool_result_chars(&over_cap);
+        assert_eq!(
+            sliced.chars().count(),
+            1_500,
+            "the omission marker counts within the scalar-value cap"
+        );
+        assert!(sliced.starts_with("開始"));
+        assert!(sliced.contains("…[omitted]…"));
+        assert!(sliced.ends_with("終端診断"));
+        assert!(
+            std::str::from_utf8(sliced.as_bytes()).is_ok(),
+            "multibyte scalar slicing must return valid UTF-8 rather than split bytes"
+        );
+    }
+
+    #[test]
     fn transcript_excerpt_tail_slices_long_error_results() {
         use djinn_core::message::{ContentBlock, Message, Role};
 
@@ -3690,6 +3716,35 @@ mod tests {
         );
         assert!(!out.contains("line 0:"), "head should be dropped");
     }
+
+    #[test]
+    fn transcript_excerpt_outer_trim_keeps_byte_bounded_unicode_suffix() {
+        use djinn_core::message::{ContentBlock, Message, Role};
+
+        const OUTER_OMISSION_PREFIX: &str = "…(earlier turns omitted)…\n";
+        let body = "🦀漢é".repeat(4_000);
+        let full = format!("assistant: {body}");
+        assert!(full.len() > TRANSCRIPT_EXCERPT_CHARS);
+        let messages = vec![Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::text(body)],
+            metadata: None,
+        }];
+
+        let out = build_transcript_excerpt(&messages, TRANSCRIPT_EXCERPT_CHARS);
+        let suffix = out
+            .strip_prefix(OUTER_OMISSION_PREFIX)
+            .expect("an over-threshold transcript must carry the exact outer omission prefix");
+        let suffix_start = full.len() - suffix.len();
+        assert!(suffix.len() <= TRANSCRIPT_EXCERPT_CHARS);
+        assert!(
+            full.is_char_boundary(suffix_start),
+            "the retained suffix must begin at a Unicode character boundary"
+        );
+        assert!(full.ends_with(suffix));
+        assert_eq!(out, format!("{OUTER_OMISSION_PREFIX}{suffix}"));
+    }
+
     #[test]
     fn parse_extraction_response_accepts_typed_revision_operations() {
         let patch_id = "018f0000-0000-7000-8000-000000000001";
