@@ -181,6 +181,9 @@ pub enum FeedbackRefinementDisposition {
 pub struct FeedbackRefinementDispositionInput {
     pub proposal_id: String,
     pub injection_id: String,
+    /// Immutable root/generation identity observed when the debate was materialized.
+    pub root_feedback_id: String,
+    pub generation: i32,
     pub debate_entry_id: String,
     pub disposition: FeedbackRefinementDisposition,
 }
@@ -1076,35 +1079,52 @@ impl ProposalRepository {
         feedback_id: &str,
         withdrawn_by_user_id: &str,
     ) -> Result<ProposalFeedback> {
+        let (feedback, _) = self.withdraw_feedback_with_refinement_derivation(feedback_id, withdrawn_by_user_id).await?;
+        Ok(feedback)
+    }
+
+    /// Withdraw feedback and close linked materialized objections only once every captured blocking snapshot row is withdrawn.
+    pub async fn withdraw_feedback_with_refinement_derivation(&self, feedback_id: &str, withdrawn_by_user_id: &str) -> Result<(ProposalFeedback, Vec<FeedbackRefinementWithdrawalResult>)> {
         self.db.ensure_initialized().await?;
-        if withdrawn_by_user_id.trim().is_empty() {
-            return Err(Error::InvalidData("withdrawn_by_user_id must be non-empty".into()));
+        if withdrawn_by_user_id.trim().is_empty() { return Err(Error::InvalidData("withdrawn_by_user_id must be non-empty".into())); }
+        let mut tx = self.db.pool().begin().await?;
+        sqlx::query(r#"UPDATE proposal_feedback SET withdrawn_at=to_char(transaction_timestamp() AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'), withdrawn_by_user_id=$1, updated_at=to_char(transaction_timestamp() AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') WHERE id=$2"#).bind(withdrawn_by_user_id).bind(feedback_id).execute(&mut *tx).await?;
+        let feedback: ProposalFeedback = sqlx::query_as("SELECT id,proposal_id,parent_id,author_kind,author_user_id,author_model,body,severity,withdrawn_at,withdrawn_by_user_id,resolved_at,resolved_revision_seq,resolved_by_user_id,created_at,updated_at FROM proposal_feedback WHERE id=$1").bind(feedback_id).fetch_optional(&mut *tx).await?.ok_or_else(|| Error::InvalidData("feedback not found".into()))?;
+        let injections: Vec<ProposalFeedbackRefinementInjection> = sqlx::query_as("SELECT id,proposal_id,root_feedback_id,generation,state,cutoff_at,cutoff_feedback_id,round,debate_entry_id,accepted_disposition,accepted_revision_seq,accepted_reason,accepted_at,accepted_by_user_id,created_at,updated_at FROM proposal_feedback_refinement_injections i WHERE i.state='injected' AND EXISTS (SELECT 1 FROM proposal_feedback_refinement_sources s WHERE s.injection_id=i.id AND s.source_feedback_id=$1) FOR UPDATE").bind(feedback_id).fetch_all(&mut *tx).await?;
+        let mut results=Vec::with_capacity(injections.len());
+        for injection in injections {
+            let debate_id=injection.debate_entry_id.as_deref().ok_or_else(|| Error::InvalidData("materialized injection has no debate link".into()))?;
+            let ready: bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM proposal_feedback_refinement_sources s WHERE s.injection_id=$1 AND s.source_severity='blocking') AND NOT EXISTS(SELECT 1 FROM proposal_feedback_refinement_sources s JOIN proposal_feedback f ON f.id=s.source_feedback_id WHERE s.injection_id=$1 AND s.source_severity='blocking' AND f.withdrawn_at IS NULL)").bind(&injection.id).fetch_one(&mut *tx).await?;
+            let debate: ProposalDebateTrail=sqlx::query_as("SELECT id,proposal_id,kind,body,blocking,agent_role,author_kind,author_user_id,author_model,source_task_id,against_revision_seq,round,body_metadata::text AS body_metadata,resolved_at,resolved_by_user_id,reopened_at,reopened_by_user_id,created_at,updated_at FROM proposal_debate_trail WHERE id=$1 FOR UPDATE").bind(debate_id).fetch_one(&mut *tx).await?;
+            if debate.proposal_id != injection.proposal_id || debate.kind != "human_feedback" { return Err(Error::InvalidData("invalid linked debate entry".into())); }
+            if !ready { results.push(FeedbackRefinementWithdrawalResult { injection, debate_entry: debate, withdrawn:false }); continue; }
+            let injection: ProposalFeedbackRefinementInjection=sqlx::query_as("UPDATE proposal_feedback_refinement_injections SET state='withdrawn_by_author',updated_at=to_char(transaction_timestamp() AT TIME ZONE 'utc','YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') WHERE id=$1 RETURNING id,proposal_id,root_feedback_id,generation,state,cutoff_at,cutoff_feedback_id,round,debate_entry_id,accepted_disposition,accepted_revision_seq,accepted_reason,accepted_at,accepted_by_user_id,created_at,updated_at").bind(&injection.id).fetch_one(&mut *tx).await?;
+            let debate: ProposalDebateTrail=sqlx::query_as("UPDATE proposal_debate_trail SET resolved_at=to_char(transaction_timestamp() AT TIME ZONE 'utc','YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'),resolved_by_user_id=$1,reopened_at=NULL,reopened_by_user_id=NULL WHERE id=$2 RETURNING id,proposal_id,kind,body,blocking,agent_role,author_kind,author_user_id,author_model,source_task_id,against_revision_seq,round,body_metadata::text AS body_metadata,resolved_at,resolved_by_user_id,reopened_at,reopened_by_user_id,created_at,updated_at").bind(withdrawn_by_user_id).bind(debate_id).fetch_one(&mut *tx).await?;
+            results.push(FeedbackRefinementWithdrawalResult { injection, debate_entry: debate, withdrawn:true });
         }
-        sqlx::query(r#"UPDATE proposal_feedback SET withdrawn_at=to_char(transaction_timestamp() AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'), withdrawn_by_user_id=$1, updated_at=to_char(transaction_timestamp() AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') WHERE id=$2"#)
-            .bind(withdrawn_by_user_id).bind(feedback_id).execute(self.db.pool()).await?;
-        self.get_feedback_required(feedback_id).await
+        tx.commit().await?; Ok((feedback, results))
     }
 
     /// Dispose a generation atomically and write back exactly its captured rows.
     pub async fn dispose_feedback_refinement_generation(&self, input: FeedbackRefinementDispositionInput) -> Result<FeedbackRefinementDispositionResult> {
         self.db.ensure_initialized().await?;
-        let (state, disposition, revision) = match input.disposition {
-            FeedbackRefinementDisposition::FixedRevision { revision_seq } if revision_seq > 0 => ("accepted", "fixed_revision", Some(revision_seq)),
+        let (state, disposition, revision, reason) = match input.disposition {
+            FeedbackRefinementDisposition::FixedRevision { revision_seq } if revision_seq > 0 => ("accepted", "fixed_revision", Some(revision_seq), None),
             FeedbackRefinementDisposition::FixedRevision { .. } => return Err(Error::InvalidData("fixed revision must be positive".into())),
-            FeedbackRefinementDisposition::WontFix { reason } if !reason.trim().is_empty() => ("wont_fix", "wont_fix", None),
+            FeedbackRefinementDisposition::WontFix { reason } if !reason.trim().is_empty() => ("wont_fix", "wont_fix", None, Some(reason.trim().to_owned())),
             FeedbackRefinementDisposition::WontFix { .. } => return Err(Error::InvalidData("wont-fix reason must be non-empty".into())),
         };
         let mut tx=self.db.pool().begin().await?;
-        let injection: ProposalFeedbackRefinementInjection=sqlx::query_as("SELECT id,proposal_id,root_feedback_id,generation,state,cutoff_at,cutoff_feedback_id,round,debate_entry_id,accepted_disposition,accepted_revision_seq,accepted_at,accepted_by_user_id,created_at,updated_at FROM proposal_feedback_refinement_injections WHERE id=$1 FOR UPDATE").bind(&input.injection_id).fetch_optional(&mut *tx).await?.ok_or_else(|| Error::InvalidData("feedback injection not found".into()))?;
-        if injection.proposal_id != input.proposal_id || injection.debate_entry_id.as_deref()!=Some(&input.debate_entry_id) { return Err(Error::InvalidData("feedback disposition links do not match injection".into())); }
+        let injection: ProposalFeedbackRefinementInjection=sqlx::query_as("SELECT id,proposal_id,root_feedback_id,generation,state,cutoff_at,cutoff_feedback_id,round,debate_entry_id,accepted_disposition,accepted_revision_seq,accepted_reason,accepted_at,accepted_by_user_id,created_at,updated_at FROM proposal_feedback_refinement_injections WHERE id=$1 FOR UPDATE").bind(&input.injection_id).fetch_optional(&mut *tx).await?.ok_or_else(|| Error::InvalidData("feedback injection not found".into()))?;
+        if injection.proposal_id != input.proposal_id || injection.root_feedback_id != input.root_feedback_id || injection.generation != input.generation || injection.debate_entry_id.as_deref()!=Some(&input.debate_entry_id) { return Err(Error::InvalidData("feedback disposition links do not match injection".into())); }
         let sources:Vec<String>=sqlx::query_scalar("SELECT s.source_feedback_id FROM proposal_feedback_refinement_sources s JOIN proposal_feedback f ON f.id=s.source_feedback_id WHERE s.injection_id=$1 AND f.proposal_id=$2 ORDER BY s.source_ordinal").bind(&injection.id).bind(&input.proposal_id).fetch_all(&mut *tx).await?;
         if sources.is_empty() { return Err(Error::InvalidData("feedback injection has no captured sources".into())); }
         let debate:ProposalDebateTrail=sqlx::query_as("SELECT id,proposal_id,kind,body,blocking,agent_role,author_kind,author_user_id,author_model,source_task_id,against_revision_seq,round,body_metadata::text AS body_metadata,resolved_at,resolved_by_user_id,reopened_at,reopened_by_user_id,created_at,updated_at FROM proposal_debate_trail WHERE id=$1 FOR UPDATE").bind(&input.debate_entry_id).fetch_one(&mut *tx).await?;
         if debate.proposal_id != input.proposal_id || debate.kind != "human_feedback" { return Err(Error::InvalidData("invalid linked debate entry".into())); }
-        if injection.state==state && injection.accepted_disposition.as_deref()==Some(disposition) && injection.accepted_revision_seq==revision { tx.commit().await?; return Ok(FeedbackRefinementDispositionResult{injection,debate_entry:debate,source_feedback_ids:sources,replayed:true}); }
+        if injection.state==state && injection.accepted_disposition.as_deref()==Some(disposition) && injection.accepted_revision_seq==revision && injection.accepted_reason==reason { tx.commit().await?; return Ok(FeedbackRefinementDispositionResult{injection,debate_entry:debate,source_feedback_ids:sources,replayed:true}); }
         if injection.state != "injected" { return Err(Error::InvalidTransition("feedback generation already has a conflicting disposition".into())); }
         sqlx::query("UPDATE proposal_feedback f SET resolved_at=to_char(transaction_timestamp() AT TIME ZONE 'utc','YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'),resolved_revision_seq=$1,resolved_by_user_id=$2 FROM proposal_feedback_refinement_sources s WHERE s.injection_id=$3 AND f.id=s.source_feedback_id AND f.proposal_id=$4").bind(revision).bind(djinn_core::auth_context::current_user_id()).bind(&injection.id).bind(&input.proposal_id).execute(&mut *tx).await?;
-        let injection:ProposalFeedbackRefinementInjection=sqlx::query_as("UPDATE proposal_feedback_refinement_injections SET state=$1,accepted_disposition=$2,accepted_revision_seq=$3,accepted_at=to_char(transaction_timestamp() AT TIME ZONE 'utc','YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'),accepted_by_user_id=$4 WHERE id=$5 RETURNING id,proposal_id,root_feedback_id,generation,state,cutoff_at,cutoff_feedback_id,round,debate_entry_id,accepted_disposition,accepted_revision_seq,accepted_at,accepted_by_user_id,created_at,updated_at").bind(state).bind(disposition).bind(revision).bind(djinn_core::auth_context::current_user_id()).bind(&input.injection_id).fetch_one(&mut *tx).await?;
+        let injection:ProposalFeedbackRefinementInjection=sqlx::query_as("UPDATE proposal_feedback_refinement_injections SET state=$1,accepted_disposition=$2,accepted_revision_seq=$3,accepted_reason=$4,accepted_at=to_char(transaction_timestamp() AT TIME ZONE 'utc','YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'),accepted_by_user_id=$5 WHERE id=$6 RETURNING id,proposal_id,root_feedback_id,generation,state,cutoff_at,cutoff_feedback_id,round,debate_entry_id,accepted_disposition,accepted_revision_seq,accepted_reason,accepted_at,accepted_by_user_id,created_at,updated_at").bind(state).bind(disposition).bind(revision).bind(&reason).bind(djinn_core::auth_context::current_user_id()).bind(&input.injection_id).fetch_one(&mut *tx).await?;
         let debate:ProposalDebateTrail=sqlx::query_as("UPDATE proposal_debate_trail SET resolved_at=to_char(transaction_timestamp() AT TIME ZONE 'utc','YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'),resolved_by_user_id=$1,reopened_at=NULL,reopened_by_user_id=NULL WHERE id=$2 RETURNING id,proposal_id,kind,body,blocking,agent_role,author_kind,author_user_id,author_model,source_task_id,against_revision_seq,round,body_metadata::text AS body_metadata,resolved_at,resolved_by_user_id,reopened_at,reopened_by_user_id,created_at,updated_at").bind(djinn_core::auth_context::current_user_id()).bind(&input.debate_entry_id).fetch_one(&mut *tx).await?;
         tx.commit().await?; Ok(FeedbackRefinementDispositionResult{injection,debate_entry:debate,source_feedback_ids:sources,replayed:false})
     }
@@ -1188,7 +1208,7 @@ impl ProposalRepository {
         // A queued row is a durable claim, not a request to allocate another
         // generation. Migration 182 permits it to lack sources and/or debate.
         let queued: Vec<ProposalFeedbackRefinementInjection> = sqlx::query_as(
-            r#"SELECT id,proposal_id,root_feedback_id,generation,state,cutoff_at,cutoff_feedback_id,round,debate_entry_id,accepted_disposition,accepted_revision_seq,accepted_at,accepted_by_user_id,created_at,updated_at
+            r#"SELECT id,proposal_id,root_feedback_id,generation,state,cutoff_at,cutoff_feedback_id,round,debate_entry_id,accepted_disposition,accepted_revision_seq,accepted_reason,accepted_at,accepted_by_user_id,created_at,updated_at
                 FROM proposal_feedback_refinement_injections
                 WHERE proposal_id=$1 AND state='queued' ORDER BY root_feedback_id,generation"#,
         ).bind(proposal_id).fetch_all(&mut *tx).await?;
@@ -1315,13 +1335,13 @@ impl ProposalRepository {
                 sqlx::query_as(r#"UPDATE proposal_feedback_refinement_injections SET state='injected',debate_entry_id=$1,
                     updated_at=to_char(transaction_timestamp() AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
                     WHERE id=$2 AND state='queued'
-                    RETURNING id,proposal_id,root_feedback_id,generation,state,cutoff_at,cutoff_feedback_id,round,debate_entry_id,accepted_disposition,accepted_revision_seq,accepted_at,accepted_by_user_id,created_at,updated_at"#)
+                    RETURNING id,proposal_id,root_feedback_id,generation,state,cutoff_at,cutoff_feedback_id,round,debate_entry_id,accepted_disposition,accepted_revision_seq,accepted_reason,accepted_at,accepted_by_user_id,created_at,updated_at"#)
                     .bind(&debate.id).bind(&queued.id).fetch_one(&mut *tx).await?
             } else {
                 sqlx::query_as(r#"INSERT INTO proposal_feedback_refinement_injections
                     (id,proposal_id,root_feedback_id,generation,state,cutoff_at,cutoff_feedback_id,round,debate_entry_id)
                     VALUES ($1,$2,$3,$4,'injected',$5,$6,$7,$8)
-                    RETURNING id,proposal_id,root_feedback_id,generation,state,cutoff_at,cutoff_feedback_id,round,debate_entry_id,accepted_disposition,accepted_revision_seq,accepted_at,accepted_by_user_id,created_at,updated_at"#)
+                    RETURNING id,proposal_id,root_feedback_id,generation,state,cutoff_at,cutoff_feedback_id,round,debate_entry_id,accepted_disposition,accepted_revision_seq,accepted_reason,accepted_at,accepted_by_user_id,created_at,updated_at"#)
                     .bind(&injection_id).bind(proposal_id).bind(&root).bind(generation).bind(&cutoff_at)
                     .bind(&cutoff_id).bind(round).bind(&debate.id).fetch_one(&mut *tx).await?
             };
@@ -5038,6 +5058,48 @@ mod tests {
         assert_eq!(sqlx::query_scalar::<_, i64>("SELECT count(*) FROM proposal_feedback_refinement_sources s JOIN proposal_feedback_refinement_injections i ON i.id=s.injection_id WHERE i.proposal_id=$1").bind(&proposal.id).fetch_one(db.pool()).await.unwrap(), 0);
         assert_eq!(sqlx::query_scalar::<_, i64>("SELECT count(*) FROM proposal_debate_trail WHERE proposal_id=$1 AND kind='human_feedback'").bind(&proposal.id).fetch_one(db.pool()).await.unwrap(), 0);
         assert_eq!(sqlx::query_scalar::<_, i64>("SELECT count(*) FROM proposal_revisions WHERE proposal_id=$1 AND event_kind='feedback_refinement_materialized'").bind(&proposal.id).fetch_one(db.pool()).await.unwrap(), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn feedback_disposition_and_withdrawal_target_exact_captured_generation() {
+        let db = test_db();
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let proposal = repo.create(create_input("Disposition exact generation")).await.unwrap();
+        let root = repo.add_feedback(ProposalFeedbackCreateInput { proposal_id: &proposal.id, parent_id: None, author_kind: "user", author_model: None, body: "root" }).await.unwrap();
+        let captured = repo.capture_feedback_refinement_boundary(&proposal.id).await.unwrap();
+        let capture = &captured.captures[0];
+        let late = repo.add_feedback(ProposalFeedbackCreateInput { proposal_id: &proposal.id, parent_id: Some(&root.id), author_kind: "user", author_model: None, body: "late" }).await.unwrap();
+        let input = FeedbackRefinementDispositionInput {
+            proposal_id: proposal.id.clone(), injection_id: capture.injection.id.clone(),
+            root_feedback_id: capture.injection.root_feedback_id.clone(), generation: capture.injection.generation,
+            debate_entry_id: capture.debate_entry.id.clone(), disposition: FeedbackRefinementDisposition::WontFix { reason: "not feasible".into() },
+        };
+        let first = repo.dispose_feedback_refinement_generation(input.clone()).await.unwrap();
+        assert!(!first.replayed);
+        assert_eq!(first.injection.accepted_reason.as_deref(), Some("not feasible"));
+        assert!(repo.feedback(&proposal.id).await.unwrap().iter().find(|f| f.id == late.id).unwrap().resolved_at.is_none());
+        assert!(repo.dispose_feedback_refinement_generation(input).await.unwrap().replayed);
+        let conflict = FeedbackRefinementDispositionInput { disposition: FeedbackRefinementDisposition::WontFix { reason: "different reason".into() }, ..FeedbackRefinementDispositionInput {
+            proposal_id: proposal.id.clone(), injection_id: capture.injection.id.clone(), root_feedback_id: capture.injection.root_feedback_id.clone(), generation: capture.injection.generation, debate_entry_id: capture.debate_entry.id.clone(), disposition: FeedbackRefinementDisposition::WontFix { reason: "unused".into() },
+        }};
+        assert!(repo.dispose_feedback_refinement_generation(conflict).await.is_err());
+
+        let withdrawn = repo.capture_feedback_refinement_boundary(&proposal.id).await.unwrap().captures.pop().unwrap();
+        let advisory = repo.add_feedback(ProposalFeedbackCreateInput { proposal_id: &proposal.id, parent_id: Some(&root.id), author_kind: "user", author_model: None, body: "advisory" }).await.unwrap();
+        sqlx::query("UPDATE proposal_feedback SET severity='advisory' WHERE id=$1").bind(&advisory.id).execute(db.pool()).await.unwrap();
+        let blocking = repo.add_feedback(ProposalFeedbackCreateInput { proposal_id: &proposal.id, parent_id: Some(&root.id), author_kind: "user", author_model: None, body: "blocking" }).await.unwrap();
+        let blocking_two = repo.add_feedback(ProposalFeedbackCreateInput { proposal_id: &proposal.id, parent_id: Some(&root.id), author_kind: "user", author_model: None, body: "second blocking" }).await.unwrap();
+        let generation = repo.capture_feedback_refinement_boundary(&proposal.id).await.unwrap().captures.into_iter().find(|c| c.injection.generation > withdrawn.injection.generation).unwrap();
+        let before: String = sqlx::query_scalar("SELECT source_body FROM proposal_feedback_refinement_sources WHERE injection_id=$1 AND source_feedback_id=$2").bind(&generation.injection.id).bind(&blocking.id).fetch_one(db.pool()).await.unwrap();
+        let partial = repo.withdraw_feedback_with_refinement_derivation(&blocking.id, "author").await.unwrap().1;
+        assert_eq!(partial.len(), 1); assert!(!partial[0].withdrawn);
+        // Advisory withdrawal cannot close a generation with an unwithdrawn blocking row.
+        let advisory_result = repo.withdraw_feedback_with_refinement_derivation(&advisory.id, "author").await.unwrap().1;
+        assert!(advisory_result.iter().all(|result| !result.withdrawn));
+        let final_result = repo.withdraw_feedback_with_refinement_derivation(&blocking_two.id, "author").await.unwrap().1;
+        assert!(final_result.iter().any(|result| result.injection.id == generation.injection.id && result.withdrawn));
+        let after: String = sqlx::query_scalar("SELECT source_body FROM proposal_feedback_refinement_sources WHERE injection_id=$1 AND source_feedback_id=$2").bind(&generation.injection.id).bind(&blocking.id).fetch_one(db.pool()).await.unwrap();
+        assert_eq!(before, after);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

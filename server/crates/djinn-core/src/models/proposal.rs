@@ -211,6 +211,8 @@ pub struct ProposalFeedbackRefinementInjection {
     pub debate_entry_id: Option<String>,
     pub accepted_disposition: Option<String>,
     pub accepted_revision_seq: Option<i32>,
+    /// Durable rationale for an accepted `wont_fix` disposition.
+    pub accepted_reason: Option<String>,
     pub accepted_at: Option<String>,
     pub accepted_by_user_id: Option<String>,
     pub created_at: String,
