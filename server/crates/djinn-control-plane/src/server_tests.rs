@@ -9,7 +9,7 @@ mod tests {
         models::DispatchPause,
     };
     use djinn_db::repositories::dispatch_pause::{DispatchPauseRepository, DispatchPauseTarget};
-    use djinn_db::{Database, NoteRepository, ProjectRepository};
+    use djinn_db::{Database, NoteRepository, ProjectRepository, ProposalRepository};
     use rmcp::{Json, ServerHandler, handler::server::wrapper::Parameters};
     use serde_json::json;
     use tokio::time::sleep;
@@ -494,7 +494,8 @@ mod tests {
             .expect("feedback id")
             .to_string();
 
-        // Resolve it as addressed in revision 2.
+        // Legacy resolution is deliberately unavailable: feedback must be
+        // disposed through tribunal review or withdrawn by its original author.
         let resolved = server
             .dispatch_tool(
                 "proposal_feedback_resolve",
@@ -502,20 +503,17 @@ mod tests {
             )
             .await
             .expect("dispatch proposal_feedback_resolve");
-        assert!(
-            resolved
-                .get("feedback")
-                .and_then(|f| f.get("resolved_at"))
-                .and_then(|v| v.as_str())
-                .is_some()
-        );
         assert_eq!(
-            resolved
-                .get("feedback")
-                .and_then(|f| f.get("resolved_revision_seq"))
-                .and_then(|v| v.as_i64()),
-            Some(2)
+            resolved.get("error").and_then(|v| v.as_str()),
+            Some("feedback_resolution_requires_disposition_or_withdrawal")
         );
+        let feedback = ProposalRepository::new(db.clone(), EventBus::noop())
+            .get_feedback(&feedback_id)
+            .await
+            .expect("read feedback")
+            .expect("feedback remains present");
+        assert!(feedback.resolved_at.is_none());
+        assert!(feedback.resolved_revision_seq.is_none());
 
         let shown = server
             .dispatch_tool("proposal_show", json!({ "id": id }))
@@ -529,6 +527,201 @@ mod tests {
             Some(2)
         );
     }
+
+    #[tokio::test]
+    async fn feedback_withdrawal_is_author_only_and_derives_captured_generation() {
+        let db = Database::open_in_memory().unwrap();
+        let server = DjinnMcpServer::new(test_mcp_state(db.clone()));
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let user_repo = djinn_db::UserRepository::new(db.clone());
+        let root_author = user_repo
+            .upsert_from_github(
+                uuid::Uuid::now_v7().as_u128() as i64,
+                "root-author",
+                None,
+                None,
+            )
+            .await
+            .expect("create root author")
+            .id;
+        let reply_author = user_repo
+            .upsert_from_github(
+                uuid::Uuid::now_v7().as_u128() as i64,
+                "reply-author",
+                None,
+                None,
+            )
+            .await
+            .expect("create reply author")
+            .id;
+        let created = server
+            .dispatch_tool("proposal_create", json!({ "title": "Withdrawal proposal" }))
+            .await
+            .expect("create proposal");
+        let proposal_id = created["id"].as_str().expect("proposal id").to_owned();
+
+        // A root-only row can be withdrawn by its author through the tool.
+        let root_only = djinn_core::auth_context::SESSION_USER_ID
+            .scope(Some(root_author.clone()), async {
+                server
+                    .dispatch_tool(
+                        "proposal_feedback_add",
+                        json!({ "proposal_id": proposal_id, "body": "root only" }),
+                    )
+                    .await
+                    .expect("add root-only feedback")
+            })
+            .await;
+        let root_only_id = root_only["feedback"]["id"]
+            .as_str()
+            .expect("root-only id")
+            .to_owned();
+        let withdrawn_root_only = djinn_core::auth_context::SESSION_USER_ID
+            .scope(Some(root_author.clone()), async {
+                server
+                    .dispatch_tool("proposal_feedback_withdraw", json!({ "id": root_only_id }))
+                    .await
+                    .expect("withdraw root-only feedback")
+            })
+            .await;
+        assert!(withdrawn_root_only["feedback"]["withdrawn_at"].is_string());
+
+        let root = djinn_core::auth_context::SESSION_USER_ID
+            .scope(Some(root_author.clone()), async {
+                server
+                    .dispatch_tool(
+                        "proposal_feedback_add",
+                        json!({ "proposal_id": proposal_id, "body": "blocking root" }),
+                    )
+                    .await
+                    .expect("add root")
+            })
+            .await;
+        let root_id = root["feedback"]["id"].as_str().expect("root id").to_owned();
+        let rejected = djinn_core::auth_context::SESSION_USER_ID
+            .scope(Some("other-author".to_owned()), async {
+                server
+                    .dispatch_tool("proposal_feedback_withdraw", json!({ "id": root_id }))
+                    .await
+                    .expect("reject non-author withdrawal")
+            })
+            .await;
+        assert_eq!(
+            rejected["error"].as_str(),
+            Some("feedback withdrawal requires the original row author")
+        );
+        let before_capture = server
+            .dispatch_tool("proposal_feedback_resolve", json!({ "id": root_id }))
+            .await
+            .expect("legacy resolve before capture");
+        assert_eq!(
+            before_capture["error"].as_str(),
+            Some("feedback_resolution_requires_disposition_or_withdrawal")
+        );
+        assert!(
+            repo.get_feedback(&root_id)
+                .await
+                .unwrap()
+                .expect("root")
+                .resolved_at
+                .is_none()
+        );
+
+        let reply = djinn_core::auth_context::SESSION_USER_ID
+            .scope(Some(reply_author.clone()), async {
+                server
+                    .dispatch_tool(
+                        "proposal_feedback_add",
+                        json!({ "proposal_id": proposal_id, "parent_id": root_id, "body": "blocking reply" }),
+                    )
+                    .await
+                    .expect("add reply")
+            })
+            .await;
+        let reply_id = reply["feedback"]["id"]
+            .as_str()
+            .expect("reply id")
+            .to_owned();
+        let capture = repo
+            .capture_feedback_refinement_boundary(&proposal_id)
+            .await
+            .expect("capture root and reply");
+        let generation = capture
+            .captures
+            .iter()
+            .find(|capture| capture.injection.root_feedback_id == root_id)
+            .expect("root generation");
+        assert_eq!(generation.sources.len(), 2);
+        let injection_id = generation.injection.id.clone();
+        let debate_id = generation.debate_entry.id.clone();
+        let materialized = server
+            .dispatch_tool("proposal_feedback_resolve", json!({ "id": root_id }))
+            .await
+            .expect("legacy resolve while materialized");
+        assert_eq!(
+            materialized["error"].as_str(),
+            Some("feedback_resolution_requires_disposition_or_withdrawal")
+        );
+        let partial = djinn_core::auth_context::SESSION_USER_ID
+            .scope(Some(root_author.clone()), async {
+                server
+                    .dispatch_tool("proposal_feedback_withdraw", json!({ "id": root_id }))
+                    .await
+                    .expect("withdraw captured root")
+            })
+            .await;
+        assert!(partial["feedback"]["withdrawn_at"].is_string());
+        let partial_state: String = sqlx::query_scalar(
+            "SELECT state FROM proposal_feedback_refinement_injections WHERE id=$1",
+        )
+        .bind(&injection_id)
+        .fetch_one(db.pool())
+        .await
+        .expect("partial injection state");
+        assert_eq!(partial_state, "injected");
+
+        let after_partial = server
+            .dispatch_tool("proposal_feedback_resolve", json!({ "id": reply_id }))
+            .await
+            .expect("legacy resolve after partial withdrawal");
+        assert_eq!(
+            after_partial["error"].as_str(),
+            Some("feedback_resolution_requires_disposition_or_withdrawal")
+        );
+        assert!(
+            repo.get_feedback(&reply_id)
+                .await
+                .unwrap()
+                .expect("reply")
+                .resolved_at
+                .is_none()
+        );
+        let full = djinn_core::auth_context::SESSION_USER_ID
+            .scope(Some(reply_author.clone()), async {
+                server
+                    .dispatch_tool("proposal_feedback_withdraw", json!({ "id": reply_id }))
+                    .await
+                    .expect("withdraw captured reply")
+            })
+            .await;
+        assert!(full["feedback"]["withdrawn_at"].is_string());
+        let state: String = sqlx::query_scalar(
+            "SELECT state FROM proposal_feedback_refinement_injections WHERE id=$1",
+        )
+        .bind(&injection_id)
+        .fetch_one(db.pool())
+        .await
+        .expect("full injection state");
+        assert_eq!(state, "withdrawn_by_author");
+        let resolved: Option<String> =
+            sqlx::query_scalar("SELECT resolved_at FROM proposal_debate_trail WHERE id=$1")
+                .bind(&debate_id)
+                .fetch_one(db.pool())
+                .await
+                .expect("withdrawn debate state");
+        assert!(resolved.is_some());
+    }
+
     #[tokio::test]
     async fn proposal_show_includes_manual_done_status_history_event() {
         let db = Database::open_in_memory().unwrap();
