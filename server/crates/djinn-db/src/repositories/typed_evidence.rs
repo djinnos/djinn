@@ -7,7 +7,9 @@ use djinn_core::models::{
     TribunalEvidenceAnchorMethod, TribunalEvidenceDisposition, TribunalEvidenceFinding,
     TribunalEvidenceLifecycle, TribunalEvidenceOutcome, TribunalEvidencePlannedCheck,
 };
+use sha2::{Digest, Sha256};
 use sqlx::{Postgres, Row, Transaction};
+use std::collections::{HashMap, HashSet};
 
 use crate::{Database, Error, Result};
 
@@ -19,6 +21,58 @@ pub struct DemandTypedEvidenceInput {
     pub claim: serde_json::Value,
     pub demanded_revision_seq: i32,
     pub judge_task_id: String,
+}
+/// Worker wire payload. Anchor health is intentionally absent: it is derived
+/// from immutable database facts rather than trusted from the caller.
+#[derive(Clone, Debug, serde::Deserialize)]
+pub struct TribunalEvidenceReturnV1 {
+    pub version: String,
+    pub finding_id: String,
+    pub spike_task_id: String,
+    pub attempt_id: String,
+    pub conclusion: String,
+    #[serde(default)]
+    pub checks: Vec<TribunalEvidenceReturnCheckV1>,
+    #[serde(default)]
+    pub findings: Vec<TribunalEvidenceReturnFindingV1>,
+    #[serde(default)]
+    pub failures: Vec<TribunalEvidenceReturnIssueV1>,
+    #[serde(default)]
+    pub gaps: Vec<TribunalEvidenceReturnIssueV1>,
+}
+#[derive(Clone, Debug, serde::Deserialize)]
+pub struct TribunalEvidenceReturnCheckV1 {
+    pub check_id: String,
+    pub method: String,
+    pub status: String,
+    pub detail: Option<String>,
+    pub invocation_id: Option<String>,
+    #[serde(default)]
+    pub anchors: Vec<TribunalEvidenceReturnAnchorV1>,
+}
+#[derive(Clone, Debug, serde::Deserialize)]
+pub struct TribunalEvidenceReturnFindingV1 {
+    pub check_id: String,
+    pub conclusion: String,
+    #[serde(default)]
+    pub anchors: Vec<TribunalEvidenceReturnAnchorV1>,
+}
+#[derive(Clone, Debug, serde::Deserialize)]
+pub struct TribunalEvidenceReturnAnchorV1 {
+    pub method: String,
+    pub locator: String,
+}
+#[derive(Clone, Debug, serde::Deserialize)]
+pub struct TribunalEvidenceReturnIssueV1 {
+    pub code: String,
+    pub detail: String,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TribunalEvidenceReturnResultV1 {
+    pub validation_id: String,
+    pub outcome: TribunalEvidenceOutcome,
+    pub lifecycle: TribunalEvidenceLifecycle,
+    pub replayed: bool,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AllocateTypedEvidenceAttemptInput {
@@ -103,6 +157,118 @@ impl TypedEvidenceRepository {
     }
     pub fn db(&self) -> &Database {
         &self.db
+    }
+
+    /// Validate a return against the frozen attempt and atomically persist the
+    /// normalized result. The unique attempt result is the replay fence.
+    pub async fn submit_return_v1_in_transaction(
+        tx: &mut Transaction<'_, Postgres>,
+        payload_bytes: &[u8],
+    ) -> Result<TribunalEvidenceReturnResultV1> {
+        if payload_bytes.len() > 256 * 1024 {
+            return Err(v1("payload_too_large"));
+        }
+        let payload: TribunalEvidenceReturnV1 =
+            serde_json::from_slice(payload_bytes).map_err(|_| v1("invalid_json"))?;
+        let hash = format!("{:x}", Sha256::digest(payload_bytes));
+        validate_return_shape(&payload)?;
+        let attempt = sqlx::query(
+            "SELECT finding_id,spike_task_id FROM typed_evidence_attempts WHERE id=$1 FOR UPDATE",
+        )
+        .bind(&payload.attempt_id)
+        .fetch_optional(&mut **tx)
+        .await?
+        .ok_or_else(|| v1("unknown_attempt"))?;
+        if attempt.get::<String, _>("finding_id") != payload.finding_id {
+            return Err(v1("finding_binding_mismatch"));
+        }
+        if attempt.get::<String, _>("spike_task_id") != payload.spike_task_id {
+            return Err(v1("source_task_binding_mismatch"));
+        }
+        if let Some(row)=sqlx::query("SELECT id,payload_sha256,outcome FROM typed_evidence_validation_results WHERE attempt_id=$1").bind(&payload.attempt_id).fetch_optional(&mut **tx).await? {
+            if row.get::<String,_>("payload_sha256") != hash { return Err(v1("replay_payload_conflict")); }
+            return Ok(TribunalEvidenceReturnResultV1 { validation_id:row.get("id"), outcome:parse_outcome(&row.get::<String,_>("outcome"))?, lifecycle:lock_state(tx,&payload.finding_id).await?, replayed:true });
+        }
+        let planned = checks(tx, &payload.attempt_id).await?;
+        let expected: HashMap<_, _> = planned.iter().map(|c| (c.check_id.as_str(), c)).collect();
+        if payload.checks.len() != expected.len() {
+            return Err(v1("missing_expected_check"));
+        }
+        let mut seen = HashSet::new();
+        for c in &payload.checks {
+            limit_check(c)?;
+            let Some(p) = expected.get(c.check_id.as_str()) else {
+                return Err(v1("unknown_check"));
+            };
+            if !seen.insert(c.check_id.as_str()) {
+                return Err(v1("duplicate_check"));
+            }
+            if c.method != planned_method(p.method) {
+                return Err(v1("check_method_mismatch"));
+            }
+        }
+        for f in &payload.findings {
+            if !expected.contains_key(f.check_id.as_str()) {
+                return Err(v1("dangling_finding_check"));
+            }
+            if f.anchors.len() > 16 {
+                return Err(v1("too_many_anchors"));
+            }
+            for a in &f.anchors {
+                limit_anchor(a)?;
+            }
+        }
+        for i in payload.failures.iter().chain(&payload.gaps) {
+            limit_issue(i)?;
+        }
+        let validation_id = uuid::Uuid::now_v7().to_string();
+        let mut usable = 0;
+        let mut resolved = true;
+        for c in &payload.checks {
+            let p = expected[c.check_id.as_str()];
+            let result_id = uuid::Uuid::now_v7().to_string();
+            sqlx::query("INSERT INTO typed_evidence_check_results (id,validation_result_id,planned_check_id,status,detail) VALUES ($1,$2,$3,$4,$5)").bind(&result_id).bind(&validation_id).bind(&p.id).bind(&c.status).bind(&c.detail).execute(&mut **tx).await?;
+            let invocation_ok=match &c.invocation_id {Some(id)=>sqlx::query_scalar::<_,bool>("SELECT EXISTS(SELECT 1 FROM evidence_command_invocations WHERE id=$1 AND check_id=$2)").bind(id).bind(&c.check_id).fetch_one(&mut **tx).await?,None=>false};
+            let mut healthy = false;
+            for a in &c.anchors {
+                let h = a.method == "command" && c.method == "command" && invocation_ok;
+                let id = uuid::Uuid::now_v7().to_string();
+                sqlx::query("INSERT INTO typed_evidence_anchors (id,check_result_id,method,locator) VALUES ($1,$2,$3,$4)").bind(&id).bind(&result_id).bind(&a.method).bind(&a.locator).execute(&mut **tx).await?;
+                sqlx::query("INSERT INTO typed_evidence_anchor_health (anchor_id,health,detail) VALUES ($1,$2,$3)").bind(&id).bind(if h{"healthy"}else{"unusable"}).bind(if h{None}else{Some("server hydration missing or incompatible")}).execute(&mut **tx).await?;
+                healthy |= h;
+            }
+            if c.status == "passed" && healthy {
+                usable += 1;
+            }
+            resolved &= c.status == "passed" && healthy;
+        }
+        let result_outcome = if resolved {
+            TribunalEvidenceOutcome::Resolved
+        } else if usable > 0 {
+            TribunalEvidenceOutcome::Partial
+        } else {
+            TribunalEvidenceOutcome::Unresolved
+        };
+        sqlx::query("INSERT INTO typed_evidence_validation_results (id,attempt_id,payload_sha256,outcome,validator_facts) VALUES ($1,$2,$3,$4,$5)").bind(&validation_id).bind(&payload.attempt_id).bind(&hash).bind(outcome(result_outcome)).bind(serde_json::json!({"validator_version":"TribunalEvidenceReturnV1","raw_payload_sha256":hash,"server_hydrated":true})).execute(&mut **tx).await?;
+        for (kind, issues) in [("failure", &payload.failures), ("gap", &payload.gaps)] {
+            for i in issues {
+                sqlx::query("INSERT INTO typed_evidence_issues (id,validation_result_id,kind,code,detail) VALUES ($1,$2,$3,$4,$5)").bind(uuid::Uuid::now_v7().to_string()).bind(&validation_id).bind(kind).bind(&i.code).bind(&i.detail).execute(&mut **tx).await?;
+            }
+        }
+        let state = lock_state(tx, &payload.finding_id).await?;
+        let ordinal: i32 = sqlx::query_scalar(
+            "SELECT COALESCE(MAX(ordinal),0)+1 FROM typed_evidence_transitions WHERE finding_id=$1",
+        )
+        .bind(&payload.finding_id)
+        .fetch_one(&mut **tx)
+        .await?;
+        Self::append_transition(tx,AppendTypedEvidenceTransitionInput{id:uuid::Uuid::now_v7().to_string(),finding_id:payload.finding_id,ordinal,from_lifecycle:Some(state),to_lifecycle:TribunalEvidenceLifecycle::EvidenceReceived,actor_task_id:Some(payload.spike_task_id),metadata:serde_json::json!({"validation_result_id":validation_id,"outcome":outcome(result_outcome)})}).await?;
+        Ok(TribunalEvidenceReturnResultV1 {
+            validation_id,
+            outcome: result_outcome,
+            lifecycle: TribunalEvidenceLifecycle::EvidenceReceived,
+            replayed: false,
+        })
     }
 
     /// Same normalized demand is idempotent; a different unresolved demand
@@ -429,6 +595,89 @@ fn nonempty(values: &[&str]) -> Result<()> {
         Err(Error::InvalidData(
             "typed evidence identity fields must be non-empty".into(),
         ))
+    } else {
+        Ok(())
+    }
+}
+
+fn v1(code: &str) -> Error {
+    Error::InvalidData(code.into())
+}
+fn bytes(value: &str) -> usize {
+    value.len()
+}
+fn parse_outcome(value: &str) -> Result<TribunalEvidenceOutcome> {
+    match value {
+        "resolved" => Ok(TribunalEvidenceOutcome::Resolved),
+        "partial" => Ok(TribunalEvidenceOutcome::Partial),
+        "unresolved" => Ok(TribunalEvidenceOutcome::Unresolved),
+        _ => Err(v1("invalid_persisted_outcome")),
+    }
+}
+fn validate_return_shape(p: &TribunalEvidenceReturnV1) -> Result<()> {
+    if p.version != "TribunalEvidenceReturnV1" {
+        return Err(v1("unsupported_version"));
+    }
+    if [
+        p.finding_id.as_str(),
+        p.spike_task_id.as_str(),
+        p.attempt_id.as_str(),
+        p.conclusion.as_str(),
+    ]
+    .iter()
+    .any(|s| s.trim().is_empty())
+    {
+        return Err(v1("missing_identity"));
+    }
+    if bytes(&p.conclusion) > 8192 {
+        return Err(v1("conclusion_too_large"));
+    }
+    if p.checks.len() > 32 || p.findings.len() > 32 || p.gaps.len() > 32 {
+        return Err(v1("return_limit_exceeded"));
+    }
+    Ok(())
+}
+fn limit_check(c: &TribunalEvidenceReturnCheckV1) -> Result<()> {
+    if bytes(&c.check_id) > 2048 || bytes(&c.method) > 2048 || c.anchors.len() > 16 {
+        return Err(v1("check_limit_exceeded"));
+    }
+    if !matches!(c.status.as_str(), "passed" | "failed" | "not_run") {
+        return Err(v1("invalid_check_status"));
+    }
+    if c.status != "passed" && c.detail.as_deref().is_none_or(str::is_empty) {
+        return Err(v1("status_detail_required"));
+    }
+    if c.status == "passed" && c.invocation_id.is_some() && c.method != "command" {
+        return Err(v1("invocation_method_mismatch"));
+    }
+    if c.detail.as_ref().is_some_and(|d| bytes(d) > 8192) {
+        return Err(v1("detail_too_large"));
+    }
+    for a in &c.anchors {
+        limit_anchor(a)?;
+    }
+    Ok(())
+}
+fn limit_anchor(a: &TribunalEvidenceReturnAnchorV1) -> Result<()> {
+    if a.locator.trim().is_empty()
+        || bytes(&a.locator) > 2048
+        || !matches!(
+            a.method.as_str(),
+            "code" | "graph" | "command" | "artifact" | "memory" | "external" | "repository"
+        )
+    {
+        Err(v1("invalid_anchor"))
+    } else {
+        Ok(())
+    }
+}
+fn limit_issue(i: &TribunalEvidenceReturnIssueV1) -> Result<()> {
+    if i.code.trim().is_empty()
+        || i.detail.trim().is_empty()
+        || bytes(&i.code) > 2048
+        || bytes(&i.detail) > 8192
+    {
+        Err(v1("invalid_issue"))
     } else {
         Ok(())
     }

@@ -330,8 +330,11 @@ pub use repositories::{
         AllocateTypedEvidenceAttemptInput, AllocateTypedEvidenceRetryInput,
         AppendTypedEvidenceTransitionInput, DemandTypedEvidenceInput, DisposeTypedEvidenceInput,
         PersistTypedEvidenceValidationInput, PlannedTypedEvidenceCheckInput,
-        TypedEvidenceAttemptAllocation, TypedEvidenceDispositionProjection,
-        TypedEvidenceFindingProjection, TypedEvidenceRepository,
+        TribunalEvidenceReturnAnchorV1, TribunalEvidenceReturnCheckV1,
+        TribunalEvidenceReturnFindingV1, TribunalEvidenceReturnIssueV1,
+        TribunalEvidenceReturnResultV1, TribunalEvidenceReturnV1, TypedEvidenceAttemptAllocation,
+        TypedEvidenceDispositionProjection, TypedEvidenceFindingProjection,
+        TypedEvidenceRepository,
     },
     usage_analytics::{
         EntityBreakdownRow, GroupDimension, ModelEffectivenessRow, ProjectModelMatrixRow,
