@@ -218,6 +218,46 @@ async fn admission_attempt_uses_done_items_when_completed_output_is_empty() {
 }
 
 #[tokio::test]
+async fn admission_attempt_rejects_completed_with_function_call_still_in_flight() {
+    let url = serve_one_sse_response(
+        "data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"read\",\"arguments\":\"\"}}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"output\":[]}}\n\n",
+    )
+    .await;
+    let mut attempt = ApiClient::new().start_sse_attempt_v1(
+        &url,
+        serde_json::json!({"model":"fixture"}),
+        &AuthMethod::NoAuth,
+        HeaderMap::new(),
+        attempt_context(44),
+        OpenAIResponsesTerminalReporterV1::default(),
+    );
+    assert_eq!(
+        attempt.outcome().await.terminal,
+        ProviderAttemptTerminalV1::Failed(ProviderAttemptLossV1::Transport)
+    );
+}
+
+#[tokio::test]
+async fn admission_attempt_function_arguments_done_clears_in_flight_state() {
+    let url = serve_one_sse_response(
+        "data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"read\",\"arguments\":\"\"}}\n\ndata: {\"type\":\"response.function_call_arguments.done\"}\n\ndata: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"read\",\"arguments\":\"{}\"}}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"output\":[]}}\n\n",
+    )
+    .await;
+    let mut attempt = ApiClient::new().start_sse_attempt_v1(
+        &url,
+        serde_json::json!({"model":"fixture"}),
+        &AuthMethod::NoAuth,
+        HeaderMap::new(),
+        attempt_context(45),
+        OpenAIResponsesTerminalReporterV1::default(),
+    );
+    assert_eq!(
+        attempt.outcome().await.terminal,
+        ProviderAttemptTerminalV1::Completed
+    );
+}
+
+#[tokio::test]
 async fn admission_attempt_preserves_terminal_usage_when_rate_observation_is_stale() {
     let normalizer = Arc::new(std::sync::Mutex::new(ProviderApiKeyNormalizerV1::new(
         ProviderAdmissionPolicyV1::Proactive,
