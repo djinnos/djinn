@@ -5,8 +5,13 @@ use std::collections::BTreeMap;
 use std::pin::Pin;
 
 use crate::message::{ContentBlock, Conversation};
-#[allow(unused_imports)]
-use crate::provider::client::ApiClient;
+use crate::model_turn_admission::{
+    ProviderAttemptCapabilitiesV1, ProviderAttemptLossV1, ProviderUsageObservationV1,
+};
+use crate::provider::client::{
+    ProviderAttemptContextV1, ProviderFormatReportV1, ProviderSseAttemptV1,
+    ProviderSseTerminalReporterV1, SseFrame,
+};
 use crate::provider::{
     LlmProvider, ProviderConfig, ProviderError, StreamEvent, TokenUsage, ToolChoice,
 };
@@ -48,6 +53,82 @@ enum PendingContentBlock {
         content_type: String,
         extra: serde_json::Map<String, Value>,
     },
+}
+
+#[derive(Default)]
+pub struct AnthropicTerminalReporterV1 {
+    usage: ProviderUsageObservationV1,
+    block_acc: ContentBlockAcc,
+    input_tokens: u32,
+    cache_read: u32,
+    cache_write: u32,
+}
+impl ProviderSseTerminalReporterV1 for AnthropicTerminalReporterV1 {
+    fn report(&mut self, frame: &SseFrame) -> ProviderFormatReportV1 {
+        let SseFrame::Data(data) = frame else {
+            return ProviderFormatReportV1::Malformed;
+        };
+        let Ok(v) = serde_json::from_str::<Value>(data) else {
+            return ProviderFormatReportV1::Malformed;
+        };
+        let Some(event_type) = v.get("type").and_then(Value::as_str) else {
+            return ProviderFormatReportV1::Malformed;
+        };
+        if event_type == "error" {
+            return ProviderFormatReportV1::Failed(
+                // This is the same typed classifier used by `stream`; overload
+                // and API failures must remain retryable breaker failures.
+                match classify_anthropic_error_event(data).0 {
+                    ProviderError::RateLimit { .. } => ProviderAttemptLossV1::RateLimited,
+                    ProviderError::ProviderInternal { .. }
+                    | ProviderError::Transport
+                    | ProviderError::ExhaustedTransport(_)
+                    | ProviderError::EmptyCompletion => ProviderAttemptLossV1::Transport,
+                    ProviderError::ContextOverflow
+                    | ProviderError::Authentication
+                    | ProviderError::InvalidRequest
+                    | ProviderError::InvalidOutput => ProviderAttemptLossV1::ProviderRejected,
+                },
+            );
+        }
+
+        // Keep admission token and usage reporting on the production parser.
+        // A tool `input_json_delta` is not a text token, and a structurally
+        // incomplete delta must not manufacture a first-token timestamp.
+        let events = parse_anthropic_event(
+            event_type,
+            data,
+            &mut self.block_acc,
+            &mut self.input_tokens,
+            &mut self.cache_read,
+            &mut self.cache_write,
+        );
+        let mut emitted = false;
+        let mut completed = false;
+        for event in events {
+            match event {
+                StreamEvent::Usage(usage) => {
+                    self.usage = ProviderUsageObservationV1 {
+                        input_units: Some(i64::from(usage.input)),
+                        output_units: Some(i64::from(usage.output)),
+                        combined_units: Some(i64::from(usage.input) + i64::from(usage.output)),
+                    };
+                }
+                StreamEvent::Delta(ContentBlock::Text { .. })
+                | StreamEvent::Thinking(_)
+                | StreamEvent::ThinkingDelta { .. } => emitted = true,
+                StreamEvent::Done => completed = true,
+                _ => {}
+            }
+        }
+        if completed {
+            ProviderFormatReportV1::Completed(self.usage)
+        } else if emitted {
+            ProviderFormatReportV1::TokenEmitted
+        } else {
+            ProviderFormatReportV1::Continue
+        }
+    }
 }
 
 /// Parse a single Anthropic SSE event (event_type + data JSON).
@@ -395,16 +476,34 @@ impl LlmProvider for AnthropicProvider {
     fn config_snapshot(&self) -> Option<ProviderConfig> {
         Some(self.config.clone())
     }
-
-    fn stream_request_body_bytes(
+    fn admission_capabilities_v1(&self) -> ProviderAttemptCapabilitiesV1 {
+        ProviderSseAttemptV1::capabilities()
+    }
+    fn start_sse_attempt_v1(
         &self,
         conversation: &Conversation,
         tools: &[Value],
         tool_choice: Option<ToolChoice>,
-    ) -> Option<usize> {
-        serde_json::to_vec(&self.build_request(conversation, tools, tool_choice))
-            .ok()
-            .map(|body| body.len())
+        context: ProviderAttemptContextV1,
+    ) -> Result<ProviderSseAttemptV1, crate::model_turn_admission::ProviderAttemptRouteCoverageV1>
+    {
+        Ok(self.client.start_sse_attempt_v1(
+            &self.effective_url(),
+            self.build_request(conversation, tools, tool_choice),
+            &self.config.auth,
+            self.extra_headers(),
+            context,
+            AnthropicTerminalReporterV1::default(),
+        ))
+    }
+
+    fn stream_request_body(
+        &self,
+        conversation: &Conversation,
+        tools: &[Value],
+        tool_choice: Option<ToolChoice>,
+    ) -> Option<Vec<u8>> {
+        serde_json::to_vec(&self.build_request(conversation, tools, tool_choice)).ok()
     }
 
     fn stream<'a>(

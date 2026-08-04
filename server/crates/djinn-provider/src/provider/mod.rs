@@ -18,6 +18,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::message::{ContentBlock, Conversation};
+use crate::model_turn_admission::{
+    ProviderAbortCapabilityV1, ProviderAdmissionPolicyV1, ProviderAttemptCapabilitiesV1,
+    ProviderAttemptPlanV1, ProviderAttemptRouteCoverageV1, ProviderAttemptScopeV1,
+    ProviderAttemptUncoveredReasonV1, ProviderCredentialRecordScopeV1,
+    ProviderHiddenRetryCapabilityV1, plan_provider_attempt_with_policy_v1,
+};
+use crate::provider::client::{ProviderAttemptContextV1, ProviderSseAttemptV1};
+use djinn_db::ModelTurnBucketKind;
 
 // ─── Token usage ──────────────────────────────────────────────────────────────
 
@@ -59,6 +67,13 @@ pub struct TokenUsage {
     /// back to `input + cache_read + cache_write` in that case.
     #[serde(default)]
     pub context_total: u32,
+}
+
+fn explicit_wire_output_limit(body: &[u8]) -> Option<i64> {
+    let value: Value = serde_json::from_slice(body).ok()?;
+    ["max_tokens", "max_output_tokens", "maxOutputTokens"]
+        .into_iter()
+        .find_map(|name| value.get(name).and_then(Value::as_i64))
 }
 
 impl TokenUsage {
@@ -452,15 +467,99 @@ pub trait LlmProvider: Send + Sync {
         >,
     >;
 
-    /// Exact UTF-8 JSON request-body length for this provider's stream call.
-    /// `None` is deliberately ineligible for empty-stream recovery.
-    fn stream_request_body_bytes(
+    /// Launch one admission-owned SSE request without provider-owned retries.
+    /// Legacy [`Self::stream`] callers retain their existing behavior.
+    fn start_sse_attempt_v1(
         &self,
         _conversation: &Conversation,
         _tools: &[Value],
         _tool_choice: Option<ToolChoice>,
-    ) -> Option<usize> {
+        _context: ProviderAttemptContextV1,
+    ) -> Result<ProviderSseAttemptV1, ProviderAttemptRouteCoverageV1> {
+        Err(ProviderAttemptRouteCoverageV1::Uncovered(
+            ProviderAttemptUncoveredReasonV1::SerializationUnavailable,
+        ))
+    }
+
+    /// Exact serialized body used for admission planning; it is never retained.
+    fn stream_request_body(
+        &self,
+        _conversation: &Conversation,
+        _tools: &[Value],
+        _tool_choice: Option<ToolChoice>,
+    ) -> Option<Vec<u8>> {
         None
+    }
+
+    /// Exact UTF-8 JSON request-body length for legacy empty-stream recovery.
+    fn stream_request_body_bytes(
+        &self,
+        conversation: &Conversation,
+        tools: &[Value],
+        tool_choice: Option<ToolChoice>,
+    ) -> Option<usize> {
+        self.stream_request_body(conversation, tools, tool_choice)
+            .map(|body| body.len())
+    }
+
+    /// Legacy streams retry internally and cannot be aborted by an admission caller.
+    fn admission_capabilities_v1(&self) -> ProviderAttemptCapabilitiesV1 {
+        ProviderAttemptCapabilitiesV1 {
+            hidden_retries: ProviderHiddenRetryCapabilityV1::Unsupported,
+            abort: ProviderAbortCapabilityV1::Unsupported,
+        }
+    }
+
+    /// Plan from the adapter's exact serialized body and resolved model config.
+    fn provider_attempt_plan_v1(
+        &self,
+        credential_record_id: &str,
+        conversation: &Conversation,
+        tools: &[Value],
+        tool_choice: Option<ToolChoice>,
+    ) -> Result<ProviderAttemptPlanV1, ProviderAttemptRouteCoverageV1> {
+        if credential_record_id.is_empty() {
+            return Err(ProviderAttemptRouteCoverageV1::Uncovered(
+                ProviderAttemptUncoveredReasonV1::MissingCredentialRecordIdentity,
+            ));
+        }
+        let Some(config) = self.config_snapshot() else {
+            return Err(ProviderAttemptRouteCoverageV1::Uncovered(
+                ProviderAttemptUncoveredReasonV1::SerializationUnavailable,
+            ));
+        };
+        let body = self.stream_request_body(conversation, tools, tool_choice);
+        let policy = if config.format_family == FormatFamily::Google {
+            ProviderAdmissionPolicyV1::ReactiveOnlyTarget1
+        } else {
+            ProviderAdmissionPolicyV1::Proactive
+        };
+        let bindings = if policy == ProviderAdmissionPolicyV1::ReactiveOnlyTarget1 {
+            vec![ModelTurnBucketKind::Request]
+        } else {
+            vec![
+                ModelTurnBucketKind::Request,
+                ModelTurnBucketKind::Input,
+                ModelTurnBucketKind::Output,
+                ModelTurnBucketKind::Combined,
+            ]
+        };
+        plan_provider_attempt_with_policy_v1(
+            ProviderAttemptScopeV1 {
+                credential: ProviderCredentialRecordScopeV1::from_credential_record_id(
+                    credential_record_id,
+                ),
+                provider_id: self.name().to_string(),
+                model_id: config.model_id,
+            },
+            body.as_deref(),
+            None,
+            body.as_deref().and_then(explicit_wire_output_limit),
+            config.capabilities.max_tokens_default.map(i64::from),
+            bindings,
+            self.admission_capabilities_v1(),
+            policy,
+        )
     }
 
     /// Clone of this provider's [`ProviderConfig`], if it has one.
@@ -941,5 +1040,250 @@ mod restamp_tests {
         // Transport fields also survive the double restamp.
         assert_eq!(second.base_url, first.base_url);
         assert_eq!(second.session_affinity_key, first.session_affinity_key);
+    }
+}
+
+/// Admission-plan fixtures use the public factory and real adapter
+/// serialization. Legacy `ApiClient` has internal retries, so the wrapper is
+/// deliberately test-only: production routes remain fail-closed until the
+/// abortable single-attempt transport is available.
+#[cfg(test)]
+mod admission_plan_fixtures {
+    use super::*;
+    use crate::message::Message;
+    use crate::model_turn_admission::{
+        ProviderAdmissionPolicyV1, ProviderAttemptRouteCoverageV1,
+        ProviderOutputReservationSourceV1,
+    };
+    use djinn_db::ModelTurnBucketDebit;
+    use serde_json::Value;
+    use std::pin::Pin;
+
+    struct CapabilityEnabledRoute {
+        inner: Box<dyn LlmProvider>,
+    }
+
+    impl CapabilityEnabledRoute {
+        fn new(config: ProviderConfig) -> Self {
+            Self {
+                inner: create_provider(config),
+            }
+        }
+    }
+
+    impl LlmProvider for CapabilityEnabledRoute {
+        fn name(&self) -> &str {
+            self.inner.name()
+        }
+
+        fn stream<'a>(
+            &'a self,
+            conversation: &'a Conversation,
+            tools: &'a [Value],
+            tool_choice: Option<ToolChoice>,
+        ) -> Pin<
+            Box<
+                dyn futures::Future<
+                        Output = anyhow::Result<
+                            Pin<
+                                Box<dyn futures::Stream<Item = anyhow::Result<StreamEvent>> + Send>,
+                            >,
+                        >,
+                    > + Send
+                    + 'a,
+            >,
+        > {
+            self.inner.stream(conversation, tools, tool_choice)
+        }
+
+        fn stream_request_body(
+            &self,
+            conversation: &Conversation,
+            tools: &[Value],
+            tool_choice: Option<ToolChoice>,
+        ) -> Option<Vec<u8>> {
+            self.inner
+                .stream_request_body(conversation, tools, tool_choice)
+        }
+
+        fn config_snapshot(&self) -> Option<ProviderConfig> {
+            self.inner.config_snapshot()
+        }
+
+        fn admission_capabilities_v1(&self) -> ProviderAttemptCapabilitiesV1 {
+            ProviderAttemptCapabilitiesV1 {
+                hidden_retries: ProviderHiddenRetryCapabilityV1::Disabled,
+                abort: ProviderAbortCapabilityV1::Supported,
+            }
+        }
+    }
+
+    fn config(family: FormatFamily, model: &str, output_default: Option<u32>) -> ProviderConfig {
+        ProviderConfig {
+            base_url: "https://example.test".to_string(),
+            auth: AuthMethod::NoAuth,
+            format_family: family,
+            model_id: model.to_string(),
+            context_window: 128_000,
+            telemetry: None,
+            session_affinity_key: None,
+            provider_headers: Default::default(),
+            capabilities: ProviderCapabilities {
+                streaming: true,
+                max_tokens_default: output_default,
+            },
+            reasoning_effort: None,
+            tool_schema_compat: None,
+        }
+    }
+
+    fn conversation() -> Conversation {
+        let mut conversation = Conversation::new();
+        conversation.push(Message::system("deterministic admission fixture"));
+        conversation.push(Message::user("plan this exact wire body"));
+        conversation
+    }
+
+    fn conservative_wire_units(body: &[u8]) -> i64 {
+        let fallback = (i64::try_from(body.len()).expect("fixture body fits i64") + 2) / 3;
+        (fallback * 115 + 99) / 100
+    }
+
+    fn debit(plan: &ProviderAttemptPlanV1, kind: ModelTurnBucketKind) -> Option<i64> {
+        plan.debits
+            .iter()
+            .find(|debit| debit.bucket_kind == kind)
+            .map(|debit| debit.units)
+    }
+
+    #[test]
+    fn enabled_format_routes_plan_from_their_exact_serialized_wire_bodies() {
+        // Anthropic puts its configured cap on the wire. OpenAI Chat and
+        // Responses (including Codex) fall back to model config defaults.
+        let fixtures = [
+            (
+                FormatFamily::Anthropic,
+                "claude-fixture",
+                Some(20_000),
+                "anthropic",
+                ProviderOutputReservationSourceV1::ExplicitLimit,
+                16_384,
+            ),
+            (
+                FormatFamily::OpenAI,
+                "gpt-chat-fixture",
+                Some(1_024),
+                "openai",
+                ProviderOutputReservationSourceV1::ModelDefault,
+                1_024,
+            ),
+            (
+                FormatFamily::OpenAIResponses,
+                "gpt-5.1-codex-fixture",
+                Some(20_000),
+                "openai_responses",
+                ProviderOutputReservationSourceV1::ModelDefault,
+                16_384,
+            ),
+        ];
+
+        for (family, model, default, provider_id, source, output) in fixtures {
+            let route = CapabilityEnabledRoute::new(config(family, model, default));
+            let conversation = conversation();
+            let wire = route
+                .stream_request_body(&conversation, &[], None)
+                .expect("enabled adapter serializes stream request");
+            assert_eq!(
+                route.stream_request_body_bytes(&conversation, &[], None),
+                Some(wire.len())
+            );
+            let plan = route
+                .provider_attempt_plan_v1("credential-record-fixture", &conversation, &[], None)
+                .expect("covered test route");
+
+            assert_eq!(plan.scope.provider_id, provider_id);
+            assert_eq!(plan.scope.model_id, model);
+            assert_eq!(
+                plan.scope.credential,
+                ProviderCredentialRecordScopeV1::from_credential_record_id(
+                    "credential-record-fixture"
+                )
+            );
+            assert_eq!(plan.output_reservation_source, source);
+            assert_eq!(debit(&plan, ModelTurnBucketKind::Request), Some(1));
+            assert_eq!(
+                debit(&plan, ModelTurnBucketKind::Input),
+                Some(conservative_wire_units(&wire)),
+                "{family:?} must plan actual wire bytes"
+            );
+            assert_eq!(debit(&plan, ModelTurnBucketKind::Output), Some(output));
+            assert_eq!(
+                debit(&plan, ModelTurnBucketKind::Combined),
+                Some(conservative_wire_units(&wire) + output)
+            );
+            assert!(
+                matches!(plan.coverage, ProviderAttemptRouteCoverageV1::Covered {
+                    policy: ProviderAdmissionPolicyV1::Proactive, supported_bucket_bindings, ..
+                } if supported_bucket_bindings == vec![
+                    ModelTurnBucketKind::Request, ModelTurnBucketKind::Input,
+                    ModelTurnBucketKind::Output, ModelTurnBucketKind::Combined,
+                ])
+            );
+        }
+    }
+
+    #[test]
+    fn gemini_is_reactive_only_and_claims_only_one_request() {
+        let route = CapabilityEnabledRoute::new(config(
+            FormatFamily::Google,
+            "gemini-2.5-pro-fixture",
+            Some(20_000),
+        ));
+        let conversation = conversation();
+        let wire = route
+            .stream_request_body(&conversation, &[], None)
+            .expect("Google serializes stream request");
+        assert_eq!(
+            route.stream_request_body_bytes(&conversation, &[], None),
+            Some(wire.len())
+        );
+        let plan = route
+            .provider_attempt_plan_v1("credential-record-fixture", &conversation, &[], None)
+            .expect("covered Gemini test route");
+
+        assert_eq!(plan.scope.provider_id, "google");
+        assert_eq!(plan.scope.model_id, "gemini-2.5-pro-fixture");
+        assert_eq!(
+            plan.debits,
+            vec![ModelTurnBucketDebit {
+                bucket_kind: ModelTurnBucketKind::Request,
+                units: 1
+            }]
+        );
+        assert!(
+            matches!(plan.coverage, ProviderAttemptRouteCoverageV1::Covered {
+            policy: ProviderAdmissionPolicyV1::ReactiveOnlyTarget1, ref supported_bucket_bindings, ..
+        } if supported_bucket_bindings == &vec![ModelTurnBucketKind::Request])
+        );
+        assert_eq!(debit(&plan, ModelTurnBucketKind::Input), None);
+        assert_eq!(debit(&plan, ModelTurnBucketKind::Output), None);
+        assert_eq!(debit(&plan, ModelTurnBucketKind::Combined), None);
+    }
+
+    #[test]
+    fn enabled_adapter_plan_matches_the_abortable_launch_capability() {
+        let provider = create_provider(config(FormatFamily::OpenAI, "gpt-fixture", Some(128)));
+        assert!(matches!(
+            provider.provider_attempt_plan_v1(
+                "credential-record-fixture",
+                &conversation(),
+                &[],
+                None
+            ),
+            Ok(ProviderAttemptPlanV1 {
+                coverage: ProviderAttemptRouteCoverageV1::Covered { .. },
+                ..
+            })
+        ));
     }
 }

@@ -429,6 +429,26 @@ fn build_extraction_prompt(
     )
 }
 
+/// Keep both the beginning and outcome-bearing end of an interesting tool
+/// result without splitting a Unicode scalar value.
+fn take_interesting_tool_result_chars(s: &str) -> String {
+    const INTERESTING_TOOL_RESULT_CHARS: usize = 1_500;
+    const TOOL_RESULT_OMISSION_MARKER: &str = "…[omitted]…";
+
+    let char_count = s.chars().count();
+    if char_count <= INTERESTING_TOOL_RESULT_CHARS {
+        return s.to_owned();
+    }
+
+    let marker_chars = TOOL_RESULT_OMISSION_MARKER.chars().count();
+    let retained_chars = INTERESTING_TOOL_RESULT_CHARS - marker_chars;
+    let head_chars = retained_chars * 40 / 100;
+    let tail_chars = retained_chars - head_chars;
+    let head: String = s.chars().take(head_chars).collect();
+    let tail: String = s.chars().skip(char_count - tail_chars).collect();
+    format!("{head}{TOOL_RESULT_OMISSION_MARKER}{tail}")
+}
+
 /// Render a compact transcript excerpt for the extraction prompt: assistant
 /// reasoning, tool actions, and (truncated) tool results, capped to `max_chars`
 /// and tail-biased so the session's outcome/conclusions are retained. The
@@ -437,6 +457,7 @@ fn build_extraction_prompt(
 /// arrays every time).
 fn build_transcript_excerpt(messages: &[djinn_core::message::Message], max_chars: usize) -> String {
     use djinn_core::message::{ContentBlock, Role};
+    const CLEARED_TOOL_RESULT_PREFIX: &str = "[Cleared — tool result from turn ";
     fn take_chars(s: &str, n: usize) -> String {
         if s.chars().count() > n {
             let mut t: String = s.chars().take(n).collect();
@@ -457,31 +478,43 @@ fn build_transcript_excerpt(messages: &[djinn_core::message::Message], max_chars
             .collect::<Vec<_>>()
             .join(" ")
     }
+    let total_tool_results = messages
+        .iter()
+        .flat_map(|message| &message.content)
+        .filter(|block| matches!(block, ContentBlock::ToolResult { .. }))
+        .count();
+    let mut tool_result_ordinal = 0;
     let mut lines: Vec<String> = Vec::new();
     for msg in messages {
         let role = match msg.role {
-            Role::System => continue,
-            Role::User => "user",
-            Role::Assistant => "assistant",
+            Role::System => None,
+            Role::User => Some("user"),
+            Role::Assistant => Some("assistant"),
         };
         for block in &msg.content {
             match block {
-                ContentBlock::Text { text } => {
-                    let t = text.trim();
-                    if !t.is_empty() {
-                        lines.push(format!("{role}: {t}"));
-                    }
-                }
-                ContentBlock::ToolUse { name, input, .. } => {
-                    lines.push(format!(
-                        "{role} → {name}({})",
-                        take_chars(&input.to_string(), 200)
-                    ));
-                }
                 ContentBlock::ToolResult {
                     content, is_error, ..
                 } => {
-                    let body = take_chars(&blocks_text(content), 600);
+                    let ordinal = tool_result_ordinal;
+                    tool_result_ordinal += 1;
+                    if role.is_none() {
+                        continue;
+                    }
+                    let is_cleared_placeholder = matches!(
+                        content.first(),
+                        Some(ContentBlock::Text { text })
+                            if text.starts_with(CLEARED_TOOL_RESULT_PREFIX)
+                    );
+                    let normalized_body = blocks_text(content);
+                    let is_interesting = *is_error || ordinal + 5 >= total_tool_results;
+                    let body = if is_cleared_placeholder {
+                        normalized_body
+                    } else if is_interesting {
+                        take_interesting_tool_result_chars(&normalized_body)
+                    } else {
+                        take_chars(&normalized_body, 600)
+                    };
                     if !body.is_empty() {
                         let tag = if *is_error {
                             "tool error"
@@ -490,6 +523,24 @@ fn build_transcript_excerpt(messages: &[djinn_core::message::Message], max_chars
                         };
                         lines.push(format!("{tag}: {body}"));
                     }
+                }
+                ContentBlock::Text { text } => {
+                    let Some(role) = role else {
+                        continue;
+                    };
+                    let t = text.trim();
+                    if !t.is_empty() {
+                        lines.push(format!("{role}: {t}"));
+                    }
+                }
+                ContentBlock::ToolUse { name, input, .. } => {
+                    let Some(role) = role else {
+                        continue;
+                    };
+                    lines.push(format!(
+                        "{role} → {name}({})",
+                        take_chars(&input.to_string(), 200)
+                    ));
                 }
                 _ => {}
             }
@@ -3411,6 +3462,237 @@ mod tests {
         assert!(out.contains("assistant → edit("));
         assert!(out.contains("tool error: No such file or directory"));
     }
+
+    #[test]
+    fn interesting_tool_result_slice_keeps_head_marker_and_tail_within_cap() {
+        let input = format!("head:{}:tail", "x".repeat(1_600));
+        let sliced = take_interesting_tool_result_chars(&input);
+
+        assert_eq!(sliced.chars().count(), 1_500);
+        assert!(sliced.starts_with("head:"));
+        assert!(sliced.contains("…[omitted]…"));
+        assert!(sliced.ends_with(":tail"));
+        assert_eq!(
+            take_interesting_tool_result_chars("short result"),
+            "short result"
+        );
+    }
+
+    #[test]
+    fn interesting_tool_result_slice_handles_multibyte_scalars_at_and_over_cap() {
+        let at_cap = "🦀漢é".repeat(500);
+        assert_eq!(at_cap.chars().count(), 1_500);
+        assert_eq!(
+            take_interesting_tool_result_chars(&at_cap),
+            at_cap,
+            "an input at the scalar-value cap must pass through unchanged"
+        );
+
+        let over_cap = format!("開始{}終端診断", "🦀漢é".repeat(501));
+        let sliced = take_interesting_tool_result_chars(&over_cap);
+        assert_eq!(
+            sliced.chars().count(),
+            1_500,
+            "the omission marker counts within the scalar-value cap"
+        );
+        assert!(sliced.starts_with("開始"));
+        assert!(sliced.contains("…[omitted]…"));
+        assert!(sliced.ends_with("終端診断"));
+        assert!(
+            std::str::from_utf8(sliced.as_bytes()).is_ok(),
+            "multibyte scalar slicing must return valid UTF-8 rather than split bytes"
+        );
+    }
+
+    #[test]
+    fn transcript_excerpt_tail_slices_long_error_results() {
+        use djinn_core::message::{ContentBlock, Message, Role};
+
+        let body = format!("ERROR_HEAD:{}:TAIL_DIAGNOSTIC", "x".repeat(1_600));
+        let messages = vec![Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "failed-tool".into(),
+                content: vec![ContentBlock::text(body)],
+                is_error: true,
+            }],
+            metadata: None,
+        }];
+
+        let out = build_transcript_excerpt(&messages, 12_000);
+        let error_line = out
+            .lines()
+            .find(|line| line.starts_with("tool error: "))
+            .expect("error result should be rendered");
+        let head = error_line.find("ERROR_HEAD:").unwrap();
+        let omitted = error_line.find("…[omitted]…").unwrap();
+        let tail = error_line.find(":TAIL_DIAGNOSTIC").unwrap();
+        assert!(head < omitted && omitted < tail);
+    }
+
+    #[test]
+    fn transcript_excerpt_tail_biases_final_five_tool_results_by_result_ordinal() {
+        use djinn_core::message::{ContentBlock, Message, Role};
+
+        let long_result = |index: usize| {
+            format!(
+                "result-{index}-head:{}:tail-only-result-{index}",
+                "x".repeat(1_600)
+            )
+        };
+        let mut messages = vec![Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::text("before the tool results"),
+                ContentBlock::ToolUse {
+                    id: "setup".into(),
+                    name: "setup".into(),
+                    input: serde_json::json!({"step": "initial"}),
+                },
+            ],
+            metadata: None,
+        }];
+
+        for index in 1..=6 {
+            messages.push(Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: format!("tool-{index}"),
+                    content: vec![ContentBlock::text(long_result(index))],
+                    is_error: false,
+                }],
+                metadata: None,
+            });
+            // These intervening transcript messages and blocks ensure selecting
+            // the final five by message position would produce a different set.
+            messages.push(Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::text(format!("intervening assistant message {index}")),
+                    ContentBlock::ToolUse {
+                        id: format!("intervening-{index}"),
+                        name: "observe".into(),
+                        input: serde_json::json!({"result": index}),
+                    },
+                ],
+                metadata: None,
+            });
+            messages.push(Message {
+                role: Role::User,
+                content: vec![ContentBlock::text(format!(
+                    "intervening user message {index}"
+                ))],
+                metadata: None,
+            });
+        }
+
+        let out = build_transcript_excerpt(&messages, 20_000);
+        let result_lines: Vec<_> = out
+            .lines()
+            .filter(|line| line.starts_with("tool result: "))
+            .collect();
+        assert_eq!(result_lines.len(), 6);
+        assert!(result_lines[0].contains("result-1-head:"));
+        assert_eq!(
+            result_lines[0]
+                .strip_prefix("tool result: ")
+                .expect("result line label")
+                .chars()
+                .count(),
+            601,
+            "ordinary results retain 600 head characters plus the legacy ellipsis"
+        );
+        assert!(result_lines[0].ends_with('…'));
+        assert!(
+            !result_lines[0].contains("tail-only-result-1"),
+            "the ordinary result must retain the existing 600-character head-only slice"
+        );
+        for (index, line) in (2..=6).zip(&result_lines[1..]) {
+            assert!(line.contains(&format!("result-{index}-head:")));
+            assert!(line.contains("…[omitted]…"));
+            assert!(
+                line.ends_with(&format!("tail-only-result-{index}")),
+                "final-five result {index} must retain its tail-only sentinel"
+            );
+        }
+    }
+
+    #[test]
+    fn transcript_excerpt_preserves_complete_cleared_placeholder_lines() {
+        use djinn_core::message::{ContentBlock, Message, Role};
+
+        let result_placeholder =
+            "[Cleared — tool result from turn 17] result body is retained verbatim";
+        let error_placeholder =
+            "[Cleared — tool result from turn 18] error body is retained verbatim";
+        let messages = vec![
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "cleared-result".into(),
+                    content: vec![ContentBlock::text(result_placeholder)],
+                    is_error: false,
+                }],
+                metadata: None,
+            },
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::text("intervening non-tool message")],
+                metadata: None,
+            },
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "cleared-error".into(),
+                    content: vec![ContentBlock::text(error_placeholder)],
+                    is_error: true,
+                }],
+                metadata: None,
+            },
+        ];
+
+        let out = build_transcript_excerpt(&messages, 12_000);
+        let placeholder_lines: Vec<_> = out
+            .lines()
+            .filter(|line| line.starts_with("tool result: ") || line.starts_with("tool error: "))
+            .collect();
+        assert_eq!(
+            placeholder_lines,
+            vec![
+                format!("tool result: {result_placeholder}"),
+                format!("tool error: {error_placeholder}"),
+            ]
+        );
+    }
+
+    #[test]
+    fn cleared_placeholder_prefix_after_leading_space_does_not_bypass_slicing() {
+        use djinn_core::message::{ContentBlock, Message, Role};
+
+        let body = format!(
+            " [Cleared — tool result from turn 7] {}:TAIL_DIAGNOSTIC",
+            "x".repeat(1_600)
+        );
+        let messages = vec![Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "cleared-like-tool".into(),
+                content: vec![ContentBlock::text(body)],
+                is_error: false,
+            }],
+            metadata: None,
+        }];
+
+        let out = build_transcript_excerpt(&messages, 12_000);
+        let result_line = out
+            .lines()
+            .find(|line| line.starts_with("tool result: "))
+            .expect("tool result should be rendered");
+        assert!(result_line.contains("[Cleared — tool result from turn 7]"));
+        assert!(result_line.contains("…[omitted]…"));
+        assert!(result_line.ends_with(":TAIL_DIAGNOSTIC"));
+    }
+
     #[test]
     fn transcript_excerpt_tail_biased_truncation() {
         use djinn_core::message::{ContentBlock, Message, Role};
@@ -3434,6 +3716,35 @@ mod tests {
         );
         assert!(!out.contains("line 0:"), "head should be dropped");
     }
+
+    #[test]
+    fn transcript_excerpt_outer_trim_keeps_byte_bounded_unicode_suffix() {
+        use djinn_core::message::{ContentBlock, Message, Role};
+
+        const OUTER_OMISSION_PREFIX: &str = "…(earlier turns omitted)…\n";
+        let body = "🦀漢é".repeat(4_000);
+        let full = format!("assistant: {body}");
+        assert!(full.len() > TRANSCRIPT_EXCERPT_CHARS);
+        let messages = vec![Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::text(body)],
+            metadata: None,
+        }];
+
+        let out = build_transcript_excerpt(&messages, TRANSCRIPT_EXCERPT_CHARS);
+        let suffix = out
+            .strip_prefix(OUTER_OMISSION_PREFIX)
+            .expect("an over-threshold transcript must carry the exact outer omission prefix");
+        let suffix_start = full.len() - suffix.len();
+        assert!(suffix.len() <= TRANSCRIPT_EXCERPT_CHARS);
+        assert!(
+            full.is_char_boundary(suffix_start),
+            "the retained suffix must begin at a Unicode character boundary"
+        );
+        assert!(full.ends_with(suffix));
+        assert_eq!(out, format!("{OUTER_OMISSION_PREFIX}{suffix}"));
+    }
+
     #[test]
     fn parse_extraction_response_accepts_typed_revision_operations() {
         let patch_id = "018f0000-0000-7000-8000-000000000001";
