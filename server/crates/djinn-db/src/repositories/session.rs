@@ -542,9 +542,9 @@ impl SessionRepository {
         task_id: &str,
         failure_cause: SessionFailureCause,
     ) -> Result<u64> {
-        let failure_cause = failure_cause.durable_label().ok_or_else(|| {
-            Error::InvalidData("LegacyUnclassified cannot be persisted".into())
-        })?;
+        let failure_cause = failure_cause
+            .durable_label()
+            .ok_or_else(|| Error::InvalidData("LegacyUnclassified cannot be persisted".into()))?;
         self.db.ensure_initialized().await?;
 
         let orphans = sqlx::query_as!(
@@ -693,11 +693,8 @@ impl SessionRepository {
     /// or raced settlement an observable no-op rather than touching a sibling
     /// or newer session for the same task.
     pub async fn settle_non_terminal_by_id(&self, session_id: &str) -> Result<bool> {
-        self.settle_non_terminal_by_id_with_failure_cause(
-            session_id,
-            SessionFailureCause::Protocol,
-        )
-        .await
+        self.settle_non_terminal_by_id_with_failure_cause(session_id, SessionFailureCause::Protocol)
+            .await
     }
 
     /// Cause-aware exact-id reconciliation settlement. The non-terminal guard
@@ -707,9 +704,9 @@ impl SessionRepository {
         session_id: &str,
         failure_cause: SessionFailureCause,
     ) -> Result<bool> {
-        let failure_cause = failure_cause.durable_label().ok_or_else(|| {
-            Error::InvalidData("LegacyUnclassified cannot be persisted".into())
-        })?;
+        let failure_cause = failure_cause
+            .durable_label()
+            .ok_or_else(|| Error::InvalidData("LegacyUnclassified cannot be persisted".into()))?;
         self.db.ensure_initialized().await?;
         let result = sqlx::query(
             r#"UPDATE sessions
@@ -1691,9 +1688,9 @@ impl SessionRepository {
         session_id: &str,
         failure_cause: SessionFailureCause,
     ) -> Result<bool> {
-        let failure_cause = failure_cause.durable_label().ok_or_else(|| {
-            Error::InvalidData("LegacyUnclassified cannot be persisted".into())
-        })?;
+        let failure_cause = failure_cause
+            .durable_label()
+            .ok_or_else(|| Error::InvalidData("LegacyUnclassified cannot be persisted".into()))?;
         self.db.ensure_initialized().await?;
         let result = sqlx::query(
             r#"UPDATE sessions
@@ -2412,8 +2409,22 @@ mod tests {
         assert_eq!(completed.interpreted_failure_cause(), None);
 
         let invalid = repo.create(make_session()).await.unwrap();
-        assert!(repo
-            .update_with_failure_cause(
+        assert!(
+            repo.update_with_failure_cause(
+                &invalid.id,
+                SessionStatus::Interrupted,
+                0,
+                0,
+                0,
+                0,
+                None,
+                None,
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            repo.update_with_failure_cause(
                 &invalid.id,
                 SessionStatus::Interrupted,
                 0,
@@ -2424,9 +2435,10 @@ mod tests {
                 Some(SessionFailureCause::LegacyUnclassified),
             )
             .await
-            .is_err());
-        assert!(repo
-            .update_with_failure_cause(
+            .is_err()
+        );
+        assert!(
+            repo.update_with_failure_cause(
                 &invalid.id,
                 SessionStatus::Completed,
                 0,
@@ -2437,7 +2449,8 @@ mod tests {
                 Some(SessionFailureCause::Provider),
             )
             .await
-            .is_err());
+            .is_err()
+        );
 
         // Settlement accepts no diagnostic text, and session columns never
         // contain the credential-shaped diagnostic kept on activity surfaces.

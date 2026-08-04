@@ -216,7 +216,10 @@ async fn finalize_infra_death_session(
     let session_repo =
         djinn_db::SessionRepository::new(app_state.db.clone(), app_state.event_bus.clone());
     match session_repo
-        .interrupt_running_for_task_with_failure_cause(&task.id, SessionFailureCause::Infrastructure)
+        .interrupt_running_for_task_with_failure_cause(
+            &task.id,
+            SessionFailureCause::Infrastructure,
+        )
         .await
     {
         Ok(n) if n > 0 => tracing::warn!(
