@@ -1,6 +1,6 @@
 {
   "name": "agent-readiness-guardrails",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "trust_level": "platform",
   "recommended_for_roles": ["architect"],
   "required": true,
