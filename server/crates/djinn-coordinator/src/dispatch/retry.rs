@@ -5,7 +5,7 @@ use super::admission::lane_under_user_cap;
 use super::model_under_user_cap;
 use djinn_core::clock::{Clock, SystemClock};
 use djinn_core::models::task_attempt::{TaskAttemptLedgerRow, TaskAttemptOutcome};
-use djinn_core::models::{ReopenClass, TransitionAction};
+use djinn_core::models::{ReopenClass, SessionFailureCause, TransitionAction};
 #[cfg(not(test))]
 use djinn_db::AgentRepository;
 use djinn_db::EffectiveCreatorProvenance;
@@ -2437,7 +2437,10 @@ impl CoordinatorActor {
             self.db.clone(),
             crate::events::event_bus_for(&self.events_tx),
         );
-        if let Err(e) = session_repo.interrupt_running_for_task(&task.id).await {
+        if let Err(e) = session_repo
+            .interrupt_running_for_task_with_failure_cause(&task.id, SessionFailureCause::Cancelled)
+            .await
+        {
             tracing::warn!(
                 task_id = %task.short_id,
                 error = %e,
@@ -2985,7 +2988,10 @@ impl CoordinatorActor {
             self.db.clone(),
             crate::events::event_bus_for(&self.events_tx),
         );
-        if let Err(e) = session_repo.interrupt_running_for_task(&task.id).await {
+        if let Err(e) = session_repo
+            .interrupt_running_for_task_with_failure_cause(&task.id, SessionFailureCause::Cancelled)
+            .await
+        {
             tracing::warn!(
                 task_id = %task.short_id,
                 error = %e,
