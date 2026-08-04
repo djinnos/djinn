@@ -1184,6 +1184,30 @@ async fn dispatch(
                 .await;
             ServiceRpcResponse::UpdateSessionStatus(result)
         }
+        ServiceRpcRequest::UpdateSessionStatusV2 {
+            session_id,
+            status,
+            tokens_in,
+            tokens_out,
+            cache_read,
+            cache_write,
+            parked_reason,
+            failure_cause,
+        } => {
+            let result = services
+                .update_session_status_v2(
+                    session_id,
+                    status,
+                    tokens_in,
+                    tokens_out,
+                    cache_read,
+                    cache_write,
+                    parked_reason,
+                    failure_cause,
+                )
+                .await;
+            ServiceRpcResponse::UpdateSessionStatusV2(result)
+        }
         ServiceRpcRequest::FlushSessionTokens {
             session_id,
             tokens_in,
