@@ -447,12 +447,12 @@ impl SessionRepository {
             return Ok(0);
         }
 
-        let result = sqlx::query!(
+        let result = sqlx::query(
             r#"UPDATE sessions
              SET status = 'interrupted',
                  ended_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
                  failure_cause = 'infrastructure'
-             WHERE status = 'running'"#
+             WHERE status = 'running'"#,
         )
         .execute(self.db.pool())
         .await?;
