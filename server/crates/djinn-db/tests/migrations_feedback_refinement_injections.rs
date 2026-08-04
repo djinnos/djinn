@@ -1,9 +1,9 @@
-//! Contract coverage for migration 176's dormant feedback-refinement storage.
+//! Contract coverage for migration 177's dormant feedback-refinement storage.
 use sqlx::Connection;
 use sqlx::postgres::PgPoolOptions;
 
 #[tokio::test]
-async fn migration_176_preserves_legacy_feedback_and_enforces_generation_contract() {
+async fn migration_177_preserves_legacy_feedback_and_enforces_generation_contract() {
     let base = djinn_db::test_database_base_url();
     let prefix = base
         .rsplit_once('/')
@@ -27,7 +27,7 @@ async fn migration_176_preserves_legacy_feedback_and_enforces_generation_contrac
         .connect(&url)
         .await
         .unwrap();
-    sqlx::query("INSERT INTO proposals (id,short_id,title) VALUES ('p','p176','legacy')")
+    sqlx::query("INSERT INTO proposals (id,short_id,title) VALUES ('p','p177','legacy')")
         .execute(&pool)
         .await
         .unwrap();

@@ -326,6 +326,13 @@ pub use repositories::{
         SubmitTaskAttemptParams, TaskAttemptRepository, TerminalTaskAttemptParams,
     },
     task_run::{CreateTaskRunParams, TaskRunRepository},
+    typed_evidence::{
+        AllocateTypedEvidenceAttemptInput, AllocateTypedEvidenceRetryInput,
+        AppendTypedEvidenceTransitionInput, DemandTypedEvidenceInput,
+        PersistTypedEvidenceValidationInput, PlannedTypedEvidenceCheckInput,
+        TypedEvidenceAttemptAllocation, TypedEvidenceDispositionProjection,
+        TypedEvidenceFindingProjection,
+    },
     usage_analytics::{
         EntityBreakdownRow, GroupDimension, ModelEffectivenessRow, ProjectModelMatrixRow,
         SeriesDetailRow, UsageAnalyticsQuery, UsageAnalyticsRepository, UsageTotals,
