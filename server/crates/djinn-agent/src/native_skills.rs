@@ -209,6 +209,68 @@ pub fn resolved_native_skills_for_role(role: &str) -> Vec<ResolvedSkill> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::{HashMap, HashSet};
+
+    const CI_TIMEOUT_RUNTIME_EVIDENCE_FIXTURE: &str = include_str!(
+        "native_assets/agent-readiness-guardrails/fixtures/ci-timeout-runtime-evidence.json"
+    );
+
+    fn provider_key(job: &serde_json::Value) -> String {
+        let mut labels = job["runner_labels"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|label| label.as_str().unwrap())
+            .collect::<Vec<_>>();
+        labels.sort_unstable();
+        format!(
+            "{}|{}|{}|{}",
+            job["workflow_path"].as_str().unwrap(),
+            job["rendered_job_name"].as_str().unwrap(),
+            labels.join(","),
+            job["runner_group_id"].as_str().unwrap(),
+        )
+    }
+
+    fn valid_durations(jobs: &[serde_json::Value], key: &str, assessed_at: i64) -> Vec<i64> {
+        let mut run_key_provider_ids = HashMap::new();
+        for job in jobs.iter().filter(|job| job["run_attempt"] == 1) {
+            run_key_provider_ids
+                .entry((job["workflow_run_id"].as_str().unwrap(), provider_key(job)))
+                .or_insert_with(HashSet::new)
+                .insert(job["provider_job_id"].as_str().unwrap());
+        }
+        let mut seen = HashSet::new();
+        let mut durations = Vec::new();
+        for job in jobs {
+            let run_id = job["workflow_run_id"].as_str().unwrap();
+            if provider_key(job) != key
+                || job["run_attempt"] != 1
+                || job["conclusion"] != "success"
+                || run_key_provider_ids[&(run_id, provider_key(job))].len() != 1
+            {
+                continue;
+            }
+            let (Some(started), Some(completed)) = (
+                job["started_at_unix"].as_i64(),
+                job["completed_at_unix"].as_i64(),
+            ) else {
+                continue;
+            };
+            if assessed_at - completed > 30 * 24 * 60 * 60 || completed <= started {
+                continue;
+            }
+            if seen.insert((
+                run_id,
+                job["run_attempt"].as_i64(),
+                job["provider_job_id"].as_str(),
+            )) {
+                durations.push(completed - started);
+            }
+        }
+        durations.sort_unstable();
+        durations
+    }
 
     #[test]
     fn readiness_guardrails_are_registered_as_a_platform_architect_recommendation() {
@@ -255,6 +317,17 @@ mod tests {
             assert!(skill.content.contains(id), "catalog must include {id}");
         }
         assert_eq!(skill.content.matches("### Guardrail:").count(), 9);
+        for provider_key_field in [
+            "workflow path",
+            "exact rendered job name",
+            "normalized/sorted runner labels",
+            "runner_group_id",
+        ] {
+            assert!(
+                skill.content.contains(provider_key_field),
+                "CI timeout provider key must include {provider_key_field}",
+            );
+        }
         for required_contract_text in [
             ".github/ci-timeouts.json",
             "scripts/check-ci-timeouts.mjs",
@@ -262,9 +335,14 @@ mod tests {
             "GET /repos/{owner}/{repo}/actions/workflows",
             "GET /repos/{owner}/{repo}/actions/workflows/{workflow_id}/runs",
             "GET /repos/{owner}/{repo}/actions/runs/{run_id}/attempts/1/jobs",
-            "runner_group_id",
+            "run_attempt != 1",
             "ambiguous-provider-job-identity",
             "job-requires-partitioning",
+            "Coverage-compliance outcome",
+            "Recommendation-confidence outcome",
+            "source URL and retrieval timestamp",
+            "configured timeout",
+            "recommended timeout",
             "ceil(0.95 * n)",
             "ceil(1.5 * p95_seconds / 60)",
         ] {
@@ -284,6 +362,114 @@ mod tests {
                 .content
                 .to_lowercase()
                 .contains("complexity guardrail")
+        );
+    }
+
+    #[test]
+    fn ci_timeout_runtime_fixture_proves_advisory_assessment_contract() {
+        let fixture: serde_json::Value = serde_json::from_str(CI_TIMEOUT_RUNTIME_EVIDENCE_FIXTURE)
+            .expect("checked-in CI timeout fixture must be valid JSON");
+        let jobs = fixture["jobs"].as_array().unwrap();
+        let expected = &fixture["expectations"];
+        let fresh = fixture["assessment_times"]["fresh_unix"].as_i64().unwrap();
+        let aged = fixture["assessment_times"]["aged_unix"].as_i64().unwrap();
+        let stable_key = provider_key(&jobs[0]);
+
+        let durations = valid_durations(jobs, &stable_key, fresh);
+        let expected_durations = expected["successful_durations_seconds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|duration| duration.as_i64().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(durations, expected_durations);
+        assert_eq!(durations.len(), 10);
+        let p95 = durations[(95 * durations.len()).div_ceil(100) - 1];
+        let recommendation = ((3 * p95 + 119) / 120).clamp(5, 120);
+        assert_eq!(
+            p95, 600,
+            "nearest-rank p95 must remain independently calculated"
+        );
+        assert_eq!(
+            recommendation, 15,
+            "recommendation must remain independently calculated"
+        );
+        assert_eq!(p95, expected["nearest_rank_p95_seconds"].as_i64().unwrap());
+        assert_eq!(
+            recommendation,
+            expected["recommended_timeout_minutes"].as_i64().unwrap()
+        );
+
+        let canary = provider_key(&jobs[10]);
+        let nightly = provider_key(&jobs[11]);
+        assert_ne!(
+            canary, nightly,
+            "exact rendered matrix names must remain separate"
+        );
+        assert_eq!(valid_durations(jobs, &canary, fresh).len(), 1);
+        assert_eq!(valid_durations(jobs, &nightly, fresh).len(), 1);
+
+        let collisions = jobs
+            .iter()
+            .filter(|job| job["workflow_run_id"] == "collision-01")
+            .collect::<Vec<_>>();
+        assert_eq!(collisions.len(), 2);
+        assert_eq!(provider_key(collisions[0]), provider_key(collisions[1]));
+        assert_eq!(valid_durations(jobs, &stable_key, fresh).len(), 10);
+        assert_eq!(
+            expected["collision_exclusion"],
+            "ambiguous-provider-job-identity"
+        );
+
+        let duplicate_key = provider_key(
+            jobs.iter()
+                .find(|job| job["workflow_run_id"] == "duplicate")
+                .unwrap(),
+        );
+        assert_eq!(valid_durations(jobs, &duplicate_key, fresh).len(), 1);
+        assert_eq!(
+            jobs.iter()
+                .filter(|job| job["workflow_run_id"] == "duplicate")
+                .count(),
+            2,
+            "the provider-job tuple fixture must exercise deduplication"
+        );
+        assert_eq!(expected["rerun_exclusion"], "run_attempt != 1");
+        assert!(
+            jobs.iter()
+                .any(|job| job["workflow_run_id"] == "rerun-01" && job["run_attempt"] != 1)
+        );
+
+        for run_id in [
+            "missing-timestamps",
+            "stale",
+            "non-positive",
+            "failed",
+            "cancelled",
+            "skipped",
+            "neutral",
+            "timed-out",
+            "duplicate",
+        ] {
+            assert!(jobs.iter().any(|job| job["workflow_run_id"] == run_id));
+        }
+        assert!(valid_durations(jobs, &canary, fresh).len() < 10);
+        assert_eq!(
+            expected["advisory_evidence_gaps"].as_array().unwrap().len(),
+            9,
+            "invalid, stale, and insufficient-sample cases must remain explicit advisory gaps"
+        );
+
+        assert!(valid_durations(jobs, &stable_key, aged).is_empty());
+        assert_eq!(expected["fresh_recommendation_confidence"], "high");
+        assert_eq!(expected["aged_recommendation_confidence"], "evidence-gap");
+        assert_eq!(fixture["offline_checker"]["fresh_result"], "pass");
+        assert_eq!(fixture["offline_checker"]["aged_result"], "pass");
+        assert!(
+            fixture["source"]
+                .as_str()
+                .unwrap()
+                .contains("no live API request")
         );
     }
 
