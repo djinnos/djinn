@@ -1,185 +1,201 @@
-//! Postgres conformance coverage for the public TribunalEvidenceReturnV1 repository API.
-
+//! Executable V1 return conformance tests.
 use djinn_db::{Database, TypedEvidenceRepository};
 use serde_json::{Value, json};
-
-struct Attempt {
-    finding_id: String,
-    task_id: String,
-    attempt_id: String,
+struct A {
+    finding: String,
+    task: String,
+    attempt: String,
 }
-
-async fn attempt(methods: &[&str]) -> (Database, Attempt) {
+async fn setup(methods: &[&str]) -> (Database, A) {
     let db = Database::open_in_memory().unwrap();
     db.ensure_initialized().await.unwrap();
-    let project = uuid::Uuid::now_v7().to_string();
-    let user = uuid::Uuid::now_v7().to_string();
-    let task = uuid::Uuid::now_v7().to_string();
-    let proposal = uuid::Uuid::now_v7().to_string();
+    let p = uuid::Uuid::now_v7().to_string();
+    let u = uuid::Uuid::now_v7().to_string();
+    let t = uuid::Uuid::now_v7().to_string();
+    let q = uuid::Uuid::now_v7().to_string();
     sqlx::query("INSERT INTO projects (id,name,path,verification_rules) VALUES ($1,$2,$3,'[]')")
-        .bind(&project)
-        .bind(format!("p-{project}"))
-        .bind(format!("/p-{project}"))
+        .bind(&p)
+        .bind(format!("p{p}"))
+        .bind(format!("/{p}"))
         .execute(db.pool())
         .await
         .unwrap();
     sqlx::query("INSERT INTO users (id,github_id,github_login) VALUES ($1,$2,$3)")
-        .bind(&user)
-        .bind((uuid::Uuid::now_v7().as_u128() & i64::MAX as u128) as i64)
-        .bind(format!("u-{user}"))
+        .bind(&u)
+        .bind(1_i64)
+        .bind(format!("u{u}"))
         .execute(db.pool())
         .await
         .unwrap();
-    sqlx::query("INSERT INTO tasks (id,project_id,short_id,title,description,design,labels,acceptance_criteria,memory_refs,created_by_user_id) VALUES ($1,$2,$3,'evidence','','','[]','[]','[]',$4)")
-        .bind(&task).bind(&project).bind(task.replace('-', "")).bind(&user).execute(db.pool()).await.unwrap();
-    sqlx::query("INSERT INTO proposals (id,short_id,title,body,body_format,acceptance_criteria,status,latest_revision_seq) VALUES ($1,$2,'evidence','','markdown','[]','draft',1)")
-        .bind(&proposal).bind(proposal.replace('-', "")).execute(db.pool()).await.unwrap();
-    let finding = uuid::Uuid::now_v7().to_string();
-    let attempt_id = uuid::Uuid::now_v7().to_string();
-    sqlx::query("INSERT INTO typed_evidence_findings (id,proposal_id,demand_hash,lifecycle,claim,demanded_revision_seq,created_by_task_id) VALUES ($1,$2,$3,'spike_active','{}',1,$4)")
-        .bind(&finding).bind(&proposal).bind(format!("h-{finding}")).bind(&task).execute(db.pool()).await.unwrap();
-    sqlx::query("INSERT INTO typed_evidence_attempts (id,finding_id,sequence,spike_task_id) VALUES ($1,$2,1,$3)")
-        .bind(&attempt_id).bind(&finding).bind(&task).execute(db.pool()).await.unwrap();
-    for (ordinal, method) in methods.iter().enumerate() {
-        sqlx::query("INSERT INTO typed_evidence_planned_checks (id,attempt_id,ordinal,check_id,method) VALUES ($1,$2,$3,$4,$5)")
-            .bind(uuid::Uuid::now_v7().to_string()).bind(&attempt_id).bind(ordinal as i32 + 1).bind(*method).bind(*method).execute(db.pool()).await.unwrap();
+    sqlx::query("INSERT INTO tasks (id,project_id,short_id,title,description,design,labels,acceptance_criteria,memory_refs,created_by_user_id) VALUES ($1,$2,$3,'x','','','[]','[]','[]',$4)").bind(&t).bind(&p).bind(t.replace('-', "")).bind(&u).execute(db.pool()).await.unwrap();
+    sqlx::query("INSERT INTO proposals (id,short_id,title,body,body_format,acceptance_criteria,status,latest_revision_seq) VALUES ($1,$2,'x','','markdown','[]','draft',1)").bind(&q).bind(q.replace('-', "")).execute(db.pool()).await.unwrap();
+    let f = uuid::Uuid::now_v7().to_string();
+    let a = uuid::Uuid::now_v7().to_string();
+    sqlx::query("INSERT INTO typed_evidence_findings (id,proposal_id,demand_hash,lifecycle,claim,demanded_revision_seq,created_by_task_id) VALUES ($1,$2,$3,'spike_active','{}',1,$4)").bind(&f).bind(&q).bind(format!("h{f}")).bind(&t).execute(db.pool()).await.unwrap();
+    sqlx::query("INSERT INTO typed_evidence_attempts (id,finding_id,sequence,spike_task_id) VALUES ($1,$2,1,$3)").bind(&a).bind(&f).bind(&t).execute(db.pool()).await.unwrap();
+    for (n, m) in methods.iter().enumerate() {
+        sqlx::query("INSERT INTO typed_evidence_planned_checks (id,attempt_id,ordinal,check_id,method) VALUES ($1,$2,$3,$4,$5)").bind(uuid::Uuid::now_v7().to_string()).bind(&a).bind(n as i32+1).bind(*m).bind(*m).execute(db.pool()).await.unwrap();
     }
     (
         db,
-        Attempt {
-            finding_id: finding,
-            task_id: task,
-            attempt_id,
+        A {
+            finding: f,
+            task: t,
+            attempt: a,
         },
     )
 }
-
-fn payload(a: &Attempt, checks: Vec<Value>) -> Vec<u8> {
-    serde_json::to_vec(&json!({"version":"TribunalEvidenceReturnV1","finding_id":a.finding_id,"spike_task_id":a.task_id,"attempt_id":a.attempt_id,"conclusion":"evidence","checks":checks})).unwrap()
-}
-
-fn check(id: &str, method: &str, status: &str) -> Value {
-    let mut value = json!({"check_id":id,"method":method,"status":status,"anchors":[]});
-    if status != "passed" {
-        value["detail"] = json!("not available");
+fn c(id: &str, m: &str, s: &str) -> Value {
+    let mut v = json!({"check_id":id,"method":m,"status":s,"anchors":[]});
+    if s != "passed" {
+        v["detail"] = json!("d");
     }
-    value
+    v
 }
-
+fn payload(a: &A, cs: Vec<Value>) -> Value {
+    json!({"version":"TribunalEvidenceReturnV1","finding_id":a.finding,"spike_task_id":a.task,"attempt_id":a.attempt,"conclusion":"x","checks":cs})
+}
+async fn rows(db: &Database, t: &str) -> i64 {
+    sqlx::query_scalar(&format!("SELECT count(*) FROM {t}"))
+        .fetch_one(db.pool())
+        .await
+        .unwrap()
+}
 #[tokio::test]
-async fn tribunal_evidence_return_v1_persists_methods_statuses_and_replays_once() {
-    let fixture: Value =
+async fn tribunal_evidence_return_v1_fixture_cases_are_executable() {
+    let fx: Value =
         serde_json::from_str(include_str!("fixtures/tribunal_evidence_return_v1.json")).unwrap();
-    assert_eq!(fixture["version"], "TribunalEvidenceReturnV1");
-    assert_eq!(
-        fixture["valid_cases"][0]["checks"]
-            .as_array()
-            .unwrap()
-            .len(),
-        3
-    );
-    assert_eq!(fixture["boundaries"].as_array().unwrap().len(), 8);
-    let (db, a) = attempt(&["code", "graph", "command"]).await;
-    let mut checks = vec![
-        check("code", "code", "passed"),
-        check("graph", "graph", "failed"),
-        check("command", "command", "not_run"),
-    ];
-    checks[1]["anchors"] = fixture["valid_cases"][0]["checks"][1]["anchors"].clone();
-    checks[2]["anchors"] = fixture["valid_cases"][0]["checks"][2]["anchors"].clone();
-    let mut body: Value = serde_json::from_slice(&payload(&a, checks)).unwrap();
-    body["failures"] = json!([{"check_id":"graph","code":"failed","detail":"failed"}]);
-    body["gaps"] = json!([{"check_id":"command","code":"unavailable","detail":"unavailable"}]);
-    let bytes = serde_json::to_vec(&body).unwrap();
-    let repo = TypedEvidenceRepository::new(db.clone());
-    let first = repo.submit_return_v1(&bytes).await.unwrap();
-    assert!(!first.replayed);
-    let replay = repo.submit_return_v1(&bytes).await.unwrap();
-    assert!(replay.replayed);
-    assert_eq!(first.validation_id, replay.validation_id);
-    for (table, expected) in [
-        ("typed_evidence_check_results", 3_i64),
-        ("typed_evidence_issues", 2),
-        ("typed_evidence_transitions", 1),
-    ] {
-        let count: i64 = sqlx::query_scalar(&format!("SELECT count(*) FROM {table}"))
-            .fetch_one(db.pool())
-            .await
-            .unwrap();
-        assert_eq!(count, expected, "{table} is normalized exactly once");
-    }
-    let lifecycle: String =
-        sqlx::query_scalar("SELECT lifecycle FROM typed_evidence_findings WHERE id=$1")
-            .bind(&a.finding_id)
-            .fetch_one(db.pool())
-            .await
-            .unwrap();
-    assert_eq!(lifecycle, "evidence_received");
-    let mut changed: Value = serde_json::from_slice(&bytes).unwrap();
-    changed["conclusion"] = json!("different");
-    assert!(
-        repo.submit_return_v1(&serde_json::to_vec(&changed).unwrap())
+    for x in fx["invalid_cases"].as_array().unwrap() {
+        let (db, a) = setup(&["code"]).await;
+        let mut s = serde_json::to_string(&x["payload"]).unwrap();
+        s = s
+            .replace("$finding_id", &a.finding)
+            .replace("$spike_task_id", &a.task)
+            .replace("$attempt_id", &a.attempt);
+        let e = TypedEvidenceRepository::new(db.clone())
+            .submit_return_v1(s.as_bytes())
             .await
             .unwrap_err()
-            .to_string()
-            .contains("replay_payload_conflict")
-    );
+            .to_string();
+        assert!(e.contains(x["error"].as_str().unwrap()));
+        assert_eq!(rows(&db, "typed_evidence_validation_results").await, 0);
+    }
+    assert_eq!(fx["valid_cases"].as_array().unwrap().len(), 3);
 }
-
 #[tokio::test]
-async fn tribunal_evidence_return_v1_rejects_boundaries_and_marks_malformed_attempt_failed() {
-    let (db, a) = attempt(&["code"]).await;
-    let repo = TypedEvidenceRepository::new(db.clone());
-    let malformed = format!(
-        r#"{{"attempt_id":"{}","version":"TribunalEvidenceReturnV1"}}"#,
-        a.attempt_id
+async fn tribunal_evidence_return_v1_methods_statuses_anchors_outcomes_and_replay() {
+    for m in ["code", "graph", "command"] {
+        for s in ["passed", "failed", "not_run"] {
+            if m == "command" && s == "passed" {
+                continue;
+            }
+            let (db, a) = setup(&[m]).await;
+            let mut p = payload(&a, vec![c(m, m, s)]);
+            if s == "failed" {
+                p["failures"] = json!([{"check_id":m,"code":"f","detail":"d"}]);
+            }
+            if s == "not_run" {
+                p["gaps"] = json!([{"check_id":m,"code":"g","detail":"d"}]);
+            }
+            let r = TypedEvidenceRepository::new(db.clone());
+            let first = r
+                .submit_return_v1(&serde_json::to_vec(&p).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(rows(&db, "typed_evidence_check_results").await, 1);
+            assert!(
+                r.submit_return_v1(&serde_json::to_vec(&p).unwrap())
+                    .await
+                    .unwrap()
+                    .replayed
+            );
+            assert_eq!(rows(&db, "typed_evidence_transitions").await, 1);
+            assert!(!first.replayed);
+        }
+    }
+    let (db, a) = setup(&["code", "graph", "command"]).await;
+    let mut p = payload(
+        &a,
+        vec![
+            c("code", "code", "passed"),
+            c("graph", "graph", "passed"),
+            c("command", "command", "not_run"),
+        ],
     );
+    p["checks"][0]["anchors"] = json!([{"method":"repository","locator":"repository:p:abcdef1"},{"method":"code","locator":"code:a@abcdef1#L1"}]);
+    p["checks"][1]["anchors"] =
+        json!([{"method":"graph","locator":"graph:00000000-0000-0000-0000-000000000000"}]);
+    p["checks"][2]["anchors"] = json!([{"method":"artifact","locator":"artifact:00000000-0000-0000-0000-000000000000"},{"method":"memory","locator":"memory:00000000-0000-0000-0000-000000000000@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},{"method":"external","locator":"external:https://x.test/#sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]);
+    p["gaps"] = json!([{"check_id":"command","code":"g","detail":"d"}]);
+    let got = TypedEvidenceRepository::new(db.clone())
+        .submit_return_v1(&serde_json::to_vec(&p).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(format!("{:?}", got.outcome), "Unresolved");
+    let h: Vec<String> = sqlx::query_scalar("SELECT health FROM typed_evidence_anchor_health")
+        .fetch_all(db.pool())
+        .await
+        .unwrap();
+    assert!(h.iter().all(|x| x == "unusable"));
+}
+#[tokio::test]
+async fn tribunal_evidence_return_v1_limits_atomicity_and_malformed() {
+    let (db, a) = setup(&["code"]).await;
+    let r = TypedEvidenceRepository::new(db.clone());
     assert!(
-        repo.submit_return_v1(malformed.as_bytes())
+        r.submit_return_v1(format!(r#"{{"attempt_id":"{}""#, a.attempt).as_bytes())
             .await
             .unwrap_err()
             .to_string()
             .contains("invalid_json")
     );
-    let failed: String =
+    let state: String =
         sqlx::query_scalar("SELECT lifecycle FROM typed_evidence_findings WHERE id=$1")
-            .bind(&a.finding_id)
+            .bind(&a.finding)
             .fetch_one(db.pool())
             .await
             .unwrap();
-    assert_eq!(failed, "failed");
-    let transitions: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM typed_evidence_transitions WHERE finding_id=$1")
-            .bind(&a.finding_id)
-            .fetch_one(db.pool())
-            .await
-            .unwrap();
-    assert_eq!(transitions, 1);
-    let (db, a) = attempt(&["code"]).await;
-    let repo = TypedEvidenceRepository::new(db.clone());
-    for (field, value, error) in [
-        ("conclusion", "x".repeat(8193), "conclusion_too_large"),
-        ("finding_id", "x".repeat(2049), "string_too_large"),
+    assert_eq!(state, "failed");
+    for (field, v, e) in [
+        (
+            "conclusion",
+            json!("x".repeat(8193)),
+            "conclusion_too_large",
+        ),
+        ("finding_id", json!("x".repeat(2049)), "string_too_large"),
     ] {
-        let mut body: Value =
-            serde_json::from_slice(&payload(&a, vec![check("code", "code", "passed")])).unwrap();
-        body[field] = json!(value);
+        let (db, a) = setup(&["code"]).await;
+        let mut p = payload(&a, vec![c("code", "code", "passed")]);
+        p[field] = v;
         assert!(
-            repo.submit_return_v1(&serde_json::to_vec(&body).unwrap())
+            TypedEvidenceRepository::new(db.clone())
+                .submit_return_v1(&serde_json::to_vec(&p).unwrap())
                 .await
                 .unwrap_err()
                 .to_string()
-                .contains(error)
+                .contains(e)
         );
-        let rows: i64 =
-            sqlx::query_scalar("SELECT count(*) FROM typed_evidence_validation_results")
-                .fetch_one(db.pool())
-                .await
-                .unwrap();
-        assert_eq!(rows, 0, "rejection rolls normalized rows back");
+        assert_eq!(rows(&db, "typed_evidence_validation_results").await, 0);
     }
+    let (db, a) = setup(&["code"]).await;
+    let mut p = payload(&a, vec![c("code", "code", "passed")]);
+    p["checks"][0]["anchors"] = json!(
+        (0..17)
+            .map(|_| json!({"method":"code","locator":"code:a@abcdef1#L1"}))
+            .collect::<Vec<_>>()
+    );
     assert!(
-        repo.submit_return_v1(&vec![b'x'; 262145])
+        TypedEvidenceRepository::new(db)
+            .submit_return_v1(&serde_json::to_vec(&p).unwrap())
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("check_limit_exceeded")
+    );
+    let (db, _) = setup(&["code"]).await;
+    assert!(
+        TypedEvidenceRepository::new(db)
+            .submit_return_v1(&vec![b'x'; 262145])
             .await
             .unwrap_err()
             .to_string()

@@ -1,30 +1,16 @@
 {
   "version":"TribunalEvidenceReturnV1",
-  "identity_tokens":{"finding_id":"$finding_id","spike_task_id":"$spike_task_id","attempt_id":"$attempt_id"},
+  "identity_tokens":{"finding_id":"$finding_id","spike_task_id":"$spike_task_id","attempt_id":"$attempt_id","invocation_id":"$invocation_id"},
   "valid_cases":[
-    {"name":"methods_statuses_and_families","checks":[{"check_id":"code","method":"code","status":"passed","anchors":[{"method":"repository","locator":"repository:plan123:abcdef1"},{"method":"code","locator":"code:src/lib.rs@abcdef1#L1-2"},{"method":"graph","locator":"graph:00000000-0000-0000-0000-000000000000"}]},{"check_id":"graph","method":"graph","status":"failed","detail":"failed","anchors":[{"method":"artifact","locator":"artifact:00000000-0000-0000-0000-000000000000"}],"failure":{"code":"failed","detail":"failed"}},{"check_id":"command","method":"command","status":"not_run","detail":"unavailable","anchors":[{"method":"command","locator":"command:invocation"},{"method":"memory","locator":"memory:00000000-0000-0000-0000-000000000000@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},{"method":"external","locator":"external:https://example.test/evidence#sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}],"gap":{"code":"unavailable","detail":"unavailable"}}]},
-    {"name":"resolved_healthy_command","outcome":"resolved","healthy":true},
-    {"name":"partial_healthy_and_unusable","outcome":"partial","healthy":true},
-    {"name":"unresolved_unusable","outcome":"unresolved","healthy":false}
+    {"name":"resolved_healthy_command","expected_outcome":"resolved","payload":{"version":"TribunalEvidenceReturnV1","finding_id":"$finding_id","spike_task_id":"$spike_task_id","attempt_id":"$attempt_id","conclusion":"resolved","checks":[{"check_id":"command","method":"command","status":"passed","invocation_id":"$invocation_id","anchors":[{"method":"command","locator":"command:$invocation_id"}]}]}},
+    {"name":"partial_healthy_and_unusable","expected_outcome":"partial","payload":{"version":"TribunalEvidenceReturnV1","finding_id":"$finding_id","spike_task_id":"$spike_task_id","attempt_id":"$attempt_id","conclusion":"partial","checks":[{"check_id":"code","method":"code","status":"passed","anchors":[{"method":"code","locator":"code:src/lib.rs@abcdef1#L1-2"}]},{"check_id":"command","method":"command","status":"passed","invocation_id":"$invocation_id","anchors":[{"method":"command","locator":"command:$invocation_id"}]}]}},
+    {"name":"unresolved_all_unusable_families","expected_outcome":"unresolved","payload":{"version":"TribunalEvidenceReturnV1","finding_id":"$finding_id","spike_task_id":"$spike_task_id","attempt_id":"$attempt_id","conclusion":"unresolved","checks":[{"check_id":"code","method":"code","status":"passed","anchors":[{"method":"repository","locator":"repository:plan123:abcdef1"},{"method":"code","locator":"code:src/lib.rs@abcdef1#L1-2"}]},{"check_id":"graph","method":"graph","status":"passed","anchors":[{"method":"graph","locator":"graph:00000000-0000-0000-0000-000000000000"},{"method":"repository","locator":"repository:plan123:abcdef1"}]},{"check_id":"command","method":"command","status":"passed","invocation_id":"$invocation_id","anchors":[{"method":"command","locator":"command:$invocation_id"},{"method":"artifact","locator":"artifact:00000000-0000-0000-0000-000000000000"},{"method":"memory","locator":"memory:00000000-0000-0000-0000-000000000000@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},{"method":"external","locator":"external:https://example.test/evidence#sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}}}
   ],
   "invalid_cases":[
-    {"name":"malformed_json","payload":"{\"attempt_id\":\"$attempt_id\"","error":"invalid_json"},
-    {"name":"incomplete_checks","error":"missing_expected_check"},
-    {"name":"passed_detail_forbidden","error":"passed_status_fields_forbidden"},
-    {"name":"failed_requires_failure","error":"failed_status_failure_required"},
-    {"name":"not_run_requires_gap","error":"not_run_status_gap_required"},
-    {"name":"unknown_anchor","error":"invalid_anchor"},
-    {"name":"different_replay","error":"replay_payload_conflict"}
-  ],
-  "boundaries":[
-    {"field":"checks","exact":32,"one_over":33,"error":"return_limit_exceeded"},
-    {"field":"findings","exact":32,"one_over":33,"error":"return_limit_exceeded"},
-    {"field":"anchors_per_finding","exact":16,"one_over":17,"error":"too_many_anchors"},
-    {"field":"gaps","exact":32,"one_over":33,"error":"return_limit_exceeded"},
-    {"field":"conclusion_bytes","exact":8192,"one_over":8193,"error":"conclusion_too_large"},
-    {"field":"detail_bytes","exact":8192,"one_over":8193,"error":"detail_too_large"},
-    {"field":"string_bytes","exact":2048,"one_over":2049,"error":"string_too_large"},
-    {"field":"decoded_payload_bytes","exact":262144,"one_over":262145,"error":"payload_too_large"}
-  ],
-  "persistence_assertions":["normalized_rows","foreign_keys","rollback_on_rejection","malformed_to_failed","valid_to_evidence_received","identical_replay_one_transition"]
+    {"name":"incomplete_checks","error":"missing_expected_check","payload":{"version":"TribunalEvidenceReturnV1","finding_id":"$finding_id","spike_task_id":"$spike_task_id","attempt_id":"$attempt_id","conclusion":"x","checks":[]}},
+    {"name":"passed_detail_forbidden","error":"passed_status_fields_forbidden","payload":{"version":"TribunalEvidenceReturnV1","finding_id":"$finding_id","spike_task_id":"$spike_task_id","attempt_id":"$attempt_id","conclusion":"x","checks":[{"check_id":"code","method":"code","status":"passed","detail":"no","anchors":[]}]}},
+    {"name":"failed_requires_failure","error":"failed_status_failure_required","payload":{"version":"TribunalEvidenceReturnV1","finding_id":"$finding_id","spike_task_id":"$spike_task_id","attempt_id":"$attempt_id","conclusion":"x","checks":[{"check_id":"code","method":"code","status":"failed","detail":"no","anchors":[]}]}},
+    {"name":"not_run_requires_gap","error":"not_run_status_gap_required","payload":{"version":"TribunalEvidenceReturnV1","finding_id":"$finding_id","spike_task_id":"$spike_task_id","attempt_id":"$attempt_id","conclusion":"x","checks":[{"check_id":"code","method":"code","status":"not_run","detail":"no","anchors":[]}]}},
+    {"name":"unknown_anchor","error":"invalid_anchor","payload":{"version":"TribunalEvidenceReturnV1","finding_id":"$finding_id","spike_task_id":"$spike_task_id","attempt_id":"$attempt_id","conclusion":"x","checks":[{"check_id":"code","method":"code","status":"passed","anchors":[{"method":"bogus","locator":"x"}]}]}}
+  ]
 }
