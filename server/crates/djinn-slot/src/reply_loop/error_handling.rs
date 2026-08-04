@@ -58,6 +58,33 @@ impl fmt::Display for ReplyLoopCancelled {
 
 impl std::error::Error for ReplyLoopCancelled {}
 
+/// Typed harness failure when reply-loop construction omitted the dispatcher
+/// required to execute tool calls.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MissingSlotToolDispatcher;
+
+impl fmt::Display for MissingSlotToolDispatcher {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("reply loop requires a SlotToolDispatcher; none was provided in SlotContext")
+    }
+}
+
+impl std::error::Error for MissingSlotToolDispatcher {}
+
+/// Typed harness failure for local compaction orchestration or persistence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplyLoopCompactionFailure {
+    pub details: String,
+}
+
+impl fmt::Display for ReplyLoopCompactionFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "reply-loop compaction failed: {}", self.details)
+    }
+}
+
+impl std::error::Error for ReplyLoopCompactionFailure {}
+
 // Re-export provider-layer classifiers so callers in the reply loop can import
 // them from this module as before.
 pub use djinn_provider::error_classify::{is_context_length_error, is_orphaned_tool_call_error};
@@ -243,6 +270,26 @@ impl fmt::Display for StepCapWindDownIgnored {
 
 impl std::error::Error for StepCapWindDownIgnored {}
 
+/// Typed finalization failure after repeated prose replies instead of a
+/// required finalize-tool call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FinalizeNudgesExhausted {
+    pub attempts: u32,
+    pub finalize_tools: String,
+}
+
+impl fmt::Display for FinalizeNudgesExhausted {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "session failed: {} consecutive text-only responses without calling {}",
+            self.attempts, self.finalize_tools
+        )
+    }
+}
+
+impl std::error::Error for FinalizeNudgesExhausted {}
+
 /// Build the wind-down directive injected on the final permitted turn when the
 /// reply loop is about to hit the step cap (`MAX_TURNS`).
 pub fn wind_down_message() -> Message {
@@ -350,11 +397,11 @@ pub fn next_nudge_message(
     let finalize_list = finalize_tool_names.join("` or `");
     let next_count = consecutive_nudge_count + 1;
     if next_count >= MAX_NUDGE_ATTEMPTS {
-        return Err(anyhow::anyhow!(
-            "session failed: {} consecutive text-only responses without calling {}",
-            next_count,
-            finalize_list
-        ));
+        return Err(FinalizeNudgesExhausted {
+            attempts: next_count,
+            finalize_tools: finalize_list,
+        }
+        .into());
     }
     Ok(Some((
         next_count,

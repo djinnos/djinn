@@ -92,7 +92,8 @@ use crate::actors::slot::lifecycle::setup::{SetupContext, SetupError, resolve_se
 use crate::actors::slot::lifecycle::task_classifier::classify_native_skill_trigger;
 use crate::actors::slot::lifecycle::teardown::{PostSessionParams, spawn_post_session_work};
 use crate::actors::slot::reply_loop::error_handling::{
-    BudgetWindDownIgnored, ReplyLoopCancelled, StepCapWindDownIgnored,
+    BudgetWindDownIgnored, FinalizeNudgesExhausted, MissingSlotToolDispatcher,
+    ReplyLoopCancelled, ReplyLoopCompactionFailure, StepCapWindDownIgnored,
 };
 use crate::actors::slot::reply_loop::loop_guard::{
     LoopGuardError, LoopGuardKind as ReplyLoopGuardKind,
@@ -177,9 +178,14 @@ fn reply_loop_failure_cause(error: &anyhow::Error) -> SessionFailureCause {
         || error.downcast_ref::<StepCapWindDownIgnored>().is_some()
     {
         SessionFailureCause::Protocol
-    } else if error.downcast_ref::<ToolError>().is_some() {
-        // Tool/MCP failures retain this structured envelope through the reply
-        // loop. Do not inspect display text, which is arbitrary diagnostic data.
+    } else if error.downcast_ref::<FinalizeNudgesExhausted>().is_some() {
+        SessionFailureCause::Finalization
+    } else if error.downcast_ref::<ToolError>().is_some()
+        || error.downcast_ref::<MissingSlotToolDispatcher>().is_some()
+        || error.downcast_ref::<ReplyLoopCompactionFailure>().is_some()
+    {
+        // Tool/MCP and local reply-loop harness failures retain a structured
+        // envelope. Never inspect arbitrary diagnostic text here.
         SessionFailureCause::Harness
     } else {
         SessionFailureCause::Unknown
