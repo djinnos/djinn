@@ -5325,7 +5325,7 @@ async fn stall_timeout_terminalizes_attempt_as_timed_out() {
 /// dispatch reappearance path spare the task from a failure streak / cooldown.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn interrupted_session_terminalizes_attempt_as_environmental_interrupt() {
-    use djinn_core::models::task_attempt::TaskAttemptOutcome;
+    use djinn_core::models::{SessionStatus, task_attempt::TaskAttemptOutcome};
     use djinn_db::{CreateSessionParams, SessionRepository, TaskAttemptRepository};
 
     let db = test_helpers::create_test_db();
@@ -5363,6 +5363,13 @@ async fn interrupted_session_terminalizes_attempt_as_environmental_interrupt() {
             pricing: None,
             cost_basis: None,
         })
+        .await
+        .unwrap();
+
+    // Accounting follows the addressed row's durable terminal truth, not the
+    // terminal event string supplied to the adapter below.
+    session_repo
+        .update(&session.id, SessionStatus::Interrupted, 1, 1, 0, 0, None)
         .await
         .unwrap();
 
@@ -5408,7 +5415,7 @@ async fn interrupted_session_terminalizes_attempt_as_environmental_interrupt() {
 /// keeps counting. Only `interrupted` (infra) is treated environmental.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn failed_session_terminalizes_attempt_as_crashed_not_interrupted() {
-    use djinn_core::models::task_attempt::TaskAttemptOutcome;
+    use djinn_core::models::{SessionStatus, task_attempt::TaskAttemptOutcome};
     use djinn_db::{CreateSessionParams, SessionRepository, TaskAttemptRepository};
 
     let db = test_helpers::create_test_db();
@@ -5445,6 +5452,12 @@ async fn failed_session_terminalizes_attempt_as_crashed_not_interrupted() {
             pricing: None,
             cost_basis: None,
         })
+        .await
+        .unwrap();
+    // A terminal exit event is expected only after this persisted session row
+    // has settled; that row is the source of the attempt outcome.
+    session_repo
+        .update(&session.id, SessionStatus::Failed, 1, 1, 0, 0, None)
         .await
         .unwrap();
     let attempt_id = seed_pending_attempt(&db, &task.id, "worker").await;
