@@ -69,13 +69,11 @@ pub(super) struct SlotPool {
     task_activity_seed: HashMap<String, (std::sync::Arc<std::sync::atomic::AtomicU64>, u64)>,
     draining_slots: HashSet<usize>,
     retired_slots: HashSet<usize>,
-    /// Task IDs whose settlement and mapping release are deferred because the
-    /// associated slot's reply loop is inside a compaction critical section.
-    /// Entries are removed when the eventual `SlotEvent::Killed` arrives and
-    /// `handle_event` performs the normal final release path.  Repeated
-    /// kill/drain/reclaim for the same task while it remains in this set is a
-    /// no-op (idempotent).
-    pending_teardown_tasks: HashSet<String>,
+    /// Writer-selected causes for teardown deferred while the associated slot's
+    /// reply loop is inside a compaction critical section. Entries are consumed
+    /// when the owning `SlotEvent::Killed` arrives. The first request remains
+    /// authoritative so repeated kill/drain/reclaim requests are idempotent.
+    pending_teardown_tasks: HashMap<String, SessionFailureCause>,
     pending_reconciliations: HashMap<String, PendingReconciliation>,
     ctx: SlotContext,
     cancel: CancellationToken,
@@ -121,7 +119,7 @@ impl SlotPool {
             task_activity_seed: HashMap::new(),
             draining_slots: HashSet::new(),
             retired_slots: HashSet::new(),
-            pending_teardown_tasks: HashSet::new(),
+            pending_teardown_tasks: HashMap::new(),
             pending_reconciliations: HashMap::new(),
             ctx,
             cancel,
@@ -617,9 +615,9 @@ impl SlotPool {
                 // kill_session / reclaim_session; the actual settlement
                 // happens right here when the slot actor's Kill event arrives
                 // after compaction exits.
-                if owns_task_mapping {
-                    self.pending_teardown_tasks.remove(&task_id);
-                }
+                let deferred_cause = (killed && owns_task_mapping)
+                    .then(|| self.pending_teardown_tasks.remove(&task_id))
+                    .flatten();
                 // On a killed lifecycle (stall-kill, interrupt_all/project,
                 // explicit Kill command) settle the session DB row to a terminal
                 // state *now*, at the moment the kill lands. A worker that is
@@ -636,8 +634,11 @@ impl SlotPool {
                     // the reply loop's interrupt/cancellation path before the
                     // lifecycle task exits.  Settlement below assumes any
                     // flushable assistant/tool rows have already been persisted.
-                    self.settle_session_row(&task_id, SessionFailureCause::Protocol)
-                        .await;
+                    self.settle_session_row(
+                        &task_id,
+                        deferred_cause.unwrap_or(SessionFailureCause::Protocol),
+                    )
+                    .await;
                 }
                 if owns_task_mapping {
                     self.task_to_slot.remove(&task_id);
@@ -701,7 +702,7 @@ impl SlotPool {
                     pending.snapshot.observations.final_mapping_slot_id =
                         self.task_to_slot.get(&task_id).copied();
                     pending.snapshot.observations.final_pending_teardown =
-                        self.pending_teardown_tasks.contains(&task_id);
+                        self.pending_teardown_tasks.contains_key(&task_id);
                     pending.snapshot.observations.completion_source =
                         "slot_event_killed".to_owned();
                     let teardown_failed = pending
@@ -821,7 +822,7 @@ impl SlotPool {
         // Idempotent: if a teardown is already pending (deferred by active
         // compaction), the kill command was already sent and settlement will
         // happen when the eventual Killed event arrives via handle_event.
-        if self.pending_teardown_tasks.contains(task_id) {
+        if self.pending_teardown_tasks.contains_key(task_id) {
             return Ok(());
         }
         // If the slot's reply loop is mid-compaction, defer settlement and
@@ -837,7 +838,9 @@ impl SlotPool {
             // Send the kill — the slot actor parks it as pending_kill during
             // compaction and applies it once the critical section exits.
             self.slot(slot_id)?.kill().await?;
-            self.pending_teardown_tasks.insert(task_id.to_string());
+            self.pending_teardown_tasks
+                .entry(task_id.to_string())
+                .or_insert(SessionFailureCause::Cancelled);
             return Ok(());
         }
         // Normal (non-compacting) path: settle eagerly so the Killed event
@@ -856,8 +859,13 @@ impl SlotPool {
     /// [`evict_session`], an unmapped task is reported truthfully as
     /// [`PoolError::TaskNotFound`].
     async fn terminate_session(&mut self, task_id: &str) -> Result<(), PoolError> {
-        self.reclaim_session(task_id, "terminate_session", true)
-            .await
+        self.reclaim_session(
+            task_id,
+            "terminate_session",
+            true,
+            SessionFailureCause::Cancelled,
+        )
+        .await
     }
     async fn reconcile_terminate(&mut self, task_id: &str) -> ReconcileTerminateSnapshot {
         // Fence before observing either pool or durable state. A dispatch
@@ -868,7 +876,7 @@ impl SlotPool {
             .await
             .ok();
         let initial_mapping_slot_id = self.task_to_slot.get(task_id).copied();
-        let initial_pending_teardown = self.pending_teardown_tasks.contains(task_id);
+        let initial_pending_teardown = self.pending_teardown_tasks.contains_key(task_id);
         let initial_compacting = initial_mapping_slot_id
             .and_then(|id| self.slots.get(id))
             .is_some_and(|slot| slot.is_compacting());
@@ -938,7 +946,9 @@ impl SlotPool {
                         }
                     }
                 }
-                self.pending_teardown_tasks.insert(task_id.to_owned());
+                self.pending_teardown_tasks
+                    .entry(task_id.to_owned())
+                    .or_insert(SessionFailureCause::Cancelled);
             }
             // Pending teardown is created only for a mapped slot. If legacy
             // state violates that invariant, do not install an unfinishable
@@ -1014,7 +1024,7 @@ impl SlotPool {
         let final_non_terminal_ids: Vec<String> =
             final_rows.iter().map(|row| row.id.clone()).collect();
         let final_mapping_slot_id = self.task_to_slot.get(task_id).copied();
-        let final_pending_teardown = self.pending_teardown_tasks.contains(task_id);
+        let final_pending_teardown = self.pending_teardown_tasks.contains_key(task_id);
         let teardown_failed = executions.iter().any(|x| x.teardown_error.is_some());
         let settlement_failed = executions.iter().any(|x| x.settlement_error.is_some());
         let residual = fence.is_none()
@@ -1075,7 +1085,13 @@ impl SlotPool {
     /// `task_to_slot` populated forever. This synthesizes the cleanup that never
     /// arrived.
     async fn evict_session(&mut self, task_id: &str) -> Result<(), PoolError> {
-        self.reclaim_session(task_id, "evict_session", false).await
+        self.reclaim_session(
+            task_id,
+            "evict_session",
+            false,
+            SessionFailureCause::Infrastructure,
+        )
+        .await
     }
     /// Shared reclaim logic for `terminate_session` and `evict_session`.
     async fn reclaim_session(
@@ -1083,6 +1099,7 @@ impl SlotPool {
         task_id: &str,
         reason: &str,
         require_mapping: bool,
+        failure_cause: SessionFailureCause,
     ) -> Result<(), PoolError> {
         let Some(slot_id) = self.task_to_slot.get(task_id).copied() else {
             if require_mapping {
@@ -1095,7 +1112,7 @@ impl SlotPool {
         // Idempotent: if a teardown is already pending for this task, the
         // kill command was already sent and settlement will happen when the
         // Killed event arrives.
-        if self.pending_teardown_tasks.contains(task_id) {
+        if self.pending_teardown_tasks.contains_key(task_id) {
             return Ok(());
         }
         // If the slot's reply loop is mid-compaction, defer settlement and
@@ -1113,7 +1130,9 @@ impl SlotPool {
             if let Ok(slot) = self.slot(slot_id) {
                 let _ = slot.kill().await;
             }
-            self.pending_teardown_tasks.insert(task_id.to_string());
+            self.pending_teardown_tasks
+                .entry(task_id.to_string())
+                .or_insert(failure_cause);
             return Ok(());
         }
         self.teardown_taskrun_jobs_for_task(task_id, reason).await;
@@ -1123,15 +1142,7 @@ impl SlotPool {
             let _ = slot.kill().await;
         }
         // Settle the session row so the concurrency cap is freed immediately.
-        self.settle_session_row(
-            task_id,
-            if require_mapping {
-                SessionFailureCause::Cancelled
-            } else {
-                SessionFailureCause::Infrastructure
-            },
-        )
-        .await;
+        self.settle_session_row(task_id, failure_cause).await;
         self.task_to_slot.remove(task_id);
         self.task_started.remove(task_id);
         self.task_projects.remove(task_id);
@@ -1649,8 +1660,12 @@ impl SlotPool {
         self.handle_event(event).await;
     }
     #[cfg(test)]
-    pub(super) fn test_pending_teardown_tasks(&self) -> &HashSet<String> {
+    pub(super) fn test_pending_teardown_tasks(&self) -> &HashMap<String, SessionFailureCause> {
         &self.pending_teardown_tasks
+    }
+    #[cfg(test)]
+    pub(super) async fn test_evict_session(&mut self, task_id: &str) -> Result<(), PoolError> {
+        self.evict_session(task_id).await
     }
     #[cfg(test)]
     pub(super) async fn test_kill_session(&mut self, task_id: &str) -> Result<(), PoolError> {
