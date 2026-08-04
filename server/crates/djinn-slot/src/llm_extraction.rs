@@ -3553,7 +3553,9 @@ mod tests {
             });
             messages.push(Message {
                 role: Role::User,
-                content: vec![ContentBlock::text(format!("intervening user message {index}"))],
+                content: vec![ContentBlock::text(format!(
+                    "intervening user message {index}"
+                ))],
                 metadata: None,
             });
         }
