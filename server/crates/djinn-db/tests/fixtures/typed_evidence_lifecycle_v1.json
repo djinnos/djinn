@@ -14,7 +14,11 @@
   },
   "scenarios": [
     "identical_demand_idempotent", "distinct_demand_no_write_conflict",
-    "cross_revision_n_n1_n2_blocking", "append_only_history"
+    "cross_revision_n_n1_n2_blocking", "persisted_nonterminal_transition",
+    "unlisted_transition_rejected", "generic_terminal_transition_rejected",
+    "resolved_requires_judge_and_committed_folding_revision",
+    "withdrawn_requires_rationale_and_non_load_bearing_assertion",
+    "resolved_and_withdrawn_clear_unresolved_projection", "append_only_history"
   ],
   "conflict_error": "active_evidence_conflict"
 }
