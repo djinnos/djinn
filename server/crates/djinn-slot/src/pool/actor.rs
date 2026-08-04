@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 use djinn_core::job_retention::{JobRetentionEvidence, SessionEvidence};
+use djinn_core::models::SessionFailureCause;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -635,7 +636,7 @@ impl SlotPool {
                     // the reply loop's interrupt/cancellation path before the
                     // lifecycle task exits.  Settlement below assumes any
                     // flushable assistant/tool rows have already been persisted.
-                    self.settle_session_row(&task_id).await;
+                    self.settle_session_row(&task_id, SessionFailureCause::Protocol).await;
                 }
                 if owns_task_mapping {
                     self.task_to_slot.remove(&task_id);
@@ -677,7 +678,10 @@ impl SlotPool {
                         }
                         execution.settlement_attempted = true;
                         if let Err(error) =
-                            repo.settle_non_terminal_by_id(&execution.session_id).await
+                            repo.settle_non_terminal_by_id_with_failure_cause(
+                                &execution.session_id,
+                                SessionFailureCause::Cancelled,
+                            ).await
                         {
                             execution.settlement_error = Some(error.to_string());
                         }
@@ -839,7 +843,7 @@ impl SlotPool {
         // task-run Job twice.
         self.teardown_taskrun_jobs_for_task(task_id, "kill_session")
             .await;
-        self.settle_session_row(task_id).await;
+        self.settle_session_row(task_id, SessionFailureCause::Cancelled).await;
         self.slot(slot_id)?.kill().await?;
         Ok(())
     }
@@ -968,7 +972,10 @@ impl SlotPool {
         }
         for execution in &mut executions {
             execution.settlement_attempted = true;
-            if let Err(error) = repo.settle_non_terminal_by_id(&execution.session_id).await {
+            if let Err(error) = repo.settle_non_terminal_by_id_with_failure_cause(
+                                &execution.session_id,
+                                SessionFailureCause::Cancelled,
+                            ).await {
                 execution.settlement_error = Some(error.to_string());
             }
         }
@@ -1110,7 +1117,7 @@ impl SlotPool {
             let _ = slot.kill().await;
         }
         // Settle the session row so the concurrency cap is freed immediately.
-        self.settle_session_row(task_id).await;
+        self.settle_session_row(task_id, if require_mapping { SessionFailureCause::Cancelled } else { SessionFailureCause::Infrastructure }).await;
         self.task_to_slot.remove(task_id);
         self.task_started.remove(task_id);
         self.task_projects.remove(task_id);
@@ -1134,9 +1141,11 @@ impl SlotPool {
     /// `running` rows, so re-settling an already-terminal row is a no-op.
     /// Best-effort: the slot teardown proceeds regardless of a transient DB
     /// error.
-    async fn settle_session_row(&self, task_id: &str) {
+    async fn settle_session_row(&self, task_id: &str, failure_cause: SessionFailureCause) {
         let session_repo = SessionRepository::new(self.ctx.db.clone(), self.ctx.event_bus.clone());
-        if let Err(e) = session_repo.interrupt_running_for_task(task_id).await {
+        if let Err(e) = session_repo
+            .interrupt_running_for_task_with_failure_cause(task_id, failure_cause)
+            .await {
             tracing::warn!(
                 task_id = %task_id,
                 error = %e,
