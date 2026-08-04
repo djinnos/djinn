@@ -73,6 +73,7 @@ pub mod tool_call_evaluator;
 pub mod tool_call_evaluator_tests;
 pub mod tool_call_export;
 pub mod tool_call_metrics;
+pub mod typed_evidence;
 pub mod usage_analytics;
 pub mod user;
 pub mod user_settings;
