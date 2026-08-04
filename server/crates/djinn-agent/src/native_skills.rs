@@ -260,7 +260,11 @@ mod tests {
             if assessed_at - completed > 30 * 24 * 60 * 60 || completed <= started {
                 continue;
             }
-            if seen.insert((run_id, job["run_attempt"].as_i64(), job["provider_job_id"].as_str())) {
+            if seen.insert((
+                run_id,
+                job["run_attempt"].as_i64(),
+                job["provider_job_id"].as_str(),
+            )) {
                 durations.push(completed - started);
             }
         }
@@ -320,6 +324,8 @@ mod tests {
             "GET /repos/{owner}/{repo}/actions/workflows",
             "GET /repos/{owner}/{repo}/actions/workflows/{workflow_id}/runs",
             "GET /repos/{owner}/{repo}/actions/runs/{run_id}/attempts/1/jobs",
+            "workflow path",
+            "exact rendered job name",
             "runner_group_id",
             "normalized/sorted runner labels",
             "run_attempt != 1",
@@ -373,8 +379,14 @@ mod tests {
         assert_eq!(durations.len(), 10);
         let p95 = durations[((95 * durations.len() + 99) / 100) - 1];
         let recommendation = ((3 * p95 + 119) / 120).clamp(5, 120);
-        assert_eq!(p95, 600, "nearest-rank p95 must remain independently calculated");
-        assert_eq!(recommendation, 15, "recommendation must remain independently calculated");
+        assert_eq!(
+            p95, 600,
+            "nearest-rank p95 must remain independently calculated"
+        );
+        assert_eq!(
+            recommendation, 15,
+            "recommendation must remain independently calculated"
+        );
         assert_eq!(p95, expected["nearest_rank_p95_seconds"].as_i64().unwrap());
         assert_eq!(
             recommendation,
@@ -383,7 +395,10 @@ mod tests {
 
         let canary = provider_key(&jobs[10]);
         let nightly = provider_key(&jobs[11]);
-        assert_ne!(canary, nightly, "exact rendered matrix names must remain separate");
+        assert_ne!(
+            canary, nightly,
+            "exact rendered matrix names must remain separate"
+        );
         assert_eq!(valid_durations(jobs, &canary, fresh).len(), 1);
         assert_eq!(valid_durations(jobs, &nightly, fresh).len(), 1);
 
@@ -443,7 +458,12 @@ mod tests {
         assert_eq!(expected["aged_recommendation_confidence"], "evidence-gap");
         assert_eq!(fixture["offline_checker"]["fresh_result"], "pass");
         assert_eq!(fixture["offline_checker"]["aged_result"], "pass");
-        assert!(fixture["source"].as_str().unwrap().contains("no live API request"));
+        assert!(
+            fixture["source"]
+                .as_str()
+                .unwrap()
+                .contains("no live API request")
+        );
     }
 
     #[test]
