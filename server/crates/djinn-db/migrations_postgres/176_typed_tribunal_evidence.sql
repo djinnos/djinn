@@ -171,3 +171,28 @@ $$ LANGUAGE plpgsql;
 CREATE TRIGGER typed_evidence_transitions_append_only
     BEFORE UPDATE OR DELETE ON typed_evidence_transitions
     FOR EACH ROW EXECUTE FUNCTION reject_typed_evidence_transition_mutation();
+
+-- Migration 173's AFTER INSERT trigger first acquired the observation's FK
+-- KEY SHARE lock and then tried to upgrade the parent pool row to FOR UPDATE.
+-- Two same-pool inserts could therefore deadlock while upgrading one another's
+-- FK locks. Acquire a transaction-scoped, per-pool lock before the FK check and
+-- trim the existing rows before NEW is inserted. Different pools retain their
+-- independent lock keys and can continue in parallel.
+DROP TRIGGER model_turn_observations_bounded ON model_turn_observations;
+CREATE OR REPLACE FUNCTION trim_model_turn_observations() RETURNS trigger AS $$
+BEGIN
+    PERFORM pg_advisory_xact_lock(NEW.pool_id);
+    DELETE FROM model_turn_observations
+     WHERE pool_id = NEW.pool_id
+       AND sequence IN (
+           SELECT sequence FROM model_turn_observations
+            WHERE pool_id = NEW.pool_id
+            ORDER BY sequence DESC
+            OFFSET 255
+       );
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+CREATE TRIGGER model_turn_observations_bounded
+BEFORE INSERT ON model_turn_observations
+FOR EACH ROW EXECUTE FUNCTION trim_model_turn_observations();
