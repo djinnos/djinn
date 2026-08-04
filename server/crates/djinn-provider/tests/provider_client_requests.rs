@@ -1123,6 +1123,7 @@ async fn admission_launch_openai_responses_uses_exact_route_auth_body_and_usage(
             .combined_units,
         7
     );
+    assert_eq!(outcome.token_emission.first_token_monotonic_ms, Some(100));
     let requests = server.received_requests().await.unwrap();
     assert_eq!(requests.len(), 1);
     assert_eq!(
@@ -1207,7 +1208,12 @@ async fn admission_launch_format_malformed_failures_are_protocol_terminal_once()
         let conversation = conversation();
         let mut attempt = match format {
             "openai" => OpenAIProvider::new(openai_config(server.uri(), AuthMethod::NoAuth))
-                .start_sse_attempt_v1(&conversation, &[], None, attempt_context(200 + index as u64)),
+                .start_sse_attempt_v1(
+                    &conversation,
+                    &[],
+                    None,
+                    attempt_context(200 + index as u64),
+                ),
             "anthropic" => {
                 AnthropicProvider::new(anthropic_config(server.uri(), AuthMethod::NoAuth))
                     .start_sse_attempt_v1(
@@ -1221,9 +1227,19 @@ async fn admission_launch_format_malformed_failures_are_protocol_terminal_once()
                 server.uri(),
                 AuthMethod::NoAuth,
             ))
-            .start_sse_attempt_v1(&conversation, &[], None, attempt_context(200 + index as u64)),
+            .start_sse_attempt_v1(
+                &conversation,
+                &[],
+                None,
+                attempt_context(200 + index as u64),
+            ),
             "google" => GoogleProvider::new(google_config(server.uri(), AuthMethod::NoAuth))
-                .start_sse_attempt_v1(&conversation, &[], None, attempt_context(200 + index as u64)),
+                .start_sse_attempt_v1(
+                    &conversation,
+                    &[],
+                    None,
+                    attempt_context(200 + index as u64),
+                ),
             _ => unreachable!(),
         }
         .expect("all covered adapters launch at their public boundary");
@@ -1237,7 +1253,11 @@ async fn admission_launch_format_malformed_failures_are_protocol_terminal_once()
             "{format} malformed SSE must be terminal rather than a retryable transport loss"
         );
         assert_eq!(
-            server.received_requests().await.expect("captured request").len(),
+            server
+                .received_requests()
+                .await
+                .expect("captured request")
+                .len(),
             1,
             "{format} admission launch must not retry"
         );
@@ -1269,10 +1289,17 @@ async fn admission_launch_anthropic_error_uses_stream_classifier_and_tool_delta_
         .start_sse_attempt_v1(&conversation, &[], None, attempt_context(210))
         .expect("covered anthropic route");
     let outcome = attempt.outcome().await;
-    assert_eq!(outcome.terminal, djinn_provider::ProviderAttemptTerminalV1::Completed);
+    assert_eq!(
+        outcome.terminal,
+        djinn_provider::ProviderAttemptTerminalV1::Completed
+    );
     assert_eq!(outcome.token_emission.first_token_monotonic_ms, None);
     assert_eq!(
-        server.received_requests().await.expect("captured request").len(),
+        server
+            .received_requests()
+            .await
+            .expect("captured request")
+            .len(),
         1
     );
 
@@ -1299,7 +1326,11 @@ async fn admission_launch_anthropic_error_uses_stream_classifier_and_tool_delta_
         )
     );
     assert_eq!(
-        server.received_requests().await.expect("captured request").len(),
+        server
+            .received_requests()
+            .await
+            .expect("captured request")
+            .len(),
         1
     );
 }
@@ -1346,8 +1377,72 @@ async fn admission_launch_429_normalizes_retry_deadline_once_and_redacts_diagnos
     assert!(!diagnostics.contains(credential));
     assert!(!diagnostics.contains(provider_secret));
     assert_eq!(
-        server.received_requests().await.expect("captured request").len(),
+        server
+            .received_requests()
+            .await
+            .expect("captured request")
+            .len(),
         1,
         "429 must be returned to the reply-loop retry owner without a hidden retry"
     );
+}
+
+#[tokio::test]
+async fn admission_launch_openai_responses_errors_use_production_stream_classifier() {
+    let cases = [
+        (
+            "response.failed quota",
+            "data: {\"type\":\"response.failed\",\"error\":{\"code\":\"insufficient_quota\",\"message\":\"quota\"}}\n\n",
+            djinn_provider::ProviderAttemptLossV1::RateLimited,
+        ),
+        (
+            "error server failure",
+            "data: {\"type\":\"error\",\"error\":{\"code\":\"server_error\",\"message\":\"backend failed\"}}\n\n",
+            djinn_provider::ProviderAttemptLossV1::Transport,
+        ),
+        (
+            "response.failed invalid request",
+            "data: {\"type\":\"response.failed\",\"error\":{\"code\":\"invalid_request\",\"message\":\"bad input\"}}\n\n",
+            djinn_provider::ProviderAttemptLossV1::ProviderRejected,
+        ),
+    ];
+
+    for (sequence, (name, body, expected_loss)) in cases.into_iter().enumerate() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/responses"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(body),
+            )
+            .mount(&server)
+            .await;
+        let provider =
+            OpenAIResponsesProvider::new(openai_responses_config(server.uri(), AuthMethod::NoAuth));
+        let conversation = conversation();
+        let mut attempt = provider
+            .start_sse_attempt_v1(
+                &conversation,
+                &[],
+                None,
+                attempt_context(230 + sequence as u64),
+            )
+            .expect("covered Responses route");
+
+        assert_eq!(
+            attempt.outcome().await.terminal,
+            djinn_provider::ProviderAttemptTerminalV1::Failed(expected_loss),
+            "{name} must retain the production stream error classification"
+        );
+        assert_eq!(
+            server
+                .received_requests()
+                .await
+                .expect("captured request")
+                .len(),
+            1,
+            "{name} must be a single admission-owned send"
+        );
+    }
 }

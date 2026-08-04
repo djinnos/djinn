@@ -371,8 +371,31 @@ impl ProviderSseTerminalReporterV1 for OpenAIResponsesTerminalReporterV1 {
                     ProviderFormatReportV1::CodexEmptyTurn(usage)
                 }
             }
-            ResponsesStreamEvent::ResponseFailed { .. } | ResponsesStreamEvent::Error { .. } => {
-                ProviderFormatReportV1::Failed(ProviderAttemptLossV1::ProviderRejected)
+            ResponsesStreamEvent::ResponseFailed { error }
+            | ResponsesStreamEvent::Error { error } => {
+                // Reuse the legacy stream's typed classifier: an in-band
+                // Responses error still carries a provider-specific failure
+                // class even though its HTTP response was successful.
+                match ProviderError::from_stream_error(
+                    extract_error_code(&error).as_deref(),
+                    &extract_error_message(&error),
+                ) {
+                    ProviderError::RateLimit { .. } => {
+                        ProviderFormatReportV1::Failed(ProviderAttemptLossV1::RateLimited)
+                    }
+                    ProviderError::ProviderInternal { .. }
+                    | ProviderError::Transport
+                    | ProviderError::ExhaustedTransport(_)
+                    | ProviderError::EmptyCompletion => {
+                        ProviderFormatReportV1::Failed(ProviderAttemptLossV1::Transport)
+                    }
+                    ProviderError::ContextOverflow
+                    | ProviderError::Authentication
+                    | ProviderError::InvalidRequest
+                    | ProviderError::InvalidOutput => {
+                        ProviderFormatReportV1::Failed(ProviderAttemptLossV1::ProviderRejected)
+                    }
+                }
             }
             _ => ProviderFormatReportV1::Continue,
         }
