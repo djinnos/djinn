@@ -75,6 +75,7 @@ mod checkpoint;
 mod checkpoint_safety;
 mod launcher_handshake;
 mod lifecycle;
+mod platform_dsn;
 pub mod warm_base_census;
 pub mod warm_build_lease;
 pub mod warm_step_budget;
@@ -414,6 +415,17 @@ impl djinn_graph::WarmContext for WorkerWarmContext {
 }
 
 fn main() {
+    // FIRST, before Tokio, before telemetry, before any thread exists: move the
+    // platform DSN out of this process's environment. Every command the agent
+    // runs is a descendant of this process, so this is the only place a scrub
+    // covers spawn paths that have not been written yet — including the ones
+    // that execute repository-controlled code (`build.rs`, `postinstall`, a
+    // language server). The value is kept, not dropped;
+    // `bootstrap_warm_database()` reads it from `platform_dsn` and the
+    // invocation-lease authority is composed over the handle exactly as before.
+    // See `platform_dsn` for the measurement and for why `remove_var` is sound
+    // at this point.
+    platform_dsn::take_from_environment();
     // Install before constructing Tokio or dispatching work.
     djinn_telemetry::panic_capture::install();
     let exit = tokio::runtime::Builder::new_multi_thread()
@@ -4457,9 +4469,15 @@ async fn load_cached_graph_artifact(
 /// only manage one configuration surface:
 ///
 /// * `DJINN_DATABASE_URL` — full DSN (required).
+///
+/// Read from [`platform_dsn`], not from the environment: `main` moves the
+/// variable out of this process at startup so nothing the agent spawns can
+/// inherit a DDL-capable platform connection string. The value is unchanged —
+/// this function still opens the same database, and the durable
+/// invocation-lease authority is still built over the handle it returns.
 async fn bootstrap_warm_database() -> Result<Database> {
-    let url = std::env::var("DJINN_DATABASE_URL")
-        .map_err(|_| anyhow::anyhow!("DJINN_DATABASE_URL must be set for the warm worker pod"))?;
+    let url = platform_dsn::platform_dsn()
+        .ok_or_else(|| anyhow::anyhow!("DJINN_DATABASE_URL must be set for the warm worker pod"))?;
 
     let connect = DatabaseConnectConfig::Postgres(PostgresDatabaseConfig { url });
     let db = Database::open_with_config(connect).context("open warm worker database")?;
@@ -4530,6 +4548,111 @@ mod tests {
     const WARM_TEST_PROJECT: &str = "warm-worker-project";
     const WARM_TEST_REVISION: &str = "warm-worker-revision";
     const WARM_TEST_DEADLINE: &str = "2099-01-01T00:00:00.000Z";
+
+    /// Serialises the two tests that render `DJINN_DATABASE_URL` into this
+    /// process and then take it away again. A `tokio::sync::Mutex` because both
+    /// hold it across `.await`.
+    static PLATFORM_DSN_TEST_MUTEX: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    /// The goxi-13 guard: scrubbing the platform DSN out of the process
+    /// environment must not disarm the invocation-lease authority.
+    ///
+    /// Blocker 13 was a composition change that left the runner holding an
+    /// authority which answered `Unleased` for every invocation while the
+    /// durable authority was armed — no error, no log, four rollouts. This
+    /// change moves where `bootstrap_warm_database()` gets its DSN from, which
+    /// is exactly the kind of rewiring that produced it. So the assertion here
+    /// is on the DECISION the authority reaches over the database that
+    /// `bootstrap_warm_database()` actually opened, not on the fact that a
+    /// `Database` was constructed: an authority armed to `Enforce` must project
+    /// to `Lift`.
+    #[tokio::test]
+    async fn the_scrubbed_worker_still_resolves_the_platform_invocation_lease_authority() {
+        use djinn_db::InvocationLeaseMode;
+        use djinn_supervisor::services::{
+            DurableInvocationLiftAuthority, InvocationLiftAuthority, InvocationLiftDecision,
+        };
+
+        // A real platform database: the migrated template clone, with the
+        // durable authority row seeded and armed the way production arms it.
+        let platform = Database::open_in_memory().expect("platform test database");
+        let authority_rows = djinn_db::InvocationLeaseAuthorityRepository::new(platform.clone());
+        let row = authority_rows
+            .seed_baseline()
+            .await
+            .expect("seed the disarmed baseline");
+        authority_rows
+            .set_mode_and_cap(row.epoch, InvocationLeaseMode::Enforce, None)
+            .await
+            .expect("arm the invocation lease authority");
+        let dsn = platform
+            .test_dsn()
+            .expect("the test harness exposes the per-test DSN");
+
+        // Render it the way `djinn_k8s::job` renders a task-run Pod, then run
+        // the worker's startup scrub over it.
+        let _guard = PLATFORM_DSN_TEST_MUTEX.lock().await;
+        platform_dsn::clear_for_test();
+        // SAFETY: serialised by `_guard`; this test binary mutates no other
+        // process-global environment concurrently.
+        unsafe { std::env::set_var(platform_dsn::PLATFORM_DSN_ENV, &dsn) };
+        platform_dsn::take_from_environment();
+        assert!(
+            std::env::var_os(platform_dsn::PLATFORM_DSN_ENV).is_none(),
+            "the scrub must have taken the variable out of the environment, or this test \
+             would prove nothing about the state the worker actually runs in"
+        );
+
+        // The worker binary's own bootstrap, unchanged in every other respect.
+        let opened = bootstrap_warm_database()
+            .await
+            .expect("the worker must still open the platform database after the scrub");
+
+        // The authority the in-pod composition builds over that handle
+        // (`djinn_agent::context::ShellLaunchContext::broker_backed`), asked the
+        // same question the runner asks per invocation.
+        let decision = DurableInvocationLiftAuthority::new(opened, "in-pod worker")
+            .invocation_lift_decision()
+            .await;
+        assert!(
+            matches!(decision, InvocationLiftDecision::Lift),
+            "an armed durable authority must still project to Lift after the scrub; \
+             {decision:?} is the blocker-13 shape"
+        );
+
+        drop(platform);
+    }
+
+    /// Deleting the scrub from `main` must break loudly, not silently.
+    ///
+    /// The scrub is on the ONLY path to the DSN: `bootstrap_warm_database()`
+    /// reads `platform_dsn`, never the environment. So a future edit that drops
+    /// `platform_dsn::take_from_environment()` from `main` does not quietly
+    /// restore the leak — the worker fails at startup with the same hard error
+    /// it has always raised for a missing DSN, before a session exists. This
+    /// asserts that coupling directly, because the alternative (a scrub that
+    /// some other code path can bypass) is exactly how the exposure lasted.
+    #[tokio::test]
+    async fn the_platform_dsn_is_unreachable_without_the_startup_scrub() {
+        let _guard = PLATFORM_DSN_TEST_MUTEX.lock().await;
+        platform_dsn::clear_for_test();
+        // SAFETY: serialised by `_guard`.
+        unsafe {
+            std::env::set_var(
+                platform_dsn::PLATFORM_DSN_ENV,
+                "postgres://u:p@127.0.0.1:5432/djinn",
+            );
+        }
+        // Deliberately do NOT call `take_from_environment()`.
+        let error = bootstrap_warm_database()
+            .await
+            .expect_err("a rendered variable that was never taken must not open a database");
+        assert!(
+            error.to_string().contains("DJINN_DATABASE_URL must be set"),
+            "the failure must be the existing hard startup error, got: {error}"
+        );
+        platform_dsn::clear_for_test();
+    }
 
     #[test]
     fn only_an_indexed_scip_outcome_completes_successfully() {
