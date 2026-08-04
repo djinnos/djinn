@@ -218,7 +218,7 @@ pub(super) async fn board_reconcile_impl(
                     continue;
                 }
                 if session_repo
-                    .update(
+                    .update_with_failure_cause(
                         &session.id,
                         SessionStatus::Interrupted,
                         session.tokens_in,
@@ -226,6 +226,7 @@ pub(super) async fn board_reconcile_impl(
                         session.cache_read_tokens,
                         session.cache_write_tokens,
                         None,
+                        Some(djinn_core::models::SessionFailureCause::Protocol),
                     )
                     .await
                     .is_ok()

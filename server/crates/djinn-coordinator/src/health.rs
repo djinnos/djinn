@@ -5,6 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use djinn_core::clock::{Clock, SystemClock};
+use djinn_core::models::SessionFailureCause;
 use djinn_provider::github_api::GitHubApiClient;
 use regex::Regex;
 
@@ -716,7 +717,10 @@ async fn sweep_orphan_worker_sessions(db: &djinn_db::Database) {
         // full SessionRepository::update path because we don't have an
         // EventBus reference here and the token counts are unknown (the
         // session was never properly finalized).
-        match session_repo.interrupt_by_id(&row.session_id).await {
+        match session_repo
+            .interrupt_by_id_with_failure_cause(&row.session_id, SessionFailureCause::Protocol)
+            .await
+        {
             Ok(true) => {
                 reaped += 1;
                 djinn_telemetry::stale_sweep::increment_orphan_session_reaped();
