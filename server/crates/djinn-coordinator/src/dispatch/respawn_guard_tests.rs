@@ -1194,7 +1194,7 @@ async fn handoff_moves_open_task_to_pr_review_with_audit_and_activity() {
     .await
     .expect("adopted_pr audit row inserts");
     let moved =
-        handoff_adopted_pr_to_poller(&test_task_repo(&db), &task.id, &task.status, pr).await;
+        handoff_adopted_pr_to_poller(&test_task_repo(&db), &task.id, &task.status, pr, None).await;
     assert!(
         moved,
         "an open adopted task must be handed off to the poller"
@@ -1243,7 +1243,7 @@ async fn handoff_is_one_shot_and_idempotent() {
     let repo = test_task_repo(&db);
 
     // First handoff moves open → pr_review.
-    assert!(handoff_adopted_pr_to_poller(&repo, &task.id, "open", pr).await);
+    assert!(handoff_adopted_pr_to_poller(&repo, &task.id, "open", pr, None).await);
     let s1 = repo.get(&task.id).await.unwrap().unwrap().status;
     assert_eq!(s1, "pr_review");
 
@@ -1251,7 +1251,7 @@ async fn handoff_is_one_shot_and_idempotent() {
     // the task stays in pr_review, no transition runs, but an activity entry is
     // still recorded so the handoff reason is durable.
     assert!(
-        handoff_adopted_pr_to_poller(&repo, &task.id, &s1, pr).await,
+        handoff_adopted_pr_to_poller(&repo, &task.id, &s1, pr, None).await,
         "handoff is idempotent for already-pr_review: returns true, no transition"
     );
     assert_eq!(
@@ -1298,7 +1298,9 @@ async fn reopened_task_with_retained_pr_url_is_handed_to_poller_not_wedged() {
     record_adopted_pr_attempt(&db, &task.id, "worker", pr, Some("adopted"))
         .await
         .expect("audit row inserts");
-    assert!(handoff_adopted_pr_to_poller(&test_task_repo(&db), &task.id, &task.status, pr).await);
+    assert!(
+        handoff_adopted_pr_to_poller(&test_task_repo(&db), &task.id, &task.status, pr, None).await
+    );
 
     let updated = test_task_repo(&db).get(&task.id).await.unwrap().unwrap();
     assert_eq!(
@@ -1310,7 +1312,8 @@ async fn reopened_task_with_retained_pr_url_is_handed_to_poller_not_wedged() {
     // now-pr_review task is an idempotent no-op that returns true (no
     // transition, but activity is still recorded).
     assert!(
-        handoff_adopted_pr_to_poller(&test_task_repo(&db), &updated.id, &updated.status, pr).await
+        handoff_adopted_pr_to_poller(&test_task_repo(&db), &updated.id, &updated.status, pr, None)
+            .await
     );
 }
 
@@ -1329,7 +1332,7 @@ async fn handoff_advances_pr_draft_and_idempotent_for_pr_review() {
         .await
         .expect("set_status moves the task to pr_draft");
     assert!(
-        handoff_adopted_pr_to_poller(&repo, &task.id, "pr_draft", "https://x/pull/1").await,
+        handoff_adopted_pr_to_poller(&repo, &task.id, "pr_draft", "https://x/pull/1", None).await,
         "pr_draft must be advanced to pr_review, not treated as a no-op"
     );
     assert_eq!(
@@ -1340,7 +1343,7 @@ async fn handoff_advances_pr_draft_and_idempotent_for_pr_review() {
 
     // pr_review → pr_review (idempotent no-op, returns true).
     assert!(
-        handoff_adopted_pr_to_poller(&repo, &task.id, "pr_review", "https://x/pull/1").await,
+        handoff_adopted_pr_to_poller(&repo, &task.id, "pr_review", "https://x/pull/1", None).await,
         "pr_review handoff must be an idempotent no-op returning true"
     );
     assert_eq!(
@@ -1363,12 +1366,238 @@ async fn handoff_transitions_non_open_status_to_pr_review() {
         .expect("set_status moves the task to in_progress");
 
     assert!(
-        handoff_adopted_pr_to_poller(&repo, &task.id, "in_progress", "https://x/pull/1").await,
+        handoff_adopted_pr_to_poller(&repo, &task.id, "in_progress", "https://x/pull/1", None)
+            .await,
         "in_progress task must be advanced to pr_review"
     );
     assert_eq!(
         repo.get(&task.id).await.unwrap().unwrap().status,
         "pr_review",
         "in_progress task must land in pr_review"
+    );
+}
+
+// ─── Handoff dedupe must never gate the TRANSITION (livelock regression) ──
+//
+// Production, 6h on one deployment, one coordinator:
+//
+//   "respawn guard adopting existing open PR" ......... 568
+//   "terminal PR handoff already recorded for head" ... 568   <- short-circuit
+//   "PR handed off to poller (pr_review)" .............   0   <- never happened
+//
+// The dedupe predicate compared `Option<&str>` to `Option<&str>`, and the
+// adoption path always passed `head_sha: None` while the stored payload held
+// `"head_sha": null` — so `None == None` held forever and the key collapsed to
+// the per-PR-deterministic `reason`. Worse, the dedupe ran BEFORE the
+// transition and returned `Ok(true)`, so it suppressed the state change rather
+// than just the duplicate row. Tasks z8i8 (PR #2972) and zkas (PR #2970) sat in
+// `open` for 9.5h/11.7h with green CI and an approved PR while `pr_watcher`
+// scans only `pr_draft` — owned by nobody.
+//
+// These tests assert the SIDE EFFECT (the task's status read back from the
+// repository). Asserting the `true` return value is exactly what the bug did.
+
+/// The literal adoption reason the wrapper builds — the dedupe key's only
+/// varying component once the head is `None`.
+fn adoption_reason(pr_url: &str) -> String {
+    format!("respawn_guard: adopted open PR {pr_url} — handing off to PR poller (pr_review)")
+}
+
+/// Seed the durable marker the production loop tripped over.
+async fn seed_handoff_marker(
+    repo: &TaskRepository,
+    task_id: &str,
+    reason: &str,
+    head_sha: Option<&str>,
+) {
+    let payload = serde_json::json!({
+        "from_status": "open",
+        "to_status": "pr_review",
+        "reason": reason,
+        "pr_url": "https://github.example/owner/repo/pull/2972",
+        "head_sha": head_sha,
+    })
+    .to_string();
+    repo.log_activity(
+        Some(task_id),
+        "system",
+        "respawn_guard",
+        "pr_terminal_handoff",
+        &payload,
+    )
+    .await
+    .expect("seed marker inserts");
+}
+
+fn marker_count(activity: &[djinn_core::models::ActivityEntry]) -> usize {
+    activity
+        .iter()
+        .filter(|e| e.event_type == "pr_terminal_handoff")
+        .count()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn open_task_with_prior_null_head_marker_is_still_transitioned() {
+    // THE production state (z8i8 / zkas): the task was handed off once, then
+    // reopened to `open` (startup reaper after a deploy) while the marker row
+    // — carrying `"head_sha": null` and this exact reason — stayed durable.
+    // Every later adoption pass must STILL move it into `pr_review`.
+    let db = test_db();
+    let task = create_task(&db).await; // open
+    let repo = test_task_repo(&db);
+    let pr = "https://github.example/owner/repo/pull/2972";
+    let reason = adoption_reason(pr);
+
+    seed_handoff_marker(&repo, &task.id, &reason, None).await;
+
+    // The exact production call shape: adoption passed `head_sha: None`, so
+    // `None == null` matched and the transition was skipped.
+    handoff_adopted_pr_to_poller(&repo, &task.id, "open", pr, None).await;
+
+    assert_eq!(
+        repo.get(&task.id).await.unwrap().unwrap().status,
+        "pr_review",
+        "a prior handoff MARKER must never suppress the handoff TRANSITION — \
+         the task was left wedged in `open`, polled by nobody, for 9.5h"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn open_task_with_prior_null_head_marker_is_transitioned_with_real_head() {
+    // Same durable `null`-head marker, but the call site now forwards a real
+    // head. A `None`-vs-`null` shape must not be reachable as a match at all,
+    // and a real head cannot match a stored `null` either.
+    let db = test_db();
+    let task = create_task(&db).await;
+    let repo = test_task_repo(&db);
+    let pr = "https://github.example/owner/repo/pull/2970";
+    let reason = adoption_reason(pr);
+
+    seed_handoff_marker(&repo, &task.id, &reason, None).await;
+
+    assert!(handoff_adopted_pr_to_poller(&repo, &task.id, "open", pr, Some("deadbeef")).await);
+
+    assert_eq!(
+        repo.get(&task.id).await.unwrap().unwrap().status,
+        "pr_review",
+        "a real head must not match a stored null head"
+    );
+    let activity = repo.list_activity(&task.id).await.unwrap();
+    assert_eq!(
+        marker_count(&activity),
+        2,
+        "a head that matches no stored marker records its own marker"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn repeated_adoption_at_same_head_transitions_without_duplicate_markers() {
+    // The reopen loop that produced 568 adoptions: each pass must re-establish
+    // ownership (transition) while the marker row stays deduped at one per
+    // (reason, head).
+    let db = test_db();
+    let task = create_task(&db).await;
+    let repo = test_task_repo(&db);
+    let pr = "https://github.example/owner/repo/pull/2972";
+    let head = "1111111111111111111111111111111111111111";
+
+    for pass in 0..3 {
+        // Reaper/escalation puts the task back in the dispatchable column.
+        repo.set_status(&task.id, "open")
+            .await
+            .expect("set_status reopens the task");
+        assert!(
+            handoff_adopted_pr_to_poller(&repo, &task.id, "open", pr, Some(head)).await,
+            "pass {pass}: adoption handoff must succeed"
+        );
+        assert_eq!(
+            repo.get(&task.id).await.unwrap().unwrap().status,
+            "pr_review",
+            "pass {pass}: every adoption pass must leave the task poller-owned"
+        );
+    }
+
+    let activity = repo.list_activity(&task.id).await.unwrap();
+    assert_eq!(
+        marker_count(&activity),
+        1,
+        "the dedupe still collapses duplicate marker ROWS for the same head"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn adoption_at_new_head_transitions_and_records_new_marker() {
+    // A push moves the head: the new head is a distinct dedupe key, so the
+    // handoff both transitions and records its own marker.
+    let db = test_db();
+    let task = create_task(&db).await;
+    let repo = test_task_repo(&db);
+    let pr = "https://github.example/owner/repo/pull/2972";
+
+    assert!(handoff_adopted_pr_to_poller(&repo, &task.id, "open", pr, Some("aaaa1111")).await);
+    assert_eq!(
+        repo.get(&task.id).await.unwrap().unwrap().status,
+        "pr_review"
+    );
+
+    repo.set_status(&task.id, "open")
+        .await
+        .expect("set_status reopens the task");
+    assert!(handoff_adopted_pr_to_poller(&repo, &task.id, "open", pr, Some("bbbb2222")).await);
+
+    assert_eq!(
+        repo.get(&task.id).await.unwrap().unwrap().status,
+        "pr_review",
+        "a new head must transition too"
+    );
+    let activity = repo.list_activity(&task.id).await.unwrap();
+    assert_eq!(
+        marker_count(&activity),
+        2,
+        "each distinct head records its own handoff marker"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pr_review_task_is_a_noop_with_no_transition_and_no_duplicate_marker() {
+    // Already poller-owned: the status gate — not the marker — makes this a
+    // no-op. No AdoptionHandoff transition, no second marker row.
+    let db = test_db();
+    let task = create_task(&db).await;
+    let repo = test_task_repo(&db);
+    let pr = "https://github.example/owner/repo/pull/2972";
+    let reason = adoption_reason(pr);
+    let head = "cccc3333";
+
+    repo.set_status(&task.id, "pr_review")
+        .await
+        .expect("set_status moves the task to pr_review");
+    seed_handoff_marker(&repo, &task.id, &reason, Some(head)).await;
+
+    assert!(
+        handoff_pr_to_poller(&repo, &task.id, "pr_review", pr, &reason, Some(head))
+            .await
+            .expect("pr_review handoff is an idempotent success"),
+        "an already-poller-owned task is an idempotent no-op"
+    );
+
+    assert_eq!(
+        repo.get(&task.id).await.unwrap().unwrap().status,
+        "pr_review",
+        "no spurious status change"
+    );
+    let activity = repo.list_activity(&task.id).await.unwrap();
+    assert_eq!(
+        marker_count(&activity),
+        1,
+        "the same (reason, head) must not duplicate the marker row"
+    );
+    assert_eq!(
+        activity
+            .iter()
+            .filter(|e| e.event_type == "adoption_handoff")
+            .count(),
+        0,
+        "no AdoptionHandoff transition may run for an already-pr_review task"
     );
 }
