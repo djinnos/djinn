@@ -213,6 +213,7 @@ pub enum ProviderAttemptLossV1 {
     EmptyTurn,
     CodexEmptyTurn,
     Protocol,
+    ConsumerDropped,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]

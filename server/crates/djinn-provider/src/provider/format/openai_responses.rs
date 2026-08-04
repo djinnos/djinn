@@ -7,8 +7,11 @@ use serde_json::{Value, json};
 use std::pin::Pin;
 
 use crate::message::{ContentBlock, Conversation};
+use crate::model_turn_admission::{ProviderAttemptLossV1, ProviderUsageObservationV1};
 use crate::provider::FormatFamily;
-use crate::provider::client::{ApiClient, SseFrame};
+use crate::provider::client::{
+    ApiClient, ProviderFormatReportV1, ProviderSseTerminalReporterV1, SseFrame,
+};
 use crate::provider::error::ProviderError;
 use crate::provider::format::tool_projection::project;
 use crate::provider::{LlmProvider, ProviderConfig, StreamEvent, TokenUsage, ToolChoice};
@@ -250,6 +253,66 @@ enum ResponsesStreamEvent {
     Error { error: Value },
     #[serde(rename = "keepalive")]
     Keepalive {},
+}
+
+/// Typed admission terminal adapter for the OpenAI/Codex Responses format.
+#[derive(Default)]
+pub struct OpenAIResponsesTerminalReporterV1 {
+    completed: bool,
+}
+
+impl ProviderSseTerminalReporterV1 for OpenAIResponsesTerminalReporterV1 {
+    fn report(&mut self, frame: &SseFrame) -> ProviderFormatReportV1 {
+        let SseFrame::Data(data) = frame else {
+            return if self.completed {
+                ProviderFormatReportV1::Continue
+            } else {
+                ProviderFormatReportV1::Malformed
+            };
+        };
+        let event = match parse_stream_event(data) {
+            Ok(Some(event)) => event,
+            Ok(None) => return ProviderFormatReportV1::Continue,
+            Err(_) => return ProviderFormatReportV1::Malformed,
+        };
+        match event {
+            ResponsesStreamEvent::OutputTextDelta { delta }
+            | ResponsesStreamEvent::ReasoningSummaryTextDelta { delta }
+                if !delta.is_empty() =>
+            {
+                ProviderFormatReportV1::TokenEmitted
+            }
+            ResponsesStreamEvent::ResponseCompleted { response } => {
+                self.completed = true;
+                let usage =
+                    response
+                        .usage
+                        .map_or_else(ProviderUsageObservationV1::default, |usage| {
+                            ProviderUsageObservationV1 {
+                                input_units: Some(i64::from(usage.input_tokens)),
+                                output_units: Some(i64::from(usage.output_tokens)),
+                                combined_units: Some(
+                                    i64::from(usage.input_tokens) + i64::from(usage.output_tokens),
+                                ),
+                            }
+                        });
+                if response.output.iter().any(|item| {
+                    matches!(
+                        item,
+                        OutputItemInfo::Message {} | OutputItemInfo::FunctionCall { .. }
+                    )
+                }) {
+                    ProviderFormatReportV1::Completed(usage)
+                } else {
+                    ProviderFormatReportV1::CodexEmptyTurn(usage)
+                }
+            }
+            ResponsesStreamEvent::ResponseFailed { .. } | ResponsesStreamEvent::Error { .. } => {
+                ProviderFormatReportV1::Failed(ProviderAttemptLossV1::ProviderRejected)
+            }
+            _ => ProviderFormatReportV1::Continue,
+        }
+    }
 }
 
 const KNOWN_EVENT_TYPES: &[&str] = &[

@@ -4,7 +4,8 @@ use djinn_core::clock::{Clock, SystemClock as SystemClockTrait};
 use futures::{Stream, StreamExt};
 use reqwest::header::HeaderMap;
 use std::pin::Pin;
-use std::time::{Duration, Instant, SystemTime};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::io::StreamReader;
@@ -30,6 +31,52 @@ fn auth_secrets(auth: &AuthMethod) -> Vec<String> {
         AuthMethod::BearerToken(token) => vec![token.clone()],
         AuthMethod::ApiKeyHeader { key, .. } => vec![key.clone()],
         AuthMethod::NoAuth => Vec::new(),
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ProviderFormatReportV1 {
+    Continue,
+    TokenEmitted,
+    Completed(ProviderUsageObservationV1),
+    CodexEmptyTurn(ProviderUsageObservationV1),
+    Failed(ProviderAttemptLossV1),
+    Malformed,
+}
+
+/// Provider-format seam. The transport owns SSE framing only; the selected
+/// adapter is authoritative for terminal, usage, and token semantics.
+pub trait ProviderSseTerminalReporterV1: Send + 'static {
+    fn report(&mut self, frame: &SseFrame) -> ProviderFormatReportV1;
+}
+
+/// Credential-scoped normalization and deterministic receipt clocks supplied by
+/// the admission caller rather than recreated for each request.
+#[derive(Clone)]
+pub struct ProviderAttemptContextV1 {
+    pub request_sequence: u64,
+    pub route_policy: ProviderAdmissionPolicyV1,
+    pub normalizer: Arc<Mutex<ProviderApiKeyNormalizerV1>>,
+    receipt_clock: Arc<dyn Fn() -> ProviderReceiptTimeV1 + Send + Sync>,
+}
+
+impl ProviderAttemptContextV1 {
+    pub fn new(
+        request_sequence: u64,
+        route_policy: ProviderAdmissionPolicyV1,
+        normalizer: Arc<Mutex<ProviderApiKeyNormalizerV1>>,
+        receipt_clock: impl Fn() -> ProviderReceiptTimeV1 + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            request_sequence,
+            route_policy,
+            normalizer,
+            receipt_clock: Arc::new(receipt_clock),
+        }
+    }
+
+    fn receipt(&self) -> ProviderReceiptTimeV1 {
+        (self.receipt_clock)()
     }
 }
 
@@ -133,63 +180,6 @@ fn classify_sse_line(line: &str) -> Option<SseFrame> {
         return None;
     }
     Some(SseFrame::Data(data.to_string()))
-}
-
-/// Extract only count-valued usage from a Responses-compatible terminal frame.
-/// The raw frame is deliberately not retained in the admission outcome.
-fn usage_from_sse_event(event: &serde_json::Value) -> ProviderUsageObservationV1 {
-    let usage = event
-        .get("response")
-        .and_then(|response| response.get("usage"))
-        .or_else(|| event.get("usage"));
-    ProviderUsageObservationV1 {
-        input_units: usage
-            .and_then(|usage| usage.get("input_tokens"))
-            .and_then(serde_json::Value::as_i64),
-        output_units: usage
-            .and_then(|usage| usage.get("output_tokens"))
-            .and_then(serde_json::Value::as_i64),
-        combined_units: usage
-            .and_then(|usage| usage.get("total_tokens"))
-            .and_then(serde_json::Value::as_i64),
-    }
-}
-
-/// Lifecycle, usage, and terminal frames intentionally do not count as tokens.
-fn is_token_emission_event(event: &serde_json::Value) -> bool {
-    match event.get("type").and_then(serde_json::Value::as_str) {
-        Some("response.output_text.delta") | Some("response.reasoning_summary_text.delta") => event
-            .get("delta")
-            .and_then(serde_json::Value::as_str)
-            .is_some_and(|delta| !delta.is_empty()),
-        Some("content_block_delta") => event
-            .get("delta")
-            .and_then(|delta| delta.get("text"))
-            .and_then(serde_json::Value::as_str)
-            .is_some_and(|delta| !delta.is_empty()),
-        _ => false,
-    }
-}
-
-/// The Codex/OpenAI quota signature is a valid completed frame with neither a
-/// message nor function call; it is not the same as an empty SSE transport.
-fn is_codex_empty_completed_event(event: &serde_json::Value) -> bool {
-    if event.get("type").and_then(serde_json::Value::as_str) != Some("response.completed") {
-        return false;
-    }
-    let output = event
-        .get("response")
-        .and_then(|response| response.get("output"))
-        .or_else(|| event.get("output"))
-        .and_then(serde_json::Value::as_array);
-    !output.is_some_and(|items| {
-        items.iter().any(|item| {
-            matches!(
-                item.get("type").and_then(serde_json::Value::as_str),
-                Some("message") | Some("function_call")
-            )
-        })
-    })
 }
 
 /// Render the request headers (auth + extras) into a single redacted string for
@@ -383,24 +373,8 @@ impl ApiClient {
         body: serde_json::Value,
         auth: &AuthMethod,
         extra_headers: HeaderMap,
-    ) -> ProviderSseAttemptV1 {
-        self.start_sse_attempt_v1_with_empty_turn_loss(
-            url,
-            body,
-            auth,
-            extra_headers,
-            ProviderAttemptLossV1::EmptyTurn,
-        )
-    }
-
-    /// Admission attempt with an adapter-specific empty-turn classification.
-    pub fn start_sse_attempt_v1_with_empty_turn_loss(
-        &self,
-        url: &str,
-        body: serde_json::Value,
-        auth: &AuthMethod,
-        extra_headers: HeaderMap,
-        empty_turn_loss: ProviderAttemptLossV1,
+        context: ProviderAttemptContextV1,
+        mut reporter: impl ProviderSseTerminalReporterV1,
     ) -> ProviderSseAttemptV1 {
         let (event_tx, mut event_rx) = mpsc::channel(16);
         let (outcome_tx, outcome) = oneshot::channel();
@@ -410,10 +384,9 @@ impl ApiClient {
         let url = url.to_owned();
         let auth = auth.clone();
         tokio::spawn(async move {
-            let started = Instant::now();
             let mut emission = ProviderTokenEmissionV1::default();
             let mut observation = None;
-            let mut terminal = ProviderAttemptTerminalV1::Completed;
+            let mut terminal = ProviderAttemptTerminalV1::Failed(ProviderAttemptLossV1::Protocol);
             let mut abort_result = ProviderAttemptAbortResultV1::NotRequested;
             let mut request = client
                 .post(&url)
@@ -437,7 +410,6 @@ impl ApiClient {
                 response = request.send() => match response { Ok(response) => Some(response), Err(_) => { terminal = ProviderAttemptTerminalV1::Failed(ProviderAttemptLossV1::Transport); None } }
             };
             if let Some(response) = response {
-                let monotonic_ms = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
                 let headers: Vec<(String, String)> = response
                     .headers()
                     .iter()
@@ -452,16 +424,11 @@ impl ApiClient {
                     .iter()
                     .map(|(name, value)| (name.as_str(), value.as_str()))
                     .collect();
-                let mut normalizer =
-                    ProviderApiKeyNormalizerV1::new(ProviderAdmissionPolicyV1::Proactive);
-                observation = Some(normalizer.observe(
-                    1,
+                observation = Some(context.normalizer.lock().expect("normalizer lock").observe(
+                    context.request_sequence,
                     &refs,
                     ProviderUsageObservationV1::default(),
-                    ProviderReceiptTimeV1 {
-                        wall: SystemTime::now(),
-                        monotonic_ms,
-                    },
+                    context.receipt(),
                 ));
                 if !response.status().is_success() {
                     if is_rate_limit_status(response.status()) {
@@ -484,48 +451,61 @@ impl ApiClient {
                         .bytes_stream()
                         .map(|item| item.map_err(std::io::Error::other));
                     let mut lines = BufReader::new(StreamReader::new(bytes)).lines();
-                    let mut saw_valid_event = false;
                     loop {
                         let next = tokio::select! { _ = cancellation.cancelled() => { terminal = ProviderAttemptTerminalV1::Aborted; abort_result = ProviderAttemptAbortResultV1::Confirmed; break; } next = lines.next_line() => next };
                         match next {
                             Ok(Some(line)) => {
                                 if let Some(frame) = classify_sse_line(&line) {
-                                    if let SseFrame::Data(payload) = &frame {
-                                        let event: serde_json::Value =
-                                            match serde_json::from_str(payload) {
-                                                Ok(event) => event,
-                                                Err(_) => {
-                                                    terminal = ProviderAttemptTerminalV1::Failed(
-                                                        ProviderAttemptLossV1::Protocol,
-                                                    );
-                                                    break;
-                                                }
-                                            };
-                                        saw_valid_event = true;
-                                        let receipt_ms =
-                                            started.elapsed().as_millis().min(u128::from(u64::MAX))
-                                                as u64;
-                                        if is_token_emission_event(&event) {
+                                    let receipt = context.receipt();
+                                    match reporter.report(&frame) {
+                                        ProviderFormatReportV1::Continue => {}
+                                        ProviderFormatReportV1::TokenEmitted => {
                                             emission
                                                 .first_token_monotonic_ms
-                                                .get_or_insert(receipt_ms);
-                                            emission.last_token_monotonic_ms = Some(receipt_ms);
+                                                .get_or_insert(receipt.monotonic_ms);
+                                            emission.last_token_monotonic_ms =
+                                                Some(receipt.monotonic_ms);
                                         }
-                                        let usage = usage_from_sse_event(&event);
-                                        if usage != ProviderUsageObservationV1::default() {
-                                            observation = Some(normalizer.observe(
-                                                1,
-                                                &refs,
-                                                usage,
-                                                ProviderReceiptTimeV1 {
-                                                    wall: SystemTime::now(),
-                                                    monotonic_ms: receipt_ms,
-                                                },
-                                            ));
+                                        ProviderFormatReportV1::Completed(usage) => {
+                                            observation = Some(
+                                                context
+                                                    .normalizer
+                                                    .lock()
+                                                    .expect("normalizer lock")
+                                                    .observe(
+                                                        context.request_sequence,
+                                                        &refs,
+                                                        usage,
+                                                        receipt,
+                                                    ),
+                                            );
+                                            terminal = ProviderAttemptTerminalV1::Completed;
                                         }
-                                        if is_codex_empty_completed_event(&event) {
+                                        ProviderFormatReportV1::CodexEmptyTurn(usage) => {
+                                            observation = Some(
+                                                context
+                                                    .normalizer
+                                                    .lock()
+                                                    .expect("normalizer lock")
+                                                    .observe(
+                                                        context.request_sequence,
+                                                        &refs,
+                                                        usage,
+                                                        receipt,
+                                                    ),
+                                            );
                                             terminal = ProviderAttemptTerminalV1::Failed(
                                                 ProviderAttemptLossV1::CodexEmptyTurn,
+                                            );
+                                            break;
+                                        }
+                                        ProviderFormatReportV1::Failed(loss) => {
+                                            terminal = ProviderAttemptTerminalV1::Failed(loss);
+                                            break;
+                                        }
+                                        ProviderFormatReportV1::Malformed => {
+                                            terminal = ProviderAttemptTerminalV1::Failed(
+                                                ProviderAttemptLossV1::Protocol,
                                             );
                                             break;
                                         }
@@ -535,17 +515,15 @@ impl ApiClient {
                                         sent = event_tx.send(Ok(frame)) => {
                                             // A dropped consumer must not strand the outcome
                                             // owner waiting to feed a stream nobody observes.
-                                            if sent.is_err() { break; }
+                                            if sent.is_err() {
+                                                terminal = ProviderAttemptTerminalV1::Failed(ProviderAttemptLossV1::ConsumerDropped);
+                                                break;
+                                            }
                                         }
                                     }
                                 }
                             }
-                            Ok(None) => {
-                                if !saw_valid_event {
-                                    terminal = ProviderAttemptTerminalV1::Failed(empty_turn_loss);
-                                }
-                                break;
-                            }
+                            Ok(None) => break,
                             Err(_) => {
                                 terminal = ProviderAttemptTerminalV1::Failed(
                                     ProviderAttemptLossV1::Transport,
@@ -555,12 +533,6 @@ impl ApiClient {
                         }
                     }
                 }
-            }
-            if cancellation.is_cancelled()
-                && !matches!(terminal, ProviderAttemptTerminalV1::Aborted)
-            {
-                terminal = ProviderAttemptTerminalV1::Aborted;
-                abort_result = ProviderAttemptAbortResultV1::Confirmed;
             }
             let authoritative_usage = observation
                 .as_ref()

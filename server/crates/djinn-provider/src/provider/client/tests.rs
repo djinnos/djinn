@@ -1,10 +1,160 @@
 use super::*;
 use std::sync::{
     Arc,
-    atomic::{AtomicUsize, Ordering},
+    atomic::{AtomicU64, AtomicUsize, Ordering},
 };
+use std::time::SystemTime;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::oneshot;
+
+use crate::ProviderDiscoveryOwnershipV1;
+use crate::provider::format::openai_responses::OpenAIResponsesTerminalReporterV1;
+
+fn attempt_context(sequence: u64) -> ProviderAttemptContextV1 {
+    ProviderAttemptContextV1::new(
+        sequence,
+        ProviderAdmissionPolicyV1::Proactive,
+        Arc::new(std::sync::Mutex::new(ProviderApiKeyNormalizerV1::new(
+            ProviderAdmissionPolicyV1::Proactive,
+        ))),
+        || ProviderReceiptTimeV1 {
+            wall: SystemTime::UNIX_EPOCH,
+            monotonic_ms: 100,
+        },
+    )
+}
+
+#[tokio::test]
+async fn admission_attempt_abort_terminal_race_resolves_once() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let (sent_tx, sent_rx) = oneshot::channel();
+    tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut request = [0; 4096];
+        let _ = socket.read(&mut request).await.unwrap();
+        let payload = "data: {\"type\":\"response.completed\",\"response\":{\"output\":[{\"type\":\"message\"}],\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n";
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            payload.len(),
+            payload
+        );
+        socket.write_all(response.as_bytes()).await.unwrap();
+        let _ = sent_tx.send(());
+    });
+    let mut attempt = ApiClient::new().start_sse_attempt_v1(
+        &url,
+        serde_json::json!({"model":"fixture"}),
+        &AuthMethod::NoAuth,
+        HeaderMap::new(),
+        attempt_context(11),
+        OpenAIResponsesTerminalReporterV1::default(),
+    );
+    sent_rx.await.unwrap();
+    attempt.abort.abort();
+    let outcome = tokio::time::timeout(Duration::from_secs(1), attempt.outcome())
+        .await
+        .unwrap();
+    assert!(matches!(
+        outcome.terminal,
+        ProviderAttemptTerminalV1::Completed | ProviderAttemptTerminalV1::Aborted
+    ));
+}
+
+#[tokio::test]
+async fn admission_attempt_pre_response_network_failure_sends_once() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let sends = Arc::new(AtomicUsize::new(0));
+    let observed = sends.clone();
+    tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        observed.fetch_add(1, Ordering::SeqCst);
+        let mut request = [0; 4096];
+        let _ = socket.read(&mut request).await;
+        socket.shutdown().await.unwrap();
+    });
+    let mut attempt = ApiClient::new().start_sse_attempt_v1(
+        &url,
+        serde_json::json!({"model":"fixture"}),
+        &AuthMethod::NoAuth,
+        HeaderMap::new(),
+        attempt_context(9),
+        OpenAIResponsesTerminalReporterV1::default(),
+    );
+    assert_eq!(
+        attempt.outcome().await.terminal,
+        ProviderAttemptTerminalV1::Failed(ProviderAttemptLossV1::Transport)
+    );
+    assert_eq!(sends.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn admission_attempt_consumer_drop_resolves_one_outcome() {
+    let payload = Box::leak(
+        (0..20)
+            .map(|_| "data: {\"type\":\"response.created\"}\n\n")
+            .collect::<String>()
+            .into_boxed_str(),
+    );
+    let url = serve_one_sse_response(payload).await;
+    let mut attempt = ApiClient::new().start_sse_attempt_v1(
+        &url,
+        serde_json::json!({"model":"fixture"}),
+        &AuthMethod::NoAuth,
+        HeaderMap::new(),
+        attempt_context(10),
+        OpenAIResponsesTerminalReporterV1::default(),
+    );
+    attempt.events = Box::pin(futures::stream::empty());
+    let outcome = tokio::time::timeout(Duration::from_secs(1), attempt.outcome())
+        .await
+        .unwrap();
+    assert_eq!(
+        outcome.terminal,
+        ProviderAttemptTerminalV1::Failed(ProviderAttemptLossV1::ConsumerDropped)
+    );
+}
+
+#[tokio::test]
+async fn admission_attempt_fake_receipts_and_sequence_reach_outcome() {
+    let url = serve_one_sse_response(
+        "data: {\"type\":\"response.output_text.delta\",\"delta\":\"x\"}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"output\":[{\"type\":\"message\"}],\"usage\":{\"input_tokens\":2,\"output_tokens\":1}}}\n\n",
+    )
+    .await;
+    let normalizer = Arc::new(std::sync::Mutex::new(ProviderApiKeyNormalizerV1::new(
+        ProviderAdmissionPolicyV1::Proactive,
+    )));
+    normalizer.lock().unwrap().claim_discovery(42);
+    let ticks = Arc::new(AtomicU64::new(0));
+    let clock_ticks = ticks.clone();
+    let context = ProviderAttemptContextV1::new(
+        42,
+        ProviderAdmissionPolicyV1::Proactive,
+        normalizer,
+        move || ProviderReceiptTimeV1 {
+            wall: SystemTime::UNIX_EPOCH,
+            monotonic_ms: clock_ticks.fetch_add(100, Ordering::SeqCst) + 100,
+        },
+    );
+    let mut attempt = ApiClient::new().start_sse_attempt_v1(
+        &url,
+        serde_json::json!({"model":"fixture"}),
+        &AuthMethod::NoAuth,
+        HeaderMap::new(),
+        context,
+        OpenAIResponsesTerminalReporterV1::default(),
+    );
+    let outcome = attempt.outcome().await;
+    assert_eq!(outcome.token_emission.first_token_monotonic_ms, Some(200));
+    assert_eq!(outcome.authoritative_usage.unwrap().combined_units, 3);
+    assert_eq!(
+        outcome.observation.unwrap().discovery,
+        ProviderDiscoveryOwnershipV1::DiscoveryOwned {
+            request_sequence: 42
+        }
+    );
+}
 
 async fn serve_one_sse_response(payload: &'static str) -> String {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -42,6 +192,8 @@ async fn admission_attempt_sends_retryable_response_once_and_normalizes_retry_af
         serde_json::json!({"model":"fixture"}),
         &AuthMethod::NoAuth,
         HeaderMap::new(),
+        attempt_context(1),
+        OpenAIResponsesTerminalReporterV1::default(),
     );
     let outcome = attempt.outcome().await;
     assert_eq!(sends.load(Ordering::SeqCst), 1);
@@ -82,6 +234,8 @@ async fn admission_attempt_abort_is_idempotent_and_terminal() {
         serde_json::json!({"model":"fixture"}),
         &AuthMethod::NoAuth,
         HeaderMap::new(),
+        attempt_context(1),
+        OpenAIResponsesTerminalReporterV1::default(),
     );
     in_flight_rx.await.unwrap();
     attempt.abort.abort();
@@ -104,6 +258,8 @@ async fn admission_attempt_maps_codex_empty_completed_frame() {
         serde_json::json!({"model":"fixture"}),
         &AuthMethod::NoAuth,
         HeaderMap::new(),
+        attempt_context(1),
+        OpenAIResponsesTerminalReporterV1::default(),
     );
     let outcome = attempt.outcome().await;
     assert_eq!(
@@ -121,6 +277,8 @@ async fn admission_attempt_malformed_frame_is_protocol_loss_and_token_times_are_
         serde_json::json!({"model":"fixture"}),
         &AuthMethod::NoAuth,
         HeaderMap::new(),
+        attempt_context(1),
+        OpenAIResponsesTerminalReporterV1::default(),
     );
     assert_eq!(
         malformed.outcome().await.terminal,
@@ -136,6 +294,8 @@ async fn admission_attempt_malformed_frame_is_protocol_loss_and_token_times_are_
         serde_json::json!({"model":"fixture"}),
         &AuthMethod::NoAuth,
         HeaderMap::new(),
+        attempt_context(1),
+        OpenAIResponsesTerminalReporterV1::default(),
     );
     let outcome = timing.outcome().await;
     assert!(outcome.token_emission.first_token_monotonic_ms.is_some());
