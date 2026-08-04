@@ -4,7 +4,8 @@ use std::collections::{HashMap, HashSet};
 use djinn_core::events::{DjinnEventEnvelope, EventBus};
 use djinn_core::models::{
     EvidenceFindings, NeedsEvidenceClaim, Proposal, ProposalDebateTrail, ProposalFeedback,
-    ProposalRevision, ProposalSignoff, ProposalTarget,
+    ProposalFeedbackRefinementInjection, ProposalFeedbackRefinementSource, ProposalRevision,
+    ProposalSignoff, ProposalTarget,
 };
 
 use crate::database::Database;
@@ -149,6 +150,22 @@ pub struct ProposalFeedbackCreateInput<'a> {
     pub author_kind: &'a str,
     pub author_model: Option<&'a str>,
     pub body: &'a str,
+}
+
+/// One root thread made durable by [`ProposalRepository::capture_feedback_refinement_boundary`].
+#[derive(Clone, Debug)]
+pub struct FeedbackRefinementCapture {
+    pub injection: ProposalFeedbackRefinementInjection,
+    pub sources: Vec<ProposalFeedbackRefinementSource>,
+    pub debate_entry: ProposalDebateTrail,
+    pub reused_generation: bool,
+    pub reused_round: bool,
+}
+
+/// Result of atomically capturing feedback at one proposal boundary.
+#[derive(Clone, Debug, Default)]
+pub struct FeedbackRefinementBoundaryCapture {
+    pub captures: Vec<FeedbackRefinementCapture>,
 }
 
 pub struct ProposalDebateTrailCreateInput<'a> {
@@ -1017,6 +1034,259 @@ impl ProposalRepository {
                 &feedback,
             ));
         Ok(feedback)
+    }
+
+    /// Atomically capture unresolved feedback as immutable root-scoped generations.
+    ///
+    /// The proposal lock fences the database timestamp and UUID cutoff. The
+    /// transaction writes claim, snapshots, blocking `human_feedback`, and its
+    /// lifecycle boundary together. V1 intentionally has no body hash.
+    pub async fn capture_feedback_refinement_boundary(
+        &self,
+        proposal_id: &str,
+    ) -> Result<FeedbackRefinementBoundaryCapture> {
+        self.db.ensure_initialized().await?;
+        let mut tx = self.db.pool().begin().await?;
+        let revision_seq = sqlx::query_scalar::<_, i32>(
+            "SELECT latest_revision_seq FROM proposals WHERE id = $1 FOR UPDATE",
+        )
+        .bind(proposal_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| Error::InvalidData(format!("proposal not found: {proposal_id}")))?;
+        let cutoff_at: String = sqlx::query_scalar(
+            r#"SELECT to_char(transaction_timestamp() AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')"#,
+        ).fetch_one(&mut *tx).await?;
+        let cutoff_id: Option<String> = sqlx::query_scalar(
+            "SELECT max(id) FROM proposal_feedback WHERE proposal_id=$1 AND created_at <= $2",
+        )
+        .bind(proposal_id)
+        .bind(&cutoff_at)
+        .fetch_one(&mut *tx)
+        .await?;
+        let Some(cutoff_id) = cutoff_id else {
+            tx.commit().await?;
+            return Ok(Default::default());
+        };
+        let rows: Vec<ProposalFeedback> = sqlx::query_as(
+            r#"SELECT id, proposal_id, parent_id, author_kind, author_user_id, author_model,
+                body, severity, withdrawn_at, withdrawn_by_user_id, resolved_at,
+                resolved_revision_seq, resolved_by_user_id, created_at, updated_at
+                FROM proposal_feedback WHERE proposal_id=$1 ORDER BY created_at, id"#,
+        )
+        .bind(proposal_id)
+        .fetch_all(&mut *tx)
+        .await?;
+        let captured: HashSet<String> = sqlx::query_scalar(
+            r#"SELECT s.source_feedback_id FROM proposal_feedback_refinement_sources s
+                JOIN proposal_feedback_refinement_injections i ON i.id=s.injection_id
+                WHERE i.proposal_id=$1"#,
+        )
+        .bind(proposal_id)
+        .fetch_all(&mut *tx)
+        .await?
+        .into_iter()
+        .collect();
+        let parents: HashMap<String, Option<String>> = rows
+            .iter()
+            .map(|r| (r.id.clone(), r.parent_id.clone()))
+            .collect();
+        let mut grouped: HashMap<String, Vec<&ProposalFeedback>> = HashMap::new();
+        for row in &rows {
+            if row.resolved_at.is_some()
+                || row.withdrawn_at.is_some()
+                || row.created_at > cutoff_at
+                || row.id > cutoff_id
+                || captured.contains(&row.id)
+            {
+                continue;
+            }
+            // A resolved root remains the key for its unresolved descendants.
+            let mut root = row.id.as_str();
+            let mut seen = HashSet::new();
+            while let Some(Some(parent)) = parents.get(root) {
+                if !seen.insert(root) || !parents.contains_key(parent) {
+                    break;
+                }
+                root = parent;
+            }
+            grouped.entry(root.to_owned()).or_default().push(row);
+        }
+        // A queued row is a durable claim, not a request to allocate another
+        // generation. Migration 182 permits it to lack sources and/or debate.
+        let queued: Vec<ProposalFeedbackRefinementInjection> = sqlx::query_as(
+            r#"SELECT id,proposal_id,root_feedback_id,generation,state,cutoff_at,cutoff_feedback_id,round,debate_entry_id,accepted_disposition,accepted_revision_seq,accepted_at,accepted_by_user_id,created_at,updated_at
+                FROM proposal_feedback_refinement_injections
+                WHERE proposal_id=$1 AND state='queued' ORDER BY root_feedback_id,generation"#,
+        ).bind(proposal_id).fetch_all(&mut *tx).await?;
+        let queued_round = queued.iter().map(|injection| injection.round).max();
+        let round = match queued_round {
+            Some(v) => v,
+            None => {
+                sqlx::query_scalar::<_, Option<i32>>(
+                    "SELECT max(round) FROM proposal_debate_trail WHERE proposal_id=$1",
+                )
+                .bind(proposal_id)
+                .fetch_one(&mut *tx)
+                .await?
+                .unwrap_or(0)
+                    + 1
+            }
+        };
+        let mut roots: Vec<String> = grouped
+            .iter()
+            .filter(|(_, rs)| rs.iter().any(|r| r.severity == "blocking"))
+            .map(|(root, _)| root.clone())
+            .collect();
+        roots.extend(
+            queued
+                .iter()
+                .map(|injection| injection.root_feedback_id.clone()),
+        );
+        roots.sort();
+        roots.dedup();
+        if roots.is_empty() {
+            let existing: Vec<ProposalFeedbackRefinementInjection> = sqlx::query_as(
+                r#"SELECT DISTINCT ON (root_feedback_id) id, proposal_id, root_feedback_id, generation,
+                    state, cutoff_at, cutoff_feedback_id, round, debate_entry_id, accepted_disposition,
+                    accepted_revision_seq, accepted_at, accepted_by_user_id, created_at, updated_at
+                    FROM proposal_feedback_refinement_injections
+                    WHERE proposal_id=$1 AND state='injected' AND debate_entry_id IS NOT NULL
+                    ORDER BY root_feedback_id, generation DESC"#,
+            ).bind(proposal_id).fetch_all(&mut *tx).await?;
+            let mut captures = Vec::with_capacity(existing.len());
+            for injection in existing {
+                let debate: ProposalDebateTrail = sqlx::query_as(
+                    r#"SELECT id, proposal_id, kind, body, blocking, agent_role, author_kind,
+                        author_user_id, author_model, source_task_id, against_revision_seq, round,
+                        body_metadata::text AS body_metadata, resolved_at, resolved_by_user_id,
+                        reopened_at, reopened_by_user_id, created_at, updated_at
+                        FROM proposal_debate_trail WHERE id=$1"#,
+                )
+                .bind(
+                    injection
+                        .debate_entry_id
+                        .as_deref()
+                        .expect("filtered non-null debate link"),
+                )
+                .fetch_one(&mut *tx)
+                .await?;
+                let sources: Vec<ProposalFeedbackRefinementSource> = sqlx::query_as(
+                    "SELECT injection_id,source_feedback_id,source_ordinal,source_parent_id,source_author_kind,source_author_user_id,source_author_model,source_body,source_severity,source_created_at,captured_at FROM proposal_feedback_refinement_sources WHERE injection_id=$1 ORDER BY source_ordinal",
+                ).bind(&injection.id).fetch_all(&mut *tx).await?;
+                captures.push(FeedbackRefinementCapture {
+                    injection,
+                    sources,
+                    debate_entry: debate,
+                    reused_generation: true,
+                    reused_round: true,
+                });
+            }
+            tx.commit().await?;
+            return Ok(FeedbackRefinementBoundaryCapture { captures });
+        }
+        let mut captures = Vec::with_capacity(roots.len());
+        for root in roots {
+            let queued_injection = queued
+                .iter()
+                .find(|injection| injection.root_feedback_id == root)
+                .cloned();
+            let mut sources = grouped.remove(&root).unwrap_or_default();
+            if let Some(queued) = &queued_injection {
+                // Recovery preserves the claimed cutoff; later rows remain
+                // available to form the next root generation.
+                sources.retain(|source| {
+                    source.created_at <= queued.cutoff_at && source.id <= queued.cutoff_feedback_id
+                });
+            }
+            sources.sort_by(|a, b| {
+                a.created_at
+                    .cmp(&b.created_at)
+                    .then_with(|| a.id.cmp(&b.id))
+            });
+            let generation = match &queued_injection {
+                Some(injection) => injection.generation,
+                None => sqlx::query_scalar::<_, Option<i32>>(
+                    "SELECT max(generation) FROM proposal_feedback_refinement_injections WHERE root_feedback_id=$1",
+                ).bind(&root).fetch_one(&mut *tx).await?.unwrap_or(0) + 1,
+            };
+            let injection_id = queued_injection
+                .as_ref()
+                .map(|injection| injection.id.clone())
+                .unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
+            let existing_sources: Vec<ProposalFeedbackRefinementSource> = if queued_injection
+                .is_some()
+            {
+                sqlx::query_as("SELECT injection_id,source_feedback_id,source_ordinal,source_parent_id,source_author_kind,source_author_user_id,source_author_model,source_body,source_severity,source_created_at,captured_at FROM proposal_feedback_refinement_sources WHERE injection_id=$1 ORDER BY source_ordinal")
+                    .bind(&injection_id).fetch_all(&mut *tx).await?
+            } else {
+                Vec::new()
+            };
+            let root_body = rows
+                .iter()
+                .find(|r| r.id == root)
+                .map(|r| r.body.as_str())
+                .unwrap_or("");
+            let metadata = serde_json::json!({"kind":"feedback_refinement_generation_v1", "root_feedback_id":root, "injection_id":injection_id, "generation":generation});
+            let debate: ProposalDebateTrail = sqlx::query_as(r#"INSERT INTO proposal_debate_trail
+                (id,proposal_id,kind,body,blocking,agent_role,author_kind,against_revision_seq,round,body_metadata)
+                VALUES ($1,$2,'human_feedback',$3,true,'human_feedback','agent',$4,$5,$6)
+                RETURNING id,proposal_id,kind,body,blocking,agent_role,author_kind,author_user_id,
+                author_model,source_task_id,against_revision_seq,round,body_metadata::text AS body_metadata,
+                resolved_at,resolved_by_user_id,reopened_at,reopened_by_user_id,created_at,updated_at"#)
+                .bind(uuid::Uuid::now_v7().to_string()).bind(proposal_id).bind(root_body)
+                .bind(revision_seq).bind(round).bind(&metadata).fetch_one(&mut *tx).await?;
+            let injection: ProposalFeedbackRefinementInjection = if let Some(queued) =
+                &queued_injection
+            {
+                sqlx::query_as(r#"UPDATE proposal_feedback_refinement_injections SET state='injected',debate_entry_id=$1,
+                    updated_at=to_char(transaction_timestamp() AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+                    WHERE id=$2 AND state='queued'
+                    RETURNING id,proposal_id,root_feedback_id,generation,state,cutoff_at,cutoff_feedback_id,round,debate_entry_id,accepted_disposition,accepted_revision_seq,accepted_at,accepted_by_user_id,created_at,updated_at"#)
+                    .bind(&debate.id).bind(&queued.id).fetch_one(&mut *tx).await?
+            } else {
+                sqlx::query_as(r#"INSERT INTO proposal_feedback_refinement_injections
+                    (id,proposal_id,root_feedback_id,generation,state,cutoff_at,cutoff_feedback_id,round,debate_entry_id)
+                    VALUES ($1,$2,$3,$4,'injected',$5,$6,$7,$8)
+                    RETURNING id,proposal_id,root_feedback_id,generation,state,cutoff_at,cutoff_feedback_id,round,debate_entry_id,accepted_disposition,accepted_revision_seq,accepted_at,accepted_by_user_id,created_at,updated_at"#)
+                    .bind(&injection_id).bind(proposal_id).bind(&root).bind(generation).bind(&cutoff_at)
+                    .bind(&cutoff_id).bind(round).bind(&debate.id).fetch_one(&mut *tx).await?
+            };
+            for (ordinal, source) in sources.iter().enumerate() {
+                if !existing_sources.is_empty() {
+                    break;
+                }
+                sqlx::query(r#"INSERT INTO proposal_feedback_refinement_sources
+                    (injection_id,source_feedback_id,source_ordinal,source_parent_id,source_author_kind,
+                     source_author_user_id,source_author_model,source_body,source_severity,source_created_at,captured_at)
+                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)"#)
+                    .bind(&injection_id).bind(&source.id).bind((ordinal + 1) as i32).bind(&source.parent_id)
+                    .bind(&source.author_kind).bind(&source.author_user_id).bind(&source.author_model)
+                    .bind(&source.body).bind(&source.severity).bind(&source.created_at).bind(&cutoff_at)
+                    .execute(&mut *tx).await?;
+            }
+            let snapshots: Vec<ProposalFeedbackRefinementSource> = sqlx::query_as(
+                "SELECT injection_id,source_feedback_id,source_ordinal,source_parent_id,source_author_kind,source_author_user_id,source_author_model,source_body,source_severity,source_created_at,captured_at FROM proposal_feedback_refinement_sources WHERE injection_id=$1 ORDER BY source_ordinal",
+            ).bind(&injection_id).fetch_all(&mut *tx).await?;
+            let lifecycle = serde_json::json!({"feedback_refinement":metadata,"round":round});
+            self.insert_lightweight_lifecycle_event_in_tx(
+                &mut tx,
+                proposal_id,
+                revision_seq,
+                "feedback_refinement_materialized",
+                Some(&lifecycle),
+            )
+            .await?;
+            captures.push(FeedbackRefinementCapture {
+                injection,
+                sources: snapshots,
+                debate_entry: debate,
+                reused_generation: queued_injection.is_some(),
+                reused_round: queued_round.is_some(),
+            });
+        }
+        tx.commit().await?;
+        Ok(FeedbackRefinementBoundaryCapture { captures })
     }
 
     // ── Debate trail (structured objections/rebuttals/verdicts) ──────────────
@@ -4338,6 +4608,363 @@ mod tests {
 
         repo.remove_target(&p.id, &proj).await.unwrap();
         assert!(repo.targets(&p.id).await.unwrap().is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn feedback_boundary_materializes_queued_claims_and_retries_them() {
+        let db = test_db();
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let p = repo
+            .create(create_input("Queued feedback boundary"))
+            .await
+            .unwrap();
+        let root = repo
+            .add_feedback(ProposalFeedbackCreateInput {
+                proposal_id: &p.id,
+                parent_id: None,
+                author_kind: "user",
+                author_model: None,
+                body: "verbatim root",
+            })
+            .await
+            .unwrap();
+        let queued_id = uuid::Uuid::now_v7().to_string();
+        sqlx::query("INSERT INTO proposal_feedback_refinement_injections (id,proposal_id,root_feedback_id,generation,state,cutoff_at,cutoff_feedback_id,round) VALUES ($1,$2,$3,1,'queued','9999-01-01T00:00:00.000Z',$3,7)")
+            .bind(&queued_id).bind(&p.id).bind(&root.id).execute(db.pool()).await.unwrap();
+
+        let first = repo
+            .capture_feedback_refinement_boundary(&p.id)
+            .await
+            .unwrap();
+        assert_eq!(first.captures.len(), 1);
+        assert_eq!(first.captures[0].injection.id, queued_id);
+        assert_eq!(first.captures[0].injection.generation, 1);
+        assert!(first.captures[0].reused_generation);
+        assert_eq!(first.captures[0].sources.len(), 1);
+        assert_eq!(first.captures[0].sources[0].source_body, "verbatim root");
+
+        let second = repo
+            .capture_feedback_refinement_boundary(&p.id)
+            .await
+            .unwrap();
+        assert_eq!(second.captures.len(), 1);
+        assert_eq!(second.captures[0].injection.id, queued_id);
+        assert_eq!(sqlx::query_scalar::<_, i64>("SELECT count(*) FROM proposal_debate_trail WHERE proposal_id=$1 AND kind='human_feedback'")
+            .bind(&p.id).fetch_one(db.pool()).await.unwrap(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn feedback_boundary_materializes_queued_claim_with_existing_sources() {
+        let db = test_db();
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let p = repo
+            .create(create_input("Queued captured source"))
+            .await
+            .unwrap();
+        let root = repo
+            .add_feedback(ProposalFeedbackCreateInput {
+                proposal_id: &p.id,
+                parent_id: None,
+                author_kind: "user",
+                author_model: None,
+                body: "already captured",
+            })
+            .await
+            .unwrap();
+        let queued_id = uuid::Uuid::now_v7().to_string();
+        sqlx::query("INSERT INTO proposal_feedback_refinement_injections (id,proposal_id,root_feedback_id,generation,state,cutoff_at,cutoff_feedback_id,round) VALUES ($1,$2,$3,1,'queued','9999-01-01T00:00:00.000Z',$3,3)")
+            .bind(&queued_id).bind(&p.id).bind(&root.id).execute(db.pool()).await.unwrap();
+        sqlx::query("INSERT INTO proposal_feedback_refinement_sources (injection_id,source_feedback_id,source_ordinal,source_author_kind,source_body,source_severity,source_created_at,captured_at) VALUES ($1,$2,1,'user','already captured','blocking','2000-01-01T00:00:00.000Z','2000-01-01T00:00:00.000Z')")
+            .bind(&queued_id).bind(&root.id).execute(db.pool()).await.unwrap();
+
+        let result = repo
+            .capture_feedback_refinement_boundary(&p.id)
+            .await
+            .unwrap();
+        assert_eq!(result.captures.len(), 1);
+        assert_eq!(result.captures[0].injection.id, queued_id);
+        assert_eq!(result.captures[0].sources.len(), 1);
+        assert!(result.captures[0].injection.debate_entry_id.is_some());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn feedback_boundary_captures_blocking_threads_with_advisory_context() {
+        let db = test_db();
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let proposal = repo
+            .create(create_input("Mixed feedback boundary"))
+            .await
+            .unwrap();
+        let root = repo
+            .add_feedback(ProposalFeedbackCreateInput {
+                proposal_id: &proposal.id,
+                parent_id: None,
+                author_kind: "user",
+                author_model: None,
+                body: "blocking root",
+            })
+            .await
+            .unwrap();
+        let advisory = repo
+            .add_feedback(ProposalFeedbackCreateInput {
+                proposal_id: &proposal.id,
+                parent_id: Some(&root.id),
+                author_kind: "user",
+                author_model: None,
+                body: "advisory context",
+            })
+            .await
+            .unwrap();
+        sqlx::query("UPDATE proposal_feedback SET severity='advisory' WHERE id=$1")
+            .bind(&advisory.id)
+            .execute(db.pool())
+            .await
+            .unwrap();
+        let reply = repo
+            .add_feedback(ProposalFeedbackCreateInput {
+                proposal_id: &proposal.id,
+                parent_id: Some(&root.id),
+                author_kind: "user",
+                author_model: None,
+                body: "blocking reply",
+            })
+            .await
+            .unwrap();
+
+        // A resolved root remains the thread key for its unresolved child.
+        let resolved_root = repo
+            .add_feedback(ProposalFeedbackCreateInput {
+                proposal_id: &proposal.id,
+                parent_id: None,
+                author_kind: "user",
+                author_model: None,
+                body: "resolved root",
+            })
+            .await
+            .unwrap();
+        let resolved_reply = repo
+            .add_feedback(ProposalFeedbackCreateInput {
+                proposal_id: &proposal.id,
+                parent_id: Some(&resolved_root.id),
+                author_kind: "user",
+                author_model: None,
+                body: "unresolved reply",
+            })
+            .await
+            .unwrap();
+        repo.set_feedback_resolved(&resolved_root.id, Some(1))
+            .await
+            .unwrap();
+        let advisory_only = repo
+            .add_feedback(ProposalFeedbackCreateInput {
+                proposal_id: &proposal.id,
+                parent_id: None,
+                author_kind: "user",
+                author_model: None,
+                body: "advisory only",
+            })
+            .await
+            .unwrap();
+        sqlx::query("UPDATE proposal_feedback SET severity='advisory' WHERE id=$1")
+            .bind(&advisory_only.id)
+            .execute(db.pool())
+            .await
+            .unwrap();
+
+        let captured = repo
+            .capture_feedback_refinement_boundary(&proposal.id)
+            .await
+            .unwrap();
+        assert_eq!(captured.captures.len(), 2);
+        let first = captured
+            .captures
+            .iter()
+            .find(|c| c.injection.root_feedback_id == root.id)
+            .unwrap();
+        assert_eq!(first.debate_entry.kind, "human_feedback");
+        assert!(first.debate_entry.blocking);
+        assert_eq!(first.sources.len(), 3);
+        assert_eq!(first.sources[0].source_feedback_id, root.id);
+        assert_eq!(first.sources[0].source_parent_id, None);
+        assert_eq!(first.sources[0].source_body, "blocking root");
+        assert_eq!(first.sources[1].source_feedback_id, advisory.id);
+        assert_eq!(
+            first.sources[1].source_parent_id.as_deref(),
+            Some(root.id.as_str())
+        );
+        assert_eq!(first.sources[1].source_body, "advisory context");
+        assert_eq!(first.sources[1].source_severity, "advisory");
+        assert_eq!(first.sources[2].source_feedback_id, reply.id);
+        assert_eq!(first.sources[2].source_body, "blocking reply");
+        let resolved_thread = captured
+            .captures
+            .iter()
+            .find(|c| c.injection.root_feedback_id == resolved_root.id)
+            .unwrap();
+        assert_eq!(resolved_thread.sources.len(), 1);
+        assert_eq!(
+            resolved_thread.sources[0].source_feedback_id,
+            resolved_reply.id
+        );
+        assert_eq!(
+            resolved_thread.sources[0].source_parent_id.as_deref(),
+            Some(resolved_root.id.as_str())
+        );
+        assert!(
+            !captured
+                .captures
+                .iter()
+                .any(|c| c.injection.root_feedback_id == advisory_only.id)
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn feedback_boundary_late_identical_feedback_forms_a_later_generation() {
+        let db = test_db();
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let proposal = repo
+            .create(create_input("Cutoff feedback boundary"))
+            .await
+            .unwrap();
+        let root = repo
+            .add_feedback(ProposalFeedbackCreateInput {
+                proposal_id: &proposal.id,
+                parent_id: None,
+                author_kind: "user",
+                author_model: None,
+                body: "same verbatim body",
+            })
+            .await
+            .unwrap();
+        // The injection trigger runs after the repository has selected its
+        // database timestamp and ID cutoff. It gives a separate connection a
+        // deterministic window to commit feedback after that boundary.
+        sqlx::query("CREATE FUNCTION pause_feedback_boundary_for_test() RETURNS trigger AS $$ BEGIN PERFORM pg_sleep(1); RETURN NEW; END; $$ LANGUAGE plpgsql").execute(db.pool()).await.unwrap();
+        sqlx::query("CREATE TRIGGER pause_feedback_boundary_for_test BEFORE INSERT ON proposal_feedback_refinement_injections FOR EACH ROW EXECUTE FUNCTION pause_feedback_boundary_for_test()").execute(db.pool()).await.unwrap();
+        let boundary = ProposalRepository::new(db.clone(), EventBus::noop());
+        let boundary_proposal_id = proposal.id.clone();
+        let first_task = tokio::spawn(async move {
+            boundary
+                .capture_feedback_refinement_boundary(&boundary_proposal_id)
+                .await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // V1 uses source identity, not body hashes: an identical post-cutoff
+        // reply must remain eligible for the next root generation.
+        let late = repo
+            .add_feedback(ProposalFeedbackCreateInput {
+                proposal_id: &proposal.id,
+                parent_id: Some(&root.id),
+                author_kind: "user",
+                author_model: None,
+                body: "same verbatim body",
+            })
+            .await
+            .unwrap();
+        let first = first_task.await.unwrap().unwrap();
+        sqlx::query("DROP TRIGGER pause_feedback_boundary_for_test ON proposal_feedback_refinement_injections").execute(db.pool()).await.unwrap();
+        let second = repo
+            .capture_feedback_refinement_boundary(&proposal.id)
+            .await
+            .unwrap();
+        assert_eq!(second.captures.len(), 1);
+        assert_eq!(first.captures[0].injection.generation, 1);
+        assert_eq!(first.captures[0].sources.len(), 1);
+        assert_eq!(first.captures[0].sources[0].source_feedback_id, root.id);
+        assert_eq!(second.captures[0].injection.root_feedback_id, root.id);
+        assert_eq!(second.captures[0].injection.generation, 2);
+        assert_eq!(second.captures[0].sources.len(), 1);
+        assert_eq!(second.captures[0].sources[0].source_feedback_id, late.id);
+        assert_eq!(
+            second.captures[0].sources[0].source_body,
+            "same verbatim body"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn feedback_boundary_concurrent_calls_share_one_materialization() {
+        let db = test_db();
+        let setup = ProposalRepository::new(db.clone(), EventBus::noop());
+        let proposal = setup
+            .create(create_input("Concurrent feedback boundary"))
+            .await
+            .unwrap();
+        setup
+            .add_feedback(ProposalFeedbackCreateInput {
+                proposal_id: &proposal.id,
+                parent_id: None,
+                author_kind: "user",
+                author_model: None,
+                body: "one concurrent objection",
+            })
+            .await
+            .unwrap();
+        let left = ProposalRepository::new(db.clone(), EventBus::noop());
+        let right = ProposalRepository::new(db.clone(), EventBus::noop());
+        let (left, right) = tokio::join!(
+            left.capture_feedback_refinement_boundary(&proposal.id),
+            right.capture_feedback_refinement_boundary(&proposal.id)
+        );
+        let left = left.unwrap();
+        let right = right.unwrap();
+        assert_eq!(left.captures.len(), 1);
+        assert_eq!(right.captures.len(), 1);
+        assert_eq!(
+            left.captures[0].injection.id,
+            right.captures[0].injection.id
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM proposal_feedback_refinement_injections WHERE proposal_id=$1"
+            )
+            .bind(&proposal.id)
+            .fetch_one(db.pool())
+            .await
+            .unwrap(),
+            1
+        );
+        assert_eq!(sqlx::query_scalar::<_, i64>("SELECT count(*) FROM proposal_debate_trail WHERE proposal_id=$1 AND kind='human_feedback'").bind(&proposal.id).fetch_one(db.pool()).await.unwrap(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn feedback_boundary_rolls_back_claim_sources_debate_and_lifecycle() {
+        let db = test_db();
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let proposal = repo
+            .create(create_input("Rollback feedback boundary"))
+            .await
+            .unwrap();
+        repo.add_feedback(ProposalFeedbackCreateInput {
+            proposal_id: &proposal.id,
+            parent_id: None,
+            author_kind: "user",
+            author_model: None,
+            body: "must not be claimed on failure",
+        })
+        .await
+        .unwrap();
+        sqlx::query("CREATE FUNCTION reject_feedback_boundary_for_test() RETURNS trigger AS $$ BEGIN RAISE EXCEPTION 'injected feedback boundary failure'; END; $$ LANGUAGE plpgsql").execute(db.pool()).await.unwrap();
+        sqlx::query("CREATE TRIGGER reject_feedback_boundary_for_test BEFORE INSERT ON proposal_debate_trail FOR EACH ROW EXECUTE FUNCTION reject_feedback_boundary_for_test()").execute(db.pool()).await.unwrap();
+
+        assert!(
+            repo.capture_feedback_refinement_boundary(&proposal.id)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM proposal_feedback_refinement_injections WHERE proposal_id=$1"
+            )
+            .bind(&proposal.id)
+            .fetch_one(db.pool())
+            .await
+            .unwrap(),
+            0
+        );
+        assert_eq!(sqlx::query_scalar::<_, i64>("SELECT count(*) FROM proposal_feedback_refinement_sources s JOIN proposal_feedback_refinement_injections i ON i.id=s.injection_id WHERE i.proposal_id=$1").bind(&proposal.id).fetch_one(db.pool()).await.unwrap(), 0);
+        assert_eq!(sqlx::query_scalar::<_, i64>("SELECT count(*) FROM proposal_debate_trail WHERE proposal_id=$1 AND kind='human_feedback'").bind(&proposal.id).fetch_one(db.pool()).await.unwrap(), 0);
+        assert_eq!(sqlx::query_scalar::<_, i64>("SELECT count(*) FROM proposal_revisions WHERE proposal_id=$1 AND event_kind='feedback_refinement_materialized'").bind(&proposal.id).fetch_one(db.pool()).await.unwrap(), 0);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
