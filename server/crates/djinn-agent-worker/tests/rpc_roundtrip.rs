@@ -28,11 +28,11 @@ use std::net::SocketAddr;
 use std::process::Stdio;
 use std::sync::Arc;
 
-use djinn_core::models::{Task, TaskRunTrigger};
+use djinn_core::models::{SessionFailureCause, SessionStatus, Task, TaskRunTrigger};
 use djinn_runtime::{ResolvedCredentials, SupervisorFlow, TaskRunSpec};
 use djinn_supervisor::{
-    ExpectedTokenValidator, RoleKind, ServeHandle, StageError, StageOutcome, SupervisorServices,
-    TaskRunOutcome, serve_on_tcp,
+    ExpectedTokenValidator, Frame, FramePayload, RoleKind, ServeHandle, ServiceRpcRequest,
+    StageError, StageOutcome, SupervisorServices, TaskRunOutcome, serve_on_tcp,
 };
 use djinn_workspace::Workspace;
 use tokio_util::sync::CancellationToken;
@@ -424,4 +424,58 @@ async fn worker_exits_nonzero_when_tcp_auth_rejects() {
 
     server.cancel();
     let _ = server.join.await;
+}
+
+/// Worker-side compatibility guard for the host-bound V2 status envelope.
+/// The canonical cause travels inside the RPC frame unchanged; completed
+/// deliberately carries no durable failure cause.
+#[test]
+fn v2_session_status_frame_roundtrips_every_persistable_cause() {
+    let cases = [
+        (SessionStatus::Failed, Some(SessionFailureCause::Cancelled)),
+        (SessionStatus::Failed, Some(SessionFailureCause::Provider)),
+        (SessionStatus::Failed, Some(SessionFailureCause::Harness)),
+        (
+            SessionStatus::Failed,
+            Some(SessionFailureCause::Infrastructure),
+        ),
+        (SessionStatus::Failed, Some(SessionFailureCause::Protocol)),
+        (
+            SessionStatus::Failed,
+            Some(SessionFailureCause::Finalization),
+        ),
+        (SessionStatus::Failed, Some(SessionFailureCause::Unknown)),
+        (SessionStatus::Completed, None),
+    ];
+
+    for (status, failure_cause) in cases {
+        let frame = Frame {
+            correlation_id: 99,
+            payload: FramePayload::Rpc(ServiceRpcRequest::UpdateSessionStatusV2 {
+                session_id: "worker-session".into(),
+                status,
+                tokens_in: 10,
+                tokens_out: 20,
+                cache_read: 30,
+                cache_write: 40,
+                parked_reason: None,
+                failure_cause,
+            }),
+        };
+        let bytes = bincode::serialize(&frame).expect("serialize worker V2 status frame");
+        let decoded: Frame = bincode::deserialize(&bytes).expect("decode worker V2 status frame");
+        match decoded.payload {
+            FramePayload::Rpc(ServiceRpcRequest::UpdateSessionStatusV2 {
+                session_id,
+                status: got_status,
+                failure_cause: got_cause,
+                ..
+            }) => {
+                assert_eq!(session_id, "worker-session");
+                assert_eq!(got_status, status);
+                assert_eq!(got_cause, failure_cause);
+            }
+            other => panic!("unexpected worker V2 status frame: {other:?}"),
+        }
+    }
 }

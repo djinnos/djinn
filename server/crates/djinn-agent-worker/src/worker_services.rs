@@ -44,7 +44,7 @@ use async_trait::async_trait;
 use djinn_agent::actors::slot::helpers::OAuthConfigWire;
 use djinn_agent::context::AgentContext;
 use djinn_agent::supervisor::worker_execute_stage;
-use djinn_core::models::{SessionRecord, SessionStatus, Task, TaskRunStatus};
+use djinn_core::models::{SessionFailureCause, SessionRecord, SessionStatus, Task, TaskRunStatus};
 use djinn_provider::message::Conversation;
 use djinn_provider::provider::{
     LlmProvider, LlmResponse, ProviderConfig, RestampTarget, ToolChoice, create_provider,
