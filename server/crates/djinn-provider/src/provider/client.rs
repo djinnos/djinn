@@ -6,6 +6,7 @@ use reqwest::header::HeaderMap;
 use std::pin::Pin;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::sync::{mpsc, oneshot};
 use tokio_util::io::StreamReader;
 
 use super::AuthMethod;
@@ -15,6 +16,11 @@ use super::transport::{
     TransportClassificationInput, classify_exhausted_transport, initial_request_transport_category,
 };
 use crate::rate_limit::{activate_suppression_window, clear_suppression_window};
+use crate::model_turn_admission::{
+    ProviderAttemptAbortHandleV1, ProviderAttemptAbortResultV1, ProviderAttemptCapabilitiesV1,
+    ProviderAttemptLossV1, ProviderAttemptTerminalV1, ProviderHiddenRetryCapabilityV1,
+    ProviderOutcomeV1, ProviderTokenEmissionV1,
+};
 
 /// Collect the secret values an `AuthMethod` puts on the wire so a misbehaving
 /// gateway echoing them back in the response body gets them redacted.
@@ -23,6 +29,33 @@ fn auth_secrets(auth: &AuthMethod) -> Vec<String> {
         AuthMethod::BearerToken(token) => vec![token.clone()],
         AuthMethod::ApiKeyHeader { key, .. } => vec![key.clone()],
         AuthMethod::NoAuth => Vec::new(),
+    }
+
+}
+
+/// One no-retry admission attempt and its single terminal outcome.
+pub struct ProviderSseAttemptV1 {
+    pub events: Pin<Box<dyn Stream<Item = anyhow::Result<SseFrame>> + Send>>,
+    pub abort: ProviderAttemptAbortHandleV1,
+    outcome: oneshot::Receiver<ProviderOutcomeV1>,
+}
+
+impl ProviderSseAttemptV1 {
+    pub async fn outcome(self) -> ProviderOutcomeV1 {
+        self.outcome.await.unwrap_or_else(|_| ProviderOutcomeV1 {
+            terminal: ProviderAttemptTerminalV1::Failed(ProviderAttemptLossV1::Transport),
+            authoritative_usage: None,
+            abort: ProviderAttemptAbortResultV1::Requested,
+            token_emission: ProviderTokenEmissionV1::default(),
+        })
+    }
+
+    #[must_use]
+    pub fn capabilities() -> ProviderAttemptCapabilitiesV1 {
+        ProviderAttemptCapabilitiesV1 {
+            hidden_retries: ProviderHiddenRetryCapabilityV1::Disabled,
+            abort: crate::model_turn_admission::ProviderAbortCapabilityV1::Supported,
+        }
     }
 }
 
