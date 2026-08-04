@@ -1041,20 +1041,36 @@ impl ProposalRepository {
         &self,
         input: ProposalFeedbackCreateInput<'_>,
     ) -> Result<ProposalFeedback> {
+        self.add_feedback_with_severity(input, "blocking").await
+    }
+
+    /// Add feedback with an explicit readiness severity. The legacy path stays
+    /// blocking so existing callers retain their previous behavior.
+    pub async fn add_feedback_with_severity(
+        &self,
+        input: ProposalFeedbackCreateInput<'_>,
+        severity: &str,
+    ) -> Result<ProposalFeedback> {
         self.db.ensure_initialized().await?;
+        if !matches!(severity, "advisory" | "blocking") {
+            return Err(Error::InvalidData(format!(
+                "invalid feedback severity: {severity}"
+            )));
+        }
         let id = uuid::Uuid::now_v7().to_string();
         let author_user_id = djinn_core::auth_context::current_user_id();
         sqlx::query!(
             "INSERT INTO proposal_feedback
-                (id, proposal_id, parent_id, author_kind, author_user_id, author_model, body)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                (id, proposal_id, parent_id, author_kind, author_user_id, author_model, body, severity)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
             id,
             input.proposal_id,
             input.parent_id,
             input.author_kind,
             author_user_id,
             input.author_model,
-            input.body
+            input.body,
+            severity
         )
         .execute(self.db.pool())
         .await?;

@@ -27,6 +27,8 @@ pub struct ProposalFeedbackAddParams {
     pub author_kind: Option<String>,
     /// Model id when author_kind is `ai`.
     pub author_model: Option<String>,
+    #[serde(default)]
+    pub severity: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -72,14 +74,23 @@ impl DjinnMcpServer {
                 "invalid author_kind: {author_kind:?} (expected user or ai)"
             )));
         }
+        let severity = p.severity.as_deref().unwrap_or("blocking");
+        if !matches!(severity, "advisory" | "blocking") {
+            return Json(err_feedback(
+                "invalid severity (expected advisory or blocking)",
+            ));
+        }
         match repo
-            .add_feedback(djinn_db::ProposalFeedbackCreateInput {
-                proposal_id: &proposal.id,
-                parent_id: p.parent_id.as_deref(),
-                author_kind,
-                author_model: p.author_model.as_deref(),
-                body: &p.body,
-            })
+            .add_feedback_with_severity(
+                djinn_db::ProposalFeedbackCreateInput {
+                    proposal_id: &proposal.id,
+                    parent_id: p.parent_id.as_deref(),
+                    author_kind,
+                    author_model: p.author_model.as_deref(),
+                    body: &p.body,
+                },
+                severity,
+            )
             .await
         {
             Ok(f) => Json(ProposalFeedbackResponse {
@@ -102,26 +113,10 @@ impl DjinnMcpServer {
         let Some(feedback) = repo.get_feedback(&p.id).await.ok().flatten() else {
             return Json(err_feedback(format!("feedback not found: {}", p.id)));
         };
-        // Resolving a proposal's feedback is an edit on that proposal's review
-        // state → requires edit rights, same gate as proposal_update.
-        let author = repo
-            .resolve(&feedback.proposal_id)
-            .await
-            .ok()
-            .flatten()
-            .and_then(|pr| pr.author_user_id);
-        if let Err(e) = self.gate_proposal_edit(author.as_deref()).await {
-            return Json(err_feedback(e));
-        }
-        match repo
-            .set_feedback_resolved(&p.id, p.resolved_revision_seq)
-            .await
-        {
-            Ok(f) => Json(ProposalFeedbackResponse {
-                feedback: Some((&f).into()),
-                error: None,
-            }),
-            Err(e) => Json(err_feedback(e.to_string())),
-        }
+        let _ = feedback;
+        let _ = p.resolved_revision_seq;
+        Json(err_feedback(
+            "feedback_resolution_requires_disposition_or_withdrawal",
+        ))
     }
 }
