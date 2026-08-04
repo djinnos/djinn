@@ -933,7 +933,8 @@ impl ProposalRepository {
         Ok(sqlx::query_as!(
             ProposalFeedback,
             r#"SELECT id, proposal_id, parent_id, author_kind, author_user_id, author_model,
-                    body, resolved_at, resolved_revision_seq, resolved_by_user_id, created_at, updated_at
+                    body, severity, withdrawn_at, withdrawn_by_user_id,
+                    resolved_at, resolved_revision_seq, resolved_by_user_id, created_at, updated_at
              FROM proposal_feedback WHERE proposal_id = $1 ORDER BY created_at"#,
             proposal_id
         )
@@ -946,7 +947,8 @@ impl ProposalRepository {
         Ok(sqlx::query_as!(
             ProposalFeedback,
             r#"SELECT id, proposal_id, parent_id, author_kind, author_user_id, author_model,
-                    body, resolved_at, resolved_revision_seq, resolved_by_user_id, created_at, updated_at
+                    body, severity, withdrawn_at, withdrawn_by_user_id,
+                    resolved_at, resolved_revision_seq, resolved_by_user_id, created_at, updated_at
              FROM proposal_feedback WHERE id = $1"#,
             feedback_id
         )
