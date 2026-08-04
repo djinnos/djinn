@@ -135,6 +135,63 @@ fn classify_sse_line(line: &str) -> Option<SseFrame> {
     Some(SseFrame::Data(data.to_string()))
 }
 
+/// Extract only count-valued usage from a Responses-compatible terminal frame.
+/// The raw frame is deliberately not retained in the admission outcome.
+fn usage_from_sse_event(event: &serde_json::Value) -> ProviderUsageObservationV1 {
+    let usage = event
+        .get("response")
+        .and_then(|response| response.get("usage"))
+        .or_else(|| event.get("usage"));
+    ProviderUsageObservationV1 {
+        input_units: usage
+            .and_then(|usage| usage.get("input_tokens"))
+            .and_then(serde_json::Value::as_i64),
+        output_units: usage
+            .and_then(|usage| usage.get("output_tokens"))
+            .and_then(serde_json::Value::as_i64),
+        combined_units: usage
+            .and_then(|usage| usage.get("total_tokens"))
+            .and_then(serde_json::Value::as_i64),
+    }
+}
+
+/// Lifecycle, usage, and terminal frames intentionally do not count as tokens.
+fn is_token_emission_event(event: &serde_json::Value) -> bool {
+    match event.get("type").and_then(serde_json::Value::as_str) {
+        Some("response.output_text.delta") | Some("response.reasoning_summary_text.delta") => event
+            .get("delta")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|delta| !delta.is_empty()),
+        Some("content_block_delta") => event
+            .get("delta")
+            .and_then(|delta| delta.get("text"))
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|delta| !delta.is_empty()),
+        _ => false,
+    }
+}
+
+/// The Codex/OpenAI quota signature is a valid completed frame with neither a
+/// message nor function call; it is not the same as an empty SSE transport.
+fn is_codex_empty_completed_event(event: &serde_json::Value) -> bool {
+    if event.get("type").and_then(serde_json::Value::as_str) != Some("response.completed") {
+        return false;
+    }
+    let output = event
+        .get("response")
+        .and_then(|response| response.get("output"))
+        .or_else(|| event.get("output"))
+        .and_then(serde_json::Value::as_array);
+    !output.is_some_and(|items| {
+        items.iter().any(|item| {
+            matches!(
+                item.get("type").and_then(serde_json::Value::as_str),
+                Some("message") | Some("function_call")
+            )
+        })
+    })
+}
+
 /// Render the request headers (auth + extras) into a single redacted string for
 /// the debug log. Auth header VALUES are always redacted; any other header that
 /// looks credential-bearing is scrubbed via [`redact_secrets`] using the same
@@ -407,6 +464,13 @@ impl ApiClient {
                     },
                 ));
                 if !response.status().is_success() {
+                    if is_rate_limit_status(response.status()) {
+                        // The admission wrapper owns no retry, but it must
+                        // preserve the legacy throttle/suppression signal.
+                        activate_suppression_window(Duration::from_millis(
+                            retry_after_ms(response.headers()).unwrap_or(INITIAL_BACKOFF_MS),
+                        ));
+                    }
                     terminal = ProviderAttemptTerminalV1::Failed(
                         if is_rate_limit_status(response.status()) {
                             ProviderAttemptLossV1::RateLimited
@@ -420,25 +484,64 @@ impl ApiClient {
                         .bytes_stream()
                         .map(|item| item.map_err(std::io::Error::other));
                     let mut lines = BufReader::new(StreamReader::new(bytes)).lines();
-                    let mut saw_event = false;
+                    let mut saw_valid_event = false;
                     loop {
                         let next = tokio::select! { _ = cancellation.cancelled() => { terminal = ProviderAttemptTerminalV1::Aborted; abort_result = ProviderAttemptAbortResultV1::Confirmed; break; } next = lines.next_line() => next };
                         match next {
                             Ok(Some(line)) => {
                                 if let Some(frame) = classify_sse_line(&line) {
-                                    if matches!(frame, SseFrame::Data(_)) {
-                                        saw_event = true;
-                                        let at =
+                                    if let SseFrame::Data(payload) = &frame {
+                                        let event: serde_json::Value =
+                                            match serde_json::from_str(payload) {
+                                                Ok(event) => event,
+                                                Err(_) => {
+                                                    terminal = ProviderAttemptTerminalV1::Failed(
+                                                        ProviderAttemptLossV1::Protocol,
+                                                    );
+                                                    break;
+                                                }
+                                            };
+                                        saw_valid_event = true;
+                                        let receipt_ms =
                                             started.elapsed().as_millis().min(u128::from(u64::MAX))
                                                 as u64;
-                                        emission.first_token_monotonic_ms.get_or_insert(at);
-                                        emission.last_token_monotonic_ms = Some(at);
+                                        if is_token_emission_event(&event) {
+                                            emission
+                                                .first_token_monotonic_ms
+                                                .get_or_insert(receipt_ms);
+                                            emission.last_token_monotonic_ms = Some(receipt_ms);
+                                        }
+                                        let usage = usage_from_sse_event(&event);
+                                        if usage != ProviderUsageObservationV1::default() {
+                                            observation = Some(normalizer.observe(
+                                                1,
+                                                &refs,
+                                                usage,
+                                                ProviderReceiptTimeV1 {
+                                                    wall: SystemTime::now(),
+                                                    monotonic_ms: receipt_ms,
+                                                },
+                                            ));
+                                        }
+                                        if is_codex_empty_completed_event(&event) {
+                                            terminal = ProviderAttemptTerminalV1::Failed(
+                                                ProviderAttemptLossV1::CodexEmptyTurn,
+                                            );
+                                            break;
+                                        }
                                     }
-                                    tokio::select! { _ = cancellation.cancelled() => { terminal = ProviderAttemptTerminalV1::Aborted; abort_result = ProviderAttemptAbortResultV1::Confirmed; break; } sent = event_tx.send(Ok(frame)) => { let _ = sent; } }
+                                    tokio::select! {
+                                        _ = cancellation.cancelled() => { terminal = ProviderAttemptTerminalV1::Aborted; abort_result = ProviderAttemptAbortResultV1::Confirmed; break; }
+                                        sent = event_tx.send(Ok(frame)) => {
+                                            // A dropped consumer must not strand the outcome
+                                            // owner waiting to feed a stream nobody observes.
+                                            if sent.is_err() { break; }
+                                        }
+                                    }
                                 }
                             }
                             Ok(None) => {
-                                if !saw_event {
+                                if !saw_valid_event {
                                     terminal = ProviderAttemptTerminalV1::Failed(empty_turn_loss);
                                 }
                                 break;

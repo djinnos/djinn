@@ -4,6 +4,7 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::sync::oneshot;
 
 async fn serve_one_sse_response(payload: &'static str) -> String {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -64,6 +65,7 @@ async fn admission_attempt_sends_retryable_response_once_and_normalizes_retry_af
 async fn admission_attempt_abort_is_idempotent_and_terminal() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
+    let (in_flight_tx, in_flight_rx) = oneshot::channel();
     tokio::spawn(async move {
         let (mut socket, _) = listener.accept().await.unwrap();
         let mut request = [0; 4096];
@@ -72,6 +74,7 @@ async fn admission_attempt_abort_is_idempotent_and_terminal() {
             .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n")
             .await
             .unwrap();
+        let _ = in_flight_tx.send(());
         tokio::time::sleep(Duration::from_secs(5)).await;
     });
     let mut attempt = ApiClient::new().start_sse_attempt_v1(
@@ -80,6 +83,7 @@ async fn admission_attempt_abort_is_idempotent_and_terminal() {
         &AuthMethod::NoAuth,
         HeaderMap::new(),
     );
+    in_flight_rx.await.unwrap();
     attempt.abort.abort();
     attempt.abort.abort();
     let outcome = tokio::time::timeout(Duration::from_secs(1), attempt.outcome())
@@ -90,18 +94,54 @@ async fn admission_attempt_abort_is_idempotent_and_terminal() {
 }
 
 #[tokio::test]
-async fn admission_attempt_maps_codex_empty_stream() {
-    let url = serve_one_sse_response("data: [DONE]\n\n").await;
-    let mut attempt = ApiClient::new().start_sse_attempt_v1_with_empty_turn_loss(
+async fn admission_attempt_maps_codex_empty_completed_frame() {
+    let url = serve_one_sse_response(
+        "data: {\"type\":\"response.completed\",\"response\":{\"output\":[],\"usage\":{\"input_tokens\":3,\"output_tokens\":0,\"total_tokens\":3}}}\n\ndata: [DONE]\n\n",
+    )
+    .await;
+    let mut attempt = ApiClient::new().start_sse_attempt_v1(
         &url,
         serde_json::json!({"model":"fixture"}),
         &AuthMethod::NoAuth,
         HeaderMap::new(),
-        ProviderAttemptLossV1::CodexEmptyTurn,
+    );
+    let outcome = attempt.outcome().await;
+    assert_eq!(
+        outcome.terminal,
+        ProviderAttemptTerminalV1::Failed(ProviderAttemptLossV1::CodexEmptyTurn)
+    );
+    assert_eq!(outcome.authoritative_usage.unwrap().input_units, 3);
+}
+
+#[tokio::test]
+async fn admission_attempt_malformed_frame_is_protocol_loss_and_token_times_are_emissions() {
+    let malformed_url = serve_one_sse_response("data: not-json\n\n").await;
+    let mut malformed = ApiClient::new().start_sse_attempt_v1(
+        &malformed_url,
+        serde_json::json!({"model":"fixture"}),
+        &AuthMethod::NoAuth,
+        HeaderMap::new(),
     );
     assert_eq!(
-        attempt.outcome().await.terminal,
-        ProviderAttemptTerminalV1::Failed(ProviderAttemptLossV1::CodexEmptyTurn)
+        malformed.outcome().await.terminal,
+        ProviderAttemptTerminalV1::Failed(ProviderAttemptLossV1::Protocol)
+    );
+
+    let timing_url = serve_one_sse_response(
+        "data: {\"type\":\"response.created\"}\n\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\ndata: [DONE]\n\n",
+    )
+    .await;
+    let mut timing = ApiClient::new().start_sse_attempt_v1(
+        &timing_url,
+        serde_json::json!({"model":"fixture"}),
+        &AuthMethod::NoAuth,
+        HeaderMap::new(),
+    );
+    let outcome = timing.outcome().await;
+    assert!(outcome.token_emission.first_token_monotonic_ms.is_some());
+    assert_eq!(
+        outcome.token_emission.first_token_monotonic_ms,
+        outcome.token_emission.last_token_monotonic_ms
     );
 }
 
