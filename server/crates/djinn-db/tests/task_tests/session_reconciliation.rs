@@ -1,5 +1,5 @@
 use super::*;
-use djinn_core::models::SessionStatus;
+use djinn_core::models::{SessionFailureCause, SessionStatus};
 use djinn_db::{CreateSessionParams, CreateTaskRunParams, SessionRepository, TaskRunRepository};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -106,6 +106,11 @@ async fn reconciliation_lists_and_settles_each_duplicate_session_by_exact_id() {
     let settled = sessions.get(&without_run.id).await.unwrap().unwrap();
     assert_eq!(settled.status, SessionStatus::Interrupted.as_str());
     assert!(settled.ended_at.is_some());
+    assert_eq!(
+        settled.failure_cause,
+        Some(SessionFailureCause::Protocol),
+        "the exact-id stale-board reconciliation backstop must persist Protocol"
+    );
 
     assert!(
         sessions

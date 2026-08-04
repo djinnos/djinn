@@ -15,7 +15,7 @@
 
 use super::*;
 use crate::extension::handlers::call_task_kill_session;
-use djinn_core::models::SessionStatus;
+use djinn_core::models::{SessionFailureCause, SessionStatus};
 use djinn_db::{CreateSessionParams, SessionRepository};
 
 fn kill_args(task_id: &str) -> Option<serde_json::Map<String, serde_json::Value>> {
@@ -97,6 +97,11 @@ async fn call_task_kill_session_settles_paused_session_to_interrupted() {
         after.status,
         SessionStatus::Interrupted.as_str(),
         "paused session must be settled to interrupted by the kill handler"
+    );
+    assert_eq!(
+        after.failure_cause,
+        Some(SessionFailureCause::Cancelled),
+        "the user-directed paused-session cleanup must persist Cancelled"
     );
 }
 
