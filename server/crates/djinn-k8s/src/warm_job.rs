@@ -78,9 +78,15 @@ pub const ENV_WARM_LEASE_CONSUMER_ID: &str = "DJINN_WARM_LEASE_CONSUMER_ID";
 pub const ENV_WARM_LEASE_FENCING_TOKEN: &str = "DJINN_WARM_LEASE_FENCING_TOKEN";
 /// Durable attempt identity read by `warm-graph` to finish exactly the row
 /// created by the producer before this Job was posted.
-pub const ENV_WARM_ATTEMPT_ID: &str = "DJINN_WARM_ATTEMPT_ID";
+///
+/// The name is the worker's, not this crate's: `djinn-agent-worker` reads it
+/// with `std::env::var` and fails closed when it is absent, so a renderer that
+/// spells it differently produces a Pod that dies before warming anything.
+/// `rendered_job_env_contract` binds the two sides so they cannot drift again.
+pub const ENV_WARM_GRAPH_ATTEMPT_ID: &str = "DJINN_WARM_GRAPH_ATTEMPT_ID";
 /// Immutable RFC3339 deadline shared by the attempt ledger and warm worker.
-pub const ENV_WARM_ATTEMPT_DEADLINE_AT: &str = "DJINN_WARM_ATTEMPT_DEADLINE_AT";
+/// Same naming contract as [`ENV_WARM_GRAPH_ATTEMPT_ID`].
+pub const ENV_WARM_GRAPH_ATTEMPT_DEADLINE: &str = "DJINN_WARM_GRAPH_ATTEMPT_DEADLINE";
 
 /// Mount path for the read-only mirror PVC (mirrors the task-run Job).
 pub const MIRROR_MOUNT_DIR: &str = "/mirror";
@@ -592,7 +598,11 @@ fn env_var(name: &str, value: &str) -> EnvVar {
 /// Stamp durable attempt data after either warm manifest variant has been
 /// constructed. This keeps public builders and deterministic Job identity
 /// unchanged while giving leased and unleased Pods the same worker contract.
-pub(crate) fn stamp_warm_attempt(job: &mut Job, attempt_id: &str, deadline_at: &str) {
+///
+/// Public so the binary crate that owns the reader (`djinn-agent-worker`) can
+/// render the production-equivalent manifest and assert it satisfies the
+/// worker's environment contract; nothing else outside this crate calls it.
+pub fn stamp_warm_attempt(job: &mut Job, attempt_id: &str, deadline_at: &str) {
     let container = job
         .spec
         .as_mut()
@@ -600,8 +610,8 @@ pub(crate) fn stamp_warm_attempt(job: &mut Job, attempt_id: &str, deadline_at: &
         .and_then(|spec| spec.containers.first_mut())
         .expect("warm Job builder always renders a warmer container");
     let env = container.env.get_or_insert_with(Vec::new);
-    env.push(env_var(ENV_WARM_ATTEMPT_ID, attempt_id));
-    env.push(env_var(ENV_WARM_ATTEMPT_DEADLINE_AT, deadline_at));
+    env.push(env_var(ENV_WARM_GRAPH_ATTEMPT_ID, attempt_id));
+    env.push(env_var(ENV_WARM_GRAPH_ATTEMPT_DEADLINE, deadline_at));
 }
 
 /// Sanitise a project id to a DNS-label-safe form for Job names and label

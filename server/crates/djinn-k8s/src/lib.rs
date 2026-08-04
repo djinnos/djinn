@@ -94,7 +94,7 @@ pub use scip_schedule::{
     observe_from_jobs,
 };
 pub use token_review::TokenReviewer;
-pub use warm_job::{build_leased_warm_job, build_warm_job, warm_job_name};
+pub use warm_job::{build_leased_warm_job, build_warm_job, stamp_warm_attempt, warm_job_name};
 pub use workload_inventory::{
     JOB_CONDITION_COMPLETE, JOB_CONDITION_FAILED, KubeWorkloadInventory, LABEL_ADMISSION_DOMAIN,
     LABEL_ADMISSION_GENERATION, LABEL_ADMISSION_WORK_ID, ObjectPresence, UidGetResult,
