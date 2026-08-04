@@ -176,6 +176,14 @@ pub struct ProposalFeedback {
     /// Model id when `author_kind == "ai"`.
     pub author_model: Option<String>,
     pub body: String,
+    /// Readiness impact: `blocking` (the backward-compatible default) or
+    /// `advisory` (captured as context but does not gate readiness).
+    pub severity: String,
+    /// Explicit withdrawal by the feedback author. A withdrawn row is retained
+    /// for audit/history but is no longer actionable.
+    pub withdrawn_at: Option<String>,
+    /// User who explicitly withdrew the feedback.
+    pub withdrawn_by_user_id: Option<String>,
     /// When set, the feedback has been resolved (addressed or dismissed) and is
     /// collapsed out of the active thread. `None` while unresolved.
     pub resolved_at: Option<String>,
@@ -186,6 +194,43 @@ pub struct ProposalFeedback {
     pub resolved_by_user_id: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+}
+
+/// A root-scoped materialized feedback generation.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "sqlx", derive(sqlx::FromRow))]
+pub struct ProposalFeedbackRefinementInjection {
+    pub id: String,
+    pub proposal_id: String,
+    pub root_feedback_id: String,
+    pub generation: i32,
+    pub state: String,
+    pub cutoff_at: String,
+    pub cutoff_feedback_id: String,
+    pub round: i32,
+    pub debate_entry_id: Option<String>,
+    pub accepted_disposition: Option<String>,
+    pub accepted_revision_seq: Option<i32>,
+    pub accepted_at: Option<String>,
+    pub accepted_by_user_id: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+/// An immutable verbatim feedback snapshot included in a refinement generation.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "sqlx", derive(sqlx::FromRow))]
+pub struct ProposalFeedbackRefinementSource {
+    pub injection_id: String,
+    pub source_feedback_id: String,
+    pub source_ordinal: i32,
+    pub source_parent_id: Option<String>,
+    pub source_author_kind: String,
+    pub source_author_user_id: Option<String>,
+    pub source_author_model: Option<String>,
+    pub source_body: String,
+    pub source_severity: String,
+    pub source_created_at: String,
+    pub captured_at: String,
 }
 
 /// A structured debate-trail entry for the proposal tribunal. Distinct from
