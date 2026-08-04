@@ -149,7 +149,7 @@ async fn main() -> Result<()> {
     let sessions: Vec<SessionRecord> = sqlx::query_as::<_, SessionRecord>(
         "SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at, \
          status, tokens_in, tokens_out, cache_read_tokens, cache_write_tokens, \
-         task_run_id, title, parked_reason, cost_usd, input_price_per_million_snapshot, \
+         task_run_id, title, parked_reason, failure_cause, cost_usd, input_price_per_million_snapshot, \
          output_price_per_million_snapshot, cache_read_price_per_million_snapshot, \
          cache_write_price_per_million_snapshot, cost_basis, billing_source \
          FROM sessions \
