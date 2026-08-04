@@ -503,7 +503,7 @@ fn capacity_min(
     }
 }
 
-fn normalize_usage(
+pub(crate) fn normalize_usage(
     usage: ProviderUsageObservationV1,
 ) -> Result<Option<ModelTurnAuthoritativeUsage>, ProviderObservationIgnoreReasonV1> {
     let fields = [usage.input_units, usage.output_units, usage.combined_units];

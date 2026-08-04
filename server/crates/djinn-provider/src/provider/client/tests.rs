@@ -199,6 +199,88 @@ async fn admission_attempt_combines_rate_capacity_and_terminal_usage_once() {
 }
 
 #[tokio::test]
+async fn admission_attempt_uses_done_items_when_completed_output_is_empty() {
+    let url = serve_one_sse_response(
+        "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\"}}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"output\":[],\"usage\":{\"input_tokens\":2,\"output_tokens\":1}}}\n\n",
+    )
+    .await;
+    let mut attempt = ApiClient::new().start_sse_attempt_v1(
+        &url,
+        serde_json::json!({"model":"fixture"}),
+        &AuthMethod::NoAuth,
+        HeaderMap::new(),
+        attempt_context(43),
+        OpenAIResponsesTerminalReporterV1::default(),
+    );
+    let outcome = attempt.outcome().await;
+    assert_eq!(outcome.terminal, ProviderAttemptTerminalV1::Completed);
+    assert_eq!(outcome.authoritative_usage.unwrap().combined_units, 3);
+}
+
+#[tokio::test]
+async fn admission_attempt_preserves_terminal_usage_when_rate_observation_is_stale() {
+    let normalizer = Arc::new(std::sync::Mutex::new(ProviderApiKeyNormalizerV1::new(
+        ProviderAdmissionPolicyV1::Proactive,
+    )));
+    let capacity_headers = [
+        ("x-ratelimit-remaining-requests", "7"),
+        ("x-ratelimit-remaining-input-tokens", "80"),
+        ("x-ratelimit-remaining-output-tokens", "90"),
+        ("x-ratelimit-remaining-tokens", "170"),
+        ("x-ratelimit-reset", "123"),
+    ];
+    let initial = normalizer.lock().unwrap().observe(
+        44,
+        &capacity_headers,
+        ProviderUsageObservationV1::default(),
+        ProviderReceiptTimeV1 {
+            wall: SystemTime::UNIX_EPOCH,
+            monotonic_ms: 100,
+        },
+    );
+    assert_eq!(initial.ignored, None);
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut request = [0; 4096];
+        let _ = socket.read(&mut request).await.unwrap();
+        let payload = "data: {\"type\":\"response.completed\",\"response\":{\"output\":[{\"type\":\"message\"}],\"usage\":{\"input_tokens\":2,\"output_tokens\":1}}}\n\n";
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nx-ratelimit-remaining-requests: 7\r\nx-ratelimit-remaining-input-tokens: 80\r\nx-ratelimit-remaining-output-tokens: 90\r\nx-ratelimit-remaining-tokens: 170\r\nx-ratelimit-reset: 123\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            payload.len(),
+            payload
+        );
+        socket.write_all(response.as_bytes()).await.unwrap();
+    });
+    let context =
+        ProviderAttemptContextV1::new(43, ProviderAdmissionPolicyV1::Proactive, normalizer, || {
+            ProviderReceiptTimeV1 {
+                wall: SystemTime::UNIX_EPOCH,
+                monotonic_ms: 200,
+            }
+        });
+    let mut attempt = ApiClient::new().start_sse_attempt_v1(
+        &url,
+        serde_json::json!({"model":"fixture"}),
+        &AuthMethod::NoAuth,
+        HeaderMap::new(),
+        context,
+        OpenAIResponsesTerminalReporterV1::default(),
+    );
+    let outcome = attempt.outcome().await;
+    assert_eq!(outcome.terminal, ProviderAttemptTerminalV1::Completed);
+    let observation = outcome.observation.expect("stale normalized observation");
+    assert_eq!(
+        observation.ignored,
+        Some(crate::ProviderObservationIgnoreReasonV1::Stale)
+    );
+    assert_eq!(observation.authoritative_usage, None);
+    assert_eq!(outcome.authoritative_usage.unwrap().combined_units, 3);
+}
+
+#[tokio::test]
 async fn admission_attempt_rejects_policy_mismatch_before_send() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());

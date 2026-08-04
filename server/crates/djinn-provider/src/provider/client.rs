@@ -407,6 +407,7 @@ impl ApiClient {
         tokio::spawn(async move {
             let mut emission = ProviderTokenEmissionV1::default();
             let mut observation = None;
+            let mut authoritative_usage = None;
             let mut terminal = ProviderAttemptTerminalV1::Failed(ProviderAttemptLossV1::Protocol);
             let mut abort_result = ProviderAttemptAbortResultV1::NotRequested;
             let mut request = client
@@ -543,6 +544,13 @@ impl ApiClient {
                         ) => terminal_usage,
                         _ => ProviderUsageObservationV1::default(),
                     };
+                    // Usage from a valid provider terminal remains
+                    // authoritative even when this response is too old to
+                    // update credential-scoped capacity.
+                    authoritative_usage =
+                        crate::model_turn_admission::normalize_usage(normalized_usage)
+                            .ok()
+                            .flatten();
                     observation =
                         Some(context.normalizer.lock().expect("normalizer lock").observe(
                             context.request_sequence,
@@ -552,9 +560,6 @@ impl ApiClient {
                         ));
                 }
             }
-            let authoritative_usage = observation
-                .as_ref()
-                .and_then(|value| value.authoritative_usage.clone());
             let _ = outcome_tx.send(ProviderOutcomeV1 {
                 terminal,
                 authoritative_usage,

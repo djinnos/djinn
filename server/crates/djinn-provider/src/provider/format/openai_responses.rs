@@ -259,6 +259,7 @@ enum ResponsesStreamEvent {
 #[derive(Default)]
 pub struct OpenAIResponsesTerminalReporterV1 {
     completed: bool,
+    accumulated_items: Vec<OutputItemInfo>,
 }
 
 impl ProviderSseTerminalReporterV1 for OpenAIResponsesTerminalReporterV1 {
@@ -282,6 +283,10 @@ impl ProviderSseTerminalReporterV1 for OpenAIResponsesTerminalReporterV1 {
             {
                 ProviderFormatReportV1::TokenEmitted
             }
+            ResponsesStreamEvent::OutputItemDone { item } => {
+                self.accumulated_items.push(item);
+                ProviderFormatReportV1::Continue
+            }
             ResponsesStreamEvent::ResponseCompleted { response } => {
                 self.completed = true;
                 let usage =
@@ -296,7 +301,14 @@ impl ProviderSseTerminalReporterV1 for OpenAIResponsesTerminalReporterV1 {
                                 ),
                             }
                         });
-                if response.output.iter().any(|item| {
+                // Final items can be authoritative in earlier done frames while
+                // the completed response carries an empty output array.
+                let final_items = if response.output.is_empty() {
+                    self.accumulated_items.as_slice()
+                } else {
+                    response.output.as_slice()
+                };
+                if final_items.iter().any(|item| {
                     matches!(
                         item,
                         OutputItemInfo::Message {} | OutputItemInfo::FunctionCall { .. }
