@@ -1,28 +1,30 @@
 {
-  "version": "TribunalEvidenceReturnV1",
-  "limits": {
-    "checks": 32,
-    "findings": 32,
-    "anchors_per_finding": 16,
-    "gaps": 32,
-    "conclusion_detail_bytes": 8192,
-    "string_bytes": 2048,
-    "decoded_payload_bytes": 262144
-  },
-  "stable_errors": [
-    "unsupported_version", "invalid_json", "payload_too_large", "missing_identity",
-    "string_too_large", "conclusion_too_large", "return_limit_exceeded",
-    "finding_binding_mismatch", "source_task_binding_mismatch", "unknown_attempt",
-    "missing_expected_check", "duplicate_check", "unknown_check", "check_method_mismatch",
-    "check_limit_exceeded", "invalid_check_status", "status_detail_required",
-    "invocation_method_mismatch", "command_invocation_required",
-    "command_invocation_forbidden", "unknown_invocation", "passed_status_fields_forbidden",
-    "failed_status_failure_required", "not_run_status_gap_required",
-    "dangling_finding_check", "duplicate_finding_check", "finding_conclusion_required",
-    "too_many_anchors", "detail_too_large", "invalid_anchor", "invalid_issue",
-    "dangling_issue_check", "duplicate_issue_check", "replay_payload_conflict",
-    "invalid_persisted_outcome"
+  "version":"TribunalEvidenceReturnV1",
+  "identity_tokens":{"finding_id":"$finding_id","spike_task_id":"$spike_task_id","attempt_id":"$attempt_id"},
+  "valid_cases":[
+    {"name":"methods_statuses_and_families","checks":[{"check_id":"code","method":"code","status":"passed","anchors":[{"method":"repository","locator":"repository:plan123:abcdef1"},{"method":"code","locator":"code:src/lib.rs@abcdef1#L1-2"},{"method":"graph","locator":"graph:00000000-0000-0000-0000-000000000000"}]},{"check_id":"graph","method":"graph","status":"failed","detail":"failed","anchors":[{"method":"artifact","locator":"artifact:00000000-0000-0000-0000-000000000000"}],"failure":{"code":"failed","detail":"failed"}},{"check_id":"command","method":"command","status":"not_run","detail":"unavailable","anchors":[{"method":"command","locator":"command:invocation"},{"method":"memory","locator":"memory:00000000-0000-0000-0000-000000000000@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},{"method":"external","locator":"external:https://example.test/evidence#sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}],"gap":{"code":"unavailable","detail":"unavailable"}}]},
+    {"name":"resolved_healthy_command","outcome":"resolved","healthy":true},
+    {"name":"partial_healthy_and_unusable","outcome":"partial","healthy":true},
+    {"name":"unresolved_unusable","outcome":"unresolved","healthy":false}
   ],
-  "anchor_families": ["code", "graph", "command", "artifact", "memory", "external", "repository"],
-  "outcomes": ["resolved", "partial", "unresolved"]
+  "invalid_cases":[
+    {"name":"malformed_json","payload":"{\"attempt_id\":\"$attempt_id\"","error":"invalid_json"},
+    {"name":"incomplete_checks","error":"missing_expected_check"},
+    {"name":"passed_detail_forbidden","error":"passed_status_fields_forbidden"},
+    {"name":"failed_requires_failure","error":"failed_status_failure_required"},
+    {"name":"not_run_requires_gap","error":"not_run_status_gap_required"},
+    {"name":"unknown_anchor","error":"invalid_anchor"},
+    {"name":"different_replay","error":"replay_payload_conflict"}
+  ],
+  "boundaries":[
+    {"field":"checks","exact":32,"one_over":33,"error":"return_limit_exceeded"},
+    {"field":"findings","exact":32,"one_over":33,"error":"return_limit_exceeded"},
+    {"field":"anchors_per_finding","exact":16,"one_over":17,"error":"too_many_anchors"},
+    {"field":"gaps","exact":32,"one_over":33,"error":"return_limit_exceeded"},
+    {"field":"conclusion_bytes","exact":8192,"one_over":8193,"error":"conclusion_too_large"},
+    {"field":"detail_bytes","exact":8192,"one_over":8193,"error":"detail_too_large"},
+    {"field":"string_bytes","exact":2048,"one_over":2049,"error":"string_too_large"},
+    {"field":"decoded_payload_bytes","exact":262144,"one_over":262145,"error":"payload_too_large"}
+  ],
+  "persistence_assertions":["normalized_rows","foreign_keys","rollback_on_rejection","malformed_to_failed","valid_to_evidence_received","identical_replay_one_transition"]
 }
