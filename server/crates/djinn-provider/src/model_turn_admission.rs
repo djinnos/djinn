@@ -7,10 +7,12 @@
 
 use std::collections::BTreeSet;
 use std::fmt;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use djinn_db::{ModelTurnAuthoritativeUsage, ModelTurnBucketDebit, ModelTurnBucketKind};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
+use time::{OffsetDateTime, format_description::well_known::Rfc2822};
 use tokio_util::sync::CancellationToken;
 
 /// The largest output reservation accepted by the v1 admission contract.
@@ -225,6 +227,381 @@ pub enum ProviderAttemptAbortResultV1 {
 pub struct ProviderTokenEmissionV1 {
     pub first_token_monotonic_ms: Option<u64>,
     pub last_token_monotonic_ms: Option<u64>,
+}
+
+/// Receipt clocks injected at the transport boundary. The monotonic value is an
+/// opaque millisecond counter so normalized values are deterministic and safe
+/// to persist without retaining an `Instant`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProviderReceiptTimeV1 {
+    pub wall: SystemTime,
+    pub monotonic_ms: u64,
+}
+
+/// Authoritative provider usage before reconciliation into the Phase A
+/// request/input/output/combined vocabulary. It contains counts only.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ProviderUsageObservationV1 {
+    pub input_units: Option<i64>,
+    pub output_units: Option<i64>,
+    pub combined_units: Option<i64>,
+}
+
+/// Bounded, redaction-safe reasons for ignoring an observation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderObservationIgnoreReasonV1 {
+    Malformed,
+    Stale,
+    Regressing,
+    Incomplete,
+    Impossible,
+}
+
+/// Saturating diagnostic counters; raw header names and values are never kept.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct ProviderObservationDiagnosticsV1 {
+    pub malformed: u32,
+    pub stale: u32,
+    pub regressing: u32,
+    pub incomplete: u32,
+    pub impossible: u32,
+}
+
+impl ProviderObservationDiagnosticsV1 {
+    fn record(&mut self, reason: ProviderObservationIgnoreReasonV1) {
+        let counter = match reason {
+            ProviderObservationIgnoreReasonV1::Malformed => &mut self.malformed,
+            ProviderObservationIgnoreReasonV1::Stale => &mut self.stale,
+            ProviderObservationIgnoreReasonV1::Regressing => &mut self.regressing,
+            ProviderObservationIgnoreReasonV1::Incomplete => &mut self.incomplete,
+            ProviderObservationIgnoreReasonV1::Impossible => &mut self.impossible,
+        };
+        *counter = counter.saturating_add(1);
+    }
+}
+
+/// Available capacity in the Phase A bucket vocabulary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct ProviderAvailableCapacityV1 {
+    pub request_units: i64,
+    pub input_units: i64,
+    pub output_units: i64,
+    pub combined_units: i64,
+}
+
+/// Cold pools permit one discovery response owner, compatible with Phase A's
+/// `DiscoveryRequired` state. Repository acquisition is intentionally absent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderDiscoveryOwnershipV1 {
+    DiscoveryRequired,
+    DiscoveryOwned { request_sequence: u64 },
+    Known,
+}
+
+/// Sanitized outcome of one API-key response. It retains no raw headers,
+/// request IDs, account IDs, credentials, URLs, or bodies.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ProviderNormalizedObservationV1 {
+    pub authoritative_usage: Option<ModelTurnAuthoritativeUsage>,
+    pub available_capacity: Option<ProviderAvailableCapacityV1>,
+    pub reset_epoch: Option<u64>,
+    pub retry_after_deadline_monotonic_ms: Option<u64>,
+    pub ignored: Option<ProviderObservationIgnoreReasonV1>,
+    pub diagnostics: ProviderObservationDiagnosticsV1,
+    pub discovery: ProviderDiscoveryOwnershipV1,
+}
+
+/// Stateful normalizer for API-key response observations. Raw headers are
+/// consumed only by [`Self::observe`] and are never stored in this type.
+#[derive(Clone, Debug, Default)]
+pub struct ProviderApiKeyNormalizerV1 {
+    last_sequence: Option<u64>,
+    reset_epoch: Option<u64>,
+    capacity: Option<ProviderAvailableCapacityV1>,
+    diagnostics: ProviderObservationDiagnosticsV1,
+    discovery: Option<u64>,
+    reactive_only: bool,
+}
+
+impl ProviderApiKeyNormalizerV1 {
+    #[must_use]
+    pub fn new(policy: ProviderAdmissionPolicyV1) -> Self {
+        Self {
+            reactive_only: policy == ProviderAdmissionPolicyV1::ReactiveOnlyTarget1,
+            ..Self::default()
+        }
+    }
+
+    #[must_use]
+    pub fn discovery_ownership(&self) -> ProviderDiscoveryOwnershipV1 {
+        match (self.capacity, self.discovery) {
+            (Some(_), _) => ProviderDiscoveryOwnershipV1::Known,
+            (None, Some(request_sequence)) => {
+                ProviderDiscoveryOwnershipV1::DiscoveryOwned { request_sequence }
+            }
+            (None, None) => ProviderDiscoveryOwnershipV1::DiscoveryRequired,
+        }
+    }
+
+    pub fn claim_discovery(&mut self, request_sequence: u64) -> ProviderDiscoveryOwnershipV1 {
+        if self.capacity.is_none() && self.discovery.is_none() {
+            self.discovery = Some(request_sequence);
+        }
+        self.discovery_ownership()
+    }
+
+    /// Supported capacity headers are
+    /// `x-ratelimit-remaining-{requests,input-tokens,output-tokens,tokens}` and
+    /// `x-ratelimit-reset` (an unsigned reset epoch). Header matching is ASCII
+    /// case-insensitive. `retry-after` accepts delta seconds and HTTP-date.
+    pub fn observe(
+        &mut self,
+        request_sequence: u64,
+        headers: &[(&str, &str)],
+        usage: ProviderUsageObservationV1,
+        receipt: ProviderReceiptTimeV1,
+    ) -> ProviderNormalizedObservationV1 {
+        let retry_after_deadline_monotonic_ms = match retry_after_deadline(headers, receipt) {
+            Ok(value) => value,
+            Err(reason) => return self.ignored(reason, None),
+        };
+        let authoritative_usage = match normalize_usage(usage) {
+            Ok(value) => value,
+            Err(reason) => return self.ignored(reason, retry_after_deadline_monotonic_ms),
+        };
+        let parsed = match parse_capacity_headers(headers) {
+            Ok(value) => value,
+            Err(reason) => return self.ignored(reason, retry_after_deadline_monotonic_ms),
+        };
+        if let Some((epoch, _)) = parsed
+            && self.reset_epoch.is_some_and(|previous| epoch < previous)
+        {
+            return self.ignored(
+                ProviderObservationIgnoreReasonV1::Regressing,
+                retry_after_deadline_monotonic_ms,
+            );
+        }
+
+        if let Some((epoch, candidate)) = parsed {
+            let reset_transition = self.reset_epoch != Some(epoch);
+            if reset_transition {
+                // A larger explicit epoch authoritatively starts a new window;
+                // its capacity is not compared to the preceding window.
+                self.reset_epoch = Some(epoch);
+                self.last_sequence = Some(request_sequence);
+                if !self.reactive_only {
+                    self.capacity = Some(candidate);
+                    self.discovery = None;
+                }
+            } else if self
+                .last_sequence
+                .is_none_or(|last| request_sequence > last)
+            {
+                // A newer response may report either direction for every
+                // bucket. Keep its sequence as the epoch's growth watermark.
+                self.last_sequence = Some(request_sequence);
+                if !self.reactive_only {
+                    self.capacity = Some(candidate);
+                    self.discovery = None;
+                }
+            } else if self.reactive_only {
+                return self.ignored(
+                    ProviderObservationIgnoreReasonV1::Stale,
+                    retry_after_deadline_monotonic_ms,
+                );
+            } else {
+                // An out-of-order response cannot increase enforceable
+                // capacity, but each bucket may still safely decrease. Do not
+                // move the growth watermark backwards after applying a lower
+                // observation.
+                let capacity = self.capacity.unwrap_or(candidate);
+                if !capacity_decreases(candidate, capacity) {
+                    return self.ignored(
+                        ProviderObservationIgnoreReasonV1::Stale,
+                        retry_after_deadline_monotonic_ms,
+                    );
+                }
+                self.capacity = Some(capacity_min(candidate, capacity));
+                self.discovery = None;
+            }
+        }
+        self.outcome(
+            authoritative_usage,
+            if self.reactive_only {
+                None
+            } else {
+                self.capacity
+            },
+            retry_after_deadline_monotonic_ms,
+            None,
+        )
+    }
+
+    fn ignored(
+        &mut self,
+        reason: ProviderObservationIgnoreReasonV1,
+        retry_after_deadline_monotonic_ms: Option<u64>,
+    ) -> ProviderNormalizedObservationV1 {
+        self.diagnostics.record(reason);
+        self.outcome(None, None, retry_after_deadline_monotonic_ms, Some(reason))
+    }
+
+    fn outcome(
+        &self,
+        authoritative_usage: Option<ModelTurnAuthoritativeUsage>,
+        available_capacity: Option<ProviderAvailableCapacityV1>,
+        retry_after_deadline_monotonic_ms: Option<u64>,
+        ignored: Option<ProviderObservationIgnoreReasonV1>,
+    ) -> ProviderNormalizedObservationV1 {
+        ProviderNormalizedObservationV1 {
+            authoritative_usage,
+            available_capacity,
+            reset_epoch: self.reset_epoch,
+            retry_after_deadline_monotonic_ms,
+            ignored,
+            diagnostics: self.diagnostics,
+            discovery: self.discovery_ownership(),
+        }
+    }
+}
+
+fn capacity_decreases(
+    candidate: ProviderAvailableCapacityV1,
+    current: ProviderAvailableCapacityV1,
+) -> bool {
+    candidate.request_units < current.request_units
+        || candidate.input_units < current.input_units
+        || candidate.output_units < current.output_units
+        || candidate.combined_units < current.combined_units
+}
+
+fn capacity_min(
+    candidate: ProviderAvailableCapacityV1,
+    current: ProviderAvailableCapacityV1,
+) -> ProviderAvailableCapacityV1 {
+    ProviderAvailableCapacityV1 {
+        request_units: candidate.request_units.min(current.request_units),
+        input_units: candidate.input_units.min(current.input_units),
+        output_units: candidate.output_units.min(current.output_units),
+        combined_units: candidate.combined_units.min(current.combined_units),
+    }
+}
+
+fn normalize_usage(
+    usage: ProviderUsageObservationV1,
+) -> Result<Option<ModelTurnAuthoritativeUsage>, ProviderObservationIgnoreReasonV1> {
+    let fields = [usage.input_units, usage.output_units, usage.combined_units];
+    if fields.iter().all(Option::is_none) {
+        return Ok(None);
+    }
+    let [Some(input_units), Some(output_units), Some(combined_units)] = fields else {
+        return Err(ProviderObservationIgnoreReasonV1::Incomplete);
+    };
+    if input_units < 0
+        || output_units < 0
+        || combined_units < 0
+        || input_units.checked_add(output_units) != Some(combined_units)
+    {
+        return Err(ProviderObservationIgnoreReasonV1::Impossible);
+    }
+    Ok(Some(ModelTurnAuthoritativeUsage {
+        request_units: 1,
+        input_units,
+        output_units,
+        combined_units,
+    }))
+}
+
+fn parse_capacity_headers(
+    headers: &[(&str, &str)],
+) -> Result<Option<(u64, ProviderAvailableCapacityV1)>, ProviderObservationIgnoreReasonV1> {
+    let value = |name: &str| {
+        headers
+            .iter()
+            .find_map(|(key, value)| key.eq_ignore_ascii_case(name).then_some(*value))
+    };
+    let fields = [
+        value("x-ratelimit-remaining-requests"),
+        value("x-ratelimit-remaining-input-tokens"),
+        value("x-ratelimit-remaining-output-tokens"),
+        value("x-ratelimit-remaining-tokens"),
+        value("x-ratelimit-reset"),
+    ];
+    if fields.iter().all(Option::is_none) {
+        return Ok(None);
+    }
+    let [
+        Some(request),
+        Some(input),
+        Some(output),
+        Some(combined),
+        Some(epoch),
+    ] = fields
+    else {
+        return Err(ProviderObservationIgnoreReasonV1::Incomplete);
+    };
+    let parse_i64 = |value: &str| {
+        value
+            .parse::<i64>()
+            .map_err(|_| ProviderObservationIgnoreReasonV1::Malformed)
+    };
+    let capacity = ProviderAvailableCapacityV1 {
+        request_units: parse_i64(request)?,
+        input_units: parse_i64(input)?,
+        output_units: parse_i64(output)?,
+        combined_units: parse_i64(combined)?,
+    };
+    if capacity.request_units < 0
+        || capacity.input_units < 0
+        || capacity.output_units < 0
+        || capacity.combined_units < 0
+    {
+        return Err(ProviderObservationIgnoreReasonV1::Impossible);
+    }
+    let epoch = epoch
+        .parse::<u64>()
+        .map_err(|_| ProviderObservationIgnoreReasonV1::Malformed)?;
+    Ok(Some((epoch, capacity)))
+}
+
+fn retry_after_deadline(
+    headers: &[(&str, &str)],
+    receipt: ProviderReceiptTimeV1,
+) -> Result<Option<u64>, ProviderObservationIgnoreReasonV1> {
+    let value = headers
+        .iter()
+        .find_map(|(name, value)| name.eq_ignore_ascii_case("retry-after").then_some(*value));
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let delay_ms = if let Ok(seconds) = value.parse::<u64>() {
+        seconds
+            .checked_mul(1_000)
+            .ok_or(ProviderObservationIgnoreReasonV1::Impossible)?
+    } else {
+        let date = OffsetDateTime::parse(value, &Rfc2822)
+            .map_err(|_| ProviderObservationIgnoreReasonV1::Malformed)?;
+        let date_ms = u64::try_from(date.unix_timestamp())
+            .map_err(|_| ProviderObservationIgnoreReasonV1::Impossible)?
+            .checked_mul(1_000)
+            .ok_or(ProviderObservationIgnoreReasonV1::Impossible)?;
+        let receipt_ms = u64::try_from(
+            receipt
+                .wall
+                .duration_since(UNIX_EPOCH)
+                .map_err(|_| ProviderObservationIgnoreReasonV1::Impossible)?
+                .as_millis(),
+        )
+        .map_err(|_| ProviderObservationIgnoreReasonV1::Impossible)?;
+        date_ms.saturating_sub(receipt_ms)
+    };
+    receipt
+        .monotonic_ms
+        .checked_add(delay_ms)
+        .map(Some)
+        .ok_or(ProviderObservationIgnoreReasonV1::Impossible)
 }
 
 /// Build a v1 plan from the exact serialized UTF-8 body sent by a provider
