@@ -93,9 +93,9 @@ pub(crate) const TEMPLATE_ADVISORY_LOCK_ID: i64 = 0x6a5b4c3d2e1f0a9b;
 
 /// Ensure the `djinn_test_template` database exists and is migrated.
 ///
-/// Idempotent: if the template already exists and is marked as a template, this
-/// is a no-op. If it exists but is not marked as a template, it is marked and
-/// migrations are verified. If it does not exist, it is created and migrated.
+/// Idempotent: if the template already exists, it is marked as a template and
+/// brought through the embedded migrations. If it does not exist, it is
+/// created and migrated.
 ///
 /// Uses both a local semaphore (per-process) and a Postgres advisory lock
 /// (cross-process) so parallel tests / worker pods don't collide.
@@ -162,8 +162,10 @@ async fn ensure_test_template_locked(
         return Ok(());
     }
 
-    // Template exists: ensure it is marked as a template and migrations are up
-    // to date. This covers the "someone created the DB but didn't run sqlx" case.
+    // Template exists: ensure it is marked as a template and apply any newly
+    // embedded migrations before cloning. Task-run services can retain a
+    // template from an older image, so verification alone would make every
+    // current integration test fail before it could create its isolated clone.
     sqlx::query(
         "UPDATE pg_database SET datistemplate = TRUE WHERE datname = 'djinn_test_template'",
     )
@@ -171,9 +173,11 @@ async fn ensure_test_template_locked(
     .await
     .map_err(DbError::from)?;
 
-    // The exclusive advisory lock is still held on `conn`, so verify's own
-    // connection to the template cannot be terminated by a racing clone.
-    verify_template_migrations(server_prefix).await?;
+    // The exclusive advisory lock is still held while the migration connection
+    // is open, so a racing clone cannot terminate it. Existing templates
+    // already have the reserved operator, so do not rerun fresh-database
+    // bootstrap (which intentionally only resolves pre-contract migrations).
+    migrate_existing_template(server_prefix).await?;
 
     Ok(())
 }
@@ -246,62 +250,7 @@ async fn run_template_migrations(server_prefix: &str) -> DbResult<()> {
     .await
 }
 
-async fn verify_template_migrations(server_prefix: &str) -> DbResult<()> {
+async fn migrate_existing_template(server_prefix: &str) -> DbResult<()> {
     let template_url = format!("{server_prefix}/djinn_test_template");
-    let pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(1)
-        .connect(&template_url)
-        .await
-        .map_err(DbError::from)?;
-
-    let migrator = sqlx::migrate!("./migrations_postgres");
-    let expected_versions: Vec<i64> = migrator.migrations.iter().map(|m| m.version).collect();
-    if expected_versions.is_empty() {
-        pool.close().await;
-        return Ok(());
-    }
-
-    let table_exists: i64 = sqlx::query_scalar(
-        r#"SELECT COUNT(*)
-         FROM information_schema.tables
-         WHERE table_schema = current_schema()
-           AND table_name   = '_sqlx_migrations'"#,
-    )
-    .fetch_one(&pool)
-    .await
-    .map_err(DbError::from)?;
-
-    if table_exists == 0 {
-        pool.close().await;
-        return Err(DbError::InvalidData(
-            "djinn_test_template exists but _sqlx_migrations table is missing".to_owned(),
-        ));
-    }
-
-    let applied: Vec<i64> =
-        sqlx::query_as::<_, (i64,)>("SELECT version FROM _sqlx_migrations WHERE success = TRUE")
-            .fetch_all(&pool)
-            .await
-            .map_err(DbError::from)?
-            .into_iter()
-            .map(|r| r.0)
-            .collect();
-    let applied_ok: std::collections::HashSet<i64> = applied.into_iter().collect();
-
-    let mut missing: Vec<i64> = expected_versions
-        .iter()
-        .copied()
-        .filter(|v| !applied_ok.contains(v))
-        .collect();
-    missing.sort_unstable();
-
-    pool.close().await;
-
-    if !missing.is_empty() {
-        return Err(DbError::InvalidData(format!(
-            "djinn_test_template is behind the binary — missing migrations: {missing:?}"
-        )));
-    }
-
-    Ok(())
+    migrations::run_postgres_migrations(&template_url, &MigrationContext::default()).await
 }
