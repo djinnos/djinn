@@ -195,6 +195,13 @@ pub struct FeedbackRefinementBoundaryCapture {
     pub captures: Vec<FeedbackRefinementCapture>,
 }
 
+/// Read-only exact generation projection for a materialized human-feedback row.
+#[derive(Clone, Debug)]
+pub struct FeedbackRefinementGeneration {
+    pub injection: ProposalFeedbackRefinementInjection,
+    pub sources: Vec<ProposalFeedbackRefinementSource>,
+}
+
 /// The accepted outcome for one materialized feedback generation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FeedbackRefinementDisposition {
@@ -1505,6 +1512,23 @@ impl ProposalRepository {
         )
         .fetch_all(self.db.pool())
         .await?)
+    }
+
+    /// Read the immutable generation and ordered snapshots linked to a debate row.
+    pub async fn feedback_refinement_generation_for_debate(
+        &self,
+        debate_entry_id: &str,
+    ) -> Result<Option<FeedbackRefinementGeneration>> {
+        self.db.ensure_initialized().await?;
+        let Some(injection) = sqlx::query_as::<_, ProposalFeedbackRefinementInjection>(
+            "SELECT id,proposal_id,root_feedback_id,generation,state,cutoff_at,cutoff_feedback_id,round,debate_entry_id,accepted_disposition,accepted_revision_seq,accepted_reason,accepted_at,accepted_by_user_id,created_at,updated_at FROM proposal_feedback_refinement_injections WHERE debate_entry_id=$1",
+        ).bind(debate_entry_id).fetch_optional(self.db.pool()).await? else {
+            return Ok(None);
+        };
+        let sources = sqlx::query_as::<_, ProposalFeedbackRefinementSource>(
+            "SELECT injection_id,source_feedback_id,source_ordinal,source_parent_id,source_author_kind,source_author_user_id,source_author_model,source_body,source_severity,source_created_at,captured_at FROM proposal_feedback_refinement_sources WHERE injection_id=$1 ORDER BY source_ordinal",
+        ).bind(&injection.id).fetch_all(self.db.pool()).await?;
+        Ok(Some(FeedbackRefinementGeneration { injection, sources }))
     }
 
     /// Get a single debate-trail entry by id.
