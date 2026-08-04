@@ -163,6 +163,10 @@ async fn assert_rejected_without_children(db: &Database, a: &A, payload: Value, 
         .await
         .unwrap_err()
         .to_string();
+    assert_rejection_state(db, a, error, code).await;
+}
+
+async fn assert_rejection_state(db: &Database, a: &A, error: String, code: &str) {
     assert!(error.contains(code), "expected {code}, got {error}");
     for table in [
         "typed_evidence_validation_results",
@@ -446,17 +450,7 @@ async fn tribunal_evidence_return_v1_two_kib_strings_and_payload_boundary() {
         .await
         .unwrap_err()
         .to_string();
-    assert!(error.contains("payload_too_large"));
-    for table in [
-        "typed_evidence_validation_results",
-        "typed_evidence_check_results",
-        "typed_evidence_return_findings",
-        "typed_evidence_issues",
-        "typed_evidence_anchors",
-        "typed_evidence_return_finding_anchors",
-    ] {
-        assert_eq!(rows(&db, table).await, 0, "rejection left rows in {table}");
-    }
+    assert_rejection_state(&db, &a, error, "payload_too_large").await;
 }
 
 #[tokio::test]
@@ -489,9 +483,9 @@ async fn tribunal_evidence_return_v1_cardinality_boundaries_are_exact_and_atomic
             .await
             .unwrap();
 
-        let (db, a) = setup_named(&all).await;
+        let (db, a) = setup_named(&all[..exact]).await;
         let mut rejected = payload(&a, check("check-0", "code", "passed"));
-        rejected["checks"] = json!(checks_for(&all));
+        rejected["checks"] = json!(checks_for(&all[..exact]));
         if dimension == "findings" {
             rejected["findings"] = json!(
                 (0..over)
@@ -500,7 +494,7 @@ async fn tribunal_evidence_return_v1_cardinality_boundaries_are_exact_and_atomic
             );
         } else if dimension == "gaps" {
             rejected["checks"] = json!(
-                (0..over)
+                (0..exact)
                     .map(|i| check(&format!("check-{i}"), "code", "not_run"))
                     .collect::<Vec<_>>()
             );
@@ -529,42 +523,92 @@ async fn tribunal_evidence_return_v1_anchor_and_text_boundaries_are_exact_and_at
     over["findings"] = json!([{"check_id":"check-0","conclusion":"x","anchors":(0..17).map(|_| json!({"method":"code","locator":"code:x@abcdef1#L1-1"})).collect::<Vec<_>>() }]);
     assert_rejected_without_children(&db, &a, over, "too_many_anchors").await;
 
-    for (field, exact_text, over_text, error) in [
-        (
-            "conclusion",
-            "x".repeat(8192),
-            "x".repeat(8193),
-            "conclusion_too_large",
-        ),
-        (
-            "detail",
-            "x".repeat(8192),
-            "x".repeat(8193),
-            "detail_too_large",
-        ),
+    for (kind, exact_text, over_text, error) in [
+        ("conclusion", "x".repeat(8192), "x".repeat(8193), "conclusion_too_large"),
+        ("failure", "x".repeat(8192), "x".repeat(8193), "invalid_issue"),
+        ("gap", "x".repeat(8192), "x".repeat(8193), "invalid_issue"),
     ] {
         let (db, a) = setup_named(&checks).await;
         let mut accepted = payload(&a, check("check-0", "code", "passed"));
-        if field == "conclusion" {
+        if kind == "conclusion" {
             accepted["conclusion"] = json!(exact_text);
         } else {
-            accepted["checks"][0] = check("check-0", "code", "failed");
-            accepted["checks"][0]["detail"] = json!(exact_text.clone());
-            accepted["failures"] = json!([{"check_id":"check-0","code":"f","detail":exact_text}]);
+            let status = if kind == "failure" { "failed" } else { "not_run" };
+            accepted["checks"][0] = check("check-0", "code", status);
+            accepted[if kind == "failure" { "failures" } else { "gaps" }] = json!([{"check_id":"check-0","code":"f","detail":exact_text}]);
         }
         TypedEvidenceRepository::new(db)
             .submit_return_v1(&serde_json::to_vec(&accepted).unwrap())
             .await
             .unwrap();
+
         let (db, a) = setup_named(&checks).await;
         let mut rejected = payload(&a, check("check-0", "code", "passed"));
-        if field == "conclusion" {
+        if kind == "conclusion" {
             rejected["conclusion"] = json!(over_text);
         } else {
-            rejected["checks"][0] = check("check-0", "code", "failed");
-            rejected["checks"][0]["detail"] = json!(over_text.clone());
-            rejected["failures"] = json!([{"check_id":"check-0","code":"f","detail":over_text}]);
+            let status = if kind == "failure" { "failed" } else { "not_run" };
+            rejected["checks"][0] = check("check-0", "code", status);
+            rejected[if kind == "failure" { "failures" } else { "gaps" }] = json!([{"check_id":"check-0","code":"f","detail":over_text}]);
         }
         assert_rejected_without_children(&db, &a, rejected, error).await;
+    }
+}
+
+#[tokio::test]
+async fn tribunal_evidence_return_v1_two_kib_free_form_strings_are_exact_and_atomic() {
+    let checks = named_checks(1);
+    for (kind, field) in [("failure", "code"), ("gap", "code")] {
+        let exact = "x".repeat(2048);
+        let (db, a) = setup_named(&checks).await;
+        let status = if kind == "failure" { "failed" } else { "not_run" };
+        let mut accepted = payload(&a, check("check-0", "code", status));
+        let mut issue = json!({"check_id":"check-0","code":"f","detail":"d"});
+        issue[field] = json!(exact);
+        accepted[if kind == "failure" { "failures" } else { "gaps" }] = json!([issue]);
+        TypedEvidenceRepository::new(db)
+            .submit_return_v1(&serde_json::to_vec(&accepted).unwrap())
+            .await
+            .unwrap();
+
+        let over = "x".repeat(2049);
+        let (db, a) = setup_named(&checks).await;
+        let mut rejected = payload(&a, check("check-0", "code", status));
+        let mut issue = json!({"check_id":"check-0","code":"f","detail":"d"});
+        issue[field] = json!(over);
+        rejected[if kind == "failure" { "failures" } else { "gaps" }] = json!([issue]);
+        assert_rejected_without_children(&db, &a, rejected, "invalid_issue").await;
+    }
+
+    let exact_locator = format!("code:{}@abcdef1#L1-1", "x".repeat(2030));
+    assert_eq!(exact_locator.len(), 2048);
+    let (db, a) = setup_named(&checks).await;
+    let mut accepted = payload(&a, check("check-0", "code", "passed"));
+    accepted["checks"][0]["anchors"] = json!([{"method":"code","locator":exact_locator}]);
+    TypedEvidenceRepository::new(db)
+        .submit_return_v1(&serde_json::to_vec(&accepted).unwrap())
+        .await
+        .unwrap();
+    let over_locator = format!("code:{}@abcdef1#L1-1", "x".repeat(2031));
+    assert_eq!(over_locator.len(), 2049);
+    let (db, a) = setup_named(&checks).await;
+    let mut rejected = payload(&a, check("check-0", "code", "passed"));
+    rejected["checks"][0]["anchors"] = json!([{"method":"code","locator":over_locator}]);
+    assert_rejected_without_children(&db, &a, rejected, "invalid_anchor").await;
+
+    let exact_id = "c".repeat(2048);
+    let exact_check = vec![(exact_id.clone(), "code".into())];
+    for (status, issues) in [("failed", "failures"), ("not_run", "gaps")] {
+        let (db, a) = setup_named(&exact_check).await;
+        let mut accepted = payload(&a, check(&exact_id, "code", status));
+        accepted[issues] = json!([{"check_id":exact_id,"code":"f","detail":"d"}]);
+        TypedEvidenceRepository::new(db)
+            .submit_return_v1(&serde_json::to_vec(&accepted).unwrap())
+            .await
+            .unwrap();
+        let (db, a) = setup_named(&exact_check).await;
+        let mut rejected = payload(&a, check(&exact_id, "code", status));
+        rejected[issues] = json!([{"check_id":"c".repeat(2049),"code":"f","detail":"d"}]);
+        assert_rejected_without_children(&db, &a, rejected, "invalid_issue").await;
     }
 }
