@@ -2247,11 +2247,19 @@ impl CoordinatorActor {
                     // `pr_review` column so the PR poller advances it (incident
                     // gton — an adopted `open` task was polled by nobody and
                     // wedged 9h). Idempotent: a no-op if already poller-owned.
+                    //
+                    // The head SHA keys the handoff's audit marker. It must be
+                    // the real head: a `None` head made the marker's dedupe key
+                    // collapse to the per-PR-deterministic reason, which
+                    // permanently suppressed the handoff itself.
                     super::respawn_guard::handoff_adopted_pr_to_poller(
                         &self.task_repo(),
                         &task.id,
                         &task.status,
                         &pr_url,
+                        task.ci_github_head_sha
+                            .as_deref()
+                            .or(task.ci_head_sha.as_deref()),
                     )
                     .await;
                     continue;

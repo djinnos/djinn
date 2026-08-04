@@ -148,7 +148,7 @@ async fn adopt_then_handoff_then_mergequeue_loop_bypasses_adoption() {
         "a healthy open PR is still adopted"
     );
     record_adopted_pr_attempt(&db, &task.id, "worker", PR, Some("adopted")).await;
-    assert!(handoff_adopted_pr_to_poller(&task_repo, &task.id, &task.status, PR).await);
+    assert!(handoff_adopted_pr_to_poller(&task_repo, &task.id, &task.status, PR, None).await);
 
     // Poller enqueues, merge_group fails, reopens (cycle 1) → back to open.
     merge_queue_reopen(&db, &task.id, 1).await;
