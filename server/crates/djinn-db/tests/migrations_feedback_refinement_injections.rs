@@ -27,7 +27,7 @@ async fn migration_176_preserves_legacy_feedback_and_enforces_generation_contrac
         .connect(&url)
         .await
         .unwrap();
-    sqlx::query("INSERT INTO proposals (id,short_id,title) VALUES ('p','p173','legacy')")
+    sqlx::query("INSERT INTO proposals (id,short_id,title) VALUES ('p','p176','legacy')")
         .execute(&pool)
         .await
         .unwrap();
