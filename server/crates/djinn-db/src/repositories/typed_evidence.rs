@@ -367,43 +367,39 @@ impl TypedEvidenceRepository {
             let p = expected[c.check_id.as_str()];
             let result_id = uuid::Uuid::now_v7().to_string();
             sqlx::query("INSERT INTO typed_evidence_check_results (id,validation_result_id,planned_check_id,status,detail) VALUES ($1,$2,$3,$4,$5)").bind(&result_id).bind(&validation_id).bind(&p.id).bind(&c.status).bind(&c.detail).execute(&mut **tx).await?;
+            let mut positive = false;
             if let Some(invocation_id) = &c.invocation_id {
-                let known: bool = sqlx::query_scalar(
-                    "SELECT EXISTS(SELECT 1 FROM evidence_command_invocations WHERE id=$1)",
-                )
-                .bind(invocation_id)
-                .fetch_one(&mut **tx)
-                .await?;
-                if !known {
-                    return Err(v1("unknown_invocation"));
-                }
-                // The immutable reference is retained, but does not establish
-                // positive health before exact anchor-family hydration.
-                sqlx::query("INSERT INTO typed_evidence_invocation_provenance (validation_result_id,check_result_id,invocation_id,usable) VALUES ($1,$2,$3,false)")
-                    .bind(&validation_id)
-                    .bind(&result_id)
-                    .bind(invocation_id)
-                    .execute(&mut **tx)
-                    .await?;
+                let hydrated =
+                    hydrate_command_invocation(tx, &payload.attempt_id, p, invocation_id).await?;
+                sqlx::query("INSERT INTO typed_evidence_invocation_provenance (validation_result_id,check_result_id,invocation_id,usable) VALUES ($1,$2,$3,$4)")
+                    .bind(&validation_id).bind(&result_id).bind(invocation_id).bind(hydrated.healthy && hydrated.method_compatible)
+                    .execute(&mut **tx).await?;
+                positive |= hydrated.healthy && hydrated.method_compatible;
             }
-            // Exact anchor-family hydration belongs to the chained follow-up.
-            // Until then no client locator establishes positive anchor health.
             for a in &c.anchors {
                 let id = uuid::Uuid::now_v7().to_string();
+                let hydrated = hydrate_anchor(tx, &payload.attempt_id, p, a).await?;
+                positive |= hydrated.healthy && hydrated.method_compatible;
                 sqlx::query("INSERT INTO typed_evidence_anchors (id,check_result_id,method,locator) VALUES ($1,$2,$3,$4)").bind(&id).bind(&result_id).bind(&a.method).bind(&a.locator).execute(&mut **tx).await?;
-                sqlx::query("INSERT INTO typed_evidence_anchor_health (anchor_id,health,detail) VALUES ($1,'unusable','anchor hydration pending')").bind(&id).execute(&mut **tx).await?;
+                sqlx::query("INSERT INTO typed_evidence_anchor_health (anchor_id,health,detail,immutable_identity,method_compatible) VALUES ($1,$2,$3,$4,$5)")
+                    .bind(&id).bind(hydrated.health()).bind(&hydrated.detail).bind(&hydrated.identity).bind(hydrated.method_compatible).execute(&mut **tx).await?;
             }
-            check_healthy.insert(c.check_id.as_str(), false);
+            check_healthy.insert(c.check_id.as_str(), c.status == "passed" && positive);
         }
         for f in &payload.findings {
             let p = expected[f.check_id.as_str()];
             let finding_id = uuid::Uuid::now_v7().to_string();
-            sqlx::query("INSERT INTO typed_evidence_return_findings (id,validation_result_id,planned_check_id,conclusion,usable) VALUES ($1,$2,$3,$4,false)").bind(&finding_id).bind(&validation_id).bind(&p.id).bind(&f.conclusion).execute(&mut **tx).await?;
+            let mut positive = false;
             for a in &f.anchors {
-                sqlx::query("INSERT INTO typed_evidence_return_finding_anchors (id,finding_id,method,locator,health,immutable_identity,detail) VALUES ($1,$2,$3,$4,'unusable',$5,'anchor hydration pending')").bind(uuid::Uuid::now_v7().to_string()).bind(&finding_id).bind(&a.method).bind(&a.locator).bind(serde_json::json!({"attempt_id":payload.attempt_id,"planned_check_id":p.id,"evidence_plan_id":p.evidence_plan_id,"spike_task_id":payload.spike_task_id})).execute(&mut **tx).await?;
+                let hydrated = hydrate_anchor(tx, &payload.attempt_id, p, a).await?;
+                positive |= hydrated.healthy && hydrated.method_compatible;
+                sqlx::query("INSERT INTO typed_evidence_return_finding_anchors (id,finding_id,method,locator,health,immutable_identity,detail,method_compatible) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)")
+                    .bind(uuid::Uuid::now_v7().to_string()).bind(&finding_id).bind(&a.method).bind(&a.locator).bind(hydrated.health()).bind(&hydrated.identity).bind(&hydrated.detail).bind(hydrated.method_compatible).execute(&mut **tx).await?;
             }
+            sqlx::query("INSERT INTO typed_evidence_return_findings (id,validation_result_id,planned_check_id,conclusion,usable) VALUES ($1,$2,$3,$4,$5)")
+                .bind(&finding_id).bind(&validation_id).bind(&p.id).bind(&f.conclusion).bind(positive).execute(&mut **tx).await?;
         }
-        let result_outcome = TribunalEvidenceOutcome::Unresolved;
+        let result_outcome = derive_outcome(&payload.checks, &check_healthy);
         sqlx::query("UPDATE typed_evidence_validation_results SET outcome=$1,validator_facts=$2 WHERE id=$3").bind(outcome(result_outcome)).bind(serde_json::json!({"validator_version":"TribunalEvidenceReturnV1","raw_payload_sha256":hash,"server_hydrated":true,"outcome":outcome(result_outcome)})).bind(&validation_id).execute(&mut **tx).await?;
         for i in &payload.failures {
             let p = expected[i.check_id.as_str()];
@@ -681,6 +677,26 @@ fn outcome(value: TribunalEvidenceOutcome) -> &'static str {
         TribunalEvidenceOutcome::Unresolved => "unresolved",
     }
 }
+fn derive_outcome(
+    checks: &[TribunalEvidenceReturnCheckV1],
+    check_healthy: &HashMap<&str, bool>,
+) -> TribunalEvidenceOutcome {
+    let any_positive = check_healthy.values().any(|usable| *usable);
+    let all_passed_usable = checks.iter().all(|check| {
+        check.status == "passed"
+            && check_healthy
+                .get(check.check_id.as_str())
+                .copied()
+                .unwrap_or(false)
+    });
+    if all_passed_usable {
+        TribunalEvidenceOutcome::Resolved
+    } else if any_positive {
+        TribunalEvidenceOutcome::Partial
+    } else {
+        TribunalEvidenceOutcome::Unresolved
+    }
+}
 fn planned_method(value: TribunalEvidenceAnchorMethod) -> &'static str {
     match value {
         TribunalEvidenceAnchorMethod::Code => "code",
@@ -688,6 +704,279 @@ fn planned_method(value: TribunalEvidenceAnchorMethod) -> &'static str {
         TribunalEvidenceAnchorMethod::Command => "command",
         _ => unreachable!("planned checks only permit code, graph, or command"),
     }
+}
+#[derive(Debug)]
+struct HydratedAnchor {
+    healthy: bool,
+    method_compatible: bool,
+    identity: serde_json::Value,
+    detail: String,
+}
+impl HydratedAnchor {
+    fn unusable(detail: impl Into<String>, identity: serde_json::Value) -> Self {
+        Self {
+            healthy: false,
+            method_compatible: false,
+            identity,
+            detail: detail.into(),
+        }
+    }
+    fn health(&self) -> &'static str {
+        if self.healthy && self.method_compatible {
+            "healthy"
+        } else {
+            "unusable"
+        }
+    }
+}
+fn unobserved_repository_anchor(
+    attempt_id: &str,
+    planned_check_id: &str,
+    plan_id: &str,
+    commit: &str,
+) -> HydratedAnchor {
+    HydratedAnchor::unusable(
+        "no immutable server-owned repository observation bound to this attempt and planned check",
+        serde_json::json!({
+            "attempt_id": attempt_id,
+            "planned_check_id": planned_check_id,
+            "evidence_plan_id": plan_id,
+            "captured_commit_sha": commit,
+        }),
+    )
+}
+/// A locator is merely a caller selector. Its grammar is family-specific so
+/// one family cannot be reinterpreted as another family's evidence.
+enum CanonicalAnchorLocator<'a> {
+    Repository {
+        plan_id: &'a str,
+        commit: &'a str,
+    },
+    Command {
+        invocation_id: &'a str,
+    },
+    Code {
+        path: &'a str,
+        commit: &'a str,
+        start_line: u32,
+        end_line: u32,
+    },
+    Graph {
+        generation_id: &'a str,
+    },
+    Artifact {
+        artifact_id: &'a str,
+    },
+    Memory {
+        note_id: &'a str,
+        content_sha256: &'a str,
+    },
+    External {
+        uri: &'a str,
+        content_sha256: &'a str,
+    },
+}
+fn canonical_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+}
+fn canonical_sha256(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit())
+}
+fn canonical_commit(value: &str) -> bool {
+    (7..=128).contains(&value.len()) && value.bytes().all(|b| b.is_ascii_hexdigit())
+}
+fn parse_line_range(value: &str) -> Option<(u32, u32)> {
+    let (start, end) = match value.split_once('-') {
+        Some((start, end)) => (start.parse().ok()?, end.parse().ok()?),
+        None => {
+            let line = value.parse().ok()?;
+            (line, line)
+        }
+    };
+    (start > 0 && start <= end).then_some((start, end))
+}
+fn parse_canonical_locator<'a>(
+    method: &str,
+    locator: &'a str,
+) -> Option<CanonicalAnchorLocator<'a>> {
+    match method {
+        "repository" => {
+            let (plan_id, commit) = locator.strip_prefix("repository:")?.split_once(':')?;
+            (canonical_id(plan_id) && canonical_commit(commit))
+                .then_some(CanonicalAnchorLocator::Repository { plan_id, commit })
+        }
+        "command" => {
+            let id = locator.strip_prefix("command:")?;
+            canonical_id(id).then_some(CanonicalAnchorLocator::Command { invocation_id: id })
+        }
+        "code" => {
+            let (path, revision) = locator.strip_prefix("code:")?.split_once('@')?;
+            let (commit, lines) = revision.split_once("#L")?;
+            let (start_line, end_line) = parse_line_range(lines)?;
+            (!path.is_empty()
+                && !path.starts_with('/')
+                && !path.contains("..")
+                && !path.chars().any(char::is_whitespace)
+                && canonical_commit(commit))
+            .then_some(CanonicalAnchorLocator::Code {
+                path,
+                commit,
+                start_line,
+                end_line,
+            })
+        }
+        "graph" => {
+            let id = locator.strip_prefix("graph:")?;
+            uuid::Uuid::parse_str(id)
+                .ok()
+                .map(|_| CanonicalAnchorLocator::Graph { generation_id: id })
+        }
+        "artifact" => {
+            let id = locator.strip_prefix("artifact:")?;
+            uuid::Uuid::parse_str(id)
+                .ok()
+                .map(|_| CanonicalAnchorLocator::Artifact { artifact_id: id })
+        }
+        "memory" => {
+            let (note_id, content_sha256) = locator.strip_prefix("memory:")?.split_once('@')?;
+            (uuid::Uuid::parse_str(note_id).is_ok() && canonical_sha256(content_sha256)).then_some(
+                CanonicalAnchorLocator::Memory {
+                    note_id,
+                    content_sha256,
+                },
+            )
+        }
+        "external" => {
+            let (uri, content_sha256) =
+                locator.strip_prefix("external:")?.rsplit_once("#sha256=")?;
+            (uri.starts_with("https://") && canonical_sha256(content_sha256)).then_some(
+                CanonicalAnchorLocator::External {
+                    uri,
+                    content_sha256,
+                },
+            )
+        }
+        _ => None,
+    }
+}
+/// Resolve only canonical locators against server-owned rows scoped to this
+/// frozen attempt/check. Finalized JSON is never searched for caller text.
+async fn hydrate_anchor(
+    tx: &mut Transaction<'_, Postgres>,
+    attempt_id: &str,
+    planned: &TribunalEvidencePlannedCheck,
+    anchor: &TribunalEvidenceReturnAnchorV1,
+) -> Result<HydratedAnchor> {
+    let scope = serde_json::json!({"attempt_id":attempt_id,"planned_check_id":planned.id,"evidence_plan_id":planned.evidence_plan_id});
+    let compatible = matches!(
+        (planned_method(planned.method), anchor.method.as_str()),
+        ("code", "code" | "repository")
+            | ("graph", "graph" | "repository")
+            | ("command", "command" | "artifact" | "memory" | "external")
+    );
+    if !compatible {
+        return Ok(HydratedAnchor::unusable(
+            "anchor method incompatible with planned check",
+            scope,
+        ));
+    }
+    let Some(locator) = parse_canonical_locator(&anchor.method, &anchor.locator) else {
+        return Ok(HydratedAnchor::unusable(
+            "locator is not canonical for its anchor family",
+            scope,
+        ));
+    };
+    match locator {
+        CanonicalAnchorLocator::Command { invocation_id } => {
+            hydrate_command_invocation(tx, attempt_id, planned, invocation_id).await
+        }
+        // A frozen plan and captured commit establish planning context, not an
+        // observation that performed this check. There is currently no
+        // immutable repository-observation row owned by an exact
+        // attempt/planned-check pair, so even an exact canonical selector must
+        // remain unusable. Do not infer health from `evidence_plans`.
+        CanonicalAnchorLocator::Repository { plan_id, commit } => Ok(unobserved_repository_anchor(
+            attempt_id,
+            &planned.id,
+            plan_id,
+            commit,
+        )),
+        // Graph generations and galaxy artifacts are immutable, but their
+        // repository records are project-wide. Commit equality is not exact
+        // attempt/check provenance and would allow cross-attempt evidence.
+        CanonicalAnchorLocator::Graph { generation_id } => Ok(HydratedAnchor::unusable(
+            "no immutable server-owned graph provenance bound to this attempt and planned check",
+            serde_json::json!({"attempt_id":attempt_id,"planned_check_id":planned.id,"generation_id":generation_id}),
+        )),
+        CanonicalAnchorLocator::Artifact { artifact_id } => Ok(HydratedAnchor::unusable(
+            "no immutable server-owned artifact provenance bound to this attempt and planned check",
+            serde_json::json!({"attempt_id":attempt_id,"planned_check_id":planned.id,"artifact_id":artifact_id}),
+        )),
+        // The repository has no immutable file-content, memory-revision, or
+        // external-provenance source bound to an evidence plan. These parsed
+        // selectors remain persisted as unusable rather than trusted.
+        CanonicalAnchorLocator::Code {
+            path,
+            commit,
+            start_line,
+            end_line,
+        } => Ok(HydratedAnchor::unusable(
+            "no immutable server-owned code source",
+            serde_json::json!({"attempt_id":attempt_id,"planned_check_id":planned.id,"path":path,"captured_commit_sha":commit,"start_line":start_line,"end_line":end_line}),
+        )),
+        CanonicalAnchorLocator::Memory {
+            note_id,
+            content_sha256,
+        } => Ok(HydratedAnchor::unusable(
+            "no immutable server-owned memory revision source",
+            serde_json::json!({"attempt_id":attempt_id,"planned_check_id":planned.id,"note_id":note_id,"content_sha256":content_sha256}),
+        )),
+        CanonicalAnchorLocator::External {
+            uri,
+            content_sha256,
+        } => Ok(HydratedAnchor::unusable(
+            "no immutable server-owned external provenance source",
+            serde_json::json!({"attempt_id":attempt_id,"planned_check_id":planned.id,"uri":uri,"content_sha256":content_sha256}),
+        )),
+    }
+}
+async fn hydrate_command_invocation(
+    tx: &mut Transaction<'_, Postgres>,
+    attempt_id: &str,
+    planned: &TribunalEvidencePlannedCheck,
+    invocation_id: &str,
+) -> Result<HydratedAnchor> {
+    let scope = serde_json::json!({"attempt_id":attempt_id,"planned_check_id":planned.id,"invocation_id":invocation_id});
+    if planned_method(planned.method) != "command" {
+        return Ok(HydratedAnchor::unusable(
+            "command invocation incompatible with planned check",
+            scope,
+        ));
+    }
+    let row = sqlx::query("SELECT plan_id,check_id,launch_state,process_state,exit_code,timed_out,captured_commit_sha FROM evidence_command_invocations WHERE id=$1").bind(invocation_id).fetch_optional(&mut **tx).await?.ok_or_else(|| v1("unknown_invocation"))?;
+    let plan_id: String = row.get("plan_id");
+    let check_id: String = row.get("check_id");
+    let owned = planned.evidence_plan_id.as_deref() == Some(plan_id.as_str())
+        && planned.evidence_plan_check_id.as_deref() == Some(check_id.as_str());
+    let healthy = owned
+        && row.get::<String, _>("launch_state") == "launched"
+        && row.get::<String, _>("process_state") == "exited"
+        && row.get::<Option<i32>, _>("exit_code") == Some(0)
+        && !row.get::<bool, _>("timed_out");
+    Ok(HydratedAnchor {
+        healthy,
+        method_compatible: owned,
+        identity: serde_json::json!({"invocation_id":invocation_id,"evidence_plan_id":plan_id,"evidence_plan_check_id":check_id,"captured_commit_sha":row.get::<String,_>("captured_commit_sha")}),
+        detail: if healthy {
+            "exact successful command invocation".into()
+        } else {
+            "invocation is cross-plan, cross-check, or unhealthy".into()
+        },
+    })
 }
 fn method(s: &str) -> Result<TribunalEvidenceAnchorMethod> {
     match s {
@@ -948,5 +1237,69 @@ mod tests {
         let envelope = serde_json::from_slice::<TribunalEvidenceReturnEnvelopeV1>(malformed)
             .expect("minimal envelope must decode despite malformed V1 body");
         assert_eq!(envelope.attempt_id.as_deref(), Some("attempt"));
+    }
+
+    #[test]
+    fn matching_plan_repository_locators_do_not_resolve_passed_checks() {
+        let plan_id = "019fcad4-4b3f-7ce2-8527-93c5cfab897a";
+        let commit = "abcdef0123456789";
+        let locator = format!("repository:{plan_id}:{commit}");
+        let parsed = parse_canonical_locator("repository", &locator)
+            .expect("matching plan repository locator is canonical");
+        let CanonicalAnchorLocator::Repository {
+            plan_id: parsed_plan_id,
+            commit: parsed_commit,
+        } = parsed
+        else {
+            panic!("repository parser returned a different anchor family");
+        };
+        assert_eq!(parsed_plan_id, plan_id);
+        assert_eq!(parsed_commit, commit);
+
+        let checks = vec![
+            TribunalEvidenceReturnCheckV1 {
+                check_id: "code-check".into(),
+                method: "code".into(),
+                status: "passed".into(),
+                detail: None,
+                invocation_id: None,
+                anchors: vec![TribunalEvidenceReturnAnchorV1 {
+                    method: "repository".into(),
+                    locator: locator.clone(),
+                }],
+            },
+            TribunalEvidenceReturnCheckV1 {
+                check_id: "graph-check".into(),
+                method: "graph".into(),
+                status: "passed".into(),
+                detail: None,
+                invocation_id: None,
+                anchors: vec![TribunalEvidenceReturnAnchorV1 {
+                    method: "repository".into(),
+                    locator: locator.clone(),
+                }],
+            },
+        ];
+        let code =
+            unobserved_repository_anchor("attempt", "planned-code", parsed_plan_id, parsed_commit);
+        let graph =
+            unobserved_repository_anchor("attempt", "planned-graph", parsed_plan_id, parsed_commit);
+        for hydrated in [&code, &graph] {
+            assert!(!hydrated.healthy);
+            assert!(!hydrated.method_compatible);
+            assert_eq!(hydrated.health(), "unusable");
+            assert_eq!(hydrated.identity["evidence_plan_id"], plan_id);
+            assert_eq!(hydrated.identity["captured_commit_sha"], commit);
+        }
+
+        let check_healthy = HashMap::from([
+            ("code-check", code.healthy && code.method_compatible),
+            ("graph-check", graph.healthy && graph.method_compatible),
+        ]);
+        assert_eq!(
+            derive_outcome(&checks, &check_healthy),
+            TribunalEvidenceOutcome::Unresolved,
+            "planning context alone cannot make passed code/graph checks positive",
+        );
     }
 }
