@@ -223,39 +223,40 @@ async fn tribunal_evidence_return_v1_every_fixture_is_submitted_and_normalized()
                     ),
                 ]
             );
-            let anchors: Vec<(String, String, String, bool)> = sqlx::query_as(
-                "SELECT a.method,a.locator,h.health,h.method_compatible FROM typed_evidence_anchors a JOIN typed_evidence_anchor_health h ON h.anchor_id=a.id ORDER BY a.method,a.locator",
+            let anchors: Vec<(String, String, String, String, bool)> = sqlx::query_as(
+                "SELECT p.check_id,a.method,a.locator,h.health,h.method_compatible FROM typed_evidence_anchors a JOIN typed_evidence_anchor_health h ON h.anchor_id=a.id JOIN typed_evidence_check_results c ON c.id=a.check_result_id JOIN typed_evidence_planned_checks p ON p.id=c.planned_check_id ORDER BY p.ordinal,a.method,a.locator",
             )
             .fetch_all(db.pool())
             .await
             .unwrap();
-            assert_eq!(anchors.len(), 7);
-            assert!(
-                anchors
-                    .iter()
-                    .all(|(_, _, health, compatible)| health == "unusable" && *compatible)
+            assert_eq!(
+                anchors,
+                vec![
+                    ("code".into(), "code".into(), "code:src/lib.rs@abcdef1#L1-2".into(), "unusable".into(), false),
+                    ("code".into(), "repository".into(), "repository:plan123:abcdef1".into(), "unusable".into(), false),
+                    ("graph".into(), "graph".into(), "graph:00000000-0000-0000-0000-000000000000".into(), "unusable".into(), false),
+                    ("graph".into(), "repository".into(), "repository:plan123:abcdef1".into(), "unusable".into(), false),
+                    ("command".into(), "artifact".into(), "artifact:00000000-0000-0000-0000-000000000000".into(), "unusable".into(), false),
+                    ("command".into(), "external".into(), "external:https://example.test/evidence#sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(), "unusable".into(), false),
+                    ("command".into(), "memory".into(), "memory:00000000-0000-0000-0000-000000000000@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(), "unusable".into(), false),
+                ]
             );
-            assert!(
-                anchors
-                    .iter()
-                    .any(|(method, locator, _, _)| method == "code"
-                        && locator == "code:src/lib.rs@abcdef1#L1-2")
+            let finding_anchors: Vec<(String, String, String, String, bool)> = sqlx::query_as(
+                "SELECT p.check_id,a.method,a.locator,a.health,a.method_compatible FROM typed_evidence_return_finding_anchors a JOIN typed_evidence_return_findings f ON f.id=a.finding_id JOIN typed_evidence_planned_checks p ON p.id=f.planned_check_id ORDER BY p.ordinal,a.method,a.locator",
+            )
+            .fetch_all(db.pool())
+            .await
+            .unwrap();
+            assert_eq!(
+                finding_anchors,
+                vec![(
+                    "code".into(),
+                    "code".into(),
+                    "code:src/lib.rs@abcdef1#L1-2".into(),
+                    "unusable".into(),
+                    false,
+                )]
             );
-            assert!(
-                anchors
-                    .iter()
-                    .any(|(method, locator, _, _)| method == "graph"
-                        && locator == "graph:00000000-0000-0000-0000-000000000000")
-            );
-            assert!(anchors.iter().any(|(method, locator, _, _)| method == "external"
-                && locator == "external:https://example.test/evidence#sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
-            let h: Vec<String> =
-                sqlx::query_scalar("SELECT health FROM typed_evidence_anchor_health")
-                    .fetch_all(db.pool())
-                    .await
-                    .unwrap();
-            assert_eq!(h.len(), 7);
-            assert!(h.iter().all(|x| x == "unusable"));
         }
     }
 }
