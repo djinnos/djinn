@@ -8335,7 +8335,7 @@ async fn expired_owner_group_reap_redispatches_after_reaping_each_eligible_group
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn terminal_persisted_exit_rows_cover_every_task_status() {
     use djinn_core::models::SessionStatus;
-    use djinn_db::{CreateSessionParams, SessionRepository};
+    use djinn_db::{CreateSessionParams, SessionRepository, TaskAttemptRepository};
 
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
@@ -8343,6 +8343,7 @@ async fn terminal_persisted_exit_rows_cover_every_task_status() {
     let sessions = SessionRepository::new(db.clone(), crate::events::event_bus_for(&tx));
     let tasks = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
     let evidence = djinn_db::LivenessRepository::new(db.clone());
+    let attempts = TaskAttemptRepository::new(db.clone());
     for (persisted, event) in [
         (SessionStatus::Completed, "completed"),
         (SessionStatus::Failed, "failed"),
@@ -8380,6 +8381,8 @@ async fn terminal_persisted_exit_rows_cover_every_task_status() {
                 .update(&session.id, persisted, 1, 1, 0, 0, None)
                 .await
                 .unwrap();
+            let attempt_id = seed_pending_attempt(&db, &task.id, "worker").await;
+            let before = attempts.get(&attempt_id).await.unwrap().unwrap();
             let result = actor
                 .classify_session_exit_liveness(&session.id, &task.id, None, event, "worker")
                 .await
@@ -8395,12 +8398,34 @@ async fn terminal_persisted_exit_rows_cover_every_task_status() {
                     Some(crate::dispatch::liveness::LivenessOutcome::KillNoop)
                 );
             }
+            let expected_outcome = match (event, task_status == "closed") {
+                ("failed", false) => "crashed",
+                ("interrupted", false) => "interrupted",
+                _ => "pending",
+            };
+            let after = attempts.get(&attempt_id).await.unwrap().unwrap();
+            assert_eq!(after.outcome, expected_outcome);
+            if expected_outcome == "pending" {
+                assert_eq!(after.terminal_at, before.terminal_at);
+                assert_eq!(after.summary_json, before.summary_json);
+            } else {
+                assert!(after.terminal_at.is_some());
+            }
+            let repeated = actor
+                .classify_session_exit_liveness(&session.id, &task.id, None, event, "worker")
+                .await
+                .expect("repeated persisted terminal classification must succeed");
+            assert_ne!(repeated.verdict, crate::dispatch::liveness::Verdict::ProtocolViolation);
+            let after_repeat = attempts.get(&attempt_id).await.unwrap().unwrap();
+            assert_eq!(after_repeat.outcome, after.outcome);
+            assert_eq!(after_repeat.terminal_at, after.terminal_at);
+            assert_eq!(attempts.list_for_task(&task.id).await.unwrap().len(), 1);
             assert!(
                 evidence
                     .count_evidence_for_session(&session.id, None)
                     .await
                     .unwrap()
-                    >= 1
+                    >= 2
             );
         }
     }

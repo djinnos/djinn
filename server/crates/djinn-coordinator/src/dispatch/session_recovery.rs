@@ -46,6 +46,35 @@ fn db_session_status_from_persisted(status: &str) -> Option<DbSessionStatus> {
     }
 }
 
+/// Whether a terminal session observation merely records liveness evidence or
+/// may advance the current live attempt. This intentionally does not depend on
+/// `ProtocolViolation`: persisted terminal status is exonerating evidence, but
+/// failed and interrupted exits still settle their live attempts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ExitAttemptAccounting {
+    EvidenceOnly,
+    TerminalizeLiveAttempt,
+}
+
+impl ExitAttemptAccounting {
+    fn for_exit(session_status: &str, outcome: Option<LivenessOutcome>) -> Self {
+        if matches!(session_status, "failed" | "interrupted")
+            && outcome != Some(LivenessOutcome::KillNoop)
+        {
+            Self::TerminalizeLiveAttempt
+        } else {
+            Self::EvidenceOnly
+        }
+    }
+
+    fn warning_label(self) -> &'static str {
+        match self {
+            Self::EvidenceOnly => "evidence only — no attempt accounting",
+            Self::TerminalizeLiveAttempt => "terminalizes the live attempt",
+        }
+    }
+}
+
 /// A `running`, zero-token session older than this has slipped past the
 /// 180s fast-path stall breaker — its in-memory tracking has drifted. Reap it
 /// on DB truth alone.
@@ -3048,6 +3077,7 @@ impl CoordinatorActor {
 
         // ── 3. Classify ────────────────────────────────────────────────
         let result = super::liveness::classify(&evidence);
+        let attempt_accounting = ExitAttemptAccounting::for_exit(session_status, result.outcome);
 
         tracing::info!(
             task_id = %task_id,
@@ -3097,18 +3127,13 @@ impl CoordinatorActor {
         // claimed "counts as failed attempt" for every violation including clean
         // ones, which read as retry inflation that never happened.
         if result.verdict == Verdict::ProtocolViolation {
-            let attempt_accounting = if matches!(session_status, "failed" | "interrupted") {
-                "terminalizes the live attempt"
-            } else {
-                "evidence only — no attempt accounting"
-            };
             tracing::warn!(
                 task_id = %task_id,
                 session_id = %session_id,
                 session_status = %session_status,
                 reason = ?result.reason,
                 outcome = ?result.outcome,
-                attempt_accounting,
+                attempt_accounting = attempt_accounting.warning_label(),
                 "classify_session_exit_liveness: protocol violation detected — \
                  session exited while its task was still unsettled"
             );
@@ -3145,9 +3170,7 @@ impl CoordinatorActor {
         // `Interrupted` branch. Forward-only + idempotent; `KillNoop` means the
         // task is already terminal — leave the attempt to the terminal-path owners
         // (PR poller / force-close).
-        if matches!(session_status, "failed" | "interrupted")
-            && result.outcome != Some(LivenessOutcome::KillNoop)
-        {
+        if attempt_accounting == ExitAttemptAccounting::TerminalizeLiveAttempt {
             let (attempt_outcome, failure_class, summary) =
                 if result.reason == Some(super::liveness::LivenessReason::TransientProviderFault) {
                     // The run died on the PROVIDER, not on itself. That is the same
@@ -3544,6 +3567,30 @@ mod liveness_foundation_tests {
     use djinn_slot::RunningTaskInfo;
     use time::Duration as TimeDuration;
     use time::OffsetDateTime;
+
+    #[test]
+    fn exit_attempt_accounting_labels_match_mutation_decision() {
+        assert_eq!(
+            ExitAttemptAccounting::for_exit("completed", None),
+            ExitAttemptAccounting::EvidenceOnly
+        );
+        assert_eq!(
+            ExitAttemptAccounting::for_exit("completed", None).warning_label(),
+            "evidence only — no attempt accounting"
+        );
+        assert_eq!(
+            ExitAttemptAccounting::for_exit("failed", None),
+            ExitAttemptAccounting::TerminalizeLiveAttempt
+        );
+        assert_eq!(
+            ExitAttemptAccounting::for_exit("interrupted", None).warning_label(),
+            "terminalizes the live attempt"
+        );
+        assert_eq!(
+            ExitAttemptAccounting::for_exit("failed", Some(LivenessOutcome::KillNoop)),
+            ExitAttemptAccounting::EvidenceOnly
+        );
+    }
 
     /// Format an `OffsetDateTime` as an ISO-8601 string matching the DB format.
     fn format_iso(dt: OffsetDateTime) -> String {
