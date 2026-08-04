@@ -8,9 +8,9 @@ use std::path::{Path, PathBuf};
 use sqlx::postgres::{PgConnection, PgPool, PgPoolOptions};
 use sqlx::{Connection, Executor};
 
-const MIGRATION_VERSION: u64 = 182;
-const MIGRATION_FILE: &str = "182_session_failure_cause.sql";
-const MIGRATION_OPERATOR_ID: &str = "00000000-0000-7000-8000-000000000182";
+const MIGRATION_VERSION: u64 = 183;
+const MIGRATION_FILE: &str = "183_session_failure_cause.sql";
+const MIGRATION_OPERATOR_ID: &str = "00000000-0000-7000-8000-000000000183";
 const CREATOR_CONTRACT_VERSION: u64 = 142;
 
 fn base_database_url() -> String {
@@ -102,7 +102,7 @@ async fn seed_migration_operator(conn: &mut PgConnection) {
     conn.execute(
         format!(
             "INSERT INTO users (id, github_id, github_login) VALUES \
-             ('{MIGRATION_OPERATOR_ID}', 9000000182, 'failure-cause-migration-operator') \
+             ('{MIGRATION_OPERATOR_ID}', 9000000183, 'failure-cause-migration-operator') \
              ON CONFLICT DO NOTHING"
         )
         .as_str(),
@@ -135,12 +135,12 @@ async fn apply_prior_migrations(conn: &mut PgConnection) {
     }
 }
 
-async fn apply_migration_182(conn: &mut PgConnection) {
+async fn apply_migration_183(conn: &mut PgConnection) {
     let sql = std::fs::read_to_string(migrations_dir().join(MIGRATION_FILE))
-        .expect("read migration 182 sql");
+        .expect("read migration 183 sql");
     conn.execute(sql.as_str())
         .await
-        .expect("apply migration 182 after prior migrations");
+        .expect("apply migration 183 after prior migrations");
 }
 
 async fn insert_session(pool: &PgPool, id: &str) {
@@ -238,7 +238,7 @@ async fn assert_failure_cause_schema_and_values(pool: &PgPool) {
 }
 
 #[tokio::test]
-async fn migration_182_applies_on_fresh_database() {
+async fn migration_183_applies_on_fresh_database() {
     with_temp_database("failure_cause_fresh", |db_url| async move {
         djinn_db::test_support::apply_all_migrations_to_fresh_database(&db_url).await;
         let pool = PgPoolOptions::new()
@@ -254,7 +254,7 @@ async fn migration_182_applies_on_fresh_database() {
 }
 
 #[tokio::test]
-async fn migration_182_applies_after_prior_migrations_without_backfill() {
+async fn migration_183_applies_after_prior_migrations_without_backfill() {
     with_temp_database("failure_cause_prior", |db_url| async move {
         let mut conn = PgConnection::connect(&db_url)
             .await
@@ -273,7 +273,7 @@ async fn migration_182_applies_after_prior_migrations_without_backfill() {
         let mut conn = PgConnection::connect(&db_url)
             .await
             .expect("reconnect prior migration database");
-        apply_migration_182(&mut conn).await;
+        apply_migration_183(&mut conn).await;
         drop(conn);
 
         let pool = PgPoolOptions::new()
