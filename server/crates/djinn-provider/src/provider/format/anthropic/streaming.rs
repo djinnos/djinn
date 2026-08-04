@@ -5,8 +5,13 @@ use std::collections::BTreeMap;
 use std::pin::Pin;
 
 use crate::message::{ContentBlock, Conversation};
-#[allow(unused_imports)]
-use crate::provider::client::ApiClient;
+use crate::model_turn_admission::{
+    ProviderAttemptCapabilitiesV1, ProviderAttemptLossV1, ProviderUsageObservationV1,
+};
+use crate::provider::client::{
+    ApiClient, ProviderAttemptContextV1, ProviderFormatReportV1, ProviderSseAttemptV1,
+    ProviderSseTerminalReporterV1, SseFrame,
+};
 use crate::provider::{
     LlmProvider, ProviderConfig, ProviderError, StreamEvent, TokenUsage, ToolChoice,
 };
@@ -48,6 +53,56 @@ enum PendingContentBlock {
         content_type: String,
         extra: serde_json::Map<String, Value>,
     },
+}
+
+#[derive(Default)]
+pub struct AnthropicTerminalReporterV1 {
+    usage: ProviderUsageObservationV1,
+}
+impl ProviderSseTerminalReporterV1 for AnthropicTerminalReporterV1 {
+    fn report(&mut self, frame: &SseFrame) -> ProviderFormatReportV1 {
+        let SseFrame::Data(data) = frame else {
+            return ProviderFormatReportV1::Malformed;
+        };
+        let Ok(v) = serde_json::from_str::<Value>(data) else {
+            return ProviderFormatReportV1::Malformed;
+        };
+        match v.get("type").and_then(Value::as_str) {
+            Some("error") => ProviderFormatReportV1::Failed(
+                if v.pointer("/error/type")
+                    .and_then(Value::as_str)
+                    .is_some_and(|x| x.contains("rate_limit"))
+                {
+                    ProviderAttemptLossV1::RateLimited
+                } else {
+                    ProviderAttemptLossV1::ProviderRejected
+                },
+            ),
+            Some("message_delta") => {
+                if let Some(u) = v.get("usage") {
+                    let o = u.get("output_tokens").and_then(Value::as_i64);
+                    self.usage.output_units = o;
+                    self.usage.combined_units = self
+                        .usage
+                        .input_units
+                        .zip(o)
+                        .and_then(|(a, b)| a.checked_add(b));
+                }
+                ProviderFormatReportV1::Continue
+            }
+            Some("message_start") => {
+                let i = v
+                    .pointer("/message/usage/input_tokens")
+                    .and_then(Value::as_i64);
+                self.usage.input_units = i;
+                ProviderFormatReportV1::Continue
+            }
+            Some("message_stop") => ProviderFormatReportV1::Completed(self.usage),
+            Some("content_block_delta") => ProviderFormatReportV1::TokenEmitted,
+            Some(_) => ProviderFormatReportV1::Continue,
+            None => ProviderFormatReportV1::Malformed,
+        }
+    }
 }
 
 /// Parse a single Anthropic SSE event (event_type + data JSON).
@@ -394,6 +449,26 @@ impl LlmProvider for AnthropicProvider {
 
     fn config_snapshot(&self) -> Option<ProviderConfig> {
         Some(self.config.clone())
+    }
+    fn admission_capabilities_v1(&self) -> ProviderAttemptCapabilitiesV1 {
+        ProviderSseAttemptV1::capabilities()
+    }
+    fn start_sse_attempt_v1(
+        &self,
+        conversation: &Conversation,
+        tools: &[Value],
+        tool_choice: Option<ToolChoice>,
+        context: ProviderAttemptContextV1,
+    ) -> Result<ProviderSseAttemptV1, crate::model_turn_admission::ProviderAttemptRouteCoverageV1>
+    {
+        Ok(self.client.start_sse_attempt_v1(
+            &self.effective_url(),
+            self.build_request(conversation, tools, tool_choice),
+            &self.config.auth,
+            self.extra_headers(),
+            context,
+            AnthropicTerminalReporterV1::default(),
+        ))
     }
 
     fn stream_request_body(

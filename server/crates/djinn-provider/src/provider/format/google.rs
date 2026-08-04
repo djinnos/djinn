@@ -5,7 +5,10 @@ use serde_json::{Value, json};
 use std::pin::Pin;
 
 use crate::message::{ContentBlock, Conversation};
-use crate::provider::client::ApiClient;
+use crate::provider::client::{
+    ApiClient, ProviderAttemptContextV1, ProviderFormatReportV1, ProviderSseAttemptV1,
+    ProviderSseTerminalReporterV1, SseFrame,
+};
 use crate::provider::format::tool_projection::project;
 use crate::provider::{
     FormatFamily, LlmProvider, ProviderConfig, ProviderError, StreamEvent, TokenUsage, ToolChoice,
@@ -108,6 +111,27 @@ impl GoogleProvider {
 
     fn extra_headers(&self) -> HeaderMap {
         HeaderMap::new()
+    }
+}
+
+#[derive(Default)]
+pub struct GoogleTerminalReporterV1;
+impl ProviderSseTerminalReporterV1 for GoogleTerminalReporterV1 {
+    fn report(&mut self, frame: &SseFrame) -> ProviderFormatReportV1 {
+        match frame {
+            SseFrame::Data(data)
+                if serde_json::from_str::<Value>(data)
+                    .ok()
+                    .and_then(|v| {
+                        google_candidates(&v).map(|cs| cs.iter().any(candidate_has_finish))
+                    })
+                    .unwrap_or(false) =>
+            {
+                ProviderFormatReportV1::Completed(Default::default())
+            }
+            SseFrame::Data(_) => ProviderFormatReportV1::Continue,
+            _ => ProviderFormatReportV1::Malformed,
+        }
     }
 }
 
@@ -238,6 +262,28 @@ impl LlmProvider for GoogleProvider {
 
     fn config_snapshot(&self) -> Option<ProviderConfig> {
         Some(self.config.clone())
+    }
+    fn admission_capabilities_v1(
+        &self,
+    ) -> crate::model_turn_admission::ProviderAttemptCapabilitiesV1 {
+        ProviderSseAttemptV1::capabilities()
+    }
+    fn start_sse_attempt_v1(
+        &self,
+        conversation: &Conversation,
+        tools: &[Value],
+        tool_choice: Option<ToolChoice>,
+        context: ProviderAttemptContextV1,
+    ) -> Result<ProviderSseAttemptV1, crate::model_turn_admission::ProviderAttemptRouteCoverageV1>
+    {
+        Ok(self.client.start_sse_attempt_v1(
+            &self.effective_url(),
+            self.build_request(conversation, tools, tool_choice),
+            &self.config.auth,
+            self.extra_headers(),
+            context,
+            GoogleTerminalReporterV1::default(),
+        ))
     }
 
     fn stream_request_body(

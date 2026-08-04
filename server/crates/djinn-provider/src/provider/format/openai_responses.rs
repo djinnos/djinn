@@ -10,7 +10,8 @@ use crate::message::{ContentBlock, Conversation};
 use crate::model_turn_admission::{ProviderAttemptLossV1, ProviderUsageObservationV1};
 use crate::provider::FormatFamily;
 use crate::provider::client::{
-    ApiClient, ProviderFormatReportV1, ProviderSseTerminalReporterV1, SseFrame,
+    ApiClient, ProviderAttemptContextV1, ProviderFormatReportV1, ProviderSseAttemptV1,
+    ProviderSseTerminalReporterV1, SseFrame,
 };
 use crate::provider::error::ProviderError;
 use crate::provider::format::tool_projection::project;
@@ -638,6 +639,30 @@ impl LlmProvider for OpenAIResponsesProvider {
 
     fn config_snapshot(&self) -> Option<ProviderConfig> {
         Some(self.config.clone())
+    }
+
+    fn admission_capabilities_v1(
+        &self,
+    ) -> crate::model_turn_admission::ProviderAttemptCapabilitiesV1 {
+        ProviderSseAttemptV1::capabilities()
+    }
+
+    fn start_sse_attempt_v1(
+        &self,
+        conversation: &Conversation,
+        tools: &[Value],
+        tool_choice: Option<ToolChoice>,
+        context: ProviderAttemptContextV1,
+    ) -> Result<ProviderSseAttemptV1, crate::model_turn_admission::ProviderAttemptRouteCoverageV1>
+    {
+        Ok(self.client.start_sse_attempt_v1(
+            &self.effective_url(),
+            self.build_request(conversation, tools, tool_choice),
+            &self.config.auth,
+            self.extra_headers(),
+            context,
+            OpenAIResponsesTerminalReporterV1::default(),
+        ))
     }
 
     fn stream_request_body(

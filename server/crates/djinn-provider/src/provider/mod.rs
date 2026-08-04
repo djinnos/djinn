@@ -24,6 +24,7 @@ use crate::model_turn_admission::{
     ProviderAttemptUncoveredReasonV1, ProviderCredentialRecordScopeV1,
     ProviderHiddenRetryCapabilityV1, plan_provider_attempt_with_policy_v1,
 };
+use crate::provider::client::{ProviderAttemptContextV1, ProviderSseAttemptV1};
 use djinn_db::ModelTurnBucketKind;
 
 // ─── Token usage ──────────────────────────────────────────────────────────────
@@ -465,6 +466,20 @@ pub trait LlmProvider: Send + Sync {
                 + 'a,
         >,
     >;
+
+    /// Launch one admission-owned SSE request without provider-owned retries.
+    /// Legacy [`Self::stream`] callers retain their existing behavior.
+    fn start_sse_attempt_v1(
+        &self,
+        _conversation: &Conversation,
+        _tools: &[Value],
+        _tool_choice: Option<ToolChoice>,
+        _context: ProviderAttemptContextV1,
+    ) -> Result<ProviderSseAttemptV1, ProviderAttemptRouteCoverageV1> {
+        Err(ProviderAttemptRouteCoverageV1::Uncovered(
+            ProviderAttemptUncoveredReasonV1::SerializationUnavailable,
+        ))
+    }
 
     /// Exact serialized body used for admission planning; it is never retained.
     fn stream_request_body(
@@ -1256,7 +1271,7 @@ mod admission_plan_fixtures {
     }
 
     #[test]
-    fn legacy_retrying_transport_remains_explicitly_uncovered() {
+    fn enabled_adapter_plan_matches_the_abortable_launch_capability() {
         let provider = create_provider(config(FormatFamily::OpenAI, "gpt-fixture", Some(128)));
         assert!(matches!(
             provider.provider_attempt_plan_v1(
@@ -1265,9 +1280,10 @@ mod admission_plan_fixtures {
                 &[],
                 None
             ),
-            Err(ProviderAttemptRouteCoverageV1::Uncovered(
-                ProviderAttemptUncoveredReasonV1::HiddenRetriesNotDisabled
-            ))
+            Ok(ProviderAttemptPlanV1 {
+                coverage: ProviderAttemptRouteCoverageV1::Covered { .. },
+                ..
+            })
         ));
     }
 }
