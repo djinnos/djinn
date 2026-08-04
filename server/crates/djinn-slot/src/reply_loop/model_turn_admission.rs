@@ -7,6 +7,7 @@ use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
 };
+use std::time::Duration;
 
 use djinn_db::{
     ModelTurnAcquireInput, ModelTurnAcquireOutcome, ModelTurnAdmissionPhase,
@@ -70,6 +71,8 @@ struct PreparationOwnership {
     repository: ModelTurnAdmissionRepository,
     state: Arc<Mutex<Option<ModelTurnLeaseIdentity>>>,
     cleanups: Arc<CleanupTracker>,
+    #[cfg(test)]
+    post_active_hook: Option<Arc<ActiveHandoffHook>>,
 }
 
 impl PreparationOwnership {
@@ -77,11 +80,14 @@ impl PreparationOwnership {
         repository: ModelTurnAdmissionRepository,
         identity: ModelTurnLeaseIdentity,
         cleanups: Arc<CleanupTracker>,
+        #[cfg(test)] post_active_hook: Option<Arc<ActiveHandoffHook>>,
     ) -> Self {
         Self {
             repository,
             state: Arc::new(Mutex::new(Some(identity))),
             cleanups,
+            #[cfg(test)]
+            post_active_hook,
         }
     }
 
@@ -95,6 +101,13 @@ impl PreparationOwnership {
             outcome,
             ModelTurnLeaseMutationOutcome::Applied | ModelTurnLeaseMutationOutcome::Idempotent
         ) {
+            #[cfg(test)]
+            if let Some(hook) = &self.post_active_hook {
+                // Active is the durable hand-off linearization point. This
+                // pause lets tests cancel exactly after it commits.
+                hook.reached.notify_one();
+                hook.release.notified().await;
+            }
             // Active means provider send ownership can begin: refund is prohibited.
             *state = None;
         }
@@ -109,10 +122,17 @@ impl Drop for PreparationOwnership {
         let cleanups = self.cleanups.clone();
         cleanups.in_flight.fetch_add(1, Ordering::AcqRel);
         tokio::spawn(async move {
+            // Retain this exact identity until the repository accepts a
+            // fenced/idempotent cancellation result. A transient database
+            // failure must not turn a lease into an unobservable local leak.
             let identity = state.lock().await.take();
             if let Some(identity) = identity {
-                // Locking this same state fences cancellation against mark_active.
-                let _ = repository.cancel_before_send(identity).await;
+                loop {
+                    match repository.cancel_before_send(identity.clone()).await {
+                        Ok(_) => break,
+                        Err(_) => tokio::time::sleep(Duration::from_millis(10)).await,
+                    }
+                }
             }
             cleanups.in_flight.fetch_sub(1, Ordering::AcqRel);
             cleanups.drained.notify_waiters();
@@ -132,10 +152,18 @@ pub struct ModelTurnAdmissionCoordinator {
     cleanups: Arc<CleanupTracker>,
     #[cfg(test)]
     post_dispatching_hook: Option<Arc<PrepareCancellationHook>>,
+    #[cfg(test)]
+    post_active_hook: Option<Arc<ActiveHandoffHook>>,
 }
 
 #[cfg(test)]
 struct PrepareCancellationHook {
+    reached: TestNotify,
+    release: TestNotify,
+}
+
+#[cfg(test)]
+struct ActiveHandoffHook {
     reached: TestNotify,
     release: TestNotify,
 }
@@ -148,6 +176,8 @@ impl ModelTurnAdmissionCoordinator {
             cleanups: Arc::new(CleanupTracker::default()),
             #[cfg(test)]
             post_dispatching_hook: None,
+            #[cfg(test)]
+            post_active_hook: None,
         }
     }
     #[cfg(test)]
@@ -159,12 +189,33 @@ impl ModelTurnAdmissionCoordinator {
             repository,
             cleanups: Arc::new(CleanupTracker::default()),
             post_dispatching_hook: Some(hook),
+            post_active_hook: None,
+        }
+    }
+    #[cfg(test)]
+    fn with_active_handoff_hook(
+        repository: ModelTurnAdmissionRepository,
+        hook: Arc<ActiveHandoffHook>,
+    ) -> Self {
+        Self {
+            repository,
+            cleanups: Arc::new(CleanupTracker::default()),
+            post_dispatching_hook: None,
+            post_active_hook: Some(hook),
         }
     }
     /// Join cancellation cleanup in deterministic tests.
     pub async fn wait_for_cleanup(&self) {
-        while self.cleanups.in_flight.load(Ordering::Acquire) != 0 {
-            self.cleanups.drained.notified().await;
+        loop {
+            // Register before reading the count so a final notify cannot be
+            // missed between the observation and the await.
+            let notified = self.cleanups.drained.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.cleanups.in_flight.load(Ordering::Acquire) == 0 {
+                return;
+            }
+            notified.await;
         }
     }
     pub async fn prepare(
@@ -229,6 +280,8 @@ impl ModelTurnAdmissionCoordinator {
                         self.repository.clone(),
                         identity.clone(),
                         self.cleanups.clone(),
+                        #[cfg(test)]
+                        self.post_active_hook.clone(),
                     );
                     let outcome = self.repository.mark_dispatching(&identity).await?;
                     #[cfg(test)]
@@ -501,5 +554,85 @@ mod tests {
         );
         let quarantined: (i64, i64) = sqlx::query_as("SELECT available_units, quarantined_units FROM model_turn_bucket_bindings WHERE pool_id = $1").bind(pool).fetch_one(db.pool()).await.expect("quarantine");
         assert_eq!(quarantined, (1, 1));
+    }
+
+    #[tokio::test]
+    async fn cancelled_handoff_racing_terminal_never_refunds_active_lease() {
+        let db = Database::ephemeral().await.expect("db");
+        let pool = seed(&db, "enforce", "supported", 2).await;
+        let hook = Arc::new(ActiveHandoffHook {
+            reached: Notify::new(),
+            release: Notify::new(),
+        });
+        let coordinator = Arc::new(ModelTurnAdmissionCoordinator::with_active_handoff_hook(
+            repository(&db),
+            hook.clone(),
+        ));
+        let permit = match coordinator
+            .prepare(&plan(), request("handoff-race"))
+            .await
+            .expect("prepare")
+        {
+            ModelTurnPreparation::Permit(permit) => permit,
+            _ => panic!("expected permit after fence"),
+        };
+        let lease = permit.lease.clone().expect("enforced lease");
+
+        // The hook is after the durable active transition and before local
+        // ownership is cleared. Aborting here forces permit drop/cancellation
+        // to race an independently-started terminal reconciliation.
+        let reached = hook.reached.notified();
+        let handoff = tokio::spawn(async move {
+            let mut permit = permit;
+            permit.mark_active().await
+        });
+        reached.await;
+        let terminal = tokio::spawn({
+            let coordinator = coordinator.clone();
+            let lease = lease.clone();
+            async move {
+                let outcome = ProviderOutcomeV1 {
+                    terminal: ProviderAttemptTerminalV1::Failed(
+                        djinn_provider::ProviderAttemptLossV1::Transport,
+                    ),
+                    authoritative_usage: None,
+                    observation: None,
+                    abort: djinn_provider::ProviderAttemptAbortResultV1::NotRequested,
+                    token_emission: Default::default(),
+                };
+                coordinator.reconcile(lease, &outcome).await
+            }
+        });
+        handoff.abort();
+        assert!(
+            handoff
+                .await
+                .expect_err("handoff must be cancelled")
+                .is_cancelled()
+        );
+        coordinator.wait_for_cleanup().await;
+        let terminal_outcome = terminal.await.expect("terminal task").expect("terminal");
+        assert!(matches!(
+            terminal_outcome,
+            ModelTurnLeaseMutationOutcome::Applied
+                | ModelTurnLeaseMutationOutcome::Idempotent
+                | ModelTurnLeaseMutationOutcome::Fenced
+        ));
+
+        let accounting: (i64, i64, i64) = sqlx::query_as("SELECT p.in_flight, b.available_units, b.quarantined_units FROM model_turn_pools p JOIN model_turn_bucket_bindings b ON b.pool_id = p.id WHERE p.id = $1")
+            .bind(pool)
+            .fetch_one(db.pool())
+            .await
+            .expect("active attempt is never refunded");
+        assert_eq!(accounting, (0, 1, 1));
+        let terminal: (String, String) = sqlx::query_as("SELECT outcome, accounting_state FROM model_turn_lease_terminals WHERE lease_id = $1::uuid AND generation = $2 AND request_id = $3")
+            .bind(&lease.lease_id)
+            .bind(lease.generation)
+            .bind(&lease.request_id)
+            .fetch_one(db.pool())
+            .await
+            .expect("terminal uses the exact lease identity");
+        assert!(matches!(terminal.0.as_str(), "failed" | "cancelled"));
+        assert_eq!(terminal.1, "quarantined");
     }
 }
