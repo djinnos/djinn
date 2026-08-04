@@ -64,7 +64,7 @@
 
 use std::sync::Arc;
 
-use djinn_core::models::{SessionStatus, Task};
+use djinn_core::models::{SessionFailureCause, SessionStatus, Task};
 use djinn_db::ProjectRepository;
 use djinn_runtime::spec::{RoleKind, TaskRunSpec};
 use djinn_supervisor::{ParkReason, StageError, StageOutcome, SupervisorServices};
@@ -106,9 +106,13 @@ use super::SupervisorCallbackContext;
 
 /// A session is created before extension loading so diagnostic rows can carry
 /// its foreign key. Every later setup failure must therefore settle that row.
-async fn mark_session_failed(services: &dyn SupervisorServices, session_id: &str) {
+async fn mark_session_failed(
+    services: &dyn SupervisorServices,
+    session_id: &str,
+    failure_cause: SessionFailureCause,
+) {
     if let Err(error) = services
-        .update_session_status(
+        .update_session_status_v2(
             session_id.to_owned(),
             SessionStatus::Failed,
             0,
@@ -116,10 +120,80 @@ async fn mark_session_failed(services: &dyn SupervisorServices, session_id: &str
             0,
             0,
             None,
+            Some(failure_cause),
         )
         .await
     {
         tracing::warn!(session_id, error = %error, "Supervisor stage: failed to mark setup session failed");
+    }
+}
+
+/// Private settlement metadata. `StageOutcome` remains the exact wire value;
+/// this sidecar exists only until the authoritative session status write.
+#[derive(Debug)]
+struct StageSettlement {
+    outcome: StageOutcome,
+    failure_cause: Option<SessionFailureCause>,
+}
+
+impl StageSettlement {
+    fn completed(outcome: StageOutcome) -> Self {
+        Self {
+            outcome,
+            failure_cause: None,
+        }
+    }
+
+    fn failed(outcome: StageOutcome, failure_cause: SessionFailureCause) -> Self {
+        Self {
+            outcome,
+            failure_cause: Some(failure_cause),
+        }
+    }
+}
+
+/// Select the durable cause while the typed reply-loop error is still present.
+/// Diagnostic formatting happens only after this classification.
+fn reply_loop_failure_cause(error: &anyhow::Error) -> SessionFailureCause {
+    if error.downcast_ref::<ReplyLoopCancelled>().is_some() {
+        SessionFailureCause::Cancelled
+    } else if error.downcast_ref::<ProviderError>().is_some() {
+        SessionFailureCause::Provider
+    } else if error.downcast_ref::<LoopGuardTrip>().is_some()
+        || error.downcast_ref::<LoopGuardError>().is_some()
+    {
+        SessionFailureCause::Protocol
+    } else {
+        SessionFailureCause::Unknown
+    }
+}
+
+fn settlement_for_stage_outcome(
+    outcome: StageOutcome,
+    final_result_ok: bool,
+    reply_failure_cause: Option<SessionFailureCause>,
+    role_kind: RoleKind,
+) -> StageSettlement {
+    if matches!(outcome, StageOutcome::Parked { .. }) {
+        StageSettlement::completed(outcome)
+    } else if final_result_ok {
+        if matches!(outcome, StageOutcome::Failed { .. }) {
+            StageSettlement::failed(
+                outcome,
+                if role_kind == RoleKind::Verifier {
+                    SessionFailureCause::Harness
+                } else {
+                    SessionFailureCause::Finalization
+                },
+            )
+        } else {
+            StageSettlement::completed(outcome)
+        }
+    } else {
+        StageSettlement::failed(
+            outcome,
+            reply_failure_cause.expect("failed reply loop has a classified cause"),
+        )
     }
 }
 
@@ -1132,7 +1206,7 @@ pub(crate) async fn execute_stage(
     {
         Ok(resolved) => resolved,
         Err(error) => {
-            mark_session_failed(services, &session_id).await;
+            mark_session_failed(services, &session_id, SessionFailureCause::Harness).await;
             return Err(StageError::Setup(error.to_string()));
         }
     };
@@ -1147,7 +1221,7 @@ pub(crate) async fn execute_stage(
     {
         Ok(config) => config,
         Err(error) => {
-            mark_session_failed(services, &session_id).await;
+            mark_session_failed(services, &session_id, SessionFailureCause::Harness).await;
             return Err(StageError::Setup(format!("env_config: {error}")));
         }
     };
@@ -1164,7 +1238,7 @@ pub(crate) async fn execute_stage(
     {
         Ok(ctx) => ctx,
         Err(SetupError { reason }) => {
-            mark_session_failed(services, &session_id).await;
+            mark_session_failed(services, &session_id, SessionFailureCause::Harness).await;
             return Err(StageError::Setup(reason));
         }
     };
@@ -1346,7 +1420,7 @@ pub(crate) async fn execute_stage(
         ) {
             Some(provider) => provider,
             None => {
-                mark_session_failed(services, &session_id).await;
+                mark_session_failed(services, &session_id, SessionFailureCause::Harness).await;
                 return Err(StageError::ModelResolution(
                     "no provider credential resolved for model".into(),
                 ));
@@ -1512,6 +1586,9 @@ pub(crate) async fn execute_stage(
 
     // ── Map the reply-loop outcome to StageOutcome ───────────────────────────
     let final_result_ok = reply_result.is_ok();
+    // Capture type-based settlement data before formatting the error for the
+    // outward diagnostic. No error text participates in cause classification.
+    let reply_failure_cause = reply_result.as_ref().err().map(reply_loop_failure_cause);
     let final_error = reply_result.as_ref().err().map(|e| e.to_string());
     let stage_outcome = match reply_result {
         Err(e) => {
@@ -1674,10 +1751,16 @@ pub(crate) async fn execute_stage(
     };
 
     // ── Finalize session ─────────────────────────────────────────────────────
+    let stage_settlement = settlement_for_stage_outcome(
+        stage_outcome,
+        final_result_ok,
+        reply_failure_cause,
+        role_kind,
+    );
     let (session_status, parked_reason) =
-        session_settlement_for_stage_outcome(&stage_outcome, final_result_ok);
+        session_settlement_for_stage_outcome(&stage_settlement.outcome, final_result_ok);
     if let Err(e) = services
-        .update_session_status(
+        .update_session_status_v2(
             session_id.clone(),
             session_status,
             tokens_in,
@@ -1685,6 +1768,7 @@ pub(crate) async fn execute_stage(
             cache_read,
             cache_write,
             parked_reason,
+            stage_settlement.failure_cause,
         )
         .await
     {
@@ -1700,7 +1784,7 @@ pub(crate) async fn execute_stage(
         summary: Some(summary),
         wind_down_ignored: false,
         ..
-    } = &stage_outcome
+    } = &stage_settlement.outcome
     {
         crate::actors::slot::finalize_handlers::handle_budget_park(
             summary,
@@ -1720,7 +1804,7 @@ pub(crate) async fn execute_stage(
             .await
             .unwrap_or_else(|| worktree_path.display().to_string());
 
-    let parked = matches!(stage_outcome, StageOutcome::Parked { .. });
+    let parked = matches!(stage_settlement.outcome, StageOutcome::Parked { .. });
     let post_session_result_ok = final_result_ok || parked;
     let post_session_error = if parked { None } else { final_error };
 
@@ -1739,7 +1823,7 @@ pub(crate) async fn execute_stage(
         tokens_out,
     });
 
-    Ok(stage_outcome)
+    Ok(stage_settlement.outcome)
 }
 
 /// Map a [`RoleKind`] (flow enum) to a concrete `Arc<dyn AgentRole>`.
