@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 use std::pin::Pin;
 
 use crate::message::{ContentBlock, Conversation, Role};
+use crate::model_turn_admission::ProviderUsageObservationV1;
 use crate::provider::client::{
     ApiClient, ProviderAttemptContextV1, ProviderFormatReportV1, ProviderSseAttemptV1,
     ProviderSseTerminalReporterV1, SseFrame,
@@ -91,14 +92,48 @@ impl OpenAIProvider {
     }
 }
 
+/// Admission reporter driven by the legacy Chat Completions parser so usage
+/// and real text-token timing cannot diverge between the two paths.
 #[derive(Default)]
-pub struct OpenAITerminalReporterV1;
+pub struct OpenAITerminalReporterV1 {
+    tool_acc: BTreeMap<u32, (String, String, String)>,
+    usage: ProviderUsageObservationV1,
+}
 impl ProviderSseTerminalReporterV1 for OpenAITerminalReporterV1 {
     fn report(&mut self, frame: &SseFrame) -> ProviderFormatReportV1 {
         match frame {
-            SseFrame::Done => ProviderFormatReportV1::Completed(Default::default()),
-            SseFrame::Data(_) => ProviderFormatReportV1::Continue,
-            _ => ProviderFormatReportV1::Malformed,
+            SseFrame::Done => ProviderFormatReportV1::Completed(self.usage),
+            SseFrame::Data(data) => {
+                // The legacy parser drops bad data for compatibility; admission
+                // must fail closed instead of claiming a completed attempt.
+                if serde_json::from_str::<StreamChunk>(data).is_err() {
+                    return ProviderFormatReportV1::Malformed;
+                }
+                let mut emitted = false;
+                for event in parse_openai_line(data, &mut self.tool_acc) {
+                    match event {
+                        StreamEvent::Usage(usage) => {
+                            self.usage = ProviderUsageObservationV1 {
+                                input_units: Some(i64::from(usage.input)),
+                                output_units: Some(i64::from(usage.output)),
+                                combined_units: Some(
+                                    i64::from(usage.input) + i64::from(usage.output),
+                                ),
+                            };
+                        }
+                        StreamEvent::Delta(ContentBlock::Text { .. })
+                        | StreamEvent::Thinking(_) => {
+                            emitted = true;
+                        }
+                        _ => {}
+                    }
+                }
+                if emitted {
+                    ProviderFormatReportV1::TokenEmitted
+                } else {
+                    ProviderFormatReportV1::Continue
+                }
+            }
         }
     }
 }
@@ -1240,5 +1275,30 @@ mod tests {
         let content = &req["messages"][0]["content"];
         assert_eq!(content.as_array().map(|a| a.len()).unwrap_or(usize::MAX), 0);
         assert!(content.as_str() != Some(""));
+    }
+
+    #[test]
+    fn admission_reporter_preserves_usage_and_text_emission() {
+        let mut reporter = OpenAITerminalReporterV1::default();
+        assert!(matches!(
+            reporter.report(&SseFrame::Data(
+                r#"{"choices":[{"delta":{"content":"hello"}}]}"#.into()
+            )),
+            ProviderFormatReportV1::TokenEmitted
+        ));
+        assert!(matches!(
+            reporter.report(&SseFrame::Data(
+                r#"{"choices":[],"usage":{"prompt_tokens":12,"completion_tokens":4}}"#.into()
+            )),
+            ProviderFormatReportV1::Continue
+        ));
+        assert!(matches!(
+            reporter.report(&SseFrame::Done),
+            ProviderFormatReportV1::Completed(ProviderUsageObservationV1 {
+                input_units: Some(12),
+                output_units: Some(4),
+                combined_units: Some(16)
+            })
+        ));
     }
 }

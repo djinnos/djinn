@@ -69,13 +69,18 @@ impl ProviderSseTerminalReporterV1 for AnthropicTerminalReporterV1 {
         };
         match v.get("type").and_then(Value::as_str) {
             Some("error") => ProviderFormatReportV1::Failed(
-                if v.pointer("/error/type")
-                    .and_then(Value::as_str)
-                    .is_some_and(|x| x.contains("rate_limit"))
-                {
-                    ProviderAttemptLossV1::RateLimited
-                } else {
-                    ProviderAttemptLossV1::ProviderRejected
+                // This is the same typed classifier used by `stream`; overload
+                // and API failures must remain retryable breaker failures.
+                match classify_anthropic_error_event(data).0 {
+                    ProviderError::RateLimit { .. } => ProviderAttemptLossV1::RateLimited,
+                    ProviderError::ProviderInternal { .. }
+                    | ProviderError::Transport
+                    | ProviderError::ExhaustedTransport(_)
+                    | ProviderError::EmptyCompletion => ProviderAttemptLossV1::Transport,
+                    ProviderError::ContextOverflow
+                    | ProviderError::Authentication
+                    | ProviderError::InvalidRequest
+                    | ProviderError::InvalidOutput => ProviderAttemptLossV1::ProviderRejected,
                 },
             ),
             Some("message_delta") => {

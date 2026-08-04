@@ -5,6 +5,7 @@ use serde_json::{Value, json};
 use std::pin::Pin;
 
 use crate::message::{ContentBlock, Conversation};
+use crate::model_turn_admission::ProviderUsageObservationV1;
 use crate::provider::client::{
     ApiClient, ProviderAttemptContextV1, ProviderFormatReportV1, ProviderSseAttemptV1,
     ProviderSseTerminalReporterV1, SseFrame,
@@ -114,22 +115,45 @@ impl GoogleProvider {
     }
 }
 
+/// Admission reporter driven by [`parse_google_line`], the production Gemini
+/// parser, to preserve its `usageMetadata` and text token semantics.
 #[derive(Default)]
-pub struct GoogleTerminalReporterV1;
+pub struct GoogleTerminalReporterV1 {
+    usage: ProviderUsageObservationV1,
+}
 impl ProviderSseTerminalReporterV1 for GoogleTerminalReporterV1 {
     fn report(&mut self, frame: &SseFrame) -> ProviderFormatReportV1 {
         match frame {
-            SseFrame::Data(data)
-                if serde_json::from_str::<Value>(data)
-                    .ok()
-                    .and_then(|v| {
-                        google_candidates(&v).map(|cs| cs.iter().any(candidate_has_finish))
-                    })
-                    .unwrap_or(false) =>
-            {
-                ProviderFormatReportV1::Completed(Default::default())
+            SseFrame::Data(data) => {
+                if serde_json::from_str::<Value>(data).is_err() {
+                    return ProviderFormatReportV1::Malformed;
+                }
+                let mut emitted = false;
+                let mut completed = false;
+                for event in parse_google_line(data) {
+                    match event {
+                        StreamEvent::Usage(usage) => {
+                            self.usage = ProviderUsageObservationV1 {
+                                input_units: Some(i64::from(usage.input)),
+                                output_units: Some(i64::from(usage.output)),
+                                combined_units: Some(
+                                    i64::from(usage.input) + i64::from(usage.output),
+                                ),
+                            };
+                        }
+                        StreamEvent::Delta(ContentBlock::Text { .. }) => emitted = true,
+                        StreamEvent::Done => completed = true,
+                        _ => {}
+                    }
+                }
+                if completed {
+                    ProviderFormatReportV1::Completed(self.usage)
+                } else if emitted {
+                    ProviderFormatReportV1::TokenEmitted
+                } else {
+                    ProviderFormatReportV1::Continue
+                }
             }
-            SseFrame::Data(_) => ProviderFormatReportV1::Continue,
             _ => ProviderFormatReportV1::Malformed,
         }
     }
@@ -813,5 +837,22 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("provider API error 400"));
         assert!(msg.contains("bad request"));
+    }
+
+    #[test]
+    fn admission_reporter_preserves_usage_and_text_emission() {
+        let mut reporter = GoogleTerminalReporterV1::default();
+        assert!(matches!(
+            reporter.report(&SseFrame::Data(
+                r#"{"candidates":[{"content":{"parts":[{"text":"hello"}]}}]}"#.into()
+            )),
+            ProviderFormatReportV1::TokenEmitted
+        ));
+        assert!(matches!(
+            reporter.report(&SseFrame::Data(r#"{"candidates":[{"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":12,"candidatesTokenCount":4}}"#.into())),
+            ProviderFormatReportV1::Completed(ProviderUsageObservationV1 {
+                input_units: Some(12), output_units: Some(4), combined_units: Some(16)
+            })
+        ));
     }
 }
