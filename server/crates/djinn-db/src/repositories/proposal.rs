@@ -4,7 +4,8 @@ use std::collections::{HashMap, HashSet};
 use djinn_core::events::{DjinnEventEnvelope, EventBus};
 use djinn_core::models::{
     EvidenceFindings, NeedsEvidenceClaim, Proposal, ProposalDebateTrail, ProposalFeedback,
-    ProposalRevision, ProposalSignoff, ProposalTarget,
+    ProposalFeedbackRefinementInjection, ProposalFeedbackRefinementSource, ProposalRevision,
+    ProposalSignoff, ProposalTarget,
 };
 
 use crate::database::Database;
@@ -149,6 +150,22 @@ pub struct ProposalFeedbackCreateInput<'a> {
     pub author_kind: &'a str,
     pub author_model: Option<&'a str>,
     pub body: &'a str,
+}
+
+/// One root thread made durable by [`ProposalRepository::capture_feedback_refinement_boundary`].
+#[derive(Clone, Debug)]
+pub struct FeedbackRefinementCapture {
+    pub injection: ProposalFeedbackRefinementInjection,
+    pub sources: Vec<ProposalFeedbackRefinementSource>,
+    pub debate_entry: ProposalDebateTrail,
+    pub reused_generation: bool,
+    pub reused_round: bool,
+}
+
+/// Result of atomically capturing feedback at one proposal boundary.
+#[derive(Clone, Debug, Default)]
+pub struct FeedbackRefinementBoundaryCapture {
+    pub captures: Vec<FeedbackRefinementCapture>,
 }
 
 pub struct ProposalDebateTrailCreateInput<'a> {
@@ -1017,6 +1034,206 @@ impl ProposalRepository {
                 &feedback,
             ));
         Ok(feedback)
+    }
+
+    /// Atomically capture unresolved feedback as immutable root-scoped generations.
+    ///
+    /// The proposal lock fences the database timestamp and UUID cutoff. The
+    /// transaction writes claim, snapshots, blocking `human_feedback`, and its
+    /// lifecycle boundary together. V1 intentionally has no body hash.
+    pub async fn capture_feedback_refinement_boundary(
+        &self,
+        proposal_id: &str,
+    ) -> Result<FeedbackRefinementBoundaryCapture> {
+        self.db.ensure_initialized().await?;
+        let mut tx = self.db.pool().begin().await?;
+        let revision_seq = sqlx::query_scalar::<_, i32>(
+            "SELECT latest_revision_seq FROM proposals WHERE id = $1 FOR UPDATE",
+        )
+        .bind(proposal_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| Error::InvalidData(format!("proposal not found: {proposal_id}")))?;
+        let cutoff_at: String = sqlx::query_scalar(
+            r#"SELECT to_char(transaction_timestamp() AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')"#,
+        ).fetch_one(&mut *tx).await?;
+        let cutoff_id: Option<String> = sqlx::query_scalar(
+            "SELECT max(id) FROM proposal_feedback WHERE proposal_id=$1 AND created_at <= $2",
+        )
+        .bind(proposal_id)
+        .bind(&cutoff_at)
+        .fetch_one(&mut *tx)
+        .await?;
+        let Some(cutoff_id) = cutoff_id else {
+            tx.commit().await?;
+            return Ok(Default::default());
+        };
+        let rows: Vec<ProposalFeedback> = sqlx::query_as(
+            r#"SELECT id, proposal_id, parent_id, author_kind, author_user_id, author_model,
+                body, severity, withdrawn_at, withdrawn_by_user_id, resolved_at,
+                resolved_revision_seq, resolved_by_user_id, created_at, updated_at
+                FROM proposal_feedback WHERE proposal_id=$1 ORDER BY created_at, id"#,
+        )
+        .bind(proposal_id)
+        .fetch_all(&mut *tx)
+        .await?;
+        let captured: HashSet<String> = sqlx::query_scalar(
+            r#"SELECT s.source_feedback_id FROM proposal_feedback_refinement_sources s
+                JOIN proposal_feedback_refinement_injections i ON i.id=s.injection_id
+                WHERE i.proposal_id=$1"#,
+        )
+        .bind(proposal_id)
+        .fetch_all(&mut *tx)
+        .await?
+        .into_iter()
+        .collect();
+        let parents: HashMap<String, Option<String>> = rows
+            .iter()
+            .map(|r| (r.id.clone(), r.parent_id.clone()))
+            .collect();
+        let mut grouped: HashMap<String, Vec<&ProposalFeedback>> = HashMap::new();
+        for row in &rows {
+            if row.resolved_at.is_some()
+                || row.withdrawn_at.is_some()
+                || row.created_at > cutoff_at
+                || row.id > cutoff_id
+                || captured.contains(&row.id)
+            {
+                continue;
+            }
+            // A resolved root remains the key for its unresolved descendants.
+            let mut root = row.id.as_str();
+            let mut seen = HashSet::new();
+            while let Some(Some(parent)) = parents.get(root) {
+                if !seen.insert(root) || !parents.contains_key(parent) {
+                    break;
+                }
+                root = parent;
+            }
+            grouped.entry(root.to_owned()).or_default().push(row);
+        }
+        let queued_round: Option<i32> = sqlx::query_scalar(
+            "SELECT max(round) FROM proposal_feedback_refinement_injections WHERE proposal_id=$1 AND state='queued'",
+        ).bind(proposal_id).fetch_one(&mut *tx).await?;
+        let round = match queued_round {
+            Some(v) => v,
+            None => {
+                sqlx::query_scalar::<_, Option<i32>>(
+                    "SELECT max(round) FROM proposal_debate_trail WHERE proposal_id=$1",
+                )
+                .bind(proposal_id)
+                .fetch_one(&mut *tx)
+                .await?
+                .unwrap_or(0)
+                    + 1
+            }
+        };
+        let mut roots: Vec<String> = grouped
+            .iter()
+            .filter(|(_, rs)| rs.iter().any(|r| r.severity == "blocking"))
+            .map(|(root, _)| root.clone())
+            .collect();
+        roots.sort();
+        if roots.is_empty() {
+            let existing: Vec<ProposalFeedbackRefinementInjection> = sqlx::query_as(
+                r#"SELECT DISTINCT ON (root_feedback_id) id, proposal_id, root_feedback_id, generation,
+                    state, cutoff_at, cutoff_feedback_id, round, debate_entry_id, accepted_disposition,
+                    accepted_revision_seq, accepted_at, accepted_by_user_id, created_at, updated_at
+                    FROM proposal_feedback_refinement_injections
+                    WHERE proposal_id=$1 AND state IN ('queued','injected')
+                    ORDER BY root_feedback_id, generation DESC"#,
+            ).bind(proposal_id).fetch_all(&mut *tx).await?;
+            let mut captures = Vec::with_capacity(existing.len());
+            for injection in existing {
+                let debate: ProposalDebateTrail = sqlx::query_as(
+                    r#"SELECT id, proposal_id, kind, body, blocking, agent_role, author_kind,
+                        author_user_id, author_model, source_task_id, against_revision_seq, round,
+                        body_metadata::text AS body_metadata, resolved_at, resolved_by_user_id,
+                        reopened_at, reopened_by_user_id, created_at, updated_at
+                        FROM proposal_debate_trail WHERE id=$1"#,
+                )
+                .bind(injection.debate_entry_id.as_deref())
+                .fetch_one(&mut *tx)
+                .await?;
+                let sources: Vec<ProposalFeedbackRefinementSource> = sqlx::query_as(
+                    "SELECT injection_id,source_feedback_id,source_ordinal,source_parent_id,source_author_kind,source_author_user_id,source_author_model,source_body,source_severity,source_created_at,captured_at FROM proposal_feedback_refinement_sources WHERE injection_id=$1 ORDER BY source_ordinal",
+                ).bind(&injection.id).fetch_all(&mut *tx).await?;
+                captures.push(FeedbackRefinementCapture {
+                    injection,
+                    sources,
+                    debate_entry: debate,
+                    reused_generation: true,
+                    reused_round: true,
+                });
+            }
+            tx.commit().await?;
+            return Ok(FeedbackRefinementBoundaryCapture { captures });
+        }
+        let mut captures = Vec::with_capacity(roots.len());
+        for root in roots {
+            let mut sources = grouped.remove(&root).expect("root was grouped");
+            sources.sort_by(|a, b| {
+                a.created_at
+                    .cmp(&b.created_at)
+                    .then_with(|| a.id.cmp(&b.id))
+            });
+            let generation = sqlx::query_scalar::<_, Option<i32>>(
+                "SELECT max(generation) FROM proposal_feedback_refinement_injections WHERE root_feedback_id=$1",
+            ).bind(&root).fetch_one(&mut *tx).await?.unwrap_or(0) + 1;
+            let injection_id = uuid::Uuid::now_v7().to_string();
+            let root_body = rows
+                .iter()
+                .find(|r| r.id == root)
+                .map(|r| r.body.as_str())
+                .unwrap_or("");
+            let metadata = serde_json::json!({"kind":"feedback_refinement_generation_v1", "root_feedback_id":root, "injection_id":injection_id, "generation":generation});
+            let debate: ProposalDebateTrail = sqlx::query_as(r#"INSERT INTO proposal_debate_trail
+                (id,proposal_id,kind,body,blocking,agent_role,author_kind,against_revision_seq,round,body_metadata)
+                VALUES ($1,$2,'human_feedback',$3,true,'human_feedback','agent',$4,$5,$6)
+                RETURNING id,proposal_id,kind,body,blocking,agent_role,author_kind,author_user_id,
+                author_model,source_task_id,against_revision_seq,round,body_metadata::text AS body_metadata,
+                resolved_at,resolved_by_user_id,reopened_at,reopened_by_user_id,created_at,updated_at"#)
+                .bind(uuid::Uuid::now_v7().to_string()).bind(proposal_id).bind(root_body)
+                .bind(revision_seq).bind(round).bind(&metadata).fetch_one(&mut *tx).await?;
+            let injection: ProposalFeedbackRefinementInjection = sqlx::query_as(r#"INSERT INTO proposal_feedback_refinement_injections
+                (id,proposal_id,root_feedback_id,generation,state,cutoff_at,cutoff_feedback_id,round,debate_entry_id)
+                VALUES ($1,$2,$3,$4,'injected',$5,$6,$7,$8)
+                RETURNING id,proposal_id,root_feedback_id,generation,state,cutoff_at,cutoff_feedback_id,round,
+                debate_entry_id,accepted_disposition,accepted_revision_seq,accepted_at,accepted_by_user_id,created_at,updated_at"#)
+                .bind(&injection_id).bind(proposal_id).bind(&root).bind(generation).bind(&cutoff_at)
+                .bind(&cutoff_id).bind(round).bind(&debate.id).fetch_one(&mut *tx).await?;
+            for (ordinal, source) in sources.iter().enumerate() {
+                sqlx::query(r#"INSERT INTO proposal_feedback_refinement_sources
+                    (injection_id,source_feedback_id,source_ordinal,source_parent_id,source_author_kind,
+                     source_author_user_id,source_author_model,source_body,source_severity,source_created_at,captured_at)
+                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)"#)
+                    .bind(&injection_id).bind(&source.id).bind((ordinal + 1) as i32).bind(&source.parent_id)
+                    .bind(&source.author_kind).bind(&source.author_user_id).bind(&source.author_model)
+                    .bind(&source.body).bind(&source.severity).bind(&source.created_at).bind(&cutoff_at)
+                    .execute(&mut *tx).await?;
+            }
+            let snapshots: Vec<ProposalFeedbackRefinementSource> = sqlx::query_as(
+                "SELECT injection_id,source_feedback_id,source_ordinal,source_parent_id,source_author_kind,source_author_user_id,source_author_model,source_body,source_severity,source_created_at,captured_at FROM proposal_feedback_refinement_sources WHERE injection_id=$1 ORDER BY source_ordinal",
+            ).bind(&injection_id).fetch_all(&mut *tx).await?;
+            let lifecycle = serde_json::json!({"feedback_refinement":metadata,"round":round});
+            self.insert_lightweight_lifecycle_event_in_tx(
+                &mut tx,
+                proposal_id,
+                revision_seq,
+                "feedback_refinement_materialized",
+                Some(&lifecycle),
+            )
+            .await?;
+            captures.push(FeedbackRefinementCapture {
+                injection,
+                sources: snapshots,
+                debate_entry: debate,
+                reused_generation: false,
+                reused_round: queued_round.is_some(),
+            });
+        }
+        tx.commit().await?;
+        Ok(FeedbackRefinementBoundaryCapture { captures })
     }
 
     // ── Debate trail (structured objections/rebuttals/verdicts) ──────────────
