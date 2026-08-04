@@ -324,6 +324,8 @@ impl SessionRepository {
         Ok(session)
     }
 
+    /// Compatibility entry point for legacy callers. New production terminal
+    /// writers must use `update_with_failure_cause` with an explicit cause.
     #[allow(clippy::too_many_arguments)]
     pub async fn update(
         &self,
@@ -335,60 +337,27 @@ impl SessionRepository {
         cache_write: i64,
         parked_reason: Option<String>,
     ) -> Result<SessionRecord> {
-        self.db.ensure_initialized().await?;
-
-        let status_str = status.as_str();
-        // Token params are bound twice: once as i64 for the bigint SET
-        // columns ($2-$5) and once as f64 for the cost computation
-        // ($8-$11).  Reusing the same positional parameter in both a
-        // bigint and a double-precision context makes PostgreSQL report
-        // "inconsistent types deduced", so we use separate positions.
-        let ti_f = tokens_in as f64;
-        let to_f = tokens_out as f64;
-        let cr_f = cache_read as f64;
-        let cw_f = cache_write as f64;
-        sqlx::query(
-            r#"UPDATE sessions
-             SET status = $1,
-                 tokens_in = $2,
-                 tokens_out = $3,
-                 cache_read_tokens = $4,
-                 cache_write_tokens = $5,
-                 cost_usd = CASE
-                     WHEN input_price_per_million_snapshot IS NOT NULL
-                      AND output_price_per_million_snapshot IS NOT NULL
-                      AND cache_read_price_per_million_snapshot IS NOT NULL
-                      AND cache_write_price_per_million_snapshot IS NOT NULL
-                     THEN (
-                         $8 * input_price_per_million_snapshot
-                         + $9 * output_price_per_million_snapshot
-                         + $10 * cache_read_price_per_million_snapshot
-                         + $11 * cache_write_price_per_million_snapshot
-                     ) / 1000000.0
-                     ELSE NULL
-                 END,
-                 ended_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
-                 parked_reason = COALESCE($7, parked_reason)
-             WHERE id = $6"#,
+        let cause = match status {
+            SessionStatus::Failed | SessionStatus::Interrupted => {
+                Some(SessionFailureCause::Unknown)
+            }
+            _ => None,
+        };
+        self.update_with_failure_cause(
+            id,
+            status,
+            tokens_in,
+            tokens_out,
+            cache_read,
+            cache_write,
+            parked_reason,
+            cause,
         )
-        .bind(status_str)
-        .bind(tokens_in)
-        .bind(tokens_out)
-        .bind(cache_read)
-        .bind(cache_write)
-        .bind(id)
-        .bind(parked_reason)
-        .bind(ti_f)
-        .bind(to_f)
-        .bind(cr_f)
-        .bind(cw_f)
-        .execute(self.db.pool())
-        .await?;
-
-        self.fetch_and_emit_update(id).await
+        .await
     }
 
-    /// Update a session and persist a canonical terminal failure cause.
+    /// Atomically update a session with a validated durable terminal cause.
+    /// A raced terminal settlement cannot overwrite an existing terminal row.
     #[allow(clippy::too_many_arguments)]
     pub async fn update_with_failure_cause(
         &self,
@@ -401,29 +370,53 @@ impl SessionRepository {
         parked_reason: Option<String>,
         failure_cause: Option<SessionFailureCause>,
     ) -> Result<SessionRecord> {
-        self.update(
-            id,
-            status,
-            tokens_in,
-            tokens_out,
-            cache_read,
-            cache_write,
-            parked_reason,
-        )
-        .await?;
         let failure_cause = match status {
-            SessionStatus::Failed | SessionStatus::Interrupted => failure_cause.map(|cause| {
-                cause
-                    .durable_label()
-                    .unwrap_or(SessionFailureCause::Unknown.as_str())
-            }),
+            SessionStatus::Failed | SessionStatus::Interrupted => match failure_cause {
+                Some(SessionFailureCause::LegacyUnclassified) => {
+                    return Err(Error::InvalidData(
+                        "LegacyUnclassified cannot be persisted".into(),
+                    ));
+                }
+                Some(cause) => Some(cause.as_str()),
+                None => {
+                    return Err(Error::InvalidData(
+                        "failed/interrupted settlement requires failure cause".into(),
+                    ));
+                }
+            },
+            SessionStatus::Completed if failure_cause.is_some() => {
+                return Err(Error::InvalidData(
+                    "completed settlement cannot have failure cause".into(),
+                ));
+            }
+            _ if failure_cause.is_some() => {
+                return Err(Error::InvalidData(
+                    "non-terminal update cannot have failure cause".into(),
+                ));
+            }
             _ => None,
         };
-        sqlx::query("UPDATE sessions SET failure_cause = $1 WHERE id = $2")
-            .bind(failure_cause)
-            .bind(id)
-            .execute(self.db.pool())
-            .await?;
+        self.db.ensure_initialized().await?;
+        let ti_f = tokens_in as f64;
+        let to_f = tokens_out as f64;
+        let cr_f = cache_read as f64;
+        let cw_f = cache_write as f64;
+        sqlx::query(r#"UPDATE sessions
+             SET status = $1, tokens_in = $2, tokens_out = $3,
+                 cache_read_tokens = $4, cache_write_tokens = $5,
+                 cost_usd = CASE WHEN input_price_per_million_snapshot IS NOT NULL
+                      AND output_price_per_million_snapshot IS NOT NULL
+                      AND cache_read_price_per_million_snapshot IS NOT NULL
+                      AND cache_write_price_per_million_snapshot IS NOT NULL
+                     THEN ($8 * input_price_per_million_snapshot + $9 * output_price_per_million_snapshot
+                         + $10 * cache_read_price_per_million_snapshot + $11 * cache_write_price_per_million_snapshot) / 1000000.0
+                     ELSE NULL END,
+                 ended_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+                 parked_reason = COALESCE($7, parked_reason), failure_cause = $12
+             WHERE id = $6 AND status NOT IN ('completed', 'failed', 'interrupted')"#)
+            .bind(status.as_str()).bind(tokens_in).bind(tokens_out).bind(cache_read).bind(cache_write)
+            .bind(id).bind(parked_reason).bind(ti_f).bind(to_f).bind(cr_f).bind(cw_f).bind(failure_cause)
+            .execute(self.db.pool()).await?;
         self.fetch_and_emit_update(id).await
     }
 
@@ -454,11 +447,12 @@ impl SessionRepository {
             return Ok(0);
         }
 
-        let result = sqlx::query!(
+        let result = sqlx::query(
             r#"UPDATE sessions
              SET status = 'interrupted',
-                 ended_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
-             WHERE status = 'running'"#
+                 ended_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+                 failure_cause = 'infrastructure'
+             WHERE status = 'running'"#,
         )
         .execute(self.db.pool())
         .await?;
@@ -518,7 +512,8 @@ impl SessionRepository {
         let result = sqlx::query(
             r#"UPDATE sessions
              SET status = 'interrupted',
-                 ended_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+                 ended_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+                 failure_cause = 'infrastructure'
              WHERE status = 'running'
                AND (task_run_id IS NULL OR NOT (task_run_id = ANY($1)))"#,
         )
@@ -536,6 +531,20 @@ impl SessionRepository {
     /// Mark all `running` sessions for a specific task as `interrupted`.
     /// Used by stuck-task recovery to clean up orphaned session records.
     pub async fn interrupt_running_for_task(&self, task_id: &str) -> Result<u64> {
+        self.interrupt_running_for_task_with_failure_cause(task_id, SessionFailureCause::Protocol)
+            .await
+    }
+
+    /// Cause-aware task-scoped interruption. Production callers select the
+    /// durable cause from their authoritative evidence.
+    pub async fn interrupt_running_for_task_with_failure_cause(
+        &self,
+        task_id: &str,
+        failure_cause: SessionFailureCause,
+    ) -> Result<u64> {
+        let failure_cause = failure_cause
+            .durable_label()
+            .ok_or_else(|| Error::InvalidData("LegacyUnclassified cannot be persisted".into()))?;
         self.db.ensure_initialized().await?;
 
         let orphans = sqlx::query_as!(
@@ -561,13 +570,15 @@ impl SessionRepository {
             return Ok(0);
         }
 
-        let result = sqlx::query!(
+        let result = sqlx::query(
             r#"UPDATE sessions
              SET status = 'interrupted',
-                 ended_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+                 ended_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+                 failure_cause = $2
              WHERE task_id = $1 AND status = 'running'"#,
-            task_id
         )
+        .bind(task_id)
+        .bind(failure_cause)
         .execute(self.db.pool())
         .await?;
 
@@ -682,14 +693,30 @@ impl SessionRepository {
     /// or raced settlement an observable no-op rather than touching a sibling
     /// or newer session for the same task.
     pub async fn settle_non_terminal_by_id(&self, session_id: &str) -> Result<bool> {
+        self.settle_non_terminal_by_id_with_failure_cause(session_id, SessionFailureCause::Protocol)
+            .await
+    }
+
+    /// Cause-aware exact-id reconciliation settlement. The non-terminal guard
+    /// preserves an existing terminal status and cause during races.
+    pub async fn settle_non_terminal_by_id_with_failure_cause(
+        &self,
+        session_id: &str,
+        failure_cause: SessionFailureCause,
+    ) -> Result<bool> {
+        let failure_cause = failure_cause
+            .durable_label()
+            .ok_or_else(|| Error::InvalidData("LegacyUnclassified cannot be persisted".into()))?;
         self.db.ensure_initialized().await?;
         let result = sqlx::query(
             r#"UPDATE sessions
                SET status = 'interrupted',
-                   ended_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+                   ended_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+                   failure_cause = $2
                WHERE id = $1 AND status IN ('running', 'paused')"#,
         )
         .bind(session_id)
+        .bind(failure_cause)
         .execute(self.db.pool())
         .await?;
         Ok(result.rows_affected() == 1)
@@ -1651,14 +1678,29 @@ impl SessionRepository {
     /// "fire-and-forget" variant used by the orphan-session health sweep where
     /// we don't have an `EventBus` reference and token counts are unknown.
     pub async fn interrupt_by_id(&self, session_id: &str) -> Result<bool> {
+        self.interrupt_by_id_with_failure_cause(session_id, SessionFailureCause::Protocol)
+            .await
+    }
+
+    /// Cause-aware single-session interruption for writers without token data.
+    pub async fn interrupt_by_id_with_failure_cause(
+        &self,
+        session_id: &str,
+        failure_cause: SessionFailureCause,
+    ) -> Result<bool> {
+        let failure_cause = failure_cause
+            .durable_label()
+            .ok_or_else(|| Error::InvalidData("LegacyUnclassified cannot be persisted".into()))?;
         self.db.ensure_initialized().await?;
         let result = sqlx::query(
             r#"UPDATE sessions
                SET status = 'interrupted',
-                   ended_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+                   ended_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+                   failure_cause = $2
                WHERE id = $1 AND status = 'running'"#,
         )
         .bind(session_id)
+        .bind(failure_cause)
         .execute(self.db.pool())
         .await?;
         Ok(result.rows_affected() > 0)
@@ -2302,6 +2344,131 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cause_aware_settlement_validates_and_preserves_durable_causes() {
+        let db = test_db();
+        let (project_id, task_id) = create_task(&db, EventBus::noop()).await;
+        let repo = SessionRepository::new(db.clone(), EventBus::noop());
+        let make_session = || CreateSessionParams {
+            project_id: &project_id,
+            task_id: Some(&task_id),
+            model: "openai/gpt-5",
+            agent_type: "worker",
+            metadata_json: None,
+            task_run_id: None,
+            pricing: None,
+            cost_basis: None,
+        };
+
+        let failed = repo.create(make_session()).await.unwrap();
+        let settled = repo
+            .update_with_failure_cause(
+                &failed.id,
+                SessionStatus::Failed,
+                11,
+                12,
+                0,
+                0,
+                None,
+                Some(SessionFailureCause::Provider),
+            )
+            .await
+            .unwrap();
+        assert_eq!(settled.failure_cause, Some(SessionFailureCause::Provider));
+        // A later terminal writer must observe the existing row, not overwrite
+        // its durable cause.
+        let raced = repo
+            .update_with_failure_cause(
+                &failed.id,
+                SessionStatus::Interrupted,
+                0,
+                0,
+                0,
+                0,
+                None,
+                Some(SessionFailureCause::Infrastructure),
+            )
+            .await
+            .unwrap();
+        assert_eq!(raced.failure_cause, Some(SessionFailureCause::Provider));
+
+        let completed = repo.create(make_session()).await.unwrap();
+        let completed = repo
+            .update_with_failure_cause(
+                &completed.id,
+                SessionStatus::Completed,
+                1,
+                2,
+                0,
+                0,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(completed.failure_cause.is_none());
+        assert_eq!(completed.interpreted_failure_cause(), None);
+
+        let invalid = repo.create(make_session()).await.unwrap();
+        assert!(
+            repo.update_with_failure_cause(
+                &invalid.id,
+                SessionStatus::Interrupted,
+                0,
+                0,
+                0,
+                0,
+                None,
+                None,
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            repo.update_with_failure_cause(
+                &invalid.id,
+                SessionStatus::Interrupted,
+                0,
+                0,
+                0,
+                0,
+                None,
+                Some(SessionFailureCause::LegacyUnclassified),
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            repo.update_with_failure_cause(
+                &invalid.id,
+                SessionStatus::Completed,
+                0,
+                0,
+                0,
+                0,
+                None,
+                Some(SessionFailureCause::Provider),
+            )
+            .await
+            .is_err()
+        );
+
+        // Settlement accepts no diagnostic text, and session columns never
+        // contain the credential-shaped diagnostic kept on activity surfaces.
+        let diagnostic = "Authorization: Bearer sk-secret-credential";
+        let session_text: String = sqlx::query_scalar(
+            "SELECT COALESCE(string_agg(value::text, ''), '')
+             FROM sessions s CROSS JOIN LATERAL jsonb_each_text(to_jsonb(s))
+             WHERE s.id = $1",
+        )
+        .bind(&failed.id)
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        assert!(!session_text.contains(diagnostic));
+        assert!(!session_text.contains("sk-secret-credential"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn session_record_projects_typed_and_legacy_failure_causes() {
         let db = test_db();
         let (project_id, task_id) = create_task(&db, EventBus::noop()).await;
@@ -2323,8 +2490,8 @@ mod tests {
         assert!(created.failure_cause.is_none());
         assert_eq!(created.interpreted_failure_cause(), None);
 
-        // This raw fixture write validates the read projection; production
-        // settlement APIs deliberately do not write failure causes yet.
+        // This raw fixture write validates the legacy read projection; normal
+        // production settlement APIs persist typed durable failure causes.
         sqlx::query(
             "UPDATE sessions SET status = 'failed', failure_cause = 'provider' WHERE id = $1",
         )

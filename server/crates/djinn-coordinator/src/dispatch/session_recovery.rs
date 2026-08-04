@@ -4,7 +4,7 @@ use crate::pr_poller::pr_cleanup::CloseKind;
 use djinn_core::clock::{Clock, SystemClock};
 use djinn_core::job_retention::{JobRetentionEvidence, SessionEvidence};
 use djinn_core::models::task_attempt::TaskAttemptOutcome;
-use djinn_core::models::{SessionStatus, TransitionAction};
+use djinn_core::models::{SessionFailureCause, SessionStatus, TransitionAction};
 use djinn_db::{
     ClaimExtensionRecord, CurrentLivenessState, LivenessEvidenceSnapshot, LivenessRepository,
 };
@@ -1471,7 +1471,13 @@ impl CoordinatorActor {
                         );
                     }
                     // Finalize the orphaned running row.
-                    if let Err(e) = session_repo.interrupt_running_for_task(task_id).await {
+                    if let Err(e) = session_repo
+                        .interrupt_running_for_task_with_failure_cause(
+                            task_id,
+                            SessionFailureCause::Protocol,
+                        )
+                        .await
+                    {
                         tracing::warn!(
                             task_id = %task_id,
                             session_id = %session.id,
@@ -1677,7 +1683,10 @@ impl CoordinatorActor {
             );
             let finalize_result = async {
                 let result = session_repo
-                    .interrupt_running_for_task(&finalize_task_id)
+                    .interrupt_running_for_task_with_failure_cause(
+                        &finalize_task_id,
+                        SessionFailureCause::Infrastructure,
+                    )
                     .await;
                 let outcome = if result.is_ok() { "ok" } else { "error" };
                 tracing::info!(
@@ -2205,7 +2214,13 @@ impl CoordinatorActor {
                         }
                     }
 
-                    match session_repo.interrupt_running_for_task(&task.id).await {
+                    match session_repo
+                        .interrupt_running_for_task_with_failure_cause(
+                            &task.id,
+                            SessionFailureCause::Infrastructure,
+                        )
+                        .await
+                    {
                         Ok(interrupted) if interrupted > 0 => {
                             tracing::warn!(
                                 task_id = %task.short_id,
@@ -2387,7 +2402,13 @@ impl CoordinatorActor {
                         );
                         // Finalize any orphaned "running" session records for this
                         // task so they don't accumulate as ghost rows.
-                        if let Err(e) = session_repo.interrupt_running_for_task(&task.id).await {
+                        if let Err(e) = session_repo
+                            .interrupt_running_for_task_with_failure_cause(
+                                &task.id,
+                                SessionFailureCause::Infrastructure,
+                            )
+                            .await
+                        {
                             tracing::warn!(
                                 task_id = %task.short_id,
                                 error = %e,
@@ -2575,7 +2596,10 @@ impl CoordinatorActor {
             return false;
         }
 
-        match session_repo.interrupt_running_for_task(&task.id).await {
+        match session_repo
+            .interrupt_running_for_task_with_failure_cause(&task.id, SessionFailureCause::Cancelled)
+            .await
+        {
             Ok(interrupted) if interrupted > 0 => {
                 tracing::info!(
                     task_id = %task.short_id,

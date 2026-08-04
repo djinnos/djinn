@@ -1997,6 +1997,8 @@ async fn slot_event_killed_tears_down_taskrun_job() {
     app_state.runtime_ops = Some(Arc::new(runtime.clone()));
     let task_id =
         seed_running_session_with_task_run(&app_state, "killed event teardown", "run-killed").await;
+    let sessions =
+        djinn_db::SessionRepository::new(app_state.db.clone(), app_state.event_bus.clone());
     let (signal_tx, _signal_rx) = mpsc::unbounded_channel();
     let config = make_config(
         vec![model("model-a", 1, &["worker"])],
@@ -2035,6 +2037,16 @@ async fn slot_event_killed_tears_down_taskrun_job() {
     assert_eq!(
         count, 1,
         "SlotEvent::Killed must invoke teardown exactly once (saw {count} calls)"
+    );
+    let rows = sessions
+        .list_for_task(&task_id)
+        .await
+        .expect("session reread");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].failure_cause,
+        Some(djinn_core::models::SessionFailureCause::Protocol),
+        "unmarked generic Killed backstop must persist Protocol"
     );
 }
 
@@ -2310,7 +2322,7 @@ async fn kill_session_during_compaction_defers_settlement_and_mapping_release() 
         .await
         .expect("kill_session should succeed even during compaction");
     assert!(
-        pool.test_pending_teardown_tasks().contains("task-1"),
+        pool.test_pending_teardown_tasks().contains_key("task-1"),
         "task should be in pending_teardown_tasks after deferred kill"
     );
     assert_eq!(
@@ -2374,7 +2386,7 @@ async fn kill_session_without_compaction_settles_eagerly() {
         .expect("kill_session should succeed");
     // Eager path: pending_teardown_tasks should NOT contain the task.
     assert!(
-        !pool.test_pending_teardown_tasks().contains("task-1"),
+        !pool.test_pending_teardown_tasks().contains_key("task-1"),
         "non-compacting kill should NOT defer to pending_teardown_tasks"
     );
     // Mapping is still present (removed only when Killed event arrives).
@@ -2476,7 +2488,7 @@ async fn reclaim_session_during_compaction_defers_settlement() {
         .await
         .expect("terminate_session should succeed during compaction");
     assert!(
-        pool.test_pending_teardown_tasks().contains("task-1"),
+        pool.test_pending_teardown_tasks().contains_key("task-1"),
         "reclaim during compaction should defer"
     );
     assert_eq!(
@@ -2494,6 +2506,95 @@ async fn reclaim_session_during_compaction_defers_settlement() {
     .await;
     assert!(pool.test_pending_teardown_tasks().is_empty());
     assert_eq!(pool.test_slot_of("task-1"), None);
+}
+
+async fn assert_compacting_deferred_cause_persists(
+    expected: djinn_core::models::SessionFailureCause,
+) {
+    let (app_state, cancel, _temp) = test_app_state();
+    let task_id = seed_running_session_with_task_run(
+        &app_state,
+        "deferred durable cause",
+        match expected {
+            djinn_core::models::SessionFailureCause::Cancelled => "run-deferred-cancelled",
+            djinn_core::models::SessionFailureCause::Infrastructure => "run-deferred-infra",
+            _ => panic!("unsupported deferred cause"),
+        },
+    )
+    .await;
+    let sessions =
+        djinn_db::SessionRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+    let cses: Arc<
+        Mutex<HashMap<usize, crate::reply_loop::compaction_guard::CompactionCriticalSection>>,
+    > = Arc::new(Mutex::new(HashMap::new()));
+    let (signal_tx, _signal_rx) = mpsc::unbounded_channel();
+    let (_pool_tx, pool_rx) = mpsc::channel(8);
+    let mut pool = SlotPool::new_with_factory(
+        pool_rx,
+        app_state,
+        cancel,
+        make_config(
+            vec![model("model-a", 1, &["worker"])],
+            &[("worker", vec!["model-a"])],
+        ),
+        compaction_capturing_slot_factory(Duration::from_secs(3600), signal_tx, cses.clone()),
+    );
+    pool.test_assign_busy(&task_id, 0);
+    let compaction = cses.lock().unwrap().get(&0).unwrap().clone();
+    let guard = compaction.guard();
+
+    match expected {
+        djinn_core::models::SessionFailureCause::Cancelled => {
+            pool.test_kill_session(&task_id)
+                .await
+                .expect("deferred kill");
+            // A later request must not replace the first writer's selected cause.
+            pool.test_evict_session(&task_id)
+                .await
+                .expect("duplicate deferred eviction");
+        }
+        djinn_core::models::SessionFailureCause::Infrastructure => {
+            pool.test_evict_session(&task_id)
+                .await
+                .expect("deferred eviction");
+        }
+        _ => unreachable!(),
+    }
+    assert_eq!(
+        pool.test_pending_teardown_tasks().get(&task_id),
+        Some(&expected),
+        "deferred teardown must retain the first writer-selected cause"
+    );
+
+    drop(guard);
+    pool.test_handle_slot_event(SlotEvent::Killed {
+        slot_id: 0,
+        model_id: "model-a".to_owned(),
+        task_id: task_id.clone(),
+    })
+    .await;
+
+    let rows = sessions
+        .list_for_task(&task_id)
+        .await
+        .expect("session reread");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].failure_cause, Some(expected));
+    assert!(pool.test_pending_teardown_tasks().is_empty());
+}
+
+#[tokio::test]
+async fn compacting_deferred_kill_persists_cancelled() {
+    assert_compacting_deferred_cause_persists(djinn_core::models::SessionFailureCause::Cancelled)
+        .await;
+}
+
+#[tokio::test]
+async fn compacting_deferred_eviction_persists_infrastructure() {
+    assert_compacting_deferred_cause_persists(
+        djinn_core::models::SessionFailureCause::Infrastructure,
+    )
+    .await;
 }
 
 /// Drive a production pool message through the actor while retaining direct
@@ -3343,7 +3444,7 @@ async fn deferred_reconcile_duplicate_attaches_waiters_and_replays_parked_dispat
         "the replayed same-task owner mapping is removed"
     );
     assert!(
-        !pool.test_pending_teardown_tasks().contains(&task_id),
+        !pool.test_pending_teardown_tasks().contains_key(&task_id),
         "the reconciled task has no stale pending continuation"
     );
     assert_eq!(
@@ -3470,7 +3571,7 @@ async fn deferred_reconcile_mapped_zero_rows_completes_from_killed() {
     // the authoritative final-reread assertion for the reconciled mapping;
     // the live mapping below belongs to the intentionally replayed dispatch.
     assert!(
-        !pool.test_pending_teardown_tasks().contains(&task_id),
+        !pool.test_pending_teardown_tasks().contains_key(&task_id),
         "the reconciled continuation must not remain pending after Killed"
     );
     assert_eq!(
@@ -3658,7 +3759,7 @@ async fn deferred_reconcile_duplicate_shared_run_deduplicates_teardown() {
     // replays the parked FIFO dispatches. Do not mistake the replayed mapping
     // (or the unrelated live mapping) for stale reconciliation ownership.
     assert!(
-        !pool.test_pending_teardown_tasks().contains(&task_id),
+        !pool.test_pending_teardown_tasks().contains_key(&task_id),
         "the shared-run continuation must not remain pending after Killed"
     );
     assert_eq!(
@@ -3742,7 +3843,7 @@ async fn deferred_reconcile_existing_pending_returns_capacity_once() {
     pool.test_kill_session(&task_id)
         .await
         .expect("legacy kill establishes pending teardown");
-    assert!(pool.test_pending_teardown_tasks().contains(&task_id));
+    assert!(pool.test_pending_teardown_tasks().contains_key(&task_id));
     let (reply_tx, mut reply_rx) = tokio::sync::oneshot::channel();
     pool.test_handle_message(PoolMessage::ReconcileTerminate {
         task_id: task_id.clone(),
