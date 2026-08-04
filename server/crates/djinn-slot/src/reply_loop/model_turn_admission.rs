@@ -123,15 +123,20 @@ impl Drop for PreparationOwnership {
         cleanups.in_flight.fetch_add(1, Ordering::AcqRel);
         tokio::spawn(async move {
             // Retain this exact identity until the repository accepts a
-            // fenced/idempotent cancellation result. A transient database
-            // failure must not turn a lease into an unobservable local leak.
-            let identity = state.lock().await.take();
-            if let Some(identity) = identity {
-                loop {
-                    match repository.cancel_before_send(identity.clone()).await {
-                        Ok(_) => break,
-                        Err(_) => tokio::time::sleep(Duration::from_millis(10)).await,
+            // fenced/idempotent cancellation result. Do not take it out of
+            // shared ownership before an async repository call: a transient
+            // database failure must leave the identity retained for retry.
+            loop {
+                let identity = state.lock().await.clone();
+                let Some(identity) = identity else {
+                    break;
+                };
+                match repository.cancel_before_send(identity).await {
+                    Ok(_) => {
+                        *state.lock().await = None;
+                        break;
                     }
+                    Err(_) => tokio::time::sleep(Duration::from_millis(10)).await,
                 }
             }
             cleanups.in_flight.fetch_sub(1, Ordering::AcqRel);
