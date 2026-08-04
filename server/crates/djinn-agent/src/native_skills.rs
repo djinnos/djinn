@@ -317,6 +317,17 @@ mod tests {
             assert!(skill.content.contains(id), "catalog must include {id}");
         }
         assert_eq!(skill.content.matches("### Guardrail:").count(), 9);
+        for provider_key_field in [
+            "workflow path",
+            "exact rendered job name",
+            "normalized/sorted runner labels",
+            "runner_group_id",
+        ] {
+            assert!(
+                skill.content.contains(provider_key_field),
+                "CI timeout provider key must include {provider_key_field}",
+            );
+        }
         for required_contract_text in [
             ".github/ci-timeouts.json",
             "scripts/check-ci-timeouts.mjs",
@@ -324,10 +335,6 @@ mod tests {
             "GET /repos/{owner}/{repo}/actions/workflows",
             "GET /repos/{owner}/{repo}/actions/workflows/{workflow_id}/runs",
             "GET /repos/{owner}/{repo}/actions/runs/{run_id}/attempts/1/jobs",
-            "workflow path",
-            "exact rendered job name",
-            "runner_group_id",
-            "normalized/sorted runner labels",
             "run_attempt != 1",
             "ambiguous-provider-job-identity",
             "job-requires-partitioning",
