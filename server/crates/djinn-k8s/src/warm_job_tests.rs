@@ -410,11 +410,14 @@ fn durable_attempt_stamp_reaches_leased_and_unleased_pods_without_renaming_them(
             .and_then(|spec| spec.containers.first())
             .and_then(|container| container.env.as_ref())
             .expect("warmer env");
-        assert!(env.iter().any(|entry| entry.name == ENV_WARM_ATTEMPT_ID
-            && entry.value.as_deref() == Some("019fc384-c2d5-7460-aeed-5a168b112b03")));
         assert!(
             env.iter()
-                .any(|entry| entry.name == ENV_WARM_ATTEMPT_DEADLINE_AT
+                .any(|entry| entry.name == ENV_WARM_GRAPH_ATTEMPT_ID
+                    && entry.value.as_deref() == Some("019fc384-c2d5-7460-aeed-5a168b112b03"))
+        );
+        assert!(
+            env.iter()
+                .any(|entry| entry.name == ENV_WARM_GRAPH_ATTEMPT_DEADLINE
                     && entry.value.as_deref() == Some("2026-08-02T17:30:00Z"))
         );
     }
