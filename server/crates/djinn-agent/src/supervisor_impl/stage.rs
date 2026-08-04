@@ -65,6 +65,7 @@
 use std::sync::Arc;
 
 use djinn_core::models::{SessionFailureCause, SessionStatus, Task};
+use djinn_core::tool_error::ToolError;
 use djinn_db::ProjectRepository;
 use djinn_runtime::spec::{RoleKind, TaskRunSpec};
 use djinn_supervisor::{ParkReason, StageError, StageOutcome, SupervisorServices};
@@ -163,6 +164,10 @@ fn reply_loop_failure_cause(error: &anyhow::Error) -> SessionFailureCause {
         || error.downcast_ref::<LoopGuardError>().is_some()
     {
         SessionFailureCause::Protocol
+    } else if error.downcast_ref::<ToolError>().is_some() {
+        // Tool/MCP failures retain this structured envelope through the reply
+        // loop. Do not inspect display text, which is arbitrary diagnostic data.
+        SessionFailureCause::Harness
     } else {
         SessionFailureCause::Unknown
     }
@@ -600,16 +605,46 @@ fn stage_outcome_for_reply_loop_guard_error(error: &LoopGuardError) -> StageOutc
 
 fn session_settlement_for_stage_outcome(
     stage_outcome: &StageOutcome,
-    final_result_ok: bool,
+    failure_cause: Option<SessionFailureCause>,
 ) -> (SessionStatus, Option<String>) {
     match stage_outcome {
         StageOutcome::Parked {
             reason: ParkReason::Budget,
             ..
         } => (SessionStatus::Completed, Some("budget".to_string())),
-        _ if final_result_ok => (SessionStatus::Completed, None),
-        _ => (SessionStatus::Failed, None),
+        // A reply loop may complete while its finalization is invalid. The
+        // sidecar is authoritative, so that must remain a failed session.
+        _ if failure_cause.is_some() => (SessionStatus::Failed, None),
+        _ => (SessionStatus::Completed, None),
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn settle_stage_session(
+    services: &dyn SupervisorServices,
+    session_id: String,
+    stage_settlement: &StageSettlement,
+    tokens_in: i64,
+    tokens_out: i64,
+    cache_read: i64,
+    cache_write: i64,
+) -> Result<(), String> {
+    let (session_status, parked_reason) = session_settlement_for_stage_outcome(
+        &stage_settlement.outcome,
+        stage_settlement.failure_cause,
+    );
+    services
+        .update_session_status_v2(
+            session_id,
+            session_status,
+            tokens_in,
+            tokens_out,
+            cache_read,
+            cache_write,
+            parked_reason,
+            stage_settlement.failure_cause,
+        )
+        .await
 }
 
 /// Read-only multi-repo: resolve the epic's read-source projects to slugs/names
@@ -1757,20 +1792,16 @@ pub(crate) async fn execute_stage(
         reply_failure_cause,
         role_kind,
     );
-    let (session_status, parked_reason) =
-        session_settlement_for_stage_outcome(&stage_settlement.outcome, final_result_ok);
-    if let Err(e) = services
-        .update_session_status_v2(
-            session_id.clone(),
-            session_status,
-            tokens_in,
-            tokens_out,
-            cache_read,
-            cache_write,
-            parked_reason,
-            stage_settlement.failure_cause,
-        )
-        .await
+    if let Err(e) = settle_stage_session(
+        services,
+        session_id.clone(),
+        &stage_settlement,
+        tokens_in,
+        tokens_out,
+        cache_read,
+        cache_write,
+    )
+    .await
     {
         tracing::warn!(
             session_id = %session_id,
@@ -1901,6 +1932,222 @@ fn worker_stage_outcome(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct RecordedSettlement {
+        status: SessionStatus,
+        parked_reason: Option<String>,
+        failure_cause: Option<SessionFailureCause>,
+    }
+
+    struct RecordingServices {
+        cancel: tokio_util::sync::CancellationToken,
+        settlements: Mutex<Vec<RecordedSettlement>>,
+    }
+
+    impl RecordingServices {
+        fn new() -> Self {
+            Self {
+                cancel: tokio_util::sync::CancellationToken::new(),
+                settlements: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl SupervisorServices for RecordingServices {
+        fn cancel(&self) -> &tokio_util::sync::CancellationToken {
+            &self.cancel
+        }
+
+        async fn load_task(&self, _: String) -> Result<Task, String> {
+            unimplemented!()
+        }
+
+        async fn execute_stage(
+            &self,
+            _: &Task,
+            _: &Workspace,
+            _: RoleKind,
+            _: &str,
+            _: &TaskRunSpec,
+        ) -> Result<StageOutcome, StageError> {
+            unimplemented!()
+        }
+
+        async fn open_pr(
+            &self,
+            _: &TaskRunSpec,
+            _: &Task,
+        ) -> djinn_supervisor::TaskRunOutcome {
+            unimplemented!()
+        }
+
+        async fn create_task_run(
+            &self,
+            _: djinn_supervisor::services::SerializableCreateTaskRunParams,
+        ) -> Result<(), String> {
+            unimplemented!()
+        }
+
+        async fn update_task_run_status(
+            &self,
+            _: String,
+            _: djinn_core::models::TaskRunStatus,
+        ) -> Result<(), String> {
+            unimplemented!()
+        }
+
+        async fn get_model_context_window(&self, _: String) -> Result<i64, String> {
+            unimplemented!()
+        }
+
+        async fn get_provider_base_url(&self, _: String) -> Result<String, String> {
+            unimplemented!()
+        }
+
+        async fn pick_any_default_model(&self) -> Result<Option<String>, String> {
+            unimplemented!()
+        }
+
+        async fn create_session(
+            &self,
+            _: djinn_supervisor::services::SerializableCreateSessionParams,
+        ) -> Result<djinn_core::models::SessionRecord, String> {
+            unimplemented!()
+        }
+
+        async fn publish_session_message(
+            &self,
+            _: String,
+            _: String,
+            _: String,
+            _: serde_json::Value,
+        ) -> Result<(), String> {
+            unimplemented!()
+        }
+
+        async fn get_environment_config(
+            &self,
+            _: String,
+        ) -> Result<djinn_stack::environment::EnvironmentConfig, String> {
+            unimplemented!()
+        }
+
+        async fn invoke_llm(
+            &self,
+            _: String,
+            _: Conversation,
+            _: Vec<serde_json::Value>,
+            _: Option<djinn_provider::provider::ToolChoice>,
+        ) -> Result<djinn_provider::provider::LlmResponse, String> {
+            unimplemented!()
+        }
+
+        async fn update_session_status(
+            &self,
+            _: String,
+            _: SessionStatus,
+            _: i64,
+            _: i64,
+            _: i64,
+            _: i64,
+            _: Option<String>,
+        ) -> Result<(), String> {
+            unimplemented!()
+        }
+
+        async fn update_session_status_v2(
+            &self,
+            _: String,
+            status: SessionStatus,
+            _: i64,
+            _: i64,
+            _: i64,
+            _: i64,
+            parked_reason: Option<String>,
+            failure_cause: Option<SessionFailureCause>,
+        ) -> Result<(), String> {
+            self.settlements.lock().unwrap().push(RecordedSettlement {
+                status,
+                parked_reason,
+                failure_cause,
+            });
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn v2_settlement_records_every_cause_and_never_diagnostics() {
+        let services = RecordingServices::new();
+        for cause in [
+            SessionFailureCause::Cancelled,
+            SessionFailureCause::Provider,
+            SessionFailureCause::Harness,
+            SessionFailureCause::Protocol,
+            SessionFailureCause::Finalization,
+            SessionFailureCause::Unknown,
+        ] {
+            settle_stage_session(
+                &services,
+                "session".into(),
+                &StageSettlement::failed(
+                    StageOutcome::Failed {
+                        reason: "provider diagnostic: sk-live-credential-must-not-persist".into(),
+                        provider_failure: None,
+                    },
+                    cause,
+                ),
+                0,
+                0,
+                0,
+                0,
+            )
+            .await
+            .unwrap();
+        }
+        let recorded = services.settlements.lock().unwrap();
+        assert_eq!(recorded.len(), 6);
+        for (entry, cause) in recorded.iter().zip([
+            SessionFailureCause::Cancelled,
+            SessionFailureCause::Provider,
+            SessionFailureCause::Harness,
+            SessionFailureCause::Protocol,
+            SessionFailureCause::Finalization,
+            SessionFailureCause::Unknown,
+        ]) {
+            assert_eq!(entry.status, SessionStatus::Failed);
+            assert_eq!(entry.failure_cause, Some(cause));
+            assert_eq!(entry.parked_reason, None);
+        }
+    }
+
+    #[tokio::test]
+    async fn v2_settlement_records_none_for_completed_budget_and_setup_harness() {
+        let services = RecordingServices::new();
+        settle_stage_session(
+            &services,
+            "completed".into(),
+            &StageSettlement::completed(StageOutcome::WorkerDone),
+            0, 0, 0, 0,
+        ).await.unwrap();
+        settle_stage_session(
+            &services,
+            "budget".into(),
+            &StageSettlement::completed(StageOutcome::Parked {
+                reason: ParkReason::Budget, summary: None, wind_down_ignored: false,
+                session_id: "budget".into(), tokens_in: 0, tokens_out: 0,
+            }),
+            0, 0, 0, 0,
+        ).await.unwrap();
+        mark_session_failed(&services, "setup", SessionFailureCause::Harness).await;
+        assert_eq!(*services.settlements.lock().unwrap(), vec![
+            RecordedSettlement { status: SessionStatus::Completed, parked_reason: None, failure_cause: None },
+            RecordedSettlement { status: SessionStatus::Completed, parked_reason: Some("budget".into()), failure_cause: None },
+            RecordedSettlement { status: SessionStatus::Failed, parked_reason: None, failure_cause: Some(SessionFailureCause::Harness) },
+        ]);
+    }
 
     #[tokio::test]
     async fn pre_session_gate_blocks_until_explicit_release() {
@@ -2292,7 +2539,7 @@ mod tests {
         };
 
         assert_eq!(
-            session_settlement_for_stage_outcome(&ignored_outcome, false),
+            session_settlement_for_stage_outcome(&ignored_outcome, None),
             (SessionStatus::Completed, Some("budget".to_string())),
             "typed ignored budget wind-downs must settle as completed parks, not failures"
         );
@@ -2306,7 +2553,7 @@ mod tests {
             tokens_out: 5,
         };
         assert_eq!(
-            session_settlement_for_stage_outcome(&summary_outcome, true),
+            session_settlement_for_stage_outcome(&summary_outcome, None),
             (SessionStatus::Completed, Some("budget".to_string()))
         );
     }
@@ -2314,7 +2561,7 @@ mod tests {
     #[test]
     fn non_budget_stage_settlement_keeps_existing_success_and_failure_statuses() {
         assert_eq!(
-            session_settlement_for_stage_outcome(&StageOutcome::WorkerDone, true),
+            session_settlement_for_stage_outcome(&StageOutcome::WorkerDone, None),
             (SessionStatus::Completed, None)
         );
         assert_eq!(
@@ -2323,7 +2570,7 @@ mod tests {
                     reason: "ordinary failure".to_string(),
                     provider_failure: None,
                 },
-                false,
+                Some(SessionFailureCause::Unknown),
             ),
             (SessionStatus::Failed, None)
         );
