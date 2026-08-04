@@ -73,6 +73,9 @@ pub struct DisposeTypedEvidenceInput {
     pub disposition: TribunalEvidenceLifecycle,
     pub judge_task_id: String,
     pub rationale: String,
+    /// A withdrawal needs an explicit, machine-checkable assertion in addition
+    /// to its rationale: it may only remove non-load-bearing uncertainty.
+    pub withdrawal_is_non_load_bearing: bool,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TypedEvidenceFindingProjection {
@@ -128,8 +131,7 @@ impl TypedEvidenceRepository {
             let id: String = row.get("id");
             return Ok(TypedEvidenceFindingProjection { finding: finding(&row)?, active_attempt_id: active_attempt(tx, &id).await? });
         }
-        let conflict: Option<String> = sqlx::query_scalar("SELECT id FROM typed_evidence_findings WHERE proposal_id=$1 AND lifecycle IN ('demanded','spike_active','evidence_received','failed') LIMIT 1").bind(&input.proposal_id).fetch_optional(&mut **tx).await?;
-        if conflict.is_some() {
+        if Self::has_unresolved_in_transaction(tx, &input.proposal_id).await? {
             return Err(Error::InvalidTransition("active_evidence_conflict".into()));
         }
         let row = sqlx::query("INSERT INTO typed_evidence_findings (id,proposal_id,demand_hash,lifecycle,claim,demanded_revision_seq,created_by_task_id) VALUES ($1,$2,$3,'demanded',$4,$5,$6) RETURNING id,proposal_id,demand_hash,lifecycle,claim,demanded_revision_seq,created_by_task_id,created_at,updated_at").bind(&input.finding_id).bind(&input.proposal_id).bind(&input.demand_hash).bind(&input.claim).bind(input.demanded_revision_seq).bind(&input.judge_task_id).fetch_one(&mut **tx).await?;
@@ -138,6 +140,22 @@ impl TypedEvidenceRepository {
             finding: finding(&row)?,
             active_attempt_id: None,
         })
+    }
+
+    /// Returns the proposal-wide unresolved projection. `demanded_revision_seq`
+    /// is provenance only, so a finding remains unresolved across later
+    /// proposal revisions until a terminal disposition is recorded.
+    pub async fn has_unresolved_in_transaction(
+        tx: &mut Transaction<'_, Postgres>,
+        proposal_id: &str,
+    ) -> Result<bool> {
+        nonempty(&[proposal_id])?;
+        Ok(sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM typed_evidence_findings WHERE proposal_id=$1 AND lifecycle IN ('demanded','spike_active','evidence_received','failed'))",
+        )
+        .bind(proposal_id)
+        .fetch_one(&mut **tx)
+        .await?)
     }
 
     pub async fn allocate_attempt_in_transaction(
@@ -179,6 +197,18 @@ impl TypedEvidenceRepository {
 
     /// Appends the fact and advances only the materialized current lifecycle.
     pub async fn append_transition_in_transaction(
+        tx: &mut Transaction<'_, Postgres>,
+        input: AppendTypedEvidenceTransitionInput,
+    ) -> Result<()> {
+        if input.to_lifecycle.is_terminal() {
+            return Err(Error::InvalidTransition(
+                "terminal transitions require dispose_in_transaction".into(),
+            ));
+        }
+        Self::append_transition(tx, input).await
+    }
+
+    async fn append_transition(
         tx: &mut Transaction<'_, Postgres>,
         input: AppendTypedEvidenceTransitionInput,
     ) -> Result<()> {
@@ -230,6 +260,13 @@ impl TypedEvidenceRepository {
             &input.judge_task_id,
             &input.rationale,
         ])?;
+        if input.disposition == TribunalEvidenceLifecycle::Withdrawn
+            && !input.withdrawal_is_non_load_bearing
+        {
+            return Err(Error::InvalidData(
+                "withdrawal requires non-load-bearing assertion".into(),
+            ));
+        }
         let row=sqlx::query("SELECT proposal_id,created_by_task_id,lifecycle FROM typed_evidence_findings WHERE id=$1 FOR UPDATE").bind(&input.finding_id).fetch_optional(&mut **tx).await?.ok_or_else(|| Error::InvalidData("finding not found".into()))?;
         if row.get::<String, _>("created_by_task_id") != input.judge_task_id {
             return Err(Error::InvalidData("Judge attribution required".into()));
@@ -247,7 +284,7 @@ impl TypedEvidenceRepository {
         .bind(&input.finding_id)
         .fetch_one(&mut **tx)
         .await?;
-        Self::append_transition_in_transaction(
+        Self::append_transition(
             tx,
             AppendTypedEvidenceTransitionInput {
                 id: input.transition_id,
@@ -256,7 +293,10 @@ impl TypedEvidenceRepository {
                 from_lifecycle: Some(state),
                 to_lifecycle: input.disposition,
                 actor_task_id: Some(input.judge_task_id.clone()),
-                metadata: serde_json::json!({"rationale":input.rationale}),
+                metadata: serde_json::json!({
+                    "rationale": input.rationale,
+                    "withdrawal_is_non_load_bearing": input.withdrawal_is_non_load_bearing,
+                }),
             },
         )
         .await?;

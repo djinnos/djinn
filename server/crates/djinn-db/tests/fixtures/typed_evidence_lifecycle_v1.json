@@ -7,5 +7,14 @@
     ["evidence_received", "withdrawn"], ["failed", "spike_active"], ["failed", "withdrawn"]
   ],
   "unresolved": ["demanded", "spike_active", "evidence_received", "failed"],
+  "terminal_controls": {
+    "generic_transition_error": "terminal transitions require dispose_in_transaction",
+    "resolved_requires": ["judge_attribution", "committed_folding_revision"],
+    "withdrawn_requires": ["judge_attribution", "committed_folding_revision", "nonempty_rationale", "non_load_bearing_assertion"]
+  },
+  "scenarios": [
+    "identical_demand_idempotent", "distinct_demand_no_write_conflict",
+    "cross_revision_n_n1_n2_blocking", "append_only_history"
+  ],
   "conflict_error": "active_evidence_conflict"
 }
