@@ -167,6 +167,87 @@ async fn tribunal_evidence_return_v1_every_fixture_is_submitted_and_normalized()
                 .unwrap();
         assert_eq!(outcome, c["expected_outcome"].as_str().unwrap());
         if c["name"] == "unresolved_all_anchor_families" {
+            let checks: Vec<(String, String, Option<String>)> = sqlx::query_as(
+                "SELECT p.check_id,c.status,c.detail FROM typed_evidence_check_results c JOIN typed_evidence_planned_checks p ON p.id=c.planned_check_id ORDER BY p.ordinal",
+            )
+            .fetch_all(db.pool())
+            .await
+            .unwrap();
+            assert_eq!(
+                checks,
+                vec![
+                    ("code".into(), "passed".into(), None),
+                    (
+                        "graph".into(),
+                        "failed".into(),
+                        Some("graph lookup failed".into()),
+                    ),
+                    (
+                        "command".into(),
+                        "not_run".into(),
+                        Some("no command".into())
+                    ),
+                ]
+            );
+            let findings: Vec<(String, String, bool)> = sqlx::query_as(
+                "SELECT p.check_id,f.conclusion,f.usable FROM typed_evidence_return_findings f JOIN typed_evidence_planned_checks p ON p.id=f.planned_check_id",
+            )
+            .fetch_all(db.pool())
+            .await
+            .unwrap();
+            assert_eq!(
+                findings,
+                vec![("code".into(), "code canonical but unobserved".into(), false)]
+            );
+            let issues: Vec<(String, String, String, String)> = sqlx::query_as(
+                "SELECT p.check_id,i.kind,i.code,i.detail FROM typed_evidence_issues i JOIN typed_evidence_planned_checks p ON p.id=i.planned_check_id ORDER BY i.kind",
+            )
+            .fetch_all(db.pool())
+            .await
+            .unwrap();
+            assert_eq!(
+                issues,
+                vec![
+                    (
+                        "graph".into(),
+                        "failure".into(),
+                        "graph_lookup_failed".into(),
+                        "graph lookup failed".into(),
+                    ),
+                    (
+                        "command".into(),
+                        "gap".into(),
+                        "not_run".into(),
+                        "no command".into(),
+                    ),
+                ]
+            );
+            let anchors: Vec<(String, String, String, bool)> = sqlx::query_as(
+                "SELECT a.method,a.locator,h.health,h.method_compatible FROM typed_evidence_anchors a JOIN typed_evidence_anchor_health h ON h.anchor_id=a.id ORDER BY a.method,a.locator",
+            )
+            .fetch_all(db.pool())
+            .await
+            .unwrap();
+            assert_eq!(anchors.len(), 7);
+            assert!(
+                anchors
+                    .iter()
+                    .all(|(_, _, health, compatible)| health == "unusable" && *compatible)
+            );
+            assert!(
+                anchors
+                    .iter()
+                    .any(|(method, locator, _, _)| method == "code"
+                        && locator == "code:src/lib.rs@abcdef1#L1-2")
+            );
+            assert!(
+                anchors
+                    .iter()
+                    .any(|(method, locator, _, _)| method == "graph"
+                        && locator == "graph:00000000-0000-0000-0000-000000000000")
+            );
+            assert!(anchors.iter().any(|(method, locator, _, _)| method == "external"
+                && locator == "external:https://example.test/evidence#sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
             let h: Vec<String> =
                 sqlx::query_scalar("SELECT health FROM typed_evidence_anchor_health")
                     .fetch_all(db.pool())
