@@ -367,43 +367,48 @@ impl TypedEvidenceRepository {
             let p = expected[c.check_id.as_str()];
             let result_id = uuid::Uuid::now_v7().to_string();
             sqlx::query("INSERT INTO typed_evidence_check_results (id,validation_result_id,planned_check_id,status,detail) VALUES ($1,$2,$3,$4,$5)").bind(&result_id).bind(&validation_id).bind(&p.id).bind(&c.status).bind(&c.detail).execute(&mut **tx).await?;
+            let mut positive = false;
             if let Some(invocation_id) = &c.invocation_id {
-                let known: bool = sqlx::query_scalar(
-                    "SELECT EXISTS(SELECT 1 FROM evidence_command_invocations WHERE id=$1)",
-                )
-                .bind(invocation_id)
-                .fetch_one(&mut **tx)
-                .await?;
-                if !known {
-                    return Err(v1("unknown_invocation"));
-                }
-                // The immutable reference is retained, but does not establish
-                // positive health before exact anchor-family hydration.
-                sqlx::query("INSERT INTO typed_evidence_invocation_provenance (validation_result_id,check_result_id,invocation_id,usable) VALUES ($1,$2,$3,false)")
-                    .bind(&validation_id)
-                    .bind(&result_id)
-                    .bind(invocation_id)
-                    .execute(&mut **tx)
-                    .await?;
+                let hydrated = hydrate_command_invocation(tx, &payload.attempt_id, p, invocation_id).await?;
+                sqlx::query("INSERT INTO typed_evidence_invocation_provenance (validation_result_id,check_result_id,invocation_id,usable) VALUES ($1,$2,$3,$4)")
+                    .bind(&validation_id).bind(&result_id).bind(invocation_id).bind(hydrated.healthy && hydrated.method_compatible)
+                    .execute(&mut **tx).await?;
+                positive |= hydrated.healthy && hydrated.method_compatible;
             }
-            // Exact anchor-family hydration belongs to the chained follow-up.
-            // Until then no client locator establishes positive anchor health.
             for a in &c.anchors {
                 let id = uuid::Uuid::now_v7().to_string();
+                let hydrated = hydrate_anchor(tx, &payload.attempt_id, p, a).await?;
+                positive |= hydrated.healthy && hydrated.method_compatible;
                 sqlx::query("INSERT INTO typed_evidence_anchors (id,check_result_id,method,locator) VALUES ($1,$2,$3,$4)").bind(&id).bind(&result_id).bind(&a.method).bind(&a.locator).execute(&mut **tx).await?;
-                sqlx::query("INSERT INTO typed_evidence_anchor_health (anchor_id,health,detail) VALUES ($1,'unusable','anchor hydration pending')").bind(&id).execute(&mut **tx).await?;
+                sqlx::query("INSERT INTO typed_evidence_anchor_health (anchor_id,health,detail,immutable_identity,method_compatible) VALUES ($1,$2,$3,$4,$5)")
+                    .bind(&id).bind(hydrated.health()).bind(&hydrated.detail).bind(&hydrated.identity).bind(hydrated.method_compatible).execute(&mut **tx).await?;
             }
-            check_healthy.insert(c.check_id.as_str(), false);
+            check_healthy.insert(c.check_id.as_str(), c.status == "passed" && positive);
         }
         for f in &payload.findings {
             let p = expected[f.check_id.as_str()];
             let finding_id = uuid::Uuid::now_v7().to_string();
-            sqlx::query("INSERT INTO typed_evidence_return_findings (id,validation_result_id,planned_check_id,conclusion,usable) VALUES ($1,$2,$3,$4,false)").bind(&finding_id).bind(&validation_id).bind(&p.id).bind(&f.conclusion).execute(&mut **tx).await?;
+            let mut positive = false;
             for a in &f.anchors {
-                sqlx::query("INSERT INTO typed_evidence_return_finding_anchors (id,finding_id,method,locator,health,immutable_identity,detail) VALUES ($1,$2,$3,$4,'unusable',$5,'anchor hydration pending')").bind(uuid::Uuid::now_v7().to_string()).bind(&finding_id).bind(&a.method).bind(&a.locator).bind(serde_json::json!({"attempt_id":payload.attempt_id,"planned_check_id":p.id,"evidence_plan_id":p.evidence_plan_id,"spike_task_id":payload.spike_task_id})).execute(&mut **tx).await?;
+                let hydrated = hydrate_anchor(tx, &payload.attempt_id, p, a).await?;
+                positive |= hydrated.healthy && hydrated.method_compatible;
+                sqlx::query("INSERT INTO typed_evidence_return_finding_anchors (id,finding_id,method,locator,health,immutable_identity,detail,method_compatible) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)")
+                    .bind(uuid::Uuid::now_v7().to_string()).bind(&finding_id).bind(&a.method).bind(&a.locator).bind(hydrated.health()).bind(&hydrated.identity).bind(&hydrated.detail).bind(hydrated.method_compatible).execute(&mut **tx).await?;
             }
+            sqlx::query("INSERT INTO typed_evidence_return_findings (id,validation_result_id,planned_check_id,conclusion,usable) VALUES ($1,$2,$3,$4,$5)")
+                .bind(&finding_id).bind(&validation_id).bind(&p.id).bind(&f.conclusion).bind(positive).execute(&mut **tx).await?;
         }
-        let result_outcome = TribunalEvidenceOutcome::Unresolved;
+        let any_positive = check_healthy.values().any(|usable| *usable);
+        let all_passed_usable = payload.checks.iter().all(|c| {
+            c.status == "passed" && check_healthy.get(c.check_id.as_str()).copied().unwrap_or(false)
+        });
+        let result_outcome = if all_passed_usable {
+            TribunalEvidenceOutcome::Resolved
+        } else if any_positive {
+            TribunalEvidenceOutcome::Partial
+        } else {
+            TribunalEvidenceOutcome::Unresolved
+        };
         sqlx::query("UPDATE typed_evidence_validation_results SET outcome=$1,validator_facts=$2 WHERE id=$3").bind(outcome(result_outcome)).bind(serde_json::json!({"validator_version":"TribunalEvidenceReturnV1","raw_payload_sha256":hash,"server_hydrated":true,"outcome":outcome(result_outcome)})).bind(&validation_id).execute(&mut **tx).await?;
         for i in &payload.failures {
             let p = expected[i.check_id.as_str()];
@@ -688,6 +693,60 @@ fn planned_method(value: TribunalEvidenceAnchorMethod) -> &'static str {
         TribunalEvidenceAnchorMethod::Command => "command",
         _ => unreachable!("planned checks only permit code, graph, or command"),
     }
+}
+#[derive(Debug)]
+struct HydratedAnchor {
+    healthy: bool,
+    method_compatible: bool,
+    identity: serde_json::Value,
+    detail: String,
+}
+impl HydratedAnchor {
+    fn unusable(detail: impl Into<String>, identity: serde_json::Value) -> Self {
+        Self { healthy: false, method_compatible: false, identity, detail: detail.into() }
+    }
+    fn health(&self) -> &'static str {
+        if self.healthy && self.method_compatible { "healthy" } else { "unusable" }
+    }
+}
+/// Resolve only canonical locators against server-owned rows scoped to this
+/// frozen attempt/check. Finalized JSON is never searched for caller text.
+async fn hydrate_anchor(
+    tx: &mut Transaction<'_, Postgres>, attempt_id: &str,
+    planned: &TribunalEvidencePlannedCheck, anchor: &TribunalEvidenceReturnAnchorV1,
+) -> Result<HydratedAnchor> {
+    let scope = serde_json::json!({"attempt_id":attempt_id,"planned_check_id":planned.id,"evidence_plan_id":planned.evidence_plan_id});
+    let compatible = matches!((planned_method(planned.method), anchor.method.as_str()),
+        ("code", "code" | "repository") | ("graph", "graph" | "repository") | ("command", "command" | "artifact" | "memory" | "external"));
+    if !compatible { return Ok(HydratedAnchor::unusable("anchor method incompatible with planned check", scope)); }
+    let Some((family, opaque)) = anchor.locator.split_once(':') else { return Ok(HydratedAnchor::unusable("locator is not canonical", scope)); };
+    if family != anchor.method || opaque.trim().is_empty() || opaque.contains(char::is_whitespace) { return Ok(HydratedAnchor::unusable("locator family is not canonical", scope)); }
+    if anchor.method == "command" { return hydrate_command_invocation(tx, attempt_id, planned, opaque).await; }
+    if anchor.method == "repository" {
+        let Some((plan_id, commit)) = opaque.split_once(':') else { return Ok(HydratedAnchor::unusable("repository locator requires plan and commit", scope)); };
+        let row = sqlx::query("SELECT captured_commit_sha FROM evidence_plans WHERE id=$1").bind(plan_id).fetch_optional(&mut **tx).await?;
+        return Ok(match row {
+            Some(row) if planned.evidence_plan_id.as_deref() == Some(plan_id) && row.get::<String, _>("captured_commit_sha") == commit => HydratedAnchor { healthy: true, method_compatible: true, identity: serde_json::json!({"evidence_plan_id":plan_id,"captured_commit_sha":commit}), detail: "exact frozen repository identity".into() },
+            _ => HydratedAnchor::unusable("repository identity is not owned by this planned check", scope),
+        });
+    }
+    let row = sqlx::query("SELECT immutable_identity,health,detail FROM typed_evidence_anchor_sources WHERE attempt_id=$1 AND planned_check_id=$2 AND family=$3 AND locator=$4").bind(attempt_id).bind(&planned.id).bind(&anchor.method).bind(&anchor.locator).fetch_optional(&mut **tx).await?;
+    Ok(match row {
+        Some(row) => HydratedAnchor { healthy: row.get::<String, _>("health") == "healthy", method_compatible: true, identity: row.get("immutable_identity"), detail: row.get::<Option<String>, _>("detail").unwrap_or_else(|| "exact server-owned anchor source".into()) },
+        None => HydratedAnchor::unusable("no exact server-owned anchor source", scope),
+    })
+}
+async fn hydrate_command_invocation(
+    tx: &mut Transaction<'_, Postgres>, attempt_id: &str,
+    planned: &TribunalEvidencePlannedCheck, invocation_id: &str,
+) -> Result<HydratedAnchor> {
+    let scope = serde_json::json!({"attempt_id":attempt_id,"planned_check_id":planned.id,"invocation_id":invocation_id});
+    if planned_method(planned.method) != "command" { return Ok(HydratedAnchor::unusable("command invocation incompatible with planned check", scope)); }
+    let row = sqlx::query("SELECT plan_id,check_id,launch_state,process_state,exit_code,timed_out,captured_commit_sha FROM evidence_command_invocations WHERE id=$1").bind(invocation_id).fetch_optional(&mut **tx).await?.ok_or_else(|| v1("unknown_invocation"))?;
+    let plan_id: String = row.get("plan_id"); let check_id: String = row.get("check_id");
+    let owned = planned.evidence_plan_id.as_deref() == Some(plan_id.as_str()) && planned.evidence_plan_check_id.as_deref() == Some(check_id.as_str());
+    let healthy = owned && row.get::<String, _>("launch_state") == "launched" && row.get::<String, _>("process_state") == "exited" && row.get::<Option<i32>, _>("exit_code") == Some(0) && !row.get::<bool, _>("timed_out");
+    Ok(HydratedAnchor { healthy, method_compatible: owned, identity: serde_json::json!({"invocation_id":invocation_id,"evidence_plan_id":plan_id,"evidence_plan_check_id":check_id,"captured_commit_sha":row.get::<String,_>("captured_commit_sha")}), detail: if healthy { "exact successful command invocation".into() } else { "invocation is cross-plan, cross-check, or unhealthy".into() } })
 }
 fn method(s: &str) -> Result<TribunalEvidenceAnchorMethod> {
     match s {
