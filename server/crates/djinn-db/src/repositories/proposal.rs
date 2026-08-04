@@ -114,6 +114,33 @@ pub struct ProposalListSummaryRow {
     pub target_count: i64,
 }
 
+/// One stable feedback root that currently blocks proposal readiness.
+///
+/// A root occurs at most once even when it has several uncaptured rows and/or
+/// several unresolved materialized generations. `debate_entry_ids` contains
+/// every still-open materialized generation linked to the root; an empty list
+/// means the blocker is uncaptured feedback only.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ActionableFeedbackThread {
+    pub root_feedback_id: String,
+    pub debate_entry_ids: Vec<String>,
+}
+
+/// Repository-owned readiness projection for feedback-derived blockers.
+///
+/// This exposes stable root and debate identities so readiness callers can
+/// present actionable diagnostics without duplicating generation SQL.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ActionableFeedbackReadiness {
+    pub threads: Vec<ActionableFeedbackThread>,
+}
+
+impl ActionableFeedbackReadiness {
+    pub fn blocking_thread_count(&self) -> i64 {
+        self.threads.len() as i64
+    }
+}
+
 pub struct ProposalCreateInput<'a> {
     pub title: &'a str,
     pub body: &'a str,
@@ -1895,6 +1922,92 @@ impl ProposalRepository {
         }
     }
 
+    /// Project blocking feedback onto stable roots. This sole predicate powers
+    /// detailed readiness as well as every list count.
+    async fn actionable_feedback_threads_for(
+        &self,
+        proposal_ids: &[String],
+    ) -> Result<HashMap<String, ActionableFeedbackReadiness>> {
+        let rows = sqlx::query_as::<_, (String, String, Option<String>)>(
+            r#"WITH RECURSIVE ancestry AS (
+                    SELECT f.proposal_id, f.id AS feedback_id, f.id AS root_feedback_id,
+                           f.parent_id, ARRAY[f.id::VARCHAR]::VARCHAR[] AS path
+                    FROM proposal_feedback f WHERE f.proposal_id = ANY($1)
+                  UNION ALL
+                    SELECT a.proposal_id, a.feedback_id, parent.id, parent.parent_id,
+                           a.path || parent.id::VARCHAR
+                    FROM ancestry a JOIN proposal_feedback parent
+                      ON parent.id = a.parent_id AND parent.proposal_id = a.proposal_id
+                    WHERE NOT parent.id = ANY(a.path)
+                ), stable_roots AS (
+                    SELECT DISTINCT ON (proposal_id, feedback_id)
+                           proposal_id, feedback_id, root_feedback_id
+                    FROM ancestry
+                    ORDER BY proposal_id, feedback_id, array_length(path, 1) DESC
+                ), actionable AS (
+                    SELECT r.proposal_id, r.root_feedback_id, NULL::VARCHAR AS debate_entry_id
+                    FROM stable_roots r JOIN proposal_feedback f ON f.id = r.feedback_id
+                    WHERE f.severity = 'blocking' AND f.resolved_at IS NULL
+                      AND f.withdrawn_at IS NULL
+                      AND NOT EXISTS (SELECT 1 FROM proposal_feedback_refinement_sources s
+                                      WHERE s.source_feedback_id = f.id)
+                  UNION
+                    SELECT i.proposal_id, i.root_feedback_id, i.debate_entry_id
+                    FROM proposal_feedback_refinement_injections i
+                    JOIN proposal_debate_trail d ON d.id = i.debate_entry_id
+                    WHERE i.proposal_id = ANY($1) AND i.state = 'injected'
+                      AND (d.resolved_at IS NULL OR d.reopened_at IS NOT NULL)
+                      AND EXISTS (
+                          SELECT 1 FROM proposal_feedback_refinement_sources s
+                          JOIN proposal_feedback f ON f.id = s.source_feedback_id
+                          WHERE s.injection_id = i.id AND s.source_severity = 'blocking'
+                            AND f.withdrawn_at IS NULL
+                      )
+                )
+                SELECT proposal_id, root_feedback_id, debate_entry_id FROM actionable
+                ORDER BY proposal_id, root_feedback_id, debate_entry_id"#,
+        )
+        .bind(proposal_ids)
+        .fetch_all(self.db.pool())
+        .await?;
+
+        let mut out: HashMap<String, ActionableFeedbackReadiness> = HashMap::new();
+        for (proposal_id, root_feedback_id, debate_entry_id) in rows {
+            let readiness = out.entry(proposal_id).or_default();
+            let thread = match readiness
+                .threads
+                .iter_mut()
+                .find(|thread| thread.root_feedback_id == root_feedback_id)
+            {
+                Some(thread) => thread,
+                None => {
+                    readiness.threads.push(ActionableFeedbackThread {
+                        root_feedback_id,
+                        debate_entry_ids: Vec::new(),
+                    });
+                    readiness.threads.last_mut().expect("just pushed a thread")
+                }
+            };
+            if let Some(debate_entry_id) = debate_entry_id {
+                thread.debate_entry_ids.push(debate_entry_id);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Return feedback-derived readiness blockers with stable root and debate IDs.
+    pub async fn actionable_feedback_readiness(
+        &self,
+        proposal_id: &str,
+    ) -> Result<ActionableFeedbackReadiness> {
+        self.db.ensure_initialized().await?;
+        Ok(self
+            .actionable_feedback_threads_for(&[proposal_id.to_owned()])
+            .await?
+            .remove(proposal_id)
+            .unwrap_or_default())
+    }
+
     // ── Listing ──────────────────────────────────────────────────────────────
 
     pub async fn list_filtered(&self, query: ProposalListQuery) -> Result<ProposalListResult> {
@@ -1919,13 +2032,12 @@ impl ProposalRepository {
         let limit_ph = format!("${}", params.len() + 1);
         let offset_ph = format!("${}", params.len() + 2);
         // NOTE: dynamic SQL (WHERE + ORDER built from optional filters) — compile-time check not possible.
-        // The correlated subquery counts unresolved feedback per row (cheap via
-        // the `proposal_feedback_unresolved` partial index) for the list badge.
+        // Thread counts are batched below through the same predicate used by
+        // detailed feedback readiness.
         let sql = format!(
             r#"SELECT id, short_id, title, body, body_format, acceptance_criteria::text AS acceptance_criteria,
                     status, author_user_id, superseded_by, created_at, updated_at, closed_at, latest_revision_seq, last_reconciled_revision_seq, pending_reconcile, build_owner_user_id, refinement_owner_user_id, build_frozen, build_breakdown_task_id, linked_spike_task_id, needs_evidence_claim,
-                    (SELECT COUNT(*) FROM proposal_feedback pf
-                       WHERE pf.proposal_id = proposals.id AND pf.resolved_at IS NULL) AS unresolved_feedback_count
+                    0::BIGINT AS unresolved_feedback_count
              FROM proposals WHERE {where_sql} ORDER BY {order_sql} LIMIT {limit_ph} OFFSET {offset_ph}"#
         );
         let mut q = sqlx::query_as::<_, ProposalListRow>(&sql);
@@ -1933,13 +2045,23 @@ impl ProposalRepository {
             let SqlParam::Text(s) = p;
             q = q.bind(s.clone());
         }
-        let proposals = q
+        let rows = q
             .bind(query.limit)
             .bind(query.offset)
             .fetch_all(self.db.pool())
-            .await?
+            .await?;
+        let ids: Vec<String> = rows.iter().map(|row| row.proposal.id.clone()).collect();
+        let readiness = self.actionable_feedback_threads_for(&ids).await?;
+        let proposals = rows
             .into_iter()
-            .map(|row| (row.proposal, row.unresolved_feedback_count))
+            .map(|row| {
+                let _legacy_count = row.unresolved_feedback_count;
+                let count = readiness
+                    .get(&row.proposal.id)
+                    .map(ActionableFeedbackReadiness::blocking_thread_count)
+                    .unwrap_or_default();
+                (row.proposal, count)
+            })
             .collect();
 
         Ok(ProposalListResult {
@@ -4245,17 +4367,16 @@ impl ProposalRepository {
             out.entry(id.clone()).or_default();
         }
 
-        // 1. Unresolved blocking non-verdict debate objections per proposal.
-        //    Mirrors `list_unresolved_blocking_debate_entries` (blocking +
-        //    unresolved-or-reopened) but excludes judge verdicts
-        //    (`kind <> 'verdict'`) so the count reflects only outstanding
-        //    objections, not the verdict row itself.
+        // 1. Ordinary unresolved blocking debate objections. Feedback-derived
+        //    entries are counted below from roots, preventing generation rows
+        //    from inflating one feedback thread.
         let blocking_rows = sqlx::query_as::<_, (String, i64)>(
             r#"SELECT proposal_id, COUNT(*) AS n
                FROM proposal_debate_trail
                WHERE proposal_id = ANY($1)
                  AND blocking = true
                  AND kind <> 'verdict'
+                 AND kind <> 'human_feedback'
                  AND (resolved_at IS NULL
                       OR (resolved_at IS NOT NULL AND reopened_at IS NOT NULL))
                GROUP BY proposal_id"#,
@@ -4266,6 +4387,11 @@ impl ProposalRepository {
         for (pid, n) in blocking_rows {
             if let Some(row) = out.get_mut(&pid) {
                 row.unresolved_blocking_count = n;
+            }
+        }
+        for (pid, readiness) in self.actionable_feedback_threads_for(ids).await? {
+            if let Some(row) = out.get_mut(&pid) {
+                row.unresolved_blocking_count += readiness.blocking_thread_count();
             }
         }
 
@@ -5684,6 +5810,279 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(listed.proposals[0].1, 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn readiness_and_list_counts_use_actionable_feedback_threads() {
+        let db = test_db();
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let proposal = repo
+            .create(create_input("Thread-aware readiness"))
+            .await
+            .unwrap();
+        let root = repo
+            .add_feedback(ProposalFeedbackCreateInput {
+                proposal_id: &proposal.id,
+                parent_id: None,
+                author_kind: "user",
+                author_model: None,
+                body: "root",
+            })
+            .await
+            .unwrap();
+        for body in ["reply one", "reply two"] {
+            repo.add_feedback(ProposalFeedbackCreateInput {
+                proposal_id: &proposal.id,
+                parent_id: Some(&root.id),
+                author_kind: "user",
+                author_model: None,
+                body,
+            })
+            .await
+            .unwrap();
+        }
+        let advisory = repo
+            .add_feedback(ProposalFeedbackCreateInput {
+                proposal_id: &proposal.id,
+                parent_id: Some(&root.id),
+                author_kind: "user",
+                author_model: None,
+                body: "advisory context",
+            })
+            .await
+            .unwrap();
+        sqlx::query("UPDATE proposal_feedback SET severity='advisory' WHERE id=$1")
+            .bind(&advisory.id)
+            .execute(db.pool())
+            .await
+            .unwrap();
+        let resolved_root = repo
+            .add_feedback(ProposalFeedbackCreateInput {
+                proposal_id: &proposal.id,
+                parent_id: None,
+                author_kind: "user",
+                author_model: None,
+                body: "resolved root",
+            })
+            .await
+            .unwrap();
+        repo.add_feedback(ProposalFeedbackCreateInput {
+            proposal_id: &proposal.id,
+            parent_id: Some(&resolved_root.id),
+            author_kind: "user",
+            author_model: None,
+            body: "unresolved child",
+        })
+        .await
+        .unwrap();
+        repo.set_feedback_resolved(&resolved_root.id, Some(2))
+            .await
+            .unwrap();
+        let advisory_only = repo
+            .add_feedback(ProposalFeedbackCreateInput {
+                proposal_id: &proposal.id,
+                parent_id: None,
+                author_kind: "user",
+                author_model: None,
+                body: "advisory only",
+            })
+            .await
+            .unwrap();
+        sqlx::query("UPDATE proposal_feedback SET severity='advisory' WHERE id=$1")
+            .bind(&advisory_only.id)
+            .execute(db.pool())
+            .await
+            .unwrap();
+
+        let raw = repo
+            .actionable_feedback_readiness(&proposal.id)
+            .await
+            .unwrap();
+        assert_eq!(
+            raw.blocking_thread_count(),
+            2,
+            "multiple replies and advisory rows deduplicate by stable root"
+        );
+        assert!(
+            raw.threads
+                .iter()
+                .any(|thread| thread.root_feedback_id == root.id)
+        );
+        assert!(
+            raw.threads
+                .iter()
+                .any(|thread| thread.root_feedback_id == resolved_root.id)
+        );
+        assert!(
+            raw.threads
+                .iter()
+                .all(|thread| thread.debate_entry_ids.is_empty())
+        );
+        assert_eq!(
+            repo.list_filtered(ProposalListQuery::default())
+                .await
+                .unwrap()
+                .proposals[0]
+                .1,
+            2
+        );
+        assert_eq!(
+            repo.list_summaries(std::slice::from_ref(&proposal.id))
+                .await
+                .unwrap()[&proposal.id]
+                .unresolved_blocking_count,
+            2
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn readiness_tracks_materialized_late_disposed_and_withdrawn_generations() {
+        let db = test_db();
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let proposal = repo
+            .create(create_input("Generation readiness"))
+            .await
+            .unwrap();
+        let root = repo
+            .add_feedback(ProposalFeedbackCreateInput {
+                proposal_id: &proposal.id,
+                parent_id: None,
+                author_kind: "user",
+                author_model: None,
+                body: "root",
+            })
+            .await
+            .unwrap();
+        let first = repo
+            .capture_feedback_refinement_boundary(&proposal.id)
+            .await
+            .unwrap()
+            .captures
+            .pop()
+            .unwrap();
+        let materialized = repo
+            .actionable_feedback_readiness(&proposal.id)
+            .await
+            .unwrap();
+        assert_eq!(materialized.threads[0].root_feedback_id, root.id);
+        assert_eq!(
+            materialized.threads[0].debate_entry_ids,
+            vec![first.debate_entry.id.clone()]
+        );
+        let late_one = repo
+            .add_feedback(ProposalFeedbackCreateInput {
+                proposal_id: &proposal.id,
+                parent_id: Some(&root.id),
+                author_kind: "user",
+                author_model: None,
+                body: "late one",
+            })
+            .await
+            .unwrap();
+        let late_two = repo
+            .add_feedback(ProposalFeedbackCreateInput {
+                proposal_id: &proposal.id,
+                parent_id: Some(&root.id),
+                author_kind: "user",
+                author_model: None,
+                body: "late two",
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            repo.list_filtered(ProposalListQuery::default())
+                .await
+                .unwrap()
+                .proposals[0]
+                .1,
+            1
+        );
+        assert_eq!(
+            repo.list_summaries(std::slice::from_ref(&proposal.id))
+                .await
+                .unwrap()[&proposal.id]
+                .unresolved_blocking_count,
+            1
+        );
+        repo.dispose_feedback_refinement_generation(FeedbackRefinementDispositionInput {
+            proposal_id: proposal.id.clone(),
+            injection_id: first.injection.id.clone(),
+            root_feedback_id: root.id.clone(),
+            generation: first.injection.generation,
+            debate_entry_id: first.debate_entry.id.clone(),
+            disposition: FeedbackRefinementDisposition::FixedRevision { revision_seq: 2 },
+        })
+        .await
+        .unwrap();
+        let late_raw = repo
+            .actionable_feedback_readiness(&proposal.id)
+            .await
+            .unwrap();
+        assert_eq!(late_raw.blocking_thread_count(), 1);
+        assert!(
+            late_raw.threads[0].debate_entry_ids.is_empty(),
+            "disposed generation does not gate late raw work"
+        );
+        let second = repo
+            .capture_feedback_refinement_boundary(&proposal.id)
+            .await
+            .unwrap()
+            .captures
+            .pop()
+            .unwrap();
+        repo.withdraw_feedback_with_refinement_derivation(&late_one.id, "author")
+            .await
+            .unwrap();
+        let partial = repo
+            .actionable_feedback_readiness(&proposal.id)
+            .await
+            .unwrap();
+        assert_eq!(
+            partial.threads[0].debate_entry_ids,
+            vec![second.debate_entry.id.clone()]
+        );
+        repo.add_debate_trail_entry(ProposalDebateTrailCreateInput {
+            proposal_id: &proposal.id,
+            kind: "verdict",
+            body: "verdict: needs-work",
+            blocking: true,
+            agent_role: "judge",
+            author_kind: "agent",
+            author_model: Some("test"),
+            source_task_id: None,
+            against_revision_seq: 2,
+            round: 2,
+            body_metadata: None,
+        })
+        .await
+        .unwrap();
+        repo.withdraw_feedback_with_refinement_derivation(&late_two.id, "author")
+            .await
+            .unwrap();
+        assert!(
+            repo.actionable_feedback_readiness(&proposal.id)
+                .await
+                .unwrap()
+                .threads
+                .is_empty()
+        );
+        let summary = repo
+            .list_summaries(std::slice::from_ref(&proposal.id))
+            .await
+            .unwrap();
+        assert_eq!(summary[&proposal.id].unresolved_blocking_count, 0);
+        assert_eq!(
+            summary[&proposal.id].latest_judge_verdict_body.as_deref(),
+            Some("verdict: needs-work")
+        );
+        assert_eq!(
+            repo.list_filtered(ProposalListQuery::default())
+                .await
+                .unwrap()
+                .proposals[0]
+                .1,
+            0
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
