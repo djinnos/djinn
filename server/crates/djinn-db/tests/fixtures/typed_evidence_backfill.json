@@ -1,0 +1,4 @@
+{
+  "version": "typed_evidence_backfill_v1",
+  "cases": ["active_claim_only", "active_link_only", "active_claim_and_link", "inactive_control", "idempotent_rerun", "parity_mismatch_fails_closed", "typed_write_rollback", "legacy_write_rollback", "active_task_preservation"]
+}

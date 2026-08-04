@@ -12,6 +12,9 @@ use crate::database::Database;
 use crate::repositories::epic::EpicRepository;
 use crate::repositories::note::NoteRepository;
 use crate::repositories::note::{LexicalSearchBackend, sanitize_postgres_tsquery};
+use crate::repositories::typed_evidence::{
+    DemandTypedEvidenceInput, TypedEvidenceRepository, legacy_demand_hash,
+};
 use crate::{Error, Result};
 
 use djinn_memory::ProposalSearchResult;
@@ -3055,9 +3058,12 @@ impl ProposalRepository {
         Ok(())
     }
 
-    /// Park the proposal for a needs-evidence spike: move status back to
-    /// `draft`, link the spike task, and record the named feasibility claim.
-    /// Emits a `proposal_updated` event.
+    /// Rollback-only compatibility writer for historical opaque claims.
+    ///
+    /// New structured evidence must use
+    /// [`Self::set_structured_needs_evidence_spike`] so typed demand, attempt,
+    /// lifecycle, and legacy authority commit together. This writer deliberately
+    /// remains separate for rollback recovery and is never called by that path.
     pub async fn set_needs_evidence_spike(
         &self,
         proposal_id: &str,
@@ -3089,20 +3095,17 @@ impl ProposalRepository {
     /// sets `linked_spike_task_id` in the same atomic UPDATE. The proposal
     /// status is moved back to `draft` and a `proposal_updated` event fires.
     ///
-    /// Callers that only have an opaque string claim should keep using
-    /// [`Self::set_needs_evidence_spike`]; both methods write the same columns
-    /// and emit the same event.
+    /// Opaque legacy compatibility is intentionally isolated in
+    /// [`Self::set_needs_evidence_spike`] and is not a structured fallback.
     pub async fn set_structured_needs_evidence_spike(
         &self,
         proposal_id: &str,
         spike_task_id: &str,
         claim: &NeedsEvidenceClaim,
     ) -> Result<Proposal> {
-        let json = serde_json::to_string(claim).map_err(|e| {
-            Error::InvalidData(format!("failed to serialize NeedsEvidenceClaim: {e}"))
-        })?;
-        self.set_needs_evidence_spike(proposal_id, spike_task_id, &json)
-            .await
+        self.set_structured_needs_evidence_spike_inner(proposal_id, spike_task_id, claim, false)
+            .await?
+            .ok_or_else(|| Error::InvalidData("proposal not found".into()))
     }
 
     /// Try to atomically link a spike to the proposal only when no existing
@@ -3118,53 +3121,96 @@ impl ProposalRepository {
         spike_task_id: &str,
         claim: &NeedsEvidenceClaim,
     ) -> Result<Option<Proposal>> {
+        self.set_structured_needs_evidence_spike_inner(proposal_id, spike_task_id, claim, true)
+            .await
+    }
+
+    /// The structured public entry points route through this transaction so an
+    /// active legacy link never exists without typed demand and attempt history.
+    async fn set_structured_needs_evidence_spike_inner(
+        &self,
+        proposal_id: &str,
+        spike_task_id: &str,
+        claim: &NeedsEvidenceClaim,
+        only_if_unlinked: bool,
+    ) -> Result<Option<Proposal>> {
         self.db.ensure_initialized().await?;
-        let json = serde_json::to_string(claim).map_err(|e| {
+        if spike_task_id.trim().is_empty()
+            || claim.question.trim().is_empty()
+            || claim.target_subsystem.trim().is_empty()
+            || claim.spec_unknown_anchor.trim().is_empty()
+            || claim.insufficient_in_session_research.trim().is_empty()
+            || claim.expected_findings.trim().is_empty()
+            || claim.created_by_task_id.trim().is_empty()
+            || claim.round <= 0
+            || claim.against_revision_seq <= 0
+        {
+            return Err(Error::InvalidData(
+                "structured needs-evidence claim is malformed".into(),
+            ));
+        }
+        let claim_value = serde_json::to_value(claim).map_err(|e| {
             Error::InvalidData(format!("failed to serialize NeedsEvidenceClaim: {e}"))
         })?;
-        let result = sqlx::query(
-            r#"UPDATE proposals SET
-                    status = 'draft',
-                    linked_spike_task_id = $1,
-                    needs_evidence_claim = $2,
-                    updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
-             WHERE id = $3
-               AND linked_spike_task_id IS NULL"#,
-        )
-        .bind(spike_task_id)
-        .bind(&json)
-        .bind(proposal_id)
-        .execute(self.db.pool())
-        .await?;
-
-        if result.rows_affected() == 0 {
-            // Either the proposal doesn't exist or it already has a linked
-            // spike. Read the proposal to distinguish and to return the
-            // current state.
-            let proposal = self.get(proposal_id).await?;
-            return Ok(proposal); // Some with existing spike, or None if deleted
+        let mut tx = self.db.pool().begin().await?;
+        let existing: Option<Option<String>> =
+            sqlx::query_scalar("SELECT linked_spike_task_id FROM proposals WHERE id=$1 FOR UPDATE")
+                .bind(proposal_id)
+                .fetch_optional(&mut *tx)
+                .await?;
+        let Some(existing) = existing else {
+            tx.rollback().await?;
+            return Ok(None);
+        };
+        if only_if_unlinked && existing.is_some() {
+            tx.rollback().await?;
+            // This is the race-loser result. Returning the existing proposal
+            // would make callers treat the competing spike as successfully
+            // linked even though this transaction made no authority change.
+            return Ok(None);
         }
-
+        let demand = DemandTypedEvidenceInput {
+            finding_id: uuid::Uuid::now_v7().to_string(),
+            proposal_id: proposal_id.to_owned(),
+            demand_hash: legacy_demand_hash(&claim_value, Some(spike_task_id)),
+            claim: claim_value,
+            demanded_revision_seq: claim.against_revision_seq,
+            judge_task_id: claim.created_by_task_id.clone(),
+        };
+        TypedEvidenceRepository::demand_activate_and_set_legacy_in_transaction(
+            &mut tx,
+            demand,
+            spike_task_id,
+        )
+        .await?;
+        sqlx::query(
+            "UPDATE proposals SET status='draft', updated_at=to_char(now() at time zone 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') WHERE id=$1",
+        )
+        .bind(proposal_id)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
         let proposal = self.get_required(proposal_id).await?;
         self.events
             .send(DjinnEventEnvelope::proposal_updated(&proposal));
         Ok(Some(proposal))
     }
 
-    /// Clear the needs-evidence spike linkage after the spike closes and
-    /// refinement resumes. Emits a `proposal_updated` event.
+    /// Clear a linked spike only through the typed terminal receipt transition.
+    /// Legacy authority remains present until that append-only fact commits.
     pub async fn clear_needs_evidence_spike(&self, proposal_id: &str) -> Result<Proposal> {
         self.db.ensure_initialized().await?;
-        sqlx::query(
-            r#"UPDATE proposals SET
-                    linked_spike_task_id = NULL,
-                    needs_evidence_claim = NULL,
-                    updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
-             WHERE id = $1"#,
+        let linked_spike_task_id = sqlx::query_scalar::<_, Option<String>>(
+            "SELECT linked_spike_task_id FROM proposals WHERE id=$1",
         )
         .bind(proposal_id)
-        .execute(self.db.pool())
-        .await?;
+        .fetch_optional(self.db.pool())
+        .await?
+        .flatten()
+        .ok_or_else(|| Error::InvalidTransition("legacy_typed_parity_mismatch".into()))?;
+        crate::repositories::typed_evidence::TypedEvidenceRepository::new(self.db.clone())
+            .evidence_received_and_clear_legacy(proposal_id, &linked_spike_task_id)
+            .await?;
         let proposal = self.get_required(proposal_id).await?;
         self.events
             .send(DjinnEventEnvelope::proposal_updated(&proposal));
@@ -7704,7 +7750,7 @@ mod tests {
             expected_findings: "load test results or queue depth proof".to_owned(),
             round: 2,
             against_revision_seq: 3,
-            created_by_task_id: uuid::Uuid::now_v7().to_string(),
+            created_by_task_id: spike_id.clone(),
         };
 
         let updated = repo
@@ -7753,6 +7799,278 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn structured_needs_evidence_rejects_terminal_task_without_writes() {
+        let db = test_db();
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let proposal = repo
+            .create(create_input("Terminal structured claim"))
+            .await
+            .unwrap();
+        let project = insert_project(&db, "svc-terminal-structured").await;
+        let epic = insert_epic(&db, &project, "st01").await;
+        let spike_id = insert_task(&db, &project, &epic, "terminal-spike").await;
+        set_task_status(&db, &spike_id, "closed", Some("completed")).await;
+
+        let error = repo
+            .set_structured_needs_evidence_spike(
+                &proposal.id,
+                &spike_id,
+                &sample_needs_evidence_claim(1, 1),
+            )
+            .await
+            .unwrap_err();
+        assert!(format!("{error}").contains("legacy_typed_task_not_active"));
+
+        let stored = repo.get_required(&proposal.id).await.unwrap();
+        assert!(stored.linked_spike_task_id.is_none());
+        assert!(stored.needs_evidence_claim.is_none());
+        let finding_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM typed_evidence_findings WHERE proposal_id=$1")
+                .bind(&proposal.id)
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+        assert_eq!(finding_count, 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn active_legacy_backfill_dual_read_is_idempotent_and_preserves_rollback_link() {
+        let db = test_db();
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let proposal = repo
+            .create(create_input("Legacy parity backfill"))
+            .await
+            .unwrap();
+        let project = insert_project(&db, "svc-legacy-backfill").await;
+        let epic = insert_epic(&db, &project, "lb01").await;
+        let spike_task_id = insert_task(&db, &project, &epic, "lb-spike").await;
+        let claim = sample_needs_evidence_claim(1, 1);
+        let claim_json = serde_json::to_string(&claim).unwrap();
+        sqlx::query(
+            "UPDATE proposals SET linked_spike_task_id=$1,needs_evidence_claim=$2 WHERE id=$3",
+        )
+        .bind(&spike_task_id)
+        .bind(&claim_json)
+        .bind(&proposal.id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        let typed = TypedEvidenceRepository::new(db.clone());
+        let first = typed.backfill_active_legacy_evidence().await.unwrap();
+        assert_eq!(first.created_findings, 1);
+        assert_eq!(first.created_attempts, 1);
+        let projection = typed
+            .dual_read_legacy_parity(&proposal.id)
+            .await
+            .unwrap()
+            .expect("active legacy authority must have typed parity");
+        assert_eq!(
+            projection.spike_task_id.as_deref(),
+            Some(spike_task_id.as_str())
+        );
+        assert!(projection.attempt_id.is_some());
+        let second = typed.backfill_active_legacy_evidence().await.unwrap();
+        assert_eq!(second.created_findings, 0);
+        assert_eq!(second.created_attempts, 0);
+
+        // Backfill and typed reads never clear rollback-mode legacy authority.
+        let rollback = repo.find_by_linked_spike(&spike_task_id).await.unwrap();
+        assert_eq!(rollback.expect("legacy rollback lookup").id, proposal.id);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn structured_needs_evidence_rejects_missing_task_without_writes() {
+        let db = test_db();
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let proposal = repo
+            .create(create_input("Missing structured spike"))
+            .await
+            .unwrap();
+        let missing_task_id = uuid::Uuid::now_v7().to_string();
+
+        let error = repo
+            .set_structured_needs_evidence_spike(
+                &proposal.id,
+                &missing_task_id,
+                &sample_needs_evidence_claim(1, 1),
+            )
+            .await
+            .unwrap_err();
+        assert!(format!("{error}").contains("legacy_typed_task_not_active"));
+
+        let stored = repo.get_required(&proposal.id).await.unwrap();
+        assert!(stored.linked_spike_task_id.is_none());
+        assert!(stored.needs_evidence_claim.is_none());
+        let finding_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM typed_evidence_findings WHERE proposal_id=$1")
+                .bind(&proposal.id)
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+        let transition_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM typed_evidence_transitions WHERE finding_id IN (SELECT id FROM typed_evidence_findings WHERE proposal_id=$1)",
+        )
+        .bind(&proposal.id)
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(finding_count, 0);
+        assert_eq!(transition_count, 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn try_set_structured_needs_evidence_spike_returns_none_without_writes_when_linked() {
+        let db = test_db();
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let proposal = repo
+            .create(create_input("Concurrent structured spike"))
+            .await
+            .unwrap();
+        let project = insert_project(&db, "svc-try-structured-spike").await;
+        let epic = insert_epic(&db, &project, "ts01").await;
+        let winning_task_id = insert_task(&db, &project, &epic, "ts-winner").await;
+        let losing_task_id = insert_task(&db, &project, &epic, "ts-loser").await;
+        let winning_claim = sample_needs_evidence_claim(1, 1);
+        repo.set_structured_needs_evidence_spike(&proposal.id, &winning_task_id, &winning_claim)
+            .await
+            .unwrap();
+
+        let authority_before = repo.get_required(&proposal.id).await.unwrap();
+        let finding_count_before: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM typed_evidence_findings WHERE proposal_id=$1")
+                .bind(&proposal.id)
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+        let transition_count_before: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM typed_evidence_transitions WHERE finding_id IN (SELECT id FROM typed_evidence_findings WHERE proposal_id=$1)",
+        )
+        .bind(&proposal.id)
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        let attempts_before: Vec<(String, String)> = sqlx::query_as(
+            "SELECT id,spike_task_id FROM typed_evidence_attempts WHERE finding_id IN (SELECT id FROM typed_evidence_findings WHERE proposal_id=$1) ORDER BY sequence",
+        )
+        .bind(&proposal.id)
+        .fetch_all(db.pool())
+        .await
+        .unwrap();
+
+        let result = repo
+            .try_set_structured_needs_evidence_spike(
+                &proposal.id,
+                &losing_task_id,
+                &sample_needs_evidence_claim(2, 2),
+            )
+            .await
+            .unwrap();
+        assert!(
+            result.is_none(),
+            "the occupied-link caller must lose the race"
+        );
+
+        let authority_after = repo.get_required(&proposal.id).await.unwrap();
+        assert_eq!(
+            authority_after.linked_spike_task_id,
+            authority_before.linked_spike_task_id
+        );
+        assert_eq!(
+            authority_after.needs_evidence_claim,
+            authority_before.needs_evidence_claim
+        );
+        let finding_count_after: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM typed_evidence_findings WHERE proposal_id=$1")
+                .bind(&proposal.id)
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+        let transition_count_after: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM typed_evidence_transitions WHERE finding_id IN (SELECT id FROM typed_evidence_findings WHERE proposal_id=$1)",
+        )
+        .bind(&proposal.id)
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        let attempts_after: Vec<(String, String)> = sqlx::query_as(
+            "SELECT id,spike_task_id FROM typed_evidence_attempts WHERE finding_id IN (SELECT id FROM typed_evidence_findings WHERE proposal_id=$1) ORDER BY sequence",
+        )
+        .bind(&proposal.id)
+        .fetch_all(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(finding_count_after, finding_count_before);
+        assert_eq!(transition_count_after, transition_count_before);
+        assert_eq!(attempts_after, attempts_before);
+        assert_eq!(attempts_after.len(), 1);
+        assert_eq!(attempts_after[0].1, winning_task_id);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn clear_structured_needs_evidence_rejects_ambiguous_attempts_without_writes() {
+        let db = test_db();
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let proposal = repo
+            .create(create_input("Ambiguous typed attempt clear"))
+            .await
+            .unwrap();
+        let project = insert_project(&db, "svc-ambiguous-clear").await;
+        let epic = insert_epic(&db, &project, "ac01").await;
+        let linked_task_id = insert_task(&db, &project, &epic, "ac-linked").await;
+        let other_task_id = insert_task(&db, &project, &epic, "ac-other").await;
+        let claim = sample_needs_evidence_claim(1, 1);
+        repo.set_structured_needs_evidence_spike(&proposal.id, &linked_task_id, &claim)
+            .await
+            .unwrap();
+
+        let finding_id: String =
+            sqlx::query_scalar("SELECT id FROM typed_evidence_findings WHERE proposal_id=$1")
+                .bind(&proposal.id)
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+        sqlx::query(
+            "INSERT INTO typed_evidence_attempts (id,finding_id,sequence,spike_task_id) VALUES ($1,$2,2,$3)",
+        )
+        .bind(uuid::Uuid::now_v7().to_string())
+        .bind(&finding_id)
+        .bind(&other_task_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+        let transitions_before: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM typed_evidence_transitions WHERE finding_id=$1",
+        )
+        .bind(&finding_id)
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        set_task_status(&db, &linked_task_id, "closed", Some("completed")).await;
+
+        let error = repo
+            .clear_needs_evidence_spike(&proposal.id)
+            .await
+            .unwrap_err();
+        assert!(format!("{error}").contains("legacy_typed_parity_mismatch"));
+
+        let stored = repo.get_required(&proposal.id).await.unwrap();
+        assert_eq!(
+            stored.linked_spike_task_id.as_deref(),
+            Some(linked_task_id.as_str())
+        );
+        assert!(stored.needs_evidence_claim.is_some());
+        let transitions_after: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM typed_evidence_transitions WHERE finding_id=$1",
+        )
+        .bind(&finding_id)
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(transitions_after, transitions_before);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn set_structured_needs_evidence_spike_clear_and_reparse() {
         let db = test_db();
         let repo = ProposalRepository::new(db.clone(), EventBus::noop());
@@ -7769,7 +8087,7 @@ mod tests {
             expected_findings: "lock-ordering analysis".to_owned(),
             round: 1,
             against_revision_seq: 1,
-            created_by_task_id: uuid::Uuid::now_v7().to_string(),
+            created_by_task_id: spike_id.clone(),
         };
 
         repo.set_structured_needs_evidence_spike(&p.id, &spike_id, &claim)
@@ -7781,11 +8099,28 @@ mod tests {
         assert!(stored.needs_evidence_claim.is_some());
         assert!(stored.linked_spike_task_id.is_some());
 
-        // Clear it.
+        // Clear it only after the linked task becomes terminal.
+        set_task_status(&db, &spike_id, "closed", Some("completed")).await;
         let cleared = repo.clear_needs_evidence_spike(&p.id).await.unwrap();
         assert!(cleared.needs_evidence_claim.is_none());
         assert!(cleared.linked_spike_task_id.is_none());
         assert!(!repo.has_open_needs_evidence_spike(&p.id).await.unwrap());
+        let lifecycle: String = sqlx::query_scalar(
+            "SELECT lifecycle FROM typed_evidence_findings WHERE proposal_id=$1",
+        )
+        .bind(&p.id)
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(lifecycle, "evidence_received");
+        let receipt_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM typed_evidence_transitions WHERE finding_id IN (SELECT id FROM typed_evidence_findings WHERE proposal_id=$1) AND to_lifecycle='evidence_received'",
+        )
+        .bind(&p.id)
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(receipt_count, 1);
 
         // parse_stored on None returns None.
         assert!(NeedsEvidenceClaim::parse_stored(None).unwrap().is_none());
@@ -9116,7 +9451,6 @@ mod tests {
             .await
             .unwrap();
         let completed_task = insert_task(&db, &project, &epic, "rd-done").await;
-        set_task_status(&db, &completed_task, "closed", Some("completed")).await;
         repo.set_structured_needs_evidence_spike(
             &completed.id,
             &completed_task,
@@ -9124,6 +9458,7 @@ mod tests {
         )
         .await
         .unwrap();
+        set_task_status(&db, &completed_task, "closed", Some("completed")).await;
 
         let candidates = repo
             .list_linked_evidence_spike_recovery_candidates()
@@ -9201,7 +9536,6 @@ mod tests {
         ] {
             let proposal = repo.create(create_input(title)).await.unwrap();
             let task_id = insert_task(&db, &project, &epic, short_id).await;
-            set_task_status(&db, &task_id, status, close_reason).await;
             repo.set_structured_needs_evidence_spike(
                 &proposal.id,
                 &task_id,
@@ -9209,6 +9543,7 @@ mod tests {
             )
             .await
             .unwrap();
+            set_task_status(&db, &task_id, status, close_reason).await;
             expected.push((
                 proposal.id,
                 task_id,
