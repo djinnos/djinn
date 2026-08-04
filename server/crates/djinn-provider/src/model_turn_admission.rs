@@ -81,6 +81,15 @@ pub struct ProviderAttemptCapabilitiesV1 {
     pub abort: ProviderAbortCapabilityV1,
 }
 
+/// Whether a route may make predictive capacity claims before a response.
+/// Gemini target-1 is deliberately reactive-only.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderAdmissionPolicyV1 {
+    Proactive,
+    ReactiveOnlyTarget1,
+}
+
 /// A route is either fully covered by the additive v1 contract or explicitly
 /// excluded from enforcement. `Uncovered` is fail-closed, never a zero debit.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -89,6 +98,7 @@ pub enum ProviderAttemptRouteCoverageV1 {
     Covered {
         capabilities: ProviderAttemptCapabilitiesV1,
         supported_bucket_bindings: Vec<ModelTurnBucketKind>,
+        policy: ProviderAdmissionPolicyV1,
     },
     Uncovered(ProviderAttemptUncoveredReasonV1),
 }
@@ -105,6 +115,7 @@ pub enum ProviderAttemptUncoveredReasonV1 {
     MissingBucketBinding { bucket_kind: ModelTurnBucketKind },
     HiddenRetriesNotDisabled,
     AbortUnsupported,
+    MissingCredentialRecordIdentity,
 }
 
 /// The source chosen for the output reservation, retained for auditability
@@ -229,6 +240,29 @@ pub fn plan_provider_attempt_v1(
     supported_bucket_bindings: impl IntoIterator<Item = ModelTurnBucketKind>,
     capabilities: ProviderAttemptCapabilitiesV1,
 ) -> Result<ProviderAttemptPlanV1, ProviderAttemptRouteCoverageV1> {
+    plan_provider_attempt_with_policy_v1(
+        scope,
+        serialized_request_utf8,
+        provider_input_estimate,
+        explicit_output_limit,
+        model_output_default,
+        supported_bucket_bindings,
+        capabilities,
+        ProviderAdmissionPolicyV1::Proactive,
+    )
+}
+
+/// Build a v1 plan with its predictive-capacity policy made explicit.
+pub fn plan_provider_attempt_with_policy_v1(
+    scope: ProviderAttemptScopeV1,
+    serialized_request_utf8: Option<&[u8]>,
+    provider_input_estimate: Option<i64>,
+    explicit_output_limit: Option<i64>,
+    model_output_default: Option<i64>,
+    supported_bucket_bindings: impl IntoIterator<Item = ModelTurnBucketKind>,
+    capabilities: ProviderAttemptCapabilitiesV1,
+    policy: ProviderAdmissionPolicyV1,
+) -> Result<ProviderAttemptPlanV1, ProviderAttemptRouteCoverageV1> {
     if capabilities.hidden_retries != ProviderHiddenRetryCapabilityV1::Disabled {
         return Err(ProviderAttemptRouteCoverageV1::Uncovered(
             ProviderAttemptUncoveredReasonV1::HiddenRetriesNotDisabled,
@@ -241,12 +275,16 @@ pub fn plan_provider_attempt_v1(
     }
 
     let bindings: BTreeSet<_> = supported_bucket_bindings.into_iter().collect();
-    for bucket_kind in [
-        ModelTurnBucketKind::Request,
-        ModelTurnBucketKind::Input,
-        ModelTurnBucketKind::Output,
-        ModelTurnBucketKind::Combined,
-    ] {
+    let required_bindings = match policy {
+        ProviderAdmissionPolicyV1::Proactive => vec![
+            ModelTurnBucketKind::Request,
+            ModelTurnBucketKind::Input,
+            ModelTurnBucketKind::Output,
+            ModelTurnBucketKind::Combined,
+        ],
+        ProviderAdmissionPolicyV1::ReactiveOnlyTarget1 => vec![ModelTurnBucketKind::Request],
+    };
+    for &bucket_kind in &required_bindings {
         if !bindings.contains(&bucket_kind) {
             return Err(ProviderAttemptRouteCoverageV1::Uncovered(
                 ProviderAttemptUncoveredReasonV1::MissingBucketBinding { bucket_kind },
@@ -259,23 +297,36 @@ pub fn plan_provider_attempt_v1(
             ProviderAttemptUncoveredReasonV1::SerializationUnavailable,
         ));
     };
-    let input_units =
-        match conservative_input_units(serialized_request_utf8, provider_input_estimate) {
-            Ok(value) => value,
-            Err(reason) => return Err(uncovered(reason)),
-        };
-    let (output_units, output_reservation_source) =
-        match output_reservation(explicit_output_limit, model_output_default) {
-            Ok(value) => value,
-            Err(reason) => return Err(uncovered(reason)),
-        };
-    let combined_units = match input_units.checked_add(output_units) {
-        Some(value) => value,
-        None => {
-            return Err(uncovered(
-                ProviderAttemptUncoveredReasonV1::CombinedReservationOverflow,
-            ));
+    let input_units = match policy {
+        ProviderAdmissionPolicyV1::Proactive => {
+            match conservative_input_units(serialized_request_utf8, provider_input_estimate) {
+                Ok(value) => Some(value),
+                Err(reason) => return Err(uncovered(reason)),
+            }
         }
+        ProviderAdmissionPolicyV1::ReactiveOnlyTarget1 => None,
+    };
+    let (output_units, output_reservation_source) = match policy {
+        ProviderAdmissionPolicyV1::Proactive => {
+            match output_reservation(explicit_output_limit, model_output_default) {
+                Ok((value, source)) => (Some(value), source),
+                Err(reason) => return Err(uncovered(reason)),
+            }
+        }
+        ProviderAdmissionPolicyV1::ReactiveOnlyTarget1 => {
+            (None, ProviderOutputReservationSourceV1::ModelDefault)
+        }
+    };
+    let combined_units = match (input_units, output_units) {
+        (Some(input), Some(output)) => match input.checked_add(output) {
+            Some(value) => Some(value),
+            None => {
+                return Err(uncovered(
+                    ProviderAttemptUncoveredReasonV1::CombinedReservationOverflow,
+                ));
+            }
+        },
+        _ => None,
     };
 
     Ok(ProviderAttemptPlanV1 {
@@ -283,25 +334,22 @@ pub fn plan_provider_attempt_v1(
         coverage: ProviderAttemptRouteCoverageV1::Covered {
             capabilities,
             supported_bucket_bindings: bindings.into_iter().collect(),
+            policy,
         },
-        debits: vec![
-            ModelTurnBucketDebit {
-                bucket_kind: ModelTurnBucketKind::Request,
-                units: 1,
-            },
-            ModelTurnBucketDebit {
-                bucket_kind: ModelTurnBucketKind::Input,
-                units: input_units,
-            },
-            ModelTurnBucketDebit {
-                bucket_kind: ModelTurnBucketKind::Output,
-                units: output_units,
-            },
-            ModelTurnBucketDebit {
-                bucket_kind: ModelTurnBucketKind::Combined,
-                units: combined_units,
-            },
-        ],
+        debits: required_bindings
+            .into_iter()
+            .map(|bucket_kind| ModelTurnBucketDebit {
+                units: match bucket_kind {
+                    ModelTurnBucketKind::Request => 1,
+                    ModelTurnBucketKind::Input => input_units.expect("proactive input binding"),
+                    ModelTurnBucketKind::Output => output_units.expect("proactive output binding"),
+                    ModelTurnBucketKind::Combined => {
+                        combined_units.expect("proactive combined binding")
+                    }
+                },
+                bucket_kind,
+            })
+            .collect(),
         output_reservation_source,
         abort: ProviderAttemptAbortHandleV1::new(),
     })

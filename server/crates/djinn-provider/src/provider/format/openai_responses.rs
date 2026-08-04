@@ -550,15 +550,13 @@ impl LlmProvider for OpenAIResponsesProvider {
         Some(self.config.clone())
     }
 
-    fn stream_request_body_bytes(
+    fn stream_request_body(
         &self,
         conversation: &Conversation,
         tools: &[Value],
         tool_choice: Option<ToolChoice>,
-    ) -> Option<usize> {
-        serde_json::to_vec(&self.build_request(conversation, tools, tool_choice))
-            .ok()
-            .map(|body| body.len())
+    ) -> Option<Vec<u8>> {
+        serde_json::to_vec(&self.build_request(conversation, tools, tool_choice)).ok()
     }
 
     fn stream<'a>(
