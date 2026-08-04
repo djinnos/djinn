@@ -15,10 +15,11 @@ async fn setup(methods: &[&str]) -> (Database, A) {
     let u = uuid::Uuid::now_v7().to_string();
     let t = uuid::Uuid::now_v7().to_string();
     let q = uuid::Uuid::now_v7().to_string();
-    sqlx::query("INSERT INTO projects (id,name,path,verification_rules) VALUES ($1,$2,$3,'[]')")
+    sqlx::query("INSERT INTO projects (id,name,github_owner,github_repo) VALUES ($1,$2,$3,$4)")
         .bind(&p)
         .bind(format!("p{p}"))
-        .bind(format!("/{p}"))
+        .bind("fixture-owner")
+        .bind(format!("fixture-{p}"))
         .execute(db.pool())
         .await
         .unwrap();
