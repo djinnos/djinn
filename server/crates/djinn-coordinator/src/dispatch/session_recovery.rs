@@ -3,7 +3,7 @@ use super::super::*;
 use crate::pr_poller::pr_cleanup::CloseKind;
 use djinn_core::clock::{Clock, SystemClock};
 use djinn_core::job_retention::{JobRetentionEvidence, SessionEvidence};
-use djinn_core::models::TransitionAction;
+use djinn_core::models::{SessionStatus, TransitionAction};
 use djinn_core::models::task_attempt::TaskAttemptOutcome;
 use djinn_db::{
     ClaimExtensionRecord, CurrentLivenessState, LivenessEvidenceSnapshot, LivenessRepository,
@@ -30,6 +30,22 @@ fn liveness_reason_for_persistence(reason: Option<LivenessReason>) -> Option<Str
         LivenessReason::None => None,
         other => Some(other.as_str().to_owned()),
     })
+}
+
+/// Map the addressed session row's durable status into the classifier DTO.
+/// Unknown values are not treated as `Running`: receipt of an exit event is not
+/// evidence of the session's prior persisted state.
+fn db_session_status_from_persisted(status: &str) -> Option<DbSessionStatus> {
+    match status {
+        value if value == SessionStatus::Running.as_str() => Some(DbSessionStatus::Running),
+        value if value == SessionStatus::Completed.as_str() => Some(DbSessionStatus::Completed),
+        value if value == SessionStatus::Interrupted.as_str() => {
+            Some(DbSessionStatus::Interrupted)
+        }
+        value if value == SessionStatus::Failed.as_str() => Some(DbSessionStatus::Failed),
+        value if value == SessionStatus::Paused.as_str() => Some(DbSessionStatus::Paused),
+        _ => None,
+    }
 }
 
 /// A `running`, zero-token session older than this has slipped past the
@@ -2945,6 +2961,37 @@ impl CoordinatorActor {
             }
         };
 
+        // Task-scoped liveness state can describe another/latest session. The
+        // terminal event identifies the only row that can witness this exit.
+        let session_repo = djinn_db::SessionRepository::new(
+            self.db.clone(),
+            crate::events::event_bus_for(&self.events_tx),
+        );
+        let addressed_session = match session_repo.get(session_id).await {
+            Ok(Some(session)) => session,
+            Ok(None) => {
+                tracing::warn!(task_id = %task_id, session_id = %session_id,
+                    event_session_status = %session_status,
+                    "classify_session_exit_liveness: addressed session row is missing; skipping classification");
+                return None;
+            }
+            Err(e) => {
+                tracing::warn!(task_id = %task_id, session_id = %session_id, error = %e,
+                    "classify_session_exit_liveness: failed to load addressed session");
+                return None;
+            }
+        };
+        let persisted_session_status = match db_session_status_from_persisted(&addressed_session.status) {
+            Some(status) => status,
+            None => {
+                tracing::warn!(task_id = %task_id, session_id = %session_id,
+                    persisted_session_status = %addressed_session.status,
+                    event_session_status = %session_status,
+                    "classify_session_exit_liveness: addressed session has unknown persisted status; skipping classification");
+                return None;
+            }
+        };
+
         // ── 2. Build evidence with exit code from session status ───────
         // Map session terminal status → pod phase and exit code.
         // - completed → Succeeded, exit 0
@@ -2963,25 +3010,24 @@ impl CoordinatorActor {
             }
         };
 
-        // Build the base evidence from pool/DB state, then override
-        // pod_phase and exit_code for the exit path.
-        //
-        // IMPORTANT: The `db_session_status` is set to `Running` (not
-        // the terminal value) because the protocol-violation check in
-        // the classifier fires when the POD exits while the SESSION is
-        // still running. The session has since been marked terminal by
-        // the settlement code, but the evidence must reflect the state
-        // at the moment of the violation: pod exited, session was still
-        // running, task was nonterminal.
+        if addressed_session.status != session_status {
+            tracing::warn!(task_id = %task_id, session_id = %session_id,
+                event_session_status = %session_status,
+                persisted_session_status = %addressed_session.status,
+                "classify_session_exit_liveness: terminal event disagrees with persisted session status; classifying persisted truth");
+        }
+
+        // The event supplies pod phase/exit code; the addressed row supplies
+        // session state. Never synthesize a running state from the event.
         let mut evidence = build_liveness_evidence(
             None, // no pool info — session already ended, pod is gone
             &db_state,
         );
         evidence.pod_phase = Some(exit_pod_phase);
         evidence.exit_code = exit_code;
-        // Use Running to represent the state when the pod exited — this
-        // is what triggers the protocol-violation classifier path.
-        evidence.db_session_status = Some(DbSessionStatus::Running);
+        // The addressed session row, not receipt of the terminal event, is the
+        // authoritative witness for its persisted status.
+        evidence.db_session_status = Some(persisted_session_status);
         // ── Recover the signal the status fold discards ─────────────────
         // `session_status` has three values and the fold above collapses them
         // onto two pod phases plus a sentinel exit code. Everything about WHY
