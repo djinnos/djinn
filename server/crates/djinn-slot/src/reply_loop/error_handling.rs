@@ -223,6 +223,26 @@ impl fmt::Display for BudgetWindDownIgnored {
 
 impl std::error::Error for BudgetWindDownIgnored {}
 
+/// Typed terminal error for a step-cap wind-down whose final permitted turn
+/// ignored the summary directive. This is a protocol failure, not diagnostic
+/// prose for callers to parse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StepCapWindDownIgnored {
+    pub max_turns: u32,
+}
+
+impl fmt::Display for StepCapWindDownIgnored {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "max turns ({}) exceeded without text-only response (wind-down summary directive was injected but the agent did not terminate)",
+            self.max_turns
+        )
+    }
+}
+
+impl std::error::Error for StepCapWindDownIgnored {}
+
 /// Build the wind-down directive injected on the final permitted turn when the
 /// reply loop is about to hit the step cap (`MAX_TURNS`).
 pub fn wind_down_message() -> Message {

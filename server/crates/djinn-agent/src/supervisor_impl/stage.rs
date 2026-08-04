@@ -91,7 +91,9 @@ use crate::actors::slot::lifecycle::role_overrides::{
 use crate::actors::slot::lifecycle::setup::{SetupContext, SetupError, resolve_setup_context};
 use crate::actors::slot::lifecycle::task_classifier::classify_native_skill_trigger;
 use crate::actors::slot::lifecycle::teardown::{PostSessionParams, spawn_post_session_work};
-use crate::actors::slot::reply_loop::error_handling::{BudgetWindDownIgnored, ReplyLoopCancelled};
+use crate::actors::slot::reply_loop::error_handling::{
+    BudgetWindDownIgnored, ReplyLoopCancelled, StepCapWindDownIgnored,
+};
 use crate::actors::slot::reply_loop::loop_guard::{
     LoopGuardError, LoopGuardKind as ReplyLoopGuardKind,
 };
@@ -105,12 +107,22 @@ use djinn_runtime::{LoopGuardKind as RuntimeLoopGuardKind, LoopGuardTrip, Provid
 
 use super::SupervisorCallbackContext;
 
+/// Named setup construction branches all settle the already-created session as
+/// harness failures; diagnostics remain outside the authoritative status write.
+#[derive(Clone, Copy)]
+enum SetupFailureBranch {
+    McpAndSkills,
+    EnvironmentConfig,
+    SetupCommands,
+    ProviderConstruction,
+}
+
 /// A session is created before extension loading so diagnostic rows can carry
 /// its foreign key. Every later setup failure must therefore settle that row.
 async fn mark_session_failed(
     services: &dyn SupervisorServices,
     session_id: &str,
-    failure_cause: SessionFailureCause,
+    _: SetupFailureBranch,
 ) {
     if let Err(error) = services
         .update_session_status_v2(
@@ -121,7 +133,7 @@ async fn mark_session_failed(
             0,
             0,
             None,
-            Some(failure_cause),
+            Some(SessionFailureCause::Harness),
         )
         .await
     {
@@ -162,6 +174,7 @@ fn reply_loop_failure_cause(error: &anyhow::Error) -> SessionFailureCause {
         SessionFailureCause::Provider
     } else if error.downcast_ref::<LoopGuardTrip>().is_some()
         || error.downcast_ref::<LoopGuardError>().is_some()
+        || error.downcast_ref::<StepCapWindDownIgnored>().is_some()
     {
         SessionFailureCause::Protocol
     } else if error.downcast_ref::<ToolError>().is_some() {
@@ -1241,7 +1254,7 @@ pub(crate) async fn execute_stage(
     {
         Ok(resolved) => resolved,
         Err(error) => {
-            mark_session_failed(services, &session_id, SessionFailureCause::Harness).await;
+            mark_session_failed(services, &session_id, SetupFailureBranch::McpAndSkills).await;
             return Err(StageError::Setup(error.to_string()));
         }
     };
@@ -1256,7 +1269,7 @@ pub(crate) async fn execute_stage(
     {
         Ok(config) => config,
         Err(error) => {
-            mark_session_failed(services, &session_id, SessionFailureCause::Harness).await;
+            mark_session_failed(services, &session_id, SetupFailureBranch::EnvironmentConfig).await;
             return Err(StageError::Setup(format!("env_config: {error}")));
         }
     };
@@ -1273,7 +1286,7 @@ pub(crate) async fn execute_stage(
     {
         Ok(ctx) => ctx,
         Err(SetupError { reason }) => {
-            mark_session_failed(services, &session_id, SessionFailureCause::Harness).await;
+            mark_session_failed(services, &session_id, SetupFailureBranch::SetupCommands).await;
             return Err(StageError::Setup(reason));
         }
     };
@@ -1455,7 +1468,12 @@ pub(crate) async fn execute_stage(
         ) {
             Some(provider) => provider,
             None => {
-                mark_session_failed(services, &session_id, SessionFailureCause::Harness).await;
+                mark_session_failed(
+                    services,
+                    &session_id,
+                    SetupFailureBranch::ProviderConstruction,
+                )
+                .await;
                 return Err(StageError::ModelResolution(
                     "no provider credential resolved for model".into(),
                 ));
@@ -1936,6 +1954,7 @@ mod tests {
 
     #[derive(Debug, PartialEq, Eq)]
     struct RecordedSettlement {
+        session_id: String,
         status: SessionStatus,
         parked_reason: Option<String>,
         failure_cause: Option<SessionFailureCause>,
@@ -1976,11 +1995,7 @@ mod tests {
             unimplemented!()
         }
 
-        async fn open_pr(
-            &self,
-            _: &TaskRunSpec,
-            _: &Task,
-        ) -> djinn_supervisor::TaskRunOutcome {
+        async fn open_pr(&self, _: &TaskRunSpec, _: &Task) -> djinn_supervisor::TaskRunOutcome {
             unimplemented!()
         }
 
@@ -2060,7 +2075,7 @@ mod tests {
 
         async fn update_session_status_v2(
             &self,
-            _: String,
+            session_id: String,
             status: SessionStatus,
             _: i64,
             _: i64,
@@ -2070,6 +2085,7 @@ mod tests {
             failure_cause: Option<SessionFailureCause>,
         ) -> Result<(), String> {
             self.settlements.lock().unwrap().push(RecordedSettlement {
+                session_id,
                 status,
                 parked_reason,
                 failure_cause,
@@ -2079,74 +2095,157 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn v2_settlement_records_every_cause_and_never_diagnostics() {
+    async fn v2_settlement_records_typed_reply_loop_causes_without_diagnostics() {
         let services = RecordingServices::new();
-        for cause in [
-            SessionFailureCause::Cancelled,
-            SessionFailureCause::Provider,
-            SessionFailureCause::Harness,
-            SessionFailureCause::Protocol,
-            SessionFailureCause::Finalization,
-            SessionFailureCause::Unknown,
-        ] {
-            settle_stage_session(
-                &services,
-                "session".into(),
-                &StageSettlement::failed(
-                    StageOutcome::Failed {
-                        reason: "provider diagnostic: sk-live-credential-must-not-persist".into(),
-                        provider_failure: None,
-                    },
-                    cause,
-                ),
-                0,
-                0,
-                0,
-                0,
-            )
-            .await
-            .unwrap();
+        let credential_diagnostic = "provider diagnostic: sk-live-credential-must-not-persist";
+        let cases = vec![
+            (
+                "cancelled",
+                anyhow::Error::new(ReplyLoopCancelled::session()),
+                SessionFailureCause::Cancelled,
+            ),
+            (
+                "provider",
+                anyhow::Error::new(ProviderError::Authentication).context(credential_diagnostic),
+                SessionFailureCause::Provider,
+            ),
+            (
+                "harness",
+                anyhow::Error::new(ToolError::new("MCP tool failed")),
+                SessionFailureCause::Harness,
+            ),
+            (
+                "step-cap",
+                anyhow::Error::new(StepCapWindDownIgnored { max_turns: 3 }),
+                SessionFailureCause::Protocol,
+            ),
+            (
+                "unknown",
+                anyhow::anyhow!("unmatched reply-loop failure"),
+                SessionFailureCause::Unknown,
+            ),
+        ];
+        for (session_id, error, expected_cause) in cases {
+            let cause = reply_loop_failure_cause(&error);
+            assert_eq!(cause, expected_cause, "{session_id} classification");
+            let settlement = settlement_for_stage_outcome(
+                StageOutcome::Failed {
+                    reason: error.to_string(),
+                    provider_failure: None,
+                },
+                false,
+                Some(cause),
+                RoleKind::Worker,
+            );
+            settle_stage_session(&services, session_id.into(), &settlement, 0, 0, 0, 0)
+                .await
+                .unwrap();
         }
         let recorded = services.settlements.lock().unwrap();
-        assert_eq!(recorded.len(), 6);
+        assert_eq!(recorded.len(), 5);
         for (entry, cause) in recorded.iter().zip([
             SessionFailureCause::Cancelled,
             SessionFailureCause::Provider,
             SessionFailureCause::Harness,
             SessionFailureCause::Protocol,
-            SessionFailureCause::Finalization,
             SessionFailureCause::Unknown,
         ]) {
             assert_eq!(entry.status, SessionStatus::Failed);
             assert_eq!(entry.failure_cause, Some(cause));
             assert_eq!(entry.parked_reason, None);
         }
+        assert!(!format!("{recorded:?}").contains(credential_diagnostic));
     }
 
     #[tokio::test]
-    async fn v2_settlement_records_none_for_completed_budget_and_setup_harness() {
+    async fn v2_settlement_records_finalization_completed_budget_and_setup_causes() {
         let services = RecordingServices::new();
+        for (session_id, outcome, role_kind) in [
+            (
+                "unexpected-worker-finalize",
+                worker_stage_outcome("bad_finalize", None),
+                RoleKind::Worker,
+            ),
+            (
+                "invalid-planner-finalize",
+                StageOutcome::Failed {
+                    reason: "planner submitted unknown decision 'invalid'".into(),
+                    provider_failure: None,
+                },
+                RoleKind::Planner,
+            ),
+            (
+                "missing-refinement-finalize",
+                StageOutcome::Failed {
+                    reason: "refinement session ended without calling a finalize tool".into(),
+                    provider_failure: None,
+                },
+                RoleKind::Refinement,
+            ),
+        ] {
+            let settlement = settlement_for_stage_outcome(outcome, true, None, role_kind);
+            assert_eq!(
+                settlement.failure_cause,
+                Some(SessionFailureCause::Finalization)
+            );
+            settle_stage_session(&services, session_id.into(), &settlement, 0, 0, 0, 0)
+                .await
+                .unwrap();
+        }
         settle_stage_session(
             &services,
             "completed".into(),
             &StageSettlement::completed(StageOutcome::WorkerDone),
-            0, 0, 0, 0,
-        ).await.unwrap();
+            0,
+            0,
+            0,
+            0,
+        )
+        .await
+        .unwrap();
         settle_stage_session(
             &services,
             "budget".into(),
             &StageSettlement::completed(StageOutcome::Parked {
-                reason: ParkReason::Budget, summary: None, wind_down_ignored: false,
-                session_id: "budget".into(), tokens_in: 0, tokens_out: 0,
+                reason: ParkReason::Budget,
+                summary: None,
+                wind_down_ignored: false,
+                session_id: "budget".into(),
+                tokens_in: 0,
+                tokens_out: 0,
             }),
-            0, 0, 0, 0,
-        ).await.unwrap();
-        mark_session_failed(&services, "setup", SessionFailureCause::Harness).await;
-        assert_eq!(*services.settlements.lock().unwrap(), vec![
-            RecordedSettlement { status: SessionStatus::Completed, parked_reason: None, failure_cause: None },
-            RecordedSettlement { status: SessionStatus::Completed, parked_reason: Some("budget".into()), failure_cause: None },
-            RecordedSettlement { status: SessionStatus::Failed, parked_reason: None, failure_cause: Some(SessionFailureCause::Harness) },
-        ]);
+            0,
+            0,
+            0,
+            0,
+        )
+        .await
+        .unwrap();
+        for (session_id, branch) in [
+            ("mcp-skill-setup", SetupFailureBranch::McpAndSkills),
+            ("environment-setup", SetupFailureBranch::EnvironmentConfig),
+            ("command-setup", SetupFailureBranch::SetupCommands),
+            ("provider-setup", SetupFailureBranch::ProviderConstruction),
+        ] {
+            mark_session_failed(&services, session_id, branch).await;
+        }
+        let recorded = services.settlements.lock().unwrap();
+        assert_eq!(recorded.len(), 9);
+        assert!(
+            recorded[..3]
+                .iter()
+                .all(|entry| entry.status == SessionStatus::Failed
+                    && entry.failure_cause == Some(SessionFailureCause::Finalization))
+        );
+        assert_eq!(recorded[3].failure_cause, None);
+        assert_eq!(recorded[4].failure_cause, None);
+        assert_eq!(recorded[4].parked_reason.as_deref(), Some("budget"));
+        assert!(
+            recorded[5..]
+                .iter()
+                .all(|entry| entry.status == SessionStatus::Failed
+                    && entry.failure_cause == Some(SessionFailureCause::Harness))
+        );
     }
 
     #[tokio::test]

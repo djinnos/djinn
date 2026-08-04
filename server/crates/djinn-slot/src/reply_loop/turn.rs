@@ -31,13 +31,13 @@ use super::budget::{
 };
 use super::compaction_guard::CompactionCriticalSection;
 use super::error_handling::{
-    BudgetWindDownIgnored, MAX_COMPACTION_RETRIES, TransportCompactionRecoveryGuard,
-    empty_start_streak_feeds_breaker, empty_turn_backoff, empty_turn_is_reasoning_only,
-    is_context_length_error, is_orphaned_tool_call_error, is_oversized_transport_payload,
-    is_provider_failure_prose, next_nudge_message, reasoning_only_nudge_message,
-    should_retry_after_tool_call_compaction, should_retry_empty_assistant_turn,
-    should_retry_empty_stream, soft_budget_converge_message, tool_choice_for_turn,
-    wind_down_message,
+    BudgetWindDownIgnored, MAX_COMPACTION_RETRIES, StepCapWindDownIgnored,
+    TransportCompactionRecoveryGuard, empty_start_streak_feeds_breaker, empty_turn_backoff,
+    empty_turn_is_reasoning_only, is_context_length_error, is_orphaned_tool_call_error,
+    is_oversized_transport_payload, is_provider_failure_prose, next_nudge_message,
+    reasoning_only_nudge_message, should_retry_after_tool_call_compaction,
+    should_retry_empty_assistant_turn, should_retry_empty_stream, soft_budget_converge_message,
+    tool_choice_for_turn, wind_down_message,
 };
 use super::loop_guard::{
     AssistantOutputSignature, LoopGuardCondition, LoopGuardError, LoopGuardReason, LoopGuardState,
@@ -418,11 +418,7 @@ impl WindDownReason {
     }
     fn hard_error(&self, max_turns: u32) -> anyhow::Error {
         match self {
-            Self::StepCap { .. } => anyhow::anyhow!(
-                "max turns ({}) exceeded without text-only response (wind-down summary \
-                 directive was injected but the agent did not terminate)",
-                max_turns
-            ),
+            Self::StepCap { .. } => StepCapWindDownIgnored { max_turns }.into(),
             Self::Budget { details } => BudgetWindDownIgnored {
                 details: format!(
                     "{details}; hard token budget wind-down directive was injected but the agent did not produce a text-only summary"
