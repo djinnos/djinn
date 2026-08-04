@@ -484,9 +484,14 @@ async fn tribunal_evidence_return_v1_cardinality_boundaries_are_exact_and_atomic
             .await
             .unwrap();
 
-        let (db, a) = setup_named(&all[..exact]).await;
+        let rejected_checks = if dimension == "checks" {
+            &all[..over]
+        } else {
+            &all[..exact]
+        };
+        let (db, a) = setup_named(rejected_checks).await;
         let mut rejected = payload(&a, check("check-0", "code", "passed"));
-        rejected["checks"] = json!(checks_for(&all[..exact]));
+        rejected["checks"] = json!(checks_for(rejected_checks));
         if dimension == "findings" {
             rejected["findings"] =
                 json!((0..over)
