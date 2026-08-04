@@ -10,7 +10,8 @@ use crate::message::{ContentBlock, Conversation};
 use crate::model_turn_admission::{ProviderAttemptLossV1, ProviderUsageObservationV1};
 use crate::provider::FormatFamily;
 use crate::provider::client::{
-    ApiClient, ProviderFormatReportV1, ProviderSseTerminalReporterV1, SseFrame,
+    ApiClient, ProviderAttemptContextV1, ProviderFormatReportV1, ProviderSseAttemptV1,
+    ProviderSseTerminalReporterV1, SseFrame,
 };
 use crate::provider::error::ProviderError;
 use crate::provider::format::tool_projection::project;
@@ -370,8 +371,31 @@ impl ProviderSseTerminalReporterV1 for OpenAIResponsesTerminalReporterV1 {
                     ProviderFormatReportV1::CodexEmptyTurn(usage)
                 }
             }
-            ResponsesStreamEvent::ResponseFailed { .. } | ResponsesStreamEvent::Error { .. } => {
-                ProviderFormatReportV1::Failed(ProviderAttemptLossV1::ProviderRejected)
+            ResponsesStreamEvent::ResponseFailed { error }
+            | ResponsesStreamEvent::Error { error } => {
+                // Reuse the legacy stream's typed classifier: an in-band
+                // Responses error still carries a provider-specific failure
+                // class even though its HTTP response was successful.
+                match ProviderError::from_stream_error(
+                    extract_error_code(&error).as_deref(),
+                    &extract_error_message(&error),
+                ) {
+                    ProviderError::RateLimit { .. } => {
+                        ProviderFormatReportV1::Failed(ProviderAttemptLossV1::RateLimited)
+                    }
+                    ProviderError::ProviderInternal { .. }
+                    | ProviderError::Transport
+                    | ProviderError::ExhaustedTransport(_)
+                    | ProviderError::EmptyCompletion => {
+                        ProviderFormatReportV1::Failed(ProviderAttemptLossV1::Transport)
+                    }
+                    ProviderError::ContextOverflow
+                    | ProviderError::Authentication
+                    | ProviderError::InvalidRequest
+                    | ProviderError::InvalidOutput => {
+                        ProviderFormatReportV1::Failed(ProviderAttemptLossV1::ProviderRejected)
+                    }
+                }
             }
             _ => ProviderFormatReportV1::Continue,
         }
@@ -638,6 +662,30 @@ impl LlmProvider for OpenAIResponsesProvider {
 
     fn config_snapshot(&self) -> Option<ProviderConfig> {
         Some(self.config.clone())
+    }
+
+    fn admission_capabilities_v1(
+        &self,
+    ) -> crate::model_turn_admission::ProviderAttemptCapabilitiesV1 {
+        ProviderSseAttemptV1::capabilities()
+    }
+
+    fn start_sse_attempt_v1(
+        &self,
+        conversation: &Conversation,
+        tools: &[Value],
+        tool_choice: Option<ToolChoice>,
+        context: ProviderAttemptContextV1,
+    ) -> Result<ProviderSseAttemptV1, crate::model_turn_admission::ProviderAttemptRouteCoverageV1>
+    {
+        Ok(self.client.start_sse_attempt_v1(
+            &self.effective_url(),
+            self.build_request(conversation, tools, tool_choice),
+            &self.config.auth,
+            self.extra_headers(),
+            context,
+            OpenAIResponsesTerminalReporterV1::default(),
+        ))
     }
 
     fn stream_request_body(
