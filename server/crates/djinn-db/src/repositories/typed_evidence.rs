@@ -399,21 +399,7 @@ impl TypedEvidenceRepository {
             sqlx::query("INSERT INTO typed_evidence_return_findings (id,validation_result_id,planned_check_id,conclusion,usable) VALUES ($1,$2,$3,$4,$5)")
                 .bind(&finding_id).bind(&validation_id).bind(&p.id).bind(&f.conclusion).bind(positive).execute(&mut **tx).await?;
         }
-        let any_positive = check_healthy.values().any(|usable| *usable);
-        let all_passed_usable = payload.checks.iter().all(|c| {
-            c.status == "passed"
-                && check_healthy
-                    .get(c.check_id.as_str())
-                    .copied()
-                    .unwrap_or(false)
-        });
-        let result_outcome = if all_passed_usable {
-            TribunalEvidenceOutcome::Resolved
-        } else if any_positive {
-            TribunalEvidenceOutcome::Partial
-        } else {
-            TribunalEvidenceOutcome::Unresolved
-        };
+        let result_outcome = derive_outcome(&payload.checks, &check_healthy);
         sqlx::query("UPDATE typed_evidence_validation_results SET outcome=$1,validator_facts=$2 WHERE id=$3").bind(outcome(result_outcome)).bind(serde_json::json!({"validator_version":"TribunalEvidenceReturnV1","raw_payload_sha256":hash,"server_hydrated":true,"outcome":outcome(result_outcome)})).bind(&validation_id).execute(&mut **tx).await?;
         for i in &payload.failures {
             let p = expected[i.check_id.as_str()];
@@ -691,6 +677,26 @@ fn outcome(value: TribunalEvidenceOutcome) -> &'static str {
         TribunalEvidenceOutcome::Unresolved => "unresolved",
     }
 }
+fn derive_outcome(
+    checks: &[TribunalEvidenceReturnCheckV1],
+    check_healthy: &HashMap<&str, bool>,
+) -> TribunalEvidenceOutcome {
+    let any_positive = check_healthy.values().any(|usable| *usable);
+    let all_passed_usable = checks.iter().all(|check| {
+        check.status == "passed"
+            && check_healthy
+                .get(check.check_id.as_str())
+                .copied()
+                .unwrap_or(false)
+    });
+    if all_passed_usable {
+        TribunalEvidenceOutcome::Resolved
+    } else if any_positive {
+        TribunalEvidenceOutcome::Partial
+    } else {
+        TribunalEvidenceOutcome::Unresolved
+    }
+}
 fn planned_method(value: TribunalEvidenceAnchorMethod) -> &'static str {
     match value {
         TribunalEvidenceAnchorMethod::Code => "code",
@@ -722,6 +728,22 @@ impl HydratedAnchor {
             "unusable"
         }
     }
+}
+fn unobserved_repository_anchor(
+    attempt_id: &str,
+    planned_check_id: &str,
+    plan_id: &str,
+    commit: &str,
+) -> HydratedAnchor {
+    HydratedAnchor::unusable(
+        "no immutable server-owned repository observation bound to this attempt and planned check",
+        serde_json::json!({
+            "attempt_id": attempt_id,
+            "planned_check_id": planned_check_id,
+            "evidence_plan_id": plan_id,
+            "captured_commit_sha": commit,
+        }),
+    )
 }
 /// A locator is merely a caller selector. Its grammar is family-specific so
 /// one family cannot be reinterpreted as another family's evidence.
@@ -872,29 +894,17 @@ async fn hydrate_anchor(
         CanonicalAnchorLocator::Command { invocation_id } => {
             hydrate_command_invocation(tx, attempt_id, planned, invocation_id).await
         }
-        CanonicalAnchorLocator::Repository { plan_id, commit } => {
-            let row = sqlx::query("SELECT captured_commit_sha FROM evidence_plans WHERE id=$1")
-                .bind(plan_id)
-                .fetch_optional(&mut **tx)
-                .await?;
-            Ok(match row {
-                Some(row)
-                    if planned.evidence_plan_id.as_deref() == Some(plan_id)
-                        && row.get::<String, _>("captured_commit_sha") == commit =>
-                {
-                    HydratedAnchor {
-                        healthy: true,
-                        method_compatible: true,
-                        identity: serde_json::json!({"evidence_plan_id":plan_id,"captured_commit_sha":commit}),
-                        detail: "exact frozen repository identity".into(),
-                    }
-                }
-                _ => HydratedAnchor::unusable(
-                    "repository identity is not owned by this planned check",
-                    scope,
-                ),
-            })
-        }
+        // A frozen plan and captured commit establish planning context, not an
+        // observation that performed this check. There is currently no
+        // immutable repository-observation row owned by an exact
+        // attempt/planned-check pair, so even an exact canonical selector must
+        // remain unusable. Do not infer health from `evidence_plans`.
+        CanonicalAnchorLocator::Repository { plan_id, commit } => Ok(unobserved_repository_anchor(
+            attempt_id,
+            &planned.id,
+            plan_id,
+            commit,
+        )),
         // Graph generations and galaxy artifacts are immutable, but their
         // repository records are project-wide. Commit equality is not exact
         // attempt/check provenance and would allow cross-attempt evidence.
@@ -1227,5 +1237,69 @@ mod tests {
         let envelope = serde_json::from_slice::<TribunalEvidenceReturnEnvelopeV1>(malformed)
             .expect("minimal envelope must decode despite malformed V1 body");
         assert_eq!(envelope.attempt_id.as_deref(), Some("attempt"));
+    }
+
+    #[test]
+    fn matching_plan_repository_locators_do_not_resolve_passed_checks() {
+        let plan_id = "019fcad4-4b3f-7ce2-8527-93c5cfab897a";
+        let commit = "abcdef0123456789";
+        let locator = format!("repository:{plan_id}:{commit}");
+        let parsed = parse_canonical_locator("repository", &locator)
+            .expect("matching plan repository locator is canonical");
+        let CanonicalAnchorLocator::Repository {
+            plan_id: parsed_plan_id,
+            commit: parsed_commit,
+        } = parsed
+        else {
+            panic!("repository parser returned a different anchor family");
+        };
+        assert_eq!(parsed_plan_id, plan_id);
+        assert_eq!(parsed_commit, commit);
+
+        let checks = vec![
+            TribunalEvidenceReturnCheckV1 {
+                check_id: "code-check".into(),
+                method: "code".into(),
+                status: "passed".into(),
+                detail: None,
+                invocation_id: None,
+                anchors: vec![TribunalEvidenceReturnAnchorV1 {
+                    method: "repository".into(),
+                    locator: locator.clone(),
+                }],
+            },
+            TribunalEvidenceReturnCheckV1 {
+                check_id: "graph-check".into(),
+                method: "graph".into(),
+                status: "passed".into(),
+                detail: None,
+                invocation_id: None,
+                anchors: vec![TribunalEvidenceReturnAnchorV1 {
+                    method: "repository".into(),
+                    locator: locator.clone(),
+                }],
+            },
+        ];
+        let code =
+            unobserved_repository_anchor("attempt", "planned-code", parsed_plan_id, parsed_commit);
+        let graph =
+            unobserved_repository_anchor("attempt", "planned-graph", parsed_plan_id, parsed_commit);
+        for hydrated in [&code, &graph] {
+            assert!(!hydrated.healthy);
+            assert!(!hydrated.method_compatible);
+            assert_eq!(hydrated.health(), "unusable");
+            assert_eq!(hydrated.identity["evidence_plan_id"], plan_id);
+            assert_eq!(hydrated.identity["captured_commit_sha"], commit);
+        }
+
+        let check_healthy = HashMap::from([
+            ("code-check", code.healthy && code.method_compatible),
+            ("graph-check", graph.healthy && graph.method_compatible),
+        ]);
+        assert_eq!(
+            derive_outcome(&checks, &check_healthy),
+            TribunalEvidenceOutcome::Unresolved,
+            "planning context alone cannot make passed code/graph checks positive",
+        );
     }
 }
