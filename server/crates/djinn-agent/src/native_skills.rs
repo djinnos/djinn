@@ -21,7 +21,7 @@ use crate::skills::ResolvedSkill;
 pub const VISUAL_SPEC_VERSION: &str = "1.2.0";
 
 /// Version of the platform-owned readiness guardrail catalog.
-pub const AGENT_READINESS_GUARDRAILS_VERSION: &str = "1.0.0";
+pub const AGENT_READINESS_GUARDRAILS_VERSION: &str = "1.1.0";
 
 // ─── Embedded asset ─────────────────────────────────────────────────────────
 
@@ -212,7 +212,7 @@ mod tests {
 
     #[test]
     fn readiness_guardrails_are_registered_as_a_platform_architect_recommendation() {
-        let skill = native_skill_exact("agent-readiness-guardrails", "1.0.0")
+        let skill = native_skill_exact("agent-readiness-guardrails", "1.1.0")
             .expect("registered readiness pin should resolve");
         assert_eq!(skill.version, AGENT_READINESS_GUARDRAILS_VERSION);
         assert_eq!(skill.trust_level, "platform");
@@ -229,17 +229,17 @@ mod tests {
             })
         );
         assert_eq!(
-            native_skill_exact("agent-readiness-guardrails", "1.0.1"),
+            native_skill_exact("agent-readiness-guardrails", "1.0.0"),
             Err(NativeSkillLookupError::VersionMismatch {
                 name: "agent-readiness-guardrails".to_string(),
-                requested_version: "1.0.1".to_string(),
-                registered_version: "1.0.0".to_string(),
+                requested_version: "1.0.0".to_string(),
+                registered_version: "1.1.0".to_string(),
             })
         );
     }
 
     #[test]
-    fn readiness_catalog_has_exactly_the_eight_s0_guardrails() {
+    fn readiness_catalog_has_exactly_the_nine_s0_guardrails_including_ci_timeouts() {
         let skill = native_skill("agent-readiness-guardrails").unwrap();
         for id in [
             "GOV-MIG-001",
@@ -250,10 +250,29 @@ mod tests {
             "TEST-DB-001",
             "OBS-BASELINE-001",
             "SUPPLY-CHAIN-001",
+            "CI-TIMEOUT-001",
         ] {
             assert!(skill.content.contains(id), "catalog must include {id}");
         }
-        assert_eq!(skill.content.matches("### Guardrail:").count(), 8);
+        assert_eq!(skill.content.matches("### Guardrail:").count(), 9);
+        for required_contract_text in [
+            ".github/ci-timeouts.json",
+            "scripts/check-ci-timeouts.mjs",
+            "required-context-inventory-unverified",
+            "GET /repos/{owner}/{repo}/actions/workflows",
+            "GET /repos/{owner}/{repo}/actions/workflows/{workflow_id}/runs",
+            "GET /repos/{owner}/{repo}/actions/runs/{run_id}/attempts/1/jobs",
+            "runner_group_id",
+            "ambiguous-provider-job-identity",
+            "job-requires-partitioning",
+            "ceil(0.95 * n)",
+            "ceil(1.5 * p95_seconds / 60)",
+        ] {
+            assert!(
+                skill.content.contains(required_contract_text),
+                "CI timeout contract must include {required_contract_text}",
+            );
+        }
         assert!(
             !skill
                 .content
