@@ -328,10 +328,10 @@ pub use repositories::{
     task_run::{CreateTaskRunParams, TaskRunRepository},
     typed_evidence::{
         AllocateTypedEvidenceAttemptInput, AllocateTypedEvidenceRetryInput,
-        AppendTypedEvidenceTransitionInput, DemandTypedEvidenceInput,
+        AppendTypedEvidenceTransitionInput, DemandTypedEvidenceInput, DisposeTypedEvidenceInput,
         PersistTypedEvidenceValidationInput, PlannedTypedEvidenceCheckInput,
         TypedEvidenceAttemptAllocation, TypedEvidenceDispositionProjection,
-        TypedEvidenceFindingProjection,
+        TypedEvidenceFindingProjection, TypedEvidenceRepository,
     },
     usage_analytics::{
         EntityBreakdownRow, GroupDimension, ModelEffectivenessRow, ProjectModelMatrixRow,
