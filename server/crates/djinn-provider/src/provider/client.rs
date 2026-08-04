@@ -4,8 +4,10 @@ use djinn_core::clock::{Clock, SystemClock as SystemClockTrait};
 use futures::{Stream, StreamExt};
 use reqwest::header::HeaderMap;
 use std::pin::Pin;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::sync::{mpsc, oneshot};
 use tokio_util::io::StreamReader;
 
 use super::AuthMethod;
@@ -13,6 +15,12 @@ use super::error::{ProviderError, redact_secrets};
 use super::first_event::first_event_budget;
 use super::transport::{
     TransportClassificationInput, classify_exhausted_transport, initial_request_transport_category,
+};
+use crate::model_turn_admission::{
+    ProviderAdmissionPolicyV1, ProviderApiKeyNormalizerV1, ProviderAttemptAbortHandleV1,
+    ProviderAttemptAbortResultV1, ProviderAttemptCapabilitiesV1, ProviderAttemptLossV1,
+    ProviderAttemptTerminalV1, ProviderHiddenRetryCapabilityV1, ProviderOutcomeV1,
+    ProviderReceiptTimeV1, ProviderTokenEmissionV1, ProviderUsageObservationV1,
 };
 use crate::rate_limit::{activate_suppression_window, clear_suppression_window};
 
@@ -23,6 +31,81 @@ fn auth_secrets(auth: &AuthMethod) -> Vec<String> {
         AuthMethod::BearerToken(token) => vec![token.clone()],
         AuthMethod::ApiKeyHeader { key, .. } => vec![key.clone()],
         AuthMethod::NoAuth => Vec::new(),
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ProviderFormatReportV1 {
+    Continue,
+    TokenEmitted,
+    Completed(ProviderUsageObservationV1),
+    CodexEmptyTurn(ProviderUsageObservationV1),
+    Failed(ProviderAttemptLossV1),
+    Malformed,
+}
+
+/// Provider-format seam. The transport owns SSE framing only; the selected
+/// adapter is authoritative for terminal, usage, and token semantics.
+pub trait ProviderSseTerminalReporterV1: Send + 'static {
+    fn report(&mut self, frame: &SseFrame) -> ProviderFormatReportV1;
+}
+
+/// Credential-scoped normalization and deterministic receipt clocks supplied by
+/// the admission caller rather than recreated for each request.
+#[derive(Clone)]
+pub struct ProviderAttemptContextV1 {
+    pub request_sequence: u64,
+    pub route_policy: ProviderAdmissionPolicyV1,
+    pub normalizer: Arc<Mutex<ProviderApiKeyNormalizerV1>>,
+    receipt_clock: Arc<dyn Fn() -> ProviderReceiptTimeV1 + Send + Sync>,
+}
+
+impl ProviderAttemptContextV1 {
+    pub fn new(
+        request_sequence: u64,
+        route_policy: ProviderAdmissionPolicyV1,
+        normalizer: Arc<Mutex<ProviderApiKeyNormalizerV1>>,
+        receipt_clock: impl Fn() -> ProviderReceiptTimeV1 + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            request_sequence,
+            route_policy,
+            normalizer,
+            receipt_clock: Arc::new(receipt_clock),
+        }
+    }
+
+    fn receipt(&self) -> ProviderReceiptTimeV1 {
+        (self.receipt_clock)()
+    }
+}
+
+/// One no-retry admission attempt and its single terminal outcome.
+pub struct ProviderSseAttemptV1 {
+    pub events: Pin<Box<dyn Stream<Item = anyhow::Result<SseFrame>> + Send>>,
+    pub abort: ProviderAttemptAbortHandleV1,
+    outcome: oneshot::Receiver<ProviderOutcomeV1>,
+}
+
+impl ProviderSseAttemptV1 {
+    pub async fn outcome(&mut self) -> ProviderOutcomeV1 {
+        (&mut self.outcome)
+            .await
+            .unwrap_or_else(|_| ProviderOutcomeV1 {
+                terminal: ProviderAttemptTerminalV1::Failed(ProviderAttemptLossV1::Transport),
+                authoritative_usage: None,
+                observation: None,
+                abort: ProviderAttemptAbortResultV1::NotRequested,
+                token_emission: ProviderTokenEmissionV1::default(),
+            })
+    }
+
+    #[must_use]
+    pub fn capabilities() -> ProviderAttemptCapabilitiesV1 {
+        ProviderAttemptCapabilitiesV1 {
+            hidden_retries: ProviderHiddenRetryCapabilityV1::Disabled,
+            abort: crate::model_turn_admission::ProviderAbortCapabilityV1::Supported,
+        }
     }
 }
 
@@ -279,6 +362,218 @@ impl ApiClient {
         Self {
             inner,
             first_event_budget_override: Some(override_),
+        }
+    }
+
+    /// Starts exactly one admission-owned request; legacy stream methods below
+    /// retain their retry behavior for unmigrated callers.
+    pub fn start_sse_attempt_v1(
+        &self,
+        url: &str,
+        body: serde_json::Value,
+        auth: &AuthMethod,
+        extra_headers: HeaderMap,
+        context: ProviderAttemptContextV1,
+        mut reporter: impl ProviderSseTerminalReporterV1,
+    ) -> ProviderSseAttemptV1 {
+        let (event_tx, mut event_rx) = mpsc::channel(16);
+        let (outcome_tx, outcome) = oneshot::channel();
+        let abort = ProviderAttemptAbortHandleV1::new();
+        let policy_matches = context
+            .normalizer
+            .lock()
+            .is_ok_and(|normalizer| normalizer.policy() == context.route_policy);
+        if !policy_matches {
+            drop(event_tx);
+            let _ = outcome_tx.send(ProviderOutcomeV1 {
+                terminal: ProviderAttemptTerminalV1::Failed(ProviderAttemptLossV1::PolicyMismatch),
+                authoritative_usage: None,
+                observation: None,
+                abort: ProviderAttemptAbortResultV1::NotRequested,
+                token_emission: ProviderTokenEmissionV1::default(),
+            });
+            return ProviderSseAttemptV1 {
+                events: Box::pin(
+                    stream! { while let Some(event) = event_rx.recv().await { yield event; } },
+                ),
+                abort,
+                outcome,
+            };
+        }
+        let cancellation = abort.cancellation_token();
+        let client = self.inner.clone();
+        let url = url.to_owned();
+        let auth = auth.clone();
+        tokio::spawn(async move {
+            let mut emission = ProviderTokenEmissionV1::default();
+            let mut observation = None;
+            let mut authoritative_usage = None;
+            let mut terminal = ProviderAttemptTerminalV1::Failed(ProviderAttemptLossV1::Protocol);
+            let mut abort_result = ProviderAttemptAbortResultV1::NotRequested;
+            let mut request = client
+                .post(&url)
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .json(&body);
+            request = match &auth {
+                AuthMethod::BearerToken(token) => {
+                    request.header("Authorization", format!("Bearer {token}"))
+                }
+                AuthMethod::ApiKeyHeader { header, key } => {
+                    request.header(header.as_str(), key.as_str())
+                }
+                AuthMethod::NoAuth => request,
+            };
+            for (name, value) in &extra_headers {
+                request = request.header(name, value);
+            }
+            log_outbound_request("POST", &url, &body, &auth, &extra_headers);
+            let response = tokio::select! {
+                _ = cancellation.cancelled() => { terminal = ProviderAttemptTerminalV1::Aborted; abort_result = ProviderAttemptAbortResultV1::Confirmed; None }
+                response = request.send() => match response { Ok(response) => Some(response), Err(_) => { terminal = ProviderAttemptTerminalV1::Failed(ProviderAttemptLossV1::Transport); None } }
+            };
+            if let Some(response) = response {
+                let headers: Vec<(String, String)> = response
+                    .headers()
+                    .iter()
+                    .filter_map(|(name, value)| {
+                        value
+                            .to_str()
+                            .ok()
+                            .map(|value| (name.to_string(), value.to_owned()))
+                    })
+                    .collect();
+                let refs: Vec<(&str, &str)> = headers
+                    .iter()
+                    .map(|(name, value)| (name.as_str(), value.as_str()))
+                    .collect();
+                // Preserve the response receipt while deferring successful
+                // normalization until terminal authoritative usage is known.
+                let response_receipt = context.receipt();
+                if !response.status().is_success() {
+                    observation =
+                        Some(context.normalizer.lock().expect("normalizer lock").observe(
+                            context.request_sequence,
+                            &refs,
+                            ProviderUsageObservationV1::default(),
+                            response_receipt,
+                        ));
+                    if is_rate_limit_status(response.status()) {
+                        // The admission wrapper owns no retry, but it must
+                        // preserve the legacy throttle/suppression signal.
+                        activate_suppression_window(Duration::from_millis(
+                            retry_after_ms(response.headers()).unwrap_or(INITIAL_BACKOFF_MS),
+                        ));
+                    }
+                    terminal = ProviderAttemptTerminalV1::Failed(
+                        if is_rate_limit_status(response.status()) {
+                            ProviderAttemptLossV1::RateLimited
+                        } else {
+                            ProviderAttemptLossV1::ProviderRejected
+                        },
+                    );
+                } else {
+                    clear_suppression_window();
+                    let mut terminal_usage = ProviderUsageObservationV1::default();
+                    let bytes = response
+                        .bytes_stream()
+                        .map(|item| item.map_err(std::io::Error::other));
+                    let mut lines = BufReader::new(StreamReader::new(bytes)).lines();
+                    loop {
+                        let next = tokio::select! { _ = cancellation.cancelled() => { terminal = ProviderAttemptTerminalV1::Aborted; abort_result = ProviderAttemptAbortResultV1::Confirmed; break; } next = lines.next_line() => next };
+                        match next {
+                            Ok(Some(line)) => {
+                                if let Some(frame) = classify_sse_line(&line) {
+                                    let receipt = context.receipt();
+                                    match reporter.report(&frame) {
+                                        ProviderFormatReportV1::Continue => {}
+                                        ProviderFormatReportV1::TokenEmitted => {
+                                            emission
+                                                .first_token_monotonic_ms
+                                                .get_or_insert(receipt.monotonic_ms);
+                                            emission.last_token_monotonic_ms =
+                                                Some(receipt.monotonic_ms);
+                                        }
+                                        ProviderFormatReportV1::Completed(usage) => {
+                                            terminal_usage = usage;
+                                            terminal = ProviderAttemptTerminalV1::Completed;
+                                        }
+                                        ProviderFormatReportV1::CodexEmptyTurn(usage) => {
+                                            terminal_usage = usage;
+                                            terminal = ProviderAttemptTerminalV1::Failed(
+                                                ProviderAttemptLossV1::CodexEmptyTurn,
+                                            );
+                                            break;
+                                        }
+                                        ProviderFormatReportV1::Failed(loss) => {
+                                            terminal = ProviderAttemptTerminalV1::Failed(loss);
+                                            break;
+                                        }
+                                        ProviderFormatReportV1::Malformed => {
+                                            terminal = ProviderAttemptTerminalV1::Failed(
+                                                ProviderAttemptLossV1::Protocol,
+                                            );
+                                            break;
+                                        }
+                                    }
+                                    tokio::select! {
+                                        _ = cancellation.cancelled() => { terminal = ProviderAttemptTerminalV1::Aborted; abort_result = ProviderAttemptAbortResultV1::Confirmed; break; }
+                                        sent = event_tx.send(Ok(frame)) => {
+                                            // A dropped consumer must not strand the outcome
+                                            // owner waiting to feed a stream nobody observes.
+                                            if sent.is_err() {
+                                                terminal = ProviderAttemptTerminalV1::Failed(ProviderAttemptLossV1::ConsumerDropped);
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            Ok(None) => break,
+                            Err(_) => {
+                                terminal = ProviderAttemptTerminalV1::Failed(
+                                    ProviderAttemptLossV1::Transport,
+                                );
+                                break;
+                            }
+                        }
+                    }
+                    let normalized_usage = match terminal {
+                        ProviderAttemptTerminalV1::Completed
+                        | ProviderAttemptTerminalV1::Failed(
+                            ProviderAttemptLossV1::CodexEmptyTurn,
+                        ) => terminal_usage,
+                        _ => ProviderUsageObservationV1::default(),
+                    };
+                    // Usage from a valid provider terminal remains
+                    // authoritative even when this response is too old to
+                    // update credential-scoped capacity.
+                    authoritative_usage =
+                        crate::model_turn_admission::normalize_usage(normalized_usage)
+                            .ok()
+                            .flatten();
+                    observation =
+                        Some(context.normalizer.lock().expect("normalizer lock").observe(
+                            context.request_sequence,
+                            &refs,
+                            normalized_usage,
+                            response_receipt,
+                        ));
+                }
+            }
+            let _ = outcome_tx.send(ProviderOutcomeV1 {
+                terminal,
+                authoritative_usage,
+                observation,
+                abort: abort_result,
+                token_emission: emission,
+            });
+        });
+        ProviderSseAttemptV1 {
+            events: Box::pin(
+                stream! { while let Some(event) = event_rx.recv().await { yield event; } },
+            ),
+            abort,
+            outcome,
         }
     }
 

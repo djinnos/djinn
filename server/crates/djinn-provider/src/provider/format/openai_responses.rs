@@ -7,8 +7,12 @@ use serde_json::{Value, json};
 use std::pin::Pin;
 
 use crate::message::{ContentBlock, Conversation};
+use crate::model_turn_admission::{ProviderAttemptLossV1, ProviderUsageObservationV1};
 use crate::provider::FormatFamily;
-use crate::provider::client::{ApiClient, SseFrame};
+use crate::provider::client::{
+    ApiClient, ProviderAttemptContextV1, ProviderFormatReportV1, ProviderSseAttemptV1,
+    ProviderSseTerminalReporterV1, SseFrame,
+};
 use crate::provider::error::ProviderError;
 use crate::provider::format::tool_projection::project;
 use crate::provider::{LlmProvider, ProviderConfig, StreamEvent, TokenUsage, ToolChoice};
@@ -252,6 +256,152 @@ enum ResponsesStreamEvent {
     Keepalive {},
 }
 
+#[derive(Debug, Default)]
+struct ResponsesTerminalState {
+    completed: bool,
+    accumulated_items: Vec<OutputItemInfo>,
+    in_flight_function_calls: usize,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ResponsesTerminalTransition {
+    Continue,
+    Completed,
+    IncompleteFunctionCall,
+}
+
+impl ResponsesTerminalState {
+    fn transition(&mut self, event: &ResponsesStreamEvent) -> ResponsesTerminalTransition {
+        match event {
+            ResponsesStreamEvent::OutputItemAdded {
+                item: Some(OutputItemInfo::FunctionCall { .. }),
+            } => {
+                self.in_flight_function_calls += 1;
+                ResponsesTerminalTransition::Continue
+            }
+            ResponsesStreamEvent::FunctionCallArgumentsDone {} => {
+                self.in_flight_function_calls = self.in_flight_function_calls.saturating_sub(1);
+                ResponsesTerminalTransition::Continue
+            }
+            ResponsesStreamEvent::OutputItemDone { item } => {
+                self.accumulated_items.push(item.clone());
+                ResponsesTerminalTransition::Continue
+            }
+            ResponsesStreamEvent::ResponseCompleted { .. } if self.in_flight_function_calls > 0 => {
+                self.accumulated_items.clear();
+                self.in_flight_function_calls = 0;
+                ResponsesTerminalTransition::IncompleteFunctionCall
+            }
+            ResponsesStreamEvent::ResponseCompleted { .. } => {
+                self.completed = true;
+                ResponsesTerminalTransition::Completed
+            }
+            _ => ResponsesTerminalTransition::Continue,
+        }
+    }
+
+    fn final_items<'a>(&'a self, response: &'a ResponseMetadata) -> &'a [OutputItemInfo] {
+        if response.output.is_empty() {
+            &self.accumulated_items
+        } else {
+            &response.output
+        }
+    }
+}
+
+/// Typed admission terminal adapter for the OpenAI/Codex Responses format.
+#[derive(Default)]
+pub struct OpenAIResponsesTerminalReporterV1 {
+    terminal_state: ResponsesTerminalState,
+}
+
+impl ProviderSseTerminalReporterV1 for OpenAIResponsesTerminalReporterV1 {
+    fn report(&mut self, frame: &SseFrame) -> ProviderFormatReportV1 {
+        let SseFrame::Data(data) = frame else {
+            return if self.terminal_state.completed {
+                ProviderFormatReportV1::Continue
+            } else {
+                ProviderFormatReportV1::Malformed
+            };
+        };
+        let event = match parse_stream_event(data) {
+            Ok(Some(event)) => event,
+            Ok(None) => return ProviderFormatReportV1::Continue,
+            Err(_) => return ProviderFormatReportV1::Malformed,
+        };
+        if self.terminal_state.transition(&event)
+            == ResponsesTerminalTransition::IncompleteFunctionCall
+        {
+            return ProviderFormatReportV1::Failed(ProviderAttemptLossV1::Transport);
+        }
+        match event {
+            ResponsesStreamEvent::OutputTextDelta { delta }
+            | ResponsesStreamEvent::ReasoningSummaryTextDelta { delta }
+                if !delta.is_empty() =>
+            {
+                ProviderFormatReportV1::TokenEmitted
+            }
+            ResponsesStreamEvent::OutputItemDone { .. }
+            | ResponsesStreamEvent::OutputItemAdded { .. }
+            | ResponsesStreamEvent::FunctionCallArgumentsDone {} => {
+                ProviderFormatReportV1::Continue
+            }
+            ResponsesStreamEvent::ResponseCompleted { response } => {
+                let usage = response.usage.as_ref().map_or_else(
+                    ProviderUsageObservationV1::default,
+                    |usage| ProviderUsageObservationV1 {
+                        input_units: Some(i64::from(usage.input_tokens)),
+                        output_units: Some(i64::from(usage.output_tokens)),
+                        combined_units: Some(
+                            i64::from(usage.input_tokens) + i64::from(usage.output_tokens),
+                        ),
+                    },
+                );
+                // Final items can be authoritative in earlier done frames while
+                // the completed response carries an empty output array.
+                let final_items = self.terminal_state.final_items(&response);
+                if final_items.iter().any(|item| {
+                    matches!(
+                        item,
+                        OutputItemInfo::Message {} | OutputItemInfo::FunctionCall { .. }
+                    )
+                }) {
+                    ProviderFormatReportV1::Completed(usage)
+                } else {
+                    ProviderFormatReportV1::CodexEmptyTurn(usage)
+                }
+            }
+            ResponsesStreamEvent::ResponseFailed { error }
+            | ResponsesStreamEvent::Error { error } => {
+                // Reuse the legacy stream's typed classifier: an in-band
+                // Responses error still carries a provider-specific failure
+                // class even though its HTTP response was successful.
+                match ProviderError::from_stream_error(
+                    extract_error_code(&error).as_deref(),
+                    &extract_error_message(&error),
+                ) {
+                    ProviderError::RateLimit { .. } => {
+                        ProviderFormatReportV1::Failed(ProviderAttemptLossV1::RateLimited)
+                    }
+                    ProviderError::ProviderInternal { .. }
+                    | ProviderError::Transport
+                    | ProviderError::ExhaustedTransport(_)
+                    | ProviderError::EmptyCompletion => {
+                        ProviderFormatReportV1::Failed(ProviderAttemptLossV1::Transport)
+                    }
+                    ProviderError::ContextOverflow
+                    | ProviderError::Authentication
+                    | ProviderError::InvalidRequest
+                    | ProviderError::InvalidOutput => {
+                        ProviderFormatReportV1::Failed(ProviderAttemptLossV1::ProviderRejected)
+                    }
+                }
+            }
+            _ => ProviderFormatReportV1::Continue,
+        }
+    }
+}
+
 const KNOWN_EVENT_TYPES: &[&str] = &[
     "response.created",
     "response.in_progress",
@@ -338,15 +488,9 @@ fn extract_error_message(error: &Value) -> String {
 
 /// Parse a single SSE data line from the OpenAI Responses streaming API.
 ///
-/// `accumulated_items` collects OutputItemDone items across the stream.
-/// `in_flight_function_calls` tracks function call items that have been added
-/// but whose arguments haven't completed yet (for truncation detection).
+/// `terminal_state` owns all state that determines terminal validity.
 /// Returns zero or more `StreamEvent`s, a terminal signal, or a provider error.
-fn parse_responses_line(
-    line: &str,
-    accumulated_items: &mut Vec<OutputItemInfo>,
-    in_flight_function_calls: &mut usize,
-) -> ParsedLine {
+fn parse_responses_line(line: &str, terminal_state: &mut ResponsesTerminalState) -> ParsedLine {
     let event = match parse_stream_event(line) {
         Ok(Some(e)) => e,
         Ok(None) => return ParsedLine::Events(vec![]),
@@ -355,6 +499,14 @@ fn parse_responses_line(
             return ParsedLine::Events(vec![]);
         }
     };
+
+    if terminal_state.transition(&event) == ResponsesTerminalTransition::IncompleteFunctionCall {
+        tracing::warn!("openai_responses stream response.completed with in-flight function calls");
+        return ParsedLine::ProviderError(
+            ProviderError::Transport,
+            "openai_responses stream ended with incomplete function call accumulator".to_string(),
+        );
+    }
 
     match event {
         ResponsesStreamEvent::OutputTextDelta { delta } => {
@@ -371,36 +523,12 @@ fn parse_responses_line(
                 ParsedLine::Events(vec![StreamEvent::Thinking(delta)])
             }
         }
-        ResponsesStreamEvent::OutputItemDone { item } => {
-            accumulated_items.push(item);
-            ParsedLine::Events(vec![])
-        }
+        ResponsesStreamEvent::OutputItemDone { .. } => ParsedLine::Events(vec![]),
         ResponsesStreamEvent::ResponseCompleted { response } => {
-            // Detect truncated function call accumulators: function call items
-            // were added but their arguments never completed. Fail typed rather
-            // than emitting a false complete response.
-            if *in_flight_function_calls > 0 {
-                tracing::warn!(
-                    in_flight = *in_flight_function_calls,
-                    "openai_responses stream response.completed with in-flight function calls"
-                );
-                accumulated_items.clear();
-                *in_flight_function_calls = 0;
-                return ParsedLine::ProviderError(
-                    ProviderError::Transport,
-                    "openai_responses stream ended with incomplete function call accumulator"
-                        .to_string(),
-                );
-            }
-
             let mut events = Vec::new();
 
             // Emit tool uses from accumulated items (text was already streamed as deltas)
-            let final_items = if response.output.is_empty() {
-                accumulated_items.as_slice()
-            } else {
-                response.output.as_slice()
-            };
+            let final_items = terminal_state.final_items(&response);
 
             for item in final_items {
                 match item {
@@ -439,7 +567,7 @@ fn parse_responses_line(
             }
 
             // Emit usage
-            if let Some(usage) = response.usage {
+            if let Some(usage) = response.usage.as_ref() {
                 let cache_read = usage
                     .input_tokens_details
                     .as_ref()
@@ -518,22 +646,8 @@ fn parse_responses_line(
             tracing::error!(error = %msg, ?class, "Responses API error");
             ParsedLine::ProviderError(class, msg)
         }
-        // Track function call items that have been added to the stream so we
-        // can detect truncation (added but never completed).
-        ResponsesStreamEvent::OutputItemAdded { item } => {
-            if let Some(OutputItemInfo::FunctionCall { .. }) = item {
-                *in_flight_function_calls += 1;
-            }
-            ParsedLine::Events(vec![])
-        }
-        // A completed function call arguments event: the function call is no
-        // longer in-flight (it will arrive as OutputItemDone next).
-        ResponsesStreamEvent::FunctionCallArgumentsDone {} => {
-            if *in_flight_function_calls > 0 {
-                *in_flight_function_calls -= 1;
-            }
-            ParsedLine::Events(vec![])
-        }
+        ResponsesStreamEvent::OutputItemAdded { .. }
+        | ResponsesStreamEvent::FunctionCallArgumentsDone {} => ParsedLine::Events(vec![]),
         // Ignore all other event types
         _ => ParsedLine::Events(vec![]),
     }
@@ -550,15 +664,37 @@ impl LlmProvider for OpenAIResponsesProvider {
         Some(self.config.clone())
     }
 
-    fn stream_request_body_bytes(
+    fn admission_capabilities_v1(
+        &self,
+    ) -> crate::model_turn_admission::ProviderAttemptCapabilitiesV1 {
+        ProviderSseAttemptV1::capabilities()
+    }
+
+    fn start_sse_attempt_v1(
         &self,
         conversation: &Conversation,
         tools: &[Value],
         tool_choice: Option<ToolChoice>,
-    ) -> Option<usize> {
-        serde_json::to_vec(&self.build_request(conversation, tools, tool_choice))
-            .ok()
-            .map(|body| body.len())
+        context: ProviderAttemptContextV1,
+    ) -> Result<ProviderSseAttemptV1, crate::model_turn_admission::ProviderAttemptRouteCoverageV1>
+    {
+        Ok(self.client.start_sse_attempt_v1(
+            &self.effective_url(),
+            self.build_request(conversation, tools, tool_choice),
+            &self.config.auth,
+            self.extra_headers(),
+            context,
+            OpenAIResponsesTerminalReporterV1::default(),
+        ))
+    }
+
+    fn stream_request_body(
+        &self,
+        conversation: &Conversation,
+        tools: &[Value],
+        tool_choice: Option<ToolChoice>,
+    ) -> Option<Vec<u8>> {
+        serde_json::to_vec(&self.build_request(conversation, tools, tool_choice)).ok()
     }
 
     fn stream<'a>(
@@ -587,20 +723,14 @@ impl LlmProvider for OpenAIResponsesProvider {
                 .stream_sse_frames(&url, body, &auth, extra_headers);
             let out: Pin<Box<dyn futures::Stream<Item = anyhow::Result<StreamEvent>> + Send>> =
                 Box::pin(stream! {
-                    let mut accumulated_items: Vec<OutputItemInfo> = Vec::new();
-                    let mut in_flight_function_calls: usize = 0;
+                    let mut terminal_state = ResponsesTerminalState::default();
                     let mut raw_stream = raw;
-                    let mut seen_done = false;
                     while let Some(result) = raw_stream.next().await {
                         match result {
                             Err(e) => { yield Err(e); return; }
                             Ok(frame) => match frame {
                                 SseFrame::Data(line) => {
-                                    match parse_responses_line(
-                                        &line,
-                                        &mut accumulated_items,
-                                        &mut in_flight_function_calls,
-                                    ) {
+                                    match parse_responses_line(&line, &mut terminal_state) {
                                         ParsedLine::Events(events) => {
                                             for event in events {
                                                 yield Ok(event);
@@ -615,7 +745,6 @@ impl LlmProvider for OpenAIResponsesProvider {
                                             for event in events {
                                                 yield Ok(event);
                                             }
-                                            seen_done = true;
                                         }
                                         ParsedLine::ProviderError(class, msg) => {
                                             // Preserve the typed ProviderError as the
@@ -634,11 +763,11 @@ impl LlmProvider for OpenAIResponsesProvider {
                                     // frame, this is expected. If not, the
                                     // stream ended before the expected terminal
                                     // — fail typed.
-                                    if seen_done {
+                                    if terminal_state.completed {
                                         yield Ok(StreamEvent::Done);
                                     } else {
                                         // Discard any partial accumulator state.
-                                        accumulated_items.clear();
+                                        terminal_state.accumulated_items.clear();
                                         tracing::warn!("openai_responses stream [DONE] before response.completed");
                                         yield Err(anyhow::Error::new(ProviderError::Transport)
                                             .context("openai_responses stream ended before response.completed"));
@@ -658,19 +787,21 @@ impl LlmProvider for OpenAIResponsesProvider {
                     // (When a `[DONE]` sentinel does arrive, the SseFrame::Done
                     // branch above returns first, so Done is emitted exactly
                     // once either way.)
-                    if seen_done {
+                    if terminal_state.completed {
                         yield Ok(StreamEvent::Done);
                     } else {
                         // Raw EOF before the OpenAI Responses terminal frame.
                         // Yield a typed retryable failure.
                         // Discard any partial accumulator state.
-                        if !accumulated_items.is_empty() || in_flight_function_calls > 0 {
+                        if !terminal_state.accumulated_items.is_empty()
+                            || terminal_state.in_flight_function_calls > 0
+                        {
                             tracing::warn!(
-                                accumulated = accumulated_items.len(),
-                                in_flight = in_flight_function_calls,
+                                accumulated = terminal_state.accumulated_items.len(),
+                                in_flight = terminal_state.in_flight_function_calls,
                                 "openai_responses stream EOF with incomplete accumulators"
                             );
-                            accumulated_items.clear();
+                            terminal_state.accumulated_items.clear();
                         }
                         tracing::warn!("openai_responses stream ended before response.completed");
                         yield Err(anyhow::Error::new(ProviderError::Transport)
@@ -900,8 +1031,8 @@ mod tests {
     #[test]
     fn test_parse_text_delta() {
         let line = r#"{"type":"response.output_text.delta","sequence_number":2,"item_id":"msg_1","output_index":0,"content_index":0,"delta":"Hello"}"#;
-        let mut acc = Vec::new();
-        let ParsedLine::Events(events) = parse_responses_line(line, &mut acc, &mut 0) else {
+        let mut terminal_state = ResponsesTerminalState::default();
+        let ParsedLine::Events(events) = parse_responses_line(line, &mut terminal_state) else {
             panic!("expected events");
         };
         assert_eq!(events.len(), 1);
@@ -914,8 +1045,8 @@ mod tests {
     #[test]
     fn test_parse_empty_delta_skipped() {
         let line = r#"{"type":"response.output_text.delta","sequence_number":2,"item_id":"msg_1","output_index":0,"content_index":0,"delta":""}"#;
-        let mut acc = Vec::new();
-        let ParsedLine::Events(events) = parse_responses_line(line, &mut acc, &mut 0) else {
+        let mut terminal_state = ResponsesTerminalState::default();
+        let ParsedLine::Events(events) = parse_responses_line(line, &mut terminal_state) else {
             panic!("expected events");
         };
         assert!(events.is_empty());
@@ -924,8 +1055,8 @@ mod tests {
     #[test]
     fn test_parse_completed_with_function_call() {
         let line = r#"{"type":"response.completed","sequence_number":10,"response":{"id":"resp_1","object":"response","created_at":1737368310,"status":"completed","model":"gpt-5.1-codex","output":[{"type":"function_call","id":"fc_1","status":"completed","call_id":"call_abc","name":"bash","arguments":"{\"cmd\":\"ls\"}"}],"usage":{"input_tokens":100,"output_tokens":50}}}"#;
-        let mut acc = Vec::new();
-        let ParsedLine::Terminal(events) = parse_responses_line(line, &mut acc, &mut 0) else {
+        let mut terminal_state = ResponsesTerminalState::default();
+        let ParsedLine::Terminal(events) = parse_responses_line(line, &mut terminal_state) else {
             panic!("expected events");
         };
         // Should have tool use + usage
@@ -950,8 +1081,8 @@ mod tests {
     #[test]
     fn test_parse_completed_with_reasoning_and_function_call() {
         let line = r#"{"type":"response.completed","response":{"output":[{"type":"reasoning","id":"rs_1","summary":[],"status":"completed","encrypted_content":"enc"},{"type":"function_call","call_id":"call_abc","name":"bash","arguments":"{\"cmd\":\"ls\"}"}],"usage":{"input_tokens":10,"output_tokens":5}}}"#;
-        let mut acc = Vec::new();
-        let ParsedLine::Terminal(events) = parse_responses_line(line, &mut acc, &mut 0) else {
+        let mut terminal_state = ResponsesTerminalState::default();
+        let ParsedLine::Terminal(events) = parse_responses_line(line, &mut terminal_state) else {
             panic!("expected events");
         };
 
@@ -977,15 +1108,17 @@ mod tests {
     fn test_output_item_done_accumulates_until_completed() {
         let item_done = r#"{"type":"response.output_item.done","item":{"type":"function_call","call_id":"call_acc","name":"bash","arguments":"{\"cmd\":\"pwd\"}"}}"#;
         let completed = r#"{"type":"response.completed","response":{"output":[],"usage":{"input_tokens":3,"output_tokens":4}}}"#;
-        let mut acc = Vec::new();
+        let mut terminal_state = ResponsesTerminalState::default();
 
-        let ParsedLine::Events(events) = parse_responses_line(item_done, &mut acc, &mut 0) else {
+        let ParsedLine::Events(events) = parse_responses_line(item_done, &mut terminal_state)
+        else {
             panic!("expected events");
         };
         assert!(events.is_empty());
-        assert_eq!(acc.len(), 1);
+        assert_eq!(terminal_state.accumulated_items.len(), 1);
 
-        let ParsedLine::Terminal(events) = parse_responses_line(completed, &mut acc, &mut 0) else {
+        let ParsedLine::Terminal(events) = parse_responses_line(completed, &mut terminal_state)
+        else {
             panic!("expected events");
         };
         assert_eq!(events.len(), 2);
@@ -1010,14 +1143,16 @@ mod tests {
     fn test_output_item_done_non_function_call_ignored_on_completion() {
         let item_done = r#"{"type":"response.output_item.done","item":{"type":"message"}}"#;
         let completed = r#"{"type":"response.completed","response":{"output":[],"usage":{"input_tokens":1,"output_tokens":2}}}"#;
-        let mut acc = Vec::new();
+        let mut terminal_state = ResponsesTerminalState::default();
 
-        let ParsedLine::Events(events) = parse_responses_line(item_done, &mut acc, &mut 0) else {
+        let ParsedLine::Events(events) = parse_responses_line(item_done, &mut terminal_state)
+        else {
             panic!("expected events");
         };
         assert!(events.is_empty());
 
-        let ParsedLine::Terminal(events) = parse_responses_line(completed, &mut acc, &mut 0) else {
+        let ParsedLine::Terminal(events) = parse_responses_line(completed, &mut terminal_state)
+        else {
             panic!("expected events");
         };
         assert_eq!(events.len(), 1);
@@ -1027,9 +1162,10 @@ mod tests {
     #[test]
     fn test_completed_missing_output_is_treated_as_empty_response() {
         let completed = r#"{"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":2}}}"#;
-        let mut acc = Vec::new();
+        let mut terminal_state = ResponsesTerminalState::default();
 
-        let ParsedLine::Terminal(events) = parse_responses_line(completed, &mut acc, &mut 0) else {
+        let ParsedLine::Terminal(events) = parse_responses_line(completed, &mut terminal_state)
+        else {
             panic!("expected events");
         };
         assert_eq!(events.len(), 1);
@@ -1039,19 +1175,19 @@ mod tests {
     #[test]
     fn test_incomplete_function_call_item_is_ignored() {
         let line = r#"{"type":"response.output_item.done","item":{"type":"function_call","call_id":"call_abc","name":"bash"}}"#;
-        let mut acc = Vec::new();
-        let ParsedLine::Events(events) = parse_responses_line(line, &mut acc, &mut 0) else {
+        let mut terminal_state = ResponsesTerminalState::default();
+        let ParsedLine::Events(events) = parse_responses_line(line, &mut terminal_state) else {
             panic!("expected events");
         };
         assert!(events.is_empty());
-        assert!(acc.is_empty());
+        assert!(terminal_state.accumulated_items.is_empty());
     }
 
     #[test]
     fn test_parse_keepalive_ignored() {
         let line = r#"{"type":"keepalive"}"#;
-        let mut acc = Vec::new();
-        let ParsedLine::Events(events) = parse_responses_line(line, &mut acc, &mut 0) else {
+        let mut terminal_state = ResponsesTerminalState::default();
+        let ParsedLine::Events(events) = parse_responses_line(line, &mut terminal_state) else {
             panic!("expected events");
         };
         assert!(events.is_empty());
@@ -1060,8 +1196,8 @@ mod tests {
     #[test]
     fn test_parse_unknown_event_ignored() {
         let line = r#"{"type":"response.some_future_event","data":"foo"}"#;
-        let mut acc = Vec::new();
-        let ParsedLine::Events(events) = parse_responses_line(line, &mut acc, &mut 0) else {
+        let mut terminal_state = ResponsesTerminalState::default();
+        let ParsedLine::Events(events) = parse_responses_line(line, &mut terminal_state) else {
             panic!("expected events");
         };
         assert!(events.is_empty());
@@ -1070,8 +1206,8 @@ mod tests {
     #[test]
     fn test_parse_error_propagates() {
         let line = r#"{"type":"error","error":{"message":"context_length_exceeded: too many tokens","code":"context_length_exceeded"}}"#;
-        let mut acc = Vec::new();
-        let ParsedLine::ProviderError(class, msg) = parse_responses_line(line, &mut acc, &mut 0)
+        let mut terminal_state = ResponsesTerminalState::default();
+        let ParsedLine::ProviderError(class, msg) = parse_responses_line(line, &mut terminal_state)
         else {
             panic!("expected provider error");
         };
@@ -1082,8 +1218,8 @@ mod tests {
     #[test]
     fn test_parse_response_failed_propagates() {
         let line = r#"{"type":"response.failed","error":{"message":"server error","code":"server_error"}}"#;
-        let mut acc = Vec::new();
-        let ParsedLine::ProviderError(class, msg) = parse_responses_line(line, &mut acc, &mut 0)
+        let mut terminal_state = ResponsesTerminalState::default();
+        let ParsedLine::ProviderError(class, msg) = parse_responses_line(line, &mut terminal_state)
         else {
             panic!("expected provider error");
         };
@@ -1554,9 +1690,9 @@ mod tests {
 
     #[test]
     fn test_parse_reasoning_summary_delta() {
-        let mut acc = Vec::new();
+        let mut terminal_state = ResponsesTerminalState::default();
         let line = r#"{"type":"response.reasoning_summary_text.delta","item_id":"rs_abc","output_index":0,"summary_index":0,"delta":"The user wants to","sequence_number":4}"#;
-        match parse_responses_line(line, &mut acc, &mut 0) {
+        match parse_responses_line(line, &mut terminal_state) {
             ParsedLine::Events(events) => {
                 assert_eq!(events.len(), 1);
                 assert!(matches!(&events[0], StreamEvent::Thinking(t) if t == "The user wants to"));
@@ -1568,9 +1704,9 @@ mod tests {
 
     #[test]
     fn test_parse_reasoning_summary_empty_delta_skipped() {
-        let mut acc = Vec::new();
+        let mut terminal_state = ResponsesTerminalState::default();
         let line = r#"{"type":"response.reasoning_summary_text.delta","item_id":"rs_abc","output_index":0,"summary_index":0,"delta":"","sequence_number":4}"#;
-        match parse_responses_line(line, &mut acc, &mut 0) {
+        match parse_responses_line(line, &mut terminal_state) {
             ParsedLine::Events(events) => assert!(events.is_empty()),
             ParsedLine::Terminal(_) => panic!("unexpected terminal"),
             ParsedLine::ProviderError(_, e) => panic!("unexpected error: {e}"),
@@ -1579,14 +1715,14 @@ mod tests {
 
     #[test]
     fn test_reasoning_summary_lifecycle_events_ignored() {
-        let mut acc = Vec::new();
+        let mut terminal_state = ResponsesTerminalState::default();
         // These lifecycle events should be silently consumed without error
         for line in [
             r#"{"type":"response.reasoning_summary_part.added","item_id":"rs_abc","output_index":0,"summary_index":0,"part":{"type":"summary_text","text":""},"sequence_number":3}"#,
             r#"{"type":"response.reasoning_summary_text.done","item_id":"rs_abc","output_index":0,"summary_index":0,"text":"Full summary.","sequence_number":10}"#,
             r#"{"type":"response.reasoning_summary_part.done","item_id":"rs_abc","output_index":0,"summary_index":0,"part":{"type":"summary_text","text":"Full summary."},"sequence_number":11}"#,
         ] {
-            match parse_responses_line(line, &mut acc, &mut 0) {
+            match parse_responses_line(line, &mut terminal_state) {
                 ParsedLine::Events(events) => {
                     assert!(events.is_empty(), "expected no events for lifecycle event")
                 }

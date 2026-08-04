@@ -252,6 +252,7 @@ async fn observation_retention_serializes_concurrent_pool_inserts() {
         let mut setup = PgConnection::connect(&database_url).await.expect("connect setup");
         setup.execute("INSERT INTO credentials (id, provider_id, key_name, encrypted_value) VALUES ('credential-race', 'provider', 'key-name-race', decode('00', 'hex'))").await.expect("seed credential");
         let pool_id: i64 = sqlx::query_scalar("INSERT INTO model_turn_pools (credential_id, provider_id, model_id) VALUES ('credential-race', 'provider', 'model') RETURNING id").fetch_one(&mut setup).await.expect("seed pool");
+        let independent_pool_id: i64 = sqlx::query_scalar("INSERT INTO model_turn_pools (credential_id, provider_id, model_id) VALUES ('credential-race', 'provider', 'independent-model') RETURNING id").fetch_one(&mut setup).await.expect("seed independent pool");
         for sequence in 0_i64..255 {
             sqlx::query("INSERT INTO model_turn_observations (pool_id, sequence, kind) VALUES ($1, $2, 'usage')")
                 .bind(pool_id).bind(sequence).execute(&mut setup).await.expect("seed observation");
@@ -331,11 +332,26 @@ async fn observation_retention_serializes_concurrent_pool_inserts() {
             matches!(inserted_rx.try_recv(), Err(tokio::sync::mpsc::error::TryRecvError::Empty)),
             "exactly one racer must pass the retention trigger while its peer is blocked"
         );
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            sqlx::query("INSERT INTO model_turn_observations (pool_id, sequence, kind) VALUES ($1, 0, 'usage')")
+                .bind(independent_pool_id)
+                .execute(&mut setup),
+        )
+        .await
+        .expect("a different pool must not wait on the held per-pool trigger lock")
+        .expect("insert an observation for a different pool");
         release.store(true, std::sync::atomic::Ordering::SeqCst);
         release_notification.notify_one();
         for task in tasks { task.await.expect("racer task"); }
-        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM model_turn_observations WHERE pool_id = $1")
-            .bind(pool_id).fetch_one(&mut setup).await.expect("count observations");
+        let (count, oldest, newest): (i64, i64, i64) = sqlx::query_as(
+            "SELECT count(*), min(sequence), max(sequence) FROM model_turn_observations WHERE pool_id = $1",
+        )
+        .bind(pool_id)
+        .fetch_one(&mut setup)
+        .await
+        .expect("inspect retained observations");
         assert_eq!(count, 256, "concurrent observation retention must remain bounded");
+        assert_eq!((oldest, newest), (1, 256), "retention must preserve exactly the newest 256 observations");
     }).await;
 }

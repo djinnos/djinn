@@ -16,6 +16,7 @@ pub mod task;
 pub mod task_attempt;
 pub mod task_run;
 pub mod task_run_outcome;
+pub mod typed_evidence;
 pub mod user_settings;
 
 pub use agent::Agent;
@@ -56,6 +57,14 @@ pub use task_attempt::{
 };
 pub use task_run::{TaskRunRecord, TaskRunStatus, TaskRunTrigger};
 pub use task_run_outcome::TaskRunOutcomeFact;
+pub use typed_evidence::{
+    TribunalEvidenceAnchor, TribunalEvidenceAnchorHealthStatus, TribunalEvidenceAnchorMethod,
+    TribunalEvidenceAttempt, TribunalEvidenceCheckResult, TribunalEvidenceCheckStatus,
+    TribunalEvidenceDisposition, TribunalEvidenceFinding, TribunalEvidenceIssue,
+    TribunalEvidenceIssueKind, TribunalEvidenceLifecycle, TribunalEvidenceOutcome,
+    TribunalEvidencePlannedCheck, TribunalEvidenceRetryIdempotency, TribunalEvidenceTransition,
+    TribunalEvidenceValidationResult,
+};
 pub use user_settings::{LaneMaxSessions, ModelLane, ModelLanes, UserSettings};
 
 /// Parse a JSON array string (e.g. '["a","b"]') into a `Vec<String>`.

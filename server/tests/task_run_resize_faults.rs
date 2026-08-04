@@ -408,10 +408,9 @@ async fn occupying_lease(services: &DirectServices, identity: &LeaseIdentity) ->
 /// `BuildLeaseService::release` has NOT completed, the `build_leases` row is
 /// still occupying, and terminal is not acknowledged.
 ///
-/// The fault is a 403 on `pods/resize` with the apiserver then removed
-/// entirely, so the drop quarantines and can never confirm absence. That is the
-/// shape where a released lease would be a Pod holding 4000m that nobody is
-/// paying for.
+/// The fault is a total apiserver outage, so the drop exhausts its confirmation
+/// budget, quarantines, and can never confirm absence. That is the shape where
+/// a released lease would be a Pod holding 4000m that nobody is paying for.
 ///
 /// NAMED FAILING MUTATION: let `DirectServices::release_lease` call
 /// `BuildLeaseService::release` unconditionally as it did before `0ppk-2`. The
@@ -422,9 +421,6 @@ async fn occupying_lease(services: &DirectServices, identity: &LeaseIdentity) ->
 #[tokio::test]
 async fn a_quarantined_drop_holds_the_build_lease_in_the_other_ledger() {
     let ledgers = Ledgers::lifted("held").await;
-    // The apiserver refuses the drop PATCH, and then stops answering at all, so
-    // the quarantine loop can never prove the Pod absent.
-    ledgers.cluster.fail_patches(ApiFault::forbidden());
     let surface = Arc::new(FixtureSurface(ledgers.cluster.clone()));
     let services = direct_services(
         &ledgers,
@@ -446,13 +442,13 @@ async fn a_quarantined_drop_holds_the_build_lease_in_the_other_ledger() {
         "the build lease must be occupying before the terminal: {before:?}"
     );
 
-    // Take the apiserver away the moment the quarantine begins, so absence can
-    // never be confirmed and the drop can never settle.
-    let cluster = ledgers.cluster.clone();
-    tokio::spawn(async move {
-        tokio::task::yield_now().await;
-        cluster.fail_gets(ApiFault::timeout());
-    });
+    // Take the apiserver away before starting the drop. The old spawned
+    // `yield_now` raced the release future: under a loaded executor the gate
+    // could spend its whole wait budget before the fault task ran, returning
+    // while the durable permit was still `lifted`. Installing the GET fault
+    // synchronously still exercises the same fail-closed path and guarantees
+    // absence can never be confirmed once quarantine begins.
+    ledgers.cluster.fail_gets(ApiFault::timeout());
 
     let released = services
         .release_lease(LeaseReleaseRequest {
