@@ -156,6 +156,83 @@ async fn admission_attempt_fake_receipts_and_sequence_reach_outcome() {
     );
 }
 
+#[tokio::test]
+async fn admission_attempt_combines_rate_capacity_and_terminal_usage_once() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut request = [0; 4096];
+        let _ = socket.read(&mut request).await.unwrap();
+        let payload = "data: {\"type\":\"response.completed\",\"response\":{\"output\":[{\"type\":\"message\"}],\"usage\":{\"input_tokens\":2,\"output_tokens\":1}}}\n\n";
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nx-ratelimit-remaining-requests: 7\r\nx-ratelimit-remaining-input-tokens: 80\r\nx-ratelimit-remaining-output-tokens: 90\r\nx-ratelimit-remaining-tokens: 170\r\nx-ratelimit-reset: 123\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            payload.len(),
+            payload
+        );
+        socket.write_all(response.as_bytes()).await.unwrap();
+    });
+
+    let mut attempt = ApiClient::new().start_sse_attempt_v1(
+        &url,
+        serde_json::json!({"model":"fixture"}),
+        &AuthMethod::NoAuth,
+        HeaderMap::new(),
+        attempt_context(43),
+        OpenAIResponsesTerminalReporterV1::default(),
+    );
+    let outcome = attempt.outcome().await;
+    assert_eq!(outcome.terminal, ProviderAttemptTerminalV1::Completed);
+    let observation = outcome.observation.expect("normalized observation");
+    assert_eq!(observation.ignored, None);
+    assert_eq!(
+        observation.available_capacity,
+        Some(crate::ProviderAvailableCapacityV1 {
+            request_units: 7,
+            input_units: 80,
+            output_units: 90,
+            combined_units: 170,
+        })
+    );
+    assert_eq!(observation.authoritative_usage.unwrap().combined_units, 3);
+    assert_eq!(outcome.authoritative_usage.unwrap().combined_units, 3);
+}
+
+#[tokio::test]
+async fn admission_attempt_rejects_policy_mismatch_before_send() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let context = ProviderAttemptContextV1::new(
+        44,
+        ProviderAdmissionPolicyV1::ReactiveOnlyTarget1,
+        Arc::new(std::sync::Mutex::new(ProviderApiKeyNormalizerV1::new(
+            ProviderAdmissionPolicyV1::Proactive,
+        ))),
+        || ProviderReceiptTimeV1 {
+            wall: SystemTime::UNIX_EPOCH,
+            monotonic_ms: 100,
+        },
+    );
+    let mut attempt = ApiClient::new().start_sse_attempt_v1(
+        &url,
+        serde_json::json!({"model":"fixture"}),
+        &AuthMethod::NoAuth,
+        HeaderMap::new(),
+        context,
+        OpenAIResponsesTerminalReporterV1::default(),
+    );
+    assert_eq!(
+        attempt.outcome().await.terminal,
+        ProviderAttemptTerminalV1::Failed(ProviderAttemptLossV1::PolicyMismatch)
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), listener.accept())
+            .await
+            .is_err(),
+        "policy mismatch must not open an HTTP connection"
+    );
+}
+
 async fn serve_one_sse_response(payload: &'static str) -> String {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();

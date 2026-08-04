@@ -210,6 +210,7 @@ pub enum ProviderAttemptLossV1 {
     Transport,
     ProviderRejected,
     RateLimited,
+    PolicyMismatch,
     EmptyTurn,
     CodexEmptyTurn,
     Protocol,
@@ -334,6 +335,16 @@ impl ProviderApiKeyNormalizerV1 {
         Self {
             reactive_only: policy == ProviderAdmissionPolicyV1::ReactiveOnlyTarget1,
             ..Self::default()
+        }
+    }
+
+    /// Admission policy this credential-scoped normalizer was created for.
+    #[must_use]
+    pub fn policy(&self) -> ProviderAdmissionPolicyV1 {
+        if self.reactive_only {
+            ProviderAdmissionPolicyV1::ReactiveOnlyTarget1
+        } else {
+            ProviderAdmissionPolicyV1::Proactive
         }
     }
 

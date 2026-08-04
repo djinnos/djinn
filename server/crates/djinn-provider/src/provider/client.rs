@@ -379,6 +379,27 @@ impl ApiClient {
         let (event_tx, mut event_rx) = mpsc::channel(16);
         let (outcome_tx, outcome) = oneshot::channel();
         let abort = ProviderAttemptAbortHandleV1::new();
+        let policy_matches = context
+            .normalizer
+            .lock()
+            .is_ok_and(|normalizer| normalizer.policy() == context.route_policy);
+        if !policy_matches {
+            drop(event_tx);
+            let _ = outcome_tx.send(ProviderOutcomeV1 {
+                terminal: ProviderAttemptTerminalV1::Failed(ProviderAttemptLossV1::PolicyMismatch),
+                authoritative_usage: None,
+                observation: None,
+                abort: ProviderAttemptAbortResultV1::NotRequested,
+                token_emission: ProviderTokenEmissionV1::default(),
+            });
+            return ProviderSseAttemptV1 {
+                events: Box::pin(
+                    stream! { while let Some(event) = event_rx.recv().await { yield event; } },
+                ),
+                abort,
+                outcome,
+            };
+        }
         let cancellation = abort.cancellation_token();
         let client = self.inner.clone();
         let url = url.to_owned();
@@ -424,13 +445,17 @@ impl ApiClient {
                     .iter()
                     .map(|(name, value)| (name.as_str(), value.as_str()))
                     .collect();
-                observation = Some(context.normalizer.lock().expect("normalizer lock").observe(
-                    context.request_sequence,
-                    &refs,
-                    ProviderUsageObservationV1::default(),
-                    context.receipt(),
-                ));
+                // Preserve the response receipt while deferring successful
+                // normalization until terminal authoritative usage is known.
+                let response_receipt = context.receipt();
                 if !response.status().is_success() {
+                    observation =
+                        Some(context.normalizer.lock().expect("normalizer lock").observe(
+                            context.request_sequence,
+                            &refs,
+                            ProviderUsageObservationV1::default(),
+                            response_receipt,
+                        ));
                     if is_rate_limit_status(response.status()) {
                         // The admission wrapper owns no retry, but it must
                         // preserve the legacy throttle/suppression signal.
@@ -447,6 +472,7 @@ impl ApiClient {
                     );
                 } else {
                     clear_suppression_window();
+                    let mut terminal_usage = ProviderUsageObservationV1::default();
                     let bytes = response
                         .bytes_stream()
                         .map(|item| item.map_err(std::io::Error::other));
@@ -467,33 +493,11 @@ impl ApiClient {
                                                 Some(receipt.monotonic_ms);
                                         }
                                         ProviderFormatReportV1::Completed(usage) => {
-                                            observation = Some(
-                                                context
-                                                    .normalizer
-                                                    .lock()
-                                                    .expect("normalizer lock")
-                                                    .observe(
-                                                        context.request_sequence,
-                                                        &refs,
-                                                        usage,
-                                                        receipt,
-                                                    ),
-                                            );
+                                            terminal_usage = usage;
                                             terminal = ProviderAttemptTerminalV1::Completed;
                                         }
                                         ProviderFormatReportV1::CodexEmptyTurn(usage) => {
-                                            observation = Some(
-                                                context
-                                                    .normalizer
-                                                    .lock()
-                                                    .expect("normalizer lock")
-                                                    .observe(
-                                                        context.request_sequence,
-                                                        &refs,
-                                                        usage,
-                                                        receipt,
-                                                    ),
-                                            );
+                                            terminal_usage = usage;
                                             terminal = ProviderAttemptTerminalV1::Failed(
                                                 ProviderAttemptLossV1::CodexEmptyTurn,
                                             );
@@ -532,6 +536,20 @@ impl ApiClient {
                             }
                         }
                     }
+                    let normalized_usage = match terminal {
+                        ProviderAttemptTerminalV1::Completed
+                        | ProviderAttemptTerminalV1::Failed(
+                            ProviderAttemptLossV1::CodexEmptyTurn,
+                        ) => terminal_usage,
+                        _ => ProviderUsageObservationV1::default(),
+                    };
+                    observation =
+                        Some(context.normalizer.lock().expect("normalizer lock").observe(
+                            context.request_sequence,
+                            &refs,
+                            normalized_usage,
+                            response_receipt,
+                        ));
                 }
             }
             let authoritative_usage = observation
