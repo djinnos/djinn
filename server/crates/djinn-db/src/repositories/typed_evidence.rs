@@ -221,17 +221,25 @@ impl TypedEvidenceRepository {
         for i in payload.failures.iter().chain(&payload.gaps) {
             limit_issue(i)?;
         }
+        // This parent must precede its normalized children: the FK is immediate.
         let validation_id = uuid::Uuid::now_v7().to_string();
+        sqlx::query("INSERT INTO typed_evidence_validation_results (id,attempt_id,payload_sha256,outcome,validator_facts) VALUES ($1,$2,$3,'unresolved',$4)")
+            .bind(&validation_id).bind(&payload.attempt_id).bind(&hash)
+            .bind(serde_json::json!({"validator_version":"TribunalEvidenceReturnV1","raw_payload_sha256":hash,"server_hydrated":true}))
+            .execute(&mut **tx).await?;
         let mut usable = 0;
-        let mut resolved = true;
+        let mut resolved = !payload.checks.is_empty();
         for c in &payload.checks {
             let p = expected[c.check_id.as_str()];
             let result_id = uuid::Uuid::now_v7().to_string();
             sqlx::query("INSERT INTO typed_evidence_check_results (id,validation_result_id,planned_check_id,status,detail) VALUES ($1,$2,$3,$4,$5)").bind(&result_id).bind(&validation_id).bind(&p.id).bind(&c.status).bind(&c.detail).execute(&mut **tx).await?;
-            let invocation_ok=match &c.invocation_id {Some(id)=>sqlx::query_scalar::<_,bool>("SELECT EXISTS(SELECT 1 FROM evidence_command_invocations WHERE id=$1 AND check_id=$2)").bind(id).bind(&c.check_id).fetch_one(&mut **tx).await?,None=>false};
+            let invocation_ok=hydrate_invocation(tx, p, &payload.spike_task_id, c).await?;
+            if let Some(invocation_id) = &c.invocation_id {
+                sqlx::query("INSERT INTO typed_evidence_invocation_provenance (validation_result_id,check_result_id,invocation_id,usable) VALUES ($1,$2,$3,$4)").bind(&validation_id).bind(&result_id).bind(invocation_id).bind(invocation_ok).execute(&mut **tx).await?;
+            }
             let mut healthy = false;
             for a in &c.anchors {
-                let h = a.method == "command" && c.method == "command" && invocation_ok;
+                let h = a.method == "command" && c.method == "command" && invocation_ok && !a.locator.trim().is_empty();
                 let id = uuid::Uuid::now_v7().to_string();
                 sqlx::query("INSERT INTO typed_evidence_anchors (id,check_result_id,method,locator) VALUES ($1,$2,$3,$4)").bind(&id).bind(&result_id).bind(&a.method).bind(&a.locator).execute(&mut **tx).await?;
                 sqlx::query("INSERT INTO typed_evidence_anchor_health (anchor_id,health,detail) VALUES ($1,$2,$3)").bind(&id).bind(if h{"healthy"}else{"unusable"}).bind(if h{None}else{Some("server hydration missing or incompatible")}).execute(&mut **tx).await?;
@@ -249,7 +257,7 @@ impl TypedEvidenceRepository {
         } else {
             TribunalEvidenceOutcome::Unresolved
         };
-        sqlx::query("INSERT INTO typed_evidence_validation_results (id,attempt_id,payload_sha256,outcome,validator_facts) VALUES ($1,$2,$3,$4,$5)").bind(&validation_id).bind(&payload.attempt_id).bind(&hash).bind(outcome(result_outcome)).bind(serde_json::json!({"validator_version":"TribunalEvidenceReturnV1","raw_payload_sha256":hash,"server_hydrated":true})).execute(&mut **tx).await?;
+        sqlx::query("UPDATE typed_evidence_validation_results SET outcome=$1,validator_facts=$2 WHERE id=$3").bind(outcome(result_outcome)).bind(serde_json::json!({"validator_version":"TribunalEvidenceReturnV1","raw_payload_sha256":hash,"server_hydrated":true,"outcome":outcome(result_outcome)})).bind(&validation_id).execute(&mut **tx).await?;
         for (kind, issues) in [("failure", &payload.failures), ("gap", &payload.gaps)] {
             for i in issues {
                 sqlx::query("INSERT INTO typed_evidence_issues (id,validation_result_id,kind,code,detail) VALUES ($1,$2,$3,$4,$5)").bind(uuid::Uuid::now_v7().to_string()).bind(&validation_id).bind(kind).bind(&i.code).bind(&i.detail).execute(&mut **tx).await?;
@@ -629,16 +637,19 @@ fn validate_return_shape(p: &TribunalEvidenceReturnV1) -> Result<()> {
     {
         return Err(v1("missing_identity"));
     }
+    if [p.finding_id.as_str(), p.spike_task_id.as_str(), p.attempt_id.as_str(), p.version.as_str()].iter().any(|s| bytes(s) > 2048) {
+        return Err(v1("string_too_large"));
+    }
     if bytes(&p.conclusion) > 8192 {
         return Err(v1("conclusion_too_large"));
     }
-    if p.checks.len() > 32 || p.findings.len() > 32 || p.gaps.len() > 32 {
+    if p.checks.len() > 32 || p.findings.len() > 32 || p.failures.len() > 32 || p.gaps.len() > 32 {
         return Err(v1("return_limit_exceeded"));
     }
     Ok(())
 }
 fn limit_check(c: &TribunalEvidenceReturnCheckV1) -> Result<()> {
-    if bytes(&c.check_id) > 2048 || bytes(&c.method) > 2048 || c.anchors.len() > 16 {
+    if bytes(&c.check_id) > 2048 || bytes(&c.method) > 2048 || bytes(&c.status) > 2048 || c.invocation_id.as_ref().is_some_and(|s| bytes(s)>2048) || c.anchors.len() > 16 {
         return Err(v1("check_limit_exceeded"));
     }
     if !matches!(c.status.as_str(), "passed" | "failed" | "not_run") {
@@ -647,8 +658,11 @@ fn limit_check(c: &TribunalEvidenceReturnCheckV1) -> Result<()> {
     if c.status != "passed" && c.detail.as_deref().is_none_or(str::is_empty) {
         return Err(v1("status_detail_required"));
     }
-    if c.status == "passed" && c.invocation_id.is_some() && c.method != "command" {
+    if c.invocation_id.is_some() && c.method != "command" {
         return Err(v1("invocation_method_mismatch"));
+    }
+    if c.method == "command" && c.status == "passed" && c.invocation_id.as_deref().is_none_or(str::is_empty) {
+        return Err(v1("command_invocation_required"));
     }
     if c.detail.as_ref().is_some_and(|d| bytes(d) > 8192) {
         return Err(v1("detail_too_large"));
@@ -660,7 +674,7 @@ fn limit_check(c: &TribunalEvidenceReturnCheckV1) -> Result<()> {
 }
 fn limit_anchor(a: &TribunalEvidenceReturnAnchorV1) -> Result<()> {
     if a.locator.trim().is_empty()
-        || bytes(&a.locator) > 2048
+        || bytes(&a.locator) > 2048 || bytes(&a.method) > 2048
         || !matches!(
             a.method.as_str(),
             "code" | "graph" | "command" | "artifact" | "memory" | "external" | "repository"
@@ -681,6 +695,22 @@ fn limit_issue(i: &TribunalEvidenceReturnIssueV1) -> Result<()> {
     } else {
         Ok(())
     }
+}
+
+/// Hydrate immutable command facts through the frozen plan identity. A command
+/// is usable only after a successful completed process; arbitrary ids, timeout,
+/// runner failure, or identity mismatch fail closed.
+async fn hydrate_invocation(
+    tx: &mut Transaction<'_, Postgres>,
+    check: &TribunalEvidencePlannedCheck,
+    spike_task_id: &str,
+    returned: &TribunalEvidenceReturnCheckV1,
+) -> Result<bool> {
+    let Some(invocation_id) = returned.invocation_id.as_deref() else { return Ok(false) };
+    let Some(plan_id) = check.evidence_plan_id.as_deref() else { return Ok(false) };
+    if returned.method != "command" || check.method != TribunalEvidenceAnchorMethod::Command { return Ok(false) }
+    Ok(sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM evidence_command_invocations i JOIN evidence_plans p ON p.id=i.plan_id WHERE i.id=$1 AND i.plan_id=$2 AND i.spike_task_id=$3 AND i.check_id=$4 AND i.session_id=p.session_id AND i.captured_commit_sha=p.captured_commit_sha AND i.worktree_fingerprint=p.worktree_fingerprint AND i.launch_state='launched' AND i.process_state='exited' AND i.exit_code=0 AND i.timed_out=false AND i.runner_failure IS NULL)")
+        .bind(invocation_id).bind(plan_id).bind(spike_task_id).bind(&check.check_id).fetch_one(&mut **tx).await?)
 }
 
 #[cfg(test)]
