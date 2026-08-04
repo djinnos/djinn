@@ -266,6 +266,35 @@ pub trait SupervisorServices: Send + Sync + 'static {
         parked_reason: Option<String>,
     ) -> Result<(), String>;
 
+    /// V2 terminal session update carrying a durable failure cause.
+    ///
+    /// This is additive: the legacy method and its positional-bincode request
+    /// remain available for older workers. Implementations that do not yet
+    /// override V2 retain their legacy behavior through this default.
+    #[allow(clippy::too_many_arguments)]
+    async fn update_session_status_v2(
+        &self,
+        session_id: String,
+        status: djinn_core::models::SessionStatus,
+        tokens_in: i64,
+        tokens_out: i64,
+        cache_read: i64,
+        cache_write: i64,
+        parked_reason: Option<String>,
+        _failure_cause: Option<djinn_core::models::SessionFailureCause>,
+    ) -> Result<(), String> {
+        self.update_session_status(
+            session_id,
+            status,
+            tokens_in,
+            tokens_out,
+            cache_read,
+            cache_write,
+            parked_reason,
+        )
+        .await
+    }
+
     /// Best-effort mid-flight flush of a running session's cumulative token
     /// counters to the session row, so long sessions don't sit at
     /// `tokens_in = 0` in the DB (and every list/show surface reading it)

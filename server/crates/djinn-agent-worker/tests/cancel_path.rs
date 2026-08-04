@@ -288,6 +288,12 @@ async fn start_fake_server(
                         ServiceRpcRequest::UpdateSessionStatus { .. } => {
                             ServiceRpcResponse::UpdateSessionStatus(Ok(()))
                         }
+                        // This raw-wire fixture must remain exhaustive for
+                        // tail-appended status requests even though cancellation
+                        // prevents a stage from issuing one here.
+                        ServiceRpcRequest::UpdateSessionStatusV2 { .. } => {
+                            ServiceRpcResponse::UpdateSessionStatus(Ok(()))
+                        }
                         ServiceRpcRequest::FlushSessionTokens { .. } => {
                             ServiceRpcResponse::FlushSessionTokens(Ok(()))
                         }

@@ -1,7 +1,7 @@
 // djinn:allow-oversize — legacy module over size-guard threshold; split when touched substantively.
 use djinn_core::events::{DjinnEventEnvelope, EventBus};
 use djinn_core::models::provider::Pricing;
-use djinn_core::models::{ModelLane, SessionRecord, SessionStatus};
+use djinn_core::models::{ModelLane, SessionFailureCause, SessionRecord, SessionStatus};
 use serde_json::Value;
 
 use crate::database::Database;
@@ -385,6 +385,45 @@ impl SessionRepository {
         .execute(self.db.pool())
         .await?;
 
+        self.fetch_and_emit_update(id).await
+    }
+
+    /// Update a session and persist a canonical terminal failure cause.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn update_with_failure_cause(
+        &self,
+        id: &str,
+        status: SessionStatus,
+        tokens_in: i64,
+        tokens_out: i64,
+        cache_read: i64,
+        cache_write: i64,
+        parked_reason: Option<String>,
+        failure_cause: Option<SessionFailureCause>,
+    ) -> Result<SessionRecord> {
+        self.update(
+            id,
+            status,
+            tokens_in,
+            tokens_out,
+            cache_read,
+            cache_write,
+            parked_reason,
+        )
+        .await?;
+        let failure_cause = match status {
+            SessionStatus::Failed | SessionStatus::Interrupted => failure_cause.map(|cause| {
+                cause
+                    .durable_label()
+                    .unwrap_or(SessionFailureCause::Unknown.as_str())
+            }),
+            _ => None,
+        };
+        sqlx::query("UPDATE sessions SET failure_cause = $1 WHERE id = $2")
+            .bind(failure_cause)
+            .bind(id)
+            .execute(self.db.pool())
+            .await?;
         self.fetch_and_emit_update(id).await
     }
 

@@ -32,7 +32,7 @@
 //! helpers live in `djinn-runtime::wire` so both the launcher server side and
 //! the worker client side use the same reader/writer pair.
 
-use djinn_core::models::{SessionRecord, SessionStatus, Task, TaskRunStatus};
+use djinn_core::models::{SessionFailureCause, SessionRecord, SessionStatus, Task, TaskRunStatus};
 use djinn_runtime::wire::{ControlMsg, WorkerEvent, WorkspaceRef};
 use serde::{Deserialize, Serialize};
 
@@ -561,6 +561,18 @@ pub enum ServiceRpcRequest {
     ReleaseLease { request: LeaseReleaseRequest },
     /// Exact immutable Pod watchdog termination. Appended for bincode stability.
     TerminateWatchdogPod { request: WatchdogTerminationRequest },
+    /// V2 session-status update. Appended at the tail so every legacy request,
+    /// including `UpdateSessionStatus`, retains its positional-bincode shape.
+    UpdateSessionStatusV2 {
+        session_id: String,
+        status: SessionStatus,
+        tokens_in: i64,
+        tokens_out: i64,
+        cache_read: i64,
+        cache_write: i64,
+        parked_reason: Option<String>,
+        failure_cause: Option<SessionFailureCause>,
+    },
 }
 
 /// Typed response variants — one per [`ServiceRpcRequest`] variant.
@@ -665,6 +677,8 @@ pub enum ServiceRpcResponse {
     CancelLease(LeaseResult),
     ReleaseLease(LeaseResult),
     TerminateWatchdogPod(Result<(), String>),
+    /// V2 session-status acknowledgement, tail-appended with its request.
+    UpdateSessionStatusV2(Result<(), String>),
 }
 
 #[cfg(test)]
@@ -1577,6 +1591,103 @@ mod tests {
                     assert_eq!(got_parked_reason, parked_reason);
                 }
                 other => panic!("unexpected: {other:?}"),
+            }
+        }
+    }
+
+    /// This byte sequence was produced by the pre-V2 wire layout. Decode it
+    /// directly rather than re-serializing a current value: positional bincode
+    /// encodes enum indices, so only a fixed historical frame catches an
+    /// accidental legacy variant reorder or field-shape change.
+    #[test]
+    fn update_session_status_decodes_pre_v2_golden_frame() {
+        const PRE_V2_FRAME: &[u8] = &[
+            // Frame { correlation_id: 42, payload: Rpc(..) }
+            42, 0, 0, 0, 0, 0, 0, 0, // correlation_id
+            0, 0, 0, 0, // FramePayload::Rpc
+            12, 0, 0, 0, // ServiceRpcRequest::UpdateSessionStatus
+            2, 0, 0, 0, 0, 0, 0, 0, b's', b'1', // session_id
+            3, 0, 0, 0, // SessionStatus::Failed
+            0, 0, 0, 0, 0, 0, 0, 0, // tokens_in
+            0, 0, 0, 0, 0, 0, 0, 0, // tokens_out
+            0, 0, 0, 0, 0, 0, 0, 0, // cache_read
+            0, 0, 0, 0, 0, 0, 0, 0, // cache_write
+            0, // parked_reason: None
+        ];
+
+        let frame: Frame = bincode::deserialize(PRE_V2_FRAME)
+            .expect("the pre-V2 UpdateSessionStatus frame must remain decodable");
+        let correlation_id = frame.correlation_id;
+        match frame.payload {
+            FramePayload::Rpc(ServiceRpcRequest::UpdateSessionStatus {
+                session_id,
+                status,
+                tokens_in,
+                tokens_out,
+                cache_read,
+                cache_write,
+                parked_reason,
+            }) => {
+                assert_eq!(correlation_id, 42);
+                assert_eq!(session_id, "s1");
+                assert_eq!(status, SessionStatus::Failed);
+                assert_eq!(
+                    (tokens_in, tokens_out, cache_read, cache_write),
+                    (0, 0, 0, 0)
+                );
+                assert_eq!(parked_reason, None);
+            }
+            other => panic!("unexpected pre-V2 frame payload: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn update_session_status_v2_request_roundtrips_every_cause() {
+        let cases = [
+            (SessionStatus::Failed, Some(SessionFailureCause::Cancelled)),
+            (SessionStatus::Failed, Some(SessionFailureCause::Provider)),
+            (SessionStatus::Failed, Some(SessionFailureCause::Harness)),
+            (
+                SessionStatus::Failed,
+                Some(SessionFailureCause::Infrastructure),
+            ),
+            (SessionStatus::Failed, Some(SessionFailureCause::Protocol)),
+            (
+                SessionStatus::Failed,
+                Some(SessionFailureCause::Finalization),
+            ),
+            (SessionStatus::Failed, Some(SessionFailureCause::Unknown)),
+            (SessionStatus::Completed, None),
+        ];
+
+        for (status, failure_cause) in cases {
+            let frame = Frame {
+                correlation_id: 43,
+                payload: FramePayload::Rpc(ServiceRpcRequest::UpdateSessionStatusV2 {
+                    session_id: "s-v2".into(),
+                    status,
+                    tokens_in: 1234,
+                    tokens_out: 567,
+                    cache_read: 89,
+                    cache_write: 12,
+                    parked_reason: None,
+                    failure_cause,
+                }),
+            };
+            let bytes = bincode::serialize(&frame).unwrap();
+            let decoded: Frame = bincode::deserialize(&bytes).unwrap();
+            match decoded.payload {
+                FramePayload::Rpc(ServiceRpcRequest::UpdateSessionStatusV2 {
+                    session_id,
+                    status: got_status,
+                    failure_cause: got_cause,
+                    ..
+                }) => {
+                    assert_eq!(session_id, "s-v2");
+                    assert_eq!(got_status, status);
+                    assert_eq!(got_cause, failure_cause);
+                }
+                other => panic!("unexpected V2 frame payload: {other:?}"),
             }
         }
     }
