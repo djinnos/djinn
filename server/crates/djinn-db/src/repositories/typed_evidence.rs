@@ -194,14 +194,10 @@ impl TypedEvidenceRepository {
         payload: &TribunalEvidenceReturnV1,
         code: &str,
     ) -> Result<()> {
-        if [
-            payload.finding_id.as_str(),
-            payload.spike_task_id.as_str(),
-            payload.attempt_id.as_str(),
-        ]
-        .iter()
-        .any(|value| value.trim().is_empty())
-        {
+        // The attempt is the only caller-supplied identity required to locate
+        // the authoritative finding/task pair. An incorrect claimed binding
+        // must not suppress the required failed lifecycle fact.
+        if payload.attempt_id.trim().is_empty() {
             return Ok(());
         }
         let mut tx = self.db.pool().begin().await?;
@@ -221,26 +217,25 @@ impl TypedEvidenceRepository {
         .bind(&payload.attempt_id)
         .fetch_one(&mut *tx)
         .await?;
-        if attempt.get::<String, _>("finding_id") != payload.finding_id
-            || attempt.get::<String, _>("spike_task_id") != payload.spike_task_id
-            || already_terminal
-        {
+        if already_terminal {
             tx.commit().await?;
             return Ok(());
         }
-        let state = lock_state(&mut tx, &payload.finding_id).await?;
+        let finding_id: String = attempt.get("finding_id");
+        let spike_task_id: String = attempt.get("spike_task_id");
+        let state = lock_state(&mut tx, &finding_id).await?;
         if state == TribunalEvidenceLifecycle::SpikeActive {
             let ordinal: i32 = sqlx::query_scalar("SELECT COALESCE(MAX(ordinal),0)+1 FROM typed_evidence_transitions WHERE finding_id=$1")
-                .bind(&payload.finding_id)
+                .bind(&finding_id)
                 .fetch_one(&mut *tx)
                 .await?;
             Self::append_transition(&mut tx, AppendTypedEvidenceTransitionInput {
                 id: uuid::Uuid::now_v7().to_string(),
-                finding_id: payload.finding_id.clone(),
+                finding_id,
                 ordinal,
                 from_lifecycle: Some(state),
                 to_lifecycle: TribunalEvidenceLifecycle::Failed,
-                actor_task_id: Some(payload.spike_task_id.clone()),
+                actor_task_id: Some(spike_task_id),
                 metadata: serde_json::json!({"validator_version":"TribunalEvidenceReturnV1", "validation_error":code}),
             }).await?;
         }
@@ -320,17 +315,19 @@ impl TypedEvidenceRepository {
                 limit_anchor(a)?;
             }
         }
-        let failures: HashSet<_> = payload
-            .failures
-            .iter()
-            .map(|i| i.check_id.as_str())
-            .collect();
-        let gaps: HashSet<_> = payload.gaps.iter().map(|i| i.check_id.as_str()).collect();
+        let mut failures = HashSet::new();
         for i in &payload.failures {
             limit_failure(i, &expected)?;
+            if !failures.insert(i.check_id.as_str()) {
+                return Err(v1("duplicate_issue_check"));
+            }
         }
+        let mut gaps = HashSet::new();
         for i in &payload.gaps {
             limit_gap(i, &expected)?;
+            if !gaps.insert(i.check_id.as_str()) {
+                return Err(v1("duplicate_issue_check"));
+            }
         }
         for c in &payload.checks {
             let has_failure = failures.contains(c.check_id.as_str());
@@ -359,6 +356,25 @@ impl TypedEvidenceRepository {
             let p = expected[c.check_id.as_str()];
             let result_id = uuid::Uuid::now_v7().to_string();
             sqlx::query("INSERT INTO typed_evidence_check_results (id,validation_result_id,planned_check_id,status,detail) VALUES ($1,$2,$3,$4,$5)").bind(&result_id).bind(&validation_id).bind(&p.id).bind(&c.status).bind(&c.detail).execute(&mut **tx).await?;
+            if let Some(invocation_id) = &c.invocation_id {
+                let known: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM evidence_command_invocations WHERE id=$1)",
+                )
+                .bind(invocation_id)
+                .fetch_one(&mut **tx)
+                .await?;
+                if !known {
+                    return Err(v1("unknown_invocation"));
+                }
+                // The immutable reference is retained, but does not establish
+                // positive health before exact anchor-family hydration.
+                sqlx::query("INSERT INTO typed_evidence_invocation_provenance (validation_result_id,check_result_id,invocation_id,usable) VALUES ($1,$2,$3,false)")
+                    .bind(&validation_id)
+                    .bind(&result_id)
+                    .bind(invocation_id)
+                    .execute(&mut **tx)
+                    .await?;
+            }
             // Exact anchor-family hydration belongs to the chained follow-up.
             // Until then no client locator establishes positive anchor health.
             for a in &c.anchors {
@@ -379,10 +395,12 @@ impl TypedEvidenceRepository {
         let result_outcome = TribunalEvidenceOutcome::Unresolved;
         sqlx::query("UPDATE typed_evidence_validation_results SET outcome=$1,validator_facts=$2 WHERE id=$3").bind(outcome(result_outcome)).bind(serde_json::json!({"validator_version":"TribunalEvidenceReturnV1","raw_payload_sha256":hash,"server_hydrated":true,"outcome":outcome(result_outcome)})).bind(&validation_id).execute(&mut **tx).await?;
         for i in &payload.failures {
-            sqlx::query("INSERT INTO typed_evidence_issues (id,validation_result_id,kind,code,detail) VALUES ($1,$2,'failure',$3,$4)").bind(uuid::Uuid::now_v7().to_string()).bind(&validation_id).bind(&i.code).bind(format!("{}: {}", i.check_id, i.detail)).execute(&mut **tx).await?;
+            let p = expected[i.check_id.as_str()];
+            sqlx::query("INSERT INTO typed_evidence_issues (id,validation_result_id,planned_check_id,kind,code,detail) VALUES ($1,$2,$3,'failure',$4,$5)").bind(uuid::Uuid::now_v7().to_string()).bind(&validation_id).bind(&p.id).bind(&i.code).bind(&i.detail).execute(&mut **tx).await?;
         }
         for i in &payload.gaps {
-            sqlx::query("INSERT INTO typed_evidence_issues (id,validation_result_id,kind,code,detail) VALUES ($1,$2,'gap',$3,$4)").bind(uuid::Uuid::now_v7().to_string()).bind(&validation_id).bind(&i.code).bind(format!("{}: {}", i.check_id, i.detail)).execute(&mut **tx).await?;
+            let p = expected[i.check_id.as_str()];
+            sqlx::query("INSERT INTO typed_evidence_issues (id,validation_result_id,planned_check_id,kind,code,detail) VALUES ($1,$2,$3,'gap',$4,$5)").bind(uuid::Uuid::now_v7().to_string()).bind(&validation_id).bind(&p.id).bind(&i.code).bind(&i.detail).execute(&mut **tx).await?;
         }
         let state = lock_state(tx, &payload.finding_id).await?;
         let ordinal: i32 = sqlx::query_scalar(
@@ -830,20 +848,19 @@ fn limit_failure(
     i: &TribunalEvidenceReturnFailureV1,
     expected: &HashMap<&str, &TribunalEvidencePlannedCheck>,
 ) -> Result<()> {
-    limit_typed_issue(&i.check_id, &i.code, &i.detail, expected, "invalid_failure")
+    limit_typed_issue(&i.check_id, &i.code, &i.detail, expected)
 }
 fn limit_gap(
     i: &TribunalEvidenceReturnGapV1,
     expected: &HashMap<&str, &TribunalEvidencePlannedCheck>,
 ) -> Result<()> {
-    limit_typed_issue(&i.check_id, &i.code, &i.detail, expected, "invalid_gap")
+    limit_typed_issue(&i.check_id, &i.code, &i.detail, expected)
 }
 fn limit_typed_issue(
     check_id: &str,
     code: &str,
     detail: &str,
     expected: &HashMap<&str, &TribunalEvidencePlannedCheck>,
-    invalid: &str,
 ) -> Result<()> {
     if check_id.trim().is_empty()
         || code.trim().is_empty()
@@ -852,7 +869,7 @@ fn limit_typed_issue(
         || bytes(code) > 2048
         || bytes(detail) > 8192
     {
-        Err(v1(invalid))
+        Err(v1("invalid_issue"))
     } else if !expected.contains_key(check_id) {
         Err(v1("dangling_issue_check"))
     } else {

@@ -10,10 +10,18 @@
     "decoded_payload_bytes": 262144
   },
   "stable_errors": [
-    "unsupported_version", "finding_binding_mismatch", "source_task_binding_mismatch",
+    "unsupported_version", "invalid_json", "payload_too_large", "missing_identity",
+    "string_too_large", "conclusion_too_large", "return_limit_exceeded",
+    "finding_binding_mismatch", "source_task_binding_mismatch", "unknown_attempt",
     "missing_expected_check", "duplicate_check", "unknown_check", "check_method_mismatch",
-    "invalid_check_status", "status_detail_required", "dangling_finding_check",
-    "invalid_anchor", "invalid_issue", "replay_payload_conflict"
+    "check_limit_exceeded", "invalid_check_status", "status_detail_required",
+    "invocation_method_mismatch", "command_invocation_required",
+    "command_invocation_forbidden", "unknown_invocation", "passed_status_fields_forbidden",
+    "failed_status_failure_required", "not_run_status_gap_required",
+    "dangling_finding_check", "duplicate_finding_check", "finding_conclusion_required",
+    "too_many_anchors", "detail_too_large", "invalid_anchor", "invalid_issue",
+    "dangling_issue_check", "duplicate_issue_check", "replay_payload_conflict",
+    "invalid_persisted_outcome"
   ],
   "anchor_families": ["code", "graph", "command", "artifact", "memory", "external", "repository"],
   "outcomes": ["resolved", "partial", "unresolved"]
