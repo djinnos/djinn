@@ -49,10 +49,10 @@ use crate::tools::project_tools::{
 use crate::tools::proposal_blocks::{GetBlockCatalogParams, ProposalBlocksParams};
 use crate::tools::proposal_tools::{
     ProposalBlockPatchParams, ProposalCreateParams, ProposalDeleteParams, ProposalExportParams,
-    ProposalFeedbackAddParams, ProposalFeedbackResolveParams, ProposalGraduateParams,
-    ProposalImportParams, ProposalListParams, ProposalReconcileObsoleteEpicParams,
-    ProposalShowParams, ProposalSignoffParams, ProposalStopBuildParams, ProposalTargetParams,
-    ProposalUpdateParams,
+    ProposalFeedbackAddParams, ProposalFeedbackResolveParams, ProposalFeedbackWithdrawParams,
+    ProposalGraduateParams, ProposalImportParams, ProposalListParams,
+    ProposalReconcileObsoleteEpicParams, ProposalShowParams, ProposalSignoffParams,
+    ProposalStopBuildParams, ProposalTargetParams, ProposalUpdateParams,
 };
 use crate::tools::provider_tools::{
     ModelHealthInput, ProviderCatalogInput, ProviderConnectedInput, ProviderModelLookupInput,
@@ -485,6 +485,13 @@ impl DjinnMcpServer {
                 name,
                 self.proposal_feedback_resolve(Parameters(decode_args::<
                     ProposalFeedbackResolveParams,
+                >(name, args)?))
+                    .await,
+            ),
+            "proposal_feedback_withdraw" => map_json(
+                name,
+                self.proposal_feedback_withdraw(Parameters(decode_args::<
+                    ProposalFeedbackWithdrawParams,
                 >(name, args)?))
                     .await,
             ),
