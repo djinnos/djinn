@@ -456,6 +456,24 @@ enum ParsedLine {
     ProviderError(ProviderError, String),
 }
 
+#[derive(Default)]
+struct OpenAIResponsesFrameParserV1 {
+    terminal_state: ResponsesTerminalState,
+}
+impl crate::provider::ProviderSseFrameParserV1 for OpenAIResponsesFrameParserV1 {
+    fn parse(&mut self, frame: SseFrame) -> Vec<anyhow::Result<StreamEvent>> {
+        match frame {
+            SseFrame::Data(line) => match parse_responses_line(&line, &mut self.terminal_state) {
+                ParsedLine::Events(v) | ParsedLine::Terminal(v) => v.into_iter().map(Ok).collect(),
+                ParsedLine::ProviderError(e, m) => vec![Err(anyhow::Error::new(e).context(m))],
+            },
+            SseFrame::Done if self.terminal_state.completed => vec![Ok(StreamEvent::Done)],
+            SseFrame::Done => vec![Err(anyhow::Error::new(ProviderError::Transport)
+                .context("openai_responses stream ended before response.completed"))],
+        }
+    }
+}
+
 /// Extract the OpenAI error `code` (top-level or nested under `error`) for
 /// typed classification, separate from the human-readable message.
 fn extract_error_code(error: &Value) -> Option<String> {
@@ -686,6 +704,10 @@ impl LlmProvider for OpenAIResponsesProvider {
             context,
             OpenAIResponsesTerminalReporterV1::default(),
         ))
+    }
+
+    fn sse_frame_parser_v1(&self) -> Option<Box<dyn crate::provider::ProviderSseFrameParserV1>> {
+        Some(Box::new(OpenAIResponsesFrameParserV1::default()))
     }
 
     fn stream_request_body(

@@ -13,9 +13,8 @@ use futures::StreamExt;
 use futures::stream::FuturesUnordered;
 
 use djinn_core::events::DjinnEventEnvelope;
-use djinn_provider::message::{ContentBlock, Conversation};
-use djinn_provider::provider::client::backoff_delay_ms;
-use djinn_provider::provider::{LlmProvider, ProviderError, StreamEvent, ToolChoice};
+use djinn_provider::message::ContentBlock;
+use djinn_provider::provider::StreamEvent;
 
 use super::budget::record_provider_usage;
 use super::error_handling::{
@@ -136,6 +135,9 @@ pub struct StreamTurnState {
     /// cancellation/interruption and from normal completion; it tells the
     /// reply loop to flush any observed in-flight content before returning.
     pub early_stream_end: bool,
+    /// Set only by an explicit provider terminal event. Raw EOF is not a
+    /// successful completion and must reconcile the admission lease as loss.
+    pub provider_done: bool,
     /// Idempotency guard: `true` once this turn's observed assistant/tool
     /// rows have been persisted (either through the normal finalize path or
     /// via [`persistence::flush_in_flight_turn`]).  Repeated flush calls
@@ -169,6 +171,7 @@ impl StreamTurnState {
             streaming_results: Vec::new(),
             streaming_dispatched: HashSet::new(),
             early_stream_end: false,
+            provider_done: false,
             turn_flushed: false,
         }
     }
@@ -178,14 +181,7 @@ pub(super) type ProviderStream =
     Pin<Box<dyn futures::Stream<Item = anyhow::Result<StreamEvent>> + Send>>;
 
 pub(super) struct StreamLoopContext<'a> {
-    pub provider: &'a dyn LlmProvider,
     pub stream: ProviderStream,
-    /// The exact request inputs that produced [`Self::stream`], so a round
-    /// killed by a *transient* mid-stream provider error can be re-issued
-    /// verbatim. See [`consume_provider_stream`]'s retry branch.
-    pub request_conversation: &'a Conversation,
-    pub request_tools: &'a [serde_json::Value],
-    pub request_tool_choice: Option<ToolChoice>,
     pub tool_metadata: &'a ToolRuntimeMetadataMap,
     pub dispatch: &'a ToolDispatchContext<'a>,
     pub phase_tracker: &'a Arc<Mutex<super::phase::SessionPhaseTracker>>,
@@ -391,9 +387,6 @@ pub(super) async fn consume_provider_stream(
 ) -> anyhow::Result<StreamTurnState> {
     let mut state = StreamTurnState::new();
     let mut streaming_inflight: FuturesUnordered<StreamingFut<'_>> = FuturesUnordered::new();
-    // Attempts already spent restarting this round after a transient
-    // mid-stream provider error (see `MAX_STREAM_EVENT_RETRIES`).
-    let mut stream_event_retries: u32 = 0;
     loop {
         // A concurrent-safe side tool may have temporarily taken phase
         // ownership. Every select iteration waits for the provider again, so
@@ -430,82 +423,8 @@ pub(super) async fn consume_provider_stream(
                         break;
                     }
                     Err(e) => {
-                        // A transient provider failure that arrived as a stream
-                        // *event* (HTTP 200 was already returned, so the client's
-                        // request-establishment retry cannot help) gets a bounded
-                        // restart of the whole round — but only while the round is
-                        // still safely restartable. Otherwise fall through to the
-                        // unchanged terminal path.
-                        if let Some((delay, max_attempts)) = transient_round_restart_delay(
-                            &e,
-                            stream_event_retries,
-                            &state,
-                            streaming_inflight.len(),
-                        ) {
-                            stream_event_retries += 1;
-                            tracing::warn!(
-                                task_id = %ctx.task_id,
-                                session_id = %ctx.session_id,
-                                attempt = stream_event_retries,
-                                max_attempts,
-                                delay_ms = delay.as_millis() as u64,
-                                error = %e,
-                                "provider stream event failed with a retryable error before any \
-                                 output was emitted; retrying"
-                            );
-                            // A deliberate backoff is activity, not idleness:
-                            // refresh the liveness clocks so the coordinator's
-                            // stall poller keeps counting this session as live
-                            // across a multi-minute throttle wait.
-                            touch_stream_activity(
-                                ctx.ctx,
-                                ctx.task_id,
-                                ctx.activity_ts,
-                                ctx.last_rpc_touch,
-                            )
-                            .await;
-                            tokio::select! {
-                                biased;
-                                _ = ctx.cancel.cancelled() => {
-                                    state.interrupted = Some(ReplyLoopCancelled::session());
-                                    break;
-                                }
-                                _ = ctx.global_cancel.cancelled() => {
-                                    state.interrupted = Some(ReplyLoopCancelled::supervisor_shutdown());
-                                    break;
-                                }
-                                _ = tokio::time::sleep(delay) => {}
-                            }
-                            // Re-issue the identical request. Copy the `&'a`
-                            // inputs out first so `ctx.stream` can be reassigned.
-                            let provider = ctx.provider;
-                            let request_conversation = ctx.request_conversation;
-                            let request_tools = ctx.request_tools;
-                            let request_tool_choice = ctx.request_tool_choice;
-                            match provider
-                                .stream(request_conversation, request_tools, request_tool_choice)
-                                .await
-                            {
-                                Ok(restarted) => {
-                                    ctx.stream = restarted;
-                                    // Nothing was emitted (asserted by
-                                    // `round_is_safely_restartable`), so the
-                                    // round starts from a clean slate.
-                                    state = StreamTurnState::new();
-                                    continue;
-                                }
-                                Err(restart_error) => {
-                                    tracing::warn!(
-                                        task_id = %ctx.task_id,
-                                        session_id = %ctx.session_id,
-                                        attempt = stream_event_retries,
-                                        error = %restart_error,
-                                        "retry of the provider stream failed to start; \
-                                         surfacing the original mid-stream error"
-                                    );
-                                }
-                            }
-                        }
+                        // This consumer cannot send around the admission fence.
+                        // Fresh attempts belong to the turn scheduler and acquire a fresh lease.
                         let diag = runtime_fs_diagnostics(ctx.project_path, ctx.worktree_path);
                         let env_diag = runtime_env_diagnostics(ctx.session_id, ctx.project_path, ctx.worktree_path);
                         let detail = format!(
@@ -666,7 +585,10 @@ pub(super) async fn consume_provider_stream(
                             }
                         }
                     }
-                    StreamEvent::Done => break,
+                    StreamEvent::Done => {
+                        state.provider_done = true;
+                        break;
+                    }
                 }
             }
         }
@@ -682,6 +604,5 @@ pub(super) async fn consume_provider_stream(
             "ReplyLoop: streaming dispatch complete (ADR-048 §1B)"
         );
     }
-    let _ = ctx.provider.name();
     Ok(state)
 }

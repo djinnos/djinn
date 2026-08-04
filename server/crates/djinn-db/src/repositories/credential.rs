@@ -504,6 +504,27 @@ impl CredentialRepository {
             .await
     }
 
+    /// Resolve and decrypt a credential together with the durable row identity
+    /// selected by the same private-then-org fallback query. A key name is not
+    /// an identity: private and shared rows can use the same name.
+    pub async fn get_decrypted_with_id(&self, key_name: &str) -> Result<Option<(String, String)>> {
+        let user_id = djinn_core::auth_context::current_user_id();
+        let Some(id) = self
+            .resolve_id_for_user(key_name, user_id.as_deref())
+            .await?
+        else {
+            return Ok(None);
+        };
+        let blob: Option<Vec<u8>> =
+            sqlx::query_scalar!("SELECT encrypted_value FROM credentials WHERE id = $1", id)
+                .fetch_optional(self.db.pool())
+                .await?;
+        match blob {
+            Some(blob) => Ok(Some((id, crypto::decrypt(&blob)?))),
+            None => Ok(None),
+        }
+    }
+
     /// Decrypt and return the raw API key for `key_name`, resolved against an
     /// explicit `user_id`: prefer that user's own credential, otherwise the
     /// org-shared (`owner_user_id IS NULL`) fallback. `user_id = None` resolves

@@ -3109,7 +3109,11 @@ mod tests {
                     .await
                     .map_err(|error| format!("credential lookup failed: {error}"))?
                 {
-                    Some(value) => Ok(crate::helpers::ProviderCredential::ApiKey(key_name, value)),
+                    Some(value) => Ok(crate::helpers::ProviderCredential::ApiKey(
+                        "extraction-credential-record".to_string(),
+                        key_name,
+                        value,
+                    )),
                     None => Err(format!(
                         "no credential stored for provider {provider_id} (expected key {key_name})"
                     )),

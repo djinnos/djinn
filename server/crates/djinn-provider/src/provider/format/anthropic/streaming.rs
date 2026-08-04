@@ -131,6 +131,41 @@ impl ProviderSseTerminalReporterV1 for AnthropicTerminalReporterV1 {
     }
 }
 
+#[derive(Default)]
+struct AnthropicFrameParserV1 {
+    block_acc: ContentBlockAcc,
+    input_tokens: u32,
+    cache_read: u32,
+    cache_write: u32,
+}
+
+impl crate::provider::ProviderSseFrameParserV1 for AnthropicFrameParserV1 {
+    fn parse(&mut self, frame: SseFrame) -> Vec<anyhow::Result<StreamEvent>> {
+        let SseFrame::Data(line) = frame else {
+            return Vec::new();
+        };
+        let Ok(value) = serde_json::from_str::<Value>(&line) else {
+            return Vec::new();
+        };
+        let event_type = value["type"].as_str().unwrap_or("");
+        if event_type == "error" {
+            let (class, message) = classify_anthropic_error_event(&line);
+            return vec![Err(anyhow::Error::new(class).context(message))];
+        }
+        parse_anthropic_event(
+            event_type,
+            &line,
+            &mut self.block_acc,
+            &mut self.input_tokens,
+            &mut self.cache_read,
+            &mut self.cache_write,
+        )
+        .into_iter()
+        .map(Ok)
+        .collect()
+    }
+}
+
 /// Parse a single Anthropic SSE event (event_type + data JSON).
 /// Mutates `block_acc` in place; caller owns it across calls.
 pub(crate) fn parse_anthropic_event(
@@ -495,6 +530,10 @@ impl LlmProvider for AnthropicProvider {
             context,
             AnthropicTerminalReporterV1::default(),
         ))
+    }
+
+    fn sse_frame_parser_v1(&self) -> Option<Box<dyn crate::provider::ProviderSseFrameParserV1>> {
+        Some(Box::new(AnthropicFrameParserV1::default()))
     }
 
     fn stream_request_body(

@@ -195,6 +195,7 @@ async fn run_case(
         ReplyLoopContext {
             session_budget: None,
             provider: &provider,
+            credential_record_id: "test-credential",
             tools: &[],
             task_id: &task.id,
             task_short_id: "fixture",
@@ -314,6 +315,7 @@ async fn oversized_transport_compaction_persists_boundary_occupancy() {
         ReplyLoopContext {
             session_budget: None,
             provider: &provider,
+            credential_record_id: "test-credential",
             tools: &[],
             task_id: &task.id,
             task_short_id: "fixture",

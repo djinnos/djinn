@@ -24,7 +24,7 @@ use crate::model_turn_admission::{
     ProviderAttemptUncoveredReasonV1, ProviderCredentialRecordScopeV1,
     ProviderHiddenRetryCapabilityV1, plan_provider_attempt_with_policy_v1,
 };
-use crate::provider::client::{ProviderAttemptContextV1, ProviderSseAttemptV1};
+use crate::provider::client::{ProviderAttemptContextV1, ProviderSseAttemptV1, SseFrame};
 use djinn_db::ModelTurnBucketKind;
 
 // ─── Token usage ──────────────────────────────────────────────────────────────
@@ -440,6 +440,11 @@ pub enum ToolChoice {
     None,
 }
 
+/// Stateful format adapter from raw B1 frames to normal production events.
+pub trait ProviderSseFrameParserV1: Send {
+    fn parse(&mut self, frame: SseFrame) -> Vec<anyhow::Result<StreamEvent>>;
+}
+
 // ─── Provider trait ───────────────────────────────────────────────────────────
 
 /// Abstraction over a single LLM provider endpoint.
@@ -479,6 +484,11 @@ pub trait LlmProvider: Send + Sync {
         Err(ProviderAttemptRouteCoverageV1::Uncovered(
             ProviderAttemptUncoveredReasonV1::SerializationUnavailable,
         ))
+    }
+
+    /// Construct the covered route's authoritative raw-frame parser.
+    fn sse_frame_parser_v1(&self) -> Option<Box<dyn ProviderSseFrameParserV1>> {
+        None
     }
 
     /// Exact serialized body used for admission planning; it is never retained.

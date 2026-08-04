@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::Ordering;
 
+use futures::StreamExt;
 #[cfg(feature = "test-support")]
 use std::sync::OnceLock;
 
@@ -22,7 +23,9 @@ use djinn_db::repositories::task_rejected_submission_integrity::TaskRejectedSubm
 use djinn_git::{SubmissionDiffFingerprint, compute_submission_diff_fingerprint};
 use djinn_provider::message::{ContentBlock, Conversation, Message, MessageMeta, Role};
 use djinn_provider::provider::LlmProvider;
+use djinn_provider::provider::client::{ProviderAttemptContextV1, SseFrame};
 use djinn_provider::provider::telemetry;
+use djinn_provider::{ProviderApiKeyNormalizerV1, ProviderReceiptTimeV1};
 
 use crate::lifecycle::teardown::settle_no_progress_submission;
 
@@ -43,6 +46,9 @@ use super::loop_guard::{
     AssistantOutputSignature, LoopGuardCondition, LoopGuardError, LoopGuardReason, LoopGuardState,
     ToolCallSignature, ToolFailureClass,
 };
+use super::model_turn_admission::{
+    ModelTurnAdmissionCoordinator, ModelTurnAdmissionRequest, ModelTurnPreparation,
+};
 use super::persistence::{
     complete_compaction_boundary, flush_in_flight_turn, persist_session_message,
     record_compaction_started, serialize_llm_input, serialize_message,
@@ -51,6 +57,29 @@ use super::phase::SessionPhaseTracker;
 use super::streaming::{StreamLoopContext, StreamTurnState, consume_provider_stream};
 use super::tool_dispatch::{ToolDispatchContext, collect_tool_results, tool_runtime_metadata};
 use djinn_db::{CompactionTrigger, SessionCompactionBoundaryRepository};
+
+/// Typed admission decision returned through the reply-loop error seam.
+///
+/// The supervisor can downcast this instead of parsing a diagnostic, retaining
+/// cancellation-aware scheduling ownership outside this boundary.
+#[derive(Debug)]
+pub enum ModelTurnAdmissionOutcome {
+    Wait(djinn_db::ModelTurnAdmissionWait),
+    Rejected(djinn_db::ModelTurnAdmissionRejection),
+    DispatchFenced(djinn_db::ModelTurnLeaseMutationOutcome),
+}
+
+impl std::fmt::Display for ModelTurnAdmissionOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Wait(_) => f.write_str("model-turn admission waiting"),
+            Self::Rejected(_) => f.write_str("model-turn admission rejected"),
+            Self::DispatchFenced(_) => f.write_str("model-turn dispatch fenced"),
+        }
+    }
+}
+
+impl std::error::Error for ModelTurnAdmissionOutcome {}
 
 /// True when `model_id` (a `provider/model` string) is served by the Codex /
 /// OpenAI consumer backend that signals over-quota by answering a turn with an
@@ -505,6 +534,8 @@ async fn maybe_inject_soft_budget_reminder(
 /// Context for the reply loop, adapted for the slot crate.
 pub struct ReplyLoopContext<'a> {
     pub provider: &'a dyn LlmProvider,
+    /// Durable credential-row identity selected at provider construction.
+    pub credential_record_id: &'a str,
     pub tools: &'a [serde_json::Value],
     pub task_id: &'a str,
     pub task_short_id: &'a str,
@@ -627,6 +658,7 @@ pub async fn run_reply_loop(
 ) -> (anyhow::Result<()>, ParsedAgentOutput, i64, i64, i64, i64) {
     let ReplyLoopContext {
         provider,
+        credential_record_id,
         tools,
         task_id,
         task_short_id,
@@ -906,9 +938,81 @@ pub async fn run_reply_loop(
             // mutating stored history.
             let request_conversation = conversation.with_synthesized_tool_results();
             phase_tracker.lock().unwrap_or_else(std::sync::PoisonError::into_inner).enter_provider_wait();
-            let stream_result = provider
-                .stream(request_conversation.as_ref(), tools, tool_choice)
-                .await;
+            // Covered adapters construct the plan from this exact request
+            // body. `prepare` persists the decision and commits the dispatch
+            // fence before this code reaches the network launch below. An
+            // adapter that cannot construct a plan remains explicitly on the
+            // uncovered compatibility path rather than claiming enforcement.
+            let stream_result = if let Ok(plan) = provider.provider_attempt_plan_v1(
+                credential_record_id,
+                request_conversation.as_ref(),
+                tools,
+                tool_choice,
+            ) {
+                let coordinator = ModelTurnAdmissionCoordinator::new(
+                    djinn_db::ModelTurnAdmissionRepository::new(slot_ctx.db.clone()),
+                );
+                match coordinator
+                    .prepare(
+                        &plan,
+                        ModelTurnAdmissionRequest {
+                            credential_id: credential_record_id.to_owned(),
+                            request_id: format!("{session_id}:{turns}"),
+                            owner_pod_uid: None,
+                            generation: 0,
+                        },
+                    )
+                    .await
+                    .map_err(anyhow::Error::from)?
+                {
+                    ModelTurnPreparation::Permit(mut permit) => {
+                        let djinn_provider::ProviderAttemptRouteCoverageV1::Covered { policy, .. } = plan.coverage else {
+                            return Err(anyhow::anyhow!("covered admission plan became uncovered"));
+                        };
+                        let normalizer = Arc::new(Mutex::new(ProviderApiKeyNormalizerV1::new(policy)));
+                        let started = std::time::Instant::now();
+                        // A launch failure drops this pre-active permit and its
+                        // Drop implementation cancels the prepared lease.
+                        let attempt = provider.start_sse_attempt_v1(
+                            request_conversation.as_ref(), tools, tool_choice,
+                            ProviderAttemptContextV1::new(turns as u64, policy, normalizer, move || ProviderReceiptTimeV1 {
+                                wall: std::time::SystemTime::now(),
+                                monotonic_ms: started.elapsed().as_millis() as u64,
+                            }),
+                        ).map_err(|coverage| anyhow::anyhow!("covered B1 launch rejected: {coverage:?}"))?;
+                        let mut parser = provider.sse_frame_parser_v1().ok_or_else(||
+                            anyhow::anyhow!("covered B1 route has no authoritative frame parser"))?;
+                        // The dispatching fence committed in prepare; active is
+                        // committed only after B1 accepted the launch.
+                        permit.mark_active().await.map_err(anyhow::Error::from)?;
+                        Ok(Box::pin(async_stream::stream! {
+                            let mut frames = attempt.events;
+                            while let Some(frame) = frames.next().await {
+                                match frame {
+                                    Ok(frame) => for event in parser.parse(frame) {
+                                        let failed = event.is_err();
+                                        yield event;
+                                        if failed { return; }
+                                    },
+                                    Err(error) => { yield Err(error); return; }
+                                }
+                            }
+                        }) as super::streaming::ProviderStream)
+                    }
+                    ModelTurnPreparation::Wait(wait) => {
+                        return Err(anyhow::Error::new(ModelTurnAdmissionOutcome::Wait(wait)));
+                    }
+                    ModelTurnPreparation::Rejected(rejection) => {
+                        return Err(anyhow::Error::new(ModelTurnAdmissionOutcome::Rejected(rejection)));
+                    }
+                    ModelTurnPreparation::DispatchFenced { outcome, .. } => {
+                        return Err(anyhow::Error::new(ModelTurnAdmissionOutcome::DispatchFenced(outcome)));
+                    }
+                }
+            } else {
+                // Explicit uncovered compatibility path: no B2 claim was made.
+                provider.stream(request_conversation.as_ref(), tools, tool_choice).await
+            };
             let stream = match stream_result {
                 Ok(s) => s,
                 Err(e)
@@ -1146,6 +1250,7 @@ pub async fn run_reply_loop(
                 streaming_results,
                 streaming_dispatched,
                 early_stream_end,
+                provider_done: _,
                 turn_flushed: _,
             } = stream_state;
             saw_any_event |= saw_round_event;
