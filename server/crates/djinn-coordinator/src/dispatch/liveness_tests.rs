@@ -269,6 +269,73 @@ fn terminal_session_with_exited_pod_is_not_protocol_violation() {
     assert_ne!(result.verdict, Verdict::ProtocolViolation);
 }
 
+/// A persisted terminal session makes an exited pod expected, regardless of
+/// where the task state machine currently is. Keep this as an exhaustive
+/// table rather than relying on the handoff subset: `open` and `in_progress`
+/// are precisely the states that would otherwise satisfy the structural
+/// inconsistency guard.
+#[test]
+fn terminal_persisted_sessions_never_violate_protocol_for_any_task_status() {
+    let terminal_session_statuses = [
+        DbSessionStatus::Completed,
+        DbSessionStatus::Failed,
+        DbSessionStatus::Interrupted,
+    ];
+    let all_task_statuses = [
+        DbTaskStatus::Open,
+        DbTaskStatus::InProgress,
+        DbTaskStatus::NeedsTaskReview,
+        DbTaskStatus::InTaskReview,
+        DbTaskStatus::Approved,
+        DbTaskStatus::PrDraft,
+        DbTaskStatus::PrReview,
+        DbTaskStatus::NeedsLeadIntervention,
+        DbTaskStatus::InLeadIntervention,
+        DbTaskStatus::Closed,
+    ];
+
+    for session_status in terminal_session_statuses {
+        for task_status in all_task_statuses {
+            let mut ev = live_evidence();
+            ev.pod_phase = Some(PodPhase::Succeeded);
+            ev.exit_code = Some(0);
+            ev.db_session_status = Some(session_status);
+            ev.db_task_status = Some(task_status);
+
+            let result = classify(&ev);
+            assert_ne!(
+                result.verdict,
+                Verdict::ProtocolViolation,
+                "terminal persisted session {session_status:?} with task {task_status:?}"
+            );
+            if task_status == DbTaskStatus::Closed {
+                assert_eq!(
+                    result.outcome,
+                    Some(LivenessOutcome::KillNoop),
+                    "closed task must retain KillNoop precedence for {session_status:?}"
+                );
+            }
+        }
+    }
+}
+
+/// Terminal persisted status only exonerates the structural-exit rung. It must
+/// not bypass the higher-priority hard runtime cap.
+#[test]
+fn hard_runtime_precedes_terminal_session_structural_exoneration() {
+    let mut ev = live_evidence();
+    ev.pod_phase = Some(PodPhase::Succeeded);
+    ev.exit_code = Some(0);
+    ev.db_session_status = Some(DbSessionStatus::Completed);
+    ev.db_task_status = Some(DbTaskStatus::InProgress);
+    ev.hard_runtime_deadline_exceeded = true;
+
+    let result = classify(&ev);
+    assert_eq!(result.verdict, Verdict::Dead);
+    assert_eq!(result.outcome, Some(LivenessOutcome::Timeout));
+    assert_eq!(result.reason, Some(LivenessReason::HardRuntimeExceeded));
+}
+
 // ── Precedence 4: Dead ───────────────────────────────────────────────
 
 #[test]
@@ -486,26 +553,39 @@ fn exit_at_a_recorded_handoff_is_not_a_protocol_violation() {
 }
 
 /// The detector must keep firing on the shape it exists for: a pod that
-/// exited leaving its task still claimed or still queued, with the session
-/// row never settled.
+/// exited leaving its task still claimed or still queued, with a persisted
+/// session status that has not settled.
 #[test]
-fn exit_leaving_the_task_unsettled_is_still_a_protocol_violation() {
-    for status in [DbTaskStatus::Open, DbTaskStatus::InProgress] {
-        let mut clean = live_evidence();
-        clean.pod_phase = Some(PodPhase::Succeeded);
-        clean.exit_code = Some(0);
-        clean.db_session_status = Some(DbSessionStatus::Running);
-        clean.db_task_status = Some(status);
-        let result = classify(&clean);
-        assert_eq!(result.verdict, Verdict::ProtocolViolation, "{status:?}");
-        assert_eq!(result.reason, Some(LivenessReason::CleanExitNonterminal));
+fn nonterminal_persisted_sessions_keep_unsettled_exit_controls() {
+    // `Paused` remains nonterminal under the classifier's current semantics,
+    // so it must retain the same structural checks as `Running`.
+    for session_status in [DbSessionStatus::Running, DbSessionStatus::Paused] {
+        for task_status in [DbTaskStatus::Open, DbTaskStatus::InProgress] {
+            let mut clean = live_evidence();
+            clean.pod_phase = Some(PodPhase::Succeeded);
+            clean.exit_code = Some(0);
+            clean.db_session_status = Some(session_status);
+            clean.db_task_status = Some(task_status);
+            let result = classify(&clean);
+            assert_eq!(
+                result.verdict,
+                Verdict::ProtocolViolation,
+                "clean exit: {session_status:?} session left {task_status:?} unsettled"
+            );
+            assert_eq!(result.reason, Some(LivenessReason::CleanExitNonterminal));
 
-        let mut crashed = clean.clone();
-        crashed.pod_phase = Some(PodPhase::Failed);
-        crashed.exit_code = Some(1);
-        let result = classify(&crashed);
-        assert_eq!(result.verdict, Verdict::ProtocolViolation, "{status:?}");
-        assert_eq!(result.outcome, Some(LivenessOutcome::Crash));
+            let mut crashed = clean.clone();
+            crashed.pod_phase = Some(PodPhase::Failed);
+            crashed.exit_code = Some(1);
+            let result = classify(&crashed);
+            assert_eq!(
+                result.verdict,
+                Verdict::ProtocolViolation,
+                "nonzero exit: {session_status:?} session left {task_status:?} unsettled"
+            );
+            assert_eq!(result.outcome, Some(LivenessOutcome::Crash));
+            assert_eq!(result.reason, Some(LivenessReason::NonzeroExitNonterminal));
+        }
     }
 }
 
