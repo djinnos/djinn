@@ -5813,6 +5813,272 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn readiness_and_list_counts_use_actionable_feedback_threads() {
+        let db = test_db();
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let proposal = repo
+            .create(create_input("Thread-aware readiness"))
+            .await
+            .unwrap();
+        let root = repo
+            .add_feedback(ProposalFeedbackCreateInput {
+                proposal_id: &proposal.id,
+                parent_id: None,
+                author_kind: "user",
+                author_model: None,
+                body: "root",
+            })
+            .await
+            .unwrap();
+        for body in ["reply one", "reply two"] {
+            repo.add_feedback(ProposalFeedbackCreateInput {
+                proposal_id: &proposal.id,
+                parent_id: Some(&root.id),
+                author_kind: "user",
+                author_model: None,
+                body,
+            })
+            .await
+            .unwrap();
+        }
+        let advisory = repo
+            .add_feedback(ProposalFeedbackCreateInput {
+                proposal_id: &proposal.id,
+                parent_id: Some(&root.id),
+                author_kind: "user",
+                author_model: None,
+                body: "advisory context",
+            })
+            .await
+            .unwrap();
+        sqlx::query("UPDATE proposal_feedback SET severity='advisory' WHERE id=$1")
+            .bind(&advisory.id)
+            .execute(db.pool())
+            .await
+            .unwrap();
+        let resolved_root = repo
+            .add_feedback(ProposalFeedbackCreateInput {
+                proposal_id: &proposal.id,
+                parent_id: None,
+                author_kind: "user",
+                author_model: None,
+                body: "resolved root",
+            })
+            .await
+            .unwrap();
+        repo.add_feedback(ProposalFeedbackCreateInput {
+            proposal_id: &proposal.id,
+            parent_id: Some(&resolved_root.id),
+            author_kind: "user",
+            author_model: None,
+            body: "unresolved child",
+        })
+        .await
+        .unwrap();
+        repo.set_feedback_resolved(&resolved_root.id, Some(2))
+            .await
+            .unwrap();
+        let advisory_only = repo
+            .add_feedback(ProposalFeedbackCreateInput {
+                proposal_id: &proposal.id,
+                parent_id: None,
+                author_kind: "user",
+                author_model: None,
+                body: "advisory only",
+            })
+            .await
+            .unwrap();
+        sqlx::query("UPDATE proposal_feedback SET severity='advisory' WHERE id=$1")
+            .bind(&advisory_only.id)
+            .execute(db.pool())
+            .await
+            .unwrap();
+
+        let raw = repo
+            .actionable_feedback_readiness(&proposal.id)
+            .await
+            .unwrap();
+        assert_eq!(
+            raw.blocking_thread_count(),
+            2,
+            "multiple replies and advisory rows deduplicate by stable root"
+        );
+        assert!(
+            raw.threads
+                .iter()
+                .any(|thread| thread.root_feedback_id == root.id)
+        );
+        assert!(
+            raw.threads
+                .iter()
+                .any(|thread| thread.root_feedback_id == resolved_root.id)
+        );
+        assert!(
+            raw.threads
+                .iter()
+                .all(|thread| thread.debate_entry_ids.is_empty())
+        );
+        assert_eq!(
+            repo.list_filtered(ProposalListQuery::default())
+                .await
+                .unwrap()
+                .proposals[0]
+                .1,
+            2
+        );
+        assert_eq!(
+            repo.list_summaries(&[proposal.id.clone()]).await.unwrap()[&proposal.id]
+                .unresolved_blocking_count,
+            2
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn readiness_tracks_materialized_late_disposed_and_withdrawn_generations() {
+        let db = test_db();
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let proposal = repo
+            .create(create_input("Generation readiness"))
+            .await
+            .unwrap();
+        let root = repo
+            .add_feedback(ProposalFeedbackCreateInput {
+                proposal_id: &proposal.id,
+                parent_id: None,
+                author_kind: "user",
+                author_model: None,
+                body: "root",
+            })
+            .await
+            .unwrap();
+        let first = repo
+            .capture_feedback_refinement_boundary(&proposal.id)
+            .await
+            .unwrap()
+            .captures
+            .pop()
+            .unwrap();
+        let materialized = repo
+            .actionable_feedback_readiness(&proposal.id)
+            .await
+            .unwrap();
+        assert_eq!(materialized.threads[0].root_feedback_id, root.id);
+        assert_eq!(
+            materialized.threads[0].debate_entry_ids,
+            vec![first.debate_entry.id.clone()]
+        );
+        let late_one = repo
+            .add_feedback(ProposalFeedbackCreateInput {
+                proposal_id: &proposal.id,
+                parent_id: Some(&root.id),
+                author_kind: "user",
+                author_model: None,
+                body: "late one",
+            })
+            .await
+            .unwrap();
+        let late_two = repo
+            .add_feedback(ProposalFeedbackCreateInput {
+                proposal_id: &proposal.id,
+                parent_id: Some(&root.id),
+                author_kind: "user",
+                author_model: None,
+                body: "late two",
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            repo.list_filtered(ProposalListQuery::default())
+                .await
+                .unwrap()
+                .proposals[0]
+                .1,
+            1
+        );
+        assert_eq!(
+            repo.list_summaries(&[proposal.id.clone()]).await.unwrap()[&proposal.id]
+                .unresolved_blocking_count,
+            1
+        );
+        repo.dispose_feedback_refinement_generation(FeedbackRefinementDispositionInput {
+            proposal_id: proposal.id.clone(),
+            injection_id: first.injection.id.clone(),
+            root_feedback_id: root.id.clone(),
+            generation: first.injection.generation,
+            debate_entry_id: first.debate_entry.id.clone(),
+            disposition: FeedbackRefinementDisposition::FixedRevision { revision_seq: 2 },
+        })
+        .await
+        .unwrap();
+        let late_raw = repo
+            .actionable_feedback_readiness(&proposal.id)
+            .await
+            .unwrap();
+        assert_eq!(late_raw.blocking_thread_count(), 1);
+        assert!(
+            late_raw.threads[0].debate_entry_ids.is_empty(),
+            "disposed generation does not gate late raw work"
+        );
+        let second = repo
+            .capture_feedback_refinement_boundary(&proposal.id)
+            .await
+            .unwrap()
+            .captures
+            .pop()
+            .unwrap();
+        repo.withdraw_feedback_with_refinement_derivation(&late_one.id, "author")
+            .await
+            .unwrap();
+        let partial = repo
+            .actionable_feedback_readiness(&proposal.id)
+            .await
+            .unwrap();
+        assert_eq!(
+            partial.threads[0].debate_entry_ids,
+            vec![second.debate_entry.id.clone()]
+        );
+        repo.add_debate_trail_entry(ProposalDebateTrailCreateInput {
+            proposal_id: &proposal.id,
+            kind: "verdict",
+            body: "verdict: needs-work",
+            blocking: true,
+            agent_role: "judge",
+            author_kind: "agent",
+            author_model: Some("test"),
+            source_task_id: None,
+            against_revision_seq: 2,
+            round: 2,
+            body_metadata: None,
+        })
+        .await
+        .unwrap();
+        repo.withdraw_feedback_with_refinement_derivation(&late_two.id, "author")
+            .await
+            .unwrap();
+        assert!(
+            repo.actionable_feedback_readiness(&proposal.id)
+                .await
+                .unwrap()
+                .threads
+                .is_empty()
+        );
+        let summary = repo.list_summaries(&[proposal.id.clone()]).await.unwrap();
+        assert_eq!(summary[&proposal.id].unresolved_blocking_count, 0);
+        assert_eq!(
+            summary[&proposal.id].latest_judge_verdict_body.as_deref(),
+            Some("verdict: needs-work")
+        );
+        assert_eq!(
+            repo.list_filtered(ProposalListQuery::default())
+                .await
+                .unwrap()
+                .proposals[0]
+                .1,
+            0
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn list_summaries_batches_tribunal_facts() {
         let db = test_db();
         let repo = ProposalRepository::new(db.clone(), EventBus::noop());
