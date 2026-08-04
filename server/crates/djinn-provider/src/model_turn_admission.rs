@@ -190,6 +190,8 @@ pub struct ProviderAttemptPlanV1 {
 pub struct ProviderOutcomeV1 {
     pub terminal: ProviderAttemptTerminalV1,
     pub authoritative_usage: Option<ModelTurnAuthoritativeUsage>,
+    /// Sanitized response metadata captured at the provider boundary.
+    pub observation: Option<ProviderNormalizedObservationV1>,
     pub abort: ProviderAttemptAbortResultV1,
     pub token_emission: ProviderTokenEmissionV1,
 }
@@ -208,9 +210,11 @@ pub enum ProviderAttemptLossV1 {
     Transport,
     ProviderRejected,
     RateLimited,
+    PolicyMismatch,
     EmptyTurn,
     CodexEmptyTurn,
     Protocol,
+    ConsumerDropped,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -331,6 +335,16 @@ impl ProviderApiKeyNormalizerV1 {
         Self {
             reactive_only: policy == ProviderAdmissionPolicyV1::ReactiveOnlyTarget1,
             ..Self::default()
+        }
+    }
+
+    /// Admission policy this credential-scoped normalizer was created for.
+    #[must_use]
+    pub fn policy(&self) -> ProviderAdmissionPolicyV1 {
+        if self.reactive_only {
+            ProviderAdmissionPolicyV1::ReactiveOnlyTarget1
+        } else {
+            ProviderAdmissionPolicyV1::Proactive
         }
     }
 
@@ -489,7 +503,7 @@ fn capacity_min(
     }
 }
 
-fn normalize_usage(
+pub(crate) fn normalize_usage(
     usage: ProviderUsageObservationV1,
 ) -> Result<Option<ModelTurnAuthoritativeUsage>, ProviderObservationIgnoreReasonV1> {
     let fields = [usage.input_units, usage.output_units, usage.combined_units];
@@ -956,6 +970,7 @@ mod tests {
         let outcome = ProviderOutcomeV1 {
             terminal: ProviderAttemptTerminalV1::Failed(ProviderAttemptLossV1::CodexEmptyTurn),
             authoritative_usage: None,
+            observation: None,
             abort: ProviderAttemptAbortResultV1::NotRequested,
             token_emission: ProviderTokenEmissionV1::default(),
         };
