@@ -1,5 +1,6 @@
--- Exact, server-authored anchor identities. No caller locator is searched inside
--- finalized JSON; a source must be explicitly registered for one attempt/check.
+-- Legacy append-only registry retained for compatibility only. Hydration never
+-- trusts it: positive identities are resolved from evidence plans/invocations or
+-- immutable repository graph records, never from caller-adjacent JSON.
 CREATE TABLE typed_evidence_anchor_sources (
     id VARCHAR(36) PRIMARY KEY,
     attempt_id VARCHAR(36) NOT NULL REFERENCES typed_evidence_attempts(id) ON DELETE RESTRICT,

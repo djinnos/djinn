@@ -709,6 +709,34 @@ impl HydratedAnchor {
         if self.healthy && self.method_compatible { "healthy" } else { "unusable" }
     }
 }
+/// A locator is merely a caller selector. Its grammar is family-specific so
+/// one family cannot be reinterpreted as another family's evidence.
+enum CanonicalAnchorLocator<'a> {
+    Repository { plan_id: &'a str, commit: &'a str }, Command { invocation_id: &'a str },
+    Code { path: &'a str, commit: &'a str, start_line: u32, end_line: u32 },
+    Graph { generation_id: &'a str }, Artifact { artifact_id: &'a str },
+    Memory { note_id: &'a str, content_sha256: &'a str },
+    External { uri: &'a str, content_sha256: &'a str },
+}
+fn canonical_id(value: &str) -> bool { !value.is_empty() && value.len() <= 128 && value.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_')) }
+fn canonical_sha256(value: &str) -> bool { value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit()) }
+fn canonical_commit(value: &str) -> bool { (7..=128).contains(&value.len()) && value.bytes().all(|b| b.is_ascii_hexdigit()) }
+fn parse_line_range(value: &str) -> Option<(u32, u32)> {
+    let (start, end) = match value.split_once('-') { Some((start, end)) => (start.parse().ok()?, end.parse().ok()?), None => { let line = value.parse().ok()?; (line, line) } };
+    (start > 0 && start <= end).then_some((start, end))
+}
+fn parse_canonical_locator<'a>(method: &str, locator: &'a str) -> Option<CanonicalAnchorLocator<'a>> {
+    match method {
+        "repository" => { let (plan_id, commit) = locator.strip_prefix("repository:")?.split_once(':')?; (canonical_id(plan_id) && canonical_commit(commit)).then_some(CanonicalAnchorLocator::Repository { plan_id, commit }) }
+        "command" => { let id = locator.strip_prefix("command:")?; canonical_id(id).then_some(CanonicalAnchorLocator::Command { invocation_id: id }) }
+        "code" => { let (path, revision) = locator.strip_prefix("code:")?.split_once('@')?; let (commit, lines) = revision.split_once("#L")?; let (start_line, end_line) = parse_line_range(lines)?; (!path.is_empty() && !path.starts_with('/') && !path.contains("..") && !path.chars().any(char::is_whitespace) && canonical_commit(commit)).then_some(CanonicalAnchorLocator::Code { path, commit, start_line, end_line }) }
+        "graph" => { let id = locator.strip_prefix("graph:")?; uuid::Uuid::parse_str(id).ok().map(|_| CanonicalAnchorLocator::Graph { generation_id: id }) }
+        "artifact" => { let id = locator.strip_prefix("artifact:")?; uuid::Uuid::parse_str(id).ok().map(|_| CanonicalAnchorLocator::Artifact { artifact_id: id }) }
+        "memory" => { let (note_id, content_sha256) = locator.strip_prefix("memory:")?.split_once('@')?; (uuid::Uuid::parse_str(note_id).is_ok() && canonical_sha256(content_sha256)).then_some(CanonicalAnchorLocator::Memory { note_id, content_sha256 }) }
+        "external" => { let (uri, content_sha256) = locator.strip_prefix("external:")?.rsplit_once("#sha256=")?; (uri.starts_with("https://") && canonical_sha256(content_sha256)).then_some(CanonicalAnchorLocator::External { uri, content_sha256 }) }
+        _ => None,
+    }
+}
 /// Resolve only canonical locators against server-owned rows scoped to this
 /// frozen attempt/check. Finalized JSON is never searched for caller text.
 async fn hydrate_anchor(
@@ -719,21 +747,44 @@ async fn hydrate_anchor(
     let compatible = matches!((planned_method(planned.method), anchor.method.as_str()),
         ("code", "code" | "repository") | ("graph", "graph" | "repository") | ("command", "command" | "artifact" | "memory" | "external"));
     if !compatible { return Ok(HydratedAnchor::unusable("anchor method incompatible with planned check", scope)); }
-    let Some((family, opaque)) = anchor.locator.split_once(':') else { return Ok(HydratedAnchor::unusable("locator is not canonical", scope)); };
-    if family != anchor.method || opaque.trim().is_empty() || opaque.contains(char::is_whitespace) { return Ok(HydratedAnchor::unusable("locator family is not canonical", scope)); }
-    if anchor.method == "command" { return hydrate_command_invocation(tx, attempt_id, planned, opaque).await; }
-    if anchor.method == "repository" {
-        let Some((plan_id, commit)) = opaque.split_once(':') else { return Ok(HydratedAnchor::unusable("repository locator requires plan and commit", scope)); };
-        let row = sqlx::query("SELECT captured_commit_sha FROM evidence_plans WHERE id=$1").bind(plan_id).fetch_optional(&mut **tx).await?;
-        return Ok(match row {
-            Some(row) if planned.evidence_plan_id.as_deref() == Some(plan_id) && row.get::<String, _>("captured_commit_sha") == commit => HydratedAnchor { healthy: true, method_compatible: true, identity: serde_json::json!({"evidence_plan_id":plan_id,"captured_commit_sha":commit}), detail: "exact frozen repository identity".into() },
-            _ => HydratedAnchor::unusable("repository identity is not owned by this planned check", scope),
-        });
+    let Some(locator) = parse_canonical_locator(&anchor.method, &anchor.locator) else {
+        return Ok(HydratedAnchor::unusable("locator is not canonical for its anchor family", scope));
+    };
+    match locator {
+        CanonicalAnchorLocator::Command { invocation_id } => hydrate_command_invocation(tx, attempt_id, planned, invocation_id).await,
+        CanonicalAnchorLocator::Repository { plan_id, commit } => {
+            let row = sqlx::query("SELECT captured_commit_sha FROM evidence_plans WHERE id=$1").bind(plan_id).fetch_optional(&mut **tx).await?;
+            Ok(match row {
+                Some(row) if planned.evidence_plan_id.as_deref() == Some(plan_id) && row.get::<String, _>("captured_commit_sha") == commit => HydratedAnchor { healthy: true, method_compatible: true, identity: serde_json::json!({"evidence_plan_id":plan_id,"captured_commit_sha":commit}), detail: "exact frozen repository identity".into() },
+                _ => HydratedAnchor::unusable("repository identity is not owned by this planned check", scope),
+            })
+        }
+        CanonicalAnchorLocator::Graph { generation_id } => hydrate_graph_generation(tx, planned, generation_id).await,
+        CanonicalAnchorLocator::Artifact { artifact_id } => hydrate_graph_artifact(tx, planned, artifact_id).await,
+        // The repository has no immutable file-content, memory-revision, or
+        // external-provenance source bound to an evidence plan. These parsed
+        // selectors remain persisted as unusable rather than trusted.
+        CanonicalAnchorLocator::Code { path, commit, start_line, end_line } => Ok(HydratedAnchor::unusable("no immutable server-owned code source", serde_json::json!({"attempt_id":attempt_id,"planned_check_id":planned.id,"path":path,"captured_commit_sha":commit,"start_line":start_line,"end_line":end_line}))),
+        CanonicalAnchorLocator::Memory { note_id, content_sha256 } => Ok(HydratedAnchor::unusable("no immutable server-owned memory revision source", serde_json::json!({"attempt_id":attempt_id,"planned_check_id":planned.id,"note_id":note_id,"content_sha256":content_sha256}))),
+        CanonicalAnchorLocator::External { uri, content_sha256 } => Ok(HydratedAnchor::unusable("no immutable server-owned external provenance source", serde_json::json!({"attempt_id":attempt_id,"planned_check_id":planned.id,"uri":uri,"content_sha256":content_sha256}))),
     }
-    let row = sqlx::query("SELECT immutable_identity,health,detail FROM typed_evidence_anchor_sources WHERE attempt_id=$1 AND planned_check_id=$2 AND family=$3 AND locator=$4").bind(attempt_id).bind(&planned.id).bind(&anchor.method).bind(&anchor.locator).fetch_optional(&mut **tx).await?;
+}
+async fn hydrate_graph_generation(tx: &mut Transaction<'_, Postgres>, planned: &TribunalEvidencePlannedCheck, generation_id: &str) -> Result<HydratedAnchor> {
+    let scope = serde_json::json!({"planned_check_id":planned.id,"generation_id":generation_id});
+    let row = sqlx::query("SELECT g.project_id,g.commit_sha FROM repo_graph_generation g JOIN evidence_plans p ON p.id=$1 JOIN tasks t ON t.id=p.spike_task_id WHERE g.generation_id=$2::uuid AND g.project_id=t.project_id AND g.commit_sha=p.captured_commit_sha")
+        .bind(&planned.evidence_plan_id).bind(generation_id).fetch_optional(&mut **tx).await?;
     Ok(match row {
-        Some(row) => HydratedAnchor { healthy: row.get::<String, _>("health") == "healthy", method_compatible: true, identity: row.get("immutable_identity"), detail: row.get::<Option<String>, _>("detail").unwrap_or_else(|| "exact server-owned anchor source".into()) },
-        None => HydratedAnchor::unusable("no exact server-owned anchor source", scope),
+        Some(row) => HydratedAnchor { healthy: true, method_compatible: planned_method(planned.method) == "graph", identity: serde_json::json!({"generation_id":generation_id,"project_id":row.get::<String,_>("project_id"),"captured_commit_sha":row.get::<String,_>("commit_sha")}), detail: "exact immutable graph generation for frozen repository".into() },
+        None => HydratedAnchor::unusable("graph generation is not owned by this frozen repository", scope),
+    })
+}
+async fn hydrate_graph_artifact(tx: &mut Transaction<'_, Postgres>, planned: &TribunalEvidencePlannedCheck, artifact_id: &str) -> Result<HydratedAnchor> {
+    let scope = serde_json::json!({"planned_check_id":planned.id,"artifact_id":artifact_id});
+    let row = sqlx::query("SELECT g.project_id,g.commit_sha,a.generation_id::text AS generation_id,a.graph_content_hash,a.transport_sha256 FROM repo_graph_galaxy_artifact a JOIN repo_graph_generation g ON g.generation_id=a.generation_id JOIN evidence_plans p ON p.id=$1 JOIN tasks t ON t.id=p.spike_task_id WHERE a.artifact_id=$2::uuid AND g.project_id=t.project_id AND g.commit_sha=p.captured_commit_sha")
+        .bind(&planned.evidence_plan_id).bind(artifact_id).fetch_optional(&mut **tx).await?;
+    Ok(match row {
+        Some(row) => HydratedAnchor { healthy: true, method_compatible: planned_method(planned.method) == "command", identity: serde_json::json!({"artifact_id":artifact_id,"generation_id":row.get::<String,_>("generation_id"),"project_id":row.get::<String,_>("project_id"),"captured_commit_sha":row.get::<String,_>("commit_sha"),"graph_content_hash":row.get::<String,_>("graph_content_hash"),"transport_sha256":row.get::<String,_>("transport_sha256")}), detail: "exact immutable artifact for frozen repository".into() },
+        None => HydratedAnchor::unusable("artifact is not owned by this frozen repository", scope),
     })
 }
 async fn hydrate_command_invocation(
