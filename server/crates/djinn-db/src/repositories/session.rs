@@ -2183,6 +2183,7 @@ mod tests {
 
         let start = "2026-01-01T00:00:00.000Z".parse::<DateTime<Utc>>().unwrap();
         let end = "2026-01-02T00:00:00.000Z".parse::<DateTime<Utc>>().unwrap();
+        #[allow(clippy::too_many_arguments)]
         async fn insert_terminal(
             db: &Database,
             id: &str,
