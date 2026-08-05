@@ -3,8 +3,8 @@
 
 use djinn_core::{events::EventBus, models::TribunalEvidenceLifecycle};
 use djinn_db::{
-    Database, DemandTypedEvidenceInput, ProposalRepository, TypedEvidenceRepository,
-    legacy_demand_hash,
+    AppendTypedEvidenceTransitionInput, Database, DemandTypedEvidenceInput, ProposalRepository,
+    TypedEvidenceRepository, legacy_demand_hash,
 };
 use serde_json::{Value, json};
 
@@ -273,6 +273,18 @@ async fn typed_evidence_backfill_fail_closed_mismatch_matrix() {
         .unwrap();
     assert_fail_closed(&db, &typed, &malformed.proposal).await;
     let missing = active(&db, &typed).await;
+    // Test setup deliberately creates missing authority; bypass only the
+    // append-only guards while constructing that corrupt persisted fixture.
+    sqlx::query("ALTER TABLE typed_evidence_transitions DISABLE TRIGGER typed_evidence_transitions_append_only")
+        .execute(db.pool())
+        .await
+        .unwrap();
+    sqlx::query(
+        "ALTER TABLE typed_evidence_attempts DISABLE TRIGGER typed_evidence_attempts_append_only",
+    )
+    .execute(db.pool())
+    .await
+    .unwrap();
     for q in [
         "DELETE FROM typed_evidence_transitions WHERE finding_id IN (SELECT id FROM typed_evidence_findings WHERE proposal_id=$1)",
         "DELETE FROM typed_evidence_attempts WHERE finding_id IN (SELECT id FROM typed_evidence_findings WHERE proposal_id=$1)",
@@ -284,10 +296,34 @@ async fn typed_evidence_backfill_fail_closed_mismatch_matrix() {
             .await
             .unwrap();
     }
+    sqlx::query("ALTER TABLE typed_evidence_transitions ENABLE TRIGGER typed_evidence_transitions_append_only")
+        .execute(db.pool())
+        .await
+        .unwrap();
+    sqlx::query(
+        "ALTER TABLE typed_evidence_attempts ENABLE TRIGGER typed_evidence_attempts_append_only",
+    )
+    .execute(db.pool())
+    .await
+    .unwrap();
     assert_fail_closed(&db, &typed, &missing.proposal).await;
     let ambiguous = active(&db, &typed).await;
-    sqlx::query("INSERT INTO typed_evidence_findings (id,proposal_id,demand_hash,lifecycle,claim,demanded_revision_seq,created_by_task_id) VALUES ($1,$2,$3,'demanded',$4,7,$5)").bind(uuid::Uuid::now_v7().to_string()).bind(&ambiguous.proposal).bind(format!("other-{}",uuid::Uuid::now_v7())).bind(claim(&ambiguous)).bind(&ambiguous.creator).execute(db.pool()).await.unwrap();
+    sqlx::query("DROP INDEX typed_evidence_one_unresolved_finding_per_proposal")
+        .execute(db.pool())
+        .await
+        .unwrap();
+    let extra_finding = uuid::Uuid::now_v7().to_string();
+    sqlx::query("INSERT INTO typed_evidence_findings (id,proposal_id,demand_hash,lifecycle,claim,demanded_revision_seq,created_by_task_id) VALUES ($1,$2,$3,'demanded',$4,7,$5)").bind(&extra_finding).bind(&ambiguous.proposal).bind(format!("other-{}",uuid::Uuid::now_v7())).bind(claim(&ambiguous)).bind(&ambiguous.creator).execute(db.pool()).await.unwrap();
     assert_fail_closed(&db, &typed, &ambiguous.proposal).await;
+    sqlx::query("DELETE FROM typed_evidence_findings WHERE id=$1")
+        .bind(extra_finding)
+        .execute(db.pool())
+        .await
+        .unwrap();
+    sqlx::query("CREATE UNIQUE INDEX typed_evidence_one_unresolved_finding_per_proposal ON typed_evidence_findings(proposal_id) WHERE lifecycle IN ('demanded','spike_active','evidence_received','failed')")
+        .execute(db.pool())
+        .await
+        .unwrap();
     let task_state = active(&db, &typed).await;
     sqlx::query("UPDATE tasks SET status='closed' WHERE id=$1")
         .bind(&task_state.spike)
@@ -337,11 +373,32 @@ async fn typed_evidence_backfill_dual_write_clear_rollback_and_reverse_rollback(
     .unwrap();
     tx.commit().await.unwrap();
     let (f, a, t) = typed_rows(&db, &s.proposal).await;
-    assert_eq!((&a[0].1, &a[0].3), (&f[0].0, &s.spike));
-    assert_eq!(t.len(), 2);
+    let stored_legacy = legacy(&db, &s.proposal).await;
+    assert_eq!(stored_legacy.0.as_deref(), Some(s.spike.as_str()));
     assert_eq!(
-        legacy(&db, &s.proposal).await.0.as_deref(),
-        Some(s.spike.as_str())
+        serde_json::from_str::<Value>(stored_legacy.1.as_deref().unwrap()).unwrap(),
+        c
+    );
+    assert_eq!(
+        (&f[0].1, &f[0].2, f[0].3.as_str(), &f[0].4, f[0].5, &f[0].6),
+        (
+            &s.proposal,
+            &legacy_demand_hash(&c, Some(&s.spike)),
+            "spike_active",
+            &c,
+            7,
+            &s.creator
+        )
+    );
+    assert_eq!((&a[0].1, a[0].2, &a[0].3), (&f[0].0, 1, &s.spike));
+    assert_eq!(
+        t.iter()
+            .map(|row| (row.1, row.2.as_deref(), row.3.as_str(), row.4.as_deref()))
+            .collect::<Vec<_>>(),
+        vec![
+            (1, None, "demanded", Some(s.creator.as_str())),
+            (2, Some("demanded"), "spike_active", Some(s.spike.as_str()))
+        ]
     );
     sqlx::query("UPDATE tasks SET status='closed' WHERE id=$1")
         .bind(&s.spike)
@@ -371,42 +428,83 @@ async fn typed_evidence_backfill_dual_write_clear_rollback_and_reverse_rollback(
             &json!({"source":"legacy_dual_write_clear","attempt_id":a[0].0.clone()})
         )
     );
-    let typed_first = seed(&db).await;
-    let ct = claim(&typed_first);
-    let before = snapshot(&db, &typed_first.proposal).await;
+    // The production set API writes the finding and legacy columns before it
+    // allocates the active attempt. Reject that insert at the real boundary.
+    let set_failure = seed(&db).await;
+    let set_claim = claim(&set_failure);
+    let before = snapshot(&db, &set_failure.proposal).await;
+    sqlx::query("CREATE FUNCTION typed_evidence_test_reject_attempt() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'typed evidence test attempt rejection'; END $$").execute(db.pool()).await.unwrap();
+    sqlx::query("CREATE TRIGGER typed_evidence_test_reject_attempt BEFORE INSERT ON typed_evidence_attempts FOR EACH ROW EXECUTE FUNCTION typed_evidence_test_reject_attempt()").execute(db.pool()).await.unwrap();
     let mut tx = db.pool().begin().await.unwrap();
-    TypedEvidenceRepository::demand_in_transaction(
+    let result = TypedEvidenceRepository::demand_activate_and_set_legacy_in_transaction(
         &mut tx,
         DemandTypedEvidenceInput {
             finding_id: uuid::Uuid::now_v7().to_string(),
-            proposal_id: typed_first.proposal.clone(),
-            demand_hash: legacy_demand_hash(&ct, Some(&typed_first.spike)),
-            claim: ct,
+            proposal_id: set_failure.proposal.clone(),
+            demand_hash: legacy_demand_hash(&set_claim, Some(&set_failure.spike)),
+            claim: set_claim,
             demanded_revision_seq: 7,
-            judge_task_id: typed_first.creator.clone(),
+            judge_task_id: set_failure.creator.clone(),
         },
+        &set_failure.spike,
     )
-    .await
-    .unwrap();
-    let injected: Result<(), &str> = Err("after typed write before legacy write");
-    assert!(injected.is_err());
-    tx.rollback().await.unwrap();
-    assert_eq!(snapshot(&db, &typed_first.proposal).await, before);
-    let legacy_first = seed(&db).await;
-    let cl = claim(&legacy_first);
-    let before = snapshot(&db, &legacy_first.proposal).await;
-    let mut tx = db.pool().begin().await.unwrap();
-    sqlx::query("UPDATE proposals SET linked_spike_task_id=$1,needs_evidence_claim=$2 WHERE id=$3")
-        .bind(&legacy_first.spike)
-        .bind(serde_json::to_string(&cl).unwrap())
-        .bind(&legacy_first.proposal)
-        .execute(&mut *tx)
+    .await;
+    assert!(result.is_err());
+    drop(tx);
+    sqlx::query("DROP TRIGGER typed_evidence_test_reject_attempt ON typed_evidence_attempts")
+        .execute(db.pool())
         .await
         .unwrap();
-    let injected: Result<(), &str> = Err("after legacy write before typed write");
-    assert!(injected.is_err());
-    tx.rollback().await.unwrap();
-    assert_eq!(snapshot(&db, &legacy_first.proposal).await, before);
+    sqlx::query("DROP FUNCTION typed_evidence_test_reject_attempt()")
+        .execute(db.pool())
+        .await
+        .unwrap();
+    let after = snapshot(&db, &set_failure.proposal).await;
+    assert_eq!(after.0, before.0, "legacy set was not rolled back");
+    assert_eq!(after.1, before.1, "finding set was not rolled back");
+    assert_eq!(after.2, before.2, "attempt set was not rolled back");
+    assert_eq!(after.3, before.3, "transition set was not rolled back");
+
+    // Begin populated, append the typed clear transition, then reject only the
+    // legacy UPDATE which clears non-null compatibility authority.
+    let clear_failure = active(&db, &typed).await;
+    let before = snapshot(&db, &clear_failure.proposal).await;
+    let finding_id = before.1[0].0.clone();
+    let attempt_id = before.2[0].0.clone();
+    sqlx::query("CREATE FUNCTION typed_evidence_test_reject_legacy_clear() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF OLD.linked_spike_task_id IS NOT NULL AND OLD.needs_evidence_claim IS NOT NULL AND NEW.linked_spike_task_id IS NULL AND NEW.needs_evidence_claim IS NULL THEN RAISE EXCEPTION 'typed evidence test legacy clear rejection'; END IF; RETURN NEW; END $$").execute(db.pool()).await.unwrap();
+    sqlx::query("CREATE TRIGGER typed_evidence_test_reject_legacy_clear BEFORE UPDATE ON proposals FOR EACH ROW EXECUTE FUNCTION typed_evidence_test_reject_legacy_clear()").execute(db.pool()).await.unwrap();
+    let mut tx = db.pool().begin().await.unwrap();
+    let result = TypedEvidenceRepository::transition_and_clear_legacy_in_transaction(
+        &mut tx,
+        &clear_failure.proposal,
+        &clear_failure.spike,
+        AppendTypedEvidenceTransitionInput {
+            id: uuid::Uuid::now_v7().to_string(),
+            finding_id,
+            ordinal: 3,
+            from_lifecycle: Some(TribunalEvidenceLifecycle::SpikeActive),
+            to_lifecycle: TribunalEvidenceLifecycle::EvidenceReceived,
+            actor_task_id: Some(clear_failure.spike.clone()),
+            metadata: json!({"source":"legacy_dual_write_clear","attempt_id":attempt_id}),
+        },
+    )
+    .await;
+    assert!(result.is_err());
+    drop(tx);
+    sqlx::query("DROP TRIGGER typed_evidence_test_reject_legacy_clear ON proposals")
+        .execute(db.pool())
+        .await
+        .unwrap();
+    sqlx::query("DROP FUNCTION typed_evidence_test_reject_legacy_clear()")
+        .execute(db.pool())
+        .await
+        .unwrap();
+    let after = snapshot(&db, &clear_failure.proposal).await;
+    assert_eq!(after.0, before.0, "legacy columns were cleared");
+    assert!(after.0.0.is_some() && after.0.1.is_some());
+    assert_eq!(after.1, before.1, "finding transition was not rolled back");
+    assert_eq!(after.2, before.2, "attempt rows changed during clear");
+    assert_eq!(after.3, before.3, "transition append was not rolled back");
     let rollback = active(&db, &typed).await;
     let history = typed_rows(&db, &rollback.proposal).await;
     let legacy_repo = ProposalRepository::new(db.clone(), EventBus::noop());
