@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use djinn_cgroup_launcher::{
-    CgroupFs, CgroupMode, ChildProcess, CommandSpec, Error, Invocation, Launcher,
+    CgroupFs, CgroupMode, ChildProcess, CommandSpec, Error, Invocation, KillSettle, Launcher,
     LauncherAuthorityProtocol, LauncherConfig, LeaseAuthority, Readiness, SpawnIntoCgroup,
     broker::{
         Broker, BrokerConfig, OsNonceSource, PeerCredentials, UnixPeer, WORKER_GID, WORKER_UID,
@@ -390,7 +390,12 @@ fn ac2_daemon_and_double_fork_stay_in_one_cgroup_and_release_gates_on_populated_
     let mut launcher = Launcher::new(
         fs.clone(),
         clone.clone(),
-        LauncherConfig::new(None, None, 7).expect("config"),
+        // IMMEDIATE: this case asserts the still-populated refusal itself, so
+        // it must answer from the first `cgroup.events` read rather than
+        // sitting through the production settle budget.
+        LauncherConfig::new(None, None, 7)
+            .expect("config")
+            .with_kill_settle(KillSettle::IMMEDIATE),
     )
     .expect("launcher");
 
@@ -462,7 +467,11 @@ fn ac2_cleanup_after_kill_still_requires_empty_before_unlink() {
     let mut launcher = Launcher::new(
         fs.clone(),
         FakeClone::allow(),
-        LauncherConfig::new(None, None, 3).expect("config"),
+        // IMMEDIATE for the same reason as above: the assertion below is that a
+        // still-populated leaf is never unlinked, not how long the wait is.
+        LauncherConfig::new(None, None, 3)
+            .expect("config")
+            .with_kill_settle(KillSettle::IMMEDIATE),
     )
     .expect("launcher");
     let (mut leaf, _) = launcher
