@@ -87,12 +87,11 @@ describe("MainLayout — project selector chrome", () => {
     expect(selector).toBeInTheDocument();
   });
 
-  it("renders the shared project selector on /task/:taskId (global-project-context)", () => {
+  it("hides the shared project selector on /task/:taskId (task is bound to one project)", () => {
     render(<MainLayout />, {
       wrapperOptions: { routerProps: { initialEntries: ["/task/abc-123"] } },
     });
-    const selector = screen.getByLabelText("Select project");
-    expect(selector).toBeInTheDocument();
+    expect(screen.queryByLabelText("Select project")).not.toBeInTheDocument();
   });
 
   it("renders the shared project selector on /memory (global-project-context)", () => {

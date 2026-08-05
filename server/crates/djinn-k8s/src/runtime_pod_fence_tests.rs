@@ -157,7 +157,7 @@ async fn watch_after_fence_binding<F>(
     runtime: KubernetesRuntime,
     job_name: &str,
     mutate: F,
-) -> Result<String, tokio::time::error::Elapsed>
+) -> Result<TerminalRuntimeObservation, tokio::time::error::Elapsed>
 where
     F: FnOnce(&Arc<FakeCluster>),
 {
@@ -245,8 +245,8 @@ async fn a_force_deleted_worker_pod_terminalises_the_run_and_reaps_its_job() {
     .expect("a force-deleted worker Pod under a live Job must resolve the infra-death watch");
 
     assert!(
-        reason.contains(&destroyed_uid) && reason.contains(&job_name),
-        "the death reason must name the destroyed Pod and its Job; got {reason}"
+        reason.diagnostic.contains(&destroyed_uid) && reason.diagnostic.contains(&job_name),
+        "the death reason must name the destroyed Pod and its Job; got {reason:?}"
     );
     assert!(
         cluster.job_names().is_empty(),
@@ -292,14 +292,16 @@ async fn a_replacement_pod_with_a_different_uid_is_observed_but_never_adopted() 
         "fixture invariant: the replacement must carry a different immutable UID"
     );
     assert!(
-        reason.contains(&format!("worker Pod {destroyed_uid} was deleted")),
-        "the run stays bound to the Pod UID it launched, not the replacement; got {reason}"
+        reason
+            .diagnostic
+            .contains(&format!("worker Pod {destroyed_uid} was deleted")),
+        "the run stays bound to the Pod UID it launched, not the replacement; got {reason:?}"
     );
     assert!(
-        reason.contains(&format!(
+        reason.diagnostic.contains(&format!(
             "refused to adopt replacement Pod UID(s) {replacement_uid}"
         )),
-        "the replacement must be reported as refused, not silently ignored; got {reason}"
+        "the replacement must be reported as refused, not silently ignored; got {reason:?}"
     );
     assert!(
         cluster.pod_uids().contains(&replacement_uid) || cluster.pod_uids().is_empty(),
@@ -417,8 +419,8 @@ async fn pod_and_job_both_gone_still_resolves_with_its_original_reason() {
     .expect("the pre-existing pod-and-job-both-gone arm must still resolve");
 
     assert!(
-        reason.contains("worker Pod and Job disappeared"),
-        "the both-gone arm must keep its own reason; got {reason}"
+        reason.diagnostic.contains("worker Pod and Job disappeared"),
+        "the both-gone arm must keep its own reason; got {reason:?}"
     );
     assert!(
         job_delete_calls(&cluster, &job_name).is_empty(),
@@ -443,8 +445,8 @@ async fn a_failed_job_still_resolves_with_its_condition_reason() {
         .expect("the pre-existing Job-Failed arm must still resolve");
 
     assert!(
-        reason.contains("BackoffLimitExceeded"),
-        "the Job-Failed arm must keep reporting the apiserver's condition reason; got {reason}"
+        reason.diagnostic.contains("BackoffLimitExceeded"),
+        "the Job-Failed arm must keep reporting the apiserver's condition reason; got {reason:?}"
     );
     assert_eq!(
         cluster.job_names(),
@@ -453,30 +455,35 @@ async fn a_failed_job_still_resolves_with_its_condition_reason() {
     );
 }
 
-/// A cleanly Complete Job whose Pod was TTL-GC'd is NOT a death, and is NOT
-/// reaped.
+/// A cleanly Complete Job whose Pod was TTL-GC'd is protocol evidence, not
+/// infrastructure evidence, and is NOT reaped.
 ///
 /// This is the containment's own blast radius. The new arm fires on *any*
 /// fenced-Pod disappearance under a live Job; gating it on the Job being
 /// nonterminal is what stops it from racing — and deleting — the Job of a run
-/// that finished cleanly and whose terminal report is still on the wire.
+/// that finished cleanly. The typed watch still resolves so the coordinator can
+/// settle a missing terminal report as protocol failure rather than leaving the
+/// run live indefinitely.
 #[tokio::test(start_paused = true)]
-async fn a_completed_job_whose_pod_was_ttl_gcd_is_neither_a_death_nor_reaped() {
+async fn a_completed_job_whose_pod_was_ttl_gcd_is_protocol_evidence_and_not_reaped() {
     let cluster = FakeCluster::new();
     let config = fence_config();
     let job_name = seed_running_taskrun(&cluster, &config).await;
     let runtime = runtime_on(&cluster, config);
 
-    let outcome = watch_after_fence_binding(&cluster, runtime, &job_name, |cluster| {
+    let observation = watch_after_fence_binding(&cluster, runtime, &job_name, |cluster| {
         cluster.complete_job(&job_name);
         cluster.gc_pod_of(&job_name);
     })
-    .await;
+    .await
+    .expect("a clean completion without a terminal report must resolve");
 
-    assert!(
-        outcome.is_err(),
-        "a clean completion must not resolve the infra-death watch; it resolved with {outcome:?}"
+    assert_eq!(
+        observation.kind,
+        TerminalRuntimeEvidenceKind::ProtocolNoReport,
+        "a clean completion is missing-report protocol evidence, not infrastructure evidence"
     );
+    assert!(observation.diagnostic.contains("completed cleanly"));
     assert_eq!(
         cluster.job_names(),
         vec![job_name.clone()],
@@ -512,7 +519,10 @@ async fn seed_admitted_taskrun(cluster: &Arc<FakeCluster>, config: &KubernetesCo
 }
 
 /// Start the watch and let it bind its fence to the admitted Pod.
-fn watch_of(runtime: KubernetesRuntime, job_name: &str) -> tokio::task::JoinHandle<String> {
+fn watch_of(
+    runtime: KubernetesRuntime,
+    job_name: &str,
+) -> tokio::task::JoinHandle<TerminalRuntimeObservation> {
     let handle = run_handle(job_name);
     tokio::spawn(async move { runtime.watch_infra_death(&handle).await })
 }
@@ -686,8 +696,8 @@ async fn a_force_delete_under_a_never_evicted_workload_still_reaps() {
     );
 
     assert!(
-        reason.contains(&destroyed_uid),
-        "the death reason must name the destroyed Pod; got {reason}",
+        reason.diagnostic.contains(&destroyed_uid),
+        "the death reason must name the destroyed Pod; got {reason:?}",
     );
     assert!(
         cluster.job_names().is_empty(),
