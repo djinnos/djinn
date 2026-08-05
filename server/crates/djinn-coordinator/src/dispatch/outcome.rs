@@ -1,3 +1,5 @@
+use djinn_provider::catalog::HealthKey;
+
 /// Result of a `try_dispatch_to_pool` failover-chain traversal.
 #[derive(Debug)]
 pub(crate) enum DispatchOutcome {

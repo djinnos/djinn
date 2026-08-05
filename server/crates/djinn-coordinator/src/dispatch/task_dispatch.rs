@@ -6314,18 +6314,13 @@ mod failover_chain_tests {
         cancel.cancel();
     }
 
-    /// AC2 regression: circuit breaker IS tripped after chain exhaustion when
-    /// consecutive failure threshold is reached, and breaker demotion/cooldown
-    /// was deferred until this point (not applied during per-candidate traversal).
-    ///
-    /// Scenario: 2 candidates fail, 3 chain exhaustions in a row.
-    /// After the 3rd exhaustion (consecutive_failures reaches
-    /// CIRCUIT_BREAKER_THRESHOLD = 3), `apply_chain_exhaustion_side_effects`
-    /// trips the breaker for both candidates.  Before the 3rd exhaustion,
-    /// the breaker should NOT be tripped even though failures were observed.
+    /// Generic pool dispatch exhaustion is breaker-neutral even after repeated
+    /// attempts, while its task failure streak and redispatch cooldown remain
+    /// active. The third exhaustion still follows the terminal task-close path,
+    /// but cannot turn `PoolError::SlotBusy` into breaker evidence.
     #[tokio::test]
     #[tracing_test::traced_test]
-    async fn breaker_tripped_after_chain_exhaustion_reaches_threshold() {
+    async fn generic_chain_exhaustion_keeps_breaker_neutral_with_task_backoff() {
         let db = crate::test_helpers::create_test_db();
         let (events_tx, _) = tokio::sync::broadcast::channel(64);
 
@@ -6397,8 +6392,8 @@ mod failover_chain_tests {
             refinement_role: None,
         };
 
-        // Run 2 chain exhaustions — breaker threshold is 3, so breaker should
-        // NOT be tripped yet even though failures are observed.
+        // Generic pool failures retain task-local retry accounting but never
+        // become model-breaker failures.
         for round in 1..=2 {
             let outcome = actor
                 .try_dispatch_to_pool(
@@ -6413,12 +6408,6 @@ mod failover_chain_tests {
                 )
                 .await;
             assert!(matches!(outcome, DispatchOutcome::Failed { .. }));
-
-            // Breaker should still be available before side-effects are applied
-            assert!(
-                actor.health.is_available(None, "provider/model-a"),
-                "model-a should be available before side-effects (round {round})"
-            );
 
             let exhausted_observations = match outcome {
                 DispatchOutcome::Failed {
@@ -6436,21 +6425,17 @@ mod failover_chain_tests {
                 )
                 .await;
 
-            // After round 2: consecutive_failures = 2 for each candidate.
-            // Breaker threshold is 3, so NOT tripped yet.
             let model_a_health = actor.health.model_health(None, "provider/model-a");
-            assert!(
-                !model_a_health.auto_disabled,
-                "model-a breaker must NOT be tripped after {round} exhaustions (threshold is 3)"
-            );
+            assert!(!model_a_health.auto_disabled);
+            assert_eq!(model_a_health.consecutive_failures, 0);
             let model_b_health = actor.health.model_health(None, "provider/model-b");
-            assert!(
-                !model_b_health.auto_disabled,
-                "model-b breaker must NOT be tripped after {round} exhaustions (threshold is 3)"
-            );
+            assert!(!model_b_health.auto_disabled);
+            assert_eq!(model_b_health.consecutive_failures, 0);
+            assert_eq!(actor.dispatch_failure_streak.get(&task.id), Some(&round));
+            assert!(actor.dispatch_cooldowns.contains_key(&task.id));
         }
 
-        // 3rd chain exhaustion: consecutive_failures reaches 3 → breaker trips.
+        // The terminal third exhaustion remains breaker-neutral.
         let outcome = actor
             .try_dispatch_to_pool(
                 &task.short_id,
@@ -6465,14 +6450,8 @@ mod failover_chain_tests {
             .await;
         assert!(matches!(outcome, DispatchOutcome::Failed { .. }));
 
-        // Before side-effects: breaker should still be available
-        // (observation-only recording does not trip the breaker).
-        assert!(
-            actor.health.is_available(None, "provider/model-a"),
-            "model-a must still be available before side-effects are applied (AC2 deferral)"
-        );
-
-        // Apply chain-exhaustion side effects → breaker trips for both.
+        // Preserve terminal task handling without converting pool diagnostics
+        // into model-breaker evidence.
         let exhausted_observations = match outcome {
             DispatchOutcome::Failed {
                 exhausted_observations,
@@ -6489,19 +6468,12 @@ mod failover_chain_tests {
             )
             .await;
 
-        // Breaker IS tripped for model-a after chain exhaustion.
         let model_a_health = actor.health.model_health(None, "provider/model-a");
-        assert!(
-            model_a_health.auto_disabled,
-            "model-a breaker MUST be tripped after 3 chain exhaustions reach threshold"
-        );
-
-        // Breaker IS tripped for model-b after chain exhaustion.
+        assert!(!model_a_health.auto_disabled);
+        assert_eq!(model_a_health.consecutive_failures, 0);
         let model_b_health = actor.health.model_health(None, "provider/model-b");
-        assert!(
-            model_b_health.auto_disabled,
-            "model-b breaker MUST be tripped after 3 chain exhaustions reach threshold"
-        );
+        assert!(!model_b_health.auto_disabled);
+        assert_eq!(model_b_health.consecutive_failures, 0);
 
         cancel.cancel();
     }
