@@ -5,6 +5,7 @@
 use crate::server::DjinnMcpServer;
 use crate::state::stubs::test_mcp_state;
 use djinn_core::events::EventBus;
+use djinn_core::models::NeedsEvidenceClaim;
 use djinn_db::{
     Database, EffectiveCreatorProvenance, ProjectRepository, ProposalCreateInput,
     ProposalDebateTrailCreateInput, ProposalRepository, TaskRepository, UserRepository,
@@ -265,11 +266,21 @@ async fn needs_evidence_spike_parking_resume_and_graduation() {
         .await
         .unwrap();
 
-    repo.set_needs_evidence_spike(&proposal.id, &spike.id, "X is load-bearing")
+    let claim = NeedsEvidenceClaim {
+        question: "Is X load-bearing?".to_owned(),
+        target_subsystem: "X".to_owned(),
+        spec_unknown_anchor: "API returns 200".to_owned(),
+        insufficient_in_session_research: "Feasibility requires a dedicated spike".to_owned(),
+        expected_findings: "Whether X is feasible and the approach required".to_owned(),
+        round: 1,
+        against_revision_seq: proposal.latest_revision_seq,
+        created_by_task_id: spike.id.clone(),
+    };
+    repo.set_structured_needs_evidence_spike(&proposal.id, &spike.id, &claim)
         .await
         .unwrap();
 
-    // set_needs_evidence_spike parks the proposal in draft.
+    // Structured needs-evidence setup parks the proposal in draft.
     // Force to approved AFTER parking so the gate blocks on the spike.
     force_approved(&db, &proposal.id).await;
 
@@ -295,9 +306,9 @@ async fn needs_evidence_spike_parking_resume_and_graduation() {
         "error should mention needs-evidence: {err}"
     );
 
-    // Close the spike.
+    // Close the spike using the canonical terminal task status.
     TaskRepository::new(db.clone(), EventBus::noop())
-        .set_status(&spike.id, "done")
+        .set_status(&spike.id, "closed")
         .await
         .unwrap();
 
