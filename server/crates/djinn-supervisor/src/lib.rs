@@ -9698,8 +9698,14 @@ mod tests {
         let captured = logs.take();
         // Must contain the junk-only message with structured fields.
         assert!(
-            captured.contains("no legitimate changes after stage; junk-only files excluded"),
+            captured.contains("NO commit created"),
             "expected junk-only log message, got:\n{captured}"
+        );
+        // Reported at WARN, not INFO: a stage whose every path was filtered out
+        // leaves the branch unchanged while the author believes work landed.
+        assert!(
+            captured.contains("WARN"),
+            "junk-only exclusion must be visible at WARN, got:\n{captured}"
         );
         assert!(
             captured.contains("excluded_count="),
@@ -9773,8 +9779,15 @@ mod tests {
         let captured = logs.take();
         // Must contain the committed message WITH scratch exclusion details.
         assert!(
-            captured.contains("committed worker/architect changes (some scratch files excluded)"),
+            captured.contains("OMITTED excluded paths"),
             "expected committed-with-exclusions log message, got:\n{captured}"
+        );
+        // Reported at WARN, not INFO: the commit exists but does not contain
+        // everything the author edited, and a reviewer diffing the branch would
+        // otherwise see no trace of those edits.
+        assert!(
+            captured.contains("WARN"),
+            "a commit omitting edited paths must be visible at WARN, got:\n{captured}"
         );
         assert!(
             captured.contains("excluded_count="),
@@ -9786,7 +9799,7 @@ mod tests {
         );
         // Must NOT contain the junk-only message (legitimate changes exist).
         assert!(
-            !captured.contains("no legitimate changes after stage"),
+            !captured.contains("NO commit created"),
             "mixed commit must NOT log as junk-only, got:\n{captured}"
         );
     }
