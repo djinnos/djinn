@@ -112,6 +112,24 @@ fn pending_feedback_disposition<'a>(
         .max_by_key(|(row, _)| (&row.created_at, &row.id))
 }
 
+fn feedback_obligation_is_open(
+    entry: &djinn_core::models::ProposalDebateTrail,
+    generation_state: &str,
+) -> bool {
+    entry.resolved_at.is_none() && entry.reopened_at.is_none() && generation_state == "injected"
+}
+
+fn is_feedback_acceptance_replay(
+    entry: &djinn_core::models::ProposalDebateTrail,
+    generation_state: &str,
+    verdict: &str,
+) -> bool {
+    verdict == "accept"
+        && entry.resolved_at.is_some()
+        && entry.reopened_at.is_none()
+        && matches!(generation_state, "accepted" | "wont_fix")
+}
+
 async fn debate_model(
     repo: &ProposalRepository,
     entry: &djinn_core::models::ProposalDebateTrail,
@@ -456,6 +474,40 @@ impl DjinnMcpServer {
                     "human_feedback resolution requires explicit accept or reject verdict",
                 ));
             };
+            if !matches!(verdict, "accept" | "reject") {
+                return Json(err_debate(
+                    "human_feedback verdict must be accept or reject",
+                ));
+            }
+
+            // A captured generation is the durable lifecycle authority for a
+            // human-feedback obligation. Do not append needs-work after an
+            // accepted or withdrawn generation has closed the debate row. A
+            // repeated acceptance of an already accepted disposition is the
+            // one intentional no-op, matching repository write-back replay.
+            let generation = match repo
+                .feedback_refinement_generation_for_debate(&entry.id)
+                .await
+            {
+                Ok(Some(generation)) => generation,
+                Ok(None) => {
+                    return Json(err_debate(
+                        "human_feedback entry has no materialized generation",
+                    ));
+                }
+                Err(e) => return Json(err_debate(e.to_string())),
+            };
+            if !feedback_obligation_is_open(&entry, &generation.injection.state) {
+                if is_feedback_acceptance_replay(&entry, &generation.injection.state, verdict) {
+                    return Json(ProposalDebateTrailResponse {
+                        entry: Some((&entry).into()),
+                        error: None,
+                    });
+                }
+                return Json(err_debate(
+                    "feedback disposition requires an unresolved human_feedback obligation",
+                ));
+            }
             if verdict == "reject" {
                 let Some(reason) = p.reason.filter(|reason| !reason.trim().is_empty()) else {
                     return Json(err_debate("reject requires needs-work reasoning"));
@@ -495,11 +547,6 @@ impl DjinnMcpServer {
                     Err(e) => Json(err_debate(e.to_string())),
                 };
             }
-            if verdict != "accept" {
-                return Json(err_debate(
-                    "human_feedback verdict must be accept or reject",
-                ));
-            }
             let rows = match repo.debate_trail(&entry.proposal_id).await {
                 Ok(rows) => rows,
                 Err(e) => return Json(err_debate(e.to_string())),
@@ -526,16 +573,6 @@ impl DjinnMcpServer {
                     Err(e) => return Json(err_debate(e.to_string())),
                 }
             }
-            let Some(generation) = repo
-                .feedback_refinement_generation_for_debate(&entry.id)
-                .await
-                .ok()
-                .flatten()
-            else {
-                return Json(err_debate(
-                    "human_feedback entry has no materialized generation",
-                ));
-            };
             return match repo
                 .dispose_feedback_refinement_generation(FeedbackRefinementDispositionInput {
                     proposal_id: entry.proposal_id.clone(),
@@ -961,6 +998,26 @@ mod tests {
         let pending = pending_feedback_disposition(&[rejected, replacement], "feedback")
             .expect("a replacement disposition should be pending");
         assert_eq!(pending.0.id, "replacement");
+    }
+
+    #[test]
+    fn closed_feedback_obligation_reject_cannot_append_needs_work() {
+        let mut accepted = disposition_row("accepted", None);
+        accepted.resolved_at = Some("2026-08-05T00:00:00.000Z".to_owned());
+
+        assert!(!feedback_obligation_is_open(&accepted, "accepted"));
+        assert!(!is_feedback_acceptance_replay(
+            &accepted, "accepted", "reject"
+        ));
+        assert!(is_feedback_acceptance_replay(
+            &accepted, "accepted", "accept"
+        ));
+
+        let mut reopened = accepted;
+        reopened.reopened_at = Some("2026-08-05T00:01:00.000Z".to_owned());
+        assert!(!is_feedback_acceptance_replay(
+            &reopened, "accepted", "accept"
+        ));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
