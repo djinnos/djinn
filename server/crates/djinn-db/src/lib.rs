@@ -243,7 +243,9 @@ pub use repositories::{
         ProjectWorkspaceGraphRepository, ProjectWorkspaceGraphUpsert,
     },
     proposal::{
-        AwaitingReviewPark, NeedsEvidenceCapStatus, NeedsEvidenceClaimLink, ProposalCreateInput,
+        AwaitingReviewPark, FeedbackRefinementDisposition, FeedbackRefinementDispositionInput,
+        FeedbackRefinementRejectionInput, FeedbackRefinementRejectionResult,
+        NeedsEvidenceCapStatus, NeedsEvidenceClaimLink, ProposalCreateInput,
         ProposalDebateTrailCreateInput, ProposalFeedbackCreateInput, ProposalListQuery,
         ProposalListResult, ProposalListSummaryRow, ProposalMemoryRef, ProposalRef,
         ProposalRepository, ProposalUpdateInput,

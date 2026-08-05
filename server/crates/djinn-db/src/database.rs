@@ -609,29 +609,28 @@ const DEFAULT_TEST_DATABASE_URL: &str = "postgres://postgres:postgres@127.0.0.1:
 /// Base URL of the Postgres server that integration tests should use.
 ///
 /// Resolution order is `TEST_POSTGRES_URL`, then `DJINN_TEST_DATABASE_URL`,
-/// then [`DEFAULT_TEST_DATABASE_URL`]. **The order matters and is not
-/// arbitrary:**
+/// then `DJINN_DATABASE_URL`, then [`DEFAULT_TEST_DATABASE_URL`]. **The order
+/// matters and is not arbitrary:**
 ///
 /// - Task-run Pods inject `TEST_POSTGRES_URL` pointing at the in-Pod
 ///   `svc-postgres` sidecar on `127.0.0.1:5432`.
-/// - `server/.cargo/config.toml` bakes `DJINN_TEST_DATABASE_URL` at `:5433`
-///   for local development, and CI sets the same value explicitly.
+/// - CI can set `DJINN_TEST_DATABASE_URL` explicitly for its dedicated test
+///   service.
+/// - Some review Pods expose only `DJINN_DATABASE_URL`. The harness still
+///   creates and drops a UUID-named database there; it never opens or mutates
+///   the database named by that URL.
+/// - Local development normally sets none of these variables and reaches the
+///   unprivileged `:5433` default.
 ///
-/// Cargo's `[env]` table applies to every process cargo launches, so when
-/// `DJINN_TEST_DATABASE_URL` was checked first, `cargo test` inside a Pod
-/// always dialled `:5433` — where nothing listens — while running the
-/// compiled test binary directly worked, because cargo was not in the loop to
-/// inject the variable. That split is what made in-Pod database tests look
-/// intermittently flaky when they were in fact deterministic.
-///
-/// Checking `TEST_POSTGRES_URL` first is correct everywhere: neither CI nor
-/// local development sets it, so both fall through to `:5433` unchanged.
+/// Checking `TEST_POSTGRES_URL` first keeps a task Pod on its isolated
+/// sidecar even when that Pod also carries a platform database DSN.
 ///
 /// Every integration test must use this helper rather than reading the
 /// environment directly, so the precedence exists in exactly one place.
 pub fn test_database_base_url() -> String {
     std::env::var("TEST_POSTGRES_URL")
         .or_else(|_| std::env::var("DJINN_TEST_DATABASE_URL"))
+        .or_else(|_| std::env::var("DJINN_DATABASE_URL"))
         .unwrap_or_else(|_| DEFAULT_TEST_DATABASE_URL.to_owned())
 }
 
