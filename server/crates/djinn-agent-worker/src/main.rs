@@ -100,6 +100,7 @@ use djinn_agent::context::{AgentContext, ReconciliationSweepConfig, ShellLaunchC
 use djinn_agent::file_time::FileTime;
 use djinn_agent::lsp::LspManager;
 use djinn_agent::roles::RoleRegistry;
+use djinn_core::cancel_origin::{CancelOrigin, CancelOriginTag};
 use djinn_core::events::EventBus;
 use djinn_core::models::KnowledgeInjectionConfig;
 use djinn_db::{Database, DatabaseConnectConfig, PostgresDatabaseConfig};
@@ -2977,6 +2978,15 @@ async fn run_task_run(args: WorkerDefaultArgs) -> Result<()> {
     //    loop.  Any post-handshake `SupervisorServices` call round-trips over
     //    that same TCP connection.
     let cancel = CancellationToken::new();
+    // Side channel for WHICH trigger fires `cancel`. A `CancellationToken`
+    // carries no payload, and this one Pod-wide token is fired from SIGTERM,
+    // the soft deadline, a host control frame, RPC transport death, and
+    // orderly teardown — so without this every one of those settled as an
+    // indistinguishable "session cancelled". Each trigger stamps the tag
+    // immediately before `.cancel()`; the stage boundary reads it when the
+    // reply loop reports a cancellation. Unstamped reads back as `unknown`
+    // and never gates anything.
+    let cancel_origin = CancelOriginTag::new();
 
     // The live ephemeral stage clone's path, populated by
     // `WorkerSupervisorServices::execute_stage` on its first call and read
@@ -3016,6 +3026,7 @@ async fn run_task_run(args: WorkerDefaultArgs) -> Result<()> {
     // we have to checkpoint + drain the RPC before SIGKILL hits.
     install_termination_handlers(
         cancel.clone(),
+        cancel_origin.clone(),
         args.task_run_id.clone(),
         captured_workspace_path.clone(),
         spec.task_branch.clone(),
@@ -3038,6 +3049,7 @@ async fn run_task_run(args: WorkerDefaultArgs) -> Result<()> {
     // absent/unparseable → no soft deadline (the kubelet backstop still applies).
     install_soft_deadline(
         cancel.clone(),
+        cancel_origin.clone(),
         args.task_run_id.clone(),
         captured_workspace_path.clone(),
         spec.task_branch.clone(),
@@ -3065,6 +3077,7 @@ async fn run_task_run(args: WorkerDefaultArgs) -> Result<()> {
         args.task_run_id.clone(),
         token,
         cancel.clone(),
+        cancel_origin.clone(),
     )
     .await
     .with_context(|| format!("dial djinn-server at {server_addr}"))?;
@@ -3219,6 +3232,7 @@ async fn run_task_run(args: WorkerDefaultArgs) -> Result<()> {
             // Shut down RPC cleanly before exiting.
             drop(rpc);
             let _ = background.writer.await;
+            cancel_origin.record(CancelOrigin::WorkerTeardown);
             cancel.cancel();
             let _ = background.reader.await;
             drop(workspace);
@@ -3256,6 +3270,7 @@ async fn run_task_run(args: WorkerDefaultArgs) -> Result<()> {
         rpc.clone(),
         credentials,
         cancel.clone(),
+        cancel_origin.clone(),
         agent_context,
         captured_workspace_path,
     ));
@@ -3337,6 +3352,9 @@ async fn run_task_run(args: WorkerDefaultArgs) -> Result<()> {
     let _ = background.writer.await;
     // Reader still needs an explicit cancel — it's parked on a read that
     // won't wake up on its own now that we've closed our side of the write.
+    // The run is already over here, so this attribution only ever wins when
+    // nothing else cancelled first.
+    cancel_origin.record(CancelOrigin::WorkerTeardown);
     cancel.cancel();
     let _ = background.reader.await;
 
@@ -3512,14 +3530,15 @@ async fn checkpoint_workspace(
 /// the supervisor records once stages begin.
 fn install_termination_handlers(
     cancel: CancellationToken,
+    cancel_origin: CancelOriginTag,
     task_run_id: String,
     captured_workspace_path: Arc<std::sync::Mutex<Option<PathBuf>>>,
     task_branch: String,
     identity: CheckpointIdentity,
 ) {
-    for (kind, label) in [
-        (SignalKind::terminate(), "SIGTERM"),
-        (SignalKind::interrupt(), "SIGINT"),
+    for (kind, label, origin) in [
+        (SignalKind::terminate(), "SIGTERM", CancelOrigin::Sigterm),
+        (SignalKind::interrupt(), "SIGINT", CancelOrigin::Sigint),
     ] {
         let mut stream = match signal(kind) {
             Ok(s) => s,
@@ -3533,6 +3552,7 @@ fn install_termination_handlers(
             }
         };
         let cancel = cancel.clone();
+        let cancel_origin = cancel_origin.clone();
         let task_run_id = task_run_id.clone();
         let captured_workspace_path = captured_workspace_path.clone();
         let task_branch = task_branch.clone();
@@ -3541,9 +3561,14 @@ fn install_termination_handlers(
             if stream.recv().await.is_some() {
                 info!(
                     signal = label,
+                    cancel_origin = origin.as_str(),
                     task_run_id = %task_run_id,
                     "received termination signal; cancelling supervisor + checkpointing work"
                 );
+                // Attribute the cancellation BEFORE firing the token: the
+                // reply loop and the stage boundary read the origin the
+                // instant they wake, and a token carries no cause of its own.
+                cancel_origin.record(origin);
                 // Cancel first so the supervisor stops streaming and starts its
                 // own graceful exit; then checkpoint to save in-flight work.
                 cancel.cancel();
@@ -3584,6 +3609,7 @@ fn soft_deadline_interval(deadline_secs: u64) -> Duration {
 /// configured deadlines (tests) don't fire immediately at startup.
 fn install_soft_deadline(
     cancel: CancellationToken,
+    cancel_origin: CancelOriginTag,
     task_run_id: String,
     captured_workspace_path: Arc<std::sync::Mutex<Option<PathBuf>>>,
     task_branch: String,
@@ -3625,8 +3651,10 @@ fn install_soft_deadline(
                 warn!(
                     task_run_id = %task_run_id,
                     soft_deadline_secs = fire_after.as_secs(),
+                    cancel_origin = CancelOrigin::SoftDeadline.as_str(),
                     "soft deadline reached; winding down (cancel + checkpoint) before the kubelet hard-kills the Pod"
                 );
+                cancel_origin.record(CancelOrigin::SoftDeadline);
                 cancel.cancel();
                 checkpoint_workspace(
                     &captured_workspace_path,
@@ -4983,7 +5011,8 @@ mod tests {
             let (stream, _peer) = tokio::io::duplex(64);
             let (read, write) = tokio::io::split(stream);
             let cancel = CancellationToken::new();
-            let (rpc, _tasks) = RpcServices::from_split(read, write, cancel.clone());
+            let (rpc, _tasks) =
+                RpcServices::from_split(read, write, cancel.clone(), CancelOriginTag::new());
             let spec = TaskRunSpec {
                 task_run_id: "worker-config-propagation".into(),
                 task_attempt_id: None,
@@ -5065,7 +5094,8 @@ mod tests {
         let (stream, _peer) = tokio::io::duplex(64);
         let (read, write) = tokio::io::split(stream);
         let cancel = CancellationToken::new();
-        let (rpc, _tasks) = RpcServices::from_split(read, write, cancel.clone());
+        let (rpc, _tasks) =
+            RpcServices::from_split(read, write, cancel.clone(), CancelOriginTag::new());
         let context = build_worker_agent_context(
             Database::open_in_memory().expect("in-memory worker database"),
             rpc,
