@@ -5,6 +5,7 @@ use crate::refinement_dispatch::refinement_cap_tests::{
     TEST_MODEL, build_refinement_actor, seed_refinement_fixture, spawn_test_pool,
 };
 use djinn_core::events::{DjinnEventEnvelope, EventBus};
+use djinn_core::models::NeedsEvidenceClaim;
 use djinn_db::{
     EffectiveCreatorProvenance, ProposalDebateTrailCreateInput, ProposalRepository, TaskRepository,
 };
@@ -41,9 +42,18 @@ async fn evidence_receipt_clears_link_and_dispatches_advocate_with_findings_cont
         .await
         .expect("create spike task")
         .id;
-    let claim = r#"{"question":"Can the coordinator resume safely?","target_subsystem":"refinement","spec_unknown_anchor":"resume path","insufficient_in_session_research":"needs spike","expected_findings":"structured findings","round":1,"against_revision_seq":1,"created_by_task_id":"judge-task"}"#;
+    let claim = NeedsEvidenceClaim {
+        question: "Can the coordinator resume safely?".to_owned(),
+        target_subsystem: "refinement".to_owned(),
+        spec_unknown_anchor: "resume path".to_owned(),
+        insufficient_in_session_research: "needs spike".to_owned(),
+        expected_findings: "structured findings".to_owned(),
+        round: 1,
+        against_revision_seq: 1,
+        created_by_task_id: spike_task_id.clone(),
+    };
     proposal_repo
-        .set_needs_evidence_spike(&fixture.proposal_id, &spike_task_id, claim)
+        .set_structured_needs_evidence_spike(&fixture.proposal_id, &spike_task_id, &claim)
         .await
         .expect("link spike");
     proposal_repo
@@ -181,9 +191,18 @@ async fn evidence_receipt_respects_freeze_without_auto_dispatch() {
         .await
         .expect("create spike task")
         .id;
-    let claim = r#"{"question":"Can frozen resume wait?","target_subsystem":"refinement","spec_unknown_anchor":"freeze gate","insufficient_in_session_research":"needs spike","expected_findings":"structured findings","round":1,"against_revision_seq":1,"created_by_task_id":"judge-task"}"#;
+    let claim = NeedsEvidenceClaim {
+        question: "Can frozen resume wait?".to_owned(),
+        target_subsystem: "refinement".to_owned(),
+        spec_unknown_anchor: "freeze gate".to_owned(),
+        insufficient_in_session_research: "needs spike".to_owned(),
+        expected_findings: "structured findings".to_owned(),
+        round: 1,
+        against_revision_seq: 1,
+        created_by_task_id: spike_task_id.clone(),
+    };
     proposal_repo
-        .set_needs_evidence_spike(&fixture.proposal_id, &spike_task_id, claim)
+        .set_structured_needs_evidence_spike(&fixture.proposal_id, &spike_task_id, &claim)
         .await
         .expect("link spike");
     let findings_metadata = serde_json::json!({

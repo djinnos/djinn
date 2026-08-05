@@ -87,7 +87,9 @@ pub(super) async fn setup_structured_claim()
         .await
         .unwrap();
 
-    // Create a real task to satisfy the FK constraint on linked_spike_task_id.
+    // Create a real task to satisfy the typed finding's task FKs. This fixture
+    // uses the spike task as the judge task as well; test-only lifecycle actor
+    // strings below exercise status rendering independently.
     let proj = insert_project(&db, "svc-test").await;
     let epic = insert_epic(&db, &proj).await;
     let spike_id = insert_task(&db, &proj, &epic).await;
@@ -100,7 +102,7 @@ pub(super) async fn setup_structured_claim()
         expected_findings: "Evidence that token refresh is or is not required".to_owned(),
         round: 1,
         against_revision_seq: 2,
-        created_by_task_id: "judge-task-001".to_owned(),
+        created_by_task_id: spike_id.clone(),
     };
     repo.set_structured_needs_evidence_spike(&p.id, &spike_id, &claim)
         .await
@@ -136,7 +138,10 @@ async fn structured_claim_fields_exposed_in_status() {
     );
     assert_eq!(ne.round, Some(1));
     assert_eq!(ne.against_revision_seq, Some(2));
-    assert_eq!(ne.created_by_task_id.as_deref(), Some("judge-task-001"));
+    assert_eq!(
+        ne.created_by_task_id.as_deref(),
+        Some(ne.spike_task_id.as_str())
+    );
     // Spike task id is propagated.
     assert!(!ne.spike_task_id.is_empty());
 }
