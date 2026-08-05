@@ -46,6 +46,12 @@ use crate::secret::task_run_resource_name;
 
 const FENCE_TASK_RUN_ID: &str = "019f72b5-a92a-7501-8b41-b0ffe68cdda5";
 
+/// A fake-apiserver mutation that produces one terminal runtime observation.
+type TerminalMutation = fn(&Arc<FakeCluster>, &str);
+
+/// Name, mutation, and diagnostic fragment expected for a terminal observation.
+type TerminalEvidenceCase = (&'static str, TerminalMutation, &'static str);
+
 /// Virtual-time budget for a watch that is *expected* to resolve. Time is
 /// paused in these tests, so this costs no wall clock — it exists so a watch
 /// that never resolves fails as a timeout instead of hanging the suite.
@@ -244,6 +250,11 @@ async fn a_force_deleted_worker_pod_terminalises_the_run_and_reaps_its_job() {
     .await
     .expect("a force-deleted worker Pod under a live Job must resolve the infra-death watch");
 
+    assert_eq!(
+        reason.kind,
+        TerminalRuntimeEvidenceKind::ProtocolNoReport,
+        "an unexplained fenced-Pod disappearance has no allowlisted infrastructure evidence"
+    );
     assert!(
         reason.diagnostic.contains(&destroyed_uid) && reason.diagnostic.contains(&job_name),
         "the death reason must name the destroyed Pod and its Job; got {reason:?}"
@@ -453,6 +464,135 @@ async fn a_failed_job_still_resolves_with_its_condition_reason() {
         vec![job_name.clone()],
         "the Job-Failed arm reaps nothing — a terminal Job holds no quota, and teardown owns it"
     );
+}
+
+/// Explicit Kubernetes infrastructure observations stay distinct from generic
+/// failures when the real paused-time watch polls the fake apiserver.
+#[tokio::test(start_paused = true)]
+async fn allowlisted_terminal_pod_observations_are_infrastructure_evidence() {
+    let cases: [TerminalEvidenceCase; 3] = [
+        (
+            "worker OOMKilled",
+            |cluster, job| cluster.terminate_worker(job, 137, Some("OOMKilled")),
+            "OOMKilled",
+        ),
+        (
+            "Pod Evicted",
+            |cluster, job| cluster.fail_pod_with_reason(job, "Evicted"),
+            "Pod status reason Evicted",
+        ),
+        (
+            "Pod NodeLost",
+            |cluster, job| cluster.fail_pod_with_reason(job, "NodeLost"),
+            "Pod status reason NodeLost",
+        ),
+    ];
+    for (name, mutate, diagnostic) in cases {
+        let cluster = FakeCluster::new();
+        let config = fence_config();
+        let job_name = seed_running_taskrun(&cluster, &config).await;
+        let observation = watch_after_fence_binding(
+            &cluster,
+            runtime_on(&cluster, config),
+            &job_name,
+            |cluster| mutate(cluster, &job_name),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("{name} must resolve within the virtual watch budget"));
+
+        assert_eq!(
+            observation.kind,
+            TerminalRuntimeEvidenceKind::Infrastructure,
+            "{name} is explicit infrastructure evidence; got {observation:?}"
+        );
+        assert!(observation.diagnostic.contains(diagnostic));
+    }
+}
+
+/// A crash exit and generic Kubernetes Failed signals are unknown evidence,
+/// never inferred infrastructure.
+#[tokio::test(start_paused = true)]
+async fn unallowlisted_terminal_observations_are_unknown_evidence() {
+    let cases: [TerminalEvidenceCase; 3] = [
+        (
+            "worker exit 101",
+            |cluster, job| cluster.terminate_worker(job, 101, Some("Error")),
+            "exit 101",
+        ),
+        (
+            "generic Failed Pod",
+            |cluster, job| cluster.fail_pod_with_reason(job, "UnexpectedAdmissionError"),
+            "UnexpectedAdmissionError",
+        ),
+        (
+            "generic Failed Job",
+            |cluster, job| cluster.fail_job(job, "BackoffLimitExceeded"),
+            "BackoffLimitExceeded",
+        ),
+    ];
+    for (name, mutate, diagnostic) in cases {
+        let cluster = FakeCluster::new();
+        let config = fence_config();
+        let job_name = seed_running_taskrun(&cluster, &config).await;
+        let observation = watch_after_fence_binding(
+            &cluster,
+            runtime_on(&cluster, config),
+            &job_name,
+            |cluster| mutate(cluster, &job_name),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("{name} must resolve within the virtual watch budget"));
+
+        assert_eq!(
+            observation.kind,
+            TerminalRuntimeEvidenceKind::UnknownFailure,
+            "{name} must not be promoted to infrastructure; got {observation:?}"
+        );
+        assert!(observation.diagnostic.contains(diagnostic));
+    }
+}
+
+/// Successful runtime observations and garbage collection settle as missing
+/// report protocol evidence within the same bounded paused-time watch.
+#[tokio::test(start_paused = true)]
+async fn clean_and_garbage_collected_runtime_observations_are_protocol_evidence() {
+    let cases: [TerminalEvidenceCase; 3] = [
+        (
+            "clean worker exit",
+            |cluster, job| cluster.terminate_worker(job, 0, Some("Completed")),
+            "exited cleanly",
+        ),
+        (
+            "clean Job completion",
+            |cluster, job| cluster.complete_job(job),
+            "completed cleanly",
+        ),
+        (
+            "Job garbage collection",
+            |cluster, job| cluster.gc_job(job),
+            "Job disappeared",
+        ),
+    ];
+    for (name, mutate, diagnostic) in cases {
+        let cluster = FakeCluster::new();
+        let config = fence_config();
+        let job_name = seed_running_taskrun(&cluster, &config).await;
+        let observation = watch_after_fence_binding(
+            &cluster,
+            runtime_on(&cluster, config),
+            &job_name,
+            |cluster| mutate(cluster, &job_name),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("{name} must resolve within the virtual watch budget"));
+
+        assert_eq!(
+            observation.kind,
+            TerminalRuntimeEvidenceKind::ProtocolNoReport,
+            "{name} is protocol/no-report evidence; got {observation:?}"
+        );
+        assert!(observation.diagnostic.contains(diagnostic));
+    }
 }
 
 /// A cleanly Complete Job whose Pod was TTL-GC'd is protocol evidence, not
