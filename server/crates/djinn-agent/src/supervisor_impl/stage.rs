@@ -108,37 +108,25 @@ use djinn_runtime::{LoopGuardKind as RuntimeLoopGuardKind, LoopGuardTrip, Provid
 
 use super::SupervisorCallbackContext;
 
-/// Named setup construction branches all settle the already-created session as
-/// harness failures; diagnostics remain outside the authoritative status write.
-#[derive(Clone, Copy)]
-enum SetupFailureBranch {
-    McpAndSkills,
-    EnvironmentConfig,
-    SetupCommands,
-    ProviderConstruction,
-}
-
-/// A session is created before extension loading so diagnostic rows can carry
-/// its foreign key. Every later setup failure must therefore settle that row.
-async fn mark_session_failed(
-    services: &dyn SupervisorServices,
+/// Carry post-creation failures back to the supervisor without performing a
+/// terminal write in agent code.
+fn after_session_error(
     session_id: &str,
-    _: SetupFailureBranch,
-) {
-    if let Err(error) = services
-        .update_session_status_v2(
-            session_id.to_owned(),
-            SessionStatus::Failed,
-            0,
-            0,
-            0,
-            0,
-            None,
-            Some(SessionFailureCause::Harness),
-        )
-        .await
-    {
-        tracing::warn!(session_id, error = %error, "Supervisor stage: failed to mark setup session failed");
+    message: String,
+    failure_cause: djinn_core::models::SessionFailureCause,
+) -> StageError {
+    StageError::AfterSession {
+        message,
+        settlement: djinn_supervisor::StageSessionSettlement {
+            session_id: session_id.to_owned(),
+            status: SessionStatus::Failed,
+            tokens_in: 0,
+            tokens_out: 0,
+            cache_read: 0,
+            cache_write: 0,
+            parked_reason: None,
+            failure_cause: Some(failure_cause),
+        },
     }
 }
 
@@ -627,6 +615,8 @@ fn session_settlement_for_stage_outcome(
     failure_cause: Option<SessionFailureCause>,
 ) -> (SessionStatus, Option<String>) {
     match stage_outcome {
+        // These outcomes are useful terminal evidence, but did not provide a
+        // durable healthy board handoff.
         StageOutcome::Parked {
             reason: ParkReason::Budget,
             ..
@@ -639,6 +629,7 @@ fn session_settlement_for_stage_outcome(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 async fn settle_stage_session(
     services: &dyn SupervisorServices,
     session_id: String,
@@ -1057,7 +1048,7 @@ pub(crate) async fn execute_stage(
     spec: &TaskRunSpec,
     callbacks: &SupervisorCallbackContext,
     services: &dyn SupervisorServices,
-) -> Result<StageOutcome, StageError> {
+) -> Result<djinn_supervisor::StageExecutionResult, StageError> {
     let role = role_arc_for(role_kind);
     let role_name = role.config().name;
     let worktree_path = workspace.path();
@@ -1260,8 +1251,11 @@ pub(crate) async fn execute_stage(
     {
         Ok(resolved) => resolved,
         Err(error) => {
-            mark_session_failed(services, &session_id, SetupFailureBranch::McpAndSkills).await;
-            return Err(StageError::Setup(error.to_string()));
+            return Err(after_session_error(
+                &session_id,
+                error.to_string(),
+                djinn_core::models::SessionFailureCause::Harness,
+            ));
         }
     };
 
@@ -1275,8 +1269,11 @@ pub(crate) async fn execute_stage(
     {
         Ok(config) => config,
         Err(error) => {
-            mark_session_failed(services, &session_id, SetupFailureBranch::EnvironmentConfig).await;
-            return Err(StageError::Setup(format!("env_config: {error}")));
+            return Err(after_session_error(
+                &session_id,
+                format!("env_config: {error}"),
+                djinn_core::models::SessionFailureCause::Harness,
+            ));
         }
     };
     let SetupContext {
@@ -1292,8 +1289,11 @@ pub(crate) async fn execute_stage(
     {
         Ok(ctx) => ctx,
         Err(SetupError { reason }) => {
-            mark_session_failed(services, &session_id, SetupFailureBranch::SetupCommands).await;
-            return Err(StageError::Setup(reason));
+            return Err(after_session_error(
+                &session_id,
+                reason,
+                djinn_core::models::SessionFailureCause::Harness,
+            ));
         }
     };
 
@@ -1474,14 +1474,10 @@ pub(crate) async fn execute_stage(
         ) {
             Some(provider) => provider,
             None => {
-                mark_session_failed(
-                    services,
+                return Err(after_session_error(
                     &session_id,
-                    SetupFailureBranch::ProviderConstruction,
-                )
-                .await;
-                return Err(StageError::ModelResolution(
                     "no provider credential resolved for model".into(),
+                    djinn_core::models::SessionFailureCause::Provider,
                 ));
             }
         };
@@ -1816,23 +1812,20 @@ pub(crate) async fn execute_stage(
         reply_failure_cause,
         role_kind,
     );
-    if let Err(e) = settle_stage_session(
-        services,
-        session_id.clone(),
-        &stage_settlement,
-        tokens_in,
-        tokens_out,
-        cache_read,
-        cache_write,
-    )
-    .await
-    {
-        tracing::warn!(
-            session_id = %session_id,
-            error = %e,
-            "Supervisor stage: failed to update session record"
-        );
-    }
+    let cancelled_at_ownership_cutover = services.cancel().is_cancelled();
+    let (session_status, parked_reason) = if cancelled_at_ownership_cutover {
+        (SessionStatus::Interrupted, None)
+    } else {
+        session_settlement_for_stage_outcome(
+            &stage_settlement.outcome,
+            stage_settlement.failure_cause,
+        )
+    };
+    let failure_cause = if cancelled_at_ownership_cutover {
+        Some(SessionFailureCause::Cancelled)
+    } else {
+        stage_settlement.failure_cause
+    };
 
     if let StageOutcome::Parked {
         reason: ParkReason::Budget,
@@ -1878,7 +1871,19 @@ pub(crate) async fn execute_stage(
         tokens_out,
     });
 
-    Ok(stage_settlement.outcome)
+    Ok(djinn_supervisor::StageExecutionResult {
+        outcome: stage_settlement.outcome,
+        settlement: Some(djinn_supervisor::StageSessionSettlement {
+            session_id,
+            status: session_status,
+            tokens_in,
+            tokens_out,
+            cache_read,
+            cache_write,
+            parked_reason,
+            failure_cause,
+        }),
+    })
 }
 
 /// Map a [`RoleKind`] (flow enum) to a concrete `Arc<dyn AgentRole>`.
@@ -1997,7 +2002,7 @@ mod tests {
             _: RoleKind,
             _: &str,
             _: &TaskRunSpec,
-        ) -> Result<StageOutcome, StageError> {
+        ) -> Result<djinn_supervisor::StageExecutionResult, StageError> {
             unimplemented!()
         }
 
@@ -2350,16 +2355,8 @@ mod tests {
         )
         .await
         .unwrap();
-        for (session_id, branch) in [
-            ("mcp-skill-setup", SetupFailureBranch::McpAndSkills),
-            ("environment-setup", SetupFailureBranch::EnvironmentConfig),
-            ("command-setup", SetupFailureBranch::SetupCommands),
-            ("provider-setup", SetupFailureBranch::ProviderConstruction),
-        ] {
-            mark_session_failed(&services, session_id, branch).await;
-        }
         let recorded = services.settlements.lock().unwrap();
-        assert_eq!(recorded.len(), 9);
+        assert_eq!(recorded.len(), 5);
         assert!(
             recorded[..3]
                 .iter()
@@ -2369,12 +2366,6 @@ mod tests {
         assert_eq!(recorded[3].failure_cause, None);
         assert_eq!(recorded[4].failure_cause, None);
         assert_eq!(recorded[4].parked_reason.as_deref(), Some("budget"));
-        assert!(
-            recorded[5..]
-                .iter()
-                .all(|entry| entry.status == SessionStatus::Failed
-                    && entry.failure_cause == Some(SessionFailureCause::Harness))
-        );
     }
 
     #[tokio::test]
@@ -2756,7 +2747,7 @@ mod tests {
     }
 
     #[test]
-    fn budget_park_settles_completed_with_parked_reason_even_when_wind_down_ignored() {
+    fn budget_park_settles_failed_without_claiming_a_handoff() {
         let ignored_outcome = StageOutcome::Parked {
             reason: ParkReason::Budget,
             summary: None,

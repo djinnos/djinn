@@ -63,7 +63,7 @@ use djinn_supervisor::services::{
     WatchdogTerminationRequest,
 };
 use djinn_supervisor::{
-    BranchPublicationResult, RpcServices, StageError, StageOutcome, SupervisorServices,
+    BranchPublicationResult, RpcServices, StageError, StageExecutionResult, SupervisorServices,
     TaskRunOutcome, TaskRunSpec,
 };
 use djinn_workspace::Workspace;
@@ -363,7 +363,7 @@ impl SupervisorServices for WorkerSupervisorServices {
         role_kind: RoleKind,
         task_run_id: &str,
         spec: &TaskRunSpec,
-    ) -> Result<StageOutcome, StageError> {
+    ) -> Result<StageExecutionResult, StageError> {
         // Snapshot the supervisor's workspace path on the first stage so
         // `open_pr` can push the worker's task_branch back to the mirror
         // before delegating the host RPC. The first stage owns this path; a

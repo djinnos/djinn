@@ -1074,8 +1074,33 @@ async fn dispatch(
             };
             let result = services
                 .execute_stage(&task, &workspace, role_kind, &task_run_id, &spec)
-                .await;
+                .await
+                .map(|closed| closed.outcome);
             ServiceRpcResponse::ExecuteStage(result)
+        }
+        ServiceRpcRequest::ExecuteStageV2 {
+            task,
+            workspace,
+            role_kind,
+            task_run_id,
+            spec,
+        } => {
+            let workspace = match djinn_workspace::Workspace::attach_existing(
+                workspace.path.as_path(),
+                workspace.branch.clone(),
+            ) {
+                Ok(w) => w,
+                Err(e) => {
+                    return ServiceRpcResponse::ExecuteStageV2(Err(crate::StageError::Setup(
+                        format!("attach workspace: {e}"),
+                    )));
+                }
+            };
+            ServiceRpcResponse::ExecuteStageV2(
+                services
+                    .execute_stage(&task, &workspace, role_kind, &task_run_id, &spec)
+                    .await,
+            )
         }
         ServiceRpcRequest::OpenPr { spec, task } => {
             let outcome = services.open_pr(&spec, &task).await;
@@ -1371,7 +1396,7 @@ mod tests {
     use tokio::io::AsyncReadExt;
     use tokio::net::TcpStream;
 
-    use crate::{RoleKind, StageError, StageOutcome, TaskRunOutcome, TaskRunSpec};
+    use crate::{RoleKind, StageError, StageExecutionResult, TaskRunOutcome, TaskRunSpec};
 
     /// Minimal fake that returns a canned task on `load_task` and panics on
     /// the other trait methods (the launcher-side tests only exercise the
@@ -1402,7 +1427,7 @@ mod tests {
             _role_kind: RoleKind,
             _task_run_id: &str,
             _spec: &TaskRunSpec,
-        ) -> Result<StageOutcome, StageError> {
+        ) -> Result<StageExecutionResult, StageError> {
             unimplemented!("not exercised in server tests")
         }
 
@@ -2223,7 +2248,7 @@ mod tests {
             _role_kind: RoleKind,
             _task_run_id: &str,
             _spec: &TaskRunSpec,
-        ) -> Result<StageOutcome, StageError> {
+        ) -> Result<StageExecutionResult, StageError> {
             unimplemented!()
         }
         async fn open_pr(&self, _spec: &TaskRunSpec, _task: &Task) -> TaskRunOutcome {
