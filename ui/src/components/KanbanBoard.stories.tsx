@@ -106,6 +106,7 @@ const tasksFixture: Task[] = [
 
   // In Flight — review
   makeTask("t-3", "Refine empty states", "needs_task_review", 2, "Mina", "epic-ux", ["ui"], "2026-03-01T11:20:00.000Z", {
+    active_session: { agent_type: "reviewer", model_id: "claude-3.5-sonnet", started_at: new Date(Date.now() - 480_000).toISOString() },
     duration_seconds: 1860,
   }),
 
