@@ -6,8 +6,8 @@
     {
       "op": "replace",
       "path": "server/crates/djinn-cgroup-launcher/src/lib.rs",
-      "find": "        let events = self.fs.read_leaf(leaf.fd, \"cgroup.events\")?;\n        if populated_zero(&events)? {\n",
-      "with": "        let drained = self.fs.read_leaf(leaf.fd, \"cgroup.events\")?;\n        if populated_zero(&drained)? {\n"
+      "find": "            let events = self.fs.read_leaf(leaf.fd, \"cgroup.events\")?;\n            if populated_zero(&events)? {\n",
+      "with": "            let drained = self.fs.read_leaf(leaf.fd, \"cgroup.events\")?;\n            if populated_zero(&drained)? {\n"
     }
   ]
 }
