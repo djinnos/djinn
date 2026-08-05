@@ -130,6 +130,9 @@ pub struct AllocateTypedEvidenceRetryInput {
     pub retry_attempt_id: String,
     /// Reserved before dispatch so dispatch recovery never allocates another task.
     pub retry_spike_task_id: String,
+    /// Retry attempts retain a distinct immutable plan for return validation.
+    pub evidence_plan_id: Option<String>,
+    pub planned_checks: Vec<PlannedTypedEvidenceCheckInput>,
     pub demanded_transition_id: String,
     pub actor_task_id: Option<String>,
 }
@@ -1018,13 +1021,28 @@ impl TypedEvidenceRepository {
         if legacy.is_some() || active {
             return Err(Error::InvalidTransition("active_evidence_conflict".into()));
         }
+        let retry_task_is_new_and_active: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM tasks t WHERE t.id=$1 AND t.status <> 'closed' AND NOT EXISTS(SELECT 1 FROM typed_evidence_attempts a WHERE a.spike_task_id=t.id))")
+            .bind(&input.retry_spike_task_id)
+            .fetch_one(&mut **tx)
+            .await?;
+        if !retry_task_is_new_and_active {
+            return Err(Error::InvalidTransition("retry_spike_task_not_new_and_active".into()));
+        }
+        if input.planned_checks.is_empty() {
+            return Err(Error::InvalidData(
+                "typed evidence attempt requires planned checks".into(),
+            ));
+        }
         let sequence: i32 = sqlx::query_scalar(
             "SELECT COALESCE(MAX(sequence),0)+1 FROM typed_evidence_attempts WHERE finding_id=$1",
         )
         .bind(&input.finding_id)
         .fetch_one(&mut **tx)
         .await?;
-        sqlx::query("INSERT INTO typed_evidence_attempts (id,finding_id,sequence,spike_task_id) VALUES ($1,$2,$3,$4)").bind(&input.retry_attempt_id).bind(&input.finding_id).bind(sequence).bind(&input.retry_spike_task_id).execute(&mut **tx).await?;
+        sqlx::query("INSERT INTO typed_evidence_attempts (id,finding_id,sequence,spike_task_id,evidence_plan_id) VALUES ($1,$2,$3,$4,$5)").bind(&input.retry_attempt_id).bind(&input.finding_id).bind(sequence).bind(&input.retry_spike_task_id).bind(&input.evidence_plan_id).execute(&mut **tx).await?;
+        for check in &input.planned_checks {
+            sqlx::query("INSERT INTO typed_evidence_planned_checks (id,attempt_id,ordinal,check_id,method,evidence_plan_id,evidence_plan_check_id) VALUES ($1,$2,$3,$4,$5,$6,$7)").bind(&check.id).bind(&input.retry_attempt_id).bind(check.ordinal).bind(&check.check_id).bind(planned_method(check.method)).bind(&check.evidence_plan_id).bind(&check.evidence_plan_check_id).execute(&mut **tx).await?;
+        }
         sqlx::query("INSERT INTO typed_evidence_retry_idempotency (finding_id,failed_transition_id,retry_attempt_id) VALUES ($1,$2,$3)").bind(&input.finding_id).bind(&input.failed_transition_id).bind(&input.retry_attempt_id).execute(&mut **tx).await?;
         let ordinal: i32 = sqlx::query_scalar(
             "SELECT COALESCE(MAX(ordinal),0)+1 FROM typed_evidence_transitions WHERE finding_id=$1",
@@ -1033,11 +1051,12 @@ impl TypedEvidenceRepository {
         .fetch_one(&mut **tx)
         .await?;
         Self::append_transition(tx, AppendTypedEvidenceTransitionInput { id:input.demanded_transition_id, finding_id:input.finding_id, ordinal, from_lifecycle:Some(TribunalEvidenceLifecycle::Failed), to_lifecycle:TribunalEvidenceLifecycle::Demanded, actor_task_id:input.actor_task_id, metadata:serde_json::json!({"retry_attempt_id":input.retry_attempt_id,"failed_transition_id":input.failed_transition_id}) }).await?;
+        let planned_checks = checks(tx, &input.retry_attempt_id).await?;
         Ok(TypedEvidenceAttemptAllocation {
             attempt_id: input.retry_attempt_id,
             spike_task_id: input.retry_spike_task_id,
             sequence,
-            planned_checks: vec![],
+            planned_checks,
         })
     }
 
@@ -1051,8 +1070,8 @@ impl TypedEvidenceRepository {
             &input.spike_task_id,
             &input.transition_id,
         ])?;
-        let owned: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM typed_evidence_attempts WHERE id=$1 AND finding_id=$2 AND spike_task_id=$3)").bind(&input.attempt_id).bind(&input.finding_id).bind(&input.spike_task_id).fetch_one(&mut **tx).await?;
-        if !owned {
+        let reserved: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM typed_evidence_retry_idempotency r JOIN typed_evidence_attempts a ON a.id=r.retry_attempt_id JOIN typed_evidence_findings f ON f.id=r.finding_id JOIN typed_evidence_transitions d ON d.finding_id=r.finding_id WHERE r.finding_id=$1 AND a.id=$2 AND a.spike_task_id=$3 AND f.lifecycle='demanded' AND d.ordinal=(SELECT MAX(ordinal) FROM typed_evidence_transitions WHERE finding_id=r.finding_id) AND d.to_lifecycle='demanded' AND d.metadata->>'retry_attempt_id'=a.id AND d.metadata->>'failed_transition_id'=r.failed_transition_id)").bind(&input.finding_id).bind(&input.attempt_id).bind(&input.spike_task_id).fetch_one(&mut **tx).await?;
+        if !reserved {
             return Err(Error::InvalidTransition(
                 "retry_attempt_identity_mismatch".into(),
             ));
@@ -1076,7 +1095,7 @@ impl TypedEvidenceRepository {
             &input.spike_task_id,
             &input.error,
         ])?;
-        let written = sqlx::query("INSERT INTO typed_evidence_retry_dispatch_errors (id,finding_id,attempt_id,spike_task_id,error) SELECT $1,$2,$3,$4,$5 WHERE EXISTS (SELECT 1 FROM typed_evidence_attempts WHERE id=$3 AND finding_id=$2 AND spike_task_id=$4)").bind(uuid::Uuid::now_v7().to_string()).bind(&input.finding_id).bind(&input.attempt_id).bind(&input.spike_task_id).bind(&input.error).execute(self.db.pool()).await?;
+        let written = sqlx::query("INSERT INTO typed_evidence_retry_dispatch_errors (id,finding_id,attempt_id,spike_task_id,error) SELECT $1,$2,$3,$4,$5 WHERE EXISTS (SELECT 1 FROM typed_evidence_retry_idempotency r JOIN typed_evidence_attempts a ON a.id=r.retry_attempt_id JOIN typed_evidence_findings f ON f.id=r.finding_id JOIN typed_evidence_transitions d ON d.finding_id=r.finding_id WHERE r.finding_id=$2 AND a.id=$3 AND a.spike_task_id=$4 AND f.lifecycle='demanded' AND d.ordinal=(SELECT MAX(ordinal) FROM typed_evidence_transitions WHERE finding_id=r.finding_id) AND d.to_lifecycle='demanded' AND d.metadata->>'retry_attempt_id'=a.id AND d.metadata->>'failed_transition_id'=r.failed_transition_id)").bind(uuid::Uuid::now_v7().to_string()).bind(&input.finding_id).bind(&input.attempt_id).bind(&input.spike_task_id).bind(&input.error).execute(self.db.pool()).await?;
         if written.rows_affected() != 1 {
             return Err(Error::InvalidTransition(
                 "retry_attempt_identity_mismatch".into(),
@@ -1176,17 +1195,26 @@ impl TypedEvidenceRepository {
             return Err(Error::InvalidData("Judge attribution required".into()));
         }
         let proposal_id: String = row.get("proposal_id");
-        // Terminal disposition cannot silently clear an active legacy slot;
-        // that slot must have been reconciled by its typed lifecycle edge.
         let legacy_link: Option<String> =
             sqlx::query_scalar("SELECT linked_spike_task_id FROM proposals WHERE id=$1 FOR UPDATE")
                 .bind(&proposal_id)
                 .fetch_one(&mut **tx)
                 .await?;
-        if legacy_link.is_some() {
-            return Err(Error::InvalidTransition(
-                "legacy_typed_parity_mismatch".into(),
-            ));
+        if let Some(linked_spike_task_id) = legacy_link.as_deref() {
+            let Some(parity) =
+                Self::dual_read_legacy_parity_in_transaction(tx, &proposal_id).await?
+            else {
+                return Err(Error::InvalidTransition(
+                    "legacy_typed_parity_mismatch".into(),
+                ));
+            };
+            if parity.finding.id != input.finding_id
+                || parity.spike_task_id.as_deref() != Some(linked_spike_task_id)
+            {
+                return Err(Error::InvalidTransition(
+                    "legacy_typed_parity_mismatch".into(),
+                ));
+            }
         }
         let committed:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM proposal_revisions WHERE proposal_id=$1 AND seq=$2 AND event_kind='spec_revision')").bind(&proposal_id).bind(input.folding_revision).fetch_one(&mut **tx).await?;
         if !committed {
@@ -1217,12 +1245,18 @@ impl TypedEvidenceRepository {
             },
         )
         .await?;
-        sqlx::query(
-            "UPDATE proposals SET linked_spike_task_id=NULL,needs_evidence_claim=NULL WHERE id=$1",
+        let clear = sqlx::query(
+            "UPDATE proposals SET linked_spike_task_id=NULL,needs_evidence_claim=NULL WHERE id=$1 AND linked_spike_task_id IS NOT DISTINCT FROM $2",
         )
         .bind(&proposal_id)
+        .bind(&legacy_link)
         .execute(&mut **tx)
         .await?;
+        if clear.rows_affected() != 1 {
+            return Err(Error::InvalidTransition(
+                "legacy_typed_parity_mismatch".into(),
+            ));
+        }
         let row=sqlx::query("INSERT INTO typed_evidence_dispositions (id,finding_id,validation_result_id,folding_revision,outcome,disposition,judge_task_id,rationale) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING created_at").bind(&input.disposition_id).bind(&input.finding_id).bind(&input.validation_result_id).bind(input.folding_revision).bind(outcome(input.outcome)).bind(input.disposition.as_str()).bind(&input.judge_task_id).bind(&input.rationale).fetch_one(&mut **tx).await?;
         Ok(TypedEvidenceDispositionProjection {
             disposition: TribunalEvidenceDisposition {
