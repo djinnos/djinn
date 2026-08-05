@@ -306,9 +306,9 @@ async fn needs_evidence_spike_parking_resume_and_graduation() {
         "error should mention needs-evidence: {err}"
     );
 
-    // Close the spike.
+    // Close the spike using the canonical terminal task status.
     TaskRepository::new(db.clone(), EventBus::noop())
-        .set_status(&spike.id, "done")
+        .set_status(&spike.id, "closed")
         .await
         .unwrap();
 
