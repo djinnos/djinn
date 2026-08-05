@@ -7,7 +7,7 @@
 // scope for the read-coverage fix that pushed this file over MAX_BYTES.
 
 use super::gate_guard::{gate_guard_edit_check, gate_guard_shell_check};
-use super::shell_exec::{effective_shell_timeout_ms, finish_shell};
+use super::shell_exec::{finish_shell, resolve_shell_budget};
 use super::size_nudge::maybe_append_size_nudge;
 use super::workspace_helpers::{
     cargo_check_denied, classify_cargo_command, emit_edit_match_telemetry,
@@ -59,7 +59,21 @@ pub(crate) async fn call_shell(
     // any subprocess execution. Non-worker roles pass through unconditionally.
     gate_guard_shell_check(state, session_role, worktree_path, &p.command).await?;
 
-    let timeout_ms = effective_shell_timeout_ms(p.timeout_ms, &p.command);
+    // Class-aware budget, bounded by the wall-clock this Pod will actually
+    // still exist for. `clamped_by_pod_deadline` is the operator-facing signal:
+    // when it is set, raising `DJINN_SHELL_BUILD_TIMEOUT_MS` changes nothing and
+    // `DJINN_K8S_TASK_RUN_ACTIVE_DEADLINE_SECONDS` is what must move.
+    let budget = resolve_shell_budget(p.timeout_ms, &p.command);
+    let timeout_ms = budget.timeout_ms;
+    if budget.clamped_by_pod_deadline {
+        tracing::warn!(
+            shell_class = budget.class.as_str(),
+            requested_ms = p.timeout_ms,
+            budget_ms = budget.timeout_ms,
+            clamped_by_pod_deadline = true,
+            "shell budget bounded by the task-run Pod's activeDeadlineSeconds"
+        );
+    }
 
     // Cross-repo shell is authorized by immutable task-run data injected into
     // AgentContext, never by process environment. Workers consume only an
