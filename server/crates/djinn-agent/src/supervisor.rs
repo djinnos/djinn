@@ -127,7 +127,7 @@ pub async fn worker_execute_stage(
         djinn_supervisor::services::BillingSource,
     )>,
     services: &dyn SupervisorServices,
-) -> Result<djinn_supervisor::StageOutcome, djinn_supervisor::StageError> {
+) -> Result<djinn_supervisor::StageExecutionResult, djinn_supervisor::StageError> {
     let callbacks = SupervisorCallbackContext {
         agent_context,
         cancel,
