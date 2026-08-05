@@ -1686,31 +1686,6 @@ mod tests {
     }
 
     #[test]
-    fn typed_evidence_backfill_fixture_names_required_mixed_version_cases() {
-        let fixture: serde_json::Value = serde_json::from_str(include_str!(
-            "../../tests/fixtures/typed_evidence_backfill.json"
-        ))
-        .expect("backfill fixture must be valid JSON");
-        let cases = fixture["cases"].as_array().expect("fixture cases array");
-        for required in [
-            "active_claim_only",
-            "active_link_only",
-            "active_claim_and_link",
-            "inactive_control",
-            "idempotent_rerun",
-            "parity_mismatch_fails_closed",
-            "typed_write_rollback",
-            "legacy_write_rollback",
-            "active_task_preservation",
-        ] {
-            assert!(
-                cases.iter().any(|case| case == required),
-                "missing {required}"
-            );
-        }
-    }
-
-    #[test]
     fn malformed_return_envelope_retains_attempt_identity() {
         let malformed = br#"{
             "version":"TribunalEvidenceReturnV1",

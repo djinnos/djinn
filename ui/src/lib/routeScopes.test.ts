@@ -12,9 +12,9 @@ describe("routeScopes", () => {
       expect(isGlobalProjectContextRoute("/agents")).toBe(true);
     });
 
-    it("returns true for /task/:taskId (any task id)", () => {
-      expect(isGlobalProjectContextRoute("/task/abc-123")).toBe(true);
-      expect(isGlobalProjectContextRoute("/task/xyz")).toBe(true);
+    it("returns false for /task/:taskId (the task carries its own project)", () => {
+      expect(isGlobalProjectContextRoute("/task/abc-123")).toBe(false);
+      expect(isGlobalProjectContextRoute("/task/xyz")).toBe(false);
     });
 
     it("returns true for /memory (local picker removed)", () => {
@@ -71,7 +71,6 @@ describe("routeScopes", () => {
   describe("needsChromeProjectSelector", () => {
     it("returns true for global-project-context routes without an in-page selector", () => {
       expect(needsChromeProjectSelector("/agents")).toBe(true);
-      expect(needsChromeProjectSelector("/task/abc-123")).toBe(true);
       expect(needsChromeProjectSelector("/memory")).toBe(true);
     });
 
@@ -106,6 +105,12 @@ describe("routeScopes", () => {
 
     it("returns path-scoped for /projects/:id/environment", () => {
       const entry = getRouteScopeEntry("/projects/proj-1/environment");
+      expect(entry).toBeDefined();
+      expect(entry!.scope).toBe("path-scoped");
+    });
+
+    it("returns path-scoped for /task/:taskId — the task resolves its own project", () => {
+      const entry = getRouteScopeEntry("/task/abc-123");
       expect(entry).toBeDefined();
       expect(entry!.scope).toBe("path-scoped");
     });

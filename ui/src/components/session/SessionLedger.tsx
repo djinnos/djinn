@@ -360,7 +360,7 @@ function BriefBand({ phase }: { phase: LedgerPhase }) {
         </button>
       </header>
       <div className="px-3.5 py-3">
-        <p className="max-w-[68ch] text-sm leading-relaxed text-zinc-300">{brief.body}</p>
+        <p className="text-sm leading-relaxed text-zinc-300">{brief.body}</p>
         {brief.facets && brief.facets.length > 0 && (
           <div className="mt-3 flex flex-wrap gap-1.5">
             {brief.facets.map((f) => (
@@ -480,7 +480,7 @@ function Rail({
   blockers: string[];
 }) {
   return (
-    <aside className="flex w-52 shrink-0 flex-col gap-5 overflow-y-auto border-r border-white/[0.06] px-3 py-4">
+    <aside className="flex w-72 shrink-0 flex-col gap-5 overflow-y-auto border-r border-white/[0.06] px-4 py-4">
       <section className="flex flex-col gap-2.5">
         <Eyebrow className="text-zinc-500">Criteria</Eyebrow>
         <CriteriaMeter criteria={criteria} />
@@ -498,7 +498,7 @@ function Rail({
               <div className="min-w-0">
                 <p
                   className={cn(
-                    "line-clamp-3 text-[11px] leading-snug",
+                    "line-clamp-4 text-[11px] leading-relaxed",
                     c.met ? "text-zinc-500" : "text-zinc-300",
                   )}
                   title={c.text}
@@ -574,7 +574,7 @@ export function SessionLedger({
   const liveAccent = accentFor(live?.agentType);
 
   return (
-    <div className="flex h-full flex-col bg-background text-foreground">
+    <div className="flex h-full min-w-0 flex-1 flex-col bg-background text-foreground">
       {showHeader && (
       <header className="flex shrink-0 items-center gap-3 border-b border-white/[0.06] px-4 py-2.5">
         <span className="shrink-0 font-mono text-xs text-zinc-500">{taskShortId}</span>
@@ -599,7 +599,10 @@ export function SessionLedger({
         <Rail criteria={criteria} agents={agents} blockers={blockers} />
 
         <main className="min-w-0 flex-1 overflow-y-auto">
-          <div className="mx-auto flex max-w-3xl flex-col gap-4 px-5 py-5">
+          {/* The scroll container fills the pane so the scrollbar sits at the
+              screen edge, while the column itself stays a centred, bounded
+              measure — full-bleed text is unreadable on a wide display. */}
+          <div className="mx-auto flex w-full max-w-5xl flex-col gap-4 px-6 py-5">
             {entries.length === 0 && (
               <p className="py-8 text-center text-sm text-zinc-500">{emptyMessage}</p>
             )}
