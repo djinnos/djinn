@@ -2066,6 +2066,81 @@ mod tests {
             unimplemented!()
         }
 
+        async fn tool_github_search(
+            &self,
+            _: Option<String>,
+            _: serde_json::Map<String, serde_json::Value>,
+        ) -> Result<serde_json::Value, String> {
+            unimplemented!()
+        }
+
+        async fn tool_github_fetch_file(
+            &self,
+            _: Option<String>,
+            _: serde_json::Map<String, serde_json::Value>,
+        ) -> Result<serde_json::Value, String> {
+            unimplemented!()
+        }
+
+        async fn tool_ci_job_log(
+            &self,
+            _: Option<String>,
+            _: serde_json::Map<String, serde_json::Value>,
+        ) -> Result<serde_json::Value, String> {
+            unimplemented!()
+        }
+
+        async fn emit_djinn_event(
+            &self,
+            _: djinn_supervisor::services::SerializableDjinnEvent,
+        ) -> Result<(), String> {
+            unimplemented!()
+        }
+
+        async fn touch_activity(&self, _: String) -> Result<(), String> {
+            unimplemented!()
+        }
+
+        async fn transition_task(
+            &self,
+            _: String,
+            _: String,
+            _: Option<String>,
+        ) -> Result<(), String> {
+            unimplemented!()
+        }
+
+        async fn record_arbiter_decision(
+            &self,
+            _: String,
+            _: String,
+            _: String,
+        ) -> Result<(), String> {
+            unimplemented!()
+        }
+
+        async fn start_monitored_reopen(
+            &self,
+            _: String,
+            _: String,
+            _: String,
+            _: Vec<String>,
+        ) -> Result<(), String> {
+            unimplemented!()
+        }
+
+        async fn complete_monitored_reopen(&self, _: String) -> Result<(), String> {
+            unimplemented!()
+        }
+
+        async fn record_arbiter_session_termination(
+            &self,
+            _: String,
+            _: bool,
+        ) -> Result<bool, String> {
+            unimplemented!()
+        }
+
         async fn update_session_status(
             &self,
             _: String,
