@@ -12,9 +12,9 @@
 use djinn_control_plane::test_support::McpTestHarness;
 use djinn_core::auth_context::SESSION_USER_ID;
 use djinn_core::events::EventBus;
-use djinn_core::models::{Model, Pricing, Provider};
+use djinn_core::models::{Model, Pricing, Provider, SessionStatus};
 use djinn_db::repositories::user::UserRepository;
-use djinn_db::{OrgAiPolicyRepository, ProjectRepository};
+use djinn_db::{CreateSessionParams, OrgAiPolicyRepository, ProjectRepository, SessionRepository};
 use djinn_provider::catalog::builtin;
 use djinn_provider::repos::CredentialRepository;
 use serde_json::json;
@@ -178,26 +178,30 @@ async fn model_health_status_returns_autonomous_outcome_without_breaker_bucket()
         .await
         .expect("create outcome fixture project");
 
-    for (model_id, agent_type) in [
-        ("outcome-only/model", "worker"),
-        ("chat-only/model", "chat"),
-    ] {
-        // Chat rows are intentionally projectless: the session schema's agent
-        // constraint reserves a project for autonomous task sessions.
-        let project_id = (agent_type != "chat").then_some(project.id.as_str());
-        sqlx::query(
-            "INSERT INTO sessions (id, project_id, model_id, agent_type, status, ended_at)
-             VALUES ($1, $2, $3, $4, 'completed',
-                     to_char(now() at time zone 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'))",
-        )
-        .bind(uuid::Uuid::now_v7().to_string())
-        .bind(project_id)
-        .bind(model_id)
-        .bind(agent_type)
-        .execute(db.pool())
+    let sessions = SessionRepository::new(db, EventBus::noop());
+    let autonomous = sessions
+        .create(CreateSessionParams {
+            project_id: &project.id,
+            task_id: None,
+            model: "outcome-only/model",
+            agent_type: "worker",
+            metadata_json: None,
+            task_run_id: None,
+            pricing: None,
+            cost_basis: None,
+        })
         .await
-        .expect("insert terminal outcome fixture");
-    }
+        .expect("create autonomous outcome fixture");
+    sessions
+        .update(&autonomous.id, SessionStatus::Completed, 0, 0, 0, 0, None)
+        .await
+        .expect("complete autonomous outcome fixture");
+
+    // Chat rows are projectless by the session schema's agent constraint.
+    sessions
+        .upsert_chat_session(&uuid::Uuid::now_v7().to_string(), "chat-only/model")
+        .await
+        .expect("create chat outcome fixture");
 
     let status = harness
         .call_tool("model_health", json!({"action":"status"}))
