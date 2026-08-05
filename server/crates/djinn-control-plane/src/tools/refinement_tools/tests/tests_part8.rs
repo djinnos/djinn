@@ -53,7 +53,7 @@ async fn awaiting_evidence_full_structured_claim_payload() {
     );
     assert_eq!(ne.round, Some(1));
     assert_eq!(ne.against_revision_seq, Some(2));
-    assert_eq!(ne.created_by_task_id.as_deref(), Some("judge-task-001"));
+    assert_eq!(ne.created_by_task_id.as_deref(), Some(spike_id.as_str()));
 
     // The newly added structured claim fields.
     assert_eq!(
@@ -307,7 +307,7 @@ async fn paused_or_frozen_preserves_full_evidence_context() {
     );
     assert_eq!(ne.round, Some(1));
     assert_eq!(ne.against_revision_seq, Some(2));
-    assert_eq!(ne.created_by_task_id.as_deref(), Some("judge-task-001"));
+    assert_eq!(ne.created_by_task_id.as_deref(), Some(spike_id.as_str()));
 }
 
 /// When frozen and evidence has failed, the top-level state is
