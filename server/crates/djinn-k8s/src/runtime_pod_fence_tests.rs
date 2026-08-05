@@ -455,30 +455,35 @@ async fn a_failed_job_still_resolves_with_its_condition_reason() {
     );
 }
 
-/// A cleanly Complete Job whose Pod was TTL-GC'd is NOT a death, and is NOT
-/// reaped.
+/// A cleanly Complete Job whose Pod was TTL-GC'd is protocol evidence, not
+/// infrastructure evidence, and is NOT reaped.
 ///
 /// This is the containment's own blast radius. The new arm fires on *any*
 /// fenced-Pod disappearance under a live Job; gating it on the Job being
 /// nonterminal is what stops it from racing — and deleting — the Job of a run
-/// that finished cleanly and whose terminal report is still on the wire.
+/// that finished cleanly. The typed watch still resolves so the coordinator can
+/// settle a missing terminal report as protocol failure rather than leaving the
+/// run live indefinitely.
 #[tokio::test(start_paused = true)]
-async fn a_completed_job_whose_pod_was_ttl_gcd_is_neither_a_death_nor_reaped() {
+async fn a_completed_job_whose_pod_was_ttl_gcd_is_protocol_evidence_and_not_reaped() {
     let cluster = FakeCluster::new();
     let config = fence_config();
     let job_name = seed_running_taskrun(&cluster, &config).await;
     let runtime = runtime_on(&cluster, config);
 
-    let outcome = watch_after_fence_binding(&cluster, runtime, &job_name, |cluster| {
+    let observation = watch_after_fence_binding(&cluster, runtime, &job_name, |cluster| {
         cluster.complete_job(&job_name);
         cluster.gc_pod_of(&job_name);
     })
-    .await;
+    .await
+    .expect("a clean completion without a terminal report must resolve");
 
-    assert!(
-        outcome.is_err(),
-        "a clean completion must not resolve the infra-death watch; it resolved with {outcome:?}"
+    assert_eq!(
+        observation.kind,
+        TerminalRuntimeEvidenceKind::ProtocolNoReport,
+        "a clean completion is missing-report protocol evidence, not infrastructure evidence"
     );
+    assert!(observation.diagnostic.contains("completed cleanly"));
     assert_eq!(
         cluster.job_names(),
         vec![job_name.clone()],
