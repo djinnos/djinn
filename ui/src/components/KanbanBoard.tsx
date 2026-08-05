@@ -7,7 +7,6 @@ import { taskStore } from "@/stores/taskStore";
 import type { Epic, Task } from "@/api/types";
 import { TaskCard, DoneTaskRow } from "@/components/TaskCard";
 import { TaskIdLabel } from "@/components/TaskIdLabel";
-import { TaskDetailPanel } from "@/components/TaskDetailPanel";
 import { BoardHealthBanner } from "@/components/BoardHealthBanner";
 import { GitHubAppBanner } from "@/components/GitHubAppBanner";
 import {
@@ -240,8 +239,6 @@ export function KanbanBoard({
 
     return unsubscribe;
   }, [tasksProp]);
-
-  const [selectedTask, setSelectedTask] = useState<Task | null>(null);
 
   const handleTaskClick = (task: Task) => {
     navigate(`/task/${task.id}`);
@@ -623,14 +620,6 @@ export function KanbanBoard({
         </div>
       </div>
 
-      <TaskDetailPanel
-        open={!!selectedTask}
-        task={selectedTask}
-        epic={
-          selectedTask?.epic_id ? epics.get(selectedTask.epic_id) : undefined
-        }
-        onClose={() => setSelectedTask(null)}
-      />
     </div>
   );
 }
