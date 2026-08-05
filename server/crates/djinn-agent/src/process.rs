@@ -1076,10 +1076,50 @@ impl LeaseInvocationRunner {
                 .record_at(&identity, fence.clone(), true, self.clock.now())
                 .map_err(LeaseInvocationError::Launcher)?;
         }
-        child.kill().map_err(LeaseInvocationError::Launcher)?;
-        child.wait_empty().map_err(LeaseInvocationError::Launcher)?;
-        drain_remote(&mut *child, &mut stdout, &mut stderr)?;
-        let status = observed.unwrap_or(child.wait().map_err(started_lease_error)?);
+        // TEARDOWN MUST NOT FAIL A COMMAND THAT HAS ALREADY RUN.
+        //
+        // Everything from here on is the disposal of a leaf whose command is
+        // over: the output is collected, the status is decided, the durable
+        // lease is reconciled below. A `?` on any of it discards all of that —
+        // and it did, for 30-48 minutes of work at a time.
+        //
+        // `cgroup.kill` is asynchronous, so `wait_empty` on a leaf whose tree was
+        // still alive (i.e. every timeout and every cancellation) had to observe
+        // `populated 1`. That is `Error::StillPopulated`, which the broker
+        // categorises as `ControlRejection::State`, and this line propagated it:
+        //
+        //   ReplyLoop: tool call returned error tool=shell error=failed to run
+        //   shell command: lease invocation failed: Launcher(Custom { kind:
+        //   Other, error: ControlRejected(State) })
+        //
+        // measured immediately after a `cargo test` hit its 1800s budget. The
+        // `?` also skipped `cleanup()` below, so the leaf, its descriptors and
+        // the broker's invocation binding were never released.
+        //
+        // `Launcher::wait_empty` now waits the settling kill out (see
+        // `KillSettle`), which fixes the cause. This is the second half of the
+        // same rule the lift already follows one arm up — a lease-subsystem
+        // failure makes a command SLOW or LOSSY, never dead — so that a leaf
+        // that still refuses to drain costs a warning and a synthesized status
+        // instead of the whole invocation.
+        let drained = release_invocation_leaf(&mut *child, &identity);
+        if let Err(error) = drain_remote(&mut *child, &mut stdout, &mut stderr) {
+            tracing::warn!(
+                invocation_id = %identity.invocation_id,
+                task_run_id = %identity.task_run_id,
+                error = ?error,
+                "post-terminal output drain failed; reporting the bytes already collected"
+            );
+        }
+        let status = match observed {
+            Some(status) => status,
+            None => settled_status(&mut *child, drained, &identity).ok_or_else(|| {
+                started_lease_error(io::Error::other(
+                    "the invocation leaf never reported populated 0 and no terminal child status \
+                     could be observed",
+                ))
+            })?,
+        };
         let process = ProcessOutput {
             output: Output {
                 status,
@@ -1088,7 +1128,15 @@ impl LeaseInvocationRunner {
             },
             termination,
         };
-        child.cleanup().map_err(LeaseInvocationError::Launcher)?;
+        if let Err(error) = child.cleanup() {
+            tracing::warn!(
+                invocation_id = %identity.invocation_id,
+                task_run_id = %identity.task_run_id,
+                error = %error,
+                "invocation leaf cleanup failed; the leaf and its broker binding are leaked for \
+                 this invocation, but the command's result is preserved"
+            );
+        }
         if queued
             && reconcile_terminal_lease(self.services.as_ref(), lease, fence).await
             && let Some(journal) = &self.journal
@@ -1180,6 +1228,80 @@ fn terminal_now(
         .try_wait()
         .map_err(started_lease_error)?
         .map(|status| (Some(status), ProcessTermination::Exited)))
+}
+
+/// Kill the invocation's cgroup leaf and wait for it to report `populated 0`.
+///
+/// Returns whether emptiness was actually observed. Neither step can fail the
+/// invocation: by the time this runs the command is over, so a teardown refusal
+/// is a leak to report, never a result to discard.
+fn release_invocation_leaf(
+    child: &mut dyn ProcessHandle,
+    identity: &TaskInvocationLeaseIdentity,
+) -> bool {
+    if let Err(error) = child.kill() {
+        tracing::warn!(
+            invocation_id = %identity.invocation_id,
+            task_run_id = %identity.task_run_id,
+            error = %error,
+            "cgroup.kill for the invocation leaf failed; still waiting for the leaf to drain"
+        );
+    }
+    match child.wait_empty() {
+        Ok(()) => true,
+        Err(error) => {
+            tracing::warn!(
+                invocation_id = %identity.invocation_id,
+                task_run_id = %identity.task_run_id,
+                error = %error,
+                "the invocation leaf did not reach populated 0 within the launcher's settle \
+                 budget; the command's result is preserved and the leaf is abandoned"
+            );
+            false
+        }
+    }
+}
+
+/// The terminal status for a child the runner never observed exiting.
+///
+/// A drained leaf holds no live process, so waiting on it returns at once. A
+/// leaf that never drained must NOT be waited on: [`ProcessHandle::wait`] polls
+/// until a terminal status appears, so blocking there would trade a lost command
+/// for a hung session — the same trade `cleanup_and_reap` refuses with its
+/// bounded post-kill reap.
+fn settled_status(
+    child: &mut dyn ProcessHandle,
+    drained: bool,
+    identity: &TaskInvocationLeaseIdentity,
+) -> Option<std::process::ExitStatus> {
+    if drained && let Ok(status) = child.wait() {
+        return Some(status);
+    }
+    if let Ok(Some(status)) = child.try_wait() {
+        return Some(status);
+    }
+    let status = abandoned_child_status()?;
+    tracing::warn!(
+        invocation_id = %identity.invocation_id,
+        task_run_id = %identity.task_run_id,
+        "no terminal status could be read for the killed child; reporting it as SIGKILLed so the \
+         session keeps running"
+    );
+    Some(status)
+}
+
+/// A killed-but-unreapable child reports as SIGKILLed, exactly as the direct
+/// (non-brokered) runner's `cleanup_and_reap` already does.
+#[cfg(unix)]
+fn abandoned_child_status() -> Option<std::process::ExitStatus> {
+    Some(std::process::ExitStatus::from_raw(libc::SIGKILL))
+}
+
+/// No portable constructor exists off Unix, and neither does the cgroup leaf
+/// this whole path governs.
+#[cfg(not(unix))]
+fn abandoned_child_status() -> Option<std::process::ExitStatus> {
+    None
 }
 
 fn drain_remote(
