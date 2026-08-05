@@ -2646,11 +2646,26 @@ mod tests {
     }
 
     #[test]
-    fn untyped_error_maps_to_none() {
-        // A non-provider failure (git push, tool error, finalize misuse) carries
-        // no `ProviderError` source → must never trip the breaker.
-        let untyped = anyhow::anyhow!("worker failed to push task_branch to mirror");
-        assert_eq!(classify_provider_failure(&untyped), None);
+    fn non_provider_terminal_causes_are_breaker_neutral() {
+        // Durable settlement causes remain visible for operations/reporting, but
+        // none is a breaker classifier. Only a concrete ProviderError can cross
+        // this boundary; these cover cancellation, harness, infrastructure,
+        // protocol, finalization, unknown, and legacy-unclassified outcomes.
+        let errors = [
+            anyhow::Error::new(ReplyLoopCancelled::session()),
+            anyhow::Error::new(ToolError::new("MCP tool failed")),
+            anyhow::anyhow!("infrastructure: worker pod disappeared"),
+            anyhow::Error::new(StepCapWindDownIgnored { max_turns: 3 }),
+            anyhow::Error::new(FinalizeNudgesExhausted {
+                attempts: 3,
+                finalize_tools: "finalize_task".into(),
+            }),
+            anyhow::anyhow!("unknown reply-loop failure"),
+            anyhow::anyhow!("legacy_unclassified session failure"),
+        ];
+        for error in errors {
+            assert_eq!(classify_provider_failure(&error), None);
+        }
     }
 
     #[test]

@@ -2276,13 +2276,19 @@ impl TaskRunSupervisor {
                                         "supervisor: committed worker/architect changes"
                                     );
                                 } else {
-                                    tracing::info!(
+                                    // WARN, not INFO: the commit exists but does
+                                    // not contain everything the author edited.
+                                    // A reviewer diffing this branch sees no
+                                    // trace of those edits and reasonably
+                                    // concludes the author never made them.
+                                    tracing::warn!(
                                         task_id = %task.short_id,
                                         task_run_id = %run_id,
                                         role = %role_kind.as_str(),
                                         excluded_count = excluded.len(),
                                         excluded_paths = ?excluded,
-                                        "supervisor: committed worker/architect changes (some scratch files excluded)"
+                                        "supervisor: committed changes but OMITTED excluded paths; \
+                                         edits to these files are absent from the branch diff"
                                     );
                                 }
                                 // The push that makes this commit durable in the
@@ -2296,13 +2302,20 @@ impl TaskRunSupervisor {
                             Ok(djinn_workspace::CommitOutcome::NoLegitimateChanges {
                                 ref excluded,
                             }) => {
-                                tracing::info!(
+                                // WARN, not INFO: every file this stage touched
+                                // was filtered out, so the branch gains nothing
+                                // while the author believes the work landed.
+                                // If these paths are not obviously generated
+                                // artifacts, the filter is over-broad — that is
+                                // the shape the `.cargo` component produced.
+                                tracing::warn!(
                                     task_id = %task.short_id,
                                     task_run_id = %run_id,
                                     role = %role_kind.as_str(),
                                     excluded_count = excluded.len(),
                                     excluded_paths = ?excluded,
-                                    "supervisor: no legitimate changes after stage; junk-only files excluded"
+                                    "supervisor: NO commit created; every changed path was excluded \
+                                     by the commit-safety filter"
                                 );
                             }
                             Ok(djinn_workspace::CommitOutcome::NoChanges) => {
@@ -9685,8 +9698,14 @@ mod tests {
         let captured = logs.take();
         // Must contain the junk-only message with structured fields.
         assert!(
-            captured.contains("no legitimate changes after stage; junk-only files excluded"),
+            captured.contains("NO commit created"),
             "expected junk-only log message, got:\n{captured}"
+        );
+        // Reported at WARN, not INFO: a stage whose every path was filtered out
+        // leaves the branch unchanged while the author believes work landed.
+        assert!(
+            captured.contains("WARN"),
+            "junk-only exclusion must be visible at WARN, got:\n{captured}"
         );
         assert!(
             captured.contains("excluded_count="),
@@ -9760,8 +9779,15 @@ mod tests {
         let captured = logs.take();
         // Must contain the committed message WITH scratch exclusion details.
         assert!(
-            captured.contains("committed worker/architect changes (some scratch files excluded)"),
+            captured.contains("OMITTED excluded paths"),
             "expected committed-with-exclusions log message, got:\n{captured}"
+        );
+        // Reported at WARN, not INFO: the commit exists but does not contain
+        // everything the author edited, and a reviewer diffing the branch would
+        // otherwise see no trace of those edits.
+        assert!(
+            captured.contains("WARN"),
+            "a commit omitting edited paths must be visible at WARN, got:\n{captured}"
         );
         assert!(
             captured.contains("excluded_count="),
@@ -9773,7 +9799,7 @@ mod tests {
         );
         // Must NOT contain the junk-only message (legitimate changes exist).
         assert!(
-            !captured.contains("no legitimate changes after stage"),
+            !captured.contains("NO commit created"),
             "mixed commit must NOT log as junk-only, got:\n{captured}"
         );
     }
