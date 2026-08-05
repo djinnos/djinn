@@ -32,7 +32,10 @@ pub mod test_runtime;
 
 pub use credentials::{ResolvedCredentials, SerializableCredential};
 pub use handle::RunHandle;
-pub use session_runtime::{InfraDeathLogTailCapture, RuntimeError, SessionRuntime};
+pub use session_runtime::{
+    InfraDeathLogTailCapture, RuntimeError, SessionRuntime, TerminalRuntimeEvidenceKind,
+    TerminalRuntimeObservation,
+};
 pub use spec::{
     BuildSlotWeight, LoopGuardKind, LoopGuardTrip, ProviderFailureClass, ResumeLifecycleMetadata,
     ResumeSelectionReason, ResumeSourceKind, RoleKind, RoleResourceClass, SupervisorFlow,

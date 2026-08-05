@@ -7,7 +7,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { useSelectedProject } from "@/stores/useProjectStore";
+import { useProjects, useSelectedProject } from "@/stores/useProjectStore";
 import { useTaskStore } from "@/stores/useTaskStore";
 import { useSessionMessages } from "@/hooks/useSessionMessages";
 import { SessionLedger } from "@/components/session/SessionLedger";
@@ -130,16 +130,23 @@ function TaskSidebarSkeleton() {
 export function TaskSessionPage() {
   const { taskId } = useParams<{ taskId: string }>();
   const navigate = useNavigate();
+  const projects = useProjects();
   const selectedProject = useSelectedProject();
-  const projectSlug = selectedProject
-    ? `${selectedProject.github_owner}/${selectedProject.github_repo}`
-    : null;
   const tasks = useTaskStore((s) => s.tasks);
 
   // Derive the task straight from the store. `taskStore` replaces the tasks Map
   // on every mutation, so the selector above re-renders on any change — no
   // effect-based syncing or manual subscription is needed.
   const task = taskId ? tasks.get(taskId) ?? null : null;
+
+  // A task belongs to exactly one project, so the task is the authority — not
+  // the global selector. Deriving it here is what lets a deep link into a task
+  // outside the currently selected project load its sessions at all.
+  const project = useMemo(
+    () => projects.find((p) => p.id === task?.project_id) ?? selectedProject,
+    [projects, task?.project_id, selectedProject]
+  );
+  const projectSlug = project ? `${project.github_owner}/${project.github_repo}` : null;
 
   // Give the store a brief moment to populate before showing "not found". The
   // grace window resets whenever the task id changes (render-phase pattern) and
