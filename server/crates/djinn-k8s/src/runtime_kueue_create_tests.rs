@@ -425,6 +425,42 @@ impl FakeCluster {
         self.state.lock().unwrap().jobs.remove(job_name);
     }
 
+    /// Publish a terminated status for the named worker Pod, as the kubelet
+    /// does before the Job controller records the matching Job condition.
+    /// Keeping this mutation in the stateful apiserver makes the runtime tests
+    /// exercise its real list/polling path rather than a pure classifier.
+    pub(super) fn terminate_worker(&self, job_name: &str, exit_code: i32, reason: Option<&str>) {
+        let mut state = self.state.lock().unwrap();
+        let index = Self::owned_pod_index(&state, job_name).expect("the Job has a worker Pod");
+        state.pods[index]["status"] = json!({
+            "phase": "Failed",
+            "containerStatuses": [{
+                "name": "worker",
+                "image": "registry/test:test",
+                "imageID": "registry/test@sha256:test",
+                "ready": false,
+                "restartCount": 0,
+                "state": {"terminated": {
+                    "exitCode": exit_code,
+                    "reason": reason,
+                }},
+            }],
+        });
+    }
+
+    /// Publish a terminal Pod-level reason without inventing a worker-container
+    /// status. `Evicted` and `NodeLost` are deliberate infrastructure evidence;
+    /// other Failed-Pod reasons remain unknown evidence.
+    pub(super) fn fail_pod_with_reason(&self, job_name: &str, reason: &str) {
+        let mut state = self.state.lock().unwrap();
+        let index = Self::owned_pod_index(&state, job_name).expect("the Job has a worker Pod");
+        state.pods[index]["status"] = json!({
+            "phase": "Failed",
+            "reason": reason,
+            "message": format!("fixture terminal Pod reason {reason}"),
+        });
+    }
+
     /// Drive the Job to its terminal `Failed` condition, as `backoffLimit: 0`
     /// does on a single Pod failure.
     pub(super) fn fail_job(&self, job_name: &str, reason: &str) {
