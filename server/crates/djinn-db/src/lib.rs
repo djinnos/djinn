@@ -304,8 +304,9 @@ pub use repositories::{
     },
     service::{ServicePreset, ServicePresetRepository},
     session::{
-        CreateSessionParams, CreateTaskExecutionSessionParams, ExtractionBackfillCandidate,
-        OrphanSessionCandidate, SessionRepository, SessionStatusSnapshot,
+        AutonomousSessionOutcomeRow, CreateSessionParams, CreateTaskExecutionSessionParams,
+        ExtractionBackfillCandidate, OrphanSessionCandidate, SessionRepository,
+        SessionStatusSnapshot,
     },
     session_auth::{CreateUserAuthSession, SessionAuthRepository, UserAuthSessionRecord},
     session_compaction_boundary::{

@@ -1,4 +1,5 @@
 // djinn:allow-oversize — legacy module over size-guard threshold; split when touched substantively.
+use chrono::{DateTime, SecondsFormat, Utc};
 use djinn_core::events::{DjinnEventEnvelope, EventBus};
 use djinn_core::models::provider::Pricing;
 use djinn_core::models::{ModelLane, SessionFailureCause, SessionRecord, SessionStatus};
@@ -51,6 +52,23 @@ pub struct CreateTaskExecutionSessionParams<'a> {
     pub execution_generation: i64,
     /// The ordinary session attributes to persist on a successful guard.
     pub session: CreateSessionParams<'a>,
+}
+
+/// Durable terminal outcomes for one autonomous `(creator_user_id, model_id)` scope.
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+pub struct AutonomousSessionOutcomeRow {
+    pub creator_user_id: Option<String>,
+    pub model_id: String,
+    pub completed_count: i64,
+    pub cancelled_count: i64,
+    pub provider_count: i64,
+    pub harness_count: i64,
+    pub infrastructure_count: i64,
+    pub protocol_count: i64,
+    pub finalization_count: i64,
+    pub unknown_count: i64,
+    /// Failed/interrupted pre-taxonomy rows whose durable cause is NULL.
+    pub legacy_unclassified_count: i64,
 }
 
 impl SessionRepository {
@@ -836,6 +854,44 @@ impl SessionRepository {
             .into_iter()
             .map(|r| (r.creator, r.model_id, r.cnt))
             .collect())
+    }
+
+    /// Aggregate qualifying terminal autonomous sessions in the half-open UTC
+    /// interval `[start, end)`. Session creator attribution takes precedence
+    /// over its task creator; report keys are sourced from sessions only.
+    pub async fn autonomous_outcomes_by_user_and_model(
+        &self,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    ) -> Result<Vec<AutonomousSessionOutcomeRow>> {
+        self.db.ensure_initialized().await?;
+        let start = start.to_rfc3339_opts(SecondsFormat::Millis, true);
+        let end = end.to_rfc3339_opts(SecondsFormat::Millis, true);
+        Ok(sqlx::query_as::<_, AutonomousSessionOutcomeRow>(
+            r#"SELECT COALESCE(s.created_by_user_id, t.created_by_user_id) AS creator_user_id,
+                      s.model_id,
+                      COUNT(*) FILTER (WHERE s.status = 'completed')::bigint AS completed_count,
+                      COUNT(*) FILTER (WHERE s.failure_cause = 'cancelled')::bigint AS cancelled_count,
+                      COUNT(*) FILTER (WHERE s.failure_cause = 'provider')::bigint AS provider_count,
+                      COUNT(*) FILTER (WHERE s.failure_cause = 'harness')::bigint AS harness_count,
+                      COUNT(*) FILTER (WHERE s.failure_cause = 'infrastructure')::bigint AS infrastructure_count,
+                      COUNT(*) FILTER (WHERE s.failure_cause = 'protocol')::bigint AS protocol_count,
+                      COUNT(*) FILTER (WHERE s.failure_cause = 'finalization')::bigint AS finalization_count,
+                      COUNT(*) FILTER (WHERE s.failure_cause = 'unknown')::bigint AS unknown_count,
+                      COUNT(*) FILTER (WHERE s.status IN ('failed', 'interrupted') AND s.failure_cause IS NULL)::bigint AS legacy_unclassified_count
+                 FROM sessions s
+                 LEFT JOIN tasks t ON t.id = s.task_id
+                WHERE s.status IN ('completed', 'failed', 'interrupted')
+                  AND s.agent_type <> 'chat'
+                  AND s.ended_at >= $1
+                  AND s.ended_at < $2
+                GROUP BY COALESCE(s.created_by_user_id, t.created_by_user_id), s.model_id
+                ORDER BY COALESCE(s.created_by_user_id, t.created_by_user_id) NULLS FIRST, s.model_id"#,
+        )
+        .bind(start)
+        .bind(end)
+        .fetch_all(self.db.pool())
+        .await?)
     }
 
     /// Count currently-running autonomous sessions grouped by
