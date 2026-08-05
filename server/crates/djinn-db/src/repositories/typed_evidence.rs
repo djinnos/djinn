@@ -3,6 +3,7 @@
 //! APIs take a caller-owned transaction so a coordinator can compose them with
 //! proposal mutations. Attempts and transitions are append-only database facts.
 
+use djinn_core::models::task::is_evidence_spike;
 use djinn_core::models::{
     TribunalEvidenceAnchorMethod, TribunalEvidenceDisposition, TribunalEvidenceFinding,
     TribunalEvidenceLifecycle, TribunalEvidenceOutcome, TribunalEvidencePlannedCheck,
@@ -1021,12 +1022,14 @@ impl TypedEvidenceRepository {
         if legacy.is_some() || active {
             return Err(Error::InvalidTransition("active_evidence_conflict".into()));
         }
-        let retry_task_is_new_and_active: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM tasks t WHERE t.id=$1 AND t.status <> 'closed' AND NOT EXISTS(SELECT 1 FROM typed_evidence_attempts a WHERE a.spike_task_id=t.id))")
+        let retry_task_labels: Option<String> = sqlx::query_scalar("SELECT t.labels FROM tasks t WHERE t.id=$1 AND t.status <> 'closed' AND NOT EXISTS(SELECT 1 FROM typed_evidence_attempts a WHERE a.spike_task_id=t.id)")
             .bind(&input.retry_spike_task_id)
-            .fetch_one(&mut **tx)
+            .fetch_optional(&mut **tx)
             .await?;
-        if !retry_task_is_new_and_active {
-            return Err(Error::InvalidTransition("retry_spike_task_not_new_and_active".into()));
+        if !retry_task_labels.as_deref().is_some_and(is_evidence_spike) {
+            return Err(Error::InvalidTransition(
+                "retry_spike_task_not_new_and_active".into(),
+            ));
         }
         if input.planned_checks.is_empty() {
             return Err(Error::InvalidData(
@@ -1109,13 +1112,19 @@ impl TypedEvidenceRepository {
         finding_id: &str,
         failed_transition_id: &str,
     ) -> Result<Option<TypedEvidenceAttemptAllocation>> {
-        let row = sqlx::query("SELECT a.id,a.sequence,a.spike_task_id FROM typed_evidence_retry_idempotency r JOIN typed_evidence_attempts a ON a.id=r.retry_attempt_id WHERE r.finding_id=$1 AND r.failed_transition_id=$2").bind(finding_id).bind(failed_transition_id).fetch_optional(self.db.pool()).await?;
-        Ok(row.map(|r| TypedEvidenceAttemptAllocation {
-            attempt_id: r.get("id"),
-            spike_task_id: r.get("spike_task_id"),
-            sequence: r.get("sequence"),
-            planned_checks: vec![],
-        }))
+        let mut tx = self.db.pool().begin().await?;
+        let row = sqlx::query("SELECT a.id,a.sequence,a.spike_task_id FROM typed_evidence_retry_idempotency r JOIN typed_evidence_attempts a ON a.id=r.retry_attempt_id WHERE r.finding_id=$1 AND r.failed_transition_id=$2").bind(finding_id).bind(failed_transition_id).fetch_optional(&mut *tx).await?;
+        if let Some(row) = row {
+            let attempt_id: String = row.get("id");
+            Ok(Some(TypedEvidenceAttemptAllocation {
+                spike_task_id: row.get("spike_task_id"),
+                sequence: row.get("sequence"),
+                planned_checks: checks(&mut tx, &attempt_id).await?,
+                attempt_id,
+            }))
+        } else {
+            Ok(None)
+        }
     }
 
     /// Appends the fact and advances only the materialized current lifecycle.
