@@ -322,7 +322,8 @@ async fn start_fake_server(
                         ServiceRpcRequest::PickAnyDefaultModel => {
                             ServiceRpcResponse::PickAnyDefaultModel(Ok(None))
                         }
-                        ServiceRpcRequest::ExecuteStage { .. } => {
+                        ServiceRpcRequest::ExecuteStage { .. }
+                        | ServiceRpcRequest::ExecuteStageV2 { .. } => {
                             panic!(
                                 "worker dispatched execute_stage via RPC — \
                                  stage must run locally even on the cancellation path"

@@ -146,6 +146,14 @@ pub enum StageError {
 
     #[error("session create: {0}")]
     SessionCreate(String),
+
+    /// Failure after a session row exists. Terminal persistence remains owned
+    /// by the supervisor across both direct and RPC execution.
+    #[error("post-session stage failure: {message}")]
+    AfterSession {
+        message: String,
+        settlement: StageSessionSettlement,
+    },
 }
 
 /// Outcome of executing one role stage.
@@ -285,6 +293,28 @@ pub enum StageOutcome {
     },
 }
 
+/// Session data captured by the stage and settled only after the supervisor's
+/// durable exit barrier has completed.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct StageSessionSettlement {
+    pub session_id: String,
+    pub status: djinn_core::models::SessionStatus,
+    pub tokens_in: i64,
+    pub tokens_out: i64,
+    pub cache_read: i64,
+    pub cache_write: i64,
+    pub parked_reason: Option<String>,
+    pub failure_cause: Option<djinn_core::models::SessionFailureCause>,
+}
+
+/// Closed stage result. This preserves `StageOutcome` while transferring the
+/// terminal session write to the supervisor.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct StageExecutionResult {
+    pub outcome: StageOutcome,
+    pub settlement: Option<StageSessionSettlement>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ParkReason {
     Budget,
@@ -377,6 +407,154 @@ fn planner_terminal_close_action(task: &Task) -> Option<&'static str> {
     match task.issue_type.as_str() {
         "planning" | "decomposition" | "review" | "epic_breakdown" => Some("close"),
         _ => None,
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SessionExitBarrierAction {
+    SubmitTaskReview,
+    TaskReviewApprove,
+    TaskReviewReject,
+    Close,
+    LeadApprove,
+    LeadApproveConflict,
+    LeadInterventionComplete,
+    ForceClose,
+    ArbiterPark,
+    ArbiterSupersede,
+}
+
+impl SessionExitBarrierAction {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::SubmitTaskReview => "submit_task_review",
+            Self::TaskReviewApprove => "task_review_approve",
+            Self::TaskReviewReject => "task_review_reject",
+            Self::Close => "close",
+            Self::LeadApprove => "lead_approve",
+            Self::LeadApproveConflict => "lead_approve_conflict",
+            Self::LeadInterventionComplete => "lead_intervention_complete",
+            Self::ForceClose => "force_close",
+            Self::ArbiterPark => "arbiter_park",
+            Self::ArbiterSupersede => "arbiter_supersede",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SessionExitBarrierPlan {
+    Required {
+        action: SessionExitBarrierAction,
+        expected_target: &'static str,
+    },
+    TerminalEvidenceOnly,
+    InterruptedOrFailed,
+}
+
+/// Exhaustive durable-handoff contract for a closed stage outcome. Cancellation
+/// is checked by the executor immediately before every Required write.
+fn session_exit_barrier_plan(
+    outcome: &StageOutcome,
+    role_kind: RoleKind,
+    task: &Task,
+) -> SessionExitBarrierPlan {
+    match outcome {
+        StageOutcome::WorkerDone => {
+            if role_kind == RoleKind::Worker {
+                SessionExitBarrierPlan::Required {
+                    action: SessionExitBarrierAction::SubmitTaskReview,
+                    expected_target: "needs_task_review",
+                }
+            } else {
+                SessionExitBarrierPlan::TerminalEvidenceOnly
+            }
+        }
+        StageOutcome::PlannerExecute
+        | StageOutcome::PlannerClose { .. }
+        | StageOutcome::VerifierPassed => {
+            if role_kind == RoleKind::Planner && planner_terminal_close_action(task).is_some() {
+                SessionExitBarrierPlan::Required {
+                    action: SessionExitBarrierAction::Close,
+                    expected_target: "closed",
+                }
+            } else {
+                SessionExitBarrierPlan::TerminalEvidenceOnly
+            }
+        }
+        StageOutcome::ReviewerApproved => SessionExitBarrierPlan::Required {
+            action: SessionExitBarrierAction::TaskReviewApprove,
+            expected_target: "approved",
+        },
+        StageOutcome::ReviewerRejected { .. } => SessionExitBarrierPlan::Required {
+            action: SessionExitBarrierAction::TaskReviewReject,
+            expected_target: "open",
+        },
+        StageOutcome::VerifierFailed { .. } => SessionExitBarrierPlan::InterruptedOrFailed,
+        StageOutcome::ArchitectDone => SessionExitBarrierPlan::TerminalEvidenceOnly,
+        StageOutcome::Escalate { .. } => {
+            if role_kind == RoleKind::Planner && planner_terminal_close_action(task).is_some() {
+                SessionExitBarrierPlan::Required {
+                    action: SessionExitBarrierAction::Close,
+                    expected_target: "closed",
+                }
+            } else {
+                SessionExitBarrierPlan::TerminalEvidenceOnly
+            }
+        }
+        StageOutcome::LeadApproved { .. } => SessionExitBarrierPlan::Required {
+            action: SessionExitBarrierAction::LeadApprove,
+            expected_target: "approved",
+        },
+        StageOutcome::LeadApproveConflict { .. } => SessionExitBarrierPlan::Required {
+            action: SessionExitBarrierAction::LeadApproveConflict,
+            expected_target: "open",
+        },
+        StageOutcome::LeadReopen { .. } | StageOutcome::LeadEscalate { .. } => {
+            SessionExitBarrierPlan::Required {
+                action: SessionExitBarrierAction::LeadInterventionComplete,
+                expected_target: "open",
+            }
+        }
+        StageOutcome::LeadClose { .. } => SessionExitBarrierPlan::Required {
+            action: SessionExitBarrierAction::ForceClose,
+            expected_target: "closed",
+        },
+        StageOutcome::LeadParked { .. } => SessionExitBarrierPlan::Required {
+            action: SessionExitBarrierAction::ArbiterPark,
+            expected_target: "open",
+        },
+        StageOutcome::LeadSuperseded { .. } => SessionExitBarrierPlan::Required {
+            action: SessionExitBarrierAction::ArbiterSupersede,
+            expected_target: "closed",
+        },
+        StageOutcome::Failed {
+            provider_failure, ..
+        } => {
+            if route_planner_failed(role_kind, task, *provider_failure, false)
+                == PlannerFailedRoute::CloseWithFailureReason
+            {
+                SessionExitBarrierPlan::Required {
+                    action: SessionExitBarrierAction::Close,
+                    expected_target: "closed",
+                }
+            } else {
+                SessionExitBarrierPlan::InterruptedOrFailed
+            }
+        }
+        StageOutcome::LoopGuardTripped { .. } | StageOutcome::Parked { .. } => {
+            SessionExitBarrierPlan::InterruptedOrFailed
+        }
+    }
+}
+
+fn settlement_status_after_exit_barrier(
+    plan: SessionExitBarrierPlan,
+    status: djinn_core::models::SessionStatus,
+) -> djinn_core::models::SessionStatus {
+    match plan {
+        SessionExitBarrierPlan::Required { .. } => status,
+        SessionExitBarrierPlan::TerminalEvidenceOnly
+        | SessionExitBarrierPlan::InterruptedOrFailed => djinn_core::models::SessionStatus::Failed,
     }
 }
 
@@ -1834,33 +2012,48 @@ impl TaskRunSupervisor {
                     }
                 }
 
-                let stage_outcome = match self
+                let StageExecutionResult {
+                    outcome: mut stage_outcome,
+                    settlement: mut pending_settlement,
+                } = match self
                     .services
                     .execute_stage(&task, &workspace, role_kind, &run_id, &spec)
                     .await
                 {
-                    Ok(o) => o,
+                    Ok(closed) => closed,
                     Err(e) => {
-                        // Stage failure during an in-flight cancellation
-                        // is the expected shape: `execute_stage` saw the
-                        // CancellationToken flip and tore its provider /
-                        // RPC dependencies down with an error.  Surface
-                        // an Interrupted outcome rather than a fatal
-                        // SupervisorError so the worker exits cleanly.
-                        if self.services.cancel().is_cancelled() {
-                            debug!(
-                                task_run_id = %run_id,
-                                error = %e,
-                                role = %role_kind.as_str(),
-                                "execute_stage failed during cancellation; \
-                                 returning Interrupted outcome"
-                            );
+                        let cancelled = self.services.cancel().is_cancelled();
+                        if let StageError::AfterSession { settlement, .. } = &e {
+                            let mut settlement = settlement.clone();
+                            if cancelled {
+                                settlement.status = djinn_core::models::SessionStatus::Interrupted;
+                                settlement.failure_cause =
+                                    Some(djinn_core::models::SessionFailureCause::Cancelled);
+                            }
+                            if let Err(error) = self
+                                .services
+                                .update_session_status_v2(
+                                    settlement.session_id.clone(),
+                                    settlement.status,
+                                    settlement.tokens_in,
+                                    settlement.tokens_out,
+                                    settlement.cache_read,
+                                    settlement.cache_write,
+                                    settlement.parked_reason,
+                                    settlement.failure_cause,
+                                )
+                                .await
+                            {
+                                tracing::warn!(session_id = %settlement.session_id, %error,
+                                    "supervisor: failed to persist post-session stage failure");
+                            }
+                        }
+                        if cancelled {
+                            debug!(task_run_id = %run_id, error = %e, role = %role_kind.as_str(),
+                                "execute_stage failed during cancellation; returning Interrupted outcome");
                             result = Some(TaskRunOutcome::Interrupted);
                             break;
                         }
-                        // Best-effort teardown before the error return; the
-                        // workspace is owned and must not be implicitly dropped
-                        // without emitting exactly one cleanup sample.
                         let _ = timed_workspace_teardown(
                             &*self.clock,
                             workspace,
@@ -1869,6 +2062,183 @@ impl TaskRunSupervisor {
                         return Err(SupervisorError::from(e));
                     }
                 };
+
+                // A closed stage may not settle Completed until its minimal
+                // durable board handoff is known to have reached the target.
+                let barrier_plan = session_exit_barrier_plan(&stage_outcome, role_kind, &task);
+                let barrier_required =
+                    matches!(barrier_plan, SessionExitBarrierPlan::Required { .. });
+                let defer_worker_barrier = matches!(
+                    barrier_plan,
+                    SessionExitBarrierPlan::Required {
+                        action: SessionExitBarrierAction::SubmitTaskReview,
+                        ..
+                    }
+                );
+                if !defer_worker_barrier && self.services.cancel().is_cancelled() {
+                    if let Some(settlement) = pending_settlement.as_mut() {
+                        settlement.status = djinn_core::models::SessionStatus::Interrupted;
+                        settlement.failure_cause =
+                            Some(djinn_core::models::SessionFailureCause::Cancelled);
+                    }
+                } else if !defer_worker_barrier
+                    && let SessionExitBarrierPlan::Required {
+                        action,
+                        expected_target,
+                    } = barrier_plan
+                {
+                    // Lead arbitration metadata is part of the minimal durable
+                    // handoff and must retain its metadata-before-transition order.
+                    match &stage_outcome {
+                        StageOutcome::LeadApproved { evidence } => {
+                            if let Err(error) = self
+                                .services
+                                .record_arbiter_decision(
+                                    spec.task_id.clone(),
+                                    "approve".into(),
+                                    evidence.clone(),
+                                )
+                                .await
+                            {
+                                tracing::warn!(task_run_id = %run_id, task_id = %spec.task_id, %error,
+                                    "supervisor: record_arbiter_decision failed — proceeding with lead_approve");
+                            }
+                        }
+                        StageOutcome::LeadApproveConflict { evidence, .. } => {
+                            if let Err(error) = self
+                                .services
+                                .record_arbiter_decision(
+                                    spec.task_id.clone(),
+                                    "approve_conflict".into(),
+                                    evidence.clone(),
+                                )
+                                .await
+                            {
+                                tracing::warn!(task_run_id = %run_id, task_id = %spec.task_id, %error,
+                                    "supervisor: record_arbiter_decision for approve_conflict failed — proceeding with transition");
+                            }
+                        }
+                        StageOutcome::LeadReopen {
+                            directive,
+                            verification_command,
+                            exclude_models,
+                            ..
+                        } => {
+                            match self
+                                .services
+                                .start_monitored_reopen(
+                                    spec.task_id.clone(),
+                                    directive.clone(),
+                                    verification_command.clone(),
+                                    exclude_models.clone(),
+                                )
+                                .await
+                            {
+                                Ok(()) => started_monitored_reopen = true,
+                                Err(error) => {
+                                    tracing::warn!(task_run_id = %run_id, task_id = %spec.task_id, %error,
+                                    "supervisor: start_monitored_reopen failed — proceeding with lead_intervention_complete transition")
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                    let reason = match &stage_outcome {
+                        StageOutcome::PlannerClose { reason }
+                        | StageOutcome::LeadApproveConflict { reason, .. }
+                        | StageOutcome::LeadReopen { reason, .. }
+                        | StageOutcome::LeadClose { reason }
+                        | StageOutcome::LeadEscalate { reason } => Some(reason.clone()),
+                        StageOutcome::Escalate { reason } => Some(format!("planner escalated: {reason}")),
+                        StageOutcome::ReviewerRejected { feedback } => Some(feedback.clone()),
+                        StageOutcome::LeadParked { park_dossier_json } => Some(park_dossier_json.clone()),
+                        StageOutcome::LeadSuperseded { reason, replacement_task_ids } => Some(
+                            serde_json::json!({ "reason": reason, "replacement_task_ids": replacement_task_ids }).to_string()
+                        ),
+                        StageOutcome::Failed { reason, .. } => Some(format!("planner session failed: {reason}")),
+                        _ => None,
+                    };
+                    // Metadata work above may await; sample cancellation again
+                    // immediately before the board write.
+                    if self.services.cancel().is_cancelled() {
+                        if let Some(settlement) = pending_settlement.as_mut() {
+                            settlement.status = djinn_core::models::SessionStatus::Interrupted;
+                            settlement.failure_cause =
+                                Some(djinn_core::models::SessionFailureCause::Cancelled);
+                        }
+                    } else {
+                        let transition = self
+                            .services
+                            .transition_task(
+                                spec.task_id.clone(),
+                                action.as_str().to_owned(),
+                                reason,
+                            )
+                            .await;
+                        let confirmed = if transition.is_ok() {
+                            true
+                        } else {
+                            // Exactly one read-back handles both an error and a lost response.
+                            matches!(self.services.load_task(spec.task_id.clone()).await,
+                                Ok(reloaded) if reloaded.status == expected_target)
+                        };
+                        if !confirmed {
+                            if let Some(settlement) = pending_settlement.as_mut() {
+                                settlement.status = djinn_core::models::SessionStatus::Failed;
+                                settlement.failure_cause =
+                                    Some(djinn_core::models::SessionFailureCause::Protocol);
+                            }
+                            stage_outcome = StageOutcome::Failed {
+                                reason: format!(
+                                    "session exit barrier could not confirm {} reached {}",
+                                    action.as_str(),
+                                    expected_target
+                                ),
+                                provider_failure: None,
+                            };
+                        }
+                    }
+                } else if !defer_worker_barrier
+                    && let Some(settlement) = pending_settlement.as_mut()
+                {
+                    // Closed evidence without a durable board handoff cannot
+                    // truthfully claim a Completed terminal settlement.
+                    settlement.status =
+                        settlement_status_after_exit_barrier(barrier_plan, settlement.status);
+                    if settlement.status == djinn_core::models::SessionStatus::Failed
+                        && settlement.failure_cause.is_none()
+                    {
+                        settlement.failure_cause =
+                            Some(djinn_core::models::SessionFailureCause::Unknown);
+                    }
+                }
+
+                // Settlement is persisted exactly once after the barrier resolves.
+                #[allow(clippy::collapsible_if)]
+                if !defer_worker_barrier && let Some(settlement) = pending_settlement.take() {
+                    if let Err(error) = self
+                        .services
+                        .update_session_status_v2(
+                            settlement.session_id.clone(),
+                            settlement.status,
+                            settlement.tokens_in,
+                            settlement.tokens_out,
+                            settlement.cache_read,
+                            settlement.cache_write,
+                            settlement.parked_reason,
+                            settlement.failure_cause,
+                        )
+                        .await
+                    {
+                        tracing::warn!(session_id = %settlement.session_id, %error,
+                            "supervisor: failed to persist terminal stage settlement");
+                    }
+                }
+
+                if self.services.cancel().is_cancelled() {
+                    result = Some(TaskRunOutcome::Interrupted);
+                    break;
+                }
 
                 last_stage_role = Some(role_kind);
                 completed.push(role_kind);
@@ -2244,6 +2614,25 @@ impl TaskRunSupervisor {
                                     ),
                                     body_excerpt: None,
                                 });
+                                if let Some(mut settlement) = pending_settlement.take() {
+                                    settlement.status = djinn_core::models::SessionStatus::Failed;
+                                    settlement.failure_cause = Some(
+                                        djinn_core::models::SessionFailureCause::Infrastructure,
+                                    );
+                                    let _ = self
+                                        .services
+                                        .update_session_status_v2(
+                                            settlement.session_id,
+                                            settlement.status,
+                                            settlement.tokens_in,
+                                            settlement.tokens_out,
+                                            settlement.cache_read,
+                                            settlement.cache_write,
+                                            settlement.parked_reason,
+                                            settlement.failure_cause,
+                                        )
+                                        .await;
+                                }
                                 break;
                             }
                             if self.services.cancel().is_cancelled() {
@@ -2252,21 +2641,57 @@ impl TaskRunSupervisor {
                                     task_id = %spec.task_id,
                                     "supervisor: run cancelled — skipping submit_task_review (task stays in_progress for redispatch)"
                                 );
-                            } else if let Err(e) = self
-                                .services
-                                .transition_task(
-                                    spec.task_id.clone(),
-                                    "submit_task_review".into(),
-                                    None,
-                                )
-                                .await
-                            {
-                                tracing::warn!(
-                                    task_run_id = %run_id,
-                                    task_id = %spec.task_id,
-                                    error = %e,
-                                    "supervisor: post-worker submit_task_review transition skipped"
-                                );
+                                if let Some(settlement) = pending_settlement.as_mut() {
+                                    settlement.status =
+                                        djinn_core::models::SessionStatus::Interrupted;
+                                    settlement.failure_cause =
+                                        Some(djinn_core::models::SessionFailureCause::Cancelled);
+                                }
+                            } else if defer_worker_barrier {
+                                let transition = self
+                                    .services
+                                    .transition_task(
+                                        spec.task_id.clone(),
+                                        "submit_task_review".into(),
+                                        None,
+                                    )
+                                    .await;
+                                let confirmed = transition.is_ok()
+                                    || matches!(
+                                        self.services.load_task(spec.task_id.clone()).await,
+                                        Ok(reloaded) if reloaded.status == "needs_task_review"
+                                    );
+                                if !confirmed {
+                                    if let Some(settlement) = pending_settlement.as_mut() {
+                                        settlement.status =
+                                            djinn_core::models::SessionStatus::Failed;
+                                        settlement.failure_cause =
+                                            Some(djinn_core::models::SessionFailureCause::Protocol);
+                                    }
+                                    result = Some(TaskRunOutcome::Failed {
+                                        stage: "worker".into(),
+                                        reason: "session exit barrier could not confirm submit_task_review reached needs_task_review".into(),
+                                        provider_failure: None,
+                                        error_class: None,
+                                        hint: None,
+                                        body_excerpt: None,
+                                    });
+                                }
+                            }
+                            if let Some(settlement) = pending_settlement.take() {
+                                let _ = self
+                                    .services
+                                    .update_session_status_v2(
+                                        settlement.session_id,
+                                        settlement.status,
+                                        settlement.tokens_in,
+                                        settlement.tokens_out,
+                                        settlement.cache_read,
+                                        settlement.cache_write,
+                                        settlement.parked_reason,
+                                        settlement.failure_cause,
+                                    )
+                                    .await;
                             }
                         }
                     }
@@ -2284,14 +2709,15 @@ impl TaskRunSupervisor {
                                 task_id = %spec.task_id,
                                 "supervisor: run cancelled — skipping task_review_approve (task stays in_task_review for redispatch)"
                             );
-                        } else if let Err(e) = self
-                            .services
-                            .transition_task(
-                                spec.task_id.clone(),
-                                "task_review_approve".into(),
-                                None,
-                            )
-                            .await
+                        } else if !barrier_required
+                            && let Err(e) = self
+                                .services
+                                .transition_task(
+                                    spec.task_id.clone(),
+                                    "task_review_approve".into(),
+                                    None,
+                                )
+                                .await
                         {
                             tracing::warn!(
                                 task_run_id = %run_id,
@@ -2330,7 +2756,8 @@ impl TaskRunSupervisor {
                             // auto-closed here (defense in depth behind the
                             // coordinator dispatch-rule exclusion).
                             let action = planner_terminal_close_action(&task);
-                            if let Some(action) = action
+                            if !barrier_required
+                                && let Some(action) = action
                                 && let Err(e) = self
                                     .services
                                     .transition_task(spec.task_id.clone(), action.into(), None)
@@ -2359,7 +2786,8 @@ impl TaskRunSupervisor {
                             // here — `planner_terminal_close_action` returns
                             // `None` for it (defense in depth).
                             let action = planner_terminal_close_action(&task);
-                            if let Some(action) = action
+                            if !barrier_required
+                                && let Some(action) = action
                                 && let Err(e) = self
                                     .services
                                     .transition_task(
@@ -2433,18 +2861,24 @@ impl TaskRunSupervisor {
                             result = Some(TaskRunOutcome::Escalated { reason });
                             break;
                         }
-                        let outcome = apply_planner_escalate_route(
-                            role_kind,
-                            &task.issue_type,
-                            &spec.task_id,
-                            &run_id,
-                            reason,
-                            self.services.cancel().is_cancelled(),
-                            |task_id, action, reason| async move {
-                                self.services.transition_task(task_id, action, reason).await
-                            },
-                        )
-                        .await;
+                        let outcome = if barrier_required {
+                            TaskRunOutcome::Closed {
+                                reason: format!("planner escalated: {reason}"),
+                            }
+                        } else {
+                            apply_planner_escalate_route(
+                                role_kind,
+                                &task.issue_type,
+                                &spec.task_id,
+                                &run_id,
+                                reason,
+                                self.services.cancel().is_cancelled(),
+                                |task_id, action, reason| async move {
+                                    self.services.transition_task(task_id, action, reason).await
+                                },
+                            )
+                            .await
+                        };
                         result = Some(outcome);
                         break;
                     }
@@ -2476,14 +2910,15 @@ impl TaskRunSupervisor {
                         // transition so the arbitration row carries the
                         // decision payload and an arbiter_decision activity
                         // event is emitted (AC2).
-                        if let Err(e) = self
-                            .services
-                            .record_arbiter_decision(
-                                spec.task_id.clone(),
-                                "approve".into(),
-                                evidence.clone(),
-                            )
-                            .await
+                        if !barrier_required
+                            && let Err(e) = self
+                                .services
+                                .record_arbiter_decision(
+                                    spec.task_id.clone(),
+                                    "approve".into(),
+                                    evidence.clone(),
+                                )
+                                .await
                         {
                             tracing::warn!(
                                 task_run_id = %run_id,
@@ -2492,10 +2927,11 @@ impl TaskRunSupervisor {
                                 "supervisor: record_arbiter_decision failed — proceeding with lead_approve"
                             );
                         }
-                        if let Err(e) = self
-                            .services
-                            .transition_task(spec.task_id.clone(), "lead_approve".into(), None)
-                            .await
+                        if !barrier_required
+                            && let Err(e) = self
+                                .services
+                                .transition_task(spec.task_id.clone(), "lead_approve".into(), None)
+                                .await
                         {
                             tracing::warn!(
                                 task_run_id = %run_id,
@@ -2521,14 +2957,15 @@ impl TaskRunSupervisor {
                         // ── Persist arbiter decision on arbitration row ────
                         // Record the decision and evidence before the board
                         // transition (AC2).
-                        if let Err(e) = self
-                            .services
-                            .record_arbiter_decision(
-                                spec.task_id.clone(),
-                                "approve_conflict".into(),
-                                evidence.clone(),
-                            )
-                            .await
+                        if !barrier_required
+                            && let Err(e) = self
+                                .services
+                                .record_arbiter_decision(
+                                    spec.task_id.clone(),
+                                    "approve_conflict".into(),
+                                    evidence.clone(),
+                                )
+                                .await
                         {
                             tracing::warn!(
                                 task_run_id = %run_id,
@@ -2537,14 +2974,15 @@ impl TaskRunSupervisor {
                                 "supervisor: record_arbiter_decision for approve_conflict failed — proceeding with transition"
                             );
                         }
-                        if let Err(e) = self
-                            .services
-                            .transition_task(
-                                spec.task_id.clone(),
-                                "lead_approve_conflict".into(),
-                                Some(reason.clone()),
-                            )
-                            .await
+                        if !barrier_required
+                            && let Err(e) = self
+                                .services
+                                .transition_task(
+                                    spec.task_id.clone(),
+                                    "lead_approve_conflict".into(),
+                                    Some(reason.clone()),
+                                )
+                                .await
                         {
                             tracing::warn!(
                                 task_run_id = %run_id,
@@ -2568,8 +3006,8 @@ impl TaskRunSupervisor {
                         // start so re-entry cannot inject the directive twice.
                         // The directive is injected into exactly one next
                         // worker prompt (see prompt_context::load_arbiter_directive).
-                        if !self.services.cancel().is_cancelled()
-                            && let Err(e) = self
+                        if !barrier_required && !self.services.cancel().is_cancelled() {
+                            match self
                                 .services
                                 .start_monitored_reopen(
                                     spec.task_id.clone(),
@@ -2578,22 +3016,20 @@ impl TaskRunSupervisor {
                                     exclude_models.clone(),
                                 )
                                 .await
-                        {
-                            tracing::warn!(
-                                task_run_id = %run_id,
-                                task_id = %spec.task_id,
-                                error = %e,
-                                "supervisor: start_monitored_reopen failed — proceeding with lead_intervention_complete transition"
-                            );
-                        } else {
-                            // Mark that this run started a monitored reopen so
-                            // the post-loop completion hook is skipped.  The
-                            // arbitration row must remain unconsumed until the
-                            // monitored worker attempt reaches a terminal
-                            // outcome in a separate task-run.
-                            started_monitored_reopen = true;
+                            {
+                                // Mark that this run started a monitored reopen so
+                                // the post-loop completion hook is skipped.
+                                Ok(()) => started_monitored_reopen = true,
+                                Err(e) => tracing::warn!(
+                                    task_run_id = %run_id,
+                                    task_id = %spec.task_id,
+                                    error = %e,
+                                    "supervisor: start_monitored_reopen failed — proceeding with lead_intervention_complete transition"
+                                ),
+                            }
                         }
-                        if !self.services.cancel().is_cancelled()
+                        if !barrier_required
+                            && !self.services.cancel().is_cancelled()
                             && let Err(e) = self
                                 .services
                                 .transition_task(
@@ -2616,7 +3052,8 @@ impl TaskRunSupervisor {
                         break;
                     }
                     StageOutcome::LeadClose { reason } => {
-                        if !self.services.cancel().is_cancelled()
+                        if !barrier_required
+                            && !self.services.cancel().is_cancelled()
                             && let Err(e) = self
                                 .services
                                 .transition_task(
@@ -2643,7 +3080,8 @@ impl TaskRunSupervisor {
                         // Lead couldn't resolve → return to the board (open) for
                         // re-dispatch / Planner safety net. Distinct from
                         // LeadClose (board re-review vs terminal closure).
-                        if !self.services.cancel().is_cancelled()
+                        if !barrier_required
+                            && !self.services.cancel().is_cancelled()
                             && let Err(e) = self
                                 .services
                                 .transition_task(
@@ -2673,7 +3111,8 @@ impl TaskRunSupervisor {
                         // consumed, creates a HumanReview remediation
                         // hold with the dossier as the hold description,
                         // and parks the source to open.
-                        if !self.services.cancel().is_cancelled()
+                        if !barrier_required
+                            && !self.services.cancel().is_cancelled()
                             && let Err(e) = self
                                 .services
                                 .transition_task(
@@ -2715,7 +3154,8 @@ impl TaskRunSupervisor {
                             "replacement_task_ids": replacement_task_ids,
                         })
                         .to_string();
-                        if !self.services.cancel().is_cancelled()
+                        if !barrier_required
+                            && !self.services.cancel().is_cancelled()
                             && let Err(e) = self
                                 .services
                                 .transition_task(
@@ -2741,14 +3181,15 @@ impl TaskRunSupervisor {
                         // requires_reason, so pass the feedback string. The
                         // failed-run TaskRunOutcome reason includes the same
                         // feedback for caller log parity.
-                        if let Err(e) = self
-                            .services
-                            .transition_task(
-                                spec.task_id.clone(),
-                                "task_review_reject".into(),
-                                Some(feedback.clone()),
-                            )
-                            .await
+                        if !barrier_required
+                            && let Err(e) = self
+                                .services
+                                .transition_task(
+                                    spec.task_id.clone(),
+                                    "task_review_reject".into(),
+                                    Some(feedback.clone()),
+                                )
+                                .await
                         {
                             tracing::warn!(
                                 task_run_id = %run_id,
@@ -2806,21 +3247,23 @@ impl TaskRunSupervisor {
                         // that does happen carries a "planner session failed:"
                         // reason marker so it is distinguishable from a
                         // planner-adjudicated completion.
-                        apply_planner_failed_close(
-                            role_kind,
-                            &task,
-                            &spec.task_id,
-                            &run_id,
-                            &reason,
-                            provider_failure,
-                            self.services.cancel().is_cancelled(),
-                            |task_id, action, close_reason| async move {
-                                self.services
-                                    .transition_task(task_id, action, close_reason)
-                                    .await
-                            },
-                        )
-                        .await;
+                        if !barrier_required {
+                            apply_planner_failed_close(
+                                role_kind,
+                                &task,
+                                &spec.task_id,
+                                &run_id,
+                                &reason,
+                                provider_failure,
+                                self.services.cancel().is_cancelled(),
+                                |task_id, action, close_reason| async move {
+                                    self.services
+                                        .transition_task(task_id, action, close_reason)
+                                        .await
+                                },
+                            )
+                            .await;
+                        }
                         // Arbiter session termination accounting: distinguish
                         // provider/infra failures from sessions that ran and
                         // ended without a valid decision.  Infra failures
@@ -2976,22 +3419,8 @@ impl TaskRunSupervisor {
                                 spec.flow.as_str(),
                                 last_stage_role
                             );
-                            if let Err(e) = self
-                                .services
-                                .transition_task(
-                                    spec.task_id.clone(),
-                                    "close".into(),
-                                    Some(reason.clone()),
-                                )
-                                .await
-                            {
-                                tracing::warn!(
-                                    task_run_id = %run_id,
-                                    task_id = %spec.task_id,
-                                    error = %e,
-                                    "supervisor: spike-completion close transition skipped"
-                                );
-                            }
+                            // ArchitectDone is terminal evidence only; do not
+                            // fabricate a later board handoff.
                             TaskRunOutcome::Closed { reason }
                         }
                         SupervisorFlow::Planning => TaskRunOutcome::Closed {
@@ -3001,30 +3430,15 @@ impl TaskRunSupervisor {
                                 last_stage_role
                             ),
                         },
-                        // Refinement tribunal sessions are simple-lifecycle:
-                        // close the task on success (same pattern as Spike).
+                        // Refinement WorkerDone is terminal evidence only. Its
+                        // barrier plan deliberately requires no board handoff,
+                        // so do not fabricate a later close after settlement.
                         SupervisorFlow::Refinement => {
                             let reason = format!(
                                 "{} flow completed (last stage: {:?})",
                                 spec.flow.as_str(),
                                 last_stage_role
                             );
-                            if let Err(e) = self
-                                .services
-                                .transition_task(
-                                    spec.task_id.clone(),
-                                    "close".into(),
-                                    Some(reason.clone()),
-                                )
-                                .await
-                            {
-                                tracing::warn!(
-                                    task_run_id = %run_id,
-                                    task_id = %spec.task_id,
-                                    error = %e,
-                                    "supervisor: refinement-completion close transition skipped"
-                                );
-                            }
                             TaskRunOutcome::Closed { reason }
                         }
                         // Worker-only flows (NewTask / ReviewResponse /
@@ -3438,11 +3852,14 @@ mod tests {
             role_kind: RoleKind,
             _task_run_id: &str,
             _spec: &TaskRunSpec,
-        ) -> Result<StageOutcome, StageError> {
+        ) -> Result<StageExecutionResult, StageError> {
             self.execute_stage_calls
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             assert_eq!(role_kind, self.expected_role);
-            Ok(self.outcome.clone())
+            Ok(StageExecutionResult {
+                outcome: self.outcome.clone(),
+                settlement: None,
+            })
         }
 
         async fn open_pr(&self, _spec: &TaskRunSpec, _task: &Task) -> TaskRunOutcome {
@@ -3761,6 +4178,219 @@ mod tests {
             execute_stage_calls.load(std::sync::atomic::Ordering::SeqCst),
             1,
             "stage must run when `start` fails only because the task is already in_progress"
+        );
+    }
+
+    #[test]
+    fn stage_outcome_exit_barrier_is_exhaustive() {
+        let mut task = fixture_task("barrier-task", "barrier-project");
+        task.issue_type = "review".into();
+        let terminal = |action, expected_target| SessionExitBarrierPlan::Required {
+            action,
+            expected_target,
+        };
+        let cases = vec![
+            (
+                StageOutcome::WorkerDone,
+                RoleKind::Worker,
+                terminal(
+                    SessionExitBarrierAction::SubmitTaskReview,
+                    "needs_task_review",
+                ),
+            ),
+            (
+                StageOutcome::PlannerExecute,
+                RoleKind::Planner,
+                terminal(SessionExitBarrierAction::Close, "closed"),
+            ),
+            (
+                StageOutcome::PlannerClose {
+                    reason: "close".into(),
+                },
+                RoleKind::Planner,
+                terminal(SessionExitBarrierAction::Close, "closed"),
+            ),
+            (
+                StageOutcome::ReviewerApproved,
+                RoleKind::Reviewer,
+                terminal(SessionExitBarrierAction::TaskReviewApprove, "approved"),
+            ),
+            (
+                StageOutcome::ReviewerRejected {
+                    feedback: "reject".into(),
+                },
+                RoleKind::Reviewer,
+                terminal(SessionExitBarrierAction::TaskReviewReject, "open"),
+            ),
+            (
+                StageOutcome::VerifierPassed,
+                RoleKind::Planner,
+                terminal(SessionExitBarrierAction::Close, "closed"),
+            ),
+            (
+                StageOutcome::VerifierFailed {
+                    reason: "failed".into(),
+                },
+                RoleKind::Verifier,
+                SessionExitBarrierPlan::InterruptedOrFailed,
+            ),
+            (
+                StageOutcome::ArchitectDone,
+                RoleKind::Architect,
+                SessionExitBarrierPlan::TerminalEvidenceOnly,
+            ),
+            (
+                StageOutcome::Escalate {
+                    reason: "escalate".into(),
+                },
+                RoleKind::Planner,
+                terminal(SessionExitBarrierAction::Close, "closed"),
+            ),
+            (
+                StageOutcome::LeadApproved {
+                    evidence: "{}".into(),
+                },
+                RoleKind::Lead,
+                terminal(SessionExitBarrierAction::LeadApprove, "approved"),
+            ),
+            (
+                StageOutcome::LeadApproveConflict {
+                    reason: "conflict".into(),
+                    evidence: "{}".into(),
+                },
+                RoleKind::Lead,
+                terminal(SessionExitBarrierAction::LeadApproveConflict, "open"),
+            ),
+            (
+                StageOutcome::LeadReopen {
+                    reason: "reopen".into(),
+                    directive: "do it".into(),
+                    verification_command: "true".into(),
+                    exclude_models: vec![],
+                },
+                RoleKind::Lead,
+                terminal(SessionExitBarrierAction::LeadInterventionComplete, "open"),
+            ),
+            (
+                StageOutcome::LeadClose {
+                    reason: "close".into(),
+                },
+                RoleKind::Lead,
+                terminal(SessionExitBarrierAction::ForceClose, "closed"),
+            ),
+            (
+                StageOutcome::LeadEscalate {
+                    reason: "escalate".into(),
+                },
+                RoleKind::Lead,
+                terminal(SessionExitBarrierAction::LeadInterventionComplete, "open"),
+            ),
+            (
+                StageOutcome::Failed {
+                    reason: "failed".into(),
+                    provider_failure: None,
+                },
+                RoleKind::Worker,
+                SessionExitBarrierPlan::InterruptedOrFailed,
+            ),
+            (
+                StageOutcome::LoopGuardTripped {
+                    kind: LoopGuardKind::ConsecutiveFailures,
+                    offending_signature: "sig".into(),
+                    threshold: 3,
+                    observed: 3,
+                    turn_span: (1, 3),
+                    session_id: "session".into(),
+                },
+                RoleKind::Worker,
+                SessionExitBarrierPlan::InterruptedOrFailed,
+            ),
+            (
+                StageOutcome::Parked {
+                    reason: ParkReason::Budget,
+                    summary: None,
+                    wind_down_ignored: false,
+                    session_id: "session".into(),
+                    tokens_in: 0,
+                    tokens_out: 0,
+                },
+                RoleKind::Worker,
+                SessionExitBarrierPlan::InterruptedOrFailed,
+            ),
+            (
+                StageOutcome::LeadParked {
+                    park_dossier_json: "{}".into(),
+                },
+                RoleKind::Lead,
+                terminal(SessionExitBarrierAction::ArbiterPark, "open"),
+            ),
+            (
+                StageOutcome::LeadSuperseded {
+                    reason: "superseded".into(),
+                    replacement_task_ids: vec!["replacement".into()],
+                },
+                RoleKind::Lead,
+                terminal(SessionExitBarrierAction::ArbiterSupersede, "closed"),
+            ),
+        ];
+        for (outcome, role, expected) in cases {
+            assert_eq!(
+                session_exit_barrier_plan(&outcome, role, &task),
+                expected,
+                "{outcome:?}"
+            );
+        }
+
+        // Guarded variants never fabricate a handoff or persist Completed.
+        for plan in [
+            session_exit_barrier_plan(&StageOutcome::ArchitectDone, RoleKind::Architect, &task),
+            session_exit_barrier_plan(&StageOutcome::WorkerDone, RoleKind::Architect, &task),
+        ] {
+            assert_eq!(plan, SessionExitBarrierPlan::TerminalEvidenceOnly);
+            assert_eq!(
+                settlement_status_after_exit_barrier(
+                    plan,
+                    djinn_core::models::SessionStatus::Completed,
+                ),
+                djinn_core::models::SessionStatus::Failed
+            );
+        }
+        task.issue_type = "task".into();
+        let guarded_planner =
+            session_exit_barrier_plan(&StageOutcome::PlannerExecute, RoleKind::Planner, &task);
+        assert_eq!(
+            guarded_planner,
+            SessionExitBarrierPlan::TerminalEvidenceOnly
+        );
+        assert_eq!(
+            settlement_status_after_exit_barrier(
+                guarded_planner,
+                djinn_core::models::SessionStatus::Completed,
+            ),
+            djinn_core::models::SessionStatus::Failed
+        );
+        task.issue_type = "review".into();
+        assert_eq!(
+            session_exit_barrier_plan(
+                &StageOutcome::Failed {
+                    reason: "failed".into(),
+                    provider_failure: None
+                },
+                RoleKind::Planner,
+                &task
+            ),
+            terminal(SessionExitBarrierAction::Close, "closed")
+        );
+        task.labels = format!("[\"{HUMAN_REVIEW_HOLD_LABEL}\"]");
+        assert_eq!(
+            session_exit_barrier_plan(
+                &StageOutcome::PlannerClose {
+                    reason: "close".into()
+                },
+                RoleKind::Planner,
+                &task
+            ),
+            SessionExitBarrierPlan::TerminalEvidenceOnly
         );
     }
 
@@ -7127,9 +7757,12 @@ mod tests {
             role_kind: RoleKind,
             _task_run_id: &str,
             _spec: &TaskRunSpec,
-        ) -> Result<StageOutcome, StageError> {
+        ) -> Result<StageExecutionResult, StageError> {
             assert_eq!(role_kind, RoleKind::Worker);
-            Ok(StageOutcome::WorkerDone)
+            Ok(StageExecutionResult {
+                outcome: StageOutcome::WorkerDone,
+                settlement: None,
+            })
         }
 
         async fn open_pr(&self, _spec: &TaskRunSpec, _task: &Task) -> TaskRunOutcome {
@@ -7366,12 +7999,15 @@ mod tests {
             role_kind: RoleKind,
             _task_run_id: &str,
             _spec: &TaskRunSpec,
-        ) -> Result<StageOutcome, StageError> {
+        ) -> Result<StageExecutionResult, StageError> {
             assert_eq!(
                 role_kind, self.expected_role,
                 "execute_stage called with unexpected role"
             );
-            Ok(self.stage_outcome.clone())
+            Ok(StageExecutionResult {
+                outcome: self.stage_outcome.clone(),
+                settlement: None,
+            })
         }
 
         async fn open_pr(&self, _spec: &TaskRunSpec, _task: &Task) -> TaskRunOutcome {
@@ -8800,9 +9436,12 @@ mod tests {
             _role_kind: RoleKind,
             _task_run_id: &str,
             _spec: &TaskRunSpec,
-        ) -> Result<StageOutcome, StageError> {
+        ) -> Result<StageExecutionResult, StageError> {
             (self.write_fn)(workspace.path());
-            Ok(StageOutcome::WorkerDone)
+            Ok(StageExecutionResult {
+                outcome: StageOutcome::WorkerDone,
+                settlement: None,
+            })
         }
 
         async fn open_pr(&self, _spec: &TaskRunSpec, _task: &Task) -> TaskRunOutcome {
@@ -9256,10 +9895,13 @@ mod tests {
             role_kind: RoleKind,
             _task_run_id: &str,
             _spec: &TaskRunSpec,
-        ) -> Result<StageOutcome, StageError> {
+        ) -> Result<StageExecutionResult, StageError> {
             assert_eq!(role_kind, RoleKind::Worker);
             (self.write_fn)(workspace.path());
-            Ok(StageOutcome::WorkerDone)
+            Ok(StageExecutionResult {
+                outcome: StageOutcome::WorkerDone,
+                settlement: None,
+            })
         }
 
         async fn open_pr(&self, _spec: &TaskRunSpec, _task: &Task) -> TaskRunOutcome {

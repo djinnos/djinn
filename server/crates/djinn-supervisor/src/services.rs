@@ -15,7 +15,7 @@ use djinn_workspace::Workspace;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
-use crate::{RoleKind, StageError, StageOutcome, TaskRunOutcome, TaskRunSpec};
+use crate::{RoleKind, StageError, StageExecutionResult, TaskRunOutcome, TaskRunSpec};
 
 pub mod invocation_admission;
 pub mod lease;
@@ -138,7 +138,7 @@ pub trait SupervisorServices: Send + Sync + 'static {
         role_kind: RoleKind,
         task_run_id: &str,
         spec: &TaskRunSpec,
-    ) -> Result<StageOutcome, StageError>;
+    ) -> Result<StageExecutionResult, StageError>;
 
     /// Open (or adopt) a GitHub PR for the completed task-run.  Called at
     /// most once per run, only for `NewTask` / `ReviewResponse` /
