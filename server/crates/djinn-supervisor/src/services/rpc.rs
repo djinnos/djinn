@@ -56,7 +56,8 @@ use super::wire::{
     ServiceRpcRequest, ServiceRpcResponse,
 };
 use crate::{
-    BranchPublicationResult, RoleKind, StageError, StageOutcome, TaskRunOutcome, TaskRunSpec,
+    BranchPublicationResult, RoleKind, StageError, StageExecutionResult, TaskRunOutcome,
+    TaskRunSpec,
 };
 
 /// Failure mode for [`RpcServices::connect_tcp`].
@@ -534,7 +535,7 @@ impl SupervisorServices for RpcServices {
         role_kind: RoleKind,
         task_run_id: &str,
         spec: &TaskRunSpec,
-    ) -> Result<StageOutcome, StageError> {
+    ) -> Result<StageExecutionResult, StageError> {
         // Pack the workspace as a WorkspaceRef so it can cross the wire.
         // `owned_by_runtime` is always `true` on the worker path: the host
         // materialised the bind mount and the worker only attached to it.
@@ -543,7 +544,7 @@ impl SupervisorServices for RpcServices {
             branch: workspace.branch().to_string(),
             owned_by_runtime: true,
         };
-        let req = ServiceRpcRequest::ExecuteStage {
+        let req = ServiceRpcRequest::ExecuteStageV2 {
             task: task.clone(),
             workspace: workspace_ref,
             role_kind,
@@ -551,7 +552,7 @@ impl SupervisorServices for RpcServices {
             spec: spec.clone(),
         };
         match self.roundtrip(req).await {
-            Ok(ServiceRpcResponse::ExecuteStage(result)) => result,
+            Ok(ServiceRpcResponse::ExecuteStageV2(result)) => result,
             Ok(ServiceRpcResponse::Err(e)) => Err(StageError::Setup(format!("rpc transport: {e}"))),
             Ok(other) => Err(StageError::Setup(format!(
                 "rpc protocol: unexpected reply {other:?}"
@@ -1298,7 +1299,7 @@ impl SupervisorServices for UnimplementedRpcServices {
         _role_kind: RoleKind,
         _task_run_id: &str,
         _spec: &TaskRunSpec,
-    ) -> Result<StageOutcome, StageError> {
+    ) -> Result<StageExecutionResult, StageError> {
         unimplemented!(
             "UnimplementedRpcServices::execute_stage — construct RpcServices for real RPC"
         )
