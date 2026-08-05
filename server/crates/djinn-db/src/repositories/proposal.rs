@@ -8214,7 +8214,7 @@ mod tests {
             .set_structured_needs_evidence_spike(
                 &proposal.id,
                 &spike_id,
-                &sample_needs_evidence_claim(1, 1),
+                &sample_needs_evidence_claim(1, 1, &spike_id),
             )
             .await
             .unwrap_err();
@@ -8243,7 +8243,7 @@ mod tests {
         let project = insert_project(&db, "svc-legacy-backfill").await;
         let epic = insert_epic(&db, &project, "lb01").await;
         let spike_task_id = insert_task(&db, &project, &epic, "lb-spike").await;
-        let claim = sample_needs_evidence_claim(1, 1);
+        let claim = sample_needs_evidence_claim(1, 1, &spike_task_id);
         let claim_json = serde_json::to_string(&claim).unwrap();
         sqlx::query(
             "UPDATE proposals SET linked_spike_task_id=$1,needs_evidence_claim=$2 WHERE id=$3",
@@ -8286,13 +8286,16 @@ mod tests {
             .create(create_input("Missing structured spike"))
             .await
             .unwrap();
+        let project = insert_project(&db, "svc-missing-structured").await;
+        let epic = insert_epic(&db, &project, "sm01").await;
+        let creator_task_id = insert_task(&db, &project, &epic, "sm-creator").await;
         let missing_task_id = uuid::Uuid::now_v7().to_string();
 
         let error = repo
             .set_structured_needs_evidence_spike(
                 &proposal.id,
                 &missing_task_id,
-                &sample_needs_evidence_claim(1, 1),
+                &sample_needs_evidence_claim(1, 1, &creator_task_id),
             )
             .await
             .unwrap_err();
@@ -8330,7 +8333,7 @@ mod tests {
         let epic = insert_epic(&db, &project, "ts01").await;
         let winning_task_id = insert_task(&db, &project, &epic, "ts-winner").await;
         let losing_task_id = insert_task(&db, &project, &epic, "ts-loser").await;
-        let winning_claim = sample_needs_evidence_claim(1, 1);
+        let winning_claim = sample_needs_evidence_claim(1, 1, &winning_task_id);
         repo.set_structured_needs_evidence_spike(&proposal.id, &winning_task_id, &winning_claim)
             .await
             .unwrap();
@@ -8361,7 +8364,7 @@ mod tests {
             .try_set_structured_needs_evidence_spike(
                 &proposal.id,
                 &losing_task_id,
-                &sample_needs_evidence_claim(2, 2),
+                &sample_needs_evidence_claim(2, 2, &losing_task_id),
             )
             .await
             .unwrap();
@@ -8418,7 +8421,7 @@ mod tests {
         let epic = insert_epic(&db, &project, "ac01").await;
         let linked_task_id = insert_task(&db, &project, &epic, "ac-linked").await;
         let other_task_id = insert_task(&db, &project, &epic, "ac-other").await;
-        let claim = sample_needs_evidence_claim(1, 1);
+        let claim = sample_needs_evidence_claim(1, 1, &linked_task_id);
         repo.set_structured_needs_evidence_spike(&proposal.id, &linked_task_id, &claim)
             .await
             .unwrap();
@@ -9461,7 +9464,11 @@ mod tests {
         );
     }
 
-    fn sample_needs_evidence_claim(round: i32, against_revision_seq: i32) -> NeedsEvidenceClaim {
+    fn sample_needs_evidence_claim(
+        round: i32,
+        against_revision_seq: i32,
+        creator_task_id: &str,
+    ) -> NeedsEvidenceClaim {
         NeedsEvidenceClaim {
             question: "Can the linked spike answer the claim?".to_owned(),
             target_subsystem: "proposal repository".to_owned(),
@@ -9470,7 +9477,7 @@ mod tests {
             expected_findings: "structured evidence_findings".to_owned(),
             round,
             against_revision_seq,
-            created_by_task_id: uuid::Uuid::now_v7().to_string(),
+            created_by_task_id: creator_task_id.to_owned(),
         }
     }
 
@@ -9512,7 +9519,7 @@ mod tests {
         let proj = insert_project(&db, "svc-lookup-valid").await;
         let epic = insert_epic(&db, &proj, "lv01").await;
         let spike_task_id = insert_task(&db, &proj, &epic, "lv-task").await;
-        let claim = sample_needs_evidence_claim(2, 3);
+        let claim = sample_needs_evidence_claim(2, 3, &spike_task_id);
         repo.set_structured_needs_evidence_spike(&p.id, &spike_task_id, &claim)
             .await
             .unwrap();
@@ -9559,7 +9566,7 @@ mod tests {
         let proj = insert_project(&db, "svc-lookup-missing").await;
         let epic = insert_epic(&db, &proj, "lm01").await;
         let spike_task_id = insert_task(&db, &proj, &epic, "lm-task").await;
-        let claim = sample_needs_evidence_claim(2, 3);
+        let claim = sample_needs_evidence_claim(2, 3, &spike_task_id);
         repo.set_structured_needs_evidence_spike(&p.id, &spike_task_id, &claim)
             .await
             .unwrap();
@@ -9580,7 +9587,7 @@ mod tests {
         let proj = insert_project(&db, "svc-lookup-malformed").await;
         let epic = insert_epic(&db, &proj, "mf01").await;
         let spike_task_id = insert_task(&db, &proj, &epic, "mf-task").await;
-        let claim = sample_needs_evidence_claim(2, 3);
+        let claim = sample_needs_evidence_claim(2, 3, &spike_task_id);
         repo.set_structured_needs_evidence_spike(&p.id, &spike_task_id, &claim)
             .await
             .unwrap();
@@ -9621,7 +9628,7 @@ mod tests {
         let proj = insert_project(&db, "svc-lookup-nometa").await;
         let epic = insert_epic(&db, &proj, "nm01").await;
         let spike_task_id = insert_task(&db, &proj, &epic, "nm-task").await;
-        let claim = sample_needs_evidence_claim(2, 3);
+        let claim = sample_needs_evidence_claim(2, 3, &spike_task_id);
         repo.set_structured_needs_evidence_spike(&p.id, &spike_task_id, &claim)
             .await
             .unwrap();
@@ -9655,7 +9662,7 @@ mod tests {
         let epic = insert_epic(&db, &proj, "ws01").await;
         let linked_spike_id = insert_task(&db, &proj, &epic, "ws-task").await;
         let other_spike_id = uuid::Uuid::now_v7().to_string();
-        let claim = sample_needs_evidence_claim(2, 3);
+        let claim = sample_needs_evidence_claim(2, 3, &linked_spike_id);
         repo.set_structured_needs_evidence_spike(&p.id, &linked_spike_id, &claim)
             .await
             .unwrap();
@@ -9679,7 +9686,7 @@ mod tests {
         let proj = insert_project(&db, "svc-lookup-wround").await;
         let epic = insert_epic(&db, &proj, "wr01").await;
         let spike_task_id = insert_task(&db, &proj, &epic, "wr-task").await;
-        let claim = sample_needs_evidence_claim(2, 3);
+        let claim = sample_needs_evidence_claim(2, 3, &spike_task_id);
         repo.set_structured_needs_evidence_spike(&p.id, &spike_task_id, &claim)
             .await
             .unwrap();
@@ -9720,7 +9727,7 @@ mod tests {
         let proj = insert_project(&db, "svc-lookup-wrev").await;
         let epic = insert_epic(&db, &proj, "wv01").await;
         let spike_task_id = insert_task(&db, &proj, &epic, "wv-task").await;
-        let claim = sample_needs_evidence_claim(2, 3);
+        let claim = sample_needs_evidence_claim(2, 3, &spike_task_id);
         repo.set_structured_needs_evidence_spike(&p.id, &spike_task_id, &claim)
             .await
             .unwrap();
@@ -9775,8 +9782,8 @@ mod tests {
         let proj = insert_project(&db, "svc-lookup-wlink").await;
         let epic = insert_epic(&db, &proj, "wl01").await;
         let linked_spike_id = insert_task(&db, &proj, &epic, "wl-task").await;
-        let requested_spike_id = uuid::Uuid::now_v7().to_string();
-        let claim = sample_needs_evidence_claim(2, 3);
+        let requested_spike_id = insert_task(&db, &proj, &epic, "wl-requested").await;
+        let claim = sample_needs_evidence_claim(2, 3, &linked_spike_id);
         repo.set_structured_needs_evidence_spike(&p.id, &linked_spike_id, &claim)
             .await
             .unwrap();
@@ -9826,7 +9833,7 @@ mod tests {
         repo.set_structured_needs_evidence_spike(
             &open.id,
             &open_task,
-            &sample_needs_evidence_claim(1, 1),
+            &sample_needs_evidence_claim(1, 1, &open_task),
         )
         .await
         .unwrap();
@@ -9840,7 +9847,7 @@ mod tests {
         repo.set_structured_needs_evidence_spike(
             &running.id,
             &running_task,
-            &sample_needs_evidence_claim(1, 1),
+            &sample_needs_evidence_claim(1, 1, &running_task),
         )
         .await
         .unwrap();
@@ -9853,7 +9860,7 @@ mod tests {
         repo.set_structured_needs_evidence_spike(
             &completed.id,
             &completed_task,
-            &sample_needs_evidence_claim(1, 1),
+            &sample_needs_evidence_claim(1, 1, &completed_task),
         )
         .await
         .unwrap();
@@ -9938,7 +9945,7 @@ mod tests {
             repo.set_structured_needs_evidence_spike(
                 &proposal.id,
                 &task_id,
-                &sample_needs_evidence_claim(1, 1),
+                &sample_needs_evidence_claim(1, 1, &task_id),
             )
             .await
             .unwrap();
@@ -10009,7 +10016,7 @@ mod tests {
         let proj = insert_project(db, &format!("svc-terminal-{}", uuid::Uuid::now_v7())).await;
         let epic = insert_epic(db, &proj, "te01").await;
         let spike_task_id = insert_task(db, &proj, &epic, "te-task").await;
-        let claim = sample_needs_evidence_claim(2, 3);
+        let claim = sample_needs_evidence_claim(2, 3, &spike_task_id);
         repo.set_structured_needs_evidence_spike(&p.id, &spike_task_id, &claim)
             .await
             .unwrap();
