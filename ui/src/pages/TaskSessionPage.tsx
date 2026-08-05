@@ -5,16 +5,15 @@
  * Right panel: unified chat thread (ADR-007)
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useSelectedProject } from "@/stores/useProjectStore";
 import { useTaskStore } from "@/stores/useTaskStore";
 import { useSessionMessages } from "@/hooks/useSessionMessages";
-import { SessionThread } from "@/components/SessionThread";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
+import { SessionLedger } from "@/components/session/SessionLedger";
+import { buildLedger } from "@/components/session/buildLedger";
 import { cn } from "@/lib/utils";
-import type { AcceptanceCriterion, Task } from "@/api/types";
+import type { AcceptanceCriterion } from "@/api/types";
 import {
   AlertDiamondIcon,
   ArrowLeft02Icon,
@@ -86,13 +85,6 @@ function formatTokens(n: number): string {
   return String(n);
 }
 
-function SectionHeader({ children }: { children: React.ReactNode }) {
-  return (
-    <h3 className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
-      {children}
-    </h3>
-  );
-}
 
 // ── Token totals derived from sessions ──────────────────────────────────────
 
@@ -129,51 +121,6 @@ function TaskSidebarSkeleton() {
           <TextSkeleton lines={4} />
         </div>
       </div>
-    </div>
-  );
-}
-
-// ── Left panel ───────────────────────────────────────────────────────────────
-
-function TaskSidebar({ task }: { task: Task }) {
-  const criteria = (task.acceptance_criteria ?? []).map(parseCriterion);
-  return (
-    <div className="flex w-80 shrink-0 flex-col gap-4 overflow-y-auto border-r border-border p-4">
-      {/* Acceptance Criteria */}
-      {criteria.length > 0 && (
-        <div className="rounded-lg bg-card p-4 ring-1 ring-foreground/10">
-          <SectionHeader>Acceptance Criteria</SectionHeader>
-          <ul className="mt-3 space-y-2">
-            {criteria.map((item: { criterion: string; met: boolean }, idx: number) => (
-              <li key={idx} className="flex items-start gap-2 text-xs">
-                <span
-                  className={cn(
-                    "mt-0.5 flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-sm border text-[9px]",
-                    item.met
-                      ? "border-emerald-500/50 bg-emerald-500/20 text-emerald-400"
-                      : "border-border"
-                  )}
-                >
-                  {item.met ? "✓" : ""}
-                </span>
-                <span className={item.met ? "text-muted-foreground line-through" : ""}>
-                  {item.criterion}
-                </span>
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
-
-      {/* Description */}
-      {task.description && (
-        <div className="rounded-lg bg-card p-4 ring-1 ring-foreground/10">
-          <SectionHeader>Description</SectionHeader>
-          <div className="prose prose-sm max-w-none pt-3 text-xs dark:prose-invert">
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>{task.description}</ReactMarkdown>
-          </div>
-        </div>
-      )}
     </div>
   );
 }
@@ -220,6 +167,39 @@ export function TaskSessionPage() {
   // Determine active agent type for streaming display
   const activeSession = sessions.find(
     (s) => s.status === "running" || s.status === "active"
+  );
+
+  const ledger = useMemo(
+    () =>
+      buildLedger({
+        timeline,
+        sessions,
+        description: task?.description ?? undefined,
+        criteria: (task?.acceptance_criteria ?? []).map(parseCriterion),
+        filedBy: task?.created_by_user_id ?? undefined,
+        filedAt: task?.created_at,
+      }),
+    [timeline, sessions, task]
+  );
+
+  // The strand's live tail comes from the stream, not from persisted messages.
+  const live = useMemo(() => {
+    if (!ledger.live) return null;
+    const thinking = activeSession ? streamingThinking.get(activeSession.id) : undefined;
+    const text = activeSession ? streamingText.get(activeSession.id) : undefined;
+    const tail = (thinking ?? text ?? "").split("\n").find((l) => l.trim());
+    return {
+      ...ledger.live,
+      nowLabel: tail ? tail.replace(/\*\*/g, "").slice(0, 120) : "working",
+    };
+  }, [ledger.live, activeSession, streamingThinking, streamingText]);
+
+  const blockers = useMemo(
+    () =>
+      (task?.unresolved_blocker_count ?? 0) > 0
+        ? [`${task?.unresolved_blocker_count} unresolved`]
+        : [],
+    [task?.unresolved_blocker_count]
   );
 
   // Loading / skeleton state
@@ -295,19 +275,20 @@ export function TaskSessionPage() {
         className="shrink-0 border-b border-border px-4 py-2 mb-0"
       />
 
-      {/* Content: sidebar + thread */}
+      {/* Content: the ledger owns the rail and the thread */}
       <div className="flex min-h-0 flex-1">
-        <TaskSidebar task={task} />
-        <div className="flex min-w-0 flex-1 flex-col">
-          <SessionThread
-            timeline={timeline}
-            streamingText={streamingText}
-            streamingThinking={streamingThinking}
-            loading={loading}
-            error={error}
-            activeAgentType={activeSession?.agentType}
-          />
-        </div>
+        <SessionLedger
+          showHeader={false}
+          taskShortId={task.short_id}
+          taskTitle={task.title}
+          statusLabel={STATUS_LABELS[task.status] ?? task.status}
+          criteria={ledger.criteria}
+          agents={ledger.agents}
+          blockers={blockers}
+          entries={ledger.entries}
+          live={live}
+          emptyMessage={error ?? "No session activity yet."}
+        />
       </div>
     </div>
   );
