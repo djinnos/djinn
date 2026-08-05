@@ -126,6 +126,20 @@ const ALLOWED_KEYS: &[&str] = &[
     "MAKEFLAGS",
     "NEXTEST_TEST_THREADS",
     "RAYON_NUM_THREADS",
+    // ── Pod-local backing services ──────────────────────────────────────────
+    // The task-run Pod injects each declared service sidecar under the names in
+    // its preset's `conn_env_var` (`preset-postgres-18` exports both of these).
+    // These name the **project's own** database — the in-Pod `svc-postgres`
+    // sidecar on loopback — not the platform control plane, which is
+    // `DJINN_DATABASE_URL` and is denied by name in [`DENIED_KEYS`].
+    //
+    // Admitting them by name is necessary but not sufficient: the sidecar DSN
+    // embeds `postgres:postgres` userinfo, so the shape rule in
+    // [`is_allowed_environment_entry`] would refuse it. That rule exempts
+    // loopback authorities — see [`is_pod_local_database_uri`] — which is what
+    // makes these usable while keeping every off-Pod DSN refused.
+    "DATABASE_URL",
+    "TEST_POSTGRES_URL",
 ];
 
 /// Key prefixes the broker forwards wholesale.
@@ -237,6 +251,60 @@ fn is_credentialed_database_uri(value: &str) -> bool {
     }
 }
 
+/// Loopback authorities a pod-local backing service can legitimately name.
+///
+/// Deliberately exact literals rather than a range. A task-run Pod's injected
+/// sidecar is always reached on loopback in the Pod's own network namespace, so
+/// nothing legitimate needs `127.0.0.2` or a hostname that merely resolves to
+/// loopback — and refusing those keeps the exemption from widening by accident.
+const POD_LOCAL_HOSTS: &[&str] = &["127.0.0.1", "localhost", "::1", "[::1]"];
+
+/// Does `value` name a database on this Pod's own loopback interface?
+///
+/// This is the exemption that lets [`is_allowed_environment_entry`]'s shape rule
+/// refuse credentialed DSNs in general while still admitting the backing
+/// services the task-run Pod injects for the project under test.
+///
+/// The distinction is not cosmetic. The leak the shape rule was written for was
+/// a **platform** DSN — `djinn-postgres.djinn.svc.cluster.local`, a different
+/// server holding `tasks`, `sessions` and `credentials`. A loopback authority
+/// cannot name that host, or any host outside this Pod's network namespace, so
+/// admitting it forfeits nothing the rule was protecting. What it buys is the
+/// project's own database: without it, `sqlx` compile-time macro expansion and
+/// every database-backed test in a task-run Pod fail with `Connection refused`,
+/// because cargo's `[env]` default fills the gap with an address nothing serves.
+fn is_pod_local_database_uri(value: &str) -> bool {
+    let Some(rest) = CREDENTIALED_URI_SCHEMES
+        .iter()
+        .find_map(|scheme| value.strip_prefix(scheme))
+    else {
+        return false;
+    };
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority = &rest[..authority_end];
+    // Drop userinfo; what remains is `host` or `host:port`.
+    let host_port = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host);
+    // A `:` is only a port separator when it cannot belong to an IPv6 literal.
+    let host = if let Some(after_bracket) = host_port.strip_prefix('[') {
+        // Bracketed literal: the host runs through the closing bracket.
+        match after_bracket.find(']') {
+            Some(end) => &host_port[..end + 2],
+            None => host_port,
+        }
+    } else if host_port.matches(':').count() == 1 {
+        host_port
+            .split_once(':')
+            .map_or(host_port, |(head, _)| head)
+    } else {
+        // No colon (bare host) or several (an unbracketed IPv6 literal, which
+        // cannot carry a port at all).
+        host_port
+    };
+    POD_LOCAL_HOSTS.contains(&host)
+}
+
 /// Is `key` forwardable to a launched child?
 ///
 /// This is the single predicate behind both ends of the hop: the worker filters
@@ -277,12 +345,23 @@ pub fn is_allowed_environment_key(key: &str) -> bool {
 /// DDL-capable platform DSN reaching `bash -lc`, and the next one will arrive
 /// under a name nobody thought to deny. See [`is_credentialed_database_uri`].
 ///
+/// The one exception is a DSN whose authority is loopback — the task-run Pod's
+/// own injected service sidecars. Those name a server that exists only inside
+/// this Pod, so they are outside what the rule protects, and refusing them broke
+/// every database-backed test and every `sqlx` macro expansion in a task-run
+/// Pod. See [`is_pod_local_database_uri`].
+///
+/// Order matters: the loopback exemption is a carve-out of the *shape* rule
+/// only. [`DENIED_KEYS`] is still consulted inside
+/// [`is_allowed_environment_key`], so a denied name stays denied even if some
+/// future value happens to be loopback.
+///
 /// Every other key is judged by name, as before.
 pub fn is_allowed_environment_entry(key: &str, value: &str) -> bool {
     if key == GIT_TRUST_ANCHOR_KEY {
         return crate::git_trust::is_anchor_value(value);
     }
-    if is_credentialed_database_uri(value) {
+    if is_credentialed_database_uri(value) && !is_pod_local_database_uri(value) {
         return false;
     }
     is_allowed_environment_key(key)
@@ -443,9 +522,12 @@ mod tests {
     /// added later under a name nobody thought to deny is refused by shape.
     #[test]
     fn a_credentialed_database_uri_is_refused_whatever_its_key_is() {
+        // Every case here is deliberately **off-Pod**. A loopback authority is
+        // exempt by design — see
+        // `a_pod_local_sidecar_dsn_is_admitted_but_an_off_pod_one_is_not`.
         for value in [
             "postgres://djinn:hunter2@djinn-postgres.djinn.svc.cluster.local:5432/djinn",
-            "postgresql://djinn:hunter2@127.0.0.1:5432/djinn?sslmode=require",
+            "postgresql://djinn:hunter2@db.internal:5432/djinn?sslmode=require",
             "mysql://root:root@db:3306/app",
             "redis://default:secret@cache:6379",
             "mongodb+srv://user:pw@cluster0.example.net/db",
@@ -457,6 +539,62 @@ mod tests {
             assert!(
                 !is_allowed_environment_entry("RUST_LOG", value),
                 "the shape rule is key-independent: {value}"
+            );
+        }
+    }
+
+    /// The task-run Pod injects its declared service sidecars on loopback under
+    /// `DATABASE_URL`/`TEST_POSTGRES_URL`. Refusing those is what broke `sqlx`
+    /// compile-time macro expansion and every database-backed test inside a
+    /// task-run Pod: with the key absent, cargo's `[env]` default filled the gap
+    /// with an address nothing serves, so the whole workspace failed to compile.
+    ///
+    /// The exemption is scoped to the authority, not to the key, and the
+    /// platform DSN must stay refused by both name and shape.
+    #[test]
+    fn a_pod_local_sidecar_dsn_is_admitted_but_an_off_pod_one_is_not() {
+        for value in [
+            "postgres://postgres:postgres@127.0.0.1:5432/app_test?sslmode=disable",
+            "postgres://postgres:postgres@localhost:5432/app_test",
+            "postgres://postgres:postgres@[::1]:5432/app_test",
+            "redis://default:secret@127.0.0.1:6379",
+        ] {
+            assert!(
+                is_pod_local_database_uri(value),
+                "a loopback authority is Pod-local: {value}"
+            );
+            assert!(
+                is_allowed_environment_entry("DATABASE_URL", value),
+                "the injected sidecar DSN must reach the child: {value}"
+            );
+            assert!(
+                is_allowed_environment_entry("TEST_POSTGRES_URL", value),
+                "both names in the preset's conn_env_var must reach the child: {value}"
+            );
+        }
+
+        // A loopback value does not re-open a denied name, and a hostname that
+        // merely looks local is still off-Pod.
+        assert!(
+            !is_allowed_environment_entry(
+                "DJINN_DATABASE_URL",
+                "postgres://postgres:postgres@127.0.0.1:5432/app_test"
+            ),
+            "DENIED_KEYS outranks the loopback exemption"
+        );
+        for value in [
+            "postgres://djinn:hunter2@djinn-postgres.djinn.svc.cluster.local:5432/djinn",
+            "postgres://djinn:hunter2@127.0.0.1.example.com:5432/djinn",
+            "postgres://djinn:hunter2@localhost.evil.net:5432/djinn",
+            "postgres://djinn:hunter2@127.0.0.2:5432/djinn",
+        ] {
+            assert!(
+                !is_pod_local_database_uri(value),
+                "only exact loopback literals are Pod-local: {value}"
+            );
+            assert!(
+                !is_allowed_environment_entry("DATABASE_URL", value),
+                "an off-Pod DSN stays refused even under an admitted key: {value}"
             );
         }
     }
