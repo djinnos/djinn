@@ -157,7 +157,7 @@ async fn watch_after_fence_binding<F>(
     runtime: KubernetesRuntime,
     job_name: &str,
     mutate: F,
-) -> Result<String, tokio::time::error::Elapsed>
+) -> Result<TerminalRuntimeObservation, tokio::time::error::Elapsed>
 where
     F: FnOnce(&Arc<FakeCluster>),
 {
@@ -245,7 +245,7 @@ async fn a_force_deleted_worker_pod_terminalises_the_run_and_reaps_its_job() {
     .expect("a force-deleted worker Pod under a live Job must resolve the infra-death watch");
 
     assert!(
-        reason.contains(&destroyed_uid) && reason.contains(&job_name),
+        reason.diagnostic.contains(&destroyed_uid) && reason.diagnostic.contains(&job_name),
         "the death reason must name the destroyed Pod and its Job; got {reason}"
     );
     assert!(
@@ -292,11 +292,13 @@ async fn a_replacement_pod_with_a_different_uid_is_observed_but_never_adopted() 
         "fixture invariant: the replacement must carry a different immutable UID"
     );
     assert!(
-        reason.contains(&format!("worker Pod {destroyed_uid} was deleted")),
+        reason
+            .diagnostic
+            .contains(&format!("worker Pod {destroyed_uid} was deleted")),
         "the run stays bound to the Pod UID it launched, not the replacement; got {reason}"
     );
     assert!(
-        reason.contains(&format!(
+        reason.diagnostic.contains(&format!(
             "refused to adopt replacement Pod UID(s) {replacement_uid}"
         )),
         "the replacement must be reported as refused, not silently ignored; got {reason}"
@@ -417,7 +419,7 @@ async fn pod_and_job_both_gone_still_resolves_with_its_original_reason() {
     .expect("the pre-existing pod-and-job-both-gone arm must still resolve");
 
     assert!(
-        reason.contains("worker Pod and Job disappeared"),
+        reason.diagnostic.contains("worker Pod and Job disappeared"),
         "the both-gone arm must keep its own reason; got {reason}"
     );
     assert!(
@@ -443,7 +445,7 @@ async fn a_failed_job_still_resolves_with_its_condition_reason() {
         .expect("the pre-existing Job-Failed arm must still resolve");
 
     assert!(
-        reason.contains("BackoffLimitExceeded"),
+        reason.diagnostic.contains("BackoffLimitExceeded"),
         "the Job-Failed arm must keep reporting the apiserver's condition reason; got {reason}"
     );
     assert_eq!(
@@ -512,7 +514,10 @@ async fn seed_admitted_taskrun(cluster: &Arc<FakeCluster>, config: &KubernetesCo
 }
 
 /// Start the watch and let it bind its fence to the admitted Pod.
-fn watch_of(runtime: KubernetesRuntime, job_name: &str) -> tokio::task::JoinHandle<String> {
+fn watch_of(
+    runtime: KubernetesRuntime,
+    job_name: &str,
+) -> tokio::task::JoinHandle<TerminalRuntimeObservation> {
     let handle = run_handle(job_name);
     tokio::spawn(async move { runtime.watch_infra_death(&handle).await })
 }
@@ -686,7 +691,7 @@ async fn a_force_delete_under_a_never_evicted_workload_still_reaps() {
     );
 
     assert!(
-        reason.contains(&destroyed_uid),
+        reason.diagnostic.contains(&destroyed_uid),
         "the death reason must name the destroyed Pod; got {reason}",
     );
     assert!(
