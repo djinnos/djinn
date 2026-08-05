@@ -5,7 +5,7 @@
 //! this boundary only creates and controls one direct child of a validated
 //! delegated cgroup root.
 
-use std::{collections::BTreeSet, io, os::fd::RawFd};
+use std::{collections::BTreeSet, io, os::fd::RawFd, time::Duration};
 
 use thiserror::Error;
 
@@ -125,12 +125,60 @@ fn cpu_max_for(millicores: u32) -> String {
     )
 }
 
+/// How long [`Launcher::wait_empty`] keeps re-reading `cgroup.events` before it
+/// gives up and reports [`Error::StillPopulated`].
+///
+/// # Why waiting is not optional
+///
+/// `cgroup.kill` is **asynchronous**: writing `1` marks the subtree for
+/// SIGKILL, but every member still has to be scheduled and run its exit path
+/// before `cgroup.events` flips to `populated 0`. A single read taken straight
+/// after the write therefore observes `populated 1` for any leaf whose child
+/// tree was alive at teardown — which is exactly the timeout and cancellation
+/// paths, and exactly the two paths a cargo build dies on.
+///
+/// The launcher's own kernel tests have always known this: every one of them
+/// wraps `wait_empty` in a 200x25ms retry loop after `cgroup.kill`. Production
+/// called it once, so a 30-minute `cargo test` that hit its budget produced
+/// `StillPopulated` -> `ControlRejection::State`, the worker's shell tool failed
+/// on the *teardown* of a command that had already produced its output, and the
+/// invocation's `CLEAN` never ran — leaking the leaf, its descriptors and the
+/// broker's invocation binding. The wait belongs here, next to the write that
+/// makes it necessary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct KillSettle {
+    /// Reads of `cgroup.events` allowed, including the first (unslept) one.
+    pub attempts: u32,
+    /// Pause between reads.
+    pub poll: Duration,
+}
+
+impl KillSettle {
+    /// 500 x 20ms = a 10s ceiling. Bounded on purpose: the privileged broker
+    /// serves controls one at a time, so an unbounded wait here would be a
+    /// stall with no upper limit. A caller that still observes
+    /// [`Error::StillPopulated`] after this must degrade, not fail — see the
+    /// runner's terminal teardown.
+    pub const DEFAULT: Self = Self {
+        attempts: 500,
+        poll: Duration::from_millis(20),
+    };
+
+    /// Answer from the first read only. Used by tests that assert the
+    /// still-populated refusal itself and must not sleep out the budget.
+    pub const IMMEDIATE: Self = Self {
+        attempts: 1,
+        poll: Duration::ZERO,
+    };
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LauncherConfig {
     pub unleased_quota: UnleasedQuota,
     pub leased_quota: LeasedQuota,
     pub expected_uid: u32,
     authority_protocol: LauncherAuthorityProtocol,
+    kill_settle: KillSettle,
 }
 
 impl LauncherConfig {
@@ -154,6 +202,7 @@ impl LauncherConfig {
             leased_quota: leased,
             expected_uid,
             authority_protocol: LauncherAuthorityProtocol::LeafV1,
+            kill_settle: KillSettle::DEFAULT,
         })
     }
 
@@ -164,8 +213,19 @@ impl LauncherConfig {
         self
     }
 
+    /// How long [`Launcher::wait_empty`] waits out an asynchronous
+    /// `cgroup.kill`. See [`KillSettle`].
+    pub fn with_kill_settle(mut self, settle: KillSettle) -> Self {
+        self.kill_settle = settle;
+        self
+    }
+
     pub fn authority_protocol(&self) -> LauncherAuthorityProtocol {
         self.authority_protocol
+    }
+
+    pub fn kill_settle(&self) -> KillSettle {
+        self.kill_settle
     }
 }
 
@@ -494,12 +554,33 @@ impl<F: CgroupFs, S: SpawnIntoCgroup> Launcher<F, S> {
         self.fs.write_leaf(leaf.fd, "cgroup.kill", "1")
     }
 
+    /// Return once the leaf reports `populated 0`, or after the configured
+    /// [`KillSettle`] budget is spent.
+    ///
+    /// This POLLS. `cgroup.kill` only marks the subtree for SIGKILL; the flip to
+    /// `populated 0` happens later, once every member has actually run its exit
+    /// path. A single read is a coin toss on any leaf that was alive when it was
+    /// killed, and losing that toss used to be reported to the worker as
+    /// `ControlRejection::State` — see [`KillSettle`].
+    ///
+    /// An unreadable or malformed `cgroup.events` still fails immediately: that
+    /// is a broken delegation, not a settling kill, and no amount of waiting
+    /// changes it.
     pub fn wait_empty(&mut self, leaf: &Leaf) -> Result<(), Error> {
-        let events = self.fs.read_leaf(leaf.fd, "cgroup.events")?;
-        if populated_zero(&events)? {
-            Ok(())
-        } else {
-            Err(Error::StillPopulated)
+        let settle = self.config.kill_settle;
+        let mut remaining = settle.attempts.max(1);
+        loop {
+            let events = self.fs.read_leaf(leaf.fd, "cgroup.events")?;
+            if populated_zero(&events)? {
+                return Ok(());
+            }
+            remaining -= 1;
+            if remaining == 0 {
+                return Err(Error::StillPopulated);
+            }
+            if !settle.poll.is_zero() {
+                std::thread::sleep(settle.poll);
+            }
         }
     }
 
@@ -703,6 +784,10 @@ mod tests {
         created: Vec<String>,
         removed: Vec<String>,
         next: i32,
+        /// Reads of `cgroup.events` that still report descendants before the
+        /// recorded value takes over — the fake's stand-in for an asynchronous
+        /// `cgroup.kill` that has not finished tearing the subtree down.
+        settling_reads: usize,
     }
     impl FakeFs {
         fn ready() -> Self {
@@ -743,6 +828,10 @@ mod tests {
         }
         fn read_leaf(&mut self, fd: RawFd, file: &str) -> Result<String, Error> {
             self.reads.push(file.into());
+            if file == "cgroup.events" && self.settling_reads > 0 {
+                self.settling_reads -= 1;
+                return Ok("populated 1\n".into());
+            }
             Ok(self
                 .files
                 .get(&(fd, file.into()))
@@ -781,8 +870,14 @@ mod tests {
             })
         }
     }
+    /// `IMMEDIATE` so the cases that assert the still-populated refusal answer
+    /// from the first read instead of sleeping out the production budget. The
+    /// budget itself is proven in
+    /// [`wait_empty_polls_a_settling_kill_and_stays_bounded`].
     fn config() -> LauncherConfig {
-        LauncherConfig::new(None, None, 7).unwrap()
+        LauncherConfig::new(None, None, 7)
+            .unwrap()
+            .with_kill_settle(KillSettle::IMMEDIATE)
     }
     fn launcher() -> Launcher<FakeFs, FakeSpawn> {
         Launcher::new(FakeFs::ready(), FakeSpawn::default(), config()).unwrap()
@@ -1095,6 +1190,82 @@ mod tests {
             launcher.fs.reads,
             vec!["cgroup.events"],
             "spawn failure waits for cgroup.events to report emptiness before removal"
+        );
+    }
+
+    /// A leaf killed while its tree was alive does NOT report `populated 0` on
+    /// the read that follows the `cgroup.kill` write. `wait_empty` must sit
+    /// through the settling window rather than refusing — a single read is what
+    /// turned every timed-out build's teardown into `StillPopulated`, i.e. a
+    /// `ControlRejection::State` that failed the shell tool after the command
+    /// had already produced its output.
+    #[test]
+    fn wait_empty_polls_a_settling_kill_and_stays_bounded() {
+        let mut fs = FakeFs::ready();
+        // Three reads still see descendants; the fourth sees the leaf drained.
+        fs.settling_reads = 3;
+        let mut l = Launcher::new(
+            fs,
+            FakeSpawn::default(),
+            LauncherConfig::new(None, None, 7)
+                .unwrap()
+                .with_kill_settle(KillSettle {
+                    attempts: 8,
+                    poll: Duration::from_millis(1),
+                }),
+        )
+        .unwrap();
+        let mut leaf = create(&mut l, "settling");
+        l.fs.files
+            .insert((leaf.fd, "cgroup.events".into()), "populated 0\n".into());
+        l.kill(&mut leaf).unwrap();
+        l.remove(&leaf)
+            .expect("a kill that settles inside the budget must not refuse the teardown");
+        assert_eq!(
+            l.fs.reads
+                .iter()
+                .filter(|file| file.as_str() == "cgroup.events")
+                .count(),
+            4,
+            "wait_empty must re-read cgroup.events until it flips, not once"
+        );
+        assert_eq!(
+            l.fs.removed,
+            vec!["settling"],
+            "the drained leaf must actually be unlinked"
+        );
+
+        // The wait is bounded: a leaf that never drains still refuses, after
+        // exactly the configured number of reads and no more.
+        let mut fs = FakeFs::ready();
+        fs.settling_reads = usize::MAX;
+        let mut stuck = Launcher::new(
+            fs,
+            FakeSpawn::default(),
+            LauncherConfig::new(None, None, 7)
+                .unwrap()
+                .with_kill_settle(KillSettle {
+                    attempts: 3,
+                    poll: Duration::ZERO,
+                }),
+        )
+        .unwrap();
+        let mut leaf = create(&mut stuck, "stuck");
+        stuck.kill(&mut leaf).unwrap();
+        assert!(matches!(stuck.remove(&leaf), Err(Error::StillPopulated)));
+        assert_eq!(
+            stuck
+                .fs
+                .reads
+                .iter()
+                .filter(|file| file.as_str() == "cgroup.events")
+                .count(),
+            3,
+            "the budget must cap the wait; an unbounded one would stall the broker"
+        );
+        assert!(
+            stuck.fs.removed.is_empty(),
+            "no cgroup is unlinked while still populated"
         );
     }
 

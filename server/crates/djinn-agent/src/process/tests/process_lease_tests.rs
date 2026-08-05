@@ -138,6 +138,9 @@ struct BrokerBackedState {
     empties: usize,
     cleanups: usize,
     samples: usize,
+    /// When set, `wait_empty` answers with the refusal a leaf whose
+    /// `cgroup.kill` has not settled produces on the wire.
+    wait_empty_refuses: bool,
 }
 
 impl BrokerBackedLauncher {
@@ -154,6 +157,7 @@ impl BrokerBackedLauncher {
                 empties: 0,
                 cleanups: 0,
                 samples: 0,
+                wait_empty_refuses: false,
             })),
             cpu_usage_usec: 0,
         }
@@ -171,9 +175,17 @@ impl BrokerBackedLauncher {
                 empties: 0,
                 cleanups: 0,
                 samples: 0,
+                wait_empty_refuses: false,
             })),
             cpu_usage_usec,
         }
+    }
+
+    /// Make the leaf refuse to report `populated 0`, exactly as the broker does
+    /// for a subtree whose asynchronous `cgroup.kill` has not finished.
+    fn refusing_teardown(self) -> Self {
+        self.state.lock().unwrap().wait_empty_refuses = true;
+        self
     }
 }
 
@@ -238,7 +250,17 @@ impl ProcessHandle for BrokerBackedHandle {
         Ok(())
     }
     fn wait_empty(&mut self) -> io::Result<()> {
-        self.state.lock().unwrap().empties += 1;
+        let mut state = self.state.lock().unwrap();
+        state.empties += 1;
+        if state.wait_empty_refuses {
+            // The production wire form: `StillPopulated` is categorised as
+            // `ControlRejection::State` before it reaches the worker.
+            return Err(io::Error::other(
+                djinn_cgroup_launcher::Error::ControlRejected(
+                    djinn_cgroup_launcher::ControlRejection::State,
+                ),
+            ));
+        }
         Ok(())
     }
     fn cleanup(&mut self) -> io::Result<()> {
@@ -862,6 +884,79 @@ async fn broker_backed_shell_cancellation_kills_waits_empty_and_cleans_up() {
 
     assert_eq!(output.process.termination, ProcessTermination::Cancelled);
     assert_eq!(services.queue_calls.load(Ordering::SeqCst), 0);
+    let state = launcher.state.lock().unwrap();
+    assert_eq!((state.kills, state.empties, state.cleanups), (1, 1, 1));
+}
+
+/// A leaf that will not report `populated 0` must cost a warning, not the
+/// command.
+///
+/// `cgroup.kill` is asynchronous, so the teardown `wait_empty` on any killed
+/// invocation could observe `populated 1` -> `StillPopulated` ->
+/// `ControlRejection::State`. Production propagated that with a `?`, which
+/// (a) failed the agent's shell tool for a command that had ALREADY produced
+/// its output and exit status, and (b) skipped `cleanup`, leaking the leaf and
+/// the broker's invocation binding. Both halves are asserted here.
+#[tokio::test]
+async fn a_refused_leaf_teardown_preserves_the_result_and_still_cleans_up() {
+    let services = Arc::new(ScriptedServices::new(vec![], vec![], vec![]));
+    let launcher = Arc::new(
+        BrokerBackedLauncher::exited(b"cargo output\n", b"cargo warnings\n", 101)
+            .refusing_teardown(),
+    );
+    let runner = LeaseInvocationRunner::new(
+        services.clone(),
+        services.clone(),
+        launcher.clone(),
+        clock(),
+    );
+
+    let output = runner
+        .output(command(), config(), CancellationToken::new())
+        .await
+        .expect(
+            "a teardown refusal must not discard a command that already ran; this is the \
+             ControlRejected(State) that ended 59% of production task-runs as Interrupted",
+        );
+
+    assert_eq!(output.process.output.stdout, b"cargo output\n");
+    assert_eq!(output.process.output.stderr, b"cargo warnings\n");
+    assert_eq!(output.process.output.status.code(), Some(101));
+    let state = launcher.state.lock().unwrap();
+    assert_eq!(
+        (state.kills, state.empties, state.cleanups),
+        (1, 1, 1),
+        "CLEAN must still be sent: the `?` that failed the command also leaked the leaf, its \
+         descriptors and the broker's invocation binding"
+    );
+}
+
+/// The same refusal on the CANCELLED path, where the runner has no observed
+/// exit status of its own and used to block or fail deciding one.
+#[tokio::test]
+async fn a_refused_leaf_teardown_still_reports_a_terminal_status_for_a_killed_child() {
+    let services = Arc::new(ScriptedServices::new(vec![], vec![], vec![]));
+    let launcher = Arc::new(BrokerBackedLauncher::running(0).refusing_teardown());
+    let runner = LeaseInvocationRunner::new(
+        services.clone(),
+        services.clone(),
+        launcher.clone(),
+        clock(),
+    );
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+
+    let output = runner
+        .output(command(), config(), cancel)
+        .await
+        .expect("a cancelled invocation whose leaf will not drain must still report");
+
+    assert_eq!(output.process.termination, ProcessTermination::Cancelled);
+    assert_eq!(
+        output.process.output.status.signal(),
+        Some(libc::SIGKILL),
+        "a child the launcher killed reports as signalled, never as a missing status"
+    );
     let state = launcher.state.lock().unwrap();
     assert_eq!((state.kills, state.empties, state.cleanups), (1, 1, 1));
 }
