@@ -1242,14 +1242,14 @@ mod tests {
             .count()
     }
 
-    fn sample_needs_evidence_claim() -> NeedsEvidenceClaim {
+    fn sample_needs_evidence_claim(created_by_task_id: &str) -> NeedsEvidenceClaim {
         NeedsEvidenceClaim {
             question: "Does the evidence spike support the refinement?".to_owned(),
             target_subsystem: "coordinator event path".to_owned(),
             spec_unknown_anchor: "linked spike terminal event".to_owned(),
             insufficient_in_session_research: "requires event-driven fixture".to_owned(),
             expected_findings: "structured evidence_findings".to_owned(),
-            created_by_task_id: "judge-task-evt".to_owned(),
+            created_by_task_id: created_by_task_id.to_owned(),
             round: 2,
             against_revision_seq: 1,
         }
@@ -1293,7 +1293,9 @@ mod tests {
             .await
             .unwrap();
         let spike_task = create_task(db, &epic.id, &project.id, title, "spike", tx).await;
-        let claim = sample_needs_evidence_claim();
+        // Typed findings require a real task foreign key; the active spike is
+        // the fixture's authoritative demand source.
+        let claim = sample_needs_evidence_claim(&spike_task.id);
         let proposal = proposal_repo
             .set_structured_needs_evidence_spike(&proposal.id, &spike_task.id, &claim)
             .await

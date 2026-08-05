@@ -60,9 +60,9 @@ struct EvidenceLifecycleCase {
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
-/// Build a deterministic claim payload for the fixture proposal.
-fn sample_claim(judge_task_id: &str) -> String {
-    let claim = NeedsEvidenceClaim {
+/// Build a deterministic typed claim payload for the fixture proposal.
+fn sample_claim(judge_task_id: &str) -> NeedsEvidenceClaim {
+    NeedsEvidenceClaim {
         question: "Can the coordinator resume safely?".to_string(),
         target_subsystem: "refinement".to_string(),
         spec_unknown_anchor: "resume path".to_string(),
@@ -71,8 +71,7 @@ fn sample_claim(judge_task_id: &str) -> String {
         round: 1,
         against_revision_seq: 1,
         created_by_task_id: judge_task_id.to_string(),
-    };
-    serde_json::to_string(&claim).expect("serialize claim")
+    }
 }
 
 /// Build a deterministic evidence_findings payload with the given answer.
@@ -147,7 +146,7 @@ async fn seed_linked_spike(
 
     let claim = sample_claim(&judge_task_id);
     proposal_repo
-        .set_needs_evidence_spike(&fixture.proposal_id, &spike_task_id, &claim)
+        .set_structured_needs_evidence_spike(&fixture.proposal_id, &spike_task_id, &claim)
         .await
         .expect("link spike");
 
@@ -936,11 +935,9 @@ async fn redrive_already_processed_lifecycle_is_idempotent() {
     );
 
     actor.recover_terminal_linked_spike_evidence().await;
-    // Clear the link manually to simulate the already-cleared scenario.
-    proposal_repo
-        .clear_needs_evidence_spike(&fixture.proposal_id)
-        .await
-        .expect("clear link");
+    // The first pass atomically records the typed receipt and clears the
+    // compatible legacy authority. The following passes model an
+    // already-cleared lifecycle without a second terminal transition.
     actor.recover_terminal_linked_spike_evidence().await;
     actor.drive_active_refinements().await;
     actor.recover_terminal_linked_spike_evidence().await;
@@ -1011,7 +1008,7 @@ async fn two_judge_demands_cannot_create_two_linked_spikes() {
         .expect("create spike 1")
         .id;
     proposal_repo
-        .set_needs_evidence_spike(&fixture.proposal_id, &spike1, &claim)
+        .set_structured_needs_evidence_spike(&fixture.proposal_id, &spike1, &claim)
         .await
         .expect("link first spike");
 
@@ -1038,14 +1035,12 @@ async fn two_judge_demands_cannot_create_two_linked_spikes() {
         .expect("create spike 2")
         .id;
     let result = proposal_repo
-        .set_needs_evidence_spike(&fixture.proposal_id, &spike2, &claim)
+        .try_set_structured_needs_evidence_spike(&fixture.proposal_id, &spike2, &claim)
         .await;
 
-    // The repository helper must prevent the second link (either by error or by
-    // replacing the previous link atomically; the important behavior is that only
-    // one spike remains linked at the end).  The existing implementation replaces
-    // the link, so assert the final link is the one we most recently set.
-    result.expect("set second spike link may replace");
+    // An occupied link is a race loser: it must return None and leave the
+    // established typed and legacy authority untouched.
+    assert!(result.expect("try link second spike").is_none());
     let proposal = proposal_repo
         .get(&fixture.proposal_id)
         .await
@@ -1053,11 +1048,12 @@ async fn two_judge_demands_cannot_create_two_linked_spikes() {
         .expect("proposal exists");
     assert_eq!(
         proposal.linked_spike_task_id.as_deref(),
-        Some(spike2.as_str())
+        Some(spike1.as_str())
     );
     assert_eq!(
-        proposal.needs_evidence_claim.as_deref(),
-        Some(claim.as_str())
+        NeedsEvidenceClaim::parse_stored(proposal.needs_evidence_claim.as_deref())
+            .expect("stored claim must remain valid"),
+        Some(claim)
     );
 }
 
