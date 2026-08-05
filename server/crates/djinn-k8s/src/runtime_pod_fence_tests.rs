@@ -46,6 +46,12 @@ use crate::secret::task_run_resource_name;
 
 const FENCE_TASK_RUN_ID: &str = "019f72b5-a92a-7501-8b41-b0ffe68cdda5";
 
+/// A fake-apiserver mutation that produces one terminal runtime observation.
+type TerminalMutation = fn(&Arc<FakeCluster>, &str);
+
+/// Name, mutation, and diagnostic fragment expected for a terminal observation.
+type TerminalEvidenceCase = (&'static str, TerminalMutation, &'static str);
+
 /// Virtual-time budget for a watch that is *expected* to resolve. Time is
 /// paused in these tests, so this costs no wall clock — it exists so a watch
 /// that never resolves fails as a timeout instead of hanging the suite.
@@ -464,7 +470,7 @@ async fn a_failed_job_still_resolves_with_its_condition_reason() {
 /// failures when the real paused-time watch polls the fake apiserver.
 #[tokio::test(start_paused = true)]
 async fn allowlisted_terminal_pod_observations_are_infrastructure_evidence() {
-    let cases: [(&str, fn(&Arc<FakeCluster>, &str), &str); 3] = [
+    let cases: [TerminalEvidenceCase; 3] = [
         (
             "worker OOMKilled",
             |cluster, job| cluster.terminate_worker(job, 137, Some("OOMKilled")),
@@ -507,7 +513,7 @@ async fn allowlisted_terminal_pod_observations_are_infrastructure_evidence() {
 /// never inferred infrastructure.
 #[tokio::test(start_paused = true)]
 async fn unallowlisted_terminal_observations_are_unknown_evidence() {
-    let cases: [(&str, fn(&Arc<FakeCluster>, &str), &str); 3] = [
+    let cases: [TerminalEvidenceCase; 3] = [
         (
             "worker exit 101",
             |cluster, job| cluster.terminate_worker(job, 101, Some("Error")),
@@ -550,7 +556,7 @@ async fn unallowlisted_terminal_observations_are_unknown_evidence() {
 /// report protocol evidence within the same bounded paused-time watch.
 #[tokio::test(start_paused = true)]
 async fn clean_and_garbage_collected_runtime_observations_are_protocol_evidence() {
-    let cases: [(&str, fn(&Arc<FakeCluster>, &str), &str); 3] = [
+    let cases: [TerminalEvidenceCase; 3] = [
         (
             "clean worker exit",
             |cluster, job| cluster.terminate_worker(job, 0, Some("Completed")),
