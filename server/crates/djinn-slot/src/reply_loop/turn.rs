@@ -1131,13 +1131,7 @@ pub async fn run_reply_loop(
                 turn_inline_budget: None,
             };
             let mut stream_state = match consume_provider_stream(StreamLoopContext {
-                provider,
                 stream,
-                // Exact inputs behind `stream`, so a transient mid-stream
-                // provider failure can re-issue the identical request.
-                request_conversation: request_conversation.as_ref(),
-                request_tools: tools,
-                request_tool_choice: tool_choice,
                 tool_metadata: &tool_metadata,
                 dispatch: &dispatch_ctx,
                 phase_tracker: &phase_tracker,
