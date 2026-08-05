@@ -1117,42 +1117,16 @@ impl CoordinatorActor {
                 continue;
             }
 
-            // Resolve the breaker scope: health is keyed per owning user so this
-            // trip only demotes the model for THIS task's creator, not globally.
-            // The throttle that produces first-call hangs is per-credential
-            // (most acutely the per-account ChatGPT Codex backend), so a global
-            // trip would disable the model for everyone on one user's bad luck.
             let task_repo = self.task_repo();
             let task_row = task_repo.get(task_id).await.ok().flatten();
-            let scope = task_row.as_ref().map(|t| t.created_by_user_id.clone());
             let current_status = task_row
                 .as_ref()
                 .map(|t| t.status.clone())
                 .unwrap_or_default();
 
-            // Feed the model circuit-breaker so dispatch fails over to the next
-            // model in the creator's ordered list on redispatch. A first-call
-            // hang (no sign of life at all) is a strong "this model/backend is
-            // bad right now" signal → trip immediately with a long cooldown that
-            // outlasts the task's escalating redispatch cooldown (`record_stall`).
-            // A plain idle stall is a weaker signal (a genuinely long worker turn
-            // that went quiet), so we feed the gentler consecutive-failure
-            // breaker (`record_failure`) which only trips after repeats — this
-            // avoids needlessly demoting the user's preferred model on a single
-            // idle blip. Either way the cooldown auto-expires (self-heal) and a
-            // recovered model is reset by `record_success` on a real run.
-            // `self.health` is the same HealthTracker instance the dispatch
-            // `is_available` gate consults (cloned into slots), so this trip is
-            // visible to the very next dispatch pass.
-            if never_active {
-                // A first-call hang is a genuine model/backend-health signal
-                // (not a quota throttle), so escalate the cooldown cap.
-                self.health
-                    .record_stall(scope.as_deref(), &session.model_id, true);
-            } else {
-                self.health
-                    .record_failure(scope.as_deref(), &session.model_id);
-            }
+            // Liveness timeouts are coordinator heuristics, not a typed in-pod
+            // ProviderError. Keep cancellation, durable settlement, and
+            // redispatch behavior below, but do not mutate model breaker health.
 
             let reason = if never_active {
                 "first-call hung (no activity)"
@@ -1177,7 +1151,6 @@ impl CoordinatorActor {
                 idle_seconds = idle,
                 threshold_secs = applied_threshold,
                 never_active,
-                scope = ?scope,
                 "CoordinatorActor: killed stalled session"
             );
 
