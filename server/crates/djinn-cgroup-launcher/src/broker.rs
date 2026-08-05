@@ -559,13 +559,19 @@ mod tests {
     fn broker() -> Broker<Fs, Clone, Nonces> {
         broker_running(crate::LauncherAuthorityProtocol::LeafV1)
     }
+    /// `IMMEDIATE`, so the cases below that assert a still-populated refusal
+    /// answer from the first `cgroup.events` read instead of sleeping out the
+    /// production settle budget.
+    fn test_config() -> crate::LauncherConfig {
+        crate::LauncherConfig::new(None, None, 0)
+            .unwrap()
+            .with_kill_settle(crate::KillSettle::IMMEDIATE)
+    }
     fn broker_running(protocol: crate::LauncherAuthorityProtocol) -> Broker<Fs, Clone, Nonces> {
         let launcher = Launcher::new(
             Fs::ready(),
             Clone,
-            crate::LauncherConfig::new(None, None, 0)
-                .unwrap()
-                .with_authority_protocol(protocol),
+            test_config().with_authority_protocol(protocol),
         )
         .unwrap();
         Broker::new(
@@ -890,12 +896,7 @@ mod tests {
     fn duplicate_create_does_not_clone_or_replace_the_active_leaf() {
         let fs = Fs::ready();
         let creates = Rc::clone(&fs.creates);
-        let launcher = Launcher::new(
-            fs,
-            Clone,
-            crate::LauncherConfig::new(None, None, 0).unwrap(),
-        )
-        .unwrap();
+        let launcher = Launcher::new(fs, Clone, test_config()).unwrap();
         let mut broker = Broker::new(
             launcher,
             BrokerConfig::worker(42, b"private".to_vec()).unwrap(),
@@ -952,12 +953,7 @@ mod tests {
         let fs = Fs::ready();
         let events = Rc::clone(&fs.events);
         *events.borrow_mut() = "populated 1".into();
-        let launcher = Launcher::new(
-            fs,
-            Clone,
-            crate::LauncherConfig::new(None, None, 0).unwrap(),
-        )
-        .unwrap();
+        let launcher = Launcher::new(fs, Clone, test_config()).unwrap();
         let mut broker = Broker::new(
             launcher,
             BrokerConfig::worker(42, b"private".to_vec()).unwrap(),

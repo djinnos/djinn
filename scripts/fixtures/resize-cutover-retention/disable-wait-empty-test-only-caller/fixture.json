@@ -6,8 +6,8 @@
     {
       "op": "replace",
       "path": "server/crates/djinn-agent/src/process.rs",
-      "find": "        child.wait_empty().map_err(LeaseInvocationError::Launcher)?;\n",
-      "with": ""
+      "find": "    match child.wait_empty() {\n",
+      "with": "    match Ok::<(), io::Error>(()) {\n"
     },
     {
       "op": "append",

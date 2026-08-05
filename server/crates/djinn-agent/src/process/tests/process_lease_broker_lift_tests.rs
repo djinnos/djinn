@@ -64,14 +64,33 @@ struct RecordingFs {
     next_fd: RawFd,
     /// Latest value per (fd, file), so `read_leaf` answers what was written.
     files: std::collections::HashMap<(RawFd, String), String>,
+    /// Reads of `cgroup.events` that still report descendants — the fake's
+    /// stand-in for an asynchronous `cgroup.kill` that has not settled.
+    settling_reads: Arc<Mutex<usize>>,
+    /// Leaf names actually unlinked, so a leaked leaf is observable.
+    removed: Arc<Mutex<Vec<String>>>,
 }
 
 impl RecordingFs {
     fn new(writes: Writes) -> Self {
+        Self::settling(
+            writes,
+            Arc::new(Mutex::new(0)),
+            Arc::new(Mutex::new(Vec::new())),
+        )
+    }
+
+    fn settling(
+        writes: Writes,
+        settling_reads: Arc<Mutex<usize>>,
+        removed: Arc<Mutex<Vec<String>>>,
+    ) -> Self {
         Self {
             writes,
             next_fd: 100,
             files: std::collections::HashMap::new(),
+            settling_reads,
+            removed,
         }
     }
 }
@@ -99,6 +118,11 @@ impl CgroupFs for RecordingFs {
     }
     fn read_leaf(&mut self, fd: RawFd, file: &str) -> Result<String, LauncherError> {
         if file == "cgroup.events" {
+            let mut settling = self.settling_reads.lock().unwrap();
+            if *settling > 0 {
+                *settling -= 1;
+                return Ok("populated 1".to_owned());
+            }
             return Ok("populated 0".to_owned());
         }
         Ok(self
@@ -107,7 +131,8 @@ impl CgroupFs for RecordingFs {
             .cloned()
             .unwrap_or_else(|| "usage_usec 0".to_owned()))
     }
-    fn remove_leaf(&mut self, _: RawFd, _: &str) -> Result<(), LauncherError> {
+    fn remove_leaf(&mut self, _: RawFd, name: &str) -> Result<(), LauncherError> {
+        self.removed.lock().unwrap().push(name.to_owned());
         Ok(())
     }
 }
@@ -153,8 +178,15 @@ fn broker(
     writes: Writes,
     born: Arc<Mutex<Vec<Invocation>>>,
 ) -> Broker<RecordingFs, RecordingSpawn> {
+    broker_with_fs(RecordingFs::new(writes), born)
+}
+
+fn broker_with_fs(
+    fs: RecordingFs,
+    born: Arc<Mutex<Vec<Invocation>>>,
+) -> Broker<RecordingFs, RecordingSpawn> {
     let launcher = Launcher::new(
-        RecordingFs::new(writes),
+        fs,
         RecordingSpawn { born },
         LauncherConfig::new(None, None, unsafe { libc::geteuid() }).expect("launcher config"),
     )
@@ -363,4 +395,93 @@ fn distinct_invocations_get_distinct_fences() {
         crate::process::broker_invocation_fence("a"),
         crate::process::broker_invocation_fence("b")
     );
+}
+
+/// THE regression test for the teardown wedge.
+///
+/// A killed invocation must tear its leaf down and leave the launcher able to
+/// serve the next one.
+///
+/// `cgroup.kill` is asynchronous: the leaf keeps reporting `populated 1` for as
+/// long as its members take to run their exit paths, which for a 30-minute
+/// `cargo test` killed at its budget is not instant. `Launcher::wait_empty` read
+/// `cgroup.events` exactly ONCE, so the teardown of every killed invocation was
+/// refused with `StillPopulated` -> `ControlRejection::State`:
+///
+/// ```text
+/// ReplyLoop: tool call returned error tool=shell error=failed to run shell
+/// command: lease invocation failed: Launcher(Custom { kind: Other, error:
+/// ControlRejected(State) })
+/// ```
+///
+/// and the `CLEAN` that follows never ran, so the leaf, its descriptors and the
+/// broker's invocation binding were leaked. Nothing here is a double of the
+/// launcher: the broker, its nonce rotation, `Launcher::wait_empty` and
+/// `Launcher::remove` are all real, and only cgroupfs is recorded.
+#[test]
+fn a_killed_invocation_drains_its_leaf_and_the_next_lease_invocation_succeeds() {
+    let writes: Writes = Arc::new(Mutex::new(Vec::new()));
+    let born = Arc::new(Mutex::new(Vec::new()));
+    // Three reads after the kill still see descendants; the fourth sees the
+    // leaf drained. One read - what production did - sees only the first.
+    let settling = Arc::new(Mutex::new(3_usize));
+    let removed = Arc::new(Mutex::new(Vec::new()));
+    let (client_stream, server_stream) = UnixStream::pair().expect("socketpair");
+
+    std::thread::scope(|scope| {
+        let mut server = UnixBrokerServer::new(broker_with_fs(
+            RecordingFs::settling(writes.clone(), settling.clone(), removed.clone()),
+            born.clone(),
+        ));
+        let served = scope.spawn(move || server.serve_connection(server_stream));
+
+        let launcher = UnixBrokerLauncher::new(connected_client(client_stream));
+
+        // The invocation that gets killed mid-flight.
+        let killed = identity();
+        let mut handle = launcher
+            .launch(shell_command(), &killed, LeaseAuthority::Armed)
+            .expect("the brokered launch must succeed");
+        handle.kill().expect("cgroup.kill");
+        handle.wait_empty().expect(
+            "a settling cgroup.kill must be waited out, not refused; this is the \
+             ControlRejected(State) that failed the shell tool after 30 minutes of work",
+        );
+        handle
+            .cleanup()
+            .expect("the drained leaf must be removable");
+        assert_eq!(
+            *settling.lock().unwrap(),
+            0,
+            "wait_empty must have re-read cgroup.events until it flipped"
+        );
+        assert_eq!(
+            removed.lock().unwrap().clone(),
+            vec![killed.invocation_id.clone()],
+            "the killed invocation's leaf must be unlinked; a skipped CLEAN leaks the leaf, its \
+             descriptors and the broker's invocation binding"
+        );
+        drop(handle);
+
+        // The next lease invocation on the same launcher and broker.
+        let next = identity();
+        let mut handle = launcher
+            .launch(shell_command(), &next, LeaseAuthority::Armed)
+            .expect("the launcher must still admit a lease invocation after a killed one");
+        handle
+            .fenced_lift()
+            .expect("and it must still be a fully usable invocation");
+        handle.kill().expect("cgroup.kill");
+        handle.wait_empty().expect("populated 0");
+        handle.cleanup().expect("cleanup");
+        assert_eq!(
+            removed.lock().unwrap().clone(),
+            vec![killed.invocation_id, next.invocation_id],
+            "both leaves must have been released"
+        );
+
+        drop(handle);
+        drop(launcher);
+        served.join().expect("server thread").expect("served");
+    });
 }
