@@ -87,6 +87,12 @@ export interface LedgerPhase {
   modelId?: string;
   durationLabel?: string;
   running?: boolean;
+  /**
+   * Set when a phase spanned more than one session. A phase whose agent died
+   * and respawned renders as one phase with N attempts; without this the dead
+   * sessions render as nothing at all.
+   */
+  attempts?: { total: number; failed: number };
   turns: LedgerTurn[];
   /** Present only on the origin band. */
   brief?: LedgerBrief;
@@ -139,4 +145,8 @@ export interface SessionLedgerProps {
   blockers?: string[];
   entries: LedgerEntry[];
   live?: LedgerLiveState | null;
+  /** Off when the host page already renders its own title bar. */
+  showHeader?: boolean;
+  /** Rendered in place of the thread when there is nothing to show. */
+  emptyMessage?: string;
 }
