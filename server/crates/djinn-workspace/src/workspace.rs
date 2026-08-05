@@ -331,6 +331,22 @@ impl Workspace {
         )
         .await?;
         self.assert_merge_tree_integrity().await?;
+        // A commit that silently omits a path the author edited is the worst
+        // shape this filter can take: the work looks committed, the reviewer
+        // sees no diff, and the author gets read as having fabricated the
+        // change. (That is exactly what happened when `.cargo` was a excluded
+        // directory component — see `commit_safety::DEFAULT_EXCLUDED_DIR_COMPONENTS`.)
+        // The exclusion is still correct and still not fatal; it just must not
+        // be invisible, so it is reported at WARN and carried out on the
+        // outcome for the caller to surface to the author.
+        if !excluded.is_empty() {
+            tracing::warn!(
+                excluded_paths = ?excluded,
+                excluded_count = excluded.len(),
+                "commit: created a commit that omits excluded paths; \
+                 the author's edits to these files are NOT in the commit"
+            );
+        }
         Ok(CommitOutcome::Committed { excluded })
     }
 
