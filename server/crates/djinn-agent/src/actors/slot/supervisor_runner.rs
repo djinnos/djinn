@@ -40,6 +40,10 @@ fn supervisor_rpc_span(op: &'static str, session_id: &str, task_id: &str) -> tra
 /// Pre-session liveness deadline (8 min default).
 const PRE_SESSION_DEADLINE_SECS_DEFAULT: u64 = 480;
 
+/// Maximum report-delivery grace after the first terminal runtime observation.
+/// Non-terminal stream frames never extend this deadline.
+const TERMINAL_RUNTIME_REPORT_GRACE: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Step label before the worker emits its first stage marker.
 const PRE_SESSION_INITIAL_STEP: &str = "run_create";
 
@@ -175,9 +179,9 @@ async fn apply_handshake_timeout_failover(task_repo: &TaskRepository, task: &Tas
     );
 }
 
-/// Log a `session_error` activity entry and finalize any orphaned running
-/// session rows when the worker infrastructure died before completing a run.
-async fn finalize_infra_death_session(
+/// Log sanitized terminal-runtime evidence and settle any orphaned running
+/// session rows with the stable cause selected from that evidence.
+async fn finalize_terminal_runtime_observation(
     task_repo: &TaskRepository,
     task: &Task,
     app_state: &AgentContext,
@@ -185,7 +189,7 @@ async fn finalize_infra_death_session(
     failure_cause: SessionFailureCause,
 ) {
     let payload = serde_json::json!({
-        "error": format!("Worker infrastructure died before completing the run: {reason}"),
+        "error": format!("Terminal runtime observation before completing the run: {reason}"),
         "agent_type": "system",
     })
     .to_string();
@@ -208,13 +212,13 @@ async fn finalize_infra_death_session(
             task_id = %task.short_id,
             %reason,
             sessions = n,
-            "supervisor dispatch: finalized orphaned running session(s) after infra death"
+            "supervisor dispatch: finalized orphaned running session(s) after terminal runtime observation"
         ),
         Ok(_) => {}
         Err(e) => tracing::warn!(
             task_id = %task.short_id,
             error = %e,
-            "supervisor dispatch: failed to finalize session row after infra death"
+            "supervisor dispatch: failed to finalize session row after terminal runtime observation"
         ),
     }
 }
@@ -222,7 +226,7 @@ async fn finalize_infra_death_session(
 /// Best-effort persist infra-death log-tail capture on the latest
 /// pending/submitted attempt for the task.  Failures are logged and swallowed —
 /// this is purely diagnostic enrichment and must never block teardown.
-async fn persist_infra_death_on_attempt(
+async fn persist_terminal_runtime_observation_on_attempt(
     app_state: &AgentContext,
     task: &Task,
     reason: &str,
@@ -252,7 +256,7 @@ async fn persist_infra_death_on_attempt(
     };
 
     let meta = serde_json::json!({
-        "infra_death_log_tail": {
+        "terminal_runtime_log_tail": {
             "schema_version": capture.schema_version,
             "fetched": capture.log_tail.is_some(),
             "pod_name": capture.pod_name,
@@ -690,8 +694,8 @@ pub(super) async fn dispatch_task_runtime(
         report_result,
         teardown,
         handshake_timed_out,
-        infra_death,
-        infra_death_log_tail,
+        terminal_runtime_observation,
+        terminal_runtime_log_tail,
         presession_timeout,
     } = execute_runtime_report_phase(
         runtime.clone(),
@@ -707,20 +711,21 @@ pub(super) async fn dispatch_task_runtime(
         apply_handshake_timeout_failover(&task_repo, &task, &model_id)
         .await;
     }
-    if let Some(observation) = infra_death.as_ref() {
+    if let Some(observation) = terminal_runtime_observation.as_ref() {
         let reason = observation.diagnostic.as_str();
         let failure_cause = match observation.kind {
             TerminalRuntimeEvidenceKind::Infrastructure => SessionFailureCause::Infrastructure,
             TerminalRuntimeEvidenceKind::UnknownFailure => SessionFailureCause::Unknown,
             TerminalRuntimeEvidenceKind::ProtocolNoReport => SessionFailureCause::Protocol,
         };
-        finalize_infra_death_session(&task_repo, &task, &app_state, reason, failure_cause).await;
-        // Best-effort: persist infra-death log-tail capture on the matching
+        finalize_terminal_runtime_observation(&task_repo, &task, &app_state, reason, failure_cause)
+            .await;
+        // Best-effort: persist terminal-runtime log-tail capture on the matching
         // attempt.  This is purely diagnostic enrichment — it does not change
         // the attempt's outcome or prevent a real terminal report from being
         // authoritative.
-        if let Some(capture) = &infra_death_log_tail {
-            persist_infra_death_on_attempt(&app_state, &task, reason, capture).await;
+        if let Some(capture) = &terminal_runtime_log_tail {
+            persist_terminal_runtime_observation_on_attempt(&app_state, &task, reason, capture).await;
         }
     }
     if let Some(timeout) = presession_timeout {
@@ -897,8 +902,8 @@ pub struct RuntimeExecutionOutcome {
     pub report_result: anyhow::Result<Option<TaskRunReport>>,
     pub teardown: Result<TaskRunReport, djinn_runtime::RuntimeError>,
     pub handshake_timed_out: bool,
-    pub infra_death: Option<TerminalRuntimeObservation>,
-    pub infra_death_log_tail: Option<InfraDeathLogTailCapture>,
+    pub terminal_runtime_observation: Option<TerminalRuntimeObservation>,
+    pub terminal_runtime_log_tail: Option<InfraDeathLogTailCapture>,
     pub presession_timeout: Option<PreSessionTimeout>,
 }
 
@@ -1281,7 +1286,7 @@ fn validate_resize_birth_gate_inputs(
 struct TerminalReportAwaitOutcome {
     report_result: anyhow::Result<Option<TaskRunReport>>,
     handshake_timed_out: bool,
-    infra_death: Option<TerminalRuntimeObservation>,
+    terminal_runtime_observation: Option<TerminalRuntimeObservation>,
     presession_timeout: Option<PreSessionTimeout>,
 }
 
@@ -1367,7 +1372,7 @@ pub async fn execute_runtime_report_phase(
             .await;
     abort_runtime_cancel_watcher(cancel_task).await;
     // Best-effort: capture pod log tail before teardown deletes the Job.
-    let infra_death_log_tail = if await_outcome.infra_death.is_some() {
+    let terminal_runtime_log_tail = if await_outcome.terminal_runtime_observation.is_some() {
         runtime.capture_infra_death_log_tail(&handle).await
     } else {
         None
@@ -1380,8 +1385,8 @@ pub async fn execute_runtime_report_phase(
         report_result: await_outcome.report_result,
         teardown,
         handshake_timed_out: await_outcome.handshake_timed_out,
-        infra_death: await_outcome.infra_death,
-        infra_death_log_tail,
+        terminal_runtime_observation: await_outcome.terminal_runtime_observation,
+        terminal_runtime_log_tail,
         presession_timeout: await_outcome.presession_timeout,
     })
 }
@@ -1415,8 +1420,9 @@ async fn abort_runtime_cancel_watcher(cancel_task: tokio::task::JoinHandle<()>) 
     let _ = cancel_task.await;
 }
 
-/// Attach stdio and wait for the authoritative terminal report, racing the
-/// runtime's infra-death watcher and tracking pre-session timeouts.
+/// Attach stdio and coordinate the authoritative report with terminal runtime
+/// evidence. Reports are polled first in every race and receive one bounded
+/// grace period after evidence arrives.
 async fn attach_and_await_terminal_report(
     runtime: Arc<dyn SessionRuntime>,
     handle: &djinn_runtime::RunHandle,
@@ -1440,40 +1446,88 @@ async fn attach_and_await_terminal_report(
         &bistream_result,
         Err(djinn_runtime::RuntimeError::HandshakeTimeout(_))
     );
-    let mut infra_death: Option<TerminalRuntimeObservation> = None;
+    let mut terminal_runtime_observation: Option<TerminalRuntimeObservation> = None;
     let mut presession_timeout: Option<PreSessionTimeout> = None;
     let report_result: anyhow::Result<Option<TaskRunReport>> = match bistream_result {
-        Ok(bistream) => {
-            let await_outcome = tokio::select! {
-                biased;
-                res = await_report_from_stream(
-                    bistream,
-                    kill,
-                    app_state.db.clone(),
-                    &spec.task_run_id,
-                    &spec.task_id,
-                    pre_session_deadline(),
-                ) => res,
-                observation = runtime.watch_infra_death(handle) => {
-                    tracing::warn!(
-                        task_id = %task.short_id,
-                        diagnostic = %observation.diagnostic,
-                        evidence_kind = ?observation.kind,
-                        runtime = ?runtime_kind(),
-                        "supervisor dispatch: worker infra died before terminal report \
-                         (OOM / eviction / Job failure); finalizing run as interrupted"
-                    );
-                    infra_death = Some(observation);
-                    Ok(ReportAwait::Report(None))
+        Ok(mut bistream) => {
+            let runtime_watch = runtime.watch_infra_death(handle);
+            tokio::pin!(runtime_watch);
+            let pre_session = tokio::time::sleep(pre_session_deadline());
+            tokio::pin!(pre_session);
+            let mut session_reached = false;
+            let mut initial_report = None;
+            let observation = loop {
+                tokio::select! {
+                    biased;
+                    // This ordering makes a report authoritative when both
+                    // receive and runtime-watch are ready in one turn.
+                    frame = bistream.events_rx.recv() => match frame {
+                        Some(StreamEvent::Report(report)) => {
+                            initial_report = Some(report);
+                            break None::<TerminalRuntimeObservation>;
+                        },
+                        Some(StreamEvent::StageStep { step }) => {
+                            session_reached |= step == djinn_runtime::STAGE_STEP_FIRST_TURN;
+                        }
+                        Some(_) => session_reached = true,
+                        None => break None,
+                    },
+                    _ = kill.cancelled() => break None,
+                    _ = &mut pre_session, if !session_reached => {
+                        let session_repo = djinn_db::SessionRepository::new(
+                            app_state.db.clone(), djinn_core::events::EventBus::new(|_| {})
+                        );
+                        if !session_repo.exists_for_task_run(&spec.task_run_id).await.unwrap_or(true) {
+                            presession_timeout = Some(PreSessionTimeout {
+                                step: PRE_SESSION_INITIAL_STEP.to_string(),
+                                elapsed_secs: pre_session_deadline().as_secs(),
+                            });
+                            break None;
+                        }
+                        session_reached = true;
+                    }
+                    evidence = &mut runtime_watch => break Some(evidence),
                 }
             };
-            match await_outcome {
-                Ok(ReportAwait::Report(report)) => Ok(report),
-                Ok(ReportAwait::PreSessionTimeout(timeout)) => {
-                    presession_timeout = Some(timeout);
-                    Ok(None)
+            if observation.is_none() {
+                Ok(initial_report)
+            } else {
+                let observation = observation.expect("checked above");
+                // Final non-blocking drain before starting the one fixed grace
+                // window. A queued terminal report always wins.
+                while let Ok(frame) = bistream.events_rx.try_recv() {
+                    if let StreamEvent::Report(report) = frame {
+                        return TerminalReportAwaitOutcome {
+                            report_result: Ok(Some(report)), handshake_timed_out,
+                            terminal_runtime_observation: None, presession_timeout,
+                        };
+                    }
                 }
-                Err(e) => Err(e),
+                let grace = tokio::time::sleep(TERMINAL_RUNTIME_REPORT_GRACE);
+                tokio::pin!(grace);
+                loop {
+                    tokio::select! {
+                        biased;
+                        frame = bistream.events_rx.recv() => match frame {
+                            Some(StreamEvent::Report(report)) => return TerminalReportAwaitOutcome {
+                                report_result: Ok(Some(report)), handshake_timed_out,
+                                terminal_runtime_observation: None, presession_timeout,
+                            },
+                            Some(_) => {},
+                            None => break,
+                        },
+                        _ = kill.cancelled() => return TerminalReportAwaitOutcome {
+                            report_result: Ok(None), handshake_timed_out,
+                            terminal_runtime_observation: None, presession_timeout,
+                        },
+                        _ = &mut grace => break,
+                    }
+                }
+                tracing::warn!(task_id = %task.short_id, diagnostic = %observation.diagnostic,
+                    evidence_kind = ?observation.kind, runtime = ?runtime_kind(),
+                    "supervisor dispatch: terminal runtime observation received no report before grace deadline");
+                terminal_runtime_observation = Some(observation);
+                Ok(None)
             }
         }
         Err(e) => Err(anyhow::anyhow!("runtime.attach_stdio failed: {e}")),
@@ -1481,7 +1535,7 @@ async fn attach_and_await_terminal_report(
     TerminalReportAwaitOutcome {
         report_result,
         handshake_timed_out,
-        infra_death,
+        terminal_runtime_observation,
         presession_timeout,
     }
 }
