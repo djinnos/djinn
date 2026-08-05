@@ -162,6 +162,28 @@ pub struct TypedEvidenceDispositionProjection {
     pub finding_lifecycle: TribunalEvidenceLifecycle,
 }
 
+/// The only projection a mixed-version consumer may use. `None` deliberately
+/// conflates absent and invalid typed state: legacy authority remains usable
+/// during rollback, while typed-mode callers must fail closed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LegacyEvidenceParityProjection {
+    pub finding: TribunalEvidenceFinding,
+    pub attempt_id: Option<String>,
+    pub spike_task_id: Option<String>,
+}
+
+/// Summary of a re-runnable legacy migration. Rows that cannot be represented
+/// (notably malformed claims) are skipped rather than guessed.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TypedEvidenceBackfillReport {
+    pub scanned: usize,
+    pub created_findings: usize,
+    pub created_attempts: usize,
+    pub skipped_malformed: usize,
+}
+
+const LEGACY_LINK_ONLY_CLAIM: &str = "__typed_evidence_legacy_link_only";
+
 pub struct TypedEvidenceRepository {
     db: Database,
 }
@@ -171,6 +193,413 @@ impl TypedEvidenceRepository {
     }
     pub fn db(&self) -> &Database {
         &self.db
+    }
+
+    /// Backfill only actively parked legacy rows. It is re-runnable and never
+    /// changes legacy authority, which keeps rollback recovery intact.
+    pub async fn backfill_active_legacy_evidence(&self) -> Result<TypedEvidenceBackfillReport> {
+        let mut tx = self.db.pool().begin().await?;
+        let rows = sqlx::query("SELECT id,linked_spike_task_id,needs_evidence_claim,latest_revision_seq FROM proposals WHERE NULLIF(btrim(linked_spike_task_id),'') IS NOT NULL OR NULLIF(btrim(needs_evidence_claim),'') IS NOT NULL FOR UPDATE")
+            .fetch_all(&mut *tx).await?;
+        let mut report = TypedEvidenceBackfillReport {
+            scanned: rows.len(),
+            ..Default::default()
+        };
+        for row in rows {
+            let proposal_id: String = row.get("id");
+            let link: Option<String> = row.get("linked_spike_task_id");
+            // A linked row is active authority only while the task remains
+            // active. Leave terminal or missing-task legacy state untouched so
+            // rollback readers can recover it without invented typed history.
+            if let Some(task_id) = link.as_deref() {
+                let task_is_active: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM tasks WHERE id=$1 AND status <> 'closed')",
+                )
+                .bind(task_id)
+                .fetch_one(&mut *tx)
+                .await?;
+                if !task_is_active {
+                    report.skipped_malformed += 1;
+                    continue;
+                }
+            }
+            let Some(claim) = legacy_claim(
+                row.get::<Option<String>, _>("needs_evidence_claim")
+                    .as_deref(),
+            ) else {
+                report.skipped_malformed += 1;
+                continue;
+            };
+            let judge = claim
+                .get("created_by_task_id")
+                .and_then(serde_json::Value::as_str)
+                .or(link.as_deref());
+            let Some(judge) = judge else {
+                report.skipped_malformed += 1;
+                continue;
+            };
+            let revision = claim
+                .get("against_revision_seq")
+                .and_then(serde_json::Value::as_i64)
+                .map(|v| v as i32)
+                .filter(|v| *v > 0)
+                .unwrap_or(row.get("latest_revision_seq"));
+            let hash = legacy_demand_hash(&claim, link.as_deref());
+            let existing = sqlx::query(
+                "SELECT id,claim,lifecycle FROM typed_evidence_findings WHERE proposal_id=$1 AND demand_hash=$2 FOR UPDATE",
+            )
+            .bind(&proposal_id)
+            .bind(&hash)
+            .fetch_optional(&mut *tx)
+            .await?;
+            let finding_id = if let Some(existing) = existing {
+                let id: String = existing.get("id");
+                let lifecycle = parse(&existing.get::<String, _>("lifecycle"))?;
+                let attempts = sqlx::query(
+                    "SELECT spike_task_id FROM typed_evidence_attempts WHERE finding_id=$1 ORDER BY sequence",
+                )
+                .bind(&id)
+                .fetch_all(&mut *tx)
+                .await?;
+                let parity_matches = existing.get::<serde_json::Value, _>("claim") == claim
+                    && match link.as_deref() {
+                        None => {
+                            lifecycle == TribunalEvidenceLifecycle::Demanded && attempts.is_empty()
+                        }
+                        Some(task) => {
+                            (lifecycle == TribunalEvidenceLifecycle::Demanded
+                                && attempts.is_empty())
+                                || (lifecycle == TribunalEvidenceLifecycle::SpikeActive
+                                    && attempts.len() == 1
+                                    && attempts[0].get::<String, _>("spike_task_id") == task)
+                        }
+                    };
+                if !parity_matches {
+                    report.skipped_malformed += 1;
+                    continue;
+                }
+                id
+            } else {
+                if Self::has_unresolved_in_transaction(&mut tx, &proposal_id).await? {
+                    report.skipped_malformed += 1;
+                    continue;
+                }
+                let id = uuid::Uuid::now_v7().to_string();
+                sqlx::query("INSERT INTO typed_evidence_findings (id,proposal_id,demand_hash,lifecycle,claim,demanded_revision_seq,created_by_task_id) VALUES ($1,$2,$3,'demanded',$4,$5,$6)").bind(&id).bind(&proposal_id).bind(&hash).bind(&claim).bind(revision).bind(judge).execute(&mut *tx).await?;
+                sqlx::query("INSERT INTO typed_evidence_transitions (id,finding_id,ordinal,from_lifecycle,to_lifecycle,actor_task_id,metadata) VALUES ($1,$2,1,NULL,'demanded',$3,$4)").bind(uuid::Uuid::now_v7().to_string()).bind(&id).bind(judge).bind(serde_json::json!({"source":"legacy_backfill"})).execute(&mut *tx).await?;
+                report.created_findings += 1;
+                id
+            };
+            if let Some(task) = link {
+                let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM typed_evidence_attempts WHERE finding_id=$1 AND spike_task_id=$2)").bind(&finding_id).bind(&task).fetch_one(&mut *tx).await?;
+                if !exists {
+                    let seq: i32 = sqlx::query_scalar("SELECT COALESCE(MAX(sequence),0)+1 FROM typed_evidence_attempts WHERE finding_id=$1").bind(&finding_id).fetch_one(&mut *tx).await?;
+                    sqlx::query("INSERT INTO typed_evidence_attempts (id,finding_id,sequence,spike_task_id) VALUES ($1,$2,$3,$4)").bind(uuid::Uuid::now_v7().to_string()).bind(&finding_id).bind(seq).bind(&task).execute(&mut *tx).await?;
+                    report.created_attempts += 1;
+                }
+                if lock_state(&mut tx, &finding_id).await? == TribunalEvidenceLifecycle::Demanded {
+                    Self::append_transition(
+                        &mut tx,
+                        AppendTypedEvidenceTransitionInput {
+                            id: uuid::Uuid::now_v7().to_string(),
+                            finding_id: finding_id.clone(),
+                            ordinal: 2,
+                            from_lifecycle: Some(TribunalEvidenceLifecycle::Demanded),
+                            to_lifecycle: TribunalEvidenceLifecycle::SpikeActive,
+                            actor_task_id: Some(task),
+                            metadata: serde_json::json!({"source":"legacy_backfill"}),
+                        },
+                    )
+                    .await?;
+                }
+            }
+        }
+        tx.commit().await?;
+        Ok(report)
+    }
+
+    /// Typed-mode read. Any absent, malformed, ambiguous, or mismatched state
+    /// yields `None` and does not repair either authority representation.
+    pub async fn dual_read_legacy_parity(
+        &self,
+        proposal_id: &str,
+    ) -> Result<Option<LegacyEvidenceParityProjection>> {
+        let mut tx = self.db.pool().begin().await?;
+        let result = Self::dual_read_legacy_parity_in_transaction(&mut tx, proposal_id).await?;
+        tx.commit().await?;
+        Ok(result)
+    }
+
+    pub async fn dual_read_legacy_parity_in_transaction(
+        tx: &mut Transaction<'_, Postgres>,
+        proposal_id: &str,
+    ) -> Result<Option<LegacyEvidenceParityProjection>> {
+        let Some(legacy) = sqlx::query(
+            "SELECT linked_spike_task_id,needs_evidence_claim FROM proposals WHERE id=$1 FOR SHARE",
+        )
+        .bind(proposal_id)
+        .fetch_optional(&mut **tx)
+        .await?
+        else {
+            return Ok(None);
+        };
+        let link: Option<String> = legacy.get("linked_spike_task_id");
+        let Some(claim) = legacy_claim(
+            legacy
+                .get::<Option<String>, _>("needs_evidence_claim")
+                .as_deref(),
+        ) else {
+            return Ok(None);
+        };
+        let rows = sqlx::query("SELECT id,proposal_id,demand_hash,lifecycle,claim,demanded_revision_seq,created_by_task_id,created_at,updated_at FROM typed_evidence_findings WHERE proposal_id=$1 AND lifecycle IN ('demanded','spike_active','evidence_received','failed')").bind(proposal_id).fetch_all(&mut **tx).await?;
+        if rows.len() != 1 || rows[0].get::<serde_json::Value, _>("claim") != claim {
+            return Ok(None);
+        }
+        let finding = finding(&rows[0])?;
+        if finding.demand_hash != legacy_demand_hash(&claim, link.as_deref()) {
+            return Ok(None);
+        }
+        let attempts = sqlx::query("SELECT id,spike_task_id FROM typed_evidence_attempts WHERE finding_id=$1 ORDER BY sequence DESC").bind(&finding.id).fetch_all(&mut **tx).await?;
+        let linked_task_is_active = match link.as_deref() {
+            Some(task) => {
+                sqlx::query_scalar::<_, bool>(
+                    "SELECT EXISTS(SELECT 1 FROM tasks WHERE id=$1 AND status <> 'closed')",
+                )
+                .bind(task)
+                .fetch_one(&mut **tx)
+                .await?
+            }
+            None => false,
+        };
+        match (link, finding.lifecycle, attempts.as_slice()) {
+            (None, TribunalEvidenceLifecycle::Demanded, []) => {
+                Ok(Some(LegacyEvidenceParityProjection {
+                    finding,
+                    attempt_id: None,
+                    spike_task_id: None,
+                }))
+            }
+            (Some(task), TribunalEvidenceLifecycle::SpikeActive, [attempt])
+                if attempt.get::<String, _>("spike_task_id") == task && linked_task_is_active =>
+            {
+                Ok(Some(LegacyEvidenceParityProjection {
+                    finding,
+                    attempt_id: Some(attempt.get("id")),
+                    spike_task_id: Some(task),
+                }))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// Dual-write the initial typed demand and rollback-compatible legacy
+    /// authority under one caller-owned transaction. Callers that allocate a
+    /// spike append `demanded -> spike_active` in that same transaction.
+    pub async fn demand_and_set_legacy_in_transaction(
+        tx: &mut Transaction<'_, Postgres>,
+        input: DemandTypedEvidenceInput,
+        linked_spike_task_id: Option<&str>,
+    ) -> Result<TypedEvidenceFindingProjection> {
+        let proposal_id = input.proposal_id.clone();
+        if input.demand_hash != legacy_demand_hash(&input.claim, linked_spike_task_id) {
+            return Err(Error::InvalidData(
+                "legacy dual-write demand hash mismatch".into(),
+            ));
+        }
+        let claim = serde_json::to_string(&input.claim).map_err(|error| {
+            Error::InvalidData(format!("legacy claim serialization failed: {error}"))
+        })?;
+        let projection = Self::demand_in_transaction(tx, input).await?;
+        let updated = sqlx::query(
+            "UPDATE proposals SET linked_spike_task_id=$1,needs_evidence_claim=$2 WHERE id=$3",
+        )
+        .bind(linked_spike_task_id)
+        .bind(claim)
+        .bind(&proposal_id)
+        .execute(&mut **tx)
+        .await?;
+        if updated.rows_affected() != 1 {
+            return Err(Error::InvalidData("proposal not found".into()));
+        }
+        Ok(projection)
+    }
+
+    /// Atomically materialize an active legacy spike as a typed demand, its
+    /// current attempt, and `demanded -> spike_active`. This prevents new
+    /// mixed-version links from existing without typed authority.
+    pub async fn demand_activate_and_set_legacy_in_transaction(
+        tx: &mut Transaction<'_, Postgres>,
+        input: DemandTypedEvidenceInput,
+        spike_task_id: &str,
+    ) -> Result<TypedEvidenceFindingProjection> {
+        nonempty(&[spike_task_id])?;
+        let task_is_active: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM tasks WHERE id=$1 AND status <> 'closed')",
+        )
+        .bind(spike_task_id)
+        .fetch_one(&mut **tx)
+        .await?;
+        if !task_is_active {
+            return Err(Error::InvalidTransition(
+                "legacy_typed_task_not_active".into(),
+            ));
+        }
+        let projection =
+            Self::demand_and_set_legacy_in_transaction(tx, input, Some(spike_task_id)).await?;
+        let finding_id = projection.finding.id.clone();
+        let attempts = sqlx::query(
+            "SELECT id FROM typed_evidence_attempts WHERE finding_id=$1 AND spike_task_id=$2",
+        )
+        .bind(&finding_id)
+        .bind(spike_task_id)
+        .fetch_all(&mut **tx)
+        .await?;
+        if attempts.len() > 1 {
+            return Err(Error::InvalidTransition(
+                "legacy_typed_parity_mismatch".into(),
+            ));
+        }
+        if attempts.is_empty() {
+            let sequence: i32 = sqlx::query_scalar(
+                "SELECT COALESCE(MAX(sequence),0)+1 FROM typed_evidence_attempts WHERE finding_id=$1",
+            )
+            .bind(&finding_id)
+            .fetch_one(&mut **tx)
+            .await?;
+            sqlx::query(
+                "INSERT INTO typed_evidence_attempts (id,finding_id,sequence,spike_task_id) VALUES ($1,$2,$3,$4)",
+            )
+            .bind(uuid::Uuid::now_v7().to_string())
+            .bind(&finding_id)
+            .bind(sequence)
+            .bind(spike_task_id)
+            .execute(&mut **tx)
+            .await?;
+        }
+        let lifecycle = lock_state(tx, &finding_id).await?;
+        if lifecycle == TribunalEvidenceLifecycle::Demanded
+            || lifecycle == TribunalEvidenceLifecycle::Failed
+        {
+            let ordinal: i32 = sqlx::query_scalar(
+                "SELECT COALESCE(MAX(ordinal),0)+1 FROM typed_evidence_transitions WHERE finding_id=$1",
+            )
+            .bind(&finding_id)
+            .fetch_one(&mut **tx)
+            .await?;
+            Self::append_transition(
+                tx,
+                AppendTypedEvidenceTransitionInput {
+                    id: uuid::Uuid::now_v7().to_string(),
+                    finding_id: finding_id.clone(),
+                    ordinal,
+                    from_lifecycle: Some(lifecycle),
+                    to_lifecycle: TribunalEvidenceLifecycle::SpikeActive,
+                    actor_task_id: Some(spike_task_id.to_owned()),
+                    metadata: serde_json::json!({"source":"legacy_dual_write_demand"}),
+                },
+            )
+            .await?;
+        }
+        Ok(projection)
+    }
+
+    /// Clearing legacy authority is inseparable from the corresponding typed
+    /// non-terminal transition in this caller-owned transaction.
+    pub async fn transition_and_clear_legacy_in_transaction(
+        tx: &mut Transaction<'_, Postgres>,
+        proposal_id: &str,
+        expected_spike_task_id: &str,
+        transition: AppendTypedEvidenceTransitionInput,
+    ) -> Result<()> {
+        let Some(parity) = Self::dual_read_legacy_parity_in_transaction(tx, proposal_id).await?
+        else {
+            return Err(Error::InvalidTransition(
+                "legacy_typed_parity_mismatch".into(),
+            ));
+        };
+        if parity.finding.id != transition.finding_id
+            || parity.spike_task_id.as_deref() != Some(expected_spike_task_id)
+        {
+            return Err(Error::InvalidTransition(
+                "legacy_typed_parity_mismatch".into(),
+            ));
+        }
+        Self::append_transition_in_transaction(tx, transition).await?;
+        let updated = sqlx::query("UPDATE proposals SET linked_spike_task_id=NULL,needs_evidence_claim=NULL WHERE id=$1 AND linked_spike_task_id=$2").bind(proposal_id).bind(expected_spike_task_id).execute(&mut **tx).await?;
+        if updated.rows_affected() != 1 {
+            return Err(Error::InvalidTransition(
+                "legacy_typed_parity_mismatch".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Commit the `spike_active -> evidence_received` fact and legacy clearing
+    /// together. Unlike the live projection, this path requires the linked
+    /// task to be terminal; any missing or ambiguous authority rolls back.
+    pub async fn evidence_received_and_clear_legacy(
+        &self,
+        proposal_id: &str,
+        spike_task_id: &str,
+    ) -> Result<()> {
+        let mut tx = self.db.pool().begin().await?;
+        let result = async {
+            let legacy = sqlx::query("SELECT needs_evidence_claim FROM proposals WHERE id=$1 AND linked_spike_task_id=$2 FOR UPDATE")
+                .bind(proposal_id).bind(spike_task_id).fetch_optional(&mut *tx).await?
+                .ok_or_else(|| Error::InvalidTransition("legacy_typed_parity_mismatch".into()))?;
+            let claim = legacy_claim(legacy.get::<Option<String>, _>("needs_evidence_claim").as_deref())
+                .ok_or_else(|| Error::InvalidTransition("legacy_typed_parity_mismatch".into()))?;
+            let terminal: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM tasks WHERE id=$1 AND status='closed')")
+                .bind(spike_task_id).fetch_one(&mut *tx).await?;
+            if !terminal {
+                return Err(Error::InvalidTransition("legacy_typed_task_not_terminal".into()));
+            }
+            let findings = sqlx::query("SELECT id,lifecycle FROM typed_evidence_findings WHERE proposal_id=$1 AND demand_hash=$2 FOR UPDATE")
+                .bind(proposal_id).bind(legacy_demand_hash(&claim, Some(spike_task_id)))
+                .fetch_all(&mut *tx).await?;
+            if findings.len() != 1 || findings[0].get::<String, _>("lifecycle") != "spike_active" {
+                return Err(Error::InvalidTransition("legacy_typed_parity_mismatch".into()));
+            }
+            let finding_id: String = findings[0].get("id");
+            // Inspect the complete immutable attempt history, rather than only
+            // the expected task. Filtering here would hide a second attempt
+            // for another task and allow ambiguous authority to clear the
+            // rollback-compatible legacy fields.
+            let attempts = sqlx::query(
+                "SELECT id,spike_task_id FROM typed_evidence_attempts WHERE finding_id=$1 ORDER BY sequence",
+            )
+            .bind(&finding_id)
+            .fetch_all(&mut *tx)
+            .await?;
+            if attempts.len() != 1
+                || attempts[0].get::<String, _>("spike_task_id") != spike_task_id
+            {
+                return Err(Error::InvalidTransition("legacy_typed_parity_mismatch".into()));
+            }
+            let ordinal: i32 = sqlx::query_scalar("SELECT COALESCE(MAX(ordinal),0)+1 FROM typed_evidence_transitions WHERE finding_id=$1")
+                .bind(&finding_id).fetch_one(&mut *tx).await?;
+            Self::append_transition(&mut tx, AppendTypedEvidenceTransitionInput {
+                id: uuid::Uuid::now_v7().to_string(), finding_id, ordinal,
+                from_lifecycle: Some(TribunalEvidenceLifecycle::SpikeActive),
+                to_lifecycle: TribunalEvidenceLifecycle::EvidenceReceived,
+                actor_task_id: Some(spike_task_id.to_owned()),
+                metadata: serde_json::json!({"source":"legacy_dual_write_clear", "attempt_id": attempts[0].get::<String, _>("id")}),
+            }).await?;
+            let update = sqlx::query("UPDATE proposals SET linked_spike_task_id=NULL, needs_evidence_claim=NULL WHERE id=$1 AND linked_spike_task_id=$2")
+                .bind(proposal_id).bind(spike_task_id).execute(&mut *tx).await?;
+            if update.rows_affected() != 1 {
+                return Err(Error::InvalidTransition("legacy_typed_parity_mismatch".into()));
+            }
+            Ok(())
+        }.await;
+        match result {
+            Ok(()) => tx.commit().await?,
+            Err(error) => {
+                tx.rollback().await?;
+                return Err(error);
+            }
+        }
+        Ok(())
     }
 
     /// Database-owned entry point: a rejected normalized payload is rolled
@@ -1044,6 +1473,32 @@ fn finding(r: &sqlx::postgres::PgRow) -> Result<TribunalEvidenceFinding> {
         updated_at: r.get("updated_at"),
     })
 }
+fn legacy_claim(raw: Option<&str>) -> Option<serde_json::Value> {
+    match raw.filter(|value| !value.trim().is_empty()) {
+        Some(raw) => {
+            let value: serde_json::Value = serde_json::from_str(raw).ok()?;
+            (value.is_object()
+                && value
+                    .get("created_by_task_id")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|id| !id.trim().is_empty())
+                && value
+                    .get("against_revision_seq")
+                    .and_then(serde_json::Value::as_i64)
+                    .is_some_and(|seq| seq > 0))
+            .then_some(value)
+        }
+        None => Some(serde_json::json!({ LEGACY_LINK_ONLY_CLAIM: true })),
+    }
+}
+pub fn legacy_demand_hash(claim: &serde_json::Value, spike_task_id: Option<&str>) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"typed_evidence_legacy_backfill_v1\0");
+    hasher.update(serde_json::to_vec(claim).expect("JSON value serialization cannot fail"));
+    hasher.update(b"\0");
+    hasher.update(spike_task_id.unwrap_or_default().as_bytes());
+    format!("legacy:{:x}", hasher.finalize())
+}
 fn nonempty(values: &[&str]) -> Result<()> {
     if values.iter().any(|v| v.trim().is_empty()) {
         Err(Error::InvalidData(
@@ -1228,6 +1683,31 @@ mod tests {
         assert!(!Demanded.is_terminal());
         assert!(Resolved.is_terminal());
         assert!(Withdrawn.is_terminal());
+    }
+
+    #[test]
+    fn typed_evidence_backfill_fixture_names_required_mixed_version_cases() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/typed_evidence_backfill.json"
+        ))
+        .expect("backfill fixture must be valid JSON");
+        let cases = fixture["cases"].as_array().expect("fixture cases array");
+        for required in [
+            "active_claim_only",
+            "active_link_only",
+            "active_claim_and_link",
+            "inactive_control",
+            "idempotent_rerun",
+            "parity_mismatch_fails_closed",
+            "typed_write_rollback",
+            "legacy_write_rollback",
+            "active_task_preservation",
+        ] {
+            assert!(
+                cases.iter().any(|case| case == required),
+                "missing {required}"
+            );
+        }
     }
 
     #[test]
