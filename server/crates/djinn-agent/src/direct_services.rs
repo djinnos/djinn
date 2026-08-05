@@ -39,7 +39,7 @@ use djinn_supervisor::services::{
     WatchdogTerminationRequest,
 };
 use djinn_supervisor::{
-    BranchPublicationResult, RoleKind, StageError, StageOutcome, SupervisorServices,
+    BranchPublicationResult, RoleKind, StageError, StageExecutionResult, SupervisorServices,
     TaskRunOutcome, TaskRunSpec,
 };
 use djinn_workspace::Workspace;
@@ -1142,7 +1142,7 @@ impl SupervisorServices for DirectServices {
         role_kind: RoleKind,
         task_run_id: &str,
         spec: &TaskRunSpec,
-    ) -> Result<StageOutcome, StageError> {
+    ) -> Result<StageExecutionResult, StageError> {
         execute_stage(
             task,
             workspace,

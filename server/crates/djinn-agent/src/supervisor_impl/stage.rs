@@ -104,22 +104,25 @@ use djinn_runtime::{LoopGuardKind as RuntimeLoopGuardKind, LoopGuardTrip, Provid
 
 use super::SupervisorCallbackContext;
 
-/// A session is created before extension loading so diagnostic rows can carry
-/// its foreign key. Every later setup failure must therefore settle that row.
-async fn mark_session_failed(services: &dyn SupervisorServices, session_id: &str) {
-    if let Err(error) = services
-        .update_session_status(
-            session_id.to_owned(),
-            SessionStatus::Failed,
-            0,
-            0,
-            0,
-            0,
-            None,
-        )
-        .await
-    {
-        tracing::warn!(session_id, error = %error, "Supervisor stage: failed to mark setup session failed");
+/// Carry post-creation failures back to the supervisor without performing a
+/// terminal write in agent code.
+fn after_session_error(
+    session_id: &str,
+    message: String,
+    failure_cause: djinn_core::models::SessionFailureCause,
+) -> StageError {
+    StageError::AfterSession {
+        message,
+        settlement: djinn_supervisor::StageSessionSettlement {
+            session_id: session_id.to_owned(),
+            status: SessionStatus::Failed,
+            tokens_in: 0,
+            tokens_out: 0,
+            cache_read: 0,
+            cache_write: 0,
+            parked_reason: None,
+            failure_cause: Some(failure_cause),
+        },
     }
 }
 
@@ -527,12 +530,22 @@ fn stage_outcome_for_reply_loop_guard_error(error: &LoopGuardError) -> StageOutc
 fn session_settlement_for_stage_outcome(
     stage_outcome: &StageOutcome,
     final_result_ok: bool,
+    cancelled: bool,
 ) -> (SessionStatus, Option<String>) {
+    if cancelled {
+        return (SessionStatus::Interrupted, None);
+    }
     match stage_outcome {
+        // These outcomes are useful terminal evidence, but did not provide a
+        // durable healthy board handoff.
         StageOutcome::Parked {
             reason: ParkReason::Budget,
             ..
-        } => (SessionStatus::Completed, Some("budget".to_string())),
+        } => (SessionStatus::Failed, Some("budget".to_string())),
+        StageOutcome::Failed { .. }
+        | StageOutcome::VerifierFailed { .. }
+        | StageOutcome::ReviewerRejected { .. }
+        | StageOutcome::LoopGuardTripped { .. } => (SessionStatus::Failed, None),
         _ if final_result_ok => (SessionStatus::Completed, None),
         _ => (SessionStatus::Failed, None),
     }
@@ -929,7 +942,7 @@ pub(crate) async fn execute_stage(
     spec: &TaskRunSpec,
     callbacks: &SupervisorCallbackContext,
     services: &dyn SupervisorServices,
-) -> Result<StageOutcome, StageError> {
+) -> Result<djinn_supervisor::StageExecutionResult, StageError> {
     let role = role_arc_for(role_kind);
     let role_name = role.config().name;
     let worktree_path = workspace.path();
@@ -1132,8 +1145,11 @@ pub(crate) async fn execute_stage(
     {
         Ok(resolved) => resolved,
         Err(error) => {
-            mark_session_failed(services, &session_id).await;
-            return Err(StageError::Setup(error.to_string()));
+            return Err(after_session_error(
+                &session_id,
+                error.to_string(),
+                djinn_core::models::SessionFailureCause::Infrastructure,
+            ));
         }
     };
 
@@ -1147,8 +1163,11 @@ pub(crate) async fn execute_stage(
     {
         Ok(config) => config,
         Err(error) => {
-            mark_session_failed(services, &session_id).await;
-            return Err(StageError::Setup(format!("env_config: {error}")));
+            return Err(after_session_error(
+                &session_id,
+                format!("env_config: {error}"),
+                djinn_core::models::SessionFailureCause::Infrastructure,
+            ));
         }
     };
     let SetupContext {
@@ -1164,8 +1183,11 @@ pub(crate) async fn execute_stage(
     {
         Ok(ctx) => ctx,
         Err(SetupError { reason }) => {
-            mark_session_failed(services, &session_id).await;
-            return Err(StageError::Setup(reason));
+            return Err(after_session_error(
+                &session_id,
+                reason,
+                djinn_core::models::SessionFailureCause::Harness,
+            ));
         }
     };
 
@@ -1355,9 +1377,10 @@ pub(crate) async fn execute_stage(
         ) {
             Some(provider) => provider,
             None => {
-                mark_session_failed(services, &session_id).await;
-                return Err(StageError::ModelResolution(
+                return Err(after_session_error(
+                    &session_id,
                     "no provider credential resolved for model".into(),
+                    djinn_core::models::SessionFailureCause::Provider,
                 ));
             }
         };
@@ -1684,27 +1707,11 @@ pub(crate) async fn execute_stage(
     };
 
     // ── Finalize session ─────────────────────────────────────────────────────
-    let (session_status, parked_reason) =
-        session_settlement_for_stage_outcome(&stage_outcome, final_result_ok);
-    if let Err(e) = services
-        .update_session_status(
-            session_id.clone(),
-            session_status,
-            tokens_in,
-            tokens_out,
-            cache_read,
-            cache_write,
-            parked_reason,
-        )
-        .await
-    {
-        tracing::warn!(
-            session_id = %session_id,
-            error = %e,
-            "Supervisor stage: failed to update session record"
-        );
-    }
-
+    let (session_status, parked_reason) = session_settlement_for_stage_outcome(
+        &stage_outcome,
+        final_result_ok,
+        services.cancel().is_cancelled(),
+    );
     if let StageOutcome::Parked {
         reason: ParkReason::Budget,
         summary: Some(summary),
@@ -1749,7 +1756,37 @@ pub(crate) async fn execute_stage(
         tokens_out,
     });
 
-    Ok(stage_outcome)
+    Ok(djinn_supervisor::StageExecutionResult {
+        outcome: stage_outcome.clone(),
+        settlement: Some(djinn_supervisor::StageSessionSettlement {
+            session_id,
+            status: session_status,
+            tokens_in,
+            tokens_out,
+            cache_read,
+            cache_write,
+            parked_reason,
+            failure_cause: match session_status {
+                SessionStatus::Interrupted => {
+                    Some(djinn_core::models::SessionFailureCause::Cancelled)
+                }
+                SessionStatus::Failed => Some(
+                    if matches!(
+                        stage_outcome,
+                        StageOutcome::Failed {
+                            provider_failure: Some(_),
+                            ..
+                        }
+                    ) {
+                        djinn_core::models::SessionFailureCause::Provider
+                    } else {
+                        djinn_core::models::SessionFailureCause::Unknown
+                    },
+                ),
+                _ => None,
+            },
+        }),
+    })
 }
 
 /// Map a [`RoleKind`] (flow enum) to a concrete `Arc<dyn AgentRole>`.
@@ -2207,7 +2244,7 @@ mod tests {
     }
 
     #[test]
-    fn budget_park_settles_completed_with_parked_reason_even_when_wind_down_ignored() {
+    fn budget_park_settles_failed_without_claiming_a_handoff() {
         let ignored_outcome = StageOutcome::Parked {
             reason: ParkReason::Budget,
             summary: None,
@@ -2218,9 +2255,9 @@ mod tests {
         };
 
         assert_eq!(
-            session_settlement_for_stage_outcome(&ignored_outcome, false),
-            (SessionStatus::Completed, Some("budget".to_string())),
-            "typed ignored budget wind-downs must settle as completed parks, not failures"
+            session_settlement_for_stage_outcome(&ignored_outcome, false, false),
+            (SessionStatus::Failed, Some("budget".to_string())),
+            "typed ignored budget wind-downs must not settle as a completed handoff"
         );
 
         let summary_outcome = StageOutcome::Parked {
@@ -2232,16 +2269,21 @@ mod tests {
             tokens_out: 5,
         };
         assert_eq!(
-            session_settlement_for_stage_outcome(&summary_outcome, true),
-            (SessionStatus::Completed, Some("budget".to_string()))
+            session_settlement_for_stage_outcome(&summary_outcome, true, false),
+            (SessionStatus::Failed, Some("budget".to_string()))
         );
     }
 
     #[test]
     fn non_budget_stage_settlement_keeps_existing_success_and_failure_statuses() {
         assert_eq!(
-            session_settlement_for_stage_outcome(&StageOutcome::WorkerDone, true),
+            session_settlement_for_stage_outcome(&StageOutcome::WorkerDone, true, false),
             (SessionStatus::Completed, None)
+        );
+        assert_eq!(
+            session_settlement_for_stage_outcome(&StageOutcome::WorkerDone, true, true),
+            (SessionStatus::Interrupted, None),
+            "a cancellation observed at the ownership cutover must never settle Completed"
         );
         assert_eq!(
             session_settlement_for_stage_outcome(
@@ -2249,6 +2291,7 @@ mod tests {
                     reason: "ordinary failure".to_string(),
                     provider_failure: None,
                 },
+                false,
                 false,
             ),
             (SessionStatus::Failed, None)

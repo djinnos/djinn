@@ -32,7 +32,7 @@ use djinn_core::models::{SessionFailureCause, SessionStatus, Task, TaskRunTrigge
 use djinn_runtime::{ResolvedCredentials, SupervisorFlow, TaskRunSpec};
 use djinn_supervisor::{
     ExpectedTokenValidator, Frame, FramePayload, RoleKind, ServeHandle, ServiceRpcRequest,
-    StageError, StageOutcome, SupervisorServices, TaskRunOutcome, serve_on_tcp,
+    StageError, StageExecutionResult, SupervisorServices, TaskRunOutcome, serve_on_tcp,
 };
 use djinn_workspace::Workspace;
 use tokio_util::sync::CancellationToken;
@@ -156,7 +156,7 @@ impl SupervisorServices for FakeServices {
         _role_kind: RoleKind,
         _task_run_id: &str,
         _spec: &TaskRunSpec,
-    ) -> Result<StageOutcome, StageError> {
+    ) -> Result<StageExecutionResult, StageError> {
         unimplemented!("not exercised on the auth-rejection path")
     }
 

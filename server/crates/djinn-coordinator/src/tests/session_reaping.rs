@@ -292,6 +292,17 @@ async fn zombie_zero_token_session_is_reaped_on_db_truth() {
             .any(|s| s.id == session.id),
         "zombie session row must be finalized by the backstop"
     );
+    let persisted = session_repo
+        .get(&session.id)
+        .await
+        .unwrap()
+        .expect("reaped session remains available for audit");
+    assert_eq!(persisted.status, "interrupted");
+    assert_eq!(
+        persisted.failure_cause,
+        Some(djinn_core::models::SessionFailureCause::Infrastructure),
+        "a proven dead supervisor/worker is infrastructure loss, not a model failure"
+    );
     let updated = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx))
         .get(&task.id)
         .await
@@ -1572,6 +1583,17 @@ async fn ready_state_stale_orphan_session_is_finalized() {
             .iter()
             .any(|s| s.id == session.id),
         "stale ready-state orphan session must be finalized via interrupt_running_for_task"
+    );
+    let persisted = session_repo
+        .get(&session.id)
+        .await
+        .unwrap()
+        .expect("recovered session remains available for audit");
+    assert_eq!(persisted.status, "interrupted");
+    assert_eq!(
+        persisted.failure_cause,
+        Some(djinn_core::models::SessionFailureCause::Infrastructure),
+        "task recovery must preserve the exact infrastructure interruption cause"
     );
 
     let updated = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx))
