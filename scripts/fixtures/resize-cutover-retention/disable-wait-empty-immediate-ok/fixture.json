@@ -1,12 +1,12 @@
 {
   "asset": "wait-empty",
   "expect": "reject",
-  "why": "AC9, mutation one. `wait_empty` replaced with an immediate `Ok(())`. The symbol is still there, the call sites still compile, every existence check still passes — and the leaf is never observed to drain. A gate that only checks the file still exists stays green under this.",
+  "why": "AC9, mutation one. `wait_empty` replaced with an immediate `Ok(())`. The symbol is still there, the call sites still compile, every existence check still passes — and the leaf is never observed to drain. A gate that only checks the file still exists stays green under this. The body is now a bounded poll rather than a single read, so the anchor is the whole loop: replacing it with `Ok(())` retires the read, the `populated_zero` interpretation and the `StillPopulated` failure arm together, exactly as before.",
   "operations": [
     {
       "op": "replace",
       "path": "server/crates/djinn-cgroup-launcher/src/lib.rs",
-      "find": "        let events = self.fs.read_leaf(leaf.fd, \"cgroup.events\")?;\n        if populated_zero(&events)? {\n            Ok(())\n        } else {\n            Err(Error::StillPopulated)\n        }\n",
+      "find": "        let settle = self.config.kill_settle;\n        let mut remaining = settle.attempts.max(1);\n        loop {\n            let events = self.fs.read_leaf(leaf.fd, \"cgroup.events\")?;\n            if populated_zero(&events)? {\n                return Ok(());\n            }\n            remaining -= 1;\n            if remaining == 0 {\n                return Err(Error::StillPopulated);\n            }\n            if !settle.poll.is_zero() {\n                std::thread::sleep(settle.poll);\n            }\n        }\n",
       "with": "        Ok(())\n"
     }
   ]
