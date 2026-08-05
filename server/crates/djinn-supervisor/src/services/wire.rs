@@ -42,7 +42,8 @@ use crate::services::lease::{
     WatchdogTerminationRequest,
 };
 use crate::{
-    BranchPublicationResult, RoleKind, StageError, StageOutcome, TaskRunOutcome, TaskRunSpec,
+    BranchPublicationResult, RoleKind, StageError, StageExecutionResult, StageOutcome,
+    TaskRunOutcome, TaskRunSpec,
 };
 
 /// Top-level wire envelope.
@@ -573,6 +574,16 @@ pub enum ServiceRpcRequest {
         parked_reason: Option<String>,
         failure_cause: Option<SessionFailureCause>,
     },
+    /// Versioned stage-execution transport. The original ExecuteStage reply
+    /// is positional-bincode-compatible only with StageOutcome, so the pending
+    /// settlement contract must use an appended request/reply pair.
+    ExecuteStageV2 {
+        task: Task,
+        workspace: WorkspaceRef,
+        role_kind: RoleKind,
+        task_run_id: String,
+        spec: TaskRunSpec,
+    },
 }
 
 /// Typed response variants — one per [`ServiceRpcRequest`] variant.
@@ -585,6 +596,7 @@ pub enum ServiceRpcRequest {
 #[allow(clippy::large_enum_variant)]
 pub enum ServiceRpcResponse {
     LoadTask(Result<Task, String>),
+    /// Legacy response; keep its StageOutcome payload unchanged for old peers.
     ExecuteStage(Result<StageOutcome, StageError>),
     OpenPr(TaskRunOutcome),
     CreateTaskRun(Result<(), String>),
@@ -679,6 +691,8 @@ pub enum ServiceRpcResponse {
     TerminateWatchdogPod(Result<(), String>),
     /// V2 session-status acknowledgement, tail-appended with its request.
     UpdateSessionStatusV2(Result<(), String>),
+    /// Reply for the tail-appended ExecuteStageV2 request.
+    ExecuteStageV2(Result<StageExecutionResult, StageError>),
 }
 
 #[cfg(test)]
@@ -888,11 +902,14 @@ mod tests {
         // A6: the `StageOutcome::Failed { provider_failure: Some(Throttle {
         // retry_after_ms }) }` shape must survive the bincode RPC frame so the
         // host can floor the redispatch cooldown on a provider-stated reset.
-        let resp = ServiceRpcResponse::ExecuteStage(Ok(StageOutcome::Failed {
-            reason: "rate limited".into(),
-            provider_failure: Some(djinn_runtime::ProviderFailureClass::Throttle {
-                retry_after_ms: Some(5 * 60 * 60 * 1000),
-            }),
+        let resp = ServiceRpcResponse::ExecuteStageV2(Ok(StageExecutionResult {
+            outcome: crate::StageOutcome::Failed {
+                reason: "rate limited".into(),
+                provider_failure: Some(djinn_runtime::ProviderFailureClass::Throttle {
+                    retry_after_ms: Some(5 * 60 * 60 * 1000),
+                }),
+            },
+            settlement: None,
         }));
         let f = Frame {
             correlation_id: 3,
@@ -901,10 +918,14 @@ mod tests {
         let bytes = bincode::serialize(&f).unwrap();
         let back: Frame = bincode::deserialize(&bytes).unwrap();
         match back.payload {
-            FramePayload::RpcReply(ServiceRpcResponse::ExecuteStage(Ok(
-                StageOutcome::Failed {
-                    reason,
-                    provider_failure,
+            FramePayload::RpcReply(ServiceRpcResponse::ExecuteStageV2(Ok(
+                StageExecutionResult {
+                    outcome:
+                        crate::StageOutcome::Failed {
+                            reason,
+                            provider_failure,
+                        },
+                    settlement: None,
                 },
             ))) => {
                 assert_eq!(reason, "rate limited");

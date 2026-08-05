@@ -32,7 +32,7 @@ use djinn_control_plane::test_support::{
     StubRepoGraph,
 };
 use djinn_core::events::EventBus;
-use djinn_core::models::{DjinnSettings, SessionStatus};
+use djinn_core::models::{DjinnSettings, SessionFailureCause, SessionStatus};
 use djinn_db::test_support::{
     liveness_evidence_for_task_for_test, reject_task_liveness_evidence_for_test,
     set_task_short_id_for_test,
@@ -171,6 +171,11 @@ async fn execution_kill_task_settles_live_run_through_control_plane_tool_route()
 
     let session = harness.session(&seeded.session_id).await;
     assert_eq!(session.status, SessionStatus::Interrupted.as_str());
+    assert_eq!(
+        session.failure_cause,
+        Some(SessionFailureCause::Cancelled),
+        "the live execution kill route must persist its administrative cause"
+    );
     assert!(
         session.ended_at.is_some(),
         "terminated session is stamped ended_at"
@@ -672,6 +677,10 @@ async fn execution_kill_task_racing_natural_completion_settles_once_and_releases
         session.status,
         SessionStatus::Completed.as_str(),
         "kill must not overwrite the natural terminal settlement"
+    );
+    assert_eq!(
+        session.failure_cause, None,
+        "a naturally completed control must never retain a failure cause"
     );
     assert!(
         session.ended_at.is_some(),

@@ -77,6 +77,7 @@ mod set_file_mode_tests;
 mod shell_dispatch_tests;
 mod skill_read_tests;
 mod task_kill_session_tests;
+mod task_merge_tests;
 mod tool_dispatch_tests;
 
 /// Filesystem path a test can use in place of the removed `Project.path`

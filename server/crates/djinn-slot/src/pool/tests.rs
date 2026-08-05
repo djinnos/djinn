@@ -2044,6 +2044,11 @@ async fn slot_event_killed_tears_down_taskrun_job() {
         .expect("session reread");
     assert_eq!(rows.len(), 1);
     assert_eq!(
+        rows[0].status,
+        djinn_core::models::SessionStatus::Interrupted.as_str(),
+        "an unmarked Killed event must still terminalize the durable row"
+    );
+    assert_eq!(
         rows[0].failure_cause,
         Some(djinn_core::models::SessionFailureCause::Protocol),
         "unmarked generic Killed backstop must persist Protocol"
