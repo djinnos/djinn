@@ -4883,7 +4883,7 @@ fn proposal_sort_to_sql(sort: &str) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, Barrier, Mutex};
 
     use djinn_core::events::{DjinnEventEnvelope, EventBus};
 
@@ -4931,6 +4931,79 @@ mod tests {
         }
     }
 
+    async fn feedback_accept_reject_fixture(
+        db: &Database,
+    ) -> (
+        Proposal,
+        FeedbackRefinementCapture,
+        ProposalDebateTrail,
+        FeedbackRefinementDispositionInput,
+    ) {
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let proposal = repo
+            .create(create_input("feedback accept reject lifecycle"))
+            .await
+            .unwrap();
+        repo.add_feedback(ProposalFeedbackCreateInput {
+            proposal_id: &proposal.id,
+            parent_id: None,
+            author_kind: "user",
+            author_model: None,
+            body: "captured blocking human feedback",
+        })
+        .await
+        .unwrap();
+        let capture = repo
+            .capture_feedback_refinement_boundary(&proposal.id)
+            .await
+            .unwrap()
+            .captures
+            .pop()
+            .unwrap();
+        let disposition = feedback_accept_reject_append_disposition(
+            &repo,
+            &proposal.id,
+            &capture.debate_entry,
+            "not appropriate for this proposal",
+        )
+        .await;
+        let input = FeedbackRefinementDispositionInput {
+            proposal_id: proposal.id.clone(),
+            injection_id: capture.injection.id.clone(),
+            root_feedback_id: capture.injection.root_feedback_id.clone(),
+            generation: capture.injection.generation,
+            debate_entry_id: capture.debate_entry.id.clone(),
+            disposition: FeedbackRefinementDisposition::WontFix {
+                reason: "not appropriate for this proposal".into(),
+            },
+        };
+        (proposal, capture, disposition, input)
+    }
+
+    async fn feedback_accept_reject_append_disposition(
+        repo: &ProposalRepository,
+        proposal_id: &str,
+        feedback_entry: &ProposalDebateTrail,
+        reason: &str,
+    ) -> ProposalDebateTrail {
+        let metadata = serde_json::json!({"kind": "human_feedback_disposition_v1", "human_feedback_entry_id": feedback_entry.id, "disposition": "wont_fix", "reason": reason});
+        repo.add_debate_trail_entry(ProposalDebateTrailCreateInput {
+            proposal_id,
+            kind: "rebuttal",
+            body: "structured Advocate disposition",
+            blocking: false,
+            agent_role: "advocate",
+            author_kind: "agent",
+            author_model: None,
+            source_task_id: None,
+            against_revision_seq: feedback_entry.against_revision_seq,
+            round: feedback_entry.round,
+            body_metadata: Some(&metadata),
+        })
+        .await
+        .unwrap()
+    }
+
     fn create_input_with_ac<'a>(
         title: &'a str,
         body: &'a str,
@@ -4943,6 +5016,152 @@ mod tests {
             status: None,
             body_format: None,
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn feedback_accept_reject_race_allows_exactly_one_terminal_transition() {
+        let db = test_db();
+        let (proposal, capture, disposition, accept_input) =
+            feedback_accept_reject_fixture(&db).await;
+        let reject_input = FeedbackRefinementRejectionInput {
+            proposal_id: proposal.id.clone(),
+            injection_id: capture.injection.id.clone(),
+            root_feedback_id: capture.injection.root_feedback_id.clone(),
+            generation: capture.injection.generation,
+            debate_entry_id: capture.debate_entry.id.clone(),
+            disposition_entry_id: disposition.id.clone(),
+            reason: "different resolution required".into(),
+        };
+        let barrier = Arc::new(Barrier::new(2));
+        let accept_repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let reject_repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let accept_barrier = barrier.clone();
+        let reject_barrier = barrier.clone();
+        let selected_id = disposition.id.clone();
+        let accept = tokio::spawn(async move {
+            accept_barrier.wait();
+            accept_repo
+                .dispose_feedback_refinement_generation_for_disposition(accept_input, selected_id)
+                .await
+        });
+        let reject = tokio::spawn(async move {
+            reject_barrier.wait();
+            reject_repo
+                .reject_feedback_refinement_disposition(reject_input)
+                .await
+        });
+        let accepted = accept.await.unwrap();
+        let rejected = reject.await.unwrap();
+        assert_eq!(
+            usize::from(accepted.is_ok()) + usize::from(rejected.is_ok()),
+            1
+        );
+
+        let state: String = sqlx::query_scalar(
+            "SELECT state FROM proposal_feedback_refinement_injections WHERE id=$1",
+        )
+        .bind(&capture.injection.id)
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        let resolved: Option<String> =
+            sqlx::query_scalar("SELECT resolved_at FROM proposal_debate_trail WHERE id=$1")
+                .bind(&capture.debate_entry.id)
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+        let disposition_rows: i64 = sqlx::query_scalar("SELECT count(*) FROM proposal_debate_trail WHERE id=$1 AND body_metadata->>'kind'='human_feedback_disposition_v1'").bind(&disposition.id).fetch_one(db.pool()).await.unwrap();
+        assert_eq!(disposition_rows, 1);
+        if accepted.is_ok() {
+            assert_eq!(state, "wont_fix");
+            assert!(resolved.is_some());
+            let resolved_sources: i64 = sqlx::query_scalar("SELECT count(*) FROM proposal_feedback_refinement_sources s JOIN proposal_feedback f ON f.id=s.source_feedback_id WHERE s.injection_id=$1 AND f.resolved_at IS NOT NULL").bind(&capture.injection.id).fetch_one(db.pool()).await.unwrap();
+            assert_eq!(resolved_sources, 1);
+            let needs_work: i64 = sqlx::query_scalar("SELECT count(*) FROM proposal_debate_trail WHERE proposal_id=$1 AND agent_role='judge' AND kind='verdict' AND body LIKE 'needs-work:%'").bind(&proposal.id).fetch_one(db.pool()).await.unwrap();
+            assert_eq!(
+                needs_work, 0,
+                "acceptance leaves no latest or any Judge needs-work verdict"
+            );
+        } else {
+            assert_eq!(state, "injected");
+            assert!(resolved.is_none());
+            assert!(matches!(accepted, Err(Error::InvalidTransition(_))));
+            let rejection_markers: i64 = sqlx::query_scalar("SELECT count(*) FROM proposal_debate_trail WHERE proposal_id=$1 AND body_metadata->>'kind'='human_feedback_disposition_rejection_v1' AND body_metadata->>'rejected_disposition_entry_id'=$2").bind(&proposal.id).bind(&disposition.id).fetch_one(db.pool()).await.unwrap();
+            assert_eq!(rejection_markers, 1);
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn feedback_accept_reject_reject_after_accept_preserves_verdict_state() {
+        let db = test_db();
+        let (proposal, capture, disposition, input) = feedback_accept_reject_fixture(&db).await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        repo.dispose_feedback_refinement_generation_for_disposition(input, disposition.id.clone())
+            .await
+            .unwrap();
+        let before: (i64, Option<String>) = sqlx::query_as("SELECT count(*), max(created_at) FROM proposal_debate_trail WHERE proposal_id=$1 AND agent_role='judge' AND kind='verdict'").bind(&proposal.id).fetch_one(db.pool()).await.unwrap();
+        let error = repo
+            .reject_feedback_refinement_disposition(FeedbackRefinementRejectionInput {
+                proposal_id: proposal.id.clone(),
+                injection_id: capture.injection.id.clone(),
+                root_feedback_id: capture.injection.root_feedback_id.clone(),
+                generation: capture.injection.generation,
+                debate_entry_id: capture.debate_entry.id.clone(),
+                disposition_entry_id: disposition.id,
+                reason: "too late".into(),
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(error, Error::InvalidTransition(_)));
+        let after: (i64, Option<String>) = sqlx::query_as("SELECT count(*), max(created_at) FROM proposal_debate_trail WHERE proposal_id=$1 AND agent_role='judge' AND kind='verdict'").bind(&proposal.id).fetch_one(db.pool()).await.unwrap();
+        assert_eq!(
+            after, before,
+            "rejection cannot append a later Judge verdict"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn feedback_accept_reject_accept_after_reject_requires_new_disposition() {
+        let db = test_db();
+        let (proposal, capture, rejected, input) = feedback_accept_reject_fixture(&db).await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        repo.reject_feedback_refinement_disposition(FeedbackRefinementRejectionInput {
+            proposal_id: proposal.id.clone(),
+            injection_id: capture.injection.id.clone(),
+            root_feedback_id: capture.injection.root_feedback_id.clone(),
+            generation: capture.injection.generation,
+            debate_entry_id: capture.debate_entry.id.clone(),
+            disposition_entry_id: rejected.id.clone(),
+            reason: "needs a replacement".into(),
+        })
+        .await
+        .unwrap();
+        let error = repo
+            .dispose_feedback_refinement_generation_for_disposition(input.clone(), rejected.id)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, Error::InvalidTransition(_)));
+        let replacement = feedback_accept_reject_append_disposition(
+            &repo,
+            &proposal.id,
+            &capture.debate_entry,
+            "new structured disposition",
+        )
+        .await;
+        let accepted = repo
+            .dispose_feedback_refinement_generation_for_disposition(
+                FeedbackRefinementDispositionInput {
+                    disposition: FeedbackRefinementDisposition::WontFix {
+                        reason: "new structured disposition".into(),
+                    },
+                    ..input
+                },
+                replacement.id,
+            )
+            .await
+            .unwrap();
+        assert_eq!(accepted.injection.state, "wont_fix");
+        assert!(accepted.debate_entry.resolved_at.is_some());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
