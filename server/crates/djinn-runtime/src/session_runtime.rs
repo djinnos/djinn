@@ -100,6 +100,37 @@ pub struct InfraDeathLogTailCapture {
     pub fetch_error_detail: Option<String>,
 }
 
+/// Stable classification for terminal evidence observed by a runtime when no
+/// worker report has arrived. Backend-specific details intentionally remain
+/// outside this enum.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TerminalRuntimeEvidenceKind {
+    /// Explicit allowlisted infrastructure evidence.
+    Infrastructure,
+    /// A terminal failure whose cause is not allowlisted infrastructure.
+    UnknownFailure,
+    /// Runtime completion or disappearance without a worker report.
+    ProtocolNoReport,
+}
+
+/// Terminal runtime evidence with a stable kind separated from display-safe
+/// diagnostic detail. Consumers must use `kind`, never parse `diagnostic`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TerminalRuntimeObservation {
+    pub kind: TerminalRuntimeEvidenceKind,
+    /// Bounded and sanitized backend diagnostic detail.
+    pub diagnostic: String,
+}
+
+impl TerminalRuntimeObservation {
+    pub fn new(kind: TerminalRuntimeEvidenceKind, diagnostic: impl Into<String>) -> Self {
+        Self {
+            kind,
+            diagnostic: diagnostic.into(),
+        }
+    }
+}
+
 /// Object-safe lifecycle interface every runtime backend implements.
 ///
 /// Implementations own any per-run state (container ids, socket paths,
@@ -137,9 +168,8 @@ pub trait SessionRuntime: Send + Sync {
     async fn teardown(&self, handle: RunHandle) -> Result<TaskRunReport, RuntimeError>;
 
     /// Wait until the run's backing infrastructure has *terminally died*
-    /// (the worker process is gone and cannot reconnect), returning a short
-    /// human-readable reason string (e.g. `"OOMKilled (exit 137)"`,
-    /// `"BackoffLimitExceeded"`).
+    /// (the worker process is gone and cannot reconnect), returning typed
+    /// evidence plus bounded display-safe diagnostic detail.
     ///
     /// This is the host-side liveness watch the dispatch runner races against
     /// the worker's terminal-report stream: when the worker is SIGKILLed (OOM,
@@ -159,7 +189,7 @@ pub trait SessionRuntime: Send + Sync {
     /// Implementations MUST only resolve on a *terminal* condition — never on
     /// a transient connection blip or a Pod that might still be scheduling /
     /// restarting — so a legitimate in-flight run is never declared dead.
-    async fn watch_infra_death(&self, _handle: &RunHandle) -> String {
+    async fn watch_infra_death(&self, _handle: &RunHandle) -> TerminalRuntimeObservation {
         std::future::pending().await
     }
 
