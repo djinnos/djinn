@@ -34,7 +34,8 @@ use super::budget::{
 };
 use super::compaction_guard::CompactionCriticalSection;
 use super::error_handling::{
-    BudgetWindDownIgnored, MAX_COMPACTION_RETRIES, TransportCompactionRecoveryGuard,
+    BudgetWindDownIgnored, MAX_COMPACTION_RETRIES, MissingSlotToolDispatcher,
+    ReplyLoopCompactionFailure, StepCapWindDownIgnored, TransportCompactionRecoveryGuard,
     empty_start_streak_feeds_breaker, empty_turn_backoff, empty_turn_is_reasoning_only,
     is_context_length_error, is_orphaned_tool_call_error, is_oversized_transport_payload,
     is_provider_failure_prose, next_nudge_message, reasoning_only_nudge_message,
@@ -447,11 +448,7 @@ impl WindDownReason {
     }
     fn hard_error(&self, max_turns: u32) -> anyhow::Error {
         match self {
-            Self::StepCap { .. } => anyhow::anyhow!(
-                "max turns ({}) exceeded without text-only response (wind-down summary \
-                 directive was injected but the agent did not terminate)",
-                max_turns
-            ),
+            Self::StepCap { .. } => StepCapWindDownIgnored { max_turns }.into(),
             Self::Budget { details } => BudgetWindDownIgnored {
                 details: format!(
                     "{details}; hard token budget wind-down directive was injected but the agent did not produce a text-only summary"
@@ -682,9 +679,7 @@ pub async fn run_reply_loop(
         Some(d) => d.as_ref(),
         None => {
             return (
-                Err(anyhow::anyhow!(
-                    "reply loop requires a SlotToolDispatcher; none was provided in SlotContext"
-                )),
+                Err(MissingSlotToolDispatcher.into()),
                 ParsedAgentOutput::new(role_name == "reviewer" || role_name == "task_reviewer"),
                 0,
                 0,
@@ -1094,7 +1089,7 @@ pub async fn run_reply_loop(
                         slot_ctx,
                     )
                     .await
-                    .map_err(anyhow::Error::msg)?;
+                    .map_err(|details| ReplyLoopCompactionFailure { details })?;
                     if compacted {
                         // Lifetime spend persists across reactive compaction.
                         current_context_tokens = 0;
@@ -1103,8 +1098,8 @@ pub async fn run_reply_loop(
                         conversation.push(Message::user("Continue with the task."));
                         continue;
                     }
-                    return Err(anyhow::anyhow!(
-                        "context_length_exceeded and reactive compaction failed"
+                    return Err(e.context(
+                        "context_length_exceeded and reactive compaction was not applied",
                     ));
                 }
                 Err(e) => {
@@ -1317,7 +1312,7 @@ pub async fn run_reply_loop(
                     slot_ctx,
                 )
                 .await
-                .map_err(anyhow::Error::msg)?;
+                .map_err(|details| ReplyLoopCompactionFailure { details })?;
                 if compacted {
                     // Lifetime spend persists across reactive compaction.
                     current_context_tokens = 0;
@@ -1326,9 +1321,10 @@ pub async fn run_reply_loop(
                     conversation.push(Message::user("Continue with the task."));
                     continue;
                 }
-                return Err(anyhow::anyhow!(
-                    "context_length_exceeded and reactive compaction failed"
-                ));
+                return Err(anyhow::Error::new(
+                    djinn_provider::provider::ProviderError::ContextOverflow,
+                )
+                .context("context_length_exceeded and reactive compaction was not applied"));
             }
             if !saw_round_event {
                 if let Some(next_retry) = should_retry_empty_stream(saw_round_event, empty_turn_retries, is_codex) {
@@ -1580,7 +1576,7 @@ pub async fn run_reply_loop(
                     slot_ctx,
                 )
                 .await
-                .map_err(anyhow::Error::msg)?;
+                .map_err(|details| ReplyLoopCompactionFailure { details })?;
                 if compacted {
                     // Lifetime spend persists across proactive compaction.
                     current_context_tokens = 0;
@@ -1891,10 +1887,10 @@ pub async fn run_reply_loop(
         }
         if !saw_any_event {
             let diag = runtime_fs_diagnostics(project_path, worktree_path);
-            return Err(anyhow::anyhow!(
-                "provider session produced no events; {}",
-                diag
-            ));
+            return Err(anyhow::Error::new(
+                djinn_provider::provider::ProviderError::EmptyCompletion,
+            )
+            .context(format!("provider session produced no events; {diag}")));
         }
         if !last_assistant_text.is_empty() {
             output.ingest_text(&last_assistant_text);
