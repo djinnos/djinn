@@ -6,7 +6,7 @@
     {
       "op": "replace",
       "path": "server/crates/djinn-cgroup-launcher/src/lib.rs",
-      "find": "    pub fn wait_empty(&mut self, leaf: &Leaf) -> Result<(), Error> {\n        let events = self.fs.read_leaf(leaf.fd, \"cgroup.events\")?;\n        if populated_zero(&events)? {\n            Ok(())\n        } else {\n            Err(Error::StillPopulated)\n        }\n    }\n",
+      "find": "    pub fn wait_empty(&mut self, leaf: &Leaf) -> Result<(), Error> {\n        let settle = self.config.kill_settle;\n        let mut remaining = settle.attempts.max(1);\n        loop {\n            let events = self.fs.read_leaf(leaf.fd, \"cgroup.events\")?;\n            if populated_zero(&events)? {\n                return Ok(());\n            }\n            remaining -= 1;\n            if remaining == 0 {\n                return Err(Error::StillPopulated);\n            }\n            if !settle.poll.is_zero() {\n                std::thread::sleep(settle.poll);\n            }\n        }\n    }\n",
       "with": ""
     }
   ]
