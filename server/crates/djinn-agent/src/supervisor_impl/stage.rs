@@ -92,8 +92,8 @@ use crate::actors::slot::lifecycle::setup::{SetupContext, SetupError, resolve_se
 use crate::actors::slot::lifecycle::task_classifier::classify_native_skill_trigger;
 use crate::actors::slot::lifecycle::teardown::{PostSessionParams, spawn_post_session_work};
 use crate::actors::slot::reply_loop::error_handling::{
-    BudgetWindDownIgnored, FinalizeNudgesExhausted, MissingSlotToolDispatcher,
-    ReplyLoopCancelled, ReplyLoopCompactionFailure, StepCapWindDownIgnored,
+    BudgetWindDownIgnored, FinalizeNudgesExhausted, MissingSlotToolDispatcher, ReplyLoopCancelled,
+    ReplyLoopCompactionFailure, StepCapWindDownIgnored,
 };
 use crate::actors::slot::reply_loop::loop_guard::{
     LoopGuardError, LoopGuardKind as ReplyLoopGuardKind,
@@ -2161,6 +2161,54 @@ mod tests {
             assert_eq!(entry.parked_reason, None);
         }
         assert!(!format!("{recorded:?}").contains(credential_diagnostic));
+    }
+
+    #[tokio::test]
+    async fn v2_settlement_records_concrete_dispatcher_and_nudge_causes() {
+        let services = RecordingServices::new();
+        let errors = [
+            anyhow::Error::new(MissingSlotToolDispatcher),
+            anyhow::Error::new(FinalizeNudgesExhausted {
+                attempts: 3,
+                finalize_tools: "finalize_task".into(),
+            }),
+        ];
+
+        for (session_id, error) in ["missing-dispatcher", "nudges-exhausted"]
+            .into_iter()
+            .zip(errors)
+        {
+            let cause = reply_loop_failure_cause(&error);
+            let settlement = settlement_for_stage_outcome(
+                StageOutcome::Failed {
+                    reason: error.to_string(),
+                    provider_failure: None,
+                },
+                false,
+                Some(cause),
+                RoleKind::Worker,
+            );
+            settle_stage_session(&services, session_id.into(), &settlement, 0, 0, 0, 0)
+                .await
+                .unwrap();
+        }
+
+        let recorded = services.settlements.lock().unwrap();
+        assert_eq!(
+            recorded
+                .iter()
+                .map(|entry| (entry.status, entry.failure_cause))
+                .collect::<Vec<_>>(),
+            vec![
+                (SessionStatus::Failed, Some(SessionFailureCause::Harness)),
+                (
+                    SessionStatus::Failed,
+                    Some(SessionFailureCause::Finalization)
+                ),
+            ]
+        );
+        assert!(recorded.iter().all(|entry| entry.parked_reason.is_none()));
+        assert!(!format!("{recorded:?}").contains("diagnostic"));
     }
 
     #[tokio::test]
