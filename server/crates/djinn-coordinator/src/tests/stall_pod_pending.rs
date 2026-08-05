@@ -8,9 +8,8 @@
 //! DiskPressure taint, or pulling its image. The idle-stall watchdog consumed
 //! that number verbatim, so a slow-to-schedule Pod could arrive at its very
 //! first sweep already past `STALL_TIMEOUT_SECS` and be killed as an
-//! `idle_stall` — terminalizing the attempt `TimedOut`, feeding the model
-//! circuit breaker, and (on the second consecutive occurrence) telling the
-//! Planner to decompose/rescope a task whose only problem was cluster capacity.
+//! `idle_stall` — terminalizing the attempt `TimedOut` and telling the Planner
+//! to decompose/rescope a task whose only problem was cluster capacity.
 //!
 //! The fix anchors the idle clock to pod-Running: `sessions.started_at` is
 //! written by the worker from INSIDE the Pod, so it cannot predate the Pod
@@ -254,9 +253,9 @@ async fn pod_pending_time_is_not_counted_as_idle_and_no_stall_kill_fires() {
 /// session has genuinely existed for 40 minutes, so its Pod has been `Running`
 /// the whole time and the agent really is hung.
 ///
-/// It must still be killed exactly as before: `TimedOut` attempt and a breaker
-/// failure. Without this, "fixing" the Pending case could just mean disabling
-/// the watchdog.
+/// It must still be killed exactly as before and retain its `TimedOut` attempt.
+/// The timeout is coordinator liveness evidence rather than a typed in-pod
+/// provider error, so it is deliberately breaker-neutral.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn genuinely_idle_running_pod_is_still_stall_killed() {
     let db = test_helpers::create_test_db();
@@ -284,9 +283,10 @@ async fn genuinely_idle_running_pod_is_still_stall_killed() {
         Some("timed_out".to_owned()),
         "a real idle stall must still terminalize the attempt as TimedOut"
     );
-    assert!(
-        breaker_consecutive_failures(&fx.actor) >= 1,
-        "a real idle stall must still feed the model circuit breaker"
+    assert_eq!(
+        breaker_consecutive_failures(&fx.actor),
+        0,
+        "a coordinator idle timeout has no typed provider evidence and must not feed the breaker"
     );
 }
 
