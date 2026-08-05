@@ -1581,6 +1581,24 @@ fn pod_terminal_observation(pod: &Pod) -> Option<TerminalRuntimeObservation> {
             ),
         ));
     }
+    // Apart from the exact infrastructure-reason allowlist above, a failed Pod
+    // is terminal unknown evidence even if its worker status has not appeared
+    // yet. This covers admission and kubelet failures that never create a
+    // terminated worker-container record. Keep the apiserver's reason/message
+    // diagnostic-only; neither changes the stable classification.
+    if status.phase.as_deref() == Some("Failed") {
+        return Some(terminal_observation(
+            TerminalRuntimeEvidenceKind::UnknownFailure,
+            match (status.reason.as_deref(), status.message.as_deref()) {
+                (Some(reason), Some(message)) if !message.is_empty() => {
+                    format!("Pod failed: {reason}: {message}")
+                }
+                (Some(reason), _) => format!("Pod failed: {reason}"),
+                (None, Some(message)) if !message.is_empty() => format!("Pod failed: {message}"),
+                _ => "Pod failed".to_string(),
+            },
+        ));
+    }
     let statuses = status.container_statuses.as_ref()?;
     let worker = statuses.iter().find(|c| c.name == "worker")?;
     let terminated = worker.state.as_ref()?.terminated.as_ref()?;
@@ -3963,6 +3981,29 @@ mod tests {
     fn pod_without_worker_status_is_not_terminal() {
         let pod = pod_with_worker_terminated(137, Some("OOMKilled"), "main");
         assert!(pod_terminal_observation(&pod).is_none());
+    }
+
+    /// A generic terminal Pod failure may occur before a worker-container
+    /// status exists. It is unknown evidence, never infrastructure inferred
+    /// from its free-form reason.
+    #[test]
+    fn failed_pod_without_worker_status_is_unknown_failure() {
+        let pod = Pod {
+            status: Some(PodStatus {
+                phase: Some("Failed".to_string()),
+                reason: Some("UnexpectedAdmissionError".to_string()),
+                message: Some("admission webhook rejected the Pod".to_string()),
+                ..PodStatus::default()
+            }),
+            ..Pod::default()
+        };
+
+        let observation = pod_terminal_observation(&pod).expect("failed Pod is terminal");
+        assert_eq!(
+            observation.kind,
+            TerminalRuntimeEvidenceKind::UnknownFailure
+        );
+        assert!(observation.diagnostic.contains("UnexpectedAdmissionError"));
     }
 
     #[test]
