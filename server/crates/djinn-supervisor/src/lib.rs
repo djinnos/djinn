@@ -553,8 +553,15 @@ fn settlement_status_after_exit_barrier(
 ) -> djinn_core::models::SessionStatus {
     match plan {
         SessionExitBarrierPlan::Required { .. } => status,
-        SessionExitBarrierPlan::TerminalEvidenceOnly
-        | SessionExitBarrierPlan::InterruptedOrFailed => djinn_core::models::SessionStatus::Failed,
+        SessionExitBarrierPlan::TerminalEvidenceOnly => djinn_core::models::SessionStatus::Failed,
+        // These outcomes have no board handoff, but an already-paused or
+        // interrupted session is truthful terminal evidence and must not be
+        // rewritten as a failure.
+        SessionExitBarrierPlan::InterruptedOrFailed => match status {
+            djinn_core::models::SessionStatus::Paused
+            | djinn_core::models::SessionStatus::Interrupted => status,
+            _ => djinn_core::models::SessionStatus::Failed,
+        },
     }
 }
 
@@ -4792,9 +4799,20 @@ mod tests {
         .into_iter()
         .enumerate()
         {
+            let expected_settlement = if matches!(&outcome, StageOutcome::Parked { .. }) {
+                "settle:Paused"
+            } else {
+                "settle:Failed"
+            };
+            let id = if matches!(&outcome, StageOutcome::Parked { .. }) {
+                // ScriptedLoopGuardServices seeds Paused for this fixture.
+                "barrier-parked".into()
+            } else {
+                format!("barrier-terminal-{n}")
+            };
             let calls = run_case(
                 &source,
-                &format!("barrier-terminal-{n}"),
+                &id,
                 task.clone(),
                 outcome,
                 RoleKind::Worker,
@@ -4825,10 +4843,8 @@ mod tests {
                 "terminal evidence advanced board: {calls:?}"
             );
             assert!(
-                calls
-                    .iter()
-                    .any(|c| matches!(c.action.as_str(), "settle:Failed" | "settle:Paused")),
-                "terminal evidence must preserve failed or parked truth: {calls:?}"
+                calls.iter().any(|c| c.action == expected_settlement),
+                "terminal evidence must preserve its expected settlement truth: {calls:?}"
             );
         }
 
