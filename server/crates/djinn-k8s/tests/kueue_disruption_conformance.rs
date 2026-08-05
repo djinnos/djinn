@@ -662,7 +662,10 @@ fn live_a_force_deleted_pod_still_terminalises_the_run() {
             workload_summary(&context),
         )
     });
-    eprintln!("03z3 AC2 live death reason (bound uid {bound_uid}): {reason}");
+    eprintln!(
+        "03z3 AC2 live terminal evidence (bound uid {bound_uid}): {:?}: {}",
+        reason.kind, reason.diagnostic
+    );
 
     delete_job(&context, &job_name);
 }

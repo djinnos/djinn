@@ -14,7 +14,7 @@ use djinn_db::{TaskRepository, task_branch_name};
 use djinn_runtime::{
     BiStream, InfraDeathLogTailCapture, LoopGuardKind, ProviderFailureClass, ResolvedCredentials,
     ResumeLifecycleMetadata, SessionRuntime, StreamEvent, TaskRunOutcome, TaskRunReport,
-    TestRuntime,
+    TerminalRuntimeEvidenceKind, TerminalRuntimeObservation, TestRuntime,
 };
 use djinn_slot::{TerminalExtractionContext, TerminalExtractionOutcome};
 
@@ -182,6 +182,7 @@ async fn finalize_infra_death_session(
     task: &Task,
     app_state: &AgentContext,
     reason: &str,
+    failure_cause: SessionFailureCause,
 ) {
     let payload = serde_json::json!({
         "error": format!("Worker infrastructure died before completing the run: {reason}"),
@@ -200,10 +201,7 @@ async fn finalize_infra_death_session(
     let session_repo =
         djinn_db::SessionRepository::new(app_state.db.clone(), app_state.event_bus.clone());
     match session_repo
-        .interrupt_running_for_task_with_failure_cause(
-            &task.id,
-            SessionFailureCause::Infrastructure,
-        )
+        .interrupt_running_for_task_with_failure_cause(&task.id, failure_cause)
         .await
     {
         Ok(n) if n > 0 => tracing::warn!(
@@ -709,8 +707,14 @@ pub(super) async fn dispatch_task_runtime(
         apply_handshake_timeout_failover(&task_repo, &task, &model_id)
         .await;
     }
-    if let Some(reason) = infra_death.as_deref() {
-        finalize_infra_death_session(&task_repo, &task, &app_state, reason).await;
+    if let Some(observation) = infra_death.as_ref() {
+        let reason = observation.diagnostic.as_str();
+        let failure_cause = match observation.kind {
+            TerminalRuntimeEvidenceKind::Infrastructure => SessionFailureCause::Infrastructure,
+            TerminalRuntimeEvidenceKind::UnknownFailure => SessionFailureCause::Unknown,
+            TerminalRuntimeEvidenceKind::ProtocolNoReport => SessionFailureCause::Protocol,
+        };
+        finalize_infra_death_session(&task_repo, &task, &app_state, reason, failure_cause).await;
         // Best-effort: persist infra-death log-tail capture on the matching
         // attempt.  This is purely diagnostic enrichment — it does not change
         // the attempt's outcome or prevent a real terminal report from being
@@ -893,7 +897,7 @@ pub struct RuntimeExecutionOutcome {
     pub report_result: anyhow::Result<Option<TaskRunReport>>,
     pub teardown: Result<TaskRunReport, djinn_runtime::RuntimeError>,
     pub handshake_timed_out: bool,
-    pub infra_death: Option<String>,
+    pub infra_death: Option<TerminalRuntimeObservation>,
     pub infra_death_log_tail: Option<InfraDeathLogTailCapture>,
     pub presession_timeout: Option<PreSessionTimeout>,
 }
@@ -1277,7 +1281,7 @@ fn validate_resize_birth_gate_inputs(
 struct TerminalReportAwaitOutcome {
     report_result: anyhow::Result<Option<TaskRunReport>>,
     handshake_timed_out: bool,
-    infra_death: Option<String>,
+    infra_death: Option<TerminalRuntimeObservation>,
     presession_timeout: Option<PreSessionTimeout>,
 }
 
@@ -1436,7 +1440,7 @@ async fn attach_and_await_terminal_report(
         &bistream_result,
         Err(djinn_runtime::RuntimeError::HandshakeTimeout(_))
     );
-    let mut infra_death: Option<String> = None;
+    let mut infra_death: Option<TerminalRuntimeObservation> = None;
     let mut presession_timeout: Option<PreSessionTimeout> = None;
     let report_result: anyhow::Result<Option<TaskRunReport>> = match bistream_result {
         Ok(bistream) => {
@@ -1450,15 +1454,16 @@ async fn attach_and_await_terminal_report(
                     &spec.task_id,
                     pre_session_deadline(),
                 ) => res,
-                reason = runtime.watch_infra_death(handle) => {
+                observation = runtime.watch_infra_death(handle) => {
                     tracing::warn!(
                         task_id = %task.short_id,
-                        %reason,
+                        diagnostic = %observation.diagnostic,
+                        evidence_kind = ?observation.kind,
                         runtime = ?runtime_kind(),
                         "supervisor dispatch: worker infra died before terminal report \
                          (OOM / eviction / Job failure); finalizing run as interrupted"
                     );
-                    infra_death = Some(reason);
+                    infra_death = Some(observation);
                     Ok(ReportAwait::Report(None))
                 }
             };
