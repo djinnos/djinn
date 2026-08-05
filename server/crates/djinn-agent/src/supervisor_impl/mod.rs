@@ -19,6 +19,8 @@ use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
 
+use djinn_core::cancel_origin::CancelOriginTag;
+
 use crate::context::AgentContext;
 use djinn_provider::provider::LlmProvider;
 
@@ -56,6 +58,18 @@ pub(crate) use stage::execute_stage;
 pub(crate) struct SupervisorCallbackContext {
     pub agent_context: AgentContext,
     pub cancel: CancellationToken,
+    /// Which trigger fired [`Self::cancel`], recorded at the trigger site.
+    ///
+    /// A `CancellationToken` carries no payload, so the stage boundary could
+    /// only ever report "cancelled" and never *why*. The worker Pod fires one
+    /// token from SIGTERM, the in-pod soft deadline, host control frames, RPC
+    /// transport death, and orderly teardown; this side channel is what lets
+    /// [`stage::execute_stage`] name the cause in the durable terminal reason.
+    ///
+    /// Purely diagnostic: an unattributed cancellation reads back as
+    /// [`djinn_core::cancel_origin::CancelOrigin::Unknown`] and nothing gates
+    /// on it.
+    pub cancel_origin: CancelOriginTag,
     /// Injected `LlmProvider`. This is THE production in-Pod worker path
     /// (`djinn-agent-worker` builds the provider from a Secret-mounted
     /// credential and passes it here) as well as the integration-test stub

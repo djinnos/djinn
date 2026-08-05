@@ -101,6 +101,7 @@ use crate::actors::slot::reply_loop::loop_guard::{
 use crate::actors::slot::reply_loop::{ReplyLoopContext, run_reply_loop};
 use crate::context::AgentContext;
 use crate::roles::{AgentRole, role_impl_for};
+use djinn_core::cancel_origin::CancelOrigin;
 use djinn_provider::message::{Conversation, Message};
 use djinn_provider::provider::LlmProvider;
 use djinn_provider::provider::error::ProviderError;
@@ -249,6 +250,33 @@ fn classify_reply_loop_failure(err: &anyhow::Error) -> ReplyLoopFailureClass {
     } else {
         ReplyLoopFailureClass::Other
     }
+}
+
+/// Append the cancellation trigger to a diagnostic, so a cancelled session
+/// names its cause instead of only its observation.
+///
+/// Production sessions died at ~4.3/hour with the bare reason
+/// `session cancelled`, which said *that* the token fired and never *who* fired
+/// it: one Pod-wide `CancellationToken` is triggered by SIGTERM, the in-pod
+/// soft deadline, a host control frame, RPC transport death, and orderly
+/// teardown, and a token carries no payload to tell them apart.
+///
+/// The `origin=` suffix is always emitted, including for
+/// [`CancelOrigin::Unknown`]. An unattributed cancellation is a normal outcome
+/// (some trigger simply did not stamp the tag), and emitting it explicitly is
+/// what distinguishes "we looked and nobody claimed it" from "this row predates
+/// origin tagging". It is never an error and never gates anything.
+fn with_cancel_origin(diagnostic: &str, origin: CancelOrigin) -> String {
+    format!("{diagnostic} (origin={})", origin.as_str())
+}
+
+/// [`with_cancel_origin`] under the established `reply loop error:` prefix,
+/// for the [`StageOutcome::Failed`] reason that reaches `task_runs`.
+fn cancelled_stage_reason(error_display: &str, origin: CancelOrigin) -> String {
+    format!(
+        "reply loop error: {}",
+        with_cancel_origin(error_display, origin)
+    )
 }
 
 /// Classify a reply-loop terminal error into the breaker-relevant
@@ -1617,7 +1645,16 @@ pub(crate) async fn execute_stage(
             context_window,
             model_id: &model_id,
             cancel: &callbacks.cancel,
-            global_cancel: &callbacks.cancel,
+            // NOT `&callbacks.cancel` again. Passing the same token to both
+            // fields made the reply loop's supervisor-shutdown select arm
+            // unreachable, because the biased select always resolved the
+            // session arm first. `services.cancel()` is the supervisor-wide
+            // token by definition (see `SupervisorServices::cancel`), so it is
+            // the correct source for this field. Every current wiring happens
+            // to hand the stage the same object, so this is behaviour-neutral
+            // today; the actual cause disambiguation comes from
+            // `callbacks.cancel_origin`, read at settlement below.
+            global_cancel: services.cancel(),
             app_state: agent_context,
             services,
             mcp_registry: mcp_registry.as_ref(),
@@ -1654,7 +1691,18 @@ pub(crate) async fn execute_stage(
     // Capture type-based settlement data before formatting the error for the
     // outward diagnostic. No error text participates in cause classification.
     let reply_failure_cause = reply_result.as_ref().err().map(reply_loop_failure_cause);
-    let final_error = reply_result.as_ref().err().map(|e| e.to_string());
+    // The same origin attribution the `Failed` reason carries, so the
+    // `session_error` activity row logged by `spawn_post_session_work` names
+    // the trigger too — otherwise the durable reason and the activity log
+    // disagree about the same cancellation.
+    let final_error = reply_result.as_ref().err().map(|e| {
+        let diagnostic = e.to_string();
+        if classify_reply_loop_failure(e) == ReplyLoopFailureClass::Cancelled {
+            with_cancel_origin(&diagnostic, callbacks.cancel_origin.get())
+        } else {
+            diagnostic
+        }
+    });
     let stage_outcome = match reply_result {
         Err(e) => {
             if e.downcast_ref::<BudgetWindDownIgnored>().is_some() {
@@ -1673,8 +1721,17 @@ pub(crate) async fn execute_stage(
             } else if classify_reply_loop_failure(&e) == ReplyLoopFailureClass::Cancelled {
                 // Preserve the established diagnostic and wire shape while making
                 // the typed cancellation seam explicit for durable settlement.
+                // The origin suffix is what turns an undiagnosable
+                // "session cancelled" into a row that names its trigger.
+                let origin = callbacks.cancel_origin.get();
+                tracing::warn!(
+                    task_id = %task.short_id,
+                    session_id = %session_id,
+                    cancel_origin = origin.as_str(),
+                    "reply loop cancelled"
+                );
                 StageOutcome::Failed {
-                    reason: format!("reply loop error: {e}"),
+                    reason: cancelled_stage_reason(&e.to_string(), origin),
                     provider_failure: None,
                 }
             } else {
@@ -2665,6 +2722,115 @@ mod tests {
         ];
         for error in errors {
             assert_eq!(classify_provider_failure(&error), None);
+        }
+    }
+
+    /// The defect this addresses: every cancellation settled as the same
+    /// undiagnosable `reply loop error: session cancelled`, so production could
+    /// not tell a kubelet SIGTERM from a soft-deadline wind-down from a dead
+    /// RPC socket. The durable reason must now name the trigger.
+    #[test]
+    fn a_cancelled_stage_reason_names_the_trigger_that_fired_the_token() {
+        let cancelled = anyhow::Error::new(ReplyLoopCancelled::session()).to_string();
+
+        for (origin, expected) in [
+            (CancelOrigin::Sigterm, "origin=sigterm"),
+            (CancelOrigin::Sigint, "origin=sigint"),
+            (CancelOrigin::SoftDeadline, "origin=soft_deadline"),
+            (
+                CancelOrigin::HostCancelControl,
+                "origin=host_cancel_control",
+            ),
+            (
+                CancelOrigin::HostShutdownControl,
+                "origin=host_shutdown_control",
+            ),
+            (
+                CancelOrigin::RpcTransportClosed,
+                "origin=rpc_transport_closed",
+            ),
+            (CancelOrigin::WorkerTeardown, "origin=worker_teardown"),
+            (
+                CancelOrigin::SupervisorShutdown,
+                "origin=supervisor_shutdown",
+            ),
+            (CancelOrigin::Session, "origin=session"),
+        ] {
+            let reason = cancelled_stage_reason(&cancelled, origin);
+            assert!(
+                reason.contains(expected),
+                "reason must name the trigger: {reason}"
+            );
+        }
+
+        // Distinct triggers must produce distinct rows — that is the whole
+        // point. Two origins that render identically would put us back where
+        // we started.
+        assert_ne!(
+            cancelled_stage_reason(&cancelled, CancelOrigin::Sigterm),
+            cancelled_stage_reason(&cancelled, CancelOrigin::SoftDeadline),
+        );
+    }
+
+    /// Hard constraint: an unattributed cancellation degrades to `unknown`. It
+    /// must never become an error, an empty reason, or a missing field — the
+    /// platform has repeatedly been wedged by fail-closed diagnostics.
+    #[test]
+    fn an_unattributed_cancellation_degrades_to_unknown_and_keeps_the_diagnostic() {
+        let cancelled = anyhow::Error::new(ReplyLoopCancelled::session()).to_string();
+        let reason = cancelled_stage_reason(&cancelled, CancelOrigin::Unknown);
+
+        assert!(reason.contains("origin=unknown"), "{reason}");
+        // The established diagnostic is preserved, not replaced: existing
+        // consumers of the reply-loop prefix and the cancellation text keep
+        // matching.
+        assert!(reason.starts_with("reply loop error: "), "{reason}");
+        assert!(reason.contains("session cancelled"), "{reason}");
+    }
+
+    /// The `task_runs` reason and the `session_error` activity row are two
+    /// different strings built from the same error. Both must carry the
+    /// attribution, or an operator reading one of them is still blind.
+    #[test]
+    fn the_activity_log_diagnostic_carries_the_same_origin_as_the_stage_reason() {
+        let cancelled = anyhow::Error::new(ReplyLoopCancelled::session()).to_string();
+        let activity = with_cancel_origin(&cancelled, CancelOrigin::SoftDeadline);
+        let stage_reason = cancelled_stage_reason(&cancelled, CancelOrigin::SoftDeadline);
+
+        assert!(activity.contains("origin=soft_deadline"), "{activity}");
+        assert!(
+            stage_reason.contains("origin=soft_deadline"),
+            "{stage_reason}"
+        );
+        assert!(
+            stage_reason.ends_with(&activity),
+            "the stage reason must be the activity diagnostic under the \
+             established prefix: {stage_reason} / {activity}"
+        );
+    }
+
+    /// The origin rides along with, and never replaces, the durable settlement
+    /// cause. A tagged cancellation is still a cancellation.
+    #[test]
+    fn origin_tagging_does_not_change_how_a_cancellation_settles() {
+        for cancellation in [
+            ReplyLoopCancelled::session(),
+            ReplyLoopCancelled::supervisor_shutdown(),
+        ] {
+            let error = anyhow::Error::new(cancellation);
+            assert_eq!(
+                classify_reply_loop_failure(&error),
+                ReplyLoopFailureClass::Cancelled,
+            );
+            assert_eq!(
+                reply_loop_failure_cause(&error),
+                SessionFailureCause::Cancelled
+            );
+            assert_eq!(
+                classify_provider_failure(&error),
+                None,
+                "a cancellation must stay breaker-neutral however it is tagged",
+            );
         }
     }
 

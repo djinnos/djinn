@@ -326,6 +326,12 @@ impl DirectServices {
             callbacks: SupervisorCallbackContext {
                 agent_context,
                 cancel,
+                // The in-process host surface owns no cancellation trigger of
+                // its own — the Pod-side triggers (SIGTERM, soft deadline, RPC
+                // teardown) all live in `djinn-agent-worker`. Nothing stamps
+                // this tag on the direct path, so a direct-path cancellation
+                // reports `origin=unknown`, which is exactly what it is.
+                cancel_origin: djinn_core::cancel_origin::CancelOriginTag::new(),
                 provider_override,
                 // Host path derives the billing signal from the resolved
                 // credential inside `execute_stage`; nothing to pre-supply.
@@ -3865,9 +3871,13 @@ mod dispatch_identity_rpc_persistence_tests {
         let socket = dir.path().join("supervisor.sock");
         let server = serve_on_unix_socket(&socket, host).await.unwrap();
         let cancel = CancellationToken::new();
-        let (rpc, background) = RpcServices::connect_unix(&socket, cancel.clone())
-            .await
-            .unwrap();
+        let (rpc, background) = RpcServices::connect_unix(
+            &socket,
+            cancel.clone(),
+            djinn_core::cancel_origin::CancelOriginTag::new(),
+        )
+        .await
+        .unwrap();
         let attempts = TaskAttemptRepository::new(db.clone());
 
         let owner = uuid::Uuid::now_v7().to_string();
@@ -4074,9 +4084,13 @@ mod stale_pod_session_rpc_persistence_tests {
             .await
             .expect("serve host");
         let cancel = CancellationToken::new();
-        let (worker_rpc, background) = RpcServices::connect_unix(&socket, cancel.clone())
-            .await
-            .expect("connect worker rpc");
+        let (worker_rpc, background) = RpcServices::connect_unix(
+            &socket,
+            cancel.clone(),
+            djinn_core::cancel_origin::CancelOriginTag::new(),
+        )
+        .await
+        .expect("connect worker rpc");
 
         let error = worker_rpc
             .create_session(SerializableCreateSessionParams {

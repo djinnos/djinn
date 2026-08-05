@@ -1,4 +1,5 @@
 pub mod auth_context;
+pub mod cancel_origin;
 pub mod cargo_target_runs;
 pub mod child_ownership;
 pub mod clock;
