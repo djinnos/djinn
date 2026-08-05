@@ -1,12 +1,10 @@
 //! PostgreSQL integration coverage for mixed-version typed-evidence authority.
-//!
-//! Every assertion below reads persisted rows; this deliberately does not use
-//! fixture case names as a proxy for repository behavior.
+//! Assertions inspect persisted rows; fixture labels are never used as behavior.
 
-use djinn_core::models::TribunalEvidenceLifecycle;
+use djinn_core::{events::EventBus, models::TribunalEvidenceLifecycle};
 use djinn_db::{
-    AppendTypedEvidenceTransitionInput, Database, DemandTypedEvidenceInput,
-    TypedEvidenceRepository, legacy_demand_hash,
+    Database, DemandTypedEvidenceInput, ProposalRepository, TypedEvidenceRepository,
+    legacy_demand_hash,
 };
 use serde_json::{Value, json};
 
@@ -15,47 +13,22 @@ struct Seed {
     creator: String,
     spike: String,
 }
-
-type FindingRow = (String, String, String, String, Value, i32, String);
-type AttemptRow = (String, String, i32, String);
-type TransitionRow = (String, i32, Option<String>, String, Option<String>, Value);
-
-/// Read the actual authority records.  Counts alone cannot detect an incorrect
-/// actor, ordinal, or binding in an otherwise plausible backfill.
-async fn persisted_rows(
-    db: &Database,
-    proposal: &str,
-) -> (Vec<FindingRow>, Vec<AttemptRow>, Vec<TransitionRow>) {
-    let findings = sqlx::query_as("SELECT id,proposal_id,demand_hash,lifecycle,claim,demanded_revision_seq,created_by_task_id FROM typed_evidence_findings WHERE proposal_id=$1 ORDER BY id")
-        .bind(proposal).fetch_all(db.pool()).await.unwrap();
-    let attempts = sqlx::query_as("SELECT id,finding_id,sequence,spike_task_id FROM typed_evidence_attempts WHERE finding_id IN (SELECT id FROM typed_evidence_findings WHERE proposal_id=$1) ORDER BY sequence")
-        .bind(proposal).fetch_all(db.pool()).await.unwrap();
-    let transitions = sqlx::query_as("SELECT id,ordinal,from_lifecycle,to_lifecycle,actor_task_id,metadata FROM typed_evidence_transitions WHERE finding_id IN (SELECT id FROM typed_evidence_findings WHERE proposal_id=$1) ORDER BY ordinal")
-        .bind(proposal).fetch_all(db.pool()).await.unwrap();
-    (findings, attempts, transitions)
-}
-async fn legacy_row(db: &Database, proposal: &str) -> (Option<String>, Option<String>) {
-    sqlx::query_as("SELECT linked_spike_task_id,needs_evidence_claim FROM proposals WHERE id=$1")
-        .bind(proposal)
-        .fetch_one(db.pool())
-        .await
-        .unwrap()
-}
+type Finding = (String, String, String, String, Value, i32, String);
+type Attempt = (String, String, i32, String);
+type Transition = (String, i32, Option<String>, String, Option<String>, Value);
+type Snapshot = (
+    (Option<String>, Option<String>),
+    Vec<Finding>,
+    Vec<Attempt>,
+    Vec<Transition>,
+);
 
 async fn insert_task(db: &Database, project: &str, user: &str, title: &str) -> String {
     let id = uuid::Uuid::now_v7().to_string();
     sqlx::query("INSERT INTO tasks (id,project_id,short_id,title,description,design,labels,acceptance_criteria,memory_refs,created_by_user_id) VALUES ($1,$2,$3,$4,'','','[]','[]','[]',$5)")
-        .bind(&id)
-        .bind(project)
-        .bind(id.replace('-', ""))
-        .bind(title)
-        .bind(user)
-        .execute(db.pool())
-        .await
-        .unwrap();
+        .bind(&id).bind(project).bind(id.replace('-', "")).bind(title).bind(user).execute(db.pool()).await.unwrap();
     id
 }
-
 async fn seed(db: &Database) -> Seed {
     let project = uuid::Uuid::now_v7().to_string();
     let user = uuid::Uuid::now_v7().to_string();
@@ -78,8 +51,7 @@ async fn seed(db: &Database) -> Seed {
     let creator = insert_task(db, &project, &user, "judge").await;
     let spike = insert_task(db, &project, &user, "spike").await;
     let proposal = uuid::Uuid::now_v7().to_string();
-    sqlx::query("INSERT INTO proposals (id,short_id,title,body,body_format,acceptance_criteria,status,latest_revision_seq) VALUES ($1,$2,'p','','markdown','[]','draft',7)")
-        .bind(&proposal).bind(proposal.replace('-', "")).execute(db.pool()).await.unwrap();
+    sqlx::query("INSERT INTO proposals (id,short_id,title,body,body_format,acceptance_criteria,status,latest_revision_seq) VALUES ($1,$2,'p','','markdown','[]','draft',7)").bind(&proposal).bind(proposal.replace('-',"")).execute(db.pool()).await.unwrap();
     Seed {
         proposal,
         creator,
@@ -89,49 +61,46 @@ async fn seed(db: &Database) -> Seed {
 fn claim(s: &Seed) -> Value {
     json!({"created_by_task_id":s.creator,"against_revision_seq":7,"uncertainty":"load-bearing"})
 }
-async fn legacy(db: &Database, s: &Seed, link: Option<&str>, claim: Option<&Value>) {
+async fn set_legacy(db: &Database, s: &Seed, link: Option<&str>, c: Option<&Value>) {
     sqlx::query("UPDATE proposals SET linked_spike_task_id=$1,needs_evidence_claim=$2 WHERE id=$3")
         .bind(link)
-        .bind(claim.map(|v| serde_json::to_string(v).unwrap()))
+        .bind(c.map(|x| serde_json::to_string(x).unwrap()))
         .bind(&s.proposal)
         .execute(db.pool())
         .await
         .unwrap();
 }
-async fn counts(db: &Database, proposal: &str) -> (i64, i64, i64) {
-    let f: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM typed_evidence_findings WHERE proposal_id=$1")
-            .bind(proposal)
-            .fetch_one(db.pool())
-            .await
-            .unwrap();
-    let a: i64 = sqlx::query_scalar("SELECT count(*) FROM typed_evidence_attempts WHERE finding_id IN (SELECT id FROM typed_evidence_findings WHERE proposal_id=$1)").bind(proposal).fetch_one(db.pool()).await.unwrap();
-    let t: i64 = sqlx::query_scalar("SELECT count(*) FROM typed_evidence_transitions WHERE finding_id IN (SELECT id FROM typed_evidence_findings WHERE proposal_id=$1)").bind(proposal).fetch_one(db.pool()).await.unwrap();
-    (f, a, t)
-}
-
-type PersistedFinding = (String, String, String, String, Value, i32, String);
-type PersistedAttempt = (String, String, i32, String);
-type PersistedTransition = (String, i32, Option<String>, String, Option<String>, Value);
-async fn persisted_rows(
-    db: &Database,
-    proposal: &str,
-) -> (
-    Vec<PersistedFinding>,
-    Vec<PersistedAttempt>,
-    Vec<PersistedTransition>,
-) {
-    let f = sqlx::query_as("SELECT id,proposal_id,demand_hash,lifecycle,claim,demanded_revision_seq,created_by_task_id FROM typed_evidence_findings WHERE proposal_id=$1 ORDER BY id").bind(proposal).fetch_all(db.pool()).await.unwrap();
-    let a = sqlx::query_as("SELECT id,finding_id,sequence,spike_task_id FROM typed_evidence_attempts WHERE finding_id IN (SELECT id FROM typed_evidence_findings WHERE proposal_id=$1) ORDER BY sequence").bind(proposal).fetch_all(db.pool()).await.unwrap();
-    let t = sqlx::query_as("SELECT id,ordinal,from_lifecycle,to_lifecycle,actor_task_id,metadata FROM typed_evidence_transitions WHERE finding_id IN (SELECT id FROM typed_evidence_findings WHERE proposal_id=$1) ORDER BY ordinal").bind(proposal).fetch_all(db.pool()).await.unwrap();
-    (f, a, t)
-}
-async fn legacy_row(db: &Database, proposal: &str) -> (Option<String>, Option<String>) {
+async fn legacy(db: &Database, p: &str) -> (Option<String>, Option<String>) {
     sqlx::query_as("SELECT linked_spike_task_id,needs_evidence_claim FROM proposals WHERE id=$1")
-        .bind(proposal)
+        .bind(p)
         .fetch_one(db.pool())
         .await
         .unwrap()
+}
+async fn typed_rows(db: &Database, p: &str) -> (Vec<Finding>, Vec<Attempt>, Vec<Transition>) {
+    let f=sqlx::query_as("SELECT id,proposal_id,demand_hash,lifecycle,claim,demanded_revision_seq,created_by_task_id FROM typed_evidence_findings WHERE proposal_id=$1 ORDER BY id").bind(p).fetch_all(db.pool()).await.unwrap();
+    let a=sqlx::query_as("SELECT id,finding_id,sequence,spike_task_id FROM typed_evidence_attempts WHERE finding_id IN (SELECT id FROM typed_evidence_findings WHERE proposal_id=$1) ORDER BY sequence,id").bind(p).fetch_all(db.pool()).await.unwrap();
+    let t=sqlx::query_as("SELECT id,ordinal,from_lifecycle,to_lifecycle,actor_task_id,metadata FROM typed_evidence_transitions WHERE finding_id IN (SELECT id FROM typed_evidence_findings WHERE proposal_id=$1) ORDER BY ordinal,id").bind(p).fetch_all(db.pool()).await.unwrap();
+    (f, a, t)
+}
+async fn snapshot(db: &Database, p: &str) -> Snapshot {
+    let (f, a, t) = typed_rows(db, p).await;
+    (legacy(db, p).await, f, a, t)
+}
+async fn assert_fail_closed(db: &Database, typed: &TypedEvidenceRepository, p: &str) {
+    let before = snapshot(db, p).await;
+    assert_eq!(typed.dual_read_legacy_parity(p).await.unwrap(), None);
+    assert_eq!(
+        snapshot(db, p).await,
+        before,
+        "fail-closed read mutated authority"
+    );
+}
+async fn active(db: &Database, typed: &TypedEvidenceRepository) -> Seed {
+    let s = seed(db).await;
+    set_legacy(db, &s, Some(&s.spike), Some(&claim(&s))).await;
+    typed.backfill_active_legacy_evidence().await.unwrap();
+    s
 }
 
 #[tokio::test]
@@ -139,49 +108,33 @@ async fn typed_evidence_backfill_postgres_parity_matrix() {
     let db = Database::ephemeral().await.unwrap();
     db.ensure_initialized().await.unwrap();
     let typed = TypedEvidenceRepository::new(db.clone());
-
-    // Claim-only backfill has canonical claim/hash and only the initial demand fact.
     let claim_only = seed(&db).await;
     let c = claim(&claim_only);
-    legacy(&db, &claim_only, None, Some(&c)).await;
-    let authority = legacy_row(&db, &claim_only.proposal).await;
-    let report = typed.backfill_active_legacy_evidence().await.unwrap();
-    assert_eq!(report.created_findings, 1);
-    let projection = typed
-        .dual_read_legacy_parity(&claim_only.proposal)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(projection.finding.claim, c);
+    set_legacy(&db, &claim_only, None, Some(&c)).await;
+    let authority = legacy(&db, &claim_only.proposal).await;
     assert_eq!(
-        projection.finding.lifecycle,
-        TribunalEvidenceLifecycle::Demanded
+        typed
+            .backfill_active_legacy_evidence()
+            .await
+            .unwrap()
+            .created_findings,
+        1
     );
+    let (f, a, t) = typed_rows(&db, &claim_only.proposal).await;
+    assert_eq!(f.len(), 1);
+    assert!(a.is_empty());
+    assert_eq!(t.len(), 1);
     assert_eq!(
-        projection.finding.demand_hash,
-        legacy_demand_hash(&projection.finding.claim, None)
-    );
-    assert_eq!(counts(&db, &claim_only.proposal).await, (1, 0, 1));
-    let (f, a, t) = persisted_rows(&db, &claim_only.proposal).await;
-    assert_eq!(
+        (&f[0].1, &f[0].2, &f[0].3, &f[0].4, f[0].5, &f[0].6),
         (
-            f[0].1.as_str(),
-            f[0].2.as_str(),
-            f[0].3.as_str(),
-            &f[0].4,
-            f[0].5,
-            f[0].6.as_str()
-        ),
-        (
-            claim_only.proposal.as_str(),
-            legacy_demand_hash(&c, None).as_str(),
-            "demanded",
+            &claim_only.proposal,
+            &legacy_demand_hash(&c, None),
+            &"demanded".to_owned(),
             &c,
             7,
-            claim_only.creator.as_str()
+            &claim_only.creator
         )
     );
-    assert!(a.is_empty());
     assert_eq!(
         (
             t[0].1,
@@ -198,39 +151,28 @@ async fn typed_evidence_backfill_postgres_parity_matrix() {
             &json!({"source":"legacy_backfill"})
         )
     );
-    assert_eq!(legacy_row(&db, &claim_only.proposal).await, authority);
-
-    // Link-only has its documented synthetic claim and a current active attempt.
+    assert_eq!(legacy(&db, &claim_only.proposal).await, authority);
     let link_only = seed(&db).await;
-    legacy(&db, &link_only, Some(&link_only.spike), None).await;
-    let authority = legacy_row(&db, &link_only.proposal).await;
+    set_legacy(&db, &link_only, Some(&link_only.spike), None).await;
+    let authority = legacy(&db, &link_only.proposal).await;
     typed.backfill_active_legacy_evidence().await.unwrap();
-    let p = typed
-        .dual_read_legacy_parity(&link_only.proposal)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(p.spike_task_id.as_deref(), Some(link_only.spike.as_str()));
-    assert!(p.attempt_id.is_some());
-    assert_eq!(p.finding.lifecycle, TribunalEvidenceLifecycle::SpikeActive);
-    assert_eq!(counts(&db, &link_only.proposal).await, (1, 1, 2));
-    let (f, a, t) = persisted_rows(&db, &link_only.proposal).await;
+    let (f, a, t) = typed_rows(&db, &link_only.proposal).await;
     let synthetic = json!({"__typed_evidence_legacy_link_only":true});
     assert_eq!(
-        (&f[0].4, f[0].2.as_str(), f[0].3.as_str()),
+        (&f[0].1, &f[0].2, &f[0].3, &f[0].4, f[0].5, &f[0].6),
         (
+            &link_only.proposal,
+            &legacy_demand_hash(&synthetic, Some(&link_only.spike)),
+            &"spike_active".to_owned(),
             &synthetic,
-            legacy_demand_hash(&synthetic, Some(&link_only.spike)).as_str(),
-            "spike_active"
+            7,
+            &link_only.spike
         )
     );
-    assert_eq!(
-        (a[0].1.as_str(), a[0].2, a[0].3.as_str()),
-        (f[0].0.as_str(), 1, link_only.spike.as_str())
-    );
+    assert_eq!((&a[0].1, a[0].2, &a[0].3), (&f[0].0, 1, &link_only.spike));
     assert_eq!(
         t.iter()
-            .map(|r| (r.1, r.2.clone(), r.3.clone(), r.4.clone(), r.5.clone()))
+            .map(|x| (x.1, x.2.clone(), x.3.clone(), x.4.clone(), x.5.clone()))
             .collect::<Vec<_>>(),
         vec![
             (
@@ -249,60 +191,64 @@ async fn typed_evidence_backfill_postgres_parity_matrix() {
             )
         ]
     );
-    assert_eq!(legacy_row(&db, &link_only.proposal).await, authority);
-
-    // Claim+link preserves legacy authority byte-for-byte and is idempotent.
+    assert_eq!(legacy(&db, &link_only.proposal).await, authority);
     let both = seed(&db).await;
     let c = claim(&both);
-    legacy(&db, &both, Some(&both.spike), Some(&c)).await;
+    set_legacy(&db, &both, Some(&both.spike), Some(&c)).await;
+    let authority = legacy(&db, &both.proposal).await;
     typed.backfill_active_legacy_evidence().await.unwrap();
-    let before = counts(&db, &both.proposal).await;
-    let rows_before = persisted_rows(&db, &both.proposal).await;
-    let id = typed
-        .dual_read_legacy_parity(&both.proposal)
-        .await
-        .unwrap()
-        .unwrap()
-        .finding
-        .id;
-    let second = typed.backfill_active_legacy_evidence().await.unwrap();
-    assert_eq!((second.created_findings, second.created_attempts), (0, 0));
-    assert_eq!(counts(&db, &both.proposal).await, before);
-    assert_eq!(persisted_rows(&db, &both.proposal).await, rows_before);
-    let stored: (Option<String>, Option<String>) = sqlx::query_as(
-        "SELECT linked_spike_task_id,needs_evidence_claim FROM proposals WHERE id=$1",
-    )
-    .bind(&both.proposal)
-    .fetch_one(db.pool())
-    .await
-    .unwrap();
-    assert_eq!(stored.0.as_deref(), Some(both.spike.as_str()));
+    let before = snapshot(&db, &both.proposal).await;
+    let (f, a, t) = typed_rows(&db, &both.proposal).await;
     assert_eq!(
-        serde_json::from_str::<Value>(&stored.1.unwrap()).unwrap(),
-        c
+        (&f[0].1, &f[0].2, &f[0].3, &f[0].4, f[0].5, &f[0].6),
+        (
+            &both.proposal,
+            &legacy_demand_hash(&c, Some(&both.spike)),
+            &"spike_active".to_owned(),
+            &c,
+            7,
+            &both.creator
+        )
     );
+    assert_eq!((&a[0].1, a[0].2, &a[0].3), (&f[0].0, 1, &both.spike));
     assert_eq!(
-        typed
-            .dual_read_legacy_parity(&both.proposal)
-            .await
-            .unwrap()
-            .unwrap()
-            .finding
-            .id,
-        id
+        t.iter()
+            .map(|x| (x.1, x.2.clone(), x.3.clone(), x.4.clone(), x.5.clone()))
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                1,
+                None,
+                "demanded".into(),
+                Some(both.creator.clone()),
+                json!({"source":"legacy_backfill"})
+            ),
+            (
+                2,
+                Some("demanded".into()),
+                "spike_active".into(),
+                Some(both.spike.clone()),
+                json!({"source":"legacy_backfill"})
+            )
+        ]
     );
-
-    // Terminal linked state is inactive control: neither typed state nor legacy gating changes.
+    typed.backfill_active_legacy_evidence().await.unwrap();
+    assert_eq!(snapshot(&db, &both.proposal).await, before);
+    assert_eq!(legacy(&db, &both.proposal).await, authority);
     let inactive = seed(&db).await;
     let c = claim(&inactive);
-    legacy(&db, &inactive, Some(&inactive.spike), Some(&c)).await;
+    set_legacy(&db, &inactive, Some(&inactive.spike), Some(&c)).await;
     sqlx::query("UPDATE tasks SET status='closed' WHERE id=$1")
         .bind(&inactive.spike)
         .execute(db.pool())
         .await
         .unwrap();
+    let before = snapshot(&db, &inactive.proposal).await;
     typed.backfill_active_legacy_evidence().await.unwrap();
-    assert_eq!(counts(&db, &inactive.proposal).await, (0, 0, 0));
+    assert_eq!(
+        typed_rows(&db, &inactive.proposal).await,
+        (vec![], vec![], vec![])
+    );
     assert_eq!(
         typed
             .dual_read_legacy_parity(&inactive.proposal)
@@ -310,27 +256,79 @@ async fn typed_evidence_backfill_postgres_parity_matrix() {
             .unwrap(),
         None
     );
+    assert_eq!(snapshot(&db, &inactive.proposal).await, before);
 }
 
 #[tokio::test]
-async fn typed_evidence_backfill_dual_write_clear_and_rollbacks() {
+async fn typed_evidence_backfill_fail_closed_mismatch_matrix() {
+    let db = Database::ephemeral().await.unwrap();
+    db.ensure_initialized().await.unwrap();
+    let typed = TypedEvidenceRepository::new(db.clone());
+    let malformed = seed(&db).await;
+    set_legacy(&db, &malformed, Some(&malformed.spike), None).await;
+    sqlx::query("UPDATE proposals SET needs_evidence_claim='{}' WHERE id=$1")
+        .bind(&malformed.proposal)
+        .execute(db.pool())
+        .await
+        .unwrap();
+    assert_fail_closed(&db, &typed, &malformed.proposal).await;
+    let missing = active(&db, &typed).await;
+    for q in [
+        "DELETE FROM typed_evidence_transitions WHERE finding_id IN (SELECT id FROM typed_evidence_findings WHERE proposal_id=$1)",
+        "DELETE FROM typed_evidence_attempts WHERE finding_id IN (SELECT id FROM typed_evidence_findings WHERE proposal_id=$1)",
+        "DELETE FROM typed_evidence_findings WHERE proposal_id=$1",
+    ] {
+        sqlx::query(q)
+            .bind(&missing.proposal)
+            .execute(db.pool())
+            .await
+            .unwrap();
+    }
+    assert_fail_closed(&db, &typed, &missing.proposal).await;
+    let ambiguous = active(&db, &typed).await;
+    sqlx::query("INSERT INTO typed_evidence_findings (id,proposal_id,demand_hash,lifecycle,claim,demanded_revision_seq,created_by_task_id) VALUES ($1,$2,$3,'demanded',$4,7,$5)").bind(uuid::Uuid::now_v7().to_string()).bind(&ambiguous.proposal).bind(format!("other-{}",uuid::Uuid::now_v7())).bind(claim(&ambiguous)).bind(&ambiguous.creator).execute(db.pool()).await.unwrap();
+    assert_fail_closed(&db, &typed, &ambiguous.proposal).await;
+    let task_state = active(&db, &typed).await;
+    sqlx::query("UPDATE tasks SET status='closed' WHERE id=$1")
+        .bind(&task_state.spike)
+        .execute(db.pool())
+        .await
+        .unwrap();
+    assert_fail_closed(&db, &typed, &task_state.proposal).await;
+    for (column, value) in [
+        ("claim", "'{\"different\":true}'::jsonb"),
+        ("demand_hash", "'wrong'"),
+        ("lifecycle", "'demanded'"),
+    ] {
+        let s = active(&db, &typed).await;
+        sqlx::query(&format!(
+            "UPDATE typed_evidence_findings SET {column}={value} WHERE proposal_id=$1"
+        ))
+        .bind(&s.proposal)
+        .execute(db.pool())
+        .await
+        .unwrap();
+        assert_fail_closed(&db, &typed, &s.proposal).await;
+    }
+}
+
+#[tokio::test]
+async fn typed_evidence_backfill_dual_write_clear_rollback_and_reverse_rollback() {
     let db = Database::ephemeral().await.unwrap();
     db.ensure_initialized().await.unwrap();
     let typed = TypedEvidenceRepository::new(db.clone());
     let s = seed(&db).await;
     let c = claim(&s);
-    let demand = |finding_id| DemandTypedEvidenceInput {
-        finding_id,
+    let demand = |id| DemandTypedEvidenceInput {
+        finding_id: id,
         proposal_id: s.proposal.clone(),
         demand_hash: legacy_demand_hash(&c, Some(&s.spike)),
         claim: c.clone(),
         demanded_revision_seq: 7,
         judge_task_id: s.creator.clone(),
     };
-
-    // Production atomic set primitive commits matching legacy and typed authority.
     let mut tx = db.pool().begin().await.unwrap();
-    let created = TypedEvidenceRepository::demand_activate_and_set_legacy_in_transaction(
+    TypedEvidenceRepository::demand_activate_and_set_legacy_in_transaction(
         &mut tx,
         demand(uuid::Uuid::now_v7().to_string()),
         &s.spike,
@@ -338,74 +336,103 @@ async fn typed_evidence_backfill_dual_write_clear_and_rollbacks() {
     .await
     .unwrap();
     tx.commit().await.unwrap();
-    assert!(
-        typed
-            .dual_read_legacy_parity(&s.proposal)
-            .await
-            .unwrap()
-            .is_some()
+    let (f, a, t) = typed_rows(&db, &s.proposal).await;
+    assert_eq!((&a[0].1, &a[0].3), (&f[0].0, &s.spike));
+    assert_eq!(t.len(), 2);
+    assert_eq!(
+        legacy(&db, &s.proposal).await.0.as_deref(),
+        Some(s.spike.as_str())
     );
-    assert_eq!(counts(&db, &s.proposal).await, (1, 1, 2));
-
-    // Fail closed before clear: malformed parity leaves both representations unchanged.
-    sqlx::query("UPDATE proposals SET needs_evidence_claim='{}' WHERE id=$1")
-        .bind(&s.proposal)
+    sqlx::query("UPDATE tasks SET status='closed' WHERE id=$1")
+        .bind(&s.spike)
         .execute(db.pool())
         .await
         .unwrap();
-    let before = counts(&db, &s.proposal).await;
+    typed
+        .evidence_received_and_clear_legacy(&s.proposal, &s.spike)
+        .await
+        .unwrap();
+    let (f, a, t) = typed_rows(&db, &s.proposal).await;
+    assert_eq!(legacy(&db, &s.proposal).await, (None, None));
+    assert_eq!(f[0].3, "evidence_received");
+    assert_eq!(
+        (
+            t[2].1,
+            t[2].2.as_deref(),
+            t[2].3.as_str(),
+            t[2].4.as_deref(),
+            &t[2].5
+        ),
+        (
+            3,
+            Some("spike_active"),
+            "evidence_received",
+            Some(s.spike.as_str()),
+            &json!({"source":"legacy_dual_write_clear","attempt_id":a[0].0.clone()})
+        )
+    );
+    let typed_first = seed(&db).await;
+    let ct = claim(&typed_first);
+    let before = snapshot(&db, &typed_first.proposal).await;
     let mut tx = db.pool().begin().await.unwrap();
-    let err = TypedEvidenceRepository::transition_and_clear_legacy_in_transaction(
+    TypedEvidenceRepository::demand_in_transaction(
         &mut tx,
-        &s.proposal,
-        &s.spike,
-        AppendTypedEvidenceTransitionInput {
-            id: uuid::Uuid::now_v7().to_string(),
-            finding_id: created.finding.id.clone(),
-            ordinal: 3,
-            from_lifecycle: Some(TribunalEvidenceLifecycle::SpikeActive),
-            to_lifecycle: TribunalEvidenceLifecycle::EvidenceReceived,
-            actor_task_id: Some(s.spike.clone()),
-            metadata: json!({}),
+        DemandTypedEvidenceInput {
+            finding_id: uuid::Uuid::now_v7().to_string(),
+            proposal_id: typed_first.proposal.clone(),
+            demand_hash: legacy_demand_hash(&ct, Some(&typed_first.spike)),
+            claim: ct,
+            demanded_revision_seq: 7,
+            judge_task_id: typed_first.creator.clone(),
         },
     )
     .await
-    .unwrap_err();
-    assert!(err.to_string().contains("legacy_typed_parity_mismatch"));
+    .unwrap();
+    let injected: Result<(), &str> = Err("after typed write before legacy write");
+    assert!(injected.is_err());
     tx.rollback().await.unwrap();
-    assert_eq!(counts(&db, &s.proposal).await, before);
-
-    // Inject failures after production primitive writes: aborting each caller-owned transaction leaves no partial typed or legacy residue.
-    for _side in ["typed", "legacy"] {
-        let isolated = seed(&db).await;
-        let ci = claim(&isolated);
-        let mut tx = db.pool().begin().await.unwrap();
-        let input = DemandTypedEvidenceInput {
-            finding_id: uuid::Uuid::now_v7().to_string(),
-            proposal_id: isolated.proposal.clone(),
-            demand_hash: legacy_demand_hash(&ci, Some(&isolated.spike)),
-            claim: ci,
-            demanded_revision_seq: 7,
-            judge_task_id: isolated.creator.clone(),
-        };
-        TypedEvidenceRepository::demand_activate_and_set_legacy_in_transaction(
-            &mut tx,
-            input,
-            &isolated.spike,
-        )
+    assert_eq!(snapshot(&db, &typed_first.proposal).await, before);
+    let legacy_first = seed(&db).await;
+    let cl = claim(&legacy_first);
+    let before = snapshot(&db, &legacy_first.proposal).await;
+    let mut tx = db.pool().begin().await.unwrap();
+    sqlx::query("UPDATE proposals SET linked_spike_task_id=$1,needs_evidence_claim=$2 WHERE id=$3")
+        .bind(&legacy_first.spike)
+        .bind(serde_json::to_string(&cl).unwrap())
+        .bind(&legacy_first.proposal)
+        .execute(&mut *tx)
         .await
         .unwrap();
-        let injected: Result<(), &str> = Err("deterministic injected failure before commit");
-        assert!(injected.is_err());
-        tx.rollback().await.unwrap();
-        assert_eq!(counts(&db, &isolated.proposal).await, (0, 0, 0));
-        let legacy: (Option<String>, Option<String>) = sqlx::query_as(
-            "SELECT linked_spike_task_id,needs_evidence_claim FROM proposals WHERE id=$1",
-        )
-        .bind(&isolated.proposal)
-        .fetch_one(db.pool())
+    let injected: Result<(), &str> = Err("after legacy write before typed write");
+    assert!(injected.is_err());
+    tx.rollback().await.unwrap();
+    assert_eq!(snapshot(&db, &legacy_first.proposal).await, before);
+    let rollback = active(&db, &typed).await;
+    let history = typed_rows(&db, &rollback.proposal).await;
+    let legacy_repo = ProposalRepository::new(db.clone(), EventBus::noop());
+    assert_eq!(
+        legacy_repo
+            .find_by_linked_spike(&rollback.spike)
+            .await
+            .unwrap()
+            .unwrap()
+            .id,
+        rollback.proposal
+    );
+    assert_eq!(typed_rows(&db, &rollback.proposal).await, history);
+    for c in legacy_repo
+        .list_linked_evidence_spike_recovery_candidates()
         .await
-        .unwrap();
-        assert_eq!(legacy, (None, None));
+        .unwrap()
+        .into_iter()
+        .filter(|x| x.linked_spike_task_status != "closed")
+    {
+        let n:i64=sqlx::query_scalar("SELECT count(*) FROM typed_evidence_attempts a JOIN typed_evidence_findings f ON f.id=a.finding_id WHERE f.proposal_id=$1 AND f.lifecycle='spike_active' AND a.spike_task_id=$2").bind(&c.proposal_id).bind(&c.linked_spike_task_id).fetch_one(db.pool()).await.unwrap();
+        assert_eq!(n, 1);
+        assert_eq!(
+            legacy(&db, &c.proposal_id).await.0.as_deref(),
+            Some(c.linked_spike_task_id.as_str())
+        );
     }
+    assert_eq!(TribunalEvidenceLifecycle::Demanded.as_str(), "demanded");
 }
