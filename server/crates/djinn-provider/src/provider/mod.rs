@@ -1296,4 +1296,49 @@ mod admission_plan_fixtures {
             })
         ));
     }
+
+
+    fn parsed(parser: &mut dyn ProviderSseFrameParserV1, frame: SseFrame) -> Vec<StreamEvent> {
+        parser.parse(frame).into_iter().collect::<anyhow::Result<Vec<_>>>()
+            .expect("authoritative parser accepts fixture")
+    }
+
+    #[test]
+    fn anthropic_frame_parser_v1_adapts_raw_frames() {
+        let provider = create_provider(config(FormatFamily::Anthropic, "claude-fixture", Some(128)));
+        let mut parser = provider.sse_frame_parser_v1().expect("Anthropic parser");
+        assert!(matches!(parsed(&mut *parser, SseFrame::Data(r#"{"type":"content_block_delta","delta":{"type":"text_delta","text":"hello"}}"#.into())).as_slice(), [StreamEvent::Delta(ContentBlock::Text { text })] if text == "hello"));
+        assert!(matches!(parsed(&mut *parser, SseFrame::Data(r#"{"type":"message_delta","usage":{"output_tokens":3}}"#.into())).as_slice(), [StreamEvent::Usage(usage)] if usage.output == 3));
+        assert!(matches!(parsed(&mut *parser, SseFrame::Data(r#"{"type":"message_stop"}"#.into())).as_slice(), [StreamEvent::Done]));
+    }
+
+    #[test]
+    fn openai_chat_frame_parser_v1_adapts_raw_frames() {
+        let provider = create_provider(config(FormatFamily::OpenAI, "gpt-fixture", Some(128)));
+        let mut parser = provider.sse_frame_parser_v1().expect("OpenAI parser");
+        assert!(matches!(parsed(&mut *parser, SseFrame::Data(r#"{"choices":[{"delta":{"content":"hello"}}]}"#.into())).as_slice(), [StreamEvent::Delta(ContentBlock::Text { text })] if text == "hello"));
+        assert!(matches!(parsed(&mut *parser, SseFrame::Data(r#"{"choices":[],"usage":{"prompt_tokens":2,"completion_tokens":3}}"#.into())).as_slice(), [StreamEvent::Usage(usage)] if usage.input == 2 && usage.output == 3));
+        assert!(matches!(parsed(&mut *parser, SseFrame::Done).as_slice(), [StreamEvent::Done]));
+    }
+
+    #[test]
+    fn openai_responses_frame_parser_v1_adapts_raw_frames() {
+        let provider = create_provider(config(FormatFamily::OpenAIResponses, "gpt-5.1-codex", Some(128)));
+        let mut parser = provider.sse_frame_parser_v1().expect("Responses parser");
+        assert!(matches!(parsed(&mut *parser, SseFrame::Data(r#"{"type":"response.output_text.delta","delta":"hello"}"#.into())).as_slice(), [StreamEvent::Delta(ContentBlock::Text { text })] if text == "hello"));
+        let events = parsed(&mut *parser, SseFrame::Data(r#"{"type":"response.completed","response":{"output":[{"type":"function_call","call_id":"call_1","name":"shell","arguments":"{\"cmd\":\"pwd\"}"}],"usage":{"input_tokens":2,"output_tokens":3}}}"#.into()));
+        assert!(matches!(events.as_slice(), [StreamEvent::Delta(ContentBlock::ToolUse { name, .. }), StreamEvent::Usage(usage)] if name == "shell" && usage.input == 2));
+        assert!(matches!(parsed(&mut *parser, SseFrame::Done).as_slice(), [StreamEvent::Done]));
+    }
+
+    #[test]
+    fn google_frame_parser_v1_adapts_raw_frames() {
+        let provider = create_provider(config(FormatFamily::Google, "gemini-fixture", Some(128)));
+        let mut parser = provider.sse_frame_parser_v1().expect("Google parser");
+        let events = parsed(&mut *parser, SseFrame::Data(r#"{"candidates":[{"content":{"parts":[{"text":"hello"},{"functionCall":{"name":"shell","args":{"cmd":"pwd"}}}],"role":"model"},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":2,"candidatesTokenCount":3}}"#.into()));
+        assert!(events.iter().any(|event| matches!(event, StreamEvent::Delta(ContentBlock::Text { text }) if text == "hello")));
+        assert!(events.iter().any(|event| matches!(event, StreamEvent::Delta(ContentBlock::ToolUse { name, .. }) if name == "shell")));
+        assert!(events.iter().any(|event| matches!(event, StreamEvent::Usage(usage) if usage.input == 2 && usage.output == 3)));
+        assert!(events.iter().any(|event| matches!(event, StreamEvent::Done)));
+    }
 }

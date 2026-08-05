@@ -1103,6 +1103,7 @@ async fn run_scripted_reply_loop_with_dispatcher(
             session_budget: None,
             compaction_cs: &crate::reply_loop::CompactionCriticalSection::new(),
             provider,
+            credential_record_id: "test-credential",
             tools,
             task_id: &task_id,
             task_short_id: "t1",
