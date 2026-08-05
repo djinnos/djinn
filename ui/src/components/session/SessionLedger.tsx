@@ -121,7 +121,9 @@ function ActivityRun({ strand }: { strand: ActivityStrand }) {
         className="flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-xs text-zinc-400 transition-colors hover:bg-white/[0.03] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-white/25"
       >
         <span className="text-zinc-600">⋯</span>
-        <span className="font-medium text-zinc-300 tabular-nums">{strand.steps.length} steps</span>
+        <span className="font-medium text-zinc-300 tabular-nums">
+          {strand.steps.length} {strand.steps.length === 1 ? "step" : "steps"}
+        </span>
         {strand.durationLabel && (
           <span className="text-zinc-500 tabular-nums">· {strand.durationLabel}</span>
         )}
@@ -416,12 +418,22 @@ function PhaseBand({ phase }: { phase: LedgerPhase }) {
             <span className="shrink-0 tabular-nums">· {phase.durationLabel}</span>
           )}
         </span>
-        {phase.running && (
-          <span className="ml-auto flex shrink-0 items-center gap-1.5 text-[11px] text-zinc-300">
-            <LiveDot className="bg-emerald-400" />
-            running
-          </span>
-        )}
+        <span className="ml-auto flex shrink-0 items-center gap-2">
+          {phase.attempts && phase.attempts.failed > 0 && (
+            <span
+              className="rounded border border-red-400/25 bg-red-400/10 px-1.5 py-0.5 text-[10px] font-medium tabular-nums text-red-300"
+              title={`${phase.attempts.failed} of ${phase.attempts.total} sessions failed and respawned`}
+            >
+              attempt {phase.attempts.total} · {phase.attempts.failed} failed
+            </span>
+          )}
+          {phase.running && (
+            <span className="flex items-center gap-1.5 text-[11px] text-zinc-300">
+              <LiveDot className="bg-emerald-400" />
+              running
+            </span>
+          )}
+        </span>
       </header>
 
       <div className="flex flex-col">
@@ -554,6 +566,8 @@ export function SessionLedger({
   blockers = [],
   entries,
   live = null,
+  showHeader = true,
+  emptyMessage = "No session activity yet.",
 }: SessionLedgerProps) {
   const metCount = criteria.filter((c) => c.met).length;
   const liveIdentity = live ? getAgentIdentity(live.agentType) : null;
@@ -561,6 +575,7 @@ export function SessionLedger({
 
   return (
     <div className="flex h-full flex-col bg-background text-foreground">
+      {showHeader && (
       <header className="flex shrink-0 items-center gap-3 border-b border-white/[0.06] px-4 py-2.5">
         <span className="shrink-0 font-mono text-xs text-zinc-500">{taskShortId}</span>
         <h1 className="min-w-0 flex-1 truncate text-sm font-semibold text-zinc-100">{taskTitle}</h1>
@@ -578,12 +593,16 @@ export function SessionLedger({
           {statusLabel}
         </span>
       </header>
+      )}
 
       <div className="flex min-h-0 flex-1">
         <Rail criteria={criteria} agents={agents} blockers={blockers} />
 
         <main className="min-w-0 flex-1 overflow-y-auto">
           <div className="mx-auto flex max-w-3xl flex-col gap-4 px-5 py-5">
+            {entries.length === 0 && (
+              <p className="py-8 text-center text-sm text-zinc-500">{emptyMessage}</p>
+            )}
             {entries.map((entry) =>
               entry.kind === "handoff" ? (
                 <HandoffBand key={entry.id} handoff={entry} />
