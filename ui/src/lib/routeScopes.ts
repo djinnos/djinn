@@ -75,11 +75,6 @@ export const ROUTE_SCOPES: readonly RouteScopeEntry[] = [
     note: "AgentsPage reads useSelectedProject() for metrics/MCP context",
   },
   {
-    pattern: "/task/:taskId",
-    scope: "global-project-context",
-    note: "TaskSessionPage reads useSelectedProject() for session context/back-nav",
-  },
-  {
     pattern: "/code-graph",
     scope: "global-project-context",
     inPageSelector: true,
@@ -116,6 +111,15 @@ export const ROUTE_SCOPES: readonly RouteScopeEntry[] = [
   },
 
   // ── path-scoped ─────────────────────────────────────────────────────────
+  {
+    pattern: "/task/:taskId",
+    scope: "path-scoped",
+    note:
+      "A task is always bound to one project, so TaskSessionPage resolves its " +
+      "project from the task's own project_id rather than the global store. " +
+      "Showing a selector implied the page could be re-scoped, which it cannot; " +
+      "deriving it also makes cross-project deep links resolve correctly.",
+  },
   {
     pattern: "/projects/:id/environment",
     scope: "path-scoped",
