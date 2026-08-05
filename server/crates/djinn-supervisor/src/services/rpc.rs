@@ -39,6 +39,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
+use djinn_core::cancel_origin::{CancelOrigin, CancelOriginTag};
 use djinn_core::models::{Task, TaskRunStatus};
 use djinn_runtime::wire::{ControlMsg, WorkspaceRef, read_frame, write_frame};
 use djinn_workspace::Workspace;
@@ -145,10 +146,19 @@ impl RpcServices {
     /// round-trip on TCP) MUST be consumed by the caller before handing
     /// the halves in — this function assumes the stream is positioned at
     /// the start of the post-handshake RPC byte stream.
+    /// `cancel_origin` is the side channel that records WHICH trigger fired
+    /// `cancel` (see [`djinn_core::cancel_origin`]). The reader and writer
+    /// loops are themselves cancellation triggers — transport death winds the
+    /// worker down — so they must stamp the tag before firing the token, or
+    /// the resulting terminal reason cannot name the RPC as the cause. Pass a
+    /// clone of the tag that travels with `cancel`; a fresh
+    /// [`CancelOriginTag::new`] simply leaves those cancellations
+    /// unattributed.
     pub fn from_split<R, W>(
         read_half: R,
         write_half: W,
         cancel: CancellationToken,
+        cancel_origin: CancelOriginTag,
     ) -> (Arc<Self>, RpcBackgroundTasks)
     where
         R: AsyncRead + Unpin + Send + 'static,
@@ -164,8 +174,13 @@ impl RpcServices {
             next_id: AtomicU64::new(1),
         });
 
-        let reader = tokio::spawn(reader_loop(read_half, pending.clone(), cancel.clone()));
-        let writer = tokio::spawn(writer_loop(write_half, rx, cancel.clone()));
+        let reader = tokio::spawn(reader_loop(
+            read_half,
+            pending.clone(),
+            cancel.clone(),
+            cancel_origin.clone(),
+        ));
+        let writer = tokio::spawn(writer_loop(write_half, rx, cancel.clone(), cancel_origin));
 
         (services, RpcBackgroundTasks { reader, writer })
     }
@@ -174,18 +189,20 @@ impl RpcServices {
     pub fn from_unix_stream(
         stream: UnixStream,
         cancel: CancellationToken,
+        cancel_origin: CancelOriginTag,
     ) -> (Arc<Self>, RpcBackgroundTasks) {
         let (read_half, write_half) = stream.into_split();
-        Self::from_split(read_half, write_half, cancel)
+        Self::from_split(read_half, write_half, cancel, cancel_origin)
     }
 
     /// Split a [`TcpStream`] and delegate to [`RpcServices::from_split`].
     pub fn from_stream(
         stream: TcpStream,
         cancel: CancellationToken,
+        cancel_origin: CancelOriginTag,
     ) -> (Arc<Self>, RpcBackgroundTasks) {
         let (read_half, write_half) = stream.into_split();
-        Self::from_split(read_half, write_half, cancel)
+        Self::from_split(read_half, write_half, cancel, cancel_origin)
     }
 
     /// Convenience wrapper: dial `path` via `UnixStream`, then delegate to
@@ -193,9 +210,10 @@ impl RpcServices {
     pub async fn connect_unix(
         path: impl AsRef<Path>,
         cancel: CancellationToken,
+        cancel_origin: CancelOriginTag,
     ) -> std::io::Result<(Arc<Self>, RpcBackgroundTasks)> {
         let stream = UnixStream::connect(path.as_ref()).await?;
-        Ok(Self::from_unix_stream(stream, cancel))
+        Ok(Self::from_unix_stream(stream, cancel, cancel_origin))
     }
 
     /// Dial `addr`, perform the [`FramePayload::AuthHello`] handshake, and —
@@ -219,6 +237,7 @@ impl RpcServices {
         task_run_id: String,
         token: String,
         cancel: CancellationToken,
+        cancel_origin: CancelOriginTag,
     ) -> Result<(Arc<Self>, RpcBackgroundTasks), ConnectTcpError> {
         // Retry the TCP dial with exponential backoff so the worker tolerates
         // launcher races AND a server rolling restart: the dispatch path can
@@ -312,7 +331,12 @@ impl RpcServices {
 
         // 3. Split the stream and enter the shared dispatch loop.
         let (read_half, write_half) = stream.into_split();
-        Ok(Self::from_split(read_half, write_half, cancel))
+        Ok(Self::from_split(
+            read_half,
+            write_half,
+            cancel,
+            cancel_origin,
+        ))
     }
 
     /// Push an out-of-band [`WorkerEvent`] onto the outbound mpsc channel so
@@ -1125,8 +1149,12 @@ impl SupervisorServices for RpcServices {
 
 // ── Reader / writer loops ────────────────────────────────────────────────────
 
-async fn reader_loop<R>(mut read_half: R, pending: PendingMap, cancel: CancellationToken)
-where
+async fn reader_loop<R>(
+    mut read_half: R,
+    pending: PendingMap,
+    cancel: CancellationToken,
+    cancel_origin: CancelOriginTag,
+) where
     R: AsyncRead + Unpin + Send + 'static,
 {
     // Loop until cancellation or socket close, then drain `pending` on the
@@ -1159,10 +1187,14 @@ where
                         }
                         FramePayload::Control(ControlMsg::Cancel) => {
                             debug!("rpc reader: received Cancel control frame");
+                            // Stamp the origin BEFORE firing so anything that
+                            // wakes on the token already reads the cause.
+                            cancel_origin.record(CancelOrigin::HostCancelControl);
                             cancel.cancel();
                         }
                         FramePayload::Control(ControlMsg::Shutdown) => {
                             debug!("rpc reader: received Shutdown control frame");
+                            cancel_origin.record(CancelOrigin::HostShutdownControl);
                             cancel.cancel();
                             break Ok(());
                         }
@@ -1182,6 +1214,7 @@ where
                         // their pods kept running for 50+ min, wedging
                         // scheduling on the single-node VPS.)
                         warn!(error = %e, "rpc reader: stream closed; cancelling worker");
+                        cancel_origin.record(CancelOrigin::RpcTransportClosed);
                         cancel.cancel();
                         break Ok(());
                     }
@@ -1209,8 +1242,12 @@ where
     }
 }
 
-async fn writer_loop<W>(mut write_half: W, mut rx: mpsc::Receiver<Frame>, cancel: CancellationToken)
-where
+async fn writer_loop<W>(
+    mut write_half: W,
+    mut rx: mpsc::Receiver<Frame>,
+    cancel: CancellationToken,
+    cancel_origin: CancelOriginTag,
+) where
     W: AsyncWrite + Unpin + Send + 'static,
 {
     // Unlike the reader, the writer does NOT exit eagerly on cancel.  On a
@@ -1242,6 +1279,7 @@ where
             // write means the host is gone and there is no reconnect, so the
             // worker must wind down rather than orphan itself.
             error!(error = %e, "rpc writer: failed to write frame; cancelling worker");
+            cancel_origin.record(CancelOrigin::RpcTransportClosed);
             cancel.cancel();
             return;
         }
@@ -1593,7 +1631,8 @@ mod tests {
         });
 
         let cancel = CancellationToken::new();
-        let (services, bg) = RpcServices::from_unix_stream(client, cancel.clone());
+        let (services, bg) =
+            RpcServices::from_unix_stream(client, cancel.clone(), CancelOriginTag::new());
         let result = services.load_task("hello-task".into()).await;
         let task = result.expect("load_task ok");
         assert_eq!(task.id, "hello-task");
@@ -1644,7 +1683,8 @@ mod tests {
         });
 
         let cancel = CancellationToken::new();
-        let (services, bg) = RpcServices::from_unix_stream(client, cancel.clone());
+        let (services, bg) =
+            RpcServices::from_unix_stream(client, cancel.clone(), CancelOriginTag::new());
         let params = SerializableCreateTaskRunParams {
             id: "run-create-rt".into(),
             task_attempt_id: None,
@@ -1699,7 +1739,8 @@ mod tests {
         });
 
         let cancel = CancellationToken::new();
-        let (services, bg) = RpcServices::from_unix_stream(client, cancel.clone());
+        let (services, bg) =
+            RpcServices::from_unix_stream(client, cancel.clone(), CancelOriginTag::new());
         services
             .update_task_run_status("run-update-rt".into(), TaskRunStatus::Completed)
             .await
@@ -1737,7 +1778,8 @@ mod tests {
         });
 
         let cancel2 = CancellationToken::new();
-        let (services2, bg2) = RpcServices::from_unix_stream(client2, cancel2.clone());
+        let (services2, bg2) =
+            RpcServices::from_unix_stream(client2, cancel2.clone(), CancelOriginTag::new());
         let err = services2
             .update_task_run_status("run-update-err".into(), TaskRunStatus::Failed)
             .await
@@ -1776,7 +1818,8 @@ mod tests {
         });
 
         let cancel = CancellationToken::new();
-        let (services, bg) = RpcServices::from_unix_stream(client, cancel.clone());
+        let (services, bg) =
+            RpcServices::from_unix_stream(client, cancel.clone(), CancelOriginTag::new());
         let got = services
             .get_model_context_window("anthropic/claude-opus-4-7".into())
             .await
@@ -1813,7 +1856,8 @@ mod tests {
         });
 
         let cancel2 = CancellationToken::new();
-        let (services2, bg2) = RpcServices::from_unix_stream(client2, cancel2.clone());
+        let (services2, bg2) =
+            RpcServices::from_unix_stream(client2, cancel2.clone(), CancelOriginTag::new());
         let err = services2
             .get_model_context_window("missing/model".into())
             .await
@@ -1853,7 +1897,8 @@ mod tests {
         });
 
         let cancel = CancellationToken::new();
-        let (services, bg) = RpcServices::from_unix_stream(client, cancel.clone());
+        let (services, bg) =
+            RpcServices::from_unix_stream(client, cancel.clone(), CancelOriginTag::new());
         let got = services
             .get_provider_base_url("anthropic".into())
             .await
@@ -1890,7 +1935,8 @@ mod tests {
         });
 
         let cancel2 = CancellationToken::new();
-        let (services2, bg2) = RpcServices::from_unix_stream(client2, cancel2.clone());
+        let (services2, bg2) =
+            RpcServices::from_unix_stream(client2, cancel2.clone(), CancelOriginTag::new());
         let err = services2
             .get_provider_base_url("no-such-provider".into())
             .await
@@ -1927,7 +1973,8 @@ mod tests {
         });
 
         let cancel = CancellationToken::new();
-        let (services, bg) = RpcServices::from_unix_stream(client, cancel.clone());
+        let (services, bg) =
+            RpcServices::from_unix_stream(client, cancel.clone(), CancelOriginTag::new());
         let got = services
             .pick_any_default_model()
             .await
@@ -1964,7 +2011,8 @@ mod tests {
         });
 
         let cancel2 = CancellationToken::new();
-        let (services2, bg2) = RpcServices::from_unix_stream(client2, cancel2.clone());
+        let (services2, bg2) =
+            RpcServices::from_unix_stream(client2, cancel2.clone(), CancelOriginTag::new());
         let got = services2
             .pick_any_default_model()
             .await
@@ -2026,7 +2074,8 @@ mod tests {
         });
 
         let cancel = CancellationToken::new();
-        let (services, bg) = RpcServices::from_unix_stream(client, cancel.clone());
+        let (services, bg) =
+            RpcServices::from_unix_stream(client, cancel.clone(), CancelOriginTag::new());
         let params = SerializableCreateSessionParams {
             project_id: "p1".into(),
             task_id: Some("t1".into()),
@@ -2082,7 +2131,8 @@ mod tests {
             }
         });
         let cancel = CancellationToken::new();
-        let (services, bg) = RpcServices::from_unix_stream(client, cancel.clone());
+        let (services, bg) =
+            RpcServices::from_unix_stream(client, cancel.clone(), CancelOriginTag::new());
         let error = services
             .create_session(SerializableCreateSessionParams {
                 project_id: "p1".into(),
@@ -2140,7 +2190,8 @@ mod tests {
         });
 
         let cancel = CancellationToken::new();
-        let (services, bg) = RpcServices::from_unix_stream(client, cancel.clone());
+        let (services, bg) =
+            RpcServices::from_unix_stream(client, cancel.clone(), CancelOriginTag::new());
         services
             .publish_session_message(
                 "s1".into(),
@@ -2213,7 +2264,8 @@ mod tests {
         });
 
         let cancel = CancellationToken::new();
-        let (services, bg) = RpcServices::from_unix_stream(client, cancel.clone());
+        let (services, bg) =
+            RpcServices::from_unix_stream(client, cancel.clone(), CancelOriginTag::new());
         let mut conv = Conversation::new();
         conv.push(Message::user("ping"));
         let got = services
@@ -2265,7 +2317,8 @@ mod tests {
         });
 
         let cancel = CancellationToken::new();
-        let (services, bg) = RpcServices::from_unix_stream(client, cancel.clone());
+        let (services, bg) =
+            RpcServices::from_unix_stream(client, cancel.clone(), CancelOriginTag::new());
         let cfg = services
             .get_environment_config("p1".into())
             .await
@@ -2284,6 +2337,92 @@ mod tests {
         let _ = bg.reader.await;
         let _ = bg.writer.await;
         let _ = server_task.await;
+    }
+
+    /// A dead transport already cancelled the worker; before this change the
+    /// cause was indistinguishable from every other cancellation. Assert the
+    /// *attribution*, and assert the cancellation still fires — the tag is an
+    /// addition to the teardown, never a replacement for it.
+    #[tokio::test]
+    async fn transport_death_attributes_the_cancellation_to_the_rpc_reader() {
+        let (client, server) = UnixStream::pair().expect("pair");
+        let cancel = CancellationToken::new();
+        let origin = CancelOriginTag::new();
+        assert_eq!(
+            origin.get(),
+            CancelOrigin::Unknown,
+            "unattributed before any trigger fires"
+        );
+
+        let (services, bg) = RpcServices::from_unix_stream(client, cancel.clone(), origin.clone());
+
+        // Kill the transport under the reader.
+        drop(server);
+        cancel.cancelled().await;
+
+        assert!(cancel.is_cancelled(), "transport death must still cancel");
+        assert_eq!(origin.get(), CancelOrigin::RpcTransportClosed);
+
+        drop(services);
+        let _ = bg.reader.await;
+        let _ = bg.writer.await;
+    }
+
+    /// A host `Control(Shutdown)` frame and a host `Control(Cancel)` frame are
+    /// different operator actions that used to settle identically.
+    #[tokio::test]
+    async fn a_host_shutdown_control_frame_is_attributed_to_the_host() {
+        let (client, server) = UnixStream::pair().expect("pair");
+        let cancel = CancellationToken::new();
+        let origin = CancelOriginTag::new();
+
+        let server_task = tokio::spawn(async move {
+            let (_read, mut write) = server.into_split();
+            let frame = Frame {
+                correlation_id: 0,
+                payload: FramePayload::Control(ControlMsg::Shutdown),
+            };
+            write_frame(&mut write, &frame)
+                .await
+                .expect("write control");
+            // Hold the socket open so the reader observes the control frame
+            // rather than an EOF.
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        });
+
+        let (services, bg) = RpcServices::from_unix_stream(client, cancel.clone(), origin.clone());
+        cancel.cancelled().await;
+
+        assert_eq!(origin.get(), CancelOrigin::HostShutdownControl);
+
+        drop(services);
+        let _ = bg.reader.await;
+        let _ = bg.writer.await;
+        let _ = server_task.await;
+    }
+
+    /// The cause outranks its consequences: the transport dying *after* the
+    /// pod already began winding down must not relabel the row.
+    #[tokio::test]
+    async fn an_already_attributed_cancellation_survives_transport_death() {
+        let (client, server) = UnixStream::pair().expect("pair");
+        let cancel = CancellationToken::new();
+        let origin = CancelOriginTag::new();
+        origin.record(CancelOrigin::Sigterm);
+
+        let (services, bg) = RpcServices::from_unix_stream(client, cancel.clone(), origin.clone());
+        drop(server);
+        cancel.cancelled().await;
+
+        assert_eq!(
+            origin.get(),
+            CancelOrigin::Sigterm,
+            "SIGTERM caused the teardown; the RPC close is downstream of it"
+        );
+
+        drop(services);
+        let _ = bg.reader.await;
+        let _ = bg.writer.await;
     }
 
     fn fixture_task() -> Task {
