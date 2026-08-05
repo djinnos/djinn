@@ -337,11 +337,12 @@ pub use repositories::{
     typed_evidence::{
         AllocateTypedEvidenceAttemptInput, AllocateTypedEvidenceRetryInput,
         AppendTypedEvidenceTransitionInput, DemandTypedEvidenceInput, DisposeTypedEvidenceInput,
-        PersistTypedEvidenceValidationInput, PlannedTypedEvidenceCheckInput,
-        TribunalEvidenceReturnAnchorV1, TribunalEvidenceReturnCheckV1,
-        TribunalEvidenceReturnFailureV1, TribunalEvidenceReturnFindingV1,
-        TribunalEvidenceReturnGapV1, TribunalEvidenceReturnResultV1, TribunalEvidenceReturnV1,
-        TypedEvidenceAttemptAllocation, TypedEvidenceDispositionProjection,
+        LegacyEvidenceParityProjection, PersistTypedEvidenceValidationInput,
+        PlannedTypedEvidenceCheckInput, TribunalEvidenceReturnAnchorV1,
+        TribunalEvidenceReturnCheckV1, TribunalEvidenceReturnFailureV1,
+        TribunalEvidenceReturnFindingV1, TribunalEvidenceReturnGapV1,
+        TribunalEvidenceReturnResultV1, TribunalEvidenceReturnV1, TypedEvidenceAttemptAllocation,
+        TypedEvidenceBackfillReport, TypedEvidenceDispositionProjection,
         TypedEvidenceFindingProjection, TypedEvidenceRepository,
     },
     usage_analytics::{
