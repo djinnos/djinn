@@ -1540,11 +1540,11 @@ enum JobTerminal {
 /// — i.e. NOT a death the infra-watch should trip on.
 ///
 /// Pure over the Pod object so the OOMKilled / non-zero-exit classification is
-/// unit-testable without a live cluster. Reads the `worker` container's
-/// `state.terminated` (falling back to the first container if the worker name
-/// isn't matched, for forward-compat): an explicit `OOMKilled` reason or any
+/// unit-testable without a live cluster. Reads only the named `worker`
+/// container's `state.terminated`: an explicit `OOMKilled` reason or any
 /// non-zero exit code is a death; a zero exit (clean success) is not — that
-/// run's terminal report rides the stream and the runner prefers it.
+/// run's terminal report rides the stream and the runner prefers it. A missing
+/// worker status is nonterminal rather than evidence from a sidecar.
 const MAX_TERMINAL_DIAGNOSTIC_BYTES: usize = 1024;
 
 fn terminal_observation(
@@ -1557,7 +1557,11 @@ fn terminal_observation(
         .filter(|c| !c.is_control() || matches!(c, '\n' | '\t'))
         .collect::<String>();
     if diagnostic.len() > MAX_TERMINAL_DIAGNOSTIC_BYTES {
-        diagnostic.truncate(MAX_TERMINAL_DIAGNOSTIC_BYTES);
+        let mut end = MAX_TERMINAL_DIAGNOSTIC_BYTES;
+        while !diagnostic.is_char_boundary(end) {
+            end -= 1;
+        }
+        diagnostic.truncate(end);
     }
     TerminalRuntimeObservation::new(kind, diagnostic)
 }
@@ -1578,10 +1582,7 @@ fn pod_terminal_observation(pod: &Pod) -> Option<TerminalRuntimeObservation> {
         ));
     }
     let statuses = status.container_statuses.as_ref()?;
-    let worker = statuses
-        .iter()
-        .find(|c| c.name == "worker")
-        .or_else(|| statuses.first())?;
+    let worker = statuses.iter().find(|c| c.name == "worker")?;
     let terminated = worker.state.as_ref()?.terminated.as_ref()?;
     let exit_code = terminated.exit_code;
     let reason = terminated.reason.as_deref();
@@ -3943,13 +3944,25 @@ mod tests {
         assert!(pod_terminal_observation(&Pod::default()).is_none());
     }
 
-    /// When the worker container can't be matched by name (forward-compat for a
-    /// renamed container), fall back to the first container's terminated state.
+    /// A terminated sidecar must not stand in for the named worker: otherwise an
+    /// unrelated OOM kill could be settled as infrastructure evidence.
     #[test]
-    fn pod_falls_back_to_first_container_when_worker_name_absent() {
+    fn pod_without_worker_status_is_not_terminal() {
         let pod = pod_with_worker_terminated(137, Some("OOMKilled"), "main");
-        let reason = pod_terminal_observation(&pod).expect("fallback to first container");
-        assert!(reason.diagnostic.contains("OOMKilled"));
+        assert!(pod_terminal_observation(&pod).is_none());
+    }
+
+    #[test]
+    fn terminal_diagnostic_truncates_at_a_unicode_boundary() {
+        let diagnostic = format!("{}é", "a".repeat(MAX_TERMINAL_DIAGNOSTIC_BYTES - 1));
+        let observation =
+            terminal_observation(TerminalRuntimeEvidenceKind::UnknownFailure, diagnostic);
+
+        assert_eq!(
+            observation.diagnostic,
+            "a".repeat(MAX_TERMINAL_DIAGNOSTIC_BYTES - 1)
+        );
+        assert!(observation.diagnostic.len() <= MAX_TERMINAL_DIAGNOSTIC_BYTES);
     }
 
     fn job_with_failed_condition(reason: Option<&str>, message: Option<&str>) -> Job {
