@@ -132,7 +132,14 @@ pub const DEFAULT_EXCLUDED_DIR_COMPONENTS: &[&str] = &[
     ".nuxt",
     ".svelte-kit",
     "vendor",
-    ".cargo",
+    // NOTE: `.cargo` is deliberately NOT a component here. The artifact this
+    // list is after is the downloaded crate cache, and that is already excluded
+    // by the `.cargo/registry/` path pattern above. Excluding the bare
+    // component swept up `<workspace>/.cargo/config.toml` — a tracked source
+    // file that configures every cargo invocation in the workspace — so a
+    // worker could edit it, verify the fix, and have the change silently
+    // dropped from its own commit. Three sessions were then spent concluding
+    // the worker had fabricated the change.
     ".pnpm-store",
     ".yarn",
     "logs",
@@ -451,6 +458,37 @@ mod tests {
         let config = default_config();
         assert!(is_generated_path("target/debug/foo", &config));
         assert!(is_generated_path("target/foo", &config));
+    }
+
+    /// `<workspace>/.cargo/config.toml` is tracked source: it configures every
+    /// cargo invocation in the workspace, and a worker fixing the build has to
+    /// be able to commit it. The downloaded crate cache under `.cargo/registry/`
+    /// is the thing that must stay excluded, and it is covered by a path
+    /// pattern rather than by a bare `.cargo` component.
+    #[test]
+    fn cargo_config_is_committable_while_the_registry_cache_is_not() {
+        let config = default_config();
+        for committable in [
+            ".cargo/config.toml",
+            "server/.cargo/config.toml",
+            "server/.cargo/audit.toml",
+        ] {
+            assert_eq!(
+                classify_path(committable, &config),
+                PathClassification::Allowed,
+                "cargo configuration is tracked source: {committable}"
+            );
+        }
+        for excluded in [
+            ".cargo/registry/index/foo",
+            "server/.cargo/registry/cache/bar.crate",
+        ] {
+            assert_eq!(
+                classify_path(excluded, &config),
+                PathClassification::Excluded(PathExclusionReason::GeneratedPath),
+                "the downloaded crate cache stays excluded: {excluded}"
+            );
+        }
     }
 
     #[test]
