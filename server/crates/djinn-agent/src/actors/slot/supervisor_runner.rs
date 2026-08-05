@@ -40,9 +40,10 @@ fn supervisor_rpc_span(op: &'static str, session_id: &str, task_id: &str) -> tra
 /// Pre-session liveness deadline (8 min default).
 const PRE_SESSION_DEADLINE_SECS_DEFAULT: u64 = 480;
 
-/// Maximum report-delivery grace after the first terminal runtime observation.
-/// Non-terminal stream frames never extend this deadline.
-const TERMINAL_RUNTIME_REPORT_GRACE: std::time::Duration = std::time::Duration::from_secs(30);
+/// Maximum time from the first terminal runtime observation to synthetic
+/// settlement. Non-terminal stream frames and diagnostic cleanup never extend
+/// this deadline.
+const TERMINAL_RUNTIME_REPORT_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Step label before the worker emits its first stage marker.
 const PRE_SESSION_INITIAL_STEP: &str = "run_create";
@@ -188,20 +189,8 @@ async fn finalize_terminal_runtime_observation(
     reason: &str,
     failure_cause: SessionFailureCause,
 ) {
-    let payload = serde_json::json!({
-        "error": format!("Terminal runtime observation before completing the run: {reason}"),
-        "agent_type": "system",
-    })
-    .to_string();
-    let _ = task_repo
-        .log_activity(
-            Some(&task.id),
-            "agent-supervisor",
-            "system",
-            "session_error",
-            &payload,
-        )
-        .await;
+    // Settle first: activity is diagnostic and must not delay the durable
+    // cause-bearing transition once the report deadline has elapsed.
     let session_repo =
         djinn_db::SessionRepository::new(app_state.db.clone(), app_state.event_bus.clone());
     match session_repo
@@ -220,6 +209,32 @@ async fn finalize_terminal_runtime_observation(
             error = %e,
             "supervisor dispatch: failed to finalize session row after terminal runtime observation"
         ),
+    }
+    let payload = serde_json::json!({
+        "error": format!("Terminal runtime observation before completing the run: {reason}"),
+        "agent_type": "system",
+    })
+    .to_string();
+    let _ = task_repo
+        .log_activity(
+            Some(&task.id),
+            "agent-supervisor",
+            "system",
+            "session_error",
+            &payload,
+        )
+        .await;
+}
+
+/// Collapse typed runtime evidence into the stable, durable session cause.
+/// Exact evidence remains in activity and attempt diagnostics.
+fn failure_cause_for_terminal_runtime_observation(
+    observation: &TerminalRuntimeObservation,
+) -> SessionFailureCause {
+    match observation.kind {
+        TerminalRuntimeEvidenceKind::Infrastructure => SessionFailureCause::Infrastructure,
+        TerminalRuntimeEvidenceKind::UnknownFailure => SessionFailureCause::Unknown,
+        TerminalRuntimeEvidenceKind::ProtocolNoReport => SessionFailureCause::Protocol,
     }
 }
 
@@ -713,17 +728,10 @@ pub(super) async fn dispatch_task_runtime(
     }
     if let Some(observation) = terminal_runtime_observation.as_ref() {
         let reason = observation.diagnostic.as_str();
-        let failure_cause = match observation.kind {
-            TerminalRuntimeEvidenceKind::Infrastructure => SessionFailureCause::Infrastructure,
-            TerminalRuntimeEvidenceKind::UnknownFailure => SessionFailureCause::Unknown,
-            TerminalRuntimeEvidenceKind::ProtocolNoReport => SessionFailureCause::Protocol,
-        };
-        finalize_terminal_runtime_observation(&task_repo, &task, &app_state, reason, failure_cause)
-            .await;
         // Best-effort: persist terminal-runtime log-tail capture on the matching
-        // attempt.  This is purely diagnostic enrichment — it does not change
-        // the attempt's outcome or prevent a real terminal report from being
-        // authoritative.
+        // attempt. Settlement already happened at the report deadline, before
+        // any potentially slow log capture or runtime teardown; this is purely
+        // diagnostic enrichment.
         if let Some(capture) = &terminal_runtime_log_tail {
             persist_terminal_runtime_observation_on_attempt(&app_state, &task, reason, capture).await;
         }
@@ -1370,6 +1378,21 @@ pub async fn execute_runtime_report_phase(
     let await_outcome =
         attach_and_await_terminal_report(runtime.clone(), &handle, app_state, spec, task, kill)
             .await;
+    // A no-report terminal observation has crossed its absolute report deadline.
+    // Durable settlement must precede log-tail capture and teardown: Kubernetes
+    // teardown can legitimately wait far longer than the coordinator's 30s
+    // report-delivery bound.
+    if let Some(observation) = await_outcome.terminal_runtime_observation.as_ref() {
+        let task_repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+        finalize_terminal_runtime_observation(
+            &task_repo,
+            task,
+            app_state,
+            &observation.diagnostic,
+            failure_cause_for_terminal_runtime_observation(observation),
+        )
+        .await;
+    }
     abort_runtime_cancel_watcher(cancel_task).await;
     // Best-effort: capture pod log tail before teardown deletes the Job.
     let terminal_runtime_log_tail = if await_outcome.terminal_runtime_observation.is_some() {
@@ -1456,12 +1479,13 @@ async fn attach_and_await_terminal_report(
             tokio::pin!(pre_session);
             let mut session_reached = false;
             let mut initial_report = None;
+            let mut events_closed = false;
             let observation = loop {
                 tokio::select! {
                     biased;
                     // This ordering makes a report authoritative when both
                     // receive and runtime-watch are ready in one turn.
-                    frame = bistream.events_rx.recv() => match frame {
+                    frame = bistream.events_rx.recv(), if !events_closed => match frame {
                         Some(StreamEvent::Report(report)) => {
                             initial_report = Some(report);
                             break None::<TerminalRuntimeObservation>;
@@ -1470,7 +1494,10 @@ async fn attach_and_await_terminal_report(
                             session_reached |= step == djinn_runtime::STAGE_STEP_FIRST_TURN;
                         }
                         Some(_) => session_reached = true,
-                        None => break None,
+                        // Closing stdio is not terminal runtime evidence. Keep
+                        // the typed watcher alive so completion, disappearance,
+                        // and classified failures retain distinct causes.
+                        None => events_closed = true,
                     },
                     _ = kill.cancelled() => break None,
                     _ = &mut pre_session, if !session_reached => {
@@ -1493,28 +1520,35 @@ async fn attach_and_await_terminal_report(
                 Ok(initial_report)
             } else {
                 let observation = observation.expect("checked above");
-                // Final non-blocking drain before starting the one fixed grace
-                // window. A queued terminal report always wins.
-                while let Ok(frame) = bistream.events_rx.try_recv() {
-                    if let StreamEvent::Report(report) = frame {
-                        return TerminalReportAwaitOutcome {
+                // Capture the single absolute deadline *before* draining. The
+                // drain is non-blocking and neither it nor later stream frames
+                // may buy additional time after runtime evidence arrived.
+                let report_deadline =
+                    tokio::time::Instant::now() + TERMINAL_RUNTIME_REPORT_DEADLINE;
+                let grace = tokio::time::sleep_until(report_deadline);
+                tokio::pin!(grace);
+                // Final non-blocking drain. Check the absolute deadline on
+                // every frame so a deep queued stream cannot evade settlement.
+                while tokio::time::Instant::now() < report_deadline {
+                    match bistream.events_rx.try_recv() {
+                        Ok(StreamEvent::Report(report)) => return TerminalReportAwaitOutcome {
                             report_result: Ok(Some(report)), handshake_timed_out,
                             terminal_runtime_observation: None, presession_timeout,
-                        };
+                        },
+                        Ok(_) => {},
+                        Err(_) => break,
                     }
                 }
-                let grace = tokio::time::sleep(TERMINAL_RUNTIME_REPORT_GRACE);
-                tokio::pin!(grace);
                 loop {
                     tokio::select! {
                         biased;
-                        frame = bistream.events_rx.recv() => match frame {
+                        frame = bistream.events_rx.recv(), if !events_closed => match frame {
                             Some(StreamEvent::Report(report)) => return TerminalReportAwaitOutcome {
                                 report_result: Ok(Some(report)), handshake_timed_out,
                                 terminal_runtime_observation: None, presession_timeout,
                             },
                             Some(_) => {},
-                            None => break,
+                            None => events_closed = true,
                         },
                         _ = kill.cancelled() => return TerminalReportAwaitOutcome {
                             report_result: Ok(None), handshake_timed_out,
