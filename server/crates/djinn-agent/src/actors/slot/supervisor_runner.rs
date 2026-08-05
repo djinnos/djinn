@@ -726,15 +726,21 @@ pub(super) async fn dispatch_task_runtime(
         apply_handshake_timeout_failover(&task_repo, &task, &model_id)
         .await;
     }
-    if let Some(observation) = terminal_runtime_observation.as_ref() {
-        let reason = observation.diagnostic.as_str();
+    if let (Some(observation), Some(capture)) = (
+        terminal_runtime_observation.as_ref(),
+        terminal_runtime_log_tail.as_ref(),
+    ) {
         // Best-effort: persist terminal-runtime log-tail capture on the matching
         // attempt. Settlement already happened at the report deadline, before
         // any potentially slow log capture or runtime teardown; this is purely
         // diagnostic enrichment.
-        if let Some(capture) = &terminal_runtime_log_tail {
-            persist_terminal_runtime_observation_on_attempt(&app_state, &task, reason, capture).await;
-        }
+        persist_terminal_runtime_observation_on_attempt(
+            &app_state,
+            &task,
+            &observation.diagnostic,
+            capture,
+        )
+        .await;
     }
     if let Some(timeout) = presession_timeout {
         let PreSessionTimeout { step, elapsed_secs } = &timeout;
@@ -1381,7 +1387,8 @@ pub async fn execute_runtime_report_phase(
     // A no-report terminal observation has crossed its absolute report deadline.
     // Durable settlement must precede log-tail capture and teardown: Kubernetes
     // teardown can legitimately wait far longer than the coordinator's 30s
-    // report-delivery bound.
+    // report-delivery bound. This phase owns the write because its caller cannot
+    // run until diagnostic cleanup and teardown below have completed.
     if let Some(observation) = await_outcome.terminal_runtime_observation.as_ref() {
         let task_repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
         finalize_terminal_runtime_observation(
@@ -1516,10 +1523,7 @@ async fn attach_and_await_terminal_report(
                     evidence = &mut runtime_watch => break Some(evidence),
                 }
             };
-            if observation.is_none() {
-                Ok(initial_report)
-            } else {
-                let observation = observation.expect("checked above");
+            if let Some(observation) = observation {
                 // Capture the single absolute deadline *before* draining. The
                 // drain is non-blocking and neither it nor later stream frames
                 // may buy additional time after runtime evidence arrived.
@@ -1531,11 +1535,15 @@ async fn attach_and_await_terminal_report(
                 // every frame so a deep queued stream cannot evade settlement.
                 while tokio::time::Instant::now() < report_deadline {
                     match bistream.events_rx.try_recv() {
-                        Ok(StreamEvent::Report(report)) => return TerminalReportAwaitOutcome {
-                            report_result: Ok(Some(report)), handshake_timed_out,
-                            terminal_runtime_observation: None, presession_timeout,
-                        },
-                        Ok(_) => {},
+                        Ok(StreamEvent::Report(report)) => {
+                            return TerminalReportAwaitOutcome {
+                                report_result: Ok(Some(report)),
+                                handshake_timed_out,
+                                terminal_runtime_observation: None,
+                                presession_timeout,
+                            };
+                        }
+                        Ok(_) => {}
                         Err(_) => break,
                     }
                 }
@@ -1546,10 +1554,14 @@ async fn attach_and_await_terminal_report(
                     // frame one final report-precedence check, then settle.
                     if tokio::time::Instant::now() >= report_deadline {
                         match bistream.events_rx.try_recv() {
-                            Ok(StreamEvent::Report(report)) => return TerminalReportAwaitOutcome {
-                                report_result: Ok(Some(report)), handshake_timed_out,
-                                terminal_runtime_observation: None, presession_timeout,
-                            },
+                            Ok(StreamEvent::Report(report)) => {
+                                return TerminalReportAwaitOutcome {
+                                    report_result: Ok(Some(report)),
+                                    handshake_timed_out,
+                                    terminal_runtime_observation: None,
+                                    presession_timeout,
+                                };
+                            }
                             Ok(_) | Err(_) => break,
                         }
                     }
@@ -1600,6 +1612,8 @@ async fn attach_and_await_terminal_report(
                     "supervisor dispatch: terminal runtime observation received no report before grace deadline");
                 terminal_runtime_observation = Some(observation);
                 Ok(None)
+            } else {
+                Ok(initial_report)
             }
         }
         Err(e) => Err(anyhow::anyhow!("runtime.attach_stdio failed: {e}")),
