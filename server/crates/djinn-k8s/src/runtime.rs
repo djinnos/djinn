@@ -1932,7 +1932,7 @@ pub async fn terminate_taskrun_pod_exact(
         // teardown: the hold below keeps the deleted Pod observable, so a
         // release that failed after the Job DELETE is finished here instead of
         // erroring forever. Every other absent Job stays unconfirmed.
-        return release_confirmed_exact_pod(&pods, &selector, task_run_id, pod_uid).await;
+        return release_confirmed_exact_pod(&pods, &selector, pod_uid).await;
     };
     if job.metadata.deletion_timestamp.is_some() {
         return Err("exact-pod watchdog termination task-run Job is not confirmable".into());
@@ -2089,14 +2089,35 @@ async fn release_exact_pod_hold(
 }
 
 /// Finish a teardown whose Job is already gone. This is a terminal resolution
-/// only when the held, terminating Pod carrying this protocol's own finalizer
-/// is still visible with the recorded UID under the canonical Job owner — the
-/// exact state left behind when the Job DELETE succeeded and the release did
-/// not. Anything else keeps the original unavailable-Job error.
+/// only when the held, terminating Pod carrying this protocol's own finalizer is
+/// still visible with the recorded UID — the exact state left behind when the
+/// Job DELETE succeeded and the release did not. Anything else keeps the
+/// original unavailable-Job error.
+///
+/// # Why the owning Job is not part of the proof
+///
+/// It used to be, and that made this function's success condition unsatisfiable.
+/// The preceding step, [`delete_taskrun_job_orphaned`], deletes with
+/// [`PropagationPolicy::Orphan`], whose defined effect is that the garbage
+/// collector strips the `ownerReferences` entry naming that Job from every
+/// dependent. So by the time this recovery runs, the owner reference it was
+/// looking for has been removed *by design* — it can never be found, the hold is
+/// never released, and the Pod stays in `Terminating` forever while
+/// `confirm_absence` re-issues its UID-fenced delete on a ~2s backoff for the
+/// life of the process. Measured 2026-08-05: 181 Pods pinned this way, the
+/// oldest for ten days, every one of them `ownerReferences: null` with its Job
+/// already 404 — and the resize reconciler's sweep degraded from its 30s design
+/// cadence to ~20 minutes because each wedged row costs it a 45s budget.
+///
+/// The remaining three facts are already a complete proof of the state this
+/// resolves. The UID match pins the exact Pod incarnation; the deletion
+/// timestamp proves the delete this protocol issued was accepted; and the
+/// finalizer is added in exactly one place — [`hold_exact_pod`], immediately
+/// before this protocol's own UID-fenced DELETE — so its presence proves this
+/// protocol, and no other actor, is what the Pod is waiting on.
 async fn release_confirmed_exact_pod(
     pods: &Api<Pod>,
     selector: &str,
-    task_run_id: &str,
     pod_uid: &str,
 ) -> Result<(), String> {
     let listed_pods = pods
@@ -2104,30 +2125,22 @@ async fn release_confirmed_exact_pod(
         .await
         .map_err(|e| format!("list task-run Pods: {e}"))?
         .items;
-    let job_name = taskrun_job_name(task_run_id);
     let confirmed = listed_pods.into_iter().find(|pod| {
         pod.metadata.uid.as_deref() == Some(pod_uid)
             && pod.metadata.deletion_timestamp.is_some()
             && pod_holds_termination_finalizer(pod)
-            && pod
-                .metadata
-                .owner_references
-                .as_ref()
-                .is_some_and(|owners| {
-                    owners
-                        .iter()
-                        .any(|owner| owner.kind == "Job" && owner.name == job_name)
-                })
     });
     let Some(pod) = confirmed else {
-        return Err("exact-pod watchdog termination task-run Job is unavailable".into());
+        return Err(
+            "exact-pod watchdog termination: no held terminating Pod with the recorded UID".into(),
+        );
     };
     let pod_name = pod
         .metadata
         .name
         .clone()
         .filter(|name| !name.trim().is_empty())
-        .ok_or_else(|| "exact-pod watchdog termination task-run Job is unavailable".to_string())?;
+        .ok_or_else(|| "exact-pod watchdog termination: held Pod has no name".to_string())?;
     release_exact_pod_hold(pods, &pod_name, pod_uid, &pod).await
 }
 
