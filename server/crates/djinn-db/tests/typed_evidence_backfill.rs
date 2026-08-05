@@ -16,6 +16,32 @@ struct Seed {
     spike: String,
 }
 
+type FindingRow = (String, String, String, String, Value, i32, String);
+type AttemptRow = (String, String, i32, String);
+type TransitionRow = (String, i32, Option<String>, String, Option<String>, Value);
+
+/// Read the actual authority records.  Counts alone cannot detect an incorrect
+/// actor, ordinal, or binding in an otherwise plausible backfill.
+async fn persisted_rows(
+    db: &Database,
+    proposal: &str,
+) -> (Vec<FindingRow>, Vec<AttemptRow>, Vec<TransitionRow>) {
+    let findings = sqlx::query_as("SELECT id,proposal_id,demand_hash,lifecycle,claim,demanded_revision_seq,created_by_task_id FROM typed_evidence_findings WHERE proposal_id=$1 ORDER BY id")
+        .bind(proposal).fetch_all(db.pool()).await.unwrap();
+    let attempts = sqlx::query_as("SELECT id,finding_id,sequence,spike_task_id FROM typed_evidence_attempts WHERE finding_id IN (SELECT id FROM typed_evidence_findings WHERE proposal_id=$1) ORDER BY sequence")
+        .bind(proposal).fetch_all(db.pool()).await.unwrap();
+    let transitions = sqlx::query_as("SELECT id,ordinal,from_lifecycle,to_lifecycle,actor_task_id,metadata FROM typed_evidence_transitions WHERE finding_id IN (SELECT id FROM typed_evidence_findings WHERE proposal_id=$1) ORDER BY ordinal")
+        .bind(proposal).fetch_all(db.pool()).await.unwrap();
+    (findings, attempts, transitions)
+}
+async fn legacy_row(db: &Database, proposal: &str) -> (Option<String>, Option<String>) {
+    sqlx::query_as("SELECT linked_spike_task_id,needs_evidence_claim FROM proposals WHERE id=$1")
+        .bind(proposal)
+        .fetch_one(db.pool())
+        .await
+        .unwrap()
+}
+
 async fn insert_task(db: &Database, project: &str, user: &str, title: &str) -> String {
     let id = uuid::Uuid::now_v7().to_string();
     sqlx::query("INSERT INTO tasks (id,project_id,short_id,title,description,design,labels,acceptance_criteria,memory_refs,created_by_user_id) VALUES ($1,$2,$3,$4,'','','[]','[]','[]',$5)")
@@ -84,6 +110,30 @@ async fn counts(db: &Database, proposal: &str) -> (i64, i64, i64) {
     (f, a, t)
 }
 
+type PersistedFinding = (String, String, String, String, Value, i32, String);
+type PersistedAttempt = (String, String, i32, String);
+type PersistedTransition = (String, i32, Option<String>, String, Option<String>, Value);
+async fn persisted_rows(
+    db: &Database,
+    proposal: &str,
+) -> (
+    Vec<PersistedFinding>,
+    Vec<PersistedAttempt>,
+    Vec<PersistedTransition>,
+) {
+    let f = sqlx::query_as("SELECT id,proposal_id,demand_hash,lifecycle,claim,demanded_revision_seq,created_by_task_id FROM typed_evidence_findings WHERE proposal_id=$1 ORDER BY id").bind(proposal).fetch_all(db.pool()).await.unwrap();
+    let a = sqlx::query_as("SELECT id,finding_id,sequence,spike_task_id FROM typed_evidence_attempts WHERE finding_id IN (SELECT id FROM typed_evidence_findings WHERE proposal_id=$1) ORDER BY sequence").bind(proposal).fetch_all(db.pool()).await.unwrap();
+    let t = sqlx::query_as("SELECT id,ordinal,from_lifecycle,to_lifecycle,actor_task_id,metadata FROM typed_evidence_transitions WHERE finding_id IN (SELECT id FROM typed_evidence_findings WHERE proposal_id=$1) ORDER BY ordinal").bind(proposal).fetch_all(db.pool()).await.unwrap();
+    (f, a, t)
+}
+async fn legacy_row(db: &Database, proposal: &str) -> (Option<String>, Option<String>) {
+    sqlx::query_as("SELECT linked_spike_task_id,needs_evidence_claim FROM proposals WHERE id=$1")
+        .bind(proposal)
+        .fetch_one(db.pool())
+        .await
+        .unwrap()
+}
+
 #[tokio::test]
 async fn typed_evidence_backfill_postgres_parity_matrix() {
     let db = Database::ephemeral().await.unwrap();
@@ -94,6 +144,7 @@ async fn typed_evidence_backfill_postgres_parity_matrix() {
     let claim_only = seed(&db).await;
     let c = claim(&claim_only);
     legacy(&db, &claim_only, None, Some(&c)).await;
+    let authority = legacy_row(&db, &claim_only.proposal).await;
     let report = typed.backfill_active_legacy_evidence().await.unwrap();
     assert_eq!(report.created_findings, 1);
     let projection = typed
@@ -111,10 +162,48 @@ async fn typed_evidence_backfill_postgres_parity_matrix() {
         legacy_demand_hash(&projection.finding.claim, None)
     );
     assert_eq!(counts(&db, &claim_only.proposal).await, (1, 0, 1));
+    let (f, a, t) = persisted_rows(&db, &claim_only.proposal).await;
+    assert_eq!(
+        (
+            f[0].1.as_str(),
+            f[0].2.as_str(),
+            f[0].3.as_str(),
+            &f[0].4,
+            f[0].5,
+            f[0].6.as_str()
+        ),
+        (
+            claim_only.proposal.as_str(),
+            legacy_demand_hash(&c, None).as_str(),
+            "demanded",
+            &c,
+            7,
+            claim_only.creator.as_str()
+        )
+    );
+    assert!(a.is_empty());
+    assert_eq!(
+        (
+            t[0].1,
+            t[0].2.as_deref(),
+            t[0].3.as_str(),
+            t[0].4.as_deref(),
+            &t[0].5
+        ),
+        (
+            1,
+            None,
+            "demanded",
+            Some(claim_only.creator.as_str()),
+            &json!({"source":"legacy_backfill"})
+        )
+    );
+    assert_eq!(legacy_row(&db, &claim_only.proposal).await, authority);
 
     // Link-only has its documented synthetic claim and a current active attempt.
     let link_only = seed(&db).await;
     legacy(&db, &link_only, Some(&link_only.spike), None).await;
+    let authority = legacy_row(&db, &link_only.proposal).await;
     typed.backfill_active_legacy_evidence().await.unwrap();
     let p = typed
         .dual_read_legacy_parity(&link_only.proposal)
@@ -125,6 +214,42 @@ async fn typed_evidence_backfill_postgres_parity_matrix() {
     assert!(p.attempt_id.is_some());
     assert_eq!(p.finding.lifecycle, TribunalEvidenceLifecycle::SpikeActive);
     assert_eq!(counts(&db, &link_only.proposal).await, (1, 1, 2));
+    let (f, a, t) = persisted_rows(&db, &link_only.proposal).await;
+    let synthetic = json!({"__typed_evidence_legacy_link_only":true});
+    assert_eq!(
+        (&f[0].4, f[0].2.as_str(), f[0].3.as_str()),
+        (
+            &synthetic,
+            legacy_demand_hash(&synthetic, Some(&link_only.spike)).as_str(),
+            "spike_active"
+        )
+    );
+    assert_eq!(
+        (a[0].1.as_str(), a[0].2, a[0].3.as_str()),
+        (f[0].0.as_str(), 1, link_only.spike.as_str())
+    );
+    assert_eq!(
+        t.iter()
+            .map(|r| (r.1, r.2.clone(), r.3.clone(), r.4.clone(), r.5.clone()))
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                1,
+                None,
+                "demanded".into(),
+                Some(link_only.spike.clone()),
+                json!({"source":"legacy_backfill"})
+            ),
+            (
+                2,
+                Some("demanded".into()),
+                "spike_active".into(),
+                Some(link_only.spike.clone()),
+                json!({"source":"legacy_backfill"})
+            )
+        ]
+    );
+    assert_eq!(legacy_row(&db, &link_only.proposal).await, authority);
 
     // Claim+link preserves legacy authority byte-for-byte and is idempotent.
     let both = seed(&db).await;
@@ -132,6 +257,7 @@ async fn typed_evidence_backfill_postgres_parity_matrix() {
     legacy(&db, &both, Some(&both.spike), Some(&c)).await;
     typed.backfill_active_legacy_evidence().await.unwrap();
     let before = counts(&db, &both.proposal).await;
+    let rows_before = persisted_rows(&db, &both.proposal).await;
     let id = typed
         .dual_read_legacy_parity(&both.proposal)
         .await
@@ -142,6 +268,7 @@ async fn typed_evidence_backfill_postgres_parity_matrix() {
     let second = typed.backfill_active_legacy_evidence().await.unwrap();
     assert_eq!((second.created_findings, second.created_attempts), (0, 0));
     assert_eq!(counts(&db, &both.proposal).await, before);
+    assert_eq!(persisted_rows(&db, &both.proposal).await, rows_before);
     let stored: (Option<String>, Option<String>) = sqlx::query_as(
         "SELECT linked_spike_task_id,needs_evidence_claim FROM proposals WHERE id=$1",
     )
