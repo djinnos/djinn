@@ -15,7 +15,7 @@ use crate::tools::proposal_ops::{
 };
 use djinn_db::{
     FeedbackRefinementDisposition, FeedbackRefinementDispositionInput,
-    ProposalDebateTrailCreateInput, ProposalRepository,
+    FeedbackRefinementRejectionInput, ProposalDebateTrailCreateInput, ProposalRepository,
 };
 
 fn debate_not_found_error(id: &str) -> String {
@@ -82,12 +82,17 @@ fn feedback_disposition_from_entry(
 fn rejected_feedback_disposition_id(
     row: &djinn_core::models::ProposalDebateTrail,
     feedback_entry_id: &str,
-) -> Option<&str> {
+) -> Option<String> {
     let metadata: Value = serde_json::from_str(row.body_metadata.as_deref()?).ok()?;
     let object = metadata.as_object()?;
     (object.get("kind")?.as_str()? == FEEDBACK_DISPOSITION_REJECTION_METADATA_KIND
         && object.get("human_feedback_entry_id")?.as_str()? == feedback_entry_id)
-        .then(|| object.get("rejected_disposition_entry_id")?.as_str())
+        .then(|| {
+            object
+                .get("rejected_disposition_entry_id")?
+                .as_str()
+                .map(str::to_owned)
+        })
         .flatten()
 }
 
@@ -98,7 +103,7 @@ fn pending_feedback_disposition<'a>(
     &'a djinn_core::models::ProposalDebateTrail,
     FeedbackRefinementDisposition,
 )> {
-    let rejected: std::collections::HashSet<&str> = rows
+    let rejected: std::collections::HashSet<String> = rows
         .iter()
         .filter_map(|row| rejected_feedback_disposition_id(row, feedback_entry_id))
         .collect();
@@ -516,32 +521,25 @@ impl DjinnMcpServer {
                     Ok(rows) => rows,
                     Err(e) => return Json(err_debate(e.to_string())),
                 };
-                let rejected_disposition_entry_id = pending_feedback_disposition(&rows, &entry.id)
-                    .map(|(candidate, _)| candidate.id.clone());
-                let body = format!("needs-work: {reason}");
-                let metadata = json!({
-                    "kind": FEEDBACK_DISPOSITION_REJECTION_METADATA_KIND,
-                    "human_feedback_entry_id": entry.id,
-                    "rejected_disposition_entry_id": rejected_disposition_entry_id,
-                });
+                let Some((candidate, _)) = pending_feedback_disposition(&rows, &entry.id) else {
+                    return Json(err_debate(
+                        "human_feedback has no pending Advocate disposition",
+                    ));
+                };
                 return match repo
-                    .add_debate_trail_entry(ProposalDebateTrailCreateInput {
-                        proposal_id: &entry.proposal_id,
-                        kind: "verdict",
-                        body: &body,
-                        blocking: true,
-                        agent_role: "judge",
-                        author_kind: "agent",
-                        author_model: None,
-                        source_task_id: None,
-                        against_revision_seq: entry.against_revision_seq,
-                        round: entry.round,
-                        body_metadata: Some(&metadata),
+                    .reject_feedback_refinement_disposition(FeedbackRefinementRejectionInput {
+                        proposal_id: entry.proposal_id.clone(),
+                        injection_id: generation.injection.id,
+                        root_feedback_id: generation.injection.root_feedback_id,
+                        generation: generation.injection.generation,
+                        debate_entry_id: entry.id.clone(),
+                        disposition_entry_id: candidate.id.clone(),
+                        reason,
                     })
                     .await
                 {
-                    Ok(_) => Json(ProposalDebateTrailResponse {
-                        entry: Some((&entry).into()),
+                    Ok(result) => Json(ProposalDebateTrailResponse {
+                        entry: Some((&result.debate_entry).into()),
                         error: None,
                     }),
                     Err(e) => Json(err_debate(e.to_string())),
@@ -551,7 +549,7 @@ impl DjinnMcpServer {
                 Ok(rows) => rows,
                 Err(e) => return Json(err_debate(e.to_string())),
             };
-            let Some((_candidate, disposition)) = pending_feedback_disposition(&rows, &entry.id)
+            let Some((candidate, disposition)) = pending_feedback_disposition(&rows, &entry.id)
             else {
                 return Json(err_debate(
                     "human_feedback has no pending Advocate disposition",
@@ -574,14 +572,17 @@ impl DjinnMcpServer {
                 }
             }
             return match repo
-                .dispose_feedback_refinement_generation(FeedbackRefinementDispositionInput {
-                    proposal_id: entry.proposal_id.clone(),
-                    injection_id: generation.injection.id,
-                    root_feedback_id: generation.injection.root_feedback_id,
-                    generation: generation.injection.generation,
-                    debate_entry_id: entry.id.clone(),
-                    disposition,
-                })
+                .dispose_feedback_refinement_generation_for_disposition(
+                    FeedbackRefinementDispositionInput {
+                        proposal_id: entry.proposal_id.clone(),
+                        injection_id: generation.injection.id,
+                        root_feedback_id: generation.injection.root_feedback_id,
+                        generation: generation.injection.generation,
+                        debate_entry_id: entry.id.clone(),
+                        disposition,
+                    },
+                    candidate.id.clone(),
+                )
                 .await
             {
                 Ok(result) => Json(ProposalDebateTrailResponse {

@@ -244,6 +244,7 @@ pub use repositories::{
     },
     proposal::{
         AwaitingReviewPark, FeedbackRefinementDisposition, FeedbackRefinementDispositionInput,
+        FeedbackRefinementRejectionInput, FeedbackRefinementRejectionResult,
         NeedsEvidenceCapStatus, NeedsEvidenceClaimLink, ProposalCreateInput,
         ProposalDebateTrailCreateInput, ProposalFeedbackCreateInput, ProposalListQuery,
         ProposalListResult, ProposalListSummaryRow, ProposalMemoryRef, ProposalRef,
