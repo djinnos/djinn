@@ -1696,9 +1696,13 @@ mod tests {
 
         // Drive the worker side via RpcServices.
         let client_cancel = CancellationToken::new();
-        let (rpc, bg) = super::super::rpc::RpcServices::connect_unix(&sock, client_cancel.clone())
-            .await
-            .expect("connect rpc");
+        let (rpc, bg) = super::super::rpc::RpcServices::connect_unix(
+            &sock,
+            client_cancel.clone(),
+            djinn_core::cancel_origin::CancelOriginTag::new(),
+        )
+        .await
+        .expect("connect rpc");
         let task = rpc
             .load_task("wire-task-1".into())
             .await
@@ -1848,7 +1852,11 @@ mod tests {
         // Now the stream is in the shared dispatch loop.  Hand it to
         // `RpcServices::from_stream` and round-trip a load_task.
         let cancel = CancellationToken::new();
-        let (rpc, bg) = super::super::rpc::RpcServices::from_stream(stream, cancel.clone());
+        let (rpc, bg) = super::super::rpc::RpcServices::from_stream(
+            stream,
+            cancel.clone(),
+            djinn_core::cancel_origin::CancelOriginTag::new(),
+        );
         let task = rpc
             .load_task("tcp-task-1".into())
             .await
@@ -2114,9 +2122,13 @@ mod tests {
             .await
             .expect("bind server");
         let client_cancel = CancellationToken::new();
-        let (rpc, bg) = super::super::rpc::RpcServices::connect_unix(&sock, client_cancel.clone())
-            .await
-            .expect("connect rpc");
+        let (rpc, bg) = super::super::rpc::RpcServices::connect_unix(
+            &sock,
+            client_cancel.clone(),
+            djinn_core::cancel_origin::CancelOriginTag::new(),
+        )
+        .await
+        .expect("connect rpc");
         let result = rpc
             .plan_memory_intents(super::super::wire::AttributedPlannerRequest {
                 project_id: "project-1".into(),
@@ -2432,9 +2444,13 @@ mod tests {
             .await
             .expect("bind server");
         let client_cancel = CancellationToken::new();
-        let (rpc, bg) = super::super::rpc::RpcServices::connect_unix(&sock, client_cancel.clone())
-            .await
-            .expect("connect rpc");
+        let (rpc, bg) = super::super::rpc::RpcServices::connect_unix(
+            &sock,
+            client_cancel.clone(),
+            djinn_core::cancel_origin::CancelOriginTag::new(),
+        )
+        .await
+        .expect("connect rpc");
         (rpc, bg, handle, client_cancel, dir)
     }
 
@@ -2561,9 +2577,13 @@ mod tests {
             .await
             .expect("bind server");
         let client_cancel = CancellationToken::new();
-        let (rpc, bg) = super::super::rpc::RpcServices::connect_unix(&sock, client_cancel.clone())
-            .await
-            .expect("connect rpc");
+        let (rpc, bg) = super::super::rpc::RpcServices::connect_unix(
+            &sock,
+            client_cancel.clone(),
+            djinn_core::cancel_origin::CancelOriginTag::new(),
+        )
+        .await
+        .expect("connect rpc");
 
         // Tear down the server side, breaking the transport.
         handle.cancel();
@@ -2604,9 +2624,13 @@ mod tests {
             .await
             .expect("bind server");
         let client_cancel = CancellationToken::new();
-        let (rpc, bg) = super::super::rpc::RpcServices::connect_unix(&sock, client_cancel.clone())
-            .await
-            .expect("connect rpc");
+        let (rpc, bg) = super::super::rpc::RpcServices::connect_unix(
+            &sock,
+            client_cancel.clone(),
+            djinn_core::cancel_origin::CancelOriginTag::new(),
+        )
+        .await
+        .expect("connect rpc");
         let valid = WatchdogTerminationRequest {
             task_id: "task-1".into(),
             task_run_id: "run-1".into(),
