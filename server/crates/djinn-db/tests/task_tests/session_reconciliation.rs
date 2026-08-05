@@ -126,3 +126,38 @@ async fn reconciliation_lists_and_settles_each_duplicate_session_by_exact_id() {
             .is_empty()
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn legacy_terminal_update_persists_unknown_instead_of_a_null_cause() {
+    let db = create_test_db();
+    let events = noop_events();
+    let epic = make_epic(&db, events.clone()).await;
+    let tasks = TaskRepository::new(db.clone(), events.clone());
+    let task = open_task(&tasks, &epic.id).await;
+    let sessions = SessionRepository::new(db, events);
+    let session = sessions
+        .create(CreateSessionParams {
+            project_id: &task.project_id,
+            task_id: Some(&task.id),
+            model: "openai/gpt-5",
+            agent_type: "worker",
+            metadata_json: None,
+            task_run_id: None,
+            pricing: None,
+            cost_basis: None,
+        })
+        .await
+        .unwrap();
+
+    sessions
+        .update(&session.id, SessionStatus::Interrupted, 0, 0, 0, 0, None)
+        .await
+        .unwrap();
+    let persisted = sessions.get(&session.id).await.unwrap().unwrap();
+    assert_eq!(persisted.status, SessionStatus::Interrupted.as_str());
+    assert_eq!(
+        persisted.failure_cause,
+        Some(SessionFailureCause::Unknown),
+        "legacy-compatible terminal writers must explicitly persist Unknown"
+    );
+}
