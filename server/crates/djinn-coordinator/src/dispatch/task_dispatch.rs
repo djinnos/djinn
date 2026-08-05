@@ -6755,15 +6755,11 @@ mod failover_chain_tests {
             "model-a breaker must NOT be tripped when fallback rescued the \
              chain (AC2 deferral: breaker checks only on chain exhaustion)"
         );
-        // The failure counter IS recorded for diagnostics — but the breaker
-        // is still below the trip threshold.
-        assert!(
-            model_a_health.consecutive_failures >= 1,
-            "model-a's failure counter must be incremented for diagnostics \
-             (per-candidate observation), but the breaker must not trip \
-             below the threshold (got {} consecutive failures)",
-            model_a_health.consecutive_failures
+        assert_eq!(
+            model_a_health.consecutive_failures, 0,
+            "generic fallback failure must remain breaker-neutral"
         );
+        assert_eq!(model_a_health.breaker_eligible_consecutive_failures, 0);
 
         // ── AC3.6: chain-exhaustion path was NOT entered ────────────────────
         assert!(
@@ -6827,11 +6823,7 @@ mod failover_chain_tests {
             )
             .await;
 
-        // Model-a's state must still reflect ONLY the per-candidate
-        // observation from the fallback-rescued chain (no breaker trip,
-        // exactly 1 consecutive failure). A cross-chain leakage would
-        // have reset model-a's consecutive_failures via this observation's
-        // breaker check, or worse, tripped the breaker.
+        // Model-a remains breaker-neutral after unrelated generic exhaustion.
         let model_a_post = actor.health.model_health(scope, "provider/model-a");
         assert!(
             !model_a_post.auto_disabled,
@@ -6840,38 +6832,27 @@ mod failover_chain_tests {
              leak into this chain's breaker state)"
         );
         assert_eq!(
-            model_a_post.consecutive_failures, 1,
-            "model-a's consecutive_failures must remain at 1 (the \
-             fallback-rescued chain's observation only); a cross-chain \
-             leakage from an unrelated exhaustion would have incremented \
-             this counter"
+            model_a_post.consecutive_failures, 0,
+            "generic pool failures must not mutate model-a health"
         );
 
         cancel.cancel();
     }
 
-    /// AC2 reviewer-repro regression: a candidate model that is observed
-    /// (recorded for diagnostics) during a *fallback-rescued* chain must NOT
-    /// later contribute to the circuit-breaker trip. Only candidate failures
-    /// from chains that actually exhaust are breaker-eligible.
+    /// Generic pool failures remain breaker-neutral across fallback and
+    /// exhausted failover chains.
     ///
-    /// Scenario (the reviewer's repro):
-    ///   * Model-a fails twice, each time rescued by a successful fallback
-    ///     candidate. After these two non-terminal chains, model-a's
-    ///     `consecutive_failures` is 2 but its breaker-eligible counter is 0.
-    ///   * A third chain containing model-a *exhausts*. That exhaustion
-    ///     advances the breaker-eligible counter by 1. Despite model-a's
-    ///     overall diagnostic `consecutive_failures` now being 3, the breaker
-    ///     MUST NOT trip — only one breaker-eligible exhausted-chain failure
-    ///     has occurred (below the threshold of 3).
-    ///   * Only repeated exhausted-chain failures reaching the configured
-    ///     threshold trip the breaker (verifying the breaker still trips
-    ///     when it should).
+    /// Scenario:
+    ///   * Model-a fails twice with `PoolError::SlotBusy`, each time rescued by
+    ///     a successful model-b fallback. Neither health counter changes.
+    ///   * A third chain exhausts with the same generic error. Applying its
+    ///     terminal side effects advances the task failure streak and installs
+    ///     retry cooldown, but does not mutate or trip either model's breaker.
+    ///   * Repeated generic exhaustion continues advancing task-side state
+    ///     while both models remain breaker-neutral and available.
     ///
-    /// This guards against a regression where the breaker eligibility counter
-    /// is identical to (or accumulated into) the diagnostic `consecutive_failures`
-    /// counter, which would let fallback-rescued observations leak into later
-    /// breaker decisions.
+    /// This guards the typed-provider boundary: generic `PoolError` values are
+    /// useful for traversal and terminal handling, but are not health inputs.
     #[tokio::test]
     #[tracing_test::traced_test]
     async fn ac4_fallback_rescued_observations_do_not_advance_breaker_eligibility() {
@@ -6955,10 +6936,7 @@ mod failover_chain_tests {
             persisted_dispatch_task(&db, "breaker eligibility fallback two").await,
         ];
 
-        // ── Step 1: Two model-a failures, each rescued by model-b ─────────
-        // After two of these chains, model-a's `consecutive_failures` will be
-        // 2, but breaker-eligible failures are STILL zero — the two
-        // diagnostic observations must not contribute to breaker eligibility.
+        // ── Step 1: Two generic model-a failures, each rescued by model-b ──
         for chain in 1..=2 {
             let outcome = actor
                 .try_dispatch_to_pool(
@@ -6974,7 +6952,7 @@ mod failover_chain_tests {
                         let mid = model_id.to_owned();
                         async move {
                             if mid == "provider/model-a" {
-                                // Failure observation: rescued by next candidate.
+                                // Generic failure: rescued by the next candidate.
                                 Err(djinn_slot::PoolError::Slot(djinn_slot::SlotError::SlotBusy))
                             } else {
                                 pool.dispatch(&tid, &pp, &mid).await
@@ -6989,35 +6967,19 @@ mod failover_chain_tests {
                 "step 1 chain {chain}: fallback should rescue the dispatch; got {outcome:?}"
             );
 
-            // Sanity check the diagnostic observation was recorded.
-            let after_chain = actor.health.model_health(None, "provider/model-a");
-            assert_eq!(
-                after_chain.consecutive_failures, chain as u32,
-                "step 1 chain {chain}: model-a's diagnostic counter should be {chain} \
-                 (got {})",
-                after_chain.consecutive_failures
-            );
-            assert_eq!(
-                after_chain.breaker_eligible_consecutive_failures, 0,
-                "step 1 chain {chain}: breaker-eligible counter MUST stay 0 — these \
-                 observations are fallback-rescued and never advance breaker \
-                 eligibility (AC2 reviewer repro). Got {}.",
-                after_chain.breaker_eligible_consecutive_failures
-            );
-            assert!(
-                actor.health.is_available(None, "provider/model-a"),
-                "step 1 chain {chain}: model-a must remain available — failed was \
-                 rescued by successful fallback, breaker should not have tripped"
-            );
+            for model_id in ["provider/model-a", "provider/model-b"] {
+                let health = actor.health.model_health(None, model_id);
+                assert_eq!(health.consecutive_failures, 0, "chain {chain}: {model_id}");
+                assert_eq!(
+                    health.breaker_eligible_consecutive_failures, 0,
+                    "chain {chain}: {model_id}"
+                );
+                assert!(!health.auto_disabled, "chain {chain}: {model_id}");
+                assert!(actor.health.is_available(None, model_id));
+            }
         }
 
-        // ── Step 2: A third chain CONTAINING model-a exhausts ──────────────
-        // This single exhaustion records one diagnostic observation AND
-        // applies exactly one breaker-eligible failure check. After this
-        // round, model-a's diagnostic `consecutive_failures` is 3 (from the
-        // 2 fallback-rescued + 1 exhausted), but only one breaker-eligible
-        // failure has occurred. The breaker MUST NOT trip — that requires
-        // the configured threshold of breaker-eligible failures.
+        // ── Step 2: A generic chain containing both models exhausts ─────────
         let outcome = actor
             .try_dispatch_to_pool(
                 &task.short_id,
@@ -7037,21 +6999,18 @@ mod failover_chain_tests {
             "step 2: chain must exhaust when both candidates fail"
         );
 
-        // Importantly: the breaker must NOT yet be tripped before side effects
-        // are applied. Observations alone don't trip the breaker — that is
-        // exclusively the job of `apply_chain_exhaustion_side_effects`.
-        let pre_side_effects = actor.health.model_health(None, "provider/model-a");
-        assert_eq!(
-            pre_side_effects.consecutive_failures, 3,
-            "step 2 pre-side-effects: diagnostic counter should be 3 \
-             (2 fallback-rescued + 1 exhausted-chain)"
-        );
-        assert!(
-            actor.health.is_available(None, "provider/model-a"),
-            "step 2 pre-side-effects: model-a must still be available — observation alone \
-             does NOT trip the breaker (that requires apply_breaker_check_for via chain \
-             exhaustion)"
-        );
+        for model_id in ["provider/model-a", "provider/model-b"] {
+            let health = actor.health.model_health(None, model_id);
+            assert_eq!(
+                health.consecutive_failures, 0,
+                "pre-side-effects: {model_id}"
+            );
+            assert_eq!(
+                health.breaker_eligible_consecutive_failures, 0,
+                "pre-side-effects: {model_id}"
+            );
+            assert!(!health.auto_disabled, "pre-side-effects: {model_id}");
+        }
 
         // Apply the chain-exhaustion side effects for this single exhaustion.
         let exhausted_observations = match outcome {
@@ -7070,40 +7029,26 @@ mod failover_chain_tests {
             )
             .await;
 
-        // ── Step 3: After ONE exhausted-chain failure, breaker MUST NOT trip
-        let after_one_exhaustion = actor.health.model_health(None, "provider/model-a");
-        assert_eq!(
-            after_one_exhaustion.consecutive_failures, 3,
-            "after one exhausted chain: diagnostic counter must equal 3 \
-             (two fallback-rescued + one exhausted-chain observation)"
-        );
-        assert_eq!(
-            after_one_exhaustion.breaker_eligible_consecutive_failures, 1,
-            "after one exhausted chain: breaker-eligible counter must equal 1 — \
-             only the single exhausted-chain failure advanced it, not the two \
-             fallback-rescued observations"
-        );
-        assert!(
-            actor.health.is_available(None, "provider/model-a"),
-            "after one exhausted chain: model-a must STILL be available — the configured \
-             breaker threshold requires multiple exhausted-chain failures, and only one \
-             breaker-eligible failure has occurred (reviewer repro: the prior \
-             2 fallback-rescued observations must NOT count). If this trips, the AC2 \
-             breaker-eligibility separation regressed."
-        );
+        // ── Step 3: Terminal task behavior occurs without breaker mutation ─
+        assert_eq!(actor.dispatch_failure_streak.get(&task.id), Some(&1));
+        assert!(actor.dispatch_cooldowns.contains_key(&task.id));
+        for model_id in ["provider/model-a", "provider/model-b"] {
+            let health = actor.health.model_health(None, model_id);
+            assert_eq!(
+                health.consecutive_failures, 0,
+                "after exhaustion: {model_id}"
+            );
+            assert_eq!(
+                health.breaker_eligible_consecutive_failures, 0,
+                "after exhaustion: {model_id}"
+            );
+            assert!(!health.auto_disabled, "after exhaustion: {model_id}");
+            assert!(actor.health.is_available(None, model_id));
+        }
 
-        // ── Step 4: Repeated exhausted-chain failures reaching threshold trip
-        // The breaker-eligible counter is now 1 (from step 2's single
-        // exhausted chain). Drive the remaining `THRESHOLD - 1` exhausted
-        // chains to reach the configured threshold, which trips the breaker
-        // at the end of the next exhaustion. We hardcode the threshold to 3
-        // (matching `CIRCUIT_BREAKER_THRESHOLD` in
-        // `djinn-provider/src/catalog/health.rs`) to avoid leaking the
-        // constant via `pub`; if the constant ever changes, this test
-        // must be re-tuned, with the inline comment refreshed.
-        const THRESHOLD: u32 = 3;
-        let additional_needed = THRESHOLD - 1;
-        for exhaustion_round in 1..=additional_needed {
+        // Repeated exhausted generic chains remain terminal for the task while
+        // never becoming breaker inputs.
+        for exhaustion_round in 2..=3 {
             let outcome = actor
                 .try_dispatch_to_pool(
                     &task.short_id,
@@ -7116,12 +7061,7 @@ mod failover_chain_tests {
                     },
                 )
                 .await;
-
-            assert!(
-                matches!(outcome, DispatchOutcome::Failed { .. }),
-                "exhausted-chain round {exhaustion_round}: must report exhaustion"
-            );
-
+            assert!(matches!(outcome, DispatchOutcome::Failed { .. }));
             let exhausted_observations = match outcome {
                 DispatchOutcome::Failed {
                     exhausted_observations,
@@ -7137,41 +7077,28 @@ mod failover_chain_tests {
                     false,
                 )
                 .await;
-
-            let running_total = 1 + exhaustion_round;
-            let health = actor.health.model_health(None, "provider/model-a");
             assert_eq!(
-                health.breaker_eligible_consecutive_failures, running_total,
-                "after {running_total} total exhausted chains, breaker-eligible counter \
-                 must equal {running_total} (got {})",
-                health.breaker_eligible_consecutive_failures
+                actor.dispatch_failure_streak.get(&task.id),
+                Some(&exhaustion_round)
             );
-            // The breaker should NOT trip until we hit the threshold.
-            if running_total < THRESHOLD {
-                assert!(
-                    actor.health.is_available(None, "provider/model-a"),
-                    "after {running_total} exhausted chains (below threshold): \
-                     model-a must still be available"
+            assert!(actor.dispatch_cooldowns.contains_key(&task.id));
+            for model_id in ["provider/model-a", "provider/model-b"] {
+                let health = actor.health.model_health(None, model_id);
+                assert_eq!(
+                    health.consecutive_failures, 0,
+                    "round {exhaustion_round}: {model_id}"
                 );
+                assert_eq!(
+                    health.breaker_eligible_consecutive_failures, 0,
+                    "round {exhaustion_round}: {model_id}"
+                );
+                assert!(
+                    !health.auto_disabled,
+                    "round {exhaustion_round}: {model_id}"
+                );
+                assert!(actor.health.is_available(None, model_id));
             }
         }
-
-        // We have now exhausted exactly THRESHOLD chains. The breaker must be
-        // tripped from the LAST exhaustion's side effects (i.e. on the
-        // exhaustion that pushes the counter to the threshold).
-        let final_health = actor.health.model_health(None, "provider/model-a");
-        assert!(
-            final_health.auto_disabled,
-            "model-a breaker MUST trip after THRESHOLD exhausted chains reach the \
-             configured breaker threshold (verifying the breaker still trips when \
-             it should — only exhausted-chain failures count toward eligibility)"
-        );
-        assert_eq!(
-            final_health.breaker_eligible_consecutive_failures, THRESHOLD,
-            "breaker-eligible counter must equal THRESHOLD ({THRESHOLD}) after exactly \
-             THRESHOLD exhausted chains (got {})",
-            final_health.breaker_eligible_consecutive_failures
-        );
 
         cancel.cancel();
     }

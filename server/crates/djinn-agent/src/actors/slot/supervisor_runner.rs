@@ -115,8 +115,8 @@ async fn surface_credential_revocation(
 /// `failed over off model {model_id}` phrase so it is insensitive to the
 /// per-cycle elapsed-time suffix. On a read failure it returns `false` (better a
 /// duplicate than a silently dropped operator signal). This only gates the
-/// timeline COMMENT — the health/breaker `record_stall` +
-/// `note_task_provider_failure` side effects still fire every cycle.
+/// timeline comment; timeout diagnostics and task-side failover handling still
+/// run every cycle, while generic timeout paths remain breaker-neutral.
 async fn failover_comment_already_logged(
     task_repo: &TaskRepository,
     task_id: &str,
