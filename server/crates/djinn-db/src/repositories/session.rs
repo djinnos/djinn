@@ -2136,6 +2136,178 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn autonomous_outcomes_keep_creator_scope_and_half_open_boundaries() {
+        let db = test_db();
+        let (bus, _captured) = capturing_bus();
+        db.ensure_initialized().await.unwrap();
+
+        // Fixed ids make nullable-scope ordering observable: NULL, user_a, user_b.
+        let user_a = "00000000-0000-0000-0000-000000000001";
+        let user_b = "00000000-0000-0000-0000-000000000002";
+        for (id, github_id, login) in [(user_a, 8101i64, "outcome-a"), (user_b, 8102, "outcome-b")]
+        {
+            sqlx::query("INSERT INTO users (id, github_id, github_login) VALUES ($1, $2, $3)")
+                .bind(id)
+                .bind(github_id)
+                .bind(login)
+                .execute(db.pool())
+                .await
+                .unwrap();
+        }
+
+        let epic = EpicRepository::new(db.clone(), bus.clone())
+            .create("E", "", "", "", "", None)
+            .await
+            .unwrap();
+        let task_a = "00000000-0000-0000-0000-000000000011";
+        let task_b = "00000000-0000-0000-0000-000000000012";
+        for (id, short_id, creator) in
+            [(task_a, "outcome-a", user_a), (task_b, "outcome-b", user_b)]
+        {
+            sqlx::query(
+                "INSERT INTO tasks (id, project_id, short_id, epic_id, title, description, design,
+                                    issue_type, priority, owner, status, continuation_count,
+                                    labels, acceptance_criteria, memory_refs, created_by_user_id)
+                 VALUES ($1, $2, $3, $4, 'T', '', '', 'task', 0, '', 'open', 0,
+                         '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, $5)",
+            )
+            .bind(id)
+            .bind(&epic.project_id)
+            .bind(short_id)
+            .bind(&epic.id)
+            .bind(creator)
+            .execute(db.pool())
+            .await
+            .unwrap();
+        }
+
+        let start = "2026-01-01T00:00:00.000Z".parse::<DateTime<Utc>>().unwrap();
+        let end = "2026-01-02T00:00:00.000Z".parse::<DateTime<Utc>>().unwrap();
+        async fn insert_terminal(
+            db: &Database,
+            id: &str,
+            task_id: Option<&str>,
+            creator: Option<&str>,
+            agent_type: &str,
+            status: &str,
+            failure_cause: Option<&str>,
+            ended_at: &str,
+        ) {
+            sqlx::query(
+                "INSERT INTO sessions
+                    (id, project_id, task_id, model_id, agent_type, status,
+                     created_by_user_id, failure_cause, ended_at)
+                 VALUES ($1, NULL, $2, 'shared/model', $3, $4, $5, $6, $7)",
+            )
+            .bind(id)
+            .bind(task_id)
+            .bind(agent_type)
+            .bind(status)
+            .bind(creator)
+            .bind(failure_cause)
+            .bind(ended_at)
+            .execute(db.pool())
+            .await
+            .unwrap();
+        }
+
+        // Exact-start counts via task creator; just-before-end keeps user_b separate.
+        insert_terminal(
+            &db,
+            "00000000-0000-0000-0000-000000000021",
+            Some(task_a),
+            None,
+            "worker",
+            "completed",
+            None,
+            "2026-01-01T00:00:00.000Z",
+        )
+        .await;
+        insert_terminal(
+            &db,
+            "00000000-0000-0000-0000-000000000022",
+            Some(task_b),
+            None,
+            "worker",
+            "failed",
+            Some("provider"),
+            "2026-01-01T23:59:59.999Z",
+        )
+        .await;
+        // Session creator overrides its task's user_a attribution.
+        insert_terminal(
+            &db,
+            "00000000-0000-0000-0000-000000000023",
+            Some(task_a),
+            Some(user_b),
+            "worker",
+            "interrupted",
+            Some("harness"),
+            "2026-01-01T12:00:00.000Z",
+        )
+        .await;
+        // A standalone failed legacy row forms a distinct NULL/shared scope.
+        insert_terminal(
+            &db,
+            "00000000-0000-0000-0000-000000000024",
+            None,
+            None,
+            "worker",
+            "failed",
+            None,
+            "2026-01-01T12:00:00.000Z",
+        )
+        .await;
+        // Chat and exact-end sessions do not contribute to autonomous [start, end) counts.
+        insert_terminal(
+            &db,
+            "00000000-0000-0000-0000-000000000025",
+            Some(task_a),
+            Some(user_a),
+            "chat",
+            "completed",
+            None,
+            "2026-01-01T12:00:00.000Z",
+        )
+        .await;
+        insert_terminal(
+            &db,
+            "00000000-0000-0000-0000-000000000026",
+            Some(task_a),
+            None,
+            "worker",
+            "completed",
+            None,
+            "2026-01-02T00:00:00.000Z",
+        )
+        .await;
+
+        let rows = SessionRepository::new(db, bus)
+            .autonomous_outcomes_by_user_and_model(start, end)
+            .await
+            .unwrap();
+
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].creator_user_id, None);
+        assert_eq!(rows[0].model_id, "shared/model");
+        assert_eq!(rows[0].legacy_unclassified_count, 1);
+        assert_eq!(rows[0].completed_count, 0);
+
+        assert_eq!(rows[1].creator_user_id.as_deref(), Some(user_a));
+        assert_eq!(rows[1].completed_count, 1, "exact-start is included");
+        assert_eq!(rows[1].provider_count, 0);
+        assert_eq!(rows[1].harness_count, 0);
+
+        assert_eq!(rows[2].creator_user_id.as_deref(), Some(user_b));
+        assert_eq!(rows[2].provider_count, 1, "just-before-end is included");
+        assert_eq!(
+            rows[2].harness_count, 1,
+            "session creator overrides task creator"
+        );
+        assert_eq!(rows[2].completed_count, 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn count_active_by_user_and_model_groups_by_task_creator_and_model() {
         let db = test_db();
         let (bus, _captured) = capturing_bus();
