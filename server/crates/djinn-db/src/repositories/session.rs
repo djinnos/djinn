@@ -2186,6 +2186,7 @@ mod tests {
         #[allow(clippy::too_many_arguments)]
         async fn insert_terminal(
             db: &Database,
+            project_id: Option<&str>,
             id: &str,
             task_id: Option<&str>,
             creator: Option<&str>,
@@ -2198,9 +2199,10 @@ mod tests {
                 "INSERT INTO sessions
                     (id, project_id, task_id, model_id, agent_type, status,
                      created_by_user_id, failure_cause, ended_at)
-                 VALUES ($1, NULL, $2, 'shared/model', $3, $4, $5, $6, $7)",
+                 VALUES ($1, $2, $3, 'shared/model', $4, $5, $6, $7, $8)",
             )
             .bind(id)
+            .bind(project_id)
             .bind(task_id)
             .bind(agent_type)
             .bind(status)
@@ -2215,6 +2217,7 @@ mod tests {
         // Exact-start counts via task creator; just-before-end keeps user_b separate.
         insert_terminal(
             &db,
+            Some(&epic.project_id),
             "00000000-0000-0000-0000-000000000021",
             Some(task_a),
             None,
@@ -2226,6 +2229,7 @@ mod tests {
         .await;
         insert_terminal(
             &db,
+            Some(&epic.project_id),
             "00000000-0000-0000-0000-000000000022",
             Some(task_b),
             None,
@@ -2238,6 +2242,7 @@ mod tests {
         // Session creator overrides its task's user_a attribution.
         insert_terminal(
             &db,
+            Some(&epic.project_id),
             "00000000-0000-0000-0000-000000000023",
             Some(task_a),
             Some(user_b),
@@ -2250,6 +2255,7 @@ mod tests {
         // A standalone failed legacy row forms a distinct NULL/shared scope.
         insert_terminal(
             &db,
+            Some(&epic.project_id),
             "00000000-0000-0000-0000-000000000024",
             None,
             None,
@@ -2262,6 +2268,7 @@ mod tests {
         // Chat and exact-end sessions do not contribute to autonomous [start, end) counts.
         insert_terminal(
             &db,
+            None,
             "00000000-0000-0000-0000-000000000025",
             Some(task_a),
             Some(user_a),
@@ -2273,6 +2280,7 @@ mod tests {
         .await;
         insert_terminal(
             &db,
+            Some(&epic.project_id),
             "00000000-0000-0000-0000-000000000026",
             Some(task_a),
             None,
