@@ -149,11 +149,7 @@ async fn failover_comment_already_logged(
 /// Record failover diagnostics when the worker never completed its startup
 /// handshake within the deadline. This infrastructure timeout has no typed
 /// in-pod ProviderError, so it must not mutate model breaker health.
-async fn apply_handshake_timeout_failover(
-    task_repo: &TaskRepository,
-    task: &Task,
-    model_id: &str,
-) {
+async fn apply_handshake_timeout_failover(task_repo: &TaskRepository, task: &Task, model_id: &str) {
     if !failover_comment_already_logged(task_repo, &task.id, model_id).await {
         let _ = task_repo
             .log_activity(

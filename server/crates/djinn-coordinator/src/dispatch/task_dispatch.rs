@@ -6031,18 +6031,17 @@ mod failover_chain_tests {
             "dispatch_fn should have been called with model-b (fallback)"
         );
 
-        // ── AC3c: per-candidate health failure was recorded for model-a ──
-        // After one pool error, model-a should have 1 consecutive failure.
-        // The breaker threshold is 3, so it should still be available.
-        assert!(
-            actor.health.is_available(None, "provider/model-a"),
-            "model-a should still be available after a single pool error (below breaker threshold)"
-        );
+        // ── AC3c: generic pool errors are not health observations ────────
+        // A dispatch failure happens before an in-pod typed ProviderError
+        // exists, so even a fallback-rescued pool failure cannot increment the
+        // breaker counter.
+        let model_a_health = actor.health.model_health(None, "provider/model-a");
+        assert!(!model_a_health.auto_disabled);
+        assert_eq!(model_a_health.consecutive_failures, 0);
 
         // ── AC3c2: circuit breaker was NOT tripped (AC2 deferral) ────────
-        // The breaker must NOT be tripped for model-a even though it failed,
-        // because the chain was not exhausted — a later candidate succeeded.
-        // Breaker demotion is deferred to `apply_chain_exhaustion_side_effects`.
+        // The breaker must NOT be tripped: the generic pool failure supplied no
+        // typed ProviderError evidence, and a later candidate succeeded.
         let model_a_health = actor.health.model_health(None, "provider/model-a");
         assert!(
             !model_a_health.auto_disabled,
@@ -6104,7 +6103,7 @@ mod failover_chain_tests {
     /// 1. The outcome is `Failed` (chain exhausted).
     /// 2. `apply_chain_exhaustion_side_effects` records a failure streak.
     /// 3. A dispatch cooldown is applied.
-    /// 4. Per-candidate health failures were recorded for both candidates.
+    /// 4. Both generic pool failures leave model health counters unchanged.
     /// 5. Repeated exhaustion escalates the streak.
     #[tokio::test]
     #[tracing_test::traced_test]
@@ -6220,17 +6219,14 @@ mod failover_chain_tests {
         assert!(attempted.contains(&"provider/model-a".to_string()));
         assert!(attempted.contains(&"provider/model-b".to_string()));
 
-        // ── AC4c: per-candidate health failures were recorded ────────────
-        // After one pool error each, both models should have 1 consecutive
-        // failure. Breaker threshold is 3, so both should still be available.
-        assert!(
-            actor.health.is_available(None, "provider/model-a"),
-            "model-a should still be available after a single pool error"
-        );
-        assert!(
-            actor.health.is_available(None, "provider/model-b"),
-            "model-b should still be available after a single pool error"
-        );
+        // ── AC4c: exhausted generic pool failures remain breaker-neutral ─
+        // Preserve exhaustion handling below, but neither candidate gets a
+        // health counter increment because no typed ProviderError was observed.
+        for model_id in ["provider/model-a", "provider/model-b"] {
+            let health = actor.health.model_health(None, model_id);
+            assert!(!health.auto_disabled, "{model_id}");
+            assert_eq!(health.consecutive_failures, 0, "{model_id}");
+        }
 
         // ── AC4d: apply terminal side effects (as dispatch_ready_tasks does) ─
         let exhausted_observations = match &outcome {
