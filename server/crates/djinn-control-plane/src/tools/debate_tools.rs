@@ -140,34 +140,33 @@ async fn debate_model(
     entry: &djinn_core::models::ProposalDebateTrail,
 ) -> Result<ProposalDebateTrailModel, String> {
     let mut model: ProposalDebateTrailModel = entry.into();
-    if entry.kind == "human_feedback" {
-        if let Some(generation) = repo
+    if entry.kind == "human_feedback"
+        && let Some(generation) = repo
             .feedback_refinement_generation_for_debate(&entry.id)
             .await
             .map_err(|e| e.to_string())?
-        {
-            model.source_feedback_id = Some(generation.injection.root_feedback_id);
-            model.generation = Some(generation.injection.generation);
-            model.disposition_state = Some(generation.injection.state);
-            model.accepted_disposition = generation.injection.accepted_disposition;
-            model.accepted_revision_seq = generation.injection.accepted_revision_seq;
-            model.accepted_reason = generation.injection.accepted_reason;
-            model.source_rows = generation
-                .sources
-                .into_iter()
-                .map(|s| ProposalFeedbackSourceRowModel {
-                    source_feedback_id: s.source_feedback_id,
-                    source_ordinal: s.source_ordinal,
-                    source_parent_id: s.source_parent_id,
-                    author_kind: s.source_author_kind,
-                    author_user_id: s.source_author_user_id,
-                    author_model: s.source_author_model,
-                    body: s.source_body,
-                    severity: s.source_severity,
-                    created_at: s.source_created_at,
-                })
-                .collect();
-        }
+    {
+        model.source_feedback_id = Some(generation.injection.root_feedback_id);
+        model.generation = Some(generation.injection.generation);
+        model.disposition_state = Some(generation.injection.state);
+        model.accepted_disposition = generation.injection.accepted_disposition;
+        model.accepted_revision_seq = generation.injection.accepted_revision_seq;
+        model.accepted_reason = generation.injection.accepted_reason;
+        model.source_rows = generation
+            .sources
+            .into_iter()
+            .map(|s| ProposalFeedbackSourceRowModel {
+                source_feedback_id: s.source_feedback_id,
+                source_ordinal: s.source_ordinal,
+                source_parent_id: s.source_parent_id,
+                author_kind: s.source_author_kind,
+                author_user_id: s.source_author_user_id,
+                author_model: s.source_author_model,
+                body: s.source_body,
+                severity: s.source_severity,
+                created_at: s.source_created_at,
+            })
+            .collect();
     }
     Ok(model)
 }
@@ -950,7 +949,7 @@ mod tests {
             id: id.to_owned(),
             proposal_id: "proposal".to_owned(),
             kind: "rebuttal".to_owned(),
-            body: format!("feedback_disposition:feedback:fixed_by_revision:2"),
+            body: "feedback_disposition:feedback:fixed_by_revision:2".to_owned(),
             blocking: false,
             agent_role: "advocate".to_owned(),
             author_kind: "agent".to_owned(),
@@ -996,7 +995,8 @@ mod tests {
             "replacement",
             Some(feedback_disposition_metadata("feedback", &disposition)),
         );
-        let pending = pending_feedback_disposition(&[rejected, replacement], "feedback")
+        let candidates = [rejected, replacement];
+        let pending = pending_feedback_disposition(&candidates, "feedback")
             .expect("a replacement disposition should be pending");
         assert_eq!(pending.0.id, "replacement");
     }
