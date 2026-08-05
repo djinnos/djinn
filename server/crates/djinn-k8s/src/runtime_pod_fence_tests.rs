@@ -246,7 +246,7 @@ async fn a_force_deleted_worker_pod_terminalises_the_run_and_reaps_its_job() {
 
     assert!(
         reason.diagnostic.contains(&destroyed_uid) && reason.diagnostic.contains(&job_name),
-        "the death reason must name the destroyed Pod and its Job; got {reason}"
+        "the death reason must name the destroyed Pod and its Job; got {reason:?}"
     );
     assert!(
         cluster.job_names().is_empty(),
@@ -295,13 +295,13 @@ async fn a_replacement_pod_with_a_different_uid_is_observed_but_never_adopted() 
         reason
             .diagnostic
             .contains(&format!("worker Pod {destroyed_uid} was deleted")),
-        "the run stays bound to the Pod UID it launched, not the replacement; got {reason}"
+        "the run stays bound to the Pod UID it launched, not the replacement; got {reason:?}"
     );
     assert!(
         reason.diagnostic.contains(&format!(
             "refused to adopt replacement Pod UID(s) {replacement_uid}"
         )),
-        "the replacement must be reported as refused, not silently ignored; got {reason}"
+        "the replacement must be reported as refused, not silently ignored; got {reason:?}"
     );
     assert!(
         cluster.pod_uids().contains(&replacement_uid) || cluster.pod_uids().is_empty(),
@@ -420,7 +420,7 @@ async fn pod_and_job_both_gone_still_resolves_with_its_original_reason() {
 
     assert!(
         reason.diagnostic.contains("worker Pod and Job disappeared"),
-        "the both-gone arm must keep its own reason; got {reason}"
+        "the both-gone arm must keep its own reason; got {reason:?}"
     );
     assert!(
         job_delete_calls(&cluster, &job_name).is_empty(),
@@ -446,7 +446,7 @@ async fn a_failed_job_still_resolves_with_its_condition_reason() {
 
     assert!(
         reason.diagnostic.contains("BackoffLimitExceeded"),
-        "the Job-Failed arm must keep reporting the apiserver's condition reason; got {reason}"
+        "the Job-Failed arm must keep reporting the apiserver's condition reason; got {reason:?}"
     );
     assert_eq!(
         cluster.job_names(),
@@ -692,7 +692,7 @@ async fn a_force_delete_under_a_never_evicted_workload_still_reaps() {
 
     assert!(
         reason.diagnostic.contains(&destroyed_uid),
-        "the death reason must name the destroyed Pod; got {reason}",
+        "the death reason must name the destroyed Pod; got {reason:?}",
     );
     assert!(
         cluster.job_names().is_empty(),

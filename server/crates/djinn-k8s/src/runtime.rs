@@ -1581,6 +1581,41 @@ fn pod_terminal_observation(pod: &Pod) -> Option<TerminalRuntimeObservation> {
             ),
         ));
     }
+    // Inspect only the explicitly named worker before applying the generic Pod
+    // failure fallback. Kubernetes commonly reports phase=Failed alongside the
+    // worker's terminated state, and allowlisted OOMKilled evidence is more
+    // specific than that generic phase. A sidecar must never stand in for the
+    // worker here.
+    if let Some(terminated) = status
+        .container_statuses
+        .as_ref()
+        .and_then(|statuses| statuses.iter().find(|container| container.name == "worker"))
+        .and_then(|worker| worker.state.as_ref())
+        .and_then(|state| state.terminated.as_ref())
+    {
+        let exit_code = terminated.exit_code;
+        let reason = terminated.reason.as_deref();
+        if reason == Some("OOMKilled") {
+            // Exit code for an OOM kill is conventionally 137 (128 + SIGKILL).
+            return Some(terminal_observation(
+                TerminalRuntimeEvidenceKind::Infrastructure,
+                format!("OOMKilled (exit {exit_code})"),
+            ));
+        }
+        if exit_code != 0 {
+            return Some(terminal_observation(
+                TerminalRuntimeEvidenceKind::UnknownFailure,
+                match reason {
+                    Some(r) => format!("{r} (exit {exit_code})"),
+                    None => format!("worker container exited with code {exit_code}"),
+                },
+            ));
+        }
+        return Some(protocol_observation(
+            "worker container exited cleanly but no terminal report arrived",
+        ));
+    }
+
     // Apart from the exact infrastructure-reason allowlist above, a failed Pod
     // is terminal unknown evidence even if its worker status has not appeared
     // yet. This covers admission and kubelet failures that never create a
@@ -1599,30 +1634,7 @@ fn pod_terminal_observation(pod: &Pod) -> Option<TerminalRuntimeObservation> {
             },
         ));
     }
-    let statuses = status.container_statuses.as_ref()?;
-    let worker = statuses.iter().find(|c| c.name == "worker")?;
-    let terminated = worker.state.as_ref()?.terminated.as_ref()?;
-    let exit_code = terminated.exit_code;
-    let reason = terminated.reason.as_deref();
-    if reason == Some("OOMKilled") {
-        // Exit code for an OOM kill is conventionally 137 (128 + SIGKILL).
-        return Some(terminal_observation(
-            TerminalRuntimeEvidenceKind::Infrastructure,
-            format!("OOMKilled (exit {exit_code})"),
-        ));
-    }
-    if exit_code != 0 {
-        return Some(terminal_observation(
-            TerminalRuntimeEvidenceKind::UnknownFailure,
-            match reason {
-                Some(r) => format!("{r} (exit {exit_code})"),
-                None => format!("worker container exited with code {exit_code}"),
-            },
-        ));
-    }
-    Some(protocol_observation(
-        "worker container exited cleanly but no terminal report arrived",
-    ))
+    None
 }
 
 /// The immutable Pod identity a run's infra-death watch fences itself to.
@@ -3911,12 +3923,27 @@ mod tests {
         let reason = pod_terminal_observation(&pod).expect("OOMKilled must be a death");
         assert!(
             reason.diagnostic.contains("OOMKilled"),
-            "reason should name OOM: {reason}"
+            "reason should name OOM: {reason:?}"
         );
         assert!(
             reason.diagnostic.contains("137"),
-            "reason should carry the exit code: {reason}"
+            "reason should carry the exit code: {reason:?}"
         );
+    }
+
+    /// Named-worker OOM evidence is more specific than the generic Failed Pod
+    /// phase that Kubernetes reports alongside a terminated container.
+    #[test]
+    fn failed_pod_with_worker_oomkilled_is_infrastructure() {
+        let mut pod = pod_with_worker_terminated(137, Some("OOMKilled"), "worker");
+        pod.status.as_mut().unwrap().phase = Some("Failed".to_string());
+
+        let observation = pod_terminal_observation(&pod).expect("failed OOM Pod is terminal");
+        assert_eq!(
+            observation.kind,
+            TerminalRuntimeEvidenceKind::Infrastructure
+        );
+        assert!(observation.diagnostic.contains("OOMKilled"));
     }
 
     /// Any non-zero exit (crash, SIGKILL past grace, generic Error) is a death.
@@ -3927,7 +3954,7 @@ mod tests {
         assert!(reason.diagnostic.contains("Error"));
         assert!(
             reason.diagnostic.contains("exit 1"),
-            "reason should carry exit code: {reason}"
+            "reason should carry exit code: {reason:?}"
         );
     }
 
@@ -4048,7 +4075,7 @@ mod tests {
         let reason = job_terminal_observation(&job).expect("failed job must be a failure");
         assert!(
             reason.diagnostic.contains("BackoffLimitExceeded"),
-            "reason: {reason}"
+            "reason: {reason:?}"
         );
     }
 
