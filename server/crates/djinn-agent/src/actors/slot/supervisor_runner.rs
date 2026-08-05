@@ -1540,6 +1540,19 @@ async fn attach_and_await_terminal_report(
                     }
                 }
                 loop {
+                    // A biased `select!` is not itself a deadline: queued
+                    // ordinary frames remain ready and can otherwise starve an
+                    // expired timer. At the boundary, give the next queued
+                    // frame one final report-precedence check, then settle.
+                    if tokio::time::Instant::now() >= report_deadline {
+                        match bistream.events_rx.try_recv() {
+                            Ok(StreamEvent::Report(report)) => return TerminalReportAwaitOutcome {
+                                report_result: Ok(Some(report)), handshake_timed_out,
+                                terminal_runtime_observation: None, presession_timeout,
+                            },
+                            Ok(_) | Err(_) => break,
+                        }
+                    }
                     tokio::select! {
                         biased;
                         frame = bistream.events_rx.recv(), if !events_closed => match frame {
@@ -1547,14 +1560,39 @@ async fn attach_and_await_terminal_report(
                                 report_result: Ok(Some(report)), handshake_timed_out,
                                 terminal_runtime_observation: None, presession_timeout,
                             },
-                            Some(_) => {},
+                            Some(_) => {
+                                // Re-check after every ordinary frame. This
+                                // makes the deadline terminal even if the
+                                // receiver is continuously ready.
+                                if tokio::time::Instant::now() >= report_deadline {
+                                    match bistream.events_rx.try_recv() {
+                                        Ok(StreamEvent::Report(report)) => return TerminalReportAwaitOutcome {
+                                            report_result: Ok(Some(report)), handshake_timed_out,
+                                            terminal_runtime_observation: None, presession_timeout,
+                                        },
+                                        Ok(_) | Err(_) => break,
+                                    }
+                                }
+                            },
                             None => events_closed = true,
                         },
                         _ = kill.cancelled() => return TerminalReportAwaitOutcome {
                             report_result: Ok(None), handshake_timed_out,
                             terminal_runtime_observation: None, presession_timeout,
                         },
-                        _ = &mut grace => break,
+                        _ = &mut grace => {
+                            // The report receive is first above for same-turn
+                            // readiness. If the timer wins, inspect one final
+                            // queued frame without allowing ordinary frames to
+                            // buy another grace interval.
+                            match bistream.events_rx.try_recv() {
+                                Ok(StreamEvent::Report(report)) => return TerminalReportAwaitOutcome {
+                                    report_result: Ok(Some(report)), handshake_timed_out,
+                                    terminal_runtime_observation: None, presession_timeout,
+                                },
+                                Ok(_) | Err(_) => break,
+                            }
+                        },
                     }
                 }
                 tracing::warn!(task_id = %task.short_id, diagnostic = %observation.diagnostic,
