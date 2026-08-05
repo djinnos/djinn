@@ -671,13 +671,10 @@ mod tests {
             })
             .await;
         assert!(partial["feedback"]["withdrawn_at"].is_string());
-        let (_, partial_withdrawals) = repo
-            .withdraw_feedback_with_refinement_derivation(&root_id, &root_author)
+        let partial_withdrawal = repo
+            .get_feedback_refinement_withdrawal_result(&injection_id)
             .await
-            .expect("read typed partial withdrawal derivation");
-        let partial_withdrawal = partial_withdrawals
-            .iter()
-            .find(|result| result.injection.id == injection_id)
+            .expect("read typed partial withdrawal state")
             .expect("partial withdrawal result");
         assert_eq!(partial_withdrawal.injection.state, "injected");
         assert!(!partial_withdrawal.withdrawn);
@@ -699,19 +696,6 @@ mod tests {
                 .resolved_at
                 .is_none()
         );
-        let (withdrawn_reply, full_withdrawals) = repo
-            .withdraw_feedback_with_refinement_derivation(&reply_id, &reply_author)
-            .await
-            .expect("withdraw captured reply with typed derivation");
-        assert!(withdrawn_reply.withdrawn_at.is_some());
-        let full_withdrawal = full_withdrawals
-            .iter()
-            .find(|result| result.injection.id == injection_id)
-            .expect("full withdrawal result");
-        assert_eq!(full_withdrawal.injection.state, "withdrawn_by_author");
-        assert!(full_withdrawal.withdrawn);
-        assert!(full_withdrawal.debate_entry.resolved_at.is_some());
-
         let full = djinn_core::auth_context::SESSION_USER_ID
             .scope(Some(reply_author.clone()), async {
                 server
@@ -721,6 +705,14 @@ mod tests {
             })
             .await;
         assert!(full["feedback"]["withdrawn_at"].is_string());
+        let full_withdrawal = repo
+            .get_feedback_refinement_withdrawal_result(&injection_id)
+            .await
+            .expect("read typed full withdrawal state")
+            .expect("full withdrawal result");
+        assert_eq!(full_withdrawal.injection.state, "withdrawn_by_author");
+        assert!(full_withdrawal.withdrawn);
+        assert!(full_withdrawal.debate_entry.resolved_at.is_some());
         let debate = repo
             .get_debate_trail_entry(&debate_id)
             .await
