@@ -671,14 +671,17 @@ mod tests {
             })
             .await;
         assert!(partial["feedback"]["withdrawn_at"].is_string());
-        let partial_state: String = sqlx::query_scalar(
-            "SELECT state FROM proposal_feedback_refinement_injections WHERE id=$1",
-        )
-        .bind(&injection_id)
-        .fetch_one(db.pool())
-        .await
-        .expect("partial injection state");
-        assert_eq!(partial_state, "injected");
+        let (_, partial_withdrawals) = repo
+            .withdraw_feedback_with_refinement_derivation(&root_id, &root_author)
+            .await
+            .expect("read typed partial withdrawal derivation");
+        let partial_withdrawal = partial_withdrawals
+            .iter()
+            .find(|result| result.injection.id == injection_id)
+            .expect("partial withdrawal result");
+        assert_eq!(partial_withdrawal.injection.state, "injected");
+        assert!(!partial_withdrawal.withdrawn);
+        assert!(partial_withdrawal.debate_entry.resolved_at.is_none());
 
         let after_partial = server
             .dispatch_tool("proposal_feedback_resolve", json!({ "id": reply_id }))
@@ -696,6 +699,19 @@ mod tests {
                 .resolved_at
                 .is_none()
         );
+        let (withdrawn_reply, full_withdrawals) = repo
+            .withdraw_feedback_with_refinement_derivation(&reply_id, &reply_author)
+            .await
+            .expect("withdraw captured reply with typed derivation");
+        assert!(withdrawn_reply.withdrawn_at.is_some());
+        let full_withdrawal = full_withdrawals
+            .iter()
+            .find(|result| result.injection.id == injection_id)
+            .expect("full withdrawal result");
+        assert_eq!(full_withdrawal.injection.state, "withdrawn_by_author");
+        assert!(full_withdrawal.withdrawn);
+        assert!(full_withdrawal.debate_entry.resolved_at.is_some());
+
         let full = djinn_core::auth_context::SESSION_USER_ID
             .scope(Some(reply_author.clone()), async {
                 server
@@ -705,21 +721,12 @@ mod tests {
             })
             .await;
         assert!(full["feedback"]["withdrawn_at"].is_string());
-        let state: String = sqlx::query_scalar(
-            "SELECT state FROM proposal_feedback_refinement_injections WHERE id=$1",
-        )
-        .bind(&injection_id)
-        .fetch_one(db.pool())
-        .await
-        .expect("full injection state");
-        assert_eq!(state, "withdrawn_by_author");
-        let resolved: Option<String> =
-            sqlx::query_scalar("SELECT resolved_at FROM proposal_debate_trail WHERE id=$1")
-                .bind(&debate_id)
-                .fetch_one(db.pool())
-                .await
-                .expect("withdrawn debate state");
-        assert!(resolved.is_some());
+        let debate = repo
+            .get_debate_trail_entry(&debate_id)
+            .await
+            .expect("read withdrawn debate state")
+            .expect("withdrawn debate entry");
+        assert!(debate.resolved_at.is_some());
     }
 
     #[tokio::test]
