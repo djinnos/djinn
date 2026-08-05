@@ -121,6 +121,12 @@ pub async fn worker_execute_stage(
     spec: &djinn_supervisor::TaskRunSpec,
     agent_context: AgentContext,
     cancel: CancellationToken,
+    // Origin side channel for `cancel` (see `djinn_core::cancel_origin`). The
+    // worker stamps it at every trigger site — SIGTERM, the in-pod soft
+    // deadline, host control frames, RPC transport death, teardown — so a
+    // cancelled stage settles naming its cause instead of a bare
+    // "session cancelled". Unstamped reads back as `unknown`.
+    cancel_origin: djinn_core::cancel_origin::CancelOriginTag,
     provider: Arc<dyn LlmProvider>,
     billing_signal: Option<(
         djinn_supervisor::services::CostBasisHint,
@@ -131,6 +137,7 @@ pub async fn worker_execute_stage(
     let callbacks = SupervisorCallbackContext {
         agent_context,
         cancel,
+        cancel_origin,
         provider_override: Some(provider),
         billing_signal,
     };

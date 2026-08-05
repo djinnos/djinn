@@ -1160,9 +1160,13 @@ async fn live_a_real_brokered_shell_is_governed_by_the_resized_sidecar() {
         .await
         .expect("the supervisor RPC server binds");
     let cancel = CancellationToken::new();
-    let (rpc, background) = RpcServices::connect_unix(&socket, cancel.clone())
-        .await
-        .expect("the supervisor RPC client connects");
+    let (rpc, background) = RpcServices::connect_unix(
+        &socket,
+        cancel.clone(),
+        djinn_core::cancel_origin::CancelOriginTag::new(),
+    )
+    .await
+    .expect("the supervisor RPC client connects");
 
     // Render first: the lease identity must carry the SAME task-run id the
     // renderer stamped onto the Job, or the lease and the Pod are two unrelated
@@ -1469,9 +1473,13 @@ async fn live_the_absent_init_status_is_not_confirmed() {
         .await
         .expect("the supervisor RPC server binds");
     let cancel = CancellationToken::new();
-    let (rpc, background) = RpcServices::connect_unix(&socket, cancel.clone())
-        .await
-        .expect("the client connects");
+    let (rpc, background) = RpcServices::connect_unix(
+        &socket,
+        cancel.clone(),
+        djinn_core::cancel_origin::CancelOriginTag::new(),
+    )
+    .await
+    .expect("the client connects");
     let granted = confirm_launcher_cpu(&pod, CpuLimit::from_millis(2_000)).is_ok();
     assert!(
         !granted,
