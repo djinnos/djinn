@@ -44,6 +44,7 @@ use async_trait::async_trait;
 use djinn_agent::actors::slot::helpers::OAuthConfigWire;
 use djinn_agent::context::AgentContext;
 use djinn_agent::supervisor::worker_execute_stage;
+use djinn_core::cancel_origin::CancelOriginTag;
 use djinn_core::models::{SessionFailureCause, SessionRecord, SessionStatus, Task, TaskRunStatus};
 use djinn_provider::message::Conversation;
 use djinn_provider::provider::{
@@ -74,6 +75,11 @@ pub struct WorkerSupervisorServices {
     rpc: Arc<RpcServices>,
     credentials: ResolvedCredentials,
     cancel: CancellationToken,
+    /// Origin side channel for `cancel`, stamped by whichever trigger fires
+    /// the Pod-wide token. Handed to the per-stage executor so a cancelled
+    /// stage can name its cause instead of settling as a bare
+    /// "session cancelled". See [`djinn_core::cancel_origin`].
+    cancel_origin: CancelOriginTag,
     agent_context: AgentContext,
     /// Path of the supervisor-created ephemeral [`Workspace`], captured the
     /// first time `execute_stage` is invoked.  Used by `open_pr` to
@@ -106,6 +112,7 @@ impl WorkerSupervisorServices {
         rpc: Arc<RpcServices>,
         credentials: ResolvedCredentials,
         cancel: CancellationToken,
+        cancel_origin: CancelOriginTag,
         agent_context: AgentContext,
         captured_workspace_path: Arc<Mutex<Option<PathBuf>>>,
     ) -> Self {
@@ -113,6 +120,7 @@ impl WorkerSupervisorServices {
             rpc,
             credentials,
             cancel,
+            cancel_origin,
             agent_context,
             captured_workspace_path,
         }
@@ -454,6 +462,7 @@ impl SupervisorServices for WorkerSupervisorServices {
             spec,
             self.agent_context.clone(),
             self.cancel.clone(),
+            self.cancel_origin.clone(),
             provider,
             billing_signal,
             self,
@@ -967,6 +976,7 @@ mod tests {
 mod lease_adapter_conformance_tests {
     use super::WorkerSupervisorServices;
     use djinn_agent::direct_services::DirectServices;
+    use djinn_core::cancel_origin::CancelOriginTag;
     use djinn_db::BuildLeaseRepository;
     use djinn_runtime::ResolvedCredentials;
     use djinn_supervisor::services::{
@@ -1190,13 +1200,15 @@ mod lease_adapter_conformance_tests {
             .await
             .expect("serve");
         let cancel = CancellationToken::new();
-        let (rpc, background) = RpcServices::connect_unix(&path, cancel.clone())
-            .await
-            .expect("rpc");
+        let (rpc, background) =
+            RpcServices::connect_unix(&path, cancel.clone(), CancelOriginTag::new())
+                .await
+                .expect("rpc");
         let worker = WorkerSupervisorServices::new(
             rpc.clone(),
             ResolvedCredentials::default(),
             CancellationToken::new(),
+            CancelOriginTag::new(),
             djinn_agent::test_helpers::agent_context_from_db(
                 djinn_agent::test_helpers::create_test_db(),
                 CancellationToken::new(),
@@ -1210,14 +1222,18 @@ mod lease_adapter_conformance_tests {
             .await
             .expect("serve timeout");
         let timeout_cancel = CancellationToken::new();
-        let (timeout_rpc, timeout_background) =
-            RpcServices::connect_unix(&timeout_path, timeout_cancel.clone())
-                .await
-                .expect("connect timeout rpc");
+        let (timeout_rpc, timeout_background) = RpcServices::connect_unix(
+            &timeout_path,
+            timeout_cancel.clone(),
+            CancelOriginTag::new(),
+        )
+        .await
+        .expect("connect timeout rpc");
         let timeout_worker = WorkerSupervisorServices::new(
             timeout_rpc.clone(),
             ResolvedCredentials::default(),
             CancellationToken::new(),
+            CancelOriginTag::new(),
             djinn_agent::test_helpers::agent_context_from_db(
                 djinn_agent::test_helpers::create_test_db(),
                 CancellationToken::new(),
