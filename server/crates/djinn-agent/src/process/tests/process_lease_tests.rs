@@ -7,7 +7,8 @@ use djinn_supervisor::services::{
     SerializableDjinnEvent,
 };
 use djinn_supervisor::{
-    BranchPublicationResult, RoleKind, StageError, StageOutcome, TaskRunOutcome, TaskRunSpec,
+    BranchPublicationResult, RoleKind, StageError, StageExecutionResult, TaskRunOutcome,
+    TaskRunSpec,
 };
 use std::collections::VecDeque;
 use std::io;
@@ -427,7 +428,7 @@ impl SupervisorServices for ScriptedServices {
         _: RoleKind,
         _: &str,
         _: &TaskRunSpec,
-    ) -> Result<StageOutcome, StageError> {
+    ) -> Result<StageExecutionResult, StageError> {
         unimplemented!()
     }
     async fn open_pr(&self, _: &TaskRunSpec, _: &djinn_core::models::Task) -> TaskRunOutcome {

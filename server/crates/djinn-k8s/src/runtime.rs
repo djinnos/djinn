@@ -4114,7 +4114,8 @@ mod tests {
         use djinn_core::models::Task;
         use djinn_supervisor::{
             AllowAllValidator, AuthHelloMsg, AuthResultMsg, RoleKind as SupRoleKind, StageError,
-            StageOutcome, SupervisorServices, TaskRunOutcome as SupTaskRunOutcome, TaskRunSpec,
+            StageExecutionResult, SupervisorServices, TaskRunOutcome as SupTaskRunOutcome,
+            TaskRunSpec,
         };
         use djinn_workspace::Workspace;
         use tokio::net::TcpStream;
@@ -4138,7 +4139,7 @@ mod tests {
                 _: SupRoleKind,
                 _: &str,
                 _: &TaskRunSpec,
-            ) -> Result<StageOutcome, StageError> {
+            ) -> Result<StageExecutionResult, StageError> {
                 unimplemented!()
             }
             async fn open_pr(&self, _: &TaskRunSpec, _: &Task) -> SupTaskRunOutcome {
