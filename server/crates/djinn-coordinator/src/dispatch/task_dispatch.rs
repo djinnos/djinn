@@ -1027,14 +1027,9 @@ impl CoordinatorActor {
         let mut any_at_capacity = false;
         let total_candidates = model_ids.len();
         let mut skipped_count: usize = 0;
-        // Chain-scoped failure observations: only this dispatch attempt's
-        // observed failures can later trigger breaker side effects. The list
-        // is collected here (not on `HealthTracker`) precisely so a successful
-        // fallback never causes breaker checks for an earlier candidate, and
-        // so two unrelated failover chains cannot leak breaker observations
-        // into each other. Returned to the caller via
-        // `DispatchOutcome::Failed { exhausted_observations }`; discarded on
-        // every other branch.
+        // Keep chain-local candidate diagnostics for the exhaustion log. Pool
+        // errors occur before an in-pod typed ProviderError exists and are not
+        // breaker evidence, so this list is never applied to HealthTracker.
         let mut exhausted_observations: Vec<djinn_provider::catalog::HealthKey> = Vec::new();
         // Failover latency: wall-clock from first candidate attempt to
         // terminal event (acceptance or exhaustion).
@@ -1153,18 +1148,9 @@ impl CoordinatorActor {
                     return DispatchOutcome::PoolDead;
                 }
                 Err(e) => {
-                    // Failover-chain traversal: record the per-candidate
-                    // health *observation* immediately (failure counts are
-                    // incremented for diagnostics and candidate health state),
-                    // but do NOT trip the circuit breaker yet — breaker
-                    // demotion/cooldown is deferred until the chain is
-                    // exhausted (AC2).  Track the key on the *chain-local*
-                    // list so a successful fallback never evaluates a breaker
-                    // check for an earlier candidate, and so two unrelated
-                    // failover chains cannot leak observations into each
-                    // other.  Log the failure and continue to the next
-                    // eligible candidate.
-                    self.health.record_failure_observation(scope, model_id);
+                    // Pool dispatch failures precede an in-pod typed
+                    // ProviderError. Preserve failover and diagnostics, but do
+                    // not mutate model health from this untyped error.
                     exhausted_observations
                         .push(djinn_provider::catalog::HealthKey::new(scope, model_id));
                     tracing::Span::current().record("outcome", "error");
@@ -1292,22 +1278,9 @@ impl CoordinatorActor {
         // chain exhausted without a single dispatch being attempted.
         breaker_open_for_all_candidates: bool,
     ) {
-        // Apply deferred breaker checks for THIS chain's observed failures
-        // only.  Observations from a fallback-rescued chain (which were
-        // discarded by `try_dispatch_to_pool` on the success path) cannot
-        // leak here, and observations from an unrelated exhaustion cannot
-        // leak in via a global buffer. The breaker trip happens at most
-        // once per chain-exhausted failover attempt.
-        //
-        // On the breaker-open-for-all path this loop is a no-op: every
-        // candidate was skipped before `dispatch_fn` ran, so
-        // `try_dispatch_to_pool` recorded no failure observation and the list
-        // is empty. Kept above the branch so the ordering (breaker checks,
-        // then accounting) is identical on both paths.
-        for key in exhausted_observations {
-            self.health
-                .apply_breaker_check_for(key.scope.as_deref(), &key.model_id);
-        }
+        // These are generic pool dispatch diagnostics, not typed reply-loop
+        // ProviderError evidence. Do not apply them to the model breaker.
+        let _ = exhausted_observations;
 
         if breaker_open_for_all_candidates {
             poll_stack::boxed(|| {

@@ -146,26 +146,14 @@ async fn failover_comment_already_logged(
     }
 }
 
-/// Record stall + failover + activity when the worker never completed its
-/// startup handshake within the deadline.
+/// Record failover diagnostics when the worker never completed its startup
+/// handshake within the deadline. This infrastructure timeout has no typed
+/// in-pod ProviderError, so it must not mutate model breaker health.
 async fn apply_handshake_timeout_failover(
-    app_state: &AgentContext,
     task_repo: &TaskRepository,
     task: &Task,
     model_id: &str,
-    creator_scope: Option<&str>,
 ) {
-    app_state
-        .health_tracker
-        .record_stall(creator_scope, model_id, true);
-    app_state.health_tracker.note_task_provider_failure(
-        &task.id,
-        djinn_provider::catalog::health::TaskFailureSignal {
-            throttle: true,
-            transient: false,
-            retry_after_ms: None,
-        },
-    );
     if !failover_comment_already_logged(task_repo, &task.id, model_id).await {
         let _ = task_repo
             .log_activity(
@@ -187,7 +175,7 @@ async fn apply_handshake_timeout_failover(
     tracing::warn!(
         task_id = %task.short_id,
         %model_id,
-        "supervisor dispatch: worker handshake timed out; recorded stall + failover"
+        "supervisor dispatch: worker handshake timed out; recorded failover diagnostics"
     );
 }
 
@@ -722,13 +710,7 @@ pub(super) async fn dispatch_task_runtime(
     )
     .await?;
     if handshake_timed_out {
-        apply_handshake_timeout_failover(
-            &app_state,
-            &task_repo,
-            &task,
-            &model_id,
-            creator_scope.as_deref(),
-        )
+        apply_handshake_timeout_failover(&task_repo, &task, &model_id)
         .await;
     }
     if let Some(reason) = infra_death.as_deref() {
@@ -751,17 +733,6 @@ pub(super) async fn dispatch_task_runtime(
             elapsed_secs,
             "supervisor dispatch: pre-session stage-init deadline exceeded before first \
              provider turn; failing run fast"
-        );
-        app_state
-            .health_tracker
-            .record_stall(creator_scope.as_deref(), &model_id, true);
-        app_state.health_tracker.note_task_provider_failure(
-            &task.id,
-            djinn_provider::catalog::health::TaskFailureSignal {
-                throttle: true,
-                transient: false,
-                retry_after_ms: None,
-            },
         );
         if !failover_comment_already_logged(&task_repo, &task.id, &model_id).await {
             let _ = task_repo
