@@ -6,7 +6,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
 use djinn_core::models::Task;
-use djinn_core::models::{TaskRunStatus, TaskRunTrigger};
+use djinn_core::models::{SessionFailureCause, TaskRunStatus, TaskRunTrigger};
 use djinn_db::repositories::task_attempt::TaskAttemptRepository;
 use djinn_db::repositories::task_run::TaskRunRepository;
 use djinn_db::repositories::task_run_outcome::TaskRunOutcomeRepository;
@@ -215,7 +215,13 @@ async fn finalize_infra_death_session(
         .await;
     let session_repo =
         djinn_db::SessionRepository::new(app_state.db.clone(), app_state.event_bus.clone());
-    match session_repo.interrupt_running_for_task(&task.id).await {
+    match session_repo
+        .interrupt_running_for_task_with_failure_cause(
+            &task.id,
+            SessionFailureCause::Infrastructure,
+        )
+        .await
+    {
         Ok(n) if n > 0 => tracing::warn!(
             task_id = %task.short_id,
             %reason,

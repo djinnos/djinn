@@ -426,7 +426,11 @@ async fn a_quarantined_drop_holds_the_build_lease_in_the_other_ledger() {
         &ledgers,
         surface,
         Arc::new(StallingClock::new(24)),
-        Duration::from_millis(50),
+        // Leave enough wall-clock budget for the durable `lifted -> drop_required`
+        // transition even when CI's shared Postgres is contended. The stalling
+        // clock still makes the quarantine loop pending, so this timeout tests
+        // the held-lease boundary rather than racing the transition itself.
+        Duration::from_secs(2),
     );
 
     let identity = ledgers.lease_identity();

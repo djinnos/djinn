@@ -1,5 +1,5 @@
 use crate::context::CoordinatorContext;
-use djinn_core::models::SessionStatus;
+use djinn_core::models::{SessionFailureCause, SessionStatus};
 use djinn_db::{ProjectRepository, SessionRepository, TaskRepository};
 use djinn_git::GitError;
 use djinn_provider::github_api::GitHubApiClient;
@@ -86,7 +86,7 @@ pub(crate) async fn interrupt_paused_worker_session(task_id: &str, app_state: &C
     };
 
     if let Err(e) = repo
-        .update(
+        .update_with_failure_cause(
             &paused.id,
             SessionStatus::Interrupted,
             paused.tokens_in,
@@ -94,6 +94,7 @@ pub(crate) async fn interrupt_paused_worker_session(task_id: &str, app_state: &C
             paused.cache_read_tokens,
             paused.cache_write_tokens,
             None,
+            Some(SessionFailureCause::Cancelled),
         )
         .await
     {
