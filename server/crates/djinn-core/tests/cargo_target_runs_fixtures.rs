@@ -87,6 +87,46 @@ struct InventoryExpected {
 
 #[test]
 fn cargo_target_runs_fixture_contract() {
+    // ── Declared precondition: a filesystem that charges for directories ────
+    //
+    // This suite pins EXACT allocated-byte totals, and those totals are only
+    // meaningful relative to a filesystem. The fixtures were generated on ext4,
+    // where an empty directory costs one 4 KiB block; tmpfs and btrfs charge
+    // nothing for a directory (`st_blocks == 0`). The difference is not merely
+    // numeric — the byte CAPS then bind differently, so a fixture trims a
+    // different number of runs and even the surviving-directory counts change.
+    // No correction reconstructs that: the per-fixture directory count the
+    // constants charge is not derivable from the tree.
+    //
+    // `tempfile::tempdir()` follows `TMPDIR`, so off-reference is any developer
+    // whose /tmp is tmpfs — the default on most Linux desktops, for whom this
+    // suite was previously and permanently red with no explanation.
+    //
+    // Declaring the precondition beats pretending it does not exist, but it
+    // must never let CI skip silently: under `CI` an off-reference host is a
+    // hard failure, because that means the reference assumption itself moved.
+    if host_directory_allocation() != REFERENCE_DIRECTORY_ALLOCATION {
+        let message = format!(
+            "cargo-target-runs fixtures require a filesystem that allocates {REFERENCE_DIRECTORY_ALLOCATION} \
+             bytes per directory; TMPDIR ({}) allocates {}. Re-run with TMPDIR pointed at an ext4 \
+             path, e.g. `TMPDIR=$PWD/target/tmp cargo test -p djinn-core --test cargo_target_runs_fixtures`.",
+            std::env::temp_dir().display(),
+            host_directory_allocation(),
+        );
+        assert!(
+            std::env::var_os("CI").is_none(),
+            "{message} Under CI this is a hard failure: the reference filesystem assumption moved."
+        );
+        #[allow(
+            clippy::print_stderr,
+            reason = "the declared-precondition skip must be visible in test output"
+        )]
+        {
+            eprintln!("SKIPPED: {message}");
+        }
+        return;
+    }
+
     let root = Path::new(FIXTURES);
     let mut cases = fs::read_dir(root)
         .expect("committed fixture directory must exist")
@@ -346,6 +386,29 @@ fn materialize(root: &Path, scenario: &str) {
 fn run(root: &Path, name: &str) {
     fs::create_dir(root.join(name)).unwrap();
     fs::write(root.join(name).join("payload"), vec![1_u8; 4096]).unwrap();
+}
+
+/// Per-directory allocation the committed fixtures were generated on.
+///
+/// On ext4 — the reference, and what CI runs on — an empty directory costs one
+/// 4 KiB block. tmpfs and btrfs charge nothing for a directory at all
+/// (`st_blocks == 0`).
+const REFERENCE_DIRECTORY_ALLOCATION: u64 = 4096;
+
+/// What THIS host's filesystem charges for a directory, measured once in its
+/// own throwaway temp root. `tempfile::tempdir()` follows `TMPDIR`, so this
+/// measures the same filesystem the fixtures materialize on.
+fn host_directory_allocation() -> u64 {
+    static MEASURED: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *MEASURED.get_or_init(|| {
+        let probe_root = tempfile::tempdir().expect("directory-allocation probe root");
+        let probe = probe_root.path().join("probe");
+        fs::create_dir(&probe).expect("probe directory");
+        fs::symlink_metadata(&probe)
+            .expect("probe directory metadata")
+            .blocks()
+            * 512
+    })
 }
 
 fn allocated_bytes_independently(root: &Path) -> u64 {
