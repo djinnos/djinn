@@ -734,13 +734,16 @@ async fn session_exit_trigger_is_insert_once_and_replays_are_immutable() {
     assert_eq!(first_id, replay_id);
 
     let evidence_row = sqlx::query(
-        "SELECT verdict, outcome_kind, outcome_reason, evidence, created_at
+        "SELECT session_id, task_id, task_run_id, verdict, outcome_kind, outcome_reason, evidence, created_at
          FROM liveness_evidence WHERE id = $1",
     )
     .bind(&first_id)
     .fetch_one(db.pool())
     .await
     .unwrap();
+    let original_session_id: String = evidence_row.get("session_id");
+    let original_task_id: Option<String> = evidence_row.get("task_id");
+    let original_task_run_id: Option<String> = evidence_row.get("task_run_id");
     let original_verdict: String = evidence_row.get("verdict");
     let original_kind: Option<String> = evidence_row.get("outcome_kind");
     let original_reason: Option<String> = evidence_row.get("outcome_reason");
@@ -756,13 +759,25 @@ async fn session_exit_trigger_is_insert_once_and_replays_are_immutable() {
     assert_eq!(replay_after_state_change, first_id);
 
     let evidence_row = sqlx::query(
-        "SELECT verdict, outcome_kind, outcome_reason, evidence, created_at
+        "SELECT session_id, task_id, task_run_id, verdict, outcome_kind, outcome_reason, evidence, created_at
          FROM liveness_evidence WHERE id = $1",
     )
     .bind(&first_id)
     .fetch_one(db.pool())
     .await
     .unwrap();
+    assert_eq!(
+        evidence_row.get::<String, _>("session_id"),
+        original_session_id
+    );
+    assert_eq!(
+        evidence_row.get::<Option<String>, _>("task_id"),
+        original_task_id
+    );
+    assert_eq!(
+        evidence_row.get::<Option<String>, _>("task_run_id"),
+        original_task_run_id
+    );
     assert_eq!(evidence_row.get::<String, _>("verdict"), original_verdict);
     assert_eq!(
         evidence_row.get::<Option<String>, _>("outcome_kind"),
