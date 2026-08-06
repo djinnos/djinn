@@ -357,6 +357,325 @@ async fn legacy_pending_escalation_persists_its_fallback_epoch_once() {
     );
 }
 
+// ── AC2: the INCLUSIVE floor comparison and the pre-epoch exclusion ─────────
+
+/// Seed one SUBMITTED worker attempt on `task_id` and return the durable row.
+///
+/// `post_intervention_history` compares the row's `created_at` against the
+/// evidence floor, and counts it in `qualifying_submission_count` /
+/// `any_submitted` when it qualifies — so this row is the only thing the
+/// floor-boundary tests below need.
+async fn seed_submitted_worker_attempt(
+    db: &Database,
+    task_id: &str,
+    tag: &str,
+) -> djinn_core::models::task_attempt::TaskAttempt {
+    let attempt_repo = TaskAttemptRepository::new(db.clone());
+    let id = uuid::Uuid::now_v7().to_string();
+    let dispatch_key = format!("evidence-floor-{tag}-{id}");
+    let attempt = attempt_repo
+        .create_or_get_pending(CreateTaskAttemptParams {
+            id: &id,
+            task_id,
+            role: "worker",
+            dispatch_key: &dispatch_key,
+            session_id: None,
+            attempt_seq: None,
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
+        })
+        .await
+        .expect("seed a pending worker attempt");
+    attempt_repo
+        .advance_to_submitted(
+            djinn_db::repositories::task_attempt::SubmitTaskAttemptParams {
+                id: &attempt.id,
+                submit_ref: None,
+                checkpoint_ref: None,
+                mirror_head_sha: None,
+                github_head_sha: None,
+                summary: None,
+                summary_json: None,
+                log_tail: None,
+            },
+        )
+        .await
+        .expect("advance the seeded worker attempt to submitted")
+}
+
+/// **AC2.** The floor comparison is INCLUSIVE. The proposal is explicit: "Only
+/// attempts and submissions with `created_at >= evidence_floor` qualify. The
+/// comparison is inclusive so an attempt written in the same transaction
+/// timestamp is not lost." Task timestamps are millisecond text, and the epoch
+/// stamp and the attempt insert genuinely share a transaction instant in
+/// production, so an exclusive `>` would silently discard the one piece of
+/// evidence uv3p needs and re-park forever.
+///
+/// This is the ONLY test that pins the boundary itself: every other fixture
+/// sleeps so its evidence sorts strictly after the floor, and an auditor who
+/// changed `>=` to `>` in `post_intervention_history` left all 2083 tests
+/// green. Both floor terms that can win at the boundary are exercised — the
+/// epoch and `last_intervention_at` — because the filter reads whatever
+/// `canonical_evidence_floor` returned, not a particular column.
+///
+/// **If the `role == "worker" && created_at >= floor` filter body were deleted**
+/// and every attempt qualified unconditionally, this test would still pass: it
+/// is a boundary test, not an over-inclusion test. What it does catch, and
+/// nothing else does, is the boundary moving off the floor by one instant.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_attempt_at_exactly_the_evidence_floor_qualifies() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let actor = coordinator_actor_for_tests(&db, &tx);
+
+    let (task, _path) = create_simple_task(&db, &tx, "task", "inclusive floor boundary").await;
+    let attempt = seed_submitted_worker_attempt(&db, &task.id, "equal").await;
+
+    // (a) the EPOCH lands on exactly the attempt's instant — the same
+    // transaction timestamp the proposal names.
+    let mut epoch_at_the_attempt = task.clone();
+    epoch_at_the_attempt.escalation_evidence_at = Some(attempt.created_at.clone());
+    assert_eq!(
+        actor
+            .canonical_evidence_floor(&epoch_at_the_attempt)
+            .await
+            .as_deref(),
+        Some(attempt.created_at.as_str()),
+        "fixture: the floor must sit on exactly the attempt's created_at"
+    );
+
+    let history = actor.post_intervention_history(&epoch_at_the_attempt).await;
+    assert_eq!(
+        history.evidence_floor.as_deref(),
+        Some(attempt.created_at.as_str())
+    );
+    assert_eq!(
+        history.qualifying_submission_count, 1,
+        "an attempt written AT the evidence floor must qualify — `>=`, not `>`"
+    );
+    assert!(
+        history.any_submitted,
+        "the same-instant submission is the evidence uv3p measures; losing it \
+         re-declines the park on every tick forever"
+    );
+    assert!(
+        history.latest_submission_at.is_some(),
+        "the qualifying submission must also be visible to the 2vxr freshness guard"
+    );
+
+    // (b) `last_intervention_at` wins the max() and lands on the same instant.
+    // The filter must read the RESOLVED floor, whichever term produced it.
+    let mut intervention_at_the_attempt = task.clone();
+    intervention_at_the_attempt.last_intervention_at = Some(attempt.created_at.clone());
+    assert_eq!(
+        actor
+            .canonical_evidence_floor(&intervention_at_the_attempt)
+            .await
+            .as_deref(),
+        Some(attempt.created_at.as_str())
+    );
+    assert_eq!(
+        actor
+            .post_intervention_history(&intervention_at_the_attempt)
+            .await
+            .qualifying_submission_count,
+        1,
+        "the inclusive comparison is a property of the FLOOR, not of one column"
+    );
+}
+
+/// **AC2, truth-table row 7** ("Trigger fires after an older successful
+/// submission → new trigger timestamp → older submission excluded → decline;
+/// 2vxr cannot use a prior head"). Evidence that predates the epoch belongs to
+/// a previous head and a previous adjudication; letting it through is exactly
+/// the 2vxr incident, where CI evidence from a prior head justified a park.
+///
+/// The control assertion is what makes this non-vacuous: the SAME durable
+/// attempt row is measured twice, once against a floor at its own instant
+/// (qualifies) and once against the newer epoch (excluded). A fixture that
+/// simply failed to create the attempt would fail the control.
+///
+/// **If the `created_at >= floor` filter body were deleted** so every attempt
+/// qualified, the control would still pass and this test's second half would
+/// fail — which is the point.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pre_epoch_evidence_is_excluded_from_the_current_adjudication() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let actor = coordinator_actor_for_tests(&db, &tx);
+    let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+
+    let (task, _path) = create_simple_task(&db, &tx, "task", "prior-head submission").await;
+    let seeded = seed_submitted_worker_attempt(&db, &task.id, "prior").await;
+    // Push the submission an hour into the past: it belongs to the head the
+    // task carried BEFORE the trigger that is about to fire.
+    djinn_db::test_support::backdate_task_attempt_created_at(&db, &seeded.id, "1 hour").await;
+    let older = TaskAttemptRepository::new(db.clone())
+        .get(&seeded.id)
+        .await
+        .unwrap()
+        .expect("the backdated attempt row must still exist");
+
+    // Control: with the floor at the older submission's own instant it DOES
+    // qualify, so the exclusion below cannot be an artefact of a broken seed.
+    let mut floor_at_the_older_attempt = task.clone();
+    floor_at_the_older_attempt.escalation_evidence_at = Some(older.created_at.clone());
+    assert_eq!(
+        actor
+            .post_intervention_history(&floor_at_the_older_attempt)
+            .await
+            .qualifying_submission_count,
+        1,
+        "control: the seeded submission is real and countable"
+    );
+
+    // The new trigger stamps a NEW epoch — after the older submission.
+    let epoch = repo
+        .stamp_escalation_evidence_epoch(&task.id)
+        .await
+        .unwrap()
+        .expect("the trigger must stamp an epoch");
+    assert!(
+        epoch.as_str() > older.created_at.as_str(),
+        "fixture: the new trigger must be strictly newer than the older submission \
+         (epoch {epoch}, submission {})",
+        older.created_at
+    );
+    let refreshed = repo.get(&task.id).await.unwrap().unwrap();
+    assert_eq!(
+        refreshed.escalation_evidence_at.as_deref(),
+        Some(epoch.as_str()),
+        "the epoch under test must be the PERSISTED column, not a fixture-local value"
+    );
+
+    let history = actor.post_intervention_history(&refreshed).await;
+    assert_eq!(history.evidence_floor.as_deref(), Some(epoch.as_str()));
+    assert_eq!(
+        history.qualifying_submission_count, 0,
+        "a submission that predates the epoch belongs to a prior head and must not \
+         count toward the current adjudication"
+    );
+    assert!(
+        !history.any_submitted,
+        "uv3p must decline the park: no post-trigger worker evidence exists"
+    );
+    assert!(
+        history.latest_submission_at.is_none(),
+        "2vxr must not be handed a prior head's submission as the current one"
+    );
+    assert!(
+        history.non_attempt_models.is_empty() && history.rotation_excluded_models().is_empty(),
+        "a pre-epoch attempt must not contribute rotation exclusions either"
+    );
+}
+
+/// **AC2, truth-table row 5** ("Prior human review resolves after trigger →
+/// floor is the human-review resolution timestamp → only attempts at or after
+/// review resolution qualify"). `human_review_resolved_at` is the third term of
+/// `max(escalation_evidence_at, last_intervention_at, human_review_resolved_at)`
+/// and, before this test, was never the WINNING one anywhere in the suite: a
+/// floor implemented as `max(epoch, last_intervention_at)` would have passed
+/// every other test in this file.
+///
+/// The durable evidence is the `human_review_resolved_at` column stamped by
+/// `TaskRepository::mark_human_review_resolved` when the hold child resolves,
+/// plus the attempt row that sits strictly between the epoch and that stamp.
+///
+/// **If `canonical_evidence_floor`'s body were reduced to just the epoch**, the
+/// control assertion would still pass and the post-resolution assertions would
+/// fail.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_human_review_resolution_wins_the_floor_and_excludes_earlier_evidence() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let actor = coordinator_actor_for_tests(&db, &tx);
+    let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+
+    let (task, _path) = create_simple_task(&db, &tx, "task", "review resolution floor").await;
+    let hold = repo
+        .create_fixture_in_project(
+            &task.project_id,
+            task.epic_id.as_deref(),
+            "Human review hold",
+            "hold",
+            "",
+            "review",
+            1,
+            "",
+            Some("open"),
+            None,
+        )
+        .await
+        .unwrap();
+    repo.add_blocker(&task.id, &hold.id).await.unwrap();
+
+    // 1. the trigger stamps the epoch.
+    let epoch = repo
+        .stamp_escalation_evidence_epoch(&task.id)
+        .await
+        .unwrap()
+        .expect("the trigger must stamp an epoch");
+
+    // 2. a worker submits AFTER the epoch — at this point it qualifies.
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    let attempt = seed_submitted_worker_attempt(&db, &task.id, "pre-review").await;
+    let mid = repo.get(&task.id).await.unwrap().unwrap();
+    assert_eq!(
+        actor
+            .post_intervention_history(&mid)
+            .await
+            .qualifying_submission_count,
+        1,
+        "control: before the review resolves, the post-epoch submission qualifies"
+    );
+
+    // 3. the human review resolves LAST, raising the floor above everything.
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    assert_eq!(
+        repo.mark_human_review_resolved(&hold.id).await.unwrap(),
+        1,
+        "the resolving hold must stamp exactly its own source"
+    );
+    let resolved_at = repo
+        .human_review_resolved_at(&task.id)
+        .await
+        .unwrap()
+        .expect("mark_human_review_resolved must write the durable column");
+
+    let mut after = repo.get(&task.id).await.unwrap().unwrap();
+    // `last_intervention_at` sits on the submission's own instant: strictly
+    // later than the epoch, and still strictly below the review resolution. So
+    // the review resolution is the max of all THREE terms, and if it were
+    // dropped the submission would qualify.
+    after.last_intervention_at = Some(attempt.created_at.clone());
+
+    assert!(
+        resolved_at.as_str() > epoch.as_str() && resolved_at.as_str() > attempt.created_at.as_str(),
+        "fixture: the review resolution must be later than both the epoch ({epoch}) \
+         and the intervention/submission instant ({})",
+        attempt.created_at
+    );
+    assert_eq!(
+        actor.canonical_evidence_floor(&after).await.as_deref(),
+        Some(resolved_at.as_str()),
+        "human_review_resolved_at is the max of the three terms and therefore IS the floor"
+    );
+
+    let history = actor.post_intervention_history(&after).await;
+    assert_eq!(
+        history.evidence_floor.as_deref(),
+        Some(resolved_at.as_str()),
+        "the guards must measure against the review-resolution floor"
+    );
+    assert_eq!(
+        history.qualifying_submission_count, 0,
+        "evidence between the epoch and the review resolution is discarded: a human \
+         already adjudicated it, so it cannot justify a later park"
+    );
+    assert!(!history.any_submitted);
+    assert!(history.latest_submission_at.is_none());
+}
+
 // ── AC5: bounded promotion from the arbitration ledger ──────────────────────
 
 /// **AC5.** `MAX_ARBITER_HOLD_CYCLES = 3` has one exact meaning: rows 0, 1 and 2

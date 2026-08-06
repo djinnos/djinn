@@ -35,8 +35,9 @@
 use super::*;
 
 use crate::tripwires::{
-    ActivityEntryRef, HUMAN_RELEASE_ACTOR, HUMAN_RELEASE_ROLE, TRIPWIRE_EVENT_HOLD_RELEASED,
-    build_hold_released_payload, compute_active_hold_state,
+    ARBITER_RELEASE_ACTOR, ARBITER_RELEASE_ROLE, ActivityEntryRef, HUMAN_RELEASE_ACTOR,
+    HUMAN_RELEASE_ROLE, TRIPWIRE_EVENT_HOLD_RELEASED, build_hold_released_payload,
+    compute_active_hold_state,
 };
 
 impl CoordinatorActor {
@@ -92,8 +93,14 @@ impl CoordinatorActor {
                     continue;
                 }
             };
-            self.release_tripwire_holds_on_source(&source, &rationale, &now)
-                .await;
+            self.release_tripwire_holds_on_source(
+                &source,
+                &rationale,
+                &now,
+                HUMAN_RELEASE_ACTOR,
+                HUMAN_RELEASE_ROLE,
+            )
+            .await;
         }
     }
 
@@ -153,8 +160,14 @@ impl CoordinatorActor {
         let now = ::time::OffsetDateTime::now_utc()
             .format(&::time::format_description::well_known::Rfc3339)
             .unwrap_or_default();
-        self.release_tripwire_holds_on_source(source, &rationale, &now)
-            .await;
+        self.release_tripwire_holds_on_source(
+            source,
+            &rationale,
+            &now,
+            ARBITER_RELEASE_ACTOR,
+            ARBITER_RELEASE_ROLE,
+        )
+        .await;
     }
 
     /// Release every head on `source` that still carries an un-released
@@ -165,6 +178,8 @@ impl CoordinatorActor {
         source: &djinn_core::models::Task,
         rationale: &str,
         now: &str,
+        actor: &str,
+        role: &str,
     ) {
         let task_repo = self.task_repo();
         {
@@ -215,8 +230,8 @@ impl CoordinatorActor {
                     &source.id,
                     &source.project_id,
                     pr_number,
-                    HUMAN_RELEASE_ACTOR,
-                    HUMAN_RELEASE_ROLE,
+                    actor,
+                    role,
                     rationale,
                     now,
                 ) {
@@ -236,8 +251,8 @@ impl CoordinatorActor {
                 match task_repo
                     .log_activity(
                         Some(&source.id),
-                        HUMAN_RELEASE_ACTOR,
-                        HUMAN_RELEASE_ROLE,
+                        actor,
+                        role,
                         TRIPWIRE_EVENT_HOLD_RELEASED,
                         &payload_json,
                     )

@@ -76,10 +76,20 @@ pub struct BusinessDisposition {
 }
 
 // NOTE on the supersession/replacement relationship: tasks carry no
-// `superseded_by` column. A supersede transition sets the source's `status` to
-// `superseded` and its `close_reason` to `superseded`, BOTH of which this
-// snapshot already holds — so a supersede always reads as `source_changed`
-// without inventing a relationship column the schema does not have.
+// `superseded_by` column, and none of the four fields above is one.
+//
+// What a supersede actually writes is worth stating precisely, because the
+// enum names are misleading: `TransitionAction::ArbiterSupersede` writes status
+// `closed` and `close_reason = CLOSE_REASON_FORCE_CLOSED` ("force_closed") —
+// NOT `TaskStatus::Superseded` / `CLOSE_REASON_SUPERSEDED`, which exist but
+// which no arbiter path writes. (An operator grepping for
+// `status = 'superseded'` to find superseded sources will find nothing.)
+//
+// Either way the source leaves the parked state and acquires a terminal close
+// reason, and BOTH of those are in this snapshot — so a supersede always reads
+// as `source_changed` without inventing a relationship column the schema does
+// not have. `adjudication_close_tests::a_supersede_before_the_close_reads_source_changed`
+// asserts that against the schema and against both representations.
 
 /// Activity `event_type` carrying the source's business disposition as it stood
 /// when an adjudication child was CREATED.
@@ -372,10 +382,12 @@ pub async fn apply_adjudication_child_close_tx(
         // `before` is the disposition captured when the child was CREATED, not
         // the live row: the planner's edits land before it closes the child.
         let Some(at_creation) = read_source_snapshot(tx, &source_id, child_id).await? else {
-            // No snapshot (a child created before 4etb shipped). Fall back to
-            // the live row, which can only ever report `source_unchanged` and
-            // therefore never triggers a destructive exhausted-ladder branch on
-            // a source somebody may have legitimately edited.
+            // No snapshot: a child created before 4etb shipped. There is no
+            // honest `before` to compare against, so this close emits NO
+            // outcome event and takes NO ownership branch — the conservative
+            // direction, since the alternative is disposing of a source on
+            // evidence nobody recorded. Such children drain within one
+            // adjudication cycle; every child created from here on has one.
             continue;
         };
         let before = at_creation;

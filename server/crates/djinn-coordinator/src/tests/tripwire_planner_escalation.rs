@@ -6,11 +6,17 @@
 //! takes the legacy path, and still releases the hold — emitting
 //! `tripwire.hold.released` for every held head — when its hold task closes.
 //!
-//! 4etb note (reported, not fixed here): the arbiter-adjudicated branch has NO
-//! producer of `tripwire.hold.released`. `emit_tripwire_release_on_hold_close`
-//! fires only for a closing hold CHILD, and that branch no longer creates one.
-//! An arbiter that approves on the SAME head therefore leaves the active-hold
-//! state set; only a new head SHA clears it.
+//! 4etb: the arbiter-adjudicated branch creates no hold CHILD, so
+//! `emit_tripwire_release_on_hold_close` — which fires only when such a child
+//! closes — can never run for it. An arbiter that decides `approve` /
+//! `approve_conflict` / `supersede` on the SAME head would therefore leave the
+//! active-hold state set forever, with nothing left that could clear it. The
+//! second producer, `emit_tripwire_release_on_arbiter_clearance`, closes that
+//! gap; it is gated on the task's OWN arbitration ledger recording one of those
+//! clearing decisions, so an ordinary approval that never went through
+//! adjudication cannot release a hold. Both halves — the release that must
+//! happen and the release that must NOT — are covered at the bottom of this
+//! file.
 
 use super::*;
 use crate::tripwires::{ActivityEntryRef, TripwireEvaluationInput, TripwirePolicy};
@@ -284,5 +290,185 @@ async fn human_adjudicated_tripwire_hold_releases_the_hold_on_close() {
     assert!(
         !active_hold_held(&repo, &task.id, HELD_HEAD).await,
         "the hold must be released after it closes — merge may proceed"
+    );
+}
+
+// ── 4etb: the arbiter-clearance release producer ────────────────────────────
+
+/// Every `tripwire.hold.released` activity payload on `task_id`.
+async fn hold_released_payloads(repo: &TaskRepository, task_id: &str) -> Vec<serde_json::Value> {
+    repo.list_activity(task_id)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.event_type == crate::tripwires::TRIPWIRE_EVENT_HOLD_RELEASED)
+        .map(|e| serde_json::from_str::<serde_json::Value>(&e.payload).unwrap())
+        .collect()
+}
+
+/// Record an arbiter decision on the task's own arbitration ledger — the ONLY
+/// input `emit_tripwire_release_on_arbiter_clearance` consults.
+async fn record_arbiter_decision(db: &Database, task_id: &str, decision: &str) {
+    let applied =
+        djinn_db::repositories::task_arbitration::TaskArbitrationRepository::new(db.clone())
+            .update_dispatch_ledger(
+                djinn_db::repositories::task_arbitration::UpdateDispatchLedgerParams {
+                    task_id,
+                    hold_cycle: 0,
+                    mirror_head_sha: None,
+                    github_head_sha: None,
+                    pr_url: None,
+                    failing_ci_job_ids: None,
+                    dossier: None,
+                    directive: Some(&serde_json::json!({ "decision": decision })),
+                    verification_command: None,
+                    excluded_models: None,
+                },
+            )
+            .await
+            .unwrap();
+    assert!(
+        applied,
+        "fixture: the tripwire route must have opened hold cycle 0 for the decision to land on"
+    );
+}
+
+/// Drive a tripwire-held source all the way to an arbiter-adjudicated state:
+/// `gate.held` logged, the arbiter route taken, hold cycle 0 open. Returns the
+/// source as it stands while the adjudication is in flight.
+async fn arbiter_adjudicated_tripwire_source(
+    db: &Database,
+    tx: &broadcast::Sender<DjinnEventEnvelope>,
+    actor: &mut CoordinatorActor,
+    repo: &TaskRepository,
+) -> djinn_core::models::Task {
+    let task = make_task_with_reopen_count(db, tx, 0).await;
+    repo.set_status(&task.id, "pr_review").await.unwrap();
+    let task = repo.get(&task.id).await.unwrap().unwrap();
+
+    let result = held_migration_result(&task.id, &task.project_id, HELD_HEAD);
+    log_gate_held(repo, &task.id, &result).await;
+    actor.create_tripwire_hold(&task, &result, HELD_HEAD).await;
+
+    assert!(
+        active_hold_held(repo, &task.id, HELD_HEAD).await,
+        "fixture: the merge must be blocked before the arbiter decides"
+    );
+    repo.get(&task.id).await.unwrap().unwrap()
+}
+
+/// 4etb: an arbiter `approve` on the SAME head must release the tripwire hold.
+///
+/// The arbiter route creates no hold CHILD, so the child-close producer can
+/// never fire for it. Without this second producer the `gate.held` event stays
+/// unreleased for the current head and the merge is blocked forever — the hold
+/// only ever clears when a new commit moves the head, which an approved task
+/// will never produce.
+///
+/// The durable evidence is the `tripwire.hold.released` activity row and the
+/// recomputed active-hold state over the source's own activity entries: no log
+/// line participates, and the released payload must pin the HELD head, not the
+/// task row's head.
+///
+/// **If `emit_tripwire_release_on_arbiter_clearance`'s body were deleted**, the
+/// hold-created and dossier assertions in the tests above would all still pass;
+/// only these two assertions fail.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_arbiter_approval_releases_the_tripwire_hold_it_cleared() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+    let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+
+    let source = arbiter_adjudicated_tripwire_source(&db, &tx, &mut actor, &repo).await;
+    record_arbiter_decision(&db, &source.id, "approve").await;
+
+    actor
+        .emit_tripwire_release_on_arbiter_clearance(&source)
+        .await;
+
+    let released = hold_released_payloads(&repo, &source.id).await;
+    assert_eq!(
+        released.len(),
+        1,
+        "the arbiter's clearing decision must emit exactly one tripwire.hold.released"
+    );
+    assert_eq!(
+        released[0]["head_sha"], HELD_HEAD,
+        "the release must cover the head the gate actually holds, not a later row head"
+    );
+    assert!(
+        !released[0]["released_findings"]
+            .as_array()
+            .expect("released_findings must be an array")
+            .is_empty(),
+        "the release must name the findings it clears; an empty release clears nothing"
+    );
+    assert!(
+        released[0]["rationale"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("approve"),
+        "the rationale must record WHICH arbiter decision cleared the hold; got {}",
+        released[0]["rationale"]
+    );
+    assert!(
+        !active_hold_held(&repo, &source.id, HELD_HEAD).await,
+        "the merge-boundary gate must clear for the held head once the arbiter cleared it"
+    );
+}
+
+/// 4etb, the load-bearing negative: a source with NO clearing arbiter decision
+/// must NOT get a release.
+///
+/// A producer that fired unconditionally would defeat the tripwire gate
+/// entirely — every held source would be released the moment the coordinator
+/// looked at it, which is strictly worse than the stuck-hold bug this producer
+/// exists to fix. Two shapes are covered: an adjudication still in flight (row
+/// open, no directive at all) and a NON-clearing decision (`reopen`, which is
+/// safe precisely because the worker's next push moves the head and the gate
+/// re-evaluates).
+///
+/// **If the decision filter were deleted** — the `matches!(approve |
+/// approve_conflict | supersede)` guard, or the `Some(decision) else return` —
+/// both halves of this test fail while the positive test above still passes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn no_clearing_arbiter_decision_means_no_tripwire_release() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+    let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+
+    // (a) adjudication in flight: the ledger records no decision yet.
+    let in_flight = arbiter_adjudicated_tripwire_source(&db, &tx, &mut actor, &repo).await;
+    actor
+        .emit_tripwire_release_on_arbiter_clearance(&in_flight)
+        .await;
+    assert!(
+        hold_released_payloads(&repo, &in_flight.id)
+            .await
+            .is_empty(),
+        "an undecided adjudication must not release the hold it is still deciding"
+    );
+    assert!(
+        active_hold_held(&repo, &in_flight.id, HELD_HEAD).await,
+        "the merge must stay blocked while the arbiter is still in flight"
+    );
+
+    // (b) a NON-clearing decision: `reopen` sends the source back to a worker,
+    // whose next push moves the head. Releasing here would clear a hold nobody
+    // adjudicated away.
+    let reopened = arbiter_adjudicated_tripwire_source(&db, &tx, &mut actor, &repo).await;
+    record_arbiter_decision(&db, &reopened.id, "reopen").await;
+    actor
+        .emit_tripwire_release_on_arbiter_clearance(&reopened)
+        .await;
+    assert!(
+        hold_released_payloads(&repo, &reopened.id).await.is_empty(),
+        "a `reopen` is not a clearance: it must not emit a release"
+    );
+    assert!(
+        active_hold_held(&repo, &reopened.id, HELD_HEAD).await,
+        "the merge must stay blocked after a reopen decision"
     );
 }

@@ -228,6 +228,176 @@ async fn a_rescope_before_the_close_reads_source_changed() {
     assert_eq!(events[0]["source_status_after"], "open");
 }
 
+/// **AC8, truth-table row 3.** "Supersede replaces the source while closing the
+/// adjudication child → supersession/replacement relationship changes, normally
+/// with source status `superseded` → `source_changed`."
+///
+/// [`BusinessDisposition`] has NO supersession column, and the module comment
+/// argues that `status` + `close_reason` carry the relationship on their own.
+/// This test proves that claim from the schema up:
+///
+/// 1. `tasks` genuinely has no supersession/replacement column, so there is
+///    nothing else the snapshot could have read (asserted against
+///    `information_schema`, not against a comment);
+/// 2. the representation PRODUCTION actually writes — `TransitionAction::
+///    ArbiterSupersede` force-closes the source, so `status = closed` and
+///    `close_reason = force_closed` — reads `source_changed`;
+/// 3. the representation the module comment DESCRIBES — `status = superseded`
+///    with `close_reason = superseded` — also reads `source_changed`.
+///
+/// Both representations are covered because the comment's stated values do not
+/// match what `ArbiterSupersede` writes; the claim survives that discrepancy,
+/// but only because both forms move `status` away from the parked state.
+///
+/// **If the whole close transaction's body were deleted** no event would exist
+/// at all and the first assertion would fail. What would still pass if only the
+/// supersession reasoning were wrong: nothing here — a snapshot comparison that
+/// ignored `status` and `close_reason` fails both cases.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_supersede_before_the_close_reads_source_changed() {
+    let db = Database::open_in_memory().unwrap();
+    let repo = TaskRepository::new(db.clone(), silent_bus());
+    let project = make_project(&db).await;
+    let epic_id = make_epic(&db, &project.id).await;
+
+    // (1) The premise of the module comment, asserted against the live schema.
+    let supersession_columns: Vec<String> = sqlx::query_scalar(
+        "SELECT column_name::text FROM information_schema.columns
+          WHERE table_name = 'tasks' AND column_name LIKE '%supersed%'",
+    )
+    .fetch_all(db.pool())
+    .await
+    .unwrap();
+    assert!(
+        supersession_columns.is_empty(),
+        "the snapshot omits a supersession column because `tasks` has none; if one \
+         is ever added, BusinessDisposition must start reading it (found {supersession_columns:?})"
+    );
+
+    // (2) What `ArbiterSupersede` actually writes: a force-close.
+    let (source_id, child_id) = source_with_escalation_rounds(&db, &repo, &epic_id, 1).await;
+    sqlx::query("UPDATE tasks SET status = 'closed', close_reason = $2 WHERE id = $1")
+        .bind(&source_id)
+        .bind(djinn_core::models::task::CLOSE_REASON_FORCE_CLOSED)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+    close_child(&repo, &child_id).await;
+
+    let events = outcome_events(&repo, &source_id).await;
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+        events[0]["adjudication_outcome"], SOURCE_CHANGED,
+        "a supersede replaces the source: status and close_reason both move, so \
+         the fixed snapshot carries the relationship without a dedicated column"
+    );
+    assert_eq!(events[0]["source_status_before"], "in_lead_intervention");
+    assert_eq!(events[0]["source_status_after"], "closed");
+    let superseded = repo.get(&source_id).await.unwrap().unwrap();
+    assert_eq!(
+        superseded.close_reason.as_deref(),
+        Some(djinn_core::models::task::CLOSE_REASON_FORCE_CLOSED),
+        "the supersede's own terminal reason must survive the close transaction"
+    );
+
+    // (3) The representation the module comment describes.
+    let (named_id, named_child) = source_with_escalation_rounds(&db, &repo, &epic_id, 1).await;
+    sqlx::query("UPDATE tasks SET status = 'superseded', close_reason = $2 WHERE id = $1")
+        .bind(&named_id)
+        .bind(djinn_core::models::task::CLOSE_REASON_SUPERSEDED)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+    close_child(&repo, &named_child).await;
+
+    let named_events = outcome_events(&repo, &named_id).await;
+    assert_eq!(named_events.len(), 1);
+    assert_eq!(
+        named_events[0]["adjudication_outcome"], SOURCE_CHANGED,
+        "the `superseded` status form must read as a change too"
+    );
+    assert_eq!(named_events[0]["source_status_after"], "superseded");
+}
+
+/// **AC8.** The applied arbiter directive, ALONE, is a disposition change.
+///
+/// `applied_directive` is the fifth field of the fixed snapshot and was the
+/// only one no test ever moved on its own: a comparison that dropped it would
+/// have stayed green everywhere. It is derived from the newest
+/// `task_arbitrations` row with `directive_injected = TRUE`, so "the arbiter
+/// reopened the source with a new directive" is durable state, not prose.
+///
+/// Status, close reason and every scope field are deliberately untouched here,
+/// so the ONLY thing separating `before` from `after` is the directive.
+///
+/// **If the applied-directive term were dropped from the comparison**, this
+/// close would read `source_unchanged` and this test would fail — while every
+/// other close test in this file would still pass.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_applied_arbiter_directive_alone_reads_source_changed() {
+    use crate::repositories::task_arbitration::{
+        CreateArbitrationParams, TaskArbitrationRepository,
+    };
+
+    let db = Database::open_in_memory().unwrap();
+    let repo = TaskRepository::new(db.clone(), silent_bus());
+    let project = make_project(&db).await;
+    let epic_id = make_epic(&db, &project.id).await;
+
+    let (source_id, child_id) = source_with_escalation_rounds(&db, &repo, &epic_id, 1).await;
+    let before = repo.get(&source_id).await.unwrap().unwrap();
+
+    // The arbiter applies a reopen directive to the source. No arbitration row
+    // existed when the snapshot was taken, so `applied_directive` moves from
+    // `None` to this directive and NOTHING else moves.
+    let arb = TaskArbitrationRepository::new(db.clone());
+    let empty = serde_json::json!([]);
+    arb.try_create(CreateArbitrationParams {
+        task_id: &source_id,
+        hold_cycle: 0,
+        deadline_at: None,
+        mirror_head_sha: None,
+        github_head_sha: None,
+        pr_url: None,
+        failing_ci_job_ids: &empty,
+        dossier: None,
+        directive: Some(&serde_json::json!({
+            "decision": "reopen",
+            "instructions": "register the service in the router before resubmitting",
+        })),
+        verification_command: None,
+        excluded_models: &empty,
+    })
+    .await
+    .expect("open the arbitration row carrying the directive");
+    assert!(
+        arb.mark_directive_injected(&source_id, 0).await.unwrap(),
+        "the directive must be marked injected — that flag is what makes it APPLIED"
+    );
+
+    close_child(&repo, &child_id).await;
+
+    let events = outcome_events(&repo, &source_id).await;
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+        events[0]["adjudication_outcome"], SOURCE_CHANGED,
+        "a newly applied arbiter directive is a real disposition change even though \
+         the status and every scope field are identical"
+    );
+
+    // Prove nothing else moved, so the outcome can only have come from the
+    // directive.
+    let after = repo.get(&source_id).await.unwrap().unwrap();
+    assert_eq!(after.status, before.status, "status must not have moved");
+    assert_eq!(after.close_reason, before.close_reason);
+    assert_eq!(after.description, before.description);
+    assert_eq!(after.design, before.design);
+    assert_eq!(events[0]["source_status_before"], "in_lead_intervention");
+    assert_eq!(events[0]["source_status_after"], "open");
+}
+
 /// **AC8.** Duplicate closure delivery emits no second event and re-runs no
 /// disposition. The (source, child) pair is the idempotency key.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
