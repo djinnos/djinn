@@ -1097,9 +1097,14 @@ mod tests {
             assert_eq!(
                 pretty, committed,
                 "DjinnMcpServer::all_tool_schemas() has drifted from the committed fixture.\n\
-                 If this is intentional, regenerate with:\n\
-                 UPDATE_DJINN_MCP_SERVER_FIXTURE=1 cargo test -p djinn-control-plane --lib \n\
-                   server_tests::tests::djinn_mcp_server_corpus_fixture_is_current -- --nocapture"
+                 This fixture is one of several artifacts derived from the MCP tool schemas;\n\
+                 a tool-surface change moves the others too. Regenerate ALL of them with one\n\
+                 command, from the repository root:\n\
+                 \n    make tool-goldens\n\n\
+                 (this fixture alone:\n\
+                   UPDATE_DJINN_MCP_SERVER_FIXTURE=1 cargo test -p djinn-control-plane --lib \\\n\
+                     server_tests::tests::djinn_mcp_server_corpus_fixture_is_current -- --nocapture)\n\
+                 The full artifact set lives in scripts/tool-goldens.manifest.json."
             );
         }
     }
