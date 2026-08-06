@@ -2923,7 +2923,7 @@ impl CoordinatorActor {
             .filter(|_| !merged);
 
         if let Some(pr_url) = open_pr {
-            const HANDOFF_REASON: &str = "adjudication_ladder_exhausted_pr_handoff";
+            const HANDOFF_REASON: &str = djinn_db::repositories::task::PR_HANDOFF_REASON;
             let head_sha = latest
                 .ci_github_head_sha
                 .as_deref()

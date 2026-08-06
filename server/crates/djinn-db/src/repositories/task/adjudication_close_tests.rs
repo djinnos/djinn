@@ -238,8 +238,22 @@ async fn every_producer_snapshot_status_reaches_the_exhausted_ladder() {
         );
         let events = outcome_events(&repo, &source_id).await;
         assert_eq!(
-            events[0]["source_status_before"], snapshot_status,
-            "the event must report the real snapshot status"
+            events[0]["source_status_at_child_creation"], snapshot_status,
+            "the comparison baseline is reported as metadata"
+        );
+        // The reported pair must describe THIS transaction. Asserting the
+        // creation snapshot here previously locked in a contradiction: for the
+        // `pr_review` producer it claimed `pr_review -> pr_review` — no
+        // movement — beside a `source_changed` outcome, for the very handoff
+        // the transaction had just performed.
+        assert_eq!(
+            events[0]["source_status_before"], "open",
+            "snapshot status {snapshot_status:?}: the source was parked at `open` before this \
+             close transaction ran"
+        );
+        assert_eq!(
+            events[0]["source_status_after"], "pr_review",
+            "snapshot status {snapshot_status:?}: and this transaction moved it to the poller"
         );
         // Outcome truth-table row 4: the exhausted handoff IS a disposition
         // change. Asserting only `source.status` above let a real defect
@@ -459,9 +473,13 @@ async fn round_one_scaffolding_close_reads_source_unchanged() {
     let events = outcome_events(&repo, &source_id).await;
     assert_eq!(events.len(), 1, "exactly one outcome event per child close");
     assert_eq!(events[0]["adjudication_outcome"], SOURCE_UNCHANGED);
+    // The reported pair is the CLOSE transaction's own before/after, not the
+    // child-creation snapshot: the producer's park already landed the source at
+    // `open` in an earlier transaction, and this close moved nothing.
+    assert_eq!(events[0]["source_status_before"], "open");
     assert_eq!(
-        events[0]["source_status_before"], "in_lead_intervention",
-        "the snapshot is taken mid-adjudication, exactly as production does"
+        events[0]["source_status_at_child_creation"], "in_lead_intervention",
+        "the comparison baseline is still reported, as operational metadata"
     );
     assert_eq!(events[0]["source_status_after"], "open");
     assert_eq!(events[0]["adjudication_child_id"], child_id);
@@ -504,9 +522,13 @@ async fn a_rescope_before_the_close_reads_source_changed() {
         events[0]["adjudication_outcome"], SOURCE_CHANGED,
         "a scope change is a real disposition even though the status did not move"
     );
+    // The reported pair is the CLOSE transaction's own before/after, not the
+    // child-creation snapshot: the producer's park already landed the source at
+    // `open` in an earlier transaction, and this close moved nothing.
+    assert_eq!(events[0]["source_status_before"], "open");
     assert_eq!(
-        events[0]["source_status_before"], "in_lead_intervention",
-        "the snapshot is taken mid-adjudication, exactly as production does"
+        events[0]["source_status_at_child_creation"], "in_lead_intervention",
+        "the comparison baseline is still reported, as operational metadata"
     );
     assert_eq!(events[0]["source_status_after"], "open");
 }
@@ -575,8 +597,14 @@ async fn a_supersede_before_the_close_reads_source_changed() {
         "a supersede replaces the source: status and close_reason both move, so \
          the fixed snapshot carries the relationship without a dedicated column"
     );
-    assert_eq!(events[0]["source_status_before"], "in_lead_intervention");
+    // The pair describes THIS transaction: the source was parked at `open`
+    // before it and the supersede left it `closed`.
+    assert_eq!(events[0]["source_status_before"], "closed");
     assert_eq!(events[0]["source_status_after"], "closed");
+    assert_eq!(
+        events[0]["source_status_at_child_creation"],
+        "in_lead_intervention"
+    );
     let superseded = repo.get(&source_id).await.unwrap().unwrap();
     assert_eq!(
         superseded.close_reason.as_deref(),
@@ -677,8 +705,12 @@ async fn an_applied_arbiter_directive_alone_reads_source_changed() {
     assert_eq!(after.close_reason, before.close_reason);
     assert_eq!(after.description, before.description);
     assert_eq!(after.design, before.design);
-    assert_eq!(events[0]["source_status_before"], "in_lead_intervention");
+    assert_eq!(events[0]["source_status_before"], "open");
     assert_eq!(events[0]["source_status_after"], "open");
+    assert_eq!(
+        events[0]["source_status_at_child_creation"],
+        "in_lead_intervention"
+    );
 }
 
 /// **AC8.** Duplicate closure delivery emits no second event and re-runs no
@@ -748,9 +780,13 @@ async fn round_three_unchanged_close_sends_an_open_pr_source_to_pr_review() {
         events[0]["adjudication_outcome"], SOURCE_CHANGED,
         "the ownership transition IS a disposition change"
     );
+    // The reported pair is the CLOSE transaction's own before/after, not the
+    // child-creation snapshot: the producer's park already landed the source at
+    // `open` in an earlier transaction, and this close moved nothing.
+    assert_eq!(events[0]["source_status_before"], "open");
     assert_eq!(
-        events[0]["source_status_before"], "in_lead_intervention",
-        "the snapshot is taken mid-adjudication, exactly as production does"
+        events[0]["source_status_at_child_creation"], "in_lead_intervention",
+        "the comparison baseline is still reported, as operational metadata"
     );
     assert_eq!(events[0]["source_status_after"], "pr_review");
 }
@@ -920,6 +956,138 @@ async fn closing_an_adjudication_child_clears_the_evidence_epoch() {
             .is_none(),
         "the epoch must be cleared when the adjudication clears"
     );
+}
+
+/// **AC8, the "no retroactive change" clause.** The spec is explicit that the
+/// outcome "describes ONLY that transaction — it is not a claim that the task
+/// eventually merged or converged, and no longitudinal reporting is derived from
+/// it". So a LATER merge must leave the already-emitted event exactly as it was:
+/// no rewrite, no correcting second event.
+///
+/// This is a real hazard rather than a hypothetical one. The obvious "fix" for
+/// an operator complaining that a `source_changed` handoff later merged anyway
+/// is to re-run the close and amend the row — and the amendment would be
+/// silently wrong, because the merge is a different transaction with a different
+/// cause. The duplicate-delivery guard is what forbids it, and this test pins
+/// the guard against the specific input that would tempt someone to bypass it: a
+/// source whose `merge_commit_sha` is now set and whose status has moved
+/// terminal since the event was written.
+///
+/// The durable evidence is the `activity_log` ROW ITSELF — id, `payload::text`
+/// and `created_at`, read before and after the merge — plus the row count.
+///
+/// **If `apply_adjudication_child_close_tx`'s body were made inert** the first
+/// half of this test fails: no round-3 handoff and no event to preserve. **If
+/// only the `outcome_already_emitted` guard were deleted**, the redelivery after
+/// the merge would emit a SECOND event — reporting `source_unchanged` off the
+/// merged row — and both the count assertion and the returned-`emitted`
+/// assertion fail while every other test in this file still passes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_later_merge_does_not_retroactively_change_the_emitted_outcome() {
+    let db = Database::open_in_memory().unwrap();
+    let repo = TaskRepository::new(db.clone(), silent_bus());
+    let project = make_project(&db).await;
+    let epic_id = make_epic(&db, &project.id).await;
+
+    /// The full durable outcome rows for a source: (id, canonical payload text,
+    /// created_at). Ordered by id so the comparison is position-stable.
+    async fn outcome_rows(db: &Database, source_id: &str) -> Vec<(String, String, String)> {
+        sqlx::query_as::<_, (String, String, String)>(
+            r#"SELECT id, payload::text, created_at FROM activity_log
+                WHERE task_id = $1 AND event_type = $2
+                ORDER BY id ASC"#,
+        )
+        .bind(source_id)
+        .bind(ADJUDICATION_OUTCOME_EVENT)
+        .fetch_all(db.pool())
+        .await
+        .unwrap()
+    }
+
+    let (source_id, child_id) =
+        source_with_escalation_rounds(&db, &repo, &epic_id, MAX_AUTONOMOUS_ESCALATIONS).await;
+    repo.set_pr_url(&source_id, "https://github.com/o/r/pull/93")
+        .await
+        .unwrap();
+
+    close_child(&repo, &child_id).await;
+
+    let before_merge = outcome_rows(&db, &source_id).await;
+    assert_eq!(
+        before_merge.len(),
+        1,
+        "the round-3 close must have emitted exactly one outcome event"
+    );
+    let emitted_payload: serde_json::Value = serde_json::from_str(&before_merge[0].1).unwrap();
+    assert_eq!(
+        emitted_payload["adjudication_outcome"], SOURCE_CHANGED,
+        "fixture: the event under test is the terminal handoff"
+    );
+    assert_eq!(emitted_payload["source_status_after"], "pr_review");
+    assert_eq!(
+        repo.get(&source_id).await.unwrap().unwrap().status,
+        TaskStatus::PrReview.as_str(),
+    );
+
+    // ── The later merge ────────────────────────────────────────────────────
+    // The poller took the handoff, the PR landed, and the task closed. Both
+    // things the exhausted-ladder branch reads — `merge_commit_sha` and the
+    // status — now say something different from what they said in the
+    // transaction that wrote the event.
+    sqlx::query(
+        "UPDATE tasks SET merge_commit_sha = $2, status = 'closed', close_reason = $3 WHERE id = $1",
+    )
+    .bind(&source_id)
+    .bind("f00dfacecafe0001")
+    .bind(djinn_core::models::task::CLOSE_REASON_COMPLETED)
+    .execute(db.pool())
+    .await
+    .unwrap();
+
+    let after_merge = outcome_rows(&db, &source_id).await;
+    assert_eq!(
+        after_merge, before_merge,
+        "the merge must not rewrite the emitted event: the row's id, payload and created_at all \
+         describe the child-close transaction, not the task's eventual fate"
+    );
+
+    // ── And a re-delivery after the merge stays a no-op ────────────────────
+    // Without this the assertion above would only prove that an UPDATE on
+    // `tasks` does not touch `activity_log`, which is trivially true. Re-running
+    // the mechanism against the merged row is the input that would produce a
+    // second, contradictory event.
+    let mut tx = db.pool().begin().await.unwrap();
+    let emitted = crate::repositories::task::apply_adjudication_child_close_tx(
+        &mut tx,
+        &child_id,
+        ESCALATION_LABELS,
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+
+    assert_eq!(
+        emitted, 0,
+        "re-delivering the close after the merge must emit nothing"
+    );
+    assert_eq!(
+        outcome_rows(&db, &source_id).await,
+        before_merge,
+        "no second outcome event, and the first one is still byte-identical: the (source, child) \
+         pair is the idempotency key and the merge is not part of it"
+    );
+
+    // The merge's own state is untouched too — the re-delivery must not have
+    // re-dispositioned a source somebody else already closed.
+    let merged = repo.get(&source_id).await.unwrap().unwrap();
+    assert_eq!(merged.status, "closed");
+    assert_eq!(
+        merged.close_reason.as_deref(),
+        Some(djinn_core::models::task::CLOSE_REASON_COMPLETED),
+        "the merge's own close reason must survive; the exhausted-ladder class must not \
+         overwrite it"
+    );
+    assert_eq!(merged.merge_commit_sha.as_deref(), Some("f00dfacecafe0001"));
 }
 
 /// A NON-adjudication child close must not touch any of this. The label is the

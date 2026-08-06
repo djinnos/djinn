@@ -63,6 +63,19 @@ pub const LADDER_EXHAUSTED_CLOSE_REASON: &str =
 /// agree.
 pub const TERMINAL_CLOSE_REASON_CLASS: &str = "force_closed";
 
+/// Actor, role and reason for the `pr_terminal_handoff` marker, kept
+/// byte-identical to the coordinator's `respawn_guard::handoff_pr_to_poller`
+/// (`HANDOFF_ACTOR_ID` / `HANDOFF_ACTOR_ROLE`) and to the `HANDOFF_REASON` its
+/// exhausted-ladder copy passes, so one operator query finds handoffs from
+/// BOTH copies of the contract. Duplicated rather than imported because
+/// `djinn-db` cannot depend on `djinn-coordinator`; the coordinator asserts the
+/// parity from its side.
+pub const PR_HANDOFF_ACTOR_ID: &str = "system";
+/// See [`PR_HANDOFF_ACTOR_ID`].
+pub const PR_HANDOFF_ACTOR_ROLE: &str = "respawn_guard";
+/// See [`PR_HANDOFF_ACTOR_ID`].
+pub const PR_HANDOFF_REASON: &str = "adjudication_ladder_exhausted_pr_handoff";
+
 /// Terminal-rung ceiling: `PlannerEscalation` rounds 1, 2 and 3 are permitted;
 /// the unchanged close of round 3 invokes exhausted ownership and round 4 is
 /// never created.
@@ -482,9 +495,10 @@ pub async fn apply_adjudication_child_close_tx(
             && !changed_by_adjudication
             && !already_owned(&at_close.status)
         {
-            let (destination, close_reason) = match has_open_unmerged_pr(tx, &source_id).await? {
+            let open_pr_url = has_open_unmerged_pr(tx, &source_id).await?;
+            let (destination, close_reason) = match open_pr_url {
                 // Owner: the PR poller (`poll_pr_review_tasks`).
-                Some(_pr_url) => ("pr_review", None),
+                Some(_) => ("pr_review", None),
                 // No poller required: terminal by contract.
                 None => ("closed", Some(TERMINAL_CLOSE_REASON_CLASS)),
             };
@@ -534,8 +548,31 @@ pub async fn apply_adjudication_child_close_tx(
             // branch through `respawn_guard::handoff_pr_to_poller`, which
             // writes a durable `pr_terminal_handoff` marker. Operator queries
             // key on that marker, so a DB-side handoff that skipped it was
-            // invisible to every one of them. Same event type, same shape.
+            // invisible to every one of them — and the DB copy is the one
+            // production takes for a planner-closed child, i.e. the marker most
+            // of those queries actually want.
+            //
+            // Byte-identical to the coordinator's, deliberately: same actor,
+            // role, reason and field set (`pr_url` and `head_sha` included), so
+            // ONE query finds both. The literals are duplicated because
+            // `djinn-db` cannot depend on `djinn-coordinator`;
+            // `crate::tests::direct_arbiter_routing` asserts the two agree from
+            // the coordinator side, which can see both.
             if destination == "pr_review" {
+                let head = sqlx::query_scalar::<_, Option<String>>(
+                    r#"SELECT COALESCE(
+                            (SELECT ta.github_head_sha FROM task_attempts ta
+                              WHERE ta.task_id = $1 AND ta.github_head_sha IS NOT NULL
+                              ORDER BY ta.created_at DESC LIMIT 1),
+                            (SELECT s.head_sha FROM task_pr_ci_snapshots s
+                              WHERE s.task_id = $1
+                              ORDER BY s.last_seen_at DESC LIMIT 1)
+                        )"#,
+                )
+                .bind(&source_id)
+                .fetch_optional(&mut **tx)
+                .await?
+                .flatten();
                 let marker_id = uuid::Uuid::now_v7().to_string();
                 sqlx::query(
                     "INSERT INTO activity_log (id, task_id, actor_id, actor_role, event_type, payload)
@@ -543,13 +580,15 @@ pub async fn apply_adjudication_child_close_tx(
                 )
                 .bind(&marker_id)
                 .bind(&source_id)
-                .bind("coordinator")
-                .bind("system")
+                .bind(PR_HANDOFF_ACTOR_ID)
+                .bind(PR_HANDOFF_ACTOR_ROLE)
                 .bind(
                     serde_json::json!({
                         "from_status": at_close.status,
                         "to_status": destination,
-                        "reason": LADDER_EXHAUSTED_CLOSE_REASON,
+                        "reason": PR_HANDOFF_REASON,
+                        "pr_url": open_pr_url,
+                        "head_sha": head,
                     })
                     .to_string(),
                 )

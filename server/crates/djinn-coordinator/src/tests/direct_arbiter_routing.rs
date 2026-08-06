@@ -27,6 +27,11 @@
 //! without changing the trigger must fail these.
 
 use super::*;
+use djinn_core::models::TransitionAction;
+use djinn_db::repositories::task::{
+    ADJUDICATION_OUTCOME_EVENT, LADDER_EXHAUSTED_CLOSE_REASON, SOURCE_CHANGED, SOURCE_UNCHANGED,
+    TERMINAL_CLOSE_REASON_CLASS, is_adjudication_child,
+};
 use djinn_db::repositories::task_arbitration::TaskArbitrationRepository;
 
 // ── Fixtures ────────────────────────────────────────────────────────────────
@@ -930,4 +935,740 @@ async fn only_held_remediation_kinds_survive() {
             "no surviving kind may carry the retired first-response label"
         );
     }
+}
+
+// ── AC7/AC8: the child-close contract, driven by its REAL producers ─────────
+//
+// Everything above this line either calls `apply_exhausted_ladder_ownership`
+// (the COORDINATOR-side copy of the contract) directly, or asserts a property
+// that never reaches a child close at all. The DB-side copy —
+// `djinn_db::repositories::task::apply_adjudication_child_close_tx`, which is
+// the one production actually takes when a planner closes an adjudication
+// child — had NO coverage in this crate: an audit made its entire body inert
+// and all 2092 lib tests here stayed green, because the only tests that
+// exercised it were its own djinn-db fixture tests, and that fixture calls
+// `record_adjudication_source_snapshot` itself and sets the source's statuses
+// by hand.
+//
+// Every one of the four defects found in this mechanism was "the fixture
+// agreed with itself while production did something different", and each one
+// turned on the SNAPSHOT-TIME STATUS a particular producer leaves behind. So
+// the tests below drive the real producers, three real escalation rounds each,
+// and close every round's child through `TaskRepository::transition` — the real
+// close path, the one that runs the transaction.
+//
+// What each test would still pass with the mechanism's body deleted is stated
+// on the test itself.
+
+/// Every `adjudication_outcome` payload written for the (source, child) pair.
+///
+/// Matched on `adjudication_child_id` rather than on position: `query_activity`
+/// orders by `created_at DESC` at millisecond resolution, and three rounds of a
+/// fast test genuinely tie.
+async fn outcome_for_child(
+    repo: &TaskRepository,
+    source_id: &str,
+    child_id: &str,
+) -> serde_json::Value {
+    let mut found: Vec<serde_json::Value> = repo
+        .query_activity(ActivityQuery {
+            task_id: Some(source_id.to_owned()),
+            event_type: Some(ADJUDICATION_OUTCOME_EVENT.to_owned()),
+            limit: 100,
+            ..ActivityQuery::default()
+        })
+        .await
+        .unwrap()
+        .into_iter()
+        .filter_map(|e| serde_json::from_str::<serde_json::Value>(&e.payload).ok())
+        .filter(|payload| payload["adjudication_child_id"] == child_id)
+        .collect();
+    assert_eq!(
+        found.len(),
+        1,
+        "exactly one adjudication_outcome event must exist for child {child_id} on source \
+         {source_id}; found {}",
+        found.len()
+    );
+    found.pop().expect("length asserted above")
+}
+
+/// Every durable `pr_terminal_handoff` marker on `task_id`. This is the marker
+/// operator queries key on to find work the exhausted ladder pushed back to the
+/// poller — the DB-side copy of the contract must write it, not just move the
+/// status column.
+async fn pr_terminal_handoffs(repo: &TaskRepository, task_id: &str) -> Vec<serde_json::Value> {
+    repo.query_activity(ActivityQuery {
+        task_id: Some(task_id.to_owned()),
+        event_type: Some("pr_terminal_handoff".to_owned()),
+        limit: 100,
+        ..ActivityQuery::default()
+    })
+    .await
+    .unwrap()
+    .into_iter()
+    .filter_map(|e| serde_json::from_str::<serde_json::Value>(&e.payload).ok())
+    .collect()
+}
+
+/// The one unresolved adjudication child currently holding `source_id`.
+///
+/// Derived from the durable blocker rows + the child's own label, exactly the
+/// way `planner_escalation_count_tx` derives the round number — so a producer
+/// that stopped labelling its child, or stopped linking it, fails here rather
+/// than silently dropping out of the ladder.
+async fn held_by_one_adjudication_child(repo: &TaskRepository, source_id: &str) -> String {
+    let mut open = Vec::new();
+    for blocker in repo.list_blockers(source_id).await.unwrap() {
+        let child = repo
+            .get(&blocker.task_id)
+            .await
+            .unwrap()
+            .expect("a blocker row must point at a real task");
+        if child.status != "closed" && is_adjudication_child(&child.labels) {
+            open.push(child.id);
+        }
+    }
+    assert_eq!(
+        open.len(),
+        1,
+        "the producer must leave the source held by exactly one unresolved adjudication child; \
+         found {open:?}"
+    );
+    open.pop().expect("length asserted above")
+}
+
+/// Close an adjudication child through the REAL close path.
+///
+/// `TaskRepository::transition` is where `apply_adjudication_child_close_tx`
+/// runs, in the child's own transaction. Nothing here pokes the source.
+async fn close_adjudication_child(repo: &TaskRepository, child_id: &str, rationale: &str) {
+    repo.transition(
+        child_id,
+        TransitionAction::Close,
+        "planner",
+        "planner",
+        Some(rationale),
+        None,
+    )
+    .await
+    .expect("the planner's close of an adjudication child must succeed");
+}
+
+/// Assert the non-terminal rounds: a child close that adjudicated nothing is
+/// coordinator scaffolding. It releases the source back to `open` and reports
+/// `source_unchanged`.
+///
+/// This is where defect instances 2 and 3 lived. The exclusion that makes a
+/// producer's `<snapshot status> -> open` park read as scaffolding was once
+/// narrowed to the two Lead-intervention statuses, which silently reinstated
+/// `source_changed` for every producer that snapshots from a PR status — and a
+/// `source_changed` round-3 close never invokes exhausted ownership at all.
+async fn assert_intermediate_round_released_the_source(
+    repo: &TaskRepository,
+    source_id: &str,
+    child_id: &str,
+    round: i64,
+    producer: &str,
+) {
+    let source = repo.get(source_id).await.unwrap().unwrap();
+    assert_eq!(
+        source.status, "open",
+        "{producer} round {round}: rounds below the ceiling release the source, they do not \
+         dispose of it"
+    );
+    assert_eq!(
+        source.close_reason, None,
+        "{producer} round {round}: a released source carries no terminal close reason"
+    );
+    let outcome = outcome_for_child(repo, source_id, child_id).await;
+    assert_eq!(
+        outcome["adjudication_outcome"], SOURCE_UNCHANGED,
+        "{producer} round {round}: closing the child, releasing its blocker and letting the next \
+         round open is scaffolding — the source's business disposition did not move"
+    );
+    assert_eq!(
+        outcome["terminal_rung_round"], round,
+        "{producer} round {round}: the round number is derived from the durable blocker rows"
+    );
+}
+
+/// Assert the terminal round for a source carrying an OPEN, UNMERGED PR: it
+/// lands in `pr_review` (the PR poller's queue) with the durable handoff marker,
+/// and the outcome event reports the handoff as a disposition change described
+/// by THIS transaction's own before/after pair.
+///
+/// `z8i8`/`zkas` are the incident: those sources exhausted the ladder with
+/// unmerged PRs and sat `open` — a status nothing scans — until a human moved
+/// them.
+///
+/// **Marker parity.** The two copies of this contract write the SAME
+/// `pr_terminal_handoff` event, byte for byte: same actor and role, the same
+/// `adjudication_ladder_exhausted_pr_handoff` reason, and the same `pr_url` /
+/// `head_sha` fields. They diverged at first — the DB copy wrote
+/// `actor_role = "system"`, the contractual sentence as its reason, and neither
+/// PR field — which meant an operator query keyed on the coordinator's reason
+/// string (exactly what
+/// `escalation_ceiling::ceiling_pr_handoff_is_invariant_across_pr_snapshot_observations`
+/// asserts) matched NO DB-side handoff, and the DB copy is the one production
+/// takes for a planner-closed child. The constants themselves are asserted
+/// equal by `both_pr_handoff_marker_writers_agree_on_actor_role_and_reason`;
+/// this asserts the row actually written carries them.
+async fn assert_terminal_round_handed_the_pr_to_the_poller(
+    repo: &TaskRepository,
+    source_id: &str,
+    child_id: &str,
+    producer: &str,
+) {
+    let source = repo.get(source_id).await.unwrap().unwrap();
+    assert_eq!(
+        source.status, "pr_review",
+        "{producer}: the spent ladder must hand an open unmerged PR to the poller, never leave \
+         the source `open` with no owner"
+    );
+    assert_eq!(
+        source.close_reason, None,
+        "{producer}: the PR-handoff branch does not terminate the source"
+    );
+
+    let outcome = outcome_for_child(repo, source_id, child_id).await;
+    assert_eq!(
+        outcome["adjudication_outcome"], SOURCE_CHANGED,
+        "{producer}: the ownership handoff IS a disposition change (outcome truth-table row 4)"
+    );
+    assert_eq!(
+        outcome["source_status_before"], "open",
+        "{producer}: the reported pair describes THIS transaction — the producer's own park had \
+         already landed the source at `open` before it ran"
+    );
+    assert_eq!(
+        outcome["source_status_after"], "pr_review",
+        "{producer}: ...and this transaction is what moved it to the poller"
+    );
+    assert_eq!(
+        outcome["terminal_rung_round"], MAX_AUTONOMOUS_ESCALATIONS,
+        "{producer}: the terminal rung is round {MAX_AUTONOMOUS_ESCALATIONS}"
+    );
+
+    let handoffs = pr_terminal_handoffs(repo, source_id).await;
+    assert_eq!(
+        handoffs.len(),
+        1,
+        "{producer}: exactly one durable pr_terminal_handoff marker — the operator query for \
+         ladder-exhausted PR work reads this row, not the status column"
+    );
+    assert_eq!(handoffs[0]["from_status"], "open", "{producer}");
+    assert_eq!(handoffs[0]["to_status"], "pr_review", "{producer}");
+    assert_eq!(
+        handoffs[0]["reason"],
+        djinn_db::repositories::task::PR_HANDOFF_REASON,
+        "{producer}: the marker must carry the same reason the coordinator copy writes, so both \
+         answer one query"
+    );
+}
+
+/// Assert the terminal round for a source with NO PR: terminal by contract,
+/// with the fixed-vocabulary class in the `close_reason` COLUMN and the
+/// contractual sentence on the timeline (which is where the coordinator-side
+/// copy puts it too, so one operator query finds both).
+async fn assert_terminal_round_closed_a_no_pr_source(
+    repo: &TaskRepository,
+    source_id: &str,
+    child_id: &str,
+    producer: &str,
+) {
+    let source = repo.get(source_id).await.unwrap().unwrap();
+    assert_eq!(
+        source.status, "closed",
+        "{producer}: no PR means no poller can own it — the ladder ends terminally"
+    );
+    assert_eq!(
+        source.close_reason.as_deref(),
+        Some(TERMINAL_CLOSE_REASON_CLASS),
+        "{producer}: the close_reason column carries the fixed vocabulary class"
+    );
+
+    let reasons: Vec<String> = repo
+        .query_activity(ActivityQuery {
+            task_id: Some(source_id.to_owned()),
+            event_type: Some("status_changed".to_owned()),
+            limit: 100,
+            ..ActivityQuery::default()
+        })
+        .await
+        .unwrap()
+        .into_iter()
+        .filter_map(|e| serde_json::from_str::<serde_json::Value>(&e.payload).ok())
+        .filter(|p| p["to_status"] == "closed")
+        .filter_map(|p| p["reason"].as_str().map(str::to_owned))
+        .collect();
+    assert!(
+        reasons.iter().any(|r| r == LADDER_EXHAUSTED_CLOSE_REASON),
+        "{producer}: the terminal disposition must be on the timeline with its exact contractual \
+         reason; got {reasons:?}"
+    );
+
+    let outcome = outcome_for_child(repo, source_id, child_id).await;
+    assert_eq!(
+        outcome["adjudication_outcome"], SOURCE_CHANGED,
+        "{producer}"
+    );
+    assert_eq!(outcome["source_status_before"], "open", "{producer}");
+    assert_eq!(outcome["source_status_after"], "closed", "{producer}");
+    assert!(
+        pr_terminal_handoffs(repo, source_id).await.is_empty(),
+        "{producer}: a source with no PR must NOT be advertised to the poller"
+    );
+}
+
+/// **AC7/AC8, producer 1: the loop-breaker / arbiter ceiling, PR-bearing.**
+///
+/// `escalate_to_planner_or_terminally_fail` is the no-human bottom of the
+/// ladder, reached from the dispatch rung and from the arbiter hold-cycle
+/// ceiling. It snapshots the source in whatever in-flight state the trigger
+/// caught it in — here the Lead-intervention hold the arbiter ceiling parks
+/// from — and then parks it `open` behind a fresh `planner-park-escalation`.
+///
+/// THREE real rounds are driven, and each round's child is closed through
+/// `TaskRepository::transition`. Nothing calls
+/// `apply_exhausted_ladder_ownership` (the coordinator-side copy); the round-3
+/// disposition below is produced entirely by the DB-side child-close
+/// transaction.
+///
+/// **With `apply_adjudication_child_close_tx`'s body made inert** (early
+/// `return Ok(0)`): rounds 1 and 2 lose their outcome events, so
+/// `outcome_for_child` fails first; and the round-3 source stays `open` with an
+/// unmerged PR and no owner — the exact `z8i8`/`zkas` stranding. What would
+/// STILL pass with the body deleted: everything about the producer itself — the
+/// three children are still created, still labelled, still linked as blockers,
+/// and the source is still parked `open` each round. That is precisely why the
+/// producer-side assertions alone were not enough.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn loop_breaker_three_rounds_hand_an_open_pr_source_to_the_poller() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+    let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+
+    let task = make_task_with_reopen_count(&db, &tx, 0).await;
+    repo.set_pr_url(&task.id, "https://github.com/o/r/pull/301")
+        .await
+        .unwrap();
+
+    let mut terminal_child = String::new();
+    for round in 1..=MAX_AUTONOMOUS_ESCALATIONS {
+        // The arbiter ceiling parks out of the Lead-intervention hold, so that
+        // is the status the producer snapshots. Staging it is the only fixture
+        // step; the escalation itself is the production call.
+        repo.set_status(&task.id, "in_lead_intervention")
+            .await
+            .unwrap();
+        let observed = repo.get(&task.id).await.unwrap().unwrap();
+
+        assert!(
+            actor
+                .escalate_to_planner_or_terminally_fail(
+                    &observed,
+                    &format!("loop-breaker round {round}: still not converging")
+                )
+                .await,
+            "round {round} is below the ceiling and must park behind a fresh escalation"
+        );
+        let child = held_by_one_adjudication_child(&repo, &task.id).await;
+
+        close_adjudication_child(&repo, &child, "planner reviewed; nothing to change").await;
+        if round < MAX_AUTONOMOUS_ESCALATIONS {
+            assert_intermediate_round_released_the_source(
+                &repo,
+                &task.id,
+                &child,
+                round,
+                "loop-breaker",
+            )
+            .await;
+        }
+        terminal_child = child;
+    }
+
+    assert_terminal_round_handed_the_pr_to_the_poller(
+        &repo,
+        &task.id,
+        &terminal_child,
+        "loop-breaker",
+    )
+    .await;
+    assert_eq!(
+        repo.list_blockers(&task.id).await.unwrap().len(),
+        MAX_AUTONOMOUS_ESCALATIONS as usize,
+        "the ladder ends at round {MAX_AUTONOMOUS_ESCALATIONS}: a fourth escalation is forbidden"
+    );
+}
+
+/// **AC7/AC8, producer 1: the loop-breaker / arbiter ceiling, NO PR.**
+///
+/// The other branch of the same producer. A source with no PR has no poller
+/// that could own it, so the spent ladder ends it terminally — and the
+/// contractual reason has to be matchable, because the operator query for
+/// stranded exhausted work keys on it.
+///
+/// **With the mechanism's body made inert**: the source stays `open` forever
+/// with three closed escalations against it and no disposition at all, and no
+/// outcome event is ever written. What would STILL pass: the producer's own
+/// contract — three children created and closed, the ceiling never exceeded.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn loop_breaker_three_rounds_terminally_close_a_no_pr_source() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+    let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+
+    // No `set_pr_url`: this source never opened one.
+    let task = make_task_with_reopen_count(&db, &tx, 0).await;
+    assert!(
+        task.pr_url.is_none(),
+        "fixture: the no-PR branch requires a source with no PR"
+    );
+
+    let mut terminal_child = String::new();
+    for round in 1..=MAX_AUTONOMOUS_ESCALATIONS {
+        // Reached from the dispatch rung, where the source is `open`: the park
+        // is a no-op and the snapshot status is `open` too. That makes this the
+        // one producer shape where the scaffolding EXCLUSION never fires and
+        // plain status equality carries the unchanged reading.
+        let observed = repo.get(&task.id).await.unwrap().unwrap();
+        assert_eq!(observed.status, "open", "round {round}");
+
+        assert!(
+            actor
+                .escalate_to_planner_or_terminally_fail(
+                    &observed,
+                    &format!("loop-breaker round {round}: dispatch dead end")
+                )
+                .await,
+            "round {round} is below the ceiling and must park behind a fresh escalation"
+        );
+        let child = held_by_one_adjudication_child(&repo, &task.id).await;
+
+        close_adjudication_child(&repo, &child, "planner reviewed; nothing to change").await;
+        if round < MAX_AUTONOMOUS_ESCALATIONS {
+            assert_intermediate_round_released_the_source(
+                &repo,
+                &task.id,
+                &child,
+                round,
+                "loop-breaker (no PR)",
+            )
+            .await;
+        }
+        terminal_child = child;
+    }
+
+    assert_terminal_round_closed_a_no_pr_source(
+        &repo,
+        &task.id,
+        &terminal_child,
+        "loop-breaker (no PR)",
+    )
+    .await;
+}
+
+/// **AC7/AC8, producer 2: the merge-method wedge.**
+///
+/// `poll_pr_review_tasks` escalates STRAIGHT OFF a `pr_review` row when the
+/// repository has rejected every merge method Djinn can attempt. This is the
+/// `z8i8`/`zkas` family itself and the producer that hid defect instances 2 and
+/// 3: its snapshot status is `pr_review`, so
+///
+/// - a scaffolding exclusion narrowed to the Lead-intervention pair made its
+///   `pr_review -> open` park read `source_changed`, and a changed round-3 close
+///   never invokes exhausted ownership; and
+/// - reporting the CREATION snapshot as `source_status_before` made the terminal
+///   handoff read `pr_review -> pr_review` — no movement — beside a
+///   `source_changed` outcome.
+///
+/// Both are asserted below: rounds 1/2 must read `source_unchanged`, and round
+/// 3 must report `open -> pr_review`.
+///
+/// **Scope note (no mock).** The GitHub half of this producer — the merge
+/// attempt, `is_merge_method_not_allowed`, and the failure counter that reaches
+/// `MERGE_METHOD_NOT_ALLOWED_ESCALATION_THRESHOLD` — needs a live
+/// `GitHubApiClient` resolved from a project installation, and cannot be driven
+/// from a test without a fake that would bypass the very thing under test. What
+/// IS driven here is everything downstream of that decision and everything the
+/// child-close contract can see: the real escalation entry point the wedge
+/// calls, invoked with a source loaded from a real `pr_review` row, which is the
+/// only property of this producer the mechanism reads.
+///
+/// **With the mechanism's body made inert**: the round-1 `outcome_for_child`
+/// lookup fails, and the round-3 source sits `open` with an unmergeable PR
+/// nobody polls. What would STILL pass: the escalation ladder, the blockers, the
+/// parks — the producer is entirely healthy in both worlds.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn merge_method_wedge_three_rounds_hand_the_pr_row_back_to_the_poller() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+    let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+
+    let task = make_task_with_reopen_count(&db, &tx, 0).await;
+    repo.set_pr_url(&task.id, "https://github.com/o/r/pull/302")
+        .await
+        .unwrap();
+
+    let mut terminal_child = String::new();
+    for round in 1..=MAX_AUTONOMOUS_ESCALATIONS {
+        // `poll_pr_review_tasks` iterates `list_by_status("pr_review")`, so the
+        // task it hands the escalation is always a `pr_review` row.
+        repo.set_status(&task.id, "pr_review").await.unwrap();
+        let observed = repo.get(&task.id).await.unwrap().unwrap();
+        assert_eq!(
+            observed.status, "pr_review",
+            "round {round}: the merge-method wedge escalates off a pr_review row"
+        );
+
+        assert!(
+            actor
+                .escalate_to_planner_or_terminally_fail(
+                    &observed,
+                    &format!(
+                        "PR #302 cannot be merged: the repository rejected every merge method \
+                         Djinn attempted (squash / merge-commit / rebase) as \"not allowed\" \
+                         (round {round})."
+                    )
+                )
+                .await,
+            "round {round} is below the ceiling and must park behind a fresh escalation"
+        );
+        let child = held_by_one_adjudication_child(&repo, &task.id).await;
+
+        close_adjudication_child(&repo, &child, "planner cannot fix repo merge settings").await;
+        if round < MAX_AUTONOMOUS_ESCALATIONS {
+            assert_intermediate_round_released_the_source(
+                &repo,
+                &task.id,
+                &child,
+                round,
+                "merge-method wedge",
+            )
+            .await;
+        }
+        terminal_child = child;
+    }
+
+    assert_terminal_round_handed_the_pr_to_the_poller(
+        &repo,
+        &task.id,
+        &terminal_child,
+        "merge-method wedge",
+    )
+    .await;
+}
+
+/// **AC7/AC8, producer 3: the CI-loop park.**
+///
+/// `escalate_ci_failure_and_park` is the PR poller's non-converging-CI rung. It
+/// terminalizes the in-flight worker attempt as `PrCiFailed`/`Reopened` FIRST
+/// and then routes into the same escalation ladder, so the source it snapshots
+/// is the red `pr_draft` row the poller was looking at. That attempt
+/// terminalization is a real production write this test drives, and it is the
+/// reason this producer needs its own case rather than sharing the loop-breaker
+/// one: it reaches the ladder with different durable state around the source.
+///
+/// **With the mechanism's body made inert**: the round-1/2 outcome lookups fail
+/// and the round-3 source keeps its red PR with no owner. What would STILL pass:
+/// the CI escalation comment, the attempt terminalization, the blocker and the
+/// park — every assertion the existing `escalate_ci_failure_and_park` tests in
+/// `tests::intervention` make.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ci_loop_park_three_rounds_hand_the_red_pr_to_the_poller() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+    let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+
+    const PR_URL: &str = "https://github.com/o/r/pull/303";
+    let task = make_task_with_reopen_count(&db, &tx, 0).await;
+    repo.set_pr_url(&task.id, PR_URL).await.unwrap();
+
+    let mut terminal_child = String::new();
+    for round in 1..=MAX_AUTONOMOUS_ESCALATIONS {
+        // The CI-loop park is reached with the source on its draft PR.
+        repo.set_status(&task.id, "pr_draft").await.unwrap();
+        let observed = repo.get(&task.id).await.unwrap().unwrap();
+
+        actor
+            .escalate_ci_failure_and_park(
+                &observed,
+                PR_URL,
+                &format!(
+                    "Required CI keeps failing on the same fingerprint across round {round}; the \
+                     worker is not converging."
+                ),
+                &["**Failed job:** server-clippy (failure)".to_owned()],
+            )
+            .await;
+        let child = held_by_one_adjudication_child(&repo, &task.id).await;
+
+        close_adjudication_child(&repo, &child, "planner reviewed the CI loop; no rescope").await;
+        if round < MAX_AUTONOMOUS_ESCALATIONS {
+            assert_intermediate_round_released_the_source(
+                &repo,
+                &task.id,
+                &child,
+                round,
+                "CI-loop park",
+            )
+            .await;
+        }
+        terminal_child = child;
+    }
+
+    assert_terminal_round_handed_the_pr_to_the_poller(
+        &repo,
+        &task.id,
+        &terminal_child,
+        "CI-loop park",
+    )
+    .await;
+}
+
+/// Build a `Held` tripwire gate result from a migration change (an
+/// enforcement-on rule) for the given task/project/head.
+///
+/// A local copy of the fixture in `tests::tripwire_planner_escalation` — that
+/// module's helper is private to it, and duplicating six lines is cheaper than
+/// widening its visibility.
+fn held_migration_gate(
+    task_id: &str,
+    project_id: &str,
+    head_sha: &str,
+) -> crate::pr_poller::tripwire_gate::TripwireGateResult {
+    let pr_files = vec![djinn_provider::github_api::PrFile {
+        sha: "deadbeef".to_owned(),
+        filename: "migrations/20260805_add_column.sql".to_owned(),
+        status: "added".to_owned(),
+        additions: 12,
+        deletions: 0,
+        changes: 12,
+        patch: None,
+    }];
+    let result =
+        crate::pr_poller::tripwire_gate::run_gate(&crate::tripwires::TripwireEvaluationInput {
+            task_id: task_id.to_owned(),
+            project_id: project_id.to_owned(),
+            pr_number: Some(4343),
+            head_sha: head_sha.to_owned(),
+            policy: crate::tripwires::TripwirePolicy::default(),
+            allowlist_revision: None,
+            changed_files: crate::pr_poller::tripwire_gate::convert_pr_files(&pr_files),
+        });
+    assert_eq!(
+        result.decision.outcome,
+        crate::tripwires::GateOutcome::Held,
+        "fixture must produce a Held gate"
+    );
+    result
+}
+
+/// **AC7/AC8, producer 4: the tripwire human-adjudication escape hatch.**
+///
+/// `create_tripwire_hold_with_policy`, given a policy whose rule adjudication is
+/// `Human`, takes the legacy path: a `human-review-hold` child plus a park out
+/// of `pr_draft`. That child carries a DIFFERENT label from every other producer
+/// here, and `is_adjudication_child` / `planner_escalation_count_tx` are the only
+/// things that make it participate in the terminal-rung round count at all — so
+/// this is the one producer whose rounds would silently never reach the ceiling
+/// if the label discrimination regressed.
+///
+/// It also snapshots from `pr_draft`, the second PR-status producer that the
+/// Lead-intervention-only exclusion left stranded.
+///
+/// **With the mechanism's body made inert**: a source whose tripwire hold a
+/// human declined three times keeps its held draft PR and sits `open`. What
+/// would STILL pass: `human_adjudicated_tripwire_hold_keeps_legacy_human_review_path`
+/// and `..._releases_the_hold_on_close` — both assert the hold child and the
+/// release, neither of which this mechanism writes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn human_adjudicated_tripwire_hold_three_rounds_reaches_the_exhausted_ladder() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+    let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+
+    let task = make_task_with_reopen_count(&db, &tx, 0).await;
+    repo.set_pr_url(&task.id, "https://github.com/o/r/pull/304")
+        .await
+        .unwrap();
+
+    // The operator opted the migration rule into human adjudication.
+    let mut policy = crate::tripwires::TripwirePolicy::default();
+    policy.migration.adjudication = crate::tripwires::Adjudication::Human;
+
+    let mut terminal_child = String::new();
+    for round in 1..=MAX_AUTONOMOUS_ESCALATIONS {
+        // Each round is a fresh push: a new held head on the draft PR.
+        let head = format!("head-tripwire-round-{round}-000000000000");
+        repo.set_status(&task.id, "pr_draft").await.unwrap();
+        let observed = repo.get(&task.id).await.unwrap().unwrap();
+        let gate = held_migration_gate(&observed.id, &observed.project_id, &head);
+
+        actor
+            .create_tripwire_hold_with_policy(&observed, &gate, &head, policy.clone())
+            .await;
+        let child = held_by_one_adjudication_child(&repo, &task.id).await;
+        let child_task = repo.get(&child).await.unwrap().unwrap();
+        assert!(
+            child_task.labels.contains("human-review-hold"),
+            "round {round}: the human escape hatch must take the legacy path; labels={}",
+            child_task.labels
+        );
+
+        close_adjudication_child(&repo, &child, "human reviewed the migration; no change").await;
+        if round < MAX_AUTONOMOUS_ESCALATIONS {
+            assert_intermediate_round_released_the_source(
+                &repo,
+                &task.id,
+                &child,
+                round,
+                "tripwire human hatch",
+            )
+            .await;
+        }
+        terminal_child = child;
+    }
+
+    assert_terminal_round_handed_the_pr_to_the_poller(
+        &repo,
+        &task.id,
+        &terminal_child,
+        "tripwire human hatch",
+    )
+    .await;
+}
+
+/// Both copies of the exhausted-ladder PR handoff must write the SAME durable
+/// marker, or an operator query finds only one of them — and the one
+/// production takes for a planner-closed child is the DB copy, i.e. the one
+/// most such queries actually want.
+///
+/// `djinn-db` cannot depend on `djinn-coordinator`, so its constants are
+/// duplicated literals. This is the only place that can see both, so this is
+/// where the parity is asserted. It would still pass if the marker were never
+/// written; that the DB copy writes it is proven by the producer-level tests
+/// above, which read the payload back.
+#[test]
+fn both_pr_handoff_marker_writers_agree_on_actor_role_and_reason() {
+    assert_eq!(
+        djinn_db::repositories::task::PR_HANDOFF_ACTOR_ID,
+        crate::dispatch::respawn_guard::HANDOFF_ACTOR_ID,
+    );
+    assert_eq!(
+        djinn_db::repositories::task::PR_HANDOFF_ACTOR_ROLE,
+        crate::dispatch::respawn_guard::HANDOFF_ACTOR_ROLE,
+    );
+    assert_eq!(
+        djinn_db::repositories::task::PR_HANDOFF_REASON,
+        "adjudication_ladder_exhausted_pr_handoff",
+        "the reason string is what `escalation_ceiling` and operator queries match on"
+    );
 }
