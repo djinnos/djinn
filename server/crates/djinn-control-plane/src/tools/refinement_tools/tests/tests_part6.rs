@@ -77,8 +77,9 @@ async fn cross_proposal_judge_task_rejected() {
 
     let error = resp.get("error").and_then(|v| v.as_str()).unwrap();
     assert!(
-        error.contains("no active Judge task"),
-        "should mention no Judge task for this proposal: {error}"
+        error
+            .contains("no active Adversary or Judge task in flight for this proposal's refinement"),
+        "should mention no Adversary or Judge authority task for this proposal: {error}"
     );
     assert!(
         !resp
