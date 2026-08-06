@@ -734,6 +734,11 @@ async fn i3mv_rotation_delegates_to_attempt_session_model_lookup() {
         submission_pending_review: false,
         latest_submission_at: None,
         most_recent_reopen_class: djinn_core::models::ReopenClass::Other,
+        // 4etb: the epoch these attempts were measured against. Rotation reads
+        // `non_attempt_models`, so the floor is inert here — but it is now a
+        // required field, and a fixture that omitted it would not compile.
+        evidence_floor: Some("2026-08-06T00:00:00.000Z".to_string()),
+        qualifying_submission_count: 0,
     };
 
     let excluded = history.rotation_excluded_models();
@@ -759,6 +764,11 @@ async fn i3mv_rotation_delegates_to_attempt_session_model_lookup() {
         submission_pending_review: false,
         latest_submission_at: None,
         most_recent_reopen_class: djinn_core::models::ReopenClass::Other,
+        // 4etb: the epoch these attempts were measured against. Rotation reads
+        // `non_attempt_models`, so the floor is inert here — but it is now a
+        // required field, and a fixture that omitted it would not compile.
+        evidence_floor: Some("2026-08-06T00:00:00.000Z".to_string()),
+        qualifying_submission_count: 0,
     };
     let excluded2 = history_with_fallback.rotation_excluded_models();
     assert_eq!(

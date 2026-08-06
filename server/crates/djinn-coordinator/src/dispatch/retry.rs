@@ -1197,8 +1197,8 @@ impl CoordinatorActor {
                 _ => {
                     // review_rejected / other quality strikes keep the existing AC phrasing.
                     format!(
-                        "The post-intervention remediation WAS attempted — at least one session \
-                         submitted work after the planner reshaped the scope — but the acceptance \
+                        "The remediation WAS attempted — at least one session submitted work at \
+                         or after the current escalation evidence epoch — but the acceptance \
                          criteria still did not pass, so re-dispatching would only loop again.{skip_note}"
                     )
                 }
@@ -1234,7 +1234,7 @@ impl CoordinatorActor {
                 )
             };
             format!(
-                "{} post-intervention session(s) terminated pre-submission across models {} — \
+                "{} session(s) since the escalation evidence epoch terminated pre-submission across models {} — \
                  the remediation never converged despite forced model rotation, so re-dispatching \
                  would only loop again.{infra_note}",
                 history.non_attempt_session_labels.len(),

@@ -1456,6 +1456,12 @@ mod escalation_ceiling;
 #[cfg(test)]
 mod hold_cycle_ceiling;
 
+/// Proposal 4etb: rung-1 planner remediation retired; direct arbiter routing,
+/// the canonical escalation evidence epoch, bounded promotion, and the
+/// exhausted-ladder ownership contract.
+#[cfg(test)]
+mod direct_arbiter_routing;
+
 #[cfg(test)]
 mod incarnation_lease_liveness;
 

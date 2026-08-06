@@ -97,19 +97,22 @@ async fn hold_cycle_ceiling_markers(
     .collect()
 }
 
-/// Build a task sitting exactly on the second-strike rung
-/// (`intervention_count == MAX_PLANNER_INTERVENTIONS`).
+/// Build a task sitting on the arbiter rung.
+///
+/// 4etb: the rung is now UNCONDITIONAL — rung 1 is retired, so there is no
+/// `intervention_count >= MAX_PLANNER_INTERVENTIONS` threshold to reach and no
+/// counter to assert. A task that has crossed the quality-strike threshold IS
+/// on the rung. The fixture deliberately asserts `intervention_count == 0` so
+/// that a regression reinstating a counter gate would fail here rather than
+/// silently skip the whole gy53 ceiling suite.
 async fn task_on_the_park_rung(
     db: &Database,
     tx: &broadcast::Sender<DjinnEventEnvelope>,
 ) -> djinn_core::models::Task {
-    let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(tx));
     let task = make_task_with_reopen_count(db, tx, REOPEN_INTERVENTION_THRESHOLD).await;
-    repo.reset_intervention_counters(&task.id).await.unwrap();
-    let task = repo.get(&task.id).await.unwrap().unwrap();
     assert_eq!(
-        task.intervention_count, MAX_PLANNER_INTERVENTIONS,
-        "fixture must sit exactly on the second-strike rung"
+        task.intervention_count, 0,
+        "4etb: the arbiter rung must be reachable with a ZERO intervention_count"
     );
     task
 }

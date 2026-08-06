@@ -3382,6 +3382,7 @@ mod inflight_ledger_tests {
 
     fn task(project_id: &str, creator: Option<&str>) -> Task {
         Task {
+            escalation_evidence_at: None,
             id: "task-uuid".to_owned(),
             project_id: project_id.to_owned(),
             short_id: "task".to_owned(),
