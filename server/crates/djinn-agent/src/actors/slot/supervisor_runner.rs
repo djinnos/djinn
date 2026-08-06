@@ -3316,7 +3316,7 @@ mod tests {
             task_run_id: id.into(),
             container_id: None,
             pod_ref: None,
-            started_at: std::time::SystemTime::now(),
+            started_at: std::time::SystemTime::UNIX_EPOCH,
             job_uid: None,
             launcher_authority_protocol: None,
         }
