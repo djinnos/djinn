@@ -862,7 +862,10 @@ impl CoordinatorActor {
             epoch = repo.escalation_evidence_at(&task.id).await.ok().flatten();
         }
         if epoch.is_none() {
-            match repo.backfill_legacy_escalation_evidence_epoch(&task.id).await {
+            match repo
+                .backfill_legacy_escalation_evidence_epoch(&task.id)
+                .await
+            {
                 Ok(persisted @ Some(_)) => {
                     tracing::info!(
                         task_id = %task.short_id,
@@ -1395,7 +1398,10 @@ impl CoordinatorActor {
         let excluded_models = history.rotation_excluded_models();
 
         if let Some(record) = unconsumed.as_ref() {
-            match arbiter_repo.mark_consumed(&task.id, record.hold_cycle).await {
+            match arbiter_repo
+                .mark_consumed(&task.id, record.hold_cycle)
+                .await
+            {
                 Ok(true) => {}
                 Ok(false) => {
                     // Already consumed by an earlier tick — this delivery is a
@@ -2401,7 +2407,6 @@ impl CoordinatorActor {
         }
     }
 
-
     /// Emit the parked-task telemetry metric with strike-class breakdown labels.
     ///
     /// Fetches the task's reopen ledger from the DB to derive
@@ -2867,7 +2872,10 @@ impl CoordinatorActor {
             _ => return false,
         };
         // Already-owned states are preserved verbatim.
-        if matches!(latest.status.as_str(), "closed" | "superseded" | "pr_review") {
+        if matches!(
+            latest.status.as_str(),
+            "closed" | "superseded" | "pr_review"
+        ) {
             tracing::info!(
                 task_id = %latest.short_id,
                 status = %latest.status,

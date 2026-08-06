@@ -232,12 +232,10 @@ async fn has_open_unmerged_pr(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     task_id: &str,
 ) -> Result<Option<String>> {
-    let row = sqlx::query(
-        "SELECT pr_url, merge_commit_sha FROM tasks WHERE id = $1",
-    )
-    .bind(task_id)
-    .fetch_optional(&mut **tx)
-    .await?;
+    let row = sqlx::query("SELECT pr_url, merge_commit_sha FROM tasks WHERE id = $1")
+        .bind(task_id)
+        .fetch_optional(&mut **tx)
+        .await?;
     let Some(row) = row else { return Ok(None) };
     let pr_url: Option<String> = row.get("pr_url");
     let merge_commit_sha: Option<String> = row.get("merge_commit_sha");

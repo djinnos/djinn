@@ -234,11 +234,9 @@ impl TaskArbitrationRepository {
         self.db.ensure_initialized().await?;
         let mut tx = self.db.pool().begin().await?;
 
-        let epoch = crate::repositories::task::stamp_escalation_evidence_epoch_tx(
-            &mut tx,
-            params.task_id,
-        )
-        .await?;
+        let epoch =
+            crate::repositories::task::stamp_escalation_evidence_epoch_tx(&mut tx, params.task_id)
+                .await?;
 
         // `ON CONFLICT DO NOTHING` rather than letting the unique violation
         // fire: inside a transaction a constraint error aborts the whole

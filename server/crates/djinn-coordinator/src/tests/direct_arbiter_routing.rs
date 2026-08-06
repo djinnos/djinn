@@ -65,10 +65,7 @@ async fn arbitration_rows(db: &Database, task_id: &str) -> Vec<i32> {
     cycles
 }
 
-async fn arbiter_dispatch_payloads(
-    repo: &TaskRepository,
-    task_id: &str,
-) -> Vec<serde_json::Value> {
+async fn arbiter_dispatch_payloads(repo: &TaskRepository, task_id: &str) -> Vec<serde_json::Value> {
     repo.query_activity(ActivityQuery {
         task_id: Some(task_id.to_owned()),
         event_type: Some(ARBITER_DISPATCHED_MARKER.to_string()),
@@ -111,7 +108,10 @@ async fn first_trigger_routes_directly_to_the_arbiter_and_stamps_the_epoch() {
     let handled = actor
         .route_arbiter_adjudication(&task, "worker", "trigger A: quality strikes", None, 5)
         .await;
-    assert!(handled, "the first trigger must be handled by the arbiter rung");
+    assert!(
+        handled,
+        "the first trigger must be handled by the arbiter rung"
+    );
 
     let after = repo.get(&task.id).await.unwrap().unwrap();
     let epoch = after
@@ -338,11 +338,10 @@ async fn legacy_pending_escalation_persists_its_fallback_epoch_once() {
         "the legacy fixture must start with no epoch"
     );
 
-    let floor = actor
-        .canonical_evidence_floor(&task)
-        .await
-        .expect("a legacy pending escalation must get the bounded fallback, never \
-                 an unbounded-history read");
+    let floor = actor.canonical_evidence_floor(&task).await.expect(
+        "a legacy pending escalation must get the bounded fallback, never \
+                 an unbounded-history read",
+    );
 
     let persisted = repo
         .escalation_evidence_at(&task.id)
@@ -411,7 +410,10 @@ async fn promotion_opens_rows_0_1_2_then_one_final_row_3_and_never_row_4() {
         .unwrap()
         .expect("prospective cycle 3 opens the one-shot final arbiter");
     assert_eq!(
-        final_row.dossier.as_ref().and_then(|d| d["final_disposition"].as_bool()),
+        final_row
+            .dossier
+            .as_ref()
+            .and_then(|d| d["final_disposition"].as_bool()),
         Some(true),
         "row 3 must be dispatched as the FINAL disposition, not an ordinary cycle"
     );
@@ -508,9 +510,7 @@ async fn exhausted_ladder_force_closes_a_no_pr_source_with_the_contractual_reaso
         .next()
         .expect("the terminal close must carry a reason");
     assert!(
-        reason_text.starts_with(
-            djinn_db::repositories::task::LADDER_EXHAUSTED_CLOSE_REASON
-        ),
+        reason_text.starts_with(djinn_db::repositories::task::LADDER_EXHAUSTED_CLOSE_REASON),
         "the contractual reason must be the PREFIX so operator queries match it; \
          got {reason_text}"
     );
@@ -574,7 +574,11 @@ async fn only_held_remediation_kinds_survive() {
             .await;
 
         let labels = remediation_child_labels(&repo, &source.id).await;
-        assert_eq!(labels.len(), 1, "{kind:?} must create exactly one held child");
+        assert_eq!(
+            labels.len(),
+            1,
+            "{kind:?} must create exactly one held child"
+        );
         assert!(
             labels[0].contains(expected_label),
             "{kind:?} must be labelled {expected_label}; got {}",

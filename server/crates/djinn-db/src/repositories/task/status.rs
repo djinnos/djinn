@@ -30,15 +30,13 @@ impl TaskRepository {
     /// 4etb: read the canonical evidence epoch without writing.
     pub async fn escalation_evidence_at(&self, task_id: &str) -> Result<Option<String>> {
         self.db.ensure_initialized().await?;
-        Ok(
-            sqlx::query_scalar::<_, Option<String>>(
-                "SELECT escalation_evidence_at FROM tasks WHERE id = $1",
-            )
-            .bind(task_id)
-            .fetch_optional(self.db.pool())
-            .await?
-            .flatten(),
+        Ok(sqlx::query_scalar::<_, Option<String>>(
+            "SELECT escalation_evidence_at FROM tasks WHERE id = $1",
         )
+        .bind(task_id)
+        .fetch_optional(self.db.pool())
+        .await?
+        .flatten())
     }
 
     /// 4etb: clear the evidence epoch once an adjudication clears.
@@ -115,15 +113,13 @@ pub async fn stamp_escalation_evidence_epoch_tx(
     .bind(task_id)
     .execute(&mut **tx)
     .await?;
-    Ok(
-        sqlx::query_scalar::<_, Option<String>>(
-            "SELECT escalation_evidence_at FROM tasks WHERE id = $1",
-        )
-        .bind(task_id)
-        .fetch_optional(&mut **tx)
-        .await?
-        .flatten(),
+    Ok(sqlx::query_scalar::<_, Option<String>>(
+        "SELECT escalation_evidence_at FROM tasks WHERE id = $1",
     )
+    .bind(task_id)
+    .fetch_optional(&mut **tx)
+    .await?
+    .flatten())
 }
 
 impl TaskRepository {

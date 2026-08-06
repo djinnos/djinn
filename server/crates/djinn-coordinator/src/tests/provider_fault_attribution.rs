@@ -115,9 +115,7 @@ async fn three_transient_provider_faults_route_no_planner_remediation() {
     replay_failed_reappearances(&mut actor, &task.id, "reviewer", TRANSIENT, passes).await;
 
     assert!(
-        arbiter_dispatch_markers(&repo, &task.id)
-            .await
-            .is_empty(),
+        arbiter_dispatch_markers(&repo, &task.id).await.is_empty(),
         "a run of transient provider faults must never route a planner-remediation \
          intervention — the provider failed, the task did not"
     );
@@ -185,9 +183,7 @@ async fn request_attributable_provider_failures_still_escalate_at_threshold() {
         "each request-attributable failure advances the provider-failure streak"
     );
     assert!(
-        arbiter_dispatch_markers(&repo, &task.id)
-            .await
-            .is_empty(),
+        arbiter_dispatch_markers(&repo, &task.id).await.is_empty(),
         "below the threshold nothing is routed"
     );
 
@@ -347,9 +343,7 @@ async fn auto_disabled_model_breaker_blocks_the_escalation() {
     replay_failed_reappearances(&mut actor, &task.id, "reviewer", REQUEST_FAULT, passes).await;
 
     assert!(
-        arbiter_dispatch_markers(&repo, &task.id)
-            .await
-            .is_empty(),
+        arbiter_dispatch_markers(&repo, &task.id).await.is_empty(),
         "a tripped model-wide breaker is evidence the MODEL is at fault; the task must not be \
          escalated over it"
     );

@@ -10,6 +10,7 @@ use djinn_core::models::{
 };
 
 mod activity;
+mod adjudication_close;
 mod blockers;
 mod board_health;
 mod board_health_dispatch_gate;
@@ -20,7 +21,6 @@ mod generation;
 mod parent_disposition;
 mod queries;
 mod reads;
-mod adjudication_close;
 mod status;
 mod writes;
 pub use writes::EffectiveCreatorProvenance;
@@ -33,20 +33,20 @@ pub(crate) use writes::{
 
 // Re-export parent-disposition types so `EpicRepository::close` can
 // construct the scope and inspect the classification plan.
-pub use parent_disposition::{
-    ChildDisposition, DispositionCounts, DispositionFinding, DispositionPlan, DispositionScope,
-    DoctorRepairOutcome, apply_doctor_repair_tx, apply_parent_disposition_tx, classify_child_tx,
-};
 pub use adjudication_close::{
     ADJUDICATION_OUTCOME_EVENT, LADDER_EXHAUSTED_CLOSE_REASON, MAX_AUTONOMOUS_ESCALATIONS,
     SOURCE_CHANGED, SOURCE_UNCHANGED, apply_adjudication_child_close_tx, is_adjudication_child,
     planner_escalation_count_tx, record_adjudication_source_snapshot,
 };
-pub use status::stamp_escalation_evidence_epoch_tx;
+pub use parent_disposition::{
+    ChildDisposition, DispositionCounts, DispositionFinding, DispositionPlan, DispositionScope,
+    DoctorRepairOutcome, apply_doctor_repair_tx, apply_parent_disposition_tx, classify_child_tx,
+};
 pub use queries::{
     BOARD_HEALTH_MISMATCH_PAGE_SIZE, BoardHealthMismatchCandidate, BoardHealthMismatchPage,
     BoardHealthMismatchScanState, evaluate_board_health_mismatch_candidate,
 };
+pub use status::stamp_escalation_evidence_epoch_tx;
 
 // ── Query / result types ──────────────────────────────────────────────────────
 

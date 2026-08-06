@@ -1392,10 +1392,7 @@ async fn park_redispatch_markers(repo: &TaskRepository, task_id: &str) -> Vec<se
 /// exists. `arbiter_dispatched` is the side effect the coordinator writes when
 /// a trigger reaches the forensic arbiter — the mechanism these tests are
 /// actually asserting.
-async fn arbiter_dispatch_markers(
-    repo: &TaskRepository,
-    task_id: &str,
-) -> Vec<serde_json::Value> {
+async fn arbiter_dispatch_markers(repo: &TaskRepository, task_id: &str) -> Vec<serde_json::Value> {
     repo.query_activity(ActivityQuery {
         task_id: Some(task_id.to_owned()),
         event_type: Some(ARBITER_DISPATCHED_MARKER.to_string()),

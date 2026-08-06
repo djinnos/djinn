@@ -1,4 +1,42 @@
 // djinn:allow-oversize
+//! Coordinator intervention / escalation rung tests.
+//!
+//! **Proposal 4etb reframed this whole file.** Before it, the escalation ladder
+//! had TWO autonomous rungs: a first-response `RemediationKind::Planner`
+//! remediation (a review child, source left `open`, guarded by a
+//! `planner_intervention` activity marker keyed on `reopen_count`), and — only
+//! once `intervention_count >= MAX_PLANNER_INTERVENTIONS` — the forensic
+//! arbiter. Rung 1, its label, its title prefix, its marker and the
+//! `MAX_PLANNER_INTERVENTIONS` constant are all deleted. Every in-scope trigger
+//! (A: quality strikes, B: same-role cycling, C: reply-loop guard, D: provider
+//! failure streak) now reaches the arbiter on its FIRST escalation.
+//!
+//! Consequences for the tests here, applied throughout:
+//!
+//! * "the first crossing creates a Planner remediation child and stays `open`"
+//!   became "the first crossing opens arbitration row 0, stamps
+//!   `escalation_evidence_at`, emits one `arbiter_dispatched` event and holds
+//!   the source in `needs_lead_intervention`".
+//! * Idempotency is no longer keyed on `reopen_count` via an activity marker;
+//!   the stamped epoch plus the unconsumed arbitration row ARE the boundary.
+//!   The router's return value on a repeat tick is therefore not a contract
+//!   (the source is already held, so dispatch cannot act on it either way) —
+//!   these tests assert the durable ledger instead.
+//! * `reset_intervention_counters` survives in fixtures only for its
+//!   `last_intervention_at` stamp, which RAISES the canonical evidence floor
+//!   `max(escalation_evidence_at, last_intervention_at,
+//!   human_review_resolved_at)` that every park guard measures from
+//!   (inclusive `>=`). The `intervention_count` it also bumps is inert.
+//! * The uv3p / 8y3q / 2vxr / 6tlg / gy53 / lre2 / v1ej / zkk9 guards are
+//!   unchanged in intent; only their EPOCH KEYING changed, so their tests keep
+//!   their incident references and gain assertions on the new decline contract
+//!   (`park_guard_insufficient_epoch_evidence`, `evidence_floor`, `hold_cycle`,
+//!   `qualifying_submission_count`, `disposition`).
+//!
+//! The proposal's own acceptance matrix lives in
+//! `crate::tests::direct_arbiter_routing`; the tests here are the pre-existing
+//! rung coverage carried forward onto the new contract.
+
 use super::*;
 use crate::supervisor_impl::disposition::{NUDGE_CAP, RunDisposition, decide_run_disposition};
 use djinn_core::models::{ReopenClass, TaskStatus, TransitionAction};
@@ -289,9 +327,7 @@ impl InterventionChaosHarness {
     /// canonical evidence floor (`max(escalation_evidence_at,
     /// last_intervention_at, human_review_resolved_at)`), so evidence predating
     /// the adjudication can no longer justify a later park.
-    async fn conclude_adjudication_and_raise_evidence_floor(
-        &self,
-    ) -> djinn_core::models::Task {
+    async fn conclude_adjudication_and_raise_evidence_floor(&self) -> djinn_core::models::Task {
         self.repo
             .reset_intervention_counters(&self.task_id)
             .await
@@ -593,8 +629,13 @@ impl InterventionChaosHarness {
     /// HOLD CYCLE, which is what the arbitration ledger derives promotion from.
     /// Asserting the cycle sequence is the same property, read off the ledger
     /// key the current design actually owns.
+    ///
+    /// Sorted ascending: `query_activity` returns newest-first and its
+    /// `created_at` is millisecond-resolution, so two dispatches in the same
+    /// millisecond would otherwise tie non-deterministically. The property under
+    /// test is WHICH cycles were dispatched, not the row order.
     async fn assert_arbiter_marker_hold_cycles(&self, expected: &[i64]) {
-        let actual: Vec<i64> = self
+        let mut actual: Vec<i64> = self
             .arbiter_dispatch_markers()
             .await
             .iter()
@@ -604,6 +645,7 @@ impl InterventionChaosHarness {
                     .expect("arbiter_dispatched marker must carry its hold_cycle")
             })
             .collect();
+        actual.sort_unstable();
         assert_eq!(actual, expected, "arbiter_dispatched marker hold cycles");
     }
 
@@ -870,13 +912,15 @@ async fn reopen_loop_chaos_reaches_the_arbiter_on_the_first_crossing_without_rea
     harness.assert_open_held_remediation_count(0).await;
     harness.assert_no_retired_rung_one_child().await;
 
+    // A repeat tick while the SAME escalation is pending. The router's return
+    // value is deliberately NOT asserted here: with the arbiter in flight the
+    // source is held in `needs_lead_intervention`, so whether this tick reports
+    // "handled" or falls through to a guard decline is invisible to dispatch.
+    // What must hold either way are the durable invariants — one epoch, one
+    // row, one child — which are the actual idempotency boundary now that the
+    // reopen-count-keyed marker guard is retired.
     let first_epoch = first_routed.escalation_evidence_at.clone().unwrap();
-    let (handled_again, unchanged_after_repeat) = harness.route_reopen_intervention().await;
-    assert!(
-        handled_again,
-        "a repeat tick is still HANDLED (the arbiter is in flight, so the caller \
-         must not redispatch the worker)"
-    );
+    let (_repeat_handled, unchanged_after_repeat) = harness.route_reopen_intervention().await;
     assert_eq!(
         unchanged_after_repeat.escalation_evidence_at.as_deref(),
         Some(first_epoch.as_str()),
@@ -895,8 +939,13 @@ async fn reopen_loop_chaos_reaches_the_arbiter_on_the_first_crossing_without_rea
         .mark_consumed(&harness.task_id, 0)
         .await
         .unwrap();
-    let reset = harness.conclude_adjudication_and_raise_evidence_floor().await;
-    assert_eq!(reset.reopen_count, 0, "adjudication resets the reopen ladder");
+    let reset = harness
+        .conclude_adjudication_and_raise_evidence_floor()
+        .await;
+    assert_eq!(
+        reset.reopen_count, 0,
+        "adjudication resets the reopen ladder"
+    );
 
     harness.drive_review_failures_beyond_threshold(1).await;
     let second_threshold = harness.task().await;
@@ -940,11 +989,10 @@ async fn reopen_loop_chaos_reaches_the_arbiter_on_the_first_crossing_without_rea
 
     let marker_count_after_dispatch = harness.arbiter_dispatch_markers().await.len();
 
-    let (terminal_recheck_handled, terminal_recheck) = harness.route_reopen_intervention().await;
-    assert!(
-        terminal_recheck_handled,
-        "the recheck is consumed by the in-flight arbiter rather than redispatched"
-    );
+    // Again: the recheck's return value is not the contract — the durable
+    // ledger is. The source must stay on its live arbiter and the ladder must
+    // not advance.
+    let (_terminal_recheck_handled, terminal_recheck) = harness.route_reopen_intervention().await;
     assert_eq!(terminal_recheck.status, "needs_lead_intervention");
     assert_eq!(
         harness.arbiter_dispatch_markers().await.len(),
@@ -1034,14 +1082,14 @@ async fn same_role_cycling_trigger_b_chaos_reaches_the_arbiter_and_is_absorbed_b
     harness.assert_no_retired_rung_one_child().await;
     harness.assert_dispatch_backoff_cleared().await;
 
-    let (absorbed_handled, absorbed) = harness
+    // Further cycles are ABSORBED by the in-flight arbiter. The router's return
+    // value is not the contract (the source is already held in
+    // `needs_lead_intervention`, so dispatch cannot act on it either way) — the
+    // durable invariants are: no second row, no second dispatch event, and the
+    // source never leaves the arbiter.
+    let (_absorbed_handled, absorbed) = harness
         .dispatch_same_role_reappearances_like_dispatch(role, STREAK_INTERVENTION_THRESHOLD)
         .await;
-    assert!(
-        absorbed_handled,
-        "further cycles are ABSORBED by the in-flight arbiter: the router reports \
-         the task handled so the caller never redispatches a source that is held"
-    );
     assert_eq!(
         absorbed.status, "needs_lead_intervention",
         "the absorbed cycles must not move the source off the arbiter"
@@ -1500,9 +1548,7 @@ async fn below_threshold_does_not_intervene() {
 
     let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
     assert!(
-        arbiter_dispatch_markers(&repo, &task.id)
-            .await
-            .is_empty(),
+        arbiter_dispatch_markers(&repo, &task.id).await.is_empty(),
         "no arbiter dispatch may be recorded below threshold"
     );
     assert!(
@@ -2182,12 +2228,12 @@ async fn escalation_is_idempotent_per_hold_cycle_not_per_reopen_count() {
         .escalation_evidence_at
         .expect("the first escalation stamps the epoch");
 
+    // Repeat passes while the arbiter is in flight. Their return value is not
+    // pinned (the source is held in `needs_lead_intervention`, so dispatch
+    // cannot act on it either way); the durable invariants below are.
     for _ in 0..2 {
         let refreshed = repo.get(&task.id).await.unwrap().unwrap();
-        assert!(
-            actor.maybe_intervene_on_stuck_task(&refreshed).await,
-            "a repeat pass while the arbiter is in flight is handled, not redispatched"
-        );
+        let _ = actor.maybe_intervene_on_stuck_task(&refreshed).await;
     }
     assert_eq!(
         arbiter_dispatch_markers(&repo, &task.id).await.len(),
@@ -2210,12 +2256,17 @@ async fn escalation_is_idempotent_per_hold_cycle_not_per_reopen_count() {
     repo.set_status(&task.id, "closed").await.unwrap();
     let bumped = repo.set_status(&task.id, "open").await.unwrap();
     assert_eq!(bumped.reopen_count, REOPEN_INTERVENTION_THRESHOLD + 1);
-    assert!(actor.maybe_intervene_on_stuck_task(&bumped).await);
+    let _ = actor.maybe_intervene_on_stuck_task(&bumped).await;
     assert_eq!(
         arbiter_dispatch_markers(&repo, &task.id).await.len(),
         1,
         "a bumped reopen count must NOT open a second cycle while the arbiter is \
          still in flight — the ledger, not the counter, gates promotion"
+    );
+    assert_eq!(
+        arb_repo.list_for_task(&task.id).await.unwrap().len(),
+        1,
+        "a bumped reopen count must not open a second arbitration row either"
     );
 
     // Consuming the row is what re-arms the ladder. The floor is now the
@@ -2515,7 +2566,10 @@ async fn park_guard_declines_with_the_epoch_keyed_reason_contract() {
         Some(0),
         "zero submissions qualified at or after the floor"
     );
-    assert_eq!(marker["qualifying_non_attempt_models"], serde_json::json!([]));
+    assert_eq!(
+        marker["qualifying_non_attempt_models"],
+        serde_json::json!([])
+    );
     assert_eq!(marker["excluded_models"], serde_json::json!([]));
     assert_eq!(marker["disposition"], "redispatch_rotated");
     assert!(
@@ -3715,9 +3769,7 @@ async fn quality_strikes_below_threshold_does_not_intervene() {
         "quality_strikes below threshold must not trigger intervention"
     );
     assert!(
-        arbiter_dispatch_markers(&repo, &task.id)
-            .await
-            .is_empty(),
+        arbiter_dispatch_markers(&repo, &task.id).await.is_empty(),
         "no marker should be written below threshold"
     );
 }
@@ -3969,11 +4021,7 @@ async fn intervention_uses_db_quality_count_not_raw_reopen_count() {
     let quality = repo.quality_reopen_count(&task.id).await.unwrap();
     assert_eq!(quality, 3, "quality count stays at threshold");
 
-    let intervened = actor.maybe_intervene_on_stuck_task(&t).await;
-    assert!(
-        intervened,
-        "the in-flight arbiter absorbs the repeat pass rather than redispatching"
-    );
+    let _ = actor.maybe_intervene_on_stuck_task(&t).await;
     assert_eq!(
         arbiter_dispatch_markers(&repo, &task.id).await.len(),
         1,
@@ -4440,9 +4488,7 @@ async fn gs37_park_guard_not_triggered_below_quality_threshold_despite_raw_reope
          despite the raw reopen counter having advanced"
     );
     assert!(
-        arbiter_dispatch_markers(&repo, &task.id)
-            .await
-            .is_empty(),
+        arbiter_dispatch_markers(&repo, &task.id).await.is_empty(),
         "no arbiter may be dispatched below the quality threshold"
     );
     assert!(

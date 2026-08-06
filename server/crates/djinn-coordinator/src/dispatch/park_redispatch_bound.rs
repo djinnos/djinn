@@ -161,7 +161,11 @@ mod tests {
                 break;
             }
             redispatched += 1;
-            recorded.push(marker(NO_ATTEMPTED_REMEDIATION_KIND, 1, "2026-08-06T00:00:00.000Z"));
+            recorded.push(marker(
+                NO_ATTEMPTED_REMEDIATION_KIND,
+                1,
+                "2026-08-06T00:00:00.000Z",
+            ));
         }
 
         assert_eq!(
