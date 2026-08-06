@@ -13,6 +13,9 @@
 //   4. Repeat until `dry_rounds_required` consecutive rounds with no new blocking
 //      objection ("dry rounds") — then invoke the Judge.
 //   5. Judge adjudicates (produces a verdict via debate trail).
+//   6. A blocking verdict re-opens the loop at the Advocate (step 1), because
+//      the verdict prescribes a body change and only the Advocate writes the
+//      body. See `RefinementLoopState::record_judge_verdict`.
 //
 // Guards:
 //   - Hard round cap (default 5).
@@ -61,11 +64,16 @@ pub fn role_for_phase(phase: RefinementPhase) -> RefinementRole {
 
 /// The current phase of the refinement loop.
 ///
-/// v2 tribunal order: each round runs `Adversary → Advocate → Judge`. The
+/// v2 tribunal order: the first round runs `Adversary → Advocate → Judge`. The
 /// Adversary opens (red-teams the current spec), the Advocate responds
 /// (revises to address objections), and the Judge rules whether to loop again
 /// or surface the result to the human. The human is NOT in the loop — they
 /// only review the converged result once, via `AwaitingHumanReview`.
+///
+/// A round re-opened by a **blocking judge verdict** starts at the Advocate
+/// instead (`Advocate → Judge`): the verdict itself is the work item, and only
+/// the Advocate can rewrite the body it prescribes changing. See
+/// [`RefinementLoopState::record_judge_verdict`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RefinementPhase {
     /// Waiting for the Adversary to red-team the current spec. (Round opener.)
@@ -427,8 +435,26 @@ impl RefinementLoopState {
     /// Record a judge verdict — the round's arbiter.
     /// - non-blocking ("ready") → the spec converged; park it for the human's
     ///   single accept/reject review;
-    /// - blocking ("not ready") → run another round (Adversary first), unless
-    ///   the round cap is hit, in which case escalate to the human.
+    /// - blocking ("not ready") → run another round *starting at the Advocate*,
+    ///   unless the round cap is hit, in which case escalate to the human.
+    ///
+    /// The next round opens at [`RefinementPhase::AdvocateRevision`], not at
+    /// [`RefinementPhase::AdversaryAttack`]. A blocking verdict is a prescribed
+    /// remedy ("name the narrower design", "this AC is untestable"), and the
+    /// Advocate is the only role that can rewrite the proposal body. Routing it
+    /// to the Adversary handed the remedy to a role that can only file
+    /// objections: once every Adversary objection was already resolved, the
+    /// Adversary had nothing left to raise, the round went dry, the Advocate was
+    /// never dispatched (a dry round skips it), and the verdict's prescription
+    /// could never be implemented — a permanent dead end that burned rounds
+    /// until the cap.
+    ///
+    /// The Advocate's revision is adjudicated by the Judge on the same round
+    /// (`record_advocate_revision` → `JudgeAdjudication`), so round accounting,
+    /// the round cap, dry accounting, and the `AwaitingHumanReview` park are all
+    /// unchanged. A verdict-driven round costs two spawns (Advocate + Judge)
+    /// versus the three of an Adversary-opened round, so `max_total_spawns`
+    /// still cannot preempt `RoundCap`.
     pub fn record_judge_verdict(&mut self, result: &JudgeVerdictResult) {
         if !result.blocking {
             self.phase = RefinementPhase::AwaitingHumanReview;
@@ -439,7 +465,7 @@ impl RefinementLoopState {
             return;
         }
         self.current_round += 1;
-        self.phase = RefinementPhase::AdversaryAttack;
+        self.phase = RefinementPhase::AdvocateRevision;
     }
 
     /// Record that the Judge demanded evidence for a load-bearing claim.
@@ -758,21 +784,129 @@ mod tests {
     }
 
     #[test]
-    fn judge_blocking_starts_next_adversary_round() {
+    fn judge_blocking_starts_next_round_at_the_advocate() {
         let mut state = RefinementLoopState::with_config("p1", 0, test_config());
         state.process_adversary_pass(&AdversaryPassResult {
             objections: vec![blocking_objection("Issue A")],
             explicit_dry: false,
         });
         state.record_advocate_revision(1);
-        // Judge still finds the spec lacking → next round, adversary first.
+        // Judge still finds the spec lacking → next round, ADVOCATE first: the
+        // verdict prescribes a body change and only the Advocate writes bodies.
         state.record_judge_verdict(&JudgeVerdictResult {
             body: "Still needs work.".into(),
             blocking: true,
         });
-        assert_eq!(state.phase, RefinementPhase::AdversaryAttack);
+        assert_eq!(state.phase, RefinementPhase::AdvocateRevision);
         assert_eq!(state.current_round, 2);
         assert!(!state.is_complete());
+    }
+
+    /// The wedge this routing fixes. A blocking verdict arriving on a round
+    /// where the Adversary had ZERO unresolved objections used to route to
+    /// `AdversaryAttack`. The Adversary then had nothing left to raise, the
+    /// round went dry, `process_adversary_pass` skipped the Advocate and went
+    /// straight back to the Judge — so the verdict's prescribed remedy could
+    /// never be implemented by any role, forever.
+    ///
+    /// The blocking verdict must land in a phase where the body can actually be
+    /// revised.
+    #[test]
+    fn blocking_verdict_with_zero_unresolved_objections_reaches_a_body_writing_phase() {
+        let mut state = RefinementLoopState::with_config("p1", 0, test_config());
+
+        // Round 1: the Adversary is dry — every objection is already resolved.
+        let outcome = state.process_adversary_pass(&AdversaryPassResult {
+            objections: vec![],
+            explicit_dry: true,
+        });
+        assert_eq!(outcome, AdversaryPassOutcome::Dry);
+        assert_eq!(state.phase, RefinementPhase::JudgeAdjudication);
+
+        // The Judge rejects anyway and prescribes a concrete remedy.
+        state.record_judge_verdict(&JudgeVerdictResult {
+            body: "needs-work: AC 3 is untestable; replace it with a measurable \
+                   assertion on the emitted row count."
+                .into(),
+            blocking: true,
+        });
+
+        // The next phase must be able to rewrite the proposal body. Routing to
+        // the Adversary is the dead end: it can only file objections, and it
+        // has none to file.
+        assert_eq!(
+            state.phase,
+            RefinementPhase::AdvocateRevision,
+            "a blocking verdict must route to the only role that can revise the body"
+        );
+        assert_eq!(state.current_round, 2);
+        assert!(!state.is_complete());
+        assert!(!state.is_awaiting_human_review());
+        assert!(state.stop_reason.is_none());
+
+        // And the Advocate's revision is adjudicated, so the loop keeps moving
+        // rather than dead-ending on a second dry pass.
+        state.record_advocate_revision(1);
+        assert_eq!(state.phase, RefinementPhase::JudgeAdjudication);
+        assert_eq!(
+            state.current_round, 2,
+            "the advocate turn stays in its round"
+        );
+    }
+
+    /// A verdict-driven round must not cost more agent spawns than the
+    /// Adversary-opened round it replaces, or `SpawnCap` (which *terminates*
+    /// the run) would preempt `RoundCap` (which *parks* it for human review)
+    /// and silently convert a reviewable park into a dead run.
+    #[test]
+    fn verdict_driven_rounds_keep_round_cap_binding_before_spawn_cap() {
+        let mut state = RefinementLoopState::with_config("p1", 0, test_config());
+        let mut spawns = 0;
+
+        // Round 1 opens at the Adversary: adversary + advocate + judge.
+        assert_eq!(state.phase, RefinementPhase::AdversaryAttack);
+        for _ in 0..3 {
+            state.record_spawn().expect("round 1 fits the spawn budget");
+            spawns += 1;
+        }
+        state.process_adversary_pass(&AdversaryPassResult {
+            objections: vec![blocking_objection("Issue A")],
+            explicit_dry: false,
+        });
+        state.record_advocate_revision(1);
+
+        // Rounds 2..=max_rounds are verdict-driven: advocate + judge only.
+        let mut revision = 1;
+        loop {
+            state.record_judge_verdict(&JudgeVerdictResult {
+                body: format!("needs-work: round {}", state.current_round),
+                blocking: true,
+            });
+            if state.is_awaiting_human_review() {
+                break;
+            }
+            assert_eq!(state.phase, RefinementPhase::AdvocateRevision);
+            for _ in 0..2 {
+                state
+                    .record_spawn()
+                    .expect("verdict-driven rounds stay inside the spawn budget");
+                spawns += 1;
+            }
+            revision += 1;
+            state.record_advocate_revision(revision);
+        }
+
+        // The run parked on the ROUND cap, not the spawn cap, and never
+        // terminated.
+        assert_eq!(state.stop_reason, Some(StopReason::RoundCap));
+        assert!(state.is_awaiting_human_review());
+        assert!(!state.is_complete());
+        assert_eq!(state.current_round, test_config().max_rounds);
+        assert!(
+            spawns <= test_config().max_total_spawns,
+            "worst-case verdict-driven run used {spawns} spawns, budget is {}",
+            test_config().max_total_spawns
+        );
     }
 
     #[test]
@@ -794,14 +928,10 @@ mod tests {
             blocking: true,
         });
         assert_eq!(state.current_round, 2);
-        assert_eq!(state.phase, RefinementPhase::AdversaryAttack);
+        assert_eq!(state.phase, RefinementPhase::AdvocateRevision);
 
-        // Round 2 (== cap): adversary blocking → advocate → judge blocking →
+        // Round 2 (== cap): advocate implements the verdict → judge blocking →
         // escalate to human review (round cap reached).
-        state.process_adversary_pass(&AdversaryPassResult {
-            objections: vec![blocking_objection("Issue B")],
-            explicit_dry: false,
-        });
         state.record_advocate_revision(2);
         state.record_judge_verdict(&JudgeVerdictResult {
             body: "Still needs work.".into(),
@@ -818,7 +948,8 @@ mod tests {
     fn repeated_blocking_objection_escalates_to_human_review() {
         let mut state = RefinementLoopState::with_config("p1", 0, test_config());
 
-        // Round 1: blocking objection → advocate revision.
+        // Round 1: blocking objection → advocate revision → judge approves →
+        // parked for the human's single review.
         let outcome = state.process_adversary_pass(&AdversaryPassResult {
             objections: vec![blocking_objection("Missing Problem Statement")],
             explicit_dry: false,
@@ -826,9 +957,15 @@ mod tests {
         assert_eq!(outcome, AdversaryPassOutcome::Continue);
         state.record_advocate_revision(1);
         state.record_judge_verdict(&JudgeVerdictResult {
-            body: "Not ready.".into(),
-            blocking: true,
+            body: "Ready.".into(),
+            blocking: false,
         });
+        assert!(state.is_awaiting_human_review());
+
+        // The human rejects WITH feedback, which re-opens the tribunal at the
+        // Adversary — the path on which a second Adversary pass is reachable.
+        state.resolve_human_review(false, true);
+        assert_eq!(state.phase, RefinementPhase::AdversaryAttack);
         assert_eq!(state.current_round, 2);
 
         // Round 2: the same objection (different casing/whitespace) repeats →
@@ -1242,11 +1379,8 @@ mod tests {
         });
         assert_eq!(state.current_round, 2);
 
-        // Round 2: adversary → advocate → judge demands evidence.
-        state.process_adversary_pass(&AdversaryPassResult {
-            objections: vec![blocking_objection("Issue B")],
-            explicit_dry: false,
-        });
+        // Round 2 is verdict-driven: advocate → judge demands evidence.
+        assert_eq!(state.phase, RefinementPhase::AdvocateRevision);
         state.record_advocate_revision(2);
         state.record_needs_evidence();
         assert_eq!(

@@ -1054,10 +1054,26 @@ impl DjinnMcpServer {
             return Json(err_single(e));
         }
 
-        // Composed gate (task cuzf): block entering `in_review` when
-        // DoR or tribunal conditions are not met. Existing body/MDX/AC-count
+        // Composed gate (task cuzf): block *entering* `in_review` when DoR or
+        // tribunal conditions are not met. Existing body/MDX/AC-count
         // validation already passed above.
-        if status == "in_review" {
+        //
+        // `status` defaults to `existing.status`, so gating on `status ==
+        // "in_review"` alone also fired on every in-place edit of a proposal
+        // that was *already* `in_review` — including an edit that changes no
+        // status at all. That made a needs-work judge verdict edit-lock the
+        // very body it demands changing: the tribunal Advocate's primary action
+        // is `proposal_update(body=...)`, and gate step 2c blocks on a
+        // `needs-work` `latest_judge_verdict` unless a human override is
+        // current. Restrict the gate to the transition it was written for.
+        //
+        // This does not weaken spec integrity for in-place edits: every
+        // material revision write goes through
+        // `ProposalRepository::insert_revision_checked`, which lints the
+        // candidate body and fails closed with `SPEC_LINT_REJECTED` on any
+        // error — independently of this gate.
+        let entering_in_review = status == "in_review" && existing.status != "in_review";
+        if entering_in_review {
             let target_count = repo
                 .targets(&existing.id)
                 .await

@@ -1026,6 +1026,100 @@ fn adversary_prompt_contains_objection_contract() {
     );
 }
 
+/// A blocking judge verdict now routes to the Advocate (it is the only role
+/// that rewrites the proposal body). The Advocate's prompt must therefore tell
+/// it to read judge verdicts and treat a needs-work verdict's prescribed remedy
+/// as a work item — the prompt previously framed `proposal_debate_list` purely
+/// as an objection list and mentioned "verdict" only to forbid writing one, so
+/// a verdict-only round read as "nothing to do".
+#[test]
+fn advocate_prompt_treats_a_needs_work_verdict_as_a_work_item() {
+    let task = make_task();
+    let ctx = make_ctx();
+    let prompt = render_prompt(AgentType::Advocate, &task, &ctx);
+
+    assert!(
+        prompt.contains("kind=\"verdict\"") || prompt.contains("`verdict`"),
+        "advocate prompt must name the verdict entry kind it has to read"
+    );
+    assert!(
+        prompt.contains("needs-work"),
+        "advocate prompt must name the needs-work verdict it has to act on"
+    );
+    assert!(
+        prompt.contains("latest"),
+        "advocate prompt must tell the Advocate to take the LATEST verdict \
+         (verdicts are never marked resolved, so an unresolved old one is not a signal)"
+    );
+    // A verdict-only round — zero unresolved objections, one outstanding
+    // needs-work verdict — is exactly the state that used to dead-end.
+    assert!(
+        prompt.contains("zero unresolved objections"),
+        "advocate prompt must state that a round can carry only a verdict"
+    );
+    // The write path the Advocate must use must still be named.
+    assert!(
+        prompt.contains("proposal_update"),
+        "advocate prompt must name the body-revision tool"
+    );
+    // The existing authority boundary must survive: rebuttal-only appends, and
+    // no verdicts or resolutions from the Advocate.
+    assert!(
+        prompt.contains("kind=\"rebuttal\"") && prompt.contains("ONLY kind you may append"),
+        "advocate prompt must keep the rebuttal-only append rule"
+    );
+    assert!(
+        prompt.contains("Never file objections or verdicts"),
+        "advocate prompt must keep the never-file-verdicts rule"
+    );
+    assert!(
+        !prompt.contains("{{"),
+        "advocate prompt should have no unresolved placeholders"
+    );
+}
+
+/// The Adversary's dedup guidance must stay scoped to its *own* prior
+/// objections. Framing judge verdicts as part of the dedup filter ("so you do
+/// NOT re-raise an objection already filed or already resolved") suppressed
+/// judge-originated requirements: the Adversary read the verdict as something
+/// already handled and filed nothing, the round went dry, and the Advocate was
+/// never dispatched.
+#[test]
+fn adversary_prompt_scopes_dedup_to_objections_not_judge_verdicts() {
+    let task = make_task();
+    let ctx = make_ctx();
+    let prompt = render_prompt(AgentType::Adversary, &task, &ctx);
+
+    // Dedup survives.
+    assert!(
+        prompt.contains("re-raise an objection already filed"),
+        "adversary prompt must keep the objection dedup rule"
+    );
+    // But it is explicitly scoped away from verdicts.
+    assert!(
+        prompt.contains("Judge verdicts are not your dedup list"),
+        "adversary prompt must carry the verdict-dedup carve-out"
+    );
+    assert!(
+        prompt.contains("never marked resolved"),
+        "adversary prompt must explain why an unresolved verdict is not a dedup signal"
+    );
+    assert!(
+        prompt.contains("verdict the Advocate did not implement"),
+        "adversary prompt must license filing an objection for an unimplemented verdict"
+    );
+    // The anti-filler rule must survive so the carve-out is not read as a
+    // license to paraphrase the verdict into a manufactured objection.
+    assert!(
+        prompt.contains("manufactured blockers are worse than a dry round"),
+        "adversary prompt must keep the anti-filler rule"
+    );
+    assert!(
+        !prompt.contains("{{"),
+        "adversary prompt should have no unresolved placeholders"
+    );
+}
+
 /// Human approval, authorization and organizational structure are categorically
 /// outside the agent's model: djinn writes code and opens PRs, and approval and
 /// merge are enforced by the forge and its configured owners. Without this rule
