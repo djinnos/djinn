@@ -12,9 +12,9 @@
 use djinn_control_plane::test_support::McpTestHarness;
 use djinn_core::auth_context::SESSION_USER_ID;
 use djinn_core::events::EventBus;
-use djinn_core::models::{Model, Pricing, Provider};
-use djinn_db::OrgAiPolicyRepository;
+use djinn_core::models::{Model, Pricing, Provider, SessionStatus};
 use djinn_db::repositories::user::UserRepository;
+use djinn_db::{CreateSessionParams, OrgAiPolicyRepository, ProjectRepository, SessionRepository};
 use djinn_provider::catalog::builtin;
 use djinn_provider::repos::CredentialRepository;
 use serde_json::json;
@@ -154,6 +154,7 @@ async fn model_health_status_and_param_validation_shapes() {
         .expect("model_health status should dispatch");
     assert_eq!(status["action"], "status");
     assert!(status["models"].is_array());
+    assert!(status["outcomes"].is_array());
 
     let reset_err = harness
         .call_tool("model_health", json!({"action":"reset"}))
@@ -166,6 +167,72 @@ async fn model_health_status_and_param_validation_shapes() {
         .await
         .expect("model_health enable should dispatch");
     assert!(enable_err["error"].as_str().is_some());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn model_health_status_returns_autonomous_outcome_without_breaker_bucket() {
+    let harness = McpTestHarness::new().await;
+    let db = harness.db().clone();
+    let project = ProjectRepository::new(db.clone(), EventBus::noop())
+        .create("model-health-outcomes", "test", "model-health-outcomes")
+        .await
+        .expect("create outcome fixture project");
+
+    let sessions = SessionRepository::new(db, EventBus::noop());
+    let autonomous = sessions
+        .create(CreateSessionParams {
+            project_id: &project.id,
+            task_id: None,
+            model: "outcome-only/model",
+            agent_type: "worker",
+            metadata_json: None,
+            task_run_id: None,
+            pricing: None,
+            cost_basis: None,
+        })
+        .await
+        .expect("create autonomous outcome fixture");
+    sessions
+        .update(&autonomous.id, SessionStatus::Completed, 0, 0, 0, 0, None)
+        .await
+        .expect("complete autonomous outcome fixture");
+
+    // Chat rows are projectless by the session schema's agent constraint.
+    sessions
+        .upsert_chat_session(&uuid::Uuid::now_v7().to_string(), "chat-only/model")
+        .await
+        .expect("create chat outcome fixture");
+
+    let status = harness
+        .call_tool("model_health", json!({"action":"status"}))
+        .await
+        .expect("model_health status should dispatch");
+    let outcomes = status["outcomes"].as_array().expect("outcomes array");
+    let outcome = outcomes
+        .iter()
+        .find(|row| row["model_id"] == "outcome-only/model")
+        .expect("autonomous outcome-only key must be reported");
+    assert_eq!(outcome["population_kind"], "autonomous");
+    assert!(outcome["scope"].is_null());
+    assert_eq!(outcome["completed_count"], 1);
+    assert_eq!(outcome["cancelled_count"], 0);
+    assert_eq!(outcome["provider_count"], 0);
+    assert!(outcome["window_start"].as_str().is_some());
+    assert!(outcome["window_end"].as_str().is_some());
+    assert!(
+        !outcomes
+            .iter()
+            .any(|row| row["model_id"] == "chat-only/model"),
+        "chat sessions must stay out of autonomous outcomes"
+    );
+    assert!(
+        !status["models"]
+            .as_array()
+            .expect("models array")
+            .iter()
+            .any(|row| row["model_id"] == "outcome-only/model"),
+        "durable outcome keys must not be derived from breaker state"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
