@@ -159,6 +159,18 @@ impl ProviderSseTerminalReporterV1 for GoogleTerminalReporterV1 {
     }
 }
 
+#[derive(Default)]
+struct GoogleFrameParserV1;
+
+impl crate::provider::ProviderSseFrameParserV1 for GoogleFrameParserV1 {
+    fn parse(&mut self, frame: SseFrame) -> Vec<anyhow::Result<StreamEvent>> {
+        match frame {
+            SseFrame::Data(line) => parse_google_line(&line).into_iter().map(Ok).collect(),
+            SseFrame::Done => Vec::new(),
+        }
+    }
+}
+
 // ─── SSE parsing helpers ──────────────────────────────────────────────────────
 
 /// Parse a single Google AI Studio SSE data line.
@@ -308,6 +320,10 @@ impl LlmProvider for GoogleProvider {
             context,
             GoogleTerminalReporterV1::default(),
         ))
+    }
+
+    fn sse_frame_parser_v1(&self) -> Option<Box<dyn crate::provider::ProviderSseFrameParserV1>> {
+        Some(Box::new(GoogleFrameParserV1))
     }
 
     fn stream_request_body(

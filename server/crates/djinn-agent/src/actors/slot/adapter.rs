@@ -45,8 +45,8 @@ pub(crate) fn agent_credential_to_slot(
     credential: super::helpers::ProviderCredential,
 ) -> djinn_slot::helpers::ProviderCredential {
     match credential {
-        super::helpers::ProviderCredential::ApiKey(k, v) => {
-            djinn_slot::helpers::ProviderCredential::ApiKey(k, v)
+        super::helpers::ProviderCredential::ApiKey(id, k, v) => {
+            djinn_slot::helpers::ProviderCredential::ApiKey(id, k, v)
         }
         super::helpers::ProviderCredential::OAuthConfig(v) => {
             djinn_slot::helpers::ProviderCredential::OAuthConfig(v)
