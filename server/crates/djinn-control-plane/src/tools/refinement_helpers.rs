@@ -50,14 +50,9 @@ pub struct ProposalRefinementDemandEvidenceParams {
     pub insufficient_in_session_research: String,
     /// What the evidence spike should produce to resolve the claim.
     pub expected_findings: String,
-    /// Caller-declared load-bearing threshold. Kept additive for legacy MCP
-    /// callers; an omitted legacy value is feasibility.
-    #[serde(default = "default_load_bearing_category")]
+    /// Caller-declared load-bearing threshold. The server must not infer this
+    /// authority from legacy question prose.
     pub load_bearing_category: String,
-}
-
-fn default_load_bearing_category() -> String {
-    "feasibility".to_string()
 }
 
 // ── Demand-evidence validation helpers ───────────────────────────────────────
@@ -79,6 +74,21 @@ const GENERIC_QUESTION_PATTERNS: &[&str] = &[
     "review more",
     "think about",
     "study more",
+];
+
+const PREFERENCE_QUESTION_PATTERNS: &[&str] = &[
+    "should we prefer",
+    "which do you prefer",
+    "would be nicer",
+    "style",
+    "color",
+    "colour",
+];
+const REPOSITORY_ANSWERABLE_PATTERNS: &[&str] = &[
+    "is already in the repository",
+    "can be answered by inspecting",
+    "grep",
+    "search the repository",
 ];
 
 /// Find the active Adversary or Judge task for a proposal's refinement run.
@@ -156,7 +166,6 @@ pub(crate) async fn verify_active_judge_authorization(
             },
         ));
     }
-
     Ok(task.id)
 }
 
@@ -263,6 +272,16 @@ pub(crate) async fn validate_demand_evidence(
         }
     }
 
+    if PREFERENCE_QUESTION_PATTERNS
+        .iter()
+        .any(|pattern| question_lower.contains(pattern))
+    {
+        return Err(
+            "question is preference-only; evidence demands require a load-bearing uncertainty"
+                .to_string(),
+        );
+    }
+
     // 7. `target_subsystem` must be non-empty.
     if params.target_subsystem.trim().is_empty() {
         return Err("target_subsystem must not be empty".to_string());
@@ -294,6 +313,24 @@ pub(crate) async fn validate_demand_evidence(
         );
     }
 
+    let rationale = params.insufficient_in_session_research.to_lowercase();
+    if REPOSITORY_ANSWERABLE_PATTERNS
+        .iter()
+        .any(|pattern| rationale.contains(pattern))
+    {
+        return Err("demand is repository-answerable; inspect the repository instead of allocating evidence".to_string());
+    }
+    let expected = params.expected_findings.trim();
+    if expected.is_empty() {
+        return Err(
+            "expected_findings must name focused checks the evidence spike will perform"
+                .to_string(),
+        );
+    }
+    if expected.len() < 8 || expected.eq_ignore_ascii_case("findings") {
+        return Err("expected_findings must name focused, concrete checks".to_string());
+    }
+
     // 10. Cap must not be exhausted.
     match check_needs_evidence_cap(repo, &proposal.id).await {
         Ok(cap_status) => {
@@ -311,17 +348,6 @@ pub(crate) async fn validate_demand_evidence(
             }
         }
         Err(e) => return Err(e),
-    }
-
-    // 11. No existing open linked evidence spike.
-    if proposal.linked_spike_task_id.is_some() {
-        return Err(format!(
-            "proposal already has an open linked evidence spike ({}); resolve it before demanding new evidence",
-            proposal
-                .linked_spike_task_id
-                .as_deref()
-                .unwrap_or("unknown"),
-        ));
     }
 
     Ok(judge_task_id)

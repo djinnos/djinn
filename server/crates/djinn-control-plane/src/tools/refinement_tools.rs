@@ -27,7 +27,7 @@ use djinn_core::models::{NeedsEvidenceClaim, TaskStatus, TransitionAction};
 use djinn_db::{
     AdmitRefinementRunRequest, EffectiveCreatorProvenance, NeedsEvidenceClaimLink,
     ProposalDebateTrailCreateInput, ProposalRepository, RefinementAdmissionError,
-    RefinementAdmissionOutcome, RefinementAdmissionSource, TaskRepository,
+    RefinementAdmissionOutcome, RefinementAdmissionSource, TaskRepository, TypedEvidenceRepository,
 };
 
 fn err_refinement_start(error: impl Into<String>) -> ProposalRefinementStartResponse {
@@ -35,6 +35,7 @@ fn err_refinement_start(error: impl Into<String>) -> ProposalRefinementStartResp
         proposal_id: None,
         refinement: None,
         error: Some(error.into()),
+        conflict_code: None,
     }
 }
 
@@ -43,6 +44,7 @@ fn err_refinement_status(error: impl Into<String>) -> ProposalRefinementStatusRe
         proposal_id: None,
         refinement: None,
         error: Some(error.into()),
+        conflict_code: None,
     }
 }
 
@@ -262,6 +264,7 @@ fn err_demand_evidence(error: impl Into<String>) -> NeedsEvidenceDemandResponse 
         accepted: false,
         result: None,
         error: Some(error.into()),
+        conflict_code: None,
     }
 }
 // ── Tool router ──────────────────────────────────────────────────────────────
@@ -445,6 +448,7 @@ impl DjinnMcpServer {
                     accepted: false,
                     refinement: None,
                     error: Some(e),
+                    conflict_code: None,
                 });
             }
         };
@@ -637,6 +641,7 @@ impl DjinnMcpServer {
             proposal_id: Some(proposal.id),
             resolved: true,
             error: None,
+            conflict_code: None,
         })
     }
 
@@ -762,6 +767,7 @@ impl DjinnMcpServer {
             overridden: true,
             override_on_revision_seq: Some(override_seq),
             error: None,
+            conflict_code: None,
         })
     }
 
@@ -808,6 +814,7 @@ impl DjinnMcpServer {
                     accepted: false,
                     result: None,
                     error: Some(e),
+                    conflict_code: None,
                 });
             }
         };
@@ -834,6 +841,7 @@ impl DjinnMcpServer {
                         accepted: false,
                         result: None,
                         error: Some(e),
+                        conflict_code: None,
                     });
                 }
             };
@@ -863,6 +871,7 @@ impl DjinnMcpServer {
                         "proposal has no target project; cannot create evidence spike task"
                             .to_string(),
                     ),
+                    conflict_code: None,
                 });
             }
         };
@@ -925,6 +934,7 @@ impl DjinnMcpServer {
                     accepted: false,
                     result: None,
                     error: Some(format!("failed to create evidence spike task: {e}")),
+                    conflict_code: None,
                 });
             }
         };
@@ -984,6 +994,7 @@ impl DjinnMcpServer {
                 accepted: false,
                 result: None,
                 error: Some(format!("failed to record needs_evidence debate entry: {e}")),
+                conflict_code: None,
             });
         }
 
@@ -1015,23 +1026,12 @@ impl DjinnMcpServer {
                         Some(TaskStatus::Closed),
                     )
                     .await;
-                // Re-read to get the winner's spike id for the error.
-                let winner_id = repo
-                    .get(&proposal.id)
-                    .await
-                    .ok()
-                    .flatten()
-                    .and_then(|p| p.linked_spike_task_id.clone())
-                    .unwrap_or_else(|| "unknown".to_string());
                 return Json(NeedsEvidenceDemandResponse {
                     proposal_id: Some(proposal.id),
                     accepted: false,
                     result: None,
-                    error: Some(format!(
-                        "proposal already has an open linked evidence spike ({}); \
-                         concurrent demand was rejected",
-                        winner_id
-                    )),
+                    error: Some("active_evidence_conflict".to_string()),
+                    conflict_code: Some("active_evidence_conflict".to_string()),
                 });
             }
             Err(e) => {
@@ -1042,6 +1042,7 @@ impl DjinnMcpServer {
                     accepted: false,
                     result: None,
                     error: Some(format!("failed to link evidence spike to proposal: {e}")),
+                    conflict_code: None,
                 });
             }
         }
@@ -1066,6 +1067,14 @@ impl DjinnMcpServer {
             );
         }
 
+        // Typed authority is the response source; legacy fields above remain an
+        // additive compatibility projection. A parity failure is never guessed.
+        let typed = TypedEvidenceRepository::new(self.state.db().clone())
+            .dual_read_legacy_parity(&proposal.id)
+            .await
+            .ok()
+            .flatten();
+
         Json(NeedsEvidenceDemandResponse {
             proposal_id: Some(proposal.id),
             accepted: true,
@@ -1074,8 +1083,19 @@ impl DjinnMcpServer {
                 spike_task_id: Some(spike_task.id.clone()),
                 against_revision_seq: p.against_revision_seq,
                 round: p.round,
+                finding_id: typed
+                    .as_ref()
+                    .map(|projection| projection.finding.id.clone()),
+                attempt_id: typed
+                    .as_ref()
+                    .and_then(|projection| projection.attempt_id.clone()),
+                lifecycle: typed
+                    .as_ref()
+                    .map(|projection| format!("{:?}", projection.finding.lifecycle).to_lowercase()),
+                replayed: Some(false),
             }),
             error: None,
+            conflict_code: None,
         })
     }
 }
