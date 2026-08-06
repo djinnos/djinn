@@ -11,7 +11,7 @@ use crate::tools::credential_tools::{
 };
 use crate::tools::debate_tools::{
     ProposalDebateAppendParams, ProposalDebateListParams, ProposalDebateReopenParams,
-    ProposalDebateResolveParams,
+    ProposalDebateResolveParams, ProposalFeedbackDispositionParams,
 };
 use crate::tools::dispatch_pause_tools::{
     DispatchPauseParams, DispatchPauseStatusParams, DispatchResumeParams,
@@ -536,6 +536,13 @@ impl DjinnMcpServer {
                     name, args,
                 )?))
                 .await,
+            ),
+            "proposal_feedback_disposition" => map_json(
+                name,
+                self.proposal_feedback_disposition(Parameters(decode_args::<
+                    ProposalFeedbackDispositionParams,
+                >(name, args)?))
+                    .await,
             ),
             "proposal_debate_resolve" => map_json(
                 name,
