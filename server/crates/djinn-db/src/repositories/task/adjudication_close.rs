@@ -530,6 +530,32 @@ pub async fn apply_adjudication_child_close_tx(
             )
             .execute(&mut **tx)
             .await?;
+            // The coordinator-side copy of this contract routes its open-PR
+            // branch through `respawn_guard::handoff_pr_to_poller`, which
+            // writes a durable `pr_terminal_handoff` marker. Operator queries
+            // key on that marker, so a DB-side handoff that skipped it was
+            // invisible to every one of them. Same event type, same shape.
+            if destination == "pr_review" {
+                let marker_id = uuid::Uuid::now_v7().to_string();
+                sqlx::query(
+                    "INSERT INTO activity_log (id, task_id, actor_id, actor_role, event_type, payload)
+                     VALUES ($1, $2, $3, $4, 'pr_terminal_handoff', $5::jsonb)",
+                )
+                .bind(&marker_id)
+                .bind(&source_id)
+                .bind("coordinator")
+                .bind("system")
+                .bind(
+                    serde_json::json!({
+                        "from_status": at_close.status,
+                        "to_status": destination,
+                        "reason": LADDER_EXHAUSTED_CLOSE_REASON,
+                    })
+                    .to_string(),
+                )
+                .execute(&mut **tx)
+                .await?;
+            }
             ownership_applied = true;
         }
 
@@ -559,10 +585,28 @@ pub async fn apply_adjudication_child_close_tx(
         let payload = serde_json::json!({
             "adjudication_child_id": child_id,
             "adjudication_outcome": outcome,
-            "source_status_before": before.status,
+            // The spec's pair is "immediately before and after the child-close
+            // TRANSACTION". `at_close` is read before this transaction's own
+            // writes and `after` immediately after them, so they are exactly
+            // that pair.
+            //
+            // These deliberately do NOT report the child-creation snapshot.
+            // Doing so mixed two baselines and made the pair contradict the
+            // outcome beside it: rounds 1 and 2 reported a `pr_review -> open`
+            // move that belonged to the PRODUCER's earlier park transaction and
+            // that the accompanying `source_unchanged` denied, while a round-3
+            // handoff off a `pr_review` snapshot reported `pr_review ->
+            // pr_review` — no movement at all — for the truth-table row that
+            // says "status changes to `pr_review`".
+            "source_status_before": at_close.status,
             "source_status_after": after.status,
+            // Operational metadata only — never an input to
+            // `adjudication_outcome`, and never the reported pair. Kept because
+            // the comparison baseline is genuinely the creation snapshot (the
+            // planner's edits land before it closes the child), so an operator
+            // reconstructing an outcome needs to see it.
+            "source_status_at_child_creation": before.status,
             "terminal_rung_round": round,
-            // Operational metadata only — never an input to `adjudication_outcome`.
             "blocker_released": true,
         })
         .to_string();
