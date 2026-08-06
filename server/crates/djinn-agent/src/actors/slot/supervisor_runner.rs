@@ -1470,6 +1470,7 @@ async fn attach_and_await_terminal_report(
             let pre_session = tokio::time::sleep(pre_session_deadline());
             tokio::pin!(pre_session);
             let mut session_reached = false;
+            let mut last_step = PRE_SESSION_INITIAL_STEP.to_string();
             let mut initial_report = None;
             let mut events_closed = false;
             let observation = loop {
@@ -1480,20 +1481,9 @@ async fn attach_and_await_terminal_report(
                     // simultaneously queued Report authoritative, while a
                     // backlog of other frames cannot postpone the deadline.
                     evidence = &mut runtime_watch => break Some(evidence),
-                    frame = bistream.events_rx.recv(), if !events_closed => match frame {
-                        Some(StreamEvent::Report(report)) => {
-                            initial_report = Some(report);
-                            break None::<TerminalRuntimeObservation>;
-                        },
-                        Some(StreamEvent::StageStep { step }) => {
-                            session_reached |= step == djinn_runtime::STAGE_STEP_FIRST_TURN;
-                        }
-                        Some(_) => session_reached = true,
-                        // Closing stdio is not terminal runtime evidence. Keep
-                        // the typed watcher alive so completion, disappearance,
-                        // and classified failures retain distinct causes.
-                        None => events_closed = true,
-                    },
+                    // Cancellation and the pre-session deadline are also typed
+                    // exits. Keep both ahead of ordinary stream frames so a
+                    // continuously ready receiver cannot starve either one.
                     _ = kill.cancelled() => break None,
                     _ = &mut pre_session, if !session_reached => {
                         let session_repo = djinn_db::SessionRepository::new(
@@ -1501,13 +1491,28 @@ async fn attach_and_await_terminal_report(
                         );
                         if !session_repo.exists_for_task_run(&spec.task_run_id).await.unwrap_or(true) {
                             presession_timeout = Some(PreSessionTimeout {
-                                step: PRE_SESSION_INITIAL_STEP.to_string(),
+                                step: last_step.clone(),
                                 elapsed_secs: pre_session_deadline().as_secs(),
                             });
                             break None;
                         }
                         session_reached = true;
                     }
+                    frame = bistream.events_rx.recv(), if !events_closed => match frame {
+                        Some(StreamEvent::Report(report)) => {
+                            initial_report = Some(report);
+                            break None::<TerminalRuntimeObservation>;
+                        },
+                        Some(StreamEvent::StageStep { step }) => {
+                            session_reached |= step == djinn_runtime::STAGE_STEP_FIRST_TURN;
+                            last_step = step;
+                        }
+                        Some(_) => {}
+                        // Closing stdio is not terminal runtime evidence. Keep
+                        // the typed watcher alive so completion, disappearance,
+                        // and classified failures retain distinct causes.
+                        None => events_closed = true,
+                    },
                 }
             };
             if let Some(observation) = observation {
