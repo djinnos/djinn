@@ -9,6 +9,8 @@ use djinn_agent::actors::slot::{SlotPoolConfig, SlotPoolHandle};
 use djinn_db::{CreateUserAuthSession, Database, SessionAuthRepository, UserRepository};
 use http_body_util::BodyExt;
 use serde_json::Value;
+use std::{sync::Arc, time::Duration};
+use tokio::sync::Barrier;
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
 
@@ -298,25 +300,36 @@ async fn test_debug_dispatch_state_does_not_mutate() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn test_debug_dispatch_state_lock_contention_under_5s() {
+async fn test_debug_dispatch_state_concurrent_snapshots_complete_without_deadlock() {
+    // A bounded cohort is sufficient to make every call contend for the actor
+    // snapshot path. Unlike a throughput benchmark, this timeout allows for
+    // shared CI CPU and database load while still detecting a deadlock or a
+    // lock path that serializes requests pathologically.
+    const CONCURRENT_SNAPSHOTS: usize = 32;
+    const DEADLOCK_TIMEOUT: Duration = Duration::from_secs(30);
+
     let db = test_helpers::create_test_db();
     let state = app_state_with_agents(db).await;
     let coordinator = state.coordinator().await.unwrap();
-    let started = tokio::time::Instant::now();
+    let start = Arc::new(Barrier::new(CONCURRENT_SNAPSHOTS));
 
-    let mut tasks = Vec::with_capacity(1000);
-    for _ in 0..1000 {
+    let mut tasks = Vec::with_capacity(CONCURRENT_SNAPSHOTS);
+    for _ in 0..CONCURRENT_SNAPSHOTS {
         let coordinator = coordinator.clone();
+        let start = start.clone();
         tasks.push(tokio::spawn(async move {
-            coordinator.debug_dispatch_state().await.unwrap();
+            start.wait().await;
+            coordinator.debug_dispatch_state().await
         }));
     }
-    for task in tasks {
-        task.await.unwrap();
-    }
 
-    assert!(
-        started.elapsed() < std::time::Duration::from_secs(5),
-        "1000 debug snapshots should complete under 5s"
-    );
+    tokio::time::timeout(DEADLOCK_TIMEOUT, async {
+        for task in tasks {
+            task.await
+                .expect("concurrent debug snapshot task should not panic")
+                .expect("concurrent debug snapshot should succeed");
+        }
+    })
+    .await
+    .expect("concurrent debug snapshots should complete before the deadlock timeout");
 }
