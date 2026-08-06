@@ -24,6 +24,7 @@ pub(crate) mod loop_guard {
 
 pub(crate) struct ReplyLoopContext<'a> {
     pub provider: &'a dyn djinn_provider::provider::LlmProvider,
+    pub credential_record_id: &'a str,
     pub tools: &'a [serde_json::Value],
     pub task_id: &'a str,
     pub task_short_id: &'a str,
@@ -389,6 +390,7 @@ pub(crate) async fn run_reply_loop(
 ) -> (anyhow::Result<()>, ParsedAgentOutput, i64, i64, i64, i64) {
     let ReplyLoopContext {
         provider,
+        credential_record_id,
         tools,
         task_id,
         task_short_id,
@@ -436,6 +438,7 @@ pub(crate) async fn run_reply_loop(
             djinn_slot::reply_loop::ReplyLoopContext {
                 session_budget: None,
                 provider,
+                credential_record_id,
                 tools,
                 task_id,
                 task_short_id,

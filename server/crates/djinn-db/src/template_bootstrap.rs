@@ -171,9 +171,26 @@ async fn ensure_test_template_locked(
     .await
     .map_err(DbError::from)?;
 
-    // The exclusive advisory lock is still held on `conn`, so verify's own
-    // connection to the template cannot be terminated by a racing clone.
-    verify_template_migrations(server_prefix).await?;
+    // The exclusive advisory lock is still held on `conn`, so migration's own
+    // connection to the template cannot be terminated by a racing clone. A
+    // long-lived test server may have a template from an older checkout; bring
+    // it forward before cloning instead of making every test fail verification.
+    if let Err(error) = run_template_migrations(server_prefix).await {
+        let incompatible_history = matches!(
+            &error,
+            DbError::InvalidData(message)
+                if message.contains("previously applied but is missing in the resolved migrations")
+        );
+        if !incompatible_history {
+            return Err(error);
+        }
+
+        // A shared review server can retain a template produced by another
+        // branch whose migration history diverged. It is disposable test data,
+        // so rebuild it under the same exclusive lock rather than weakening
+        // migration validation for real databases.
+        rebuild_test_template(server_prefix, conn).await?;
+    }
 
     Ok(())
 }
@@ -221,6 +238,30 @@ async fn create_and_migrate_template(
     run_template_migrations(server_prefix).await
 }
 
+async fn rebuild_test_template(
+    server_prefix: &str,
+    conn: &mut sqlx::postgres::PgConnection,
+) -> DbResult<()> {
+    sqlx::query(
+        "UPDATE pg_database SET datistemplate = FALSE WHERE datname = 'djinn_test_template'",
+    )
+    .execute(&mut *conn)
+    .await
+    .map_err(DbError::from)?;
+    sqlx::query(
+        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity \
+         WHERE datname = 'djinn_test_template' AND pid <> pg_backend_pid()",
+    )
+    .execute(&mut *conn)
+    .await
+    .map_err(DbError::from)?;
+    sqlx::query("DROP DATABASE \"djinn_test_template\"")
+        .execute(&mut *conn)
+        .await
+        .map_err(DbError::from)?;
+    create_and_migrate_template(server_prefix, conn).await
+}
+
 async fn run_template_migrations(server_prefix: &str) -> DbResult<()> {
     let template_url = format!("{server_prefix}/djinn_test_template");
     // Reserved exclusively for the clone template; production code has no
@@ -244,64 +285,4 @@ async fn run_template_migrations(server_prefix: &str) -> DbResult<()> {
         },
     )
     .await
-}
-
-async fn verify_template_migrations(server_prefix: &str) -> DbResult<()> {
-    let template_url = format!("{server_prefix}/djinn_test_template");
-    let pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(1)
-        .connect(&template_url)
-        .await
-        .map_err(DbError::from)?;
-
-    let migrator = sqlx::migrate!("./migrations_postgres");
-    let expected_versions: Vec<i64> = migrator.migrations.iter().map(|m| m.version).collect();
-    if expected_versions.is_empty() {
-        pool.close().await;
-        return Ok(());
-    }
-
-    let table_exists: i64 = sqlx::query_scalar(
-        r#"SELECT COUNT(*)
-         FROM information_schema.tables
-         WHERE table_schema = current_schema()
-           AND table_name   = '_sqlx_migrations'"#,
-    )
-    .fetch_one(&pool)
-    .await
-    .map_err(DbError::from)?;
-
-    if table_exists == 0 {
-        pool.close().await;
-        return Err(DbError::InvalidData(
-            "djinn_test_template exists but _sqlx_migrations table is missing".to_owned(),
-        ));
-    }
-
-    let applied: Vec<i64> =
-        sqlx::query_as::<_, (i64,)>("SELECT version FROM _sqlx_migrations WHERE success = TRUE")
-            .fetch_all(&pool)
-            .await
-            .map_err(DbError::from)?
-            .into_iter()
-            .map(|r| r.0)
-            .collect();
-    let applied_ok: std::collections::HashSet<i64> = applied.into_iter().collect();
-
-    let mut missing: Vec<i64> = expected_versions
-        .iter()
-        .copied()
-        .filter(|v| !applied_ok.contains(v))
-        .collect();
-    missing.sort_unstable();
-
-    pool.close().await;
-
-    if !missing.is_empty() {
-        return Err(DbError::InvalidData(format!(
-            "djinn_test_template is behind the binary — missing migrations: {missing:?}"
-        )));
-    }
-
-    Ok(())
 }

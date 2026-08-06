@@ -838,7 +838,7 @@ pub(super) async fn completions_handler_impl(
             cfg.session_affinity_key = Some(session_id.clone());
             *cfg
         }
-        ProviderCredential::ApiKey(_name, api_key) => {
+        ProviderCredential::ApiKey(_credential_record_id, _name, api_key) => {
             let base_url = state
                 .catalog()
                 .list_providers()
@@ -1732,7 +1732,7 @@ async fn generate_chat_title(
             cfg.session_affinity_key = Some(format!("{session_id}:title"));
             *cfg
         }
-        ProviderCredential::ApiKey(_name, api_key) => {
+        ProviderCredential::ApiKey(_credential_record_id, _name, api_key) => {
             let base_url = state
                 .catalog()
                 .list_providers()
