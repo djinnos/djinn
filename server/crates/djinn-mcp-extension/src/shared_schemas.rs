@@ -14,6 +14,26 @@ pub struct ToolSafetyAnnotations {
     pub concurrent_safe: bool,
 }
 
+pub fn tool_proposal_feedback_disposition() -> RmcpTool {
+    RmcpTool::new(
+        "proposal_feedback_disposition".to_string(),
+        "Propose an Advocate disposition for an unresolved `human_feedback` debate entry. Use `fixed_by_revision` with a newer revision on the same proposal, or `wont_fix` with non-empty reasoning. Only the Judge may accept or reject it.".to_string(),
+        object!({
+            "type": "object", "required": ["id", "disposition"],
+            "properties": {
+                "id": {"type": "string", "description": "Unresolved human_feedback debate entry id."},
+                "disposition": {"type": "string", "enum": ["fixed_by_revision", "wont_fix"]},
+                "fixed_by_revision": {"type": "integer", "description": "Required for fixed_by_revision; must be newer and on this proposal."},
+                "reason": {"type": "string", "minLength": 1, "description": "Required non-empty reasoning for wont_fix."}
+            },
+            "allOf": [
+                {"if": {"properties": {"disposition": {"const": "fixed_by_revision"}}}, "then": {"required": ["fixed_by_revision"]}},
+                {"if": {"properties": {"disposition": {"const": "wont_fix"}}}, "then": {"required": ["reason"]}}
+            ]
+        }),
+    )
+}
+
 pub fn tool_memory_retrieval_outcomes_report() -> RmcpTool {
     RmcpTool::new(
         "memory_retrieval_outcomes_report".to_string(),
@@ -422,12 +442,14 @@ pub fn tool_proposal_debate_list() -> RmcpTool {
 pub fn tool_proposal_debate_resolve() -> RmcpTool {
     RmcpTool::new(
         "proposal_debate_resolve".to_string(),
-        "Mark a debate-trail objection as resolved by entry `id` (from `proposal_debate_list`). The Judge or Advocate calls this for each blocking objection the revision genuinely satisfies. Pair with a `proposal_debate_append` rebuttal explaining how.".to_string(),
+        "Judge-only global resolution for a debate-trail objection by entry `id` (from `proposal_debate_list`). For `human_feedback`, supply `verdict=accept` or `reject`; rejection requires non-empty needs-work `reason`.".to_string(),
         object!({
             "type": "object",
             "required": ["id"],
             "properties": {
-                "id": {"type": "string", "description": "The debate-trail entry id to resolve (from proposal_debate_list)"}
+                "id": {"type": "string", "description": "The debate-trail entry id to resolve (from proposal_debate_list)"},
+                "verdict": {"type": "string", "enum": ["accept", "reject"], "description": "Required only for human_feedback."},
+                "reason": {"type": "string", "minLength": 1, "description": "Required needs-work reasoning when rejecting human_feedback."}
             }
         }),
     )
