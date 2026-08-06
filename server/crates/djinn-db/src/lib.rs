@@ -118,8 +118,8 @@ pub use repositories::{
         CiCallingRecoveryRecord, CiChargeOutcome, CiClass, CiDiagnosticReason, CiEvidenceIdentity,
         CiLane, CiOriginState, CiQuiescenceProof, CiReopenMode, CiReserveOutcome,
         CiReservedRecovery, CiRouteAttempt, CiRouteAttemptRepository, CiRouteOutcome,
-        CiRouteQuiescence, CiRouteReservation, CiTier2LeaseOutcome, CiTier2LeaseState,
-        CiTier2Reason, CiTier2Resolution,
+        CiRouteQuiescence, CiRouteReservation, CiRouteSubject, CiSubjectKind, CiTier2LeaseOutcome,
+        CiTier2LeaseState, CiTier2Reason, CiTier2Resolution,
     },
     code_chunk::{
         ChunkAndEmbedReport, CodeChunk, CodeChunkEmbeddingProvider, CodeChunkRepairEmbeddingRow,

@@ -31,11 +31,20 @@
 //! | Identity current, budget exhausted | route through retry exhaustion | no charge, at most one Tier-2 lease |
 //!
 //! The middle row is the one worth stating twice: N concurrent recoveries and
-//! N restarts converge on **one** winner and **one** charge, because the
-//! charge is welded to the `reserved` -> `calling` compare-and-set inside a
-//! single transaction that holds the row with `SELECT ... FOR UPDATE`. The
-//! `pre_call_resumptions` counter records how many recoveries ran; it has no
-//! influence on the charge, which is the point of recording it.
+//! N restarts converge on **one** winner and **one** charge. Two mechanisms
+//! do that, and it is worth being precise about which does what, because they
+//! are easy to confuse:
+//!
+//! * the **row lock** (`SELECT ... FOR UPDATE` in [`fetch_locked`]) serializes
+//!   the recoveries so the losers observe a non-`reserved` phase and return
+//!   without charging; and
+//! * the **counter lock plus the phase CAS** is what makes a double charge
+//!   impossible even if the row lock were absent — a loser that got as far as
+//!   incrementing would find `action_phase = 'reserved'` no longer true, fail
+//!   the CAS, and roll its increment back with the transaction.
+//!
+//! `pre_call_resumptions` records how many recoveries ran; it has no influence
+//! on the charge, which is the point of recording it.
 //!
 //! # Why `calling` recovery is so much more restricted
 //!
@@ -55,6 +64,20 @@
 //! including the ones that correctly did nothing. A sweep that left a live
 //! owner alone has to be observable, or the claim "we never steal a live
 //! owner's row" cannot be falsified by a test.
+//!
+//! # Two write-once outcome fields, not one
+//!
+//! [`CiRouteAttempt::terminal_outcome`] is the route's own single terminal
+//! fact and is never rewritten. A row that terminalized on its provider
+//! result (`action_failed`, `outcome_unknown`) may still legally route to Tier
+//! 2 **once**; that adjudication lands in
+//! [`CiRouteAttempt::tier2_resolution`] instead, because terminalization
+//! already happened and is write-once.
+//!
+//! **Downstream obligation (W2/W4/W5):** any query that counts reopens, parks,
+//! or supersessions must union *both* columns. Reading only `terminal_outcome`
+//! silently drops every reopen that followed a provider failure — which is
+//! precisely the population the evidence-led route exists to serve.
 
 use serde::{Deserialize, Serialize};
 use sqlx::{Postgres, Row, Transaction};
@@ -84,7 +107,7 @@ pub const CI_RESERVATION_RECOVERY_TIMEOUT_SECS: i64 = 60;
 /// considered. Fixed by the proposal.
 pub const CI_CALLING_RECOVERY_TIMEOUT_SECS: i64 = 300;
 
-const ROW_COLUMNS: &str = "provider_action_key, lane, pr_number, pr_head_sha, run_id, run_head_sha, dequeue_id, \
+const ROW_COLUMNS: &str = "subject_kind, subject_id, provider_action_key, lane, pr_number, pr_head_sha, run_id, run_head_sha, dequeue_id, \
     task_id, origin_state, class, action, transient_fingerprint, retry_budget_key, head_budget_key, \
     action_phase, terminal_outcome, \
     to_char(reserved_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS reserved_at, \
@@ -96,6 +119,9 @@ const ROW_COLUMNS: &str = "provider_action_key, lane, pr_number, pr_head_sha, ru
     to_char(tier2_leased_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS tier2_leased_at, \
     tier2_resolution, lead_session_id, reopen_mode, diagnostic_reason, park_justification, \
     provider_error::text AS provider_error, superseded_by_evidence::text AS superseded_by_evidence";
+
+/// `WHERE` fragment naming one row by its full subject-scoped primary key.
+const BY_PK: &str = "subject_kind = $1 AND subject_id = $2 AND provider_action_key = $3";
 
 // ---------------------------------------------------------------------------
 // Vocabularies
@@ -141,6 +167,24 @@ macro_rules! durable_enum {
             }
         }
     };
+}
+
+durable_enum! {
+    /// What a route is remediating.
+    ///
+    /// A CI evidence identity contains no subject of its own, so the subject
+    /// is carried alongside it. Every key on the table is scoped by it.
+    CiSubjectKind {
+        /// A board task. The only kind wave 1 writes, and the only kind with
+        /// database-enforced referential integrity (migration 191 derives
+        /// `task_id` from the subject and puts the foreign key on it).
+        Task => "task",
+        /// Reserved for a proposal-branch PR, which has no owning task and
+        /// whose remedy is new work rather than one reopen. Wave 1 has **no
+        /// writer** for this and nothing branches on it; the value exists so
+        /// that route needs no DDL on a table carrying live routing state.
+        Proposal => "proposal",
+    }
 }
 
 durable_enum! {
@@ -215,6 +259,21 @@ durable_enum! {
     }
 }
 
+impl CiRouteOutcome {
+    /// The three outcomes that assert something about a provider call.
+    ///
+    /// They are reachable only through
+    /// [`CiRouteAttemptRepository::finalize_calling`], which is fenced to the
+    /// exact `calling` owner. Nothing else may claim the provider was called.
+    #[must_use]
+    pub fn is_provider_finalization(self) -> bool {
+        matches!(
+            self,
+            Self::Retriggered | Self::Reenqueued | Self::ActionFailed
+        )
+    }
+}
+
 durable_enum! {
     /// Why a Tier-2 lease was opened.
     CiTier2Reason {
@@ -285,13 +344,38 @@ durable_enum! {
 }
 
 // ---------------------------------------------------------------------------
-// Identity
+// Subject and identity
 // ---------------------------------------------------------------------------
+
+/// The thing a route is remediating, and the scope of every key on the table.
+///
+/// Scoping matters more than it looks. `provider_action_key` and
+/// `tier2_lease_key` are caller-computed hashes; if they were globally unique
+/// a collision would not merely share a budget, it would make
+/// [`CiRouteAttemptRepository::reserve`] answer "already present" for *foreign*
+/// evidence, so the colliding route would silently never exist. Scoping by
+/// subject makes that class impossible rather than unlikely.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CiRouteSubject {
+    pub kind: CiSubjectKind,
+    pub id: String,
+}
+
+impl CiRouteSubject {
+    /// The task subject — the only kind wave 1 writes.
+    #[must_use]
+    pub fn task(task_id: impl Into<String>) -> Self {
+        Self {
+            kind: CiSubjectKind::Task,
+            id: task_id.into(),
+        }
+    }
+}
 
 /// The immutable evidence identity a route attempt is bound to.
 ///
 /// Stored expanded on the row (not only as the caller's hash) so a recovery
-/// sweep can compare a freshly observed identity against it without
+/// sweep can compare it against a freshly observed identity without
 /// recomputing the caller's hash function — and so a supersession is
 /// explainable by reading the row.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -325,9 +409,12 @@ impl CiEvidenceIdentity {
 /// One durable route attempt.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CiRouteAttempt {
+    pub subject: CiRouteSubject,
     pub provider_action_key: String,
     pub identity: CiEvidenceIdentity,
-    pub task_id: String,
+    /// The generated, foreign-key-backed task id. `Some` exactly when the
+    /// subject is a task; the database derives it and refuses a direct write.
+    pub task_id: Option<String>,
     pub origin_state: CiOriginState,
     pub class: CiClass,
     pub action: CiAction,
@@ -372,6 +459,10 @@ impl CiRouteAttempt {
             }
         }
         Ok(Self {
+            subject: CiRouteSubject {
+                kind: CiSubjectKind::parse(row.try_get::<String, _>("subject_kind")?.as_str())?,
+                id: row.try_get("subject_id")?,
+            },
             provider_action_key: row.try_get("provider_action_key")?,
             identity: CiEvidenceIdentity {
                 lane: CiLane::parse(row.try_get::<String, _>("lane")?.as_str())?,
@@ -430,6 +521,27 @@ impl CiRouteAttempt {
     pub fn holds_open_tier2_lease(&self) -> bool {
         self.tier2_lease_state == Some(CiTier2LeaseState::Open)
     }
+
+    /// Whether this row has already used its one trip to Tier 2.
+    ///
+    /// True from the moment a lease is opened, and it stays true after that
+    /// lease resolves. "Route **once** to Tier 2" is a once-ever property, not
+    /// a concurrency property.
+    #[must_use]
+    pub fn has_routed_to_tier2(&self) -> bool {
+        self.tier2_lease_state.is_some()
+    }
+
+    /// The Lead adjudication that closed this route, wherever it landed.
+    ///
+    /// See the module note on the two write-once outcome fields: a row that
+    /// terminalized on its provider result keeps that outcome and records the
+    /// Tier-2 result separately. Callers counting reopens or parks must use
+    /// this rather than `terminal_outcome` alone.
+    #[must_use]
+    pub fn adjudicated_outcome(&self) -> Option<CiRouteOutcome> {
+        self.tier2_resolution.or(self.terminal_outcome)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -439,11 +551,12 @@ impl CiRouteAttempt {
 /// Everything needed to open a reservation.
 #[derive(Clone, Debug)]
 pub struct CiRouteReservation {
+    pub subject: CiRouteSubject,
     /// Caller-computed hash of the immutable evidence identity plus action.
-    /// Its uniqueness is what permits at most one provider-call episode.
+    /// Its uniqueness within the subject is what permits at most one
+    /// provider-call episode.
     pub provider_action_key: String,
     pub identity: CiEvidenceIdentity,
-    pub task_id: String,
     pub origin_state: CiOriginState,
     pub class: CiClass,
     pub action: CiAction,
@@ -476,8 +589,9 @@ pub enum CiReserveOutcome {
     /// A fresh reservation was committed. Provider mutation remains forbidden
     /// until the caller wins [`CiRouteAttemptRepository::charge_and_begin_calling`].
     Reserved(Box<CiRouteAttempt>),
-    /// This exact evidence identity already has an attempt row. A duplicate
-    /// poll or a restart landed here; the existing row is authoritative.
+    /// This exact evidence identity already has an attempt row *for this
+    /// subject*. A duplicate poll or a restart landed here; the existing row
+    /// is authoritative.
     AlreadyPresent(Box<CiRouteAttempt>),
     /// The budgets were already spent, so no reservation was created and no
     /// Tier-1 action is possible for this evidence.
@@ -495,7 +609,14 @@ pub enum CiChargeOutcome {
     /// The observed identity no longer matches; the row is now terminal
     /// `superseded_pre_call` with no charge and no lease.
     SupersededPreCall(Box<CiRouteAttempt>),
-    /// Still current, but the budgets are spent. No charge, no call.
+    /// Still current, but the budgets were spent between the reservation and
+    /// this call. No charge and no provider call.
+    ///
+    /// Note the asymmetry with [`CiReservedRecovery::RetryExhausted`]: this is
+    /// the *live* path, so it only stamps `retry_exhausted_at` and leaves the
+    /// row `reserved`. It does **not** open a Tier-2 lease, because the caller
+    /// is still running and owns that decision. The recovery path opens the
+    /// lease itself precisely because no caller is left to make it.
     BudgetExhausted {
         attempt: Box<CiRouteAttempt>,
         counts: CiBudgetCounts,
@@ -509,7 +630,7 @@ pub enum CiChargeOutcome {
 /// two "nothing to do" shapes.
 #[derive(Clone, Debug)]
 pub enum CiReservedRecovery {
-    /// No row with that key.
+    /// No row with that key for that subject.
     NotFound,
     /// The row is not a recoverable `reserved` row: either it has advanced
     /// past `reserved`, or its reservation timeout has not elapsed yet.
@@ -522,14 +643,18 @@ pub enum CiReservedRecovery {
         attempt: Box<CiRouteAttempt>,
         counts: CiBudgetCounts,
     },
-    /// Current identity, budget spent: routed through retry exhaustion, with
-    /// at most one Tier-2 lease opened.
+    /// Current identity, budget spent: routed through retry exhaustion.
     RetryExhausted {
         attempt: Box<CiRouteAttempt>,
         counts: CiBudgetCounts,
-        /// `Some` when this call opened the lease, `None` when a lease for
-        /// that current-evidence key was already open (the "at most one"
-        /// half of the contract).
+        /// `Some` when this call opened the lease.
+        ///
+        /// `None` means no lease could be opened — either this row already
+        /// routed to Tier 2, or **another row holds the head lease**. The
+        /// second case leaves this row `reserved` with no route out of its own
+        /// accord, so W2 must re-drive `recover_reserved` after the holding
+        /// lease resolves, or close the row explicitly. It is not
+        /// self-healing.
         tier2_lease_id: Option<String>,
     },
 }
@@ -583,9 +708,12 @@ pub enum CiTier2LeaseOutcome {
         attempt: Box<CiRouteAttempt>,
         lease_id: String,
     },
-    /// A lease for that key is already open — possibly on this very row.
-    /// Mutually exclusive by construction.
-    AlreadyLeased(Box<CiRouteAttempt>),
+    /// Another row on this subject holds the open lease for that
+    /// current-evidence key. Mutually exclusive by construction.
+    KeyHeldElsewhere(Box<CiRouteAttempt>),
+    /// This row has already used its one trip to Tier 2 — the lease is open,
+    /// or it resolved and may not be reopened.
+    AlreadyRoutedToTier2(Box<CiRouteAttempt>),
     /// The compare-and-set failed: the identity changed or a newer
     /// passing/merged observation already terminalized the row. The row is
     /// closed as `superseded_before_lead` with no lease and no Lead dispatch.
@@ -651,6 +779,12 @@ impl CiTier2Resolution {
     }
 
     fn validate(&self) -> Result<()> {
+        if self.outcome.is_provider_finalization() {
+            return Err(DbError::InvalidData(format!(
+                "`{}` asserts a provider call and cannot be a Tier-2 resolution",
+                self.outcome.as_str()
+            )));
+        }
         match self.outcome {
             CiRouteOutcome::RepairReopened => {
                 if self.reopen_mode != Some(CiReopenMode::Repair) {
@@ -739,17 +873,23 @@ impl CiRouteAttemptRepository {
         Self { db }
     }
 
-    /// Fetch one attempt by its provider-action key.
+    /// Fetch one attempt by its subject and provider-action key.
     ///
     /// # Errors
     ///
     /// Database failures, or a row carrying a value outside a durable
     /// vocabulary.
-    pub async fn get(&self, provider_action_key: &str) -> Result<Option<CiRouteAttempt>> {
+    pub async fn get(
+        &self,
+        subject: &CiRouteSubject,
+        provider_action_key: &str,
+    ) -> Result<Option<CiRouteAttempt>> {
         self.db.ensure_initialized().await?;
         let row = sqlx::query(&format!(
-            "SELECT {ROW_COLUMNS} FROM ci_route_attempts WHERE provider_action_key = $1"
+            "SELECT {ROW_COLUMNS} FROM ci_route_attempts WHERE {BY_PK}"
         ))
+        .bind(subject.kind.as_str())
+        .bind(&subject.id)
         .bind(provider_action_key)
         .fetch_optional(self.db.pool())
         .await?;
@@ -763,25 +903,27 @@ impl CiRouteAttemptRepository {
     /// Database failures.
     pub async fn budget_counts(
         &self,
+        subject: &CiRouteSubject,
         retry_budget_key: &str,
         head_budget_key: &str,
     ) -> Result<CiBudgetCounts> {
         self.db.ensure_initialized().await?;
-        let signature: Option<i64> = sqlx::query_scalar(
-            "SELECT charged_count FROM ci_route_budget_counters WHERE scope = 'signature' AND counter_key = $1",
-        )
-        .bind(retry_budget_key)
-        .fetch_optional(self.db.pool())
-        .await?;
-        let head: Option<i64> = sqlx::query_scalar(
-            "SELECT charged_count FROM ci_route_budget_counters WHERE scope = 'head' AND counter_key = $1",
-        )
-        .bind(head_budget_key)
-        .fetch_optional(self.db.pool())
-        .await?;
+        let read = |scope: &'static str, key: String| async move {
+            let count: Option<i64> = sqlx::query_scalar(
+                "SELECT charged_count FROM ci_route_budget_counters \
+                 WHERE subject_kind = $1 AND subject_id = $2 AND scope = $3 AND counter_key = $4",
+            )
+            .bind(subject.kind.as_str())
+            .bind(&subject.id)
+            .bind(scope)
+            .bind(key)
+            .fetch_optional(self.db.pool())
+            .await?;
+            Ok::<i64, DbError>(count.unwrap_or(0))
+        };
         Ok(CiBudgetCounts {
-            signature: signature.unwrap_or(0),
-            head: head.unwrap_or(0),
+            signature: read("signature", retry_budget_key.to_owned()).await?,
+            head: read("head", head_budget_key.to_owned()).await?,
         })
     }
 
@@ -798,12 +940,20 @@ impl CiRouteAttemptRepository {
         self.db.ensure_initialized().await?;
         let mut tx = self.db.pool().begin().await?;
 
-        if let Some(existing) = fetch_in_tx(&mut tx, &input.provider_action_key).await? {
+        if let Some(existing) =
+            fetch_in_tx(&mut tx, &input.subject, &input.provider_action_key).await?
+        {
             tx.commit().await?;
             return Ok(CiReserveOutcome::AlreadyPresent(Box::new(existing)));
         }
 
-        let counts = lock_budgets(&mut tx, &input.retry_budget_key, &input.head_budget_key).await?;
+        let counts = lock_budgets(
+            &mut tx,
+            &input.subject,
+            &input.retry_budget_key,
+            &input.head_budget_key,
+        )
+        .await?;
         if counts.is_exhausted() {
             tx.commit().await?;
             return Ok(CiReserveOutcome::BudgetExhausted(counts));
@@ -816,11 +966,13 @@ impl CiRouteAttemptRepository {
         // unique violation. The unique key is still what enforces one row per
         // evidence identity — this only decides how the loser is *told*.
         let inserted = sqlx::query(
-            "INSERT INTO ci_route_attempts (provider_action_key, lane, pr_number, pr_head_sha, run_id, run_head_sha, dequeue_id, \
-             task_id, origin_state, class, action, transient_fingerprint, retry_budget_key, head_budget_key, action_phase) \
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'reserved') \
-             ON CONFLICT (provider_action_key) DO NOTHING",
+            "INSERT INTO ci_route_attempts (subject_kind, subject_id, provider_action_key, lane, pr_number, pr_head_sha, run_id, run_head_sha, dequeue_id, \
+             origin_state, class, action, transient_fingerprint, retry_budget_key, head_budget_key, action_phase) \
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,'reserved') \
+             ON CONFLICT (subject_kind, subject_id, provider_action_key) DO NOTHING",
         )
+        .bind(input.subject.kind.as_str())
+        .bind(&input.subject.id)
         .bind(&input.provider_action_key)
         .bind(input.identity.lane.as_str())
         .bind(input.identity.pr_number)
@@ -828,7 +980,6 @@ impl CiRouteAttemptRepository {
         .bind(input.identity.run_id)
         .bind(&input.identity.run_head_sha)
         .bind(input.identity.dequeue_id.as_deref())
-        .bind(&input.task_id)
         .bind(input.origin_state.as_str())
         .bind(input.class.as_str())
         .bind(input.action.as_str())
@@ -838,7 +989,7 @@ impl CiRouteAttemptRepository {
         .execute(&mut *tx)
         .await?;
 
-        let row = fetch_in_tx(&mut tx, &input.provider_action_key)
+        let row = fetch_in_tx(&mut tx, &input.subject, &input.provider_action_key)
             .await?
             .ok_or_else(|| DbError::Internal("reserved route row disappeared".to_owned()))?;
         tx.commit().await?;
@@ -863,9 +1014,10 @@ impl CiRouteAttemptRepository {
     ///
     /// # Errors
     ///
-    /// Database failures.
+    /// Database failures, or no such reservation.
     pub async fn charge_and_begin_calling(
         &self,
+        subject: &CiRouteSubject,
         provider_action_key: &str,
         owner_incarnation_id: &str,
         observed_identity: &CiEvidenceIdentity,
@@ -873,10 +1025,12 @@ impl CiRouteAttemptRepository {
         self.db.ensure_initialized().await?;
         let mut tx = self.db.pool().begin().await?;
 
-        let Some(attempt) = fetch_locked(&mut tx, provider_action_key).await? else {
+        let Some(attempt) = fetch_locked(&mut tx, subject, provider_action_key).await? else {
             tx.commit().await?;
             return Err(DbError::InvalidData(format!(
-                "no ci route attempt for provider_action_key `{provider_action_key}`"
+                "no ci route attempt for `{}`/`{}`/`{provider_action_key}`",
+                subject.kind.as_str(),
+                subject.id
             )));
         };
 
@@ -888,27 +1042,34 @@ impl CiRouteAttemptRepository {
         if !attempt.identity.matches(observed_identity) {
             let superseded = terminalize_in_tx(
                 &mut tx,
+                subject,
                 provider_action_key,
                 CiRouteOutcome::SupersededPreCall,
                 Some(&identity_evidence_json(observed_identity)),
-                None,
             )
             .await?;
             tx.commit().await?;
             return Ok(CiChargeOutcome::SupersededPreCall(Box::new(superseded)));
         }
 
-        let counts =
-            lock_budgets(&mut tx, &attempt.retry_budget_key, &attempt.head_budget_key).await?;
+        let counts = lock_budgets(
+            &mut tx,
+            subject,
+            &attempt.retry_budget_key,
+            &attempt.head_budget_key,
+        )
+        .await?;
         if counts.is_exhausted() {
-            sqlx::query(
+            sqlx::query(&format!(
                 "UPDATE ci_route_attempts SET retry_exhausted_at = now(), updated_at = now() \
-                 WHERE provider_action_key = $1 AND retry_exhausted_at IS NULL",
-            )
+                 WHERE {BY_PK} AND retry_exhausted_at IS NULL"
+            ))
+            .bind(subject.kind.as_str())
+            .bind(&subject.id)
             .bind(provider_action_key)
             .execute(&mut *tx)
             .await?;
-            let refreshed = fetch_in_tx(&mut tx, provider_action_key)
+            let refreshed = fetch_in_tx(&mut tx, subject, provider_action_key)
                 .await?
                 .ok_or_else(|| DbError::Internal("route row disappeared".to_owned()))?;
             tx.commit().await?;
@@ -918,19 +1079,26 @@ impl CiRouteAttemptRepository {
             });
         }
 
-        let charged =
-            charge_budgets_in_tx(&mut tx, &attempt.retry_budget_key, &attempt.head_budget_key)
-                .await?;
-
-        // The CAS. `action_phase = 'reserved'` in the WHERE clause is
-        // redundant under the row lock we already hold and is kept anyway:
-        // it makes the single-winner property readable at the statement.
-        let updated = sqlx::query(
-            "UPDATE ci_route_attempts \
-             SET action_phase = 'calling', calling_at = now(), owner_incarnation_id = $2, \
-                 charged_signature_count = $3, charged_head_count = $4, updated_at = now() \
-             WHERE provider_action_key = $1 AND action_phase = 'reserved'",
+        let charged = charge_budgets_in_tx(
+            &mut tx,
+            subject,
+            &attempt.retry_budget_key,
+            &attempt.head_budget_key,
         )
+        .await?;
+
+        // The CAS. `action_phase = 'reserved'` in the WHERE clause is what
+        // makes a double charge impossible independently of the row lock: a
+        // caller that got as far as incrementing but lost the phase race
+        // fails here and rolls its increment back with the transaction.
+        let updated = sqlx::query(&format!(
+            "UPDATE ci_route_attempts \
+             SET action_phase = 'calling', calling_at = now(), owner_incarnation_id = $4, \
+                 charged_signature_count = $5, charged_head_count = $6, updated_at = now() \
+             WHERE {BY_PK} AND action_phase = 'reserved'"
+        ))
+        .bind(subject.kind.as_str())
+        .bind(&subject.id)
         .bind(provider_action_key)
         .bind(owner_incarnation_id)
         .bind(charged.signature)
@@ -943,7 +1111,7 @@ impl CiRouteAttemptRepository {
             ));
         }
 
-        let calling = fetch_in_tx(&mut tx, provider_action_key)
+        let calling = fetch_in_tx(&mut tx, subject, provider_action_key)
             .await?
             .ok_or_else(|| DbError::Internal("calling route row disappeared".to_owned()))?;
         tx.commit().await?;
@@ -961,32 +1129,35 @@ impl CiRouteAttemptRepository {
     /// which a late result from a drained process is rejected rather than
     /// silently overwriting a recovery.
     ///
+    /// This is the **only** path to a provider-finalization outcome;
+    /// [`Self::terminalize`] refuses them.
+    ///
     /// # Errors
     ///
     /// Database failures, or an outcome outside the provider-terminal set.
     pub async fn finalize_calling(
         &self,
+        subject: &CiRouteSubject,
         provider_action_key: &str,
         owner_incarnation_id: &str,
         outcome: CiRouteOutcome,
         provider_error_json: Option<&str>,
     ) -> Result<bool> {
         self.db.ensure_initialized().await?;
-        if !matches!(
-            outcome,
-            CiRouteOutcome::Retriggered | CiRouteOutcome::Reenqueued | CiRouteOutcome::ActionFailed
-        ) {
+        if !outcome.is_provider_finalization() {
             return Err(DbError::InvalidData(format!(
                 "`{}` is not a provider finalization outcome",
                 outcome.as_str()
             )));
         }
-        let updated = sqlx::query(
+        let updated = sqlx::query(&format!(
             "UPDATE ci_route_attempts \
-             SET action_phase = 'terminal', terminal_outcome = $3, terminalized_at = now(), \
-                 provider_error = $4::jsonb, updated_at = now() \
-             WHERE provider_action_key = $1 AND action_phase = 'calling' AND owner_incarnation_id = $2",
-        )
+             SET action_phase = 'terminal', terminal_outcome = $5, terminalized_at = now(), \
+                 provider_error = $6::jsonb, updated_at = now() \
+             WHERE {BY_PK} AND action_phase = 'calling' AND owner_incarnation_id = $4"
+        ))
+        .bind(subject.kind.as_str())
+        .bind(&subject.id)
         .bind(provider_action_key)
         .bind(owner_incarnation_id)
         .bind(outcome.as_str())
@@ -1002,28 +1173,57 @@ impl CiRouteAttemptRepository {
     /// second call — from a duplicate poll, a startup sweep, or a delayed Lead
     /// result — observes `false` and must not treat the row as freshly closed.
     ///
+    /// **Two fences, both deliberate.** This sits beside the owner-scoped
+    /// [`Self::finalize_calling`], and an unfenced sibling would be a way
+    /// around it:
+    ///
+    /// * a provider-finalization outcome is rejected outright, so nothing but
+    ///   the `calling` owner can ever claim the provider was called; and
+    /// * a row in `calling` is refused, so a sweep cannot close a route whose
+    ///   provider future is still live. Such a row belongs to its owner and
+    ///   leaves `calling` only through that owner's finalizer or through
+    ///   [`Self::recover_calling_owner`].
+    ///
     /// # Errors
     ///
-    /// Database failures.
+    /// Database failures, a provider-finalization outcome, or a `calling` row.
     pub async fn terminalize(
         &self,
+        subject: &CiRouteSubject,
         provider_action_key: &str,
         outcome: CiRouteOutcome,
         superseded_by_evidence_json: Option<&str>,
     ) -> Result<bool> {
         self.db.ensure_initialized().await?;
-        let updated = sqlx::query(
-            "UPDATE ci_route_attempts \
-             SET action_phase = 'terminal', terminal_outcome = $2, terminalized_at = now(), \
-                 superseded_by_evidence = COALESCE($3::jsonb, superseded_by_evidence), updated_at = now() \
-             WHERE provider_action_key = $1 AND action_phase <> 'terminal'",
+        if outcome.is_provider_finalization() {
+            return Err(DbError::InvalidData(format!(
+                "`{}` may only be written by the calling owner through finalize_calling",
+                outcome.as_str()
+            )));
+        }
+        let mut tx = self.db.pool().begin().await?;
+        let Some(attempt) = fetch_locked(&mut tx, subject, provider_action_key).await? else {
+            tx.commit().await?;
+            return Ok(false);
+        };
+        if attempt.action_phase == CiActionPhase::Calling {
+            tx.commit().await?;
+            return Err(DbError::InvalidTransition(format!(
+                "route `{provider_action_key}` is owned by incarnation `{}` in phase calling; \
+                 it can only be closed by that owner or by startup recovery",
+                attempt.owner_incarnation_id.as_deref().unwrap_or("<none>")
+            )));
+        }
+        let wrote = terminalize_cas_in_tx(
+            &mut tx,
+            subject,
+            provider_action_key,
+            outcome,
+            superseded_by_evidence_json,
         )
-        .bind(provider_action_key)
-        .bind(outcome.as_str())
-        .bind(superseded_by_evidence_json)
-        .execute(self.db.pool())
         .await?;
-        Ok(updated.rows_affected() == 1)
+        tx.commit().await?;
+        Ok(wrote)
     }
 
     /// Pre-call recovery. See the module docs for the three-outcome contract.
@@ -1037,6 +1237,7 @@ impl CiRouteAttemptRepository {
     /// Database failures.
     pub async fn recover_reserved(
         &self,
+        subject: &CiRouteSubject,
         provider_action_key: &str,
         observed_identity: &CiEvidenceIdentity,
         recovering_incarnation_id: &str,
@@ -1046,7 +1247,7 @@ impl CiRouteAttemptRepository {
         self.db.ensure_initialized().await?;
         let mut tx = self.db.pool().begin().await?;
 
-        let Some(attempt) = fetch_locked(&mut tx, provider_action_key).await? else {
+        let Some(attempt) = fetch_locked(&mut tx, subject, provider_action_key).await? else {
             tx.commit().await?;
             return Ok(CiReservedRecovery::NotFound);
         };
@@ -1061,10 +1262,12 @@ impl CiRouteAttemptRepository {
         // subtracting it in Rust would compare two clocks, and a coordinator
         // whose clock runs behind Postgres would read every reservation as
         // young and never recover one.
-        let eligible: bool = sqlx::query_scalar(
-            "SELECT reserved_at <= now() - make_interval(secs => $2::double precision) \
-             FROM ci_route_attempts WHERE provider_action_key = $1",
-        )
+        let eligible: bool = sqlx::query_scalar(&format!(
+            "SELECT reserved_at <= now() - make_interval(secs => $4::double precision) \
+             FROM ci_route_attempts WHERE {BY_PK}"
+        ))
+        .bind(subject.kind.as_str())
+        .bind(&subject.id)
         .bind(provider_action_key)
         .bind(reservation_timeout_secs as f64)
         .fetch_one(&mut *tx)
@@ -1077,58 +1280,72 @@ impl CiRouteAttemptRepository {
         if !attempt.identity.matches(observed_identity) {
             let superseded = terminalize_in_tx(
                 &mut tx,
+                subject,
                 provider_action_key,
                 CiRouteOutcome::SupersededPreCall,
                 Some(&identity_evidence_json(observed_identity)),
-                None,
             )
             .await?;
             tx.commit().await?;
             return Ok(CiReservedRecovery::SupersededPreCall(Box::new(superseded)));
         }
 
-        let counts =
-            lock_budgets(&mut tx, &attempt.retry_budget_key, &attempt.head_budget_key).await?;
+        let counts = lock_budgets(
+            &mut tx,
+            subject,
+            &attempt.retry_budget_key,
+            &attempt.head_budget_key,
+        )
+        .await?;
 
         if counts.is_exhausted() {
-            sqlx::query(
+            sqlx::query(&format!(
                 "UPDATE ci_route_attempts \
                  SET retry_exhausted_at = COALESCE(retry_exhausted_at, now()), \
                      pre_call_resumptions = pre_call_resumptions + 1, updated_at = now() \
-                 WHERE provider_action_key = $1",
-            )
+                 WHERE {BY_PK}"
+            ))
+            .bind(subject.kind.as_str())
+            .bind(&subject.id)
             .bind(provider_action_key)
             .execute(&mut *tx)
             .await?;
-            let lease_id = open_tier2_lease_in_tx(
+            let grant = open_tier2_lease_in_tx(
                 &mut tx,
+                subject,
                 provider_action_key,
                 tier2_lease_key,
                 CiTier2Reason::RetryExhausted,
             )
             .await?;
-            let refreshed = fetch_in_tx(&mut tx, provider_action_key)
+            let refreshed = fetch_in_tx(&mut tx, subject, provider_action_key)
                 .await?
                 .ok_or_else(|| DbError::Internal("route row disappeared".to_owned()))?;
             tx.commit().await?;
             return Ok(CiReservedRecovery::RetryExhausted {
                 attempt: Box::new(refreshed),
                 counts,
-                tier2_lease_id: lease_id,
+                tier2_lease_id: grant.opened_id(),
             });
         }
 
-        let charged =
-            charge_budgets_in_tx(&mut tx, &attempt.retry_budget_key, &attempt.head_budget_key)
-                .await?;
-
-        let updated = sqlx::query(
-            "UPDATE ci_route_attempts \
-             SET action_phase = 'calling', calling_at = now(), owner_incarnation_id = $2, \
-                 charged_signature_count = $3, charged_head_count = $4, \
-                 pre_call_resumptions = pre_call_resumptions + 1, updated_at = now() \
-             WHERE provider_action_key = $1 AND action_phase = 'reserved'",
+        let charged = charge_budgets_in_tx(
+            &mut tx,
+            subject,
+            &attempt.retry_budget_key,
+            &attempt.head_budget_key,
         )
+        .await?;
+
+        let updated = sqlx::query(&format!(
+            "UPDATE ci_route_attempts \
+             SET action_phase = 'calling', calling_at = now(), owner_incarnation_id = $4, \
+                 charged_signature_count = $5, charged_head_count = $6, \
+                 pre_call_resumptions = pre_call_resumptions + 1, updated_at = now() \
+             WHERE {BY_PK} AND action_phase = 'reserved'"
+        ))
+        .bind(subject.kind.as_str())
+        .bind(&subject.id)
         .bind(provider_action_key)
         .bind(recovering_incarnation_id)
         .bind(charged.signature)
@@ -1141,7 +1358,7 @@ impl CiRouteAttemptRepository {
             ));
         }
 
-        let resumed = fetch_in_tx(&mut tx, provider_action_key)
+        let resumed = fetch_in_tx(&mut tx, subject, provider_action_key)
             .await?
             .ok_or_else(|| DbError::Internal("resumed route row disappeared".to_owned()))?;
         tx.commit().await?;
@@ -1157,38 +1374,42 @@ impl CiRouteAttemptRepository {
     /// The predicates, in the order they are checked:
     ///
     /// 1. the caller attests exclusive advisory-lock ownership;
-    /// 2. the caller attests a quiescence proof that is not
+    /// 2. the row is still `calling`;
+    /// 3. its owner is the exact named former owner, and differs from the
+    ///    recovering incarnation;
+    /// 4. the caller attests a quiescence proof that is not
     ///    [`CiQuiescenceProof::None`] — and for a graceful drain, the former
     ///    incarnation must actually carry `provider_actions_drained_at`;
-    /// 3. the row is still `calling`;
-    /// 4. its owner is the exact named former owner, and differs from the
-    ///    recovering incarnation;
     /// 5. `calling_at` is at least `calling_recovery_timeout_secs` old.
     ///
-    /// Only then does it compare-and-set. Passing all five and still losing —
-    /// because the former owner's finalizer committed first — is legal and is
-    /// recorded as `cas_lost`.
+    /// Only then does it compare-and-set.
+    ///
+    /// `observed_identity` is **not** optional, deliberately. A caller that
+    /// cannot observe the current identity must not call this at all: passing
+    /// "unknown" would resolve to `superseded_after_call` and silently suppress
+    /// the Tier-2 adjudication a possibly-current row is owed.
     ///
     /// # Errors
     ///
     /// Database failures.
     pub async fn recover_calling_owner(
         &self,
+        subject: &CiRouteSubject,
         provider_action_key: &str,
-        observed_identity: Option<&CiEvidenceIdentity>,
+        observed_identity: &CiEvidenceIdentity,
         authority: &CiCallingRecoveryAuthority,
         tier2_lease_key: &str,
     ) -> Result<CiCallingRecovery> {
         self.db.ensure_initialized().await?;
         let mut tx = self.db.pool().begin().await?;
 
-        let Some(attempt) = fetch_locked(&mut tx, provider_action_key).await? else {
+        let Some(attempt) = fetch_locked(&mut tx, subject, provider_action_key).await? else {
             tx.commit().await?;
             return Ok(CiCallingRecovery::NotFound);
         };
 
-        // (1) lock ownership — a periodic sweep or a non-leader runtime stops
-        // here and can never open Tier 2.
+        // (1-3) lock ownership, phase, and exact owner. A periodic sweep or a
+        // non-leader runtime stops here and can never open Tier 2.
         let deferral = if !authority.holds_exclusive_lock {
             Some(CiCallingRecoveryReason::LockNotHeld)
         } else if attempt.action_phase != CiActionPhase::Calling {
@@ -1203,8 +1424,16 @@ impl CiRouteAttemptRepository {
         };
 
         if let Some(reason) = deferral {
-            record_calling_recovery(&mut tx, provider_action_key, authority, reason, false, None)
-                .await?;
+            record_calling_recovery(
+                &mut tx,
+                subject,
+                provider_action_key,
+                authority,
+                reason,
+                false,
+                None,
+            )
+            .await?;
             tx.commit().await?;
             return Ok(CiCallingRecovery::Deferred {
                 attempt: Box::new(attempt),
@@ -1212,7 +1441,7 @@ impl CiRouteAttemptRepository {
             });
         }
 
-        // (2) quiescence. `None` is never enough, and a claimed graceful
+        // (4) quiescence. `None` is never enough, and a claimed graceful
         // drain is checked against the former incarnation's own record rather
         // than believed.
         let quiescent = match authority.quiescence_proof {
@@ -1231,6 +1460,7 @@ impl CiRouteAttemptRepository {
         if !quiescent {
             record_calling_recovery(
                 &mut tx,
+                subject,
                 provider_action_key,
                 authority,
                 CiCallingRecoveryReason::LiveOwnerDeferred,
@@ -1245,11 +1475,13 @@ impl CiRouteAttemptRepository {
             });
         }
 
-        // (3) the 300s floor, again measured by the database clock.
-        let elapsed: bool = sqlx::query_scalar(
-            "SELECT calling_at <= now() - make_interval(secs => $2::double precision) \
-             FROM ci_route_attempts WHERE provider_action_key = $1",
-        )
+        // (5) the 300s floor, again measured by the database clock.
+        let elapsed: bool = sqlx::query_scalar(&format!(
+            "SELECT calling_at <= now() - make_interval(secs => $4::double precision) \
+             FROM ci_route_attempts WHERE {BY_PK}"
+        ))
+        .bind(subject.kind.as_str())
+        .bind(&subject.id)
         .bind(provider_action_key)
         .bind(authority.calling_recovery_timeout_secs as f64)
         .fetch_one(&mut *tx)
@@ -1257,6 +1489,7 @@ impl CiRouteAttemptRepository {
         if !elapsed {
             record_calling_recovery(
                 &mut tx,
+                subject,
                 provider_action_key,
                 authority,
                 CiCallingRecoveryReason::TimeoutNotElapsed,
@@ -1274,25 +1507,27 @@ impl CiRouteAttemptRepository {
         // The external outcome is unknowable and is never queried or replayed.
         // A still-current row becomes `outcome_unknown` and keeps its charge;
         // an obsolete one becomes `superseded_after_call`.
-        let still_current = observed_identity.is_some_and(|obs| attempt.identity.matches(obs));
+        let still_current = attempt.identity.matches(observed_identity);
         let outcome = if still_current {
             CiRouteOutcome::OutcomeUnknown
         } else {
             CiRouteOutcome::SupersededAfterCall
         };
 
-        let won = sqlx::query(
+        let won = sqlx::query(&format!(
             "UPDATE ci_route_attempts \
-             SET owner_incarnation_id = $3, action_phase = 'terminal', terminal_outcome = $4, \
-                 terminalized_at = now(), superseded_by_evidence = COALESCE($5::jsonb, superseded_by_evidence), \
+             SET owner_incarnation_id = $5, action_phase = 'terminal', terminal_outcome = $6, \
+                 terminalized_at = now(), superseded_by_evidence = COALESCE($7::jsonb, superseded_by_evidence), \
                  updated_at = now() \
-             WHERE provider_action_key = $1 AND action_phase = 'calling' AND owner_incarnation_id = $2",
-        )
+             WHERE {BY_PK} AND action_phase = 'calling' AND owner_incarnation_id = $4"
+        ))
+        .bind(subject.kind.as_str())
+        .bind(&subject.id)
         .bind(provider_action_key)
         .bind(&authority.former_owner_incarnation)
         .bind(&authority.recovering_incarnation)
         .bind(outcome.as_str())
-        .bind(observed_identity.map(identity_evidence_json))
+        .bind(identity_evidence_json(observed_identity))
         .execute(&mut *tx)
         .await?;
 
@@ -1304,11 +1539,12 @@ impl CiRouteAttemptRepository {
         // being observable is a lost CAS being silently treated as a win, and
         // the audit row makes it falsifiable if the locking ever changes.
         if won.rows_affected() != 1 {
-            let refreshed = fetch_in_tx(&mut tx, provider_action_key)
+            let refreshed = fetch_in_tx(&mut tx, subject, provider_action_key)
                 .await?
                 .ok_or_else(|| DbError::Internal("route row disappeared".to_owned()))?;
             record_calling_recovery(
                 &mut tx,
+                subject,
                 provider_action_key,
                 authority,
                 CiCallingRecoveryReason::CasLost,
@@ -1326,20 +1562,23 @@ impl CiRouteAttemptRepository {
         let lease_id = if still_current {
             open_tier2_lease_in_tx(
                 &mut tx,
+                subject,
                 provider_action_key,
                 tier2_lease_key,
                 CiTier2Reason::OutcomeUnknown,
             )
             .await?
+            .opened_id()
         } else {
             None
         };
 
-        let refreshed = fetch_in_tx(&mut tx, provider_action_key)
+        let refreshed = fetch_in_tx(&mut tx, subject, provider_action_key)
             .await?
             .ok_or_else(|| DbError::Internal("route row disappeared".to_owned()))?;
         record_calling_recovery(
             &mut tx,
+            subject,
             provider_action_key,
             authority,
             CiCallingRecoveryReason::StartupOwnerHandoff,
@@ -1363,11 +1602,23 @@ impl CiRouteAttemptRepository {
     /// passing or merged observation. A failed guard closes the row
     /// `superseded_before_lead` and opens nothing.
     ///
+    /// A row routes to Tier 2 **at most once, ever**. Both the open lease and
+    /// a resolved one refuse a second adjudication; only the partial unique
+    /// index is released on resolution, and that release is for a *different*
+    /// row carrying genuinely newer evidence.
+    ///
+    /// `tier2_lease_key` is derived by wave 2 from **(PR number, PR-head
+    /// SHA)** — never the lane, the run id, or the dequeue id. A lane-scoped
+    /// key would allow two concurrent Lead adjudications for one PR head and
+    /// defeat the head-level hold. The subject scoping supplies repository
+    /// identity, so the key does not need to.
+    ///
     /// # Errors
     ///
     /// Database failures.
     pub async fn open_tier2_lease(
         &self,
+        subject: &CiRouteSubject,
         provider_action_key: &str,
         observed_identity: &CiEvidenceIdentity,
         tier2_lease_key: &str,
@@ -1376,7 +1627,7 @@ impl CiRouteAttemptRepository {
         self.db.ensure_initialized().await?;
         let mut tx = self.db.pool().begin().await?;
 
-        let Some(attempt) = fetch_locked(&mut tx, provider_action_key).await? else {
+        let Some(attempt) = fetch_locked(&mut tx, subject, provider_action_key).await? else {
             tx.commit().await?;
             return Ok(CiTier2LeaseOutcome::NotFound);
         };
@@ -1395,51 +1646,64 @@ impl CiRouteAttemptRepository {
         if !attempt.identity.matches(observed_identity) || terminal_blocks_lease {
             let closed = terminalize_in_tx(
                 &mut tx,
+                subject,
                 provider_action_key,
                 CiRouteOutcome::SupersededBeforeLead,
                 Some(&identity_evidence_json(observed_identity)),
-                None,
             )
             .await?;
             tx.commit().await?;
             return Ok(CiTier2LeaseOutcome::SupersededBeforeLead(Box::new(closed)));
         }
 
-        let lease_id =
-            open_tier2_lease_in_tx(&mut tx, provider_action_key, tier2_lease_key, reason).await?;
-        let refreshed = fetch_in_tx(&mut tx, provider_action_key)
+        let grant = open_tier2_lease_in_tx(
+            &mut tx,
+            subject,
+            provider_action_key,
+            tier2_lease_key,
+            reason,
+        )
+        .await?;
+        let refreshed = fetch_in_tx(&mut tx, subject, provider_action_key)
             .await?
             .ok_or_else(|| DbError::Internal("route row disappeared".to_owned()))?;
         tx.commit().await?;
-        Ok(match lease_id {
-            Some(id) => CiTier2LeaseOutcome::Opened {
+        Ok(match grant {
+            Tier2Grant::Opened(id) => CiTier2LeaseOutcome::Opened {
                 attempt: Box::new(refreshed),
                 lease_id: id,
             },
-            None => CiTier2LeaseOutcome::AlreadyLeased(Box::new(refreshed)),
+            Tier2Grant::AlreadyRoutedToTier2 => {
+                CiTier2LeaseOutcome::AlreadyRoutedToTier2(Box::new(refreshed))
+            }
+            Tier2Grant::KeyHeldElsewhere => {
+                CiTier2LeaseOutcome::KeyHeldElsewhere(Box::new(refreshed))
+            }
         })
     }
 
     /// Bind a dispatched Lead session to an open lease.
     ///
     /// Fenced to the exact lease id so a stale caller cannot attach a session
-    /// to a lease that has already been resolved and reopened for newer
-    /// evidence.
+    /// to a lease that has already been resolved.
     ///
     /// # Errors
     ///
     /// Database failures.
     pub async fn attach_lead_session(
         &self,
+        subject: &CiRouteSubject,
         provider_action_key: &str,
         lease_id: &str,
         lead_session_id: &str,
     ) -> Result<bool> {
         self.db.ensure_initialized().await?;
-        let updated = sqlx::query(
-            "UPDATE ci_route_attempts SET lead_session_id = $3, updated_at = now() \
-             WHERE provider_action_key = $1 AND tier2_lease_id = $2 AND tier2_lease_state = 'open'",
-        )
+        let updated = sqlx::query(&format!(
+            "UPDATE ci_route_attempts SET lead_session_id = $5, updated_at = now() \
+             WHERE {BY_PK} AND tier2_lease_id = $4 AND tier2_lease_state = 'open'"
+        ))
+        .bind(subject.kind.as_str())
+        .bind(&subject.id)
         .bind(provider_action_key)
         .bind(lease_id)
         .bind(lead_session_id)
@@ -1453,9 +1717,10 @@ impl CiRouteAttemptRepository {
     /// Resolving the lease releases the current-evidence key, and — for a row
     /// that has not already terminalized on its provider outcome — writes the
     /// route's single terminal outcome. A row that *did* terminalize earlier
-    /// (`action_failed`, `outcome_unknown`) keeps that outcome: the Tier-2
-    /// resolution is recorded on `tier2_resolution` instead, because
-    /// terminalization is write-once.
+    /// (`action_failed`, `outcome_unknown`) keeps that outcome and records the
+    /// adjudication in `tier2_resolution`, because terminalization is
+    /// write-once. Use [`CiRouteAttempt::adjudicated_outcome`] to read it back
+    /// without caring which case applied.
     ///
     /// # Errors
     ///
@@ -1463,6 +1728,7 @@ impl CiRouteAttemptRepository {
     /// outcome.
     pub async fn resolve_tier2_lease(
         &self,
+        subject: &CiRouteSubject,
         provider_action_key: &str,
         lease_id: &str,
         observed_identity: &CiEvidenceIdentity,
@@ -1472,7 +1738,7 @@ impl CiRouteAttemptRepository {
         resolution.validate()?;
         let mut tx = self.db.pool().begin().await?;
 
-        let Some(attempt) = fetch_locked(&mut tx, provider_action_key).await? else {
+        let Some(attempt) = fetch_locked(&mut tx, subject, provider_action_key).await? else {
             tx.commit().await?;
             return Ok(false);
         };
@@ -1487,66 +1753,59 @@ impl CiRouteAttemptRepository {
         // transition it authorizes. A head, lane, or dequeue change since
         // dispatch closes the route without any board mutation.
         if !attempt.identity.matches(observed_identity) {
-            sqlx::query(
-                "UPDATE ci_route_attempts \
-                 SET tier2_lease_state = 'resolved', tier2_resolved_at = now(), \
-                     tier2_resolution = 'superseded_before_apply', updated_at = now() \
-                 WHERE provider_action_key = $1 AND tier2_lease_id = $2",
-            )
-            .bind(provider_action_key)
-            .bind(lease_id)
-            .execute(&mut *tx)
-            .await?;
-            terminalize_in_tx(
+            resolve_lease_in_tx(
                 &mut tx,
+                subject,
+                provider_action_key,
+                lease_id,
+                &CiTier2Resolution::plain(CiRouteOutcome::SupersededBeforeApply),
+            )
+            .await?;
+            terminalize_cas_in_tx(
+                &mut tx,
+                subject,
                 provider_action_key,
                 CiRouteOutcome::SupersededBeforeApply,
                 Some(&identity_evidence_json(observed_identity)),
-                None,
             )
             .await?;
             tx.commit().await?;
             return Ok(false);
         }
 
-        sqlx::query(
-            "UPDATE ci_route_attempts \
-             SET tier2_lease_state = 'resolved', tier2_resolved_at = now(), tier2_resolution = $3, \
-                 reopen_mode = $4, diagnostic_reason = $5, park_justification = $6, updated_at = now() \
-             WHERE provider_action_key = $1 AND tier2_lease_id = $2",
+        resolve_lease_in_tx(&mut tx, subject, provider_action_key, lease_id, resolution).await?;
+        terminalize_cas_in_tx(
+            &mut tx,
+            subject,
+            provider_action_key,
+            resolution.outcome,
+            None,
         )
-        .bind(provider_action_key)
-        .bind(lease_id)
-        .bind(resolution.outcome.as_str())
-        .bind(resolution.reopen_mode.map(CiReopenMode::as_str))
-        .bind(resolution.diagnostic_reason.map(CiDiagnosticReason::as_str))
-        .bind(resolution.park_justification.as_deref())
-        .execute(&mut *tx)
         .await?;
-
-        terminalize_in_tx(&mut tx, provider_action_key, resolution.outcome, None, None).await?;
         tx.commit().await?;
         Ok(true)
     }
 
-    /// Close every non-terminal route for a PR because CI passed or the PR
-    /// merged.
+    /// Close every `reserved` route for a PR because CI passed or it merged.
     ///
     /// Charges are **not** refunded — a spent slot stays spent. Any open
     /// Tier-2 lease is resolved so its current-evidence key is released and a
     /// delayed Lead result finds nothing to apply to.
+    ///
+    /// A `calling` row is deliberately left alone: its provider future may be
+    /// in flight, and closing it here would steal the row from a live owner
+    /// and make its own finalizer a silent no-op. Such a row drains through
+    /// that owner or through startup recovery, which is what the rollback
+    /// quiescence gate waits for.
     ///
     /// Returns the number of routes closed.
     ///
     /// # Errors
     ///
     /// Database failures, or an outcome other than `passed`/`merged`.
-    ///
-    /// Scoped by `task_id` as well as `pr_number`: a PR number is unique only
-    /// within one repository, and this repository holds every project's rows.
     pub async fn close_routes_for_newer_outcome(
         &self,
-        task_id: &str,
+        subject: &CiRouteSubject,
         pr_number: i64,
         outcome: CiRouteOutcome,
         observed_evidence_json: Option<&str>,
@@ -1562,21 +1821,25 @@ impl CiRouteAttemptRepository {
         sqlx::query(
             "UPDATE ci_route_attempts \
              SET tier2_lease_state = 'resolved', tier2_resolved_at = now(), \
-                 tier2_resolution = COALESCE(tier2_resolution, $3), updated_at = now() \
-             WHERE task_id = $1 AND pr_number = $2 AND tier2_lease_state = 'open'",
+                 tier2_resolution = COALESCE(tier2_resolution, $4), updated_at = now() \
+             WHERE subject_kind = $1 AND subject_id = $2 AND pr_number = $3 \
+               AND tier2_lease_state = 'open'",
         )
-        .bind(task_id)
+        .bind(subject.kind.as_str())
+        .bind(&subject.id)
         .bind(pr_number)
         .bind(outcome.as_str())
         .execute(&mut *tx)
         .await?;
         let closed = sqlx::query(
             "UPDATE ci_route_attempts \
-             SET action_phase = 'terminal', terminal_outcome = $3, terminalized_at = now(), \
-                 superseded_by_evidence = COALESCE($4::jsonb, superseded_by_evidence), updated_at = now() \
-             WHERE task_id = $1 AND pr_number = $2 AND action_phase <> 'terminal'",
+             SET action_phase = 'terminal', terminal_outcome = $4, terminalized_at = now(), \
+                 superseded_by_evidence = COALESCE($5::jsonb, superseded_by_evidence), updated_at = now() \
+             WHERE subject_kind = $1 AND subject_id = $2 AND pr_number = $3 \
+               AND action_phase = 'reserved'",
         )
-        .bind(task_id)
+        .bind(subject.kind.as_str())
+        .bind(&subject.id)
         .bind(pr_number)
         .bind(outcome.as_str())
         .bind(observed_evidence_json)
@@ -1611,23 +1874,26 @@ impl CiRouteAttemptRepository {
         })
     }
 
-    /// The evidence identities that are still non-terminal, i.e. the routed
-    /// failed identities the rollback gate must see advance, pass, or merge.
+    /// The routes that are still non-terminal, i.e. the routed failed
+    /// identities the rollback gate must see advance, pass, or merge.
     ///
     /// # Errors
     ///
     /// Database failures.
-    pub async fn non_terminal_identities(&self) -> Result<Vec<(String, CiEvidenceIdentity)>> {
+    pub async fn non_terminal_identities(
+        &self,
+    ) -> Result<Vec<(CiRouteSubject, String, CiEvidenceIdentity)>> {
         self.db.ensure_initialized().await?;
         let rows = sqlx::query(&format!(
             "SELECT {ROW_COLUMNS} FROM ci_route_attempts WHERE action_phase <> 'terminal' \
-             ORDER BY reserved_at, provider_action_key"
+             ORDER BY reserved_at, subject_kind, subject_id, provider_action_key"
         ))
         .fetch_all(self.db.pool())
         .await?;
         rows.iter()
             .map(|row| {
-                CiRouteAttempt::from_row(row).map(|a| (a.provider_action_key.clone(), a.identity))
+                CiRouteAttempt::from_row(row)
+                    .map(|a| (a.subject, a.provider_action_key, a.identity))
             })
             .collect()
     }
@@ -1639,6 +1905,7 @@ impl CiRouteAttemptRepository {
     /// Database failures.
     pub async fn calling_recovery_audit(
         &self,
+        subject: &CiRouteSubject,
         provider_action_key: &str,
     ) -> Result<Vec<CiCallingRecoveryRecord>> {
         self.db.ensure_initialized().await?;
@@ -1646,8 +1913,12 @@ impl CiRouteAttemptRepository {
             "SELECT id, provider_action_key, former_owner_incarnation, recovering_incarnation, \
                     holds_exclusive_lock, quiescence_proof, recovery_reason, \
                     calling_recovery_timeout_secs, cas_won, resulting_outcome \
-             FROM ci_route_calling_recoveries WHERE provider_action_key = $1 ORDER BY id",
+             FROM ci_route_calling_recoveries \
+             WHERE subject_kind = $1 AND subject_id = $2 AND provider_action_key = $3 \
+             ORDER BY id",
         )
+        .bind(subject.kind.as_str())
+        .bind(&subject.id)
         .bind(provider_action_key)
         .fetch_all(self.db.pool())
         .await?;
@@ -1700,11 +1971,14 @@ pub struct CiCallingRecoveryRecord {
 
 async fn fetch_in_tx(
     tx: &mut Transaction<'_, Postgres>,
+    subject: &CiRouteSubject,
     provider_action_key: &str,
 ) -> Result<Option<CiRouteAttempt>> {
     let row = sqlx::query(&format!(
-        "SELECT {ROW_COLUMNS} FROM ci_route_attempts WHERE provider_action_key = $1"
+        "SELECT {ROW_COLUMNS} FROM ci_route_attempts WHERE {BY_PK}"
     ))
+    .bind(subject.kind.as_str())
+    .bind(&subject.id)
     .bind(provider_action_key)
     .fetch_optional(&mut **tx)
     .await?;
@@ -1718,18 +1992,21 @@ async fn fetch_in_tx(
 /// prove is a plain row reference.
 async fn fetch_locked(
     tx: &mut Transaction<'_, Postgres>,
+    subject: &CiRouteSubject,
     provider_action_key: &str,
 ) -> Result<Option<CiRouteAttempt>> {
-    let locked: Option<(String,)> = sqlx::query_as(
-        "SELECT provider_action_key FROM ci_route_attempts WHERE provider_action_key = $1 FOR UPDATE",
-    )
+    let locked: Option<(String,)> = sqlx::query_as(&format!(
+        "SELECT provider_action_key FROM ci_route_attempts WHERE {BY_PK} FOR UPDATE"
+    ))
+    .bind(subject.kind.as_str())
+    .bind(&subject.id)
     .bind(provider_action_key)
     .fetch_optional(&mut **tx)
     .await?;
     if locked.is_none() {
         return Ok(None);
     }
-    fetch_in_tx(tx, provider_action_key).await
+    fetch_in_tx(tx, subject, provider_action_key).await
 }
 
 /// Materialize and lock both counter rows, returning their current values.
@@ -1738,32 +2015,40 @@ async fn fetch_locked(
 /// creating a counter is not charging it.
 async fn lock_budgets(
     tx: &mut Transaction<'_, Postgres>,
+    subject: &CiRouteSubject,
     retry_budget_key: &str,
     head_budget_key: &str,
 ) -> Result<CiBudgetCounts> {
     // Deterministic order (signature then head) so two transactions charging
     // the same pair can never deadlock against each other.
-    let signature = lock_counter(tx, "signature", retry_budget_key).await?;
-    let head = lock_counter(tx, "head", head_budget_key).await?;
+    let signature = lock_counter(tx, subject, "signature", retry_budget_key).await?;
+    let head = lock_counter(tx, subject, "head", head_budget_key).await?;
     Ok(CiBudgetCounts { signature, head })
 }
 
 async fn lock_counter(
     tx: &mut Transaction<'_, Postgres>,
+    subject: &CiRouteSubject,
     scope: &str,
     counter_key: &str,
 ) -> Result<i64> {
     sqlx::query(
-        "INSERT INTO ci_route_budget_counters (scope, counter_key, charged_count) VALUES ($1, $2, 0) \
-         ON CONFLICT (scope, counter_key) DO NOTHING",
+        "INSERT INTO ci_route_budget_counters (subject_kind, subject_id, scope, counter_key, charged_count) \
+         VALUES ($1, $2, $3, $4, 0) \
+         ON CONFLICT (subject_kind, subject_id, scope, counter_key) DO NOTHING",
     )
+    .bind(subject.kind.as_str())
+    .bind(&subject.id)
     .bind(scope)
     .bind(counter_key)
     .execute(&mut **tx)
     .await?;
     let count: i64 = sqlx::query_scalar(
-        "SELECT charged_count FROM ci_route_budget_counters WHERE scope = $1 AND counter_key = $2 FOR UPDATE",
+        "SELECT charged_count FROM ci_route_budget_counters \
+         WHERE subject_kind = $1 AND subject_id = $2 AND scope = $3 AND counter_key = $4 FOR UPDATE",
     )
+    .bind(subject.kind.as_str())
+    .bind(&subject.id)
     .bind(scope)
     .bind(counter_key)
     .fetch_one(&mut **tx)
@@ -1779,16 +2064,18 @@ async fn lock_counter(
 /// was still listening.
 async fn charge_budgets_in_tx(
     tx: &mut Transaction<'_, Postgres>,
+    subject: &CiRouteSubject,
     retry_budget_key: &str,
     head_budget_key: &str,
 ) -> Result<CiBudgetCounts> {
-    let signature = charge_counter(tx, "signature", retry_budget_key).await?;
-    let head = charge_counter(tx, "head", head_budget_key).await?;
+    let signature = charge_counter(tx, subject, "signature", retry_budget_key).await?;
+    let head = charge_counter(tx, subject, "head", head_budget_key).await?;
     Ok(CiBudgetCounts { signature, head })
 }
 
 async fn charge_counter(
     tx: &mut Transaction<'_, Postgres>,
+    subject: &CiRouteSubject,
     scope: &str,
     counter_key: &str,
 ) -> Result<i64> {
@@ -1797,9 +2084,11 @@ async fn charge_counter(
          SET charged_count = charged_count + 1, \
              first_charged_at = COALESCE(first_charged_at, now()), \
              last_charged_at = now() \
-         WHERE scope = $1 AND counter_key = $2 \
+         WHERE subject_kind = $1 AND subject_id = $2 AND scope = $3 AND counter_key = $4 \
          RETURNING charged_count",
     )
+    .bind(subject.kind.as_str())
+    .bind(&subject.id)
     .bind(scope)
     .bind(counter_key)
     .fetch_one(&mut **tx)
@@ -1807,76 +2096,160 @@ async fn charge_counter(
     Ok(count)
 }
 
-async fn terminalize_in_tx(
+/// The write-once terminal compare-and-set. Returns whether it wrote.
+async fn terminalize_cas_in_tx(
     tx: &mut Transaction<'_, Postgres>,
+    subject: &CiRouteSubject,
     provider_action_key: &str,
     outcome: CiRouteOutcome,
     superseded_by_evidence_json: Option<&str>,
-    provider_error_json: Option<&str>,
-) -> Result<CiRouteAttempt> {
-    sqlx::query(
+) -> Result<bool> {
+    let updated = sqlx::query(&format!(
         "UPDATE ci_route_attempts \
-         SET action_phase = 'terminal', terminal_outcome = $2, terminalized_at = now(), \
-             superseded_by_evidence = COALESCE($3::jsonb, superseded_by_evidence), \
-             provider_error = COALESCE($4::jsonb, provider_error), updated_at = now() \
-         WHERE provider_action_key = $1 AND action_phase <> 'terminal'",
-    )
+         SET action_phase = 'terminal', terminal_outcome = $4, terminalized_at = now(), \
+             superseded_by_evidence = COALESCE($5::jsonb, superseded_by_evidence), updated_at = now() \
+         WHERE {BY_PK} AND action_phase <> 'terminal'"
+    ))
+    .bind(subject.kind.as_str())
+    .bind(&subject.id)
     .bind(provider_action_key)
     .bind(outcome.as_str())
     .bind(superseded_by_evidence_json)
-    .bind(provider_error_json)
     .execute(&mut **tx)
     .await?;
-    fetch_in_tx(tx, provider_action_key)
+    Ok(updated.rows_affected() == 1)
+}
+
+async fn terminalize_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    subject: &CiRouteSubject,
+    provider_action_key: &str,
+    outcome: CiRouteOutcome,
+    superseded_by_evidence_json: Option<&str>,
+) -> Result<CiRouteAttempt> {
+    terminalize_cas_in_tx(
+        tx,
+        subject,
+        provider_action_key,
+        outcome,
+        superseded_by_evidence_json,
+    )
+    .await?;
+    fetch_in_tx(tx, subject, provider_action_key)
         .await?
         .ok_or_else(|| DbError::Internal("terminalized route row disappeared".to_owned()))
 }
 
-/// Open the lease, or report that the current-evidence key already has one.
+async fn resolve_lease_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    subject: &CiRouteSubject,
+    provider_action_key: &str,
+    lease_id: &str,
+    resolution: &CiTier2Resolution,
+) -> Result<()> {
+    sqlx::query(&format!(
+        "UPDATE ci_route_attempts \
+         SET tier2_lease_state = 'resolved', tier2_resolved_at = now(), tier2_resolution = $5, \
+             reopen_mode = $6, diagnostic_reason = $7, park_justification = $8, updated_at = now() \
+         WHERE {BY_PK} AND tier2_lease_id = $4"
+    ))
+    .bind(subject.kind.as_str())
+    .bind(&subject.id)
+    .bind(provider_action_key)
+    .bind(lease_id)
+    .bind(resolution.outcome.as_str())
+    .bind(resolution.reopen_mode.map(CiReopenMode::as_str))
+    .bind(resolution.diagnostic_reason.map(CiDiagnosticReason::as_str))
+    .bind(resolution.park_justification.as_deref())
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+/// Why a Tier-2 lease request did or did not produce a lease.
+enum Tier2Grant {
+    Opened(String),
+    /// This row has already used its one trip to Tier 2 (open or resolved).
+    AlreadyRoutedToTier2,
+    /// Another row on this subject holds the open lease for that key.
+    KeyHeldElsewhere,
+}
+
+impl Tier2Grant {
+    fn opened_id(self) -> Option<String> {
+        match self {
+            Self::Opened(id) => Some(id),
+            _ => None,
+        }
+    }
+}
+
+/// Open the lease, or explain why not.
 ///
-/// The mutual exclusion is the partial unique index, not this function: two
-/// concurrent transactions both reach the INSERT-equivalent UPDATE and one of
-/// them violates the index. `ON CONFLICT` is unavailable for an UPDATE, so the
-/// contention is resolved by checking for an existing open lease under the
-/// row/key locks the callers already hold.
+/// Two distinct refusals, deliberately not collapsed:
+///
+/// * **once-ever** — `tier2_lease_state IS NULL` in the UPDATE guard. The
+///   proposal says failed or unknown provider evidence "may route **once** to
+///   Tier 2", and a resolved lease must therefore not be reopenable. A guard
+///   of `IS DISTINCT FROM 'open'` would give only *concurrent* uniqueness: an
+///   `action_failed` row whose adjudication already landed could be re-leased,
+///   re-adjudicated, and would carry a stale `tier2_resolution` while its
+///   state flipped back to open.
+/// * **mutual exclusion** — another row already holds the key. The partial
+///   unique index is the real enforcement; this lookup exists so the loser
+///   gets an outcome instead of a constraint violation.
 async fn open_tier2_lease_in_tx(
     tx: &mut Transaction<'_, Postgres>,
+    subject: &CiRouteSubject,
     provider_action_key: &str,
     tier2_lease_key: &str,
     reason: CiTier2Reason,
-) -> Result<Option<String>> {
+) -> Result<Tier2Grant> {
     let existing: Option<(String,)> = sqlx::query_as(
         "SELECT provider_action_key FROM ci_route_attempts \
-         WHERE tier2_lease_key = $1 AND tier2_lease_state = 'open' FOR UPDATE",
+         WHERE subject_kind = $1 AND subject_id = $2 AND tier2_lease_key = $3 \
+           AND tier2_lease_state = 'open' FOR UPDATE",
     )
+    .bind(subject.kind.as_str())
+    .bind(&subject.id)
     .bind(tier2_lease_key)
     .fetch_optional(&mut **tx)
     .await?;
-    if existing.is_some() {
-        return Ok(None);
+    if let Some((holder,)) = existing {
+        return Ok(if holder == provider_action_key {
+            Tier2Grant::AlreadyRoutedToTier2
+        } else {
+            Tier2Grant::KeyHeldElsewhere
+        });
     }
+
     let lease_id = uuid::Uuid::now_v7().to_string();
-    let updated = sqlx::query(
+    let updated = sqlx::query(&format!(
         "UPDATE ci_route_attempts \
-         SET tier2_lease_id = $2, tier2_lease_key = $3, tier2_lease_state = 'open', \
-             tier2_lease_reason = $4, tier2_leased_at = now(), updated_at = now() \
-         WHERE provider_action_key = $1 AND tier2_lease_state IS DISTINCT FROM 'open'",
-    )
+         SET tier2_lease_id = $4, tier2_lease_key = $5, tier2_lease_state = 'open', \
+             tier2_lease_reason = $6, tier2_leased_at = now(), updated_at = now() \
+         WHERE {BY_PK} AND tier2_lease_state IS NULL"
+    ))
+    .bind(subject.kind.as_str())
+    .bind(&subject.id)
     .bind(provider_action_key)
     .bind(&lease_id)
     .bind(tier2_lease_key)
     .bind(reason.as_str())
     .execute(&mut **tx)
     .await?;
-    if updated.rows_affected() == 1 {
-        Ok(Some(lease_id))
+    Ok(if updated.rows_affected() == 1 {
+        Tier2Grant::Opened(lease_id)
     } else {
-        Ok(None)
-    }
+        // Not `KeyHeldElsewhere`: the key lookup above found nothing, so the
+        // only way to miss here is this row's own lease having resolved.
+        Tier2Grant::AlreadyRoutedToTier2
+    })
 }
 
 async fn record_calling_recovery(
     tx: &mut Transaction<'_, Postgres>,
+    subject: &CiRouteSubject,
     provider_action_key: &str,
     authority: &CiCallingRecoveryAuthority,
     reason: CiCallingRecoveryReason,
@@ -1885,13 +2258,17 @@ async fn record_calling_recovery(
 ) -> Result<()> {
     sqlx::query(
         "INSERT INTO ci_route_calling_recoveries \
-           (id, provider_action_key, former_owner_incarnation, recovering_incarnation, \
-            holds_exclusive_lock, quiescence_proof, recovery_reason, calling_recovery_timeout_secs, \
-            observed_calling_at, cas_won, resulting_outcome) \
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8, \
-                 (SELECT calling_at FROM ci_route_attempts WHERE provider_action_key = $2), $9, $10)",
+           (id, subject_kind, subject_id, provider_action_key, former_owner_incarnation, \
+            recovering_incarnation, holds_exclusive_lock, quiescence_proof, recovery_reason, \
+            calling_recovery_timeout_secs, observed_calling_at, cas_won, resulting_outcome) \
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10, \
+                 (SELECT calling_at FROM ci_route_attempts \
+                   WHERE subject_kind = $2 AND subject_id = $3 AND provider_action_key = $4), \
+                 $11, $12)",
     )
     .bind(uuid::Uuid::now_v7().to_string())
+    .bind(subject.kind.as_str())
+    .bind(&subject.id)
     .bind(provider_action_key)
     .bind(&authority.former_owner_incarnation)
     .bind(&authority.recovering_incarnation)

@@ -1148,11 +1148,21 @@ pub async fn make_coordinator_incarnation_vanish_after_first_read(
         .execute(db.pool())
         .await
         .unwrap();
+    // The view must project EVERY column `CoordinatorIncarnationRepository`
+    // selects, not just the ones this fixture varies. A column added to the
+    // real table and forgotten here turns the first read into a *lookup
+    // error*, and the branch this fixture exists to reach is never entered —
+    // the test still fails, but on the wrong classification, and the reason is
+    // three crates away. Migration 191's `draining_at` /
+    // `provider_actions_drained_at` are NULL here because a vanished lease has
+    // no drain history to report.
     let sql = format!(
         r#"CREATE VIEW coordinator_incarnations AS
            SELECT '{incarnation_id}'::varchar AS id,
                   '{registered_at}'::varchar AS registered_at,
-                  '{last_renewed_at}'::varchar AS last_renewed_at
+                  '{last_renewed_at}'::varchar AS last_renewed_at,
+                  NULL::varchar AS draining_at,
+                  NULL::varchar AS provider_actions_drained_at
            WHERE nextval('ci_access_count') = 1"#
     );
     sqlx::query(&sql).execute(db.pool()).await.unwrap();
@@ -1199,11 +1209,17 @@ pub async fn make_coordinator_incarnation_error_after_first_read(
     .execute(db.pool())
     .await
     .unwrap();
+    // Same completeness requirement as the vanish fixture above: project
+    // every column the repository selects, or the guard fires on the wrong
+    // read and this fixture silently starts testing the `get()` error branch
+    // instead of the `is_live()` one.
     let sql = format!(
         r#"CREATE VIEW coordinator_incarnations AS
            SELECT '{incarnation_id}'::varchar AS id,
                   '{registered_at}'::varchar AS registered_at,
-                  '{last_renewed_at}'::varchar AS last_renewed_at
+                  '{last_renewed_at}'::varchar AS last_renewed_at,
+                  NULL::varchar AS draining_at,
+                  NULL::varchar AS provider_actions_drained_at
            WHERE ci_error_guard()"#
     );
     sqlx::query(&sql).execute(db.pool()).await.unwrap();

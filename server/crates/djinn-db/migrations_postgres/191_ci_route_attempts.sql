@@ -6,17 +6,18 @@
 -- creates three new relations and adds two nullable columns to
 -- `coordinator_incarnations`. No existing row is rewritten and no existing
 -- column changes shape, so a binary that predates the feature keeps running
--- against this schema with the tables simply empty (the "migration only, old
+-- against this schema with the tables empty (the "migration only, old
 -- binary" row of the proposal's mixed-version matrix).
 --
 -- The three invariants this schema exists to enforce, in the database rather
 -- than in a coordinator that can crash between statements:
 --
 --  1. AT MOST ONE PROVIDER-CALL EPISODE PER EVIDENCE IDENTITY.
---     `ci_route_attempts.provider_action_key` is UNIQUE and is the primary
---     key. It is a caller-computed hash of the immutable evidence identity
---     (lane + PR number + PR-head SHA + run id + run head SHA + dequeue
---     identity) plus the action. Duplicate polls and restarts collide on it.
+--     `provider_action_key` is a caller-computed hash of the immutable
+--     evidence identity (lane + PR number + PR-head SHA + run id + run head
+--     SHA + dequeue identity) plus the action. Duplicate polls and restarts
+--     collide on it. It is scoped by the route SUBJECT rather than global —
+--     see below, that scoping is load bearing.
 --
 --  2. MONOTONIC RETRY BUDGETS. `ci_route_budget_counters.charged_count` has a
 --     CHECK that keeps it non-negative and the repository never issues a
@@ -26,9 +27,12 @@
 --     reversible accounting column.
 --
 --  3. AT MOST ONE TIER-2 (Lead) ADJUDICATION PER CURRENT EVIDENCE.
---     A PARTIAL UNIQUE INDEX on `tier2_lease_key` restricted to `open` leases
---     makes concurrent openers mutually exclusive; a resolved lease releases
---     the key so a genuinely newer evidence identity can adjudicate later.
+--     A PARTIAL UNIQUE INDEX on the subject-scoped lease key, restricted to
+--     `open` leases, makes concurrent openers mutually exclusive; resolving a
+--     lease releases the key for genuinely newer evidence. A given ROW may
+--     still only ever route to Tier 2 once — that is enforced in the
+--     repository, which refuses to re-lease a row whose lease already
+--     resolved.
 --
 -- The `reserved` -> `calling` -> terminal phase column carries the fourth
 -- invariant, the one the whole pre-call recovery contract rests on: a
@@ -36,11 +40,51 @@
 -- ownership, therefore no provider mutation happened. Recovery of such a row
 -- resumes it, supersedes it, or exhausts it -- there is no abandonment state,
 -- which is why no `abandoned` value appears in the terminal vocabulary below.
+--
+-- ---------------------------------------------------------------------------
+-- Why the route subject is polymorphic
+-- ---------------------------------------------------------------------------
+--
+-- Every key on this table is caller-computed, so two routes could in principle
+-- collide. The consequence of a collision is NOT a merely-shared budget: with
+-- a globally unique `provider_action_key` a colliding reservation returns
+-- "already present" for FOREIGN evidence and that route then silently never
+-- exists. The same shape applies to the Tier-2 lease: a colliding lease key
+-- reports "already leased" and the Lead adjudication never opens. Scoping both
+-- by the owning subject makes that class structurally impossible rather than
+-- merely unlikely.
+--
+-- The subject is `(subject_kind, subject_id)` rather than a bare `task_id`
+-- because a CI evidence identity has no task in it. A PR opened from a
+-- proposal branch has no owning task at all, and its remedy is new work rather
+-- than one reopen; Tier 1 applies to it unchanged and only the Tier-2 subject
+-- differs. Modelling that now costs two columns. Retrofitting it later means
+-- dropping NOT NULL, dropping a foreign key, backfilling, and rebuilding both
+-- the primary key and the lease index on a table carrying live routing state.
+--
+-- Referential integrity is kept for the task case WITHOUT denormalization:
+-- `task_id` is `GENERATED ALWAYS ... STORED` from the subject and carries the
+-- real foreign key. PostgreSQL enforces the key on the generated value and
+-- cascades a task delete through it, and because the column is GENERATED
+-- ALWAYS the repository physically cannot write a value that disagrees with
+-- `subject_id` (verified on PostgreSQL 16). The honest limit: a non-task
+-- subject generates NULL, so it has NO database-enforced referential
+-- integrity. Whichever wave first writes a non-task subject owns proving that
+-- its subject exists.
 
 CREATE TABLE ci_route_attempts (
+    -- ---- subject ----------------------------------------------------------
+    -- The thing this route is remediating. `task` today; the vocabulary
+    -- reserves `proposal` so a proposal-branch PR route needs no DDL, but
+    -- wave 1 has NO writer for it and nothing branches on it.
+    subject_kind            VARCHAR(32)  NOT NULL,
+    subject_id              VARCHAR(36)  NOT NULL,
+
     -- ---- identity ---------------------------------------------------------
     -- Caller-computed hash over the immutable evidence identity plus action.
-    -- Primary key: the unique constraint IS the idempotency mechanism.
+    -- Unique WITHIN a subject: the unique constraint is the idempotency
+    -- mechanism, and scoping it is what stops one subject's route from
+    -- swallowing another's.
     provider_action_key     VARCHAR(128) NOT NULL,
 
     -- Immutable evidence identity, stored in expanded form so a recovery
@@ -53,10 +97,14 @@ CREATE TABLE ci_route_attempts (
     run_head_sha            VARCHAR(64)  NOT NULL,
     dequeue_id              VARCHAR(128) NULL,
 
-    -- Board linkage. `task_id` is what makes "sessions per merged PR by lane"
-    -- reportable; `origin_state` is the board state the route was opened from
-    -- and the state a Lead-driven `PrCiFailed` must transition out of.
-    task_id                 VARCHAR(36)  NOT NULL,
+    -- Real referential integrity for the task subject, derived rather than
+    -- duplicated. See the header note.
+    task_id                 VARCHAR(36)
+        GENERATED ALWAYS AS (CASE WHEN subject_kind = 'task' THEN subject_id END) STORED
+        REFERENCES tasks(id) ON DELETE CASCADE,
+
+    -- The board state the route was opened from, and the state a Lead-driven
+    -- `PrCiFailed` must transition out of.
     origin_state            VARCHAR(32)  NOT NULL,
 
     -- ---- classification ---------------------------------------------------
@@ -101,10 +149,12 @@ CREATE TABLE ci_route_attempts (
     retry_exhausted_at      TIMESTAMPTZ  NULL,
 
     -- ---- Tier 2 ----------------------------------------------------------
-    -- `tier2_lease_key` is the current-evidence scope (lane + PR + PR-head
-    -- SHA): at most one Lead adjudication may be open for a PR head at a
-    -- time, which is the "head-level hold" the proposal's retry-storm
-    -- safeguard names.
+    -- `tier2_lease_key` is the current-evidence scope. It carries the PR
+    -- number and PR-head SHA and NOT the lane, the run id, or the dequeue id:
+    -- at most one Lead adjudication may be open per PR head ACROSS BOTH LANES,
+    -- which is the "head-level hold" the proposal's retry-storm safeguard
+    -- names. A lane-scoped key would permit two concurrent adjudications for
+    -- one head and defeat it.
     tier2_lease_id          VARCHAR(36)  NULL,
     tier2_lease_key         VARCHAR(128) NULL,
     tier2_lease_state       VARCHAR(16)  NULL,
@@ -129,10 +179,11 @@ CREATE TABLE ci_route_attempts (
     created_at              TIMESTAMPTZ  NOT NULL DEFAULT now(),
     updated_at              TIMESTAMPTZ  NOT NULL DEFAULT now(),
 
-    CONSTRAINT ci_route_attempts_pkey PRIMARY KEY (provider_action_key),
-    CONSTRAINT ci_route_attempts_task_fkey
-        FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+    CONSTRAINT ci_route_attempts_pkey
+        PRIMARY KEY (subject_kind, subject_id, provider_action_key),
 
+    CONSTRAINT ci_route_attempts_subject_kind_check
+        CHECK (subject_kind IN ('task', 'proposal')),
     CONSTRAINT ci_route_attempts_lane_check
         CHECK (lane IN ('pr_head', 'merge_group')),
     CONSTRAINT ci_route_attempts_origin_state_check
@@ -207,21 +258,23 @@ CREATE TABLE ci_route_attempts (
         CHECK (diagnostic_reason IS NULL OR reopen_mode = 'diagnose')
 );
 
--- The current-evidence Tier-2 hold. PARTIAL so that only OPEN leases are
--- mutually exclusive: once Lead's result has been applied the key is free for
--- a genuinely newer evidence identity.
+-- The current-evidence Tier-2 hold, scoped to the subject for the same reason
+-- the primary key is. PARTIAL so that only OPEN leases are mutually exclusive:
+-- once Lead's result has been applied the key is free for a genuinely newer
+-- evidence identity on a different row.
 CREATE UNIQUE INDEX ci_route_attempts_open_tier2_lease_uniq
-    ON ci_route_attempts(tier2_lease_key)
+    ON ci_route_attempts(subject_kind, subject_id, tier2_lease_key)
     WHERE tier2_lease_state = 'open';
 
--- Recovery sweeps scan by phase; reporting scans by lane/PR identity.
+-- Recovery sweeps scan by phase; reporting scans by subject and lane identity.
 CREATE INDEX ci_route_attempts_phase_idx
     ON ci_route_attempts(action_phase)
     WHERE action_phase <> 'terminal';
 CREATE INDEX ci_route_attempts_lane_identity_idx
-    ON ci_route_attempts(lane, pr_number, pr_head_sha);
+    ON ci_route_attempts(subject_kind, subject_id, lane, pr_number, pr_head_sha);
 CREATE INDEX ci_route_attempts_task_idx
-    ON ci_route_attempts(task_id);
+    ON ci_route_attempts(task_id)
+    WHERE task_id IS NOT NULL;
 CREATE INDEX ci_route_attempts_owner_idx
     ON ci_route_attempts(owner_incarnation_id)
     WHERE owner_incarnation_id IS NOT NULL;
@@ -237,13 +290,18 @@ CREATE INDEX ci_route_attempts_owner_idx
 -- it is not a corrupt row. A CHECK here would turn a normal, expected
 -- exhaustion into a transaction abort.
 CREATE TABLE ci_route_budget_counters (
+    subject_kind     VARCHAR(32)  NOT NULL,
+    subject_id       VARCHAR(36)  NOT NULL,
     scope            VARCHAR(16)  NOT NULL,
     counter_key      VARCHAR(128) NOT NULL,
     charged_count    BIGINT       NOT NULL DEFAULT 0,
     first_charged_at TIMESTAMPTZ  NULL,
     last_charged_at  TIMESTAMPTZ  NULL,
 
-    CONSTRAINT ci_route_budget_counters_pkey PRIMARY KEY (scope, counter_key),
+    CONSTRAINT ci_route_budget_counters_pkey
+        PRIMARY KEY (subject_kind, subject_id, scope, counter_key),
+    CONSTRAINT ci_route_budget_counters_subject_kind_check
+        CHECK (subject_kind IN ('task', 'proposal')),
     CONSTRAINT ci_route_budget_counters_scope_check
         CHECK (scope IN ('signature', 'head')),
     CONSTRAINT ci_route_budget_counters_nonneg_check
@@ -256,6 +314,8 @@ CREATE TABLE ci_route_budget_counters (
 -- "we never steal a live owner's row" is an unfalsifiable claim.
 CREATE TABLE ci_route_calling_recoveries (
     id                        VARCHAR(36)  NOT NULL,
+    subject_kind              VARCHAR(32)  NOT NULL,
+    subject_id                VARCHAR(36)  NOT NULL,
     provider_action_key       VARCHAR(128) NOT NULL,
     former_owner_incarnation  VARCHAR(36)  NULL,
     recovering_incarnation    VARCHAR(36)  NOT NULL,
@@ -275,8 +335,9 @@ CREATE TABLE ci_route_calling_recoveries (
 
     CONSTRAINT ci_route_calling_recoveries_pkey PRIMARY KEY (id),
     CONSTRAINT ci_route_calling_recoveries_attempt_fkey
-        FOREIGN KEY (provider_action_key)
-        REFERENCES ci_route_attempts(provider_action_key) ON DELETE CASCADE,
+        FOREIGN KEY (subject_kind, subject_id, provider_action_key)
+        REFERENCES ci_route_attempts(subject_kind, subject_id, provider_action_key)
+        ON DELETE CASCADE,
     CONSTRAINT ci_route_calling_recoveries_quiescence_check
         CHECK (quiescence_proof IN ('graceful_drain', 'process_terminated', 'none')),
     CONSTRAINT ci_route_calling_recoveries_reason_check
@@ -294,7 +355,7 @@ CREATE TABLE ci_route_calling_recoveries (
 );
 
 CREATE INDEX ci_route_calling_recoveries_attempt_idx
-    ON ci_route_calling_recoveries(provider_action_key);
+    ON ci_route_calling_recoveries(subject_kind, subject_id, provider_action_key);
 
 -- Provider-action drain proof on the coordinator incarnation lease.
 --
@@ -306,5 +367,9 @@ CREATE INDEX ci_route_calling_recoveries_attempt_idx
 -- an incarnation registered by an old binary simply has neither, and the
 -- calling-recovery predicate treats a missing drain proof as "not proven",
 -- never as "drained".
+--
+-- Anything that reads `coordinator_incarnations` through
+-- `CoordinatorIncarnationRepository::get` must project these two columns --
+-- including the test-support fixtures that replace the table with a view.
 ALTER TABLE coordinator_incarnations ADD COLUMN draining_at VARCHAR(64) NULL;
 ALTER TABLE coordinator_incarnations ADD COLUMN provider_actions_drained_at VARCHAR(64) NULL;
