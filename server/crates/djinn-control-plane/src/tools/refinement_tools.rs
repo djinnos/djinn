@@ -907,192 +907,47 @@ impl DjinnMcpServer {
             format!("proposal:{}", proposal.short_id),
         ];
 
-        let spike_task = match task_repo
-            .create_in_project_with_provenance(
-                &project_id,
-                None, // no epic parent
-                EffectiveCreatorProvenance {
-                    explicit_user_id: None,
-                    source_task_id: None,
-                    proposal_id: Some(&proposal.id),
-                },
-                &spike_title,
-                &spike_description,
-                "", // no design field
-                "spike",
-                0,  // default priority
-                "", // no owner
-                Some("open"),
-                None, // no acceptance criteria
-            )
-            .await
-        {
-            Ok(task) => task,
-            Err(e) => {
-                return Json(NeedsEvidenceDemandResponse {
-                    proposal_id: Some(proposal.id),
-                    accepted: false,
-                    result: None,
-                    error: Some(format!("failed to create evidence spike task: {e}")),
-                    conflict_code: None,
-                });
-            }
-        };
-
-        // Set labels on the spike task.
-        if let Err(e) = task_repo
-            .update_labels(
-                &spike_task.id,
-                &serde_json::to_string(&labels).unwrap_or_else(|_| "[]".into()),
-            )
-            .await
-        {
-            // Best-effort: log but don't fail the entire demand.
-            tracing::warn!(
-                spike_task_id = %spike_task.id,
-                error = %e,
-                "failed to set labels on evidence spike task"
-            );
-        }
-
-        // Set agent_type = "architect" for Architect routing.
-        if let Err(e) = task_repo
-            .update_agent_type(&spike_task.id, Some("architect"))
-            .await
-        {
-            tracing::warn!(
-                spike_task_id = %spike_task.id,
-                error = %e,
-                "failed to set agent_type on evidence spike task"
-            );
-        }
-
-        // ── Step 3: Write needs_evidence debate-trail entry ──────────────
-        let claim_link = NeedsEvidenceClaimLink::from_claim(&proposal.id, &spike_task.id, &claim);
-        let claim_link_value = claim_link.to_value();
-
-        if let Err(e) = repo
-            .add_debate_trail_entry(ProposalDebateTrailCreateInput {
+        let labels = serde_json::json!(labels);
+        let allocated = match repo
+            .demand_evidence_atomically(djinn_db::AtomicEvidenceDemandInput {
                 proposal_id: &proposal.id,
-                kind: "needs_evidence",
-                body: &p.question,
-                blocking: true,
-                agent_role: "judge",
-                author_kind: "agent",
-                author_model: None,
-                source_task_id: Some(&judge_task_id),
-                against_revision_seq: p.against_revision_seq,
-                round: p.round,
-                body_metadata: Some(&claim_link_value),
+                project_id: &project_id,
+                claim: &claim,
+                title: &spike_title,
+                description: &spike_description,
+                labels: &labels,
             })
             .await
         {
-            // Clean up the spike task on failure.
-            let _ = task_repo.delete(&spike_task.id).await;
-            return Json(NeedsEvidenceDemandResponse {
-                proposal_id: Some(proposal.id),
-                accepted: false,
-                result: None,
-                error: Some(format!("failed to record needs_evidence debate entry: {e}")),
-                conflict_code: None,
-            });
-        }
-
-        // ── Step 4: Link spike to proposal (race-safe atomic) ─────────
-        //
-        // `try_set_structured_needs_evidence_spike` atomically sets
-        // `linked_spike_task_id` and `needs_evidence_claim` only when
-        // `linked_spike_task_id IS NULL`. Returns `None` when a
-        // concurrent demand already won the race.
-        let link_result = repo
-            .try_set_structured_needs_evidence_spike(&proposal.id, &spike_task.id, &claim)
-            .await;
-
-        match link_result {
-            Ok(Some(_updated_proposal)) => {
-                // We won the race — the spike is linked to the proposal.
-            }
-            Ok(None) => {
-                // A concurrent demand already linked a spike (or the
-                // proposal was deleted). Clean up our spike and report
-                // the conflict.
-                let _ = task_repo
-                    .transition(
-                        &spike_task.id,
-                        TransitionAction::ForceClose,
-                        "system",
-                        "system",
-                        Some("duplicate demand; superseded"),
-                        Some(TaskStatus::Closed),
-                    )
-                    .await;
+            Ok(value) => value,
+            Err(e) if e.to_string().contains("active_evidence_conflict") => {
                 return Json(NeedsEvidenceDemandResponse {
                     proposal_id: Some(proposal.id),
                     accepted: false,
                     result: None,
-                    error: Some("active_evidence_conflict".to_string()),
-                    conflict_code: Some("active_evidence_conflict".to_string()),
+                    error: Some("active_evidence_conflict".into()),
+                    conflict_code: Some("active_evidence_conflict".into()),
                 });
             }
             Err(e) => {
-                // The atomic UPDATE failed — likely a DB error. Clean up.
-                let _ = task_repo.delete(&spike_task.id).await;
-                return Json(NeedsEvidenceDemandResponse {
-                    proposal_id: Some(proposal.id),
-                    accepted: false,
-                    result: None,
-                    error: Some(format!("failed to link evidence spike to proposal: {e}")),
-                    conflict_code: None,
-                });
+                return Json(err_demand_evidence(format!(
+                    "failed to allocate evidence demand atomically: {e}"
+                )));
             }
-        }
-
-        // ── Step 5: Record refinement_awaiting_evidence_started lifecycle ─
-        if let Err(e) = repo
-            .record_awaiting_evidence_started(
-                &proposal.id,
-                &spike_task.id,
-                &judge_task_id,
-                p.round,
-                p.against_revision_seq,
-            )
-            .await
-        {
-            tracing::warn!(
-                proposal_id = %proposal.id,
-                spike_task_id = %spike_task.id,
-                error = %e,
-                "failed to record refinement_awaiting_evidence_started lifecycle event; \
-                 spike is linked but lifecycle event is missing"
-            );
-        }
-
-        // Typed authority is the response source; legacy fields above remain an
-        // additive compatibility projection. A parity failure is never guessed.
-        let typed = TypedEvidenceRepository::new(self.state.db().clone())
-            .dual_read_legacy_parity(&proposal.id)
-            .await
-            .ok()
-            .flatten();
+        };
 
         Json(NeedsEvidenceDemandResponse {
             proposal_id: Some(proposal.id),
             accepted: true,
             result: Some(NeedsEvidenceDemandResult {
                 claim: claim.question.clone(),
-                spike_task_id: Some(spike_task.id.clone()),
+                spike_task_id: Some(allocated.spike_task_id),
                 against_revision_seq: p.against_revision_seq,
                 round: p.round,
-                finding_id: typed
-                    .as_ref()
-                    .map(|projection| projection.finding.id.clone()),
-                attempt_id: typed
-                    .as_ref()
-                    .and_then(|projection| projection.attempt_id.clone()),
-                lifecycle: typed
-                    .as_ref()
-                    .map(|projection| format!("{:?}", projection.finding.lifecycle).to_lowercase()),
-                replayed: Some(false),
+                finding_id: Some(allocated.finding_id),
+                attempt_id: Some(allocated.attempt_id),
+                lifecycle: Some("spike_active".into()),
+                replayed: Some(allocated.replayed),
             }),
             error: None,
             conflict_code: None,

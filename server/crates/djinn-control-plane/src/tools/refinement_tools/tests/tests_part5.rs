@@ -20,7 +20,8 @@ pub(super) fn valid_demand_params(proposal_id: &str) -> serde_json::Value {
         "target_subsystem": "auth",
         "spec_unknown_anchor": "anchor-text",
         "insufficient_in_session_research": "No integration tests cover token expiry edge case",
-        "expected_findings": "Evidence that token refresh is or is not required"
+        "expected_findings": "Evidence that token refresh is or is not required",
+        "load_bearing_category": "feasibility"
     })
 }
 

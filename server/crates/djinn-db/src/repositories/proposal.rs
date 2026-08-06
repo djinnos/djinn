@@ -262,6 +262,24 @@ pub struct ProposalDebateTrailCreateInput<'a> {
     pub body_metadata: Option<&'a serde_json::Value>,
 }
 
+/// Facts for the one repository-owned atomic demand boundary.
+pub struct AtomicEvidenceDemandInput<'a> {
+    pub proposal_id: &'a str,
+    pub project_id: &'a str,
+    pub claim: &'a NeedsEvidenceClaim,
+    pub title: &'a str,
+    pub description: &'a str,
+    pub labels: &'a serde_json::Value,
+}
+
+#[derive(Clone, Debug)]
+pub struct AtomicEvidenceDemandResult {
+    pub finding_id: String,
+    pub attempt_id: String,
+    pub spike_task_id: String,
+    pub replayed: bool,
+}
+
 /// A Planner-authored acceptance-criteria spec amendment. Unlike
 /// [`ProposalRepository::set_acceptance_criteria`], these operations are real
 /// spec edits: they bump the proposal revision and write an audit trail.
@@ -3210,6 +3228,111 @@ impl ProposalRepository {
         self.events
             .send(DjinnEventEnvelope::proposal_updated(&proposal));
         Ok(proposal)
+    }
+
+    /// Atomically allocate the task, typed authority, legacy projection, debate
+    /// link, and lifecycle fact.  The proposal lock is the normalized delivery
+    /// replay/conflict fence, so no loser task can be created.
+    pub async fn demand_evidence_atomically(
+        &self,
+        input: AtomicEvidenceDemandInput<'_>,
+    ) -> Result<AtomicEvidenceDemandResult> {
+        self.db.ensure_initialized().await?;
+        let claim =
+            serde_json::to_value(input.claim).map_err(|e| Error::InvalidData(e.to_string()))?;
+        let mut tx = self.db.pool().begin().await?;
+        sqlx::query("SELECT id FROM proposals WHERE id=$1 FOR UPDATE")
+            .bind(input.proposal_id)
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or_else(|| Error::InvalidData("proposal not found".into()))?;
+        let active = sqlx::query("SELECT f.id,f.claim,a.id attempt_id,a.spike_task_id FROM typed_evidence_findings f LEFT JOIN typed_evidence_attempts a ON a.finding_id=f.id WHERE f.proposal_id=$1 AND f.lifecycle IN ('demanded','spike_active','evidence_received','failed') ORDER BY a.sequence DESC").bind(input.proposal_id).fetch_all(&mut *tx).await?;
+        if let Some(row) = active.first() {
+            if row.get::<serde_json::Value, _>("claim") == claim {
+                if let (Some(attempt_id), Some(spike_task_id)) =
+                    (row.get("attempt_id"), row.get("spike_task_id"))
+                {
+                    let result = AtomicEvidenceDemandResult {
+                        finding_id: row.get("id"),
+                        attempt_id,
+                        spike_task_id,
+                        replayed: true,
+                    };
+                    tx.commit().await?;
+                    return Ok(result);
+                }
+            }
+            return Err(Error::InvalidTransition("active_evidence_conflict".into()));
+        }
+        let task_id = uuid::Uuid::now_v7().to_string();
+        let creator: String =
+            sqlx::query_scalar("SELECT created_by_user_id FROM tasks WHERE id=$1")
+                .bind(&input.claim.created_by_task_id)
+                .fetch_one(&mut *tx)
+                .await?;
+        sqlx::query("INSERT INTO tasks (id,project_id,short_id,title,description,design,issue_type,priority,owner,status,labels,acceptance_criteria,created_by_user_id,agent_type) VALUES ($1,$2,$3,$4,$5,'','spike',0,'','open',$6,'[]'::jsonb,$7,'architect')")
+            .bind(&task_id).bind(input.project_id).bind(format!("e{}", &task_id[..7])).bind(input.title).bind(input.description).bind(input.labels).bind(creator).execute(&mut *tx).await?;
+        let demand = DemandTypedEvidenceInput {
+            finding_id: uuid::Uuid::now_v7().to_string(),
+            proposal_id: input.proposal_id.into(),
+            demand_hash: legacy_demand_hash(&claim, Some(&task_id)),
+            claim,
+            demanded_revision_seq: input.claim.against_revision_seq,
+            judge_task_id: input.claim.created_by_task_id.clone(),
+        };
+        let typed = TypedEvidenceRepository::demand_activate_and_set_legacy_in_transaction(
+            &mut tx, demand, &task_id,
+        )
+        .await?;
+        let attempt_id: String = sqlx::query_scalar(
+            "SELECT id FROM typed_evidence_attempts WHERE finding_id=$1 AND spike_task_id=$2",
+        )
+        .bind(&typed.finding.id)
+        .bind(&task_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        let link =
+            NeedsEvidenceClaimLink::from_claim(input.proposal_id, &task_id, input.claim).to_value();
+        self.add_debate_trail_entry_in_tx(
+            &mut tx,
+            ProposalDebateTrailCreateInput {
+                proposal_id: input.proposal_id,
+                kind: "needs_evidence",
+                body: &input.claim.question,
+                blocking: true,
+                agent_role: "judge",
+                author_kind: "agent",
+                author_model: None,
+                source_task_id: Some(&input.claim.created_by_task_id),
+                against_revision_seq: input.claim.against_revision_seq,
+                round: input.claim.round,
+                body_metadata: Some(&link),
+            },
+        )
+        .await?;
+        let meta = EvidenceLifecycleMetadata::awaiting_started(
+            input.proposal_id,
+            &task_id,
+            &input.claim.created_by_task_id,
+            input.claim.round,
+            input.claim.against_revision_seq,
+        )
+        .to_event_metadata();
+        self.insert_lightweight_lifecycle_event_in_tx(
+            &mut tx,
+            input.proposal_id,
+            input.claim.against_revision_seq,
+            evidence_lifecycle_kind::AWAITING_EVIDENCE_STARTED,
+            Some(&meta),
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(AtomicEvidenceDemandResult {
+            finding_id: typed.finding.id,
+            attempt_id,
+            spike_task_id: task_id,
+            replayed: false,
+        })
     }
 
     /// Structured counterpart of [`Self::set_needs_evidence_spike`]: persists
