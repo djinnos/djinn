@@ -8517,12 +8517,15 @@ async fn terminal_persisted_exit_rows_cover_every_task_status() {
             assert_eq!(after_repeat.outcome, after.outcome);
             assert_eq!(after_repeat.terminal_at, after.terminal_at);
             assert_eq!(attempts.list_for_task(&task.id).await.unwrap().len(), 1);
-            assert!(
+            // A terminal delivery has one durable `session_exit:{session_id}`
+            // trigger. Replaying it returns the original immutable observation
+            // rather than appending a second liveness-evidence row.
+            assert_eq!(
                 evidence
                     .count_evidence_for_session(&session.id, None)
                     .await
-                    .unwrap()
-                    >= 2
+                    .unwrap(),
+                1
             );
         }
     }
