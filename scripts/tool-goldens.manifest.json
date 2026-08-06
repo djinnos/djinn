@@ -1,0 +1,236 @@
+{
+  "$comment": [
+    "Single source of truth for every COMMITTED artifact derived from the MCP tool schemas.",
+    "",
+    "Why this file exists: changing one #[tool] description used to require regenerating",
+    "derived artifacts in seven different places, with no single command that did it and no",
+    "failing check that named one. Authors discovered the artifacts one CI cycle at a time.",
+    "",
+    "  `make tool-goldens`        regenerates every `artifacts` entry, in `producers` order.",
+    "  `make tool-goldens-check`  regenerates and fails if the committed tree differs.",
+    "",
+    "Adding a new derived tool-schema artifact WITHOUT listing it here fails",
+    "`scripts/check-tool-goldens.mjs`, which walks `discovery` and reports any candidate file",
+    "that appears in neither `artifacts` nor `notDerived`."
+  ],
+  "version": 1,
+  "regenerateCommand": "make tool-goldens",
+  "verifyCommand": "make tool-goldens-check",
+
+  "producers": [
+    {
+      "id": "mcp-extension-snapshots",
+      "description": "insta snapshots of every role tool surface exported by djinn-mcp-extension",
+      "kind": "shell",
+      "cwd": "server",
+      "command": "cargo test --locked -p djinn-mcp-extension --lib tests::schema_tests",
+      "env": {
+        "SQLX_OFFLINE": "true",
+        "INSTA_UPDATE": "force",
+        "INSTA_FORCE_UPDATE": "1"
+      },
+      "consumes": []
+    },
+    {
+      "id": "agent-role-snapshots",
+      "description": "insta snapshots of the role tool surfaces as djinn-agent registers them",
+      "kind": "shell",
+      "cwd": "server",
+      "command": "cargo test --locked -p djinn-agent --lib extension::tests::schema_snapshot_tests",
+      "env": {
+        "SQLX_OFFLINE": "true",
+        "INSTA_UPDATE": "force",
+        "INSTA_FORCE_UPDATE": "1"
+      },
+      "consumes": []
+    },
+    {
+      "id": "tool-surface-baseline",
+      "description": "reviewed MCP tool-surface inventory used by the operation-enum guard",
+      "kind": "shell",
+      "cwd": "server",
+      "command": "cargo run --locked -p djinn-mcp-extension --bin regenerate_tool_surface_baseline",
+      "env": { "SQLX_OFFLINE": "true" },
+      "consumes": []
+    },
+    {
+      "id": "evidence-spike-profile",
+      "description": "exact Judge / evidence-spike public tool-name contract",
+      "kind": "shell",
+      "cwd": "server",
+      "command": "cargo test --locked -p djinn-mcp-extension --test evidence_spike_profile_contract",
+      "env": {
+        "SQLX_OFFLINE": "true",
+        "UPDATE_EVIDENCE_SPIKE_PROFILE_FIXTURE": "1"
+      },
+      "consumes": []
+    },
+    {
+      "id": "provider-mcp-server-fixture",
+      "description": "DjinnMcpServer::all_tool_schemas() corpus for the projection tests (djinn-provider cannot depend on djinn-control-plane, so it is committed)",
+      "kind": "shell",
+      "cwd": "server",
+      "command": "cargo test --locked -p djinn-control-plane --lib server_tests::tests::djinn_mcp_server_corpus_fixture_is_current",
+      "env": {
+        "SQLX_OFFLINE": "true",
+        "UPDATE_DJINN_MCP_SERVER_FIXTURE": "1"
+      },
+      "consumes": []
+    },
+    {
+      "id": "provider-role-fixtures",
+      "description": "role corpora for the projection tests, copied out of the djinn-mcp-extension insta snapshots with the insta frontmatter stripped (djinn-provider cannot depend on djinn-mcp-extension's dev graph without a cycle)",
+      "kind": "derive-insta-body",
+      "files": [
+        {
+          "from": "server/crates/djinn-mcp-extension/src/tests/snapshots/djinn_mcp_extension__tests__schema_tests__worker_tool_schemas.snap",
+          "to": "server/crates/djinn-provider/tests/fixtures/tool_schema_projection/builtin/worker.json"
+        },
+        {
+          "from": "server/crates/djinn-mcp-extension/src/tests/snapshots/djinn_mcp_extension__tests__schema_tests__planner_tool_schemas.snap",
+          "to": "server/crates/djinn-provider/tests/fixtures/tool_schema_projection/builtin/planner.json"
+        },
+        {
+          "from": "server/crates/djinn-mcp-extension/src/tests/snapshots/djinn_mcp_extension__tests__schema_tests__lead_tool_schemas.snap",
+          "to": "server/crates/djinn-provider/tests/fixtures/tool_schema_projection/builtin/lead.json"
+        },
+        {
+          "from": "server/crates/djinn-mcp-extension/src/tests/snapshots/djinn_mcp_extension__tests__schema_tests__reviewer_tool_schemas.snap",
+          "to": "server/crates/djinn-provider/tests/fixtures/tool_schema_projection/builtin/reviewer.json"
+        },
+        {
+          "from": "server/crates/djinn-mcp-extension/src/tests/snapshots/djinn_mcp_extension__tests__schema_tests__architect_tool_schemas.snap",
+          "to": "server/crates/djinn-provider/tests/fixtures/tool_schema_projection/builtin/architect.json"
+        }
+      ],
+      "consumes": [
+        "server/crates/djinn-mcp-extension/src/tests/snapshots/djinn_mcp_extension__tests__schema_tests__*.snap"
+      ]
+    },
+    {
+      "id": "server-tool-schema-snapshot",
+      "description": "canonical advertised MCP tool signature snapshot (also the input to the UI type generator)",
+      "kind": "shell",
+      "cwd": "server",
+      "command": "cargo test --locked -p djinn-server --lib server::tests::tool_schemas::mcp_tools_schema_snapshot",
+      "env": {
+        "SQLX_OFFLINE": "true",
+        "INSTA_UPDATE": "force",
+        "INSTA_FORCE_UPDATE": "1"
+      },
+      "consumes": []
+    },
+    {
+      "id": "ui-mcp-types",
+      "description": "TypeScript types the web client generates from the tool signature snapshot",
+      "kind": "shell",
+      "cwd": "ui",
+      "command": "pnpm mcp:types:snapshot",
+      "env": {},
+      "requiresNodeModules": "ui",
+      "consumes": [
+        "server/src/server/tests/snapshots/djinn_server__server__tests__tool_schemas__mcp_tools_schema.snap"
+      ]
+    }
+  ],
+
+  "artifacts": [
+    {
+      "glob": "server/crates/djinn-mcp-extension/src/tests/snapshots/djinn_mcp_extension__tests__schema_tests__*.snap",
+      "producer": "mcp-extension-snapshots",
+      "guard": {
+        "kind": "cargo-test",
+        "file": "server/crates/djinn-mcp-extension/src/tests/schema_tests.rs",
+        "runs": "cargo test -p djinn-mcp-extension --lib tests::schema_tests"
+      }
+    },
+    {
+      "glob": "server/crates/djinn-agent/src/extension/tests/snapshots/djinn_agent__extension__tests__schema_snapshot_tests__*.snap",
+      "producer": "agent-role-snapshots",
+      "guard": {
+        "kind": "cargo-test",
+        "file": "server/crates/djinn-agent/src/extension/tests/schema_snapshot_tests.rs",
+        "runs": "cargo test -p djinn-agent --lib extension::tests::schema_snapshot_tests"
+      }
+    },
+    {
+      "path": "server/crates/djinn-mcp-extension/tests/fixtures/tool_surface_baseline.json",
+      "producer": "tool-surface-baseline",
+      "guard": {
+        "kind": "cargo-test",
+        "file": "server/crates/djinn-mcp-extension/tests/tool_surface_baseline.rs",
+        "runs": "cargo test -p djinn-mcp-extension --test tool_surface_baseline"
+      }
+    },
+    {
+      "path": "server/crates/djinn-mcp-extension/tests/fixtures/evidence_spike_profile.json",
+      "producer": "evidence-spike-profile",
+      "guard": {
+        "kind": "cargo-test",
+        "file": "server/crates/djinn-mcp-extension/tests/evidence_spike_profile_contract.rs",
+        "runs": "cargo test -p djinn-mcp-extension --test evidence_spike_profile_contract"
+      }
+    },
+    {
+      "path": "server/crates/djinn-provider/tests/fixtures/tool_schema_projection/builtin/djinn_mcp_server.json",
+      "producer": "provider-mcp-server-fixture",
+      "guard": {
+        "kind": "cargo-test",
+        "file": "server/crates/djinn-control-plane/src/server_tests.rs",
+        "runs": "cargo test -p djinn-control-plane --lib server_tests::tests::djinn_mcp_server_corpus_fixture_is_current"
+      }
+    },
+    {
+      "glob": "server/crates/djinn-provider/tests/fixtures/tool_schema_projection/builtin/{worker,planner,lead,reviewer,architect}.json",
+      "producer": "provider-role-fixtures",
+      "guard": {
+        "kind": "cargo-test",
+        "file": "server/crates/djinn-mcp-extension/tests/provider_projection_corpus.rs",
+        "runs": "cargo test -p djinn-mcp-extension --test provider_projection_corpus"
+      }
+    },
+    {
+      "path": "server/src/server/tests/snapshots/djinn_server__server__tests__tool_schemas__mcp_tools_schema.snap",
+      "producer": "server-tool-schema-snapshot",
+      "guard": {
+        "kind": "cargo-test",
+        "file": "server/src/server/tests/tool_schemas.rs",
+        "runs": "cargo test -p djinn-server --lib server::tests::tool_schemas::mcp_tools_schema_snapshot"
+      }
+    },
+    {
+      "path": "ui/src/api/generated/mcp-tools.gen.ts",
+      "producer": "ui-mcp-types",
+      "guard": {
+        "kind": "pnpm",
+        "file": "ui/package.json",
+        "runs": "pnpm mcp:types:check"
+      }
+    }
+  ],
+
+  "notDerived": [
+    {
+      "glob": "server/crates/djinn-provider/tests/fixtures/tool_schema_projection/regression/*.json",
+      "reason": "Hand-authored known-bad JSON Schema shapes from proposal mpen. They are inputs to the projection tests, not projections of the live tool surface, and must never move when the tool surface moves."
+    },
+    {
+      "path": "server/crates/djinn-provider/tests/fixtures/tool_schema_projection/manifest.json",
+      "reason": "Hand-maintained index of the projection corpus. Lists which fixture files each corpus group loads; carries no tool schema of its own."
+    }
+  ],
+
+  "discovery": {
+    "$comment": [
+      "How check-tool-goldens.mjs decides a committed file is a candidate derived tool-schema",
+      "artifact. A candidate must live under one of `roots`, carry one of `extensions`, and",
+      "either embed one of `contentMarkers` or carry one of `pathMarkers` in its path.",
+      "Candidates matching neither `artifacts` nor `notDerived` fail the guard."
+    ],
+    "roots": ["server", "ui/src"],
+    "ignoreDirs": ["target", "node_modules", ".sqlx", ".git"],
+    "extensions": [".snap", ".json", ".ts"],
+    "contentMarkers": ["\"inputSchema\"", "\"input_schema\""],
+    "pathMarkers": ["tool_schema", "tool_names", "tool_surface", "mcp-tools.gen"]
+  }
+}

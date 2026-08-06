@@ -60,18 +60,24 @@ The `builtin/*.json` files are **snapshots** of the role-based tool
 schema helpers exported by `djinn-mcp-extension` (registered via
 `djinn-agent`), plus the full `DjinnMcpServer` corpus:
 
-| Fixture                    | Source function                                       |
-|----------------------------|-------------------------------------------------------|
-| `worker.json`              | `djinn_agent::extension::tool_schemas_worker()`       |
-| `planner.json`             | `djinn_agent::extension::tool_schemas_planner()`      |
-| `lead.json`                | `djinn_agent::extension::tool_schemas_lead()`         |
-| `reviewer.json`            | `djinn_agent::extension::tool_schemas_reviewer()`     |
-| `architect.json`           | `djinn_agent::extension::tool_schemas_architect()`    |
-| `djinn_mcp_server.json`    | `DjinnMcpServer::all_tool_schemas()` (sorted by name)|
+| Fixture                    | Source function                                            |
+|----------------------------|------------------------------------------------------------|
+| `worker.json`              | `djinn_mcp_extension::tool_defs::tool_schemas_worker()`    |
+| `planner.json`             | `djinn_mcp_extension::tool_defs::tool_schemas_planner()`   |
+| `lead.json`                | `djinn_mcp_extension::tool_defs::tool_schemas_lead()`      |
+| `reviewer.json`            | `djinn_mcp_extension::tool_defs::tool_schemas_reviewer()`  |
+| `architect.json`           | `djinn_mcp_extension::tool_defs::tool_schemas_architect()` |
+| `djinn_mcp_server.json`    | `DjinnMcpServer::all_tool_schemas()` (sorted by name)      |
 
 These are the same values captured by the insta snapshots at
-`server/crates/djinn-agent/src/extension/tests/snapshots/`
-(`*_tool_schemas.snap`), stripped of insta frontmatter.
+`server/crates/djinn-mcp-extension/src/tests/snapshots/`
+(`djinn_mcp_extension__tests__schema_tests__*_tool_schemas.snap`),
+stripped of insta frontmatter.
+
+`djinn-agent` also snapshots three of the role surfaces
+(`worker`/`planner`/`lead`) as a façade lockstep check, but only
+`djinn-mcp-extension` snapshots all five, so it is the source these
+fixtures are copied from.
 
 ### DjinnMcpServer corpus
 
@@ -94,41 +100,31 @@ The tools are sorted by `name` for deterministic diffs.
 
 ## Refresh path
 
-### Regenerating the role-based builtin snapshots
-
-The canonical source for these snapshots is the insta snapshot test in
-`djinn-agent`:
+**One command, from the repository root:**
 
 ```sh
-# From the server/ workspace root:
-cargo test -p djinn-agent --lib \
-  extension::tests::schema_snapshot_tests::role_schema_snapshots_match_registered_role_name_source
-
-# If the schema surface changed intentionally, accept new snapshots:
-cargo insta accept --workspace \
-  crates/djinn-agent/src/extension/tests/snapshots/*_tool_schemas.snap
+make tool-goldens
 ```
 
-Then copy the updated insta snapshots into this fixture directory:
+That regenerates every committed artifact derived from the MCP tool
+schemas — the `builtin/*.json` corpora here, the insta role snapshots
+they are copied from, the reviewed tool-surface baseline, the
+`DjinnMcpServer` corpus, the advertised tool-signature snapshot and the
+UI's generated MCP types — in dependency order. The set is enumerated in
+`scripts/tool-goldens.manifest.json`; `make tool-goldens-check` fails if
+the committed tree does not match a fresh run.
 
-```sh
-# From the server/ workspace root:
-for role in worker planner lead reviewer architect; do
-  # Strip insta frontmatter (first 5 lines) and copy as JSON
-  tail -n +6 \
-    "crates/djinn-agent/src/extension/tests/snapshots/djinn_agent__extension__tests__schema_snapshot_tests__${role}_tool_schemas.snap" \
-    > "crates/djinn-provider/tests/fixtures/tool_schema_projection/builtin/${role}.json"
-done
-```
+Do not refresh these fixtures by hand. Copying one of them without the
+others is how a correct change still fails CI three times in a row.
 
 ### When fixtures intentionally changed
 
 Reviewers can tell that a fixture change is **intentional** (not drift)
 by checking:
 
-1. **The `djinn-agent` insta snapshots changed in the same PR.**
+1. **The `djinn-mcp-extension` insta snapshots changed in the same PR.**
    The role snapshots in
-   `crates/djinn-agent/src/extension/tests/snapshots/` are the canonical
+   `crates/djinn-mcp-extension/src/tests/snapshots/` are the canonical
    source. If those changed and the `djinn-provider` builtin fixtures
    mirror the change, the refresh was run correctly.
 
@@ -142,7 +138,9 @@ by checking:
    discovered or an existing one is re-characterized — never as a side
    effect of tool-surface drift.
 
-### Regenerating the DjinnMcpServer snapshot
+### Regenerating the DjinnMcpServer snapshot on its own
+
+`make tool-goldens` already covers this. To rewrite only this fixture:
 
 ```sh
 UPDATE_DJINN_MCP_SERVER_FIXTURE=1 cargo test -p djinn-control-plane --lib \
