@@ -1135,3 +1135,190 @@ async fn duplicate_demand_after_accepted_rejected() {
         "should have exactly one needs_evidence debate entry"
     );
 }
+
+// ── Atomic authority race fence ───────────────────────────────────
+
+/// Snapshot every relation owned by the atomic-demand boundary. The authority
+/// task itself is deliberately excluded because the test changes it after
+/// preflight to model a handoff race.
+async fn atomic_demand_snapshot(
+    db: &Database,
+    repo: &ProposalRepository,
+    proposal_id: &str,
+    project_id: &str,
+) -> (i64, i64, i64, i64, i64, Option<String>, Option<String>) {
+    let task_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tasks WHERE project_id = $1")
+        .bind(project_id)
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+    let finding_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM typed_evidence_findings WHERE proposal_id = $1")
+            .bind(proposal_id)
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+    let attempt_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM typed_evidence_attempts WHERE finding_id IN \
+         (SELECT id FROM typed_evidence_findings WHERE proposal_id = $1)",
+    )
+    .bind(proposal_id)
+    .fetch_one(db.pool())
+    .await
+    .unwrap();
+    let debate_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM proposal_debate_trail WHERE proposal_id = $1")
+            .bind(proposal_id)
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+    let lifecycle_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM proposal_revisions WHERE proposal_id = $1 \
+         AND event_kind = 'refinement_awaiting_evidence_started'",
+    )
+    .bind(proposal_id)
+    .fetch_one(db.pool())
+    .await
+    .unwrap();
+    let proposal = repo.get(proposal_id).await.unwrap().unwrap();
+    (
+        task_count,
+        finding_count,
+        attempt_count,
+        debate_count,
+        lifecycle_count,
+        proposal.linked_spike_task_id,
+        proposal.needs_evidence_claim,
+    )
+}
+
+fn atomic_demand_claim(authority_task_id: &str) -> djinn_core::models::NeedsEvidenceClaim {
+    djinn_core::models::NeedsEvidenceClaim {
+        question: "Does module X handle token expiry correctly?".to_owned(),
+        target_subsystem: "auth".to_owned(),
+        spec_unknown_anchor: "anchor-text".to_owned(),
+        insufficient_in_session_research: "No integration tests cover token expiry edge case"
+            .to_owned(),
+        expected_findings: "Evidence that token refresh is or is not required".to_owned(),
+        round: 1,
+        against_revision_seq: 1,
+        created_by_task_id: authority_task_id.to_owned(),
+    }
+}
+
+/// Preflight can pass and then lose its authority before the repository
+/// transaction begins. The repository must reject before allocating any of its
+/// task, typed, legacy, debate, or lifecycle rows.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn atomic_demand_rejects_authority_handoff_after_preflight_without_writes() {
+    let (_server, db, proposal, user_id, judge_task_id) = setup_demand_test().await;
+    let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+    let project_id = repo.targets(&proposal.id).await.unwrap()[0]
+        .project_id
+        .clone();
+
+    let preflight = djinn_core::auth_context::SESSION_USER_ID
+        .scope(Some(user_id), async {
+            crate::tools::refinement_helpers::verify_active_judge_authorization(
+                &repo,
+                &proposal.id,
+                1,
+                1,
+            )
+            .await
+        })
+        .await;
+    assert_eq!(
+        preflight.unwrap(),
+        judge_task_id,
+        "fixture must pass preflight"
+    );
+
+    // Model a role handoff between handler validation and transaction entry.
+    sqlx::query("UPDATE tasks SET status = 'closed' WHERE id = $1")
+        .bind(&judge_task_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+    let before = atomic_demand_snapshot(&db, &repo, &proposal.id, &project_id).await;
+    let claim = atomic_demand_claim(&judge_task_id);
+    let labels = serde_json::json!(["refinement-evidence", "read-only"]);
+
+    let error = repo
+        .demand_evidence_atomically(djinn_db::AtomicEvidenceDemandInput {
+            proposal_id: &proposal.id,
+            project_id: &project_id,
+            claim: &claim,
+            title: "Evidence spike: token expiry",
+            description: "Read-only evidence investigation",
+            labels: &labels,
+            load_bearing_category: "feasibility",
+        })
+        .await
+        .expect_err("handoff after preflight must be rejected");
+    assert!(
+        error
+            .to_string()
+            .contains("stale_evidence_demand_authority"),
+        "must return stable stale rejection: {error}"
+    );
+    assert_eq!(
+        before,
+        atomic_demand_snapshot(&db, &repo, &proposal.id, &project_id).await,
+        "stale demand must not write any demand-owned relation"
+    );
+}
+
+/// A normalized duplicate still replays after the authority recheck rather
+/// than allocating another task, finding, attempt, legacy projection, debate,
+/// or lifecycle row.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn atomic_demand_normalized_replay_survives_authority_fence() {
+    let (_server, db, proposal, _user_id, judge_task_id) = setup_demand_test().await;
+    let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+    let project_id = repo.targets(&proposal.id).await.unwrap()[0]
+        .project_id
+        .clone();
+    let claim = atomic_demand_claim(&judge_task_id);
+    let labels = serde_json::json!(["refinement-evidence", "read-only"]);
+
+    let first = repo
+        .demand_evidence_atomically(djinn_db::AtomicEvidenceDemandInput {
+            proposal_id: &proposal.id,
+            project_id: &project_id,
+            claim: &claim,
+            title: "Evidence spike: token expiry",
+            description: "Read-only evidence investigation",
+            labels: &labels,
+            load_bearing_category: "feasibility",
+        })
+        .await
+        .unwrap();
+    assert!(!first.replayed);
+    let before_replay = atomic_demand_snapshot(&db, &repo, &proposal.id, &project_id).await;
+
+    let replay = repo
+        .demand_evidence_atomically(djinn_db::AtomicEvidenceDemandInput {
+            proposal_id: &proposal.id,
+            project_id: &project_id,
+            claim: &claim,
+            title: "Evidence spike: token expiry",
+            description: "Read-only evidence investigation",
+            labels: &labels,
+            load_bearing_category: "feasibility",
+        })
+        .await
+        .unwrap();
+    assert!(
+        replay.replayed,
+        "identical demand must use normalized replay"
+    );
+    assert_eq!(replay.finding_id, first.finding_id);
+    assert_eq!(replay.attempt_id, first.attempt_id);
+    assert_eq!(replay.spike_task_id, first.spike_task_id);
+    assert_eq!(
+        before_replay,
+        atomic_demand_snapshot(&db, &repo, &proposal.id, &project_id).await,
+        "replay must not allocate duplicate demand-owned rows"
+    );
+}
