@@ -36,3 +36,22 @@ impl ReadinessSkillPinResolver for AgentNativeReadinessPinResolver {
             })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use djinn_control_plane::readiness_kickoff::{READINESS_SKILL_NAME, READINESS_SKILL_VERSION};
+
+    /// The protocol pin the control plane demands and the version the agent
+    /// registry actually registers are separate constants in separate crates.
+    /// If they drift, nothing fails to compile — every readiness kickoff just
+    /// starts returning `WrongPin` at runtime. Bumping the catalog therefore
+    /// has to move both, and this is what proves it did.
+    #[tokio::test]
+    async fn control_plane_pin_resolves_against_the_registered_native_catalog() {
+        AgentNativeReadinessPinResolver
+            .resolve_exact(READINESS_SKILL_NAME, READINESS_SKILL_VERSION)
+            .await
+            .expect("the readiness protocol pin must resolve against the native registry");
+    }
+}
