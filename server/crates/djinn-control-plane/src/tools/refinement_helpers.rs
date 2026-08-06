@@ -50,6 +50,14 @@ pub struct ProposalRefinementDemandEvidenceParams {
     pub insufficient_in_session_research: String,
     /// What the evidence spike should produce to resolve the claim.
     pub expected_findings: String,
+    /// Caller-declared load-bearing threshold. Kept additive for legacy MCP
+    /// callers; an omitted legacy value is feasibility.
+    #[serde(default = "default_load_bearing_category")]
+    pub load_bearing_category: String,
+}
+
+fn default_load_bearing_category() -> String {
+    "feasibility".to_string()
 }
 
 // ── Demand-evidence validation helpers ───────────────────────────────────────
@@ -73,13 +81,13 @@ const GENERIC_QUESTION_PATTERNS: &[&str] = &[
     "study more",
 ];
 
-/// Find the active Judge task for a proposal's refinement run.
+/// Find the active Adversary or Judge task for a proposal's refinement run.
 ///
 /// Queries the DB for an open or in-progress refinement task whose
 /// `agent_type` is `"judge"` and whose title contains the proposal id.
 /// Returns the task if found, or `None` when no Judge task is in flight
 /// for this proposal.
-async fn find_active_judge_task(
+async fn find_active_evidence_authority_task(
     task_repo: &TaskRepository,
     proposal_id: &str,
 ) -> Result<Option<djinn_core::models::Task>, String> {
@@ -94,7 +102,7 @@ async fn find_active_judge_task(
 
     let candidate = open_tasks.into_iter().chain(in_progress_tasks).find(|t| {
         t.issue_type == "refinement"
-            && t.agent_type.as_deref() == Some("judge")
+            && matches!(t.agent_type.as_deref(), Some("judge") | Some("adversary"))
             && t.title.contains(proposal_id)
     });
 
@@ -123,12 +131,12 @@ pub(crate) async fn verify_active_judge_authorization(
     };
 
     // Find the active Judge task for this proposal's refinement run.
-    let judge_task = find_active_judge_task(task_repo, proposal_id).await?;
+    let judge_task = find_active_evidence_authority_task(task_repo, proposal_id).await?;
 
     let Some(task) = judge_task else {
         return Err(
-            "no active Judge task in flight for this proposal's refinement; \
-             the caller cannot be verified as the active Judge"
+            "no active Adversary or Judge task in flight for this proposal's refinement; \
+             the caller cannot be verified as evidence authority"
                 .to_string(),
         );
     };
@@ -137,8 +145,8 @@ pub(crate) async fn verify_active_judge_authorization(
     let task_owner = task.created_by_user_id.as_str();
     if task_owner.is_empty() || task_owner != caller_id {
         return Err(format!(
-            "caller '{}' is not the active Judge for this proposal \
-             (Judge task {} attributed to '{}')",
+            "caller '{}' is not the active Adversary or Judge for this proposal \
+             (authority task {} attributed to '{}')",
             caller_id,
             task.id,
             if task_owner.is_empty() {
@@ -226,10 +234,11 @@ pub(crate) async fn validate_demand_evidence(
         ));
     }
 
-    // 5. `against_revision_seq` must be valid (not beyond latest).
-    if params.against_revision_seq > proposal.latest_revision_seq {
+    // A demand is authority for the exact current revision, not an older
+    // revision which happens still to be in history.
+    if params.against_revision_seq != proposal.latest_revision_seq {
         return Err(format!(
-            "against_revision_seq {} exceeds the proposal's latest revision seq {}",
+            "against_revision_seq {} does not match the proposal's active revision seq {}",
             params.against_revision_seq, proposal.latest_revision_seq,
         ));
     }
@@ -259,35 +268,24 @@ pub(crate) async fn validate_demand_evidence(
         return Err("target_subsystem must not be empty".to_string());
     }
 
-    // 8. `spec_unknown_anchor` must be present in the reviewed proposal body.
+    if !matches!(
+        params.load_bearing_category.trim(),
+        "feasibility"
+            | "safety"
+            | "integrity"
+            | "compatibility"
+            | "rollout"
+            | "core_acceptance_criteria"
+    ) {
+        return Err("load_bearing_category must be feasibility, safety, integrity, compatibility, rollout, or core_acceptance_criteria".to_string());
+    }
+
+    // `spec_unknown_anchor` is an explicit caller assertion. Do not inspect
+    // proposal prose, Open questions, or QuestionForm to manufacture it.
     let anchor = params.spec_unknown_anchor.trim();
     if anchor.is_empty() {
         return Err("spec_unknown_anchor must not be empty".to_string());
     }
-    // Look up the body of the reviewed revision. If the against_revision_seq
-    // matches the current head, use the live proposal body; otherwise read
-    // from proposal_revisions.
-    let revision_body = if params.against_revision_seq >= proposal.latest_revision_seq {
-        proposal.body.clone()
-    } else {
-        let revisions = repo
-            .revisions(&proposal.id)
-            .await
-            .map_err(|e| format!("failed to read revisions: {e}"))?;
-        revisions
-            .iter()
-            .rev()
-            .find(|r| r.seq == params.against_revision_seq && r.event_kind == "spec_revision")
-            .map(|r| r.body.clone())
-            .unwrap_or_default()
-    };
-    if !revision_body.contains(anchor) {
-        return Err(format!(
-            "spec_unknown_anchor '{}' not found in the reviewed proposal revision (seq {})",
-            anchor, params.against_revision_seq,
-        ));
-    }
-
     // 9. `insufficient_in_session_research` must be non-empty.
     if params.insufficient_in_session_research.trim().is_empty() {
         return Err(
