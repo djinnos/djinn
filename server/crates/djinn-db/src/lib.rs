@@ -344,6 +344,7 @@ pub use repositories::{
         TypedEvidenceAttemptAllocation, TypedEvidenceBackfillReport,
         TypedEvidenceDispositionProjection, TypedEvidenceFindingProjection,
         TypedEvidenceRepository, TypedEvidenceRetryDispatchErrorInput, legacy_demand_hash,
+        normalized_demand_hash,
     },
     usage_analytics::{
         EntityBreakdownRow, GroupDimension, ModelEffectivenessRow, ProjectModelMatrixRow,

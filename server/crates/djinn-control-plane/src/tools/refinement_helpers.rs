@@ -83,12 +83,16 @@ const PREFERENCE_QUESTION_PATTERNS: &[&str] = &[
     "style",
     "color",
     "colour",
+    "better than",
+    "best ",
 ];
 const REPOSITORY_ANSWERABLE_PATTERNS: &[&str] = &[
     "is already in the repository",
     "can be answered by inspecting",
     "grep",
     "search the repository",
+    "which function currently",
+    "which function parses",
 ];
 
 /// Find the active Adversary or Judge task for a proposal's refinement run.
@@ -313,10 +317,12 @@ pub(crate) async fn validate_demand_evidence(
         );
     }
 
+    // Classify the explicit request only. Proposal prose and question-form
+    // content never manufacture or validate a finding.
     let rationale = params.insufficient_in_session_research.to_lowercase();
     if REPOSITORY_ANSWERABLE_PATTERNS
         .iter()
-        .any(|pattern| rationale.contains(pattern))
+        .any(|pattern| question_lower.contains(pattern) || rationale.contains(pattern))
     {
         return Err("demand is repository-answerable; inspect the repository instead of allocating evidence".to_string());
     }

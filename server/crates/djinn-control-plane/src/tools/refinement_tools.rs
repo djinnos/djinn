@@ -916,6 +916,7 @@ impl DjinnMcpServer {
                 title: &spike_title,
                 description: &spike_description,
                 labels: &labels,
+                load_bearing_category: &p.load_bearing_category,
             })
             .await
         {
