@@ -10,6 +10,49 @@
 use super::*;
 use std::collections::BTreeSet;
 
+// ── MCP tool-schema golden plumbing ─────────────────────────────────────────
+//
+// insta's failure output names the mismatched snapshot file and nothing else.
+// That is what made tool-surface changes take several CI cycles to land: the
+// author learned that "a snapshot moved", not that other committed artifacts
+// move with it, and not which command refreshes them all.
+// `tool_golden_snapshot!` forwards to insta unchanged and, on failure only,
+// re-panics with the original diff plus that command.
+
+const TOOL_GOLDEN_HINT: &str = "\n\n\
+    ── this snapshot is an MCP tool-schema golden ──────────────────────────\n\
+    Regenerate EVERY derived tool-schema artifact with one command, from the\n\
+    repository root:\n\
+    \n    make tool-goldens\n\n\
+    The full artifact set lives in scripts/tool-goldens.manifest.json.\n";
+
+fn tool_golden_panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    payload
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| {
+            payload
+                .downcast_ref::<&str>()
+                .map(|text| (*text).to_owned())
+        })
+        .unwrap_or_else(|| "<non-string panic payload>".to_owned())
+}
+
+macro_rules! tool_golden_snapshot {
+    ($($args:tt)*) => {{
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            insta::assert_json_snapshot!($($args)*);
+        }));
+        if let Err(payload) = outcome {
+            panic!(
+                "{}{}",
+                tool_golden_panic_message(payload.as_ref()),
+                TOOL_GOLDEN_HINT
+            );
+        }
+    }};
+}
+
 #[derive(Debug)]
 struct ToolReference {
     source: String,
@@ -340,17 +383,17 @@ fn worker_cannot_use_lead_only_tool() {
 
 #[test]
 fn worker_tool_schemas() {
-    insta::assert_json_snapshot!(tool_schemas_worker());
+    tool_golden_snapshot!("worker_tool_schemas", tool_schemas_worker());
 }
 
 #[test]
 fn planner_tool_schemas() {
-    insta::assert_json_snapshot!(tool_schemas_planner());
+    tool_golden_snapshot!("planner_tool_schemas", tool_schemas_planner());
 }
 
 #[test]
 fn lead_tool_schemas() {
-    insta::assert_json_snapshot!(tool_schemas_lead());
+    tool_golden_snapshot!("lead_tool_schemas", tool_schemas_lead());
 }
 
 // ── Cut-over regression guards (10qg) ───────────────────────────────────
