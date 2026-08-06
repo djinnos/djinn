@@ -1655,6 +1655,29 @@ impl CoordinatorActor {
             // unconsumed row). A genuinely in-flight arbiter is left to finish
             // — it may still approve or supersede — and is separately bounded
             // by the 24h arbitration deadline and the decision-failure cap.
+            // 4etb: the evidence epoch is stamped HERE, before any guard reads
+            // it. It used to be stamped inside the arbitration-row insert,
+            // which runs at the BOTTOM of this rung — so on a first escalation
+            // every guard saw an empty floor, the uv3p attempted-remediation
+            // guard declined, and the arbiter the whole proposal routes to was
+            // never dispatched. Stamping first is what makes the guards measure
+            // the CURRENT escalation instead of nothing. The write is
+            // conditional on the column being NULL, so a repeated tick while
+            // this escalation is pending is a no-op and the row insert below
+            // re-reads the same value inside its own transaction.
+            if let Err(e) = self
+                .task_repo()
+                .stamp_escalation_evidence_epoch(&task.id)
+                .await
+            {
+                tracing::warn!(
+                    task_id = %task.short_id,
+                    error = %e,
+                    "4etb: failed to stamp the escalation evidence epoch; guards will fall back \
+                     to the intervention/human-review floor for this tick"
+                );
+            }
+
             let final_disposition =
                 poll_stack::boxed(|| self.arbiter_hold_cycle_ceiling_reached(task)).await;
             if final_disposition
@@ -1678,6 +1701,23 @@ impl CoordinatorActor {
                     )
                     .await;
             }
+
+            // 4etb: is this the FIRST cycle for this task? The promotion truth
+            // table is unconditional there — "no row, prospective cycle 0 →
+            // stamp the epoch, insert arbitration row 0, dispatch one ordinary
+            // arbiter child". The park guards below gate a PARK, not arbiter
+            // ENTRY: on cycle 0 no arbiter has run, so there is no prior
+            // remediation whose attempt they could measure, and declining here
+            // would reinstate exactly the first-escalation livelock this
+            // proposal closes. From cycle 1 on they are fully live: a previous
+            // arbiter reopened, a worker did or did not run, and the guards
+            // decide whether that is evidence enough to escalate again.
+            let first_cycle = matches!(
+                TaskArbitrationRepository::new(self.db.clone())
+                    .resolve_current_hold_cycle(&task.id)
+                    .await,
+                Ok((0, None))
+            );
 
             // uv3p Part B: attempted-remediation requirement on the park rung.
             // A park declares the current intervention's remediation a failure —
@@ -1712,6 +1752,7 @@ impl CoordinatorActor {
             // Skip the fingerprint check when CI evidence is stale (from a prior
             // head SHA) — it cannot serve as a park-triggering strike.
             if !final_disposition
+                && !first_cycle
                 && !ci_stale
                 && let Some(fingerprint) = task
                     .ci_failure_fingerprint
@@ -1778,6 +1819,7 @@ impl CoordinatorActor {
                 .no_attempted_remediation_decline_count(&task.id, &evidence_floor)
                 .await;
             if !final_disposition
+                && !first_cycle
                 && should_decline_no_attempted_remediation_park(
                     history.any_submitted,
                     history.non_attempt_models.len(),
@@ -1808,7 +1850,11 @@ impl CoordinatorActor {
             // (mirror-vs-GitHub staleness) must not serve as the park-triggering
             // strike. If the task is in needs_task_review/in_task_review with no
             // rejection newer than the submission, do not park.
-            if !final_disposition && history.any_submitted && history.submission_pending_review {
+            if !final_disposition
+                && !first_cycle
+                && history.any_submitted
+                && history.submission_pending_review
+            {
                 poll_stack::boxed(|| {
                     self.record_park_redispatch_marker(
                         task,
@@ -2484,11 +2530,17 @@ impl CoordinatorActor {
         task: &djinn_core::models::Task,
     ) -> Vec<TaskAttemptLedgerRow> {
         let attempt_repo = TaskAttemptRepository::new(self.db.clone());
+        // 4etb: the ledger the arbiter reads must be sliced by the SAME
+        // canonical evidence floor the guards use. Slicing on
+        // `last_intervention_at` alone meant a first escalation (where that
+        // column is NULL) handed the arbiter unbounded history, contradicting
+        // the very guards whose decision it is meant to explain.
+        let floor = poll_stack::boxed(|| self.canonical_evidence_floor(task)).await;
         match attempt_repo
             .ledger_for_task_since(
                 &task.id,
                 None, // all roles — worker, guard, etc.
-                task.last_intervention_at.as_deref(),
+                floor.as_deref(),
                 100,
             )
             .await
@@ -2940,37 +2992,17 @@ impl CoordinatorActor {
         // No PR: terminal by contract, with the EXACT reason the ownership
         // contract specifies. `reason` is appended as context, never as a
         // replacement — matching on the contractual prefix must stay possible.
+        //
+        // Routed through `terminally_fail_task`, the single terminal gate:
+        // `dispatch/retry.rs` must never own a second `ForceClose` gateway
+        // (`tests::terminal_gate_boundary`). The gate's own PR-handoff branch is
+        // a no-op here because the open-PR case already returned above.
         let terminal_reason = format!(
             "{}. Last adjudication reason: {reason}",
             djinn_db::repositories::task::LADDER_EXHAUSTED_CLOSE_REASON
         );
-        match repo
-            .transition(
-                &latest.id,
-                TransitionAction::ForceClose,
-                "coordinator",
-                "system",
-                Some(&terminal_reason),
-                None,
-            )
+        poll_stack::boxed(|| self.terminally_fail_task(&latest, "coordinator", &terminal_reason))
             .await
-        {
-            Ok(_) => {
-                tracing::warn!(
-                    task_id = %latest.short_id,
-                    "4etb: adjudication ladder exhausted with no actionable PR — force-closed"
-                );
-                true
-            }
-            Err(e) => {
-                tracing::warn!(
-                    task_id = %latest.short_id,
-                    error = %e,
-                    "4etb: exhausted-ladder force-close failed"
-                );
-                false
-            }
-        }
     }
 
     /// Summarize every arbitration cycle already closed on this task, newest
@@ -3498,14 +3530,6 @@ impl CoordinatorActor {
         //   status + any active tripwire `gate.held`) is the real gate. The
         //   label only drives the close-time source-release semantics
         //   (`releases_source_on_close`).
-        // - `Planner` → `planner-remediation`: a purely DESCRIPTIVE sibling that
-        //   makes the first-response rung queryable instead of only readable. It
-        //   is inert against every behavioural predicate — it is not a human
-        //   hold (`is_human_review_hold`), does not release the source on close
-        //   (`releases_source_on_close` — a first-response remediation revives
-        //   its source through the ordinary blocker path), and does not affect
-        //   planner claiming (`planner_review_claims` only excludes
-        //   `human-review-hold`).
         let kind_label = match kind {
             RemediationKind::HumanReview => crate::roles::HUMAN_REVIEW_HOLD_LABEL,
             RemediationKind::PlannerEscalation => crate::roles::PLANNER_PARK_ESCALATION_LABEL,

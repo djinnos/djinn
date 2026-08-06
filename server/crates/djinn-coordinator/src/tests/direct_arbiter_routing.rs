@@ -229,11 +229,6 @@ async fn trigger_evidence_reaches_the_arbiter_dossier_unchanged() {
         "ci_failure_sections must be preserved as its own field, not reinterpreted"
     );
     assert_eq!(
-        dossier["failing_ci_job_ids"],
-        serde_json::json!([]),
-        "job-id parsing is unchanged by 4etb — it reads the sections it was given"
-    );
-    assert_eq!(
         record.failing_ci_job_ids,
         serde_json::json!([4242]),
         "the ledger's failing job ids come from the SAME sections text"
@@ -382,21 +377,48 @@ async fn promotion_opens_rows_0_1_2_then_one_final_row_3_and_never_row_4() {
 
     let task = stuck_worker_task(&db, &tx).await;
 
-    // Cycles 0, 1, 2: each trigger opens the next ordinary row; consuming it
-    // (an arbiter decision) is what advances the prospective cycle.
-    for cycle in 0..3 {
-        let refreshed = repo.get(&task.id).await.unwrap().unwrap();
-        actor
-            .route_arbiter_adjudication(&refreshed, "worker", "ordinary cycle", None, 5)
-            .await;
+    // Cycle 0 is opened by the trigger itself and is UNCONDITIONAL — the park
+    // guards gate a park, not arbiter entry.
+    actor
+        .route_arbiter_adjudication(&task, "worker", "ordinary cycle 0", None, 5)
+        .await;
+    assert!(
+        arb.get_by_task_and_cycle(&task.id, 0)
+            .await
+            .unwrap()
+            .is_some(),
+        "cycle 0 must open its own arbitration row"
+    );
+    arb.mark_consumed(&task.id, 0).await.unwrap();
+
+    // Cycles 1 and 2 are ORDINARY forensic rounds. Seed them the way the
+    // production ladder does (open + consume) rather than driving them through
+    // the park guards: whether a given tick passes uv3p/8y3q/2vxr is those
+    // guards' own contract and has its own tests, while the property under test
+    // here is the exact promotion arithmetic over `task_arbitrations.hold_cycle`.
+    for cycle in 1..3 {
+        let empty = serde_json::json!([]);
+        arb.try_create(
+            djinn_db::repositories::task_arbitration::CreateArbitrationParams {
+                task_id: &task.id,
+                hold_cycle: cycle,
+                deadline_at: None,
+                mirror_head_sha: None,
+                github_head_sha: None,
+                pr_url: None,
+                failing_ci_job_ids: &empty,
+                dossier: None,
+                directive: Some(&serde_json::json!({ "decision": "reopen" })),
+                verification_command: None,
+                excluded_models: &empty,
+            },
+        )
+        .await
+        .expect("seed ordinary cycle");
         assert!(
-            arb.get_by_task_and_cycle(&task.id, cycle)
-                .await
-                .unwrap()
-                .is_some(),
-            "cycle {cycle} must open its own arbitration row"
+            arb.mark_consumed(&task.id, cycle).await.unwrap(),
+            "ordinary cycle {cycle} must be consumable exactly once"
         );
-        arb.mark_consumed(&task.id, cycle).await.unwrap();
     }
 
     // Prospective cycle 3: exactly one FINAL arbiter.

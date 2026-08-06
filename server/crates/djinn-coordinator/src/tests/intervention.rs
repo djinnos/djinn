@@ -2397,15 +2397,15 @@ async fn seed_task_at_second_strike_park_condition(
     task
 }
 
-/// Regression (incident k6hm, 2026-07-21): a task that has exhausted its
-/// intervention budget on EARLIER review rejections then hits a trivial merge
+/// Regression (incident k6hm, 2026-07-21): a task already carrying a raised
+/// evidence floor from EARLIER review rejections then hits a trivial merge
 /// conflict against main. A conflict means main moved under an otherwise-healthy
 /// PR — it is not evidence the worker cannot converge on the acceptance
 /// criteria — so the dispatch tick must route it to the normal ConflictRetry
 /// rework worker, NOT consume the second strike and park it into
 /// `needs_lead_intervention` / the arbitration lane.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn merge_conflict_reopen_at_intervention_cap_does_not_park() {
+async fn merge_conflict_reopen_at_the_escalation_condition_does_not_park() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
     let mut actor = coordinator_actor_for_tests(&db, &tx);
@@ -2440,7 +2440,7 @@ async fn merge_conflict_reopen_at_intervention_cap_does_not_park() {
     assert_ne!(
         after.status, "needs_lead_intervention",
         "a merge-conflict reopen must never park to needs_lead_intervention, even at \
-         the intervention cap — it routes to the ConflictRetry rework worker"
+         the escalation condition — it routes to the ConflictRetry rework worker"
     );
 
     let arb_repo = TaskArbitrationRepository::new(db.clone());
@@ -2456,14 +2456,14 @@ async fn merge_conflict_reopen_at_intervention_cap_does_not_park() {
     );
 }
 
-/// Control for `merge_conflict_reopen_at_intervention_cap_does_not_park`:
-/// through the SAME dispatch tick, an identical second-strike task WITHOUT a
+/// Control for `merge_conflict_reopen_at_the_escalation_condition_does_not_park`:
+/// through the SAME dispatch tick, an identical task WITHOUT a
 /// merge-conflict signal (a genuine quality strike) still parks to
 /// `needs_lead_intervention` with a durable arbitration row. Proves the exempt
 /// path above is scoped to merge conflicts and does not weaken genuine
 /// quality-strike parking.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn genuine_quality_strike_at_intervention_cap_still_parks_through_dispatch() {
+async fn genuine_quality_strike_at_the_escalation_condition_still_parks_through_dispatch() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
     let mut actor = coordinator_actor_for_tests(&db, &tx);
@@ -2481,7 +2481,7 @@ async fn genuine_quality_strike_at_intervention_cap_still_parks_through_dispatch
     let after = repo.get(&task.id).await.unwrap().unwrap();
     assert_eq!(
         after.status, "needs_lead_intervention",
-        "a genuine quality strike at the intervention cap must still park"
+        "a genuine quality strike at the escalation condition must still park"
     );
     let arb_repo = TaskArbitrationRepository::new(db.clone());
     let (_cycle, existing) = arb_repo.resolve_current_hold_cycle(&task.id).await.unwrap();
@@ -3531,12 +3531,12 @@ fn failure_and_stall_escalation_thresholds_are_distinct() {
 }
 
 /// Three consecutive provider-error FAILED sessions without durable status
-/// progress route the task to a Planner intervention (the second-strike PARK
+/// progress route the task to the arbiter adjudication (the PARK
 /// path here — 4etb made that rung unconditional) instead
 /// of another backoff+redispatch cycle. The first two strikes only advance the
 /// streak; the third escalates and clears the task's backoff state.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn third_provider_failure_without_progress_routes_to_planner() {
+async fn third_provider_failure_without_progress_routes_to_the_arbiter() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
     let mut actor = coordinator_actor_for_tests(&db, &tx);
@@ -3590,7 +3590,7 @@ async fn third_provider_failure_without_progress_routes_to_planner() {
         .await;
     assert!(
         routed,
-        "the third consecutive provider-error failure routes to a Planner intervention"
+        "the third consecutive provider-error failure routes to the arbiter"
     );
 
     // The task is dispatched to the Lead arbiter (needs_lead_intervention),
