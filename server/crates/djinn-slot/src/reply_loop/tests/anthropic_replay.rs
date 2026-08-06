@@ -9,7 +9,9 @@ use axum::{
     response::Response,
     routing::post,
 };
-use djinn_db::SessionMessageRepository;
+use djinn_db::{
+    SessionMessageRepository, repositories::test_support::seed_scoped_model_turn_admission_fixture,
+};
 use djinn_provider::{
     message::{ContentBlock, Message, Role},
     provider::format::anthropic::AnthropicProvider,
@@ -132,26 +134,16 @@ async fn seed_shadow_admission(harness: &ReplyLoopHarness, provider: &AnthropicP
         None,
     )
     .expect("Anthropic fixture must use the covered B1 route");
-    sqlx::query(
-        "INSERT INTO credentials (id, provider_id, key_name, encrypted_value) \
-         VALUES ($1, $2, 'anthropic-replay', decode('00', 'hex'))",
+    seed_scoped_model_turn_admission_fixture(
+        &harness.slot_ctx.db,
+        "test-credential",
+        &plan.scope.provider_id,
+        &plan.scope.model_id,
+        "shadow",
+        "supported",
+        1,
     )
-    .bind("test-credential")
-    .bind(&plan.scope.provider_id)
-    .execute(harness.slot_ctx.db.pool())
-    .await
-    .expect("seed replay credential identity");
-    sqlx::query(
-        "INSERT INTO model_turn_pools \
-         (credential_id, provider_id, model_id, phase, capability_state, learned_concurrency) \
-         VALUES ($1, $2, $3, 'shadow', 'supported', 1)",
-    )
-    .bind("test-credential")
-    .bind(&plan.scope.provider_id)
-    .bind(&plan.scope.model_id)
-    .execute(harness.slot_ctx.db.pool())
-    .await
-    .expect("seed covered shadow admission pool");
+    .await;
 }
 
 #[tokio::test]
