@@ -287,7 +287,12 @@ pub fn render_prompt_for_role(
         Some(text) if !text.trim().is_empty() => format!(
             "## Relevant Knowledge\n\n\
              The following patterns, pitfalls, and cases were learned from previous work \
-             in the code areas this task touches.\n\n{text}\n"
+             in the code areas this task touches. Each entry states when the note applies \
+             and may carry a bounded `action:` excerpt of its prevention guidance. \
+             These excerpts are truncated to a byte budget — when one ends in \
+             `… truncated` or is otherwise insufficient, open the full note by passing \
+             the permalink shown on that entry to `memory_read(identifier=<permalink>)`.\
+             \n\n{text}\n"
         ),
         _ => String::new(),
     };

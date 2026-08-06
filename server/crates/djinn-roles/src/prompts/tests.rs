@@ -2027,3 +2027,39 @@ fn memory_search_contract_present_in_all_operational_prompts() {
 
     assert_memory_search_contract(include_str!("proposal_address.md"), "proposal_address.md");
 }
+
+/// Proposal u46i AC9: the copy immediately above the injected notes must tell
+/// the agent that a bounded excerpt can be expanded by passing the shown
+/// permalink to `memory_read`.
+#[test]
+fn injected_knowledge_section_documents_the_memory_read_pull_path() {
+    let task = make_task();
+    let mut ctx = make_ctx();
+    ctx.knowledge_context = Some(
+        "- **[Pitfall] Example**: applies when X (permalink: pitfalls/example)\n  \
+         action: … truncated; memory_read(pitfalls/example)"
+            .to_string(),
+    );
+    let prompt = render_prompt(AgentType::Worker, &task, &ctx);
+
+    let Some(section_start) = prompt.find("## Relevant Knowledge") else {
+        panic!("the knowledge section must render when knowledge_context is present");
+    };
+    let Some(notes_start) = prompt[section_start..].find("- **[Pitfall] Example**") else {
+        panic!("the injected notes must render inside the knowledge section");
+    };
+    let copy = &prompt[section_start..section_start + notes_start];
+
+    assert!(
+        copy.contains("memory_read"),
+        "the copy above injected notes must name `memory_read`: {copy}"
+    );
+    assert!(
+        copy.contains("permalink"),
+        "the copy must tell the agent to pass the shown permalink: {copy}"
+    );
+    assert!(
+        copy.contains("truncated"),
+        "the copy must explain that excerpts can be truncated: {copy}"
+    );
+}

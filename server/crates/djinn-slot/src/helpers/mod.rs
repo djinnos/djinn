@@ -54,15 +54,20 @@ mod reviewer_diff;
 #[cfg(test)]
 mod code_context_tests;
 
+// Proposal u46i: applicability anchors + bounded actionable excerpts.
+#[cfg(test)]
+mod code_context_action_tests;
+
 // Tests hold `AUTO_CODE_CONTEXT_ENV_LOCK` across `.await` on purpose.
 #[cfg(test)]
 #[allow(clippy::await_holding_lock)]
 mod tests;
 
 pub use code_context::{
-    KnowledgePackConfig, NotePackDisposition, NotePackOutcome, PackedKnowledgeNotes,
-    build_role_code_graph_context, derive_task_scope_paths, format_knowledge_notes,
-    is_role_auto_code_context_enabled, pack_knowledge_notes, pack_ranked_knowledge_notes,
+    ACTION_EXCERPT_CAP, ActionExcerptDetail, KnowledgePackConfig, NotePackDisposition,
+    NotePackOutcome, PackedKnowledgeNotes, build_role_code_graph_context, derive_task_scope_paths,
+    format_knowledge_notes, is_role_auto_code_context_enabled, pack_knowledge_notes,
+    pack_ranked_knowledge_notes,
 };
 #[cfg(test)]
 pub(crate) use feedback::log_snippet;
