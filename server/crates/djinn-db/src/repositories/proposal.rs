@@ -281,6 +281,13 @@ pub struct AtomicEvidenceDemandResult {
     pub replayed: bool,
 }
 
+/// The exact persisted authority identity used to admit an evidence demand.
+#[derive(Clone, Debug, PartialEq, Eq, sqlx::FromRow)]
+pub struct ActiveEvidenceAuthorityTask {
+    pub task_id: String,
+    pub created_by_user_id: String,
+}
+
 /// A Planner-authored acceptance-criteria spec amendment. Unlike
 /// [`ProposalRepository::set_acceptance_criteria`], these operations are real
 /// spec edits: they bump the proposal revision and write an audit trail.
@@ -737,6 +744,34 @@ impl ProposalRepository {
     /// Access the underlying event bus for constructing sibling repositories.
     pub fn events(&self) -> &EventBus {
         &self.events
+    }
+
+    /// Find an open authority task using its full persisted refinement tuple.
+    pub async fn active_evidence_authority_task(
+        &self,
+        proposal_id: &str,
+        against_revision_seq: i32,
+        round: i32,
+    ) -> Result<Option<ActiveEvidenceAuthorityTask>> {
+        self.db.ensure_initialized().await?;
+        let row = sqlx::query_as(
+            "SELECT t.id AS task_id, t.created_by_user_id FROM tasks t \
+             JOIN refinement_dispatch_intents i ON i.id = t.refinement_intent_id \
+             JOIN refinement_runs r ON r.id = i.run_id JOIN proposals p ON p.id = r.proposal_id \
+             WHERE r.proposal_id = $1 AND r.state = 'running' AND p.latest_revision_seq = $2 \
+               AND i.round = $3 AND i.state = 'materialized' AND i.task_id = t.id \
+               AND t.issue_type = 'refinement' AND t.status IN ('open', 'in_progress') \
+               AND t.agent_type IN ('judge', 'adversary') AND t.refinement_run_id = r.id \
+               AND t.refinement_generation = r.generation AND t.refinement_round = i.round \
+               AND t.refinement_phase = i.phase AND t.refinement_role = i.role AND t.agent_type = t.refinement_role \
+               AND t.refinement_role IN ('judge', 'adversary') ORDER BY t.updated_at DESC, t.id DESC LIMIT 1",
+        )
+        .bind(proposal_id)
+        .bind(against_revision_seq)
+        .bind(round)
+        .fetch_optional(self.db.pool())
+        .await?;
+        Ok(row)
     }
 
     pub async fn get(&self, id: &str) -> Result<Option<Proposal>> {

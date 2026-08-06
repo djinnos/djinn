@@ -192,30 +192,13 @@ pub(super) async fn setup_demand_test() -> (
     let project_id = link_proposal_to_project(&db, &repo, &p.id).await;
     let judge_task_id = create_judge_task(&db, &project_id, &p.id, &user_id).await;
     // Titles are display-only; materialize the exact Judge authority tuple.
-    let judge_intent_id = uuid::Uuid::now_v7().to_string();
-    sqlx::query(
-        "INSERT INTO refinement_dispatch_intents (id, run_id, round, phase, role, state, idempotency_key, task_id) \
-         VALUES ($1, $2, 1, 'judge_adjudication', 'judge', 'materialized', $3, $4)",
+    djinn_db::test_support::materialize_judge_authority_for_test(
+        &db,
+        &judge_task_id,
+        &run_id,
+        i64::from(generation),
     )
-    .bind(&judge_intent_id)
-    .bind(&run_id)
-    .bind(format!("demand-validation/judge/{judge_task_id}"))
-    .bind(&judge_task_id)
-    .execute(db.pool())
-    .await
-    .unwrap();
-    sqlx::query(
-        "UPDATE tasks SET refinement_run_id = $1, refinement_intent_id = $2, \
-         refinement_generation = $3, refinement_round = 1, \
-         refinement_phase = 'judge_adjudication', refinement_role = 'judge' WHERE id = $4",
-    )
-    .bind(&run_id)
-    .bind(&judge_intent_id)
-    .bind(i64::from(generation))
-    .bind(&judge_task_id)
-    .execute(db.pool())
-    .await
-    .unwrap();
+    .await;
 
     let updated = repo.get(&p.id).await.unwrap().unwrap();
     (server, db, updated, user_id, judge_task_id)
@@ -1146,47 +1129,17 @@ async fn atomic_demand_snapshot(
     repo: &ProposalRepository,
     proposal_id: &str,
     project_id: &str,
-) -> (i64, i64, i64, i64, i64, Option<String>, Option<String>) {
-    let task_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tasks WHERE project_id = $1")
-        .bind(project_id)
-        .fetch_one(db.pool())
-        .await
-        .unwrap();
-    let finding_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM typed_evidence_findings WHERE proposal_id = $1")
-            .bind(proposal_id)
-            .fetch_one(db.pool())
-            .await
-            .unwrap();
-    let attempt_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM typed_evidence_attempts WHERE finding_id IN \
-         (SELECT id FROM typed_evidence_findings WHERE proposal_id = $1)",
-    )
-    .bind(proposal_id)
-    .fetch_one(db.pool())
-    .await
-    .unwrap();
-    let debate_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM proposal_debate_trail WHERE proposal_id = $1")
-            .bind(proposal_id)
-            .fetch_one(db.pool())
-            .await
-            .unwrap();
-    let lifecycle_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM proposal_revisions WHERE proposal_id = $1 \
-         AND event_kind = 'refinement_awaiting_evidence_started'",
-    )
-    .bind(proposal_id)
-    .fetch_one(db.pool())
-    .await
-    .unwrap();
+) -> (
+    djinn_db::test_support::AtomicEvidenceDemandCountsForTest,
+    Option<String>,
+    Option<String>,
+) {
+    let counts =
+        djinn_db::test_support::atomic_evidence_demand_counts_for_test(db, proposal_id, project_id)
+            .await;
     let proposal = repo.get(proposal_id).await.unwrap().unwrap();
     (
-        task_count,
-        finding_count,
-        attempt_count,
-        debate_count,
-        lifecycle_count,
+        counts,
         proposal.linked_spike_task_id,
         proposal.needs_evidence_claim,
     )
@@ -1235,9 +1188,8 @@ async fn atomic_demand_rejects_authority_handoff_after_preflight_without_writes(
     );
 
     // Model a role handoff between handler validation and transaction entry.
-    sqlx::query("UPDATE tasks SET status = 'closed' WHERE id = $1")
-        .bind(&judge_task_id)
-        .execute(db.pool())
+    djinn_db::TaskRepository::new(db.clone(), EventBus::noop())
+        .set_status(&judge_task_id, "closed")
         .await
         .unwrap();
     let before = atomic_demand_snapshot(&db, &repo, &proposal.id, &project_id).await;

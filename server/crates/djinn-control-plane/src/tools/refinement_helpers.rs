@@ -6,9 +6,6 @@
 // `ProposalRefinementDemandEvidenceParams` which have external callers or are
 // part of the MCP schema surface.
 
-use serde::Deserialize;
-use sqlx::Row;
-
 use crate::tools::proposal_ops::{
     EvidenceLifecyclePhase, EvidenceLifecycleState, NeedsEvidenceStatus,
     ProposalRefinementStatusModel,
@@ -23,6 +20,7 @@ use djinn_core::{
 use djinn_db::{
     EvidenceRepository, ProposalDebateTrailCreateInput, ProposalRepository, TaskRepository,
 };
+use serde::Deserialize;
 
 use crate::tools::evidence_findings::{
     EvidenceCompletionV1, finalize_evidence_completion_v1_in_transaction,
@@ -103,25 +101,10 @@ async fn find_active_evidence_authority_task(
     against_revision_seq: i32,
     round: i32,
 ) -> Result<Option<(String, String)>, String> {
-    let row = sqlx::query(
-        "SELECT t.id, t.created_by_user_id FROM tasks t \
-         JOIN refinement_dispatch_intents i ON i.id = t.refinement_intent_id \
-         JOIN refinement_runs r ON r.id = i.run_id JOIN proposals p ON p.id = r.proposal_id \
-         WHERE r.proposal_id = $1 AND r.state = 'running' AND p.latest_revision_seq = $2 \
-           AND i.round = $3 AND i.state = 'materialized' AND i.task_id = t.id \
-           AND t.issue_type = 'refinement' AND t.status IN ('open', 'in_progress') \
-           AND t.agent_type IN ('judge', 'adversary') AND t.refinement_run_id = r.id \
-           AND t.refinement_generation = r.generation AND t.refinement_round = i.round \
-           AND t.refinement_phase = i.phase AND t.refinement_role = i.role AND t.agent_type = t.refinement_role \
-           AND t.refinement_role IN ('judge', 'adversary') ORDER BY t.updated_at DESC, t.id DESC LIMIT 1",
-    )
-    .bind(proposal_id)
-    .bind(against_revision_seq)
-    .bind(round)
-    .fetch_optional(repo.db().pool())
-    .await
-    .map_err(|e| format!("failed to query active refinement authority: {e}"))?;
-    Ok(row.map(|row| (row.get("id"), row.get("created_by_user_id"))))
+    repo.active_evidence_authority_task(proposal_id, against_revision_seq, round)
+        .await
+        .map(|authority| authority.map(|task| (task.task_id, task.created_by_user_id)))
+        .map_err(|e| format!("failed to query active refinement authority: {e}"))
 }
 
 /// Verify the caller is the active Judge for this proposal's refinement run.
