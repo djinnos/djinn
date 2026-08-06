@@ -135,7 +135,7 @@ async fn hold_cycle_ceiling_terminates_when_a_different_guard_declines_each_cycl
     round.ci_failure_fingerprint = Some("fp-round-0".to_string());
     assert!(
         !actor
-            .route_planner_intervention(&round, "worker", "strike", None, 5)
+            .route_arbiter_adjudication(&round, "worker", "strike", None, 5)
             .await,
         "a novel CI fingerprint must buy one remediation while under the ceiling"
     );
@@ -148,7 +148,7 @@ async fn hold_cycle_ceiling_terminates_when_a_different_guard_declines_each_cycl
     round.ci_failure_fingerprint = None;
     assert!(
         !actor
-            .route_planner_intervention(&round, "worker", "strike", None, 5)
+            .route_arbiter_adjudication(&round, "worker", "strike", None, 5)
             .await,
         "an unattempted remediation must redispatch while under the ceiling"
     );
@@ -159,7 +159,7 @@ async fn hold_cycle_ceiling_terminates_when_a_different_guard_declines_each_cycl
     round.ci_failure_fingerprint = Some("fp-round-2".to_string());
     assert!(
         !actor
-            .route_planner_intervention(&round, "worker", "strike", None, 5)
+            .route_arbiter_adjudication(&round, "worker", "strike", None, 5)
             .await,
         "a second novel fingerprint must also buy a remediation while under the ceiling"
     );
@@ -189,7 +189,7 @@ async fn hold_cycle_ceiling_terminates_when_a_different_guard_declines_each_cycl
     let mut final_round = base.clone();
     final_round.ci_failure_fingerprint = Some("fp-round-3".to_string());
     let handled = actor
-        .route_planner_intervention(&final_round, "worker", "strike", None, 5)
+        .route_arbiter_adjudication(&final_round, "worker", "strike", None, 5)
         .await;
     assert!(
         handled,
@@ -262,7 +262,7 @@ async fn hold_cycle_ceiling_does_not_fire_below_the_bound() {
     round.ci_failure_fingerprint = Some("fp-below-bound".to_string());
     assert!(
         !actor
-            .route_planner_intervention(&round, "worker", "strike", None, 5)
+            .route_arbiter_adjudication(&round, "worker", "strike", None, 5)
             .await,
         "with {} of {MAX_ARBITER_HOLD_CYCLES} cycles spent the rung must still decline to a \
          redispatch",
@@ -300,7 +300,7 @@ async fn hold_cycle_ceiling_yields_to_an_in_flight_arbiter() {
     round.ci_failure_fingerprint = Some("fp-in-flight".to_string());
     assert!(
         !actor
-            .route_planner_intervention(&round, "worker", "strike", None, 5)
+            .route_arbiter_adjudication(&round, "worker", "strike", None, 5)
             .await,
         "an unconsumed arbitration row means an arbiter is live; the ceiling must not pre-empt it"
     );
@@ -338,7 +338,7 @@ async fn hold_cycle_ceiling_dispatches_one_final_arbiter_for_pr_task() {
     round.ci_failure_fingerprint = Some("fp-pr-bearing".to_string());
     assert!(
         actor
-            .route_planner_intervention(&round, "worker", "strike", None, 5)
+            .route_arbiter_adjudication(&round, "worker", "strike", None, 5)
             .await,
         "a PR-bearing task at the ceiling must still be handled, never redispatched"
     );
@@ -396,7 +396,7 @@ async fn arbiter_dossier_carries_hold_cycle_and_prior_decisions() {
 
     assert!(
         actor
-            .route_planner_intervention(&round, "worker", "strike", None, 5)
+            .route_arbiter_adjudication(&round, "worker", "strike", None, 5)
             .await,
         "with the sub-guards cleared and budget remaining, the rung dispatches the Lead arbiter"
     );

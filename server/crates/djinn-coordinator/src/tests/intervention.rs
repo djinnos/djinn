@@ -1368,7 +1368,7 @@ async fn loop_guard_routes_to_planner_without_dispatch_failure_streak() {
     );
 
     let handled = actor
-        .route_loop_guard_planner_intervention(
+        .route_loop_guard_arbiter_adjudication(
             &task.id,
             "worker",
             "Reply-loop guard `identical_tool_failure` tripped: offending_signature=`shell:cargo-test`, threshold=3, observed=4, turn_span=7..=12",
@@ -1381,7 +1381,7 @@ async fn loop_guard_routes_to_planner_without_dispatch_failure_streak() {
 
     assert!(
         !actor.dispatch_failure_streak.contains_key(&task.id),
-        "route_planner_intervention clears stale streak state instead of incrementing it"
+        "route_arbiter_adjudication clears stale streak state instead of incrementing it"
     );
     assert!(
         !actor.last_dispatched.contains_key(&task.id),
@@ -1502,7 +1502,7 @@ async fn loop_guard_second_strike_parks_task() {
         .unwrap();
 
     let handled = actor
-        .route_loop_guard_planner_intervention(
+        .route_loop_guard_arbiter_adjudication(
             &task.id,
             "worker",
             "Reply-loop guard `identical_tool_failure` tripped: offending_signature=`shell:cargo-test`, threshold=3, observed=4, turn_span=7..=12",
@@ -2227,7 +2227,7 @@ async fn park_rung_dispatches_one_remediation_on_first_occurrence_fingerprint() 
     seed_terminated_post_intervention_sessions(&db, &tx, &task.id, &["m-a", "m-b"]).await;
 
     let handled = actor
-        .route_planner_intervention(&task, "worker", "second strike", None, 5)
+        .route_arbiter_adjudication(&task, "worker", "second strike", None, 5)
         .await;
     assert!(
         !handled,
@@ -2247,7 +2247,7 @@ async fn park_rung_dispatches_one_remediation_on_first_occurrence_fingerprint() 
     // attempted-remediation gate, which — with two non-attempt models on record
     // — parks.
     let handled_again = actor
-        .route_planner_intervention(&task, "worker", "second strike", None, 5)
+        .route_arbiter_adjudication(&task, "worker", "second strike", None, 5)
         .await;
     assert!(
         handled_again,
@@ -2642,10 +2642,10 @@ async fn escalate_ci_failure_includes_merge_queue_lane_facts() {
     );
 }
 
-/// `route_planner_intervention` appends the merge-queue lane facts even when the
+/// `route_arbiter_adjudication` appends the merge-queue lane facts even when the
 /// caller passes `ci_failure_sections = None`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn route_planner_intervention_appends_merge_queue_lane_facts() {
+async fn route_arbiter_adjudication_appends_merge_queue_lane_facts() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
     let mut actor = coordinator_actor_for_tests(&db, &tx);
@@ -2658,9 +2658,9 @@ async fn route_planner_intervention_appends_merge_queue_lane_facts() {
 
     let reason = "Merge queue repeatedly rejected PR.";
     let handled = actor
-        .route_planner_intervention(&task, "worker", reason, None, task.reopen_count)
+        .route_arbiter_adjudication(&task, "worker", reason, None, task.reopen_count)
         .await;
-    assert!(handled, "route_planner_intervention must handle the task");
+    assert!(handled, "route_arbiter_adjudication must handle the task");
 
     let comments = repo
         .query_activity(ActivityQuery {
@@ -2694,10 +2694,10 @@ async fn route_planner_intervention_appends_merge_queue_lane_facts() {
     }
 }
 
-/// `route_planner_intervention` appends CI failure sections to the escalation
+/// `route_arbiter_adjudication` appends CI failure sections to the escalation
 /// reason when `ci_failure_sections` is `Some(...)`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn route_planner_intervention_appends_ci_failure_sections() {
+async fn route_arbiter_adjudication_appends_ci_failure_sections() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
     let mut actor = coordinator_actor_for_tests(&db, &tx);
@@ -2708,11 +2708,11 @@ async fn route_planner_intervention_appends_ci_failure_sections() {
     let sections = "**Workflow:** CI\n**Failed job:** test (failure)";
 
     let handled = actor
-        .route_planner_intervention(&task, "worker", reason, Some(sections), task.reopen_count)
+        .route_arbiter_adjudication(&task, "worker", reason, Some(sections), task.reopen_count)
         .await;
-    assert!(handled, "route_planner_intervention must handle the task");
+    assert!(handled, "route_arbiter_adjudication must handle the task");
 
-    // The PLANNER_ESCALATION comment logged by dispatch_planner_escalation
+    // The PLANNER_ESCALATION comment logged by dispatch_arbiter_adjudication
     // should contain the CI failure sections in the reason.
     let comments = repo
         .query_activity(ActivityQuery {
@@ -2756,10 +2756,10 @@ async fn route_planner_intervention_appends_ci_failure_sections() {
     );
 }
 
-/// `route_planner_intervention` passes the original reason unchanged when
+/// `route_arbiter_adjudication` passes the original reason unchanged when
 /// `ci_failure_sections` is `None`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn route_planner_intervention_with_none_sections_preserves_reason() {
+async fn route_arbiter_adjudication_with_none_sections_preserves_reason() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
     let mut actor = coordinator_actor_for_tests(&db, &tx);
@@ -2769,9 +2769,9 @@ async fn route_planner_intervention_with_none_sections_preserves_reason() {
     let reason = "Internal review loop exceeded threshold.";
 
     let handled = actor
-        .route_planner_intervention(&task, "worker", reason, None, task.reopen_count)
+        .route_arbiter_adjudication(&task, "worker", reason, None, task.reopen_count)
         .await;
-    assert!(handled, "route_planner_intervention must handle the task");
+    assert!(handled, "route_arbiter_adjudication must handle the task");
 
     let comments = repo
         .query_activity(ActivityQuery {
@@ -2816,7 +2816,7 @@ async fn route_planner_intervention_with_none_sections_preserves_reason() {
 /// intervention returns it to `open` / `list_ready` — and that a normal
 /// (non-review) blocker has identical semantics.
 ///
-/// This test exercises the real coordinator path (`route_loop_guard_planner_intervention`)
+/// This test exercises the real coordinator path (`route_loop_guard_arbiter_adjudication`)
 /// and then queries `list_ready` — the same dispatch readiness query the
 /// coordinator's dispatch tick uses — to prove:
 /// 1. Source is NOT ready while in needs_lead_intervention.
@@ -2844,7 +2844,7 @@ async fn review_hold_release_lifecycle_proves_dispatch_readiness_recovery() {
 
     // Route to the loop guard second-strike path (the actual pdn6 hold mechanism).
     let handled = actor
-        .route_loop_guard_planner_intervention(
+        .route_loop_guard_arbiter_adjudication(
             &task.id,
             "worker",
             "Reply-loop guard `identical_tool_failure` tripped: offending_signature=`shell:cargo-test`, threshold=3, observed=4, turn_span=7..=12",
@@ -4252,13 +4252,13 @@ async fn park_rung_does_not_park_while_submission_pending_review() {
 // When a consumed/failed arbitration exists for the latest hold cycle,
 // `resolve_current_hold_cycle` advances to the next cycle and a new arbiter
 // is dispatched (the normal flow).  The `AlreadyExistsConsumed` /
-// `AlreadyExistsFailed` match arms in `route_planner_intervention` are
+// `AlreadyExistsFailed` match arms in `route_arbiter_adjudication` are
 // race-condition safety nets: they fire when `try_create` hits a uniqueness
 // conflict on the SAME hold cycle — e.g. the unconsumed row was consumed
 // between `resolve_current_hold_cycle` and `try_create`.
 
 /// When the latest arbitration is consumed, `resolve_current_hold_cycle`
-/// advances to the next cycle and `route_planner_intervention` dispatches a
+/// advances to the next cycle and `route_arbiter_adjudication` dispatches a
 /// new arbiter.  The task transitions to `needs_lead_intervention`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn consumed_arbitration_advances_to_next_cycle_and_dispatches() {
@@ -4305,7 +4305,7 @@ async fn consumed_arbitration_advances_to_next_cycle_and_dispatches() {
     // arbitration at cycle 0 is detected, `resolve_current_hold_cycle`
     // advances to cycle 1 and `try_create(1)` inserts a new row → dispatch.
     let handled = actor
-        .route_planner_intervention(&task, "worker", "consumed cycle reentry", None, 5)
+        .route_arbiter_adjudication(&task, "worker", "consumed cycle reentry", None, 5)
         .await;
     assert!(handled, "consumed-cycle re-entry must be handled");
 
@@ -4397,7 +4397,7 @@ async fn failed_arbitration_advances_to_next_cycle_and_dispatches() {
     seed_terminated_post_intervention_sessions(&db, &tx, &task.id, &["m-a", "m-b"]).await;
 
     let handled = actor
-        .route_planner_intervention(&task, "worker", "failed cycle reentry", None, 5)
+        .route_arbiter_adjudication(&task, "worker", "failed cycle reentry", None, 5)
         .await;
     assert!(handled, "failed-cycle re-entry must be handled");
 
@@ -4456,7 +4456,7 @@ async fn reentry_with_unconsumed_arbiter_does_not_create_second_arbiter() {
     // First dispatch: creates the arbitration row and transitions to
     // needs_lead_intervention.
     let first_handled = actor
-        .route_planner_intervention(&task, "worker", "second strike first dispatch", None, 5)
+        .route_arbiter_adjudication(&task, "worker", "second strike first dispatch", None, 5)
         .await;
     assert!(first_handled, "first dispatch must handle the task");
 
@@ -4470,12 +4470,12 @@ async fn reentry_with_unconsumed_arbiter_does_not_create_second_arbiter() {
     let first_arb_id = all_arbs[0].id.clone();
 
     // Re-entry: refresh the task (now in needs_lead_intervention) and call
-    // route_planner_intervention again. The unconsumed arbitration for the
+    // route_arbiter_adjudication again. The unconsumed arbitration for the
     // current hold cycle means the arbiter is already in flight.
     let refreshed = repo.get(&task.id).await.unwrap().unwrap();
     assert_eq!(refreshed.status, "needs_lead_intervention");
     let reentry_handled = actor
-        .route_planner_intervention(&refreshed, "worker", "second strike reentry", None, 5)
+        .route_arbiter_adjudication(&refreshed, "worker", "second strike reentry", None, 5)
         .await;
     assert!(
         reentry_handled,
@@ -4512,7 +4512,7 @@ async fn reentry_with_unconsumed_arbiter_does_not_create_second_arbiter() {
 /// Monitored-reopen starvation regression (incident v1ej, 2026-07-17): when
 /// the current hold cycle's unconsumed arbitration row carries a `reopen`
 /// decision, the arbiter has ALREADY decided and the one monitored worker
-/// attempt is what must run next.  `route_planner_intervention` must yield
+/// attempt is what must run next.  `route_arbiter_adjudication` must yield
 /// (return `false`) so the normal dispatch pass can run that worker — instead
 /// of treating the row as "arbiter in flight" on every tick, which starves the
 /// monitored attempt until the 24h arbitration deadline.
@@ -4538,7 +4538,7 @@ async fn pending_monitored_reopen_yields_to_normal_dispatch() {
 
     // First dispatch creates the arbitration row (arbiter routed).
     let first_handled = actor
-        .route_planner_intervention(&task, "worker", "second strike first dispatch", None, 5)
+        .route_arbiter_adjudication(&task, "worker", "second strike first dispatch", None, 5)
         .await;
     assert!(first_handled, "first dispatch must handle the task");
 
@@ -4583,7 +4583,7 @@ async fn pending_monitored_reopen_yields_to_normal_dispatch() {
     // dispatch — not spin "arbiter already in flight".
     let refreshed = repo.get(&task.id).await.unwrap().unwrap();
     let handled = actor
-        .route_planner_intervention(&refreshed, "worker", "second strike reentry", None, 5)
+        .route_arbiter_adjudication(&refreshed, "worker", "second strike reentry", None, 5)
         .await;
     assert!(
         !handled,
@@ -4613,7 +4613,7 @@ async fn pending_monitored_reopen_yields_to_normal_dispatch() {
 /// AND the durable `task_arbitrations` row is written (the arbitration ledger,
 /// keyed by `(task_id, hold_cycle)`), then (2) a best-effort `arbiter_dispatched`
 /// activity/outbox record is logged — a write whose failure is only a
-/// `tracing::warn!` (see `route_planner_intervention`, "Log the arbiter_dispatched
+/// `tracing::warn!` (see `route_arbiter_adjudication`, "Log the arbiter_dispatched
 /// outbox payload"). A crash/error in the window AFTER step 1 commits but BEFORE
 /// step 2 becomes durable leaves the task held on a committed arbitration with NO
 /// visible `arbiter_dispatched` record.
@@ -4718,7 +4718,7 @@ async fn arbiter_dispatch_transition_before_activity_failure_recovers_to_single_
     // ── Initial dispatch: real code commits the transition + durable arbitration
     // row and logs the arbiter_dispatched activity. ─────────────────────────────
     let first_handled = actor
-        .route_planner_intervention(
+        .route_arbiter_adjudication(
             &task,
             "worker",
             "second strike initial dispatch",
@@ -4798,7 +4798,7 @@ async fn arbiter_dispatch_transition_before_activity_failure_recovers_to_single_
     let refreshed = repo.get(&task.id).await.unwrap().unwrap();
     assert_eq!(refreshed.status, "needs_lead_intervention");
     let recovered = actor
-        .route_planner_intervention(
+        .route_arbiter_adjudication(
             &refreshed,
             "worker",
             "second strike recovery replay",
@@ -4916,7 +4916,7 @@ async fn repeated_consumed_cycles_do_not_create_duplicate_arbitration_rows() {
 
     // First intervention: advances from consumed cycle 0 to cycle 1.
     let handled1 = actor
-        .route_planner_intervention(&task, "worker", "first consumed reentry", None, 5)
+        .route_arbiter_adjudication(&task, "worker", "first consumed reentry", None, 5)
         .await;
     assert!(handled1, "first consumed re-entry must be handled");
 
@@ -4940,7 +4940,7 @@ async fn repeated_consumed_cycles_do_not_create_duplicate_arbitration_rows() {
     // Task is in needs_lead_intervention from first dispatch; refresh.
     let refreshed = repo.get(&task.id).await.unwrap().unwrap();
     let handled2 = actor
-        .route_planner_intervention(&refreshed, "worker", "second consumed reentry", None, 5)
+        .route_arbiter_adjudication(&refreshed, "worker", "second consumed reentry", None, 5)
         .await;
     assert!(handled2, "second consumed re-entry must be handled");
 
@@ -4969,7 +4969,7 @@ async fn repeated_consumed_cycles_do_not_create_duplicate_arbitration_rows() {
 
 /// `try_create` must return `AlreadyExistsConsumed` when a consumed row
 /// already exists at the same `(task_id, hold_cycle)`.  This is the
-/// race-condition safety net that `route_planner_intervention` uses to park
+/// race-condition safety net that `route_arbiter_adjudication` uses to park
 /// rather than double-dispatch.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn try_create_returns_already_exists_consumed_for_consumed_row() {
@@ -5325,7 +5325,7 @@ async fn arbiter_dossier_includes_attempt_ledger() {
 
     // Trigger the second-strike arbiter path.
     let handled = actor
-        .route_loop_guard_planner_intervention(&task.id, "worker", "test-reason for ledger dossier")
+        .route_loop_guard_arbiter_adjudication(&task.id, "worker", "test-reason for ledger dossier")
         .await;
     assert!(handled, "second-strike must be handled");
 
@@ -5472,7 +5472,7 @@ async fn cross_cycle_dossier_includes_guard_deferred_ledger() {
     // First arbiter dispatch: creates the arbitration row.
     assert!(
         actor
-            .route_loop_guard_planner_intervention(&task.id, "worker", "initial reason",)
+            .route_loop_guard_arbiter_adjudication(&task.id, "worker", "initial reason",)
             .await,
         "first dispatch creates the arbitration"
     );
@@ -5519,7 +5519,7 @@ async fn cross_cycle_dossier_includes_guard_deferred_ledger() {
     // arbitration was consumed, a NEW cycle is created.
     let task = repo.get(&task.id).await.unwrap().unwrap();
     let handled = actor
-        .route_loop_guard_planner_intervention(&task.id, "worker", "re-entry reason")
+        .route_loop_guard_arbiter_adjudication(&task.id, "worker", "re-entry reason")
         .await;
     assert!(handled, "re-entry dispatch creates a new arbitration cycle");
 
@@ -6364,7 +6364,7 @@ async fn second_strike_arbiter_dispatch_atomic_marker_status_and_outbox() {
 
     // Act: route the park rung — should dispatch an arbiter.
     let handled = actor
-        .route_planner_intervention(&task, "worker", "test second strike", None, 5)
+        .route_arbiter_adjudication(&task, "worker", "test second strike", None, 5)
         .await;
     assert!(handled, "second-strike must be handled");
 
@@ -6453,7 +6453,7 @@ async fn second_strike_arbiter_dispatch_atomic_marker_status_and_outbox() {
     //    unchanged, arbitration still unconsumed) — must NOT create a second
     //    dispatch or a duplicate activity entry.
     let re_handled = actor
-        .route_planner_intervention(&task, "worker", "test second strike", None, 5)
+        .route_arbiter_adjudication(&task, "worker", "test second strike", None, 5)
         .await;
     assert!(
         re_handled,
@@ -6560,7 +6560,7 @@ async fn corrupted_arbitration_state_advances_to_next_cycle() {
 
     // Act: the park rung must create a fresh arbitration at cycle 1 and dispatch.
     let handled = actor
-        .route_planner_intervention(&task, "worker", "corruption recovery test", None, 5)
+        .route_arbiter_adjudication(&task, "worker", "corruption recovery test", None, 5)
         .await;
     assert!(handled, "park rung must handle corruption recovery");
 
@@ -6623,7 +6623,7 @@ async fn arbiter_failure_dossier_on_db_error_parks_with_evidence_fields() {
 
     // Act: route the park rung — must fail closed to human review.
     let handled = actor
-        .route_planner_intervention(&task, "worker", "db error test", None, 5)
+        .route_arbiter_adjudication(&task, "worker", "db error test", None, 5)
         .await;
     assert!(handled, "db error must park (fail-closed)");
 
@@ -6697,7 +6697,7 @@ async fn arbiter_failure_dossier_on_db_error_parks_with_evidence_fields() {
 /// This test seeds a valid consumed arbitration first, then installs a
 /// `djinn-db` test-support constraint that leaves reads intact while rejecting
 /// subsequent `task_arbitrations` INSERTs.  That means the
-/// `route_planner_intervention` call below successfully re-runs
+/// `route_arbiter_adjudication` call below successfully re-runs
 /// `resolve_current_hold_cycle` as `(1, None)` and only fails when the real
 /// `TaskArbitrationRepository::try_create` call attempts to create cycle 1.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -6819,7 +6819,7 @@ async fn try_create_db_error_parks_with_failure_dossier() {
     let ci_sections = "Required CI failed: Server Clippy (job_id=86091807456), \
                        Server sqlx Cache (job_id=86091807443)";
     let handled = actor
-        .route_planner_intervention(
+        .route_arbiter_adjudication(
             &task,
             "worker",
             "try_create error test",
@@ -7005,7 +7005,7 @@ async fn decision_failure_cap_parks_and_infra_only_increments_infra_count() {
 
     // Act: route the park rung — decision-failure cap must park, not dispatch.
     let handled = actor
-        .route_planner_intervention(&task, "worker", "decision cap test", None, 5)
+        .route_arbiter_adjudication(&task, "worker", "decision cap test", None, 5)
         .await;
     assert!(handled, "decision-failure cap must be handled (park path)");
     let after = repo.get(&task.id).await.unwrap().unwrap();
@@ -7204,7 +7204,7 @@ async fn hold_release_yields_fresh_arbitration_on_next_strike() {
 
     // First strike: dispatch arbiter at cycle 0.
     let handled = actor
-        .route_planner_intervention(&task, "worker", "first park", None, 5)
+        .route_arbiter_adjudication(&task, "worker", "first park", None, 5)
         .await;
     assert!(handled, "first park must be handled");
     let after_first = repo.get(&task.id).await.unwrap().unwrap();
@@ -7345,7 +7345,7 @@ async fn hold_release_yields_fresh_arbitration_on_next_strike() {
     let task = repo.get(&task.id).await.unwrap().unwrap();
 
     let handled2 = actor
-        .route_planner_intervention(&task, "worker", "second park after hold release", None, 5)
+        .route_arbiter_adjudication(&task, "worker", "second park after hold release", None, 5)
         .await;
     assert!(handled2, "second park after hold release must be handled");
 
@@ -7519,7 +7519,7 @@ async fn coordinator_park_rung_creates_needs_lead_intervention_while_park_for_re
     let task_a = repo.get(&task_a.id).await.unwrap().unwrap();
     seed_terminated_post_intervention_sessions(&db, &tx, &task_a.id, &["m-a", "m-b"]).await;
     let handled = actor
-        .route_planner_intervention(&task_a, "worker", "coordinator park", None, 5)
+        .route_arbiter_adjudication(&task_a, "worker", "coordinator park", None, 5)
         .await;
     assert!(handled);
     let after_a = repo.get(&task_a.id).await.unwrap().unwrap();
@@ -7616,7 +7616,7 @@ async fn dispatch_pass_parks_when_decision_failure_cap_reached_at_dispatch_time(
 
     // Act: the park rung must detect the decision-failure cap and park.
     let handled = actor
-        .route_planner_intervention(&task, "worker", "decision cap dispatch test", None, 5)
+        .route_arbiter_adjudication(&task, "worker", "decision cap dispatch test", None, 5)
         .await;
     assert!(handled, "decision-failure cap must be handled");
 
@@ -7701,7 +7701,7 @@ async fn reentry_with_stale_decided_arbitration_self_consumes_and_dispatches_fre
     seed_terminated_post_intervention_sessions(&db, &tx, &task.id, &["m-a", "m-b"]).await;
 
     let handled = actor
-        .route_planner_intervention(&task, "worker", "merge-conflict reopen reentry", None, 5)
+        .route_arbiter_adjudication(&task, "worker", "merge-conflict reopen reentry", None, 5)
         .await;
     assert!(handled, "stale-decided re-entry must be handled");
 
@@ -7780,7 +7780,7 @@ async fn reentry_with_monitored_reopen_directive_does_not_self_consume() {
     seed_terminated_post_intervention_sessions(&db, &tx, &task.id, &["m-a", "m-b"]).await;
 
     let handled = actor
-        .route_planner_intervention(&task, "worker", "monitored reopen reentry", None, 5)
+        .route_arbiter_adjudication(&task, "worker", "monitored reopen reentry", None, 5)
         .await;
     assert!(
         !handled,

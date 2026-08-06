@@ -199,7 +199,7 @@ async fn i3mv_submitted_attempt_does_not_count_as_failed_evidence() {
 /// is a submitted attempt still pending review.  CI evidence from a prior head
 /// SHA (stale) cannot override this.
 ///
-/// This exercises `route_planner_intervention` → `post_intervention_history` →
+/// This exercises `route_arbiter_adjudication` → `post_intervention_history` →
 /// the submission_pending_review guard path end-to-end.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn i3mv_submitted_attempt_with_stale_ci_does_not_park() {
@@ -311,7 +311,7 @@ async fn i3mv_stale_ci_evidence_ignored_for_submission_pending_review() {
 
     // The submission is pending review.  The stale CI evidence predates
     // the submission timestamp, so `ci_ts < sub_ts` would be true in
-    // route_planner_intervention — the CI cannot serve as a strike.
+    // route_arbiter_adjudication — the CI cannot serve as a strike.
     assert!(history.any_submitted);
     assert!(history.submission_pending_review);
     assert!(history.latest_submission_at.is_some());
@@ -1384,7 +1384,7 @@ async fn audit_genuine_dispatch_delegates_attempt_creation_to_lifecycle_api() {
 /// Structural proof: the park/guard audit code does not duplicate
 /// quality-strike, breaker/cooldown, or rotation calculations.
 ///
-/// The `maybe_intervene_on_stuck_task` → `route_planner_intervention` path
+/// The `maybe_intervene_on_stuck_task` → `route_arbiter_adjudication` path
 /// delegates to:
 /// - `TaskRepository::quality_reopen_count` for quality-strike counting
 /// - `post_intervention_history` → `TaskAttemptRepository::list_for_task`
