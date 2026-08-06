@@ -17471,6 +17471,13 @@
             "string",
             "null"
           ]
+        },
+        "severity": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
         }
       }
     },
@@ -17511,6 +17518,22 @@
             "body": {
               "type": "string"
             },
+            "severity": {
+              "description": "`advisory` discussion does not gate readiness; `blocking` feedback does.",
+              "type": "string"
+            },
+            "withdrawn_at": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "withdrawn_by_user_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "resolved_at": {
               "description": "When set, the feedback is resolved (addressed or dismissed) and collapsed\nout of the active thread.",
               "type": [
@@ -17544,6 +17567,7 @@
             "proposal_id",
             "author_kind",
             "body",
+            "severity",
             "created_at",
             "updated_at"
           ]
@@ -17636,6 +17660,22 @@
             "body": {
               "type": "string"
             },
+            "severity": {
+              "description": "`advisory` discussion does not gate readiness; `blocking` feedback does.",
+              "type": "string"
+            },
+            "withdrawn_at": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "withdrawn_by_user_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "resolved_at": {
               "description": "When set, the feedback is resolved (addressed or dismissed) and collapsed\nout of the active thread.",
               "type": [
@@ -17669,6 +17709,141 @@
             "proposal_id",
             "author_kind",
             "body",
+            "severity",
+            "created_at",
+            "updated_at"
+          ]
+        }
+      },
+      "type": "object",
+      "properties": {
+        "feedback": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProposalFeedbackModel"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "readOnly": false,
+    "destructive": true,
+    "idempotent": false,
+    "openWorld": false,
+    "concurrent_safe": false
+  },
+  {
+    "name": "proposal_feedback_withdraw",
+    "description": "Withdraw a feedback entry that you originally authored. Captured snapshots remain immutable, and a materialized human-feedback objection closes only after every captured blocking source has been withdrawn.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "required": [
+        "id"
+      ],
+      "type": "object",
+      "properties": {
+        "id": {
+          "description": "Feedback entry UUID.",
+          "type": "string"
+        }
+      }
+    },
+    "outputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$defs": {
+        "ProposalFeedbackModel": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "proposal_id": {
+              "type": "string"
+            },
+            "parent_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "author_kind": {
+              "description": "`user` or `ai`.",
+              "type": "string"
+            },
+            "author_user_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "author_model": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "body": {
+              "type": "string"
+            },
+            "severity": {
+              "description": "`advisory` discussion does not gate readiness; `blocking` feedback does.",
+              "type": "string"
+            },
+            "withdrawn_at": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "withdrawn_by_user_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "resolved_at": {
+              "description": "When set, the feedback is resolved (addressed or dismissed) and collapsed\nout of the active thread.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "resolved_revision_seq": {
+              "description": "The revision that addressed this feedback (`null` when dismissed without\na spec change).",
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int32"
+            },
+            "resolved_by_user_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "created_at": {
+              "type": "string"
+            },
+            "updated_at": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "proposal_id",
+            "author_kind",
+            "body",
+            "severity",
             "created_at",
             "updated_at"
           ]
@@ -20806,6 +20981,22 @@
             "body": {
               "type": "string"
             },
+            "severity": {
+              "description": "`advisory` discussion does not gate readiness; `blocking` feedback does.",
+              "type": "string"
+            },
+            "withdrawn_at": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "withdrawn_by_user_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "resolved_at": {
               "description": "When set, the feedback is resolved (addressed or dismissed) and collapsed\nout of the active thread.",
               "type": [
@@ -20839,6 +21030,7 @@
             "proposal_id",
             "author_kind",
             "body",
+            "severity",
             "created_at",
             "updated_at"
           ]
