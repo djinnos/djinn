@@ -54,4 +54,28 @@ mod tests {
             .await
             .expect("the readiness protocol pin must resolve against the native registry");
     }
+
+    /// `ui/src/pages/fixtures/readiness_terminal_detail.json` is a shared wire
+    /// contract, not a recorded historical run: the routed Axum regression
+    /// imports it with `include_str!` and compares it field-by-field against a
+    /// live serialized detail response, which stamps `READINESS_SKILL_VERSION`.
+    /// Leaving it behind on a catalog bump therefore breaks that regression.
+    /// This is the cheap, database-free guard that names the drift directly.
+    #[test]
+    fn shared_browser_detail_fixture_tracks_the_readiness_pin() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../ui/src/pages/fixtures/readiness_terminal_detail.json"
+        ))
+        .expect("valid shared browser detail fixture");
+        assert_eq!(
+            fixture["run"]["skill_name"], READINESS_SKILL_NAME,
+            "the shared browser fixture must name the pinned readiness skill"
+        );
+        assert_eq!(
+            fixture["run"]["skill_version"], READINESS_SKILL_VERSION,
+            "bumping the readiness catalog must also move the shared browser \
+             detail fixture; it is a wire contract the routed regression \
+             compares against a live response, not a historical record"
+        );
+    }
 }
