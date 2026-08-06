@@ -47,8 +47,21 @@ pub const SOURCE_UNCHANGED: &str = "source_unchanged";
 
 /// Terminal close reason for a no-PR source whose adjudication ladder is spent.
 /// Exact text is contractual — operators and tests match on it.
+///
+/// It is the transition REASON, not the `close_reason` column. The column
+/// carries a fixed vocabulary everywhere else (`completed`, `force_closed`,
+/// `parent_closed`, `superseded`, …), and the coordinator-side copy of this
+/// contract routes through `terminally_fail_task`, which writes
+/// [`TERMINAL_CLOSE_REASON_CLASS`] there and puts the sentence on the
+/// `status_changed` activity. Writing the free-text sentence into the column
+/// here would have meant no single operator query finds both copies.
 pub const LADDER_EXHAUSTED_CLOSE_REASON: &str =
     "adjudication ladder exhausted without an actionable PR";
+
+/// `close_reason` column value for the exhausted-ladder terminal close — the
+/// same class `terminally_fail_task` writes, so both copies of the contract
+/// agree.
+pub const TERMINAL_CLOSE_REASON_CLASS: &str = "force_closed";
 
 /// Terminal-rung ceiling: `PlannerEscalation` rounds 1, 2 and 3 are permitted;
 /// the unchanged close of round 3 invokes exhausted ownership and round 4 is
@@ -112,7 +125,7 @@ pub const ADJUDICATION_SOURCE_SNAPSHOT_EVENT: &str = "adjudication_source_snapsh
 /// — `escalate_to_planner_or_terminally_fail` via `park_source_open`, and the
 /// arbiter via `ArbiterPark`. Keeping the two in step is the point: any state
 /// the park is legal from is a state the snapshot can be taken in.
-const PARKABLE_FROM_STATUSES: &[&str] = &[
+pub const PARKABLE_FROM_STATUSES: &[&str] = &[
     "pr_draft",
     "pr_review",
     "in_progress",
@@ -237,6 +250,26 @@ impl BusinessDisposition {
 /// Idempotent per (source, child): a re-run keeps the FIRST snapshot, which is
 /// the one that predates every planner edit.
 pub async fn record_adjudication_source_snapshot(
+    pool: &sqlx::PgPool,
+    source_id: &str,
+    child_id: &str,
+) -> Result<()> {
+    // Retry: a child whose snapshot is missing takes NO ownership branch when
+    // it closes (see `apply_adjudication_child_close_tx`), which is a silent
+    // return of the z8i8/zkas stranding. A transient write failure must not be
+    // the thing that costs a source its owner, so a lost race with concurrent
+    // writers is retried before the caller is told.
+    let mut last_error = None;
+    for _ in 0..3 {
+        match record_adjudication_source_snapshot_once(pool, source_id, child_id).await {
+            Ok(()) => return Ok(()),
+            Err(e) => last_error = Some(e),
+        }
+    }
+    Err(last_error.expect("loop runs at least once"))
+}
+
+async fn record_adjudication_source_snapshot_once(
     pool: &sqlx::PgPool,
     source_id: &str,
     child_id: &str,
@@ -434,39 +467,70 @@ pub async fn apply_adjudication_child_close_tx(
         // disposing it here would destroy that decision.
         let round = planner_escalation_count_tx(tx, &source_id).await?;
         let changed_by_adjudication = !at_close.same_disposition_as(&before);
+        // Did THIS transaction apply the exhausted-ladder ownership contract?
+        //
+        // Tracked explicitly rather than inferred from the before/after status
+        // delta. The creation-time snapshot is the right `before` for the
+        // planner's own edits (which land before the close), but it is the
+        // WRONG baseline for a transition this transaction makes: a source the
+        // producer snapshotted while it was already `pr_review` — the
+        // merge-method wedge does exactly that — would compare `pr_review`
+        // against `pr_review` and report `source_unchanged` for the very
+        // handoff it just performed, contradicting outcome truth-table row 4.
+        let mut ownership_applied = false;
         if round >= MAX_AUTONOMOUS_ESCALATIONS
             && !changed_by_adjudication
             && !already_owned(&at_close.status)
         {
-            match has_open_unmerged_pr(tx, &source_id).await? {
-                Some(_pr_url) => {
-                    // Owner: the PR poller (`poll_pr_review_tasks`).
-                    sqlx::query(
-                        r#"UPDATE tasks SET
-                                status = 'pr_review',
-                                updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
-                             WHERE id = $1"#,
-                    )
-                    .bind(&source_id)
-                    .execute(&mut **tx)
-                    .await?;
-                }
-                None => {
-                    // No poller required: terminal by contract.
-                    sqlx::query(
-                        r#"UPDATE tasks SET
-                                status = 'closed',
-                                close_reason = $2,
-                                closed_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
-                                updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
-                             WHERE id = $1"#,
-                    )
-                    .bind(&source_id)
-                    .bind(LADDER_EXHAUSTED_CLOSE_REASON)
-                    .execute(&mut **tx)
-                    .await?;
-                }
-            }
+            let (destination, close_reason) = match has_open_unmerged_pr(tx, &source_id).await? {
+                // Owner: the PR poller (`poll_pr_review_tasks`).
+                Some(_pr_url) => ("pr_review", None),
+                // No poller required: terminal by contract.
+                None => ("closed", Some(TERMINAL_CLOSE_REASON_CLASS)),
+            };
+            sqlx::query(
+                r#"UPDATE tasks SET
+                        status = $2,
+                        close_reason = COALESCE($3, close_reason),
+                        closed_at = CASE
+                            WHEN $3::text IS NOT NULL
+                            THEN to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+                            ELSE closed_at
+                        END,
+                        updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+                     WHERE id = $1"#,
+            )
+            .bind(&source_id)
+            .bind(destination)
+            .bind(close_reason)
+            .execute(&mut **tx)
+            .await?;
+
+            // The disposition must be visible on the task timeline like any
+            // other status change. The raw UPDATE above deliberately does not
+            // go through `TaskRepository::transition` (it must commit inside
+            // THIS transaction, alongside the child close), so the activity row
+            // it would have written is written here instead.
+            let activity_id = uuid::Uuid::now_v7().to_string();
+            sqlx::query(
+                "INSERT INTO activity_log (id, task_id, actor_id, actor_role, event_type, payload)
+                 VALUES ($1, $2, $3, $4, 'status_changed', $5::jsonb)",
+            )
+            .bind(&activity_id)
+            .bind(&source_id)
+            .bind("coordinator")
+            .bind("system")
+            .bind(
+                serde_json::json!({
+                    "from_status": at_close.status,
+                    "to_status": destination,
+                    "reason": LADDER_EXHAUSTED_CLOSE_REASON,
+                })
+                .to_string(),
+            )
+            .execute(&mut **tx)
+            .await?;
+            ownership_applied = true;
         }
 
         // The adjudication has CLEARED for this source: its child is closed and
@@ -487,10 +551,10 @@ pub async fn apply_adjudication_child_close_tx(
             .await?
             .unwrap_or_else(|| at_close.clone());
 
-        let outcome = if after.same_disposition_as(&before) {
-            SOURCE_UNCHANGED
-        } else {
+        let outcome = if ownership_applied || !after.same_disposition_as(&before) {
             SOURCE_CHANGED
+        } else {
+            SOURCE_UNCHANGED
         };
         let payload = serde_json::json!({
             "adjudication_child_id": child_id,

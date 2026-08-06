@@ -37,8 +37,9 @@ pub(crate) use writes::{
 // construct the scope and inspect the classification plan.
 pub use adjudication_close::{
     ADJUDICATION_OUTCOME_EVENT, LADDER_EXHAUSTED_CLOSE_REASON, MAX_AUTONOMOUS_ESCALATIONS,
-    SOURCE_CHANGED, SOURCE_UNCHANGED, apply_adjudication_child_close_tx, is_adjudication_child,
-    planner_escalation_count_tx, record_adjudication_source_snapshot,
+    PARKABLE_FROM_STATUSES, SOURCE_CHANGED, SOURCE_UNCHANGED, TERMINAL_CLOSE_REASON_CLASS,
+    apply_adjudication_child_close_tx, is_adjudication_child, planner_escalation_count_tx,
+    record_adjudication_source_snapshot,
 };
 pub use parent_disposition::{
     ChildDisposition, DispositionCounts, DispositionFinding, DispositionPlan, DispositionScope,

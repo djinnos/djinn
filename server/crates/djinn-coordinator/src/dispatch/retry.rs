@@ -3478,7 +3478,7 @@ impl CoordinatorActor {
             )
             .await
             {
-                tracing::warn!(
+                tracing::error!(
                     error = %e,
                     source_task_id = %src.short_id,
                     review_task_id = %review_task.short_id,

@@ -21,7 +21,8 @@ use djinn_core::models::{Project, TaskStatus, TransitionAction};
 use crate::database::Database;
 use crate::repositories::task::{
     ADJUDICATION_OUTCOME_EVENT, LADDER_EXHAUSTED_CLOSE_REASON, MAX_AUTONOMOUS_ESCALATIONS,
-    SOURCE_CHANGED, SOURCE_UNCHANGED, TaskRepository, record_adjudication_source_snapshot,
+    PARKABLE_FROM_STATUSES, SOURCE_CHANGED, SOURCE_UNCHANGED, TERMINAL_CLOSE_REASON_CLASS,
+    TaskRepository, record_adjudication_source_snapshot,
 };
 
 const ESCALATION_LABELS: &str = r#"["planner-park-escalation"]"#;
@@ -240,7 +241,137 @@ async fn every_producer_snapshot_status_reaches_the_exhausted_ladder() {
             events[0]["source_status_before"], snapshot_status,
             "the event must report the real snapshot status"
         );
+        // Outcome truth-table row 4: the exhausted handoff IS a disposition
+        // change. Asserting only `source.status` above let a real defect
+        // through — a source snapshotted at `pr_review` compared `pr_review`
+        // against `pr_review` and reported `source_unchanged` for the very
+        // handoff it had just performed.
+        assert_eq!(
+            events[0]["adjudication_outcome"], SOURCE_CHANGED,
+            "snapshot status {snapshot_status:?}: the exhausted-ladder handoff must always \
+             report source_changed, whatever the creation snapshot happened to hold"
+        );
     }
+}
+
+/// **AC7.** The already-owned branch, exercised where it is genuinely the thing
+/// that decides.
+///
+/// `an_already_owned_source_is_preserved` sets the source to `pr_review` AFTER
+/// an `in_lead_intervention` snapshot, so the *changed* guard short-circuits
+/// first and `already_owned` is never consulted — that test passes with
+/// `already_owned` hardcoded to `false`. Here the snapshot and the close-time
+/// status are both `pr_review`, so the changed guard is false and
+/// `already_owned` is the only thing standing between an already-owned source
+/// and a spurious force-close.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn already_owned_is_the_load_bearing_guard_when_nothing_else_changed() {
+    let db = Database::open_in_memory().unwrap();
+    let repo = TaskRepository::new(db.clone(), silent_bus());
+    let project = make_project(&db).await;
+    let epic_id = make_epic(&db, &project.id).await;
+
+    // Snapshot at `pr_review` and never park: close-time status is `pr_review`
+    // too, and the source has no PR, so without `already_owned` the no-PR
+    // branch would force-close a source the PR poller already owns.
+    let (source_id, child_id) = source_with_escalation_rounds_from(
+        &db,
+        &repo,
+        &epic_id,
+        MAX_AUTONOMOUS_ESCALATIONS,
+        "pr_review",
+    )
+    .await;
+    repo.set_status(&source_id, "pr_review").await.unwrap();
+
+    close_child(&repo, &child_id).await;
+
+    let source = repo.get(&source_id).await.unwrap().unwrap();
+    assert_eq!(
+        source.status, "pr_review",
+        "an already-owned source must be preserved, not re-dispositioned"
+    );
+    assert_eq!(
+        source.close_reason, None,
+        "and must not acquire a terminal close reason"
+    );
+    let events = outcome_events(&repo, &source_id).await;
+    assert_eq!(
+        events[0]["adjudication_outcome"], SOURCE_UNCHANGED,
+        "preserving an already-owned source changes nothing"
+    );
+}
+
+/// Drift guard. `PARKABLE_FROM_STATUSES` is a hand-written list in `djinn-db`
+/// mirroring `TransitionAction::ParkForRemediation`'s legal from-set in
+/// `djinn-core`. Nothing else keeps them in step, and the two previous
+/// instances of the stranding defect were both caused by exactly that set
+/// being wrong. Derive the truth from `compute_transition` and compare.
+#[test]
+fn parkable_from_statuses_matches_the_park_transition() {
+    use djinn_core::models::{TaskStatus, TransitionAction};
+
+    // Enumerated explicitly: `TaskStatus` has no `ALL`, and a hand-listed set
+    // here is safe because a NEW variant that is missing from this list simply
+    // cannot be derived — which is why the list is asserted exhaustive by the
+    // `match` below rather than trusted.
+    const EVERY_STATUS: &[TaskStatus] = &[
+        TaskStatus::Open,
+        TaskStatus::InProgress,
+        TaskStatus::NeedsTaskReview,
+        TaskStatus::InTaskReview,
+        TaskStatus::Approved,
+        TaskStatus::PrDraft,
+        TaskStatus::PrReview,
+        TaskStatus::NeedsLeadIntervention,
+        TaskStatus::InLeadIntervention,
+        TaskStatus::Closed,
+    ];
+    // Exhaustiveness: adding a `TaskStatus` variant fails to compile here until
+    // it is added to `EVERY_STATUS` above, so the derivation can never silently
+    // miss one.
+    fn assert_every_status_listed(status: &TaskStatus) {
+        match status {
+            TaskStatus::Open
+            | TaskStatus::InProgress
+            | TaskStatus::NeedsTaskReview
+            | TaskStatus::InTaskReview
+            | TaskStatus::Approved
+            | TaskStatus::PrDraft
+            | TaskStatus::PrReview
+            | TaskStatus::NeedsLeadIntervention
+            | TaskStatus::InLeadIntervention
+            | TaskStatus::Closed => {}
+        }
+    }
+    assert_eq!(EVERY_STATUS.len(), 10);
+    EVERY_STATUS.iter().for_each(assert_every_status_listed);
+
+    let derived: Vec<String> = EVERY_STATUS
+        .iter()
+        .filter(|status| {
+            djinn_core::models::compute_transition(
+                &TransitionAction::ParkForRemediation,
+                status,
+                None,
+            )
+            .is_ok()
+        })
+        .map(|status| status.as_str().to_owned())
+        .collect();
+    let mut declared: Vec<String> = PARKABLE_FROM_STATUSES
+        .iter()
+        .map(|s| (*s).to_owned())
+        .collect();
+    let mut derived_sorted = derived.clone();
+    declared.sort();
+    derived_sorted.sort();
+    assert_eq!(
+        declared, derived_sorted,
+        "PARKABLE_FROM_STATUSES has drifted from ParkForRemediation's legal from-set. Any status \
+         the park is legal from is a status a producer can snapshot the source in, and a missing \
+         one silently reinstates the exhausted-ladder stranding."
+    );
 }
 
 /// **AC8.** The directional rule must NOT swallow a real disposition. The
@@ -304,7 +435,7 @@ async fn a_human_review_hold_child_is_an_adjudication_child() {
     );
     assert_eq!(
         source.close_reason.as_deref(),
-        Some(LADDER_EXHAUSTED_CLOSE_REASON)
+        Some(TERMINAL_CLOSE_REASON_CLASS)
     );
     assert!(!outcome_events(&repo, &source_id).await.is_empty());
 }
@@ -641,8 +772,32 @@ async fn round_three_unchanged_close_force_closes_a_no_pr_source() {
     assert_eq!(source.status, "closed");
     assert_eq!(
         source.close_reason.as_deref(),
-        Some(LADDER_EXHAUSTED_CLOSE_REASON),
-        "the terminal reason is contractual, not free text"
+        Some(TERMINAL_CLOSE_REASON_CLASS),
+        "the close_reason COLUMN carries the fixed vocabulary class, matching what \
+         `terminally_fail_task` writes on the coordinator-side copy of this contract"
+    );
+    // ...and the contractual sentence is on the timeline, where the other copy
+    // puts it too, so one operator query finds both.
+    let transition_reasons: Vec<String> = repo
+        .query_activity(crate::repositories::task::ActivityQuery {
+            task_id: Some(source_id.clone()),
+            event_type: Some("status_changed".to_owned()),
+            limit: 50,
+            ..Default::default()
+        })
+        .await
+        .unwrap()
+        .into_iter()
+        .filter_map(|e| serde_json::from_str::<serde_json::Value>(&e.payload).ok())
+        .filter(|p| p["to_status"] == "closed")
+        .filter_map(|p| p["reason"].as_str().map(str::to_owned))
+        .collect();
+    assert!(
+        transition_reasons
+            .iter()
+            .any(|reason| reason == LADDER_EXHAUSTED_CLOSE_REASON),
+        "the exhausted-ladder disposition must be visible on the timeline with its exact \
+         contractual reason; got {transition_reasons:?}"
     );
     let events = outcome_events(&repo, &source_id).await;
     assert_eq!(events[0]["adjudication_outcome"], SOURCE_CHANGED);
