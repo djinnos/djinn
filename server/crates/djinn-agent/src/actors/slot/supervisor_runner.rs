@@ -3207,4 +3207,301 @@ mod tests {
         teardown_cargo_target_run_dir(&app_state, "run-under-test").await;
         assert!(sibling.exists());
     }
+
+    /// Controlled in-process runtime for the production report/evidence race.
+    struct ScriptedRuntime {
+        bistream: tokio::sync::Mutex<Option<djinn_runtime::BiStream>>,
+        observation:
+            tokio::sync::Mutex<Option<tokio::sync::oneshot::Receiver<TerminalRuntimeObservation>>>,
+    }
+    impl ScriptedRuntime {
+        fn new() -> (
+            Arc<Self>,
+            tokio::sync::mpsc::Sender<StreamEvent>,
+            tokio::sync::oneshot::Sender<TerminalRuntimeObservation>,
+        ) {
+            let (bistream, events_tx, _requests_rx) = djinn_runtime::BiStream::new_in_memory(16);
+            let (observation_tx, observation_rx) = tokio::sync::oneshot::channel();
+            (
+                Arc::new(Self {
+                    bistream: tokio::sync::Mutex::new(Some(bistream)),
+                    observation: tokio::sync::Mutex::new(Some(observation_rx)),
+                }),
+                events_tx,
+                observation_tx,
+            )
+        }
+    }
+    #[async_trait::async_trait]
+    impl SessionRuntime for ScriptedRuntime {
+        async fn prepare(
+            &self,
+            spec: &TaskRunSpec,
+            _: &ResolvedCredentials,
+        ) -> Result<djinn_runtime::RunHandle, djinn_runtime::RuntimeError> {
+            Ok(scripted_handle(&spec.task_run_id))
+        }
+        async fn attach_stdio(
+            &self,
+            _: &djinn_runtime::RunHandle,
+        ) -> Result<djinn_runtime::BiStream, djinn_runtime::RuntimeError> {
+            Ok(self
+                .bistream
+                .lock()
+                .await
+                .take()
+                .expect("stdio attached once"))
+        }
+        async fn cancel(
+            &self,
+            _: &djinn_runtime::RunHandle,
+        ) -> Result<(), djinn_runtime::RuntimeError> {
+            Ok(())
+        }
+        async fn teardown(
+            &self,
+            handle: djinn_runtime::RunHandle,
+        ) -> Result<TaskRunReport, djinn_runtime::RuntimeError> {
+            Ok(report(
+                &handle.task_run_id,
+                vec![],
+                TaskRunOutcome::Interrupted,
+            ))
+        }
+        async fn watch_infra_death(
+            &self,
+            _: &djinn_runtime::RunHandle,
+        ) -> TerminalRuntimeObservation {
+            self.observation
+                .lock()
+                .await
+                .take()
+                .expect("watch once")
+                .await
+                .expect("observation sent")
+        }
+    }
+    fn scripted_handle(id: &str) -> djinn_runtime::RunHandle {
+        djinn_runtime::RunHandle {
+            task_run_id: id.into(),
+            container_id: None,
+            pod_ref: None,
+            started_at: std::time::SystemTime::now(),
+            job_uid: None,
+            launcher_authority_protocol: None,
+        }
+    }
+    fn scripted_spec(task: &Task) -> TaskRunSpec {
+        TaskRunSpec {
+            task_run_id: uuid::Uuid::now_v7().to_string(),
+            task_attempt_id: None,
+            task_id: task.id.clone(),
+            execution_generation: 0,
+            project_id: task.project_id.clone(),
+            trigger: TaskRunTrigger::NewTask,
+            base_branch: "main".into(),
+            task_branch: "djinn/scripted-terminal-report".into(),
+            flow: SupervisorFlow::NewTask,
+            model_id_per_role: HashMap::new(),
+            read_source_project_ids: Vec::new(),
+            knowledge_injection: Default::default(),
+            github_owner: None,
+            github_install_token: None,
+            commit_author_name: None,
+            commit_author_email: None,
+            resume_lifecycle_metadata: None,
+            is_evidence_spike: false,
+        }
+    }
+    async fn scripted_fixture() -> (AgentContext, Task, TaskRunSpec) {
+        use crate::test_helpers;
+        let db = test_helpers::create_test_db();
+        let project = test_helpers::create_test_project(&db).await;
+        let epic = test_helpers::create_test_epic(&db, &project.id).await;
+        let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
+        let context = test_helpers::agent_context_from_db(db, CancellationToken::new());
+        let spec = scripted_spec(&task);
+        (context, task, spec)
+    }
+
+    #[tokio::test]
+    async fn terminal_report_wins_delayed_success_and_simultaneous_evidence() {
+        let (context, task, spec) = scripted_fixture().await;
+        tokio::time::pause();
+        let (runtime, events_tx, observation_tx) = ScriptedRuntime::new();
+        let handle = scripted_handle(&spec.task_run_id);
+        let kill = CancellationToken::new();
+        let awaiting = tokio::spawn(async move {
+            attach_and_await_terminal_report(runtime, &handle, &context, &spec, &task, &kill).await
+        });
+        tokio::task::yield_now().await;
+        observation_tx
+            .send(TerminalRuntimeObservation::new(
+                TerminalRuntimeEvidenceKind::ProtocolNoReport,
+                "Job succeeded without report",
+            ))
+            .expect("watch accepts success");
+        tokio::task::yield_now().await;
+        tokio::time::advance(std::time::Duration::from_secs(1)).await;
+        events_tx
+            .send(StreamEvent::Report(report(
+                "delayed",
+                vec![RoleKind::Worker],
+                TaskRunOutcome::WorkerSubmitted,
+            )))
+            .await
+            .expect("report accepted");
+        let delayed = awaiting.await.expect("join");
+        assert!(matches!(delayed.report_result, Ok(Some(_))));
+        assert!(delayed.terminal_runtime_observation.is_none());
+
+        tokio::time::resume();
+        let (context, task, spec) = scripted_fixture().await;
+        tokio::time::pause();
+        let (runtime, events_tx, observation_tx) = ScriptedRuntime::new();
+        events_tx
+            .send(StreamEvent::Report(report(
+                "simultaneous",
+                vec![RoleKind::Worker],
+                TaskRunOutcome::WorkerSubmitted,
+            )))
+            .await
+            .expect("queue report");
+        observation_tx
+            .send(TerminalRuntimeObservation::new(
+                TerminalRuntimeEvidenceKind::Infrastructure,
+                "OOMKilled",
+            ))
+            .expect("queue evidence");
+        let handle = scripted_handle(&spec.task_run_id);
+        let simultaneous = attach_and_await_terminal_report(
+            runtime,
+            &handle,
+            &context,
+            &spec,
+            &task,
+            &CancellationToken::new(),
+        )
+        .await;
+        assert!(matches!(simultaneous.report_result, Ok(Some(_))));
+        assert!(simultaneous.terminal_runtime_observation.is_none());
+    }
+
+    #[tokio::test]
+    async fn no_report_evidence_matrix_uses_the_single_thirty_second_bound() {
+        let cases = [
+            ("OOMKilled", TerminalRuntimeEvidenceKind::Infrastructure),
+            ("Pod Evicted", TerminalRuntimeEvidenceKind::Infrastructure),
+            ("Pod NodeLost", TerminalRuntimeEvidenceKind::Infrastructure),
+            (
+                "worker exited 101",
+                TerminalRuntimeEvidenceKind::UnknownFailure,
+            ),
+            (
+                "generic Job failure",
+                TerminalRuntimeEvidenceKind::UnknownFailure,
+            ),
+            (
+                "Job disappeared",
+                TerminalRuntimeEvidenceKind::ProtocolNoReport,
+            ),
+            (
+                "Pod disappeared",
+                TerminalRuntimeEvidenceKind::ProtocolNoReport,
+            ),
+        ];
+        let mut clock_is_paused = false;
+        for (diagnostic, kind) in cases {
+            if clock_is_paused {
+                tokio::time::resume();
+            }
+            let (context, task, spec) = scripted_fixture().await;
+            tokio::time::pause();
+            clock_is_paused = true;
+            let (runtime, _events_tx, observation_tx) = ScriptedRuntime::new();
+            let handle = scripted_handle(&spec.task_run_id);
+            let kill = CancellationToken::new();
+            let awaiting = tokio::spawn(async move {
+                attach_and_await_terminal_report(runtime, &handle, &context, &spec, &task, &kill)
+                    .await
+            });
+            tokio::task::yield_now().await;
+            observation_tx
+                .send(TerminalRuntimeObservation::new(kind, diagnostic))
+                .expect("watch accepts evidence");
+            tokio::task::yield_now().await;
+            tokio::time::advance(TERMINAL_RUNTIME_REPORT_DEADLINE).await;
+            let outcome = awaiting.await.expect("must settle at deadline");
+            assert!(matches!(outcome.report_result, Ok(None)), "{diagnostic}");
+            assert_eq!(
+                outcome
+                    .terminal_runtime_observation
+                    .expect("evidence retained")
+                    .kind,
+                kind
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn terminal_evidence_persists_allowlisted_causes_without_diagnostic_leaks() {
+        use crate::test_helpers;
+        use djinn_db::{CreateSessionParams, SessionRepository};
+        let db = test_helpers::create_test_db();
+        let project = test_helpers::create_test_project(&db).await;
+        let epic = test_helpers::create_test_epic(&db, &project.id).await;
+        let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
+        let context = test_helpers::agent_context_from_db(db.clone(), CancellationToken::new());
+        let sessions = SessionRepository::new(db, context.event_bus.clone());
+        for (kind, expected) in [
+            (
+                TerminalRuntimeEvidenceKind::Infrastructure,
+                SessionFailureCause::Infrastructure,
+            ),
+            (
+                TerminalRuntimeEvidenceKind::UnknownFailure,
+                SessionFailureCause::Unknown,
+            ),
+            (
+                TerminalRuntimeEvidenceKind::ProtocolNoReport,
+                SessionFailureCause::Protocol,
+            ),
+        ] {
+            let session = sessions
+                .create(CreateSessionParams {
+                    project_id: &project.id,
+                    task_id: Some(&task.id),
+                    model: "fixture-model",
+                    agent_type: "worker",
+                    metadata_json: None,
+                    task_run_id: None,
+                    pricing: None,
+                    cost_basis: None,
+                })
+                .await
+                .expect("seed session");
+            let diagnostic = "Pod status token=ghp_credential_shaped_secret OOMKilled";
+            finalize_terminal_runtime_observation(
+                &TaskRepository::new(context.db.clone(), context.event_bus.clone()),
+                &task,
+                &context,
+                diagnostic,
+                failure_cause_for_terminal_runtime_observation(&TerminalRuntimeObservation::new(
+                    kind, diagnostic,
+                )),
+            )
+            .await;
+            let stored = sessions
+                .get(&session.id)
+                .await
+                .expect("read session")
+                .expect("session exists");
+            assert_eq!(stored.failure_cause, Some(expected));
+            assert!(
+                !serde_json::to_string(&stored)
+                    .expect("serialize")
+                    .contains("ghp_credential_shaped_secret")
+            );
+        }
+    }
 }
