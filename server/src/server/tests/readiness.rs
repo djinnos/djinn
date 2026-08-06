@@ -18,10 +18,11 @@ use crate::test_helpers;
 const SNAPSHOT: &str = "d34db33fd34db33fd34db33fd34db33fd34db33f";
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn readiness_routes_require_auth_and_authorize_the_project_owner() {
+async fn readiness_routes_require_auth_and_admit_any_authenticated_user() {
     let (app, project_ref, db, _project_dir) =
         test_helpers::create_test_app_with_project_and_db().await;
     let project_id = project_id(&db, &project_ref).await;
+    seed_snapshot(&db, &project_id).await;
 
     assert_status(
         get(&app, &project_id, None).await,
@@ -36,15 +37,56 @@ async fn readiness_routes_require_auth_and_authorize_the_project_owner() {
     )
     .await;
 
-    // The fixture project's GitHub owner is `test`; this credential takes the
-    // browser cookie path but resolves to a different owner login.
-    let non_owner = test_helpers::seed_session_cookie(&db, "not-the-project-owner").await;
-    assert_status(
-        get(&app, &project_id, Some(&non_owner)).await,
-        StatusCode::FORBIDDEN,
-        "forbidden",
-    )
-    .await;
+    // Reproduce the production shape: the project's `github_owner` is `test`
+    // and the authenticated caller's personal `github_login` is something
+    // else, exactly as an organization-owned repository behaves. Both readiness
+    // surfaces must serve that caller.
+    let non_owner_login = "not-the-project-owner";
+    let non_owner = test_helpers::seed_session_cookie(&db, non_owner_login).await;
+    let non_owner_id = UserRepository::new(db.clone())
+        .get_by_github_id(424_242)
+        .await
+        .unwrap()
+        .unwrap()
+        .id;
+    assert_ne!(
+        project_github_owner(&db, &project_id).await,
+        non_owner_login,
+        "the fixture must keep the caller's login distinct from the project's GitHub owner"
+    );
+
+    let load = get(&app, &project_id, Some(&non_owner)).await;
+    assert_eq!(load.status(), StatusCode::OK);
+    assert_eq!(response_json(load).await, Value::Null);
+
+    let started = post_kickoff(&app, &project_id, Some(&non_owner), "non-owner-key").await;
+    assert_eq!(started.status(), StatusCode::OK);
+    let started = response_json(started).await;
+    assert_eq!(started["created"], true);
+    assert_eq!(started["run"]["project_id"], project_id);
+    assert_eq!(started["run"]["status"], "identifying");
+
+    // The run this caller started is attributed to them, so token and cost
+    // accounting lands on the runner rather than on the repository owner.
+    let run_id = started["run"]["id"].as_str().unwrap();
+    assert_eq!(
+        run_creator(&db, run_id).await.as_deref(),
+        Some(non_owner_id.as_str())
+    );
+    assert_eq!(
+        task_creator(&db, started["identification_task_id"].as_str().unwrap())
+            .await
+            .as_deref(),
+        Some(non_owner_id.as_str())
+    );
+
+    let reloaded = get(&app, &project_id, Some(&non_owner)).await;
+    assert_eq!(reloaded.status(), StatusCode::OK);
+    assert_eq!(response_json(reloaded).await["id"], run_id);
+
+    let detail = detail(&app, &project_id, run_id, Some(&non_owner)).await;
+    assert_eq!(detail.status(), StatusCode::OK);
+    assert_eq!(response_json(detail).await["run"]["id"], run_id);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -265,6 +307,36 @@ async fn project_id(db: &djinn_db::Database, project_ref: &str) -> String {
         .await
         .unwrap()
         .expect("fixture project")
+}
+
+async fn project_github_owner(db: &djinn_db::Database, project_id: &str) -> String {
+    ProjectRepository::new(db.clone(), test_helpers::test_events())
+        .get(project_id)
+        .await
+        .unwrap()
+        .expect("fixture project")
+        .github_owner
+}
+
+/// The persisted creator of a readiness run, as recorded on the run row.
+async fn run_creator(db: &djinn_db::Database, run_id: &str) -> Option<String> {
+    sqlx::query_scalar::<_, Option<String>>(
+        "SELECT created_by_user_id FROM readiness_runs WHERE id = $1",
+    )
+    .bind(run_id)
+    .fetch_one(db.pool())
+    .await
+    .expect("read the persisted readiness run creator")
+}
+
+/// The persisted creator of a task, which is the row dispatch reads for
+/// credential and cost attribution.
+async fn task_creator(db: &djinn_db::Database, task_id: &str) -> Option<String> {
+    sqlx::query_scalar::<_, Option<String>>("SELECT created_by_user_id FROM tasks WHERE id = $1")
+        .bind(task_id)
+        .fetch_one(db.pool())
+        .await
+        .expect("read the persisted task creator")
 }
 
 async fn seed_snapshot(db: &djinn_db::Database, project_id: &str) {

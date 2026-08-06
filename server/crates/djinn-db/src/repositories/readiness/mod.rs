@@ -27,6 +27,11 @@ pub struct ReadinessRunRow {
     pub expected_area_count: Option<i32>,
     pub created_at: String,
     pub completed_at: Option<String>,
+    /// The authenticated user who started this run. Readiness is startable by
+    /// any authenticated user, so token and cost accounting follow this field
+    /// rather than the project's GitHub owner. `None` only for runs created
+    /// before migration 187 and for direct `create_run` fixtures.
+    pub created_by_user_id: Option<String>,
 }
 
 fn reference_values(value: Option<&serde_json::Value>, key: &str) -> Vec<String> {
@@ -721,7 +726,7 @@ impl ReadinessRepository {
     /// persisted lifecycle and aggregation projections in explicit stable order.
     pub async fn run_detail(&self, run_id: &str) -> Result<Option<ReadinessRunDetail>> {
         self.db.ensure_initialized().await?;
-        let Some(run) = sqlx::query_as("SELECT id,project_id,idempotency_key,status,repository_snapshot,skill_name,skill_version,expected_area_count,created_at,completed_at FROM readiness_runs WHERE id=$1").bind(run_id).fetch_optional(self.db.pool()).await? else { return Ok(None); };
+        let Some(run) = sqlx::query_as("SELECT id,project_id,idempotency_key,status,repository_snapshot,skill_name,skill_version,expected_area_count,created_at,completed_at,created_by_user_id FROM readiness_runs WHERE id=$1").bind(run_id).fetch_optional(self.db.pool()).await? else { return Ok(None); };
         let areas: Vec<ReadinessCompositionAreaDetailRow> = sqlx::query_as("SELECT id,run_id,area_key,composition,path_scopes,frozen_at,status,current_attempt_id FROM readiness_composition_areas WHERE run_id=$1 ORDER BY area_key,id").bind(run_id).fetch_all(self.db.pool()).await?;
         let attempts: Vec<ReadinessAreaAttemptRow> = sqlx::query_as("SELECT a.id,a.run_id,a.area_id,a.attempt_number,a.correlation_key,a.status,a.payload_digest,a.created_at,a.terminal_at FROM readiness_area_attempts a JOIN readiness_composition_areas area ON area.id=a.area_id WHERE a.run_id=$1 ORDER BY area.area_key,area.id,a.attempt_number,a.id").bind(run_id).fetch_all(self.db.pool()).await?;
         let findings: Vec<ReadinessGuardrailFindingRow> = sqlx::query_as("SELECT f.id,f.run_id,f.area_id,f.attempt_id,f.guardrail_key,f.status,f.severity,f.confidence,f.accepted,f.evidence,f.created_at FROM readiness_guardrail_findings f JOIN readiness_composition_areas area ON area.id=f.area_id AND area.current_attempt_id=f.attempt_id WHERE f.run_id=$1 AND f.accepted=true ORDER BY area.area_key,area.id,f.guardrail_key,f.id").bind(run_id).fetch_all(self.db.pool()).await?;
@@ -818,11 +823,11 @@ impl ReadinessRepository {
             .bind(&input.project_id)
             .execute(&mut *tx)
             .await?;
-        let active: Option<ReadinessRunRow> = sqlx::query_as("SELECT id,project_id,idempotency_key,status,repository_snapshot,skill_name,skill_version,expected_area_count,created_at,completed_at FROM readiness_runs WHERE project_id=$1 AND status IN ('identifying','analyzing','aggregating') FOR UPDATE").bind(&input.project_id).fetch_optional(&mut *tx).await?;
+        let active: Option<ReadinessRunRow> = sqlx::query_as("SELECT id,project_id,idempotency_key,status,repository_snapshot,skill_name,skill_version,expected_area_count,created_at,completed_at,created_by_user_id FROM readiness_runs WHERE project_id=$1 AND status IN ('identifying','analyzing','aggregating') FOR UPDATE").bind(&input.project_id).fetch_optional(&mut *tx).await?;
         let run = match active {
             Some(run) => run,
-            None => sqlx::query_as("INSERT INTO readiness_runs (id,project_id,idempotency_key,repository_snapshot,skill_name,skill_version) VALUES ($1,$2,$3,$4,$5,$6) RETURNING id,project_id,idempotency_key,status,repository_snapshot,skill_name,skill_version,expected_area_count,created_at,completed_at")
-                .bind(Uuid::now_v7().to_string()).bind(&input.project_id).bind(&input.idempotency_key).bind(&input.repository_snapshot).bind(&input.skill_name).bind(&input.skill_version).fetch_one(&mut *tx).await?,
+            None => sqlx::query_as("INSERT INTO readiness_runs (id,project_id,idempotency_key,repository_snapshot,skill_name,skill_version,created_by_user_id) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id,project_id,idempotency_key,status,repository_snapshot,skill_name,skill_version,expected_area_count,created_at,completed_at,created_by_user_id")
+                .bind(Uuid::now_v7().to_string()).bind(&input.project_id).bind(&input.idempotency_key).bind(&input.repository_snapshot).bind(&input.skill_name).bind(&input.skill_version).bind(&input.creator_user_id).fetch_one(&mut *tx).await?,
         };
         let task_id: Option<String> = sqlx::query_scalar("SELECT id FROM tasks WHERE project_id=$1 AND (CASE WHEN description LIKE '{%' THEN description::jsonb ELSE '{}'::jsonb END) ->> 'kind' = 'readiness_identification' AND (CASE WHEN description LIKE '{%' THEN description::jsonb ELSE '{}'::jsonb END) ->> 'run_id' = $2 FOR UPDATE").bind(&run.project_id).bind(&run.id).fetch_optional(&mut *tx).await?;
         let identification_task = match task_id {
@@ -857,7 +862,7 @@ impl ReadinessRepository {
         self.db.ensure_initialized().await?;
         let validated = validate_identification_output(output);
         let mut tx = self.db.pool().begin().await?;
-        let run: ReadinessRunRow = sqlx::query_as("SELECT id,project_id,idempotency_key,status,repository_snapshot,skill_name,skill_version,expected_area_count,created_at,completed_at FROM readiness_runs WHERE id=$1 FOR UPDATE").bind(run_id).fetch_optional(&mut *tx).await?.ok_or_else(|| Error::InvalidData("readiness run not found".into()))?;
+        let run: ReadinessRunRow = sqlx::query_as("SELECT id,project_id,idempotency_key,status,repository_snapshot,skill_name,skill_version,expected_area_count,created_at,completed_at,created_by_user_id FROM readiness_runs WHERE id=$1 FOR UPDATE").bind(run_id).fetch_optional(&mut *tx).await?.ok_or_else(|| Error::InvalidData("readiness run not found".into()))?;
         if run.status != "identifying" {
             return Err(Error::InvalidTransition(
                 "readiness run is not identifying".into(),
@@ -949,7 +954,7 @@ impl ReadinessRepository {
     }
     pub async fn create_run(&self, i: CreateReadinessRun) -> Result<ReadinessRunRow> {
         self.db.ensure_initialized().await?;
-        sqlx::query_as("INSERT INTO readiness_runs (id,project_id,idempotency_key,repository_snapshot,skill_name,skill_version) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (project_id,idempotency_key) DO UPDATE SET idempotency_key=EXCLUDED.idempotency_key RETURNING id,project_id,idempotency_key,status,repository_snapshot,skill_name,skill_version,expected_area_count,created_at,completed_at").bind(Uuid::now_v7().to_string()).bind(i.project_id).bind(i.idempotency_key).bind(i.repository_snapshot).bind(i.skill_name).bind(i.skill_version).fetch_one(self.db.pool()).await.map_err(Into::into)
+        sqlx::query_as("INSERT INTO readiness_runs (id,project_id,idempotency_key,repository_snapshot,skill_name,skill_version) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (project_id,idempotency_key) DO UPDATE SET idempotency_key=EXCLUDED.idempotency_key RETURNING id,project_id,idempotency_key,status,repository_snapshot,skill_name,skill_version,expected_area_count,created_at,completed_at,created_by_user_id").bind(Uuid::now_v7().to_string()).bind(i.project_id).bind(i.idempotency_key).bind(i.repository_snapshot).bind(i.skill_name).bind(i.skill_version).fetch_one(self.db.pool()).await.map_err(Into::into)
     }
     pub async fn create_area(
         &self,
@@ -1163,7 +1168,7 @@ impl ReadinessRepository {
     ) -> Result<ReadinessAreaFanout> {
         self.db.ensure_initialized().await?;
         let mut tx = self.db.pool().begin().await?;
-        let run: ReadinessRunRow = sqlx::query_as("SELECT id,project_id,idempotency_key,status,repository_snapshot,skill_name,skill_version,expected_area_count,created_at,completed_at FROM readiness_runs WHERE id=$1 FOR UPDATE").bind(&input.run_id).fetch_optional(&mut *tx).await?.ok_or_else(|| Error::InvalidData("readiness run not found".into()))?;
+        let run: ReadinessRunRow = sqlx::query_as("SELECT id,project_id,idempotency_key,status,repository_snapshot,skill_name,skill_version,expected_area_count,created_at,completed_at,created_by_user_id FROM readiness_runs WHERE id=$1 FOR UPDATE").bind(&input.run_id).fetch_optional(&mut *tx).await?.ok_or_else(|| Error::InvalidData("readiness run not found".into()))?;
         if !matches!(
             run.status.as_str(),
             "identifying" | "analyzing" | "aggregating"
@@ -1226,7 +1231,7 @@ impl ReadinessRepository {
         }
         self.db.ensure_initialized().await?;
         let mut tx = self.db.pool().begin().await?;
-        let run: ReadinessRunRow = sqlx::query_as("SELECT id,project_id,idempotency_key,status,repository_snapshot,skill_name,skill_version,expected_area_count,created_at,completed_at FROM readiness_runs WHERE id=$1 FOR UPDATE")
+        let run: ReadinessRunRow = sqlx::query_as("SELECT id,project_id,idempotency_key,status,repository_snapshot,skill_name,skill_version,expected_area_count,created_at,completed_at,created_by_user_id FROM readiness_runs WHERE id=$1 FOR UPDATE")
             .bind(run_id).fetch_optional(&mut *tx).await?
             .ok_or_else(|| Error::InvalidData("readiness run not found".into()))?;
         if matches!(run.status.as_str(), "completed" | "completed_with_errors") {
@@ -1326,7 +1331,7 @@ impl ReadinessRepository {
     pub async fn active_or_latest_for_project(&self, p: &str) -> Result<Option<ReadinessRunRow>> {
         self.db.ensure_initialized().await?;
         sqlx::query_as(
-            "SELECT id,project_id,idempotency_key,status,repository_snapshot,skill_name,skill_version,expected_area_count,created_at,completed_at \
+            "SELECT id,project_id,idempotency_key,status,repository_snapshot,skill_name,skill_version,expected_area_count,created_at,completed_at,created_by_user_id \
              FROM readiness_runs WHERE project_id=$1 \
              ORDER BY CASE WHEN status IN ('identifying','analyzing','aggregating') THEN 0 ELSE 1 END, \
                       created_at DESC, id DESC LIMIT 1",
