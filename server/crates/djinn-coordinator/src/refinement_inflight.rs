@@ -43,29 +43,57 @@ fn local_phase(phase: DurablePhase) -> RefinementPhase {
 }
 
 impl CoordinatorActor {
-    /// Whether the proposal's latest judge verdict is blocking — the durable
+    /// Whether **this run's** latest judge verdict is blocking — the durable
     /// witness behind `RefinementLoopState::pending_blocking_verdict`.
     ///
-    /// Both projection-rebuild paths call this. Fails safe toward `false` (the
-    /// pre-existing routing) so a transient DB error cannot invent an Advocate
-    /// round that the debate trail does not justify.
+    /// Both projection-rebuild paths call this.
+    ///
+    /// Scoped to the current run via `entry_in_current_run`, the same boundary
+    /// `select_current_run_verdict` uses. `ProposalRepository::latest_judge_verdict`
+    /// is deliberately NOT used here: it is `WHERE proposal_id = $1 ORDER BY
+    /// created_at DESC LIMIT 1`, i.e. proposal-scoped, so a *previous* run's
+    /// needs-work verdict would win. A fresh run whose projection happened to be
+    /// rebuilt would then route its first dry Adversary pass to the Advocate and
+    /// implement a superseded run's remedy — and routing would depend on whether
+    /// a rebuild occurred, since `new()` seeds this `false`. That is incident
+    /// 019f0c29's failure mode (stale prior-run verdict authority), which is the
+    /// very class of defect this loop change exists to remove.
+    ///
+    /// Unlike `select_current_run_verdict` this is NOT round-scoped. At the only
+    /// point the flag is read — a dry pass while the phase is `AdversaryAttack`
+    /// at round N — the verdict that matters was written by the Judge closing
+    /// round N-1, so scoping to N would find nothing.
+    ///
+    /// Fails safe toward `false` (the pre-existing routing) on a read error, so
+    /// a transient DB fault cannot invent an Advocate round. When no
+    /// `refinement_start` boundary exists, `entry_in_current_run` admits every
+    /// entry — the same documented fallback the outcome path takes.
     pub(super) async fn outstanding_blocking_verdict(
+        &self,
         proposal_repo: &djinn_db::ProposalRepository,
         proposal_id: &str,
     ) -> bool {
-        match proposal_repo.latest_judge_verdict(proposal_id).await {
-            Ok(Some(verdict)) => verdict.blocking,
-            Ok(None) => false,
+        let run_start = self.latest_refinement_run_start(proposal_id).await;
+        let entries = match proposal_repo.debate_trail(proposal_id).await {
+            Ok(entries) => entries,
             Err(error) => {
                 tracing::warn!(
                     proposal_id,
                     %error,
-                    "Failed to read latest judge verdict while rebuilding a refinement \
+                    "Failed to read the debate trail while rebuilding a refinement \
                      projection; treating the verdict as answered"
                 );
-                false
+                return false;
             }
-        }
+        };
+        entries
+            .iter()
+            .filter(|entry| entry.kind == "verdict" && entry.agent_role == "judge")
+            .filter(|entry| {
+                super::refinement_outcome::entry_in_current_run(entry, run_start.as_deref())
+            })
+            .max_by(|a, b| a.created_at.cmp(&b.created_at))
+            .is_some_and(|verdict| verdict.blocking)
     }
 
     /// Ensure the disposable projections name this materialized intent as the
@@ -149,8 +177,9 @@ impl CoordinatorActor {
         // Same rehydration the startup recovery path performs: a projection
         // rebuilt here (session not tracked) otherwise loses the outstanding
         // needs-work verdict and re-strands it on the next dry Adversary pass.
-        let pending_blocking_verdict =
-            Self::outstanding_blocking_verdict(&proposal_repo, &proposal.id).await;
+        let pending_blocking_verdict = self
+            .outstanding_blocking_verdict(&proposal_repo, &proposal.id)
+            .await;
         let mut state = RefinementLoopState::new(&proposal.id, proposal.latest_revision_seq)
             .with_run_identity(run_id.to_owned(), generation)
             .with_recovered_snapshot_seq(captured_snapshot_seq)

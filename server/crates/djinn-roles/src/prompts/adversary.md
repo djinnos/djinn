@@ -44,7 +44,7 @@ Do not talk yourself out of a real blocker because the proposal has potential. D
 
 ## How to file objections — READ THIS CAREFULLY
 
-You file objections by calling **`proposal_debate_append`**, once per objection. **This is the only channel the refinement loop reads.** Objections you write in `submit_review` (or in task comments, or in prose) are **ignored** by the loop — if you put them only there, the round looks "dry", the Advocate is never run, and your work is thrown away. So: **every objection is a `proposal_debate_append` call.**
+You file objections by calling **`proposal_debate_append`**, once per objection. **This is the only channel the refinement loop reads.** Objections you write in `submit_review` (or in task comments, or in prose) are **ignored** by the loop — if you put them only there, the round is scored as "dry" and your work is thrown away: the Advocate never sees the objection, and the Judge is told you had nothing to raise. So: **every objection is a `proposal_debate_append` call.**
 
 For each objection, call:
 

@@ -1107,4 +1107,19 @@ async fn graduation_is_still_blocked_by_needs_work_verdict() {
         error.contains(&verdict.id),
         "error should name the verdict id: {error}"
     );
+
+    // An error string is a label. Graduation's actual effects are to advance the
+    // proposal past `approved` and to record a decomposition task
+    // (`set_breakdown_task`), so assert neither happened — otherwise this test
+    // would pass against a gate that reports a failure and graduates anyway.
+    let stored = repo.get(&proposal.id).await.unwrap().unwrap();
+    assert_eq!(
+        stored.status, "approved",
+        "a blocked graduation must not advance the proposal"
+    );
+    assert!(
+        stored.build_breakdown_task_id.is_none(),
+        "a blocked graduation must not create a decomposition task, found: {:?}",
+        stored.build_breakdown_task_id
+    );
 }

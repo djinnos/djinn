@@ -85,10 +85,10 @@ impl CoordinatorActor {
             // recovered while parked at `AdversaryAttack` after a needs-work
             // verdict would then send its next dry pass back to the Judge and
             // re-strand exactly the verdict the restart interrupted. The durable
-            // authority is the debate trail.
-            let pending_blocking_verdict =
-                CoordinatorActor::outstanding_blocking_verdict(&proposal_repo, &exact.proposal_id)
-                    .await;
+            // authority is the debate trail, scoped to THIS run.
+            let pending_blocking_verdict = self
+                .outstanding_blocking_verdict(&proposal_repo, &exact.proposal_id)
+                .await;
             let mut state =
                 RefinementLoopState::new(&exact.proposal_id, proposal.latest_revision_seq)
                     .with_run_identity(run.run_id.clone(), exact.generation)

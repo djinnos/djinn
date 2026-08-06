@@ -726,12 +726,17 @@ pub fn build_verdict_debate_params<'a>(
 mod tests {
     use super::*;
 
+    /// Derived from the shipped defaults, not hardcoded: the spawn-budget test
+    /// below asserts a relationship between the round cap and the spawn cap, and
+    /// that assertion is only meaningful if it runs against the values
+    /// production actually uses. Hardcoding them would let a default change
+    /// silently break the `RoundCap`-before-`SpawnCap` guarantee.
     fn test_config() -> RefinementConfig {
         RefinementConfig {
-            max_rounds: 5,
-            dry_rounds_required: 2,
-            max_total_spawns: 16,
-            repeat_objection_threshold: 2,
+            max_rounds: DEFAULT_MAX_ROUNDS,
+            dry_rounds_required: DEFAULT_DRY_ROUNDS_REQUIRED,
+            max_total_spawns: DEFAULT_MAX_TOTAL_SPAWNS,
+            repeat_objection_threshold: DEFAULT_REPEAT_OBJECTION_THRESHOLD,
         }
     }
 
@@ -992,75 +997,112 @@ mod tests {
     /// ever costs more than the round it replaces, `SpawnCap` preempts
     /// `RoundCap` and a reviewable park silently becomes a dead run.
     ///
-    /// The spawn count here is DERIVED from the phases the state machine
-    /// actually asks for — one agent per dispatchable phase — rather than a
-    /// schedule this test hard-codes. A change that visits an extra phase per
-    /// round therefore blows the budget and trips `record_spawn`, instead of
-    /// passing because the test's own model was updated to match.
+    /// Both adversary behaviors are exercised, because they are NOT the same
+    /// cost and the binding one is the non-dry path:
+    ///
+    /// - always dry: round 1 is Adversary+Judge (nothing owed yet), rounds 2..N
+    ///   are Adversary+Advocate+Judge — `3N-1` spawns.
+    /// - always blocking: every round is Adversary+Advocate+Judge, the GLOBAL
+    ///   maximum at `3N`. Unchanged from `main`, since the reroute only ever
+    ///   fires on a dry pass.
+    ///
+    /// The spawn count is DERIVED from the phases the state machine actually
+    /// asks for — one agent per dispatchable phase — rather than a schedule this
+    /// test hard-codes. A change that visits an extra phase per round therefore
+    /// blows the budget and trips `record_spawn`, instead of passing because the
+    /// test's own model was updated to match.
     #[test]
-    fn worst_case_dry_verdict_run_parks_on_the_round_cap_not_the_spawn_cap() {
+    fn worst_case_verdict_runs_park_on_the_round_cap_not_the_spawn_cap() {
         let config = test_config();
-        let mut state = RefinementLoopState::with_config("p1", 0, config.clone());
-        let mut visited: Vec<RefinementPhase> = Vec::new();
-        let mut revision = 0;
 
-        // Worst case for this fix: the Judge rejects every round, and the
-        // Adversary is dry every round because the Judge resolved its
-        // objections. Bounded by the round cap; the guard below is the budget.
-        while !state.is_awaiting_human_review() && !state.is_complete() {
-            assert!(
-                visited.len() < 64,
-                "the loop must terminate through a cap, not run forever"
+        for adversary_is_dry in [true, false] {
+            let mut state = RefinementLoopState::with_config("p1", 0, config.clone());
+            let mut visited: Vec<RefinementPhase> = Vec::new();
+            let mut revision = 0;
+            let mut objection = 0;
+
+            // The Judge rejects every round, so the loop runs to the round cap.
+            while !state.is_awaiting_human_review() && !state.is_complete() {
+                assert!(
+                    visited.len() < 64,
+                    "the loop must terminate through a cap, not run forever"
+                );
+                state
+                    .record_spawn()
+                    .unwrap_or_else(|reason| panic!("spawn budget exhausted at {reason:?}"));
+                visited.push(state.phase);
+                match state.phase {
+                    RefinementPhase::AdversaryAttack => {
+                        // Distinct bodies: identical ones would trip
+                        // repeat-objection escalation and end the run early.
+                        objection += 1;
+                        state.process_adversary_pass(&AdversaryPassResult {
+                            objections: if adversary_is_dry {
+                                vec![]
+                            } else {
+                                vec![blocking_objection(&format!("distinct issue {objection}"))]
+                            },
+                            explicit_dry: adversary_is_dry,
+                        });
+                    }
+                    RefinementPhase::AdvocateRevision => {
+                        revision += 1;
+                        state.record_advocate_revision(revision);
+                    }
+                    RefinementPhase::JudgeAdjudication => {
+                        state.record_judge_verdict(&JudgeVerdictResult {
+                            body: format!("needs-work: round {}", state.current_round),
+                            blocking: true,
+                        });
+                    }
+                    other => panic!("non-dispatchable phase reached the dispatch loop: {other:?}"),
+                }
+            }
+
+            // Parked for a human on the ROUND cap — not terminated on the spawn
+            // cap.
+            assert_eq!(
+                state.stop_reason,
+                Some(StopReason::RoundCap),
+                "dry={adversary_is_dry}"
             );
-            state
-                .record_spawn()
-                .unwrap_or_else(|reason| panic!("spawn budget exhausted at {reason:?}"));
-            visited.push(state.phase);
-            match state.phase {
-                RefinementPhase::AdversaryAttack => {
-                    state.process_adversary_pass(&AdversaryPassResult {
-                        objections: vec![],
-                        explicit_dry: true,
-                    });
-                }
-                RefinementPhase::AdvocateRevision => {
-                    revision += 1;
-                    state.record_advocate_revision(revision);
-                }
-                RefinementPhase::JudgeAdjudication => {
-                    state.record_judge_verdict(&JudgeVerdictResult {
-                        body: format!("needs-work: round {}", state.current_round),
-                        blocking: true,
-                    });
-                }
-                other => panic!("non-dispatchable phase reached the dispatch loop: {other:?}"),
+            assert!(state.is_awaiting_human_review(), "dry={adversary_is_dry}");
+            assert!(!state.is_complete(), "dry={adversary_is_dry}");
+            assert_eq!(state.current_round, config.max_rounds);
+            assert!(
+                visited.len() as i32 <= config.max_total_spawns,
+                "dry={adversary_is_dry}: run asked for {} spawns, budget is {}: {visited:?}",
+                visited.len(),
+                config.max_total_spawns
+            );
+
+            let advocate_turns = visited
+                .iter()
+                .filter(|phase| **phase == RefinementPhase::AdvocateRevision)
+                .count();
+            if adversary_is_dry {
+                // The reroute actually happened: every dry round after the first
+                // owed the Judge a remedy and ran the Advocate.
+                assert_eq!(
+                    advocate_turns,
+                    (config.max_rounds - 1) as usize,
+                    "every dry round after the first must run the Advocate: {visited:?}"
+                );
+                assert_eq!(visited.len() as i32, 3 * config.max_rounds - 1);
+            } else {
+                // Unchanged from `main`: the Adversary's objections drive the
+                // Advocate, and the reroute never fires.
+                assert_eq!(
+                    advocate_turns, config.max_rounds as usize,
+                    "every blocking round runs the Advocate: {visited:?}"
+                );
+                assert_eq!(
+                    visited.len() as i32,
+                    3 * config.max_rounds,
+                    "the non-dry path is the global spawn maximum"
+                );
             }
         }
-
-        // Parked for a human on the ROUND cap — not terminated on the spawn cap.
-        assert_eq!(state.stop_reason, Some(StopReason::RoundCap));
-        assert!(state.is_awaiting_human_review());
-        assert!(!state.is_complete());
-        assert_eq!(state.current_round, config.max_rounds);
-        assert!(
-            visited.len() as i32 <= config.max_total_spawns,
-            "worst-case run asked for {} spawns, budget is {}: {visited:?}",
-            visited.len(),
-            config.max_total_spawns
-        );
-
-        // And the reroute actually happened: the Advocate ran on the dry rounds
-        // that owed the Judge a remedy (every round after the first).
-        let advocate_turns = visited
-            .iter()
-            .filter(|phase| **phase == RefinementPhase::AdvocateRevision)
-            .count();
-        assert_eq!(
-            advocate_turns,
-            (config.max_rounds - 1) as usize,
-            "every dry round after the first owes a verdict and must run the \
-             Advocate: {visited:?}"
-        );
     }
 
     #[test]
