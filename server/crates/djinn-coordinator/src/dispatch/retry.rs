@@ -1611,14 +1611,23 @@ impl CoordinatorActor {
             // unconsumed row). A genuinely in-flight arbiter is left to finish
             // — it may still approve or supersede — and is separately bounded
             // by the 24h arbitration deadline and the decision-failure cap.
-            // 4etb: the evidence epoch is stamped HERE, before any guard reads
-            // it. It used to be stamped inside the arbitration-row insert,
-            // which runs at the BOTTOM of this rung — so on a first escalation
-            // every guard saw an empty floor, the uv3p attempted-remediation
-            // guard declined, and the arbiter the whole proposal routes to was
-            // never dispatched. Stamping first is what makes the guards measure
-            // the CURRENT escalation instead of nothing. The write is
-            // conditional on the column being NULL, so a repeated tick while
+            // 4etb: stamp the evidence epoch before anything below reads it.
+            //
+            // What this buys TODAY, precisely: the arbiter's dossier attempt
+            // ledger (`attempt_ledger_for_task`) and the park-reason text are
+            // sliced by the canonical floor, and on a first escalation the
+            // floor only exists because of this call — the authoritative stamp
+            // lives in `try_create_with_evidence_epoch` at the bottom of the
+            // rung, which is too late for them. Without it a first escalation
+            // hands the arbiter unbounded history, contradicting the guards
+            // whose decision it is meant to explain.
+            //
+            // It is NOT what keeps a first escalation off the uv3p guard any
+            // more — `guards_apply` does that, by skipping the park guards
+            // entirely at prospective cycle 0. Both are deliberate: this is the
+            // evidence contract, that is the routing contract.
+            //
+            // Conditional on the column being NULL, so a repeated tick while
             // this escalation is pending is a no-op and the row insert below
             // re-reads the same value inside its own transaction.
             if let Err(e) = self

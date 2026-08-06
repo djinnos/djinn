@@ -388,12 +388,67 @@ fn parkable_from_statuses_matches_the_park_transition() {
     );
 }
 
-/// **AC8.** The directional rule must NOT swallow a real disposition. The
-/// exhausted-ladder handoff itself is `open -> pr_review`, the exact reverse of
-/// the scaffolding park — a symmetric "these statuses are equal" rule would
-/// have made it invisible and reported `source_unchanged` for it.
+/// **AC8/AC7.** The scaffolding exclusion must be DIRECTIONAL: it collapses
+/// `<parkable> -> open` (the coordinator parking the source behind its child)
+/// and nothing else. A symmetric "these statuses are equal" rule would read the
+/// reverse direction as scaffolding too — and the reverse direction is a real
+/// planner disposition.
+///
+/// The case that discriminates is a round-3 close whose planner moved the
+/// source with a STATUS-ONLY disposition, back into an in-flight state. Under
+/// the shipped directional rule that is `source_changed`, so the exhausted
+/// branch is skipped and the planner's decision survives. Under a symmetric
+/// rule it reads as scaffolding, the branch fires, and the planner's decision
+/// is destroyed by a force-close.
+///
+/// An earlier version of this test used the `open -> pr_review` handoff
+/// instead, and did not bite: `ownership_applied` forces `source_changed` for
+/// the handoff regardless of the comparison, so the test passed with the rule
+/// made symmetric. If the mechanism's directionality is removed, THIS test
+/// fails on the source's final status.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_scaffolding_exclusion_is_directional() {
+    let db = Database::open_in_memory().unwrap();
+    let repo = TaskRepository::new(db.clone(), silent_bus());
+    let project = make_project(&db).await;
+    let epic_id = make_epic(&db, &project.id).await;
+
+    // Snapshot at `open` so the delta under test is purely `open -> in_progress`
+    // — the reverse of a park, with no scope or close-reason change to carry it.
+    let (source_id, child_id) = source_with_escalation_rounds_from(
+        &db,
+        &repo,
+        &epic_id,
+        MAX_AUTONOMOUS_ESCALATIONS,
+        "open",
+    )
+    .await;
+    // The planner's disposition: put the source back to work. No PR, so a
+    // wrongly-fired exhausted branch would force-close it.
+    repo.set_status(&source_id, "in_progress").await.unwrap();
+
+    close_child(&repo, &child_id).await;
+
+    let source = repo.get(&source_id).await.unwrap().unwrap();
+    assert_eq!(
+        source.status, "in_progress",
+        "`open -> in_progress` is a real disposition, not a park: the exhausted branch must not \
+         fire and the planner's decision must survive"
+    );
+    assert_eq!(
+        source.close_reason, None,
+        "and the source must not acquire a terminal close reason"
+    );
+    let events = outcome_events(&repo, &source_id).await;
+    assert_eq!(events[0]["adjudication_outcome"], SOURCE_CHANGED);
+}
+
+/// **AC7.** The handoff the exclusion must never swallow: `open -> pr_review`.
+/// Kept as a separate, honestly-scoped assertion — it is guaranteed by
+/// `ownership_applied` rather than by the comparison, so it does NOT prove
+/// directionality (see [`the_scaffolding_exclusion_is_directional`] for that).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_exhausted_handoff_is_always_a_disposition() {
     let db = Database::open_in_memory().unwrap();
     let repo = TaskRepository::new(db.clone(), silent_bus());
     let project = make_project(&db).await;
@@ -408,15 +463,8 @@ async fn the_scaffolding_exclusion_is_directional() {
     close_child(&repo, &child_id).await;
 
     let events = outcome_events(&repo, &source_id).await;
-    assert_eq!(
-        events[0]["source_status_after"], "pr_review",
-        "the ownership handoff landed"
-    );
-    assert_eq!(
-        events[0]["adjudication_outcome"], SOURCE_CHANGED,
-        "`open -> pr_review` is a real disposition and must never be collapsed as scaffolding, \
-         even though `pr_review -> open` is"
-    );
+    assert_eq!(events[0]["source_status_after"], "pr_review");
+    assert_eq!(events[0]["adjudication_outcome"], SOURCE_CHANGED);
 }
 
 /// **AC8.** A legacy `human-review-hold` child is an adjudication child too:
