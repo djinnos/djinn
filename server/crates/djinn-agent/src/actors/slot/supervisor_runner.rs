@@ -1,5 +1,6 @@
 // djinn:allow-oversize — legacy module over size-guard threshold; split when touched substantively.
 use std::collections::HashMap;
+use std::future::Future;
 use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
@@ -627,6 +628,25 @@ async fn route_loop_guard_planner_intervention_if_needed(
     }
 }
 
+/// Complete host-owned work which is only valid after the supervisor has
+/// returned its terminal report. Routing remains awaited; extraction's caller
+/// records only the `tokio::spawn` dispatch and deliberately does not await the
+/// extraction work.
+async fn dispatch_post_settlement_host_operations<Routing, RoutingFuture, Extraction>(
+    report: &TaskRunReport,
+    route_loop_guard: Routing,
+    dispatch_extraction: Extraction,
+) where
+    Routing: FnOnce() -> RoutingFuture,
+    RoutingFuture: Future<Output = ()>,
+    Extraction: FnOnce(&TaskRunReport),
+{
+    route_loop_guard().await;
+    if !report.stages_completed.is_empty() {
+        dispatch_extraction(report);
+    }
+}
+
 /// Host-side dispatch: resolve task -> build spec -> construct runtime -> drive lifecycle.
 ///
 /// `Ok(())` = terminal outcome (slot treats as `SlotEvent::Free`).
@@ -798,29 +818,34 @@ pub(super) async fn dispatch_task_runtime(
             if is_budget_park_report(&report) {
                 clear_budget_park_dispatch_state(&app_state, &task).await;
             }
-            route_loop_guard_planner_intervention_if_needed(
-                &app_state,
+            dispatch_post_settlement_host_operations(
                 &report,
-                &task,
-                loop_guard_intervention_role,
+                || {
+                    route_loop_guard_planner_intervention_if_needed(
+                        &app_state,
+                        &report,
+                        &task,
+                        loop_guard_intervention_role,
+                    )
+                },
+                |report| {
+                    // Fire-and-forget post-session knowledge extraction.
+                    let app_state_ext = app_state.clone();
+                    let task_id_ext = task.id.clone();
+                    let task_run_id_ext = report.task_run_id.clone();
+                    let terminal_context_ext = terminal_extraction_context(report);
+                    tokio::spawn(async move {
+                        crate::actors::slot::session_extraction::run_post_session_extraction(
+                            task_id_ext,
+                            task_run_id_ext,
+                            terminal_context_ext,
+                            app_state_ext,
+                        )
+                        .await;
+                    });
+                },
             )
             .await;
-            // Fire-and-forget post-session knowledge extraction.
-            if !report.stages_completed.is_empty() {
-                let app_state_ext = app_state.clone();
-                let task_id_ext = task.id.clone();
-                let task_run_id_ext = report.task_run_id.clone();
-                let terminal_context_ext = terminal_extraction_context(&report);
-                tokio::spawn(async move {
-                    crate::actors::slot::session_extraction::run_post_session_extraction(
-                        task_id_ext,
-                        task_run_id_ext,
-                        terminal_context_ext,
-                        app_state_ext,
-                    )
-                    .await;
-                });
-            }
             Ok(())
         }
         (Err(e), teardown_result) => {
@@ -2389,6 +2414,90 @@ mod tests {
             outcome,
             stages_completed: stages,
         }
+    }
+
+    #[tokio::test]
+    async fn settled_supervisor_report_precedes_awaited_routing_and_extraction_dispatch() {
+        use std::sync::{Arc, Mutex};
+
+        // This models the host's input boundary: `TaskRunSupervisor::run` has
+        // already returned a terminal report, which is only possible after its
+        // completed settlement. The report itself maps to Completed, making the
+        // settled evidence visible to this host-side test before the helper runs.
+        async fn consume_settled_supervisor_report() -> TaskRunReport {
+            report(
+                "settled-supervisor-run",
+                vec![RoleKind::Worker],
+                TaskRunOutcome::WorkerSubmitted,
+            )
+        }
+
+        let operations = Arc::new(Mutex::new(vec!["completed_settlement_evidence"]));
+        let settled_report = consume_settled_supervisor_report().await;
+        assert_eq!(
+            report_to_terminal_status(&settled_report),
+            TaskRunStatus::Completed,
+            "the consumed supervisor report must carry Completed-settlement evidence"
+        );
+
+        let routing_operations = Arc::clone(&operations);
+        let extraction_operations = Arc::clone(&operations);
+        dispatch_post_settlement_host_operations(
+            &settled_report,
+            move || async move {
+                tokio::task::yield_now().await;
+                routing_operations
+                    .lock()
+                    .expect("operation recorder mutex poisoned")
+                    .push("loop_guard_routing_completed");
+            },
+            move |_| {
+                extraction_operations
+                    .lock()
+                    .expect("operation recorder mutex poisoned")
+                    .push("post_session_extraction_spawn_dispatched");
+            },
+        )
+        .await;
+        assert_eq!(
+            *operations
+                .lock()
+                .expect("operation recorder mutex poisoned"),
+            vec![
+                "completed_settlement_evidence",
+                "loop_guard_routing_completed",
+                "post_session_extraction_spawn_dispatched",
+            ],
+            "the executed host helper must await routing before dispatching, but not await, extraction"
+        );
+
+        let empty_stages = report("no-extraction-run", vec![], TaskRunOutcome::WorkerSubmitted);
+        let empty_operations = Arc::new(Mutex::new(Vec::new()));
+        let empty_routing_operations = Arc::clone(&empty_operations);
+        let empty_extraction_operations = Arc::clone(&empty_operations);
+        dispatch_post_settlement_host_operations(
+            &empty_stages,
+            move || async move {
+                empty_routing_operations
+                    .lock()
+                    .expect("operation recorder mutex poisoned")
+                    .push("loop_guard_routing_completed");
+            },
+            move |_| {
+                empty_extraction_operations
+                    .lock()
+                    .expect("operation recorder mutex poisoned")
+                    .push("post_session_extraction_spawn_dispatched");
+            },
+        )
+        .await;
+        assert_eq!(
+            *empty_operations
+                .lock()
+                .expect("operation recorder mutex poisoned"),
+            vec!["loop_guard_routing_completed"],
+            "empty stages must keep routing behavior but skip extraction dispatch"
+        );
     }
 
     #[test]
