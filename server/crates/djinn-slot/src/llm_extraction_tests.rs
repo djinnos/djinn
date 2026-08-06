@@ -739,7 +739,7 @@ async fn llm_extraction_graceful_degradation_no_provider_configured() {
         .with_ansi(false)
         .with_level(true)
         .finish();
-    let _capture = crate::test_log_capture::lock();
+    let _capture = crate::test_log_capture::lock().await;
     let dispatch = tracing::dispatcher::Dispatch::new(subscriber);
     let guard = tracing::dispatcher::set_default(&dispatch);
     run_llm_extraction(fixture.session_id.clone(), taxonomy, ctx).await;
@@ -1456,7 +1456,7 @@ async fn admission_gate_drops_case_missing_required_section() {
         .with_ansi(false)
         .with_level(true)
         .finish();
-    let _capture = crate::test_log_capture::lock();
+    let _capture = crate::test_log_capture::lock().await;
     let dispatch = tracing::dispatcher::Dispatch::new(subscriber);
     let guard = tracing::dispatcher::set_default(&dispatch);
     run_llm_extraction_with_provider(fixture.session_id.clone(), taxonomy, ctx, provider).await;
