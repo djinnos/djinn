@@ -534,6 +534,39 @@ fn judge_resolution_schema_supports_human_feedback_without_narrowing_ordinary_re
     assert_eq!(input["properties"]["reason"]["minLength"], 1);
 }
 
+#[test]
+fn feedback_write_schemas_preserve_disposition_variants_and_author_withdrawal() {
+    let disposition = serde_json::to_value(shared_schemas::tool_proposal_feedback_disposition())
+        .expect("serialize feedback disposition schema");
+    let input = &disposition["inputSchema"];
+    assert_eq!(input["required"], serde_json::json!(["id", "disposition"]));
+    assert_eq!(
+        input["properties"]["disposition"]["enum"],
+        serde_json::json!(["fixed_by_revision", "wont_fix"])
+    );
+    assert_eq!(
+        input["allOf"][0]["then"]["required"],
+        serde_json::json!(["fixed_by_revision"])
+    );
+    assert_eq!(
+        input["allOf"][1]["then"]["required"],
+        serde_json::json!(["reason"])
+    );
+    assert_eq!(input["properties"]["reason"]["minLength"], 1);
+
+    let withdrawal = serde_json::to_value(shared_schemas::tool_proposal_feedback_withdraw())
+        .expect("serialize feedback withdrawal schema");
+    assert_eq!(withdrawal["name"], "proposal_feedback_withdraw");
+    assert_eq!(
+        withdrawal["inputSchema"]["required"],
+        serde_json::json!(["id"])
+    );
+    assert_eq!(
+        withdrawal["inputSchema"]["properties"]["id"]["type"],
+        "string"
+    );
+}
+
 // ── schema structure / content tests ──────────────────────────────────
 
 #[test]
