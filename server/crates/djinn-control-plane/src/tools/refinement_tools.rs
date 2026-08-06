@@ -23,19 +23,19 @@ use crate::tools::refinement_helpers::validate_demand_evidence;
 pub use crate::tools::refinement_helpers::{
     ProposalRefinementDemandEvidenceParams, build_refinement_status,
 };
-use djinn_core::models::{NeedsEvidenceClaim, TaskStatus, TransitionAction};
+use djinn_core::models::NeedsEvidenceClaim;
 use djinn_db::{
-    AdmitRefinementRunRequest, EffectiveCreatorProvenance, NeedsEvidenceClaimLink,
-    ProposalDebateTrailCreateInput, ProposalRepository, RefinementAdmissionError,
-    RefinementAdmissionOutcome, RefinementAdmissionSource, TaskRepository, TypedEvidenceRepository,
+    AdmitRefinementRunRequest, ProposalRepository, RefinementAdmissionError,
+    RefinementAdmissionOutcome, RefinementAdmissionSource, TaskRepository,
 };
+#[cfg(test)]
+use djinn_db::{NeedsEvidenceClaimLink, ProposalDebateTrailCreateInput};
 
 fn err_refinement_start(error: impl Into<String>) -> ProposalRefinementStartResponse {
     ProposalRefinementStartResponse {
         proposal_id: None,
         refinement: None,
         error: Some(error.into()),
-        conflict_code: None,
     }
 }
 
@@ -44,7 +44,6 @@ fn err_refinement_status(error: impl Into<String>) -> ProposalRefinementStatusRe
         proposal_id: None,
         refinement: None,
         error: Some(error.into()),
-        conflict_code: None,
     }
 }
 
@@ -448,7 +447,6 @@ impl DjinnMcpServer {
                     accepted: false,
                     refinement: None,
                     error: Some(e),
-                    conflict_code: None,
                 });
             }
         };
@@ -641,7 +639,6 @@ impl DjinnMcpServer {
             proposal_id: Some(proposal.id),
             resolved: true,
             error: None,
-            conflict_code: None,
         })
     }
 
@@ -767,7 +764,6 @@ impl DjinnMcpServer {
             overridden: true,
             override_on_revision_seq: Some(override_seq),
             error: None,
-            conflict_code: None,
         })
     }
 

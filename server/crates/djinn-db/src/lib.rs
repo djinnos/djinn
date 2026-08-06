@@ -243,10 +243,11 @@ pub use repositories::{
         ProjectWorkspaceGraphRepository, ProjectWorkspaceGraphUpsert,
     },
     proposal::{
-        ActiveEvidenceAuthorityTask, AwaitingReviewPark, NeedsEvidenceCapStatus,
-        NeedsEvidenceClaimLink, ProposalCreateInput, ProposalDebateTrailCreateInput,
-        ProposalFeedbackCreateInput, ProposalListQuery, ProposalListResult, ProposalListSummaryRow,
-        ProposalMemoryRef, ProposalRef, ProposalRepository, ProposalUpdateInput,
+        ActiveEvidenceAuthorityTask, AtomicEvidenceDemandInput, AwaitingReviewPark,
+        NeedsEvidenceCapStatus, NeedsEvidenceClaimLink, ProposalCreateInput,
+        ProposalDebateTrailCreateInput, ProposalFeedbackCreateInput, ProposalListQuery,
+        ProposalListResult, ProposalListSummaryRow, ProposalMemoryRef, ProposalRef,
+        ProposalRepository, ProposalUpdateInput,
     },
     proposal_integrity::{
         LintMaterializationOutcome, MAX_PROPOSAL_INTEGRITY_PAGE_SIZE, ProposalIntegrityHead,
