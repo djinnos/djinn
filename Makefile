@@ -16,7 +16,7 @@ TEST_DB_MIGRATION_GITHUB_LOGIN ?=
 # Postgres (docker-compose.yml → `postgres-test` service at :5433) plus the
 # test harness targets that depend on it.
 
-.PHONY: help dev test-db-migrate test-db-postgres-template test-vault test-db-reset sqlx-prepare sqlx-check sqlx-verify test test-all validate-taskrun-backstop check-boundaries verify-cache-cleanup verify-incident-observability check-retirement-manifest
+.PHONY: help dev test-db-migrate test-db-postgres-template test-vault test-db-reset sqlx-prepare sqlx-check sqlx-verify tool-goldens tool-goldens-check tool-goldens-manifest test test-all validate-taskrun-backstop check-boundaries verify-cache-cleanup verify-incident-observability check-retirement-manifest
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*##"}; {printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2}'
@@ -137,6 +137,40 @@ sqlx-verify: ## Verify server/.sqlx/ freshness; assumes schema already applied +
 		exit 1; \
 	fi
 	@echo "server/.sqlx/ is up to date ($$(ls $(SERVER_DIR)/.sqlx/query-*.json | wc -l) entries)."
+
+# ── MCP tool-schema goldens ────────────────────────────────────────────────
+#
+# Changing one `#[tool]` description or parameter struct moves EIGHT committed
+# artifacts across four crates and the web client. Before this target existed
+# there was no single command that refreshed them and no failing check that
+# named one, so an author learned the set one ~20min CI cycle at a time and
+# rework did not converge (PRs #3035 and #3039 both landed correct code and
+# still failed, on different members of the set).
+#
+# The set, the command that writes each member, and the order they run in live
+# in scripts/tool-goldens.manifest.json — never in this file. `tool-goldens`
+# and `tool-goldens-check` are the sqlx-prepare / sqlx-verify pair for that
+# manifest: one regenerates, the other proves the committed tree matches.
+
+tool-goldens: ## Regenerate every committed MCP tool-schema golden (see scripts/tool-goldens.manifest.json)
+	@node $(CURDIR)/scripts/regenerate-tool-goldens.mjs
+
+tool-goldens-manifest: ## Fail if a derived tool-schema artifact is missing from the golden manifest (no build)
+	@node $(CURDIR)/scripts/check-tool-goldens.mjs
+
+tool-goldens-check: ## Fail if any committed MCP tool-schema golden is stale — run 'make tool-goldens' to fix
+	@$(MAKE) --no-print-directory tool-goldens-manifest
+	@# Regenerate in place and diff, exactly as ui's `mcp:types:check` does.
+	@# Leaving the refreshed files in the tree on failure is deliberate: the
+	@# fix is `git add` + commit, not a second regeneration run.
+	@$(MAKE) --no-print-directory tool-goldens
+	@paths=$$(node $(CURDIR)/scripts/check-tool-goldens.mjs --paths); \
+	if ! git -C $(CURDIR) diff --exit-code -- $$paths; then \
+		echo "::error::committed MCP tool-schema goldens are stale."; \
+		echo "Run 'make tool-goldens' and commit the diff above."; \
+		exit 1; \
+	fi
+	@echo "MCP tool-schema goldens are up to date."
 
 test-db-reset: ## Wipe and restart the test Postgres — cleans out djinn_test_* DBs
 	docker compose stop postgres-test

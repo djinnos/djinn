@@ -12,7 +12,7 @@
     "preview": "vite preview",
     "mcp:types": "tsx scripts/generate-mcp-types.ts --source=live",
     "mcp:types:snapshot": "tsx scripts/generate-mcp-types.ts --source=snapshot",
-    "mcp:types:check": "pnpm mcp:types:snapshot && git diff --exit-code -- src/api/generated/mcp-tools.gen.ts",
+    "mcp:types:check": "pnpm mcp:types:snapshot && { git diff --exit-code -- src/api/generated/mcp-tools.gen.ts || { echo '' >&2; echo 'ERROR: src/api/generated/mcp-tools.gen.ts is stale (diff above).' >&2; echo 'It is one of several committed artifacts derived from the MCP tool schemas.' >&2; echo 'Regenerate ALL of them with one command, from the repository root:' >&2; echo '' >&2; echo '    make tool-goldens' >&2; echo '' >&2; echo 'The full artifact set lives in scripts/tool-goldens.manifest.json.' >&2; exit 1; }; }",
     "usage:types": "tsx scripts/generate-usage-types.ts",
     "usage:types:generate": "tsx scripts/generate-usage-types.ts",
     "usage:types:check": "pnpm usage:types:generate && git diff --exit-code -- src/api/generated/usage-analytics.gen.ts",
