@@ -1,4 +1,8 @@
-//! Owner-authorized readiness query service.
+//! Authenticated readiness query service.
+//!
+//! Any authenticated user may read a project's readiness runs; the caller is
+//! not required to be the project's GitHub owner, which is frequently an
+//! organization rather than any person's login.
 //!
 //! This boundary deliberately exposes consumer DTOs rather than database row
 //! types. Readiness projections remain owned by `ReadinessRepository`.
@@ -135,10 +139,6 @@ pub enum ReadinessQueryError {
     AuthenticatedOwnerNotFound {
         user_id: String,
     },
-    UnauthorizedOwner {
-        project_id: String,
-        user_id: String,
-    },
     RunNotFound {
         run_id: String,
     },
@@ -161,15 +161,6 @@ impl fmt::Display for ReadinessQueryError {
             Self::AuthenticatedOwnerNotFound { user_id } => {
                 write!(f, "authenticated readiness owner not found: {user_id}")
             }
-            Self::UnauthorizedOwner {
-                project_id,
-                user_id,
-            } => {
-                write!(
-                    f,
-                    "authenticated user {user_id} does not own project {project_id}"
-                )
-            }
             Self::RunNotFound { run_id } => write!(f, "readiness run not found: {run_id}"),
             Self::RunProjectMismatch {
                 project_id,
@@ -188,7 +179,8 @@ impl fmt::Display for ReadinessQueryError {
 
 impl std::error::Error for ReadinessQueryError {}
 
-/// Performs ownership verification before delegating all readiness reads to the repository.
+/// Verifies the caller is a real authenticated user and the project exists
+/// before delegating all readiness reads to the repository.
 #[derive(Clone)]
 pub struct ReadinessQueryService {
     db: Database,
@@ -235,36 +227,33 @@ impl ReadinessQueryService {
         Ok(detail.into())
     }
 
+    /// Any authenticated user may read readiness for any known project.
+    ///
+    /// The project's `github_owner` is usually a GitHub organization, so
+    /// comparing it against a personal `github_login` made readiness
+    /// unreachable for every organization-owned repository. Authentication is
+    /// still mandatory: a caller whose user row does not exist is rejected
+    /// rather than silently admitted.
     async fn authorize(
         &self,
         project_id: &str,
         authenticated_owner_id: &str,
     ) -> Result<(), ReadinessQueryError> {
-        let project = ProjectRepository::new(self.db.clone(), djinn_core::events::EventBus::noop())
+        ProjectRepository::new(self.db.clone(), djinn_core::events::EventBus::noop())
             .get(project_id)
             .await
             .map_err(persistence_error)?
             .ok_or_else(|| ReadinessQueryError::ProjectNotFound {
                 project_id: project_id.into(),
             })?;
-        let owner = UserRepository::new(self.db.clone())
+        UserRepository::new(self.db.clone())
             .get_by_id(authenticated_owner_id)
             .await
             .map_err(persistence_error)?
             .ok_or_else(|| ReadinessQueryError::AuthenticatedOwnerNotFound {
                 user_id: authenticated_owner_id.into(),
             })?;
-        if project
-            .github_owner
-            .eq_ignore_ascii_case(&owner.github_login)
-        {
-            Ok(())
-        } else {
-            Err(ReadinessQueryError::UnauthorizedOwner {
-                project_id: project.id,
-                user_id: owner.id,
-            })
-        }
+        Ok(())
     }
 }
 
