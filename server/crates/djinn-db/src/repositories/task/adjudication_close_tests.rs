@@ -103,11 +103,28 @@ async fn source_with_escalation_rounds(
             .await
             .unwrap();
         repo.add_blocker(&source.id, &child.id).await.unwrap();
-        // The snapshot is what lets the close transaction distinguish a real
-        // disposition change from coordinator scaffolding.
+
+        // Mirror PRODUCTION ordering exactly. Both producers snapshot BEFORE
+        // parking the source: `escalate_to_planner_or_terminally_fail` calls
+        // `create_remediation_task` (which snapshots) and then
+        // `park_source_open`, and the agent's `execute_arbiter_park_transaction`
+        // snapshots before the `ArbiterPark` transition. So the snapshot sees
+        // the source mid-adjudication and the close sees it parked at `open`.
+        //
+        // An earlier version of this fixture left the source `open` throughout,
+        // which production never does — and that difference alone hid a defect
+        // that made the entire child-close transaction inert in production:
+        // every close read `source_changed` from the scaffolding status delta,
+        // so the exhausted-ladder branch never ran and a round-3 close left the
+        // source `open` with an unmerged PR and no owner.
+        repo.set_status(&source.id, "in_lead_intervention")
+            .await
+            .unwrap();
         record_adjudication_source_snapshot(db.pool(), &source.id, &child.id)
             .await
             .unwrap();
+        repo.set_status(&source.id, "open").await.unwrap();
+
         last_child = child.id;
     }
     (source.id, last_child)
@@ -159,7 +176,10 @@ async fn round_one_scaffolding_close_reads_source_unchanged() {
     let events = outcome_events(&repo, &source_id).await;
     assert_eq!(events.len(), 1, "exactly one outcome event per child close");
     assert_eq!(events[0]["adjudication_outcome"], SOURCE_UNCHANGED);
-    assert_eq!(events[0]["source_status_before"], "open");
+    assert_eq!(
+        events[0]["source_status_before"], "in_lead_intervention",
+        "the snapshot is taken mid-adjudication, exactly as production does"
+    );
     assert_eq!(events[0]["source_status_after"], "open");
     assert_eq!(events[0]["adjudication_child_id"], child_id);
 
@@ -201,7 +221,10 @@ async fn a_rescope_before_the_close_reads_source_changed() {
         events[0]["adjudication_outcome"], SOURCE_CHANGED,
         "a scope change is a real disposition even though the status did not move"
     );
-    assert_eq!(events[0]["source_status_before"], "open");
+    assert_eq!(
+        events[0]["source_status_before"], "in_lead_intervention",
+        "the snapshot is taken mid-adjudication, exactly as production does"
+    );
     assert_eq!(events[0]["source_status_after"], "open");
 }
 
@@ -272,7 +295,10 @@ async fn round_three_unchanged_close_sends_an_open_pr_source_to_pr_review() {
         events[0]["adjudication_outcome"], SOURCE_CHANGED,
         "the ownership transition IS a disposition change"
     );
-    assert_eq!(events[0]["source_status_before"], "open");
+    assert_eq!(
+        events[0]["source_status_before"], "in_lead_intervention",
+        "the snapshot is taken mid-adjudication, exactly as production does"
+    );
     assert_eq!(events[0]["source_status_after"], "pr_review");
 }
 

@@ -723,7 +723,8 @@ fn infra_reopen_class_is_not_a_quality_strike() {
 /// of on a fixture copy of it — if a required key is dropped or renamed in
 /// `retry.rs`, this test fails. It is a schema/lint-grade check: it proves the
 /// payload is CONSTRUCTED with those fields, not that a row was written. The
-/// write itself is proven by the DB-backed siblings named on the test below.
+/// write, and the VALUES it carries, are proven by
+/// `crate::tests::intervention::park_guard_declines_with_the_epoch_keyed_reason_contract`.
 const RETRY_SRC: &str = include_str!("retry.rs");
 
 /// Slice `RETRY_SRC` down to the body of `record_guard_declined_park` so the
@@ -762,25 +763,20 @@ fn record_guard_declined_park_source() -> &'static str {
 /// `hold_cycle`, `evidence_floor`, `qualifying_submission_count`,
 /// `qualifying_non_attempt_models`, `excluded_models`, `disposition =
 /// "redispatch_rotated"` — wired to the guard's own inputs, and that the
-/// decline consumes its arbitration row and stores the exclusions before
-/// writing the marker.
+/// decline leaves the arbitration ledger alone.
 ///
-/// What it does NOT prove, and where that lives instead (DB-backed, needs
-/// Postgres — none of it is reachable from here: `record_guard_declined_park`
-/// is private to `dispatch::retry` and needs a live actor):
-/// - that exactly ONE `park_redispatch` marker row is written per decline and
-///   the already-open arbitration row is consumed exactly once — the
-///   `crate::tests::direct_arbiter_routing` module (4etb's DB-backed
-///   once-only-consume coverage),
-///   `crate::tests::intervention::park_rung_redispatches_when_no_post_intervention_submission`
-///   (asserts `markers.len() == 1` with `kind == "no_attempted_remediation"`)
-///   and `crate::tests::hold_cycle_ceiling::hold_cycle_ceiling_terminates_when_a_different_guard_declines_each_cycle`
-///   (asserts one marker per cycle and none once the ceiling short-circuits);
-/// - that the redispatch actually rotates to a different model — the
-///   arbitration-row round trip in `crate::tests::direct_arbiter_routing` and
-///   `crate::tests::intervention::consumed_arbitration_advances_to_next_cycle_and_dispatches`
-///   / `..::failed_arbitration_advances_to_next_cycle_and_dispatches`, which
-///   read the stored `excluded_models` back off the row at dispatch time.
+/// What it does NOT prove, and exactly where that lives instead (DB-backed,
+/// needs Postgres; `record_guard_declined_park` is private to `dispatch::retry`
+/// and needs a live actor, so none of it is reachable from here):
+/// - that a real `park_redispatch` ROW is written carrying those field VALUES
+///   — `crate::tests::intervention::park_guard_declines_with_the_epoch_keyed_reason_contract`,
+///   which reads the persisted activity payload and asserts `reason_code`,
+///   `evidence_floor`, `hold_cycle`, `qualifying_submission_count`,
+///   `qualifying_non_attempt_models`, `excluded_models`, `disposition` and
+///   `reason` against the shipped values, and that exactly one marker exists;
+/// - that the redispatch actually rotates away from the attempted models — the
+///   dispatch-time exclusion path in `dispatch/task_dispatch.rs`, covered by
+///   `crate::tests::i3mv_regression_tests`.
 #[test]
 fn guard_decline_reason_uses_epoch_and_rotation_contract() {
     let hold_cycle: i32 = 3;
@@ -875,15 +871,13 @@ fn guard_decline_reason_uses_epoch_and_rotation_contract() {
         src.contains("PARK_REDISPATCH_MARKER"),
         "the decline must be recorded on the park_redispatch marker stream"
     );
-    // Ordering shape of the decline: consume the open arbitration row, store
-    // the rotation exclusions on it, then write the marker. (That this happens
-    // exactly once per cycle is proven by the DB-backed siblings named above.)
+    // A decline must NOT touch the arbitration ledger. It is only reachable
+    // when no unconsumed row exists (`guards_apply`), and consuming a row while
+    // an arbiter — or a monitored reopen — is in flight is exactly the v1ej
+    // contract violation the in-flight branch exists to prevent.
     assert!(
-        src.contains("mark_consumed") && src.contains("update_dispatch_ledger"),
-        "a decline must consume its already-open arbitration row and store the exclusions on it"
-    );
-    assert!(
-        src.contains("excluded_models: Some(&excluded_json)"),
-        "the rotation exclusions must be persisted on the arbitration row the redispatch reads"
+        !src.contains("mark_consumed") && !src.contains("update_dispatch_ledger"),
+        "a guard decline must never consume or rewrite an arbitration row: it only runs when \
+         none is open, and doing so with one open would destroy the monitored-reopen contract"
     );
 }

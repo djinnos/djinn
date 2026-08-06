@@ -1363,90 +1363,46 @@ impl CoordinatorActor {
 
     /// 4etb: apply one guarded park decline.
     ///
-    /// Exactly once per open cycle, in this order:
-    /// 1. consume the already-open arbitration row (a decline is a DISPOSITION
-    ///    of that cycle, not a new one — it must never invent a cycle
-    ///    increment);
-    /// 2. store the rotation exclusions on that row so the redispatch picks a
-    ///    different model;
-    /// 3. write the `park_redispatch` marker carrying the full reason contract.
+    /// Writes the `park_redispatch` marker carrying the full reason contract,
+    /// exactly once per epoch (the decline budget in
+    /// [`crate::dispatch::park_redispatch_bound`] is keyed on `evidence_floor`,
+    /// so a repeated tick within the same epoch is bounded rather than
+    /// unbounded).
     ///
-    /// Idempotent by construction: `mark_consumed` returns `false` when the row
-    /// was already consumed, and the marker is only written when this call is
-    /// the one that consumed it. A duplicate tick therefore neither consumes nor
-    /// marks again. When no row is open there is nothing to consume and the
-    /// marker is written once for the current epoch.
+    /// **On not consuming an arbitration row.** The proposal's promotion table
+    /// describes a guarded park decline as consuming row N and storing model
+    /// exclusions on it. That cannot happen here, and must not: this function
+    /// is only reachable when `guards_apply` is true, which is *defined* as
+    /// "no unconsumed row exists" (`Ok((cycle, None)) if cycle > 0`). When a
+    /// row IS unconsumed an arbiter — or a monitored reopen — is genuinely in
+    /// flight, and the in-flight branch owns that tick; consuming the row there
+    /// would silently destroy the v1ej monitored-reopen contract. So at the
+    /// moment a decline happens there is no open row to consume, and the
+    /// rotation it asks for is applied where it actually takes effect: at
+    /// dispatch time, from the durable attempt ledger
+    /// (`dispatch/task_dispatch.rs`, `rotation_excluded_models`). The decline
+    /// records the PROSPECTIVE cycle it declined to open.
     async fn record_guard_declined_park(
         &mut self,
         task: &djinn_core::models::Task,
         history: &PostInterventionHistory,
         evidence_floor: &str,
     ) {
-        let arbiter_repo = TaskArbitrationRepository::new(self.db.clone());
-        let (hold_cycle, unconsumed) = match arbiter_repo.resolve_current_hold_cycle(&task.id).await
+        let hold_cycle = match TaskArbitrationRepository::new(self.db.clone())
+            .resolve_current_hold_cycle(&task.id)
+            .await
         {
-            Ok(resolved) => resolved,
+            Ok((cycle, _)) => cycle,
             Err(e) => {
                 tracing::warn!(
                     task_id = %task.short_id,
                     error = %e,
-                    "4etb: guard-declined park could not resolve the hold cycle; recording the decline without consuming a row"
+                    "4etb: guard-declined park could not resolve the prospective hold cycle"
                 );
-                (0, None)
+                0
             }
         };
         let excluded_models = history.rotation_excluded_models();
-
-        if let Some(record) = unconsumed.as_ref() {
-            match arbiter_repo
-                .mark_consumed(&task.id, record.hold_cycle)
-                .await
-            {
-                Ok(true) => {}
-                Ok(false) => {
-                    // Already consumed by an earlier tick — this delivery is a
-                    // duplicate. Do not write a second marker.
-                    tracing::debug!(
-                        task_id = %task.short_id,
-                        hold_cycle = record.hold_cycle,
-                        "4etb: guard-declined park is a duplicate delivery; row already consumed"
-                    );
-                    return;
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        task_id = %task.short_id,
-                        hold_cycle = record.hold_cycle,
-                        error = %e,
-                        "4etb: guard-declined park failed to consume its arbitration row"
-                    );
-                }
-            }
-            let excluded_json = serde_json::json!(excluded_models);
-            if let Err(e) = arbiter_repo
-                .update_dispatch_ledger(UpdateDispatchLedgerParams {
-                    task_id: &task.id,
-                    hold_cycle: record.hold_cycle,
-                    mirror_head_sha: None,
-                    github_head_sha: None,
-                    pr_url: None,
-                    failing_ci_job_ids: None,
-                    dossier: None,
-                    directive: None,
-                    verification_command: None,
-                    excluded_models: Some(&excluded_json),
-                })
-                .await
-            {
-                tracing::warn!(
-                    task_id = %task.short_id,
-                    hold_cycle = record.hold_cycle,
-                    error = %e,
-                    "4etb: guard-declined park failed to store rotation exclusions"
-                );
-            }
-        }
-
         let operator_text = Self::guard_declined_park_reason(evidence_floor, hold_cycle);
         let payload = serde_json::json!({
             "kind": NO_ATTEMPTED_REMEDIATION_KIND,

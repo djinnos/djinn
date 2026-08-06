@@ -63,7 +63,7 @@ pub const MAX_AUTONOMOUS_ESCALATIONS: i64 = 3;
 /// Deliberately narrow: status, terminal close reason, the scope fields, the
 /// applied reopen/rescope directive, and the supersession/replacement
 /// relationship. Nothing else on the row participates.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub struct BusinessDisposition {
     pub status: String,
     pub close_reason: Option<String>,
@@ -94,7 +94,48 @@ pub struct BusinessDisposition {
 /// creation is the only honest `before`.
 pub const ADJUDICATION_SOURCE_SNAPSHOT_EVENT: &str = "adjudication_source_snapshot";
 
+/// Collapse the coordinator's own adjudication-scaffolding statuses onto the
+/// parked state they all mean.
+///
+/// Opening an adjudication moves the source
+/// `open -> needs_lead_intervention -> in_lead_intervention`, and parking it
+/// behind the escalation child moves it back to `open`. Those are the
+/// coordinator holding the source while somebody else decides — not a
+/// disposition. The spec is explicit that this scaffolding "does not by itself
+/// make the source changed".
+///
+/// This mattered enormously in production and not at all in the fixture: both
+/// producers record the creation-time snapshot BEFORE the park transition
+/// (`escalate_to_planner_or_terminally_fail` calls `create_remediation_task`
+/// then `park_source_open`; the agent's `execute_arbiter_park_transaction`
+/// snapshots before `ArbiterPark`). So `before.status` was
+/// `in_lead_intervention` and `after.status` was `open` on EVERY round — every
+/// close read `source_changed`, truth-table row 1 was violated, and the
+/// exhausted-ladder branch (which only fires on an UNCHANGED close) never ran.
+/// A round-3 close therefore left the source `open` with an unmerged PR and no
+/// owner: precisely the `z8i8`/`zkas` stranding this proposal exists to end.
+///
+/// Normalizing here rather than reordering the two call sites keeps the fix
+/// immune to a future caller getting the order wrong again.
+fn parked_equivalent(status: &str) -> &str {
+    match status {
+        "needs_lead_intervention" | "in_lead_intervention" => "open",
+        other => other,
+    }
+}
+
 impl BusinessDisposition {
+    /// Is this the same business disposition as `other`, ignoring the
+    /// coordinator's adjudication scaffolding? See [`parked_equivalent`].
+    fn same_disposition_as(&self, other: &Self) -> bool {
+        parked_equivalent(&self.status) == parked_equivalent(&other.status)
+            && self.close_reason == other.close_reason
+            && self.description == other.description
+            && self.design == other.design
+            && self.acceptance_criteria == other.acceptance_criteria
+            && self.applied_directive == other.applied_directive
+    }
+
     fn to_payload(&self, child_id: &str) -> serde_json::Value {
         serde_json::json!({
             "adjudication_child_id": child_id,
@@ -351,7 +392,7 @@ pub async fn apply_adjudication_child_close_tx(
         // real disposition and must be left exactly as the planner left it —
         // disposing it here would destroy that decision.
         let round = planner_escalation_count_tx(tx, &source_id).await?;
-        let changed_by_adjudication = at_close != before;
+        let changed_by_adjudication = !at_close.same_disposition_as(&before);
         if round >= MAX_AUTONOMOUS_ESCALATIONS
             && !changed_by_adjudication
             && !already_owned(&at_close.status)
@@ -405,7 +446,7 @@ pub async fn apply_adjudication_child_close_tx(
             .await?
             .unwrap_or_else(|| at_close.clone());
 
-        let outcome = if after == before {
+        let outcome = if after.same_disposition_as(&before) {
             SOURCE_UNCHANGED
         } else {
             SOURCE_CHANGED
