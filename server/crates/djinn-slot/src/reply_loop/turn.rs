@@ -23,7 +23,7 @@ use djinn_db::repositories::task_rejected_submission_integrity::TaskRejectedSubm
 use djinn_git::{SubmissionDiffFingerprint, compute_submission_diff_fingerprint};
 use djinn_provider::message::{ContentBlock, Conversation, Message, MessageMeta, Role};
 use djinn_provider::provider::LlmProvider;
-use djinn_provider::provider::client::{ProviderAttemptContextV1, SseFrame};
+use djinn_provider::provider::client::ProviderAttemptContextV1;
 use djinn_provider::provider::telemetry;
 use djinn_provider::{ProviderApiKeyNormalizerV1, ProviderReceiptTimeV1};
 
@@ -965,14 +965,18 @@ pub async fn run_reply_loop(
                             return Err(anyhow::anyhow!("covered admission plan became uncovered"));
                         };
                         let normalizer = Arc::new(Mutex::new(ProviderApiKeyNormalizerV1::new(policy)));
-                        let started = std::time::Instant::now();
+                        let receipt_clock = Arc::clone(&slot_ctx.clock);
+                        let started = receipt_clock.now_instant();
                         // A launch failure drops this pre-active permit and its
                         // Drop implementation cancels the prepared lease.
                         let attempt = provider.start_sse_attempt_v1(
                             request_conversation.as_ref(), tools, tool_choice,
                             ProviderAttemptContextV1::new(turns as u64, policy, normalizer, move || ProviderReceiptTimeV1 {
-                                wall: std::time::SystemTime::now(),
-                                monotonic_ms: started.elapsed().as_millis() as u64,
+                                wall: receipt_clock.now(),
+                                monotonic_ms: receipt_clock
+                                    .now_instant()
+                                    .saturating_duration_since(started)
+                                    .as_millis() as u64,
                             }),
                         ).map_err(|coverage| anyhow::anyhow!("covered B1 launch rejected: {coverage:?}"))?;
                         let mut parser = provider.sse_frame_parser_v1().ok_or_else(||
@@ -2772,7 +2776,6 @@ mod tests {
         let msg_repo =
             SessionMessageRepository::new(db.clone(), djinn_core::events::EventBus::noop());
         let slot_ctx = agent_context_from_db(db, CancellationToken::new());
-        let provider = FakeProvider::text("unused");
         let cancel = CancellationToken::new();
         let cancel_after_completion = cancel.clone();
         let stream = Box::pin(
