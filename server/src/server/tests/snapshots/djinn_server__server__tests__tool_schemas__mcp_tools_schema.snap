@@ -18329,6 +18329,122 @@ expression: signatures
     }
   },
   {
+    "name": "proposal_feedback_withdraw",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "id": {
+          "description": "Feedback entry UUID. Only its original author may withdraw it.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    },
+    "output_schema": {
+      "$defs": {
+        "ProposalFeedbackModel": {
+          "properties": {
+            "author_kind": {
+              "description": "`user` or `ai`.",
+              "type": "string"
+            },
+            "author_model": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "author_user_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "body": {
+              "type": "string"
+            },
+            "created_at": {
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "parent_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "proposal_id": {
+              "type": "string"
+            },
+            "resolved_at": {
+              "description": "When set, the feedback is resolved (addressed or dismissed) and collapsed\nout of the active thread.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "resolved_by_user_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "resolved_revision_seq": {
+              "description": "The revision that addressed this feedback (`null` when dismissed without\na spec change).",
+              "format": "int32",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "updated_at": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "proposal_id",
+            "author_kind",
+            "body",
+            "created_at",
+            "updated_at"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "feedback": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProposalFeedbackModel"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "type": "object"
+    }
+  },
+  {
     "name": "proposal_graduate",
     "read_only": false,
     "destructive": true,
