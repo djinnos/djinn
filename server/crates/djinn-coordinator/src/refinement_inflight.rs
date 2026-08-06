@@ -43,6 +43,31 @@ fn local_phase(phase: DurablePhase) -> RefinementPhase {
 }
 
 impl CoordinatorActor {
+    /// Whether the proposal's latest judge verdict is blocking — the durable
+    /// witness behind `RefinementLoopState::pending_blocking_verdict`.
+    ///
+    /// Both projection-rebuild paths call this. Fails safe toward `false` (the
+    /// pre-existing routing) so a transient DB error cannot invent an Advocate
+    /// round that the debate trail does not justify.
+    pub(super) async fn outstanding_blocking_verdict(
+        proposal_repo: &djinn_db::ProposalRepository,
+        proposal_id: &str,
+    ) -> bool {
+        match proposal_repo.latest_judge_verdict(proposal_id).await {
+            Ok(Some(verdict)) => verdict.blocking,
+            Ok(None) => false,
+            Err(error) => {
+                tracing::warn!(
+                    proposal_id,
+                    %error,
+                    "Failed to read latest judge verdict while rebuilding a refinement \
+                     projection; treating the verdict as answered"
+                );
+                false
+            }
+        }
+    }
+
     /// Ensure the disposable projections name this materialized intent as the
     /// run's in-flight work, and report whether its role agent already started.
     ///
@@ -113,16 +138,23 @@ impl CoordinatorActor {
         // projection rebuilt alongside a fresh in-flight session must agree with
         // it, or the outcome correlation fence rejects every observation and the
         // run stalls exactly as it did before.
-        let captured_snapshot_seq = djinn_db::ProposalRepository::new(
+        let proposal_repo = djinn_db::ProposalRepository::new(
             self.db.clone(),
             crate::events::event_bus_for(&self.events_tx),
-        )
-        .refinement_run_captured_snapshot_seq(run_id)
-        .await
-        .unwrap_or_default();
+        );
+        let captured_snapshot_seq = proposal_repo
+            .refinement_run_captured_snapshot_seq(run_id)
+            .await
+            .unwrap_or_default();
+        // Same rehydration the startup recovery path performs: a projection
+        // rebuilt here (session not tracked) otherwise loses the outstanding
+        // needs-work verdict and re-strands it on the next dry Adversary pass.
+        let pending_blocking_verdict =
+            Self::outstanding_blocking_verdict(&proposal_repo, &proposal.id).await;
         let mut state = RefinementLoopState::new(&proposal.id, proposal.latest_revision_seq)
             .with_run_identity(run_id.to_owned(), generation)
             .with_recovered_snapshot_seq(captured_snapshot_seq)
+            .with_pending_blocking_verdict(pending_blocking_verdict)
             .with_attributed_user(proposal.refinement_owner_user_id.clone());
         state.phase = phase;
         state.current_round = round;

@@ -200,15 +200,16 @@ fn verdict_scoping_ignores_stale_prior_run_approve() {
     assert_eq!(selected.against_revision_seq, 3);
 
     // The state machine must run another round, not park for human review.
-    // A blocking verdict re-opens at the Advocate — the only role that can
-    // implement the remedy the verdict prescribes.
     let mut state = RefinementLoopState::with_config("p1", 3, test_config());
     state.record_judge_verdict(&JudgeVerdictResult {
         body: selected.body.clone(),
         blocking: selected.blocking,
     });
-    assert_eq!(state.phase, RefinementPhase::AdvocateRevision);
+    assert_eq!(state.phase, RefinementPhase::AdversaryAttack);
     assert!(!state.is_awaiting_human_review());
+    // …and the round it re-opens carries the outstanding remedy, so a dry
+    // Adversary hands the round to the Advocate rather than stranding it.
+    assert!(state.pending_blocking_verdict);
 }
 
 /// Belt-and-braces: even with no `refinement_start` boundary recorded

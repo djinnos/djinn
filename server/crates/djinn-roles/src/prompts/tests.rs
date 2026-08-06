@@ -1120,6 +1120,54 @@ fn adversary_prompt_scopes_dedup_to_objections_not_judge_verdicts() {
     );
 }
 
+/// The Judge closes every round — `record_advocate_revision` has always routed
+/// straight to `JudgeAdjudication` — but `judge.md` claimed it was dispatched
+/// "ONLY after the Adversary produces no new blocking objections for N=2
+/// consecutive rounds" and did "NOT participate in the revision loop". Both were
+/// false, and `dry_rounds_required` is not enforced anywhere in the tree, so no
+/// prompt may restate that as a live contract. The Judge must also know its
+/// needs-work verdict is the Advocate's work order on a dry round.
+#[test]
+fn tribunal_prompts_do_not_restate_the_unenforced_dry_round_contract() {
+    let ctx = make_ctx();
+    let task = make_task();
+
+    for agent in [AgentType::Judge, AgentType::Adversary, AgentType::Advocate] {
+        let prompt = render_prompt(agent, &task, &ctx);
+        assert!(
+            !prompt.contains("N=2"),
+            "{} prompt must not restate the unenforced dry-round contract",
+            agent.as_str()
+        );
+        assert!(
+            !prompt.contains("consecutive rounds"),
+            "{} prompt must not restate the unenforced dry-round contract",
+            agent.as_str()
+        );
+    }
+
+    let judge = render_prompt(AgentType::Judge, &task, &ctx);
+    assert!(
+        !judge.contains("do NOT participate in the revision loop")
+            && !judge.contains("dispatched ONLY after"),
+        "judge prompt must not claim it sits outside the revision loop"
+    );
+    assert!(
+        judge.contains("close **every** round") || judge.contains("You close every round"),
+        "judge prompt must state that it rules at the end of every round"
+    );
+    // The needs-work verdict is the Advocate's only instruction on a dry round,
+    // so the Judge has to be told to make it concrete.
+    assert!(
+        judge.contains("work order"),
+        "judge prompt must frame a needs-work verdict as the Advocate's work order"
+    );
+    assert!(
+        !judge.contains("{{"),
+        "judge prompt should have no unresolved placeholders"
+    );
+}
+
 /// Human approval, authorization and organizational structure are categorically
 /// outside the agent's model: djinn writes code and opens PRs, and approval and
 /// merge are enforced by the forge and its configured owners. Without this rule

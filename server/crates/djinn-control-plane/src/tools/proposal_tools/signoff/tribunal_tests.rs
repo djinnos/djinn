@@ -859,6 +859,120 @@ async fn explicit_same_status_in_review_edit_is_not_treated_as_entry() {
     assert_eq!(stored.latest_revision_seq, proposal.latest_revision_seq + 1);
 }
 
+/// `proposal_import` carried the same edit-lock: it gated on
+/// `existing.status == "in_review"` while writing that status straight back, so
+/// it could only ever fire on an in-place edit. Re-importing a fixed spec must
+/// not be blocked by the verdict demanding the fix.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn in_review_import_survives_an_outstanding_needs_work_verdict() {
+    let (server, db, user_id) = setup_test_server_and_user().await;
+    let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+    let project_repo = ProjectRepository::new(db.clone(), EventBus::noop());
+
+    let proposal = create_proposal_with_target(
+        &repo,
+        &project_repo,
+        &user_id,
+        "Import Guard Test",
+        ready_body(),
+        Some(r#"[{"criterion":"API returns 200","met":false}]"#),
+    )
+    .await;
+    force_status(&db, &proposal.id, "in_review").await;
+
+    repo.add_debate_trail_entry(ProposalDebateTrailCreateInput {
+        proposal_id: &proposal.id,
+        kind: "verdict",
+        body: "needs-work: the dependency section names no owner service",
+        blocking: true,
+        agent_role: "judge",
+        author_kind: "agent",
+        author_model: Some("test-judge"),
+        source_task_id: None,
+        against_revision_seq: proposal.latest_revision_seq,
+        round: 1,
+        body_metadata: None,
+    })
+    .await
+    .unwrap();
+
+    // Round-trip through the real export format so the import parses exactly
+    // what the tool emits.
+    let export = djinn_core::auth_context::SESSION_USER_ID
+        .scope(Some(user_id.clone()), async {
+            server
+                .dispatch_tool("proposal_export", serde_json::json!({ "id": proposal.id }))
+                .await
+        })
+        .await
+        .unwrap();
+    let mdx = export
+        .get("mdx")
+        .and_then(|v| v.as_str())
+        .expect("export must return mdx");
+    // Edit inside the body (the Dependencies section from `ready_body`) so the
+    // change is unambiguously part of the spec, not trailing frontmatter slack.
+    let fixed_mdx = mdx.replace(
+        "Blocked by service C.",
+        "Blocked by service C. Owned by service C.",
+    );
+    assert_ne!(
+        fixed_mdx, mdx,
+        "the exported mdx must carry the body section"
+    );
+    // DO NOT REMOVE THIS LINE. `proposal_export` does not emit `id:` in its
+    // frontmatter (see `proposal_export`: the format string is
+    // `"---\ntitle: …\nbody_format: …\n{ac}---\n{body}"`). `proposal_import`
+    // branches on `imported.id`: absent means CREATE a new proposal, present
+    // means UPDATE the named one. Only the UPDATE branch ever ran the composed
+    // gate this test exists to prove was retired.
+    //
+    // Without this injection the test still passes — but it passes because the
+    // import created a brand-new proposal and never touched the `in_review`
+    // one carrying the needs-work verdict. It would assert nothing about the
+    // code it names, in either direction. That is exactly how it was first
+    // written; the `latest_revision_seq` assertion below is what caught it, and
+    // it is the reason that assertion is there. A `response["error"].is_none()`
+    // check alone cannot tell a passing update from an unrelated create.
+    let fixed_mdx = fixed_mdx.replacen("---\n", &format!("---\nid: {}\n", proposal.id), 1);
+
+    let response = djinn_core::auth_context::SESSION_USER_ID
+        .scope(Some(user_id.clone()), async {
+            server
+                .dispatch_tool("proposal_import", serde_json::json!({ "mdx": fixed_mdx }))
+                .await
+        })
+        .await
+        .unwrap();
+
+    assert!(
+        response.get("error").is_none(),
+        "re-importing an in_review proposal must not be blocked by the verdict \
+         demanding the fix: {:?}",
+        response.get("error")
+    );
+
+    let stored = repo.get(&proposal.id).await.unwrap().unwrap();
+    assert!(
+        stored.body.contains("Owned by service C."),
+        "the imported revision must be persisted: {}",
+        stored.body
+    );
+    // Load-bearing: this is what distinguishes "the gated UPDATE path ran and
+    // succeeded" from "the import quietly CREATEd an unrelated proposal". See
+    // the `id:` injection above — without it this assertion is the only thing
+    // that fails.
+    assert_eq!(
+        stored.latest_revision_seq,
+        proposal.latest_revision_seq + 1,
+        "the import must have taken the UPDATE path on this proposal"
+    );
+    assert_eq!(
+        stored.status, "in_review",
+        "import must not change the status"
+    );
+}
+
 /// Do not regress the guard: entering `in_review` from a status that is NOT
 /// `in_review` must still be blocked by a needs-work verdict. `approved` (not
 /// just `draft`) proves the entry check keys off the transition, not off one
