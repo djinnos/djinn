@@ -4,7 +4,8 @@
     ["demanded", "spike_active"], ["demanded", "withdrawn"],
     ["spike_active", "evidence_received"], ["spike_active", "failed"],
     ["spike_active", "withdrawn"], ["evidence_received", "resolved"],
-    ["evidence_received", "withdrawn"], ["failed", "spike_active"], ["failed", "withdrawn"]
+    ["evidence_received", "withdrawn"], ["failed", "demanded"],
+    ["failed", "spike_active"], ["failed", "withdrawn"]
   ],
   "unresolved": ["demanded", "spike_active", "evidence_received", "failed"],
   "terminal_controls": {
