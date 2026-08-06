@@ -180,15 +180,42 @@ pub(super) async fn setup_demand_test() -> (
         })
         .await
         .unwrap();
-    assert!(matches!(
-        outcome,
-        djinn_db::RefinementAdmissionOutcome::Admitted { .. }
-    ));
+    let (run_id, generation) = match outcome {
+        djinn_db::RefinementAdmissionOutcome::Admitted {
+            run_id, generation, ..
+        } => (run_id, generation),
+        other => panic!("expected admitted refinement run, got {other:?}"),
+    };
 
     // Create user, project, and Judge task for authorization.
     let user_id = create_test_user(&db, "judge-user").await;
     let project_id = link_proposal_to_project(&db, &repo, &p.id).await;
     let judge_task_id = create_judge_task(&db, &project_id, &p.id, &user_id).await;
+    // Titles are display-only; materialize the exact Judge authority tuple.
+    let judge_intent_id = uuid::Uuid::now_v7().to_string();
+    sqlx::query(
+        "INSERT INTO refinement_dispatch_intents (id, run_id, round, phase, role, state, idempotency_key, task_id) \
+         VALUES ($1, $2, 1, 'judge_adjudication', 'judge', 'materialized', $3, $4)",
+    )
+    .bind(&judge_intent_id)
+    .bind(&run_id)
+    .bind(format!("demand-validation/judge/{judge_task_id}"))
+    .bind(&judge_task_id)
+    .execute(db.pool())
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE tasks SET refinement_run_id = $1, refinement_intent_id = $2, \
+         refinement_generation = $3, refinement_round = 1, \
+         refinement_phase = 'judge_adjudication', refinement_role = 'judge' WHERE id = $4",
+    )
+    .bind(&run_id)
+    .bind(&judge_intent_id)
+    .bind(i64::from(generation))
+    .bind(&judge_task_id)
+    .execute(db.pool())
+    .await
+    .unwrap();
 
     let updated = repo.get(&p.id).await.unwrap().unwrap();
     (server, db, updated, user_id, judge_task_id)

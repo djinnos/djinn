@@ -7,6 +7,7 @@
 // part of the MCP schema surface.
 
 use serde::Deserialize;
+use sqlx::Row;
 
 use crate::tools::proposal_ops::{
     EvidenceLifecyclePhase, EvidenceLifecycleState, NeedsEvidenceStatus,
@@ -95,32 +96,32 @@ const REPOSITORY_ANSWERABLE_PATTERNS: &[&str] = &[
     "which function parses",
 ];
 
-/// Find the active Adversary or Judge task for a proposal's refinement run.
-///
-/// Queries the DB for an open or in-progress refinement task whose
-/// `agent_type` is `"judge"` and whose title contains the proposal id.
-/// Returns the task if found, or `None` when no Judge task is in flight
-/// for this proposal.
+/// Find authority from its exact persisted task/intent/run correlation.
 async fn find_active_evidence_authority_task(
-    task_repo: &TaskRepository,
+    repo: &ProposalRepository,
     proposal_id: &str,
-) -> Result<Option<djinn_core::models::Task>, String> {
-    let open_tasks = task_repo
-        .list_by_status("open")
-        .await
-        .map_err(|e| format!("failed to query open tasks: {e}"))?;
-    let in_progress_tasks = task_repo
-        .list_by_status("in_progress")
-        .await
-        .map_err(|e| format!("failed to query in_progress tasks: {e}"))?;
-
-    let candidate = open_tasks.into_iter().chain(in_progress_tasks).find(|t| {
-        t.issue_type == "refinement"
-            && matches!(t.agent_type.as_deref(), Some("judge") | Some("adversary"))
-            && t.title.contains(proposal_id)
-    });
-
-    Ok(candidate)
+    against_revision_seq: i32,
+    round: i32,
+) -> Result<Option<(String, String)>, String> {
+    let row = sqlx::query(
+        "SELECT t.id, t.created_by_user_id FROM tasks t \
+         JOIN refinement_dispatch_intents i ON i.id = t.refinement_intent_id \
+         JOIN refinement_runs r ON r.id = i.run_id JOIN proposals p ON p.id = r.proposal_id \
+         WHERE r.proposal_id = $1 AND r.state = 'running' AND p.latest_revision_seq = $2 \
+           AND i.round = $3 AND i.state = 'materialized' AND i.task_id = t.id \
+           AND t.issue_type = 'refinement' AND t.status IN ('open', 'in_progress') \
+           AND t.agent_type IN ('judge', 'adversary') AND t.refinement_run_id = r.id \
+           AND t.refinement_generation = r.generation AND t.refinement_round = i.round \
+           AND t.refinement_phase = i.phase AND t.refinement_role = i.role AND t.agent_type = t.refinement_role \
+           AND t.refinement_role IN ('judge', 'adversary') ORDER BY t.updated_at DESC, t.id DESC LIMIT 1",
+    )
+    .bind(proposal_id)
+    .bind(against_revision_seq)
+    .bind(round)
+    .fetch_optional(repo.db().pool())
+    .await
+    .map_err(|e| format!("failed to query active refinement authority: {e}"))?;
+    Ok(row.map(|row| (row.get("id"), row.get("created_by_user_id"))))
 }
 
 /// Verify the caller is the active Judge for this proposal's refinement run.
@@ -133,8 +134,10 @@ async fn find_active_evidence_authority_task(
 /// Returns `Ok(judge_task_id)` when authorized, or `Err(rejection_reason)`
 /// when the caller is not the active Judge.
 pub(crate) async fn verify_active_judge_authorization(
-    task_repo: &TaskRepository,
+    repo: &ProposalRepository,
     proposal_id: &str,
+    against_revision_seq: i32,
+    round: i32,
 ) -> Result<String, String> {
     // The caller must have a session identity.
     let caller_user_id = djinn_core::auth_context::current_user_id();
@@ -145,7 +148,8 @@ pub(crate) async fn verify_active_judge_authorization(
     };
 
     // Find the active Judge task for this proposal's refinement run.
-    let judge_task = find_active_evidence_authority_task(task_repo, proposal_id).await?;
+    let judge_task =
+        find_active_evidence_authority_task(repo, proposal_id, against_revision_seq, round).await?;
 
     let Some(task) = judge_task else {
         return Err(
@@ -156,13 +160,14 @@ pub(crate) async fn verify_active_judge_authorization(
     };
 
     // The caller must match the Judge task's attributed user.
-    let task_owner = task.created_by_user_id.as_str();
+    let (task_id, task_owner) = task;
+    let task_owner = task_owner.as_str();
     if task_owner.is_empty() || task_owner != caller_id {
         return Err(format!(
             "caller '{}' is not the active Adversary or Judge for this proposal \
              (authority task {} attributed to '{}')",
             caller_id,
-            task.id,
+            task_id,
             if task_owner.is_empty() {
                 "nobody"
             } else {
@@ -170,7 +175,7 @@ pub(crate) async fn verify_active_judge_authorization(
             },
         ));
     }
-    Ok(task.id)
+    Ok(task_id)
 }
 
 /// Validate demand-evidence parameters and proposal/refinement state before
@@ -202,7 +207,7 @@ pub(crate) async fn verify_active_judge_authorization(
 ///     most one open spike at a time.
 pub(crate) async fn validate_demand_evidence(
     repo: &ProposalRepository,
-    task_repo: &TaskRepository,
+    _task_repo: &TaskRepository,
     proposal: &djinn_core::models::Proposal,
     refinement: &ProposalRefinementStatusModel,
     params: &ProposalRefinementDemandEvidenceParams,
@@ -212,7 +217,13 @@ pub(crate) async fn validate_demand_evidence(
     //    callers receive a typed authorization rejection before any
     //    proposal/task/debate/lifecycle mutation.
     //    Returns the Judge task id on success.
-    let judge_task_id = verify_active_judge_authorization(task_repo, &proposal.id).await?;
+    let judge_task_id = verify_active_judge_authorization(
+        repo,
+        &proposal.id,
+        params.against_revision_seq,
+        params.round,
+    )
+    .await?;
 
     // 1. Terminal proposals cannot accept demands.
     if TERMINAL_PROPOSAL_STATUSES.contains(&proposal.status.as_str()) {

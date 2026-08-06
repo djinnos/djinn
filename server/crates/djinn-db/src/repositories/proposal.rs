@@ -3256,6 +3256,30 @@ impl ProposalRepository {
                 "stale_evidence_demand_revision".into(),
             ));
         }
+        // Preflight authorization can race a role handoff. Recheck the exact
+        // materialized task/intent/run correlation while this proposal is
+        // locked, before typed allocation or any demand-owned insertion.
+        let authority = sqlx::query(
+            "SELECT t.id FROM tasks t JOIN refinement_dispatch_intents i ON i.id = t.refinement_intent_id \
+             JOIN refinement_runs r ON r.id = i.run_id WHERE t.id = $1 AND r.proposal_id = $2 \
+               AND r.state = 'running' AND i.round = $3 AND i.state = 'materialized' \
+               AND i.task_id = t.id AND t.issue_type = 'refinement' \
+               AND t.status IN ('open', 'in_progress') AND t.agent_type IN ('judge', 'adversary') \
+               AND t.refinement_run_id = r.id AND t.refinement_generation = r.generation \
+               AND t.refinement_round = i.round AND t.refinement_phase = i.phase AND t.agent_type = t.refinement_role \
+               AND t.refinement_role = i.role AND t.refinement_role IN ('judge', 'adversary') \
+             FOR UPDATE OF t, i, r",
+        )
+        .bind(&input.claim.created_by_task_id)
+        .bind(input.proposal_id)
+        .bind(input.claim.round)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if authority.is_none() {
+            return Err(Error::InvalidTransition(
+                "stale_evidence_demand_authority".into(),
+            ));
+        }
         // The typed primitive decides replay versus unresolved conflict before
         // a task row is allocated.
         let typed_demand = DemandTypedEvidenceInput {
