@@ -101,7 +101,7 @@ pub(super) async fn merge_planned_knowledge(
                 continue;
             }
             // KNOWN DIVERGENCE (filed:
-            // `pitfalls/u46i-injection-rework-left-four-known-gaps-one-of-which-forbids-running-the-l0-backfill`).
+            // `pitfalls/u46i-injection-rework-three-open-follow-ups-and-the-vintage-marker-defect-it-fixed`).
             //
             // This is the pre-u46i format and it is the SECOND renderer feeding
             // the same `Relevant Knowledge` block. It still prints the title

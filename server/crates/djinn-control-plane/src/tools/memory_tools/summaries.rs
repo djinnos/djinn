@@ -3,13 +3,17 @@
 use std::time::Duration;
 
 use djinn_core::events::EventBus;
-use djinn_db::{Database, NoteRepository};
-use djinn_provider::{
-    CompletionRequest, complete, prompts::MEMORY_L0_ABSTRACT,
-    prompts::MEMORY_L0_APPLICABILITY_PREFIX, prompts::MEMORY_L1_OVERVIEW, provider::LlmProvider,
-    resolve_memory_provider_for_user,
+use djinn_db::repositories::note::{
+    AbstractVintageCoverage, DEFAULT_ABSTRACT_REGEN_ATTEMPT_LIMIT, StaleAbstractNote,
+    abstract_vintage_coverage, exhausted_abstract_regeneration_notes,
+    record_abstract_regeneration_attempt, record_abstract_regeneration_success,
+    select_stale_abstract_note_ids,
 };
-use sqlx::Row;
+use djinn_db::{Database, Error as DbError, NoteRepository};
+use djinn_provider::{
+    CompletionRequest, complete, prompts::MEMORY_L0_ABSTRACT, prompts::MEMORY_L1_OVERVIEW,
+    prompts::memory_l0_prompt_version, provider::LlmProvider, resolve_memory_provider_for_user,
+};
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
@@ -85,10 +89,16 @@ impl NoteSummaryService {
         let abstract_prompt = render_memory_prompt(MEMORY_L0_ABSTRACT, &note.title, &note.content);
         let overview_prompt = render_memory_prompt(MEMORY_L1_OVERVIEW, &note.title, &note.content);
 
-        let abstract_summary =
-            complete_summary(provider, SUMMARY_SYSTEM, &abstract_prompt, LLM_MAX_TOKENS)
-                .await
-                .unwrap_or_else(|| fallback_l0_summary(&note.content, L0_TOKEN_LIMIT));
+        // Whether the L0 abstract came from the prompt or from the non-LLM
+        // fallback decides whether this note counts as regenerated. A truncation
+        // fallback is not a prompt-vintage abstract, so it must not stamp the
+        // version — otherwise a provider outage would mark the whole corpus
+        // "current" and convergence would be a lie.
+        let generated_abstract =
+            complete_summary(provider, SUMMARY_SYSTEM, &abstract_prompt, LLM_MAX_TOKENS).await;
+        let regenerated = generated_abstract.is_some();
+        let abstract_summary = generated_abstract
+            .unwrap_or_else(|| fallback_l0_summary(&note.content, L0_TOKEN_LIMIT));
 
         let overview_summary =
             complete_summary(provider, SUMMARY_SYSTEM, &overview_prompt, LLM_MAX_TOKENS)
@@ -107,6 +117,26 @@ impl NoteSummaryService {
                 note_id = %note_id,
                 error = %error,
                 "note summary generation: failed to persist summaries"
+            );
+            return;
+        }
+
+        if regenerated
+            && let Err(error) = record_abstract_regeneration_success(
+                &self.db,
+                &note.project_id,
+                &note.id,
+                memory_l0_prompt_version(),
+            )
+            .await
+        {
+            // The abstract is persisted; only the vintage stamp failed. The
+            // note stays selectable, so the worst case is one repeat attempt
+            // rather than a note wrongly reported as current.
+            warn!(
+                note_id = %note_id,
+                error = %error,
+                "note summary generation: failed to record regeneration vintage"
             );
         }
     }
@@ -140,119 +170,64 @@ impl NoteSummaryService {
     }
 }
 
-// ── Abstract vintage: coverage counter ────────────────────────────────────────
-
-/// SQL `ILIKE` pattern that matches an abstract written by the current
-/// applicability-condition L0 prompt.
-fn current_vintage_pattern() -> String {
-    format!("{MEMORY_L0_APPLICABILITY_PREFIX}%")
-}
-
-/// How much of the corpus carries an abstract from the *current* L0 prompt.
-///
-/// The transition between prompt vintages is the risk the u46i proposal flags:
-/// for as long as it runs, ranking sees a mix of applicability-condition
-/// abstracts and pre-u46i one-liners. This makes the mix countable instead of
-/// invisible.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct AbstractVintageCoverage {
-    /// Notes in scope.
-    pub total: i64,
-    /// Notes with any non-empty abstract.
-    pub with_abstract: i64,
-    /// Notes whose abstract opens with [`MEMORY_L0_APPLICABILITY_PREFIX`].
-    pub current_vintage: i64,
-}
-
-impl AbstractVintageCoverage {
-    /// Notes carrying an abstract from a prompt older than u46i.
-    pub fn legacy_vintage(&self) -> i64 {
-        self.with_abstract.saturating_sub(self.current_vintage)
-    }
-
-    /// Notes with no usable abstract at all.
-    pub fn missing(&self) -> i64 {
-        self.total.saturating_sub(self.with_abstract)
-    }
-
-    /// Fraction of in-scope notes on the current prompt, in `0.0..=1.0`.
-    pub fn current_ratio(&self) -> f64 {
-        if self.total <= 0 {
-            return 0.0;
-        }
-        self.current_vintage as f64 / self.total as f64
-    }
-
-    /// True when nothing is left to regenerate.
-    pub fn is_converged(&self) -> bool {
-        self.total > 0 && self.current_vintage == self.total
-    }
-}
-
-/// Count abstract vintages across the corpus, optionally narrowed to note types.
-///
-/// An empty `note_types` means "every type". Scoped to `status = 'active'`,
-/// matching [`select_stale_abstract_note_ids`] exactly — if the counter measured
-/// a wider population than the sweep can act on, [`AbstractVintageCoverage::is_converged`]
-/// could never become true and the metric would look permanently stuck.
-pub async fn abstract_vintage_coverage(
-    db: &Database,
-    note_types: &[String],
-) -> Result<AbstractVintageCoverage, sqlx::Error> {
-    let types: Vec<String> = note_types.to_vec();
-    let row = sqlx::query(
-        r#"SELECT
-               count(*) AS total,
-               count(*) FILTER (
-                   WHERE abstract IS NOT NULL AND btrim(abstract) <> ''
-               ) AS with_abstract,
-               count(*) FILTER (
-                   WHERE abstract IS NOT NULL AND btrim(abstract) ILIKE $2
-               ) AS current_vintage
-           FROM notes
-           WHERE (cardinality($1::text[]) = 0 OR note_type = ANY($1::text[]))
-             AND status = 'active'"#,
-    )
-    .bind(&types)
-    .bind(current_vintage_pattern())
-    .fetch_one(db.pool())
-    .await?;
-
-    Ok(AbstractVintageCoverage {
-        total: row.try_get::<i64, _>("total")?,
-        with_abstract: row.try_get::<i64, _>("with_abstract")?,
-        current_vintage: row.try_get::<i64, _>("current_vintage")?,
-    })
-}
-
 // ── Abstract vintage: the sweep ───────────────────────────────────────────────
+//
+// Staleness is decided in `djinn-db`
+// (`repositories::note::abstract_regeneration`) against the L0 prompt's content
+// hash, not by matching the abstract's prose against a literal prefix. The
+// earlier text-matching predicate made convergence depend on the model emitting
+// exact words: a note phrased differently was re-selected from a fresh cursor on
+// every run and re-paid-for forever, and `is_converged()` was unreachable.
+//
+// This module owns orchestration only — no SQL. `check-raw-sql-boundary.sh`
+// enforces that every direct sqlx call lives in `djinn-db`.
 
 pub(crate) const SWEEP_DEFAULT_BATCH_SIZE: i64 = 200;
+
+/// How many parked permalinks to name in the diagnostic log line.
+const EXHAUSTED_DIAGNOSTIC_LIMIT: i64 = 20;
+
+/// Default ceiling on notes enqueued per run.
+///
+/// A bound, not `None`. An unbounded default means the first operator to flip
+/// the switch spends on the entire ~10.7k-note corpus in one go; 500 is a
+/// deliberate first bite that surfaces quality and cost before committing.
+/// Raise it with [`SWEEP_MAX_NOTES_ENV`] once a sample looks right.
+pub(crate) const SWEEP_DEFAULT_MAX_NOTES: usize = 500;
 
 /// Environment switches for the startup sweep. Absent/unset means **off**.
 pub(crate) const SWEEP_ENABLE_ENV: &str = "DJINN_MEMORY_ABSTRACT_SWEEP";
 pub(crate) const SWEEP_BATCH_SIZE_ENV: &str = "DJINN_MEMORY_ABSTRACT_SWEEP_BATCH_SIZE";
 pub(crate) const SWEEP_MAX_NOTES_ENV: &str = "DJINN_MEMORY_ABSTRACT_SWEEP_MAX_NOTES";
 pub(crate) const SWEEP_TYPES_ENV: &str = "DJINN_MEMORY_ABSTRACT_SWEEP_TYPES";
+pub(crate) const SWEEP_ATTEMPT_LIMIT_ENV: &str = "DJINN_MEMORY_ABSTRACT_SWEEP_ATTEMPT_LIMIT";
+
+/// Sentinel accepted by [`SWEEP_MAX_NOTES_ENV`] for "the whole remaining
+/// corpus". Spelled out so an unbounded run is always a deliberate choice.
+pub(crate) const SWEEP_MAX_NOTES_UNBOUNDED: &str = "all";
 
 /// Bounds for one sweep run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AbstractSweepConfig {
     /// Rows read per keyset page.
     pub batch_size: i64,
-    /// Hard cap on notes enqueued in a single run. `None` means "the whole
-    /// remaining corpus", which is ~10.7k notes for the injected types.
+    /// Cap on notes enqueued in a single run. `None` means the whole remaining
+    /// corpus and is only reachable by setting the env var to
+    /// [`SWEEP_MAX_NOTES_UNBOUNDED`].
     pub max_notes: Option<usize>,
     /// Restrict to these `note_type` values. Empty means every type.
     pub note_types: Vec<String>,
+    /// Enqueues a note may accumulate before it is parked and reported.
+    pub attempt_limit: i32,
 }
 
 impl Default for AbstractSweepConfig {
     fn default() -> Self {
         Self {
             batch_size: SWEEP_DEFAULT_BATCH_SIZE,
-            max_notes: None,
+            max_notes: Some(SWEEP_DEFAULT_MAX_NOTES),
             note_types: Vec::new(),
+            attempt_limit: DEFAULT_ABSTRACT_REGEN_ATTEMPT_LIMIT,
         }
     }
 }
@@ -266,9 +241,7 @@ pub struct AbstractSweepReport {
     pub selected: usize,
     /// Notes handed to the summary worker.
     pub enqueued: usize,
-    /// Last note id considered — where a follow-up run would resume within the
-    /// same pass. Persisting it is *not* required for correctness: the selection
-    /// predicate already excludes anything regenerated.
+    /// Last note id considered.
     pub cursor: Option<String>,
     /// Run stopped because `max_notes` was hit, not because work ran out.
     pub reached_cap: bool,
@@ -276,58 +249,36 @@ pub struct AbstractSweepReport {
     pub sink_closed: bool,
 }
 
-/// Page of note ids whose abstract does not come from the current L0 prompt.
-///
-/// Keyset-paginated on `id`. The predicate is what makes the sweep idempotent:
-/// a note drops out of the result set the moment its abstract is rewritten, so
-/// a restarted sweep never redoes finished work. The cursor is what makes a
-/// single pass terminate: without it a note the provider failed on would be
-/// re-selected forever.
-///
-/// Restricted to `status = 'active'`: regenerating an abstract costs a live LLM
-/// call, and a note a human archived is not one worth spending on.
-pub async fn select_stale_abstract_note_ids(
-    db: &Database,
-    after_id: Option<&str>,
-    limit: i64,
-    note_types: &[String],
-) -> Result<Vec<String>, sqlx::Error> {
-    let types: Vec<String> = note_types.to_vec();
-    sqlx::query_scalar::<_, String>(
-        r#"SELECT id
-           FROM notes
-           WHERE ($1::text IS NULL OR id > $1::text)
-             AND (cardinality($2::text[]) = 0 OR note_type = ANY($2::text[]))
-             AND status = 'active'
-             AND (
-                 abstract IS NULL
-                 OR btrim(abstract) = ''
-                 OR btrim(abstract) NOT ILIKE $3
-             )
-           ORDER BY id
-           LIMIT $4"#,
-    )
-    .bind(after_id)
-    .bind(&types)
-    .bind(current_vintage_pattern())
-    .bind(limit.max(1))
-    .fetch_all(db.pool())
-    .await
+impl AbstractSweepReport {
+    /// True when the run drained the queue rather than hitting a limit — the
+    /// signal that a follow-up run would be a no-op.
+    pub fn drained(&self) -> bool {
+        !self.reached_cap && !self.sink_closed
+    }
 }
 
-/// Enumerate stale abstracts and feed them to the existing summary worker.
+/// Enumerate notes awaiting regeneration and feed them to the summary worker.
 ///
-/// This deliberately owns no generation logic: it pushes note ids into the same
+/// Owns no generation logic: it pushes ids into the same
 /// [`spawn_summary_backfill_worker`] channel the read-triggered path uses, so
-/// there is exactly one place that talks to a provider. `send().await` on a
-/// bounded channel is also the rate limiter — the sweep cannot outrun the
-/// worker's `SUMMARY_BACKFILL_DELAY`, so it cannot stampede the provider no
-/// matter how large the corpus is.
+/// exactly one place talks to a provider. `send().await` on a bounded channel is
+/// also the rate limiter — the sweep cannot outrun the worker's
+/// `SUMMARY_BACKFILL_DELAY` and so cannot stampede the provider.
+///
+/// Termination and convergence:
+///
+/// * every enqueue records an attempt, so a note that never succeeds is parked
+///   after `attempt_limit` runs instead of being re-selected forever;
+/// * a successful regeneration stamps the prompt version, so the note leaves
+///   the stale set permanently and a repeat run is a no-op;
+/// * the keyset cursor terminates a single pass even when nothing succeeds,
+///   because attempts are recorded as we go.
 pub async fn run_abstract_sweep(
     db: &Database,
     sink: &mpsc::Sender<String>,
     config: &AbstractSweepConfig,
-) -> Result<AbstractSweepReport, sqlx::Error> {
+) -> Result<AbstractSweepReport, DbError> {
+    let prompt_version = memory_l0_prompt_version();
     let mut report = AbstractSweepReport::default();
     let mut cursor: Option<String> = None;
 
@@ -345,8 +296,15 @@ pub async fn run_abstract_sweep(
             .unwrap_or(config.batch_size);
         let limit = config.batch_size.min(remaining.max(1));
 
-        let page = select_stale_abstract_note_ids(db, cursor.as_deref(), limit, &config.note_types)
-            .await?;
+        let page = select_stale_abstract_note_ids(
+            db,
+            prompt_version,
+            cursor.as_deref(),
+            limit,
+            &config.note_types,
+            config.attempt_limit,
+        )
+        .await?;
         if page.is_empty() {
             break;
         }
@@ -354,9 +312,18 @@ pub async fn run_abstract_sweep(
         report.batches += 1;
         report.selected += page.len();
 
-        for note_id in page {
+        for stale in page {
+            let StaleAbstractNote {
+                note_id,
+                project_id,
+            } = stale;
             cursor = Some(note_id.clone());
             report.cursor = cursor.clone();
+
+            // Record the attempt BEFORE handing the note over. If the process
+            // dies between here and generation the note has still consumed an
+            // attempt, which is what keeps a crash loop bounded.
+            record_abstract_regeneration_attempt(db, &project_id, &note_id, prompt_version).await?;
 
             if sink.send(note_id).await.is_err() {
                 report.sink_closed = true;
@@ -399,9 +366,19 @@ where
         .filter(|value| *value > 0)
         .unwrap_or(SWEEP_DEFAULT_BATCH_SIZE);
 
-    let max_notes = lookup(SWEEP_MAX_NOTES_ENV)
-        .and_then(|raw| raw.trim().parse::<usize>().ok())
-        .filter(|value| *value > 0);
+    // Unset means the bounded default, NOT the whole corpus. Removing the cap
+    // requires spelling `all`, so an unbounded run is always deliberate.
+    let max_notes = match lookup(SWEEP_MAX_NOTES_ENV) {
+        None => Some(SWEEP_DEFAULT_MAX_NOTES),
+        Some(raw) if raw.trim().eq_ignore_ascii_case(SWEEP_MAX_NOTES_UNBOUNDED) => None,
+        Some(raw) => Some(
+            raw.trim()
+                .parse::<usize>()
+                .ok()
+                .filter(|value| *value > 0)
+                .unwrap_or(SWEEP_DEFAULT_MAX_NOTES),
+        ),
+    };
 
     let note_types = lookup(SWEEP_TYPES_ENV)
         .map(|raw| {
@@ -413,10 +390,16 @@ where
         })
         .unwrap_or_default();
 
+    let attempt_limit = lookup(SWEEP_ATTEMPT_LIMIT_ENV)
+        .and_then(|raw| raw.trim().parse::<i32>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_ABSTRACT_REGEN_ATTEMPT_LIMIT);
+
     Some(AbstractSweepConfig {
         batch_size,
         max_notes,
         note_types,
+        attempt_limit,
     })
 }
 
@@ -425,10 +408,13 @@ fn log_abstract_coverage(coverage: AbstractVintageCoverage, phase: &'static str)
         phase,
         total = coverage.total,
         current_vintage = coverage.current_vintage,
-        legacy_vintage = coverage.legacy_vintage(),
-        missing = coverage.missing(),
+        // Work a sweep would still do. Zero means converged.
+        pending = coverage.pending,
+        // Parked at the attempt bound: these need a human, not another run.
+        exhausted = coverage.exhausted,
         current_ratio = coverage.current_ratio(),
         converged = coverage.is_converged(),
+        converged_with_failures = coverage.converged_with_failures(),
         "memory L0 abstract vintage coverage"
     );
 }
@@ -447,8 +433,46 @@ pub(crate) fn spawn_summary_backfill_worker(db: Database) -> mpsc::Sender<String
             .map(|config| config.note_types.clone())
             .unwrap_or_default();
 
-        match abstract_vintage_coverage(&observer_db, &note_types).await {
-            Ok(coverage) => log_abstract_coverage(coverage, "startup"),
+        let attempt_limit = sweep_config
+            .as_ref()
+            .map(|config| config.attempt_limit)
+            .unwrap_or(DEFAULT_ABSTRACT_REGEN_ATTEMPT_LIMIT);
+
+        match abstract_vintage_coverage(
+            &observer_db,
+            memory_l0_prompt_version(),
+            &note_types,
+            attempt_limit,
+        )
+        .await
+        {
+            Ok(coverage) => {
+                log_abstract_coverage(coverage, "startup");
+                // Parked notes need a human, not another run. Name them, or
+                // "exhausted: 7" is a number nobody can act on.
+                if coverage.exhausted > 0 {
+                    match exhausted_abstract_regeneration_notes(
+                        &observer_db,
+                        memory_l0_prompt_version(),
+                        &note_types,
+                        attempt_limit,
+                        EXHAUSTED_DIAGNOSTIC_LIMIT,
+                    )
+                    .await
+                    {
+                        Ok(permalinks) => warn!(
+                            exhausted = coverage.exhausted,
+                            attempt_limit,
+                            sample = ?permalinks,
+                            "memory L0 abstract: notes parked at the regeneration attempt limit; \
+                             they will not be retried and need investigation"
+                        ),
+                        Err(error) => {
+                            warn!(error = %error, "abstract vintage: parked-note lookup failed");
+                        }
+                    }
+                }
+            }
             Err(error) => {
                 warn!(error = %error, "abstract vintage coverage: query failed");
             }
@@ -473,6 +497,9 @@ pub(crate) fn spawn_summary_backfill_worker(db: Database) -> mpsc::Sender<String
                     enqueued = report.enqueued,
                     reached_cap = report.reached_cap,
                     sink_closed = report.sink_closed,
+                    // True when the run drained the queue rather than hitting a
+                    // limit: the signal that a follow-up run would be a no-op.
+                    drained = report.drained(),
                     cursor = ?report.cursor,
                     "memory L0 abstract sweep finished enqueuing"
                 );
@@ -704,6 +731,7 @@ mod tests {
     }
     use djinn_core::events::{DjinnEventEnvelope, EventBus};
     use djinn_db::{Database, NoteRepository, ProjectRepository};
+    use djinn_provider::prompts::MEMORY_L0_APPLICABILITY_PREFIX;
     use tokio::sync::broadcast;
 
     use super::*;
@@ -837,7 +865,7 @@ mod tests {
     // completion is issued: executing the ~13k-call backfill is out of scope for
     // this change, and a test must never be the thing that spends it.
 
-    fn current_abstract(subject: &str) -> String {
+    fn compliant_abstract(subject: &str) -> String {
         format!("{MEMORY_L0_APPLICABILITY_PREFIX} {subject} misbehaves. Run `djinn doctor`.")
     }
 
@@ -868,38 +896,72 @@ mod tests {
         (db, project.id, repo)
     }
 
+    /// Ids the sweep would enqueue right now, under the live prompt version.
+    async fn stale_now(db: &Database, note_types: &[String]) -> Vec<String> {
+        let mut ids: Vec<String> = select_stale_abstract_note_ids(
+            db,
+            memory_l0_prompt_version(),
+            None,
+            100,
+            note_types,
+            DEFAULT_ABSTRACT_REGEN_ATTEMPT_LIMIT,
+        )
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|note| note.note_id)
+        .collect();
+        ids.sort();
+        ids
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn sweep_selects_only_notes_without_a_current_vintage_abstract() {
+    async fn sweep_selects_by_recorded_vintage_not_by_abstract_prose() {
         let (db, project_id, repo) = sweep_fixture().await;
 
         let missing = seed_note(&repo, &project_id, "missing", "pitfall").await;
         let blank = seed_note(&repo, &project_id, "blank", "pitfall").await;
-        let legacy = seed_note(&repo, &project_id, "legacy", "pitfall").await;
-        let current = seed_note(&repo, &project_id, "current", "pitfall").await;
+        let compliant_prose = seed_note(&repo, &project_id, "compliant-prose", "pitfall").await;
+        let regenerated = seed_note(&repo, &project_id, "regenerated", "pitfall").await;
 
         repo.update_summaries(&blank.id, Some("   "), Some("ov"))
             .await
             .unwrap();
+        // Opens with the prompt's lead-in but was never regenerated. Under the
+        // old text-matching predicate this note looked current; it is stale.
         repo.update_summaries(
-            &legacy.id,
-            Some("A terse pre-u46i one-liner about the thing."),
+            &compliant_prose.id,
+            Some(&compliant_abstract("dispatch")),
             Some("ov"),
         )
         .await
         .unwrap();
-        repo.update_summaries(&current.id, Some(&current_abstract("dispatch")), Some("ov"))
-            .await
-            .unwrap();
+        // Regenerated, but the model phrased it its own way. Under the old
+        // predicate this note was re-selected and re-paid-for on every run.
+        repo.update_summaries(
+            &regenerated.id,
+            Some("Reach for this when the queue wedges."),
+            Some("ov"),
+        )
+        .await
+        .unwrap();
+        record_abstract_regeneration_success(
+            &db,
+            &project_id,
+            &regenerated.id,
+            memory_l0_prompt_version(),
+        )
+        .await
+        .unwrap();
 
-        let mut selected = select_stale_abstract_note_ids(&db, None, 100, &[])
-            .await
-            .unwrap();
-        selected.sort();
-
-        let mut expected = vec![missing.id, blank.id, legacy.id];
+        let mut expected = vec![missing.id, blank.id, compliant_prose.id];
         expected.sort();
 
-        assert_eq!(selected, expected);
+        assert_eq!(
+            stale_now(&db, &[]).await,
+            expected,
+            "staleness follows the recorded prompt version, never the prose"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -909,10 +971,10 @@ mod tests {
         let pitfall = seed_note(&repo, &project_id, "pitfall-note", "pitfall").await;
         seed_note(&repo, &project_id, "reference-note", "reference").await;
 
-        let selected =
-            select_stale_abstract_note_ids(&db, None, 100, &["pitfall".to_string()]).await;
-
-        assert_eq!(selected.unwrap(), vec![pitfall.id]);
+        assert_eq!(
+            stale_now(&db, &["pitfall".to_string()]).await,
+            vec![pitfall.id]
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -972,7 +1034,7 @@ mod tests {
             &AbstractSweepConfig {
                 batch_size: 10,
                 max_notes: Some(2),
-                note_types: Vec::new(),
+                ..AbstractSweepConfig::default()
             },
         )
         .await
@@ -983,9 +1045,13 @@ mod tests {
         let done = drain(&mut rx);
         assert_eq!(done.len(), 2);
 
-        // The worker regenerated those two; they now carry current-vintage text.
+        // The worker regenerated those two: their abstracts are rewritten and
+        // the current prompt version is recorded against them.
         for id in &done {
-            repo.update_summaries(id, Some(&current_abstract("the queue")), Some("ov"))
+            repo.update_summaries(id, Some(&compliant_abstract("the queue")), Some("ov"))
+                .await
+                .unwrap();
+            record_abstract_regeneration_success(&db, &project_id, id, memory_l0_prompt_version())
                 .await
                 .unwrap();
         }
@@ -1067,23 +1133,201 @@ mod tests {
             .unwrap();
         repo.update_summaries(
             &current.id,
-            Some(&current_abstract("the sweep")),
+            Some(&compliant_abstract("the sweep")),
             Some("ov"),
         )
         .await
         .unwrap();
+        record_abstract_regeneration_success(
+            &db,
+            &project_id,
+            &current.id,
+            memory_l0_prompt_version(),
+        )
+        .await
+        .unwrap();
 
-        let coverage = abstract_vintage_coverage(&db, &["pitfall".to_string()])
+        let coverage = abstract_vintage_coverage(
+            &db,
+            memory_l0_prompt_version(),
+            &["pitfall".to_string()],
+            DEFAULT_ABSTRACT_REGEN_ATTEMPT_LIMIT,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(coverage.total, 3);
+        assert_eq!(coverage.current_vintage, 1);
+        assert_eq!(coverage.pending, 2);
+        assert_eq!(coverage.exhausted, 0);
+        assert!(!coverage.is_converged());
+        assert!((coverage.current_ratio() - 1.0 / 3.0).abs() < 1e-9);
+    }
+
+    /// Property 4: `is_converged()` is reachable even when a note can never be
+    /// regenerated.
+    ///
+    /// This is the defect the whole change exists to fix. The first cut defined
+    /// convergence as "every note current", so one permanently non-compliant
+    /// note kept `is_converged()` structurally false and the sweep re-paid for
+    /// that note on every run. Here the sweep is driven for real, the "worker"
+    /// only ever succeeds on one of the two notes, and convergence still lands.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn is_converged_is_reachable_with_a_permanently_failing_note() {
+        let (db, project_id, repo) = sweep_fixture().await;
+
+        let ok = seed_note(&repo, &project_id, "regenerates-fine", "pitfall").await;
+        let doomed = seed_note(&repo, &project_id, "never-regenerates", "pitfall").await;
+
+        let config = AbstractSweepConfig {
+            batch_size: 10,
+            note_types: vec!["pitfall".to_string()],
+            ..AbstractSweepConfig::default()
+        };
+
+        for _ in 0..config.attempt_limit {
+            let (tx, mut rx) = mpsc::channel(64);
+            run_abstract_sweep(&db, &tx, &config).await.unwrap();
+            // The worker succeeds on `ok` and fails on `doomed` every time.
+            for id in drain(&mut rx) {
+                if id == ok.id {
+                    record_abstract_regeneration_success(
+                        &db,
+                        &project_id,
+                        &id,
+                        memory_l0_prompt_version(),
+                    )
+                    .await
+                    .unwrap();
+                }
+            }
+        }
+
+        let coverage = abstract_vintage_coverage(
+            &db,
+            memory_l0_prompt_version(),
+            &config.note_types,
+            config.attempt_limit,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(coverage.total, 2);
+        assert_eq!(coverage.current_vintage, 1);
+        assert_eq!(coverage.pending, 0, "no work is left to do");
+        assert_eq!(coverage.exhausted, 1, "the doomed note is parked, not lost");
+        assert!(
+            coverage.is_converged(),
+            "convergence must be reachable with a permanently failing note"
+        );
+        assert!(
+            coverage.converged_with_failures(),
+            "and it must report that it converged WITH failures"
+        );
+
+        // The parked note is named, so an operator can act on it.
+        let parked = exhausted_abstract_regeneration_notes(
+            &db,
+            memory_l0_prompt_version(),
+            &config.note_types,
+            config.attempt_limit,
+            100,
+        )
+        .await
+        .unwrap();
+        assert_eq!(parked, vec![doomed.permalink]);
+    }
+
+    /// Property 5: re-running a completed sweep enqueues nothing.
+    ///
+    /// Asserted by actually running `run_abstract_sweep` twice against a fresh
+    /// sink, not by re-evaluating a predicate: the no-op is a property of the
+    /// orchestration, and the first cut's predicate was exactly what lied.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn rerunning_a_completed_sweep_is_a_no_op() {
+        let (db, project_id, repo) = sweep_fixture().await;
+
+        for index in 0..5 {
+            seed_note(&repo, &project_id, &format!("note-{index}"), "pitfall").await;
+        }
+
+        let (tx, mut rx) = mpsc::channel(64);
+        let first = run_abstract_sweep(&db, &tx, &AbstractSweepConfig::default())
+            .await
+            .unwrap();
+        assert_eq!(first.enqueued, 5);
+        assert!(first.drained());
+
+        // The worker regenerated everything it was handed.
+        for id in drain(&mut rx) {
+            record_abstract_regeneration_success(&db, &project_id, &id, memory_l0_prompt_version())
+                .await
+                .unwrap();
+        }
+
+        let (tx2, mut rx2) = mpsc::channel(64);
+        let second = run_abstract_sweep(&db, &tx2, &AbstractSweepConfig::default())
             .await
             .unwrap();
 
-        assert_eq!(coverage.total, 3);
-        assert_eq!(coverage.with_abstract, 2);
-        assert_eq!(coverage.current_vintage, 1);
-        assert_eq!(coverage.legacy_vintage(), 1);
-        assert_eq!(coverage.missing(), 1);
-        assert!(!coverage.is_converged());
-        assert!((coverage.current_ratio() - 1.0 / 3.0).abs() < 1e-9);
+        assert_eq!(second.enqueued, 0, "a completed sweep must cost nothing");
+        assert_eq!(second.selected, 0);
+        assert_eq!(second.batches, 0);
+        assert!(second.drained());
+        assert!(drain(&mut rx2).is_empty());
+    }
+
+    /// Property 8: the attempt is recorded at ENQUEUE time.
+    ///
+    /// A note handed to a sink that is then gone has still consumed an attempt,
+    /// which is what bounds a crash loop: without it, a process dying between
+    /// enqueue and generation would restart the same note forever.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn attempts_are_recorded_at_enqueue_so_a_dead_sink_still_consumes_budget() {
+        let (db, project_id, repo) = sweep_fixture().await;
+        let note = seed_note(&repo, &project_id, "note", "pitfall").await;
+
+        let config = AbstractSweepConfig::default();
+        for round in 1..=config.attempt_limit {
+            let (tx, rx) = mpsc::channel(4);
+            drop(rx);
+
+            let report = run_abstract_sweep(&db, &tx, &config).await.unwrap();
+            assert!(report.sink_closed);
+            assert_eq!(report.enqueued, 0, "nothing was ever delivered");
+
+            let coverage = abstract_vintage_coverage(
+                &db,
+                memory_l0_prompt_version(),
+                &config.note_types,
+                config.attempt_limit,
+            )
+            .await
+            .unwrap();
+            let exhausted = round >= config.attempt_limit;
+            assert_eq!(
+                coverage.exhausted,
+                i64::from(exhausted),
+                "after {round} of {} enqueues",
+                config.attempt_limit
+            );
+        }
+
+        // The budget was consumed by enqueues alone, so the note is now parked
+        // and no further run will pay for it.
+        assert!(stale_now(&db, &[]).await.is_empty());
+        assert_eq!(
+            exhausted_abstract_regeneration_notes(
+                &db,
+                memory_l0_prompt_version(),
+                &[],
+                config.attempt_limit,
+                100,
+            )
+            .await
+            .unwrap(),
+            vec![note.permalink]
+        );
     }
 
     #[test]
@@ -1120,6 +1364,10 @@ mod tests {
                 "pattern".to_string()
             ]
         );
+        assert_eq!(
+            config.attempt_limit, DEFAULT_ABSTRACT_REGEN_ATTEMPT_LIMIT,
+            "an unset attempt limit keeps the bound, it does not remove it"
+        );
     }
 
     #[test]
@@ -1133,13 +1381,99 @@ mod tests {
         .expect("sweep should be enabled");
 
         assert_eq!(config.batch_size, SWEEP_DEFAULT_BATCH_SIZE);
-        assert_eq!(config.max_notes, None);
+        assert_eq!(config.max_notes, Some(SWEEP_DEFAULT_MAX_NOTES));
         assert!(config.note_types.is_empty());
     }
 
+    /// Property 10: an unset cap is the bounded default, not "the whole corpus".
+    ///
+    /// The foot-gun: unset used to mean unbounded, so enabling the sweep at all
+    /// committed to ~10.7k live LLM calls in one run.
     #[test]
-    fn vintage_pattern_tracks_the_prompt() {
+    fn unset_max_notes_falls_back_to_the_bounded_default_not_unbounded() {
+        let config =
+            sweep_config_from_env(|key| (key == SWEEP_ENABLE_ENV).then(|| "1".to_string()))
+                .expect("sweep should be enabled");
+
+        assert_eq!(config.max_notes, Some(SWEEP_DEFAULT_MAX_NOTES));
+        assert_ne!(config.max_notes, None, "unset must never mean unbounded");
+    }
+
+    /// Property 11: unbounded is reachable only by spelling the sentinel.
+    #[test]
+    fn unbounded_max_notes_requires_the_explicit_all_sentinel() {
+        for spelling in ["all", "ALL", "All", "  all  "] {
+            let config = sweep_config_from_env(|key| match key {
+                SWEEP_ENABLE_ENV => Some("1".to_string()),
+                SWEEP_MAX_NOTES_ENV => Some(spelling.to_string()),
+                _ => None,
+            })
+            .expect("sweep should be enabled");
+
+            assert_eq!(config.max_notes, None, "{spelling:?} must mean unbounded");
+        }
+
+        assert_eq!(SWEEP_MAX_NOTES_UNBOUNDED, "all");
+    }
+
+    /// Property 12: a malformed or zero cap degrades to the bounded default and
+    /// never to unbounded — a typo must not become unlimited spend.
+    #[test]
+    fn invalid_max_notes_falls_back_to_the_bounded_default_never_to_unbounded() {
+        for raw in ["not-a-number", "0", "-5", "", "   ", "all-of-them", "1.5"] {
+            let config = sweep_config_from_env(|key| match key {
+                SWEEP_ENABLE_ENV => Some("1".to_string()),
+                SWEEP_MAX_NOTES_ENV => Some(raw.to_string()),
+                _ => None,
+            })
+            .expect("sweep should be enabled");
+
+            assert_eq!(
+                config.max_notes,
+                Some(SWEEP_DEFAULT_MAX_NOTES),
+                "{raw:?} must degrade to the bounded default"
+            );
+        }
+    }
+
+    /// Property 13: the attempt limit is configurable, and nonsense keeps the
+    /// default bound rather than disabling it.
+    #[test]
+    fn attempt_limit_parses_and_invalid_values_keep_the_default_bound() {
+        let config = sweep_config_from_env(|key| match key {
+            SWEEP_ENABLE_ENV => Some("1".to_string()),
+            SWEEP_ATTEMPT_LIMIT_ENV => Some(" 7 ".to_string()),
+            _ => None,
+        })
+        .expect("sweep should be enabled");
+        assert_eq!(config.attempt_limit, 7);
+
+        for raw in ["0", "-1", "not-a-number", "", "  "] {
+            let config = sweep_config_from_env(|key| match key {
+                SWEEP_ENABLE_ENV => Some("1".to_string()),
+                SWEEP_ATTEMPT_LIMIT_ENV => Some(raw.to_string()),
+                _ => None,
+            })
+            .expect("sweep should be enabled");
+
+            assert_eq!(
+                config.attempt_limit, DEFAULT_ABSTRACT_REGEN_ATTEMPT_LIMIT,
+                "{raw:?} must keep the default bound, never remove it"
+            );
+        }
+    }
+
+    #[test]
+    fn the_applicability_prefix_is_a_prose_convention_not_the_vintage_marker() {
+        // The prompt still asks for the readability lead-in …
         assert!(MEMORY_L0_ABSTRACT.contains(MEMORY_L0_APPLICABILITY_PREFIX));
-        assert_eq!(current_vintage_pattern(), "Applies when%");
+
+        // … but the marker the sweep compares against is the prompt's content
+        // hash, which no abstract's wording can imitate. Its stability matters:
+        // it is what makes a completed sweep stay completed.
+        let version = memory_l0_prompt_version();
+        assert!(version.starts_with("l0-"), "unexpected shape: {version}");
+        assert_eq!(version, memory_l0_prompt_version());
+        assert!(!version.contains(MEMORY_L0_APPLICABILITY_PREFIX));
     }
 }

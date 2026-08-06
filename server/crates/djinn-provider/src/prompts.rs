@@ -10,16 +10,32 @@ pub const MEMORY_L1_OVERVIEW: &str = include_str!(concat!(
     "/src/prompts/memory_l1_overview.md"
 ));
 
-/// The literal lead-in [`MEMORY_L0_ABSTRACT`] requires every abstract to open
-/// with.
+/// The literal lead-in [`MEMORY_L0_ABSTRACT`] asks every abstract to open with.
 ///
-/// This doubles as the **vintage marker**: an abstract that starts with this
-/// phrase was produced by the applicability-condition prompt, and one that does
-/// not predates it. Consumers count on that (see the abstract-vintage coverage
-/// counter in `djinn-control-plane`), so changing this string without changing
-/// the prompt — or the prompt without changing this string — silently reclassifies
-/// the entire corpus.
+/// This is a *readability* convention only. It is deliberately **not** the
+/// vintage marker: keying staleness on the model emitting an exact prefix made
+/// convergence depend on model compliance, so any note the model phrased
+/// differently was re-selected and re-paid-for on every sweep, forever. Vintage
+/// is now recorded per note against [`memory_l0_prompt_version`].
 pub const MEMORY_L0_APPLICABILITY_PREFIX: &str = "Applies when";
+
+/// Content-addressed version of [`MEMORY_L0_ABSTRACT`].
+///
+/// The abstract backfill records this against each note it regenerates, and a
+/// note is stale when its recorded version differs from this one. Deriving it
+/// from the prompt's own bytes means editing the prompt *automatically*
+/// invalidates the corpus — there is no separate constant to forget to bump,
+/// which is the failure mode a hand-maintained version number invites.
+pub fn memory_l0_prompt_version() -> &'static str {
+    use sha2::{Digest, Sha256};
+    use std::sync::OnceLock;
+
+    static VERSION: OnceLock<String> = OnceLock::new();
+    VERSION.get_or_init(|| {
+        let digest = Sha256::digest(MEMORY_L0_ABSTRACT.as_bytes());
+        format!("l0-{:x}", digest)[..19].to_string()
+    })
+}
 
 #[cfg(test)]
 mod tests {
@@ -34,11 +50,27 @@ mod tests {
     }
 
     #[test]
-    fn l0_abstract_prompt_demands_the_vintage_marker() {
+    fn l0_abstract_prompt_asks_for_the_applicability_lead_in() {
         assert!(
             MEMORY_L0_ABSTRACT.contains(MEMORY_L0_APPLICABILITY_PREFIX),
-            "the prompt must ask for the literal lead-in the coverage counter matches on"
+            "the prompt must still ask for the applicability lead-in"
         );
+    }
+
+    #[test]
+    fn l0_prompt_version_is_derived_from_the_prompt_bytes() {
+        let version = memory_l0_prompt_version();
+        assert!(version.starts_with("l0-"), "unexpected shape: {version}");
+        assert_eq!(version.len(), 19, "version must be a stable width");
+        // Stable across calls — the corpus is compared against it.
+        assert_eq!(version, memory_l0_prompt_version());
+
+        // And it genuinely tracks the bytes: a different prompt hashes
+        // differently, so editing the prompt invalidates the corpus without
+        // anyone remembering to bump a constant.
+        use sha2::{Digest, Sha256};
+        let other = format!("l0-{:x}", Sha256::digest(b"a different prompt"));
+        assert_ne!(version, &other[..19]);
     }
 
     #[test]
