@@ -34,6 +34,19 @@ pub fn tool_proposal_feedback_disposition() -> RmcpTool {
     )
 }
 
+/// Author withdrawal is exposed to the authenticated chat/control-plane MCP
+/// surface, never to a tribunal role surface.
+pub fn tool_proposal_feedback_withdraw() -> RmcpTool {
+    RmcpTool::new(
+        "proposal_feedback_withdraw".to_string(),
+        "Withdraw a feedback entry as its original author. This preserves captured source snapshots; a human-feedback obligation closes only when every captured blocking feedback row is withdrawn.".to_string(),
+        object!({
+            "type": "object", "required": ["id"],
+            "properties": {"id": {"type": "string", "description": "Feedback entry id authored by the authenticated caller."}}
+        }),
+    )
+}
+
 pub fn tool_memory_retrieval_outcomes_report() -> RmcpTool {
     RmcpTool::new(
         "memory_retrieval_outcomes_report".to_string(),

@@ -388,6 +388,11 @@ fn tool_schemas_include_role_specific_tools() {
         !adversary.iter().any(|n| n == "proposal_blocks"),
         "adversary must not have proposal_blocks"
     );
+    assert!(
+        !adversary
+            .iter()
+            .any(|n| n == "proposal_feedback_disposition")
+    );
 
     let judge = schema_names(tool_schemas_judge());
     assert!(

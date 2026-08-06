@@ -656,6 +656,13 @@ pub(crate) async fn call_proposal_feedback_disposition(
     dispatch_control_plane_proposal_tool(ctx, "proposal_feedback_disposition", arguments).await
 }
 
+pub(crate) async fn call_proposal_feedback_withdraw(
+    ctx: &dyn ExtensionContext,
+    arguments: &Option<serde_json::Map<String, serde_json::Value>>,
+) -> Result<serde_json::Value, String> {
+    dispatch_control_plane_proposal_tool(ctx, "proposal_feedback_withdraw", arguments).await
+}
+
 async fn dispatch_control_plane_proposal_tool(
     ctx: &dyn ExtensionContext,
     name: &str,
