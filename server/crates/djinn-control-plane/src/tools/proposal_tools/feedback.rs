@@ -104,8 +104,9 @@ impl DjinnMcpServer {
                 // Advisory feedback is discussion only. Blocking feedback added
                 // during review uses the durable admission path for a demanded
                 // round; the feedback id makes retries idempotent.
-                if severity == "blocking" && proposal.status == "in_review" {
-                    if admit_refinement_run(
+                if severity == "blocking"
+                    && proposal.status == "in_review"
+                    && admit_refinement_run(
                         self,
                         &repo,
                         &proposal.id,
@@ -116,13 +117,12 @@ impl DjinnMcpServer {
                     )
                     .await
                     .is_ok()
-                    {
-                        // The explicit start/demand boundaries capture after
-                        // admission. This auto-demand follows that same order.
-                        let _ = repo
-                            .capture_feedback_refinement_boundary(&proposal.id)
-                            .await;
-                    }
+                {
+                    // The explicit start/demand boundaries capture after
+                    // admission. This auto-demand follows that same order.
+                    let _ = repo
+                        .capture_feedback_refinement_boundary(&proposal.id)
+                        .await;
                 }
                 Json(ProposalFeedbackResponse {
                     feedback: Some((&f).into()),
