@@ -138,6 +138,29 @@ impl ProviderSseTerminalReporterV1 for OpenAITerminalReporterV1 {
     }
 }
 
+#[derive(Default)]
+struct OpenAIFrameParserV1 {
+    tool_acc: BTreeMap<u32, (String, String, String)>,
+}
+
+impl crate::provider::ProviderSseFrameParserV1 for OpenAIFrameParserV1 {
+    fn parse(&mut self, frame: SseFrame) -> Vec<anyhow::Result<StreamEvent>> {
+        match frame {
+            SseFrame::Data(line) => parse_openai_line(&line, &mut self.tool_acc)
+                .into_iter()
+                .map(Ok)
+                .collect(),
+            SseFrame::Done if self.tool_acc.is_empty() => vec![Ok(StreamEvent::Done)],
+            SseFrame::Done => {
+                self.tool_acc.clear();
+                vec![Err(anyhow::Error::new(ProviderError::Transport).context(
+                    "openai stream ended with incomplete tool/function call accumulator",
+                ))]
+            }
+        }
+    }
+}
+
 // ─── Role mapping ───────────────────────────────────────────────────────────────
 
 fn openai_role(role: Role) -> &'static str {
@@ -697,6 +720,10 @@ impl LlmProvider for OpenAIProvider {
             context,
             OpenAITerminalReporterV1::default(),
         ))
+    }
+
+    fn sse_frame_parser_v1(&self) -> Option<Box<dyn crate::provider::ProviderSseFrameParserV1>> {
+        Some(Box::new(OpenAIFrameParserV1::default()))
     }
 
     fn stream_request_body(

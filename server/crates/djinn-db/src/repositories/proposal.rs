@@ -198,6 +198,13 @@ pub struct FeedbackRefinementBoundaryCapture {
     pub captures: Vec<FeedbackRefinementCapture>,
 }
 
+/// Read-only exact generation projection for a materialized human-feedback row.
+#[derive(Clone, Debug)]
+pub struct FeedbackRefinementGeneration {
+    pub injection: ProposalFeedbackRefinementInjection,
+    pub sources: Vec<ProposalFeedbackRefinementSource>,
+}
+
 /// The accepted outcome for one materialized feedback generation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FeedbackRefinementDisposition {
@@ -224,6 +231,25 @@ pub struct FeedbackRefinementDispositionResult {
     pub debate_entry: ProposalDebateTrail,
     pub source_feedback_ids: Vec<String>,
     pub replayed: bool,
+}
+
+/// The still-open generation and pending structured disposition selected for
+/// atomic Judge rejection.
+#[derive(Clone, Debug)]
+pub struct FeedbackRefinementRejectionInput {
+    pub proposal_id: String,
+    pub injection_id: String,
+    pub root_feedback_id: String,
+    pub generation: i32,
+    pub debate_entry_id: String,
+    pub disposition_entry_id: String,
+    pub reason: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct FeedbackRefinementRejectionResult {
+    pub debate_entry: ProposalDebateTrail,
+    pub verdict_entry: ProposalDebateTrail,
 }
 
 #[derive(Clone, Debug)]
@@ -1209,10 +1235,33 @@ impl ProposalRepository {
         &self,
         input: FeedbackRefinementDispositionInput,
     ) -> Result<FeedbackRefinementDispositionResult> {
+        self.dispose_feedback_refinement_generation_selected(input, None)
+            .await
+    }
+
+    /// Dispose a generation only if the selected structured disposition is
+    /// still pending when the lifecycle locks are held.
+    pub async fn dispose_feedback_refinement_generation_for_disposition(
+        &self,
+        input: FeedbackRefinementDispositionInput,
+        disposition_entry_id: String,
+    ) -> Result<FeedbackRefinementDispositionResult> {
+        self.dispose_feedback_refinement_generation_selected(
+            input,
+            Some(disposition_entry_id.as_str()),
+        )
+        .await
+    }
+
+    async fn dispose_feedback_refinement_generation_selected(
+        &self,
+        input: FeedbackRefinementDispositionInput,
+        disposition_entry_id: Option<&str>,
+    ) -> Result<FeedbackRefinementDispositionResult> {
         self.db.ensure_initialized().await?;
-        let (state, disposition, revision, reason) = match input.disposition {
-            FeedbackRefinementDisposition::FixedRevision { revision_seq } if revision_seq > 0 => {
-                ("accepted", "fixed_revision", Some(revision_seq), None)
+        let (state, disposition, revision, reason) = match &input.disposition {
+            FeedbackRefinementDisposition::FixedRevision { revision_seq } if *revision_seq > 0 => {
+                ("accepted", "fixed_revision", Some(*revision_seq), None)
             }
             FeedbackRefinementDisposition::FixedRevision { .. } => {
                 return Err(Error::InvalidData("fixed revision must be positive".into()));
@@ -1265,6 +1314,69 @@ impl ProposalRepository {
                 "feedback generation already has a conflicting disposition".into(),
             ));
         }
+        if let Some(disposition_entry_id) = disposition_entry_id {
+            let candidate: ProposalDebateTrail = sqlx::query_as("SELECT id,proposal_id,kind,body,blocking,agent_role,author_kind,author_user_id,author_model,source_task_id,against_revision_seq,round,body_metadata::text AS body_metadata,resolved_at,resolved_by_user_id,reopened_at,reopened_by_user_id,created_at,updated_at FROM proposal_debate_trail WHERE id=$1 FOR UPDATE")
+                .bind(disposition_entry_id)
+                .fetch_optional(&mut *tx)
+                .await?
+                .ok_or_else(|| Error::InvalidTransition("selected feedback disposition is not pending".into()))?;
+            let metadata: serde_json::Value =
+                serde_json::from_str(candidate.body_metadata.as_deref().unwrap_or("null"))?;
+            let object = metadata.as_object().ok_or_else(|| {
+                Error::InvalidTransition("selected feedback disposition is not structured".into())
+            })?;
+            let structured_matches = candidate.proposal_id == input.proposal_id
+                && candidate.kind == "rebuttal"
+                && candidate.agent_role == "advocate"
+                && object.get("kind").and_then(|v| v.as_str())
+                    == Some("human_feedback_disposition_v1")
+                && object
+                    .get("human_feedback_entry_id")
+                    .and_then(|v| v.as_str())
+                    == Some(input.debate_entry_id.as_str())
+                && match (
+                    &input.disposition,
+                    object.get("disposition").and_then(|v| v.as_str()),
+                ) {
+                    (
+                        FeedbackRefinementDisposition::FixedRevision { revision_seq },
+                        Some("fixed_by_revision"),
+                    ) => {
+                        object.get("fixed_by_revision").and_then(|v| v.as_i64())
+                            == Some(i64::from(*revision_seq))
+                    }
+                    (FeedbackRefinementDisposition::WontFix { reason }, Some("wont_fix")) => {
+                        object.get("reason").and_then(|v| v.as_str()) == Some(reason.trim())
+                    }
+                    _ => false,
+                };
+            let rejected: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM proposal_debate_trail WHERE proposal_id=$1 AND body_metadata->>'kind'='human_feedback_disposition_rejection_v1' AND body_metadata->>'human_feedback_entry_id'=$2 AND body_metadata->>'rejected_disposition_entry_id'=$3)")
+                .bind(&input.proposal_id)
+                .bind(&input.debate_entry_id)
+                .bind(disposition_entry_id)
+                .fetch_one(&mut *tx)
+                .await?;
+            if !structured_matches || rejected {
+                return Err(Error::InvalidTransition(
+                    "selected feedback disposition is not pending".into(),
+                ));
+            }
+            if let Some(revision_seq) = revision {
+                let valid_revision: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM proposal_revisions WHERE proposal_id=$1 AND seq=$2)",
+                )
+                .bind(&input.proposal_id)
+                .bind(revision_seq)
+                .fetch_one(&mut *tx)
+                .await?;
+                if revision_seq <= debate.against_revision_seq || !valid_revision {
+                    return Err(Error::InvalidData(
+                        "fixed revision must exist on the proposal and be newer than the objection"
+                            .into(),
+                    ));
+                }
+            }
+        }
         sqlx::query("UPDATE proposal_feedback f SET resolved_at=to_char(transaction_timestamp() AT TIME ZONE 'utc','YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'),resolved_revision_seq=$1,resolved_by_user_id=$2 FROM proposal_feedback_refinement_sources s WHERE s.injection_id=$3 AND f.id=s.source_feedback_id AND f.proposal_id=$4").bind(revision).bind(djinn_core::auth_context::current_user_id()).bind(&injection.id).bind(&input.proposal_id).execute(&mut *tx).await?;
         let injection:ProposalFeedbackRefinementInjection=sqlx::query_as("UPDATE proposal_feedback_refinement_injections SET state=$1,accepted_disposition=$2,accepted_revision_seq=$3,accepted_reason=$4,accepted_at=to_char(transaction_timestamp() AT TIME ZONE 'utc','YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'),accepted_by_user_id=$5 WHERE id=$6 RETURNING id,proposal_id,root_feedback_id,generation,state,cutoff_at,cutoff_feedback_id,round,debate_entry_id,accepted_disposition,accepted_revision_seq,accepted_reason,accepted_at,accepted_by_user_id,created_at,updated_at").bind(state).bind(disposition).bind(revision).bind(&reason).bind(djinn_core::auth_context::current_user_id()).bind(&input.injection_id).fetch_one(&mut *tx).await?;
         let debate:ProposalDebateTrail=sqlx::query_as("UPDATE proposal_debate_trail SET resolved_at=to_char(transaction_timestamp() AT TIME ZONE 'utc','YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'),resolved_by_user_id=$1,reopened_at=NULL,reopened_by_user_id=NULL WHERE id=$2 RETURNING id,proposal_id,kind,body,blocking,agent_role,author_kind,author_user_id,author_model,source_task_id,against_revision_seq,round,body_metadata::text AS body_metadata,resolved_at,resolved_by_user_id,reopened_at,reopened_by_user_id,created_at,updated_at").bind(djinn_core::auth_context::current_user_id()).bind(&input.debate_entry_id).fetch_one(&mut *tx).await?;
@@ -1274,6 +1386,117 @@ impl ProposalRepository {
             debate_entry: debate,
             source_feedback_ids: sources,
             replayed: false,
+        })
+    }
+
+    /// Atomically retire one pending structured disposition and append the
+    /// Judge's needs-work verdict. Lock ordering intentionally matches accepted
+    /// disposition write-back: injection, linked debate, selected disposition.
+    pub async fn reject_feedback_refinement_disposition(
+        &self,
+        input: FeedbackRefinementRejectionInput,
+    ) -> Result<FeedbackRefinementRejectionResult> {
+        self.db.ensure_initialized().await?;
+        let reason = input.reason.trim();
+        if reason.is_empty() {
+            return Err(Error::InvalidData("reject reason must be non-empty".into()));
+        }
+        let mut tx = self.db.pool().begin().await?;
+        let injection: ProposalFeedbackRefinementInjection = sqlx::query_as("SELECT id,proposal_id,root_feedback_id,generation,state,cutoff_at,cutoff_feedback_id,round,debate_entry_id,accepted_disposition,accepted_revision_seq,accepted_reason,accepted_at,accepted_by_user_id,created_at,updated_at FROM proposal_feedback_refinement_injections WHERE id=$1 FOR UPDATE")
+            .bind(&input.injection_id)
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or_else(|| Error::InvalidData("feedback injection not found".into()))?;
+        if injection.proposal_id != input.proposal_id
+            || injection.root_feedback_id != input.root_feedback_id
+            || injection.generation != input.generation
+            || injection.debate_entry_id.as_deref() != Some(input.debate_entry_id.as_str())
+        {
+            return Err(Error::InvalidData(
+                "feedback rejection links do not match injection".into(),
+            ));
+        }
+        if injection.state != "injected" {
+            return Err(Error::InvalidTransition(
+                "feedback generation is not open for rejection".into(),
+            ));
+        }
+        let debate: ProposalDebateTrail = sqlx::query_as("SELECT id,proposal_id,kind,body,blocking,agent_role,author_kind,author_user_id,author_model,source_task_id,against_revision_seq,round,body_metadata::text AS body_metadata,resolved_at,resolved_by_user_id,reopened_at,reopened_by_user_id,created_at,updated_at FROM proposal_debate_trail WHERE id=$1 FOR UPDATE")
+            .bind(&input.debate_entry_id)
+            .fetch_one(&mut *tx)
+            .await?;
+        if debate.proposal_id != input.proposal_id
+            || debate.kind != "human_feedback"
+            || debate.resolved_at.is_some()
+            || debate.reopened_at.is_some()
+        {
+            return Err(Error::InvalidTransition(
+                "feedback obligation is not open for rejection".into(),
+            ));
+        }
+        let candidate: ProposalDebateTrail = sqlx::query_as("SELECT id,proposal_id,kind,body,blocking,agent_role,author_kind,author_user_id,author_model,source_task_id,against_revision_seq,round,body_metadata::text AS body_metadata,resolved_at,resolved_by_user_id,reopened_at,reopened_by_user_id,created_at,updated_at FROM proposal_debate_trail WHERE id=$1 FOR UPDATE")
+            .bind(&input.disposition_entry_id)
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or_else(|| Error::InvalidTransition("selected feedback disposition is not pending".into()))?;
+        let metadata: serde_json::Value =
+            serde_json::from_str(candidate.body_metadata.as_deref().unwrap_or("null"))?;
+        let structured = metadata.as_object().is_some_and(|object| {
+            object.get("kind").and_then(|v| v.as_str()) == Some("human_feedback_disposition_v1")
+                && object
+                    .get("human_feedback_entry_id")
+                    .and_then(|v| v.as_str())
+                    == Some(input.debate_entry_id.as_str())
+        });
+        let already_rejected: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM proposal_debate_trail WHERE proposal_id=$1 AND body_metadata->>'kind'='human_feedback_disposition_rejection_v1' AND body_metadata->>'human_feedback_entry_id'=$2 AND body_metadata->>'rejected_disposition_entry_id'=$3)")
+            .bind(&input.proposal_id)
+            .bind(&input.debate_entry_id)
+            .bind(&input.disposition_entry_id)
+            .fetch_one(&mut *tx)
+            .await?;
+        if candidate.proposal_id != input.proposal_id
+            || candidate.kind != "rebuttal"
+            || candidate.agent_role != "advocate"
+            || !structured
+            || already_rejected
+        {
+            return Err(Error::InvalidTransition(
+                "selected feedback disposition is not pending".into(),
+            ));
+        }
+        let body = format!("needs-work: {reason}");
+        let verdict_metadata = serde_json::json!({
+            "kind": "human_feedback_disposition_rejection_v1",
+            "human_feedback_entry_id": input.debate_entry_id,
+            "rejected_disposition_entry_id": input.disposition_entry_id,
+        });
+        let verdict_entry = self
+            .add_debate_trail_entry_in_tx(
+                &mut tx,
+                ProposalDebateTrailCreateInput {
+                    proposal_id: &input.proposal_id,
+                    kind: "verdict",
+                    body: &body,
+                    blocking: true,
+                    agent_role: "judge",
+                    author_kind: "agent",
+                    author_model: None,
+                    source_task_id: None,
+                    against_revision_seq: debate.against_revision_seq,
+                    round: debate.round,
+                    body_metadata: Some(&verdict_metadata),
+                },
+            )
+            .await?;
+        tx.commit().await?;
+        self.events
+            .send(DjinnEventEnvelope::proposal_debate_trail_created(
+                &input.proposal_id,
+                &verdict_entry,
+            ));
+        Ok(FeedbackRefinementRejectionResult {
+            debate_entry: debate,
+            verdict_entry,
         })
     }
 
@@ -1551,6 +1774,23 @@ impl ProposalRepository {
         )
         .fetch_all(self.db.pool())
         .await?)
+    }
+
+    /// Read the immutable generation and ordered snapshots linked to a debate row.
+    pub async fn feedback_refinement_generation_for_debate(
+        &self,
+        debate_entry_id: &str,
+    ) -> Result<Option<FeedbackRefinementGeneration>> {
+        self.db.ensure_initialized().await?;
+        let Some(injection) = sqlx::query_as::<_, ProposalFeedbackRefinementInjection>(
+            "SELECT id,proposal_id,root_feedback_id,generation,state,cutoff_at,cutoff_feedback_id,round,debate_entry_id,accepted_disposition,accepted_revision_seq,accepted_reason,accepted_at,accepted_by_user_id,created_at,updated_at FROM proposal_feedback_refinement_injections WHERE debate_entry_id=$1",
+        ).bind(debate_entry_id).fetch_optional(self.db.pool()).await? else {
+            return Ok(None);
+        };
+        let sources = sqlx::query_as::<_, ProposalFeedbackRefinementSource>(
+            "SELECT injection_id,source_feedback_id,source_ordinal,source_parent_id,source_author_kind,source_author_user_id,source_author_model,source_body,source_severity,source_created_at,captured_at FROM proposal_feedback_refinement_sources WHERE injection_id=$1 ORDER BY source_ordinal",
+        ).bind(&injection.id).fetch_all(self.db.pool()).await?;
+        Ok(Some(FeedbackRefinementGeneration { injection, sources }))
     }
 
     /// Get a single debate-trail entry by id.
@@ -4732,7 +4972,7 @@ fn proposal_sort_to_sql(sort: &str) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, Barrier, Mutex};
 
     use djinn_core::events::{DjinnEventEnvelope, EventBus};
 
@@ -4780,6 +5020,79 @@ mod tests {
         }
     }
 
+    async fn feedback_accept_reject_fixture(
+        db: &Database,
+    ) -> (
+        Proposal,
+        FeedbackRefinementCapture,
+        ProposalDebateTrail,
+        FeedbackRefinementDispositionInput,
+    ) {
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let proposal = repo
+            .create(create_input("feedback accept reject lifecycle"))
+            .await
+            .unwrap();
+        repo.add_feedback(ProposalFeedbackCreateInput {
+            proposal_id: &proposal.id,
+            parent_id: None,
+            author_kind: "user",
+            author_model: None,
+            body: "captured blocking human feedback",
+        })
+        .await
+        .unwrap();
+        let capture = repo
+            .capture_feedback_refinement_boundary(&proposal.id)
+            .await
+            .unwrap()
+            .captures
+            .pop()
+            .unwrap();
+        let disposition = feedback_accept_reject_append_disposition(
+            &repo,
+            &proposal.id,
+            &capture.debate_entry,
+            "not appropriate for this proposal",
+        )
+        .await;
+        let input = FeedbackRefinementDispositionInput {
+            proposal_id: proposal.id.clone(),
+            injection_id: capture.injection.id.clone(),
+            root_feedback_id: capture.injection.root_feedback_id.clone(),
+            generation: capture.injection.generation,
+            debate_entry_id: capture.debate_entry.id.clone(),
+            disposition: FeedbackRefinementDisposition::WontFix {
+                reason: "not appropriate for this proposal".into(),
+            },
+        };
+        (proposal, capture, disposition, input)
+    }
+
+    async fn feedback_accept_reject_append_disposition(
+        repo: &ProposalRepository,
+        proposal_id: &str,
+        feedback_entry: &ProposalDebateTrail,
+        reason: &str,
+    ) -> ProposalDebateTrail {
+        let metadata = serde_json::json!({"kind": "human_feedback_disposition_v1", "human_feedback_entry_id": feedback_entry.id, "disposition": "wont_fix", "reason": reason});
+        repo.add_debate_trail_entry(ProposalDebateTrailCreateInput {
+            proposal_id,
+            kind: "rebuttal",
+            body: "structured Advocate disposition",
+            blocking: false,
+            agent_role: "advocate",
+            author_kind: "agent",
+            author_model: None,
+            source_task_id: None,
+            against_revision_seq: feedback_entry.against_revision_seq,
+            round: feedback_entry.round,
+            body_metadata: Some(&metadata),
+        })
+        .await
+        .unwrap()
+    }
+
     fn create_input_with_ac<'a>(
         title: &'a str,
         body: &'a str,
@@ -4792,6 +5105,152 @@ mod tests {
             status: None,
             body_format: None,
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn feedback_accept_reject_race_allows_exactly_one_terminal_transition() {
+        let db = test_db();
+        let (proposal, capture, disposition, accept_input) =
+            feedback_accept_reject_fixture(&db).await;
+        let reject_input = FeedbackRefinementRejectionInput {
+            proposal_id: proposal.id.clone(),
+            injection_id: capture.injection.id.clone(),
+            root_feedback_id: capture.injection.root_feedback_id.clone(),
+            generation: capture.injection.generation,
+            debate_entry_id: capture.debate_entry.id.clone(),
+            disposition_entry_id: disposition.id.clone(),
+            reason: "different resolution required".into(),
+        };
+        let barrier = Arc::new(Barrier::new(2));
+        let accept_repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let reject_repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let accept_barrier = barrier.clone();
+        let reject_barrier = barrier.clone();
+        let selected_id = disposition.id.clone();
+        let accept = tokio::spawn(async move {
+            accept_barrier.wait();
+            accept_repo
+                .dispose_feedback_refinement_generation_for_disposition(accept_input, selected_id)
+                .await
+        });
+        let reject = tokio::spawn(async move {
+            reject_barrier.wait();
+            reject_repo
+                .reject_feedback_refinement_disposition(reject_input)
+                .await
+        });
+        let accepted = accept.await.unwrap();
+        let rejected = reject.await.unwrap();
+        assert_eq!(
+            usize::from(accepted.is_ok()) + usize::from(rejected.is_ok()),
+            1
+        );
+
+        let state: String = sqlx::query_scalar(
+            "SELECT state FROM proposal_feedback_refinement_injections WHERE id=$1",
+        )
+        .bind(&capture.injection.id)
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        let resolved: Option<String> =
+            sqlx::query_scalar("SELECT resolved_at FROM proposal_debate_trail WHERE id=$1")
+                .bind(&capture.debate_entry.id)
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+        let disposition_rows: i64 = sqlx::query_scalar("SELECT count(*) FROM proposal_debate_trail WHERE id=$1 AND body_metadata->>'kind'='human_feedback_disposition_v1'").bind(&disposition.id).fetch_one(db.pool()).await.unwrap();
+        assert_eq!(disposition_rows, 1);
+        if accepted.is_ok() {
+            assert_eq!(state, "wont_fix");
+            assert!(resolved.is_some());
+            let resolved_sources: i64 = sqlx::query_scalar("SELECT count(*) FROM proposal_feedback_refinement_sources s JOIN proposal_feedback f ON f.id=s.source_feedback_id WHERE s.injection_id=$1 AND f.resolved_at IS NOT NULL").bind(&capture.injection.id).fetch_one(db.pool()).await.unwrap();
+            assert_eq!(resolved_sources, 1);
+            let needs_work: i64 = sqlx::query_scalar("SELECT count(*) FROM proposal_debate_trail WHERE proposal_id=$1 AND agent_role='judge' AND kind='verdict' AND body LIKE 'needs-work:%'").bind(&proposal.id).fetch_one(db.pool()).await.unwrap();
+            assert_eq!(
+                needs_work, 0,
+                "acceptance leaves no latest or any Judge needs-work verdict"
+            );
+        } else {
+            assert_eq!(state, "injected");
+            assert!(resolved.is_none());
+            assert!(matches!(accepted, Err(Error::InvalidTransition(_))));
+            let rejection_markers: i64 = sqlx::query_scalar("SELECT count(*) FROM proposal_debate_trail WHERE proposal_id=$1 AND body_metadata->>'kind'='human_feedback_disposition_rejection_v1' AND body_metadata->>'rejected_disposition_entry_id'=$2").bind(&proposal.id).bind(&disposition.id).fetch_one(db.pool()).await.unwrap();
+            assert_eq!(rejection_markers, 1);
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn feedback_accept_reject_reject_after_accept_preserves_verdict_state() {
+        let db = test_db();
+        let (proposal, capture, disposition, input) = feedback_accept_reject_fixture(&db).await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        repo.dispose_feedback_refinement_generation_for_disposition(input, disposition.id.clone())
+            .await
+            .unwrap();
+        let before: (i64, Option<String>) = sqlx::query_as("SELECT count(*), max(created_at) FROM proposal_debate_trail WHERE proposal_id=$1 AND agent_role='judge' AND kind='verdict'").bind(&proposal.id).fetch_one(db.pool()).await.unwrap();
+        let error = repo
+            .reject_feedback_refinement_disposition(FeedbackRefinementRejectionInput {
+                proposal_id: proposal.id.clone(),
+                injection_id: capture.injection.id.clone(),
+                root_feedback_id: capture.injection.root_feedback_id.clone(),
+                generation: capture.injection.generation,
+                debate_entry_id: capture.debate_entry.id.clone(),
+                disposition_entry_id: disposition.id,
+                reason: "too late".into(),
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(error, Error::InvalidTransition(_)));
+        let after: (i64, Option<String>) = sqlx::query_as("SELECT count(*), max(created_at) FROM proposal_debate_trail WHERE proposal_id=$1 AND agent_role='judge' AND kind='verdict'").bind(&proposal.id).fetch_one(db.pool()).await.unwrap();
+        assert_eq!(
+            after, before,
+            "rejection cannot append a later Judge verdict"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn feedback_accept_reject_accept_after_reject_requires_new_disposition() {
+        let db = test_db();
+        let (proposal, capture, rejected, input) = feedback_accept_reject_fixture(&db).await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        repo.reject_feedback_refinement_disposition(FeedbackRefinementRejectionInput {
+            proposal_id: proposal.id.clone(),
+            injection_id: capture.injection.id.clone(),
+            root_feedback_id: capture.injection.root_feedback_id.clone(),
+            generation: capture.injection.generation,
+            debate_entry_id: capture.debate_entry.id.clone(),
+            disposition_entry_id: rejected.id.clone(),
+            reason: "needs a replacement".into(),
+        })
+        .await
+        .unwrap();
+        let error = repo
+            .dispose_feedback_refinement_generation_for_disposition(input.clone(), rejected.id)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, Error::InvalidTransition(_)));
+        let replacement = feedback_accept_reject_append_disposition(
+            &repo,
+            &proposal.id,
+            &capture.debate_entry,
+            "new structured disposition",
+        )
+        .await;
+        let accepted = repo
+            .dispose_feedback_refinement_generation_for_disposition(
+                FeedbackRefinementDispositionInput {
+                    disposition: FeedbackRefinementDisposition::WontFix {
+                        reason: "new structured disposition".into(),
+                    },
+                    ..input
+                },
+                replacement.id,
+            )
+            .await
+            .unwrap();
+        assert_eq!(accepted.injection.state, "wont_fix");
+        assert!(accepted.debate_entry.resolved_at.is_some());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

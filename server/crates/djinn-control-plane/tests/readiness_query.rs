@@ -1,4 +1,8 @@
-//! Real-Postgres service tests for owner-authorized readiness queries.
+//! Real-Postgres service tests for authenticated readiness queries.
+//!
+//! The fixture project is deliberately owned by a GitHub *organization* while
+//! every seeded user has a personal login, reproducing the production shape in
+//! which no user's `github_login` can ever equal the project's `github_owner`.
 
 use djinn_control_plane::readiness_query::{
     ReadinessProjectQuery, ReadinessQueryError, ReadinessQueryService, ReadinessRunQuery,
@@ -9,10 +13,13 @@ use djinn_db::{
     ProjectRepository, ReadinessRepository, UserRepository,
 };
 
+/// The fixture project's GitHub owner. An organization, never a person.
+const ORGANIZATION_OWNER: &str = "query-org";
+
 #[tokio::test]
-async fn owner_reads_active_precedence_and_complete_repository_detail_projection() {
+async fn any_authenticated_user_reads_active_precedence_and_complete_detail_projection() {
     let db = Database::ephemeral().await.expect("real postgres database");
-    let (project_id, owner_id, outsider_id) = seed_project_and_users(&db, "query-owner").await;
+    let (project_id, reader_id, other_user_id) = seed_project_and_users(&db, "query-owner").await;
     let repository = ReadinessRepository::new(db.clone());
 
     let latest_terminal = repository
@@ -55,9 +62,9 @@ async fn owner_reads_active_precedence_and_complete_repository_detail_projection
 
     let service = ReadinessQueryService::new(db.clone());
     let summary = service
-        .active_or_latest(project_query(&project_id, &owner_id))
+        .active_or_latest(project_query(&project_id, &reader_id))
         .await
-        .expect("owner reads active run")
+        .expect("authenticated user reads active run")
         .expect("active run exists");
     assert_eq!(
         summary.id, active.id,
@@ -66,9 +73,9 @@ async fn owner_reads_active_precedence_and_complete_repository_detail_projection
     assert_eq!(summary.skill_version, "1.0.0");
 
     let detail = service
-        .run_detail(run_query(&project_id, &active.id, &owner_id))
+        .run_detail(run_query(&project_id, &active.id, &reader_id))
         .await
-        .expect("owner reads complete detail");
+        .expect("authenticated user reads complete detail");
     assert_eq!(detail.run.id, active.id);
     assert_eq!(detail.areas.len(), 1);
     assert_eq!(detail.areas[0].area_key, "frontend");
@@ -83,22 +90,31 @@ async fn owner_reads_active_precedence_and_complete_repository_detail_projection
     assert_eq!(detail.suggestions[0].dedupe_key, "auth-remediation");
     assert_eq!(detail.events[0].event_kind, "fixture_completed");
 
-    let forbidden = service
-        .active_or_latest(project_query(&project_id, &outsider_id))
+    // A second authenticated user, whose personal login likewise cannot equal
+    // the organization that owns the project, reads exactly the same run.
+    let other_summary = service
+        .active_or_latest(project_query(&project_id, &other_user_id))
         .await
-        .expect_err("non-owner cannot read runs");
-    assert!(matches!(
-        forbidden,
-        ReadinessQueryError::UnauthorizedOwner { .. }
-    ));
+        .expect("a second authenticated user reads the same run")
+        .expect("active run exists");
+    assert_eq!(other_summary.id, active.id);
+    assert_eq!(
+        service
+            .run_detail(run_query(&project_id, &active.id, &other_user_id))
+            .await
+            .expect("a second authenticated user reads the same detail")
+            .run
+            .id,
+        active.id
+    );
 }
 
 #[tokio::test]
 async fn query_failures_are_explicit_without_cross_project_detail_leakage() {
     let db = Database::ephemeral().await.expect("real postgres database");
-    let (left_project, owner_id, _) = seed_project_and_users(&db, "query-left").await;
+    let (left_project, user_id, _) = seed_project_and_users(&db, "query-left").await;
     let right = ProjectRepository::new(db.clone(), EventBus::noop())
-        .create("query-right", "query-owner", "right")
+        .create("query-right", ORGANIZATION_OWNER, "right")
         .await
         .expect("right project");
     let right_run = ReadinessRepository::new(db.clone())
@@ -109,7 +125,7 @@ async fn query_failures_are_explicit_without_cross_project_detail_leakage() {
 
     assert!(matches!(
         service
-            .active_or_latest(project_query("missing-project", &owner_id))
+            .active_or_latest(project_query("missing-project", &user_id))
             .await,
         Err(ReadinessQueryError::ProjectNotFound { .. })
     ));
@@ -121,12 +137,12 @@ async fn query_failures_are_explicit_without_cross_project_detail_leakage() {
     ));
     assert!(matches!(
         service
-            .run_detail(run_query(&left_project, "missing-run", &owner_id))
+            .run_detail(run_query(&left_project, "missing-run", &user_id))
             .await,
         Err(ReadinessQueryError::RunNotFound { .. })
     ));
     let mismatch = service
-        .run_detail(run_query(&left_project, &right_run.id, &owner_id))
+        .run_detail(run_query(&left_project, &right_run.id, &user_id))
         .await
         .expect_err("run cannot be read through another project");
     assert!(matches!(
@@ -160,19 +176,28 @@ fn run_query(project_id: &str, run_id: &str, owner_id: &str) -> ReadinessRunQuer
     }
 }
 
+/// Seed the production shape: the project belongs to a GitHub organization and
+/// both users have personal logins, so neither login equals `github_owner`.
 async fn seed_project_and_users(db: &Database, name: &str) -> (String, String, String) {
     let project = ProjectRepository::new(db.clone(), EventBus::noop())
-        .create(name, "query-owner", name)
+        .create(name, ORGANIZATION_OWNER, name)
         .await
         .expect("project");
     let users = UserRepository::new(db.clone());
-    let owner = users
-        .upsert_from_github(602_001, "query-owner", None, None)
+    let reader = users
+        .upsert_from_github(602_001, "query-reader", None, None)
         .await
-        .expect("owner");
-    let outsider = users
-        .upsert_from_github(602_002, "query-outsider", None, None)
+        .expect("reader");
+    let other = users
+        .upsert_from_github(602_002, "query-other", None, None)
         .await
-        .expect("outsider");
-    (project.id, owner.id, outsider.id)
+        .expect("other user");
+    for login in [&reader.github_login, &other.github_login] {
+        assert_ne!(
+            login.to_ascii_lowercase(),
+            ORGANIZATION_OWNER,
+            "the fixture must keep every personal login distinct from the owning organization"
+        );
+    }
+    (project.id, reader.id, other.id)
 }

@@ -190,7 +190,7 @@ mod tests {
             .await
             .expect("resolve credential through extraction callback");
         match resolved {
-            djinn_slot::helpers::ProviderCredential::ApiKey(key_name, api_key) => {
+            djinn_slot::helpers::ProviderCredential::ApiKey(_, key_name, api_key) => {
                 assert_eq!(key_name, "ANTHROPIC_API_KEY");
                 assert_eq!(api_key, "sk-test-extraction");
             }

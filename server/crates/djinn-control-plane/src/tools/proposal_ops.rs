@@ -504,6 +504,21 @@ pub struct ProposalDebateTrailModel {
     pub against_revision_seq: i32,
     /// Debate round (1-based).
     pub round: i32,
+    /// Materialized feedback root and generation; absent on ordinary debate rows.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_feedback_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub generation: Option<i32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_rows: Vec<ProposalFeedbackSourceRowModel>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disposition_state: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub accepted_disposition: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub accepted_revision_seq: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub accepted_reason: Option<String>,
     /// When set, the entry has been resolved. `None` while open.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resolved_at: Option<String>,
@@ -533,6 +548,13 @@ impl From<&djinn_core::models::ProposalDebateTrail> for ProposalDebateTrailModel
             source_task_id: d.source_task_id.clone(),
             against_revision_seq: d.against_revision_seq,
             round: d.round,
+            source_feedback_id: None,
+            generation: None,
+            source_rows: Vec::new(),
+            disposition_state: None,
+            accepted_disposition: None,
+            accepted_revision_seq: None,
+            accepted_reason: None,
             resolved_at: d.resolved_at.clone(),
             resolved_by_user_id: d.resolved_by_user_id.clone(),
             reopened_at: d.reopened_at.clone(),
@@ -541,6 +563,23 @@ impl From<&djinn_core::models::ProposalDebateTrail> for ProposalDebateTrailModel
             updated_at: d.updated_at.clone(),
         }
     }
+}
+
+/// One verbatim snapshot captured into a feedback refinement generation.
+#[derive(Serialize, Deserialize, Clone, schemars::JsonSchema)]
+pub struct ProposalFeedbackSourceRowModel {
+    pub source_feedback_id: String,
+    pub source_ordinal: i32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_parent_id: Option<String>,
+    pub author_kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub author_user_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub author_model: Option<String>,
+    pub body: String,
+    pub severity: String,
+    pub created_at: String,
 }
 
 /// A memory note linked to a proposal via its graduated epics/tasks.

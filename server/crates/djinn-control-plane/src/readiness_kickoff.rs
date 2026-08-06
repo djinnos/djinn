@@ -1,4 +1,8 @@
-//! Owner-authorized readiness kickoff service.
+//! Authenticated readiness kickoff service.
+//!
+//! Any authenticated user may start a readiness run for any known project, and
+//! the run is attributed to whoever started it so token and cost accounting
+//! lands on the runner.
 //!
 //! The public request deliberately contains only client-owned routing data. The
 //! repository snapshot and native skill pin are resolved from persisted and
@@ -79,10 +83,6 @@ pub enum ReadinessKickoffError {
     AuthenticatedOwnerNotFound {
         user_id: String,
     },
-    UnauthorizedOwner {
-        project_id: String,
-        user_id: String,
-    },
     ImmutableSnapshotUnavailable {
         project_id: String,
     },
@@ -110,13 +110,6 @@ impl fmt::Display for ReadinessKickoffError {
             Self::AuthenticatedOwnerNotFound { user_id } => {
                 write!(f, "authenticated readiness owner not found: {user_id}")
             }
-            Self::UnauthorizedOwner {
-                project_id,
-                user_id,
-            } => write!(
-                f,
-                "authenticated user {user_id} does not own project {project_id}"
-            ),
             Self::ImmutableSnapshotUnavailable { project_id } => {
                 write!(
                     f,
@@ -142,7 +135,7 @@ impl fmt::Display for ReadinessKickoffError {
 
 impl std::error::Error for ReadinessKickoffError {}
 
-/// Performs all authorization and immutable-context resolution before calling
+/// Performs all authentication and immutable-context resolution before calling
 /// c09x's transactional materializer.
 #[derive(Clone)]
 pub struct ReadinessKickoffService<R> {
@@ -173,22 +166,20 @@ where
             .ok_or_else(|| ReadinessKickoffError::ProjectNotFound {
                 project_id: request.project_id.clone(),
             })?;
-        let owner = UserRepository::new(self.db.clone())
+        // Any authenticated user may start readiness. The project's
+        // `github_owner` is usually a GitHub organization, so requiring it to
+        // equal a personal `github_login` made readiness unreachable for every
+        // organization-owned repository. Authentication still has to hold: a
+        // caller whose user row does not exist is rejected here rather than
+        // silently admitted, and the resolved user becomes the run's creator so
+        // token and cost accounting follows whoever ran it.
+        let runner = UserRepository::new(self.db.clone())
             .get_by_id(&request.authenticated_owner_id)
             .await
             .map_err(persistence_error)?
             .ok_or_else(|| ReadinessKickoffError::AuthenticatedOwnerNotFound {
                 user_id: request.authenticated_owner_id.clone(),
             })?;
-        if !project
-            .github_owner
-            .eq_ignore_ascii_case(&owner.github_login)
-        {
-            return Err(ReadinessKickoffError::UnauthorizedOwner {
-                project_id: request.project_id,
-                user_id: owner.id,
-            });
-        }
 
         let snapshot = match RepoGraphGenerationRepository::new(self.db.clone())
             .select_project_current_graph(&project.id)
@@ -228,7 +219,7 @@ where
         ReadinessRepository::new(self.db.clone())
             .materialize_kickoff(MaterializeReadinessKickoff {
                 project_id: project.id,
-                creator_user_id: owner.id,
+                creator_user_id: runner.id,
                 idempotency_key: request.idempotency_key,
                 repository_snapshot: snapshot,
                 skill_name: READINESS_SKILL_NAME.into(),
