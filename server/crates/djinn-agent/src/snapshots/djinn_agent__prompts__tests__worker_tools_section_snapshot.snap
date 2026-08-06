@@ -1,6 +1,5 @@
 ---
 source: crates/djinn-agent/src/prompts/tests.rs
-assertion_line: 509
 expression: section
 ---
 - `task_show(id)`

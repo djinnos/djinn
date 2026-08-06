@@ -18615,6 +18615,123 @@
     "concurrent_safe": false
   },
   {
+    "name": "proposal_feedback_withdraw",
+    "description": "Withdraw a feedback entry as its original author. Withdrawal preserves captured feedback-refinement source snapshots and closes a materialized human-feedback obligation only after every captured blocking source row is withdrawn.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "required": [
+        "id"
+      ],
+      "type": "object",
+      "properties": {
+        "id": {
+          "description": "Feedback entry UUID. Only its original author may withdraw it.",
+          "type": "string"
+        }
+      }
+    },
+    "outputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$defs": {
+        "ProposalFeedbackModel": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "proposal_id": {
+              "type": "string"
+            },
+            "parent_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "author_kind": {
+              "description": "`user` or `ai`.",
+              "type": "string"
+            },
+            "author_user_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "author_model": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "body": {
+              "type": "string"
+            },
+            "resolved_at": {
+              "description": "When set, the feedback is resolved (addressed or dismissed) and collapsed\nout of the active thread.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "resolved_revision_seq": {
+              "description": "The revision that addressed this feedback (`null` when dismissed without\na spec change).",
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int32"
+            },
+            "resolved_by_user_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "created_at": {
+              "type": "string"
+            },
+            "updated_at": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "proposal_id",
+            "author_kind",
+            "body",
+            "created_at",
+            "updated_at"
+          ]
+        }
+      },
+      "type": "object",
+      "properties": {
+        "feedback": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProposalFeedbackModel"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "readOnly": false,
+    "destructive": true,
+    "idempotent": false,
+    "openWorld": false,
+    "concurrent_safe": false
+  },
+  {
     "name": "proposal_graduate",
     "description": "Kick off an approved proposal: hand it to the Planner (a single `epic_breakdown` task on the first primary target) which reads the spec + target repos and breaks it down into epics across the targets, set status to `building`, and record the build owner (must be a participant — the author or a sign-off giver; defaults to the caller). Requires the proposal to be `approved` and the engineer role (or admin).",
     "inputSchema": {
