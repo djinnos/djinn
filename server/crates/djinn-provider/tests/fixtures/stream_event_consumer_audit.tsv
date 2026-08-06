@@ -6,7 +6,13 @@
 # site identifier<TAB>all StreamEvent arms at this site
 # Source files may contain test-only mocks/emitters, but they are not match
 # sites and are excluded by stream_event_consumer_audit.rs' path classification.
-server/crates/djinn-agent/src/actors/slot/supervisor_runner.rs::await_report_from_stream#1	runtime stream arms: Report, StageStep, grouped AssistantDelta/ToolCall/FinalizePayload/StageOutcome, and None terminal handling
+server/crates/djinn-agent/src/actors/slot/supervisor_runner.rs::attach_and_await_terminal_report#1	attach-result coordination match containing the nested Report, StageStep, ordinary-frame, stream-close, and receive-error handling sites classified below
+server/crates/djinn-agent/src/actors/slot/supervisor_runner.rs::attach_and_await_terminal_report#2	pre-observation stream arms: authoritative Report, StageStep progress tracking, grouped ordinary-frame ignore, and None stream-close handling
+server/crates/djinn-agent/src/actors/slot/supervisor_runner.rs::attach_and_await_terminal_report#3	post-observation non-blocking drain arms: authoritative Report and grouped ordinary-frame ignore/error completion
+server/crates/djinn-agent/src/actors/slot/supervisor_runner.rs::attach_and_await_terminal_report#4	deadline-boundary non-blocking drain arms: authoritative Report and grouped ordinary-frame ignore/error settlement
+server/crates/djinn-agent/src/actors/slot/supervisor_runner.rs::attach_and_await_terminal_report#5	bounded-grace stream arms: authoritative Report, grouped ordinary-frame deadline recheck, and None stream-close handling
+server/crates/djinn-agent/src/actors/slot/supervisor_runner.rs::attach_and_await_terminal_report#6	ordinary-frame deadline recheck drain arms: authoritative Report and grouped ordinary-frame ignore/error settlement
+server/crates/djinn-agent/src/actors/slot/supervisor_runner.rs::attach_and_await_terminal_report#7	grace-expiry final non-blocking drain arms: authoritative Report and grouped ordinary-frame ignore/error settlement
 server/crates/djinn-agent/src/direct_services.rs::append_direct_response_event#1	shared direct-invocation and planner response match ownership; arms classified: Delta, Thinking, ThinkingDelta, ThinkingBlockComplete, Usage, Done
 server/crates/djinn-compaction/src/summarizer.rs::call_llm_for_summary#1	consumer arms: text Delta append, Usage, Done; grouped ignore arm for non-text Delta/Thinking/ThinkingDelta/ThinkingBlockComplete
 server/crates/djinn-provider/src/completion.rs::collect_completion#1	text-only consumer arms: text Delta append, Usage, Done; grouped ignore arm for non-text Delta/Thinking/ThinkingDelta/ThinkingBlockComplete
