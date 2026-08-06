@@ -954,7 +954,10 @@ pub async fn run_reply_loop(
                             credential_id: credential_record_id.to_owned(),
                             request_id: format!("{session_id}:{turns}"),
                             owner_pod_uid: None,
-                            generation: 0,
+                            // Phase A rejects non-positive generations for both
+                            // shadow decisions and enforced leases. The first
+                            // slot-owned attempt generation is therefore one.
+                            generation: 1,
                         },
                     )
                     .await

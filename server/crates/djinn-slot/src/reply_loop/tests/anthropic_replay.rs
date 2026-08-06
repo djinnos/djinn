@@ -33,7 +33,9 @@ const FIRST_RESPONSE: &str = concat!(
 
 const FINAL_RESPONSE: &str = concat!(
     "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":17}}}\n\n",
+    "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
     "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"done\"}}\n\n",
+    "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
     "data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":2}}\n\n",
     "data: {\"type\":\"message_stop\"}\n\n"
 );
@@ -121,16 +123,49 @@ fn assistant_content(request: &Value) -> &[Value] {
         .expect("assistant replay content")
 }
 
+async fn seed_shadow_admission(harness: &ReplyLoopHarness, provider: &AnthropicProvider) {
+    let plan = djinn_provider::provider::LlmProvider::provider_attempt_plan_v1(
+        provider,
+        "test-credential",
+        &harness.conv,
+        &[],
+        None,
+    )
+    .expect("Anthropic fixture must use the covered B1 route");
+    sqlx::query(
+        "INSERT INTO credentials (id, provider_id, key_name, encrypted_value) \
+         VALUES ($1, $2, 'anthropic-replay', decode('00', 'hex'))",
+    )
+    .bind("test-credential")
+    .bind(&plan.scope.provider_id)
+    .execute(harness.slot_ctx.db.pool())
+    .await
+    .expect("seed replay credential identity");
+    sqlx::query(
+        "INSERT INTO model_turn_pools \
+         (credential_id, provider_id, model_id, phase, capability_state, learned_concurrency) \
+         VALUES ($1, $2, $3, 'shadow', 'supported', 1)",
+    )
+    .bind("test-credential")
+    .bind(&plan.scope.provider_id)
+    .bind(&plan.scope.model_id)
+    .execute(harness.slot_ctx.db.pool())
+    .await
+    .expect("seed covered shadow admission pool");
+}
+
 #[tokio::test]
 async fn signed_thinking_tool_continuation_reloads_persisted_history_on_wire() {
     let (server, base_url) = RecordedServer::spawn().await;
     let provider = provider(base_url);
     let mut harness = ReplyLoopHarness::new().await;
+    seed_shadow_admission(&harness, &provider).await;
 
     let result = harness.run(&provider, &[]).await;
     assert!(
         result.0.is_ok(),
-        "reply loop should finish after the local final response"
+        "reply loop should finish after the local final response: {:?}",
+        result.0
     );
     assert_eq!(
         count_persisted_assistant_messages(&harness.slot_ctx, &harness.session_id).await,
