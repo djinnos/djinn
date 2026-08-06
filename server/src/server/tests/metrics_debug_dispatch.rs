@@ -27,13 +27,18 @@ async fn setup_wedged_dispatch_state() -> WedgedDispatchState {
     state.initialize_agent_handles_for_tests().await;
 
     // Use the breaker wedge because it is the least flaky end-to-end signal:
-    // three synthetic provider failures open the per-user/model breaker
+    // three synthetic stalled invocations open the per-user/model breaker
     // synchronously, and both `/metrics` and `/debug/dispatch-state` read that
-    // shared tracker without needing a real worker pod or log scraping.
+    // shared tracker without needing a real worker pod or log scraping. A
+    // regular failure opens for only five seconds, which can truthfully become
+    // half-open while this test seeds its database-backed admin session under a
+    // loaded CI runner. A stall is the production failover transition with a
+    // five-minute minimum cooldown; it keeps this intentionally wedged state
+    // open while preserving the observable three-failure count.
     for _ in 0..3 {
         state
             .health_tracker()
-            .record_failure(Some(WEDGE_SCOPE), WEDGE_MODEL);
+            .record_stall(Some(WEDGE_SCOPE), WEDGE_MODEL, true);
     }
 
     let app = server::router(state, false);
