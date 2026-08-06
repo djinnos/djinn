@@ -1395,7 +1395,22 @@ pub struct TaskRunSupervisor {
     mirror: Arc<MirrorManager>,
     services: Arc<dyn SupervisorServices>,
     clock: Arc<dyn Clock>,
+    /// Test-only chronological observer held by this supervisor instance.
+    /// A run-scoped observer cannot leak events across parallel fixtures.
+    #[cfg(test)]
+    run_observer: Option<TestRunObserver>,
 }
+
+#[cfg(test)]
+#[derive(Debug, Clone)]
+struct TransitionCall {
+    task_id: String,
+    action: String,
+    reason: Option<String>,
+}
+
+#[cfg(test)]
+type TestRunObserver = Arc<std::sync::Mutex<Vec<TransitionCall>>>;
 
 impl TaskRunSupervisor {
     /// Construct a supervisor bound to the given services.
@@ -1412,6 +1427,8 @@ impl TaskRunSupervisor {
             mirror,
             services,
             clock: Arc::new(SystemClock::new()),
+            #[cfg(test)]
+            run_observer: None,
         }
     }
 
@@ -1426,6 +1443,36 @@ impl TaskRunSupervisor {
             mirror,
             services,
             clock,
+            #[cfg(test)]
+            run_observer: None,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_test_run_observer(
+        mirror: Arc<MirrorManager>,
+        services: Arc<dyn SupervisorServices>,
+        observer: TestRunObserver,
+    ) -> Self {
+        Self {
+            mirror,
+            services,
+            clock: Arc::new(SystemClock::new()),
+            run_observer: Some(observer),
+        }
+    }
+
+    #[cfg(test)]
+    fn record_test_run_operation(&self, operation: impl Into<String>) {
+        if let Some(observer) = &self.run_observer {
+            observer
+                .lock()
+                .expect("run observer mutex poisoned")
+                .push(TransitionCall {
+                    task_id: String::new(),
+                    action: operation.into(),
+                    reason: None,
+                });
         }
     }
 
@@ -3591,12 +3638,12 @@ impl TaskRunSupervisor {
                 );
             } else {
                 let _ = timed_workspace_teardown(&*self.clock, workspace, CleanupTrigger::Error);
-                cleanup_cargo_target_run_dir(&run_id, &*self.clock).await;
+                self.cleanup_cargo_target_run_dir(&run_id).await;
                 return Err(SupervisorError::UpdateTaskRunStatus(e));
             }
         }
 
-        cleanup_cargo_target_run_dir(&run_id, &*self.clock).await;
+        self.cleanup_cargo_target_run_dir(&run_id).await;
 
         // Explicitly tear down the owned ephemeral workspace, recording exactly
         // one `workspace_cleanup_seconds` sample with the trigger classified
@@ -3614,6 +3661,8 @@ impl TaskRunSupervisor {
             orderly_shutdown,
         );
         let _ = timed_workspace_teardown(&*self.clock, workspace, trigger);
+        #[cfg(test)]
+        self.record_test_run_operation("workspace_teardown_complete");
 
         info!(task_run_id = %report.task_run_id, ?report.outcome, "task-run finished");
         Ok(report)
@@ -3631,6 +3680,12 @@ impl TaskRunSupervisor {
     /// swallowed — the cancellation IS the success, and a transport
     /// error here just means the host's per-task-run dispatch will fall
     /// back to its Job-status polling path.
+    async fn cleanup_cargo_target_run_dir(&self, task_run_id: &str) {
+        #[cfg(test)]
+        self.record_test_run_operation("cargo_target_cleanup_invoked");
+        cleanup_cargo_target_run_dir(task_run_id, &*self.clock).await;
+    }
+
     async fn finalize_interrupted(
         &self,
         run_id: String,
@@ -3648,7 +3703,7 @@ impl TaskRunSupervisor {
                  host will fall back to Job-status polling"
             );
         }
-        cleanup_cargo_target_run_dir(&run_id, &*self.clock).await;
+        self.cleanup_cargo_target_run_dir(&run_id).await;
 
         info!(task_run_id = %run_id, "task-run interrupted (early-cancel path)");
         Ok(TaskRunReport {
@@ -3735,13 +3790,6 @@ mod tests {
     /// stops compiling.
     #[allow(dead_code)]
     fn _obj_safe(_: &dyn SupervisorServices) {}
-
-    #[derive(Debug, Clone)]
-    struct TransitionCall {
-        task_id: String,
-        action: String,
-        reason: Option<String>,
-    }
 
     const PLANNING_ISSUE_TYPES: [&str; 4] =
         ["planning", "decomposition", "review", "epic_breakdown"];
@@ -3918,8 +3966,15 @@ mod tests {
             })
         }
 
-        async fn open_pr(&self, _spec: &TaskRunSpec, _task: &Task) -> TaskRunOutcome {
-            // Post-barrier publication is deliberately outside this family test.
+        async fn open_pr(&self, _spec: &TaskRunSpec, task: &Task) -> TaskRunOutcome {
+            self.transitions
+                .lock()
+                .expect("transitions mutex poisoned")
+                .push(TransitionCall {
+                    task_id: task.id.clone(),
+                    action: "open_pr_complete".into(),
+                    reason: None,
+                });
             TaskRunOutcome::WorkerSubmitted
         }
 
@@ -4503,7 +4558,8 @@ mod tests {
                 expected_role: role,
                 transitions: Arc::clone(&calls),
             });
-            let supervisor = TaskRunSupervisor::new(mirror, services);
+            let supervisor =
+                TaskRunSupervisor::with_test_run_observer(mirror, services, Arc::clone(&calls));
             supervisor
                 .run(TaskRunSpec {
                     task_run_id: format!("run-{id}"),
@@ -4703,6 +4759,26 @@ mod tests {
             )
             .await;
             assert_completed_after_durable_transition(&calls, action);
+            if action == "task_review_approve" {
+                let settlement = calls
+                    .iter()
+                    .position(|call| call.action == "settle:Completed")
+                    .expect("completed settlement");
+                for operation in [
+                    "open_pr_complete",
+                    "cargo_target_cleanup_invoked",
+                    "workspace_teardown_complete",
+                ] {
+                    let index = calls
+                        .iter()
+                        .position(|call| call.action == operation)
+                        .unwrap_or_else(|| panic!("missing {operation}: {calls:?}"));
+                    assert!(
+                        settlement < index,
+                        "Completed settlement must precede {operation}: {calls:?}"
+                    );
+                }
+            }
         }
 
         let mut guarded_planner = review.clone();
