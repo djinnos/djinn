@@ -188,13 +188,13 @@ async fn finalize_terminal_runtime_observation(
     task_repo: &TaskRepository,
     task: &Task,
     app_state: &AgentContext,
-    reason: &str,
-    failure_cause: SessionFailureCause,
+    observation: &TerminalRuntimeObservation,
 ) {
     // Runtime implementations normally provide sanitized diagnostics, but this
     // is the durable evidence boundary. A backend regression must not write
     // credential-shaped text into activity rows or tracing fields.
-    let reason = sanitize_terminal_runtime_diagnostic(reason);
+    let reason = sanitize_terminal_runtime_diagnostic(&observation.diagnostic);
+    let failure_cause = failure_cause_for_terminal_runtime_observation(observation);
     // Settle first: activity is diagnostic and must not delay the durable
     // cause-bearing transition once the report deadline has elapsed.
     let session_repo =
@@ -1398,14 +1398,7 @@ pub async fn execute_runtime_report_phase(
     // run until diagnostic cleanup and teardown below have completed.
     if let Some(observation) = await_outcome.terminal_runtime_observation.as_ref() {
         let task_repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
-        finalize_terminal_runtime_observation(
-            &task_repo,
-            task,
-            app_state,
-            &observation.diagnostic,
-            failure_cause_for_terminal_runtime_observation(observation),
-        )
-        .await;
+        finalize_terminal_runtime_observation(&task_repo, task, app_state, observation).await;
     }
     abort_runtime_cancel_watcher(cancel_task).await;
     // Best-effort: capture pod log tail before teardown deletes the Job.
@@ -1538,7 +1531,8 @@ async fn attach_and_await_terminal_report(
                 }
             };
             if let Some(mut observation) = observation {
-                observation.diagnostic = sanitize_terminal_runtime_diagnostic(&observation.diagnostic);
+                observation.diagnostic =
+                    sanitize_terminal_runtime_diagnostic(&observation.diagnostic);
                 // Capture the single absolute deadline *before* draining. The
                 // drain is non-blocking and neither it nor later stream frames
                 // may buy additional time after runtime evidence arrived.
@@ -3617,8 +3611,7 @@ mod tests {
                 &TaskRepository::new(context.db.clone(), context.event_bus.clone()),
                 &task,
                 &context,
-                &observation.diagnostic,
-                failure_cause_for_terminal_runtime_observation(&observation),
+                &observation,
             )
             .await;
             let stored = sessions
@@ -3650,17 +3643,29 @@ mod tests {
             .await
             .expect("seed session");
         let raw = "Pod status token=ghp_credential_shaped_secret OOMKilled";
+        let observation =
+            TerminalRuntimeObservation::new(TerminalRuntimeEvidenceKind::Infrastructure, raw);
         finalize_terminal_runtime_observation(
             &TaskRepository::new(context.db.clone(), context.event_bus.clone()),
             &task,
             &context,
-            raw,
-            SessionFailureCause::Infrastructure,
+            &observation,
         )
         .await;
-        let stored = sessions.get(&session.id).await.expect("read").expect("session");
-        assert_eq!(stored.failure_cause, Some(SessionFailureCause::Infrastructure));
-        assert!(!serde_json::to_string(&stored).expect("serialize").contains(raw));
+        let stored = sessions
+            .get(&session.id)
+            .await
+            .expect("read")
+            .expect("session");
+        assert_eq!(
+            stored.failure_cause,
+            Some(SessionFailureCause::Infrastructure)
+        );
+        assert!(
+            !serde_json::to_string(&stored)
+                .expect("serialize")
+                .contains(raw)
+        );
         let activity = TaskRepository::new(context.db, context.event_bus)
             .list_activity(&task.id)
             .await
@@ -3673,5 +3678,4 @@ mod tests {
         assert!(evidence.payload.contains("OOMKilled"));
         assert!(evidence.payload.contains("[redacted]"));
     }
-
 }
