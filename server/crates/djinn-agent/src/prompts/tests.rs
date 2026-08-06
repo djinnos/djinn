@@ -993,10 +993,15 @@ fn proposal_address_prompt_distinguishes_simple_update_from_block_patch() {
 fn proposal_address_prompt_preserves_existing_feedback_rules() {
     let prompt = include_str!("../../../djinn-roles/src/prompts/proposal_address.md");
 
-    // Existing rules must survive.
+    // The Advocate's feedback rule must use the source-scoped disposition
+    // channel and preserve Judge-only global resolution.
     assert!(
-        prompt.contains("proposal_feedback_resolve"),
-        "proposal_address.md must still mention proposal_feedback_resolve"
+        prompt.contains("proposal_feedback_disposition"),
+        "proposal_address.md must mention proposal_feedback_disposition"
+    );
+    assert!(
+        !prompt.contains("proposal_debate_resolve("),
+        "proposal_address.md must not instruct the Advocate to globally resolve objections"
     );
     assert!(
         prompt.contains("building"),
