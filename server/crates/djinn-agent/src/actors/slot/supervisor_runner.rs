@@ -12,7 +12,7 @@ use djinn_db::repositories::task_run::TaskRunRepository;
 use djinn_db::repositories::task_run_outcome::TaskRunOutcomeRepository;
 use djinn_db::{TaskRepository, task_branch_name};
 use djinn_runtime::{
-    BiStream, InfraDeathLogTailCapture, LoopGuardKind, ProviderFailureClass, ResolvedCredentials,
+    InfraDeathLogTailCapture, LoopGuardKind, ProviderFailureClass, ResolvedCredentials,
     ResumeLifecycleMetadata, SessionRuntime, StreamEvent, TaskRunOutcome, TaskRunReport,
     TerminalRuntimeEvidenceKind, TerminalRuntimeObservation, TestRuntime,
 };
@@ -27,15 +27,6 @@ use super::helpers::{
     build_restamp_target, conflict_context_for_dispatch, default_target_branch,
     load_provider_credential, parse_model_id, refresh_oauth_credential_after_401,
 };
-
-fn supervisor_rpc_span(op: &'static str, session_id: &str, task_id: &str) -> tracing::Span {
-    tracing::info_span!(
-        "djinn.supervisor.rpc",
-        op,
-        session_id = %session_id,
-        task_id = %task_id,
-    )
-}
 
 /// Pre-session liveness deadline (8 min default).
 const PRE_SESSION_DEADLINE_SECS_DEFAULT: u64 = 480;
@@ -66,12 +57,6 @@ fn pre_session_deadline() -> std::time::Duration {
 pub struct PreSessionTimeout {
     pub step: String,
     pub elapsed_secs: u64,
-}
-
-/// Outcome of awaiting the worker's terminal report or pre-session deadline.
-enum ReportAwait {
-    Report(Option<TaskRunReport>),
-    PreSessionTimeout(PreSessionTimeout),
 }
 
 /// Best-effort mark credential revoked and emit event after a 401.
@@ -1490,8 +1475,11 @@ async fn attach_and_await_terminal_report(
             let observation = loop {
                 tokio::select! {
                     biased;
-                    // This ordering makes a report authoritative when both
-                    // receive and runtime-watch are ready in one turn.
+                    // Observe terminal evidence before consuming an ordinary
+                    // frame. The final non-blocking drain below still makes a
+                    // simultaneously queued Report authoritative, while a
+                    // backlog of other frames cannot postpone the deadline.
+                    evidence = &mut runtime_watch => break Some(evidence),
                     frame = bistream.events_rx.recv(), if !events_closed => match frame {
                         Some(StreamEvent::Report(report)) => {
                             initial_report = Some(report);
@@ -1520,7 +1508,6 @@ async fn attach_and_await_terminal_report(
                         }
                         session_reached = true;
                     }
-                    evidence = &mut runtime_watch => break Some(evidence),
                 }
             };
             if let Some(observation) = observation {
@@ -2351,124 +2338,10 @@ async fn teardown_cargo_target_run_dir(app_state: &AgentContext, task_run_id: &s
     }
 }
 
-/// Drain a BiStream until the terminal Report frame, returning the TaskRunReport.
-async fn await_report_from_stream(
-    mut stream: BiStream,
-    kill: &CancellationToken,
-    db: djinn_db::Database,
-    task_run_id: &str,
-    task_id: &str,
-    pre_session_deadline: std::time::Duration,
-) -> anyhow::Result<ReportAwait> {
-    let started = tokio::time::Instant::now();
-    let deadline = tokio::time::sleep(pre_session_deadline);
-    tokio::pin!(deadline);
-    let mut last_step = PRE_SESSION_INITIAL_STEP.to_string();
-    let mut session_reached = false;
-    loop {
-        tokio::select! {
-            biased;
-            _ = kill.cancelled() => {
-                let rpc_span = supervisor_rpc_span("kill", task_run_id, task_id);
-                async move {
-                    tracing::debug!(
-                        op = "kill",
-                        session_id = %task_run_id,
-                        task_id = %task_id,
-                        "supervisor dispatch: kill fired while awaiting terminal report; \
-                         proceeding to teardown"
-                    );
-                }
-                .instrument(rpc_span)
-                .await;
-                return Ok(ReportAwait::Report(None));
-            }
-            _ = &mut deadline, if !session_reached => {
-                let session_repo =
-                    djinn_db::SessionRepository::new(db.clone(), djinn_core::events::EventBus::new(|_| {}));
-                match session_repo.exists_for_task_run(task_run_id).await {
-                    Ok(true) => {
-                        session_reached = true;
-                        continue;
-                    }
-                    Ok(false) => {}
-                    Err(e) => {
-                        tracing::warn!(
-                            task_id = %task_id,
-                            task_run_id = %task_run_id,
-                            error = %e,
-                            "supervisor dispatch: pre-session deadline DB check failed; \
-                             disarming watchdog (falling back to coarse reapers)"
-                        );
-                        session_reached = true;
-                        continue;
-                    }
-                }
-                let elapsed_secs = started.elapsed().as_secs();
-                tracing::warn!(
-                    task_id = %task_id,
-                    task_run_id = %task_run_id,
-                    stage_step = %last_step,
-                    elapsed_secs,
-                    "supervisor dispatch: pre-session liveness deadline breached before first turn"
-                );
-                return Ok(ReportAwait::PreSessionTimeout(PreSessionTimeout {
-                    step: last_step.clone(),
-                    elapsed_secs,
-                }));
-            }
-            frame = stream.events_rx.recv() => {
-                match frame {
-                    Some(StreamEvent::Report(report)) => {
-                        let rpc_span = supervisor_rpc_span("terminal_report", task_run_id, task_id);
-                        let report_task_run_id = report.task_run_id.clone();
-                        async move {
-                            tracing::info!(
-                                event = "supervisor.rpc.terminal_report",
-                                op = "terminal_report",
-                                session_id = %task_run_id,
-                                task_id = %task_id,
-                                task_run_id = %report_task_run_id,
-                            );
-                        }
-                        .instrument(rpc_span)
-                        .await;
-                        return Ok(ReportAwait::Report(Some(report)));
-                    }
-                    Some(StreamEvent::StageStep { step }) => {
-                        // means the first turn is reached — disarm the deadline.
-                        if step == djinn_runtime::STAGE_STEP_FIRST_TURN {
-                            session_reached = true;
-                        }
-                        last_step = step;
-                    }
-                    Some(
-                        StreamEvent::AssistantDelta { .. }
-                        | StreamEvent::ToolCall { .. }
-                        | StreamEvent::FinalizePayload { .. }
-                        | StreamEvent::StageOutcome { .. },
-                    ) => {
-                        session_reached = true;
-                    }
-                    // path persists state as a side effect; the caller uses the
-                    // teardown stub for the terminal status.
-                    None => return Ok(ReportAwait::Report(None)),
-                }
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use djinn_runtime::RoleKind;
-    use std::collections::HashMap;
-    use std::sync::{Arc as StdArc, Mutex as StdMutex, OnceLock};
-    use tracing::field::{Field, Visit};
-    use tracing_subscriber::layer::Context;
-    use tracing_subscriber::prelude::*;
-    use tracing_subscriber::{Layer, registry::LookupSpan};
 
     #[test]
     fn resize_birth_gate_refuses_every_missing_input_while_leaf_v1_continues() {
@@ -2504,84 +2377,6 @@ mod tests {
         }
         validate_resize_birth_gate_inputs(ResizeV2, true, &acquired, true, "run")
             .expect("complete resize-v2 inputs pass the preflight");
-    }
-    #[derive(Clone, Debug, Default)]
-    struct RecordedSpan {
-        name: String,
-        fields: HashMap<String, String>,
-    }
-    #[derive(Clone, Default)]
-    struct RecordingLayer {
-        spans: StdArc<StdMutex<Vec<RecordedSpan>>>,
-    }
-    impl RecordingLayer {
-        fn spans(&self) -> Vec<RecordedSpan> {
-            self.spans.lock().expect("recorded spans mutex").clone()
-        }
-    }
-    #[derive(Default)]
-    struct FieldRecorder {
-        fields: HashMap<String, String>,
-    }
-    impl Visit for FieldRecorder {
-        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
-            self.fields.insert(
-                field.name().to_owned(),
-                format!("{value:?}").trim_matches('\"').to_owned(),
-            );
-        }
-    }
-    impl<S> Layer<S> for RecordingLayer
-    where
-        S: tracing::Subscriber,
-        S: for<'lookup> LookupSpan<'lookup>,
-    {
-        fn on_new_span(
-            &self,
-            attrs: &tracing::span::Attributes<'_>,
-            id: &tracing::Id,
-            ctx: Context<'_, S>,
-        ) {
-            let mut recorder = FieldRecorder::default();
-            attrs.record(&mut recorder);
-            if let Some(span) = ctx.span(id) {
-                span.extensions_mut().insert(RecordedSpan {
-                    name: attrs.metadata().name().to_owned(),
-                    fields: recorder.fields,
-                });
-            }
-        }
-        fn on_record(
-            &self,
-            id: &tracing::Id,
-            values: &tracing::span::Record<'_>,
-            ctx: Context<'_, S>,
-        ) {
-            if let Some(span) = ctx.span(id) {
-                let mut recorder = FieldRecorder::default();
-                values.record(&mut recorder);
-                if let Some(recorded) = span.extensions_mut().get_mut::<RecordedSpan>() {
-                    recorded.fields.extend(recorder.fields);
-                }
-            }
-        }
-        fn on_close(&self, id: tracing::Id, ctx: Context<'_, S>) {
-            if let Some(span) = ctx.span(&id)
-                && let Some(recorded) = span.extensions().get::<RecordedSpan>()
-            {
-                self.spans
-                    .lock()
-                    .expect("recorded spans mutex")
-                    .push(recorded.clone());
-            }
-        }
-    }
-    async fn tracing_lock() -> tokio::sync::OwnedMutexGuard<()> {
-        static LOCK: OnceLock<StdArc<tokio::sync::Mutex<()>>> = OnceLock::new();
-        LOCK.get_or_init(|| StdArc::new(tokio::sync::Mutex::new(())))
-            .clone()
-            .lock_owned()
-            .await
     }
     fn report(id: &str, stages: Vec<RoleKind>, outcome: TaskRunOutcome) -> TaskRunReport {
         TaskRunReport {
@@ -2846,279 +2641,6 @@ mod tests {
             assert_eq!(resume_flow(flow, true), flow);
             assert_eq!(resume_flow(flow, false), flow);
         }
-    }
-    fn lazy_db() -> djinn_db::Database {
-        djinn_db::Database::open_in_memory().expect("lazy in-memory db handle")
-    }
-    fn no_deadline() -> std::time::Duration {
-        std::time::Duration::from_secs(3600)
-    }
-    fn expect_report(outcome: ReportAwait) -> Option<TaskRunReport> {
-        match outcome {
-            ReportAwait::Report(report) => report,
-            ReportAwait::PreSessionTimeout(t) => panic!("unexpected pre-session timeout: {t:?}"),
-        }
-    }
-    #[tokio::test]
-    async fn await_report_returns_streamed_report() {
-        let (bistream, events_tx, _requests_rx) = BiStream::new_in_memory(8);
-        let kill = CancellationToken::new();
-        let streamed = report(
-            "id-B",
-            vec![RoleKind::Worker],
-            TaskRunOutcome::Closed {
-                reason: "done".into(),
-            },
-        );
-        events_tx
-            .send(StreamEvent::Report(streamed))
-            .await
-            .expect("send report");
-        let got = expect_report(
-            await_report_from_stream(
-                bistream,
-                &kill,
-                lazy_db(),
-                "session-id-b",
-                "task-id-b",
-                no_deadline(),
-            )
-            .await
-            .expect("await ok"),
-        );
-        assert_eq!(got.expect("some report").task_run_id, "id-B");
-    }
-    #[tokio::test]
-    async fn supervisor_rpc_terminal_report_span_records_fields() {
-        let _tracing_guard = tracing_lock().await;
-        let layer = RecordingLayer::default();
-        let subscriber = tracing_subscriber::registry().with(layer.clone());
-        let _subscriber_guard = tracing::subscriber::set_default(subscriber);
-        let (bistream, events_tx, _requests_rx) = BiStream::new_in_memory(8);
-        let kill = CancellationToken::new();
-        events_tx
-            .send(StreamEvent::Report(report(
-                "run-terminal",
-                vec![RoleKind::Worker],
-                TaskRunOutcome::Interrupted,
-            )))
-            .await
-            .unwrap();
-        let got = expect_report(
-            await_report_from_stream(
-                bistream,
-                &kill,
-                lazy_db(),
-                "session-terminal",
-                "task-terminal",
-                no_deadline(),
-            )
-            .await
-            .expect("await ok"),
-        );
-        assert!(got.is_some());
-        let span = layer
-            .spans()
-            .into_iter()
-            .find(|span| span.name == "djinn.supervisor.rpc")
-            .expect("djinn.supervisor.rpc span recorded");
-        assert_eq!(
-            span.fields.get("op").map(String::as_str),
-            Some("terminal_report")
-        );
-        assert_eq!(
-            span.fields.get("session_id").map(String::as_str),
-            Some("session-terminal")
-        );
-        assert_eq!(
-            span.fields.get("task_id").map(String::as_str),
-            Some("task-terminal")
-        );
-    }
-    #[tokio::test]
-    async fn await_report_drops_non_terminal_frames_then_returns_report() {
-        let (bistream, events_tx, _requests_rx) = BiStream::new_in_memory(8);
-        let kill = CancellationToken::new();
-        events_tx
-            .send(StreamEvent::AssistantDelta {
-                session_id: "s1".into(),
-                text: "thinking".into(),
-            })
-            .await
-            .unwrap();
-        events_tx
-            .send(StreamEvent::Report(report(
-                "id-B",
-                vec![RoleKind::Worker],
-                TaskRunOutcome::Interrupted,
-            )))
-            .await
-            .unwrap();
-        let got = expect_report(
-            await_report_from_stream(
-                bistream,
-                &kill,
-                lazy_db(),
-                "session-id-b",
-                "task-id-b",
-                no_deadline(),
-            )
-            .await
-            .expect("await ok"),
-        );
-        assert_eq!(got.expect("some report").task_run_id, "id-B");
-    }
-    #[tokio::test]
-    async fn await_report_returns_none_when_kill_fires() {
-        let (bistream, _events_tx, _requests_rx) = BiStream::new_in_memory(8);
-        let kill = CancellationToken::new();
-        kill.cancel();
-        let got = expect_report(
-            await_report_from_stream(
-                bistream,
-                &kill,
-                lazy_db(),
-                "session-kill",
-                "task-kill",
-                no_deadline(),
-            )
-            .await
-            .expect("await ok"),
-        );
-        assert!(got.is_none());
-    }
-    #[tokio::test]
-    async fn supervisor_rpc_kill_span_records_fields() {
-        let _tracing_guard = tracing_lock().await;
-        let layer = RecordingLayer::default();
-        let subscriber = tracing_subscriber::registry().with(layer.clone());
-        let _subscriber_guard = tracing::subscriber::set_default(subscriber);
-        let (bistream, _events_tx, _requests_rx) = BiStream::new_in_memory(8);
-        let kill = CancellationToken::new();
-        kill.cancel();
-        let got = expect_report(
-            await_report_from_stream(
-                bistream,
-                &kill,
-                lazy_db(),
-                "session-kill",
-                "task-kill",
-                no_deadline(),
-            )
-            .await
-            .expect("await ok"),
-        );
-        assert!(got.is_none());
-        let span = layer
-            .spans()
-            .into_iter()
-            .find(|span| span.name == "djinn.supervisor.rpc")
-            .expect("djinn.supervisor.rpc kill span recorded");
-        assert_eq!(span.fields.get("op").map(String::as_str), Some("kill"));
-        assert_eq!(
-            span.fields.get("session_id").map(String::as_str),
-            Some("session-kill")
-        );
-        assert_eq!(
-            span.fields.get("task_id").map(String::as_str),
-            Some("task-kill")
-        );
-    }
-    #[tokio::test]
-    async fn await_report_returns_none_when_channel_closes_without_report() {
-        let (bistream, events_tx, _requests_rx) = BiStream::new_in_memory(8);
-        let kill = CancellationToken::new();
-        drop(events_tx);
-        let got = expect_report(
-            await_report_from_stream(
-                bistream,
-                &kill,
-                lazy_db(),
-                "session-closed",
-                "task-closed",
-                no_deadline(),
-            )
-            .await
-            .expect("await ok"),
-        );
-        assert!(got.is_none());
-    }
-    #[tokio::test]
-    async fn await_report_pre_session_deadline_fires_naming_last_step() {
-        let db = lazy_db();
-        db.ensure_initialized().await.expect("schema ready");
-        let (bistream, events_tx, _requests_rx) = BiStream::new_in_memory(8);
-        let kill = CancellationToken::new();
-        events_tx
-            .send(StreamEvent::StageStep {
-                step: djinn_runtime::stage_step::WORKSPACE_ATTACH.to_string(),
-            })
-            .await
-            .unwrap();
-        events_tx
-            .send(StreamEvent::StageStep {
-                step: djinn_runtime::stage_step::CONTEXT_BUILD.to_string(),
-            })
-            .await
-            .unwrap();
-        let outcome = await_report_from_stream(
-            bistream,
-            &kill,
-            db,
-            "run-hang-no-session",
-            "task-hang",
-            std::time::Duration::from_millis(150),
-        )
-        .await
-        .expect("await ok");
-        match outcome {
-            ReportAwait::PreSessionTimeout(t) => {
-                assert_eq!(
-                    t.step,
-                    djinn_runtime::stage_step::CONTEXT_BUILD,
-                    "timeout names the last stage step reached"
-                );
-            }
-            ReportAwait::Report(_) => panic!("expected pre-session timeout, got a report"),
-        }
-        drop(events_tx);
-    }
-    #[tokio::test]
-    async fn await_report_first_turn_marker_disarms_tiny_deadline() {
-        let (bistream, events_tx, _requests_rx) = BiStream::new_in_memory(8);
-        let kill = CancellationToken::new();
-        events_tx
-            .send(StreamEvent::StageStep {
-                step: djinn_runtime::STAGE_STEP_FIRST_TURN.to_string(),
-            })
-            .await
-            .unwrap();
-        events_tx
-            .send(StreamEvent::Report(report(
-                "run-live",
-                vec![RoleKind::Worker],
-                TaskRunOutcome::Closed {
-                    reason: "done".into(),
-                },
-            )))
-            .await
-            .unwrap();
-        let got = expect_report(
-            await_report_from_stream(
-                bistream,
-                &kill,
-                lazy_db(),
-                "run-live",
-                "task-live",
-                std::time::Duration::from_millis(50),
-            )
-            .await
-            .expect("await ok"),
-        );
-        assert_eq!(
-            got.expect("report after first turn").task_run_id,
-            "run-live"
-        );
     }
     #[test]
     fn environmental_non_attempt_has_no_provider_breaker_signal() {
