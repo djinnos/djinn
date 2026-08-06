@@ -38,6 +38,12 @@ pub struct ProposalFeedbackResolveParams {
     pub resolved_revision_seq: Option<i32>,
 }
 
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct ProposalFeedbackWithdrawParams {
+    /// Feedback entry UUID. Only its original author may withdraw it.
+    pub id: String,
+}
+
 // ── Response helpers ────────────────────────────────────────────────────────
 
 pub(super) fn err_feedback(error: impl Into<String>) -> ProposalFeedbackResponse {
@@ -122,6 +128,42 @@ impl DjinnMcpServer {
                 error: None,
             }),
             Err(e) => Json(err_feedback(e.to_string())),
+        }
+    }
+
+    /// Withdraw feedback as its original author without rewriting proposal history.
+    #[tool(
+        description = "Withdraw a feedback entry as its original author. Withdrawal preserves captured feedback-refinement source snapshots and closes a materialized human-feedback obligation only after every captured blocking source row is withdrawn."
+    )]
+    pub async fn proposal_feedback_withdraw(
+        &self,
+        Parameters(p): Parameters<ProposalFeedbackWithdrawParams>,
+    ) -> Json<ProposalFeedbackResponse> {
+        let repo = ProposalRepository::new(self.state.db().clone(), self.state.event_bus());
+        let Some(feedback) = repo.get_feedback(&p.id).await.ok().flatten() else {
+            return Json(err_feedback(format!("feedback not found: {}", p.id)));
+        };
+        let Some(author_user_id) = feedback.author_user_id.as_deref() else {
+            return Json(err_feedback(
+                "feedback withdrawal requires an original authenticated author",
+            ));
+        };
+        let Some(current_user_id) = djinn_core::auth_context::current_user_id() else {
+            return Json(err_feedback(
+                "feedback withdrawal requires the original authenticated author",
+            ));
+        };
+        if current_user_id != author_user_id {
+            return Json(err_feedback(
+                "only the original feedback author may withdraw feedback",
+            ));
+        }
+        match repo.withdraw_feedback(&p.id, &current_user_id).await {
+            Ok(feedback) => Json(ProposalFeedbackResponse {
+                feedback: Some((&feedback).into()),
+                error: None,
+            }),
+            Err(error) => Json(err_feedback(error.to_string())),
         }
     }
 }

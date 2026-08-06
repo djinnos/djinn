@@ -488,6 +488,13 @@ impl DjinnMcpServer {
                 >(name, args)?))
                     .await,
             ),
+            "proposal_feedback_withdraw" => map_json(
+                name,
+                self.proposal_feedback_withdraw(Parameters(decode_args::<
+                    ProposalFeedbackWithdrawParams,
+                >(name, args)?))
+                    .await,
+            ),
             "proposal_graduate" => map_json(
                 name,
                 self.proposal_graduate(Parameters(decode_args::<ProposalGraduateParams>(
