@@ -30,7 +30,7 @@ pub struct ReadinessRunRow {
     /// The authenticated user who started this run. Readiness is startable by
     /// any authenticated user, so token and cost accounting follow this field
     /// rather than the project's GitHub owner. `None` only for runs created
-    /// before migration 187 and for direct `create_run` fixtures.
+    /// before migration 188 and for direct `create_run` fixtures.
     pub created_by_user_id: Option<String>,
 }
 
