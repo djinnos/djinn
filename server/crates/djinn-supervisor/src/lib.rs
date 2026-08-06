@@ -1465,14 +1465,15 @@ impl TaskRunSupervisor {
     #[cfg(test)]
     fn record_test_run_operation(&self, operation: impl Into<String>) {
         if let Some(observer) = &self.run_observer {
-            observer
-                .lock()
-                .expect("run observer mutex poisoned")
-                .push(TransitionCall {
-                    task_id: String::new(),
-                    action: operation.into(),
-                    reason: None,
-                });
+            let mut calls = match observer.lock() {
+                Ok(calls) => calls,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            calls.push(TransitionCall {
+                task_id: String::new(),
+                action: operation.into(),
+                reason: None,
+            });
         }
     }
 
