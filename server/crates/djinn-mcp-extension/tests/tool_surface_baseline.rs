@@ -1,6 +1,12 @@
 //! Regression contract for the advertised MCP tool surface.
 //!
-//! Update the checked-in baseline only through:
+//! This fixture is ONE of the artifacts derived from the MCP tool schemas.
+//! Refresh the whole set — this baseline, the insta role snapshots, the
+//! projection corpora and the UI types — with `make tool-goldens` from the
+//! repository root; the set is enumerated in
+//! `scripts/tool-goldens.manifest.json`.
+//!
+//! To rewrite only this file:
 //!
 //! `cargo run -p djinn-mcp-extension --bin regenerate_tool_surface_baseline`
 
@@ -36,8 +42,11 @@ fn generated_tool_surface_matches_reviewed_baseline() {
     assert_eq!(
         generated.as_bytes(),
         FIXTURE.as_bytes(),
-        "generated MCP tool surface differs from the reviewed fixture (generated unique tool count: {tool_count}). \
-         Regenerate with: cargo run -p djinn-mcp-extension --bin regenerate_tool_surface_baseline"
+        "generated MCP tool surface differs from the reviewed fixture (generated unique tool count: {tool_count}).\n\
+         Regenerate EVERY derived tool-schema artifact with one command, from the repository root:\n\
+         \n    make tool-goldens\n\n\
+         (this fixture alone: cargo run -p djinn-mcp-extension --bin regenerate_tool_surface_baseline)\n\
+         The full artifact set lives in scripts/tool-goldens.manifest.json."
     );
     assert!(
         generated.ends_with('\n'),

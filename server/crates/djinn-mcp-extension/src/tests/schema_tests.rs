@@ -9,6 +9,49 @@ use crate::shared_schemas;
 use crate::tool_defs::*;
 use std::collections::BTreeSet;
 
+// ── MCP tool-schema golden plumbing ─────────────────────────────────────────
+//
+// insta's failure output names the mismatched snapshot file and nothing else.
+// That is what made tool-surface changes take several CI cycles to land: the
+// author learned that "a snapshot moved", not that other committed artifacts
+// move with it, and not which command refreshes them all.
+// `tool_golden_snapshot!` forwards to insta unchanged and, on failure only,
+// re-panics with the original diff plus that command.
+
+const TOOL_GOLDEN_HINT: &str = "\n\n\
+    ── this snapshot is an MCP tool-schema golden ──────────────────────────\n\
+    Regenerate EVERY derived tool-schema artifact with one command, from the\n\
+    repository root:\n\
+    \n    make tool-goldens\n\n\
+    The full artifact set lives in scripts/tool-goldens.manifest.json.\n";
+
+fn tool_golden_panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    payload
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| {
+            payload
+                .downcast_ref::<&str>()
+                .map(|text| (*text).to_owned())
+        })
+        .unwrap_or_else(|| "<non-string panic payload>".to_owned())
+}
+
+macro_rules! tool_golden_snapshot {
+    ($($args:tt)*) => {{
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            insta::assert_json_snapshot!($($args)*);
+        }));
+        if let Err(payload) = outcome {
+            panic!(
+                "{}{}",
+                tool_golden_panic_message(payload.as_ref()),
+                TOOL_GOLDEN_HINT
+            );
+        }
+    }};
+}
+
 // ── helpers ────────────────────────────────────────────────────────────
 
 fn tool_names(schemas: &[serde_json::Value]) -> Vec<&str> {
@@ -847,12 +890,12 @@ fn role_tool_schemas_pin_destructive_and_open_world_sets() {
 fn snapshot_worker_tool_names() {
     let schemas = tool_schemas_worker();
     let names = tool_names(&schemas);
-    insta::assert_json_snapshot!("worker_tool_names", names);
+    tool_golden_snapshot!("worker_tool_names", names);
 }
 
 #[test]
 fn snapshot_worker_tool_schemas() {
-    insta::assert_json_snapshot!("worker_tool_schemas", tool_schemas_worker());
+    tool_golden_snapshot!("worker_tool_schemas", tool_schemas_worker());
 }
 
 /// Phase 1 regression guard: the default model-facing tool surface (edit,
@@ -870,65 +913,65 @@ fn phase_1_default_model_facing_tool_surface_unchanged() {
                 .is_some_and(|name| DEFAULT_FACING_TOOLS.contains(&name))
         })
         .collect();
-    insta::assert_json_snapshot!("phase_1_default_model_facing_tool_schemas", default_schemas);
+    tool_golden_snapshot!("phase_1_default_model_facing_tool_schemas", default_schemas);
 }
 
 #[test]
 fn snapshot_reviewer_tool_names() {
     let schemas = tool_schemas_reviewer();
     let names = tool_names(&schemas);
-    insta::assert_json_snapshot!("reviewer_tool_names", names);
+    tool_golden_snapshot!("reviewer_tool_names", names);
 }
 
 #[test]
 fn snapshot_reviewer_tool_schemas() {
-    insta::assert_json_snapshot!("reviewer_tool_schemas", tool_schemas_reviewer());
+    tool_golden_snapshot!("reviewer_tool_schemas", tool_schemas_reviewer());
 }
 
 #[test]
 fn snapshot_lead_tool_names() {
     let schemas = tool_schemas_lead();
     let names = tool_names(&schemas);
-    insta::assert_json_snapshot!("lead_tool_names", names);
+    tool_golden_snapshot!("lead_tool_names", names);
 }
 
 #[test]
 fn snapshot_lead_tool_schemas() {
-    insta::assert_json_snapshot!("lead_tool_schemas", tool_schemas_lead());
+    tool_golden_snapshot!("lead_tool_schemas", tool_schemas_lead());
 }
 
 #[test]
 fn snapshot_planner_tool_names() {
     let schemas = tool_schemas_planner();
     let names = tool_names(&schemas);
-    insta::assert_json_snapshot!("planner_tool_names", names);
+    tool_golden_snapshot!("planner_tool_names", names);
 }
 
 #[test]
 fn snapshot_planner_tool_schemas() {
-    insta::assert_json_snapshot!("planner_tool_schemas", tool_schemas_planner());
+    tool_golden_snapshot!("planner_tool_schemas", tool_schemas_planner());
 }
 
 #[test]
 fn snapshot_architect_tool_names() {
     let schemas = tool_schemas_architect();
     let names = tool_names(&schemas);
-    insta::assert_json_snapshot!("architect_tool_names", names);
+    tool_golden_snapshot!("architect_tool_names", names);
 }
 
 #[test]
 fn snapshot_architect_tool_schemas() {
-    insta::assert_json_snapshot!("architect_tool_schemas", tool_schemas_architect());
+    tool_golden_snapshot!("architect_tool_schemas", tool_schemas_architect());
 }
 
 #[test]
 fn snapshot_lsp_tool_schema() {
-    insta::assert_json_snapshot!("lsp_tool_schema", serde_json::to_value(tool_lsp()).unwrap());
+    tool_golden_snapshot!("lsp_tool_schema", serde_json::to_value(tool_lsp()).unwrap());
 }
 
 #[test]
 fn snapshot_code_graph_tool_schema() {
-    insta::assert_json_snapshot!(
+    tool_golden_snapshot!(
         "code_graph_tool_schema",
         serde_json::to_value(tool_code_graph()).unwrap()
     );
@@ -938,36 +981,36 @@ fn snapshot_code_graph_tool_schema() {
 fn snapshot_advocate_tool_names() {
     let schemas = tool_schemas_advocate();
     let names = tool_names(&schemas);
-    insta::assert_json_snapshot!("advocate_tool_names", names);
+    tool_golden_snapshot!("advocate_tool_names", names);
 }
 
 #[test]
 fn snapshot_advocate_tool_schemas() {
-    insta::assert_json_snapshot!("advocate_tool_schemas", tool_schemas_advocate());
+    tool_golden_snapshot!("advocate_tool_schemas", tool_schemas_advocate());
 }
 
 #[test]
 fn snapshot_adversary_tool_names() {
     let schemas = tool_schemas_adversary();
     let names = tool_names(&schemas);
-    insta::assert_json_snapshot!("adversary_tool_names", names);
+    tool_golden_snapshot!("adversary_tool_names", names);
 }
 
 #[test]
 fn snapshot_adversary_tool_schemas() {
-    insta::assert_json_snapshot!("adversary_tool_schemas", tool_schemas_adversary());
+    tool_golden_snapshot!("adversary_tool_schemas", tool_schemas_adversary());
 }
 
 #[test]
 fn snapshot_judge_tool_names() {
     let schemas = tool_schemas_judge();
     let names = tool_names(&schemas);
-    insta::assert_json_snapshot!("judge_tool_names", names);
+    tool_golden_snapshot!("judge_tool_names", names);
 }
 
 #[test]
 fn snapshot_judge_tool_schemas() {
-    insta::assert_json_snapshot!("judge_tool_schemas", tool_schemas_judge());
+    tool_golden_snapshot!("judge_tool_schemas", tool_schemas_judge());
 }
 
 // ── Evidence-spike profile tests ─────────────────────────────────────────
@@ -976,12 +1019,12 @@ fn snapshot_judge_tool_schemas() {
 fn snapshot_evidence_spike_tool_names() {
     let schemas = tool_schemas_evidence_spike();
     let names = tool_names(&schemas);
-    insta::assert_json_snapshot!("evidence_spike_tool_names", names);
+    tool_golden_snapshot!("evidence_spike_tool_names", names);
 }
 
 #[test]
 fn snapshot_evidence_spike_tool_schemas() {
-    insta::assert_json_snapshot!("evidence_spike_tool_schemas", tool_schemas_evidence_spike());
+    tool_golden_snapshot!("evidence_spike_tool_schemas", tool_schemas_evidence_spike());
 }
 
 /// Helper: collect tool names from a schema list.

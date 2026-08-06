@@ -3,6 +3,7 @@
 //! APIs take a caller-owned transaction so a coordinator can compose them with
 //! proposal mutations. Attempts and transitions are append-only database facts.
 
+use djinn_core::models::task::is_evidence_spike;
 use djinn_core::models::{
     TribunalEvidenceAnchorMethod, TribunalEvidenceDisposition, TribunalEvidenceFinding,
     TribunalEvidenceLifecycle, TribunalEvidenceOutcome, TribunalEvidencePlannedCheck,
@@ -128,6 +129,28 @@ pub struct AllocateTypedEvidenceRetryInput {
     pub finding_id: String,
     pub failed_transition_id: String,
     pub retry_attempt_id: String,
+    /// Reserved before dispatch so dispatch recovery never allocates another task.
+    pub retry_spike_task_id: String,
+    /// Retry attempts retain a distinct immutable plan for return validation.
+    pub evidence_plan_id: Option<String>,
+    pub planned_checks: Vec<PlannedTypedEvidenceCheckInput>,
+    pub demanded_transition_id: String,
+    pub actor_task_id: Option<String>,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DispatchTypedEvidenceRetryInput {
+    pub finding_id: String,
+    pub attempt_id: String,
+    pub spike_task_id: String,
+    pub transition_id: String,
+    pub actor_task_id: Option<String>,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TypedEvidenceRetryDispatchErrorInput {
+    pub finding_id: String,
+    pub attempt_id: String,
+    pub spike_task_id: String,
+    pub error: String,
 }
 /// A Judge-owned terminal decision. `folding_revision` must be an existing spec revision.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -153,6 +176,7 @@ pub struct TypedEvidenceFindingProjection {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TypedEvidenceAttemptAllocation {
     pub attempt_id: String,
+    pub spike_task_id: String,
     pub sequence: i32,
     pub planned_checks: Vec<TribunalEvidencePlannedCheck>,
 }
@@ -663,22 +687,22 @@ impl TypedEvidenceRepository {
         }
         let finding_id: String = attempt.get("finding_id");
         let spike_task_id: String = attempt.get("spike_task_id");
-        let state = lock_state(&mut tx, &finding_id).await?;
-        if state == TribunalEvidenceLifecycle::SpikeActive {
-            let ordinal: i32 = sqlx::query_scalar("SELECT COALESCE(MAX(ordinal),0)+1 FROM typed_evidence_transitions WHERE finding_id=$1")
-                .bind(&finding_id)
-                .fetch_one(&mut *tx)
-                .await?;
-            Self::append_transition(&mut tx, AppendTypedEvidenceTransitionInput {
-                id: uuid::Uuid::now_v7().to_string(),
-                finding_id,
-                ordinal,
-                from_lifecycle: Some(state),
-                to_lifecycle: TribunalEvidenceLifecycle::Failed,
-                actor_task_id: Some(spike_task_id),
-                metadata: serde_json::json!({"validator_version":"TribunalEvidenceReturnV1", "validation_error":code}),
-            }).await?;
-        }
+        require_active_return_attempt(&mut tx, attempt_id, &finding_id, &spike_task_id).await?;
+        let ordinal: i32 = sqlx::query_scalar(
+            "SELECT COALESCE(MAX(ordinal),0)+1 FROM typed_evidence_transitions WHERE finding_id=$1",
+        )
+        .bind(&finding_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        Self::append_transition(&mut tx, AppendTypedEvidenceTransitionInput {
+            id: uuid::Uuid::now_v7().to_string(),
+            finding_id,
+            ordinal,
+            from_lifecycle: Some(TribunalEvidenceLifecycle::SpikeActive),
+            to_lifecycle: TribunalEvidenceLifecycle::Failed,
+            actor_task_id: Some(spike_task_id),
+            metadata: serde_json::json!({"validator_version":"TribunalEvidenceReturnV1", "validation_error":code}),
+        }).await?;
         tx.commit().await?;
         Ok(())
     }
@@ -713,6 +737,13 @@ impl TypedEvidenceRepository {
             if row.get::<String,_>("payload_sha256") != hash { return Err(v1("replay_payload_conflict")); }
             return Ok(TribunalEvidenceReturnResultV1 { validation_id:row.get("id"), outcome:parse_outcome(&row.get::<String,_>("outcome"))?, lifecycle:lock_state(tx,&payload.finding_id).await?, replayed:true });
         }
+        require_active_return_attempt(
+            tx,
+            &payload.attempt_id,
+            &payload.finding_id,
+            &payload.spike_task_id,
+        )
+        .await?;
         let planned = checks(tx, &payload.attempt_id).await?;
         let expected: HashMap<_, _> = planned.iter().map(|c| (c.check_id.as_str(), c)).collect();
         if payload.checks.len() != expected.len() {
@@ -928,7 +959,7 @@ impl TypedEvidenceRepository {
                 "attempt allocation requires demanded or failed finding".into(),
             ));
         }
-        if let Some(row) = sqlx::query("SELECT id,sequence FROM typed_evidence_attempts WHERE finding_id=$1 AND spike_task_id=$2").bind(&input.finding_id).bind(&input.spike_task_id).fetch_optional(&mut **tx).await? { let id: String=row.get("id"); return Ok(TypedEvidenceAttemptAllocation { attempt_id:id.clone(), sequence:row.get("sequence"), planned_checks:checks(tx,&id).await? }); }
+        if let Some(row) = sqlx::query("SELECT id,sequence FROM typed_evidence_attempts WHERE finding_id=$1 AND spike_task_id=$2").bind(&input.finding_id).bind(&input.spike_task_id).fetch_optional(&mut **tx).await? { let id: String=row.get("id"); return Ok(TypedEvidenceAttemptAllocation { attempt_id:id.clone(), spike_task_id: input.spike_task_id.clone(), sequence:row.get("sequence"), planned_checks:checks(tx,&id).await? }); }
         if input.planned_checks.is_empty() {
             return Err(Error::InvalidData(
                 "typed evidence attempt requires planned checks".into(),
@@ -946,9 +977,161 @@ impl TypedEvidenceRepository {
         }
         Ok(TypedEvidenceAttemptAllocation {
             attempt_id: input.attempt_id.clone(),
+            spike_task_id: input.spike_task_id,
             sequence,
             planned_checks: checks(tx, &input.attempt_id).await?,
         })
+    }
+
+    /// Allocate a second immutable attempt only from the latest failure. The
+    /// idempotency row is checked first, so duplicate calls return its identity.
+    pub async fn allocate_retry_in_transaction(
+        tx: &mut Transaction<'_, Postgres>,
+        input: AllocateTypedEvidenceRetryInput,
+    ) -> Result<TypedEvidenceAttemptAllocation> {
+        nonempty(&[
+            &input.finding_id,
+            &input.failed_transition_id,
+            &input.retry_attempt_id,
+            &input.retry_spike_task_id,
+            &input.demanded_transition_id,
+        ])?;
+        if let Some(row) = sqlx::query("SELECT a.id,a.sequence,a.spike_task_id FROM typed_evidence_retry_idempotency r JOIN typed_evidence_attempts a ON a.id=r.retry_attempt_id WHERE r.finding_id=$1 AND r.failed_transition_id=$2").bind(&input.finding_id).bind(&input.failed_transition_id).fetch_optional(&mut **tx).await? {
+            let id: String = row.get("id");
+            return Ok(TypedEvidenceAttemptAllocation { attempt_id:id.clone(), spike_task_id:row.get("spike_task_id"), sequence:row.get("sequence"), planned_checks:checks(tx,&id).await? });
+        }
+        if lock_state(tx, &input.finding_id).await? != TribunalEvidenceLifecycle::Failed {
+            return Err(Error::InvalidTransition(
+                "retry_requires_latest_failed_transition".into(),
+            ));
+        }
+        let latest = sqlx::query("SELECT id,to_lifecycle FROM typed_evidence_transitions WHERE finding_id=$1 ORDER BY ordinal DESC LIMIT 1 FOR UPDATE").bind(&input.finding_id).fetch_optional(&mut **tx).await?;
+        if latest
+            .as_ref()
+            .map(|r| (r.get::<String, _>("id"), r.get::<String, _>("to_lifecycle")))
+            != Some((input.failed_transition_id.clone(), "failed".into()))
+        {
+            return Err(Error::InvalidTransition(
+                "retry_requires_latest_failed_transition".into(),
+            ));
+        }
+        let proposal: String =
+            sqlx::query_scalar("SELECT proposal_id FROM typed_evidence_findings WHERE id=$1")
+                .bind(&input.finding_id)
+                .fetch_one(&mut **tx)
+                .await?;
+        let legacy: Option<String> =
+            sqlx::query_scalar("SELECT linked_spike_task_id FROM proposals WHERE id=$1 FOR UPDATE")
+                .bind(&proposal)
+                .fetch_one(&mut **tx)
+                .await?;
+        let active: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM typed_evidence_attempts a JOIN tasks t ON t.id=a.spike_task_id WHERE a.finding_id=$1 AND t.status <> 'closed')").bind(&input.finding_id).fetch_one(&mut **tx).await?;
+        if legacy.is_some() || active {
+            return Err(Error::InvalidTransition("active_evidence_conflict".into()));
+        }
+        let retry_task_labels: Option<String> = sqlx::query_scalar("SELECT t.labels::text FROM tasks t WHERE t.id=$1 AND t.status <> 'closed' AND NOT EXISTS(SELECT 1 FROM typed_evidence_attempts a WHERE a.spike_task_id=t.id)")
+            .bind(&input.retry_spike_task_id)
+            .fetch_optional(&mut **tx)
+            .await?;
+        if !retry_task_labels.as_deref().is_some_and(is_evidence_spike) {
+            return Err(Error::InvalidTransition(
+                "retry_spike_task_not_new_and_active".into(),
+            ));
+        }
+        if input.planned_checks.is_empty() {
+            return Err(Error::InvalidData(
+                "typed evidence attempt requires planned checks".into(),
+            ));
+        }
+        let sequence: i32 = sqlx::query_scalar(
+            "SELECT COALESCE(MAX(sequence),0)+1 FROM typed_evidence_attempts WHERE finding_id=$1",
+        )
+        .bind(&input.finding_id)
+        .fetch_one(&mut **tx)
+        .await?;
+        sqlx::query("INSERT INTO typed_evidence_attempts (id,finding_id,sequence,spike_task_id,evidence_plan_id) VALUES ($1,$2,$3,$4,$5)").bind(&input.retry_attempt_id).bind(&input.finding_id).bind(sequence).bind(&input.retry_spike_task_id).bind(&input.evidence_plan_id).execute(&mut **tx).await?;
+        for check in &input.planned_checks {
+            sqlx::query("INSERT INTO typed_evidence_planned_checks (id,attempt_id,ordinal,check_id,method,evidence_plan_id,evidence_plan_check_id) VALUES ($1,$2,$3,$4,$5,$6,$7)").bind(&check.id).bind(&input.retry_attempt_id).bind(check.ordinal).bind(&check.check_id).bind(planned_method(check.method)).bind(&check.evidence_plan_id).bind(&check.evidence_plan_check_id).execute(&mut **tx).await?;
+        }
+        sqlx::query("INSERT INTO typed_evidence_retry_idempotency (finding_id,failed_transition_id,retry_attempt_id) VALUES ($1,$2,$3)").bind(&input.finding_id).bind(&input.failed_transition_id).bind(&input.retry_attempt_id).execute(&mut **tx).await?;
+        let ordinal: i32 = sqlx::query_scalar(
+            "SELECT COALESCE(MAX(ordinal),0)+1 FROM typed_evidence_transitions WHERE finding_id=$1",
+        )
+        .bind(&input.finding_id)
+        .fetch_one(&mut **tx)
+        .await?;
+        Self::append_transition(tx, AppendTypedEvidenceTransitionInput { id:input.demanded_transition_id, finding_id:input.finding_id, ordinal, from_lifecycle:Some(TribunalEvidenceLifecycle::Failed), to_lifecycle:TribunalEvidenceLifecycle::Demanded, actor_task_id:input.actor_task_id, metadata:serde_json::json!({"retry_attempt_id":input.retry_attempt_id,"failed_transition_id":input.failed_transition_id}) }).await?;
+        let planned_checks = checks(tx, &input.retry_attempt_id).await?;
+        Ok(TypedEvidenceAttemptAllocation {
+            attempt_id: input.retry_attempt_id,
+            spike_task_id: input.retry_spike_task_id,
+            sequence,
+            planned_checks,
+        })
+    }
+
+    pub async fn dispatch_retry_success_in_transaction(
+        tx: &mut Transaction<'_, Postgres>,
+        input: DispatchTypedEvidenceRetryInput,
+    ) -> Result<()> {
+        nonempty(&[
+            &input.finding_id,
+            &input.attempt_id,
+            &input.spike_task_id,
+            &input.transition_id,
+        ])?;
+        let reserved: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM typed_evidence_retry_idempotency r JOIN typed_evidence_attempts a ON a.id=r.retry_attempt_id JOIN typed_evidence_findings f ON f.id=r.finding_id JOIN typed_evidence_transitions d ON d.finding_id=r.finding_id WHERE r.finding_id=$1 AND a.id=$2 AND a.spike_task_id=$3 AND f.lifecycle='demanded' AND d.ordinal=(SELECT MAX(ordinal) FROM typed_evidence_transitions WHERE finding_id=r.finding_id) AND d.to_lifecycle='demanded' AND d.metadata->>'retry_attempt_id'=a.id AND d.metadata->>'failed_transition_id'=r.failed_transition_id)").bind(&input.finding_id).bind(&input.attempt_id).bind(&input.spike_task_id).fetch_one(&mut **tx).await?;
+        if !reserved {
+            return Err(Error::InvalidTransition(
+                "retry_attempt_identity_mismatch".into(),
+            ));
+        }
+        let ordinal: i32 = sqlx::query_scalar(
+            "SELECT COALESCE(MAX(ordinal),0)+1 FROM typed_evidence_transitions WHERE finding_id=$1",
+        )
+        .bind(&input.finding_id)
+        .fetch_one(&mut **tx)
+        .await?;
+        Self::append_transition(tx, AppendTypedEvidenceTransitionInput { id:input.transition_id, finding_id:input.finding_id, ordinal, from_lifecycle:Some(TribunalEvidenceLifecycle::Demanded), to_lifecycle:TribunalEvidenceLifecycle::SpikeActive, actor_task_id:input.actor_task_id, metadata:serde_json::json!({"attempt_id":input.attempt_id,"spike_task_id":input.spike_task_id}) }).await
+    }
+
+    pub async fn append_retry_dispatch_error(
+        &self,
+        input: TypedEvidenceRetryDispatchErrorInput,
+    ) -> Result<()> {
+        nonempty(&[
+            &input.finding_id,
+            &input.attempt_id,
+            &input.spike_task_id,
+            &input.error,
+        ])?;
+        let written = sqlx::query("INSERT INTO typed_evidence_retry_dispatch_errors (id,finding_id,attempt_id,spike_task_id,error) SELECT $1,$2,$3,$4,$5 WHERE EXISTS (SELECT 1 FROM typed_evidence_retry_idempotency r JOIN typed_evidence_attempts a ON a.id=r.retry_attempt_id JOIN typed_evidence_findings f ON f.id=r.finding_id JOIN typed_evidence_transitions d ON d.finding_id=r.finding_id WHERE r.finding_id=$2 AND a.id=$3 AND a.spike_task_id=$4 AND f.lifecycle='demanded' AND d.ordinal=(SELECT MAX(ordinal) FROM typed_evidence_transitions WHERE finding_id=r.finding_id) AND d.to_lifecycle='demanded' AND d.metadata->>'retry_attempt_id'=a.id AND d.metadata->>'failed_transition_id'=r.failed_transition_id)").bind(uuid::Uuid::now_v7().to_string()).bind(&input.finding_id).bind(&input.attempt_id).bind(&input.spike_task_id).bind(&input.error).execute(self.db.pool()).await?;
+        if written.rows_affected() != 1 {
+            return Err(Error::InvalidTransition(
+                "retry_attempt_identity_mismatch".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub async fn retry_attempt_for_failure(
+        &self,
+        finding_id: &str,
+        failed_transition_id: &str,
+    ) -> Result<Option<TypedEvidenceAttemptAllocation>> {
+        let mut tx = self.db.pool().begin().await?;
+        let row = sqlx::query("SELECT a.id,a.sequence,a.spike_task_id FROM typed_evidence_retry_idempotency r JOIN typed_evidence_attempts a ON a.id=r.retry_attempt_id WHERE r.finding_id=$1 AND r.failed_transition_id=$2").bind(finding_id).bind(failed_transition_id).fetch_optional(&mut *tx).await?;
+        if let Some(row) = row {
+            let attempt_id: String = row.get("id");
+            Ok(Some(TypedEvidenceAttemptAllocation {
+                spike_task_id: row.get("spike_task_id"),
+                sequence: row.get("sequence"),
+                planned_checks: checks(&mut tx, &attempt_id).await?,
+                attempt_id,
+            }))
+        } else {
+            Ok(None)
+        }
     }
 
     /// Appends the fact and advances only the materialized current lifecycle.
@@ -1027,7 +1210,29 @@ impl TypedEvidenceRepository {
         if row.get::<String, _>("created_by_task_id") != input.judge_task_id {
             return Err(Error::InvalidData("Judge attribution required".into()));
         }
-        let committed:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM proposal_revisions WHERE proposal_id=$1 AND seq=$2 AND event_kind='spec_revision')").bind(row.get::<String,_>("proposal_id")).bind(input.folding_revision).fetch_one(&mut **tx).await?;
+        let proposal_id: String = row.get("proposal_id");
+        let legacy_link: Option<String> =
+            sqlx::query_scalar("SELECT linked_spike_task_id FROM proposals WHERE id=$1 FOR UPDATE")
+                .bind(&proposal_id)
+                .fetch_one(&mut **tx)
+                .await?;
+        if let Some(linked_spike_task_id) = legacy_link.as_deref() {
+            let Some(parity) =
+                Self::dual_read_legacy_parity_in_transaction(tx, &proposal_id).await?
+            else {
+                return Err(Error::InvalidTransition(
+                    "legacy_typed_parity_mismatch".into(),
+                ));
+            };
+            if parity.finding.id != input.finding_id
+                || parity.spike_task_id.as_deref() != Some(linked_spike_task_id)
+            {
+                return Err(Error::InvalidTransition(
+                    "legacy_typed_parity_mismatch".into(),
+                ));
+            }
+        }
+        let committed:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM proposal_revisions WHERE proposal_id=$1 AND seq=$2 AND event_kind='spec_revision')").bind(&proposal_id).bind(input.folding_revision).fetch_one(&mut **tx).await?;
         if !committed {
             return Err(Error::InvalidData(
                 "existing committed folding revision required".into(),
@@ -1056,6 +1261,18 @@ impl TypedEvidenceRepository {
             },
         )
         .await?;
+        let clear = sqlx::query(
+            "UPDATE proposals SET linked_spike_task_id=NULL,needs_evidence_claim=NULL WHERE id=$1 AND linked_spike_task_id IS NOT DISTINCT FROM $2",
+        )
+        .bind(&proposal_id)
+        .bind(&legacy_link)
+        .execute(&mut **tx)
+        .await?;
+        if clear.rows_affected() != 1 {
+            return Err(Error::InvalidTransition(
+                "legacy_typed_parity_mismatch".into(),
+            ));
+        }
         let row=sqlx::query("INSERT INTO typed_evidence_dispositions (id,finding_id,validation_result_id,folding_revision,outcome,disposition,judge_task_id,rationale) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING created_at").bind(&input.disposition_id).bind(&input.finding_id).bind(&input.validation_result_id).bind(input.folding_revision).bind(outcome(input.outcome)).bind(input.disposition.as_str()).bind(&input.judge_task_id).bind(&input.rationale).fetch_one(&mut **tx).await?;
         Ok(TypedEvidenceDispositionProjection {
             disposition: TribunalEvidenceDisposition {
@@ -1089,7 +1306,9 @@ fn allowed(from: TribunalEvidenceLifecycle, to: TribunalEvidenceLifecycle) -> bo
             TribunalEvidenceLifecycle::Resolved | TribunalEvidenceLifecycle::Withdrawn
         ) | (
             TribunalEvidenceLifecycle::Failed,
-            TribunalEvidenceLifecycle::SpikeActive | TribunalEvidenceLifecycle::Withdrawn
+            TribunalEvidenceLifecycle::Demanded
+                | TribunalEvidenceLifecycle::SpikeActive
+                | TribunalEvidenceLifecycle::Withdrawn
         )
     )
 }
@@ -1433,6 +1652,33 @@ async fn lock_state(
             .await?;
     parse(&s.ok_or_else(|| Error::InvalidData("finding not found".into()))?)
 }
+
+/// Fence a first terminal return to the finding's current reservation. Callers
+/// check the immutable validation-result replay fence before entering here.
+async fn require_active_return_attempt(
+    tx: &mut Transaction<'_, Postgres>,
+    attempt_id: &str,
+    finding_id: &str,
+    spike_task_id: &str,
+) -> Result<()> {
+    let state = lock_state(tx, finding_id).await?;
+    let latest = sqlx::query(
+        "SELECT id,spike_task_id FROM typed_evidence_attempts \
+         WHERE finding_id=$1 ORDER BY sequence DESC LIMIT 1 FOR UPDATE",
+    )
+    .bind(finding_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let authorized = latest.is_some_and(|row| {
+        row.get::<String, _>("id") == attempt_id
+            && row.get::<String, _>("spike_task_id") == spike_task_id
+    });
+    if state != TribunalEvidenceLifecycle::SpikeActive || !authorized {
+        return Err(v1("attempt_not_active"));
+    }
+    Ok(())
+}
+
 async fn active_attempt(tx: &mut Transaction<'_, Postgres>, id: &str) -> Result<Option<String>> {
     Ok(sqlx::query_scalar(
         "SELECT id FROM typed_evidence_attempts WHERE finding_id=$1 ORDER BY sequence DESC LIMIT 1",
@@ -1654,6 +1900,7 @@ mod tests {
             (SpikeActive, Withdrawn),
             (EvidenceReceived, Resolved),
             (EvidenceReceived, Withdrawn),
+            (Failed, Demanded),
             (Failed, SpikeActive),
             (Failed, Withdrawn),
         ];
