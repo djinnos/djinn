@@ -1,0 +1,8 @@
+{
+  "version": "typed_evidence_retry_v1",
+  "scenarios": [
+    "failed_attempt_1_to_attempt_2", "duplicate_retry", "stale_failure",
+    "occupied_slot", "immutable_history", "dispatch_error_redrive_identity",
+    "old_attempt_terminal_replay", "eventual_evidence_received"
+  ]
+}
