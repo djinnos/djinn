@@ -11,6 +11,8 @@ use djinn_core::models::{
 
 mod activity;
 mod adjudication_close;
+#[cfg(test)]
+mod adjudication_close_tests;
 mod blockers;
 mod board_health;
 mod board_health_dispatch_gate;
