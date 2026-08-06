@@ -730,31 +730,42 @@ async fn restart_rehydrated_failure_streak_continues_to_trigger_b_intervention()
     );
 }
 
+/// The terminal force-close at [`MAX_DISPATCH_FAILURES`] is the last backstop
+/// under the whole redispatch ladder, and the streak that reaches it must
+/// survive a coordinator restart.
+///
+/// 4etb: this used to drive a `reviewer` task. It no longer can. Trigger B
+/// (`should_route_cycling_intervention`) arms for `worker`/`reviewer` at
+/// `STREAK_INTERVENTION_THRESHOLD`, which a streak of
+/// `MAX_DISPATCH_FAILURES - 1` is far past, and the arbiter rung it routes to
+/// now ALWAYS handles a first escalation (rung 1 is retired, so cycle 0 skips
+/// every park guard and dispatches). The escalation therefore absorbs the pass
+/// before the hard cap is ever evaluated, and the task lands in
+/// `needs_lead_intervention` — the intended outcome for those roles, not a
+/// regression.
+///
+/// The hard cap itself is unchanged and still role-agnostic, so the coverage
+/// moves to a role that does not arm the arbiter trigger: a `review` task,
+/// which `planner_review_claims` routes to `planner`. Everything under test —
+/// rehydration of the persisted streak, the same-role reappearance advancing
+/// it, and the terminal close at the cap — is exercised exactly as before.
+/// (The reviewer-role cap path is separately still proven by
+/// `tests::provider_fault_attribution::request_attributable_failure_at_the_cap_still_force_closes`,
+/// where a typed provider failure disarms trigger B.)
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn restart_rehydrated_failure_streak_continues_to_terminal_close_threshold() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
-    let (task, _project_path) = create_simple_task(&db, &tx, "task", "terminal restart task").await;
+    let (task, _project_path) =
+        create_simple_task(&db, &tx, "review", "terminal restart task").await;
     let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
-    let task = repo
-        .set_status(&task.id, "needs_task_review")
-        .await
-        .unwrap();
-    repo.log_activity(
-        Some(&task.id),
-        "coordinator",
-        "system",
-        ARBITER_DISPATCHED_MARKER,
-        &serde_json::json!({"hold_cycle": 0, "reopen_count": task.reopen_count}).to_string(),
-    )
-    .await
-    .unwrap();
+    let task = repo.set_status(&task.id, "open").await.unwrap();
 
     let wall_now = ::time::OffsetDateTime::now_utc();
     let mut record =
         dispatch_state_record(&task.id, None, (i64::from(MAX_DISPATCH_FAILURES - 1), 0));
     record.last_dispatched_at = Some(rfc3339(wall_now - ::time::Duration::seconds(5)));
-    record.last_dispatched_role = Some("reviewer".to_owned());
+    record.last_dispatched_role = Some("planner".to_owned());
 
     let mut actor = coordinator_actor_for_tests(&db, &tx);
     actor.apply_rehydrated_dispatch_state(vec![record], wall_now, StdInstant::now());
@@ -764,6 +775,10 @@ async fn restart_rehydrated_failure_streak_continues_to_terminal_close_threshold
     assert_eq!(
         closed.status, "closed",
         "failure streak N must survive restart so the next same-role failure reaches MAX_DISPATCH_FAILURES"
+    );
+    assert!(
+        arbiter_dispatch_markers(&repo, &task.id).await.is_empty(),
+        "the hard cap must be reached on its own: no arbiter escalation may have absorbed the pass"
     );
     assert!(!actor.dispatch_failure_streak.contains_key(&task.id));
 }
@@ -1363,6 +1378,64 @@ async fn seed_terminated_post_intervention_sessions(
             .await
             .unwrap();
     }
+}
+
+/// 4etb: put a task one hold cycle INTO the adjudication ladder and stamp the
+/// canonical evidence epoch the park guards measure worker evidence from.
+///
+/// Rung 1 is retired, so the FIRST escalation of any in-scope trigger reaches
+/// the arbiter unconditionally: `first_cycle` (no arbitration row exists yet)
+/// skips the 8y3q first-occurrence-fingerprint, uv3p attempted-remediation and
+/// 2vxr pending-review guards, because those gate a PARK and not arbiter ENTRY
+/// — on cycle 0 no arbiter has run, so there is no remediation whose attempt
+/// they could measure. A fixture that wants to exercise those guards must
+/// therefore look like production AFTER one arbiter cycle: a CONSUMED
+/// arbitration row at cycle 0 (what an arbiter decision leaves behind) plus a
+/// stamped `escalation_evidence_at`.
+///
+/// Returns the stamped epoch. Worker evidence seeded AFTER this call sorts at
+/// or after that floor, which is what
+/// [`post_intervention_history`](crate::dispatch::CoordinatorActor::post_intervention_history)
+/// actually reads; evidence seeded BEFORE it is invisible by design.
+#[allow(dead_code)]
+async fn arm_park_guards_after_one_arbiter_cycle(db: &Database, task_id: &str) -> String {
+    use djinn_db::repositories::task_arbitration::{
+        CreateArbitrationParams, TaskArbitrationRepository,
+    };
+    let arb = TaskArbitrationRepository::new(db.clone());
+    let empty = serde_json::json!([]);
+    arb.try_create(CreateArbitrationParams {
+        task_id,
+        hold_cycle: 0,
+        deadline_at: None,
+        mirror_head_sha: None,
+        github_head_sha: None,
+        pr_url: None,
+        failing_ci_job_ids: &empty,
+        dossier: None,
+        directive: Some(&serde_json::json!({ "decision": "reopen" })),
+        verification_command: None,
+        excluded_models: &empty,
+    })
+    .await
+    .expect("seed the consumed cycle-0 arbitration row");
+    assert!(
+        arb.mark_consumed(task_id, 0)
+            .await
+            .expect("consume the cycle-0 arbitration row"),
+        "the seeded cycle-0 arbitration row must transition to consumed so the next escalation \
+         opens cycle 1 with the park guards live"
+    );
+    let repo = TaskRepository::new(db.clone(), djinn_core::events::EventBus::noop());
+    let epoch = repo
+        .stamp_escalation_evidence_epoch(task_id)
+        .await
+        .expect("stamp the canonical escalation evidence epoch")
+        .expect("the stamp must return the effective epoch");
+    // Millisecond-resolution timestamps: give real time a chance to advance so
+    // evidence seeded next sorts strictly after the floor.
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    epoch
 }
 
 /// uv3p Part B: the `park_attempted_remediation_redispatch` markers recorded

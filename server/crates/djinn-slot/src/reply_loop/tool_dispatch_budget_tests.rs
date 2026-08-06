@@ -807,6 +807,7 @@ async fn budget_trip_reports_tool_name_missing_for_unselected_nameless_result() 
         .with_ansi(false)
         .with_level(true)
         .finish();
+    let _capture = crate::test_log_capture::lock();
     let dispatch = tracing::dispatcher::Dispatch::new(subscriber);
     let _guard = tracing::dispatcher::set_default(&dispatch);
     apply_turn_inline_budget_pass_with_config(&mut results, &dispatch_ctx, config).await;
@@ -966,6 +967,7 @@ async fn budget_trip_structured_event_retains_required_fields() {
         .with_ansi(false)
         .with_level(true)
         .finish();
+    let _capture = crate::test_log_capture::lock();
     let dispatch = tracing::dispatcher::Dispatch::new(subscriber);
     let _guard = tracing::dispatcher::set_default(&dispatch);
     apply_turn_inline_budget_pass_with_config(&mut results, &dispatch_ctx, config).await;

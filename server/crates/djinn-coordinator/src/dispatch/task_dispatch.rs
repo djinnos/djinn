@@ -2438,13 +2438,22 @@ impl CoordinatorActor {
                             // runs complete but the task never converges (the
                             // review-cycle bounce that never passes through `open`,
                             // so trigger A's reopen_count never arms). Route it to
-                            // a Planner intervention instead of riding the ladder
-                            // to the terminal close at MAX_DISPATCH_FAILURES, which
+                            // the forensic arbiter instead of riding the ladder to
+                            // the terminal close at MAX_DISPATCH_FAILURES, which
                             // would force-close a task whose durable work may be
-                            // fine. Falls through to the ordinary ladder when the
-                            // Planner was already routed for this loop (idempotency
-                            // marker) — the terminal close then remains the final
-                            // backstop.
+                            // fine.
+                            //
+                            // 4etb: the arbiter rung ALWAYS handles a first
+                            // escalation, so for a role that arms this trigger the
+                            // dispatch-failure cap is no longer the backstop — the
+                            // adjudication ladder is, and it is strictly better
+                            // instrumented (three bounded arbiter hold cycles, one
+                            // final disposition, at most three terminal-rung
+                            // rounds, then the exhausted-ladder ownership contract
+                            // that lands the source with a NAMED owner rather than
+                            // a bare force-close). The cap still backs the paths
+                            // that never arm this trigger: a typed provider
+                            // failure, and any tick the arbiter rung declines.
                             //
                             // A reappearance whose prior session was CANCELLED or
                             // reclaimed before the run could conclude is excluded
@@ -8032,7 +8041,11 @@ mod build_admission_route_tests {
                     models: vec![djinn_slot::ModelSlotConfig {
                         model_id: WND1_STABLE_MODEL_ID.to_owned(),
                         max_slots,
-                        roles: ["worker".to_owned(), "planner".to_owned()]
+                        // `lead` is the role the 4etb adjudication route lands
+                        // on: the arbiter runs ON the escalated source, so a
+                        // pool without a lead slot would silently make the
+                        // route test unobservable.
+                        roles: ["worker".to_owned(), "planner".to_owned(), "lead".to_owned()]
                             .into_iter()
                             .collect(),
                     }],
@@ -8362,8 +8375,7 @@ mod build_admission_route_tests {
         );
     }
 
-    /// The planner-escalation route still dispatches, and dispatches a NEW
-    /// review task rather than re-dispatching its source.
+    /// The adjudication route still reaches the slot pool.
     ///
     /// This test used to be a build-admission assertion — that a Light planner
     /// took a zero-slot permit and left no journal row. With the pre-create
@@ -8371,6 +8383,17 @@ mod build_admission_route_tests {
     /// about, but the route claim underneath it is untouched and is exactly the
     /// thing a deletion could silently break: the escalation reaching the slot
     /// pool at all.
+    ///
+    /// 4etb changed WHERE that route lands, not whether it lands. Rung 1 and
+    /// `RemediationKind::Planner` are retired, so
+    /// [`CoordinatorActor::dispatch_arbiter_adjudication`] no longer creates a
+    /// NEW review task and dispatches it inline. It escalates the SOURCE to the
+    /// forensic arbiter: the source moves to `needs_lead_intervention` behind an
+    /// unconsumed hold-cycle-0 arbitration row, and the ordinary ready pass then
+    /// dispatches the `lead` arbiter onto it. Both halves are asserted, because
+    /// asserting only the status change would pass for a build where the
+    /// escalated task never reaches a slot at all — the exact regression this
+    /// test exists to catch.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn planner_escalation_route_dispatches_a_new_review_task() {
         let db = crate::test_helpers::create_test_db();
@@ -8382,18 +8405,12 @@ mod build_admission_route_tests {
         let (runtime, mut started_rx, _completed_rx) = RouteRuntime::new();
         let mut actor = build_route_actor(&db, &events_tx, &runtime, 1);
 
-        // Close all fixture tasks so the source task doesn't also dispatch.
+        // Close every other fixture task so the source is the only candidate.
         let source_task_id = fixture.task_ids[0].clone();
         close_all_except(&db, &fixture, &source_task_id).await;
-        // Also close the source so it doesn't dispatch as a worker — the
-        // planner escalation creates its OWN review task.
         let task_repo = TaskRepository::new(db.clone(), djinn_core::events::EventBus::noop());
-        task_repo
-            .set_status(&source_task_id, "closed")
-            .await
-            .expect("close source task");
 
-        // Dispatch through the actual planner-escalation route.
+        // Route through the real adjudication entry point.
         actor
             .dispatch_arbiter_adjudication(
                 &source_task_id,
@@ -8401,18 +8418,40 @@ mod build_admission_route_tests {
                 &fixture.project_id,
             )
             .await;
+
+        let escalated = task_repo
+            .get(&source_task_id)
+            .await
+            .expect("read escalated source")
+            .expect("escalated source exists");
         assert_eq!(
-            actor.dispatched, 1,
-            "planner escalation must dispatch through the route"
+            escalated.status, "needs_lead_intervention",
+            "the adjudication route must hand the source to the forensic arbiter"
+        );
+        let arbitration =
+            djinn_db::repositories::task_arbitration::TaskArbitrationRepository::new(db.clone())
+                .get_by_task_and_cycle(&source_task_id, 0)
+                .await
+                .expect("read arbitration ledger")
+                .expect("the route must open hold cycle 0");
+        assert!(
+            arbitration.consumed_at.is_none(),
+            "the arbiter opened by the route must be in flight"
         );
 
+        // …and the escalated source actually reaches the pool as the arbiter.
+        actor.dispatch_ready_tasks(Some(&fixture.project_id)).await;
+        assert_eq!(
+            actor.dispatched, 1,
+            "the adjudication route must dispatch through the slot pool"
+        );
         let dispatched_id = started_rx
             .recv()
             .await
-            .expect("pool runner must fire for the planner task");
-        assert_ne!(
+            .expect("pool runner must fire for the arbiter session");
+        assert_eq!(
             dispatched_id, source_task_id,
-            "planner escalation creates a new review task"
+            "the arbiter adjudicates the escalated source itself"
         );
 
         runtime.release(&dispatched_id).await;

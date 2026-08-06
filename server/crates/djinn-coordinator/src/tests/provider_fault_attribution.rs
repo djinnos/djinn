@@ -193,12 +193,45 @@ async fn request_attributable_provider_failures_still_escalate_at_threshold() {
         arbiter_dispatch_markers(&repo, &task.id).await.len(),
         1,
         "the {FAILURE_ESCALATION_THRESHOLD}th consecutive request-attributable provider failure \
-         must still route a planner-remediation intervention"
+         must still route the task to adjudication"
+    );
+
+    // 4etb: the escalation's durable side effect is no longer a blocking
+    // remediation CHILD — rung 1 and `RemediationKind::Planner` are retired, so
+    // trigger D routes the source straight to the forensic arbiter. What must
+    // exist is the arbiter entry contract: the source parked in
+    // `needs_lead_intervention` behind an unconsumed hold-cycle-0 arbitration
+    // row carrying the escalation's reason. Asserting the child would now pass
+    // for a build where nothing was adjudicated at all.
+    let escalated = repo.get(&task.id).await.unwrap().unwrap();
+    assert_eq!(
+        escalated.status, "needs_lead_intervention",
+        "the escalated source must be handed to the arbiter, not left dispatchable"
+    );
+    let arbitration =
+        djinn_db::repositories::task_arbitration::TaskArbitrationRepository::new(db.clone())
+            .get_by_task_and_cycle(&task.id, 0)
+            .await
+            .unwrap()
+            .expect("the escalation must open hold cycle 0");
+    assert!(
+        arbitration.consumed_at.is_none(),
+        "the arbiter for this escalation must still be in flight"
+    );
+    let dossier = arbitration
+        .dossier
+        .expect("the arbiter must be handed a dossier");
+    assert!(
+        dossier["trigger_reason"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("REQUEST-attributable provider error"),
+        "the trigger's own reason must reach the arbiter verbatim; got: {dossier}"
     );
     assert_eq!(
         remediation_blocker_count(&repo, &task.id).await,
-        1,
-        "the escalation still creates the remediation task that holds the source task"
+        0,
+        "no human-review hold or remediation child may be minted on this path"
     );
 }
 

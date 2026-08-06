@@ -3313,6 +3313,10 @@ mod tests {
             .with_ansi(false)
             .with_level(true)
             .finish();
+        // Exactly one log-capturing subscriber may be live at a time: see
+        // `crate::test_log_capture` for why a parallel suite otherwise loses
+        // this WARN to the global callsite-interest cache.
+        let _capture = crate::test_log_capture::lock();
         let dispatch = Dispatch::new(subscriber);
         let guard = tracing::dispatcher::set_default(&dispatch);
         let resolution = resolve_llm_extraction_provider_after_creator_attempt(

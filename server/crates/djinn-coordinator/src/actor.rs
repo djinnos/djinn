@@ -1943,8 +1943,22 @@ impl CoordinatorActor {
                     // current head (no release producer existed before; hold
                     // task `yynd` never cleared its gate on close).
                     poll_stack::boxed(|| self.emit_tripwire_release_on_hold_close(&task)).await;
+                    // 4etb: a tripwire hold now routes to the forensic arbiter
+                    // instead of minting a terminal escalation child, so an
+                    // arbiter `supersede` (which closes the source) has no
+                    // child whose close would release the hold.
+                    poll_stack::boxed(|| self.emit_tripwire_release_on_arbiter_clearance(&task))
+                        .await;
                     // Fire epic completion rules (spike/batch).
                     poll_stack::boxed(|| self.on_task_closed(&task)).await;
+                }
+                // 4etb: an arbiter `approve` / `approve_conflict` on a
+                // tripwire-held source leaves it `approved` on the SAME head.
+                // Nothing else would ever release that hold, so the merge would
+                // stay blocked forever.
+                if matches!(task.status.as_str(), "approved" | "superseded") {
+                    poll_stack::boxed(|| self.emit_tripwire_release_on_arbiter_clearance(&task))
+                        .await;
                 }
                 if matches!(
                     task.status.as_str(),

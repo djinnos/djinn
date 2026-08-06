@@ -563,7 +563,10 @@ fn joint_trim_reports_over_budget_error_when_removal_fails() {
         result.errors, 2,
         "one operation error per exhausted candidate, not one per pass"
     );
-    assert_eq!(result.protected, 0, "a removal failure is an error, not protection");
+    assert_eq!(
+        result.protected, 0,
+        "a removal failure is an error, not protection"
+    );
     assert_eq!(result.outcome, CargoTargetRunsTrimOutcome::OverBudgetError);
     assert!(tmp.path().join("only").exists());
     assert!(tmp.path().join("other").exists());

@@ -201,6 +201,12 @@ async fn i3mv_submitted_attempt_does_not_count_as_failed_evidence() {
 ///
 /// This exercises `route_arbiter_adjudication` → `post_intervention_history` →
 /// the submission_pending_review guard path end-to-end.
+///
+/// 4etb: the guard only runs from hold cycle 1 on — a first escalation reaches
+/// the arbiter unconditionally, because on cycle 0 no remediation has been
+/// attempted for a pending-review guard to be about. The fixture therefore
+/// seeds the consumed cycle-0 row and the evidence epoch first, and the
+/// submission is created after that epoch so the guard can see it at all.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn i3mv_submitted_attempt_with_stale_ci_does_not_park() {
     let db = test_helpers::create_test_db();
@@ -227,6 +233,10 @@ async fn i3mv_submitted_attempt_with_stale_ci_does_not_park() {
     })
     .await
     .unwrap();
+
+    // One arbiter cycle already spent, with its evidence epoch stamped: the
+    // park guards are live for the escalation the test is about to drive.
+    arm_park_guards_after_one_arbiter_cycle(&db, &task.id).await;
 
     // Sleep so the submission timestamp is strictly after CI first_seen_at.
     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -1414,6 +1424,13 @@ async fn audit_park_and_guard_paths_delegate_to_shipped_apis() {
     // Create a task at the park threshold (reopen_count >= 3).
     let task = make_post_intervention_task(&db, &tx).await;
     let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+
+    // 4etb: `post_intervention_history` slices attempts by the canonical
+    // evidence epoch, which `route_arbiter_adjudication` stamps at the top of
+    // the rung. Stamp it (and spend cycle 0) BEFORE seeding the attempt, so the
+    // attempt this test asserts the history reads genuinely belongs to the
+    // current escalation rather than predating it.
+    arm_park_guards_after_one_arbiter_cycle(&db, &task.id).await;
 
     // Seed a submitted attempt and terminally reject it so the park gate
     // sees a concluded rejection.

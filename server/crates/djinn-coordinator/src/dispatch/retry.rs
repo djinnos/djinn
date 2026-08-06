@@ -1702,21 +1702,39 @@ impl CoordinatorActor {
                     .await;
             }
 
-            // 4etb: is this the FIRST cycle for this task? The promotion truth
-            // table is unconditional there — "no row, prospective cycle 0 →
-            // stamp the epoch, insert arbitration row 0, dispatch one ordinary
-            // arbiter child". The park guards below gate a PARK, not arbiter
-            // ENTRY: on cycle 0 no arbiter has run, so there is no prior
-            // remediation whose attempt they could measure, and declining here
-            // would reinstate exactly the first-escalation livelock this
-            // proposal closes. From cycle 1 on they are fully live: a previous
-            // arbiter reopened, a worker did or did not run, and the guards
-            // decide whether that is evidence enough to escalate again.
-            let first_cycle = matches!(
+            // 4etb: do the park guards apply on THIS tick?
+            //
+            // They gate a PARK, not arbiter ENTRY, so exactly two states skip
+            // them — both straight out of the promotion truth table:
+            //
+            // - **prospective cycle 0, no row.** "no row, prospective cycle 0 →
+            //   stamp the epoch, insert arbitration row 0, dispatch one
+            //   ordinary arbiter child" is unconditional. No arbiter has run,
+            //   so there is no prior remediation whose attempt a guard could
+            //   measure, and declining here reinstates exactly the
+            //   first-escalation livelock this proposal closes.
+            //
+            // - **an unconsumed row exists.** "unconsumed row N → repeated tick
+            //   makes no write → retain the row, epoch, and child." An arbiter
+            //   (or a monitored reopen) is genuinely in flight. A guard decline
+            //   here would `mark_consumed` that live row and, on the v1ej
+            //   monitored-reopen path, silently destroy the contract the branch
+            //   further down exists to protect — while burning the epoch's
+            //   decline budget on every tick of a task the coordinator is
+            //   holding in `needs_lead_intervention`. The in-flight branch
+            //   below owns this state: it handles the stale decision, the
+            //   expired deadline, the decision-failure cap and the monitored
+            //   reopen.
+            //
+            // A ledger read error yields `false` — fail OPEN toward dispatching
+            // the arbiter, matching how the gy53 ceiling check fails open. The
+            // alternative turns a transient DB blip during a first escalation
+            // into a decline.
+            let guards_apply = matches!(
                 TaskArbitrationRepository::new(self.db.clone())
                     .resolve_current_hold_cycle(&task.id)
                     .await,
-                Ok((0, None))
+                Ok((cycle, None)) if cycle > 0
             );
 
             // uv3p Part B: attempted-remediation requirement on the park rung.
@@ -1752,7 +1770,7 @@ impl CoordinatorActor {
             // Skip the fingerprint check when CI evidence is stale (from a prior
             // head SHA) — it cannot serve as a park-triggering strike.
             if !final_disposition
-                && !first_cycle
+                && guards_apply
                 && !ci_stale
                 && let Some(fingerprint) = task
                     .ci_failure_fingerprint
@@ -1819,7 +1837,7 @@ impl CoordinatorActor {
                 .no_attempted_remediation_decline_count(&task.id, &evidence_floor)
                 .await;
             if !final_disposition
-                && !first_cycle
+                && guards_apply
                 && should_decline_no_attempted_remediation_park(
                     history.any_submitted,
                     history.non_attempt_models.len(),
@@ -1851,7 +1869,7 @@ impl CoordinatorActor {
             // strike. If the task is in needs_task_review/in_task_review with no
             // rejection newer than the submission, do not park.
             if !final_disposition
-                && !first_cycle
+                && guards_apply
                 && history.any_submitted
                 && history.submission_pending_review
             {

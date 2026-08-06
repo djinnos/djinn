@@ -92,7 +92,82 @@ impl CoordinatorActor {
                     continue;
                 }
             };
+            self.release_tripwire_holds_on_source(&source, &rationale, &now)
+                .await;
+        }
+    }
 
+    /// 4etb: emit `tripwire.hold.released` when the ARBITER cleared a
+    /// tripwire-held source directly.
+    ///
+    /// Before 4etb a tripwire hold minted a terminal `PlannerEscalation`, and
+    /// the Planner closing that child was the release producer. Tripwire holds
+    /// now route to the forensic arbiter like every other trigger, so on the
+    /// decisions that resolve the source WITHOUT creating a child — `approve`,
+    /// `approve_conflict`, `supersede` — no child ever closes and nothing emits
+    /// the release. A `reopen` is safe (the worker's next push moves the head
+    /// and the gate re-evaluates) and a `park` is safe (it creates the child),
+    /// but an approve on the SAME head would leave the merge blocked forever
+    /// with nothing left to release it.
+    ///
+    /// The arbiter is the same authority the Planner was on this path: its
+    /// clearing decision is what cleared the findings. Fires only when the
+    /// task's own arbitration ledger records one of those decisions, so an
+    /// ordinary approval that never went through adjudication cannot release a
+    /// hold.
+    pub(super) async fn emit_tripwire_release_on_arbiter_clearance(
+        &self,
+        source: &djinn_core::models::Task,
+    ) {
+        let decision =
+            match djinn_db::repositories::task_arbitration::TaskArbitrationRepository::new(
+                self.db.clone(),
+            )
+            .get_latest_for_task(&source.id)
+            .await
+            {
+                Ok(Some(record)) => record
+                    .directive
+                    .as_ref()
+                    .and_then(|directive| directive.get("decision"))
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|decision| {
+                        matches!(*decision, "approve" | "approve_conflict" | "supersede")
+                    })
+                    .map(str::to_owned),
+                Ok(None) => None,
+                Err(e) => {
+                    tracing::warn!(
+                        source_task_id = %source.short_id,
+                        error = %e,
+                        "tripwire release: failed to read the arbitration ledger for a cleared source"
+                    );
+                    None
+                }
+            };
+        let Some(decision) = decision else {
+            return;
+        };
+
+        let rationale = format!("Arbiter adjudicated the tripwire hold and decided `{decision}`.");
+        let now = ::time::OffsetDateTime::now_utc()
+            .format(&::time::format_description::well_known::Rfc3339)
+            .unwrap_or_default();
+        self.release_tripwire_holds_on_source(source, &rationale, &now)
+            .await;
+    }
+
+    /// Release every head on `source` that still carries an un-released
+    /// `tripwire.gate.held`. Shared by the hold-child-close producer and the
+    /// 4etb arbiter-clearance producer; idempotent and fail-open.
+    async fn release_tripwire_holds_on_source(
+        &self,
+        source: &djinn_core::models::Task,
+        rationale: &str,
+        now: &str,
+    ) {
+        let task_repo = self.task_repo();
+        {
             let entries = match task_repo.list_activity(&source.id).await {
                 Ok(e) => e,
                 Err(e) => {
@@ -101,7 +176,7 @@ impl CoordinatorActor {
                         error = %e,
                         "tripwire release: failed to query source activity"
                     );
-                    continue;
+                    return;
                 }
             };
             let entry_refs: Vec<ActivityEntryRef> =
@@ -142,8 +217,8 @@ impl CoordinatorActor {
                     pr_number,
                     HUMAN_RELEASE_ACTOR,
                     HUMAN_RELEASE_ROLE,
-                    &rationale,
-                    &now,
+                    rationale,
+                    now,
                 ) {
                     Ok(Some(p)) => p,
                     Ok(None) => continue,
@@ -171,10 +246,10 @@ impl CoordinatorActor {
                     Ok(_) => {
                         tracing::info!(
                             source_task_id = %source.short_id,
-                            hold_task_id = %hold_task.short_id,
                             head_sha = %head_sha,
                             released_findings = payload.released_findings.len(),
-                            "tripwire release: emitted tripwire.hold.released on human hold-task close"
+                            rationale = %rationale,
+                            "tripwire release: emitted tripwire.hold.released"
                         );
                     }
                     Err(e) => {
@@ -192,7 +267,7 @@ impl CoordinatorActor {
             // labeled source AND the tamper reconciler re-applies the label on
             // its next pass (labels were only ever added, never removed).
             // Best-effort — a failure here does not wedge the close.
-            if crate::roles::is_human_review_hold(&source) {
+            if crate::roles::is_human_review_hold(source) {
                 let cleaned = crate::roles::remove_hold_label_from_existing(&source.labels);
                 if let Err(e) = task_repo.update_labels(&source.id, &cleaned).await {
                     tracing::warn!(

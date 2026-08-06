@@ -2362,6 +2362,69 @@ async fn post_adjudication_climb_reaches_the_arbiter_again() {
     );
 }
 
+/// 4etb: stamp the canonical escalation evidence epoch BEFORE the fixture seeds
+/// worker evidence, and return the epoch that was written.
+///
+/// `route_arbiter_adjudication` stamps `escalation_evidence_at` at the TOP of
+/// the rung, and every park guard measures evidence from
+/// `max(escalation_evidence_at, last_intervention_at, human_review_resolved_at)`.
+/// A fixture that seeds attempts and only THEN calls the router hands the guards
+/// an epoch NEWER than all of its own evidence: they see zero qualifying
+/// attempts and decline, which is not the state under test.
+///
+/// The production state this reproduces is the guard-declined redispatch: the
+/// epoch is stamped, no arbitration row is opened, the rotated worker attempts
+/// accrue AFTER it, and the next trigger measures exactly those. The stamp is
+/// conditional on the column being NULL, so the router's own stamp is then a
+/// no-op and the floor stays where the fixture put it.
+async fn stamp_evidence_epoch_before_seeding(repo: &TaskRepository, task_id: &str) -> String {
+    repo.stamp_escalation_evidence_epoch(task_id)
+        .await
+        .expect("stamping the escalation evidence epoch must succeed")
+        .expect("the conditional stamp must return the epoch it wrote")
+}
+
+/// 4etb: spend arbitration hold cycle `cycle` exactly as the production ladder
+/// does — open the row and stamp the canonical evidence epoch in ONE
+/// transaction (`try_create_with_evidence_epoch`, the live dispatch path),
+/// record the arbiter's `reopen` decision on it, then consume it.
+/// `resolve_current_hold_cycle` then reports `cycle + 1` as the next cycle a
+/// fresh escalation would open. Returns the stamped epoch.
+///
+/// This is what puts a fixture PAST the unconditional cycle-0 promotion. Under
+/// 4etb a task with NO arbitration row is at prospective cycle 0, where the
+/// promotion truth table dispatches one ordinary arbiter unconditionally and the
+/// 8y3q / uv3p / 2vxr park guards are all skipped — the guards gate a PARK, not
+/// arbiter ENTRY. A guard can therefore only be exercised from cycle 1 on.
+/// Mirrors `tests::hold_cycle_ceiling::spend_hold_cycle`.
+async fn spend_hold_cycle(db: &Database, task_id: &str, cycle: i32) -> String {
+    let arb = TaskArbitrationRepository::new(db.clone());
+    let empty = serde_json::json!([]);
+    let (_result, epoch) = arb
+        .try_create_with_evidence_epoch(CreateArbitrationParams {
+            task_id,
+            hold_cycle: cycle,
+            deadline_at: None,
+            mirror_head_sha: None,
+            github_head_sha: None,
+            pr_url: None,
+            failing_ci_job_ids: &empty,
+            dossier: None,
+            directive: Some(&serde_json::json!({ "decision": "reopen" })),
+            verification_command: None,
+            excluded_models: &empty,
+        })
+        .await
+        .expect("seed arbitration row");
+    assert!(
+        arb.mark_consumed(task_id, cycle)
+            .await
+            .expect("consume arbitration row"),
+        "seeded arbitration row at cycle {cycle} must transition to consumed"
+    );
+    epoch.expect("opening a hold cycle must stamp the escalation evidence epoch")
+}
+
 /// Drive a task to the exact post-adjudication park condition — a raised
 /// evidence floor (`last_intervention_at`), quality strikes back at threshold,
 /// and enough terminated post-floor sessions to satisfy the uv3p
@@ -2503,6 +2566,10 @@ async fn genuine_quality_strike_at_the_escalation_condition_still_parks_through_
 /// hold cycle, qualifying counts and rotation exclusions, and its operator text
 /// must never mention a planner rung or an intervention count — nothing on this
 /// path reads either any more.
+///
+/// 4etb also RE-BASED the fixture to cycle 1: the guards gate a park, not
+/// arbiter entry, so at prospective cycle 0 this guard is skipped entirely and
+/// the fixture would have proven nothing about it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn park_guard_declines_with_the_epoch_keyed_reason_contract() {
     let db = test_helpers::create_test_db();
@@ -2519,11 +2586,27 @@ async fn park_guard_declines_with_the_epoch_keyed_reason_contract() {
         repo.set_status(&task.id, "open").await.unwrap();
     }
     let task = repo.get(&task.id).await.unwrap().unwrap();
-    let floor = task
+    let raised_floor = task
         .last_intervention_at
         .clone()
         .expect("the fixture's adjudication must have raised the floor");
     assert_eq!(task.reopen_count, REOPEN_INTERVENTION_THRESHOLD);
+
+    // 4etb: re-based past cycle 0. The guards gate a PARK, not arbiter ENTRY —
+    // at prospective cycle 0 the promotion truth table dispatches the arbiter
+    // unconditionally and this guard is skipped, so the uv3p decline can only be
+    // observed once a cycle has been spent (cycle 0 opened, the arbiter
+    // reopened, the row consumed). Opening that cycle is also what stamps the
+    // canonical evidence epoch, which then becomes the floor the decline is
+    // keyed on.
+    let floor = spend_hold_cycle(&db, &task.id, 0).await;
+    assert!(
+        floor >= raised_floor,
+        "the canonical floor is max(escalation_evidence_at, last_intervention_at, \
+         human_review_resolved_at) — the epoch stamped when cycle 0 opened must not \
+         go backwards (epoch {floor}, last_intervention_at {raised_floor})"
+    );
+    let task = repo.get(&task.id).await.unwrap().unwrap();
     // No sessions were dispatched after the adjudication — the cgcl/7fj3/nlus
     // shape (park within seconds of a rescope, zero dispatches).
 
@@ -2572,9 +2655,11 @@ async fn park_guard_declines_with_the_epoch_keyed_reason_contract() {
     );
     assert_eq!(marker["excluded_models"], serde_json::json!([]));
     assert_eq!(marker["disposition"], "redispatch_rotated");
-    assert!(
-        marker["hold_cycle"].is_i64(),
-        "the decline is a DISPOSITION of a hold cycle and must name it; got {marker}"
+    assert_eq!(
+        marker["hold_cycle"].as_i64(),
+        Some(1),
+        "the decline is a DISPOSITION of the hold cycle it declined: cycle 0 was \
+         spent by the fixture, so the prospective cycle is 1; got {marker}"
     );
     let operator_text = marker["reason"]
         .as_str()
@@ -2609,6 +2694,12 @@ async fn park_guard_declines_with_the_epoch_keyed_reason_contract() {
 /// remediation session before any park. 8y3q parked on a brand-new merge-queue
 /// failure whose fix was one token. A subsequent strike on the SAME (now-seen)
 /// fingerprint no longer earns a free shot.
+///
+/// 4etb re-based the fixture to cycle 1. The first-occurrence guard gates a
+/// PARK, not arbiter entry: at prospective cycle 0 the promotion truth table
+/// dispatches the arbiter unconditionally and this guard never runs, so the
+/// fixture spends cycle 0 first (open + `reopen` decision + consume) and the
+/// novel fingerprint is then presented on the cycle the guard actually governs.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn park_rung_dispatches_one_remediation_on_first_occurrence_fingerprint() {
     let db = test_helpers::create_test_db();
@@ -2618,8 +2709,14 @@ async fn park_rung_dispatches_one_remediation_on_first_occurrence_fingerprint() 
 
     let task = make_task_with_reopen_count(&db, &tx, REOPEN_INTERVENTION_THRESHOLD).await;
     repo.reset_intervention_counters(&task.id).await.unwrap();
+    // Spend cycle 0 so the park guards are live on this pass; this also stamps
+    // the canonical evidence epoch that the sessions seeded below sort after.
+    spend_hold_cycle(&db, &task.id, 0).await;
     let mut task = repo.get(&task.id).await.unwrap().unwrap();
-    assert_eq!(task.intervention_count, 1);
+    assert!(
+        task.last_intervention_at.is_some(),
+        "the fixture must have raised the evidence floor"
+    );
     // Attach a brand-new CI failure fingerprint (the merge-queue signature 8y3q
     // parked on). The Task field is read directly by the park rung.
     task.ci_failure_fingerprint = Some("abc123:Merge Queue".to_string());
@@ -2670,6 +2767,14 @@ async fn park_rung_dispatches_one_remediation_on_first_occurrence_fingerprint() 
 /// DIFFERENT models the task parks, and the reason names the terminated
 /// sessions/models — never the templated "same acceptance criteria kept
 /// failing" text that five of five 2026-07-04 parks asserted falsely.
+///
+/// 4etb re-based the fixture to cycle 1. The non-attempt bound is a park guard,
+/// and the truthful reason is computed from the evidence measured since the
+/// canonical epoch — at prospective cycle 0 the epoch is stamped by this very
+/// pass, so NO evidence could belong to it and the reason would truthfully name
+/// zero sessions. Spending cycle 0 first stamps the epoch that the two
+/// terminations then sort after, which is the production ordering (escalate →
+/// arbiter reopens → workers terminate → escalate again).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn park_rung_parks_after_two_non_attempts_with_truthful_reason() {
     let db = test_helpers::create_test_db();
@@ -2683,6 +2788,7 @@ async fn park_rung_parks_after_two_non_attempts_with_truthful_reason() {
         repo.set_status(&task.id, "closed").await.unwrap();
         repo.set_status(&task.id, "open").await.unwrap();
     }
+    spend_hold_cycle(&db, &task.id, 0).await;
     let task = repo.get(&task.id).await.unwrap().unwrap();
 
     // Two post-intervention sessions terminated pre-submission across DIFFERENT
@@ -2751,6 +2857,11 @@ async fn consumed_arbitration_prevents_duplicate_dispatch() {
         repo.set_status(&task.id, "closed").await.unwrap();
         repo.set_status(&task.id, "open").await.unwrap();
     }
+    // 4etb: the epoch is stamped BEFORE the evidence so the sessions below
+    // belong to this escalation — otherwise the re-entry pass below measures
+    // them against an epoch newer than all of them and declines instead of
+    // exercising the consumed-cycle path this test is about.
+    stamp_evidence_epoch_before_seeding(&repo, &task.id).await;
     let task = repo.get(&task.id).await.unwrap().unwrap();
     seed_terminated_post_intervention_sessions(&db, &tx, &task.id, &["m-a", "m-b"]).await;
     assert!(
@@ -4521,6 +4632,13 @@ async fn gs37_park_guard_not_triggered_below_quality_threshold_despite_raw_reope
 /// work_submitted, status needs_task_review, stale failing CI from a prior
 /// head; run the park evaluation; assert no hold is created. Then apply a
 /// review rejection and assert the park fires (attempt concluded).
+///
+/// 4etb re-based the fixture to cycle 1: the 2vxr guard gates a PARK, not
+/// arbiter entry, so at prospective cycle 0 it is skipped and the submission
+/// would be adjudicated mid-flight regardless of its review state. Spending
+/// cycle 0 (open + `reopen` decision + consume) also stamps the canonical
+/// evidence epoch, so the CI snapshot and the submission below both belong to
+/// the escalation the guard is measuring.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn park_rung_does_not_park_while_submission_pending_review() {
     let db = test_helpers::create_test_db();
@@ -4531,14 +4649,21 @@ async fn park_rung_does_not_park_while_submission_pending_review() {
     // Create a task with reopen_count at the intervention threshold so
     // quality_strikes >= REOPEN_INTERVENTION_THRESHOLD.
     let task = make_task_with_reopen_count(&db, &tx, REOPEN_INTERVENTION_THRESHOLD).await;
-    // Reset intervention counters: bumps intervention_count to 1 (>=
-    // stamps last_intervention_at, the evidence floor) and zeroes reopen_count.
-    // The quality
+    // Reset intervention counters: stamps `last_intervention_at` (a component of
+    // the canonical evidence floor) and zeroes `reopen_count`. The quality
     // reopen count is computed from the activity log and stays at
-    // REOPEN_INTERVENTION_THRESHOLD.
+    // REOPEN_INTERVENTION_THRESHOLD. 4etb: the `intervention_count` bump is
+    // inert — no rung reads it.
     repo.reset_intervention_counters(&task.id).await.unwrap();
+    // 4etb: put the task past the unconditional cycle-0 promotion so the 2vxr
+    // guard is live, and stamp the evidence epoch the CI/submission evidence
+    // below sorts after.
+    spend_hold_cycle(&db, &task.id, 0).await;
     let task = repo.get(&task.id).await.unwrap().unwrap();
-    assert_eq!(task.intervention_count, 1);
+    assert!(
+        task.last_intervention_at.is_some(),
+        "the fixture must have raised the evidence floor"
+    );
 
     // Insert a stale CI snapshot (failing, from a prior head SHA). The
     // first_seen_at is set to now by the DB.
@@ -4737,10 +4862,13 @@ async fn consumed_arbitration_advances_to_next_cycle_and_dispatches() {
     );
 
     // Seed a consumed arbitration at hold_cycle 0 to simulate a completed
-    // arbiter.
+    // arbiter. 4etb: opened through `try_create_with_evidence_epoch`, the
+    // production entry point — the row and the canonical escalation evidence
+    // epoch commit together, so the post-intervention sessions seeded below sort
+    // AFTER the epoch and qualify as evidence for the cycle-1 pass.
     let arb_repo = TaskArbitrationRepository::new(db.clone());
     arb_repo
-        .try_create(CreateArbitrationParams {
+        .try_create_with_evidence_epoch(CreateArbitrationParams {
             task_id: &task.id,
             hold_cycle: 0,
             deadline_at: None,
@@ -4842,10 +4970,13 @@ async fn failed_arbitration_advances_to_next_cycle_and_dispatches() {
         "the fixture must have raised the evidence floor"
     );
 
-    // Seed a failed arbitration at hold_cycle 0.
+    // Seed a failed arbitration at hold_cycle 0. 4etb: opened through
+    // `try_create_with_evidence_epoch` (the production entry point) so the row
+    // and the canonical escalation evidence epoch commit together and the
+    // sessions seeded below qualify as evidence for the cycle-1 pass.
     let arb_repo = TaskArbitrationRepository::new(db.clone());
     arb_repo
-        .try_create(CreateArbitrationParams {
+        .try_create_with_evidence_epoch(CreateArbitrationParams {
             task_id: &task.id,
             hold_cycle: 0,
             deadline_at: None,
@@ -4927,6 +5058,11 @@ async fn reentry_with_unconsumed_arbiter_does_not_create_second_arbiter() {
         "the fixture must have raised the evidence floor"
     );
 
+    // 4etb: stamp the evidence epoch BEFORE the sessions. The first dispatch
+    // below is the unconditional cycle-0 promotion (guards skipped), but the
+    // RE-ENTRY runs with the guards live — and they must measure the sessions
+    // this fixture seeded, not an epoch stamped after them.
+    stamp_evidence_epoch_before_seeding(&repo, &task.id).await;
     seed_terminated_post_intervention_sessions(&db, &tx, &task.id, &["m-a", "m-b"]).await;
 
     // First dispatch: creates the arbitration row and transitions to
@@ -5018,6 +5154,12 @@ async fn pending_monitored_reopen_yields_to_normal_dispatch() {
         "the fixture must have raised the evidence floor"
     );
 
+    // 4etb: stamp the evidence epoch BEFORE the sessions. The re-entry pass
+    // below runs with the park guards live (a row exists, so it is no longer the
+    // unconditional cycle-0 promotion); without this the guards would measure
+    // zero evidence, decline, and CONSUME the monitored-reopen row on the way
+    // out — masking the v1ej yield this test exists to prove.
+    stamp_evidence_epoch_before_seeding(&repo, &task.id).await;
     seed_terminated_post_intervention_sessions(&db, &tx, &task.id, &["m-a", "m-b"]).await;
 
     // First dispatch creates the arbitration row (arbiter routed).
@@ -5165,6 +5307,11 @@ async fn arbiter_dispatch_transition_before_activity_failure_recovers_to_single_
 
     // Two distinct-model pre-submission terminations so the attempted-remediation
     // park gate reaches its non-attempt bound and routes to the arbiter.
+    // 4etb: the evidence epoch is stamped first so those terminations belong to
+    // THIS escalation. The initial dispatch is the unconditional cycle-0
+    // promotion, but the recovery replay below re-enters with the guards live
+    // and must see the same evidence rather than an epoch newer than all of it.
+    stamp_evidence_epoch_before_seeding(&repo, &task.id).await;
     seed_terminated_post_intervention_sessions(&db, &tx, &task.id, &["m-a", "m-b"]).await;
 
     // A terminated (crashed) attempt carrying the mirror head SHA — the arbiter
@@ -5392,10 +5539,13 @@ async fn repeated_consumed_cycles_do_not_create_duplicate_arbitration_rows() {
         "the fixture must have raised the evidence floor"
     );
 
-    // Seed consumed arbitration at cycle 0.
+    // Seed consumed arbitration at cycle 0. 4etb: opened through
+    // `try_create_with_evidence_epoch` (the production entry point) so the
+    // canonical evidence epoch commits with the row and the sessions seeded
+    // below qualify as evidence on every later cycle.
     let arb_repo = TaskArbitrationRepository::new(db.clone());
     arb_repo
-        .try_create(CreateArbitrationParams {
+        .try_create_with_evidence_epoch(CreateArbitrationParams {
             task_id: &task.id,
             hold_cycle: 0,
             deadline_at: None,
@@ -5739,6 +5889,12 @@ async fn arbiter_dossier_includes_attempt_ledger() {
         "reset_intervention_counters must set last_intervention_at"
     );
 
+    // 4etb: the attempt ledger in the dossier is scoped to the canonical
+    // evidence epoch, so the epoch has to be stamped BEFORE the rows below —
+    // otherwise every seeded attempt predates the floor and the ledger the
+    // assertions inspect is legitimately empty.
+    stamp_evidence_epoch_before_seeding(&repo, &task.id).await;
+
     // Seed terminated post-intervention sessions so the park gate sees
     // remediation was attempted (avoids the "no evidence" early return).
     seed_terminated_post_intervention_sessions(&db, &tx, &task.id, &["m-a", "m-b"]).await;
@@ -5994,6 +6150,12 @@ async fn cross_cycle_dossier_includes_guard_deferred_ledger() {
     let task = make_task_with_reopen_count(&db, &tx, 0).await;
     repo.reset_intervention_counters(&task.id).await.unwrap();
     let task = repo.get(&task.id).await.unwrap().unwrap();
+
+    // 4etb: stamp the evidence epoch first. The re-entry dispatch below runs
+    // with the park guards live (cycle 0 has been consumed by then), so the
+    // terminated sessions must sort AFTER the epoch to count as its evidence —
+    // and the cross-cycle ledger asserted below is scoped to the same floor.
+    stamp_evidence_epoch_before_seeding(&repo, &task.id).await;
 
     // Seed terminated sessions so the park gate works.
     seed_terminated_post_intervention_sessions(&db, &tx, &task.id, &["m-a", "m-b"]).await;
@@ -6897,6 +7059,10 @@ async fn second_strike_arbiter_dispatch_atomic_marker_status_and_outbox() {
         task.last_intervention_at.is_some(),
         "the fixture must have raised the evidence floor"
     );
+    // 4etb: the epoch precedes the evidence, so the outbox-replay re-run below
+    // (which no longer takes the unconditional cycle-0 path, because the row now
+    // exists) measures these sessions instead of an empty epoch.
+    stamp_evidence_epoch_before_seeding(&repo, &task.id).await;
     seed_terminated_post_intervention_sessions(&db, &tx, &task.id, &["m-a", "m-b"]).await;
 
     // Act: route the park rung — should dispatch an arbiter.
@@ -7056,6 +7222,10 @@ async fn corrupted_arbitration_state_advances_to_next_cycle() {
         task.last_intervention_at.is_some(),
         "the fixture must have raised the evidence floor"
     );
+    // 4etb: the corrupted cycle-0 row means this pass is NOT the unconditional
+    // cycle-0 promotion — the park guards are live — so the epoch must precede
+    // the evidence they measure.
+    stamp_evidence_epoch_before_seeding(&repo, &task.id).await;
     seed_terminated_post_intervention_sessions(&db, &tx, &task.id, &["m-a", "m-b"]).await;
 
     // Seed an arbitration at cycle 0 and corrupt its state to an invalid value.
@@ -7168,6 +7338,13 @@ async fn arbiter_failure_dossier_on_db_error_parks_with_evidence_fields() {
         task.last_intervention_at.is_some(),
         "the fixture must have raised the evidence floor"
     );
+    // 4etb: with the ledger unreadable (below), `resolve_current_hold_cycle`
+    // errors, so the cycle-0 first-escalation shortcut cannot apply and the park
+    // guards run. The epoch is therefore stamped before the evidence — the
+    // guard-declined-redispatch shape, where an escalation stamped its epoch and
+    // rotated workers accrued under it — so the guards pass and the pass reaches
+    // the fail-closed branch this test is about.
+    stamp_evidence_epoch_before_seeding(&repo, &task.id).await;
     seed_terminated_post_intervention_sessions(&db, &tx, &task.id, &["m-a", "m-b"]).await;
 
     // Drop the arbitration table so resolve_current_hold_cycle fails with
@@ -7277,6 +7454,11 @@ async fn try_create_db_error_parks_with_failure_dossier() {
         task.last_intervention_at.is_some(),
         "the fixture must have raised the evidence floor"
     );
+    // 4etb: the consumed cycle-0 row seeded below puts this pass at prospective
+    // cycle 1, where the park guards are live — so the epoch is stamped before
+    // the evidence they measure, otherwise the pass declines instead of reaching
+    // the `try_create` failure arm under test.
+    stamp_evidence_epoch_before_seeding(&repo, &task.id).await;
     seed_terminated_post_intervention_sessions(&db, &tx, &task.id, &["m-a", "m-b"]).await;
 
     // Seed typed evidence that only the `try_create` error arm can preserve in
@@ -7561,6 +7743,10 @@ async fn decision_failure_cap_parks_and_infra_only_increments_infra_count() {
         repo.set_status(&task.id, "closed").await.unwrap();
         repo.set_status(&task.id, "open").await.unwrap();
     }
+    // 4etb: the unconsumed cycle-1 row means the park guards are live on this
+    // pass, so the epoch must precede the evidence they measure — otherwise the
+    // guards decline before the decision-failure cap is ever consulted.
+    stamp_evidence_epoch_before_seeding(&repo, &task.id).await;
     let task = repo.get(&task.id).await.unwrap().unwrap();
     seed_terminated_post_intervention_sessions(&db, &tx, &task.id, &["m-a", "m-b"]).await;
 
@@ -8139,6 +8325,11 @@ async fn dispatch_pass_parks_when_decision_failure_cap_reached_at_dispatch_time(
         repo.set_status(&task.id, "closed").await.unwrap();
         repo.set_status(&task.id, "open").await.unwrap();
     }
+    // 4etb: the pre-seeded unconsumed row below keeps this pass off the
+    // unconditional cycle-0 path, so the park guards run first — stamp the epoch
+    // before the evidence they measure, or they decline before the
+    // decision-failure cap is reached.
+    stamp_evidence_epoch_before_seeding(&repo, &task.id).await;
     let task = repo.get(&task.id).await.unwrap().unwrap();
     seed_terminated_post_intervention_sessions(&db, &tx, &task.id, &["m-a", "m-b"]).await;
 
@@ -8258,8 +8449,12 @@ async fn reentry_with_stale_decided_arbitration_self_consumes_and_dispatches_fre
         "decision": "approve",
         "evidence_summary": "full diff review confirmed the remediation",
     });
+    // 4etb: opened through the production entry point so the row and the
+    // canonical evidence epoch commit together — the sessions seeded below then
+    // sort after the epoch and the park guards (live, because a row exists) see
+    // them instead of declining before the self-consume path under test.
     arb_repo
-        .try_create(CreateArbitrationParams {
+        .try_create_with_evidence_epoch(CreateArbitrationParams {
             task_id: &task.id,
             hold_cycle: 0,
             deadline_at: None,
@@ -8337,8 +8532,13 @@ async fn reentry_with_monitored_reopen_directive_does_not_self_consume() {
         "decision": "reopen",
         "directive": "fix the flaky assertion and re-run the suite",
     });
+    // 4etb: opened through the production entry point so the row and the
+    // canonical evidence epoch commit together. Without the epoch preceding the
+    // sessions below, the (now live) park guards measure zero evidence, decline,
+    // and CONSUME this row on the way out — which would silently invert the
+    // property under test.
     arb_repo
-        .try_create(CreateArbitrationParams {
+        .try_create_with_evidence_epoch(CreateArbitrationParams {
             task_id: &task.id,
             hold_cycle: 0,
             deadline_at: None,

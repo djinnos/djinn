@@ -681,10 +681,27 @@ fn planner_prompt_prunes_unverifiable_acceptance_criteria() {
             && intervention_prompt.contains("supersedes the hold"),
         "tripwire adjudication must explain the reopen-with-directive alternative"
     );
+    // 4etb: the ceiling is still finite, but exhausting it no longer means an
+    // unconditional terminal fail. The prompt must now name BOTH branches of
+    // the exhausted-ladder ownership contract, because a planner that believes
+    // an exhausted source is always force-closed will not understand why one
+    // with an open PR reappears in `pr_review`. Asserting both branches plus
+    // the exact terminal reason is strictly stronger than the old single word.
     assert!(
-        intervention_prompt.contains("escalation ladder is FINITE")
-            && intervention_prompt.contains("terminally fails"),
+        intervention_prompt.contains("escalation ladder is FINITE"),
         "intervention planner must document the finite escalation ceiling"
+    );
+    assert!(
+        intervention_prompt.contains("never a fourth"),
+        "the terminal-rung round ceiling must be explicit"
+    );
+    assert!(
+        intervention_prompt.contains("pr_review"),
+        "the exhausted-ladder open-PR branch must name its owner"
+    );
+    assert!(
+        intervention_prompt.contains("adjudication ladder exhausted without an actionable PR"),
+        "the exhausted-ladder no-PR branch must name its exact terminal reason"
     );
 
     let mut proposal_task = make_task();
