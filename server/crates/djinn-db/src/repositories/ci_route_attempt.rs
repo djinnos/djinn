@@ -1,0 +1,1925 @@
+//! Durable CI evidence-route attempts (proposal `nafu`, wave 1).
+//!
+//! This is the whole persistence layer for the CI routing contract: the
+//! reservation that proves no provider call happened, the single-winner
+//! compare-and-set that grants call ownership, the monotonic retry budgets,
+//! the owner-scoped finalization, the startup-only owner handoff, and the
+//! mutually exclusive Tier-2 (Lead) lease. The coordinator that *uses* it
+//! lands in waves 2 and 3; nothing here calls a provider, dispatches a
+//! worker, or touches the board.
+//!
+//! # Why a `reserved` phase exists at all
+//!
+//! Everything hard about this contract reduces to one question a crashed
+//! coordinator cannot answer from memory: *did I already call GitHub?* The
+//! answer has to be readable from the repository alone, because there is
+//! deliberately no provider read/correlation API in scope — asking the
+//! provider "did you get my request?" is exactly the subsystem the proposal
+//! refuses to build.
+//!
+//! So the row is committed **before** the call, in phase `reserved`, and
+//! provider mutation is forbidden while it is in that phase. A `reserved`
+//! row found after a restart is therefore *proof* that no call happened.
+//! That proof is what makes recovery cheap: the row is resumed, not
+//! abandoned and not escalated. [`CiRouteAttemptRepository::recover_reserved`]
+//! has exactly three outcomes and no fourth:
+//!
+//! | Situation | Outcome | Cost |
+//! | --- | --- | --- |
+//! | Evidence identity is obsolete | terminal `superseded_pre_call` | nothing: no charge, no lease, no Lead, no worker |
+//! | Identity current, budget remains | resume the **same row** through one CAS | exactly one charge and one provider-call episode, however many recoveries run |
+//! | Identity current, budget exhausted | route through retry exhaustion | no charge, at most one Tier-2 lease |
+//!
+//! The middle row is the one worth stating twice: N concurrent recoveries and
+//! N restarts converge on **one** winner and **one** charge, because the
+//! charge is welded to the `reserved` -> `calling` compare-and-set inside a
+//! single transaction that holds the row with `SELECT ... FOR UPDATE`. The
+//! `pre_call_resumptions` counter records how many recoveries ran; it has no
+//! influence on the charge, which is the point of recording it.
+//!
+//! # Why `calling` recovery is so much more restricted
+//!
+//! A `calling` row proves the opposite: a call episode was authorized, and
+//! its result may be in flight at the provider right now. Taking that row
+//! from a *live* owner would allow two episodes for one evidence identity.
+//! Elapsed wall-clock time cannot distinguish "the owner died" from "the
+//! owner is slow", so this module never infers death from time alone. See
+//! [`CiRouteAttemptRepository::recover_calling_owner`]: it demands attested
+//! exclusive-advisory-lock ownership, an explicit quiescence proof (graceful
+//! drain recorded on the former incarnation, or process termination), an
+//! owner mismatch, and the 300-second floor — and even then it can lose its
+//! compare-and-set to the former owner's own finalizer, which is legal and
+//! recorded.
+//!
+//! Every recovery *attempt* writes a row to `ci_route_calling_recoveries`,
+//! including the ones that correctly did nothing. A sweep that left a live
+//! owner alone has to be observable, or the claim "we never steal a live
+//! owner's row" cannot be falsified by a test.
+
+use serde::{Deserialize, Serialize};
+use sqlx::{Postgres, Row, Transaction};
+
+use crate::Result;
+use crate::database::Database;
+use crate::error::DbError;
+
+/// Charged Tier-1 actions allowed per retry-budget key (lane + PR + PR-head
+/// SHA + transient fingerprint).
+pub const CI_SIGNATURE_BUDGET_LIMIT: i64 = 2;
+
+/// Charged Tier-1 actions allowed per PR head, shared **across both lanes**.
+pub const CI_HEAD_BUDGET_LIMIT: i64 = 4;
+
+/// Default age a `reserved` row must reach before a recovery sweep may touch
+/// it.
+///
+/// Unlike [`CI_CALLING_RECOVERY_TIMEOUT_SECS`] the proposal does not fix this
+/// number — it says only "the configured reservation timeout". It is a
+/// liveness/latency knob rather than a safety one: the safety comes from the
+/// compare-and-set, and a too-short value costs at worst a redundant recovery
+/// that loses its CAS. Callers may pass their own.
+pub const CI_RESERVATION_RECOVERY_TIMEOUT_SECS: i64 = 60;
+
+/// Minimum age of `calling_at` before a startup owner handoff is even
+/// considered. Fixed by the proposal.
+pub const CI_CALLING_RECOVERY_TIMEOUT_SECS: i64 = 300;
+
+const ROW_COLUMNS: &str = "provider_action_key, lane, pr_number, pr_head_sha, run_id, run_head_sha, dequeue_id, \
+    task_id, origin_state, class, action, transient_fingerprint, retry_budget_key, head_budget_key, \
+    action_phase, terminal_outcome, \
+    to_char(reserved_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS reserved_at, \
+    to_char(calling_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS calling_at, \
+    to_char(terminalized_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS terminalized_at, \
+    owner_incarnation_id, pre_call_resumptions, charged_signature_count, charged_head_count, \
+    to_char(retry_exhausted_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS retry_exhausted_at, \
+    tier2_lease_id, tier2_lease_key, tier2_lease_state, tier2_lease_reason, \
+    to_char(tier2_leased_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS tier2_leased_at, \
+    tier2_resolution, lead_session_id, reopen_mode, diagnostic_reason, park_justification, \
+    provider_error::text AS provider_error, superseded_by_evidence::text AS superseded_by_evidence";
+
+// ---------------------------------------------------------------------------
+// Vocabularies
+// ---------------------------------------------------------------------------
+
+/// A trivial two-way string mapping.
+///
+/// Every durable vocabulary below is spelled exactly once in Rust and once in
+/// migration 191's `CHECK ... IN (...)`. Keeping the two in one place per enum
+/// is what stops a new variant from binding as an unchecked string that the
+/// CHECK then rejects at 3am instead of at compile time.
+macro_rules! durable_enum {
+    ($(#[$meta:meta])* $name:ident { $($(#[$vmeta:meta])* $variant:ident => $text:literal),+ $(,)? }) => {
+        $(#[$meta])*
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+        #[serde(rename_all = "snake_case")]
+        pub enum $name {
+            $($(#[$vmeta])* $variant),+
+        }
+
+        impl $name {
+            /// The durable spelling.
+            #[must_use]
+            pub fn as_str(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $text),+
+                }
+            }
+
+            /// Parse a durable spelling, rejecting anything outside the
+            /// migration's CHECK vocabulary.
+            ///
+            /// # Errors
+            ///
+            /// [`DbError::InvalidData`] for an unknown spelling.
+            pub fn parse(value: &str) -> Result<Self> {
+                match value {
+                    $($text => Ok(Self::$variant),)+
+                    other => Err(DbError::InvalidData(format!(
+                        concat!("invalid ", stringify!($name), " `{}`"), other
+                    ))),
+                }
+            }
+        }
+    };
+}
+
+durable_enum! {
+    /// Which CI surface produced the evidence.
+    CiLane {
+        PrHead => "pr_head",
+        MergeGroup => "merge_group",
+    }
+}
+
+durable_enum! {
+    /// The deterministic classification of a complete terminal evidence set.
+    CiClass {
+        Inconclusive => "inconclusive",
+        CausalFailure => "causal_failure",
+        Unknown => "unknown",
+    }
+}
+
+durable_enum! {
+    /// The route decision recorded for the attempt.
+    CiAction {
+        RerunRun => "rerun_run",
+        Reenqueue => "reenqueue",
+        AskLead => "ask_lead",
+        Hold => "hold",
+        Discard => "discard",
+    }
+}
+
+durable_enum! {
+    /// The board state the route was opened from.
+    CiOriginState {
+        PrDraft => "pr_draft",
+        PrReview => "pr_review",
+    }
+}
+
+durable_enum! {
+    /// Non-terminal action phases plus the terminal marker.
+    ///
+    /// `Reserved` and `Calling` are the two non-terminal phases; `Terminal`
+    /// always accompanies a [`CiRouteOutcome`].
+    CiActionPhase {
+        Reserved => "reserved",
+        Calling => "calling",
+        Terminal => "terminal",
+    }
+}
+
+durable_enum! {
+    /// The closed terminal vocabulary.
+    ///
+    /// There is deliberately no `abandoned`: a row proven not to have called
+    /// the provider is resumed, superseded, or exhausted.
+    CiRouteOutcome {
+        SupersededPreCall => "superseded_pre_call",
+        Retriggered => "retriggered",
+        Reenqueued => "reenqueued",
+        SupersededAfterCall => "superseded_after_call",
+        OutcomeUnknown => "outcome_unknown",
+        ActionFailed => "action_failed",
+        Held => "held",
+        SupersededBeforeLead => "superseded_before_lead",
+        SupersededBeforeApply => "superseded_before_apply",
+        RepairReopened => "repair_reopened",
+        DiagnosticReopened => "diagnostic_reopened",
+        Parked => "parked",
+        Superseded => "superseded",
+        Passed => "passed",
+        Merged => "merged",
+    }
+}
+
+durable_enum! {
+    /// Why a Tier-2 lease was opened.
+    CiTier2Reason {
+        CausalFailure => "causal_failure",
+        EvidenceUnknown => "evidence_unknown",
+        ProviderActionFailed => "provider_action_failed",
+        OutcomeUnknown => "outcome_unknown",
+        RetryExhausted => "retry_exhausted",
+    }
+}
+
+durable_enum! {
+    /// The two mutually exclusive validated `reopen` payload modes.
+    CiReopenMode {
+        Repair => "repair",
+        Diagnose => "diagnose",
+    }
+}
+
+durable_enum! {
+    /// The closed diagnostic-reason set a `diagnose` reopen must cite.
+    CiDiagnosticReason {
+        EvidenceIncomplete => "evidence_incomplete",
+        ProviderActionFailed => "provider_action_failed",
+        NoGroundedRemedy => "no_grounded_remedy",
+        NoRepositoryCommand => "no_repository_command",
+    }
+}
+
+durable_enum! {
+    /// State of the current-evidence Tier-2 hold.
+    CiTier2LeaseState {
+        Open => "open",
+        Resolved => "resolved",
+    }
+}
+
+durable_enum! {
+    /// How a former `calling` owner's provider futures were proven gone.
+    ///
+    /// Note what is absent: elapsed time. The 300-second floor is a
+    /// *necessary* condition layered on top of one of these proofs, never a
+    /// substitute for one.
+    CiQuiescenceProof {
+        /// Leadership cancellation closed action admission, joined every
+        /// leader-owned provider-action future, and recorded
+        /// `provider_actions_drained_at` before releasing the advisory lock.
+        GracefulDrain => "graceful_drain",
+        /// The owning process died, which destroyed its futures before its
+        /// advisory-lock session could close.
+        ProcessTerminated => "process_terminated",
+        /// No proof. Recorded on deferrals so the deferral is auditable.
+        None => "none",
+    }
+}
+
+durable_enum! {
+    /// Why a `calling` recovery attempt did or did not take the row.
+    CiCallingRecoveryReason {
+        StartupOwnerHandoff => "startup_owner_handoff",
+        LiveOwnerDeferred => "live_owner_deferred",
+        NotCalling => "not_calling",
+        OwnerMismatch => "owner_mismatch",
+        TimeoutNotElapsed => "timeout_not_elapsed",
+        LockNotHeld => "lock_not_held",
+        CasLost => "cas_lost",
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Identity
+// ---------------------------------------------------------------------------
+
+/// The immutable evidence identity a route attempt is bound to.
+///
+/// Stored expanded on the row (not only as the caller's hash) so a recovery
+/// sweep can compare a freshly observed identity against it without
+/// recomputing the caller's hash function — and so a supersession is
+/// explainable by reading the row.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CiEvidenceIdentity {
+    pub lane: CiLane,
+    pub pr_number: i64,
+    pub pr_head_sha: String,
+    pub run_id: i64,
+    pub run_head_sha: String,
+    /// Merge-group dequeue event identity. `None` for the PR-head lane.
+    pub dequeue_id: Option<String>,
+}
+
+impl CiEvidenceIdentity {
+    /// Whether a freshly observed identity is the *same* evidence.
+    ///
+    /// Full equality on every field, deliberately. The lane table treats a
+    /// changed PR head, a changed run, a changed merge group, and a changed
+    /// dequeue event all as supersession, so there is no field here that may
+    /// drift while the route stays authorized.
+    #[must_use]
+    pub fn matches(&self, observed: &Self) -> bool {
+        self == observed
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Row
+// ---------------------------------------------------------------------------
+
+/// One durable route attempt.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CiRouteAttempt {
+    pub provider_action_key: String,
+    pub identity: CiEvidenceIdentity,
+    pub task_id: String,
+    pub origin_state: CiOriginState,
+    pub class: CiClass,
+    pub action: CiAction,
+    pub transient_fingerprint: String,
+    pub retry_budget_key: String,
+    pub head_budget_key: String,
+
+    pub action_phase: CiActionPhase,
+    pub terminal_outcome: Option<CiRouteOutcome>,
+    pub reserved_at: String,
+    pub calling_at: Option<String>,
+    pub terminalized_at: Option<String>,
+
+    pub owner_incarnation_id: Option<String>,
+    pub pre_call_resumptions: i64,
+    pub charged_signature_count: Option<i64>,
+    pub charged_head_count: Option<i64>,
+    pub retry_exhausted_at: Option<String>,
+
+    pub tier2_lease_id: Option<String>,
+    pub tier2_lease_key: Option<String>,
+    pub tier2_lease_state: Option<CiTier2LeaseState>,
+    pub tier2_lease_reason: Option<CiTier2Reason>,
+    pub tier2_leased_at: Option<String>,
+    pub tier2_resolution: Option<CiRouteOutcome>,
+    pub lead_session_id: Option<String>,
+
+    pub reopen_mode: Option<CiReopenMode>,
+    pub diagnostic_reason: Option<CiDiagnosticReason>,
+    pub park_justification: Option<String>,
+
+    pub provider_error: Option<String>,
+    pub superseded_by_evidence: Option<String>,
+}
+
+impl CiRouteAttempt {
+    fn from_row(row: &sqlx::postgres::PgRow) -> Result<Self> {
+        fn opt_enum<T>(value: Option<String>, f: fn(&str) -> Result<T>) -> Result<Option<T>> {
+            match value {
+                Some(v) => f(&v).map(Some),
+                None => Ok(None),
+            }
+        }
+        Ok(Self {
+            provider_action_key: row.try_get("provider_action_key")?,
+            identity: CiEvidenceIdentity {
+                lane: CiLane::parse(row.try_get::<String, _>("lane")?.as_str())?,
+                pr_number: row.try_get("pr_number")?,
+                pr_head_sha: row.try_get("pr_head_sha")?,
+                run_id: row.try_get("run_id")?,
+                run_head_sha: row.try_get("run_head_sha")?,
+                dequeue_id: row.try_get("dequeue_id")?,
+            },
+            task_id: row.try_get("task_id")?,
+            origin_state: CiOriginState::parse(row.try_get::<String, _>("origin_state")?.as_str())?,
+            class: CiClass::parse(row.try_get::<String, _>("class")?.as_str())?,
+            action: CiAction::parse(row.try_get::<String, _>("action")?.as_str())?,
+            transient_fingerprint: row.try_get("transient_fingerprint")?,
+            retry_budget_key: row.try_get("retry_budget_key")?,
+            head_budget_key: row.try_get("head_budget_key")?,
+            action_phase: CiActionPhase::parse(row.try_get::<String, _>("action_phase")?.as_str())?,
+            terminal_outcome: opt_enum(row.try_get("terminal_outcome")?, CiRouteOutcome::parse)?,
+            reserved_at: row.try_get("reserved_at")?,
+            calling_at: row.try_get("calling_at")?,
+            terminalized_at: row.try_get("terminalized_at")?,
+            owner_incarnation_id: row.try_get("owner_incarnation_id")?,
+            pre_call_resumptions: row.try_get("pre_call_resumptions")?,
+            charged_signature_count: row.try_get("charged_signature_count")?,
+            charged_head_count: row.try_get("charged_head_count")?,
+            retry_exhausted_at: row.try_get("retry_exhausted_at")?,
+            tier2_lease_id: row.try_get("tier2_lease_id")?,
+            tier2_lease_key: row.try_get("tier2_lease_key")?,
+            tier2_lease_state: opt_enum(
+                row.try_get("tier2_lease_state")?,
+                CiTier2LeaseState::parse,
+            )?,
+            tier2_lease_reason: opt_enum(row.try_get("tier2_lease_reason")?, CiTier2Reason::parse)?,
+            tier2_leased_at: row.try_get("tier2_leased_at")?,
+            tier2_resolution: opt_enum(row.try_get("tier2_resolution")?, CiRouteOutcome::parse)?,
+            lead_session_id: row.try_get("lead_session_id")?,
+            reopen_mode: opt_enum(row.try_get("reopen_mode")?, CiReopenMode::parse)?,
+            diagnostic_reason: opt_enum(
+                row.try_get("diagnostic_reason")?,
+                CiDiagnosticReason::parse,
+            )?,
+            park_justification: row.try_get("park_justification")?,
+            provider_error: row.try_get("provider_error")?,
+            superseded_by_evidence: row.try_get("superseded_by_evidence")?,
+        })
+    }
+
+    /// Whether the row has reached its single terminal outcome.
+    #[must_use]
+    pub fn is_terminal(&self) -> bool {
+        self.action_phase == CiActionPhase::Terminal
+    }
+
+    /// Whether the row currently holds an **open** Tier-2 lease.
+    #[must_use]
+    pub fn holds_open_tier2_lease(&self) -> bool {
+        self.tier2_lease_state == Some(CiTier2LeaseState::Open)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Inputs and outcomes
+// ---------------------------------------------------------------------------
+
+/// Everything needed to open a reservation.
+#[derive(Clone, Debug)]
+pub struct CiRouteReservation {
+    /// Caller-computed hash of the immutable evidence identity plus action.
+    /// Its uniqueness is what permits at most one provider-call episode.
+    pub provider_action_key: String,
+    pub identity: CiEvidenceIdentity,
+    pub task_id: String,
+    pub origin_state: CiOriginState,
+    pub class: CiClass,
+    pub action: CiAction,
+    pub transient_fingerprint: String,
+    /// lane + PR + PR-head SHA + transient fingerprint. Excludes run and
+    /// dequeue ids so equivalent later evidence shares one budget.
+    pub retry_budget_key: String,
+    /// PR + PR-head SHA. Shared across both lanes.
+    pub head_budget_key: String,
+}
+
+/// Charged slot counts for one budget pair.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CiBudgetCounts {
+    pub signature: i64,
+    pub head: i64,
+}
+
+impl CiBudgetCounts {
+    /// Whether either ceiling is already at or beyond its limit.
+    #[must_use]
+    pub fn is_exhausted(self) -> bool {
+        self.signature >= CI_SIGNATURE_BUDGET_LIMIT || self.head >= CI_HEAD_BUDGET_LIMIT
+    }
+}
+
+/// Result of [`CiRouteAttemptRepository::reserve`].
+#[derive(Clone, Debug)]
+pub enum CiReserveOutcome {
+    /// A fresh reservation was committed. Provider mutation remains forbidden
+    /// until the caller wins [`CiRouteAttemptRepository::charge_and_begin_calling`].
+    Reserved(Box<CiRouteAttempt>),
+    /// This exact evidence identity already has an attempt row. A duplicate
+    /// poll or a restart landed here; the existing row is authoritative.
+    AlreadyPresent(Box<CiRouteAttempt>),
+    /// The budgets were already spent, so no reservation was created and no
+    /// Tier-1 action is possible for this evidence.
+    BudgetExhausted(CiBudgetCounts),
+}
+
+/// Result of the `reserved` -> `calling` compare-and-set.
+#[derive(Clone, Debug)]
+pub enum CiChargeOutcome {
+    /// This caller is the single winner and owns the provider-call episode.
+    Charged {
+        attempt: Box<CiRouteAttempt>,
+        counts: CiBudgetCounts,
+    },
+    /// The observed identity no longer matches; the row is now terminal
+    /// `superseded_pre_call` with no charge and no lease.
+    SupersededPreCall(Box<CiRouteAttempt>),
+    /// Still current, but the budgets are spent. No charge, no call.
+    BudgetExhausted {
+        attempt: Box<CiRouteAttempt>,
+        counts: CiBudgetCounts,
+    },
+    /// The row had already left `reserved` — another caller won, or it is
+    /// already terminal.
+    NotReserved(Box<CiRouteAttempt>),
+}
+
+/// Result of pre-call recovery. Exactly three productive outcomes, plus the
+/// two "nothing to do" shapes.
+#[derive(Clone, Debug)]
+pub enum CiReservedRecovery {
+    /// No row with that key.
+    NotFound,
+    /// The row is not a recoverable `reserved` row: either it has advanced
+    /// past `reserved`, or its reservation timeout has not elapsed yet.
+    NotEligible(Box<CiRouteAttempt>),
+    /// Obsolete identity: terminal `superseded_pre_call`, uncharged.
+    SupersededPreCall(Box<CiRouteAttempt>),
+    /// Current identity with budget: the **same row** advanced to `calling`
+    /// under one compare-and-set winner, charging exactly once.
+    Resumed {
+        attempt: Box<CiRouteAttempt>,
+        counts: CiBudgetCounts,
+    },
+    /// Current identity, budget spent: routed through retry exhaustion, with
+    /// at most one Tier-2 lease opened.
+    RetryExhausted {
+        attempt: Box<CiRouteAttempt>,
+        counts: CiBudgetCounts,
+        /// `Some` when this call opened the lease, `None` when a lease for
+        /// that current-evidence key was already open (the "at most one"
+        /// half of the contract).
+        tier2_lease_id: Option<String>,
+    },
+}
+
+/// Authority a caller must attest before a `calling` row may be taken.
+///
+/// Every field is a *proof obligation the database cannot discharge itself*.
+/// The repository verifies what it can (owner mismatch, the 300s floor, the
+/// former incarnation's recorded `provider_actions_drained_at`) and refuses
+/// outright when the caller cannot attest the rest.
+#[derive(Clone, Debug)]
+pub struct CiCallingRecoveryAuthority {
+    /// The recovering coordinator's new immutable incarnation.
+    pub recovering_incarnation: String,
+    /// The exact former owner this handoff is fenced to.
+    pub former_owner_incarnation: String,
+    /// The recovering coordinator holds the exclusive coordinator advisory
+    /// lock for `recovering_incarnation`. A periodic sweep or a non-leader
+    /// runtime passes `false` here and is refused.
+    pub holds_exclusive_lock: bool,
+    /// How the former owner's provider futures were proven gone.
+    pub quiescence_proof: CiQuiescenceProof,
+    /// Floor on `calling_at` age. Defaults to
+    /// [`CI_CALLING_RECOVERY_TIMEOUT_SECS`].
+    pub calling_recovery_timeout_secs: i64,
+}
+
+/// Result of a `calling` owner handoff attempt.
+#[derive(Clone, Debug)]
+pub enum CiCallingRecovery {
+    NotFound,
+    /// The attempt legally did nothing. An audit row was still written.
+    Deferred {
+        attempt: Box<CiRouteAttempt>,
+        reason: CiCallingRecoveryReason,
+    },
+    /// The handoff won: the row is terminal, its charge retained, and no
+    /// provider query or replay occurred.
+    Recovered {
+        attempt: Box<CiRouteAttempt>,
+        outcome: CiRouteOutcome,
+        tier2_lease_id: Option<String>,
+    },
+}
+
+/// Result of opening a Tier-2 lease.
+#[derive(Clone, Debug)]
+pub enum CiTier2LeaseOutcome {
+    /// This caller opened the unique lease for that current-evidence key.
+    Opened {
+        attempt: Box<CiRouteAttempt>,
+        lease_id: String,
+    },
+    /// A lease for that key is already open — possibly on this very row.
+    /// Mutually exclusive by construction.
+    AlreadyLeased(Box<CiRouteAttempt>),
+    /// The compare-and-set failed: the identity changed or a newer
+    /// passing/merged observation already terminalized the row. The row is
+    /// closed as `superseded_before_lead` with no lease and no Lead dispatch.
+    SupersededBeforeLead(Box<CiRouteAttempt>),
+    NotFound,
+}
+
+/// A validated Tier-2 resolution, applied atomically with the guard.
+#[derive(Clone, Debug)]
+pub struct CiTier2Resolution {
+    pub outcome: CiRouteOutcome,
+    pub reopen_mode: Option<CiReopenMode>,
+    pub diagnostic_reason: Option<CiDiagnosticReason>,
+    pub park_justification: Option<String>,
+}
+
+impl CiTier2Resolution {
+    /// A validated repair reopen. The verification command itself is
+    /// validated by the supervisor in wave 4; what is durable here is that
+    /// the reopen was a *repair*, which is what makes a later diagnostic
+    /// reason on the same row a contradiction the CHECK rejects.
+    #[must_use]
+    pub fn repair() -> Self {
+        Self {
+            outcome: CiRouteOutcome::RepairReopened,
+            reopen_mode: Some(CiReopenMode::Repair),
+            diagnostic_reason: None,
+            park_justification: None,
+        }
+    }
+
+    /// A validated diagnostic reopen citing one closed reason.
+    #[must_use]
+    pub fn diagnose(reason: CiDiagnosticReason) -> Self {
+        Self {
+            outcome: CiRouteOutcome::DiagnosticReopened,
+            reopen_mode: Some(CiReopenMode::Diagnose),
+            diagnostic_reason: Some(reason),
+            park_justification: None,
+        }
+    }
+
+    /// A park with a cited infrastructure dead-end.
+    #[must_use]
+    pub fn park(justification: impl Into<String>) -> Self {
+        Self {
+            outcome: CiRouteOutcome::Parked,
+            reopen_mode: None,
+            diagnostic_reason: None,
+            park_justification: Some(justification.into()),
+        }
+    }
+
+    /// The plain outcomes that carry no reopen payload.
+    #[must_use]
+    pub fn plain(outcome: CiRouteOutcome) -> Self {
+        Self {
+            outcome,
+            reopen_mode: None,
+            diagnostic_reason: None,
+            park_justification: None,
+        }
+    }
+
+    fn validate(&self) -> Result<()> {
+        match self.outcome {
+            CiRouteOutcome::RepairReopened => {
+                if self.reopen_mode != Some(CiReopenMode::Repair) {
+                    return Err(DbError::InvalidData(
+                        "repair_reopened requires reopen_mode=repair".to_owned(),
+                    ));
+                }
+                if self.diagnostic_reason.is_some() {
+                    return Err(DbError::InvalidData(
+                        "repair_reopened forbids a diagnostic reason".to_owned(),
+                    ));
+                }
+            }
+            CiRouteOutcome::DiagnosticReopened => {
+                if self.reopen_mode != Some(CiReopenMode::Diagnose) {
+                    return Err(DbError::InvalidData(
+                        "diagnostic_reopened requires reopen_mode=diagnose".to_owned(),
+                    ));
+                }
+                if self.diagnostic_reason.is_none() {
+                    return Err(DbError::InvalidData(
+                        "diagnostic_reopened requires a closed diagnostic reason".to_owned(),
+                    ));
+                }
+            }
+            CiRouteOutcome::Parked => {
+                if !self
+                    .park_justification
+                    .as_deref()
+                    .is_some_and(|j| !j.trim().is_empty())
+                {
+                    return Err(DbError::InvalidData(
+                        "parked requires a cited justification".to_owned(),
+                    ));
+                }
+            }
+            _ => {
+                if self.reopen_mode.is_some() || self.diagnostic_reason.is_some() {
+                    return Err(DbError::InvalidData(format!(
+                        "{} carries no reopen payload",
+                        self.outcome.as_str()
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The repository-checkable half of the rollback quiescence report.
+///
+/// The in-process half (registered provider-action futures) belongs to the
+/// coordinator and is not knowable from here. Wave 5 pairs the two.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CiRouteQuiescence {
+    pub reserved_rows: i64,
+    pub calling_rows: i64,
+    pub open_tier2_leases: i64,
+    /// Open leases that already have a Lead session attached — a dispatched
+    /// adjudication whose result has not been applied.
+    pub unapplied_lead_results: i64,
+}
+
+impl CiRouteQuiescence {
+    /// Whether every repository-visible count is zero.
+    #[must_use]
+    pub fn is_quiescent(self) -> bool {
+        self.reserved_rows == 0
+            && self.calling_rows == 0
+            && self.open_tier2_leases == 0
+            && self.unapplied_lead_results == 0
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Repository
+// ---------------------------------------------------------------------------
+
+pub struct CiRouteAttemptRepository {
+    db: Database,
+}
+
+impl CiRouteAttemptRepository {
+    #[must_use]
+    pub fn new(db: Database) -> Self {
+        Self { db }
+    }
+
+    /// Fetch one attempt by its provider-action key.
+    ///
+    /// # Errors
+    ///
+    /// Database failures, or a row carrying a value outside a durable
+    /// vocabulary.
+    pub async fn get(&self, provider_action_key: &str) -> Result<Option<CiRouteAttempt>> {
+        self.db.ensure_initialized().await?;
+        let row = sqlx::query(&format!(
+            "SELECT {ROW_COLUMNS} FROM ci_route_attempts WHERE provider_action_key = $1"
+        ))
+        .bind(provider_action_key)
+        .fetch_optional(self.db.pool())
+        .await?;
+        row.as_ref().map(CiRouteAttempt::from_row).transpose()
+    }
+
+    /// Read both monotonic counters without charging either.
+    ///
+    /// # Errors
+    ///
+    /// Database failures.
+    pub async fn budget_counts(
+        &self,
+        retry_budget_key: &str,
+        head_budget_key: &str,
+    ) -> Result<CiBudgetCounts> {
+        self.db.ensure_initialized().await?;
+        let signature: Option<i64> = sqlx::query_scalar(
+            "SELECT charged_count FROM ci_route_budget_counters WHERE scope = 'signature' AND counter_key = $1",
+        )
+        .bind(retry_budget_key)
+        .fetch_optional(self.db.pool())
+        .await?;
+        let head: Option<i64> = sqlx::query_scalar(
+            "SELECT charged_count FROM ci_route_budget_counters WHERE scope = 'head' AND counter_key = $1",
+        )
+        .bind(head_budget_key)
+        .fetch_optional(self.db.pool())
+        .await?;
+        Ok(CiBudgetCounts {
+            signature: signature.unwrap_or(0),
+            head: head.unwrap_or(0),
+        })
+    }
+
+    /// Phase 1 of the action protocol: lock and read both budgets, reject
+    /// exhausted thresholds, and insert the unique evidence row as `reserved`.
+    ///
+    /// Committing before the call is the entire point — see the module docs.
+    /// Provider mutation is forbidden while the row is `reserved`.
+    ///
+    /// # Errors
+    ///
+    /// Database failures.
+    pub async fn reserve(&self, input: &CiRouteReservation) -> Result<CiReserveOutcome> {
+        self.db.ensure_initialized().await?;
+        let mut tx = self.db.pool().begin().await?;
+
+        if let Some(existing) = fetch_in_tx(&mut tx, &input.provider_action_key).await? {
+            tx.commit().await?;
+            return Ok(CiReserveOutcome::AlreadyPresent(Box::new(existing)));
+        }
+
+        let counts = lock_budgets(&mut tx, &input.retry_budget_key, &input.head_budget_key).await?;
+        if counts.is_exhausted() {
+            tx.commit().await?;
+            return Ok(CiReserveOutcome::BudgetExhausted(counts));
+        }
+
+        // `ON CONFLICT DO NOTHING` rather than a bare INSERT. The read above
+        // cannot lock a row that does not exist yet, so two concurrent pollers
+        // both see "absent"; the budget lock then serializes them and the
+        // loser's insert must resolve to `AlreadyPresent` rather than a raw
+        // unique violation. The unique key is still what enforces one row per
+        // evidence identity — this only decides how the loser is *told*.
+        let inserted = sqlx::query(
+            "INSERT INTO ci_route_attempts (provider_action_key, lane, pr_number, pr_head_sha, run_id, run_head_sha, dequeue_id, \
+             task_id, origin_state, class, action, transient_fingerprint, retry_budget_key, head_budget_key, action_phase) \
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'reserved') \
+             ON CONFLICT (provider_action_key) DO NOTHING",
+        )
+        .bind(&input.provider_action_key)
+        .bind(input.identity.lane.as_str())
+        .bind(input.identity.pr_number)
+        .bind(&input.identity.pr_head_sha)
+        .bind(input.identity.run_id)
+        .bind(&input.identity.run_head_sha)
+        .bind(input.identity.dequeue_id.as_deref())
+        .bind(&input.task_id)
+        .bind(input.origin_state.as_str())
+        .bind(input.class.as_str())
+        .bind(input.action.as_str())
+        .bind(&input.transient_fingerprint)
+        .bind(&input.retry_budget_key)
+        .bind(&input.head_budget_key)
+        .execute(&mut *tx)
+        .await?;
+
+        let row = fetch_in_tx(&mut tx, &input.provider_action_key)
+            .await?
+            .ok_or_else(|| DbError::Internal("reserved route row disappeared".to_owned()))?;
+        tx.commit().await?;
+        Ok(if inserted.rows_affected() == 1 {
+            CiReserveOutcome::Reserved(Box::new(row))
+        } else {
+            CiReserveOutcome::AlreadyPresent(Box::new(row))
+        })
+    }
+
+    /// Phases 2 and 3: revalidate identity, then atomically compare-and-set
+    /// `reserved` -> `calling` while incrementing both monotonic counters.
+    ///
+    /// **Only the winner may call the provider.** Concurrent callers serialize
+    /// on the row lock and every loser sees a non-`reserved` phase.
+    ///
+    /// The charge is committed in the same transaction as the phase change, so
+    /// a crash immediately after this returns leaves a `calling` row that is
+    /// already charged — which is exactly the conservative direction: slots
+    /// are never released once an action reaches `calling`, regardless of what
+    /// the provider answered.
+    ///
+    /// # Errors
+    ///
+    /// Database failures.
+    pub async fn charge_and_begin_calling(
+        &self,
+        provider_action_key: &str,
+        owner_incarnation_id: &str,
+        observed_identity: &CiEvidenceIdentity,
+    ) -> Result<CiChargeOutcome> {
+        self.db.ensure_initialized().await?;
+        let mut tx = self.db.pool().begin().await?;
+
+        let Some(attempt) = fetch_locked(&mut tx, provider_action_key).await? else {
+            tx.commit().await?;
+            return Err(DbError::InvalidData(format!(
+                "no ci route attempt for provider_action_key `{provider_action_key}`"
+            )));
+        };
+
+        if attempt.action_phase != CiActionPhase::Reserved {
+            tx.commit().await?;
+            return Ok(CiChargeOutcome::NotReserved(Box::new(attempt)));
+        }
+
+        if !attempt.identity.matches(observed_identity) {
+            let superseded = terminalize_in_tx(
+                &mut tx,
+                provider_action_key,
+                CiRouteOutcome::SupersededPreCall,
+                Some(&identity_evidence_json(observed_identity)),
+                None,
+            )
+            .await?;
+            tx.commit().await?;
+            return Ok(CiChargeOutcome::SupersededPreCall(Box::new(superseded)));
+        }
+
+        let counts =
+            lock_budgets(&mut tx, &attempt.retry_budget_key, &attempt.head_budget_key).await?;
+        if counts.is_exhausted() {
+            sqlx::query(
+                "UPDATE ci_route_attempts SET retry_exhausted_at = now(), updated_at = now() \
+                 WHERE provider_action_key = $1 AND retry_exhausted_at IS NULL",
+            )
+            .bind(provider_action_key)
+            .execute(&mut *tx)
+            .await?;
+            let refreshed = fetch_in_tx(&mut tx, provider_action_key)
+                .await?
+                .ok_or_else(|| DbError::Internal("route row disappeared".to_owned()))?;
+            tx.commit().await?;
+            return Ok(CiChargeOutcome::BudgetExhausted {
+                attempt: Box::new(refreshed),
+                counts,
+            });
+        }
+
+        let charged =
+            charge_budgets_in_tx(&mut tx, &attempt.retry_budget_key, &attempt.head_budget_key)
+                .await?;
+
+        // The CAS. `action_phase = 'reserved'` in the WHERE clause is
+        // redundant under the row lock we already hold and is kept anyway:
+        // it makes the single-winner property readable at the statement.
+        let updated = sqlx::query(
+            "UPDATE ci_route_attempts \
+             SET action_phase = 'calling', calling_at = now(), owner_incarnation_id = $2, \
+                 charged_signature_count = $3, charged_head_count = $4, updated_at = now() \
+             WHERE provider_action_key = $1 AND action_phase = 'reserved'",
+        )
+        .bind(provider_action_key)
+        .bind(owner_incarnation_id)
+        .bind(charged.signature)
+        .bind(charged.head)
+        .execute(&mut *tx)
+        .await?;
+        if updated.rows_affected() != 1 {
+            return Err(DbError::Internal(
+                "reserved->calling compare-and-set lost under a held row lock".to_owned(),
+            ));
+        }
+
+        let calling = fetch_in_tx(&mut tx, provider_action_key)
+            .await?
+            .ok_or_else(|| DbError::Internal("calling route row disappeared".to_owned()))?;
+        tx.commit().await?;
+        Ok(CiChargeOutcome::Charged {
+            attempt: Box::new(calling),
+            counts: charged,
+        })
+    }
+
+    /// Phase 4: the owner records its own provider result.
+    ///
+    /// **Owner-scoped.** The compare-and-set carries the caller's
+    /// `owner_incarnation_id`, so a former owner whose row was legally handed
+    /// off writes nothing and observes `false`. That is the whole mechanism by
+    /// which a late result from a drained process is rejected rather than
+    /// silently overwriting a recovery.
+    ///
+    /// # Errors
+    ///
+    /// Database failures, or an outcome outside the provider-terminal set.
+    pub async fn finalize_calling(
+        &self,
+        provider_action_key: &str,
+        owner_incarnation_id: &str,
+        outcome: CiRouteOutcome,
+        provider_error_json: Option<&str>,
+    ) -> Result<bool> {
+        self.db.ensure_initialized().await?;
+        if !matches!(
+            outcome,
+            CiRouteOutcome::Retriggered | CiRouteOutcome::Reenqueued | CiRouteOutcome::ActionFailed
+        ) {
+            return Err(DbError::InvalidData(format!(
+                "`{}` is not a provider finalization outcome",
+                outcome.as_str()
+            )));
+        }
+        let updated = sqlx::query(
+            "UPDATE ci_route_attempts \
+             SET action_phase = 'terminal', terminal_outcome = $3, terminalized_at = now(), \
+                 provider_error = $4::jsonb, updated_at = now() \
+             WHERE provider_action_key = $1 AND action_phase = 'calling' AND owner_incarnation_id = $2",
+        )
+        .bind(provider_action_key)
+        .bind(owner_incarnation_id)
+        .bind(outcome.as_str())
+        .bind(provider_error_json)
+        .execute(self.db.pool())
+        .await?;
+        Ok(updated.rows_affected() == 1)
+    }
+
+    /// Write-once terminalization for every non-provider route close.
+    ///
+    /// Returns `true` only for the caller that actually wrote the outcome. A
+    /// second call — from a duplicate poll, a startup sweep, or a delayed Lead
+    /// result — observes `false` and must not treat the row as freshly closed.
+    ///
+    /// # Errors
+    ///
+    /// Database failures.
+    pub async fn terminalize(
+        &self,
+        provider_action_key: &str,
+        outcome: CiRouteOutcome,
+        superseded_by_evidence_json: Option<&str>,
+    ) -> Result<bool> {
+        self.db.ensure_initialized().await?;
+        let updated = sqlx::query(
+            "UPDATE ci_route_attempts \
+             SET action_phase = 'terminal', terminal_outcome = $2, terminalized_at = now(), \
+                 superseded_by_evidence = COALESCE($3::jsonb, superseded_by_evidence), updated_at = now() \
+             WHERE provider_action_key = $1 AND action_phase <> 'terminal'",
+        )
+        .bind(provider_action_key)
+        .bind(outcome.as_str())
+        .bind(superseded_by_evidence_json)
+        .execute(self.db.pool())
+        .await?;
+        Ok(updated.rows_affected() == 1)
+    }
+
+    /// Pre-call recovery. See the module docs for the three-outcome contract.
+    ///
+    /// `tier2_lease_key` is the current-evidence lease scope used only in the
+    /// exhausted branch; it is passed in because its derivation is the
+    /// coordinator's (wave 2's) contract, not the repository's.
+    ///
+    /// # Errors
+    ///
+    /// Database failures.
+    pub async fn recover_reserved(
+        &self,
+        provider_action_key: &str,
+        observed_identity: &CiEvidenceIdentity,
+        recovering_incarnation_id: &str,
+        reservation_timeout_secs: i64,
+        tier2_lease_key: &str,
+    ) -> Result<CiReservedRecovery> {
+        self.db.ensure_initialized().await?;
+        let mut tx = self.db.pool().begin().await?;
+
+        let Some(attempt) = fetch_locked(&mut tx, provider_action_key).await? else {
+            tx.commit().await?;
+            return Ok(CiReservedRecovery::NotFound);
+        };
+
+        if attempt.action_phase != CiActionPhase::Reserved {
+            tx.commit().await?;
+            return Ok(CiReservedRecovery::NotEligible(Box::new(attempt)));
+        }
+
+        // Eligibility is measured against the DATABASE clock, from the same
+        // `now()` that stamped `reserved_at`. Rendering the timestamp and
+        // subtracting it in Rust would compare two clocks, and a coordinator
+        // whose clock runs behind Postgres would read every reservation as
+        // young and never recover one.
+        let eligible: bool = sqlx::query_scalar(
+            "SELECT reserved_at <= now() - make_interval(secs => $2::double precision) \
+             FROM ci_route_attempts WHERE provider_action_key = $1",
+        )
+        .bind(provider_action_key)
+        .bind(reservation_timeout_secs as f64)
+        .fetch_one(&mut *tx)
+        .await?;
+        if !eligible {
+            tx.commit().await?;
+            return Ok(CiReservedRecovery::NotEligible(Box::new(attempt)));
+        }
+
+        if !attempt.identity.matches(observed_identity) {
+            let superseded = terminalize_in_tx(
+                &mut tx,
+                provider_action_key,
+                CiRouteOutcome::SupersededPreCall,
+                Some(&identity_evidence_json(observed_identity)),
+                None,
+            )
+            .await?;
+            tx.commit().await?;
+            return Ok(CiReservedRecovery::SupersededPreCall(Box::new(superseded)));
+        }
+
+        let counts =
+            lock_budgets(&mut tx, &attempt.retry_budget_key, &attempt.head_budget_key).await?;
+
+        if counts.is_exhausted() {
+            sqlx::query(
+                "UPDATE ci_route_attempts \
+                 SET retry_exhausted_at = COALESCE(retry_exhausted_at, now()), \
+                     pre_call_resumptions = pre_call_resumptions + 1, updated_at = now() \
+                 WHERE provider_action_key = $1",
+            )
+            .bind(provider_action_key)
+            .execute(&mut *tx)
+            .await?;
+            let lease_id = open_tier2_lease_in_tx(
+                &mut tx,
+                provider_action_key,
+                tier2_lease_key,
+                CiTier2Reason::RetryExhausted,
+            )
+            .await?;
+            let refreshed = fetch_in_tx(&mut tx, provider_action_key)
+                .await?
+                .ok_or_else(|| DbError::Internal("route row disappeared".to_owned()))?;
+            tx.commit().await?;
+            return Ok(CiReservedRecovery::RetryExhausted {
+                attempt: Box::new(refreshed),
+                counts,
+                tier2_lease_id: lease_id,
+            });
+        }
+
+        let charged =
+            charge_budgets_in_tx(&mut tx, &attempt.retry_budget_key, &attempt.head_budget_key)
+                .await?;
+
+        let updated = sqlx::query(
+            "UPDATE ci_route_attempts \
+             SET action_phase = 'calling', calling_at = now(), owner_incarnation_id = $2, \
+                 charged_signature_count = $3, charged_head_count = $4, \
+                 pre_call_resumptions = pre_call_resumptions + 1, updated_at = now() \
+             WHERE provider_action_key = $1 AND action_phase = 'reserved'",
+        )
+        .bind(provider_action_key)
+        .bind(recovering_incarnation_id)
+        .bind(charged.signature)
+        .bind(charged.head)
+        .execute(&mut *tx)
+        .await?;
+        if updated.rows_affected() != 1 {
+            return Err(DbError::Internal(
+                "reserved->calling resumption lost under a held row lock".to_owned(),
+            ));
+        }
+
+        let resumed = fetch_in_tx(&mut tx, provider_action_key)
+            .await?
+            .ok_or_else(|| DbError::Internal("resumed route row disappeared".to_owned()))?;
+        tx.commit().await?;
+        Ok(CiReservedRecovery::Resumed {
+            attempt: Box::new(resumed),
+            counts: charged,
+        })
+    }
+
+    /// Startup-only owner handoff for a `calling` row.
+    ///
+    /// Every rejection path writes an audit row, so a deferral is observable.
+    /// The predicates, in the order they are checked:
+    ///
+    /// 1. the caller attests exclusive advisory-lock ownership;
+    /// 2. the caller attests a quiescence proof that is not
+    ///    [`CiQuiescenceProof::None`] — and for a graceful drain, the former
+    ///    incarnation must actually carry `provider_actions_drained_at`;
+    /// 3. the row is still `calling`;
+    /// 4. its owner is the exact named former owner, and differs from the
+    ///    recovering incarnation;
+    /// 5. `calling_at` is at least `calling_recovery_timeout_secs` old.
+    ///
+    /// Only then does it compare-and-set. Passing all five and still losing —
+    /// because the former owner's finalizer committed first — is legal and is
+    /// recorded as `cas_lost`.
+    ///
+    /// # Errors
+    ///
+    /// Database failures.
+    pub async fn recover_calling_owner(
+        &self,
+        provider_action_key: &str,
+        observed_identity: Option<&CiEvidenceIdentity>,
+        authority: &CiCallingRecoveryAuthority,
+        tier2_lease_key: &str,
+    ) -> Result<CiCallingRecovery> {
+        self.db.ensure_initialized().await?;
+        let mut tx = self.db.pool().begin().await?;
+
+        let Some(attempt) = fetch_locked(&mut tx, provider_action_key).await? else {
+            tx.commit().await?;
+            return Ok(CiCallingRecovery::NotFound);
+        };
+
+        // (1) lock ownership — a periodic sweep or a non-leader runtime stops
+        // here and can never open Tier 2.
+        let deferral = if !authority.holds_exclusive_lock {
+            Some(CiCallingRecoveryReason::LockNotHeld)
+        } else if attempt.action_phase != CiActionPhase::Calling {
+            Some(CiCallingRecoveryReason::NotCalling)
+        } else if attempt.owner_incarnation_id.as_deref()
+            != Some(authority.former_owner_incarnation.as_str())
+            || authority.former_owner_incarnation == authority.recovering_incarnation
+        {
+            Some(CiCallingRecoveryReason::OwnerMismatch)
+        } else {
+            None
+        };
+
+        if let Some(reason) = deferral {
+            record_calling_recovery(&mut tx, provider_action_key, authority, reason, false, None)
+                .await?;
+            tx.commit().await?;
+            return Ok(CiCallingRecovery::Deferred {
+                attempt: Box::new(attempt),
+                reason,
+            });
+        }
+
+        // (2) quiescence. `None` is never enough, and a claimed graceful
+        // drain is checked against the former incarnation's own record rather
+        // than believed.
+        let quiescent = match authority.quiescence_proof {
+            CiQuiescenceProof::None => false,
+            CiQuiescenceProof::ProcessTerminated => true,
+            CiQuiescenceProof::GracefulDrain => {
+                let drained: Option<Option<String>> = sqlx::query_scalar(
+                    "SELECT provider_actions_drained_at FROM coordinator_incarnations WHERE id = $1",
+                )
+                .bind(&authority.former_owner_incarnation)
+                .fetch_optional(&mut *tx)
+                .await?;
+                matches!(drained, Some(Some(_)))
+            }
+        };
+        if !quiescent {
+            record_calling_recovery(
+                &mut tx,
+                provider_action_key,
+                authority,
+                CiCallingRecoveryReason::LiveOwnerDeferred,
+                false,
+                None,
+            )
+            .await?;
+            tx.commit().await?;
+            return Ok(CiCallingRecovery::Deferred {
+                attempt: Box::new(attempt),
+                reason: CiCallingRecoveryReason::LiveOwnerDeferred,
+            });
+        }
+
+        // (3) the 300s floor, again measured by the database clock.
+        let elapsed: bool = sqlx::query_scalar(
+            "SELECT calling_at <= now() - make_interval(secs => $2::double precision) \
+             FROM ci_route_attempts WHERE provider_action_key = $1",
+        )
+        .bind(provider_action_key)
+        .bind(authority.calling_recovery_timeout_secs as f64)
+        .fetch_one(&mut *tx)
+        .await?;
+        if !elapsed {
+            record_calling_recovery(
+                &mut tx,
+                provider_action_key,
+                authority,
+                CiCallingRecoveryReason::TimeoutNotElapsed,
+                false,
+                None,
+            )
+            .await?;
+            tx.commit().await?;
+            return Ok(CiCallingRecovery::Deferred {
+                attempt: Box::new(attempt),
+                reason: CiCallingRecoveryReason::TimeoutNotElapsed,
+            });
+        }
+
+        // The external outcome is unknowable and is never queried or replayed.
+        // A still-current row becomes `outcome_unknown` and keeps its charge;
+        // an obsolete one becomes `superseded_after_call`.
+        let still_current = observed_identity.is_some_and(|obs| attempt.identity.matches(obs));
+        let outcome = if still_current {
+            CiRouteOutcome::OutcomeUnknown
+        } else {
+            CiRouteOutcome::SupersededAfterCall
+        };
+
+        let won = sqlx::query(
+            "UPDATE ci_route_attempts \
+             SET owner_incarnation_id = $3, action_phase = 'terminal', terminal_outcome = $4, \
+                 terminalized_at = now(), superseded_by_evidence = COALESCE($5::jsonb, superseded_by_evidence), \
+                 updated_at = now() \
+             WHERE provider_action_key = $1 AND action_phase = 'calling' AND owner_incarnation_id = $2",
+        )
+        .bind(provider_action_key)
+        .bind(&authority.former_owner_incarnation)
+        .bind(&authority.recovering_incarnation)
+        .bind(outcome.as_str())
+        .bind(observed_identity.map(identity_evidence_json))
+        .execute(&mut *tx)
+        .await?;
+
+        // Belt and braces. This transaction has held the row lock since
+        // `fetch_locked`, so a finalizer racing us blocked before its own
+        // UPDATE and this compare-and-set cannot actually lose today — the
+        // owner-mismatch and phase deferrals above catch a finalizer that
+        // committed *first*. It is kept because the alternative to a lost CAS
+        // being observable is a lost CAS being silently treated as a win, and
+        // the audit row makes it falsifiable if the locking ever changes.
+        if won.rows_affected() != 1 {
+            let refreshed = fetch_in_tx(&mut tx, provider_action_key)
+                .await?
+                .ok_or_else(|| DbError::Internal("route row disappeared".to_owned()))?;
+            record_calling_recovery(
+                &mut tx,
+                provider_action_key,
+                authority,
+                CiCallingRecoveryReason::CasLost,
+                false,
+                None,
+            )
+            .await?;
+            tx.commit().await?;
+            return Ok(CiCallingRecovery::Deferred {
+                attempt: Box::new(refreshed),
+                reason: CiCallingRecoveryReason::CasLost,
+            });
+        }
+
+        let lease_id = if still_current {
+            open_tier2_lease_in_tx(
+                &mut tx,
+                provider_action_key,
+                tier2_lease_key,
+                CiTier2Reason::OutcomeUnknown,
+            )
+            .await?
+        } else {
+            None
+        };
+
+        let refreshed = fetch_in_tx(&mut tx, provider_action_key)
+            .await?
+            .ok_or_else(|| DbError::Internal("route row disappeared".to_owned()))?;
+        record_calling_recovery(
+            &mut tx,
+            provider_action_key,
+            authority,
+            CiCallingRecoveryReason::StartupOwnerHandoff,
+            true,
+            Some(outcome),
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(CiCallingRecovery::Recovered {
+            attempt: Box::new(refreshed),
+            outcome,
+            tier2_lease_id: lease_id,
+        })
+    }
+
+    /// Open the unique Tier-2 lease for a current-evidence key.
+    ///
+    /// The compare-and-set is the guard the proposal requires *before* Lead
+    /// dispatch: the stored identity must still equal the observed current
+    /// identity and the row must not already have been closed by a newer
+    /// passing or merged observation. A failed guard closes the row
+    /// `superseded_before_lead` and opens nothing.
+    ///
+    /// # Errors
+    ///
+    /// Database failures.
+    pub async fn open_tier2_lease(
+        &self,
+        provider_action_key: &str,
+        observed_identity: &CiEvidenceIdentity,
+        tier2_lease_key: &str,
+        reason: CiTier2Reason,
+    ) -> Result<CiTier2LeaseOutcome> {
+        self.db.ensure_initialized().await?;
+        let mut tx = self.db.pool().begin().await?;
+
+        let Some(attempt) = fetch_locked(&mut tx, provider_action_key).await? else {
+            tx.commit().await?;
+            return Ok(CiTier2LeaseOutcome::NotFound);
+        };
+
+        // A row already terminalized by a newer passing/merged observation is
+        // exactly the "newer outcome" half of the guard: the pass/merge path
+        // closes route keys, so `is_terminal` covers it. `outcome_unknown` and
+        // `action_failed` are the two terminal outcomes that legally still
+        // open a lease.
+        let terminal_blocks_lease = attempt.is_terminal()
+            && !matches!(
+                attempt.terminal_outcome,
+                Some(CiRouteOutcome::OutcomeUnknown) | Some(CiRouteOutcome::ActionFailed)
+            );
+
+        if !attempt.identity.matches(observed_identity) || terminal_blocks_lease {
+            let closed = terminalize_in_tx(
+                &mut tx,
+                provider_action_key,
+                CiRouteOutcome::SupersededBeforeLead,
+                Some(&identity_evidence_json(observed_identity)),
+                None,
+            )
+            .await?;
+            tx.commit().await?;
+            return Ok(CiTier2LeaseOutcome::SupersededBeforeLead(Box::new(closed)));
+        }
+
+        let lease_id =
+            open_tier2_lease_in_tx(&mut tx, provider_action_key, tier2_lease_key, reason).await?;
+        let refreshed = fetch_in_tx(&mut tx, provider_action_key)
+            .await?
+            .ok_or_else(|| DbError::Internal("route row disappeared".to_owned()))?;
+        tx.commit().await?;
+        Ok(match lease_id {
+            Some(id) => CiTier2LeaseOutcome::Opened {
+                attempt: Box::new(refreshed),
+                lease_id: id,
+            },
+            None => CiTier2LeaseOutcome::AlreadyLeased(Box::new(refreshed)),
+        })
+    }
+
+    /// Bind a dispatched Lead session to an open lease.
+    ///
+    /// Fenced to the exact lease id so a stale caller cannot attach a session
+    /// to a lease that has already been resolved and reopened for newer
+    /// evidence.
+    ///
+    /// # Errors
+    ///
+    /// Database failures.
+    pub async fn attach_lead_session(
+        &self,
+        provider_action_key: &str,
+        lease_id: &str,
+        lead_session_id: &str,
+    ) -> Result<bool> {
+        self.db.ensure_initialized().await?;
+        let updated = sqlx::query(
+            "UPDATE ci_route_attempts SET lead_session_id = $3, updated_at = now() \
+             WHERE provider_action_key = $1 AND tier2_lease_id = $2 AND tier2_lease_state = 'open'",
+        )
+        .bind(provider_action_key)
+        .bind(lease_id)
+        .bind(lead_session_id)
+        .execute(self.db.pool())
+        .await?;
+        Ok(updated.rows_affected() == 1)
+    }
+
+    /// Apply a Lead result under the same atomic identity guard.
+    ///
+    /// Resolving the lease releases the current-evidence key, and — for a row
+    /// that has not already terminalized on its provider outcome — writes the
+    /// route's single terminal outcome. A row that *did* terminalize earlier
+    /// (`action_failed`, `outcome_unknown`) keeps that outcome: the Tier-2
+    /// resolution is recorded on `tier2_resolution` instead, because
+    /// terminalization is write-once.
+    ///
+    /// # Errors
+    ///
+    /// Database failures, or a resolution whose payload contradicts its
+    /// outcome.
+    pub async fn resolve_tier2_lease(
+        &self,
+        provider_action_key: &str,
+        lease_id: &str,
+        observed_identity: &CiEvidenceIdentity,
+        resolution: &CiTier2Resolution,
+    ) -> Result<bool> {
+        self.db.ensure_initialized().await?;
+        resolution.validate()?;
+        let mut tx = self.db.pool().begin().await?;
+
+        let Some(attempt) = fetch_locked(&mut tx, provider_action_key).await? else {
+            tx.commit().await?;
+            return Ok(false);
+        };
+        if attempt.tier2_lease_id.as_deref() != Some(lease_id)
+            || attempt.tier2_lease_state != Some(CiTier2LeaseState::Open)
+        {
+            tx.commit().await?;
+            return Ok(false);
+        }
+
+        // The supervisor-side guard, evaluated in the same transaction as the
+        // transition it authorizes. A head, lane, or dequeue change since
+        // dispatch closes the route without any board mutation.
+        if !attempt.identity.matches(observed_identity) {
+            sqlx::query(
+                "UPDATE ci_route_attempts \
+                 SET tier2_lease_state = 'resolved', tier2_resolved_at = now(), \
+                     tier2_resolution = 'superseded_before_apply', updated_at = now() \
+                 WHERE provider_action_key = $1 AND tier2_lease_id = $2",
+            )
+            .bind(provider_action_key)
+            .bind(lease_id)
+            .execute(&mut *tx)
+            .await?;
+            terminalize_in_tx(
+                &mut tx,
+                provider_action_key,
+                CiRouteOutcome::SupersededBeforeApply,
+                Some(&identity_evidence_json(observed_identity)),
+                None,
+            )
+            .await?;
+            tx.commit().await?;
+            return Ok(false);
+        }
+
+        sqlx::query(
+            "UPDATE ci_route_attempts \
+             SET tier2_lease_state = 'resolved', tier2_resolved_at = now(), tier2_resolution = $3, \
+                 reopen_mode = $4, diagnostic_reason = $5, park_justification = $6, updated_at = now() \
+             WHERE provider_action_key = $1 AND tier2_lease_id = $2",
+        )
+        .bind(provider_action_key)
+        .bind(lease_id)
+        .bind(resolution.outcome.as_str())
+        .bind(resolution.reopen_mode.map(CiReopenMode::as_str))
+        .bind(resolution.diagnostic_reason.map(CiDiagnosticReason::as_str))
+        .bind(resolution.park_justification.as_deref())
+        .execute(&mut *tx)
+        .await?;
+
+        terminalize_in_tx(&mut tx, provider_action_key, resolution.outcome, None, None).await?;
+        tx.commit().await?;
+        Ok(true)
+    }
+
+    /// Close every non-terminal route for a PR because CI passed or the PR
+    /// merged.
+    ///
+    /// Charges are **not** refunded — a spent slot stays spent. Any open
+    /// Tier-2 lease is resolved so its current-evidence key is released and a
+    /// delayed Lead result finds nothing to apply to.
+    ///
+    /// Returns the number of routes closed.
+    ///
+    /// # Errors
+    ///
+    /// Database failures, or an outcome other than `passed`/`merged`.
+    ///
+    /// Scoped by `task_id` as well as `pr_number`: a PR number is unique only
+    /// within one repository, and this repository holds every project's rows.
+    pub async fn close_routes_for_newer_outcome(
+        &self,
+        task_id: &str,
+        pr_number: i64,
+        outcome: CiRouteOutcome,
+        observed_evidence_json: Option<&str>,
+    ) -> Result<u64> {
+        self.db.ensure_initialized().await?;
+        if !matches!(outcome, CiRouteOutcome::Passed | CiRouteOutcome::Merged) {
+            return Err(DbError::InvalidData(format!(
+                "`{}` is not a newer-outcome close",
+                outcome.as_str()
+            )));
+        }
+        let mut tx = self.db.pool().begin().await?;
+        sqlx::query(
+            "UPDATE ci_route_attempts \
+             SET tier2_lease_state = 'resolved', tier2_resolved_at = now(), \
+                 tier2_resolution = COALESCE(tier2_resolution, $3), updated_at = now() \
+             WHERE task_id = $1 AND pr_number = $2 AND tier2_lease_state = 'open'",
+        )
+        .bind(task_id)
+        .bind(pr_number)
+        .bind(outcome.as_str())
+        .execute(&mut *tx)
+        .await?;
+        let closed = sqlx::query(
+            "UPDATE ci_route_attempts \
+             SET action_phase = 'terminal', terminal_outcome = $3, terminalized_at = now(), \
+                 superseded_by_evidence = COALESCE($4::jsonb, superseded_by_evidence), updated_at = now() \
+             WHERE task_id = $1 AND pr_number = $2 AND action_phase <> 'terminal'",
+        )
+        .bind(task_id)
+        .bind(pr_number)
+        .bind(outcome.as_str())
+        .bind(observed_evidence_json)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(closed.rows_affected())
+    }
+
+    /// The repository-visible half of the rollback quiescence gate.
+    ///
+    /// # Errors
+    ///
+    /// Database failures.
+    pub async fn quiescence_counts(&self) -> Result<CiRouteQuiescence> {
+        self.db.ensure_initialized().await?;
+        let row = sqlx::query(
+            "SELECT \
+               COUNT(*) FILTER (WHERE action_phase = 'reserved') AS reserved_rows, \
+               COUNT(*) FILTER (WHERE action_phase = 'calling') AS calling_rows, \
+               COUNT(*) FILTER (WHERE tier2_lease_state = 'open') AS open_tier2_leases, \
+               COUNT(*) FILTER (WHERE tier2_lease_state = 'open' AND lead_session_id IS NOT NULL) AS unapplied_lead_results \
+             FROM ci_route_attempts",
+        )
+        .fetch_one(self.db.pool())
+        .await?;
+        Ok(CiRouteQuiescence {
+            reserved_rows: row.try_get("reserved_rows")?,
+            calling_rows: row.try_get("calling_rows")?,
+            open_tier2_leases: row.try_get("open_tier2_leases")?,
+            unapplied_lead_results: row.try_get("unapplied_lead_results")?,
+        })
+    }
+
+    /// The evidence identities that are still non-terminal, i.e. the routed
+    /// failed identities the rollback gate must see advance, pass, or merge.
+    ///
+    /// # Errors
+    ///
+    /// Database failures.
+    pub async fn non_terminal_identities(&self) -> Result<Vec<(String, CiEvidenceIdentity)>> {
+        self.db.ensure_initialized().await?;
+        let rows = sqlx::query(&format!(
+            "SELECT {ROW_COLUMNS} FROM ci_route_attempts WHERE action_phase <> 'terminal' \
+             ORDER BY reserved_at, provider_action_key"
+        ))
+        .fetch_all(self.db.pool())
+        .await?;
+        rows.iter()
+            .map(|row| {
+                CiRouteAttempt::from_row(row).map(|a| (a.provider_action_key.clone(), a.identity))
+            })
+            .collect()
+    }
+
+    /// Every recovery attempt recorded against one route, newest last.
+    ///
+    /// # Errors
+    ///
+    /// Database failures.
+    pub async fn calling_recovery_audit(
+        &self,
+        provider_action_key: &str,
+    ) -> Result<Vec<CiCallingRecoveryRecord>> {
+        self.db.ensure_initialized().await?;
+        let rows = sqlx::query(
+            "SELECT id, provider_action_key, former_owner_incarnation, recovering_incarnation, \
+                    holds_exclusive_lock, quiescence_proof, recovery_reason, \
+                    calling_recovery_timeout_secs, cas_won, resulting_outcome \
+             FROM ci_route_calling_recoveries WHERE provider_action_key = $1 ORDER BY id",
+        )
+        .bind(provider_action_key)
+        .fetch_all(self.db.pool())
+        .await?;
+        rows.iter()
+            .map(|row| {
+                Ok(CiCallingRecoveryRecord {
+                    id: row.try_get("id")?,
+                    provider_action_key: row.try_get("provider_action_key")?,
+                    former_owner_incarnation: row.try_get("former_owner_incarnation")?,
+                    recovering_incarnation: row.try_get("recovering_incarnation")?,
+                    holds_exclusive_lock: row.try_get("holds_exclusive_lock")?,
+                    quiescence_proof: CiQuiescenceProof::parse(
+                        row.try_get::<String, _>("quiescence_proof")?.as_str(),
+                    )?,
+                    recovery_reason: CiCallingRecoveryReason::parse(
+                        row.try_get::<String, _>("recovery_reason")?.as_str(),
+                    )?,
+                    calling_recovery_timeout_secs: row.try_get("calling_recovery_timeout_secs")?,
+                    cas_won: row.try_get("cas_won")?,
+                    resulting_outcome: match row
+                        .try_get::<Option<String>, _>("resulting_outcome")?
+                    {
+                        Some(v) => Some(CiRouteOutcome::parse(&v)?),
+                        None => None,
+                    },
+                })
+            })
+            .collect()
+    }
+}
+
+/// One recorded `calling` recovery attempt, including the legal no-ops.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CiCallingRecoveryRecord {
+    pub id: String,
+    pub provider_action_key: String,
+    pub former_owner_incarnation: Option<String>,
+    pub recovering_incarnation: String,
+    pub holds_exclusive_lock: bool,
+    pub quiescence_proof: CiQuiescenceProof,
+    pub recovery_reason: CiCallingRecoveryReason,
+    pub calling_recovery_timeout_secs: i64,
+    pub cas_won: bool,
+    pub resulting_outcome: Option<CiRouteOutcome>,
+}
+
+// ---------------------------------------------------------------------------
+// Transaction helpers
+// ---------------------------------------------------------------------------
+
+async fn fetch_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    provider_action_key: &str,
+) -> Result<Option<CiRouteAttempt>> {
+    let row = sqlx::query(&format!(
+        "SELECT {ROW_COLUMNS} FROM ci_route_attempts WHERE provider_action_key = $1"
+    ))
+    .bind(provider_action_key)
+    .fetch_optional(&mut **tx)
+    .await?;
+    row.as_ref().map(CiRouteAttempt::from_row).transpose()
+}
+
+/// Take the row lock, then re-read through the rendering projection.
+///
+/// Two statements rather than one because `ROW_COLUMNS` contains `to_char`
+/// expressions and Postgres rejects `FOR UPDATE` on a projection it cannot
+/// prove is a plain row reference.
+async fn fetch_locked(
+    tx: &mut Transaction<'_, Postgres>,
+    provider_action_key: &str,
+) -> Result<Option<CiRouteAttempt>> {
+    let locked: Option<(String,)> = sqlx::query_as(
+        "SELECT provider_action_key FROM ci_route_attempts WHERE provider_action_key = $1 FOR UPDATE",
+    )
+    .bind(provider_action_key)
+    .fetch_optional(&mut **tx)
+    .await?;
+    if locked.is_none() {
+        return Ok(None);
+    }
+    fetch_in_tx(tx, provider_action_key).await
+}
+
+/// Materialize and lock both counter rows, returning their current values.
+///
+/// The rows are created at zero if absent so the lock has something to hold;
+/// creating a counter is not charging it.
+async fn lock_budgets(
+    tx: &mut Transaction<'_, Postgres>,
+    retry_budget_key: &str,
+    head_budget_key: &str,
+) -> Result<CiBudgetCounts> {
+    // Deterministic order (signature then head) so two transactions charging
+    // the same pair can never deadlock against each other.
+    let signature = lock_counter(tx, "signature", retry_budget_key).await?;
+    let head = lock_counter(tx, "head", head_budget_key).await?;
+    Ok(CiBudgetCounts { signature, head })
+}
+
+async fn lock_counter(
+    tx: &mut Transaction<'_, Postgres>,
+    scope: &str,
+    counter_key: &str,
+) -> Result<i64> {
+    sqlx::query(
+        "INSERT INTO ci_route_budget_counters (scope, counter_key, charged_count) VALUES ($1, $2, 0) \
+         ON CONFLICT (scope, counter_key) DO NOTHING",
+    )
+    .bind(scope)
+    .bind(counter_key)
+    .execute(&mut **tx)
+    .await?;
+    let count: i64 = sqlx::query_scalar(
+        "SELECT charged_count FROM ci_route_budget_counters WHERE scope = $1 AND counter_key = $2 FOR UPDATE",
+    )
+    .bind(scope)
+    .bind(counter_key)
+    .fetch_one(&mut **tx)
+    .await?;
+    Ok(count)
+}
+
+/// Increment both counters by one and return the new values.
+///
+/// There is no decrement anywhere in this module. That is the whole of
+/// "monotonic and conservative": a slot spent by an action that reached
+/// `calling` is never returned, whatever the provider said or whether anyone
+/// was still listening.
+async fn charge_budgets_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    retry_budget_key: &str,
+    head_budget_key: &str,
+) -> Result<CiBudgetCounts> {
+    let signature = charge_counter(tx, "signature", retry_budget_key).await?;
+    let head = charge_counter(tx, "head", head_budget_key).await?;
+    Ok(CiBudgetCounts { signature, head })
+}
+
+async fn charge_counter(
+    tx: &mut Transaction<'_, Postgres>,
+    scope: &str,
+    counter_key: &str,
+) -> Result<i64> {
+    let count: i64 = sqlx::query_scalar(
+        "UPDATE ci_route_budget_counters \
+         SET charged_count = charged_count + 1, \
+             first_charged_at = COALESCE(first_charged_at, now()), \
+             last_charged_at = now() \
+         WHERE scope = $1 AND counter_key = $2 \
+         RETURNING charged_count",
+    )
+    .bind(scope)
+    .bind(counter_key)
+    .fetch_one(&mut **tx)
+    .await?;
+    Ok(count)
+}
+
+async fn terminalize_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    provider_action_key: &str,
+    outcome: CiRouteOutcome,
+    superseded_by_evidence_json: Option<&str>,
+    provider_error_json: Option<&str>,
+) -> Result<CiRouteAttempt> {
+    sqlx::query(
+        "UPDATE ci_route_attempts \
+         SET action_phase = 'terminal', terminal_outcome = $2, terminalized_at = now(), \
+             superseded_by_evidence = COALESCE($3::jsonb, superseded_by_evidence), \
+             provider_error = COALESCE($4::jsonb, provider_error), updated_at = now() \
+         WHERE provider_action_key = $1 AND action_phase <> 'terminal'",
+    )
+    .bind(provider_action_key)
+    .bind(outcome.as_str())
+    .bind(superseded_by_evidence_json)
+    .bind(provider_error_json)
+    .execute(&mut **tx)
+    .await?;
+    fetch_in_tx(tx, provider_action_key)
+        .await?
+        .ok_or_else(|| DbError::Internal("terminalized route row disappeared".to_owned()))
+}
+
+/// Open the lease, or report that the current-evidence key already has one.
+///
+/// The mutual exclusion is the partial unique index, not this function: two
+/// concurrent transactions both reach the INSERT-equivalent UPDATE and one of
+/// them violates the index. `ON CONFLICT` is unavailable for an UPDATE, so the
+/// contention is resolved by checking for an existing open lease under the
+/// row/key locks the callers already hold.
+async fn open_tier2_lease_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    provider_action_key: &str,
+    tier2_lease_key: &str,
+    reason: CiTier2Reason,
+) -> Result<Option<String>> {
+    let existing: Option<(String,)> = sqlx::query_as(
+        "SELECT provider_action_key FROM ci_route_attempts \
+         WHERE tier2_lease_key = $1 AND tier2_lease_state = 'open' FOR UPDATE",
+    )
+    .bind(tier2_lease_key)
+    .fetch_optional(&mut **tx)
+    .await?;
+    if existing.is_some() {
+        return Ok(None);
+    }
+    let lease_id = uuid::Uuid::now_v7().to_string();
+    let updated = sqlx::query(
+        "UPDATE ci_route_attempts \
+         SET tier2_lease_id = $2, tier2_lease_key = $3, tier2_lease_state = 'open', \
+             tier2_lease_reason = $4, tier2_leased_at = now(), updated_at = now() \
+         WHERE provider_action_key = $1 AND tier2_lease_state IS DISTINCT FROM 'open'",
+    )
+    .bind(provider_action_key)
+    .bind(&lease_id)
+    .bind(tier2_lease_key)
+    .bind(reason.as_str())
+    .execute(&mut **tx)
+    .await?;
+    if updated.rows_affected() == 1 {
+        Ok(Some(lease_id))
+    } else {
+        Ok(None)
+    }
+}
+
+async fn record_calling_recovery(
+    tx: &mut Transaction<'_, Postgres>,
+    provider_action_key: &str,
+    authority: &CiCallingRecoveryAuthority,
+    reason: CiCallingRecoveryReason,
+    cas_won: bool,
+    outcome: Option<CiRouteOutcome>,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO ci_route_calling_recoveries \
+           (id, provider_action_key, former_owner_incarnation, recovering_incarnation, \
+            holds_exclusive_lock, quiescence_proof, recovery_reason, calling_recovery_timeout_secs, \
+            observed_calling_at, cas_won, resulting_outcome) \
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8, \
+                 (SELECT calling_at FROM ci_route_attempts WHERE provider_action_key = $2), $9, $10)",
+    )
+    .bind(uuid::Uuid::now_v7().to_string())
+    .bind(provider_action_key)
+    .bind(&authority.former_owner_incarnation)
+    .bind(&authority.recovering_incarnation)
+    .bind(authority.holds_exclusive_lock)
+    .bind(authority.quiescence_proof.as_str())
+    .bind(reason.as_str())
+    .bind(authority.calling_recovery_timeout_secs)
+    .bind(cas_won)
+    .bind(outcome.map(CiRouteOutcome::as_str))
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+/// Render an observed identity for the `superseded_by_evidence` audit column.
+///
+/// Recording *what defeated the compare-and-set* is not the same as making
+/// that evidence authoritative — the obsolete row still performs no action.
+fn identity_evidence_json(identity: &CiEvidenceIdentity) -> String {
+    serde_json::json!({
+        "observed": {
+            "lane": identity.lane.as_str(),
+            "pr_number": identity.pr_number,
+            "pr_head_sha": identity.pr_head_sha,
+            "run_id": identity.run_id,
+            "run_head_sha": identity.run_head_sha,
+            "dequeue_id": identity.dequeue_id,
+        }
+    })
+    .to_string()
+}
