@@ -24,10 +24,39 @@ fn cell() -> &'static Mutex<()> {
     LOCK.get_or_init(|| Mutex::new(()))
 }
 
+/// Install a permissive process-global default subscriber, once.
+///
+/// Serializing the capturing tests is not sufficient on its own. `tracing`'s
+/// interest cache is keyed per callsite and shared by the whole process, and
+/// the default when no global subscriber is installed is `NoSubscriber`, which
+/// answers `Interest::never()` for everything. Any thread running
+/// non-capturing test code can therefore re-cache a callsite as permanently
+/// disabled between our `rebuild_interest_cache` and the event we are waiting
+/// for — and then the WARN under test is never emitted at all, the capture
+/// comes back empty, and the test fails with nothing wrong in the code.
+///
+/// A global subscriber that ENABLES every callsite and writes to a sink fixes
+/// that at the root: interest can no longer be cached as `never`, so every
+/// event is dispatched to whatever subscriber is current, which for a
+/// capturing test is its own thread-local one.
+fn enable_all_callsites_globally() {
+    static INSTALLED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    INSTALLED.get_or_init(|| {
+        let sink = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .with_writer(std::io::sink)
+            .finish();
+        // Fails only if a global default is already installed, which is fine:
+        // something else already decided interest for the process.
+        let _ = tracing::subscriber::set_global_default(sink);
+    });
+}
+
 /// Acquire exclusive access to the process's log-capture seam and re-ask the
 /// (now single) default dispatcher about every callsite. Hold the returned
 /// guard until the capture has been read.
 pub(crate) async fn lock() -> MutexGuard<'static, ()> {
+    enable_all_callsites_globally();
     let guard = cell().lock().await;
     tracing::callsite::rebuild_interest_cache();
     guard
