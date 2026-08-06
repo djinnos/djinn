@@ -11828,6 +11828,83 @@ expression: signatures
     },
     "output_schema": {
       "$defs": {
+        "ModelHealthOutcomeOutput": {
+          "description": "One durable autonomous-session outcome population for an exact breaker-like\n`(scope, model_id)` key. Unlike `models`, rows come only from terminal\nsession history, so a row can exist with no corresponding breaker bucket.",
+          "properties": {
+            "cancelled_count": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "completed_count": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "finalization_count": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "harness_count": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "infrastructure_count": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "legacy_unclassified_count": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "model_id": {
+              "type": "string"
+            },
+            "population_kind": {
+              "type": "string"
+            },
+            "protocol_count": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "provider_count": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "scope": {
+              "description": "Session creator scope, falling back to the task creator in the durable\nreport. `null` identifies the shared/system scope.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "unknown_count": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "window_end": {
+              "type": "string"
+            },
+            "window_start": {
+              "description": "Explicit half-open report window `[window_start, window_end)`.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "population_kind",
+            "model_id",
+            "window_start",
+            "window_end",
+            "completed_count",
+            "cancelled_count",
+            "provider_count",
+            "harness_count",
+            "infrastructure_count",
+            "protocol_count",
+            "finalization_count",
+            "unknown_count",
+            "legacy_unclassified_count"
+          ],
+          "type": "object"
+        },
         "ModelHealthOutput": {
           "properties": {
             "auto_disabled": {
@@ -11906,11 +11983,19 @@ expression: signatures
             "$ref": "#/$defs/ModelHealthOutput"
           },
           "type": "array"
+        },
+        "outcomes": {
+          "description": "Durable terminal outcomes for autonomous sessions, separate from the\nin-memory breaker buckets in `models`.",
+          "items": {
+            "$ref": "#/$defs/ModelHealthOutcomeOutput"
+          },
+          "type": "array"
         }
       },
       "required": [
         "action",
-        "models"
+        "models",
+        "outcomes"
       ],
       "type": "object"
     }
