@@ -32,6 +32,11 @@ pub struct LivenessEvidenceSnapshot {
     pub task_id: Option<String>,
     /// The task_run context, if known.
     pub task_run_id: Option<String>,
+    /// Internal idempotency identity for a durable delivery trigger. Exit
+    /// delivery uses `session_exit:{session_id}`; absent identities retain the
+    /// append-only classification-pass behavior.
+    #[serde(default)]
+    pub trigger_identity: Option<String>,
     /// Verdict string: `"live"`, `"slow"`, `"dead"`, `"protocol_violation"`.
     pub verdict: String,
     /// Stable outcome kind: `"success"`, `"crash"`, `"timeout"`,
@@ -146,35 +151,68 @@ impl LivenessRepository {
     ///
     /// Inserts one row into the `liveness_evidence` append-only table and, when
     /// supplied, updates the denormalized liveness columns on its scalar
-    /// `sessions` and `task_runs` owners. The whole operation is atomic.
+    /// `sessions` and `task_runs` owners. A non-null trigger identity is
+    /// insert-once: concurrent or replayed deliveries return its existing row
+    /// without rewriting historical evidence or scalar projections. The whole
+    /// operation is atomic.
     ///
-    /// Returns the id of the newly-inserted `liveness_evidence` row.
+    /// Returns the id of the newly-inserted or already-recorded
+    /// `liveness_evidence` row.
     pub async fn persist_evidence(&self, snapshot: &LivenessEvidenceSnapshot) -> DbResult<String> {
         self.db.ensure_initialized().await?;
 
         let evidence_id = uuid::Uuid::now_v7().to_string();
         let mut tx = self.db.pool().begin().await?;
 
-        // 1. Insert into the append-only liveness_evidence table.
-        sqlx::query(
+        // 1. Insert into the append-only liveness_evidence table. The partial
+        // unique index only applies to durable trigger identities, preserving
+        // append-only behavior for legacy/non-exit snapshots.
+        let inserted_id: Option<String> = sqlx::query_scalar(
             "INSERT INTO liveness_evidence
                 (id, session_id, task_id, task_run_id, verdict,
-                 outcome_kind, outcome_reason, evidence)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+                 trigger_identity, outcome_kind, outcome_reason, evidence)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+             ON CONFLICT (trigger_identity) WHERE trigger_identity IS NOT NULL
+             DO NOTHING
+             RETURNING id",
         )
         .bind(&evidence_id)
         .bind(&snapshot.session_id)
         .bind(&snapshot.task_id)
         .bind(&snapshot.task_run_id)
         .bind(&snapshot.verdict)
+        .bind(&snapshot.trigger_identity)
         .bind(&snapshot.outcome_kind)
         .bind(&snapshot.outcome_reason)
         .bind(&snapshot.evidence)
-        .execute(&mut *tx)
+        .fetch_optional(&mut *tx)
         .await?;
 
-        // 2. Update denormalized columns only for an unambiguous session.
-        if let Some(session_id) = &snapshot.session_id {
+        // PostgreSQL waits for a concurrent conflicting insert before its
+        // DO-NOTHING decision, so this read observes the winning immutable row.
+        let (evidence_id, inserted) = match inserted_id {
+            Some(id) => (id, true),
+            None => {
+                let trigger_identity = snapshot
+                    .trigger_identity
+                    .as_deref()
+                    .expect("an insert without a returned id must have a trigger identity");
+                let existing_id: String = sqlx::query_scalar(
+                    "SELECT id FROM liveness_evidence WHERE trigger_identity = $1",
+                )
+                .bind(trigger_identity)
+                .fetch_one(&mut *tx)
+                .await?;
+                (existing_id, false)
+            }
+        };
+
+        // 2. Update denormalized columns only for an unambiguous session. A
+        // replayed durable trigger deliberately skips these writes: the winner
+        // alone initializes scalar projections with its immutable snapshot.
+        if (inserted || snapshot.trigger_identity.is_none())
+            && let Some(session_id) = &snapshot.session_id
+        {
             sqlx::query(
                 "UPDATE sessions
                  SET liveness_verdict = $1,
@@ -193,7 +231,9 @@ impl LivenessRepository {
         }
 
         // 3. Update denormalized columns on the task_runs row (if known).
-        if let Some(ref run_id) = snapshot.task_run_id {
+        if (inserted || snapshot.trigger_identity.is_none())
+            && let Some(ref run_id) = snapshot.task_run_id
+        {
             sqlx::query(
                 "UPDATE task_runs
                  SET liveness_outcome_kind = $1,

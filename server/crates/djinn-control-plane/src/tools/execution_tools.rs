@@ -223,6 +223,7 @@ impl DjinnMcpServer {
                 session_id: None,
                 task_id: Some(canonical_task_id.clone()),
                 task_run_id: None,
+                trigger_identity: None,
                 verdict: "protocol_violation".to_owned(),
                 outcome_kind: Some("reconciliation_incomplete".to_owned()),
                 outcome_reason: None,
@@ -250,6 +251,7 @@ impl DjinnMcpServer {
                     session_id: None,
                     task_id: Some(canonical_task_id.clone()),
                     task_run_id: None,
+                    trigger_identity: None,
                     verdict: "protocol_violation".to_owned(),
                     outcome_kind: Some("reconciliation_incomplete".to_owned()),
                     outcome_reason: None,
@@ -281,6 +283,7 @@ impl DjinnMcpServer {
             session_id: scalar_execution.map(|execution| execution.session_id.clone()),
             task_id: Some(snapshot.task_id.clone()),
             task_run_id: scalar_execution.and_then(|execution| execution.task_run_id.clone()),
+            trigger_identity: None,
             verdict: if snapshot.ok {
                 "dead"
             } else {
