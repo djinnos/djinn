@@ -528,29 +528,45 @@ fn joint_trim_tie_breaks_on_creation_then_raw_name_bytes() {
     assert!(!tmp.path().join("bravo").exists());
 }
 
-/// When the sole candidate cannot be removed (deterministic removal failure
-/// via the mock seam), the engine records an operation error and, with no
-/// remaining candidates, returns `over_budget_error`.
+/// When every candidate fails to remove (deterministic removal failure via the
+/// mock seam), the engine records one operation error per attempt and, once the
+/// candidate list is exhausted, returns `over_budget_error`.
+///
+/// The overage is driven by the DIRECTORY-COUNT cap, not the byte cap. An
+/// earlier version created one empty run and set `max_bytes: 1`, relying on the
+/// filesystem charging a block for the directory itself — true on ext4 (4096
+/// allocated bytes), false on tmpfs, where an empty directory reports
+/// `st_blocks == 0`. The run was then already within the 1-byte budget, the
+/// engine returned `WithinBudget` without attempting any removal, and
+/// `errors > 0` failed on any machine whose `TMPDIR` is tmpfs. Directory count
+/// is filesystem-independent, so the over-budget precondition now holds
+/// everywhere.
 #[cfg(unix)]
 #[test]
 fn joint_trim_reports_over_budget_error_when_removal_fails() {
     let tmp = tempfile::tempdir().unwrap();
     fs::create_dir(tmp.path().join("only")).unwrap();
+    fs::create_dir(tmp.path().join("other")).unwrap();
     let fs = FailingRemoveFilesystem;
     let result = trim_cargo_target_runs_with_fs(
         tmp.path(),
         &HashSet::new(),
         CargoTargetRunsCaps {
-            max_dirs: 0,
-            max_bytes: 1,
+            max_dirs: 1,
+            max_bytes: 0,
         },
         &fs,
     )
     .unwrap();
     assert_eq!(result.deleted, 0);
-    assert!(result.errors > 0);
+    assert_eq!(
+        result.errors, 2,
+        "one operation error per exhausted candidate, not one per pass"
+    );
+    assert_eq!(result.protected, 0, "a removal failure is an error, not protection");
     assert_eq!(result.outcome, CargoTargetRunsTrimOutcome::OverBudgetError);
     assert!(tmp.path().join("only").exists());
+    assert!(tmp.path().join("other").exists());
 }
 
 /// Files within a removable run contribute allocated bytes, but do not make
