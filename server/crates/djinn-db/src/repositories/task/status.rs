@@ -1,6 +1,131 @@
 use super::task_select_where_id;
 use super::*;
 
+/// 4etb: postgres expression producing the ISO-8601 UTC text every task
+/// timestamp column uses, so `escalation_evidence_at` compares lexically
+/// against `last_intervention_at` and `human_review_resolved_at`.
+const UTC_NOW_TEXT: &str = r#"to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')"#;
+
+impl TaskRepository {
+    /// 4etb: stamp the canonical escalation evidence epoch for a task that is
+    /// transitioning from "not awaiting adjudication" to "awaiting arbiter
+    /// adjudication".
+    ///
+    /// The write is conditional on the column being NULL, so a repeated
+    /// coordinator tick while the SAME escalation is pending never rewrites the
+    /// timestamp — the epoch is stable for the whole escalation. Returns the
+    /// effective epoch (freshly stamped or the pre-existing one) so the caller
+    /// can put it in a dossier without a second read.
+    ///
+    /// Use [`stamp_escalation_evidence_epoch_tx`] when the stamp must share a
+    /// transaction with the arbitration-row insert (the production path).
+    pub async fn stamp_escalation_evidence_epoch(&self, task_id: &str) -> Result<Option<String>> {
+        self.db.ensure_initialized().await?;
+        let mut tx = self.db.pool().begin().await?;
+        let stamped = stamp_escalation_evidence_epoch_tx(&mut tx, task_id).await?;
+        tx.commit().await?;
+        Ok(stamped)
+    }
+
+    /// 4etb: read the canonical evidence epoch without writing.
+    pub async fn escalation_evidence_at(&self, task_id: &str) -> Result<Option<String>> {
+        self.db.ensure_initialized().await?;
+        Ok(
+            sqlx::query_scalar::<_, Option<String>>(
+                "SELECT escalation_evidence_at FROM tasks WHERE id = $1",
+            )
+            .bind(task_id)
+            .fetch_optional(self.db.pool())
+            .await?
+            .flatten(),
+        )
+    }
+
+    /// 4etb: clear the evidence epoch once an adjudication clears.
+    ///
+    /// "A new trigger after adjudication clears must stamp a new epoch" — the
+    /// only way to get a new epoch is for the old one to be gone, so every
+    /// terminal disposition of an arbitration (consume + release, supersede,
+    /// terminal-rung handoff) clears it. Idempotent.
+    pub async fn clear_escalation_evidence_epoch(&self, task_id: &str) -> Result<bool> {
+        self.db.ensure_initialized().await?;
+        let result = sqlx::query(&format!(
+            "UPDATE tasks SET escalation_evidence_at = NULL, updated_at = {UTC_NOW_TEXT} \
+             WHERE id = $1 AND escalation_evidence_at IS NOT NULL"
+        ))
+        .bind(task_id)
+        .execute(self.db.pool())
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// 4etb: one-time bounded fallback for LEGACY pending escalations.
+    ///
+    /// A task that was already `needs_lead_intervention` when this shipped has
+    /// no epoch and no way to grow one — the stamp only fires on the transition
+    /// INTO adjudication, which already happened. Rather than fall back to
+    /// unbounded history (which is exactly the uv3p failure this proposal
+    /// closes), derive the floor once from
+    /// `max(last_intervention_at, human_review_resolved_at, updated_at)` and
+    /// PERSIST it, so every later evaluation reads a durable epoch like any
+    /// other task. `updated_at` is the task row's own status-change stamp — the
+    /// newest instant the legacy row can prove it was moved.
+    ///
+    /// Only touches rows that are genuinely mid-adjudication and have no epoch.
+    /// Returns the persisted epoch when the fallback fired.
+    pub async fn backfill_legacy_escalation_evidence_epoch(
+        &self,
+        task_id: &str,
+    ) -> Result<Option<String>> {
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_scalar::<_, Option<String>>(
+            r#"UPDATE tasks SET
+                    escalation_evidence_at = GREATEST(
+                        COALESCE(last_intervention_at, ''),
+                        COALESCE(human_review_resolved_at, ''),
+                        updated_at
+                    )
+                 WHERE id = $1
+                   AND escalation_evidence_at IS NULL
+                   AND status IN ('needs_lead_intervention', 'in_lead_intervention')
+                 RETURNING escalation_evidence_at"#,
+        )
+        .bind(task_id)
+        .fetch_optional(self.db.pool())
+        .await?
+        .flatten())
+    }
+}
+
+/// 4etb: transactional core of the evidence-epoch stamp.
+///
+/// Conditional on `escalation_evidence_at IS NULL` so repeated ticks are a
+/// no-op, then reads back the effective value. Shares the caller's transaction
+/// so the epoch and the arbitration row that opens the escalation commit
+/// together — a crash between them cannot leave an arbiter escalation whose
+/// guards have no floor.
+pub async fn stamp_escalation_evidence_epoch_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    task_id: &str,
+) -> Result<Option<String>> {
+    sqlx::query(&format!(
+        "UPDATE tasks SET escalation_evidence_at = {UTC_NOW_TEXT}, updated_at = {UTC_NOW_TEXT} \
+         WHERE id = $1 AND escalation_evidence_at IS NULL"
+    ))
+    .bind(task_id)
+    .execute(&mut **tx)
+    .await?;
+    Ok(
+        sqlx::query_scalar::<_, Option<String>>(
+            "SELECT escalation_evidence_at FROM tasks WHERE id = $1",
+        )
+        .bind(task_id)
+        .fetch_optional(&mut **tx)
+        .await?
+        .flatten(),
+    )
+}
+
 impl TaskRepository {
     /// Transition a task through the state machine.
     ///
@@ -172,6 +297,28 @@ impl TaskRepository {
                     .await?;
 
                     let task: Task = task_select_where_id!(&id).fetch_one(&mut *tx).await?;
+
+                    // 4etb: an adjudication child's close owns the source's
+                    // next state. Exhausted-ladder ownership and the
+                    // `adjudication_outcome` event run in THIS transaction, so
+                    // an intermediate merely-`open` source is never externally
+                    // observable and a duplicate delivery is a no-op.
+                    if task.status == "closed"
+                        && let Err(e) = super::adjudication_close::apply_adjudication_child_close_tx(
+                            &mut tx,
+                            &task.id,
+                            &task.labels,
+                        )
+                        .await
+                    {
+                        tracing::warn!(
+                            task_id = %task.short_id,
+                            error = %e,
+                            "4etb: adjudication child-close transaction failed"
+                        );
+                        return Err(e);
+                    }
+
                     tx.commit().await?;
                     Ok::<_, crate::Error>(task)
                 }

@@ -3906,8 +3906,8 @@ mod tests {
             "call_request_lead must log a deprecated_request_lead typed activity"
         );
         assert!(
-            fn_body.contains("dispatch_planner_escalation"),
-            "call_request_lead must route through dispatch_planner_escalation"
+            fn_body.contains("dispatch_arbiter_adjudication"),
+            "call_request_lead must route through dispatch_arbiter_adjudication"
         );
         // Must NOT transition to needs_lead_intervention.
         // Strip `//` comment lines before searching so that explanatory

@@ -15,6 +15,7 @@ fn render_prompt(agent_type: AgentType, task: &Task, ctx: &TaskContext) -> Strin
 
 fn make_task() -> Task {
     Task {
+        escalation_evidence_at: None,
         id: "task-123".into(),
         project_id: "project-1".into(),
         short_id: "t123".into(),

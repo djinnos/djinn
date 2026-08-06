@@ -1553,23 +1553,23 @@ impl CoordinatorActor {
                 self.model_priorities = priorities;
                 tracing::info!("CoordinatorActor: updated per-role model priorities");
             }
-            CoordinatorMessage::DispatchPlannerEscalation {
+            CoordinatorMessage::DispatchArbiterAdjudication {
                 source_task_id,
                 reason,
                 project_id,
             } => {
                 poll_stack::boxed(|| {
-                    self.dispatch_planner_escalation(&source_task_id, &reason, &project_id)
+                    self.dispatch_arbiter_adjudication(&source_task_id, &reason, &project_id)
                 })
                 .await;
             }
-            CoordinatorMessage::RouteLoopGuardPlannerIntervention {
+            CoordinatorMessage::RouteLoopGuardArbiterAdjudication {
                 source_task_id,
                 role,
                 reason,
             } => {
                 poll_stack::boxed(|| {
-                    self.route_loop_guard_planner_intervention(&source_task_id, role, &reason)
+                    self.route_loop_guard_arbiter_adjudication(&source_task_id, role, &reason)
                 })
                 .await;
             }

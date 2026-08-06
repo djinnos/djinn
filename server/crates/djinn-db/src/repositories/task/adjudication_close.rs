@@ -1,0 +1,312 @@
+//! 4etb: the adjudication child-close transaction.
+//!
+//! Two things must happen inside the SAME transaction that closes an
+//! adjudication child (a `planner-park-escalation` or a legacy
+//! `human-review-hold`):
+//!
+//! 1. **Exhausted-ladder ownership.** `PlannerEscalation` is the terminal
+//!    adjudication rung. Rounds 1 and 2 may close unchanged and release the
+//!    source into at most the next idempotent round. When ROUND 3 closes
+//!    without changing the source disposition, the ladder is spent and the
+//!    source must not be left in a status nobody polls — the exact failure of
+//!    tasks `z8i8` and `zkas`, which exhausted the old ladder with unmerged PRs
+//!    and then sat `open`, unscanned, until a human moved them. Exactly one
+//!    branch is taken: a source with an open, unmerged PR goes to `pr_review`
+//!    (owner: the PR poller); a source with no PR is force-closed with the
+//!    contractual reason; an already-terminal or already-`pr_review` source is
+//!    preserved. A fourth `PlannerEscalation` is forbidden.
+//!
+//! 2. **The adjudication outcome event.** Every adjudication child close emits
+//!    `adjudication_outcome` with `source_changed` / `source_unchanged` plus
+//!    `source_status_before` / `source_status_after`. The value describes ONLY
+//!    that transaction — it is not a claim that the task eventually merged or
+//!    converged, and no longitudinal reporting is derived from it.
+//!
+//! Doing both here rather than in the coordinator is what makes the
+//! intermediate merely-`open` source unobservable: the terminal child close and
+//! the source transition commit together.
+
+use sqlx::Row;
+
+use crate::Result;
+
+/// Activity `event_type` for the per-adjudication disposition outcome.
+pub const ADJUDICATION_OUTCOME_EVENT: &str = "adjudication_outcome";
+
+/// `adjudication_outcome` value: the child close changed the source's business
+/// disposition.
+pub const SOURCE_CHANGED: &str = "source_changed";
+
+/// `adjudication_outcome` value: the child close left the source's business
+/// disposition untouched. Coordinator-owned scaffolding (closing the child,
+/// consuming an arbitration row, writing an evidence epoch, writing a
+/// hold-ceiling or park-redispatch marker, releasing a blocker, replacing one
+/// escalation blocker with the next) does not by itself make the source
+/// changed.
+pub const SOURCE_UNCHANGED: &str = "source_unchanged";
+
+/// Terminal close reason for a no-PR source whose adjudication ladder is spent.
+/// Exact text is contractual — operators and tests match on it.
+pub const LADDER_EXHAUSTED_CLOSE_REASON: &str =
+    "adjudication ladder exhausted without an actionable PR";
+
+/// Terminal-rung ceiling: `PlannerEscalation` rounds 1, 2 and 3 are permitted;
+/// the unchanged close of round 3 invokes exhausted ownership and round 4 is
+/// never created.
+///
+/// Round number is the durable blocker-derived count of held-remediation
+/// children on the source, never a task counter column.
+pub const MAX_AUTONOMOUS_ESCALATIONS: i64 = 3;
+
+/// The fixed business-disposition snapshot the outcome compares.
+///
+/// Deliberately narrow: status, terminal close reason, the scope fields, the
+/// applied reopen/rescope directive, and the supersession/replacement
+/// relationship. Nothing else on the row participates.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BusinessDisposition {
+    pub status: String,
+    pub close_reason: Option<String>,
+    pub description: String,
+    pub design: String,
+    pub acceptance_criteria: String,
+    /// Applied reopen/rescope directive — the arbiter directive the source is
+    /// currently carrying, `None` when no directive has been applied.
+    pub applied_directive: Option<String>,
+    /// Supersession / replacement relationship: the id of the task that
+    /// superseded this one, when one exists.
+    pub superseded_by: Option<String>,
+}
+
+impl BusinessDisposition {
+    /// Read the snapshot inside a transaction.
+    pub async fn read_tx(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        task_id: &str,
+    ) -> Result<Option<Self>> {
+        let row = sqlx::query(
+            r#"SELECT
+                    t.status,
+                    t.close_reason,
+                    t.description,
+                    t.design,
+                    t.acceptance_criteria::text AS acceptance_criteria,
+                    (SELECT a.directive::text
+                       FROM task_arbitrations a
+                      WHERE a.task_id = t.id AND a.directive_injected = TRUE
+                      ORDER BY a.hold_cycle DESC LIMIT 1) AS applied_directive,
+                    (SELECT b.blocking_task_id
+                       FROM blockers b
+                       JOIN tasks r ON r.id = b.blocking_task_id
+                      WHERE b.task_id = t.id AND t.status = 'superseded'
+                      ORDER BY r.created_at DESC LIMIT 1) AS superseded_by
+                 FROM tasks t WHERE t.id = $1"#,
+        )
+        .bind(task_id)
+        .fetch_optional(&mut **tx)
+        .await?;
+        Ok(row.map(|row| Self {
+            status: row.get("status"),
+            close_reason: row.get("close_reason"),
+            description: row.get("description"),
+            design: row.get("design"),
+            acceptance_criteria: row.get("acceptance_criteria"),
+            applied_directive: row.get("applied_directive"),
+            superseded_by: row.get("superseded_by"),
+        }))
+    }
+}
+
+/// Is `labels_json` an adjudication child — a task whose close releases the
+/// source it blocks?
+///
+/// Mirrors the coordinator's `roles::releases_source_on_close`: the autonomous
+/// `planner-park-escalation` and the legacy `human-review-hold`.
+pub fn is_adjudication_child(labels_json: &str) -> bool {
+    labels_json.contains("planner-park-escalation") || labels_json.contains("human-review-hold")
+}
+
+/// Does `task_id` have an open, unmerged PR?
+///
+/// An adopted PR counts — the task carries the adopted PR's URL exactly like
+/// one it opened itself. A MERGED PR does not: `merge_commit_sha` is the
+/// durable proof the PR landed, and a landed PR gives the poller nothing to do.
+/// A source whose PR was closed on GitHub without merging has no durable
+/// column to read; the PR poller is the named owner of that reconciliation, so
+/// routing it to `pr_review` is still the correct handoff.
+async fn has_open_unmerged_pr(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    task_id: &str,
+) -> Result<Option<String>> {
+    let row = sqlx::query(
+        "SELECT pr_url, merge_commit_sha FROM tasks WHERE id = $1",
+    )
+    .bind(task_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let Some(row) = row else { return Ok(None) };
+    let pr_url: Option<String> = row.get("pr_url");
+    let merge_commit_sha: Option<String> = row.get("merge_commit_sha");
+    if merge_commit_sha.is_some_and(|sha| !sha.trim().is_empty()) {
+        return Ok(None);
+    }
+    Ok(pr_url.filter(|url| !url.trim().is_empty()))
+}
+
+/// Blocker-derived count of held-remediation (adjudication) children on
+/// `source_id`, INCLUDING closed ones.
+///
+/// Each escalation adds exactly one blocker that is never removed, so this is
+/// the terminal-rung ROUND NUMBER. No counter column and no migration.
+pub async fn planner_escalation_count_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    source_id: &str,
+) -> Result<i64> {
+    let count: i64 = sqlx::query_scalar(
+        r#"SELECT COUNT(*)::bigint
+             FROM blockers b
+             JOIN tasks t ON t.id = b.task_id
+            WHERE b.blocking_task_id = $1
+              AND (t.labels::text LIKE '%planner-park-escalation%'
+                OR t.labels::text LIKE '%human-review-hold%')"#,
+    )
+    .bind(source_id)
+    .fetch_one(&mut **tx)
+    .await?;
+    Ok(count)
+}
+
+/// Has an `adjudication_outcome` event already been written for this
+/// (source, child) pair? Duplicate delivery must emit no second event.
+async fn outcome_already_emitted(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    source_id: &str,
+    child_id: &str,
+) -> Result<bool> {
+    let exists: Option<i64> = sqlx::query_scalar(
+        r#"SELECT 1::bigint FROM activity_log
+            WHERE task_id = $1
+              AND event_type = $2
+              AND payload ->> 'adjudication_child_id' = $3
+            LIMIT 1"#,
+    )
+    .bind(source_id)
+    .bind(ADJUDICATION_OUTCOME_EVENT)
+    .bind(child_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    Ok(exists.is_some())
+}
+
+/// Statuses that already have an owner and must be preserved verbatim by the
+/// exhausted-ladder branch.
+fn already_owned(status: &str) -> bool {
+    matches!(status, "closed" | "superseded" | "pr_review")
+}
+
+/// Apply the 4etb adjudication child-close transaction for one closing child.
+///
+/// Called from `TaskRepository::transition` with the child's own transaction,
+/// AFTER the child row has been closed and BEFORE the commit. Returns the
+/// number of source tasks for which an outcome event was emitted.
+pub async fn apply_adjudication_child_close_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    child_id: &str,
+    child_labels: &str,
+) -> Result<usize> {
+    if !is_adjudication_child(child_labels) {
+        return Ok(0);
+    }
+
+    let source_ids: Vec<String> =
+        sqlx::query_scalar("SELECT task_id FROM blockers WHERE blocking_task_id = $1")
+            .bind(child_id)
+            .fetch_all(&mut **tx)
+            .await?;
+
+    let mut emitted = 0usize;
+    for source_id in source_ids {
+        // Duplicate closure delivery: the transaction is an idempotent no-op
+        // and emits no second event.
+        if outcome_already_emitted(tx, &source_id, child_id).await? {
+            continue;
+        }
+
+        let Some(before) = BusinessDisposition::read_tx(tx, &source_id).await? else {
+            continue;
+        };
+
+        // ── Exhausted-ladder ownership ──────────────────────────────────────
+        //
+        // Only the UNCHANGED close of terminal round 3 invokes it. Rounds 1 and
+        // 2 release into at most the next idempotent round, which is ordinary
+        // scaffolding and leaves the disposition untouched.
+        let round = planner_escalation_count_tx(tx, &source_id).await?;
+        if round >= MAX_AUTONOMOUS_ESCALATIONS && !already_owned(&before.status) {
+            match has_open_unmerged_pr(tx, &source_id).await? {
+                Some(_pr_url) => {
+                    // Owner: the PR poller (`poll_pr_review_tasks`).
+                    sqlx::query(
+                        r#"UPDATE tasks SET
+                                status = 'pr_review',
+                                updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+                             WHERE id = $1"#,
+                    )
+                    .bind(&source_id)
+                    .execute(&mut **tx)
+                    .await?;
+                }
+                None => {
+                    // No poller required: terminal by contract.
+                    sqlx::query(
+                        r#"UPDATE tasks SET
+                                status = 'closed',
+                                close_reason = $2,
+                                closed_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+                                updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+                             WHERE id = $1"#,
+                    )
+                    .bind(&source_id)
+                    .bind(LADDER_EXHAUSTED_CLOSE_REASON)
+                    .execute(&mut **tx)
+                    .await?;
+                }
+            }
+        }
+
+        let after = BusinessDisposition::read_tx(tx, &source_id)
+            .await?
+            .unwrap_or_else(|| before.clone());
+
+        let outcome = if after == before {
+            SOURCE_UNCHANGED
+        } else {
+            SOURCE_CHANGED
+        };
+        let payload = serde_json::json!({
+            "adjudication_child_id": child_id,
+            "adjudication_outcome": outcome,
+            "source_status_before": before.status,
+            "source_status_after": after.status,
+            "terminal_rung_round": round,
+            // Operational metadata only — never an input to `adjudication_outcome`.
+            "blocker_released": true,
+        })
+        .to_string();
+        let activity_id = uuid::Uuid::now_v7().to_string();
+        sqlx::query(
+            "INSERT INTO activity_log (id, task_id, actor_id, actor_role, event_type, payload)
+             VALUES ($1, $2, $3, $4, $5, $6::jsonb)",
+        )
+        .bind(&activity_id)
+        .bind(&source_id)
+        .bind("coordinator")
+        .bind("system")
+        .bind(ADJUDICATION_OUTCOME_EVENT)
+        .bind(&payload)
+        .execute(&mut **tx)
+        .await?;
+        emitted += 1;
+    }
+    Ok(emitted)
+}

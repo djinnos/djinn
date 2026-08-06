@@ -20,6 +20,7 @@ mod generation;
 mod parent_disposition;
 mod queries;
 mod reads;
+mod adjudication_close;
 mod status;
 mod writes;
 pub use writes::EffectiveCreatorProvenance;
@@ -36,6 +37,12 @@ pub use parent_disposition::{
     ChildDisposition, DispositionCounts, DispositionFinding, DispositionPlan, DispositionScope,
     DoctorRepairOutcome, apply_doctor_repair_tx, apply_parent_disposition_tx, classify_child_tx,
 };
+pub use adjudication_close::{
+    ADJUDICATION_OUTCOME_EVENT, LADDER_EXHAUSTED_CLOSE_REASON, MAX_AUTONOMOUS_ESCALATIONS,
+    SOURCE_CHANGED, SOURCE_UNCHANGED, apply_adjudication_child_close_tx, is_adjudication_child,
+    planner_escalation_count_tx,
+};
+pub use status::stamp_escalation_evidence_epoch_tx;
 pub use queries::{
     BOARD_HEALTH_MISMATCH_PAGE_SIZE, BoardHealthMismatchCandidate, BoardHealthMismatchPage,
     BoardHealthMismatchScanState, evaluate_board_health_mismatch_candidate,
@@ -2785,7 +2792,7 @@ macro_rules! task_select_where_id {
                 status, priority, owner, labels::text AS labels, acceptance_criteria::text AS acceptance_criteria,
                 reopen_count, continuation_count,
                 total_reopen_count,
-                intervention_count, last_intervention_at,
+                intervention_count, last_intervention_at, escalation_evidence_at,
                 created_at, updated_at, closed_at,
                 close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs::text AS memory_refs,
                 agent_type, execution_context, created_by_user_id, refinement_run_id, refinement_intent_id, refinement_generation, refinement_round, refinement_phase, refinement_role,

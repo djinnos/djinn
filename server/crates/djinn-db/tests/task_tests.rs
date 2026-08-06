@@ -83,6 +83,7 @@ pub(crate) fn make_peer_task(
     updated_at: &str,
 ) -> Task {
     Task {
+        escalation_evidence_at: None,
         id: id.to_string(),
         project_id: project_id.to_string(),
         short_id: format!("p{}", &id[..3]),

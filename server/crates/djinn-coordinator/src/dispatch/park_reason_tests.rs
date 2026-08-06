@@ -14,6 +14,7 @@ fn test_task(
     ci_failure_fingerprint: Option<&str>,
 ) -> djinn_core::models::Task {
     djinn_core::models::Task {
+        escalation_evidence_at: None,
         id: "task-3t22".to_string(),
         project_id: "proj-3t22".to_string(),
         short_id: "3t22".to_string(),

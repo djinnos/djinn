@@ -375,7 +375,7 @@ impl CoordinatorActor {
                     );
                     let sections_text = ci_failure_sections.join("\n");
                     poll_stack::boxed(|| {
-                        self.route_planner_intervention(
+                        self.route_arbiter_adjudication(
                             task,
                             "worker",
                             &reason,
@@ -512,7 +512,7 @@ impl CoordinatorActor {
             );
             let sections_text = ci_failure_sections.join("\n");
             poll_stack::boxed(|| {
-                self.route_planner_intervention(
+                self.route_arbiter_adjudication(
                     task,
                     "worker",
                     &reason,

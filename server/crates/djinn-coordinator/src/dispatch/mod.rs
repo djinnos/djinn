@@ -36,6 +36,7 @@ mod wave_dispatch_tests;
 #[cfg(test)]
 mod park_reason_tests;
 
+#[allow(unused_imports)]
 pub(crate) use admission::model_under_user_cap;
 #[cfg(test)]
 #[allow(unused_imports)]

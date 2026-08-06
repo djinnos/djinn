@@ -213,6 +213,102 @@ impl TaskArbitrationRepository {
         }
     }
 
+    /// 4etb: [`try_create`](Self::try_create) plus the canonical escalation
+    /// evidence epoch, in ONE transaction.
+    ///
+    /// This is the production entry point for opening an arbiter escalation.
+    /// The promotion truth table requires that the trigger "stamp
+    /// `escalation_evidence_at` and insert arbitration row 0 in the trigger
+    /// transaction": an escalation whose row exists but whose epoch does not
+    /// would leave the park guards with no floor, which is exactly the
+    /// first-escalation livelock this proposal closes.
+    ///
+    /// Both writes are idempotent, so a repeated tick while the same escalation
+    /// is pending re-reads the same epoch and the same unconsumed row without
+    /// creating or rewriting either. Returns the effective epoch alongside the
+    /// create result.
+    pub async fn try_create_with_evidence_epoch(
+        &self,
+        params: CreateArbitrationParams<'_>,
+    ) -> Result<(TryCreateResult, Option<String>)> {
+        self.db.ensure_initialized().await?;
+        let mut tx = self.db.pool().begin().await?;
+
+        let epoch = crate::repositories::task::stamp_escalation_evidence_epoch_tx(
+            &mut tx,
+            params.task_id,
+        )
+        .await?;
+
+        // `ON CONFLICT DO NOTHING` rather than letting the unique violation
+        // fire: inside a transaction a constraint error aborts the whole
+        // transaction, which would roll the epoch stamp back with it.
+        let id = uuid::Uuid::now_v7().to_string();
+        sqlx::query(
+            r#"INSERT INTO task_arbitrations (
+                    id, task_id, hold_cycle, state,
+                    deadline_at,
+                    mirror_head_sha, github_head_sha, pr_url,
+                    failing_ci_job_ids,
+                    dossier, directive, verification_command, excluded_models
+                ) VALUES ($1, $2, $3, 'unconsumed',
+                    $4,
+                    $5, $6, $7,
+                    $8,
+                    $9, $10, $11, $12)
+               ON CONFLICT ON CONSTRAINT uq_task_arbitrations_task_cycle DO NOTHING"#,
+        )
+        .bind(&id)
+        .bind(params.task_id)
+        .bind(params.hold_cycle)
+        .bind(params.deadline_at)
+        .bind(params.mirror_head_sha)
+        .bind(params.github_head_sha)
+        .bind(params.pr_url)
+        .bind(params.failing_ci_job_ids)
+        .bind(params.dossier)
+        .bind(params.directive)
+        .bind(params.verification_command)
+        .bind(params.excluded_models)
+        .execute(&mut *tx)
+        .await?;
+
+        let record = sqlx::query_as::<_, TaskArbitrationRecord>(ARBITRATION_SELECT_BY_TASK_CYCLE)
+            .bind(params.task_id)
+            .bind(params.hold_cycle)
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or_else(|| {
+                crate::Error::Internal(
+                    "task_arbitrations row missing after upsert-style insert".to_owned(),
+                )
+            })?;
+
+        tx.commit().await?;
+
+        // `record.id == id` proves OUR insert won the race and this is a fresh
+        // cycle; anything else is a pre-existing row whose state selects the
+        // already-exists variant, exactly as `try_create` reports it.
+        let result = if record.id == id {
+            TryCreateResult::Created(record)
+        } else {
+            match record.arbitration_state() {
+                Some(ArbitrationState::Unconsumed) => {
+                    TryCreateResult::AlreadyExistsUnconsumed(record)
+                }
+                Some(ArbitrationState::Consumed) => TryCreateResult::AlreadyExistsConsumed(record),
+                Some(ArbitrationState::Failed) => TryCreateResult::AlreadyExistsFailed(record),
+                None => {
+                    return Err(crate::Error::Internal(format!(
+                        "task_arbitrations row has unknown state: {}",
+                        record.state
+                    )));
+                }
+            }
+        };
+        Ok((result, epoch))
+    }
+
     /// Read a single arbitration by its natural key.
     pub async fn get_by_task_and_cycle(
         &self,

@@ -320,7 +320,7 @@ impl CoordinatorActor {
     /// `running_by_user_model` map after a planner intervention dispatched a
     /// new session inside the `dispatch_ready_tasks` loop.
     ///
-    /// `dispatch_planner_escalation` records its admission into
+    /// `dispatch_arbiter_adjudication` records its admission into
     /// `self.inflight_dispatches` via `record_inflight_dispatch`, but the
     /// local `running_by_user_model` was seeded at the top of the pass and
     /// won't reflect the new entry. Re-overlaying ensures the next task in
@@ -342,7 +342,7 @@ impl CoordinatorActor {
     ///
     /// This is the single shared admission-recording path. Both
     /// `dispatch_ready_tasks` (worker/reviewer/lead/architect) and
-    /// `dispatch_planner_escalation` call it, so a just-dispatched session of
+    /// `dispatch_arbiter_adjudication` call it, so a just-dispatched session of
     /// any role counts against the cap for a same-tick second admission
     /// (the worker + reviewer overshoot gap).
     pub(crate) async fn record_inflight_dispatch(
@@ -626,7 +626,7 @@ impl CoordinatorActor {
     // each caller re-implementing the cap-check + ledger logic.
     //
     // These methods are used by both `dispatch_ready_tasks` (and
-    // `dispatch_planner_escalation`) and `refinement_dispatch::
+    // `dispatch_arbiter_adjudication`) and `refinement_dispatch::
     // dispatch_next_refinement_phase`, so refinement tribunal dispatch and
     // normal task dispatch go through the exact same cap/ledger code path.
 
@@ -2292,7 +2292,7 @@ impl CoordinatorActor {
                 // same creator, potentially the same model). Bump the local
                 // per-(creator, model) count so a later task in THIS pass sees
                 // reduced capacity — the inflight ledger is already updated
-                // inside dispatch_planner_escalation, but the local
+                // inside dispatch_arbiter_adjudication, but the local
                 // running_by_user_model was seeded before this admission.
                 poll_stack::boxed(|| {
                     self.bump_local_cap_for_last_planner_admission(
@@ -2684,7 +2684,15 @@ impl CoordinatorActor {
             // fallback strings from failed session lookups are skipped.
             // Degrades to the unfiltered list when exclusion would empty it
             // (only one viable model → plan-lane retry, then park at the bound).
-            if role == "worker" && task.intervention_count >= 1 {
+            // 4etb: rotation is NO LONGER gated on `intervention_count >= 1`.
+            // With rung 1 retired nothing advances that counter, so the gate
+            // would have disabled rotation on exactly the escalations that need
+            // it — every first escalation. The canonical evidence epoch inside
+            // `post_intervention_history` is the real gate now: it returns an
+            // empty history (and therefore no exclusions) for a task that has
+            // never been escalated, so an unescalated worker dispatch is
+            // unaffected.
+            if role == "worker" {
                 let history = poll_stack::boxed(|| self.post_intervention_history(&task)).await;
                 let rotation_excluded = history.rotation_excluded_models();
                 if !rotation_excluded.is_empty() {
@@ -6120,6 +6128,7 @@ mod failover_chain_tests {
         // Build a minimal Task for the side-effect method (only `id` and
         // `short_id` are read by `apply_chain_exhaustion_side_effects`).
         let task = djinn_core::models::Task {
+            escalation_evidence_at: None,
             id: "exhausted-task-uuid".to_owned(),
             project_id: String::new(),
             short_id: "exhausted-task".to_owned(),
@@ -6327,6 +6336,7 @@ mod failover_chain_tests {
         );
 
         let task = djinn_core::models::Task {
+            escalation_evidence_at: None,
             id: "breaker-task-uuid".to_owned(),
             project_id: String::new(),
             short_id: "breaker-task".to_owned(),
@@ -6870,6 +6880,7 @@ mod failover_chain_tests {
         // Build a minimal Task for `apply_chain_exhaustion_side_effects` (only
         // `id` and `short_id` are read for streak/persist paths).
         let task = djinn_core::models::Task {
+            escalation_evidence_at: None,
             id: "breaker-elig-task-uuid".to_owned(),
             project_id: String::new(),
             short_id: "breaker-elig-task".to_owned(),
@@ -8383,7 +8394,7 @@ mod build_admission_route_tests {
 
         // Dispatch through the actual planner-escalation route.
         actor
-            .dispatch_planner_escalation(
+            .dispatch_arbiter_adjudication(
                 &source_task_id,
                 "test planner escalation reason",
                 &fixture.project_id,

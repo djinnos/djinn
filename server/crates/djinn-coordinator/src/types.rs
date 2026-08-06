@@ -329,15 +329,6 @@ pub(super) const TASK_OUTCOME_CONFIDENCE_SIGNAL: f64 = 0.1;
 pub(super) const TASK_OUTCOME_REOPEN_COUNT: &str = "reopen_count";
 pub(super) const TASK_OUTCOME_FAILED_CLOSE: &str = "failed_closed";
 
-/// Activity-log event type recording that the coordinator routed a stuck task
-/// to a Planner intervention pass (decompose / rescope / close / apply). One
-/// marker is written per `reopen_count` value, which both documents the
-/// intervention in the timeline AND serves as the idempotency guard so the
-/// coordinator doesn't re-dispatch a Planner every tick while the task sits at
-/// the same reopen count (or while the Planner intervention is in flight).
-/// The marker payload also stores the `quality_strikes` count for audit.
-pub(super) const PLANNER_INTERVENTION_MARKER: &str = "planner_intervention";
-
 /// uv3p Part B: activity marker recording that the human-park rung declined to
 /// park and redispatched instead (no post-intervention remediation was ever
 /// attempted, or a brand-new CI fingerprint deserved one shot). Payload carries
@@ -385,25 +376,6 @@ pub(super) const NON_ATTEMPT_PARK_THRESHOLD: usize = 2;
 /// same depth.
 pub(super) const REOPEN_INTERVENTION_THRESHOLD: i64 = 3;
 
-/// Number of completed Planner interventions after which a task that has STILL
-/// churned back up to `REOPEN_INTERVENTION_THRESHOLD` is parked terminally
-/// instead of escalated to the Planner yet again.
-///
-/// Rationale for `1`: the first time a worker loop exceeds the reopen threshold
-/// the Planner gets one pass to reshape it (rescope / decompose / re-spec /
-/// close). `reset_intervention_counters` zeroes `reopen_count` and bumps
-/// `intervention_count` so the sharpened task re-dispatches cleanly. But if the
-/// SAME task climbs back to the threshold a second time, the Planner's reshape
-/// demonstrably did not unstick it — re-escalating only resets the counter and
-/// the worker loops anew, monopolizing the (often single) dispatch slot
-/// indefinitely (the txr4 query_subgraph case: 37 sessions / ~11h / 10 total
-/// reopens, where the worker kept re-doing already-accepted functional wiring
-/// and never wrote the one required unit test even after the Planner narrowed
-/// scope to exactly that). Past this ceiling the coordinator force-closes the
-/// task with a recoverable reason so the queue drains; a human (or a freshly
-/// scoped task against the existing branch) can finish it.
-pub(super) const MAX_PLANNER_INTERVENTIONS: i64 = 1;
-
 /// Autonomous-escalation ceiling: the maximum number of held-remediation
 /// escalations (`planner-park-escalation` or legacy `human-review-hold`
 /// blockers) the board will spend on a single source task before it gives up
@@ -418,7 +390,7 @@ pub(super) const MAX_PLANNER_INTERVENTIONS: i64 = 1;
 /// loop-breaker terminally fails (ForceClose) the source with a reason
 /// documenting the exhausted ladder rather than creating another escalation. A
 /// planner can always resurrect the work from the epic level.
-pub(super) const MAX_AUTONOMOUS_ESCALATIONS: i64 = 3;
+pub(super) use djinn_db::repositories::task::MAX_AUTONOMOUS_ESCALATIONS;
 
 /// Cumulative, cross-cycle arbitration ceiling: the maximum number of arbiter
 /// ordinary hold cycles a single source task may open before the second-strike
