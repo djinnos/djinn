@@ -761,15 +761,35 @@ impl DirectServices {
         };
 
         // Block the source on the escalation task.
-        if let Some(ref src) = source_task
-            && let Err(e) = task_repo.add_blocker(&src.id, &review_task.id).await
-        {
-            tracing::warn!(
-                error = %e,
-                source_task_id = %src.short_id,
-                review_task_id = %review_task.short_id,
-                "arbiter_park: failed to block source on planner escalation task"
-            );
+        if let Some(ref src) = source_task {
+            if let Err(e) = task_repo.add_blocker(&src.id, &review_task.id).await {
+                tracing::warn!(
+                    error = %e,
+                    source_task_id = %src.short_id,
+                    review_task_id = %review_task.short_id,
+                    "arbiter_park: failed to block source on planner escalation task"
+                );
+            }
+            // 4etb: capture the source's business disposition BEFORE this
+            // adjudication runs, so the child's close can tell a real
+            // disposition change from coordinator scaffolding — and so the
+            // exhausted-ladder branch never disposes of a source the planner
+            // legitimately reshaped. Same contract as the coordinator's own
+            // `create_remediation_task`.
+            if let Err(e) = djinn_db::repositories::task::record_adjudication_source_snapshot(
+                self.callbacks.agent_context.db.pool(),
+                &src.id,
+                &review_task.id,
+            )
+            .await
+            {
+                tracing::warn!(
+                    error = %e,
+                    source_task_id = %src.short_id,
+                    review_task_id = %review_task.short_id,
+                    "4etb: failed to record the adjudication source snapshot for an arbiter park"
+                );
+            }
         }
 
         // Label the escalation so the close path runs the source-release

@@ -81,7 +81,43 @@ pub struct BusinessDisposition {
 // snapshot already holds — so a supersede always reads as `source_changed`
 // without inventing a relationship column the schema does not have.
 
+/// Activity `event_type` carrying the source's business disposition as it stood
+/// when an adjudication child was CREATED.
+///
+/// The outcome compares the source before and after the adjudication, and the
+/// planner's own edits (rescope, applied directive, supersede) land through
+/// separate MCP calls BEFORE it closes the child. Reading `before` off the live
+/// row inside the close transaction would therefore always see those edits
+/// already applied and report `source_unchanged` for every one of them — and,
+/// worse, would let the exhausted-ladder branch force-close a source the
+/// planner had just legitimately rescoped. The snapshot written at child
+/// creation is the only honest `before`.
+pub const ADJUDICATION_SOURCE_SNAPSHOT_EVENT: &str = "adjudication_source_snapshot";
+
 impl BusinessDisposition {
+    fn to_payload(&self, child_id: &str) -> serde_json::Value {
+        serde_json::json!({
+            "adjudication_child_id": child_id,
+            "status": self.status,
+            "close_reason": self.close_reason,
+            "description": self.description,
+            "design": self.design,
+            "acceptance_criteria": self.acceptance_criteria,
+            "applied_directive": self.applied_directive,
+        })
+    }
+
+    fn from_payload(payload: &serde_json::Value) -> Option<Self> {
+        Some(Self {
+            status: payload["status"].as_str()?.to_owned(),
+            close_reason: payload["close_reason"].as_str().map(str::to_owned),
+            description: payload["description"].as_str()?.to_owned(),
+            design: payload["design"].as_str()?.to_owned(),
+            acceptance_criteria: payload["acceptance_criteria"].as_str()?.to_owned(),
+            applied_directive: payload["applied_directive"].as_str().map(str::to_owned),
+        })
+    }
+
     /// Read the snapshot inside a transaction.
     pub async fn read_tx(
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
@@ -112,6 +148,67 @@ impl BusinessDisposition {
             applied_directive: row.get("applied_directive"),
         }))
     }
+}
+
+/// Record the source's business disposition at the moment an adjudication child
+/// is created, so the child's close can tell a REAL disposition change from the
+/// coordinator's own scaffolding.
+///
+/// Idempotent per (source, child): a re-run keeps the FIRST snapshot, which is
+/// the one that predates every planner edit.
+pub async fn record_adjudication_source_snapshot(
+    pool: &sqlx::PgPool,
+    source_id: &str,
+    child_id: &str,
+) -> Result<()> {
+    let mut tx = pool.begin().await?;
+    let existing = read_source_snapshot(&mut tx, source_id, child_id).await?;
+    if existing.is_some() {
+        tx.commit().await?;
+        return Ok(());
+    }
+    let Some(snapshot) = BusinessDisposition::read_tx(&mut tx, source_id).await? else {
+        tx.commit().await?;
+        return Ok(());
+    };
+    let activity_id = uuid::Uuid::now_v7().to_string();
+    sqlx::query(
+        "INSERT INTO activity_log (id, task_id, actor_id, actor_role, event_type, payload)
+         VALUES ($1, $2, $3, $4, $5, $6::jsonb)",
+    )
+    .bind(&activity_id)
+    .bind(source_id)
+    .bind("coordinator")
+    .bind("system")
+    .bind(ADJUDICATION_SOURCE_SNAPSHOT_EVENT)
+    .bind(snapshot.to_payload(child_id).to_string())
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+async fn read_source_snapshot(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    source_id: &str,
+    child_id: &str,
+) -> Result<Option<BusinessDisposition>> {
+    let payload: Option<String> = sqlx::query_scalar(
+        r#"SELECT payload::text FROM activity_log
+            WHERE task_id = $1
+              AND event_type = $2
+              AND payload ->> 'adjudication_child_id' = $3
+            ORDER BY created_at ASC
+            LIMIT 1"#,
+    )
+    .bind(source_id)
+    .bind(ADJUDICATION_SOURCE_SNAPSHOT_EVENT)
+    .bind(child_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    Ok(payload
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .and_then(|value| BusinessDisposition::from_payload(&value)))
 }
 
 /// Is `labels_json` an adjudication child — a task whose close releases the
@@ -233,7 +330,17 @@ pub async fn apply_adjudication_child_close_tx(
             continue;
         }
 
-        let Some(before) = BusinessDisposition::read_tx(tx, &source_id).await? else {
+        // `before` is the disposition captured when the child was CREATED, not
+        // the live row: the planner's edits land before it closes the child.
+        let Some(at_creation) = read_source_snapshot(tx, &source_id, child_id).await? else {
+            // No snapshot (a child created before 4etb shipped). Fall back to
+            // the live row, which can only ever report `source_unchanged` and
+            // therefore never triggers a destructive exhausted-ladder branch on
+            // a source somebody may have legitimately edited.
+            continue;
+        };
+        let before = at_creation;
+        let Some(at_close) = BusinessDisposition::read_tx(tx, &source_id).await? else {
             continue;
         };
 
@@ -241,9 +348,16 @@ pub async fn apply_adjudication_child_close_tx(
         //
         // Only the UNCHANGED close of terminal round 3 invokes it. Rounds 1 and
         // 2 release into at most the next idempotent round, which is ordinary
-        // scaffolding and leaves the disposition untouched.
+        // scaffolding and leaves the disposition untouched. A round-3 close that
+        // DID change the source (rescope, applied directive, supersede) is a
+        // real disposition and must be left exactly as the planner left it —
+        // disposing it here would destroy that decision.
         let round = planner_escalation_count_tx(tx, &source_id).await?;
-        if round >= MAX_AUTONOMOUS_ESCALATIONS && !already_owned(&before.status) {
+        let changed_by_adjudication = at_close != before;
+        if round >= MAX_AUTONOMOUS_ESCALATIONS
+            && !changed_by_adjudication
+            && !already_owned(&at_close.status)
+        {
             match has_open_unmerged_pr(tx, &source_id).await? {
                 Some(_pr_url) => {
                     // Owner: the PR poller (`poll_pr_review_tasks`).
@@ -291,7 +405,7 @@ pub async fn apply_adjudication_child_close_tx(
 
         let after = BusinessDisposition::read_tx(tx, &source_id)
             .await?
-            .unwrap_or_else(|| before.clone());
+            .unwrap_or_else(|| at_close.clone());
 
         let outcome = if after == before {
             SOURCE_UNCHANGED

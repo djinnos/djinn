@@ -3440,15 +3440,38 @@ impl CoordinatorActor {
         // source uuid (source_task.id) — add_blocker keys on tasks.id, and the
         // caller-supplied source_task_id may be a short_id. Non-fatal: a failed
         // link still leaves the escalation dispatched.
-        if let Some(src) = source_task.as_ref()
-            && let Err(e) = task_repo.add_blocker(&src.id, &review_task.id).await
-        {
-            tracing::warn!(
-                error = %e,
-                source_task_id = %src.short_id,
-                review_task_id = %review_task.short_id,
-                "CoordinatorActor: planner escalation — failed to block source task on review task"
-            );
+        if let Some(src) = source_task.as_ref() {
+            if let Err(e) = task_repo.add_blocker(&src.id, &review_task.id).await {
+                tracing::warn!(
+                    error = %e,
+                    source_task_id = %src.short_id,
+                    review_task_id = %review_task.short_id,
+                    "CoordinatorActor: planner escalation — failed to block source task on review task"
+                );
+            }
+            // 4etb: capture the source's business disposition as it stands NOW,
+            // before this adjudication runs. The planner's own edits (rescope,
+            // applied directive, supersede) land through separate MCP calls
+            // before it closes this child, so a `before` read at close time
+            // would see them already applied — reporting every real decision as
+            // `source_unchanged` and, at the terminal round, letting the
+            // exhausted-ladder branch dispose of a source the planner had just
+            // legitimately reshaped.
+            if let Err(e) = djinn_db::repositories::task::record_adjudication_source_snapshot(
+                self.db.pool(),
+                &src.id,
+                &review_task.id,
+            )
+            .await
+            {
+                tracing::warn!(
+                    error = %e,
+                    source_task_id = %src.short_id,
+                    review_task_id = %review_task.short_id,
+                    "4etb: failed to record the adjudication source snapshot; this child's close \
+                     will report no outcome rather than an unreliable one"
+                );
+            }
         }
 
         // Label the remediation task with its RUNG. Write only the labels column:

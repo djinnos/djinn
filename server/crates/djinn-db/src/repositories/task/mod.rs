@@ -40,7 +40,7 @@ pub use parent_disposition::{
 pub use adjudication_close::{
     ADJUDICATION_OUTCOME_EVENT, LADDER_EXHAUSTED_CLOSE_REASON, MAX_AUTONOMOUS_ESCALATIONS,
     SOURCE_CHANGED, SOURCE_UNCHANGED, apply_adjudication_child_close_tx, is_adjudication_child,
-    planner_escalation_count_tx,
+    planner_escalation_count_tx, record_adjudication_source_snapshot,
 };
 pub use status::stamp_escalation_evidence_epoch_tx;
 pub use queries::{
