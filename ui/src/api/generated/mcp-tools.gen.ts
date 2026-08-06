@@ -5415,6 +5415,11 @@ export namespace ModelHealthOutputSchema {
   action: string
   error?: string
   models: ModelHealthOutput1[]
+  /**
+   * Durable terminal outcomes for autonomous sessions, separate from the
+   * in-memory breaker buckets in `models`.
+   */
+  outcomes: ModelHealthOutcomeOutput[]
   [k: string]: any
   }
   export interface ModelHealthOutput1 {
@@ -5446,6 +5451,35 @@ export namespace ModelHealthOutputSchema {
    * reaches the ceiling (8) the bucket hard-disables.
    */
   trips_in_window: number
+  [k: string]: any
+  }
+  /**
+   * One durable autonomous-session outcome population for an exact breaker-like
+   * `(scope, model_id)` key. Unlike `models`, rows come only from terminal
+   * session history, so a row can exist with no corresponding breaker bucket.
+   */
+  export interface ModelHealthOutcomeOutput {
+  cancelled_count: number
+  completed_count: number
+  finalization_count: number
+  harness_count: number
+  infrastructure_count: number
+  legacy_unclassified_count: number
+  model_id: string
+  population_kind: string
+  protocol_count: number
+  provider_count: number
+  /**
+   * Session creator scope, falling back to the task creator in the durable
+   * report. `null` identifies the shared/system scope.
+   */
+  scope?: string
+  unknown_count: number
+  window_end: string
+  /**
+   * Explicit half-open report window `[window_start, window_end)`.
+   */
+  window_start: string
   [k: string]: any
   }
 
