@@ -73,10 +73,13 @@ pub struct BusinessDisposition {
     /// Applied reopen/rescope directive — the arbiter directive the source is
     /// currently carrying, `None` when no directive has been applied.
     pub applied_directive: Option<String>,
-    /// Supersession / replacement relationship: the id of the task that
-    /// superseded this one, when one exists.
-    pub superseded_by: Option<String>,
 }
+
+// NOTE on the supersession/replacement relationship: tasks carry no
+// `superseded_by` column. A supersede transition sets the source's `status` to
+// `superseded` and its `close_reason` to `superseded`, BOTH of which this
+// snapshot already holds — so a supersede always reads as `source_changed`
+// without inventing a relationship column the schema does not have.
 
 impl BusinessDisposition {
     /// Read the snapshot inside a transaction.
@@ -94,12 +97,7 @@ impl BusinessDisposition {
                     (SELECT a.directive::text
                        FROM task_arbitrations a
                       WHERE a.task_id = t.id AND a.directive_injected = TRUE
-                      ORDER BY a.hold_cycle DESC LIMIT 1) AS applied_directive,
-                    (SELECT b.blocking_task_id
-                       FROM blockers b
-                       JOIN tasks r ON r.id = b.blocking_task_id
-                      WHERE b.task_id = t.id AND t.status = 'superseded'
-                      ORDER BY r.created_at DESC LIMIT 1) AS superseded_by
+                      ORDER BY a.hold_cycle DESC LIMIT 1) AS applied_directive
                  FROM tasks t WHERE t.id = $1"#,
         )
         .bind(task_id)
@@ -112,7 +110,6 @@ impl BusinessDisposition {
             design: row.get("design"),
             acceptance_criteria: row.get("acceptance_criteria"),
             applied_directive: row.get("applied_directive"),
-            superseded_by: row.get("superseded_by"),
         }))
     }
 }
@@ -162,11 +159,15 @@ pub async fn planner_escalation_count_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     source_id: &str,
 ) -> Result<i64> {
+    // `blockers.task_id` is the BLOCKED source; `blockers.blocking_task_id` is
+    // the blocker itself — the same direction `TaskRepository::list_blockers`
+    // reads. Getting this backwards would count the source's DEPENDENTS and
+    // silently never reach the ceiling.
     let count: i64 = sqlx::query_scalar(
         r#"SELECT COUNT(*)::bigint
              FROM blockers b
-             JOIN tasks t ON t.id = b.task_id
-            WHERE b.blocking_task_id = $1
+             JOIN tasks t ON t.id = b.blocking_task_id
+            WHERE b.task_id = $1
               AND (t.labels::text LIKE '%planner-park-escalation%'
                 OR t.labels::text LIKE '%human-review-hold%')"#,
     )
@@ -273,6 +274,20 @@ pub async fn apply_adjudication_child_close_tx(
                 }
             }
         }
+
+        // The adjudication has CLEARED for this source: its child is closed and
+        // the blocker released. Drop the escalation evidence epoch so a LATER
+        // trigger stamps a NEW one — otherwise every future escalation would
+        // measure worker evidence against the first trigger's instant and count
+        // attempts that belong to an adjudication already spent.
+        //
+        // This is deliberately NOT done on a guard-declined park: there the
+        // escalation is still pending and the guards must keep measuring the
+        // rotated redispatch against the SAME floor.
+        sqlx::query("UPDATE tasks SET escalation_evidence_at = NULL WHERE id = $1")
+            .bind(&source_id)
+            .execute(&mut **tx)
+            .await?;
 
         let after = BusinessDisposition::read_tx(tx, &source_id)
             .await?
