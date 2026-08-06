@@ -553,8 +553,15 @@ fn settlement_status_after_exit_barrier(
 ) -> djinn_core::models::SessionStatus {
     match plan {
         SessionExitBarrierPlan::Required { .. } => status,
-        SessionExitBarrierPlan::TerminalEvidenceOnly
-        | SessionExitBarrierPlan::InterruptedOrFailed => djinn_core::models::SessionStatus::Failed,
+        SessionExitBarrierPlan::TerminalEvidenceOnly => djinn_core::models::SessionStatus::Failed,
+        // These outcomes have no board handoff, but an already-paused or
+        // interrupted session is truthful terminal evidence and must not be
+        // rewritten as a failure.
+        SessionExitBarrierPlan::InterruptedOrFailed => match status {
+            djinn_core::models::SessionStatus::Paused
+            | djinn_core::models::SessionStatus::Interrupted => status,
+            _ => djinn_core::models::SessionStatus::Failed,
+        },
     }
 }
 
@@ -3855,6 +3862,16 @@ mod tests {
 
         async fn load_task(&self, task_id: String) -> Result<Task, String> {
             assert_eq!(task_id, self.task.id);
+            if task_id.contains("transition-error") {
+                self.transitions
+                    .lock()
+                    .expect("transitions mutex poisoned")
+                    .push(TransitionCall {
+                        task_id: task_id.clone(),
+                        action: "read_back".into(),
+                        reason: None,
+                    });
+            }
             Ok(self.task.clone())
         }
 
@@ -3869,14 +3886,41 @@ mod tests {
             self.execute_stage_calls
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             assert_eq!(role_kind, self.expected_role);
+            // Exercise a cancellation that arrives after stage evidence exists:
+            // it must not be converted into a board handoff.
+            if self.task.id.contains("barrier-cancelled") {
+                self.cancel.cancel();
+            }
             Ok(StageExecutionResult {
                 outcome: self.outcome.clone(),
-                settlement: None,
+                // The transition-family contract uses the production run loop
+                // with this existing scripted service. Older scripted tests
+                // intentionally have no session to settle.
+                settlement: self
+                    .task
+                    .id
+                    .starts_with("barrier-")
+                    .then(|| StageSessionSettlement {
+                        session_id: format!("session-{}", self.task.id),
+                        // Preserve parked evidence; it is not a healthy handoff.
+                        status: if self.task.id.contains("barrier-parked") {
+                            djinn_core::models::SessionStatus::Paused
+                        } else {
+                            djinn_core::models::SessionStatus::Completed
+                        },
+                        tokens_in: 1,
+                        tokens_out: 1,
+                        cache_read: 0,
+                        cache_write: 0,
+                        parked_reason: None,
+                        failure_cause: None,
+                    }),
             })
         }
 
         async fn open_pr(&self, _spec: &TaskRunSpec, _task: &Task) -> TaskRunOutcome {
-            panic!("loop guard settlement must not open a PR")
+            // Post-barrier publication is deliberately outside this family test.
+            TaskRunOutcome::WorkerSubmitted
         }
 
         async fn create_task_run(
@@ -3950,15 +3994,23 @@ mod tests {
         #[allow(clippy::too_many_arguments)]
         async fn update_session_status(
             &self,
-            _session_id: String,
-            _status: djinn_core::models::SessionStatus,
+            session_id: String,
+            status: djinn_core::models::SessionStatus,
             _tokens_in: i64,
             _tokens_out: i64,
             _cache_read: i64,
             _cache_write: i64,
             _parked_reason: Option<String>,
         ) -> Result<(), String> {
-            unimplemented!("not exercised")
+            self.transitions
+                .lock()
+                .expect("transitions mutex poisoned")
+                .push(TransitionCall {
+                    task_id: session_id,
+                    action: format!("settle:{status:?}"),
+                    reason: None,
+                });
+            Ok(())
         }
 
         async fn tool_github_search(
@@ -4006,13 +4058,26 @@ mod tests {
                 .lock()
                 .expect("transitions mutex poisoned")
                 .push(TransitionCall {
-                    task_id,
+                    task_id: task_id.clone(),
                     action: action.clone(),
                     reason,
                 });
             if self.fail_start_transition && action == "start" {
                 return Err("task has unresolved blockers".into());
             }
+            if task_id.contains("transition-error") && action != "start" {
+                return Err("simulated lost transition response".into());
+            }
+            // Invocation and durability are distinct recorder events. The
+            // production await returns only after this completion event.
+            self.transitions
+                .lock()
+                .expect("transitions mutex poisoned")
+                .push(TransitionCall {
+                    task_id,
+                    action: format!("transition_complete:{action}"),
+                    reason: None,
+                });
             Ok(())
         }
 
@@ -4405,6 +4470,454 @@ mod tests {
             ),
             SessionExitBarrierPlan::TerminalEvidenceOnly
         );
+    }
+
+    #[tokio::test]
+    async fn stage_outcome_exit_transition_families() {
+        // Drive TaskRunSupervisor's production loop; the service records actual
+        // transition, read-back, settlement, and PR-publication calls.
+        async fn run_case(
+            source: &std::path::Path,
+            id: &str,
+            mut task: Task,
+            outcome: StageOutcome,
+            role: RoleKind,
+            flow: SupervisorFlow,
+        ) -> Vec<TransitionCall> {
+            let root = tempfile::tempdir_in(std::env::current_dir().expect("current dir"))
+                .expect("temp test root");
+            let mirror = Arc::new(MirrorManager::new(root.path().join("mirrors")));
+            mirror
+                .ensure_mirror(&task.project_id, &format!("file://{}", source.display()))
+                .await
+                .expect("fixture mirror");
+            task.id = id.into();
+            let calls = Arc::new(Mutex::new(Vec::new()));
+            let services: Arc<dyn SupervisorServices> = Arc::new(ScriptedLoopGuardServices {
+                cancel: CancellationToken::new(),
+                task: task.clone(),
+                outcome,
+                updated_statuses: Arc::new(Mutex::new(Vec::new())),
+                fail_start_transition: false,
+                execute_stage_calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                expected_role: role,
+                transitions: Arc::clone(&calls),
+            });
+            let supervisor = TaskRunSupervisor::new(mirror, services);
+            supervisor
+                .run(TaskRunSpec {
+                    task_run_id: format!("run-{id}"),
+                    task_attempt_id: None,
+                    task_id: id.into(),
+                    execution_generation: 0,
+                    project_id: task.project_id,
+                    trigger: TaskRunTrigger::NewTask,
+                    base_branch: "main".into(),
+                    task_branch: format!("djinn/{id}"),
+                    flow,
+                    model_id_per_role: Default::default(),
+                    read_source_project_ids: Vec::new(),
+                    knowledge_injection: djinn_core::models::KnowledgeInjectionConfig::default(),
+                    github_owner: None,
+                    github_install_token: None,
+                    commit_author_name: None,
+                    commit_author_email: None,
+                    resume_lifecycle_metadata: None,
+                    is_evidence_spike: false,
+                })
+                .await
+                .expect("scripted supervisor run");
+            calls.lock().expect("calls mutex poisoned").clone()
+        }
+        fn assert_completed_after_durable_transition(calls: &[TransitionCall], action: &str) {
+            let durability = calls
+                .iter()
+                .position(|c| c.action == format!("transition_complete:{action}"))
+                .expect("required transition durability completion");
+            let settlement = calls
+                .iter()
+                .position(|c| c.action == "settle:Completed")
+                .expect("completed settlement");
+            assert!(
+                durability < settlement,
+                "{action} must durably complete before settlement: {calls:?}"
+            );
+        }
+        fn assert_reconciled_transition_error(
+            calls: &[TransitionCall],
+            action: &str,
+            settlement: &str,
+        ) {
+            let invocation = calls
+                .iter()
+                .position(|c| c.action == action)
+                .expect("required transition invocation");
+            assert!(
+                calls
+                    .iter()
+                    .all(|c| c.action != format!("transition_complete:{action}")),
+                "failed transition must not claim durable completion: {calls:?}"
+            );
+            let reads = calls
+                .iter()
+                .enumerate()
+                .filter_map(|(index, call)| (call.action == "read_back").then_some(index))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                reads.len(),
+                2,
+                "initial load plus one reconciliation: {calls:?}"
+            );
+            assert!(
+                invocation < reads[1],
+                "reconciliation must follow the failed invocation: {calls:?}"
+            );
+            let settled = calls
+                .iter()
+                .position(|c| c.action == settlement)
+                .expect("terminal settlement");
+            assert!(
+                reads[1] < settled,
+                "settlement must follow reconciliation: {calls:?}"
+            );
+        }
+        let source_root = tempfile::tempdir_in(std::env::current_dir().expect("current dir"))
+            .expect("shared source test root");
+        let source = source_root.path().join("source");
+        make_source_repo(&source);
+
+        let mut review = fixture_task("unused", "barrier-project");
+        review.issue_type = "review".into();
+        let task = fixture_task("unused", "barrier-project");
+        let required = vec![
+            (
+                StageOutcome::WorkerDone,
+                RoleKind::Worker,
+                SupervisorFlow::NewTask,
+                "submit_task_review",
+            ),
+            (
+                StageOutcome::ReviewerApproved,
+                RoleKind::Reviewer,
+                SupervisorFlow::ReviewResume,
+                "task_review_approve",
+            ),
+            (
+                StageOutcome::ReviewerRejected {
+                    feedback: "no".into(),
+                },
+                RoleKind::Reviewer,
+                SupervisorFlow::ReviewResume,
+                "task_review_reject",
+            ),
+            (
+                StageOutcome::PlannerClose {
+                    reason: "done".into(),
+                },
+                RoleKind::Planner,
+                SupervisorFlow::Planning,
+                "close",
+            ),
+            (
+                StageOutcome::Failed {
+                    reason: "backstop".into(),
+                    provider_failure: None,
+                },
+                RoleKind::Planner,
+                SupervisorFlow::Planning,
+                "close",
+            ),
+            (
+                StageOutcome::LeadApproved {
+                    evidence: "{}".into(),
+                },
+                RoleKind::Lead,
+                SupervisorFlow::Lead,
+                "lead_approve",
+            ),
+            (
+                StageOutcome::LeadApproveConflict {
+                    reason: "c".into(),
+                    evidence: "{}".into(),
+                },
+                RoleKind::Lead,
+                SupervisorFlow::Lead,
+                "lead_approve_conflict",
+            ),
+            (
+                StageOutcome::LeadReopen {
+                    reason: "r".into(),
+                    directive: "r".into(),
+                    verification_command: "true".into(),
+                    exclude_models: vec![],
+                },
+                RoleKind::Lead,
+                SupervisorFlow::Lead,
+                "lead_intervention_complete",
+            ),
+            (
+                StageOutcome::LeadEscalate {
+                    reason: "escalate".into(),
+                },
+                RoleKind::Lead,
+                SupervisorFlow::Lead,
+                "lead_intervention_complete",
+            ),
+            (
+                StageOutcome::LeadClose { reason: "c".into() },
+                RoleKind::Lead,
+                SupervisorFlow::Lead,
+                "force_close",
+            ),
+            (
+                StageOutcome::LeadParked {
+                    park_dossier_json: "{}".into(),
+                },
+                RoleKind::Lead,
+                SupervisorFlow::Lead,
+                "arbiter_park",
+            ),
+            (
+                StageOutcome::LeadSuperseded {
+                    reason: "s".into(),
+                    replacement_task_ids: vec!["replacement".into()],
+                },
+                RoleKind::Lead,
+                SupervisorFlow::Lead,
+                "arbiter_supersede",
+            ),
+        ];
+        for (n, (outcome, role, flow, action)) in required.into_iter().enumerate() {
+            let case_task = if role == RoleKind::Planner {
+                review.clone()
+            } else {
+                task.clone()
+            };
+            let calls = run_case(
+                &source,
+                &format!("barrier-required-{n}"),
+                case_task,
+                outcome,
+                role,
+                flow,
+            )
+            .await;
+            assert_completed_after_durable_transition(&calls, action);
+        }
+
+        let mut guarded_planner = review.clone();
+        guarded_planner.labels = format!("[\"{HUMAN_REVIEW_HOLD_LABEL}\"]");
+        let calls = run_case(
+            &source,
+            "barrier-planner-no-close",
+            guarded_planner,
+            StageOutcome::PlannerClose {
+                reason: "held".into(),
+            },
+            RoleKind::Planner,
+            SupervisorFlow::Planning,
+        )
+        .await;
+        assert!(
+            calls
+                .iter()
+                .all(|c| (!c.action.starts_with("transition_complete:")
+                    || matches!(
+                        c.action.as_str(),
+                        "transition_complete:start" | "transition_complete:task_review_start"
+                    ))
+                    && !matches!(
+                        c.action.as_str(),
+                        "close"
+                            | "submit_task_review"
+                            | "task_review_approve"
+                            | "task_review_reject"
+                            | "lead_approve"
+                            | "lead_approve_conflict"
+                            | "lead_intervention_complete"
+                            | "force_close"
+                            | "arbiter_park"
+                            | "arbiter_supersede"
+                    )),
+            "guarded planner close advanced board: {calls:?}"
+        );
+        assert!(calls.iter().any(|c| c.action == "settle:Failed"));
+
+        // A lost transition response gets exactly one target-state read-back; it
+        // still permits Completed only when the observed state is exact.
+        let mut exact = task.clone();
+        exact.status = "approved".into();
+        let calls = run_case(
+            &source,
+            "barrier-transition-error-exact",
+            exact,
+            StageOutcome::ReviewerApproved,
+            RoleKind::Reviewer,
+            SupervisorFlow::ReviewResume,
+        )
+        .await;
+        assert_reconciled_transition_error(&calls, "task_review_approve", "settle:Completed");
+        let mut absent = task.clone();
+        absent.status = "open".into();
+        let calls = run_case(
+            &source,
+            "barrier-transition-error-absent",
+            absent,
+            StageOutcome::ReviewerApproved,
+            RoleKind::Reviewer,
+            SupervisorFlow::ReviewResume,
+        )
+        .await;
+        assert_reconciled_transition_error(&calls, "task_review_approve", "settle:Failed");
+
+        // Failed terminal evidence never advances the board nor fabricates a
+        // healthy handoff. These fixtures begin Completed, so the barrier
+        // must truthfully downgrade each of them to Failed.
+        for (n, outcome) in [
+            StageOutcome::Failed {
+                reason: "failed".into(),
+                provider_failure: None,
+            },
+            StageOutcome::LoopGuardTripped {
+                kind: LoopGuardKind::ConsecutiveFailures,
+                offending_signature: "loop".into(),
+                threshold: 1,
+                observed: 1,
+                turn_span: (1, 1),
+                session_id: "s".into(),
+            },
+            StageOutcome::VerifierFailed {
+                reason: "verifier failed".into(),
+            },
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let id = format!("barrier-terminal-{n}");
+            let calls = run_case(
+                &source,
+                &id,
+                task.clone(),
+                outcome,
+                RoleKind::Worker,
+                SupervisorFlow::NewTask,
+            )
+            .await;
+            assert!(
+                calls
+                    .iter()
+                    .all(|c| (!c.action.starts_with("transition_complete:")
+                        || matches!(
+                            c.action.as_str(),
+                            "transition_complete:start" | "transition_complete:task_review_start"
+                        ))
+                        && !matches!(
+                            c.action.as_str(),
+                            "submit_task_review"
+                                | "task_review_approve"
+                                | "task_review_reject"
+                                | "close"
+                                | "lead_approve"
+                                | "lead_approve_conflict"
+                                | "lead_intervention_complete"
+                                | "force_close"
+                                | "arbiter_park"
+                                | "arbiter_supersede"
+                        )),
+                "terminal evidence advanced board: {calls:?}"
+            );
+            assert!(
+                calls.iter().any(|c| c.action == "settle:Failed"),
+                "failed terminal evidence must settle Failed: {calls:?}"
+            );
+        }
+
+        // Parked evidence specifically begins Paused. It must not be
+        // fabricated into a healthy completion or rewritten as Failed.
+        let calls = run_case(
+            &source,
+            "barrier-parked",
+            task.clone(),
+            StageOutcome::Parked {
+                reason: ParkReason::Budget,
+                summary: None,
+                wind_down_ignored: false,
+                session_id: "s".into(),
+                tokens_in: 0,
+                tokens_out: 0,
+            },
+            RoleKind::Worker,
+            SupervisorFlow::NewTask,
+        )
+        .await;
+        assert!(
+            calls
+                .iter()
+                .all(|c| (!c.action.starts_with("transition_complete:")
+                    || matches!(
+                        c.action.as_str(),
+                        "transition_complete:start" | "transition_complete:task_review_start"
+                    ))
+                    && !matches!(
+                        c.action.as_str(),
+                        "submit_task_review"
+                            | "task_review_approve"
+                            | "task_review_reject"
+                            | "close"
+                            | "lead_approve"
+                            | "lead_approve_conflict"
+                            | "lead_intervention_complete"
+                            | "force_close"
+                            | "arbiter_park"
+                            | "arbiter_supersede"
+                    )),
+            "parked evidence advanced board: {calls:?}"
+        );
+        assert!(
+            calls.iter().any(|c| c.action == "settle:Paused"),
+            "parked evidence must settle Paused: {calls:?}"
+        );
+
+        // Architect evidence has no board handoff; drive the actual Spike flow.
+        let calls = run_case(
+            &source,
+            "barrier-architect-no-transition",
+            fixture_task("unused", "barrier-project"),
+            StageOutcome::ArchitectDone,
+            RoleKind::Architect,
+            SupervisorFlow::Spike,
+        )
+        .await;
+        assert!(
+            calls
+                .iter()
+                .all(|c| !c.action.starts_with("transition_complete:")
+                    || matches!(
+                        c.action.as_str(),
+                        "transition_complete:start" | "transition_complete:task_review_start"
+                    ))
+        );
+        assert!(calls.iter().any(|c| c.action == "settle:Failed"));
+
+        let calls = run_case(
+            &source,
+            "barrier-cancelled",
+            task,
+            StageOutcome::ReviewerApproved,
+            RoleKind::Reviewer,
+            SupervisorFlow::ReviewResume,
+        )
+        .await;
+        assert!(
+            calls.iter().all(|c| c.action != "task_review_approve"
+                && (!c.action.starts_with("transition_complete:")
+                    || matches!(
+                        c.action.as_str(),
+                        "transition_complete:start" | "transition_complete:task_review_start"
+                    ))),
+            "cancellation advanced board: {calls:?}"
+        );
+        assert!(calls.iter().any(|c| c.action == "settle:Interrupted"));
     }
 
     #[test]
@@ -5381,15 +5894,15 @@ mod tests {
             "a transient provider failure must NOT close the review task (it would book \
              close_reason=completed with zero planner output), got {transitions:?}"
         );
-        // The pre-stage claim is the only transition a transient-failed
-        // planning run should request.
+        // The successful pre-stage claim records its durable completion;
+        // the transient failure itself must not request another transition.
         assert_eq!(
             transitions
                 .iter()
                 .map(|t| t.action.as_str())
                 .collect::<Vec<_>>(),
-            vec!["start"],
-            "only the pre-stage start claim should fire"
+            vec!["start", "transition_complete:start"],
+            "only the pre-stage start claim and durable completion should fire"
         );
     }
 
