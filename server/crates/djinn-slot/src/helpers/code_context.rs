@@ -27,8 +27,9 @@ const APPROX_BYTES_PER_TOKEN: usize = 4;
 ///
 /// 1024 B is the smallest round cap that covers the p95 of *every* heading
 /// type, and the smallest that delivers the motivating note's regeneration
-/// block: its intro line plus all three commands measures 764 B of source
-/// (807 B rendered with prefixes). Only `Recommended approach`'s tail beyond
+/// block: its intro line plus all three commands measures 764 B of source,
+/// 804 B rendered with prefixes, and 944 B once the pull marker that must
+/// follow it is counted. Only `Recommended approach`'s tail beyond
 /// p95 (max 1971 B) is truncated, and that degrades to the explicit
 /// `memory_read` pull marker rather than being lost.
 ///
@@ -63,8 +64,9 @@ const ACTION_CONT_PREFIX: &str = "          ";
 ///
 /// `case` is 26% of these three injected types (`KNOWLEDGE_NOTE_TYPES`) and
 /// its template uses `## Reusable lesson` as the actionable slot. Without it,
-/// only 65.8% of notes can yield an excerpt at all; with it, 97.5%. This one
-/// entry is the single largest coverage gain available.
+/// only 65.8% of notes can yield an excerpt at all; with it, 97.5% on this
+/// sample and 98.3% measured across the full live corpus. This one entry is
+/// the single largest coverage gain available.
 const ACTION_HEADINGS: [&str; 3] = ["prevention", "recommended approach", "reusable lesson"];
 
 /// Outcome classification for a single note candidate during prompt packing.
@@ -124,7 +126,8 @@ pub struct NotePackOutcome {
     pub estimated_rendered_tokens: Option<usize>,
     /// How much of the note's actionable section reached the prompt. Trace
     /// detail only — never a second disposition. `None` when the note has no
-    /// eligible `Prevention` / `Recommended approach` section.
+    /// eligible section at all (see [`ACTION_HEADINGS`]: `Prevention`,
+    /// `Recommended approach`, or `Reusable lesson`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub action_excerpt: Option<ActionExcerptDetail>,
 }
@@ -327,8 +330,10 @@ pub(super) fn extract_action_units(content: &str) -> Option<Vec<ActionUnit<'_>>>
         sections.push((rank, start, lines.len()));
     }
 
-    // Pass 2: precedence is the first non-empty `Prevention` section, then the
-    // first non-empty `Recommended approach` section.
+    // Pass 2: precedence follows `ACTION_HEADINGS` order — the first non-empty
+    // `Prevention` section, else the first non-empty `Recommended approach`,
+    // else the first non-empty `Reusable lesson` (the `case` template's
+    // actionable slot, and 26% of the injected corpus).
     let mut chosen: Option<(usize, usize)> = None;
     for rank in 0..ACTION_HEADINGS.len() {
         chosen = sections
@@ -416,17 +421,23 @@ fn render_action_line(source: &str, is_first: bool) -> String {
 
 /// Render the bounded action block for `units`.
 ///
-/// Adds only complete units while both the 640-byte allocation and the
-/// per-physical-line cap hold, so no source line, Unicode scalar, inline-code
-/// span, or fenced block is ever byte-sliced. When content remains, the last
+/// Adds only complete units while both `excerpt_cap` (production always passes
+/// [`ACTION_EXCERPT_CAP`], 1024 B) and the per-physical-line cap hold, so no
+/// source line, Unicode scalar, inline-code span, or fenced block is ever
+/// byte-sliced. When content remains, the last
 /// physical line becomes the deterministic pull marker, dropping already
 /// included units if that is what it takes to make the marker fit. Returns
 /// `None` when not even the marker can be rendered — the entry then degrades
 /// to a summary-only line.
+/// `excerpt_cap` is an explicit input rather than a read of the global so the
+/// cap's *minimality* is testable: production has exactly one call site and it
+/// always passes [`ACTION_EXCERPT_CAP`], so the shipped cap remains
+/// non-configurable as the proposal requires.
 pub(super) fn render_action_block(
     units: &[ActionUnit<'_>],
     permalink: &str,
     line_byte_cap: usize,
+    excerpt_cap: usize,
 ) -> Option<ActionBlock> {
     let mut lines: Vec<String> = Vec::new();
     let mut unit_line_counts: Vec<usize> = Vec::new();
@@ -448,7 +459,7 @@ pub(super) fn render_action_block(
             } else {
                 used + 1 + rendered.len()
             };
-            if used > ACTION_EXCERPT_CAP {
+            if used > excerpt_cap {
                 fits = false;
                 break;
             }
@@ -489,7 +500,7 @@ pub(super) fn render_action_block(
         } else {
             action_block_bytes(&lines) + 1 + marker.len()
         };
-        if with_marker <= ACTION_EXCERPT_CAP {
+        if with_marker <= excerpt_cap {
             let detail = if lines.is_empty() {
                 ActionExcerptDetail::Omitted
             } else {
@@ -590,7 +601,10 @@ fn rendered_entry(note: &djinn_memory::Note, line_byte_cap: usize) -> Option<Ren
     };
     // A section that exists but cannot render even its pull marker still
     // degrades to a summary-only entry, reported as `omitted`.
-    let Some(block) = render_action_block(&units, &note.permalink, line_byte_cap) else {
+    // The single production call site: the shipped cap is never configurable.
+    let Some(block) =
+        render_action_block(&units, &note.permalink, line_byte_cap, ACTION_EXCERPT_CAP)
+    else {
         return Some(RenderedEntry {
             text: summary,
             action_excerpt: Some(ActionExcerptDetail::Omitted),

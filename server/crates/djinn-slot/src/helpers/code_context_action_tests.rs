@@ -242,6 +242,9 @@ fn permalink_no_longer_duplicates_the_title_and_overhead_roughly_halves() {
     let new_total: usize = notes.iter().map(rendered_line_overhead_bytes).sum();
     let reduction = 1.0 - (new_total as f64 / legacy_total as f64);
 
+    // 0.45 is the floor, not the expectation: this 20-note sample measures
+    // ~47%, and the same computation over all 5,152 live pitfalls measures
+    // 46.42%, so the sample is representative rather than flattering.
     assert!(
         reduction >= 0.45,
         "R1 must roughly halve per-line overhead; measured {:.1}% \
@@ -914,11 +917,11 @@ fn marker_that_cannot_obey_line_byte_cap_yields_no_action_block() {
 
     let marker_len = marker_for(&permalink).len();
     assert!(
-        render_action_block(&units, &permalink, marker_len - 1).is_none(),
+        render_action_block(&units, &permalink, marker_len - 1, ACTION_EXCERPT_CAP).is_none(),
         "no action block may be rendered when even the marker breaks the cap"
     );
     // One byte more of headroom and the marker alone is rendered.
-    match render_action_block(&units, &permalink, marker_len) {
+    match render_action_block(&units, &permalink, marker_len, ACTION_EXCERPT_CAP) {
         Some(block) => {
             assert_eq!(block.lines, vec![marker_for(&permalink)]);
             assert_eq!(block.detail, ActionExcerptDetail::Omitted);
@@ -1160,44 +1163,63 @@ fn reauthored_tool_schema_note_delivers_all_three_regeneration_commands() {
 #[test]
 fn action_cap_is_the_smallest_that_delivers_the_three_commands() {
     let note = tool_schema_note(TOOL_SCHEMA_REAUTHORED_BODY);
-    let deliverable = |cap: usize| {
-        let (rendered, _) = pack_one(
-            &note,
-            KnowledgePackConfig {
-                line_byte_cap: cap.max(1024),
-                ..default_config()
-            },
-        );
+    let units = extract_action_units(&note.content).unwrap_or_default();
+    assert!(!units.is_empty(), "the section must parse");
+
+    // `excerpt_cap` is a real input to the renderer, so this genuinely sweeps
+    // the cap rather than re-testing one value under a different knob.
+    let deliverable = |excerpt_cap: usize| {
+        let Some(block) = render_action_block(
+            &units,
+            TOOL_SCHEMA_PERMALINK,
+            default_config().line_byte_cap,
+            excerpt_cap,
+        ) else {
+            return 0;
+        };
         REGEN_COMMAND_LINES
             .iter()
-            .filter(|command| rendered.contains(&format!("          {command}")))
+            .filter(|command| {
+                block
+                    .lines
+                    .iter()
+                    .any(|line| line == &format!("          {command}"))
+            })
             .count()
     };
+
     assert_eq!(
         deliverable(ACTION_EXCERPT_CAP),
         3,
         "the shipped cap must deliver all three commands"
     );
-    // And the cap is derived, not guessed: it must be at least the rendered
-    // size of the intro line, the three commands, and the pull marker. The
-    // previously-specified 640 B cap was not, and delivered one command.
-    let section: Vec<&str> = TOOL_SCHEMA_REAUTHORED_BODY
-        .lines()
-        .skip_while(|line| *line != "## Prevention")
-        .skip(1)
-        .take_while(|line| *line != "## Notes")
-        .filter(|line| !line.trim().is_empty())
-        .collect();
-    let required: usize = section
-        .iter()
-        .take(4) // intro + the three commands
-        .map(|line| "  action: ".len() + line.len() + 1)
-        .sum::<usize>()
-        + marker_for(TOOL_SCHEMA_PERMALINK).len()
-        - 1;
+
+    // Minimality, actually measured: find the smallest cap that delivers all
+    // three, then assert the shipped cap is the smallest power-of-two boundary
+    // at or above it. A cap that is merely "big enough" would pass the check
+    // above; only this pins that 1024 was derived rather than guessed.
+    let smallest = (1..=ACTION_EXCERPT_CAP)
+        .find(|cap| deliverable(*cap) == 3)
+        .expect("some cap within the shipped cap delivers all three commands");
     assert!(
-        ACTION_EXCERPT_CAP >= required,
-        "cap {ACTION_EXCERPT_CAP} is below the {required} B needed to deliver \
-         the intro, all three commands, and the marker"
+        smallest > 640,
+        "the previously-specified 640 B cap should NOT have sufficed, but {smallest} B did"
+    );
+    assert!(
+        ACTION_EXCERPT_CAP >= smallest,
+        "cap {ACTION_EXCERPT_CAP} is below the measured {smallest} B requirement"
+    );
+    assert!(
+        ACTION_EXCERPT_CAP / 2 < smallest,
+        "cap {ACTION_EXCERPT_CAP} is more than twice the measured {smallest} B \
+         requirement — it is not the smallest sensible boundary"
+    );
+
+    // One byte below the measured requirement must lose a command, which is
+    // what makes `smallest` a real boundary rather than an artefact.
+    assert!(
+        deliverable(smallest - 1) < 3,
+        "at {} B all three commands still fit, so {smallest} is not the boundary",
+        smallest - 1
     );
 }

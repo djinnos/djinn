@@ -100,6 +100,17 @@ pub(super) async fn merge_planned_knowledge(
             {
                 continue;
             }
+            // KNOWN DIVERGENCE (filed:
+            // `pitfalls/u46i-injection-rework-left-four-known-gaps-one-of-which-forbids-running-the-l0-backfill`).
+            //
+            // This is the pre-u46i format and it is the SECOND renderer feeding
+            // the same `Relevant Knowledge` block. It still prints the title
+            // alongside its own slugified copy (the overhead R1 removed),
+            // hard-codes `[Note]` regardless of `note_type`, uses `snippet`
+            // rather than `retrieval_anchor`, and emits no action excerpt or
+            // pull marker. Align with `djinn_slot::helpers` `rendered_line`
+            // before enabling `DJINN_MEMORY_INTENT_PLANNER_ENABLED`, or the
+            // block renders in two formats at once.
             let line = format!(
                 "- **[Note] {}**: {} (permalink: {})",
                 row.title, row.snippet, row.permalink

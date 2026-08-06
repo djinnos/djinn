@@ -165,6 +165,13 @@ mod tests {
     const TOOL_SCHEMA_REAUTHORED_BODY: &str =
         include_str!("../../djinn-slot/src/helpers/fixtures/tool_schema_note_reauthored.md");
 
+    /// The production note's body, byte for byte, with no edits at all. Held
+    /// here so BOTH fixtures are shared by path with the `djinn-slot` tests —
+    /// the anti-drift guarantee is only real if the eval reads the same bytes
+    /// for the real body too, not just the re-authored one.
+    const TOOL_SCHEMA_REAL_BODY: &str =
+        include_str!("../../djinn-slot/src/helpers/fixtures/tool_schema_note_real.md");
+
     /// The three regeneration commands the proposal's objective names, as
     /// complete source lines, verbatim — including the test filter on the
     /// second, without which the command does not do the thing.
@@ -173,10 +180,19 @@ mod tests {
     const UI_TYPES_COMMAND: &str = "- UI types: `pnpm mcp:types:snapshot` (in `ui/`; reads the server insta snap, so regenerate that FIRST)";
 
     fn tool_schema_note() -> CorpusNoteRow {
+        tool_schema_note_with_body(TOOL_SCHEMA_REAUTHORED_BODY)
+    }
+
+    /// The same note carrying its unedited production body.
+    fn tool_schema_real_note() -> CorpusNoteRow {
+        tool_schema_note_with_body(TOOL_SCHEMA_REAL_BODY)
+    }
+
+    fn tool_schema_note_with_body(body: &str) -> CorpusNoteRow {
         CorpusNoteRow {
             permalink: TOOL_SCHEMA_PERMALINK.to_string(),
             title: "Tool-schema edits must regenerate ALL derived goldens or the merge queue breaks for everyone".to_string(),
-            content: TOOL_SCHEMA_REAUTHORED_BODY.to_string(),
+            content: body.to_string(),
             note_type: "pitfall".to_string(),
             folder: "pitfalls".to_string(),
             status: "active".to_string(),
@@ -192,6 +208,15 @@ mod tests {
             labels: vec![],
             graph_edges: vec![],
             expected_signals: Default::default(),
+        }
+    }
+
+    fn real_body_fixtures() -> Phase1Fixtures {
+        Phase1Fixtures {
+            corpus_notes: vec![tool_schema_real_note(), legacy_note()],
+            memory_ref_queries: vec![],
+            bad_cases: vec![],
+            manifest: None,
         }
     }
 
@@ -374,6 +399,62 @@ mod tests {
         assert!(
             legacy_line.contains("A free-form body with no headings at all."),
             "content fallback expected for an anchorless, abstractless note: {legacy_line}"
+        );
+    }
+
+    /// The gap, pinned on the production retrieval path rather than only in
+    /// the renderer's unit tests: the note's UNEDITED body reaches the packed
+    /// prompt with its anchor, but carries no action excerpt, because it has
+    /// no ATX heading for the grammar to key on. This is the note the
+    /// proposal's objective names, so the gap must stay visible here too.
+    #[tokio::test]
+    async fn unedited_production_body_reaches_the_pack_but_yields_no_excerpt() {
+        assert!(
+            !TOOL_SCHEMA_REAL_BODY
+                .lines()
+                .any(|line| line.starts_with("## ") || line.starts_with("# ")),
+            "fixture drift: the production note is expected to have no ATX heading"
+        );
+
+        let task_paths = vec!["server/crates/djinn-mcp-extension".to_string()];
+        let output = execute_injection_probe(&real_body_fixtures(), &task_paths)
+            .await
+            .expect("injection probe should succeed");
+        let prompt = &output.packed_prompt;
+
+        assert!(
+            prompt.contains(TOOL_SCHEMA_ANCHOR),
+            "the anchor must still reach the prompt:\n{prompt}"
+        );
+
+        let candidate = output
+            .candidates
+            .iter()
+            .find(|candidate| candidate.permalink == TOOL_SCHEMA_PERMALINK)
+            .expect("the tool-schema candidate must be present");
+        assert_eq!(
+            candidate.disposition,
+            NotePackDisposition::Injected,
+            "a note is never dropped merely for lacking a templated section"
+        );
+        assert_eq!(
+            candidate.action_excerpt, None,
+            "no eligible section exists in the unedited body"
+        );
+
+        for command in [
+            SERVER_SNAP_COMMAND,
+            CORPUS_FIXTURE_COMMAND,
+            UI_TYPES_COMMAND,
+        ] {
+            assert!(
+                !prompt.contains(command),
+                "the unedited body cannot deliver its commands inline yet:\n{prompt}"
+            );
+        }
+        assert!(
+            !prompt.contains("  action: "),
+            "no action block may render for the unedited body:\n{prompt}"
         );
     }
 

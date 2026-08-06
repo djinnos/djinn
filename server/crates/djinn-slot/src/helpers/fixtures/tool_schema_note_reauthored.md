@@ -1,4 +1,4 @@
-<!-- SYNTHETIC: body verbatim from the production note; a "## Prevention" heading was added because the real note has no ATX heading of any level. -->
+<!-- SYNTHETIC. Prose verbatim from the production note; exactly three insertions, nothing removed or reworded: (1) this banner and the blank line after it, (2) a "## Prevention" heading before the regen-command block, (3) a "## Notes" heading and a preceding blank line after the last command bullet, to bound the section. The real note has no ATX heading of any level, which is why this variant has to exist; `diff` against tool_schema_note_real.md shows precisely these three insertions. -->
 
 Changing MCP tool schema text (param descriptions in `TaskListParams`, `shared_schemas.rs`, etc.) fans out into MULTIPLE derived golden files, and regenerating only some of them leaves `main` in a state where the full merge-queue suite fails for EVERY subsequent PR — not just the offending one.
 
