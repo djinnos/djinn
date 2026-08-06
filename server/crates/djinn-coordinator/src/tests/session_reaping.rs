@@ -131,7 +131,7 @@ async fn stalled_model_is_skipped_and_dispatch_fails_over_to_next() {
         )
         .await;
 
-    assert!(matches!(outcome, DispatchOutcome::Dispatched));
+    assert!(matches!(outcome, DispatchOutcome::Dispatched { .. }));
     let attempted = attempted.lock().unwrap().clone();
     assert_eq!(
         attempted,
@@ -168,7 +168,7 @@ async fn stalled_model_recovers_after_cooldown_expires() {
             |_pool, _model_id| async move { Ok::<(), PoolError>(()) },
         )
         .await;
-    assert!(matches!(outcome, DispatchOutcome::Dispatched));
+    assert!(matches!(outcome, DispatchOutcome::Dispatched { .. }));
 }
 
 // ── Zombie-session DB-truth backstop ─────────────────────────────────────

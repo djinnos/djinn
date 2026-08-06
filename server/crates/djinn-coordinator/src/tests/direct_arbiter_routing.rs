@@ -2000,3 +2000,258 @@ async fn an_unescalated_worker_dispatch_is_unaffected_by_the_rotation_block() {
         "an ordinary worker dispatch must not stamp an evidence epoch as a side effect"
     );
 }
+
+// ── Capacity-driven failover attributes the ledger to the model that RAN ────
+//
+// `try_dispatch_to_pool` walks the candidate list and returns the model the
+// chain ACCEPTED. The `DispatchOutcome::Dispatched` arm used to throw that away
+// and re-derive the used model with
+// `model_ids.iter().find(|m| self.health.is_available(Some(c), m))`. The two
+// derivations agree on a breaker-open skip (same predicate) and disagree on
+// every other reason the chain advances — `PoolError::AtCapacity` above all.
+// On a capacity-driven failover the `find` names the model that was REJECTED,
+// so the durable `dispatch_state.inflight_model_id` (the per-user per-model cap
+// ledger, and what a restart rehydrates) recorded the wrong model.
+//
+// The fixtures below reuse the rotation ones verbatim: the same live-credential
+// seam, the same `[A, B]` candidate list, the same recording pool. The only
+// addition is a shim that answers `AtCapacity` for A.
+
+/// One entry per `dispatch_fn` invocation the coordinator's failover chain
+/// actually made: `(model_id, "at_capacity" | "accepted" | "rejected")`.
+///
+/// This is the discriminator the whole test rests on. A model that the health
+/// tracker skipped never reaches `dispatch_fn`, so it never appears here at
+/// all — an entry for A is positive proof the chain REACHED A and A was turned
+/// away for capacity, which is the only case in which the old and new
+/// derivations disagree.
+type PoolDispatchAttempts = Arc<Mutex<Vec<(String, &'static str)>>>;
+
+/// Wrap a real `SlotPoolHandle` in a pass-through shim that answers every
+/// dispatch for `full_model` with `PoolError::AtCapacity` and forwards
+/// everything else to the real pool unchanged.
+///
+/// A shim is required rather than a full model slot: `SlotPool::dispatch` is
+/// *elastic* — when no free slot exists for a model it calls `spawn_slot`,
+/// which unconditionally pushes a brand-new slot onto the free list, so the
+/// `.ok_or(PoolError::AtCapacity { .. })?` that follows is unreachable through
+/// the real actor for ANY `max_slots` value (including `0`, and including a
+/// model whose only slot is already busy). The shim therefore injects the error
+/// at exactly the boundary the coordinator observes it — the `Result` of
+/// `pool.dispatch_with_resume_metadata`, i.e. the `dispatch_fn` return value
+/// `try_dispatch_to_pool` matches on — while every other pool interaction in
+/// the pass (`get_status`, `has_session`, and the dispatch that succeeds) is
+/// served by the genuine pool actor and its genuine lifecycle runner.
+///
+/// Returns the shim handle, the attempt log, and a log of any pool message the
+/// shim did not forward (asserted empty, so the shim can never silently
+/// swallow a pass's pool interaction and fake the outcome).
+fn at_capacity_shim_for(
+    real: SlotPoolHandle,
+    full_model: &str,
+) -> (
+    SlotPoolHandle,
+    PoolDispatchAttempts,
+    Arc<Mutex<Vec<String>>>,
+) {
+    let attempts: PoolDispatchAttempts = Arc::new(Mutex::new(Vec::new()));
+    let unforwarded: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let (tx, mut rx) = mpsc::channel::<djinn_slot::PoolMessage>(64);
+    let full_model = full_model.to_owned();
+    let attempts_task = attempts.clone();
+    let unforwarded_task = unforwarded.clone();
+    tokio::spawn(async move {
+        while let Some(msg) = rx.recv().await {
+            match msg {
+                djinn_slot::PoolMessage::Dispatch {
+                    task_id,
+                    project_path,
+                    model_id,
+                    respond_to,
+                } => {
+                    let result = if model_id == full_model {
+                        attempts_task
+                            .lock()
+                            .expect("pool dispatch attempt mutex")
+                            .push((model_id.clone(), "at_capacity"));
+                        Err(djinn_slot::PoolError::AtCapacity { model_id })
+                    } else {
+                        let result = real.dispatch(&task_id, &project_path, &model_id).await;
+                        attempts_task
+                            .lock()
+                            .expect("pool dispatch attempt mutex")
+                            .push((
+                                model_id,
+                                if result.is_ok() {
+                                    "accepted"
+                                } else {
+                                    "rejected"
+                                },
+                            ));
+                        result
+                    };
+                    let _ = respond_to.send(result);
+                }
+                djinn_slot::PoolMessage::DispatchWithResume {
+                    task_id,
+                    project_path,
+                    model_id,
+                    resume_lifecycle_metadata,
+                    respond_to,
+                } => {
+                    let result = if model_id == full_model {
+                        attempts_task
+                            .lock()
+                            .expect("pool dispatch attempt mutex")
+                            .push((model_id.clone(), "at_capacity"));
+                        Err(djinn_slot::PoolError::AtCapacity { model_id })
+                    } else {
+                        let result = real
+                            .dispatch_with_resume_metadata(
+                                &task_id,
+                                &project_path,
+                                &model_id,
+                                resume_lifecycle_metadata,
+                            )
+                            .await;
+                        attempts_task
+                            .lock()
+                            .expect("pool dispatch attempt mutex")
+                            .push((
+                                model_id,
+                                if result.is_ok() {
+                                    "accepted"
+                                } else {
+                                    "rejected"
+                                },
+                            ));
+                        result
+                    };
+                    let _ = respond_to.send(result);
+                }
+                djinn_slot::PoolMessage::HasSession {
+                    task_id,
+                    respond_to,
+                } => {
+                    let _ = respond_to.send(real.has_session(&task_id).await);
+                }
+                djinn_slot::PoolMessage::GetStatus { respond_to } => {
+                    let _ = respond_to.send(real.get_status().await);
+                }
+                _ => unforwarded_task
+                    .lock()
+                    .expect("unforwarded pool message mutex")
+                    .push("unforwarded pool message".to_owned()),
+            }
+        }
+    });
+    (SlotPoolHandle::from_raw_sender(tx), attempts, unforwarded)
+}
+
+/// A capacity-driven failover must attribute the dispatch ledger to the model
+/// the failover chain ACCEPTED, not to the first health-available candidate.
+///
+/// Fixture: the ordinary (unescalated, so rotation-inert) worker dispatch of
+/// `an_unescalated_worker_dispatch_is_unaffected_by_the_rotation_block`, whose
+/// candidate list is `[A, B]` in that order and which that control test proves
+/// lands on A. The only change is a pass-through shim that answers `AtCapacity`
+/// for A, so `try_dispatch_to_pool` advances to B and B is what actually runs.
+///
+/// The two derivations are separated by construction: A's breaker is CLOSED
+/// before and after the pass (asserted), so `find(is_available)` names A, while
+/// the chain accepted B. A breaker-open A would make both derivations name B
+/// and the test would prove nothing — hence the attempt log, which records one
+/// `dispatch_fn` call per candidate the chain actually reached. A breaker skip
+/// never calls `dispatch_fn`, so `("A", "at_capacity")` in that log is proof
+/// the rejection was capacity, not health.
+///
+/// Durable evidence: `dispatch_state.inflight_model_id` (the per-user per-model
+/// cap ledger column, and the column a restart rehydrates) plus the model
+/// string the real pool's lifecycle runner was handed. No log lines.
+///
+/// **What would still pass if the fix were reverted:** everything except the
+/// final `inflight_model_id` assertion. The pool still runs B (the chain's
+/// choice was never in doubt), the shim still records `[A@capacity,
+/// B@accepted]`, `dispatch_state` still exists with a `last_dispatched` marker,
+/// and every other test in this crate is untouched — the old code's only
+/// visible wrong is which model string the ledger names. That single assertion
+/// is the regression.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_capacity_driven_failover_bills_the_model_that_actually_ran() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let cancel = CancellationToken::new();
+    let (mut actor, observed) = rotation_dispatch_actor(&db, &tx, &cancel);
+    let (shim, attempts, unforwarded) = at_capacity_shim_for(actor.pool.clone(), ROTATION_MODEL_A);
+    actor.pool = shim;
+
+    let task = rotation_worker_task(&db, &tx, "capacity failover ledger attribution").await;
+    let creator = task.created_by_user_id.clone();
+
+    // Fixture preconditions, all read from live state rather than assumed.
+    assert!(
+        task.escalation_evidence_at.is_none(),
+        "fixture: the task is unescalated, so the rotation filter is inert and the \
+         candidate list is the configured order [A, B]"
+    );
+    assert!(
+        actor.health.is_available(Some(&creator), ROTATION_MODEL_A),
+        "fixture: model A's breaker must be CLOSED. This is the whole point — with A \
+         health-available the retired `find(is_available)` derivation names A while the \
+         failover chain accepts B, so the two disagree. A breaker-open A would make both \
+         name B and the test would be vacuous."
+    );
+    assert!(
+        actor.health.is_available(Some(&creator), ROTATION_MODEL_B),
+        "fixture: model B must be dispatchable"
+    );
+
+    actor.dispatch_ready_tasks(Some(&task.project_id)).await;
+
+    // The chain REACHED A and A was turned away for capacity. A health skip
+    // short-circuits before `dispatch_fn`, so an entry for A can only mean the
+    // pool itself rejected it.
+    assert_eq!(
+        attempts
+            .lock()
+            .expect("pool dispatch attempt mutex")
+            .clone(),
+        vec![
+            (ROTATION_MODEL_A.to_owned(), "at_capacity"),
+            (ROTATION_MODEL_B.to_owned(), "accepted"),
+        ],
+        "the failover must be CAPACITY-driven: model A has to be reached and rejected by \
+         the pool (not skipped by the health tracker) before the chain advances to B"
+    );
+    assert!(
+        unforwarded
+            .lock()
+            .expect("unforwarded pool message mutex")
+            .is_empty(),
+        "the capacity shim must forward every pool interaction of the pass to the real \
+         pool; an unforwarded message means the outcome was shaped by the shim"
+    );
+    assert!(
+        actor.health.is_available(Some(&creator), ROTATION_MODEL_A),
+        "a capacity rejection is not breaker evidence: model A must still be \
+         health-available AFTER the pass, which is exactly the state in which the \
+         retired `find(is_available)` derivation would have named A"
+    );
+
+    assert_eq!(
+        model_the_pool_ran(&observed, &task.id).await,
+        ROTATION_MODEL_B,
+        "the real pool's lifecycle runner must have been handed model B — the session \
+         genuinely ran on the model the failover chain accepted"
+    );
+    assert_eq!(
+        inflight_model_of_record(&db, &task.id).await,
+        ROTATION_MODEL_B,
+        "REGRESSION: the durable dispatch_state.inflight_model_id must name the model \
+         that RAN (B). Re-deriving it as `model_ids.iter().find(|m| \
+         health.is_available(Some(creator), m))` yields A — the model the pool REJECTED \
+         for capacity — which under-counts B against the per-user per-model cap, \
+         over-counts the model that is already full, and resurrects the wrong model on \
+         a restart that rehydrates this column."
+    );
+}

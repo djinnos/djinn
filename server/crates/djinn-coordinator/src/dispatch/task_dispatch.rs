@@ -1112,7 +1112,9 @@ impl CoordinatorActor {
                     // is evaluated, so the fallback-rescued session does not
                     // demote or cooldown a model whose chain was not
                     // exhausted.
-                    return DispatchOutcome::Dispatched;
+                    return DispatchOutcome::Dispatched {
+                        model_id: model_id.clone(),
+                    };
                 }
                 Err(PoolError::AtCapacity { .. }) => {
                     any_at_capacity = true;
@@ -3152,7 +3154,9 @@ impl CoordinatorActor {
                 .await;
 
             match outcome {
-                DispatchOutcome::Dispatched => {
+                DispatchOutcome::Dispatched {
+                    model_id: used_model,
+                } => {
                     record_dispatch_outcome(djinn_telemetry::dispatch::OUTCOME_OK);
                     tracing::info!(outcome = "ok", task_id = %task.short_id, role);
                     tracing::info!(
@@ -3212,10 +3216,12 @@ impl CoordinatorActor {
                     // pass respect the cap before the session row is visible.
                     {
                         let c = creator.as_str();
-                        if let Some(used) = model_ids
-                            .iter()
-                            .find(|m| self.health.is_available(Some(c), m))
+                        // The model the failover chain ACCEPTED, carried out of
+                        // `try_dispatch_to_pool`. Re-deriving it here with
+                        // `find(is_available)` mis-attributed every
+                        // capacity-driven failover (see `DispatchOutcome`).
                         {
+                            let used = &used_model;
                             *running_by_user_model
                                 .entry((c.to_string(), used.clone()))
                                 .or_insert(0) += 1;
@@ -5226,7 +5232,7 @@ mod failover_chain_tests {
             .await;
 
         assert!(
-            matches!(outcome, DispatchOutcome::Dispatched),
+            matches!(outcome, DispatchOutcome::Dispatched { .. }),
             "dispatch should succeed on model-b after model-a breaker is open"
         );
 
@@ -5298,7 +5304,7 @@ mod failover_chain_tests {
             .await;
 
         assert!(
-            matches!(outcome, DispatchOutcome::Dispatched),
+            matches!(outcome, DispatchOutcome::Dispatched { .. }),
             "dispatch should succeed on model-b after model-a breaker is open"
         );
 
@@ -5405,7 +5411,7 @@ mod failover_chain_tests {
             .await;
 
         assert!(
-            matches!(outcome, DispatchOutcome::Dispatched),
+            matches!(outcome, DispatchOutcome::Dispatched { .. }),
             "dispatch should succeed on model-c after model-a and model-b breaker-open"
         );
 
@@ -5461,7 +5467,7 @@ mod failover_chain_tests {
             .await;
 
         assert!(
-            matches!(outcome, DispatchOutcome::Dispatched),
+            matches!(outcome, DispatchOutcome::Dispatched { .. }),
             "dispatch should succeed on model-b (first eligible in order)"
         );
 
@@ -5549,7 +5555,7 @@ mod failover_chain_tests {
             )
             .await;
 
-        assert!(matches!(outcome, DispatchOutcome::Dispatched));
+        assert!(matches!(outcome, DispatchOutcome::Dispatched { .. }));
 
         // The dispatch_fn should have been called for model-b (first eligible,
         // succeeds), but NOT for model-a (breaker-open) or model-c (chain
@@ -5629,7 +5635,7 @@ mod failover_chain_tests {
             .await;
 
         assert!(
-            matches!(outcome, DispatchOutcome::Dispatched),
+            matches!(outcome, DispatchOutcome::Dispatched { .. }),
             "dispatch should succeed on model-b after model-a breaker-open"
         );
 
@@ -5755,7 +5761,7 @@ mod failover_chain_tests {
             .await;
 
         assert!(
-            matches!(outcome, DispatchOutcome::Dispatched),
+            matches!(outcome, DispatchOutcome::Dispatched { .. }),
             "dispatch should succeed on model-b after model-a breaker-open"
         );
 
@@ -5901,7 +5907,7 @@ mod failover_chain_tests {
             .await;
 
         assert!(
-            matches!(outcome, DispatchOutcome::Dispatched),
+            matches!(outcome, DispatchOutcome::Dispatched { .. }),
             "dispatch should succeed on model-b after model-a breaker-open"
         );
 
@@ -6034,7 +6040,7 @@ mod failover_chain_tests {
 
         // ── AC3a: dispatch should succeed on model-b ─────────────────────
         assert!(
-            matches!(outcome, DispatchOutcome::Dispatched),
+            matches!(outcome, DispatchOutcome::Dispatched { .. }),
             "dispatch should succeed on model-b after model-a pool error"
         );
 
@@ -6652,7 +6658,7 @@ mod failover_chain_tests {
 
         // ── Outcome: dispatch succeeded via fallback. ────────────────────────
         assert!(
-            matches!(outcome, DispatchOutcome::Dispatched),
+            matches!(outcome, DispatchOutcome::Dispatched { .. }),
             "dispatch should succeed on model-b after model-a pool error; got {outcome:?}"
         );
         let attempted = attempted_models.lock().unwrap().clone();
@@ -6984,7 +6990,7 @@ mod failover_chain_tests {
                 .await;
 
             assert!(
-                matches!(outcome, DispatchOutcome::Dispatched),
+                matches!(outcome, DispatchOutcome::Dispatched { .. }),
                 "step 1 chain {chain}: fallback should rescue the dispatch; got {outcome:?}"
             );
 
@@ -7319,7 +7325,7 @@ mod failover_chain_tests {
             )
             .await;
         assert!(
-            matches!(outcome, DispatchOutcome::Dispatched),
+            matches!(outcome, DispatchOutcome::Dispatched { .. }),
             "fallback should rescue the dispatch on model-b; got {outcome:?}"
         );
 
