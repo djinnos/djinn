@@ -3280,12 +3280,13 @@ impl ProposalRepository {
             serde_json::Value::String(input.load_bearing_category.trim().to_owned());
         let demand_hash = normalized_demand_hash(&claim);
         let mut tx = self.db.pool().begin().await?;
-        let active_revision: i32 =
-            sqlx::query_scalar("SELECT latest_revision_seq FROM proposals WHERE id=$1 FOR UPDATE")
-                .bind(input.proposal_id)
-                .fetch_optional(&mut *tx)
-                .await?
-                .ok_or_else(|| Error::InvalidData("proposal not found".into()))?;
+        let (active_revision, linked_spike_task_id): (i32, Option<String>) = sqlx::query_as(
+            "SELECT latest_revision_seq, linked_spike_task_id FROM proposals WHERE id=$1 FOR UPDATE",
+        )
+        .bind(input.proposal_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| Error::InvalidData("proposal not found".into()))?;
         if active_revision != input.claim.against_revision_seq {
             return Err(Error::InvalidTransition(
                 "stale_evidence_demand_revision".into(),
@@ -3340,6 +3341,13 @@ impl ProposalRepository {
                 spike_task_id,
                 replayed: true,
             });
+        }
+        // A mixed-version writer may have installed a legacy link without a
+        // typed finding. It remains active authority and must not be replaced.
+        // The tentative finding inserted above is rolled back on this return;
+        // exact typed deliveries took the replay branch and remain idempotent.
+        if linked_spike_task_id.is_some() {
+            return Err(Error::InvalidTransition("active_evidence_conflict".into()));
         }
         let task_id = uuid::Uuid::now_v7().to_string();
         let creator: String =

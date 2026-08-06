@@ -286,8 +286,8 @@ async fn wrong_user_rejected() {
 
     let error = resp.get("error").and_then(|v| v.as_str()).unwrap();
     assert!(
-        error.contains("not the active Judge"),
-        "should mention Judge auth failure: {error}"
+        error.contains("not the active Adversary or Judge"),
+        "should mention evidence-authority failure: {error}"
     );
     assert!(
         !resp
@@ -849,8 +849,12 @@ async fn existing_open_linked_spike_rejected() {
 
     let error = resp.get("error").and_then(|v| v.as_str()).unwrap();
     assert!(
-        error.contains("already has an open linked evidence spike"),
-        "should mention existing spike: {error}"
+        error.contains("active_evidence_conflict"),
+        "should return the stable active-demand conflict: {error}"
+    );
+    assert_eq!(
+        resp.get("conflict_code").and_then(|v| v.as_str()),
+        Some("active_evidence_conflict")
     );
     assert!(
         !resp
