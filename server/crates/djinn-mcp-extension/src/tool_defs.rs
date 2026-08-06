@@ -834,6 +834,10 @@ pub fn tool_schemas_advocate() -> Vec<serde_json::Value> {
         mutation(),
     ));
     tool_values.push(serialize_tool(
+        shared_schemas::tool_proposal_feedback_disposition(),
+        mutation(),
+    ));
+    tool_values.push(serialize_tool(
         shared_schemas::tool_proposal_update(),
         mutation(),
     ));
