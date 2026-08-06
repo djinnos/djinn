@@ -165,7 +165,6 @@ fn query_error_response(error: ReadinessQueryError) -> Response {
         ReadinessQueryError::AuthenticatedOwnerNotFound { .. } => {
             (StatusCode::UNAUTHORIZED, "authentication_required")
         }
-        ReadinessQueryError::UnauthorizedOwner { .. } => (StatusCode::FORBIDDEN, "forbidden"),
         ReadinessQueryError::Persistence { .. } => {
             (StatusCode::INTERNAL_SERVER_ERROR, "persistence_failure")
         }
@@ -182,7 +181,6 @@ fn kickoff_error_response(error: ReadinessKickoffError) -> Response {
         ReadinessKickoffError::AuthenticatedOwnerNotFound { .. } => {
             (StatusCode::UNAUTHORIZED, "authentication_required")
         }
-        ReadinessKickoffError::UnauthorizedOwner { .. } => (StatusCode::FORBIDDEN, "forbidden"),
         ReadinessKickoffError::ImmutableSnapshotUnavailable { .. }
         | ReadinessKickoffError::SkillPinUnavailable { .. }
         | ReadinessKickoffError::SkillPinMismatch { .. } => {
@@ -218,13 +216,33 @@ mod tests {
             kickoff_error_response(ReadinessKickoffError::BlankIdempotencyKey).status(),
             StatusCode::BAD_REQUEST
         );
+        // A missing user row is an authentication failure, never a silent
+        // success: dropping the owner-equality gate must not admit a caller
+        // whose identity cannot be resolved.
         assert_eq!(
-            query_error_response(ReadinessQueryError::UnauthorizedOwner {
-                project_id: "project".into(),
+            query_error_response(ReadinessQueryError::AuthenticatedOwnerNotFound {
                 user_id: "user".into(),
             })
             .status(),
-            StatusCode::FORBIDDEN
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            kickoff_error_response(ReadinessKickoffError::AuthenticatedOwnerNotFound {
+                user_id: "user".into(),
+            })
+            .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        // Project scoping is unchanged: a run reached through the wrong
+        // project is still not found.
+        assert_eq!(
+            query_error_response(ReadinessQueryError::RunProjectMismatch {
+                project_id: "project".into(),
+                run_id: "run".into(),
+                actual_project_id: "other".into(),
+            })
+            .status(),
+            StatusCode::NOT_FOUND
         );
     }
 }

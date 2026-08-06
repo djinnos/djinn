@@ -3,6 +3,8 @@
 // sat at the 50 KiB guideline before the slice-5 org-policy block filter pushed
 // it just over. Splitting the module would scatter the shared helpers for no
 // real readability gain; the file stays a single well-factored unit.
+use chrono::{Duration, SecondsFormat, Utc};
+use djinn_db::SessionRepository;
 use rmcp::{Json, handler::server::wrapper::Parameters, schemars, tool, tool_router};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -156,6 +158,9 @@ pub struct ModelHealthInput {
 pub struct ModelHealthResponse {
     pub action: String,
     pub models: Vec<ModelHealthOutput>,
+    /// Durable terminal outcomes for autonomous sessions, separate from the
+    /// in-memory breaker buckets in `models`.
+    pub outcomes: Vec<ModelHealthOutcomeOutput>,
     pub error: Option<String>,
 }
 
@@ -204,6 +209,30 @@ impl From<ModelHealth> for ModelHealthOutput {
             trips_in_window: value.trips_in_window,
         }
     }
+}
+
+/// One durable autonomous-session outcome population for an exact breaker-like
+/// `(scope, model_id)` key. Unlike `models`, rows come only from terminal
+/// session history, so a row can exist with no corresponding breaker bucket.
+#[derive(Serialize, JsonSchema)]
+pub struct ModelHealthOutcomeOutput {
+    pub population_kind: String,
+    /// Session creator scope, falling back to the task creator in the durable
+    /// report. `null` identifies the shared/system scope.
+    pub scope: Option<String>,
+    pub model_id: String,
+    /// Explicit half-open report window `[window_start, window_end)`.
+    pub window_start: String,
+    pub window_end: String,
+    pub completed_count: i64,
+    pub cancelled_count: i64,
+    pub provider_count: i64,
+    pub harness_count: i64,
+    pub infrastructure_count: i64,
+    pub protocol_count: i64,
+    pub finalization_count: i64,
+    pub unknown_count: i64,
+    pub legacy_unclassified_count: i64,
 }
 
 // ── provider_catalog ──────────────────────────────────────────────────────────
@@ -448,11 +477,54 @@ impl DjinnMcpServer {
                 let all = tracker.all_health();
                 let models: Vec<ModelHealthOutput> =
                     all.into_iter().map(ModelHealthOutput::from).collect();
-                Json(ModelHealthResponse {
-                    action: "status".into(),
-                    models,
-                    error: None,
-                })
+                // Capture one end instant for the entire request, then pass
+                // both boundaries to the repository to retain [start, end)
+                // semantics rather than letting separate clock reads drift.
+                let end = Utc::now();
+                let start = end - Duration::days(30);
+                let window_start = start.to_rfc3339_opts(SecondsFormat::Millis, true);
+                let window_end = end.to_rfc3339_opts(SecondsFormat::Millis, true);
+                let session_repo =
+                    SessionRepository::new(self.state.db().clone(), self.state.event_bus());
+
+                match session_repo
+                    .autonomous_outcomes_by_user_and_model(start, end)
+                    .await
+                {
+                    Ok(rows) => Json(ModelHealthResponse {
+                        action: "status".into(),
+                        models,
+                        outcomes: rows
+                            .into_iter()
+                            .map(|row| ModelHealthOutcomeOutput {
+                                population_kind: "autonomous".into(),
+                                scope: row.creator_user_id,
+                                model_id: row.model_id,
+                                window_start: window_start.clone(),
+                                window_end: window_end.clone(),
+                                completed_count: row.completed_count,
+                                cancelled_count: row.cancelled_count,
+                                provider_count: row.provider_count,
+                                harness_count: row.harness_count,
+                                infrastructure_count: row.infrastructure_count,
+                                protocol_count: row.protocol_count,
+                                finalization_count: row.finalization_count,
+                                unknown_count: row.unknown_count,
+                                legacy_unclassified_count: row.legacy_unclassified_count,
+                            })
+                            .collect(),
+                        error: None,
+                    }),
+                    Err(error) => {
+                        tracing::warn!(%error, "model_health: autonomous outcome report failed");
+                        Json(ModelHealthResponse {
+                            action: "status".into(),
+                            models,
+                            outcomes: vec![],
+                            error: Some(format!("failed to load autonomous outcomes: {error}")),
+                        })
+                    }
+                }
             }
             "reset" => {
                 if let Some(model_id) = &input.model {
@@ -465,12 +537,14 @@ impl DjinnMcpServer {
                         models: vec![ModelHealthOutput::from(
                             tracker.model_health(None, model_id),
                         )],
+                        outcomes: vec![],
                         error: None,
                     })
                 } else {
                     Json(ModelHealthResponse {
                         action: "reset".into(),
                         models: vec![],
+                        outcomes: vec![],
                         error: Some("model parameter required for reset".into()),
                     })
                 }
@@ -481,6 +555,7 @@ impl DjinnMcpServer {
                 Json(ModelHealthResponse {
                     action: "reset_all".into(),
                     models: vec![],
+                    outcomes: vec![],
                     error: None,
                 })
             }
@@ -500,12 +575,14 @@ impl DjinnMcpServer {
                     Json(ModelHealthResponse {
                         action: "enable".into(),
                         models,
+                        outcomes: vec![],
                         error: None,
                     })
                 } else {
                     Json(ModelHealthResponse {
                         action: "enable".into(),
                         models: vec![],
+                        outcomes: vec![],
                         error: Some("model parameter required for enable".into()),
                     })
                 }
@@ -513,6 +590,7 @@ impl DjinnMcpServer {
             _ => Json(ModelHealthResponse {
                 action: action.to_owned(),
                 models: vec![],
+                outcomes: vec![],
                 error: Some(format!(
                     "unknown action '{action}'; valid: status, reset, reset_all, enable"
                 )),
