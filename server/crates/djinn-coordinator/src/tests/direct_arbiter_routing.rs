@@ -1672,3 +1672,331 @@ fn both_pr_handoff_marker_writers_agree_on_actor_role_and_reason() {
         "the reason string is what `escalation_ceiling` and operator queries match on"
     );
 }
+
+// ── AC4: the guard-declined park's forced model rotation, at DISPATCH ───────
+//
+// The rotation itself lives in `dispatch::task_dispatch`, in the
+// `if role == "worker"` block that rewrites `model_ids` from
+// `PostInterventionHistory::rotation_excluded_models()`. Every other rotation
+// test in this crate asserts that PURE GETTER, so the one line that makes the
+// getter matter — `model_ids = filtered` — was unreachable-safe: an auditor
+// deleted it and all 2094 coordinator tests stayed green.
+//
+// The two tests below drive the REAL dispatch pass and read the model that was
+// actually used, from two independent durable side effects:
+//
+//   * `dispatch_state.inflight_model_id` — the column `record_inflight_dispatch`
+//     writes for the model the pass admitted, and
+//   * the model string the slot pool's lifecycle runner was handed, i.e. what
+//     the session would have run on.
+//
+// Neither is a log line and neither is the getter.
+
+/// The provider the rotation fixtures connect. Two models on ONE provider,
+/// ordered A-then-B in `model_priorities`, so A is what an UNROTATED worker
+/// dispatch picks and B is reachable only by the rotation filter.
+const ROTATION_PROVIDER: &str = "rotation-provider";
+const ROTATION_MODEL_A: &str = "rotation-provider/model-a";
+const ROTATION_MODEL_B: &str = "rotation-provider/model-b";
+
+/// Every `(task_id, model_id)` pair the rotation pool's lifecycle runner was
+/// handed — the model a real session would have run on.
+type ObservedDispatches = Arc<Mutex<Vec<(String, String)>>>;
+
+/// A slot pool with a free worker slot for BOTH rotation models, whose runner
+/// records the `(task_id, model_id)` pair it was actually handed.
+///
+/// Both models have capacity, so the pool never forces a failover: whichever
+/// model the pool runs is the FIRST entry of the candidate list the dispatch
+/// pass built, which is exactly what the rotation filter rewrites.
+fn recording_rotation_pool(
+    db: &Database,
+    cancel: &CancellationToken,
+) -> (SlotPoolHandle, ObservedDispatches) {
+    let observed: ObservedDispatches = Arc::new(Mutex::new(Vec::new()));
+    let observed_factory = observed.clone();
+    let pool = SlotPoolHandle::spawn_with_factory(
+        test_helpers::agent_context_from_db(db.clone(), cancel.clone()),
+        cancel.clone(),
+        SlotPoolConfig {
+            models: [ROTATION_MODEL_A, ROTATION_MODEL_B]
+                .into_iter()
+                .map(|model_id| ModelSlotConfig {
+                    model_id: model_id.to_owned(),
+                    max_slots: 1,
+                    roles: ["worker".to_owned()].into_iter().collect(),
+                })
+                .collect(),
+            role_priorities: HashMap::new(),
+        },
+        Arc::new(move |slot_id, model_id, event_tx, app_state, cancel| {
+            let observed = observed_factory.clone();
+            let runner: djinn_slot::TestLifecycleRunner = Arc::new(
+                move |task_id, _generation, _path, model_id, _state, _kill, _pause, _resume| {
+                    let observed = observed.clone();
+                    Box::pin(async move {
+                        observed
+                            .lock()
+                            .expect("rotation dispatch observation mutex")
+                            .push((task_id, model_id));
+                        Ok(())
+                    })
+                },
+            );
+            SlotHandle::spawn_with_test_runner(
+                slot_id, model_id, event_tx, app_state, cancel, runner,
+            )
+        }),
+    );
+    (pool, observed)
+}
+
+/// A coordinator wired to resolve models through the PRODUCTION
+/// credential/catalog path (`test_use_live_credential_resolution`), so the
+/// worker candidate list is genuinely `[A, B]` rather than the fixed
+/// single-model test shortcut. With only one candidate the rotation filter can
+/// never change anything (it degrades rather than empty the list), so this seam
+/// is what makes the mechanism observable at all.
+fn rotation_dispatch_actor(
+    db: &Database,
+    tx: &broadcast::Sender<DjinnEventEnvelope>,
+    cancel: &CancellationToken,
+) -> (CoordinatorActor, ObservedDispatches) {
+    let (pool, observed) = recording_rotation_pool(db, cancel);
+    let mut actor = coordinator_actor_for_tests(db, tx);
+    actor.pool = pool;
+    actor.test_use_live_credential_resolution = true;
+    actor.catalog.add_custom_provider(
+        crate::refinement_dispatch::refinement_cap_tests::test_provider(ROTATION_PROVIDER),
+        vec![
+            crate::refinement_dispatch::refinement_cap_tests::test_model(
+                "model-a",
+                ROTATION_PROVIDER,
+            ),
+            crate::refinement_dispatch::refinement_cap_tests::test_model(
+                "model-b",
+                ROTATION_PROVIDER,
+            ),
+        ],
+    );
+    actor.model_priorities.insert(
+        "worker".to_owned(),
+        vec![ROTATION_MODEL_A.to_owned(), ROTATION_MODEL_B.to_owned()],
+    );
+    (actor, observed)
+}
+
+/// An `open` worker task whose creator has the rotation provider connected.
+/// Eligibility is scoped to the CREATOR's credentials, so the credential must
+/// be owned by whoever the task row records as its creator.
+async fn rotation_worker_task(
+    db: &Database,
+    tx: &broadcast::Sender<DjinnEventEnvelope>,
+    title: &str,
+) -> djinn_core::models::Task {
+    let project = test_helpers::create_test_project(db).await;
+    let task = TaskRepository::new(db.clone(), crate::events::event_bus_for(tx))
+        .create_fixture_in_project(
+            &project.id,
+            None,
+            title,
+            "rotation dispatch fixture",
+            "",
+            "task",
+            0,
+            "",
+            Some("open"),
+            Some(r#"[{"title":"fixture acceptance criterion"}]"#),
+        )
+        .await
+        .expect("seed the rotation dispatch task");
+    djinn_provider::repos::CredentialRepository::new(
+        db.clone(),
+        djinn_core::events::EventBus::noop(),
+    )
+    .set_with_owner(
+        ROTATION_PROVIDER,
+        "ROTATION_PROVIDER_API_KEY",
+        "rotation-provider-secret",
+        Some(&task.created_by_user_id),
+    )
+    .await
+    .expect("connect the rotation provider for the task creator");
+    assert_eq!(
+        task.intervention_count, 0,
+        "the rotation fixture must dispatch with a ZERO intervention_count — that is \
+         the exact state 4etb removed the `intervention_count >= 1` gate for"
+    );
+    task
+}
+
+/// The model the slot pool actually ran for `task_id`. The runner completes
+/// asynchronously after the pool accepts the dispatch, so poll for it.
+async fn model_the_pool_ran(observed: &ObservedDispatches, task_id: &str) -> String {
+    for _ in 0..300 {
+        let hit = observed
+            .lock()
+            .expect("rotation dispatch observation mutex")
+            .iter()
+            .find(|(observed_task, _)| observed_task == task_id)
+            .cloned();
+        if let Some((_, model)) = hit {
+            return model;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("the slot pool never ran a session for task {task_id}");
+}
+
+/// The model the dispatch pass durably recorded as in-flight for this task.
+async fn inflight_model_of_record(db: &Database, task_id: &str) -> String {
+    djinn_db::DispatchStateRepository::new(db.clone())
+        .get(task_id)
+        .await
+        .expect("read the durable dispatch_state row")
+        .expect("a successful dispatch must have written a dispatch_state row")
+        .inflight_model_id
+        .expect("a successful dispatch must record the admitted model")
+}
+
+/// **AC4.** A guard-declined park "rotates away from attempted models" — and
+/// the rotation has to happen at DISPATCH, not merely in a getter.
+///
+/// The fixture is the production shape: a task with a stamped
+/// `escalation_evidence_at`, one post-epoch worker `task_attempts` row that
+/// terminated pre-submission (`cancelled`) linked to a session that carried
+/// model A, and a worker candidate list ordered `[A, B]`. Without rotation the
+/// pass admits A — the model that just died pre-submission — and loops
+/// identically.
+///
+/// Durable evidence, both read back after the real `dispatch_ready_tasks` pass:
+/// the `dispatch_state.inflight_model_id` column, and the model string the slot
+/// pool's lifecycle runner was handed.
+///
+/// **What would still pass if the mechanism were deleted:** every existing
+/// rotation test in this crate, because they all assert
+/// `PostInterventionHistory::rotation_excluded_models()` — a pure function over
+/// a struct — and never that `model_ids` is rebuilt from it. Deleting
+/// `model_ids = filtered` leaves the getter, the log line and all 2094 other
+/// coordinator tests intact. Only the two assertions below change.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_worker_dispatch_after_a_declined_park_rotates_off_the_attempted_model() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let cancel = CancellationToken::new();
+    let (mut actor, observed) = rotation_dispatch_actor(&db, &tx, &cancel);
+    let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+
+    let task = rotation_worker_task(&db, &tx, "rotation after declined park").await;
+    // The escalation stamps the canonical evidence epoch. Under 4etb this epoch
+    // — NOT `intervention_count` — is what arms rotation.
+    repo.stamp_escalation_evidence_epoch(&task.id)
+        .await
+        .expect("stamp the canonical escalation evidence epoch")
+        .expect("the stamp must return the effective epoch");
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    // One post-epoch worker attempt that terminated pre-submission on model A,
+    // linked to a session carrying model A — the row `post_intervention_history`
+    // resolves the excluded model from.
+    seed_terminated_post_intervention_sessions(&db, &tx, &task.id, &[ROTATION_MODEL_A]).await;
+
+    // Fixture precondition, read from the durable rows: the exclusion set the
+    // dispatch pass is about to consume names model A and only model A. Without
+    // this the test could pass vacuously on a fixture that seeded nothing.
+    let escalated = repo.get(&task.id).await.unwrap().unwrap();
+    assert_eq!(
+        actor
+            .post_intervention_history(&escalated)
+            .await
+            .rotation_excluded_models(),
+        vec![ROTATION_MODEL_A.to_owned()],
+        "fixture: the seeded pre-submission attempt must exclude exactly model A"
+    );
+    assert_eq!(
+        escalated.intervention_count, 0,
+        "fixture: rotation must be armed with intervention_count still at ZERO — \
+         reinstating the retired `&& task.intervention_count >= 1` gate must fail this test"
+    );
+
+    actor
+        .dispatch_ready_tasks(Some(&escalated.project_id))
+        .await;
+
+    assert_eq!(
+        model_the_pool_ran(&observed, &task.id).await,
+        ROTATION_MODEL_B,
+        "the dispatch must ROTATE: the slot pool ran the model that did NOT terminate \
+         pre-submission. Model A would mean the filtered candidate list was computed \
+         and thrown away."
+    );
+    assert_eq!(
+        inflight_model_of_record(&db, &task.id).await,
+        ROTATION_MODEL_B,
+        "the durable dispatch_state.inflight_model_id must name the rotated model — \
+         the cap ledger and every restart-rehydrated decision read this column, so a \
+         rotation the pool honoured but the ledger did not is still a bug"
+    );
+}
+
+/// **AC4 (negative control).** The 4etb change removed the
+/// `&& task.intervention_count >= 1` gate from the rotation block, which means
+/// the block now runs on EVERY worker dispatch. What keeps it inert for
+/// ordinary work is the canonical evidence epoch: a task that has never been
+/// escalated has no floor, so `post_intervention_history` returns an empty
+/// history and there is nothing to exclude.
+///
+/// This is also the control for the positive test above: it proves model A is
+/// what this exact fixture picks WITHOUT rotation, so the `B` there is caused
+/// by the rotation and not by the candidate ordering.
+///
+/// Durable evidence: the same two side effects — the pool-run model and
+/// `dispatch_state.inflight_model_id`.
+///
+/// **What would still pass if the mechanism were deleted:** this test alone
+/// would pass with the whole rotation block removed, which is precisely why it
+/// is only meaningful paired with the positive test above.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unescalated_worker_dispatch_is_unaffected_by_the_rotation_block() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let cancel = CancellationToken::new();
+    let (mut actor, observed) = rotation_dispatch_actor(&db, &tx, &cancel);
+    let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+
+    let task = rotation_worker_task(&db, &tx, "ordinary unescalated dispatch").await;
+    assert!(
+        task.escalation_evidence_at.is_none(),
+        "fixture: an ordinary task has never been escalated"
+    );
+    assert!(
+        actor
+            .post_intervention_history(&task)
+            .await
+            .rotation_excluded_models()
+            .is_empty(),
+        "fixture: with no evidence floor there is nothing to rotate away from"
+    );
+
+    actor.dispatch_ready_tasks(Some(&task.project_id)).await;
+
+    assert_eq!(
+        model_the_pool_ran(&observed, &task.id).await,
+        ROTATION_MODEL_A,
+        "an unescalated worker dispatch must take the FIRST configured candidate — \
+         this is the control that proves model A wins this fixture without rotation"
+    );
+    assert_eq!(
+        inflight_model_of_record(&db, &task.id).await,
+        ROTATION_MODEL_A,
+        "the durable ledger must agree: the ungated rotation block is inert here"
+    );
+    assert!(
+        repo.get(&task.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .escalation_evidence_at
+            .is_none(),
+        "an ordinary worker dispatch must not stamp an evidence epoch as a side effect"
+    );
+}
