@@ -12,8 +12,33 @@ const APPROX_BYTES_PER_TOKEN: usize = 4;
 /// marker. The summary line keeps its own separate
 /// [`KnowledgePackConfig::line_byte_cap`] allowance.
 ///
+/// # Where 1024 comes from
+///
+/// Derived from a measured 120-note spread sample of the live corpus (every
+/// 70th case, 128th pitfall, 68th pattern), measuring the UTF-8 byte length of
+/// each note's actionable section body:
+///
+/// | heading                | n  | median | p90 | p95  | max  |
+/// |------------------------|----|--------|-----|------|------|
+/// | `Prevention`           | 38 | 255    | 441 | 522  | 731  |
+/// | `Recommended approach` | 40 | 372    | 808 | 1019 | 1971 |
+/// | `Reusable lesson`      | 38 | 214    | 265 | 339  | 583  |
+/// | combined               |116 | 266    | 509 | 733  | 1971 |
+///
+/// 1024 B is the smallest round cap that covers the p95 of *every* heading
+/// type, and the smallest that delivers the motivating note's regeneration
+/// block: its intro line plus all three commands measures 764 B of source
+/// (807 B rendered with prefixes). Only `Recommended approach`'s tail beyond
+/// p95 (max 1971 B) is truncated, and that degrades to the explicit
+/// `memory_read` pull marker rather than being lost.
+///
+/// Cost, as the proposal's "fewer-and-richer" fork accepts: at ~234 B per
+/// summary line after R1, a full 1024 B excerpt yields `floor(8192/1259) ≈ 6`
+/// maximal entries, and ~8-10 in practice because the measured median section
+/// is 266 B, not 1024 B.
+///
 /// Deliberately **not** configurable (proposal `u46i`).
-pub const ACTION_EXCERPT_CAP: usize = 640;
+pub const ACTION_EXCERPT_CAP: usize = 1024;
 
 /// Prefix for the first physical action line of an entry.
 const ACTION_FIRST_PREFIX: &str = "  action: ";
@@ -24,7 +49,23 @@ const ACTION_CONT_PREFIX: &str = "          ";
 
 /// Level-2 headings (ASCII case-folded) whose section body is eligible to be
 /// rendered as the entry's action excerpt, in precedence order.
-const ACTION_HEADINGS: [&str; 2] = ["prevention", "recommended approach"];
+///
+/// The proposal names only `Prevention` and `Recommended approach` and asserts
+/// "template compliance is 100% across 24 sampled notes". That is wrong, and
+/// the error is load-bearing. Measured against a 120-note spread sample of the
+/// live corpus:
+///
+/// | type    | corpus | has Prevention/Recommended approach | has Reusable lesson |
+/// |---------|--------|-------------------------------------|---------------------|
+/// | pitfall | 5144   | 95.0%                               | 0%                  |
+/// | pattern | 2729   | 100%                                | 0%                  |
+/// | case    | 2814   | **0.0%**                            | **95.0%**           |
+///
+/// `case` is 26% of these three injected types (`KNOWLEDGE_NOTE_TYPES`) and
+/// its template uses `## Reusable lesson` as the actionable slot. Without it,
+/// only 65.8% of notes can yield an excerpt at all; with it, 97.5%. This one
+/// entry is the single largest coverage gain available.
+const ACTION_HEADINGS: [&str; 3] = ["prevention", "recommended approach", "reusable lesson"];
 
 /// Outcome classification for a single note candidate during prompt packing.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -483,18 +524,50 @@ fn truncate_summary(summary: &str, max_bytes: usize) -> String {
     format!("{}{}", &summary[..boundary], ellipsis)
 }
 
+/// R1: the permalink is a slugified copy of the title, so rendering both spent
+/// ~12.8% of the whole budget twice on the same string. The permalink is the
+/// one that has to stay — it is the pull handle, and R3 requires handles to
+/// come from the index rather than be reconstructed by the model — so the
+/// title is dropped and the permalink becomes the line's label.
+///
+/// Fixed overhead per line is therefore `"- **[" + label + "] " + permalink +
+/// "**: "`, i.e. `PER_LINE_OVERHEAD_SCAFFOLD + label + permalink` bytes,
+/// against the previous `scaffold + label + title + permalink`.
 fn rendered_line(note: &djinn_memory::Note, line_byte_cap: usize) -> Option<String> {
-    let prefix = format!("- **[{}] {}**: ", note_label(note), note.title);
-    let suffix = format!(" (permalink: {})", note.permalink);
+    let prefix = format!("- **[{}] {}**: ", note_label(note), note.permalink);
     let minimum_summary = "(no abstract)";
-    let metadata_bytes = prefix.len() + suffix.len();
+    let metadata_bytes = prefix.len();
     if metadata_bytes + minimum_summary.len() > line_byte_cap {
         return None;
     }
     Some(format!(
-        "{prefix}{}{suffix}",
+        "{prefix}{}",
         truncate_summary(l0_summary(note), line_byte_cap - metadata_bytes)
     ))
+}
+
+/// Exact fixed-scaffold cost of one rendered summary line, excluding the note
+/// type label and the permalink: `"- **["`, `"] "`, and `"**: "`.
+///
+/// Exposed so tests and the eval harness can measure per-line overhead against
+/// the pre-R1 shape without re-deriving the format string.
+pub const PER_LINE_OVERHEAD_SCAFFOLD: usize = "- **[".len() + "] ".len() + "**: ".len();
+
+/// Fixed overhead of one rendered summary line for `note`: everything on the
+/// line that is not the summary payload itself.
+pub fn rendered_line_overhead_bytes(note: &djinn_memory::Note) -> usize {
+    PER_LINE_OVERHEAD_SCAFFOLD + note_label(note).len() + note.permalink.len()
+}
+
+/// The pre-R1 fixed overhead for the same note, for measurement only:
+/// `"- **[" label "] " title "**: " summary " (permalink: " permalink ")"`.
+pub fn legacy_rendered_line_overhead_bytes(note: &djinn_memory::Note) -> usize {
+    PER_LINE_OVERHEAD_SCAFFOLD
+        + note_label(note).len()
+        + note.title.len()
+        + " (permalink: ".len()
+        + note.permalink.len()
+        + ")".len()
 }
 
 /// One atomically packable entry: the summary line plus zero or more bounded
@@ -625,17 +698,24 @@ pub fn pack_knowledge_notes(
 /// `memory_read(identifier=<permalink>)` with an exact identifier instead of
 /// relying on title matching.
 ///
+/// The line is labelled by the note's **permalink**, not its title: the
+/// permalink is the slugified title, so rendering both spent ~12.8% of the
+/// whole budget twice on the same string (R1). The permalink is kept because
+/// it is the pull handle the prompt scaffold tells the agent to pass to
+/// `memory_read`.
+///
 /// Uses only L0 for the summary payload: trimmed nonblank `retrieval_anchor`
 /// (the note's applicability condition), then trimmed nonblank `abstract_`,
 /// then trimmed nonblank content, then `(no abstract)`. It never reads L1
 /// `overview`. Budget-capped at exact UTF-8 bytes, with later candidates still
-/// considered after a miss; the appended `permalink` is included in that
-/// budget accounting rather than being layered on after truncation.
+/// considered after a miss; the permalink is part of the line's fixed overhead
+/// and so is accounted before the summary is truncated, never after.
 ///
 /// Each entry may additionally carry a bounded action excerpt drawn from the
-/// note's `Prevention` (else `Recommended approach`) section, capped at
-/// [`ACTION_EXCERPT_CAP`] bytes and ending in an explicit `memory_read`
-/// pull marker when it had to be truncated.
+/// note's `Prevention`, else `Recommended approach`, else `Reusable lesson`
+/// section (see [`ACTION_HEADINGS`]), capped at [`ACTION_EXCERPT_CAP`] bytes
+/// and ending in an explicit `memory_read` pull marker when it had to be
+/// truncated.
 ///
 /// Now implemented as a compatibility wrapper around [`pack_knowledge_notes`].
 pub fn format_knowledge_notes(notes: &[djinn_memory::Note], budget_chars: usize) -> String {

@@ -566,6 +566,7 @@ mod tests {
                         project: project_path.clone(),
                         identifier: "brief".to_string(),
                     },
+                    &djinn_db::NoteAccessAttribution::unattributed(),
                 )
                 .await;
                 assert_eq!(
@@ -579,6 +580,7 @@ mod tests {
                         project: project_path.clone(),
                         identifier: "roadmap".to_string(),
                     },
+                    &djinn_db::NoteAccessAttribution::unattributed(),
                 )
                 .await;
                 assert_eq!(
@@ -653,6 +655,7 @@ mod tests {
                         project: project.slug(),
                         identifier: permalink.to_string(),
                     },
+                    &djinn_db::NoteAccessAttribution::unattributed(),
                 )
                 .await;
                 assert_eq!(read_back.error, None);

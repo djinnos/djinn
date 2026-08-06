@@ -801,3 +801,116 @@ async fn call_tool_dispatches_registered_mcp_tool_error() {
 
     assert!(error.contains("upstream MCP error"));
 }
+
+/// End-to-end proof that session attribution survives the whole path:
+/// production composition site → `ExtensionContext` override → dispatch →
+/// `note_access_events` row.
+///
+/// # Why this test is shaped this way
+///
+/// `ExtensionContext::session_id` is a **defaulted** trait method returning
+/// `None`. If the `AgentContext` override were dropped, or if the composition
+/// site stopped stamping the field, every ledger row would be written
+/// unattributed and `P(memory_read | Injected)` would report a permanent 0% —
+/// with every other test still green. A test that hand-builds a context and
+/// sets `session_id` directly would prove nothing about that.
+///
+/// So this drives the *real* constructor, `AgentToolDispatcher::new` — what the
+/// slot reply loop calls for every session — and asserts on the *persisted* row
+/// rather than on the in-memory context.
+#[tokio::test]
+async fn session_attribution_reaches_the_note_access_ledger() {
+    let db = create_test_db();
+    let project = create_test_project(&db).await;
+    let project_path = crate::extension::tests::project_fs_path(&project)
+        .to_string_lossy()
+        .into_owned();
+    let mut state = agent_context_from_db(db.clone(), CancellationToken::new());
+    state.task_ops_project_path_override = Some(project_path.clone().into());
+    assert_eq!(
+        djinn_mcp_extension::ExtensionContext::session_id(&state),
+        None,
+        "a bare AgentContext serves no session"
+    );
+
+    let note_repo = NoteRepository::new(db.clone(), EventBus::noop());
+    let note = note_repo
+        .create(
+            &project.id,
+            "Attribution Probe",
+            "Body for the attribution probe.",
+            "reference",
+            "[]",
+        )
+        .await
+        .expect("create probe note");
+
+    let services = crate::test_helpers::test_services();
+    let session_id = uuid::Uuid::now_v7().to_string();
+
+    // The production composition site. Nothing here is a test double.
+    let dispatcher = crate::actors::slot::reply_loop::AgentToolDispatcher::new(
+        &state,
+        &services,
+        None,
+        &session_id,
+        None,
+        CancellationToken::new(),
+        CancellationToken::new(),
+    );
+    let composed = dispatcher.app_state().clone();
+    assert_eq!(
+        djinn_mcp_extension::ExtensionContext::session_id(&composed),
+        Some(session_id.as_str()),
+        "AgentToolDispatcher::new must stamp the session onto the dispatch context, \
+         otherwise the ExtensionContext default silently wins"
+    );
+
+    let read_response = call_tool(
+        &composed,
+        &services,
+        "memory_read",
+        Some(
+            serde_json::json!({
+                "project": project.slug(),
+                "identifier": note.permalink
+            })
+            .as_object()
+            .expect("memory_read args object")
+            .clone(),
+        ),
+        Path::new(&project_path),
+        None,
+        Some("worker"),
+        None,
+        None,
+        &crate::extension::ToolCancellation::never(),
+    )
+    .await
+    .expect("memory_read dispatch should succeed");
+    assert_eq!(
+        read_response
+            .get("permalink")
+            .and_then(|value| value.as_str()),
+        Some(note.permalink.as_str())
+    );
+
+    let events = djinn_db::note_access_events_for_note(&db, &project.id, &note.id)
+        .await
+        .expect("read note access ledger");
+    assert_eq!(
+        events.len(),
+        1,
+        "memory_read must append exactly one ledger row"
+    );
+    assert_eq!(events[0].source, "memory_read");
+    assert_eq!(
+        events[0].session_id.as_deref(),
+        Some(session_id.as_str()),
+        "the persisted ledger row must carry the real session id — this is the \
+         assertion that fails if the defaulted ExtensionContext::session_id ever \
+         goes unoverridden"
+    );
+
+    drop(dispatcher);
+}

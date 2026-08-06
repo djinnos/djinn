@@ -33,9 +33,10 @@ use crate::tools::image_tools::{
 use crate::tools::memory_tools::{
     AssociationsParams, BrokenLinksParams, BuildContextParams, CatalogParams, DeleteParams,
     DiffParams, EditParams, ExtractedAuditParams, GraphParams, HealthParams, HistoryParams,
-    ListParams, MemoryConfirmParams, MoveParams, OrphansParams, ReadParams, RecallTraceParams,
-    RecentParams, RepairEmbeddingsParams, RetrievalOutcomesReportParams, RunEnrichmentParams,
-    SearchParams, SessionDiffParams, TaskRefsParams, WriteParams,
+    InjectedPullRateReportParams, ListParams, MemoryConfirmParams, MoveParams, OrphansParams,
+    ReadParams, RecallTraceParams, RecentParams, RepairEmbeddingsParams,
+    RetrievalOutcomesReportParams, RunEnrichmentParams, SearchParams, SessionDiffParams,
+    TaskRefsParams, WriteParams,
 };
 use crate::tools::org_policy_tools::{OrgPolicyGetParams, OrgPolicySetParams};
 use crate::tools::pr_review_tools::PrReviewContextParams;
@@ -831,6 +832,13 @@ impl DjinnMcpServer {
                 name,
                 self.memory_retrieval_outcomes_report(Parameters(decode_args::<
                     RetrievalOutcomesReportParams,
+                >(name, args)?))
+                    .await,
+            ),
+            "memory_injected_pull_rate_report" => map_json(
+                name,
+                self.memory_injected_pull_rate_report(Parameters(decode_args::<
+                    InjectedPullRateReportParams,
                 >(name, args)?))
                     .await,
             ),

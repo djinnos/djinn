@@ -15,7 +15,8 @@
 use super::code_context::{extract_action_units, l0_summary, render_action_block};
 use super::{
     ACTION_EXCERPT_CAP, ActionExcerptDetail, KnowledgePackConfig, NotePackDisposition,
-    NotePackOutcome, pack_ranked_knowledge_notes,
+    NotePackOutcome, legacy_rendered_line_overhead_bytes, pack_ranked_knowledge_notes,
+    rendered_line_overhead_bytes,
 };
 use djinn_memory::Note;
 
@@ -111,6 +112,207 @@ fn prevention_note(permalink: &str, lines: &[&str]) -> Note {
     anchored_note(permalink, Some("when the anchor applies"), &content)
 }
 
+// ── AC1 (R1): the permalink no longer duplicates the title ─────────────────
+
+/// Twenty real `(note_type, title, permalink)` triples sampled from the live
+/// djinn corpus (every 700th pitfall, every 500th pattern, every 500th case),
+/// so the overhead measurement is taken against real strings rather than
+/// invented ones. They show the duplication R1 removes: the permalink is the
+/// slugified title, verbatim.
+const REAL_CORPUS_SAMPLE: &[(&str, &str, &str)] = &[
+    (
+        "pitfall",
+        "A bounded catalog without explicit per-section limits is not bounded",
+        "pitfalls/a-bounded-catalog-without-explicit-per-section-limits-is-not-bounded",
+    ),
+    (
+        "pitfall",
+        "Broad-scope child uniqueness can silently become parent transaction failure",
+        "pitfalls/broad-scope-child-uniqueness-can-silently-become-parent-transaction-failure",
+    ),
+    (
+        "pitfall",
+        "Do not hand-roll the empty environment-config JSON shape",
+        "pitfalls/do-not-hand-roll-the-empty-environment-config-json-shape",
+    ),
+    (
+        "pitfall",
+        "Fixing only the first failing fixture causes serial CI rediscovery",
+        "pitfalls/fixing-only-the-first-failing-fixture-causes-serial-ci-rediscovery",
+    ),
+    (
+        "pitfall",
+        "Narrow-integer arithmetic inside malformed-row validation",
+        "pitfalls/narrow-integer-arithmetic-inside-malformed-row-validation",
+    ),
+    (
+        "pitfall",
+        "Resuming stale force-closed branches can reintroduce failed hardening work",
+        "pitfalls/resuming-stale-force-closed-branches-can-reintroduce-failed-hardening-work",
+    ),
+    (
+        "pitfall",
+        "Treating a failed broad Cargo test as a code failure without isolating diagnostics",
+        "pitfalls/treating-a-failed-broad-cargo-test-as-a-code-failure-without-isolating-diagnostics",
+    ),
+    (
+        "pitfall",
+        "Using an empty JSONB array as proof of an empty historical retrieval",
+        "pitfalls/using-an-empty-jsonb-array-as-proof-of-an-empty-historical-retrieval",
+    ),
+    (
+        "pattern",
+        "Add backwards-compatible fields to Rust bridge DTOs with serde defaults",
+        "patterns/add-backwards-compatible-fields-to-rust-bridge-dtos-with-serde-defaults",
+    ),
+    (
+        "pattern",
+        "Deterministic lease-race tests with injected ordering seams",
+        "patterns/deterministic-lease-race-tests-with-injected-ordering-seams",
+    ),
+    (
+        "pattern",
+        "Keep liveness policy pure and adapt persisted states at the repository boundary",
+        "patterns/keep-liveness-policy-pure-and-adapt-persisted-states-at-the-repository-boundary",
+    ),
+    (
+        "pattern",
+        "Read-only doctor checks as snapshot source plus pure evaluator",
+        "patterns/read-only-doctor-checks-as-snapshot-source-plus-pure-evaluator",
+    ),
+    (
+        "pattern",
+        "Stage-discriminating assertions for fallback pipelines",
+        "patterns/stage-discriminating-assertions-for-fallback-pipelines",
+    ),
+    (
+        "pattern",
+        "Use one canonical turn assembler for normal and interrupted paths",
+        "patterns/use-one-canonical-turn-assembler-for-normal-and-interrupted-paths",
+    ),
+    (
+        "case",
+        "6eaw tighten agent-worker checkpoint test git allowlist entry",
+        "cases/6eaw-tighten-agent-worker-checkpoint-test-git-allowlist-entry",
+    ),
+    (
+        "case",
+        "Converging synthetic extraction tool-use payloads with mandatory memory reasons",
+        "cases/converging-synthetic-extraction-tool-use-payloads-with-mandatory-memory-reasons",
+    ),
+    (
+        "case",
+        "Focused regression module for embedding_related edge-kind filtering",
+        "cases/focused-regression-module-for-embedding-related-edge-kind-filtering",
+    ),
+    (
+        "case",
+        "Postgres readiness aggregation race fixture",
+        "cases/postgres-readiness-aggregation-race-fixture",
+    ),
+    (
+        "case",
+        "Repair a thiserror String field compile regression without disturbing generation cutover work",
+        "cases/repair-a-thiserror-string-field-compile-regression-without-disturbing-generation-cutover-work",
+    ),
+    (
+        "case",
+        "Split resize reconciliation summaries by durable ledger",
+        "cases/split-resize-reconciliation-summaries-by-durable-ledger",
+    ),
+];
+
+fn real_corpus_notes() -> Vec<Note> {
+    REAL_CORPUS_SAMPLE
+        .iter()
+        .map(|(note_type, title, permalink)| {
+            let mut note = base_note(permalink, title, "body");
+            note.note_type = (*note_type).to_string();
+            note.retrieval_anchor = Some("applies when the sampled condition holds".to_string());
+            note
+        })
+        .collect()
+}
+
+#[test]
+fn permalink_no_longer_duplicates_the_title_and_overhead_roughly_halves() {
+    let notes = real_corpus_notes();
+
+    let legacy_total: usize = notes.iter().map(legacy_rendered_line_overhead_bytes).sum();
+    let new_total: usize = notes.iter().map(rendered_line_overhead_bytes).sum();
+    let reduction = 1.0 - (new_total as f64 / legacy_total as f64);
+
+    assert!(
+        reduction >= 0.45,
+        "R1 must roughly halve per-line overhead; measured {:.1}% \
+         (legacy {legacy_total} B over {} notes, now {new_total} B)",
+        reduction * 100.0,
+        notes.len()
+    );
+
+    // The title is genuinely gone from the rendered line, and the permalink —
+    // the pull handle — is genuinely still there.
+    for note in &notes {
+        let (rendered, _) = pack_one(note, default_config());
+        let summary = rendered.split('\n').next().unwrap_or_default();
+        assert!(
+            summary.contains(&note.permalink),
+            "the pull handle must remain on the line: {summary}"
+        );
+        assert!(
+            !summary.contains(&note.title),
+            "the title must not be rendered alongside its own slug: {summary}"
+        );
+        assert_eq!(
+            rendered_line_overhead_bytes(note),
+            summary.len() - l0_summary(note).len(),
+            "measured overhead must match the reported overhead for {}",
+            note.permalink
+        );
+    }
+}
+
+#[test]
+fn dropping_the_duplicate_title_lets_more_notes_survive_the_line_cap() {
+    // R1's operational point: `rendered_line` DROPS a note whose fixed
+    // overhead exceeds the cap. Halving overhead moves that cliff, so notes
+    // that were silently deleted now render.
+    let notes = real_corpus_notes();
+    let cap = 160;
+
+    let legacy_survivors = notes
+        .iter()
+        .filter(|note| legacy_rendered_line_overhead_bytes(note) + "(no abstract)".len() <= cap)
+        .count();
+    let new_survivors = notes
+        .iter()
+        .filter(|note| rendered_line_overhead_bytes(note) + "(no abstract)".len() <= cap)
+        .count();
+
+    assert!(
+        new_survivors > legacy_survivors,
+        "R1 must move the drop cliff: {legacy_survivors} → {new_survivors} survivors at cap {cap}"
+    );
+
+    let packed = pack_ranked_knowledge_notes(
+        &notes,
+        KnowledgePackConfig {
+            top_k: notes.len(),
+            line_byte_cap: cap,
+            ..default_config()
+        },
+    );
+    assert_eq!(
+        packed
+            .outcomes
+            .iter()
+            .filter(|outcome| outcome.disposition == NotePackDisposition::Injected)
+            .count(),
+        new_survivors,
+        "every note that fits the cap must actually be injected"
+    );
+}
+
 // ── AC2: field precedence ──────────────────────────────────────────────────
 
 #[test]
@@ -188,8 +390,10 @@ fn summary_truncation_never_removes_the_permalink() {
     let (rendered, _) = pack_one(&note, config);
     let summary = rendered.split('\n').next().unwrap_or_default();
 
+    // R1: the permalink is the line's label, so it precedes the summary and is
+    // structurally impossible to truncate away.
     assert!(
-        summary.ends_with(&format!(" (permalink: {permalink})")),
+        summary.starts_with(&format!("- **[Pitfall] {permalink}**: ")),
         "permalink must survive summary truncation: {summary}"
     );
     assert!(
@@ -250,6 +454,100 @@ fn prevention_takes_precedence_over_recommended_approach() {
     let (rendered, _) = pack_one(&note, default_config());
     assert!(rendered.contains("Prevention line."), "{rendered}");
     assert!(!rendered.contains("Approach line."), "{rendered}");
+}
+
+/// `case` notes are 2814 of the 10687 notes in the three injected types and
+/// their template never uses `Prevention` or `Recommended approach` — the
+/// actionable slot is `## Reusable lesson`. Measured on a 120-note spread
+/// sample: 0/40 case notes carry either proposal-named heading, 38/40 carry
+/// `Reusable lesson`. Without this heading the whole `case` type is dark.
+#[test]
+fn case_notes_extract_their_reusable_lesson_section() {
+    // Shaped on the real case template: Situation / Constraint / Approach
+    // taken / Result / Why it worked / failed / Reusable lesson / Related.
+    let content = concat!(
+        "## Situation\n\nA retrieval query returned stale notes.\n\n",
+        "## Constraint\n\nThe scoring contract could not change for old notes.\n\n",
+        "## Approach taken\n\nIntroduced a tiered decay curve.\n\n",
+        "## Result\n\nRecent notes now rank in the top 5.\n\n",
+        "## Why it worked / failed\n\nThe tail behaviour was preserved.\n\n",
+        "## Reusable lesson\n\n",
+        "When adjusting decay functions, always tier the curve so the long tail is preserved.\n",
+        "Test against the >90 day cohort as a regression guard.\n\n",
+        "## Related\n\n- decisions/decay-rate-adrs\n",
+    );
+    let note = base_note("cases/decay-rate-adjustment", "Decay case", content);
+    let mut note = note;
+    note.note_type = "case".to_string();
+    note.retrieval_anchor = Some("adjusting a memory decay function".to_string());
+
+    let (rendered, outcome) = pack_one(&note, default_config());
+    assert!(
+        rendered.contains(
+            "  action: When adjusting decay functions, always tier the curve so the long tail is preserved."
+        ),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("          Test against the >90 day cohort as a regression guard."),
+        "{rendered}"
+    );
+    assert!(
+        !rendered.contains("A retrieval query returned stale notes."),
+        "only the actionable section may be excerpted: {rendered}"
+    );
+    assert!(
+        !rendered.contains("decisions/decay-rate-adrs"),
+        "the section must end at the next level-2 heading: {rendered}"
+    );
+    assert_eq!(outcome.action_excerpt, Some(ActionExcerptDetail::Full));
+}
+
+/// Precedence across all three eligible headings, independent of the order
+/// they appear in the document.
+#[test]
+fn prevention_beats_recommended_approach_beats_reusable_lesson() {
+    let all_three = anchored_note(
+        "pitfalls/all-three",
+        Some("anchor"),
+        "## Reusable lesson\n\nLesson body.\n\n\
+         ## Recommended approach\n\nApproach body.\n\n\
+         ## Prevention\n\nPrevention body.\n",
+    );
+    let (rendered, _) = pack_one(&all_three, default_config());
+    assert!(rendered.contains("Prevention body."), "{rendered}");
+    assert!(!rendered.contains("Approach body."), "{rendered}");
+    assert!(!rendered.contains("Lesson body."), "{rendered}");
+
+    let two = anchored_note(
+        "patterns/two",
+        Some("anchor"),
+        "## Reusable lesson\n\nLesson body.\n\n## Recommended approach\n\nApproach body.\n",
+    );
+    let (rendered, _) = pack_one(&two, default_config());
+    assert!(rendered.contains("Approach body."), "{rendered}");
+    assert!(!rendered.contains("Lesson body."), "{rendered}");
+
+    let lesson_only = anchored_note(
+        "cases/one",
+        Some("anchor"),
+        "## Situation\n\ns\n\n## Reusable lesson\n\nLesson body.\n",
+    );
+    let (rendered, _) = pack_one(&lesson_only, default_config());
+    assert!(rendered.contains("Lesson body."), "{rendered}");
+}
+
+/// An empty `Prevention` must fall through the whole precedence chain, not
+/// stop at the first eligible heading it finds.
+#[test]
+fn empty_sections_fall_through_the_entire_precedence_chain() {
+    let note = anchored_note(
+        "pitfalls/chain",
+        Some("anchor"),
+        "## Prevention\n\n   \n\n## Recommended approach\n\n\n\n## Reusable lesson\n\nLast resort.\n",
+    );
+    let (rendered, _) = pack_one(&note, default_config());
+    assert!(rendered.contains("  action: Last resort."), "{rendered}");
 }
 
 #[test]
@@ -479,8 +777,8 @@ fn action_allocation_one_byte_over_640_drops_the_unit_for_the_marker() {
 fn multi_line_action_block_fits_exactly_and_one_byte_over_truncates() {
     let permalink = "pitfalls/multi";
     let first = "A".repeat(300);
-    // 310 + 1 (newline) + 10 (prefix) + 319 = 640 exactly.
-    let second_exact = "B".repeat(319);
+    // 310 + 1 (newline) + 10 (prefix) + 703 = 1024 exactly.
+    let second_exact = "B".repeat(ACTION_EXCERPT_CAP - 310 - 1 - "  action: ".len());
     let note = prevention_note(permalink, &[&first, &second_exact]);
     let (rendered, outcome) = pack_one(&note, default_config());
     assert_eq!(action_allocation_bytes(&rendered), ACTION_EXCERPT_CAP);
@@ -491,7 +789,7 @@ fn multi_line_action_block_fits_exactly_and_one_byte_over_truncates() {
     );
 
     // One byte more and the second line no longer fits; the marker replaces it.
-    let second_over = "B".repeat(320);
+    let second_over = "B".repeat(ACTION_EXCERPT_CAP - 310 - 1 - "  action: ".len() + 1);
     let note = prevention_note(permalink, &[&first, &second_over]);
     let (rendered, outcome) = pack_one(&note, default_config());
     assert!(action_allocation_bytes(&rendered) <= ACTION_EXCERPT_CAP);
@@ -509,16 +807,17 @@ fn multi_line_action_block_fits_exactly_and_one_byte_over_truncates() {
 #[test]
 fn multibyte_boundary_is_never_split() {
     let permalink = "pitfalls/multibyte";
-    // 210 × 3-byte scalars = 630 bytes → exactly on the cap with the prefix.
-    let exact = "日".repeat(210);
+    // 338 × 3-byte scalars = 1014 bytes → exactly on the cap with the prefix.
+    let exact = "日".repeat((ACTION_EXCERPT_CAP - "  action: ".len()) / 3);
     let note = prevention_note(permalink, &[&exact]);
     let (rendered, outcome) = pack_one(&note, default_config());
     assert_eq!(action_allocation_bytes(&rendered), ACTION_EXCERPT_CAP);
-    assert_eq!(rendered.matches('日').count(), 210, "{rendered}");
+    let scalars = (ACTION_EXCERPT_CAP - "  action: ".len()) / 3;
+    assert_eq!(rendered.matches('日').count(), scalars, "{rendered}");
     assert_eq!(outcome.action_excerpt, Some(ActionExcerptDetail::Full));
 
     // One scalar more crosses the cap mid-character if it were byte-sliced.
-    let over = "日".repeat(211);
+    let over = "日".repeat(scalars + 1);
     let note = prevention_note(permalink, &[&over]);
     let (rendered, _) = pack_one(&note, default_config());
     assert!(action_allocation_bytes(&rendered) <= ACTION_EXCERPT_CAP);
@@ -534,12 +833,12 @@ fn multibyte_boundary_is_never_split() {
 fn marker_evicts_already_included_units_when_it_does_not_fit() {
     let permalink = "pitfalls/evict";
     let first = "A".repeat(300); // 310 bytes
-    let second = "B".repeat(310); // + 1 + 320 = 631 bytes
+    let second = "B".repeat(690); // + 1 + 700 = 1011 bytes, just under the cap
     let third = "C".repeat(600); // does not fit → truncation begins
     let note = prevention_note(permalink, &[&first, &second, &third]);
     let (rendered, outcome) = pack_one(&note, default_config());
 
-    // 631 + 1 + marker does not fit, so the second unit is evicted.
+    // 1011 + 1 + marker does not fit, so the second unit is evicted.
     assert_eq!(
         action_lines(&rendered),
         vec![format!("  action: {first}"), marker_for(permalink)]
@@ -553,7 +852,7 @@ fn marker_evicts_already_included_units_when_it_does_not_fit() {
 #[test]
 fn fenced_block_is_indivisible_and_is_replaced_wholesale_by_the_marker() {
     let permalink = "pitfalls/fence-cap";
-    let long_command = "cargo test ".repeat(60); // ~660 bytes
+    let long_command = "cargo test ".repeat(120); // 1320 bytes, over the cap
     let content =
         format!("## Prevention\n\nRun:\n\n```sh\n{long_command}\n```\n\n## Related\n\n- q\n");
     let note = anchored_note(permalink, Some("anchor"), &content);
@@ -719,7 +1018,7 @@ fn injected_entry_is_atomic_and_carries_one_disposition_plus_action_detail() {
 
     let lines: Vec<&str> = rendered.split('\n').collect();
     assert_eq!(lines.len(), 3, "summary + two action lines: {rendered}");
-    assert!(lines[0].starts_with("- **[Pitfall] T**: "));
+    assert!(lines[0].starts_with("- **[Pitfall] pitfalls/atomic**: "));
     assert_eq!(lines[1], "  action: Guidance line one.");
     assert_eq!(lines[2], "          Guidance line two.");
 
@@ -729,99 +1028,176 @@ fn injected_entry_is_atomic_and_carries_one_disposition_plus_action_detail() {
     assert_eq!(outcome.estimated_rendered_chars, Some(rendered.len()));
 }
 
-// ── AC7: real-shaped tool-schema regression fixture ────────────────────────
+// ── AC7: the motivating note, measured ─────────────────────────────────────
+//
+// Two fixtures, because the honest answer needs both.
+//
+// `tool_schema_note_real.md` is the production note's `content` field byte for
+// byte (6879 B, fetched from the live corpus). `tool_schema_note_reauthored.md`
+// is the same bytes with ONE structural edit — a `## Prevention` heading
+// inserted before the regen block and a `## Notes` heading after it — and it
+// says so in a comment on its first line. Nothing else differs; the five
+// bullets are byte-identical between the two files.
+//
+// The split exists because the real note has NO ATX heading of any level. The
+// proposal's objective names this note, but no deterministic extractor keyed
+// on the authoring template can reach its commands until it is re-authored.
+// Asserting that on the real body keeps the gap visible instead of hiding it
+// behind an invented fixture.
 
-/// A real-shaped rendition of
-/// `pitfalls/tool-schema-edits-must-regenerate-all-derived-goldens-...`: the
-/// production note's actual title, permalink, and `retrieval_anchor`, with its
-/// regeneration commands authored under a `## Prevention` heading.
-pub(super) fn tool_schema_fixture() -> Note {
-    let content = concat!(
-        "Changing MCP tool schema text fans out into MULTIPLE derived golden files, and\n",
-        "regenerating only some of them leaves `main` in a state where the full\n",
-        "merge-queue suite fails for EVERY subsequent PR.\n",
-        "\n",
-        "## Observable symptoms\n",
-        "\n",
-        "The merge queue fails on schema snapshot / golden mismatches for PRs that never\n",
-        "touched a tool schema.\n",
-        "\n",
-        "## Prevention\n",
-        "\n",
-        "Regenerate every derived golden in the same commit:\n",
-        "\n",
-        "- Server insta snap: `INSTA_UPDATE=always cargo test --all-features tool_schemas`\n",
-        "- Corpus fixture: `UPDATE_DJINN_MCP_SERVER_FIXTURE=1 cargo test -p djinn-control-plane`\n",
-        "- UI types: `pnpm mcp:types:snapshot` (reads the insta snap, so do that one FIRST)\n",
-        "\n",
-        "## Related\n",
-        "\n",
-        "- pitfalls/environment-config-schema-golden-fanout\n",
-    );
+const TOOL_SCHEMA_REAL_BODY: &str = include_str!("fixtures/tool_schema_note_real.md");
+const TOOL_SCHEMA_REAUTHORED_BODY: &str = include_str!("fixtures/tool_schema_note_reauthored.md");
+
+pub(super) const TOOL_SCHEMA_PERMALINK: &str = "pitfalls/tool-schema-edits-must-regenerate-all-derived-goldens-or-the-merge-queue-breaks-for-everyone";
+
+/// The production note's `retrieval_anchor`, verbatim.
+pub(super) const TOOL_SCHEMA_ANCHOR: &str = "Editing MCP tool schemas/param descriptions in the djinn repo, or the merge-queue suite fails on schema snapshot/golden mismatches.";
+
+/// The three regeneration commands the proposal's objective names, as complete
+/// source lines, verbatim from the production note — including the test filter
+/// on the second one, without which the command does not do the thing.
+pub(super) const REGEN_COMMAND_LINES: [&str; 3] = [
+    "- Server insta snap: `INSTA_UPDATE=always cargo test --all-features tool_schemas` (in `server/`)",
+    "- Corpus fixture: `UPDATE_DJINN_MCP_SERVER_FIXTURE=1 cargo test -p djinn-control-plane --lib server_tests::tests::djinn_mcp_server_corpus_fixture_is_current` → writes `crates/djinn-provider/tests/fixtures/tool_schema_projection/builtin/djinn_mcp_server.json` (fails CI as \"Server Test shard\" — easy to miss because it is NOT named a schema check)",
+    "- UI types: `pnpm mcp:types:snapshot` (in `ui/`; reads the server insta snap, so regenerate that FIRST)",
+];
+
+fn tool_schema_note(body: &str) -> Note {
     let mut note = base_note(
-        "pitfalls/tool-schema-edits-must-regenerate-all-derived-goldens-or-the-merge-queue-breaks-for-everyone",
+        TOOL_SCHEMA_PERMALINK,
         "Tool-schema edits must regenerate ALL derived goldens or the merge queue breaks for everyone",
-        content,
+        body,
     );
     note.retrieval_anchor = Some(TOOL_SCHEMA_ANCHOR.to_string());
     note
 }
 
-pub(super) const TOOL_SCHEMA_ANCHOR: &str = "Editing MCP tool schemas/param descriptions in the djinn repo, or the merge-queue suite fails on schema snapshot/golden mismatches.";
-
+/// The gap, pinned. The real note yields the anchor but NO action excerpt,
+/// because it carries no ATX heading for the grammar to key on.
 #[test]
-fn tool_schema_fixture_renders_anchor_and_all_three_regeneration_commands() {
-    let note = tool_schema_fixture();
+fn real_tool_schema_note_yields_the_anchor_but_no_excerpt_today() {
+    assert!(
+        !TOOL_SCHEMA_REAL_BODY
+            .lines()
+            .any(|line| line.starts_with("## ") || line.starts_with("# ")),
+        "fixture drift: the production note is expected to have no ATX heading"
+    );
+
+    let note = tool_schema_note(TOOL_SCHEMA_REAL_BODY);
+    let (rendered, outcome) = pack_one(&note, default_config());
+
+    assert!(rendered.contains(TOOL_SCHEMA_ANCHOR), "{rendered}");
+    assert_eq!(
+        rendered.split('\n').count(),
+        1,
+        "summary-only until the note is re-authored: {rendered}"
+    );
+    assert_eq!(outcome.disposition, NotePackDisposition::Injected);
+    assert_eq!(
+        outcome.action_excerpt, None,
+        "no eligible section exists in the real body"
+    );
+    for command in REGEN_COMMAND_LINES {
+        assert!(
+            !rendered.contains(command),
+            "the real body cannot deliver its commands inline yet"
+        );
+    }
+}
+
+/// AC7 proper: once the note carries the template's heading, the pack contains
+/// the actionable content of the note that should have won on 2026-08-05 — all
+/// three regeneration commands, complete, under default settings.
+#[test]
+fn reauthored_tool_schema_note_delivers_all_three_regeneration_commands() {
+    let note = tool_schema_note(TOOL_SCHEMA_REAUTHORED_BODY);
     let config = default_config();
     let (rendered, outcome) = pack_one(&note, config);
-
-    // The applicability anchor is the injected summary payload.
-    assert!(
-        rendered.contains(TOOL_SCHEMA_ANCHOR),
-        "anchor missing from the packed prompt: {rendered}"
-    );
-    assert!(
-        rendered.contains(
-            "(permalink: pitfalls/tool-schema-edits-must-regenerate-all-derived-goldens-or-the-merge-queue-breaks-for-everyone)"
-        ),
-        "permalink missing: {rendered}"
-    );
-
-    // All three regeneration commands appear as COMPLETE physical lines.
     let lines: Vec<&str> = rendered.split('\n').collect();
-    assert_eq!(lines.len(), 6, "unexpected entry shape: {rendered}");
-    assert_eq!(
-        lines[1],
-        "  action: Regenerate every derived golden in the same commit:"
-    );
-    assert_eq!(lines[2], "");
-    assert_eq!(
-        lines[3],
-        "          - Server insta snap: `INSTA_UPDATE=always cargo test --all-features tool_schemas`"
-    );
-    assert_eq!(
-        lines[4],
-        "          - Corpus fixture: `UPDATE_DJINN_MCP_SERVER_FIXTURE=1 cargo test -p djinn-control-plane`"
-    );
-    assert_eq!(
-        lines[5],
-        "          - UI types: `pnpm mcp:types:snapshot` (reads the insta snap, so do that one FIRST)"
-    );
-    assert!(rendered.contains("INSTA_UPDATE=always"), "{rendered}");
-    assert!(
-        rendered.contains("UPDATE_DJINN_MCP_SERVER_FIXTURE=1"),
-        "{rendered}"
-    );
-    assert!(rendered.contains("pnpm mcp:types:snapshot"), "{rendered}");
 
-    assert!(!rendered.contains("truncated"), "{rendered}");
-    assert_eq!(outcome.action_excerpt, Some(ActionExcerptDetail::Full));
+    assert!(
+        lines[0].starts_with(&format!("- **[Pitfall] {TOOL_SCHEMA_PERMALINK}**: ")),
+        "{}",
+        lines[0]
+    );
+    assert!(lines[0].contains(TOOL_SCHEMA_ANCHOR), "{}", lines[0]);
+
+    // Each command must appear as a COMPLETE physical line, prefix included —
+    // `contains` on a fragment would pass on a truncated command.
+    for command in REGEN_COMMAND_LINES {
+        let expected = format!("          {command}");
+        assert!(
+            lines.contains(&expected.as_str()),
+            "missing or incomplete command line:\n  want: {expected}\n  got:\n{rendered}"
+        );
+    }
+    // The full test filter specifically — dropping it makes the command a no-op.
+    assert!(
+        rendered.contains("server_tests::tests::djinn_mcp_server_corpus_fixture_is_current"),
+        "the corpus-fixture command lost its test filter: {rendered}"
+    );
+
+    // The section is 1097 B rendered, over the 1024 B cap, so the tail is
+    // dropped at a line boundary and replaced by the pull marker.
+    assert_eq!(
+        lines.last().copied(),
+        Some(marker_for(TOOL_SCHEMA_PERMALINK).as_str()),
+        "a truncated excerpt must end in the pull marker: {rendered}"
+    );
+    assert_eq!(outcome.action_excerpt, Some(ActionExcerptDetail::Truncated));
     assert_eq!(outcome.disposition, NotePackDisposition::Injected);
 
-    // The byte contract still holds under default settings.
+    // Byte contract holds on the real content under shipped defaults.
     assert!(action_allocation_bytes(&rendered) <= ACTION_EXCERPT_CAP);
     for line in &lines {
         assert!(line.len() <= config.line_byte_cap, "line too long: {line}");
     }
     assert!(rendered.len() <= config.total_byte_budget);
+}
+
+/// The cap was derived to deliver exactly this. Pin the derivation so a future
+/// cap change that silently drops a command fails here.
+#[test]
+fn action_cap_is_the_smallest_that_delivers_the_three_commands() {
+    let note = tool_schema_note(TOOL_SCHEMA_REAUTHORED_BODY);
+    let deliverable = |cap: usize| {
+        let (rendered, _) = pack_one(
+            &note,
+            KnowledgePackConfig {
+                line_byte_cap: cap.max(1024),
+                ..default_config()
+            },
+        );
+        REGEN_COMMAND_LINES
+            .iter()
+            .filter(|command| rendered.contains(&format!("          {command}")))
+            .count()
+    };
+    assert_eq!(
+        deliverable(ACTION_EXCERPT_CAP),
+        3,
+        "the shipped cap must deliver all three commands"
+    );
+    // And the cap is derived, not guessed: it must be at least the rendered
+    // size of the intro line, the three commands, and the pull marker. The
+    // previously-specified 640 B cap was not, and delivered one command.
+    let section: Vec<&str> = TOOL_SCHEMA_REAUTHORED_BODY
+        .lines()
+        .skip_while(|line| *line != "## Prevention")
+        .skip(1)
+        .take_while(|line| *line != "## Notes")
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    let required: usize = section
+        .iter()
+        .take(4) // intro + the three commands
+        .map(|line| "  action: ".len() + line.len() + 1)
+        .sum::<usize>()
+        + marker_for(TOOL_SCHEMA_PERMALINK).len()
+        - 1;
+    assert!(
+        ACTION_EXCERPT_CAP >= required,
+        "cap {ACTION_EXCERPT_CAP} is below the {required} B needed to deliver \
+         the intro, all three commands, and the marker"
+    );
 }

@@ -100,6 +100,7 @@ mod tests {
                 edge_kinds: None,
             },
             None,
+            &djinn_db::NoteAccessAttribution::unattributed(),
         )
         .await;
 
@@ -135,6 +136,7 @@ mod tests {
                 edge_kinds: None,
             },
             None,
+            &djinn_db::NoteAccessAttribution::unattributed(),
         )
         .await;
 
@@ -171,6 +173,7 @@ mod tests {
                 edge_kinds: None,
             },
             None,
+            &djinn_db::NoteAccessAttribution::unattributed(),
         )
         .await;
 
@@ -207,6 +210,7 @@ mod tests {
                 edge_kinds: None,
             },
             None,
+            &djinn_db::NoteAccessAttribution::unattributed(),
         )
         .await;
 
@@ -235,6 +239,7 @@ mod tests {
                 edge_kinds: None,
             },
             None,
+            &djinn_db::NoteAccessAttribution::unattributed(),
         )
         .await;
 

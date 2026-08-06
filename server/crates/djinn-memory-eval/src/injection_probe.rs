@@ -153,43 +153,30 @@ mod tests {
 
     const TOOL_SCHEMA_PERMALINK: &str = "pitfalls/tool-schema-edits-must-regenerate-all-derived-goldens-or-the-merge-queue-breaks-for-everyone";
 
-    const SERVER_SNAP_COMMAND: &str =
-        "- Server insta snap: `INSTA_UPDATE=always cargo test --all-features tool_schemas`";
-    const CORPUS_FIXTURE_COMMAND: &str =
-        "- Corpus fixture: `UPDATE_DJINN_MCP_SERVER_FIXTURE=1 cargo test -p djinn-control-plane`";
-    const UI_TYPES_COMMAND: &str =
-        "- UI types: `pnpm mcp:types:snapshot` (reads the insta snap, so do that one FIRST)";
+    /// The production note's body, byte for byte, with ONE structural edit: a
+    /// `## Prevention` heading before its regeneration block and a `## Notes`
+    /// heading after it. The file's first line says so. The five bullets are
+    /// byte-identical to the real note.
+    ///
+    /// Deliberately shared with the `djinn-slot` unit tests by path rather than
+    /// copied, so the eval and the renderer can never drift onto different
+    /// bytes. See `djinn-slot/src/helpers/code_context_action_tests.rs`, which
+    /// also pins the *un*edited body and asserts it yields no excerpt.
+    const TOOL_SCHEMA_REAUTHORED_BODY: &str =
+        include_str!("../../djinn-slot/src/helpers/fixtures/tool_schema_note_reauthored.md");
 
-    /// A real-shaped rendition of the production tool-schema pitfall: its real
-    /// title, permalink, and `retrieval_anchor`, with the regeneration commands
-    /// authored under a `## Prevention` heading.
+    /// The three regeneration commands the proposal's objective names, as
+    /// complete source lines, verbatim — including the test filter on the
+    /// second, without which the command does not do the thing.
+    const SERVER_SNAP_COMMAND: &str = "- Server insta snap: `INSTA_UPDATE=always cargo test --all-features tool_schemas` (in `server/`)";
+    const CORPUS_FIXTURE_COMMAND: &str = "- Corpus fixture: `UPDATE_DJINN_MCP_SERVER_FIXTURE=1 cargo test -p djinn-control-plane --lib server_tests::tests::djinn_mcp_server_corpus_fixture_is_current` → writes `crates/djinn-provider/tests/fixtures/tool_schema_projection/builtin/djinn_mcp_server.json` (fails CI as \"Server Test shard\" — easy to miss because it is NOT named a schema check)";
+    const UI_TYPES_COMMAND: &str = "- UI types: `pnpm mcp:types:snapshot` (in `ui/`; reads the server insta snap, so regenerate that FIRST)";
+
     fn tool_schema_note() -> CorpusNoteRow {
-        let content = format!(
-            "Changing MCP tool schema text fans out into MULTIPLE derived golden files, and\n\
-             regenerating only some of them leaves `main` broken for EVERY subsequent PR.\n\
-             \n\
-             ## Observable symptoms\n\
-             \n\
-             The merge queue fails on schema snapshot / golden mismatches for PRs that never\n\
-             touched a tool schema.\n\
-             \n\
-             ## Prevention\n\
-             \n\
-             Regenerate every derived golden in the same commit:\n\
-             \n\
-             {SERVER_SNAP_COMMAND}\n\
-             {CORPUS_FIXTURE_COMMAND}\n\
-             {UI_TYPES_COMMAND}\n\
-             \n\
-             ## Related\n\
-             \n\
-             - pitfalls/environment-config-schema-golden-fanout\n"
-        );
-
         CorpusNoteRow {
             permalink: TOOL_SCHEMA_PERMALINK.to_string(),
             title: "Tool-schema edits must regenerate ALL derived goldens or the merge queue breaks for everyone".to_string(),
-            content,
+            content: TOOL_SCHEMA_REAUTHORED_BODY.to_string(),
             note_type: "pitfall".to_string(),
             folder: "pitfalls".to_string(),
             status: "active".to_string(),
@@ -290,28 +277,30 @@ mod tests {
             prompt.contains(TOOL_SCHEMA_ANCHOR),
             "applicability anchor missing from the packed prompt:\n{prompt}"
         );
+        // R1: the permalink is the line's label, and the title is not rendered.
         assert!(
-            prompt.contains(&format!("(permalink: {TOOL_SCHEMA_PERMALINK})")),
-            "permalink missing from the packed prompt:\n{prompt}"
+            prompt.contains(&format!("**[Pitfall] {TOOL_SCHEMA_PERMALINK}**: ")),
+            "permalink label missing from the packed prompt:\n{prompt}"
         );
 
+        // Each command must appear as a COMPLETE physical line — a `contains`
+        // on a fragment would pass on a truncated command.
         let lines: Vec<&str> = prompt.split('\n').collect();
+        for (label, command) in [
+            ("INSTA_UPDATE", SERVER_SNAP_COMMAND),
+            ("UPDATE_DJINN_MCP_SERVER_FIXTURE", CORPUS_FIXTURE_COMMAND),
+            ("pnpm mcp:types:snapshot", UI_TYPES_COMMAND),
+        ] {
+            assert!(
+                lines.contains(&format!("  action: {command}").as_str())
+                    || lines.contains(&format!("          {command}").as_str()),
+                "{label} command line missing or incomplete:\n{prompt}"
+            );
+        }
+        // The filter that makes the corpus-fixture command actually assert.
         assert!(
-            lines.contains(&format!("  action: {SERVER_SNAP_COMMAND}").as_str())
-                || lines.contains(&format!("          {SERVER_SNAP_COMMAND}").as_str()),
-            "INSTA_UPDATE command line missing or incomplete:\n{prompt}"
-        );
-        assert!(
-            lines.contains(&format!("          {CORPUS_FIXTURE_COMMAND}").as_str()),
-            "UPDATE_DJINN_MCP_SERVER_FIXTURE command line missing or incomplete:\n{prompt}"
-        );
-        assert!(
-            lines.contains(&format!("          {UI_TYPES_COMMAND}").as_str()),
-            "pnpm mcp:types:snapshot command line missing or incomplete:\n{prompt}"
-        );
-        assert!(
-            !prompt.contains("truncated"),
-            "the fixture must fit without truncation under default settings:\n{prompt}"
+            prompt.contains("server_tests::tests::djinn_mcp_server_corpus_fixture_is_current"),
+            "the corpus-fixture command lost its test filter:\n{prompt}"
         );
 
         let tool_schema = output
@@ -320,10 +309,34 @@ mod tests {
             .find(|candidate| candidate.permalink == TOOL_SCHEMA_PERMALINK)
             .expect("the tool-schema candidate must be present");
         assert_eq!(tool_schema.disposition, NotePackDisposition::Injected);
+        // The real section renders to 1097 B, over the 1024 B cap, so the tail
+        // is dropped at a line boundary and the pull marker closes the block —
+        // after all three commands have been delivered.
         assert_eq!(
             tool_schema.action_excerpt,
-            Some(ActionExcerptDetail::Full),
-            "the whole Prevention section must fit inline"
+            Some(ActionExcerptDetail::Truncated),
+            "the real section overflows the cap and must end in the pull marker"
+        );
+        // The pack holds more than one entry, so the marker is the last line of
+        // *this* entry, not of the whole prompt.
+        let marker = format!("  action: … truncated; memory_read({TOOL_SCHEMA_PERMALINK})");
+        let marker_at = lines
+            .iter()
+            .position(|line| *line == marker)
+            .expect("a truncated excerpt must carry the pull marker");
+        let entry_start = lines
+            .iter()
+            .position(|line| line.contains(TOOL_SCHEMA_PERMALINK))
+            .expect("the tool-schema entry must be present");
+        assert!(
+            marker_at > entry_start,
+            "the marker must close the tool-schema entry:\n{prompt}"
+        );
+        assert!(
+            lines[entry_start + 1..marker_at]
+                .iter()
+                .all(|line| line.starts_with("  action: ") || line.starts_with("          ")),
+            "every line between the summary and the marker must be an action line:\n{prompt}"
         );
 
         // The byte contract holds on the final prompt text.
@@ -356,7 +369,7 @@ mod tests {
         let legacy_line = output
             .packed_prompt
             .split('\n')
-            .find(|line| line.contains("(permalink: patterns/legacy-free-form)"))
+            .find(|line| line.contains("**[Pattern] patterns/legacy-free-form**: "))
             .expect("the legacy entry must appear in the packed prompt");
         assert!(
             legacy_line.contains("A free-form body with no headings at all."),
@@ -421,7 +434,7 @@ mod tests {
         assert!(
             output
                 .packed_prompt
-                .contains("(permalink: patterns/legacy-free-form)"),
+                .contains("**[Pattern] patterns/legacy-free-form**: "),
             "the smaller entry must appear in the packed prompt:\n{}",
             output.packed_prompt
         );
