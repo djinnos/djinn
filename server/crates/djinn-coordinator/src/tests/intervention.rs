@@ -377,8 +377,8 @@ impl InterventionChaosHarness {
             .await
     }
 
-    async fn planner_intervention_markers(&self) -> Vec<serde_json::Value> {
-        planner_intervention_markers(&self.repo, &self.task_id).await
+    async fn arbiter_dispatch_markers(&self) -> Vec<serde_json::Value> {
+        arbiter_dispatch_markers(&self.repo, &self.task_id).await
     }
 
     async fn durable_dispatch_state(&self) -> Option<djinn_db::DispatchStateRecord> {
@@ -552,7 +552,7 @@ impl InterventionChaosHarness {
 
     async fn assert_marker_reopen_counts(&self, expected: &[i64]) {
         let actual: Vec<i64> = self
-            .planner_intervention_markers()
+            .arbiter_dispatch_markers()
             .await
             .iter()
             .map(|marker| {
@@ -569,7 +569,7 @@ impl InterventionChaosHarness {
 
     async fn assert_planner_marker_count(&self, expected: usize) {
         assert_eq!(
-            self.planner_intervention_markers().await.len(),
+            self.arbiter_dispatch_markers().await.len(),
             expected,
             "planner_intervention marker count"
         );
@@ -839,7 +839,7 @@ async fn reopen_loop_guard_second_strike_chaos_parks_without_rearming() {
         .await;
     harness.assert_open_planner_review_count(1).await;
 
-    let marker_count_after_park = harness.planner_intervention_markers().await.len();
+    let marker_count_after_park = harness.arbiter_dispatch_markers().await.len();
     let review_count_after_park = harness.open_planner_intervention_reviews().await.len();
 
     let (terminal_recheck_handled, terminal_recheck) = harness.route_reopen_intervention().await;
@@ -849,7 +849,7 @@ async fn reopen_loop_guard_second_strike_chaos_parks_without_rearming() {
     );
     assert_eq!(terminal_recheck.status, "needs_lead_intervention");
     assert_eq!(
-        harness.planner_intervention_markers().await.len(),
+        harness.arbiter_dispatch_markers().await.len(),
         marker_count_after_park,
         "terminal recheck must not write another Planner marker"
     );
@@ -1343,7 +1343,7 @@ async fn below_threshold_does_not_intervene() {
 
     let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
     assert!(
-        planner_intervention_markers(&repo, &task.id)
+        arbiter_dispatch_markers(&repo, &task.id)
             .await
             .is_empty(),
         "no intervention marker should be written below threshold"
@@ -1388,7 +1388,7 @@ async fn loop_guard_routes_to_planner_without_dispatch_failure_streak() {
         "loop guard path must gate identical worker re-dispatch"
     );
 
-    let markers = planner_intervention_markers(&repo, &task.id).await;
+    let markers = arbiter_dispatch_markers(&repo, &task.id).await;
     assert_eq!(
         markers.len(),
         1,
@@ -1564,7 +1564,7 @@ async fn loop_guard_second_strike_parks_task() {
     );
 
     assert!(
-        planner_intervention_markers(&repo, &task.id)
+        arbiter_dispatch_markers(&repo, &task.id)
             .await
             .is_empty(),
         "second strike parks without writing a fresh marker"
@@ -1884,7 +1884,7 @@ async fn at_threshold_routes_to_planner_intervention() {
     let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
 
     // Exactly one intervention marker, keyed to the current reopen count.
-    let markers = planner_intervention_markers(&repo, &task.id).await;
+    let markers = arbiter_dispatch_markers(&repo, &task.id).await;
     assert_eq!(markers.len(), 1, "exactly one intervention marker");
     assert_eq!(markers[0]["reopen_count"], REOPEN_INTERVENTION_THRESHOLD);
 
@@ -1934,7 +1934,7 @@ async fn intervention_is_idempotent_per_reopen_count() {
     assert!(!actor.maybe_intervene_on_stuck_task(&task).await);
 
     assert_eq!(
-        planner_intervention_markers(&repo, &task.id).await.len(),
+        arbiter_dispatch_markers(&repo, &task.id).await.len(),
         1,
         "idempotent: a single marker for one reopen-count value"
     );
@@ -1950,7 +1950,7 @@ async fn intervention_is_idempotent_per_reopen_count() {
         "a higher reopen count must re-arm intervention"
     );
     assert_eq!(
-        planner_intervention_markers(&repo, &task.id).await.len(),
+        arbiter_dispatch_markers(&repo, &task.id).await.len(),
         2,
         "one marker per distinct reopen-count value"
     );
@@ -2015,7 +2015,7 @@ async fn second_strike_parks_task_after_prior_intervention() {
     // broken (not re-escalated to the planner). The arbiter dispatch path does
     // not create human-review blockers; the task is held via status.
     assert!(
-        !planner_intervention_markers(&repo, &task.id)
+        !arbiter_dispatch_markers(&repo, &task.id)
             .await
             .iter()
             .any(|m| m["reopen_count"] == REOPEN_INTERVENTION_THRESHOLD),
@@ -3366,7 +3366,7 @@ async fn quality_strikes_below_threshold_does_not_intervene() {
         "quality_strikes below threshold must not trigger intervention"
     );
     assert!(
-        planner_intervention_markers(&repo, &task.id)
+        arbiter_dispatch_markers(&repo, &task.id)
             .await
             .is_empty(),
         "no marker should be written below threshold"
@@ -3407,7 +3407,7 @@ async fn quality_strikes_at_threshold_triggers_intervention() {
     );
 
     // Marker stores both quality_strikes and reopen_count.
-    let markers = planner_intervention_markers(&repo, &task.id).await;
+    let markers = arbiter_dispatch_markers(&repo, &task.id).await;
     assert_eq!(markers.len(), 1, "exactly one intervention marker");
     assert_eq!(
         markers[0]["reopen_count"], REOPEN_INTERVENTION_THRESHOLD,
@@ -3507,7 +3507,7 @@ async fn excluded_class_reopens_do_not_arm_intervention() {
         "quality_strikes at threshold must trigger intervention despite prior merge_conflicts"
     );
 
-    let markers = planner_intervention_markers(&repo, &task.id).await;
+    let markers = arbiter_dispatch_markers(&repo, &task.id).await;
     assert_eq!(markers.len(), 1);
     assert_eq!(
         markers[0]["quality_strikes"], REOPEN_INTERVENTION_THRESHOLD,
@@ -3903,7 +3903,7 @@ async fn mixed_reopen_ledger_park_uses_quality_count_and_emits_telemetry_breakdo
         "second-strike park must create an unconsumed arbitration row"
     );
     assert!(
-        planner_intervention_markers(&repo, &task.id)
+        arbiter_dispatch_markers(&repo, &task.id)
             .await
             .is_empty(),
         "second-strike park must not write a fresh planner intervention marker"
@@ -4044,7 +4044,7 @@ async fn gs37_park_guard_not_triggered_below_quality_threshold_despite_raw_reope
          despite the raw reopen counter having advanced"
     );
     assert!(
-        planner_intervention_markers(&repo, &task.id)
+        arbiter_dispatch_markers(&repo, &task.id)
             .await
             .is_empty(),
         "no planner-intervention marker may be written below the quality threshold"

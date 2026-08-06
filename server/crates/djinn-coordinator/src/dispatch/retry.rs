@@ -2297,7 +2297,7 @@ impl CoordinatorActor {
                             Some(&task.id),
                             "system",
                             "coordinator",
-                            "arbiter_dispatched",
+                            ARBITER_DISPATCHED_MARKER,
                             &payload.to_string(),
                         )
                         .await
@@ -2330,7 +2330,7 @@ impl CoordinatorActor {
                         .task_repo()
                         .query_activity(ActivityQuery {
                             task_id: Some(task.id.clone()),
-                            event_type: Some("arbiter_dispatched".to_string()),
+                            event_type: Some(ARBITER_DISPATCHED_MARKER.to_string()),
                             ..ActivityQuery::default()
                         })
                         .await
@@ -2352,7 +2352,7 @@ impl CoordinatorActor {
                                 Some(&task.id),
                                 "system",
                                 "coordinator",
-                                "arbiter_dispatched",
+                                ARBITER_DISPATCHED_MARKER,
                                 &payload.to_string(),
                             )
                             .await

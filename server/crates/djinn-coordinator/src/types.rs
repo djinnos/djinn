@@ -335,6 +335,14 @@ pub(super) const TASK_OUTCOME_FAILED_CLOSE: &str = "failed_closed";
 /// the decision (`kind`), the fingerprint when relevant, and the non-attempt
 /// model count — an audit trail proving the fleet actually tried before the
 /// ladder gives up.
+/// 4etb: activity-log event type recording that the coordinator routed a stuck
+/// task DIRECTLY to the forensic arbiter. This replaced the rung-1
+/// `planner_intervention` marker: with the Planner remediation rung retired,
+/// the durable proof that a trigger was handled is the arbiter dispatch, and
+/// the epoch + unconsumed arbitration row (not an activity marker) are the
+/// idempotency boundary.
+pub(super) const ARBITER_DISPATCHED_MARKER: &str = "arbiter_dispatched";
+
 pub(super) const PARK_REDISPATCH_MARKER: &str = "park_attempted_remediation_redispatch";
 
 /// Activity marker recording that the cumulative arbitration ceiling

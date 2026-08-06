@@ -1909,7 +1909,7 @@ async fn budget_ceiling_kill_routes_loop_guard_without_tripping_breaker() {
     // The task must be routed through loop-guard planner intervention. We
     // check for the planner_intervention activity marker.
     let task_repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
-    let markers = planner_intervention_markers(&task_repo, &task.id).await;
+    let markers = arbiter_dispatch_markers(&task_repo, &task.id).await;
     assert_eq!(
         markers.len(),
         1,
@@ -2869,7 +2869,7 @@ async fn first_stall_cancel_does_not_escalate_to_planner() {
         .get(&task.id)
         .expect("first strike records a streak");
     assert_eq!(streak.count, 1, "first strike is count 1");
-    let markers = planner_intervention_markers(&actor.task_repo(), &task.id).await;
+    let markers = arbiter_dispatch_markers(&actor.task_repo(), &task.id).await;
     assert!(
         markers.is_empty(),
         "a single stall cancel must not escalate to the Planner"
@@ -2918,7 +2918,7 @@ async fn second_consecutive_stall_cancel_escalates_to_planner() {
         actor.stall_killed.contains(&session.id),
         "the second stalled session is killed"
     );
-    let markers = planner_intervention_markers(&actor.task_repo(), &task.id).await;
+    let markers = arbiter_dispatch_markers(&actor.task_repo(), &task.id).await;
     assert!(
         !markers.is_empty(),
         "the second consecutive stall cancel without status progress must route to a Planner intervention"

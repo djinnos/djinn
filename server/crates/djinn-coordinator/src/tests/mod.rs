@@ -720,7 +720,7 @@ async fn restart_rehydrated_failure_streak_continues_to_trigger_b_intervention()
     actor.dispatch_ready_tasks(None).await;
 
     assert_eq!(
-        planner_intervention_markers(&repo, &task.id).await.len(),
+        arbiter_dispatch_markers(&repo, &task.id).await.len(),
         1,
         "failure streak N must survive restart so the next same-role failure reaches trigger B"
     );
@@ -744,8 +744,8 @@ async fn restart_rehydrated_failure_streak_continues_to_terminal_close_threshold
         Some(&task.id),
         "coordinator",
         "system",
-        PLANNER_INTERVENTION_MARKER,
-        &serde_json::json!({"reopen_count": task.reopen_count}).to_string(),
+        ARBITER_DISPATCHED_MARKER,
+        &serde_json::json!({"hold_cycle": 0, "reopen_count": task.reopen_count}).to_string(),
     )
     .await
     .unwrap();
@@ -1386,14 +1386,20 @@ async fn park_redispatch_markers(repo: &TaskRepository, task_id: &str) -> Vec<se
     .collect()
 }
 
-async fn planner_intervention_markers(
+/// 4etb: durable proof that a stuck-task trigger was routed to adjudication.
+///
+/// Rung 1 is retired, so the old `planner_intervention` marker no longer
+/// exists. `arbiter_dispatched` is the side effect the coordinator writes when
+/// a trigger reaches the forensic arbiter — the mechanism these tests are
+/// actually asserting.
+async fn arbiter_dispatch_markers(
     repo: &TaskRepository,
     task_id: &str,
 ) -> Vec<serde_json::Value> {
     repo.query_activity(ActivityQuery {
         task_id: Some(task_id.to_owned()),
-        event_type: Some(PLANNER_INTERVENTION_MARKER.to_string()),
-        actor_role: Some("system".to_string()),
+        event_type: Some(ARBITER_DISPATCHED_MARKER.to_string()),
+        actor_role: None,
         project_id: None,
         from_time: None,
         to_time: None,

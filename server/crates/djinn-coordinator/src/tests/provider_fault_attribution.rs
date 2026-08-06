@@ -115,7 +115,7 @@ async fn three_transient_provider_faults_route_no_planner_remediation() {
     replay_failed_reappearances(&mut actor, &task.id, "reviewer", TRANSIENT, passes).await;
 
     assert!(
-        planner_intervention_markers(&repo, &task.id)
+        arbiter_dispatch_markers(&repo, &task.id)
             .await
             .is_empty(),
         "a run of transient provider faults must never route a planner-remediation \
@@ -185,7 +185,7 @@ async fn request_attributable_provider_failures_still_escalate_at_threshold() {
         "each request-attributable failure advances the provider-failure streak"
     );
     assert!(
-        planner_intervention_markers(&repo, &task.id)
+        arbiter_dispatch_markers(&repo, &task.id)
             .await
             .is_empty(),
         "below the threshold nothing is routed"
@@ -194,7 +194,7 @@ async fn request_attributable_provider_failures_still_escalate_at_threshold() {
     // The threshold strike escalates.
     replay_failed_reappearances(&mut actor, &task.id, "reviewer", REQUEST_FAULT, 1).await;
     assert_eq!(
-        planner_intervention_markers(&repo, &task.id).await.len(),
+        arbiter_dispatch_markers(&repo, &task.id).await.len(),
         1,
         "the {FAILURE_ESCALATION_THRESHOLD}th consecutive request-attributable provider failure \
          must still route a planner-remediation intervention"
@@ -229,7 +229,7 @@ async fn transient_provider_fault_cannot_force_close_a_task_at_the_cap() {
         Some(&task.id),
         "coordinator",
         "system",
-        PLANNER_INTERVENTION_MARKER,
+        ARBITER_DISPATCHED_MARKER,
         &serde_json::json!({ "reopen_count": task.reopen_count }).to_string(),
     )
     .await
@@ -273,7 +273,7 @@ async fn request_attributable_failure_at_the_cap_still_force_closes() {
         Some(&task.id),
         "coordinator",
         "system",
-        PLANNER_INTERVENTION_MARKER,
+        ARBITER_DISPATCHED_MARKER,
         &serde_json::json!({ "reopen_count": task.reopen_count }).to_string(),
     )
     .await
@@ -347,7 +347,7 @@ async fn auto_disabled_model_breaker_blocks_the_escalation() {
     replay_failed_reappearances(&mut actor, &task.id, "reviewer", REQUEST_FAULT, passes).await;
 
     assert!(
-        planner_intervention_markers(&repo, &task.id)
+        arbiter_dispatch_markers(&repo, &task.id)
             .await
             .is_empty(),
         "a tripped model-wide breaker is evidence the MODEL is at fault; the task must not be \
