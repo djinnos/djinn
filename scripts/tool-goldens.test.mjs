@@ -25,7 +25,7 @@ import {
   validateManifest,
 } from "./lib/tool-goldens.mjs";
 import { evaluate, findSilentGuards, goldenPaths } from "./check-tool-goldens.mjs";
-import { buildPlan } from "./regenerate-tool-goldens.mjs";
+import { buildPlan, resolvePnpmCommand, withPnpmOnPath } from "./regenerate-tool-goldens.mjs";
 
 const manifest = loadManifest();
 
@@ -259,6 +259,12 @@ test("the full plan runs every producer in manifest order", () => {
 
 test("selecting an unknown producer is an error, not a silent no-op", () => {
   assert.throws(() => buildPlan(manifest, ["not-a-producer"]), /unknown producer id/);
+});
+
+test("the golden pipeline enables the provisioned pnpm toolchain", () => {
+  const pnpm = resolvePnpmCommand({ PNPM_HOME: "/cache/pnpm", PATH: "" });
+  assert.equal(pnpm, "/cache/pnpm/bin/pnpm");
+  assert.equal(withPnpmOnPath({ PNPM_HOME: "/cache/pnpm", PATH: "" }).PATH, "/cache/pnpm/bin");
 });
 
 test("the git pathspec covers every declared artifact pattern", () => {

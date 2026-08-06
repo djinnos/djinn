@@ -62,6 +62,30 @@ export function buildPlan(manifest, only = []) {
   }));
 }
 
+/**
+ * Task-run images provide pnpm under PNPM_HOME, but a shell launched outside
+ * the image entrypoint can omit its bin directory from PATH. Resolve that
+ * provisioned toolchain before asking a producer to install or run UI tools.
+ */
+export function resolvePnpmCommand(env = process.env) {
+  const pathEntries = (env.PATH ?? "").split(path.delimiter).filter(Boolean);
+  if (pathEntries.some((entry) => existsSync(path.join(entry, "pnpm")))) return "pnpm";
+
+  const pnpmHome = env.PNPM_HOME;
+  if (!pnpmHome) return "pnpm";
+  const provisioned = path.join(pnpmHome, "bin", "pnpm");
+  return existsSync(provisioned) ? provisioned : "pnpm";
+}
+
+export function withPnpmOnPath(env = process.env) {
+  const pnpm = resolvePnpmCommand(env);
+  if (pnpm === "pnpm") return env;
+  const bin = path.dirname(pnpm);
+  const entries = (env.PATH ?? "").split(path.delimiter);
+  if (entries.includes(bin)) return env;
+  return { ...env, PATH: [bin, ...entries.filter(Boolean)].join(path.delimiter) };
+}
+
 function ensureNodeModules(manifest, producer, quiet) {
   if (!producer.requiresNodeModules) return;
   const dir = path.join(repoRoot, producer.requiresNodeModules);
@@ -69,10 +93,11 @@ function ensureNodeModules(manifest, producer, quiet) {
   if (!quiet) {
     console.log(`  ${producer.requiresNodeModules}/node_modules missing — pnpm install`);
   }
-  const install = spawnSync("pnpm", ["install", "--frozen-lockfile"], {
+  const env = withPnpmOnPath(process.env);
+  const install = spawnSync(resolvePnpmCommand(env), ["install", "--frozen-lockfile"], {
     cwd: dir,
     stdio: "inherit",
-    env: process.env,
+    env,
   });
   if (install.status !== 0) {
     throw new Error(
@@ -85,11 +110,12 @@ function ensureNodeModules(manifest, producer, quiet) {
 function runShellProducer(manifest, producer, quiet) {
   ensureNodeModules(manifest, producer, quiet);
   const cwd = path.join(repoRoot, producer.cwd);
+  const env = withPnpmOnPath({ ...process.env, ...(producer.env ?? {}) });
   const result = spawnSync(producer.command, {
     cwd,
     shell: true,
     stdio: quiet ? ["ignore", "pipe", "pipe"] : "inherit",
-    env: { ...process.env, ...(producer.env ?? {}) },
+    env,
   });
   if (result.status !== 0) {
     if (quiet) {
