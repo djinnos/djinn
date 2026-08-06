@@ -92,8 +92,8 @@ pub fn default_base_url(provider_id: &str) -> String {
 /// OAuth-derived `ProviderConfig` that already carries the right base URL,
 /// auth method, and model defaults.
 pub enum ProviderCredential {
-    /// Traditional API-key credential (key_name, decrypted key).
-    ApiKey(String, String),
+    /// Traditional API-key credential (durable row id, key name, decrypted key).
+    ApiKey(String, String, String),
     /// OAuth-derived full provider config (base_url, auth, model already set).
     OAuthConfig(Box<djinn_provider::provider::ProviderConfig>),
 }
@@ -208,7 +208,7 @@ pub(crate) fn build_provider_from_resolved(
             cfg.session_affinity_key = session_affinity_key;
             Some(djinn_provider::provider::create_provider(cfg))
         }
-        Some(ProviderCredential::ApiKey(_key_name, api_key)) => {
+        Some(ProviderCredential::ApiKey(_, _key_name, api_key)) => {
             let provider_headers = provider_headers_for(
                 &resolved.catalog_provider_id,
                 session_affinity_key.as_deref(),
@@ -287,6 +287,7 @@ mod tests {
             catalog_provider_id: provider_id.to_string(),
             model_name: model_name.to_string(),
             provider_credential: Some(ProviderCredential::ApiKey(
+                "credential-id".to_string(),
                 "TEST_KEY".to_string(),
                 "sk-test".to_string(),
             )),

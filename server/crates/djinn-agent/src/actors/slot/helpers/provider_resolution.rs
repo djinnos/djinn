@@ -45,8 +45,8 @@ pub(crate) fn build_restamp_target(
 
 /// Resolved provider credentials — API key or OAuth-derived `ProviderConfig`.
 pub enum ProviderCredential {
-    /// Traditional API-key credential (key_name, decrypted key).
-    ApiKey(String, String),
+    /// Traditional API-key credential (durable row id, key name, decrypted key).
+    ApiKey(String, String, String),
     /// OAuth-derived full provider config (base_url, auth, model already set).
     OAuthConfig(Box<djinn_provider::provider::ProviderConfig>),
 }
@@ -75,7 +75,7 @@ impl ProviderCredential {
     /// `ProviderConfig` does not implement `Serialize`.
     pub fn to_serializable(&self) -> djinn_runtime::SerializableCredential {
         match self {
-            ProviderCredential::ApiKey(key_name, api_key) => {
+            ProviderCredential::ApiKey(_, key_name, api_key) => {
                 djinn_runtime::SerializableCredential::ApiKey {
                     key_name: key_name.clone(),
                     api_key: api_key.clone(),
@@ -311,11 +311,15 @@ pub async fn load_provider_credential(
         .and_then(|p| p.env_vars.into_iter().next())
         .unwrap_or_else(|| format!("{}_API_KEY", provider_id.to_ascii_uppercase()));
     let key = credential_repo
-        .get_decrypted(&key_name)
+        .get_decrypted_with_id(&key_name)
         .await
         .map_err(|e| anyhow::anyhow!("credential lookup failed: {e}"))?;
     match key {
-        Some(v) => Ok(ProviderCredential::ApiKey(key_name, v)),
+        Some((credential_record_id, value)) => Ok(ProviderCredential::ApiKey(
+            credential_record_id,
+            key_name,
+            value,
+        )),
         None => Err(anyhow::anyhow!(
             "no credential stored for provider {provider_id} (expected key {key_name})"
         )),
@@ -366,7 +370,7 @@ pub(crate) fn build_provider_from_resolved(
             cfg.session_affinity_key = session_affinity_key;
             Some(djinn_provider::provider::create_provider(cfg))
         }
-        Some(ProviderCredential::ApiKey(_key_name, api_key)) => {
+        Some(ProviderCredential::ApiKey(_, _key_name, api_key)) => {
             let provider_headers = provider_headers_for(
                 &resolved.catalog_provider_id,
                 session_affinity_key.as_deref(),
@@ -647,10 +651,14 @@ mod tests {
     /// OAuth `with_model_id` is a no-op for API-key credentials.
     #[test]
     fn oauth_with_model_id_is_noop_for_api_key() {
-        let cred = ProviderCredential::ApiKey("KEY".to_string(), "secret".to_string());
+        let cred = ProviderCredential::ApiKey(
+            "credential-id".to_string(),
+            "KEY".to_string(),
+            "secret".to_string(),
+        );
         let target = anthropic_reasoning_target();
         match cred.with_model_id(&target) {
-            ProviderCredential::ApiKey(name, key) => {
+            ProviderCredential::ApiKey(_, name, key) => {
                 assert_eq!(name, "KEY");
                 assert_eq!(key, "secret");
             }
@@ -710,6 +718,7 @@ mod tests {
             catalog_provider_id: "anthropic".to_string(),
             model_name: "claude-sonnet-4".to_string(),
             provider_credential: Some(ProviderCredential::ApiKey(
+                "credential-id".to_string(),
                 "ANTHROPIC_API_KEY".to_string(),
                 "sk-test-key".to_string(),
             )),

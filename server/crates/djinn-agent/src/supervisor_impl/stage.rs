@@ -1464,6 +1464,15 @@ pub(crate) async fn execute_stage(
         .await
         .unwrap_or(0);
 
+    let credential_record_id = resolved
+        .as_ref()
+        .and_then(|resolved| match resolved.provider_credential.as_ref() {
+            Some(ProviderCredential::ApiKey(credential_record_id, _, _)) => {
+                Some(credential_record_id.clone())
+            }
+            Some(ProviderCredential::OAuthConfig(_)) | None => None,
+        })
+        .unwrap_or_default();
     let provider_arc: Option<Arc<dyn LlmProvider>> = provider_override;
     let provider_owned: Option<Box<dyn LlmProvider>> = if provider_arc.is_some() {
         None
@@ -1624,6 +1633,7 @@ pub(crate) async fn execute_stage(
     let reply_loop_fut = run_reply_loop(
         ReplyLoopContext {
             provider: provider_ref,
+            credential_record_id: &credential_record_id,
             tools: &tools,
             task_id: &task.id,
             task_short_id: &task.short_id,
