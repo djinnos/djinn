@@ -335,6 +335,9 @@ async fn dispatch_proposal_tools(
         "proposal_feedback_disposition" => {
             Some(task_epic::call_proposal_feedback_disposition(ctx, args).await)
         }
+        "proposal_feedback_withdraw" => {
+            Some(task_epic::call_proposal_feedback_withdraw(ctx, args).await)
+        }
         "proposal_debate_resolve" => Some(task_epic::call_proposal_debate_resolve(ctx, args).await),
         "proposal_complete" => Some(task_epic::call_proposal_complete(ctx, args).await),
         "proposal_ac_set" => Some(task_epic::call_proposal_ac_set(ctx, args).await),
