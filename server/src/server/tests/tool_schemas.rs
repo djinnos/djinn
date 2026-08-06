@@ -1,10 +1,52 @@
-use insta::assert_json_snapshot;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
 use super::helpers::{canonicalize_json, mcp_jsonrpc};
 use crate::server::AppState;
 use crate::test_helpers;
+
+// ── MCP tool-schema golden plumbing ─────────────────────────────────────────
+//
+// insta's failure output names the mismatched snapshot file and nothing else.
+// That is what made tool-surface changes take several CI cycles to land: the
+// author learned that "a snapshot moved", not that other committed artifacts
+// move with it, and not which command refreshes them all.
+// `tool_golden_snapshot!` forwards to insta unchanged and, on failure only,
+// re-panics with the original diff plus that command.
+
+const TOOL_GOLDEN_HINT: &str = "\n\n\
+    ── this snapshot is an MCP tool-schema golden ──────────────────────────\n\
+    Regenerate EVERY derived tool-schema artifact with one command, from the\n\
+    repository root:\n\
+    \n    make tool-goldens\n\n\
+    The full artifact set lives in scripts/tool-goldens.manifest.json.\n";
+
+fn tool_golden_panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    payload
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| {
+            payload
+                .downcast_ref::<&str>()
+                .map(|text| (*text).to_owned())
+        })
+        .unwrap_or_else(|| "<non-string panic payload>".to_owned())
+}
+
+macro_rules! tool_golden_snapshot {
+    ($($args:tt)*) => {{
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            insta::assert_json_snapshot!($($args)*);
+        }));
+        if let Err(payload) = outcome {
+            panic!(
+                "{}{}",
+                tool_golden_panic_message(payload.as_ref()),
+                TOOL_GOLDEN_HINT
+            );
+        }
+    }};
+}
 
 const ENVIRONMENT_CONFIG_SCHEMA_SURFACES: [(&str, &str, &str); 6] = [
     ("image_create", "inputSchema", "input_schema"),
@@ -719,7 +761,7 @@ async fn mcp_tools_schema_snapshot() {
             .collect();
     signatures.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
 
-    assert_json_snapshot!("mcp_tools_schema", signatures);
+    tool_golden_snapshot!("mcp_tools_schema", signatures);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

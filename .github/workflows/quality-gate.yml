@@ -229,6 +229,15 @@ jobs:
         run: node --test scripts/ci-release-image-validation.test.mjs
       - name: Verify shard failure summary contract
         run: node --test scripts/ci-shard-failure-summary.test.mjs
+      - name: Verify MCP tool-schema golden manifest contract
+        run: node --test scripts/tool-goldens.test.mjs
+      # Cheap (filesystem walk, no build): fails if a NEW derived tool-schema
+      # artifact was committed without being wired into `make tool-goldens`.
+      # The per-artifact freshness checks live in the cargo/ui lanes that
+      # already run them; this one only guards the artifact LIST, which is
+      # what nobody could enumerate before it existed.
+      - name: Every derived tool-schema artifact is in the golden manifest
+        run: node scripts/check-tool-goldens.mjs
       - name: Verify retirement manifest generator contract
         run: node --test scripts/test-djinn-retirement-manifest.mjs
       - name: Run retirement manifest strict reconciliation guard
