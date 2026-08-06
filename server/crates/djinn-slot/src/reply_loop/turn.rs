@@ -2174,13 +2174,13 @@ mod tests {
         Database, ModelTurnBucketDebit, ModelTurnBucketKind, ModelTurnLeaseIdentity,
         ModelTurnLeaseMutationOutcome,
     };
+    use djinn_provider::provider::ProviderError;
     use djinn_provider::{
         ProviderAbortCapabilityV1, ProviderAdmissionPolicyV1, ProviderAttemptAbortHandleV1,
         ProviderAttemptCapabilitiesV1, ProviderAttemptPlanV1, ProviderAttemptRouteCoverageV1,
-        ProviderAttemptScopeV1, ProviderCredentialRecordScopeV1,
-        ProviderHiddenRetryCapabilityV1, ProviderOutputReservationSourceV1,
+        ProviderAttemptScopeV1, ProviderCredentialRecordScopeV1, ProviderHiddenRetryCapabilityV1,
+        ProviderOutputReservationSourceV1,
     };
-    use djinn_provider::provider::ProviderError;
 
     fn covered_admission_plan() -> ProviderAttemptPlanV1 {
         ProviderAttemptPlanV1 {
@@ -2225,7 +2225,10 @@ mod tests {
             djinn_db::ModelTurnAdmissionRepository::new(db.clone()),
         );
         let preparation = coordinator
-            .prepare(&covered_admission_plan(), admission_request("ordered-launch"))
+            .prepare(
+                &covered_admission_plan(),
+                admission_request("ordered-launch"),
+            )
             .await
             .expect("prepare");
         let lease = match &preparation {
@@ -2244,7 +2247,10 @@ mod tests {
             launch_prepared_covered_attempt(
                 preparation,
                 move || {
-                    launched_events.lock().expect("events").push("network_launch");
+                    launched_events
+                        .lock()
+                        .expect("events")
+                        .push("network_launch");
                     Ok("launched")
                 },
                 move || active_events.lock().expect("events").push("mark_active"),
@@ -2272,7 +2278,10 @@ mod tests {
             djinn_db::ModelTurnAdmissionRepository::new(db.clone()),
         );
         let preparation = coordinator
-            .prepare(&covered_admission_plan(), admission_request("rejected-launch"))
+            .prepare(
+                &covered_admission_plan(),
+                admission_request("rejected-launch"),
+            )
             .await
             .expect("prepare");
         let events = Arc::new(Mutex::new(vec!["mark_dispatching"]));
