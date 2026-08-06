@@ -4770,19 +4770,13 @@ mod tests {
         .await;
         assert_reconciled_transition_error(&calls, "task_review_approve", "settle:Failed");
 
-        // Terminal evidence never advances the board nor fabricates a healthy handoff.
+        // Failed terminal evidence never advances the board nor fabricates a
+        // healthy handoff. These fixtures begin Completed, so the barrier
+        // must truthfully downgrade each of them to Failed.
         for (n, outcome) in [
             StageOutcome::Failed {
                 reason: "failed".into(),
                 provider_failure: None,
-            },
-            StageOutcome::Parked {
-                reason: ParkReason::Budget,
-                summary: None,
-                wind_down_ignored: false,
-                session_id: "s".into(),
-                tokens_in: 0,
-                tokens_out: 0,
             },
             StageOutcome::LoopGuardTripped {
                 kind: LoopGuardKind::ConsecutiveFailures,
@@ -4799,17 +4793,7 @@ mod tests {
         .into_iter()
         .enumerate()
         {
-            let expected_settlement = if matches!(&outcome, StageOutcome::Parked { .. }) {
-                "settle:Paused"
-            } else {
-                "settle:Failed"
-            };
-            let id = if matches!(&outcome, StageOutcome::Parked { .. }) {
-                // ScriptedLoopGuardServices seeds Paused for this fixture.
-                "barrier-parked".into()
-            } else {
-                format!("barrier-terminal-{n}")
-            };
+            let id = format!("barrier-terminal-{n}");
             let calls = run_case(
                 &source,
                 &id,
@@ -4843,10 +4827,56 @@ mod tests {
                 "terminal evidence advanced board: {calls:?}"
             );
             assert!(
-                calls.iter().any(|c| c.action == expected_settlement),
-                "terminal evidence must preserve its expected settlement truth: {calls:?}"
+                calls.iter().any(|c| c.action == "settle:Failed"),
+                "failed terminal evidence must settle Failed: {calls:?}"
             );
         }
+
+        // Parked evidence specifically begins Paused. It must not be
+        // fabricated into a healthy completion or rewritten as Failed.
+        let calls = run_case(
+            &source,
+            "barrier-parked",
+            task.clone(),
+            StageOutcome::Parked {
+                reason: ParkReason::Budget,
+                summary: None,
+                wind_down_ignored: false,
+                session_id: "s".into(),
+                tokens_in: 0,
+                tokens_out: 0,
+            },
+            RoleKind::Worker,
+            SupervisorFlow::NewTask,
+        )
+        .await;
+        assert!(
+            calls
+                .iter()
+                .all(|c| (!c.action.starts_with("transition_complete:")
+                    || matches!(
+                        c.action.as_str(),
+                        "transition_complete:start" | "transition_complete:task_review_start"
+                    ))
+                    && !matches!(
+                        c.action.as_str(),
+                        "submit_task_review"
+                            | "task_review_approve"
+                            | "task_review_reject"
+                            | "close"
+                            | "lead_approve"
+                            | "lead_approve_conflict"
+                            | "lead_intervention_complete"
+                            | "force_close"
+                            | "arbiter_park"
+                            | "arbiter_supersede"
+                    )),
+            "parked evidence advanced board: {calls:?}"
+        );
+        assert!(
+            calls.iter().any(|c| c.action == "settle:Paused"),
+            "parked evidence must settle Paused: {calls:?}"
+        );
 
         // Architect evidence has no board handoff; drive the actual Spike flow.
         let calls = run_case(
@@ -5864,15 +5894,15 @@ mod tests {
             "a transient provider failure must NOT close the review task (it would book \
              close_reason=completed with zero planner output), got {transitions:?}"
         );
-        // The pre-stage claim is the only transition a transient-failed
-        // planning run should request.
+        // The successful pre-stage claim records its durable completion;
+        // the transient failure itself must not request another transition.
         assert_eq!(
             transitions
                 .iter()
                 .map(|t| t.action.as_str())
                 .collect::<Vec<_>>(),
-            vec!["start"],
-            "only the pre-stage start claim should fire"
+            vec!["start", "transition_complete:start"],
+            "only the pre-stage start claim and durable completion should fire"
         );
     }
 
