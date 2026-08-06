@@ -32,6 +32,49 @@ pub async fn seed_model_turn_admission_fixture(
     pool
 }
 
+/// Seed a credential and its exact provider/model-scoped admission pool.
+///
+/// This test-only seam is provider-neutral: callers pass the identity and
+/// scope produced by the provider attempt plan they are exercising.
+pub async fn seed_scoped_model_turn_admission_fixture(
+    db: &Database,
+    credential_id: &str,
+    provider_id: &str,
+    model_id: &str,
+    phase: &str,
+    capability: &str,
+    learned_concurrency: i64,
+) -> i64 {
+    assert!(
+        learned_concurrency > 0,
+        "fixture learned concurrency must be positive"
+    );
+    db.ensure_initialized().await.unwrap();
+    sqlx::query(
+        "INSERT INTO credentials (id, provider_id, key_name, encrypted_value) \
+         VALUES ($1, $2, 'model-turn-admission-fixture', decode('00', 'hex'))",
+    )
+    .bind(credential_id)
+    .bind(provider_id)
+    .execute(db.pool())
+    .await
+    .unwrap();
+    sqlx::query_scalar(
+        "INSERT INTO model_turn_pools \
+         (credential_id, provider_id, model_id, phase, capability_state, learned_concurrency) \
+         VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
+    )
+    .bind(credential_id)
+    .bind(provider_id)
+    .bind(model_id)
+    .bind(phase)
+    .bind(capability)
+    .bind(learned_concurrency)
+    .fetch_one(db.pool())
+    .await
+    .unwrap()
+}
+
 pub async fn model_turn_decision_fixture(db: &Database, pool_id: i64) -> (String, Option<String>) {
     sqlx::query_as(
         "SELECT request_fingerprint, diagnostic FROM model_turn_decisions WHERE pool_id = $1",

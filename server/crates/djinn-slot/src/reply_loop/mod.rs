@@ -44,9 +44,3 @@ pub use turn::{ReplyLoopContext, run_reply_loop};
 
 #[cfg(test)]
 mod tests;
-
-/// Bounded, error-class-aware retry of transient MID-STREAM provider errors
-/// (see `streaming::MAX_STREAM_EVENT_RETRIES` and
-/// `streaming::MAX_THROTTLE_STREAM_EVENT_RETRIES`).
-#[cfg(test)]
-mod streaming_retry_tests;

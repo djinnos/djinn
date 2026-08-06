@@ -16534,6 +16534,51 @@
               "type": "integer",
               "format": "int32"
             },
+            "source_feedback_id": {
+              "description": "Materialized feedback root and generation; absent on ordinary debate rows.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "generation": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int32"
+            },
+            "source_rows": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/ProposalFeedbackSourceRowModel"
+              }
+            },
+            "disposition_state": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "accepted_disposition": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "accepted_revision_seq": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int32"
+            },
+            "accepted_reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "resolved_at": {
               "description": "When set, the entry has been resolved. `None` while open.",
               "type": [
@@ -16579,6 +16624,57 @@
             "round",
             "created_at",
             "updated_at"
+          ]
+        },
+        "ProposalFeedbackSourceRowModel": {
+          "description": "One verbatim snapshot captured into a feedback refinement generation.",
+          "type": "object",
+          "properties": {
+            "source_feedback_id": {
+              "type": "string"
+            },
+            "source_ordinal": {
+              "type": "integer",
+              "format": "int32"
+            },
+            "source_parent_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "author_kind": {
+              "type": "string"
+            },
+            "author_user_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "author_model": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "body": {
+              "type": "string"
+            },
+            "severity": {
+              "type": "string"
+            },
+            "created_at": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "source_feedback_id",
+            "source_ordinal",
+            "author_kind",
+            "body",
+            "severity",
+            "created_at"
           ]
         }
       },
@@ -16684,6 +16780,51 @@
               "type": "integer",
               "format": "int32"
             },
+            "source_feedback_id": {
+              "description": "Materialized feedback root and generation; absent on ordinary debate rows.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "generation": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int32"
+            },
+            "source_rows": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/ProposalFeedbackSourceRowModel"
+              }
+            },
+            "disposition_state": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "accepted_disposition": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "accepted_revision_seq": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int32"
+            },
+            "accepted_reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "resolved_at": {
               "description": "When set, the entry has been resolved. `None` while open.",
               "type": [
@@ -16729,6 +16870,57 @@
             "round",
             "created_at",
             "updated_at"
+          ]
+        },
+        "ProposalFeedbackSourceRowModel": {
+          "description": "One verbatim snapshot captured into a feedback refinement generation.",
+          "type": "object",
+          "properties": {
+            "source_feedback_id": {
+              "type": "string"
+            },
+            "source_ordinal": {
+              "type": "integer",
+              "format": "int32"
+            },
+            "source_parent_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "author_kind": {
+              "type": "string"
+            },
+            "author_user_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "author_model": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "body": {
+              "type": "string"
+            },
+            "severity": {
+              "type": "string"
+            },
+            "created_at": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "source_feedback_id",
+            "source_ordinal",
+            "author_kind",
+            "body",
+            "severity",
+            "created_at"
           ]
         }
       },
@@ -16847,6 +17039,51 @@
               "type": "integer",
               "format": "int32"
             },
+            "source_feedback_id": {
+              "description": "Materialized feedback root and generation; absent on ordinary debate rows.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "generation": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int32"
+            },
+            "source_rows": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/ProposalFeedbackSourceRowModel"
+              }
+            },
+            "disposition_state": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "accepted_disposition": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "accepted_revision_seq": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int32"
+            },
+            "accepted_reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "resolved_at": {
               "description": "When set, the entry has been resolved. `None` while open.",
               "type": [
@@ -16893,6 +17130,57 @@
             "created_at",
             "updated_at"
           ]
+        },
+        "ProposalFeedbackSourceRowModel": {
+          "description": "One verbatim snapshot captured into a feedback refinement generation.",
+          "type": "object",
+          "properties": {
+            "source_feedback_id": {
+              "type": "string"
+            },
+            "source_ordinal": {
+              "type": "integer",
+              "format": "int32"
+            },
+            "source_parent_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "author_kind": {
+              "type": "string"
+            },
+            "author_user_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "author_model": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "body": {
+              "type": "string"
+            },
+            "severity": {
+              "type": "string"
+            },
+            "created_at": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "source_feedback_id",
+            "source_ordinal",
+            "author_kind",
+            "body",
+            "severity",
+            "created_at"
+          ]
         }
       },
       "type": "object",
@@ -16934,6 +17222,20 @@
         "id": {
           "description": "Debate-trail entry UUID.",
           "type": "string"
+        },
+        "verdict": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
         }
       }
     },
@@ -16997,6 +17299,51 @@
               "type": "integer",
               "format": "int32"
             },
+            "source_feedback_id": {
+              "description": "Materialized feedback root and generation; absent on ordinary debate rows.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "generation": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int32"
+            },
+            "source_rows": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/ProposalFeedbackSourceRowModel"
+              }
+            },
+            "disposition_state": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "accepted_disposition": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "accepted_revision_seq": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int32"
+            },
+            "accepted_reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "resolved_at": {
               "description": "When set, the entry has been resolved. `None` while open.",
               "type": [
@@ -17042,6 +17389,57 @@
             "round",
             "created_at",
             "updated_at"
+          ]
+        },
+        "ProposalFeedbackSourceRowModel": {
+          "description": "One verbatim snapshot captured into a feedback refinement generation.",
+          "type": "object",
+          "properties": {
+            "source_feedback_id": {
+              "type": "string"
+            },
+            "source_ordinal": {
+              "type": "integer",
+              "format": "int32"
+            },
+            "source_parent_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "author_kind": {
+              "type": "string"
+            },
+            "author_user_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "author_model": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "body": {
+              "type": "string"
+            },
+            "severity": {
+              "type": "string"
+            },
+            "created_at": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "source_feedback_id",
+            "source_ordinal",
+            "author_kind",
+            "body",
+            "severity",
+            "created_at"
           ]
         }
       },
@@ -17640,6 +18038,270 @@
           "anyOf": [
             {
               "$ref": "#/$defs/ProposalFeedbackModel"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "readOnly": false,
+    "destructive": true,
+    "idempotent": false,
+    "openWorld": false,
+    "concurrent_safe": false
+  },
+  {
+    "name": "proposal_feedback_disposition",
+    "description": "Propose fixed_by_revision or wont_fix for unresolved human_feedback. Fixed revisions must be newer than the objection and exist on its proposal; wont_fix needs reasoning. Judge acceptance is required before write-back.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "required": [
+        "id",
+        "disposition"
+      ],
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "disposition": {
+          "type": "string"
+        },
+        "fixed_by_revision": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int32",
+          "default": null
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      }
+    },
+    "outputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$defs": {
+        "ProposalDebateTrailModel": {
+          "description": "A structured debate-trail row for the proposal tribunal. Separate from\n[`ProposalFeedbackModel`] (human discussion): debate rows are typed\n(objection, rebuttal, verdict), track blocking state, and carry\nresolution/reopen lifecycle.",
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "proposal_id": {
+              "type": "string"
+            },
+            "kind": {
+              "description": "`objection` | `rebuttal` | `verdict`.",
+              "type": "string"
+            },
+            "body": {
+              "type": "string"
+            },
+            "blocking": {
+              "description": "When true, this entry blocks proposal readiness.",
+              "type": "boolean"
+            },
+            "agent_role": {
+              "description": "Agent role (e.g. \"advocate\", \"adversary\", \"judge\").",
+              "type": "string"
+            },
+            "author_kind": {
+              "description": "`agent` or `user`.",
+              "type": "string"
+            },
+            "author_user_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "author_model": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "source_task_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "against_revision_seq": {
+              "description": "The proposal revision this entry was written against.",
+              "type": "integer",
+              "format": "int32"
+            },
+            "round": {
+              "description": "Debate round (1-based).",
+              "type": "integer",
+              "format": "int32"
+            },
+            "source_feedback_id": {
+              "description": "Materialized feedback root and generation; absent on ordinary debate rows.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "generation": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int32"
+            },
+            "source_rows": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/ProposalFeedbackSourceRowModel"
+              }
+            },
+            "disposition_state": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "accepted_disposition": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "accepted_revision_seq": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int32"
+            },
+            "accepted_reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "resolved_at": {
+              "description": "When set, the entry has been resolved. `None` while open.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "resolved_by_user_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "reopened_at": {
+              "description": "When set alongside `resolved_at`, the entry was reopened.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "reopened_by_user_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "created_at": {
+              "type": "string"
+            },
+            "updated_at": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "proposal_id",
+            "kind",
+            "body",
+            "blocking",
+            "agent_role",
+            "author_kind",
+            "against_revision_seq",
+            "round",
+            "created_at",
+            "updated_at"
+          ]
+        },
+        "ProposalFeedbackSourceRowModel": {
+          "description": "One verbatim snapshot captured into a feedback refinement generation.",
+          "type": "object",
+          "properties": {
+            "source_feedback_id": {
+              "type": "string"
+            },
+            "source_ordinal": {
+              "type": "integer",
+              "format": "int32"
+            },
+            "source_parent_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "author_kind": {
+              "type": "string"
+            },
+            "author_user_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "author_model": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "body": {
+              "type": "string"
+            },
+            "severity": {
+              "type": "string"
+            },
+            "created_at": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "source_feedback_id",
+            "source_ordinal",
+            "author_kind",
+            "body",
+            "severity",
+            "created_at"
+          ]
+        }
+      },
+      "type": "object",
+      "properties": {
+        "entry": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProposalDebateTrailModel"
             },
             {
               "type": "null"
@@ -19107,7 +19769,8 @@
         "target_subsystem",
         "spec_unknown_anchor",
         "insufficient_in_session_research",
-        "expected_findings"
+        "expected_findings",
+        "load_bearing_category"
       ],
       "type": "object",
       "properties": {
@@ -19144,6 +19807,10 @@
         "expected_findings": {
           "description": "What the evidence spike should produce to resolve the claim.",
           "type": "string"
+        },
+        "load_bearing_category": {
+          "description": "Caller-declared load-bearing threshold. The server must not infer this\nauthority from legacy question prose.",
+          "type": "string"
         }
       }
     },
@@ -19174,6 +19841,34 @@
               "description": "The debate round when the demand was issued.",
               "type": "integer",
               "format": "int32"
+            },
+            "finding_id": {
+              "description": "Typed finding identity owned by `TypedEvidenceRepository`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "attempt_id": {
+              "description": "Typed active attempt identity for the allocated spike.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "lifecycle": {
+              "description": "Typed lifecycle after atomic allocation.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "replayed": {
+              "description": "True when normalized delivery returned the existing allocation.",
+              "type": [
+                "boolean",
+                "null"
+              ]
             }
           },
           "required": [
@@ -19211,6 +19906,13 @@
         },
         "error": {
           "description": "Error message for a rejected demand.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "conflict_code": {
+          "description": "Stable machine-readable rejection/conflict code.",
           "type": [
             "string",
             "null"
@@ -21188,6 +21890,51 @@
               "type": "integer",
               "format": "int32"
             },
+            "source_feedback_id": {
+              "description": "Materialized feedback root and generation; absent on ordinary debate rows.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "generation": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int32"
+            },
+            "source_rows": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/ProposalFeedbackSourceRowModel"
+              }
+            },
+            "disposition_state": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "accepted_disposition": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "accepted_revision_seq": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int32"
+            },
+            "accepted_reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "resolved_at": {
               "description": "When set, the entry has been resolved. `None` while open.",
               "type": [
@@ -21233,6 +21980,57 @@
             "round",
             "created_at",
             "updated_at"
+          ]
+        },
+        "ProposalFeedbackSourceRowModel": {
+          "description": "One verbatim snapshot captured into a feedback refinement generation.",
+          "type": "object",
+          "properties": {
+            "source_feedback_id": {
+              "type": "string"
+            },
+            "source_ordinal": {
+              "type": "integer",
+              "format": "int32"
+            },
+            "source_parent_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "author_kind": {
+              "type": "string"
+            },
+            "author_user_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "author_model": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "body": {
+              "type": "string"
+            },
+            "severity": {
+              "type": "string"
+            },
+            "created_at": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "source_feedback_id",
+            "source_ordinal",
+            "author_kind",
+            "body",
+            "severity",
+            "created_at"
           ]
         },
         "ProposalRefinementStatusModel": {

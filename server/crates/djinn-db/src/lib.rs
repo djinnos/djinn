@@ -244,6 +244,8 @@ pub use repositories::{
     },
     proposal::{
         ActiveEvidenceAuthorityTask, AtomicEvidenceDemandInput, AwaitingReviewPark,
+        FeedbackRefinementDisposition, FeedbackRefinementDispositionInput,
+        FeedbackRefinementRejectionInput, FeedbackRefinementRejectionResult,
         NeedsEvidenceCapStatus, NeedsEvidenceClaimLink, ProposalCreateInput,
         ProposalDebateTrailCreateInput, ProposalFeedbackCreateInput, ProposalListQuery,
         ProposalListResult, ProposalListSummaryRow, ProposalMemoryRef, ProposalRef,
