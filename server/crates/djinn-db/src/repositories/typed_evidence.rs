@@ -1900,6 +1900,7 @@ mod tests {
             (SpikeActive, Withdrawn),
             (EvidenceReceived, Resolved),
             (EvidenceReceived, Withdrawn),
+            (Failed, Demanded),
             (Failed, SpikeActive),
             (Failed, Withdrawn),
         ];

@@ -67,7 +67,7 @@ async fn typed_evidence_retry_v1() {
         .execute(db.pool())
         .await
         .unwrap();
-    let old_task = task(&db, &project, &user, false).await;
+    let old_task = task(&db, &project, &user, true).await;
     let retry_task = task(&db, &project, &user, true).await;
     let ordinary_task = task(&db, &project, &user, false).await;
     let proposal = uuid::Uuid::now_v7().to_string();
