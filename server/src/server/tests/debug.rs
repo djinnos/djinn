@@ -324,17 +324,27 @@ async fn test_debug_dispatch_state_does_not_mutate() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_debug_dispatch_state_concurrent_snapshots_complete_without_deadlock() {
     let _guard = DEBUG_TEST_LOCK.lock().await;
-    // Polling this bounded cohort together submits every request before waiting
-    // for any response. This exercises contention on the coordinator snapshot
-    // path without a task-start barrier whose arrival can be delayed by sibling
-    // tests sharing the process. Unlike a throughput benchmark, the timeout
-    // permits shared CI CPU and database load while still detecting a deadlock
-    // or pathological serialization of this small, controlled cohort.
-    const DEADLOCK_TIMEOUT: Duration = Duration::from_secs(30);
-
+    // Wait for the newly spawned coordinator to finish its unrelated startup
+    // recovery before measuring the snapshot mailbox. Startup performs durable
+    // reaping and can legitimately contend with other in-process test databases;
+    // including it in the cohort deadline made this regression depend on module
+    // scheduling rather than the debug snapshot path it is meant to cover.
+    // `test_debug_dispatch_state_does_not_mutate` separately verifies this first
+    // snapshot succeeds.
     let db = test_helpers::create_test_db();
     let state = app_state_with_agents(db).await;
     let coordinator = state.coordinator().await.unwrap();
+    coordinator
+        .debug_dispatch_state()
+        .await
+        .expect("coordinator startup snapshot should succeed");
+
+    // Polling this bounded cohort together submits every request before waiting
+    // for any response. This exercises contention on the ready coordinator's
+    // snapshot mailbox without a task-start barrier whose arrival can be delayed
+    // by sibling tests sharing the process. Unlike a throughput benchmark, this
+    // timeout detects a deadlock after readiness, not shared startup load.
+    const DEADLOCK_TIMEOUT: Duration = Duration::from_secs(30);
 
     let snapshots = tokio::time::timeout(DEADLOCK_TIMEOUT, async {
         tokio::join!(
