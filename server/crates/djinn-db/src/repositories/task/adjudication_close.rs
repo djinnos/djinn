@@ -104,41 +104,70 @@ pub struct BusinessDisposition {
 /// creation is the only honest `before`.
 pub const ADJUDICATION_SOURCE_SNAPSHOT_EVENT: &str = "adjudication_source_snapshot";
 
-/// Collapse the coordinator's own adjudication-scaffolding statuses onto the
-/// parked state they all mean.
+/// Statuses the coordinator can park a source to `open` FROM when it holds it
+/// behind an adjudication child.
 ///
-/// Opening an adjudication moves the source
-/// `open -> needs_lead_intervention -> in_lead_intervention`, and parking it
-/// behind the escalation child moves it back to `open`. Those are the
-/// coordinator holding the source while somebody else decides — not a
-/// disposition. The spec is explicit that this scaffolding "does not by itself
-/// make the source changed".
+/// This is exactly `TransitionAction::ParkForRemediation`'s legal from-set
+/// (`djinn_core::models::task`), which is what both producers ultimately apply
+/// — `escalate_to_planner_or_terminally_fail` via `park_source_open`, and the
+/// arbiter via `ArbiterPark`. Keeping the two in step is the point: any state
+/// the park is legal from is a state the snapshot can be taken in.
+const PARKABLE_FROM_STATUSES: &[&str] = &[
+    "pr_draft",
+    "pr_review",
+    "in_progress",
+    "open",
+    "needs_task_review",
+    "in_task_review",
+    "needs_lead_intervention",
+    "in_lead_intervention",
+    "approved",
+];
+
+/// Is the status delta `before -> after` nothing but the coordinator parking the
+/// source behind its adjudication child?
 ///
-/// This mattered enormously in production and not at all in the fixture: both
-/// producers record the creation-time snapshot BEFORE the park transition
+/// Both producers record the creation-time snapshot BEFORE the park transition
 /// (`escalate_to_planner_or_terminally_fail` calls `create_remediation_task`
 /// then `park_source_open`; the agent's `execute_arbiter_park_transaction`
-/// snapshots before `ArbiterPark`). So `before.status` was
-/// `in_lead_intervention` and `after.status` was `open` on EVERY round — every
-/// close read `source_changed`, truth-table row 1 was violated, and the
-/// exhausted-ladder branch (which only fires on an UNCHANGED close) never ran.
-/// A round-3 close therefore left the source `open` with an unmerged PR and no
-/// owner: precisely the `z8i8`/`zkas` stranding this proposal exists to end.
+/// snapshots before `ArbiterPark`). So `before` is whatever in-flight state the
+/// trigger caught the source in and `after` is `open`. That is the coordinator
+/// holding the source while somebody else decides — not a disposition. The
+/// spec is explicit that this scaffolding "does not by itself make the source
+/// changed".
 ///
-/// Normalizing here rather than reordering the two call sites keeps the fix
-/// immune to a future caller getting the order wrong again.
-fn parked_equivalent(status: &str) -> &str {
-    match status {
-        "needs_lead_intervention" | "in_lead_intervention" => "open",
-        other => other,
-    }
+/// This mattered enormously in production and not at all in the fixture. With
+/// no exclusion, EVERY close read `source_changed`, truth-table row 1 was
+/// violated, and the exhausted-ladder branch — which only fires on an UNCHANGED
+/// close — never ran. A round-3 close therefore left the source `open` with an
+/// unmerged PR and no owner: precisely the `z8i8`/`zkas` stranding this
+/// proposal exists to end.
+///
+/// **Directional on purpose.** The rule fires only when `after` is `open`, so
+/// the reverse deltas that ARE dispositions still read as changes — most
+/// importantly `open -> pr_review`, which is the exhausted-ladder handoff
+/// itself. A symmetric "treat these statuses as equal" rule would have made
+/// that handoff invisible.
+///
+/// An earlier version collapsed only the two Lead-intervention statuses, which
+/// left the defect alive for every producer that snapshots from a PR status:
+/// the merge-method wedge (`poll_pr_review_tasks` escalates straight off a
+/// `pr_review` row) and the human-adjudicated tripwire hold (reached from
+/// `pr_draft`) — the same z8i8/zkas family. Deriving the set from the park's
+/// own legal from-set closes it for every producer at once.
+fn is_scaffolding_park(before: &str, after: &str) -> bool {
+    after == "open" && before != "open" && PARKABLE_FROM_STATUSES.contains(&before)
 }
 
 impl BusinessDisposition {
     /// Is this the same business disposition as `other`, ignoring the
     /// coordinator's adjudication scaffolding? See [`parked_equivalent`].
     fn same_disposition_as(&self, other: &Self) -> bool {
-        parked_equivalent(&self.status) == parked_equivalent(&other.status)
+        // `self` is the CLOSE-time reading, `other` the creation-time snapshot,
+        // so the delta under test is `other.status -> self.status`.
+        let status_unchanged =
+            self.status == other.status || is_scaffolding_park(&other.status, &self.status);
+        status_unchanged
             && self.close_reason == other.close_reason
             && self.description == other.description
             && self.design == other.design

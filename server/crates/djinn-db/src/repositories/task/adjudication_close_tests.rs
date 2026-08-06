@@ -77,6 +77,37 @@ async fn source_with_escalation_rounds(
     epic_id: &str,
     rounds: i64,
 ) -> (String, String) {
+    source_with_escalation_rounds_from(db, repo, epic_id, rounds, "in_lead_intervention").await
+}
+
+/// As [`source_with_escalation_rounds`], with the status the producer snapshots
+/// the source in made explicit — production has several.
+async fn source_with_escalation_rounds_from(
+    db: &Database,
+    repo: &TaskRepository,
+    epic_id: &str,
+    rounds: i64,
+    snapshot_status: &str,
+) -> (String, String) {
+    source_with_escalation_rounds_labelled(
+        db,
+        repo,
+        epic_id,
+        rounds,
+        snapshot_status,
+        ESCALATION_LABELS,
+    )
+    .await
+}
+
+async fn source_with_escalation_rounds_labelled(
+    db: &Database,
+    repo: &TaskRepository,
+    epic_id: &str,
+    rounds: i64,
+    snapshot_status: &str,
+    child_labels: &str,
+) -> (String, String) {
     let source = repo
         .create_fixture_with_ac(
             epic_id, "Source", "desc", "design", "task", 1, "worker", None, None,
@@ -99,9 +130,7 @@ async fn source_with_escalation_rounds(
             )
             .await
             .unwrap();
-        repo.update_labels(&child.id, ESCALATION_LABELS)
-            .await
-            .unwrap();
+        repo.update_labels(&child.id, child_labels).await.unwrap();
         repo.add_blocker(&source.id, &child.id).await.unwrap();
 
         // Mirror PRODUCTION ordering exactly. Both producers snapshot BEFORE
@@ -117,9 +146,7 @@ async fn source_with_escalation_rounds(
         // every close read `source_changed` from the scaffolding status delta,
         // so the exhausted-ladder branch never ran and a round-3 close left the
         // source `open` with an unmerged PR and no owner.
-        repo.set_status(&source.id, "in_lead_intervention")
-            .await
-            .unwrap();
+        repo.set_status(&source.id, snapshot_status).await.unwrap();
         record_adjudication_source_snapshot(db.pool(), &source.id, &child.id)
             .await
             .unwrap();
@@ -155,6 +182,131 @@ async fn close_child(repo: &TaskRepository, child_id: &str) {
     )
     .await
     .unwrap();
+}
+
+/// **AC7/AC8.** The scaffolding exclusion must hold for EVERY status a producer
+/// can snapshot the source in — not just the Lead-intervention pair.
+///
+/// An earlier fix collapsed only `needs_lead_intervention`/`in_lead_intervention`,
+/// which left the defect alive for every producer that snapshots from a PR
+/// status: `poll_pr_review_tasks` escalates straight off a `pr_review` row (the
+/// merge-method wedge), and the human-adjudicated tripwire hold is reached from
+/// `pr_draft`. Both are the z8i8/zkas family — a source held with an unmerged
+/// PR — so those were exactly the cases that still stranded.
+///
+/// Parameterised over the park's own legal from-set. If the mechanism's body is
+/// deleted the round-3 sources stay `open` and every case fails.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn every_producer_snapshot_status_reaches_the_exhausted_ladder() {
+    for snapshot_status in [
+        "in_lead_intervention",
+        "needs_lead_intervention",
+        "pr_review",
+        "pr_draft",
+        "in_progress",
+        "needs_task_review",
+        "in_task_review",
+        "approved",
+        "open",
+    ] {
+        let db = Database::open_in_memory().unwrap();
+        let repo = TaskRepository::new(db.clone(), silent_bus());
+        let project = make_project(&db).await;
+        let epic_id = make_epic(&db, &project.id).await;
+
+        let (source_id, child_id) = source_with_escalation_rounds_from(
+            &db,
+            &repo,
+            &epic_id,
+            MAX_AUTONOMOUS_ESCALATIONS,
+            snapshot_status,
+        )
+        .await;
+        repo.set_pr_url(&source_id, "https://github.com/o/r/pull/77")
+            .await
+            .unwrap();
+
+        close_child(&repo, &child_id).await;
+
+        let source = repo.get(&source_id).await.unwrap().unwrap();
+        assert_eq!(
+            source.status, "pr_review",
+            "a source snapshotted at {snapshot_status:?} and parked to `open` was held by \
+             coordinator scaffolding, not disposed of: the exhausted ladder must still hand its \
+             unmerged PR to the poller"
+        );
+        let events = outcome_events(&repo, &source_id).await;
+        assert_eq!(
+            events[0]["source_status_before"], snapshot_status,
+            "the event must report the real snapshot status"
+        );
+    }
+}
+
+/// **AC8.** The directional rule must NOT swallow a real disposition. The
+/// exhausted-ladder handoff itself is `open -> pr_review`, the exact reverse of
+/// the scaffolding park — a symmetric "these statuses are equal" rule would
+/// have made it invisible and reported `source_unchanged` for it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_scaffolding_exclusion_is_directional() {
+    let db = Database::open_in_memory().unwrap();
+    let repo = TaskRepository::new(db.clone(), silent_bus());
+    let project = make_project(&db).await;
+    let epic_id = make_epic(&db, &project.id).await;
+
+    let (source_id, child_id) =
+        source_with_escalation_rounds(&db, &repo, &epic_id, MAX_AUTONOMOUS_ESCALATIONS).await;
+    repo.set_pr_url(&source_id, "https://github.com/o/r/pull/78")
+        .await
+        .unwrap();
+
+    close_child(&repo, &child_id).await;
+
+    let events = outcome_events(&repo, &source_id).await;
+    assert_eq!(
+        events[0]["source_status_after"], "pr_review",
+        "the ownership handoff landed"
+    );
+    assert_eq!(
+        events[0]["adjudication_outcome"], SOURCE_CHANGED,
+        "`open -> pr_review` is a real disposition and must never be collapsed as scaffolding, \
+         even though `pr_review -> open` is"
+    );
+}
+
+/// **AC8.** A legacy `human-review-hold` child is an adjudication child too:
+/// it is counted by `planner_escalation_count_tx` and therefore participates in
+/// the round number and can trigger exhausted ownership. Only the autonomous
+/// label was exercised before.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_human_review_hold_child_is_an_adjudication_child() {
+    let db = Database::open_in_memory().unwrap();
+    let repo = TaskRepository::new(db.clone(), silent_bus());
+    let project = make_project(&db).await;
+    let epic_id = make_epic(&db, &project.id).await;
+
+    let (source_id, child_id) = source_with_escalation_rounds_labelled(
+        &db,
+        &repo,
+        &epic_id,
+        MAX_AUTONOMOUS_ESCALATIONS,
+        "in_lead_intervention",
+        r#"["human-review-hold"]"#,
+    )
+    .await;
+
+    close_child(&repo, &child_id).await;
+
+    let source = repo.get(&source_id).await.unwrap().unwrap();
+    assert_eq!(
+        source.status, "closed",
+        "the legacy human-review hold participates in the terminal-rung round count"
+    );
+    assert_eq!(
+        source.close_reason.as_deref(),
+        Some(LADDER_EXHAUSTED_CLOSE_REASON)
+    );
+    assert!(!outcome_events(&repo, &source_id).await.is_empty());
 }
 
 // ── AC8: the outcome event ──────────────────────────────────────────────────
