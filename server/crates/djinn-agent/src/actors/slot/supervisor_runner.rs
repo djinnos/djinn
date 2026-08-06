@@ -1,6 +1,6 @@
 // djinn:allow-oversize — legacy module over size-guard threshold; split when touched substantively.
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
@@ -38,6 +38,23 @@ const TERMINAL_RUNTIME_REPORT_DEADLINE: std::time::Duration = std::time::Duratio
 
 /// Step label before the worker emits its first stage marker.
 const PRE_SESSION_INITIAL_STEP: &str = "run_create";
+
+/// Redact assignment-style runtime diagnostics before they reach logs or DB
+/// evidence. Runtime backends frequently report `token=...` rather than JSON,
+/// which the provider-response sanitizer intentionally does not parse.
+static TERMINAL_RUNTIME_CREDENTIAL_ASSIGNMENT: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(
+        r#"(?i)\b((?:[a-z_][a-z0-9_-]*)?(?:password|passwd|pwd|secret|token|api[_-]?key|credential|authorization)[a-z0-9_-]*)\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s,;]+)"#,
+    )
+    .expect("valid terminal-runtime credential assignment expression")
+});
+
+fn sanitize_terminal_runtime_diagnostic(reason: &str) -> String {
+    let provider_sanitized = djinn_provider::provider::error::redact_secrets(reason, &[]);
+    TERMINAL_RUNTIME_CREDENTIAL_ASSIGNMENT
+        .replace_all(&provider_sanitized, "$1=[redacted]")
+        .into_owned()
+}
 
 fn pre_session_deadline() -> std::time::Duration {
     let secs = std::env::var("DJINN_PRESESSION_DEADLINE_SECS")
@@ -174,6 +191,10 @@ async fn finalize_terminal_runtime_observation(
     reason: &str,
     failure_cause: SessionFailureCause,
 ) {
+    // Runtime implementations normally provide sanitized diagnostics, but this
+    // is the durable evidence boundary. A backend regression must not write
+    // credential-shaped text into activity rows or tracing fields.
+    let reason = sanitize_terminal_runtime_diagnostic(reason);
     // Settle first: activity is diagnostic and must not delay the durable
     // cause-bearing transition once the report deadline has elapsed.
     let session_repo =
@@ -232,6 +253,7 @@ async fn persist_terminal_runtime_observation_on_attempt(
     reason: &str,
     capture: &InfraDeathLogTailCapture,
 ) {
+    let reason = sanitize_terminal_runtime_diagnostic(reason);
     let attempt_repo = TaskAttemptRepository::new(app_state.db.clone());
     let attempt = match attempt_repo
         .latest_pending_or_submitted(&task.id, None)
@@ -1515,7 +1537,8 @@ async fn attach_and_await_terminal_report(
                     },
                 }
             };
-            if let Some(observation) = observation {
+            if let Some(mut observation) = observation {
+                observation.diagnostic = sanitize_terminal_runtime_diagnostic(&observation.diagnostic);
                 // Capture the single absolute deadline *before* draining. The
                 // drain is non-blocking and neither it nor later stream frames
                 // may buy additional time after runtime evidence arrived.
@@ -2591,9 +2614,13 @@ mod tests {
         let streamed = report(
             "id-B-persisted",
             vec![RoleKind::Worker, RoleKind::Reviewer],
-            TaskRunOutcome::PrOpened {
-                url: "https://example/pr/1".into(),
-                sha: "deadbeef".into(),
+            TaskRunOutcome::Failed {
+                stage: "worker".into(),
+                reason: "typed report failure".into(),
+                provider_failure: Some(ProviderFailureClass::Failure),
+                error_class: None,
+                hint: None,
+                body_excerpt: None,
             },
         );
         let teardown_stub = report("id-A-transport", vec![], TaskRunOutcome::Interrupted);
@@ -2606,6 +2633,15 @@ mod tests {
             !chosen.stages_completed.is_empty(),
             "real stages must survive so the extraction gate opens"
         );
+        assert!(matches!(
+            chosen.outcome,
+            TaskRunOutcome::Failed {
+                stage,
+                reason,
+                provider_failure: Some(ProviderFailureClass::Failure),
+                ..
+            } if stage == "worker" && reason == "typed report failure"
+        ));
     }
     #[test]
     fn teardown_stub_used_when_no_streamed_report() {
@@ -3347,12 +3383,30 @@ mod tests {
             .send(StreamEvent::Report(report(
                 "delayed",
                 vec![RoleKind::Worker],
-                TaskRunOutcome::WorkerSubmitted,
+                TaskRunOutcome::Failed {
+                    stage: "worker".into(),
+                    reason: "delayed typed failure".into(),
+                    provider_failure: Some(ProviderFailureClass::Failure),
+                    error_class: None,
+                    hint: None,
+                    body_excerpt: None,
+                },
             )))
             .await
             .expect("report accepted");
         let delayed = awaiting.await.expect("join");
-        assert!(matches!(delayed.report_result, Ok(Some(_))));
+        assert!(matches!(
+            delayed.report_result,
+            Ok(Some(TaskRunReport {
+                outcome: TaskRunOutcome::Failed {
+                    stage,
+                    reason,
+                    provider_failure: Some(ProviderFailureClass::Failure),
+                    ..
+                },
+                ..
+            })) if stage == "worker" && reason == "delayed typed failure"
+        ));
         assert!(delayed.terminal_runtime_observation.is_none());
 
         tokio::time::resume();
@@ -3363,7 +3417,14 @@ mod tests {
             .send(StreamEvent::Report(report(
                 "simultaneous",
                 vec![RoleKind::Worker],
-                TaskRunOutcome::WorkerSubmitted,
+                TaskRunOutcome::Failed {
+                    stage: "worker".into(),
+                    reason: "simultaneous typed failure".into(),
+                    provider_failure: Some(ProviderFailureClass::Failure),
+                    error_class: None,
+                    hint: None,
+                    body_excerpt: None,
+                },
             )))
             .await
             .expect("queue report");
@@ -3383,7 +3444,18 @@ mod tests {
             &CancellationToken::new(),
         )
         .await;
-        assert!(matches!(simultaneous.report_result, Ok(Some(_))));
+        assert!(matches!(
+            simultaneous.report_result,
+            Ok(Some(TaskRunReport {
+                outcome: TaskRunOutcome::Failed {
+                    stage,
+                    reason,
+                    provider_failure: Some(ProviderFailureClass::Failure),
+                    ..
+                },
+                ..
+            })) if stage == "worker" && reason == "simultaneous typed failure"
+        ));
         assert!(simultaneous.terminal_runtime_observation.is_none());
     }
 
@@ -3444,32 +3516,57 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn terminal_evidence_persists_allowlisted_causes_without_diagnostic_leaks() {
-        use crate::test_helpers;
+    async fn terminal_evidence_persists_every_runtime_case_after_coordinator_deadline() {
         use djinn_db::{CreateSessionParams, SessionRepository};
-        let db = test_helpers::create_test_db();
-        let project = test_helpers::create_test_project(&db).await;
-        let epic = test_helpers::create_test_epic(&db, &project.id).await;
-        let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
-        let context = test_helpers::agent_context_from_db(db.clone(), CancellationToken::new());
-        let sessions = SessionRepository::new(db, context.event_bus.clone());
-        for (kind, expected) in [
+
+        let cases = [
             (
+                "OOMKilled",
                 TerminalRuntimeEvidenceKind::Infrastructure,
                 SessionFailureCause::Infrastructure,
             ),
             (
+                "Pod Evicted",
+                TerminalRuntimeEvidenceKind::Infrastructure,
+                SessionFailureCause::Infrastructure,
+            ),
+            (
+                "Pod NodeLost",
+                TerminalRuntimeEvidenceKind::Infrastructure,
+                SessionFailureCause::Infrastructure,
+            ),
+            (
+                "worker exited 101",
                 TerminalRuntimeEvidenceKind::UnknownFailure,
                 SessionFailureCause::Unknown,
             ),
             (
+                "generic Job failure",
+                TerminalRuntimeEvidenceKind::UnknownFailure,
+                SessionFailureCause::Unknown,
+            ),
+            (
+                "Job disappeared",
                 TerminalRuntimeEvidenceKind::ProtocolNoReport,
                 SessionFailureCause::Protocol,
             ),
-        ] {
+            (
+                "Pod disappeared",
+                TerminalRuntimeEvidenceKind::ProtocolNoReport,
+                SessionFailureCause::Protocol,
+            ),
+            (
+                "Job succeeded without report",
+                TerminalRuntimeEvidenceKind::ProtocolNoReport,
+                SessionFailureCause::Protocol,
+            ),
+        ];
+        for (diagnostic, kind, expected) in cases {
+            let (context, task, spec) = scripted_fixture().await;
+            let sessions = SessionRepository::new(context.db.clone(), context.event_bus.clone());
             let session = sessions
                 .create(CreateSessionParams {
-                    project_id: &project.id,
+                    project_id: &task.project_id,
                     task_id: Some(&task.id),
                     model: "fixture-model",
                     agent_type: "worker",
@@ -3479,16 +3576,49 @@ mod tests {
                     cost_basis: None,
                 })
                 .await
-                .expect("seed session");
-            let diagnostic = "Pod status token=ghp_credential_shaped_secret OOMKilled";
+                .expect("seed running session");
+
+            tokio::time::pause();
+            let (runtime, _events_tx, observation_tx) = ScriptedRuntime::new();
+            let handle = scripted_handle(&spec.task_run_id);
+            let awaiting_context = context.clone();
+            let awaiting_task = task.clone();
+            let awaiting_spec = spec.clone();
+            let awaiting = tokio::spawn(async move {
+                let kill = CancellationToken::new();
+                attach_and_await_terminal_report(
+                    runtime,
+                    &handle,
+                    &awaiting_context,
+                    &awaiting_spec,
+                    &awaiting_task,
+                    &kill,
+                )
+                .await
+            });
+            tokio::task::yield_now().await;
+            observation_tx
+                .send(TerminalRuntimeObservation::new(kind, diagnostic))
+                .expect("watch accepts evidence");
+            tokio::task::yield_now().await;
+            tokio::time::advance(TERMINAL_RUNTIME_REPORT_DEADLINE).await;
+            let outcome = awaiting.await.expect("settles at report deadline");
+            assert!(matches!(outcome.report_result, Ok(None)), "{diagnostic}");
+            let observation = outcome
+                .terminal_runtime_observation
+                .expect("coordinator retains no-report evidence");
+            // Database pool acquisition uses Tokio time too; unpause once the
+            // coordinator's deadline proof is complete before durable I/O.
+            tokio::time::resume();
+
+            // This is the same settlement writer execute_runtime_report_phase
+            // invokes immediately after the coordinator returns, before teardown.
             finalize_terminal_runtime_observation(
                 &TaskRepository::new(context.db.clone(), context.event_bus.clone()),
                 &task,
                 &context,
-                diagnostic,
-                failure_cause_for_terminal_runtime_observation(&TerminalRuntimeObservation::new(
-                    kind, diagnostic,
-                )),
+                &observation.diagnostic,
+                failure_cause_for_terminal_runtime_observation(&observation),
             )
             .await;
             let stored = sessions
@@ -3496,12 +3626,52 @@ mod tests {
                 .await
                 .expect("read session")
                 .expect("session exists");
-            assert_eq!(stored.failure_cause, Some(expected));
-            assert!(
-                !serde_json::to_string(&stored)
-                    .expect("serialize")
-                    .contains("ghp_credential_shaped_secret")
-            );
+            assert_eq!(stored.failure_cause, Some(expected), "{diagnostic}");
         }
     }
+
+    #[tokio::test]
+    async fn terminal_runtime_diagnostic_is_sanitized_before_durable_activity() {
+        use djinn_db::{CreateSessionParams, SessionRepository};
+
+        let (context, task, _spec) = scripted_fixture().await;
+        let sessions = SessionRepository::new(context.db.clone(), context.event_bus.clone());
+        let session = sessions
+            .create(CreateSessionParams {
+                project_id: &task.project_id,
+                task_id: Some(&task.id),
+                model: "fixture-model",
+                agent_type: "worker",
+                metadata_json: None,
+                task_run_id: None,
+                pricing: None,
+                cost_basis: None,
+            })
+            .await
+            .expect("seed session");
+        let raw = "Pod status token=ghp_credential_shaped_secret OOMKilled";
+        finalize_terminal_runtime_observation(
+            &TaskRepository::new(context.db.clone(), context.event_bus.clone()),
+            &task,
+            &context,
+            raw,
+            SessionFailureCause::Infrastructure,
+        )
+        .await;
+        let stored = sessions.get(&session.id).await.expect("read").expect("session");
+        assert_eq!(stored.failure_cause, Some(SessionFailureCause::Infrastructure));
+        assert!(!serde_json::to_string(&stored).expect("serialize").contains(raw));
+        let activity = TaskRepository::new(context.db, context.event_bus)
+            .list_activity(&task.id)
+            .await
+            .expect("read diagnostic evidence");
+        let evidence = activity
+            .iter()
+            .find(|entry| entry.event_type == "session_error")
+            .expect("terminal observation activity");
+        assert!(!evidence.payload.contains("ghp_credential_shaped_secret"));
+        assert!(evidence.payload.contains("OOMKilled"));
+        assert!(evidence.payload.contains("[redacted]"));
+    }
+
 }
