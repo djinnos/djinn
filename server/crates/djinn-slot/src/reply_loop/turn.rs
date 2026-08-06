@@ -2284,6 +2284,10 @@ mod tests {
             )
             .await
             .expect("prepare");
+        let lease = match &preparation {
+            ModelTurnPreparation::Permit(permit) => permit.lease.clone().expect("enforced lease"),
+            other => panic!("expected fenced permit, got {other:?}"),
+        };
         let events = Arc::new(Mutex::new(vec!["mark_dispatching"]));
         let launch_events = events.clone();
         let error = launch_prepared_covered_attempt(
@@ -2302,19 +2306,33 @@ mod tests {
             events.lock().expect("events").as_slice(),
             ["mark_dispatching", "network_launch"]
         );
+        assert_eq!(
+            model_turn_lease_lifecycle_fixture(&db, &lease.lease_id).await,
+            "reconciled",
+            "a launch rejection must cancel the definitely-unsent dispatching lease"
+        );
         assert_eq!(model_turn_accounting_fixture(&db, pool).await, (0, 2, 0));
     }
 
     #[tokio::test]
     async fn covered_launch_helper_preserves_typed_non_permit_outcomes_without_launching() {
         let identity = ModelTurnLeaseIdentity::new(1, "fenced");
-        for preparation in [
-            ModelTurnPreparation::Wait(djinn_db::ModelTurnAdmissionWait::Draining),
-            ModelTurnPreparation::Rejected(djinn_db::ModelTurnAdmissionRejection::Off),
-            ModelTurnPreparation::DispatchFenced {
-                identity,
-                outcome: ModelTurnLeaseMutationOutcome::Fenced,
-            },
+        for (preparation, expected) in [
+            (
+                ModelTurnPreparation::Wait(djinn_db::ModelTurnAdmissionWait::Draining),
+                "wait",
+            ),
+            (
+                ModelTurnPreparation::Rejected(djinn_db::ModelTurnAdmissionRejection::Off),
+                "rejected",
+            ),
+            (
+                ModelTurnPreparation::DispatchFenced {
+                    identity,
+                    outcome: ModelTurnLeaseMutationOutcome::Fenced,
+                },
+                "dispatch_fenced",
+            ),
         ] {
             let attempted = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let launch_attempted = attempted.clone();
@@ -2329,7 +2347,21 @@ mod tests {
             .await
             .expect_err("non-permit preparation must be returned through the turn seam");
             assert!(!attempted.load(Ordering::SeqCst), "B1 must not launch");
-            assert!(error.downcast_ref::<ModelTurnAdmissionOutcome>().is_some());
+            let outcome = error
+                .downcast_ref::<ModelTurnAdmissionOutcome>()
+                .expect("non-permit preparation must remain downcastable");
+            assert!(
+                matches!(
+                    (expected, outcome),
+                    ("wait", ModelTurnAdmissionOutcome::Wait(_))
+                        | ("rejected", ModelTurnAdmissionOutcome::Rejected(_))
+                        | (
+                            "dispatch_fenced",
+                            ModelTurnAdmissionOutcome::DispatchFenced(_)
+                        )
+                ),
+                "expected concrete {expected} outcome, got {outcome:?}"
+            );
         }
     }
 
