@@ -191,8 +191,16 @@ async fn launch_prepared_covered_attempt_with_lease(
                     | djinn_db::ModelTurnLeaseMutationOutcome::Idempotent
             ) {
                 guard.start_watchdog();
+                Ok(guard)
+            } else {
+                // B1 already accepted this request. A fenced active mutation
+                // must terminalize it rather than hand it to stream polling
+                // without a watchdog.
+                drop(guard);
+                Err(anyhow::anyhow!(
+                    "covered attempt active hand-off was fenced after provider launch"
+                ))
             }
-            Ok(guard)
         }
         ModelTurnPreparation::Wait(wait) => {
             // A wait has already been selected as the typed supervisor

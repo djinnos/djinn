@@ -246,7 +246,10 @@ impl CoveredAttemptTerminalGuard {
         if self.identity.is_none() {
             return;
         }
-        let mut watchdog = self.watchdog.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut watchdog = self
+            .watchdog
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if watchdog.is_some() {
             return;
         }
@@ -256,7 +259,9 @@ impl CoveredAttemptTerminalGuard {
         let stop = self.watchdog_stop.clone();
         let fired = self.watchdog_aborted.clone();
         *watchdog = Some(tokio::spawn(async move {
-            let Some(identity) = identity else { return; };
+            let Some(identity) = identity else {
+                return;
+            };
             let mut ticks = tokio::time::interval(Duration::from_secs(20));
             ticks.tick().await;
             let mut last_success = tokio::time::Instant::now();
@@ -287,7 +292,11 @@ impl CoveredAttemptTerminalGuard {
 
     async fn stop_watchdog(&self) {
         self.watchdog_stop.cancel();
-        let handle = self.watchdog.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
+        let handle = self
+            .watchdog
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
         if let Some(handle) = handle {
             handle.abort();
             let _ = handle.await;
@@ -375,7 +384,12 @@ impl Drop for CoveredAttemptTerminalGuard {
         // Scheduling precedes every awaited operation, so cancellation of
         // `finish` cannot suppress cleanup.
         self.watchdog_stop.cancel();
-        if let Some(handle) = self.watchdog.get_mut().unwrap_or_else(std::sync::PoisonError::into_inner).take() {
+        if let Some(handle) = self
+            .watchdog
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
             handle.abort();
         }
         self.schedule_settlement(true);
