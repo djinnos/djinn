@@ -60,6 +60,25 @@
 //! compare-and-set to the former owner's own finalizer, which is legal and
 //! recorded.
 //!
+//! That restriction is worth stating as one invariant, because it was
+//! previously enforced in some paths and not others:
+//!
+//! > **A row in `calling` is closed only by its own owner's
+//! > [`CiRouteAttemptRepository::finalize_calling`], or by
+//! > [`CiRouteAttemptRepository::recover_calling_owner`] under a quiescent
+//! > startup handoff. Nothing else may terminalize it.**
+//!
+//! It is enforced structurally, in [`terminalize_cas_in_tx`] — the single
+//! statement every non-owner terminalization funnels through — rather than by
+//! each call site remembering. The reason is what a miss costs: closing a live
+//! `calling` row makes the owner's own compare-and-set fail, so a real
+//! provider result is discarded with nothing reported. The public methods that
+//! can be handed such a row ([`CiRouteAttemptRepository::terminalize`],
+//! [`CiRouteAttemptRepository::open_tier2_lease`],
+//! [`CiRouteAttemptRepository::resolve_tier2_lease`]) additionally check the
+//! phase *before* writing, so the outcome each reports stays truthful instead
+//! of announcing a supersession the fence silently refused.
+//!
 //! Every recovery *attempt* writes a row to `ci_route_calling_recoveries`,
 //! including the ones that correctly did nothing. A sweep that left a live
 //! owner alone has to be observable, or the claim "we never steal a live
@@ -130,7 +149,7 @@ const BY_PK: &str = "subject_kind = $1 AND subject_id = $2 AND provider_action_k
 /// A trivial two-way string mapping.
 ///
 /// Every durable vocabulary below is spelled exactly once in Rust and once in
-/// migration 191's `CHECK ... IN (...)`. Keeping the two in one place per enum
+/// migration 193's `CHECK ... IN (...)`. Keeping the two in one place per enum
 /// is what stops a new variant from binding as an unchecked string that the
 /// CHECK then rejects at 3am instead of at compile time.
 macro_rules! durable_enum {
@@ -176,7 +195,7 @@ durable_enum! {
     /// is carried alongside it. Every key on the table is scoped by it.
     CiSubjectKind {
         /// A board task. The only kind wave 1 writes, and the only kind with
-        /// database-enforced referential integrity (migration 191 derives
+        /// database-enforced referential integrity (migration 193 derives
         /// `task_id` from the subject and puts the foreign key on it).
         Task => "task",
         /// Reserved for a proposal-branch PR, which has no owning task and
@@ -355,6 +374,14 @@ durable_enum! {
 /// [`CiRouteAttemptRepository::reserve`] answer "already present" for *foreign*
 /// evidence, so the colliding route would silently never exist. Scoping by
 /// subject makes that class impossible rather than unlikely.
+///
+/// The cost, stated plainly because it is the flip side of that fix: every
+/// per-key limit is **per subject**. The Tier-2 head hold, the signature and
+/// head retry budgets, and the pass/merge close all stop at the subject
+/// boundary. With one task per PR that boundary never splits a PR head, so
+/// nothing observes it. The first non-task subject to share a PR head with a
+/// task subject gets a doubled head budget and a second concurrent Lead
+/// adjudication for that head, and owns deciding what to do about it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CiRouteSubject {
     pub kind: CiSubjectKind,
@@ -714,6 +741,14 @@ pub enum CiTier2LeaseOutcome {
     /// This row has already used its one trip to Tier 2 — the lease is open,
     /// or it resolved and may not be reopened.
     AlreadyRoutedToTier2(Box<CiRouteAttempt>),
+    /// The row is in `calling`: a provider call is in flight and the row
+    /// belongs to that owner. Nothing was leased, nothing was closed.
+    ///
+    /// This is a legal race, not a caller error — a poller can read a row as
+    /// `reserved`, decide to escalate, and lose to another poller's charge in
+    /// between. The route is adjudicated (or not) after the owner's provider
+    /// result lands, or after startup recovery, never by taking it here.
+    OwnedByProviderCall(Box<CiRouteAttempt>),
     /// The compare-and-set failed: the identity changed or a newer
     /// passing/merged observation already terminalized the row. The row is
     /// closed as `superseded_before_lead` with no lease and no Lead dispatch.
@@ -1610,8 +1645,27 @@ impl CiRouteAttemptRepository {
     /// `tier2_lease_key` is derived by wave 2 from **(PR number, PR-head
     /// SHA)** — never the lane, the run id, or the dequeue id. A lane-scoped
     /// key would allow two concurrent Lead adjudications for one PR head and
-    /// defeat the head-level hold. The subject scoping supplies repository
-    /// identity, so the key does not need to.
+    /// defeat the hold. The subject scoping supplies repository identity, so
+    /// the key does not need to.
+    ///
+    /// **Head scope is a choice among three conflicting spec statements, not a
+    /// derivation.** Proposal `nafu` calls this an "evidence-scoped route
+    /// lease" (lane transitions table, which would include the run id), "at
+    /// most one Lead adjudication for current evidence" (Idempotency, which is
+    /// ambiguous), and "a head-level hold" (Risks). Head scope is the most
+    /// conservative reading and the only one under which the retry-storm
+    /// safeguard exists, so it was chosen — but a wave that reads the
+    /// lane-transitions wording literally would widen the hold and reintroduce
+    /// concurrent adjudications for one head. Resolve the spec before
+    /// changing it.
+    ///
+    /// The hold is **per subject**, not global: the unique index is
+    /// `(subject_kind, subject_id, tier2_lease_key)`, so two different
+    /// subjects can hold the identical key open simultaneously. Every subject
+    /// is a task today and one PR maps to one task, so no two subjects share a
+    /// PR head and the distinction is invisible. It stops being invisible the
+    /// moment a non-task subject shares a head — see the `tier2_lease_key`
+    /// note in migration 193.
     ///
     /// # Errors
     ///
@@ -1631,6 +1685,23 @@ impl CiRouteAttemptRepository {
             tx.commit().await?;
             return Ok(CiTier2LeaseOutcome::NotFound);
         };
+
+        // A row whose provider call is in flight belongs to its owner, and
+        // this is a benign race rather than a caller bug: W2 can read a row as
+        // `reserved`, decide to escalate, and have another poller charge it to
+        // `calling` before this call lands.
+        //
+        // Returning early matters twice over. It stops the supersession branch
+        // below from stealing the row — which it used to do, flipping a live
+        // `calling` row to terminal `superseded_before_lead` and making the
+        // owner's `finalize_calling` a silent no-op. And it keeps the reported
+        // outcome honest: with only the structural fence in
+        // `terminalize_cas_in_tx`, the write would be refused but this method
+        // would still announce `SupersededBeforeLead`.
+        if attempt.action_phase == CiActionPhase::Calling {
+            tx.commit().await?;
+            return Ok(CiTier2LeaseOutcome::OwnedByProviderCall(Box::new(attempt)));
+        }
 
         // A row already terminalized by a newer passing/merged observation is
         // exactly the "newer outcome" half of the guard: the pass/merge path
@@ -1745,6 +1816,16 @@ impl CiRouteAttemptRepository {
         if attempt.tier2_lease_id.as_deref() != Some(lease_id)
             || attempt.tier2_lease_state != Some(CiTier2LeaseState::Open)
         {
+            tx.commit().await?;
+            return Ok(false);
+        }
+
+        // Same fence as `open_tier2_lease`, for the same reason: the
+        // supersession branch below terminalizes, and a `calling` row belongs
+        // to its owner. Unreachable while `open_tier2_lease` refuses to lease
+        // a `calling` row — which is exactly why it is here. This repository
+        // does not rely on one guard holding somewhere else.
+        if attempt.action_phase == CiActionPhase::Calling {
             tx.commit().await?;
             return Ok(false);
         }
@@ -2097,6 +2178,27 @@ async fn charge_counter(
 }
 
 /// The write-once terminal compare-and-set. Returns whether it wrote.
+///
+/// **`action_phase <> 'calling'` is a structural fence, not a caller
+/// courtesy.** A `calling` row's provider future may be in flight; closing it
+/// here would steal it, and the owner's own `finalize_calling` — which is
+/// compare-and-set against `action_phase = 'calling'` — would then return
+/// `false` and silently discard a real provider result.
+///
+/// The fence lives in this helper rather than at each call site because every
+/// non-owner terminalization funnels through here, and the cost of one call
+/// site forgetting it is a lost provider outcome that nothing reports. No
+/// legitimate caller needs it: `charge_and_begin_calling` and
+/// `recover_reserved` only reach terminalization from `reserved`,
+/// `close_routes_for_newer_outcome` carries its own `= 'reserved'` predicate,
+/// and `recover_calling_owner` — the one path that may legally take a
+/// `calling` row — uses its own owner-fenced UPDATE and never comes through
+/// here.
+///
+/// Callers that could be handed a `calling` row must still check the phase
+/// themselves *before* calling, so the outcome they report stays truthful: a
+/// silent `false` here would otherwise let them announce a supersession that
+/// did not happen.
 async fn terminalize_cas_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     subject: &CiRouteSubject,
@@ -2108,7 +2210,7 @@ async fn terminalize_cas_in_tx(
         "UPDATE ci_route_attempts \
          SET action_phase = 'terminal', terminal_outcome = $4, terminalized_at = now(), \
              superseded_by_evidence = COALESCE($5::jsonb, superseded_by_evidence), updated_at = now() \
-         WHERE {BY_PK} AND action_phase <> 'terminal'"
+         WHERE {BY_PK} AND action_phase <> 'terminal' AND action_phase <> 'calling'"
     ))
     .bind(subject.kind.as_str())
     .bind(&subject.id)
