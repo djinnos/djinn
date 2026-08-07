@@ -21,7 +21,7 @@ use crate::skills::ResolvedSkill;
 pub const VISUAL_SPEC_VERSION: &str = "1.2.0";
 
 /// Version of the platform-owned readiness guardrail catalog.
-pub const AGENT_READINESS_GUARDRAILS_VERSION: &str = "1.1.0";
+pub const AGENT_READINESS_GUARDRAILS_VERSION: &str = "1.2.0";
 
 // ─── Embedded asset ─────────────────────────────────────────────────────────
 
@@ -215,6 +215,9 @@ mod tests {
         "native_assets/agent-readiness-guardrails/fixtures/ci-timeout-runtime-evidence.json"
     );
 
+    const AGENT_READINESS_GUARDRAILS_METADATA: &str =
+        include_str!("native_assets/agent-readiness-guardrails/metadata.json");
+
     fn provider_key(job: &serde_json::Value) -> String {
         let mut labels = job["runner_labels"]
             .as_array()
@@ -274,7 +277,7 @@ mod tests {
 
     #[test]
     fn readiness_guardrails_are_registered_as_a_platform_architect_recommendation() {
-        let skill = native_skill_exact("agent-readiness-guardrails", "1.1.0")
+        let skill = native_skill_exact("agent-readiness-guardrails", "1.2.0")
             .expect("registered readiness pin should resolve");
         assert_eq!(skill.version, AGENT_READINESS_GUARDRAILS_VERSION);
         assert_eq!(skill.trust_level, "platform");
@@ -295,7 +298,7 @@ mod tests {
             Err(NativeSkillLookupError::VersionMismatch {
                 name: "agent-readiness-guardrails".to_string(),
                 requested_version: "1.0.0".to_string(),
-                registered_version: "1.1.0".to_string(),
+                registered_version: "1.2.0".to_string(),
             })
         );
     }
@@ -362,6 +365,80 @@ mod tests {
                 .content
                 .to_lowercase()
                 .contains("complexity guardrail")
+        );
+    }
+
+    /// `CONTRACT-API-001` must reject a drift check that leaves the author to
+    /// discover regeneration themselves. That is the shape that stalled seven
+    /// of eight fleet PRs: a check fired, named nothing, and every author paid
+    /// a session to rediscover the steps.
+    #[test]
+    fn api_contract_guardrail_requires_one_named_regeneration_command() {
+        let skill = native_skill("agent-readiness-guardrails").unwrap();
+        let entry = skill
+            .content
+            .split("### Guardrail:")
+            .find(|section| section.starts_with(" CONTRACT-API-001"))
+            .expect("catalog must carry the CONTRACT-API-001 entry");
+
+        // The selector is deliberately unchanged: this sharpens an existing
+        // guardrail rather than widening what it applies to.
+        assert!(
+            entry.contains("**Composition selector:** UI or client consumes typed API responses."),
+            "CONTRACT-API-001 must keep its existing composition selector",
+        );
+
+        for required in [
+            "one repository-local executable generation/update command",
+            "CI drift verification whose failure output names that command",
+            "the drift-check definition and its failure hint",
+            "manually sequence the regeneration steps",
+            "the failure output does not name the command",
+            "`protect-api-contract-codegen-drift`",
+            "a check that names that command on failure",
+            "repository evidence for the command and its named failure hint",
+            "the control is noncompliant — not high or medium confidence",
+        ] {
+            assert!(
+                entry.contains(required),
+                "CONTRACT-API-001 must require: {required}",
+            );
+        }
+
+        // No sibling universal derived-artifact guardrail may be introduced;
+        // the exact-nine assertion above is the cardinality half of that, and
+        // this is the naming half.
+        for forbidden in ["derived-artifact guardrail", "multi-artifact derivation"] {
+            assert!(
+                !skill.content.to_lowercase().contains(forbidden),
+                "no sibling universal guardrail may be added: {forbidden}",
+            );
+        }
+    }
+
+    /// The embedded catalog text and the pin advertised inside it must move
+    /// together. A body that still names the previous pin tells the architect
+    /// to refuse the catalog it was just handed.
+    #[test]
+    fn readiness_catalog_body_names_the_registered_pin() {
+        let skill = native_skill("agent-readiness-guardrails").unwrap();
+        assert_eq!(skill.version, AGENT_READINESS_GUARDRAILS_VERSION);
+        assert!(
+            skill.content.contains(&format!(
+                "`agent-readiness-guardrails@{AGENT_READINESS_GUARDRAILS_VERSION}`"
+            )),
+            "catalog body must name its own registered pin",
+        );
+
+        // The checked-in asset descriptor is the third copy of this version.
+        // All three move together or the pin the architect is handed does not
+        // match the asset it resolves.
+        let metadata: serde_json::Value = serde_json::from_str(AGENT_READINESS_GUARDRAILS_METADATA)
+            .expect("readiness asset metadata must be valid JSON");
+        assert_eq!(
+            metadata["version"].as_str(),
+            Some(AGENT_READINESS_GUARDRAILS_VERSION),
+            "native_assets metadata.json must carry the registered version",
         );
     }
 

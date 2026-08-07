@@ -4,8 +4,8 @@ use djinn_db::repositories::retrieval_trace::{
     RetrievalTraceRepository, TaxonomyV1RetrievalHealthGroup,
 };
 use djinn_db::{
-    NoteRepository, ProjectRepository, normalize_virtual_note_path,
-    permalink_from_virtual_note_path, resolve_short_ids,
+    NoteAccessAttribution, NoteAccessSource, NoteRepository, ProjectRepository,
+    normalize_virtual_note_path, permalink_from_virtual_note_path, resolve_short_ids,
 };
 use djinn_telemetry::memory_retrieval::{
     MemoryRetrievalMetrics, RetrievalEntryPoint, RetrievalOutcome, RetrievalStage,
@@ -17,14 +17,16 @@ use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use crate::server::DjinnMcpServer;
 
 use super::{
-    BrokenLinksParams, BuildContextParams, ExtractedAuditParams, HealthParams, ListParams,
-    MemoryBrokenLinksResponse, MemoryBuildContextResponse, MemoryExtractedAuditResponse,
-    MemoryHealthResponse, MemoryListResponse, MemoryNoteResponse, MemoryOrphansResponse,
-    MemoryProposalOverview, MemoryRecallTraceResponse, MemoryRetrievalOutcomesReportResponse,
-    MemorySearchResponse, MemorySearchResultItem, OrphansParams, ReadParams, RecallTraceParams,
-    ResolvedMention, RetrievalEntryPointHealthSummary, RetrievalHealthResponse,
-    RetrievalHealthScope, RetrievalOutcomesReportParams, RetrievalTaxonomyValidationErrorSummary,
-    SearchParams, TaxonomyV1DispositionSummary, TaxonomyV1RetrievalHealthSummary, note_to_view,
+    BrokenLinksParams, BuildContextParams, ExtractedAuditParams, HealthParams,
+    InjectedPullRateReportParams, ListParams, MemoryBrokenLinksResponse,
+    MemoryBuildContextResponse, MemoryExtractedAuditResponse, MemoryHealthResponse,
+    MemoryInjectedPullRateReportResponse, MemoryListResponse, MemoryNoteResponse,
+    MemoryOrphansResponse, MemoryProposalOverview, MemoryRecallTraceResponse,
+    MemoryRetrievalOutcomesReportResponse, MemorySearchResponse, MemorySearchResultItem,
+    OrphansParams, ReadParams, RecallTraceParams, ResolvedMention,
+    RetrievalEntryPointHealthSummary, RetrievalHealthResponse, RetrievalHealthScope,
+    RetrievalOutcomesReportParams, RetrievalTaxonomyValidationErrorSummary, SearchParams,
+    TaxonomyV1DispositionSummary, TaxonomyV1RetrievalHealthSummary, note_to_view,
     parse_proposal_ref_item, parse_task_ref_item,
 };
 
@@ -39,6 +41,18 @@ pub async fn memory_retrieval_outcomes_report(
     p: RetrievalOutcomesReportParams,
 ) -> MemoryRetrievalOutcomesReportResponse {
     super::retrieval_outcomes_report::report(server, p).await
+}
+
+/// Operator-readable `P(memory_read | Injected)` for one project over an
+/// explicit timezone-aware `[start, end)` interval (proposal u46i AC6).
+///
+/// Surfaced as the `memory_injected_pull_rate_report` MCP tool; see
+/// [`super::injected_pull_rate_report`] for the interval and evidence contract.
+pub async fn memory_injected_pull_rate_report(
+    server: &DjinnMcpServer,
+    p: InjectedPullRateReportParams,
+) -> MemoryInjectedPullRateReportResponse {
+    super::injected_pull_rate_report::report(server, p).await
 }
 
 fn normalize_folder_filter(folder: Option<String>) -> Option<String> {
@@ -130,13 +144,20 @@ async fn record_retrieved_notes(
     server: &DjinnMcpServer,
     repo: &NoteRepository,
     note_ids: &[String],
+    attribution: &NoteAccessAttribution,
 ) {
     // ADR-054 retrieval boundary: notes returned to the MCP client count as accessed,
     // even if the client does not issue a follow-up `memory_read`. This keeps search
     // result retrieval flows visible to temporal/co-access scoring without touching
     // notes that were only considered internally during ranking.
+    //
+    // The ledger source is `MemorySearch`, NOT `MemoryRead`: appearing in a
+    // result set is not a pull, and the injected-pull-rate metric must never
+    // count it as one.
     for note_id in note_ids {
-        let _ = repo.touch_accessed(note_id).await;
+        let _ = repo
+            .touch_accessed(note_id, NoteAccessSource::MemorySearch, attribution)
+            .await;
         server.record_memory_read(note_id).await;
     }
 }
@@ -245,7 +266,19 @@ fn extract_short_id_candidates(content: &str) -> Vec<String> {
     candidates
 }
 
-pub async fn memory_read(server: &DjinnMcpServer, p: ReadParams) -> MemoryNoteResponse {
+/// Read one note.
+///
+/// `attribution` names the session/run that issued the read so the
+/// `note_access_events` ledger row can be correlated back to the retrieval trace
+/// that injected the note (`P(memory_read | Injected)`, proposal u46i AC6). Pass
+/// [`NoteAccessAttribution::unattributed`] from session-less surfaces (the host
+/// MCP server, operator tooling); the access is still recorded and is counted in
+/// the report's coverage diagnostics rather than dropped.
+pub async fn memory_read(
+    server: &DjinnMcpServer,
+    p: ReadParams,
+    attribution: &NoteAccessAttribution,
+) -> MemoryNoteResponse {
     let project_id = match resolve_project_id(server, &p.project).await {
         Ok(id) => id,
         Err(error) => return MemoryNoteResponse::error(error),
@@ -294,7 +327,9 @@ pub async fn memory_read(server: &DjinnMcpServer, p: ReadParams) -> MemoryNoteRe
         }
     };
 
-    let _ = repo.touch_accessed(&note.id).await;
+    let _ = repo
+        .touch_accessed(&note.id, NoteAccessSource::MemoryRead, attribution)
+        .await;
     if note.abstract_.is_none() || note.overview.is_none() {
         server.enqueue_missing_summary_backfill(&note.id).await;
     }
@@ -341,10 +376,17 @@ pub async fn memory_read(server: &DjinnMcpServer, p: ReadParams) -> MemoryNoteRe
     response
 }
 
+/// Search notes and proposals.
+///
+/// `attribution` is threaded into the `note_access_events` ledger for every
+/// returned note. Those rows are tagged `memory_search`, not `memory_read`: the
+/// injected-pull-rate metric must be able to tell an explicit pull apart from a
+/// note that merely appeared in a result set.
 pub async fn memory_search(
     server: &DjinnMcpServer,
     p: SearchParams,
     task_id: Option<&str>,
+    attribution: &NoteAccessAttribution,
 ) -> MemorySearchResponse {
     let observer = RetrievalObserver::new(server, RetrievalEntryPoint::Dispatch);
 
@@ -416,7 +458,7 @@ pub async fn memory_search(
                 .filter(|r| r.entity == "note")
                 .map(|result| result.id.clone())
                 .collect();
-            record_retrieved_notes(server, &repo, &retrieved_note_ids).await;
+            record_retrieved_notes(server, &repo, &retrieved_note_ids, attribution).await;
 
             let response = MemorySearchResponse {
                 results: results

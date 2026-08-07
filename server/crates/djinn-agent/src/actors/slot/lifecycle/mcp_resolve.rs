@@ -450,7 +450,7 @@ mod tests {
         let (merged, names) = merge_native_skills(
             "architect",
             project,
-            readiness_trigger("agent-readiness-guardrails", "1.1.0"),
+            readiness_trigger("agent-readiness-guardrails", "1.2.0"),
         )
         .unwrap();
         assert_eq!(names, vec!["agent-readiness-guardrails"]);

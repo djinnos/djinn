@@ -2345,6 +2345,10 @@ async fn planner_production_boundary_scope_budget_runs_planner_without_injection
     let mut task = create_project_epic_task(&db, &events, "Planner epic", "Planner task").await;
     task.created_by_user_id = "creator-real".into();
     let note_repo = NoteRepository::new(db.clone(), EventBus::noop());
+    // R1: the rendered line is labelled by the note's permalink, not its title,
+    // so the seeded permalinks are what "a scope note reached the prompt" is
+    // asserted against.
+    let mut scope_permalinks = Vec::new();
     for index in 0..10 {
         let note = note_repo
             .create(
@@ -2360,6 +2364,7 @@ async fn planner_production_boundary_scope_budget_runs_planner_without_injection
             .set_confidence(&note.id, 0.95)
             .await
             .expect("raise scope confidence");
+        scope_permalinks.push(note.permalink);
     }
 
     let mut app_state = agent_context_from_db(db, CancellationToken::new());
@@ -2406,7 +2411,12 @@ async fn planner_production_boundary_scope_budget_runs_planner_without_injection
     .await;
 
     let knowledge = context.knowledge_context.expect("scope context");
-    assert!(knowledge.contains("Scope budget note"));
+    assert!(
+        scope_permalinks
+            .iter()
+            .any(|permalink| knowledge.contains(permalink.as_str())),
+        "a scope-retrieved note must reach the prompt"
+    );
     assert!(!knowledge.contains("Oversized planned note"));
     assert_eq!(
         knowledge.lines().count(),
@@ -2434,6 +2444,10 @@ async fn scope_prompt_packing_non_default_budget_differs_from_default_budget() {
     let events = EventBus::noop();
     let task = create_project_epic_task(&db, &events, "Packing epic", "Packing task").await;
     let note_repo = NoteRepository::new(db.clone(), EventBus::noop());
+    // R1: count injected notes by permalink, not by title — the title is no
+    // longer rendered at all, so a title match now counts zero for both arms
+    // and would make the discriminating assertion trivially false.
+    let mut scope_permalinks = Vec::new();
     for index in 0..8 {
         let note = note_repo
             .create(
@@ -2449,6 +2463,7 @@ async fn scope_prompt_packing_non_default_budget_differs_from_default_budget() {
             .set_confidence(&note.id, 0.95)
             .await
             .expect("raise scope confidence");
+        scope_permalinks.push(note.permalink);
     }
 
     let mut constrained_state = agent_context_from_db(db.clone(), CancellationToken::new());
@@ -2486,12 +2501,18 @@ async fn scope_prompt_packing_non_default_budget_differs_from_default_budget() {
     assert_ne!(constrained, default);
     assert!(constrained.len() <= 4_096);
     assert!(default.len() > 4_096);
-    assert!(
-        constrained
-            .matches("Budget discriminating scope note")
+    let injected_count = |rendered: &str| {
+        scope_permalinks
+            .iter()
+            .filter(|permalink| rendered.contains(permalink.as_str()))
             .count()
-            < default.matches("Budget discriminating scope note").count(),
-        "the configured byte budget must prune an otherwise injectable scope note"
+    };
+    assert!(
+        injected_count(&constrained) < injected_count(&default),
+        "the configured byte budget must prune an otherwise injectable scope note \
+         (constrained injected {}, default injected {})",
+        injected_count(&constrained),
+        injected_count(&default)
     );
 }
 
@@ -2769,10 +2790,14 @@ async fn planner_production_boundary_scope_first_dedup_caps_and_order_are_determ
                 .knowledge_injection_budget_bytes as usize
     );
     assert_eq!(knowledge.matches("**[Note]").count(), 6);
+    // R1: the scope-retrieved entry is labelled by its permalink instead of its
+    // "Scope first" title, so the scope-first ordering marker is the permalink.
+    // The planner-sourced `**[Note]` entries are rendered by a different code
+    // path and still carry their titles.
     assert_ordered(
         knowledge,
         &[
-            "Scope first",
+            scope_note.permalink.as_str(),
             "First ranked unique",
             "Second ranked unique",
             "Third planned",

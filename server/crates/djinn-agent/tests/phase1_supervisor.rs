@@ -107,6 +107,7 @@ fn test_agent_context(db: Database) -> AgentContext {
         memory_intent_planner: djinn_agent::context::MemoryIntentPlannerConfig::default(),
         knowledge_injection: djinn_core::models::KnowledgeInjectionConfig::default(),
         compaction_cs: djinn_slot::reply_loop::CompactionCriticalSection::default(),
+        session_id: None,
     }
 }
 

@@ -445,7 +445,7 @@ fn disabled_knowledge_outcome(
 /// - **Trigger:** `{ "shape": "scope_paths", "task_paths": [...] }`.
 /// - **Outcomes** (`TraceCandidate`): `injected` (top-K, survived budget — no
 ///   reason), `min_confidence` (<0.3), `not_top_k`, `budget_pruned`,
-///   `dedupe`, `search_error`.
+///   `oversized_skipped`, `dedupe`, `search_error`.
 /// - **Durations:** `candidate_fetch_ms`, `classify_ms`, `prompt_pack_ms`, `persist_ms`.
 /// - **Tokens:** `ceil(injected_chars/4)`. **Cap:** `DEFAULT_CANDIDATE_CAP`;
 ///   `exceeded`=`len>=cap`.
@@ -841,10 +841,11 @@ fn classify_knowledge_candidates_for_error(
         .collect()
 }
 
-/// Apply budget-pruned outcomes from the packed notes to the classified candidates.
+/// Apply pack-time drop outcomes from the packed notes to the classified candidates.
 ///
-/// Candidates initially classified as `Injected` are reclassified to `BudgetPruned`
-/// if the packing outcome for the corresponding note is `BudgetPruned`.
+/// Candidates initially classified as `Injected` are reclassified to
+/// `BudgetPruned` or `OversizedSkipped` if the packing outcome for the
+/// corresponding note is `BudgetPruned` or `OversizedSkipped` respectively.
 /// Deduplication: if multiple injected candidates resolve to the same permalink
 /// (shouldn't happen in practice but handled defensively), the first wins and
 /// subsequent ones become `Dedupe`.
@@ -893,10 +894,19 @@ fn apply_budget_outcomes(
             continue;
         }
 
-        // Check budget pruning.
-        if let Some(&NotePackDisposition::BudgetPruned) = disposition_by_permalink.get(permalink) {
-            candidate.outcome = CandidateOutcome::Skipped;
-            candidate.skipped_reason = Some(SkippedReason::BudgetPruned);
+        // Check pack-time drops. `OversizedSkipped` and `BudgetPruned` are
+        // both non-injections and must be reported distinctly: the former is
+        // a whole-note drop that no budget could have saved.
+        match disposition_by_permalink.get(permalink) {
+            Some(NotePackDisposition::BudgetPruned) => {
+                candidate.outcome = CandidateOutcome::Skipped;
+                candidate.skipped_reason = Some(SkippedReason::BudgetPruned);
+            }
+            Some(NotePackDisposition::OversizedSkipped) => {
+                candidate.outcome = CandidateOutcome::Skipped;
+                candidate.skipped_reason = Some(SkippedReason::OversizedSkipped);
+            }
+            _ => {}
         }
     }
 
@@ -916,9 +926,13 @@ fn trace_candidates_from_pack(
             NotePackDisposition::Injected => (CandidateOutcome::Injected, None),
             NotePackDisposition::ConfidenceFiltered => (CandidateOutcome::Skipped, Some(SkippedReason::MinConfidence)),
             NotePackDisposition::NotTopK => (CandidateOutcome::Skipped, Some(SkippedReason::NotTopK)),
-            // Detailed legacy candidates cannot express oversized separately;
-            // taxonomy-v1 counts below retain that exact disposition.
-            NotePackDisposition::OversizedSkipped | NotePackDisposition::BudgetPruned => (CandidateOutcome::Skipped, Some(SkippedReason::BudgetPruned)),
+            // `OversizedSkipped` is a whole-note DROP (the fixed per-line
+            // overhead alone exceeds the line cap, so nothing renders) while
+            // `BudgetPruned` merely lost a competition for remaining space.
+            // They are reported distinctly so a silently deleted note stays
+            // visible to the operator (proposal u46i AC4).
+            NotePackDisposition::OversizedSkipped => (CandidateOutcome::Skipped, Some(SkippedReason::OversizedSkipped)),
+            NotePackDisposition::BudgetPruned => (CandidateOutcome::Skipped, Some(SkippedReason::BudgetPruned)),
         };
         TraceCandidate {
             note_id: note.id.clone(), permalink: Some(note.permalink.clone()), title: Some(note.title.clone()),

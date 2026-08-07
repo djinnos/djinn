@@ -9553,6 +9553,173 @@
     "concurrent_safe": false
   },
   {
+    "name": "memory_injected_pull_rate_report",
+    "description": "Read P(memory_read | Injected) — how often a knowledge note that was injected into a prompt was then explicitly pulled back by the agent via memory_read — for one project over an explicit timezone-aware RFC-3339 [start,end) interval. Read-only and observational: it makes no causal claim. Injected candidates are joined to the note_access_events ledger on stable note_id (never permalink, which move_note mutates), correlated by task_run_id or session_id, and counted only when the read strictly follows the injection. memory_search result touches are recorded but are NEVER counted as pulls. ALWAYS read the `evidence` field before `pull_rate`; it is exactly one of: `no_injected_candidates` (the window contained nothing to measure — this is NOT a zero pull rate), `no_attributable_candidates` (injected candidates exist but none carry a task run or session, so nothing can be correlated — an attribution-coverage gap, NOT a zero pull rate), `no_access_ledger_coverage` (attributable candidates exist but the window holds zero memory_read ledger rows, so the rate reflects missing instrumentation rather than agent behaviour), and `measured` (the only value under which pull_rate is a real measurement). pull_rate is null whenever the denominator is zero, and its denominator is attributable_candidate_count, not injected_candidate_count; unattributable and identityless candidates are reported in diagnostics instead of being silently counted as not-pulled. Requests outside the protected 30-day retention window are rejected without clipping.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "required": [
+        "start",
+        "end",
+        "timezone"
+      ],
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "project": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "project_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "start": {
+          "type": "string"
+        },
+        "end": {
+          "type": "string"
+        },
+        "timezone": {
+          "type": "string"
+        }
+      }
+    },
+    "outputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$defs": {
+        "InjectedPullRateReportSchema": {
+          "type": "object",
+          "properties": {
+            "project_id": {
+              "type": "string"
+            },
+            "window_start": {
+              "type": "string"
+            },
+            "window_end": {
+              "type": "string"
+            },
+            "timezone": {
+              "type": "string"
+            },
+            "injected_candidate_count": {
+              "description": "Every candidate a trace in the window recorded as `injected`, including\ncandidates that carry no run attribution.",
+              "type": "integer",
+              "format": "int64"
+            },
+            "injected_note_count": {
+              "description": "Distinct notes among those candidates.",
+              "type": "integer",
+              "format": "int64"
+            },
+            "attributable_candidate_count": {
+              "description": "Injected candidates whose trace carries a task run or session. This is\nthe denominator of `pull_rate` — NOT `injected_candidate_count`.",
+              "type": "integer",
+              "format": "int64"
+            },
+            "pulled_candidate_count": {
+              "description": "Attributable injected candidates followed by a `memory_read` of the same\nnote by the same run or session. The numerator of `pull_rate`.",
+              "type": "integer",
+              "format": "int64"
+            },
+            "pull_rate": {
+              "description": "`pulled_candidate_count / attributable_candidate_count`. Null when the\ndenominator is zero; never a bare 0.0 standing in for \"no data\".",
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double"
+            },
+            "evidence": {
+              "description": "Read this BEFORE `pull_rate`. One of `no_injected_candidates`,\n`no_attributable_candidates`, `no_access_ledger_coverage`, `measured`.\nOnly `measured` makes `pull_rate` a real measurement.",
+              "type": "string"
+            },
+            "diagnostics": {
+              "$ref": "#/$defs/InjectedPullRateDiagnosticsSchema"
+            }
+          },
+          "required": [
+            "project_id",
+            "window_start",
+            "window_end",
+            "timezone",
+            "injected_candidate_count",
+            "injected_note_count",
+            "attributable_candidate_count",
+            "pulled_candidate_count",
+            "evidence",
+            "diagnostics"
+          ]
+        },
+        "InjectedPullRateDiagnosticsSchema": {
+          "type": "object",
+          "properties": {
+            "unattributable_candidate_count": {
+              "description": "Injected candidates whose trace has neither task_run_id nor session_id;\nexcluded from the denominator, never counted as \"not pulled\".",
+              "type": "integer",
+              "format": "int64"
+            },
+            "identityless_candidate_count": {
+              "description": "Injected candidates with no stable note_id in the stored candidate JSON.",
+              "type": "integer",
+              "format": "int64"
+            },
+            "memory_read_event_count": {
+              "description": "`memory_read` ledger rows in the window. Zero alongside a non-zero\nattributable_candidate_count means the ledger has no coverage yet.",
+              "type": "integer",
+              "format": "int64"
+            },
+            "unattributed_memory_read_event_count": {
+              "description": "`memory_read` rows carrying neither a task run nor a session.",
+              "type": "integer",
+              "format": "int64"
+            },
+            "memory_search_event_count": {
+              "description": "`memory_search` rows, reported for contrast only. A search result touch\nis not a pull and never enters the numerator.",
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          "required": [
+            "unattributable_candidate_count",
+            "identityless_candidate_count",
+            "memory_read_event_count",
+            "unattributed_memory_read_event_count",
+            "memory_search_event_count"
+          ]
+        }
+      },
+      "properties": {
+        "report": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/InjectedPullRateReportSchema"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "readOnly": false,
+    "destructive": true,
+    "idempotent": false,
+    "openWorld": false,
+    "concurrent_safe": false
+  },
+  {
     "name": "memory_list",
     "description": "List notes in a folder with depth control. Returns compact summaries without full content.",
     "inputSchema": {

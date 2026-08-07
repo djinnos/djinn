@@ -72,6 +72,7 @@ fn test_agent_context(db: Database) -> AgentContext {
         knowledge_injection: djinn_core::models::KnowledgeInjectionConfig::default(),
         shell_launch: None,
         compaction_cs: djinn_slot::reply_loop::CompactionCriticalSection::default(),
+        session_id: None,
     }
 }
 
