@@ -45,6 +45,80 @@ fn assert_is_human_readable(rejection: &AdmissionRejection) {
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn typed_evidence_retry_fixture_covers_success_and_rejection_boundaries() {
+    let scenarios = [
+        (
+            djinn_db::test_support::TypedEvidenceRetryScenarioForTest::Failed,
+            true,
+        ),
+        (
+            djinn_db::test_support::TypedEvidenceRetryScenarioForTest::StaleFailure,
+            false,
+        ),
+        (
+            djinn_db::test_support::TypedEvidenceRetryScenarioForTest::NonFailed,
+            false,
+        ),
+        (
+            djinn_db::test_support::TypedEvidenceRetryScenarioForTest::OccupiedSlot,
+            false,
+        ),
+    ];
+    for (scenario, accepted) in scenarios {
+        let (server, db, proposal, user_id, judge_task_id) = setup_demand_test().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let project_id = repo.targets(&proposal.id).await.unwrap()[0]
+            .project_id
+            .clone();
+        let fixture = djinn_db::test_support::materialize_typed_evidence_retry_fixture_for_test(
+            &db,
+            &proposal.id,
+            &project_id,
+            &judge_task_id,
+            &user_id,
+            scenario,
+        )
+        .await;
+        let before = djinn_db::test_support::typed_evidence_retry_snapshot_for_test(
+            &db,
+            &proposal.id,
+            &fixture.finding_id,
+            &fixture.prior_spike_task_id,
+        )
+        .await;
+        let response = djinn_core::auth_context::SESSION_USER_ID.scope(Some(user_id), async {
+            server.dispatch_tool("proposal_refinement_retry_evidence", serde_json::json!({"finding_id": fixture.finding_id.clone(), "failed_transition_id": fixture.failed_transition_id.clone()})).await.unwrap()
+        }).await;
+        assert_eq!(
+            response["accepted"], accepted,
+            "scenario {scenario:?}: {response}"
+        );
+        let after = djinn_db::test_support::typed_evidence_retry_snapshot_for_test(
+            &db,
+            &proposal.id,
+            &fixture.finding_id,
+            &fixture.prior_spike_task_id,
+        )
+        .await;
+        if accepted {
+            assert_eq!(after.attempts.len(), before.attempts.len() + 1);
+            assert_eq!(after.planned_checks.len(), before.planned_checks.len() + 1);
+            assert_eq!(after.prior_task_status, "closed");
+            assert_eq!(after.retry_idempotency_rows.len(), 1);
+            assert!(after.routing.iter().any(|(_, role)| role == "architect"));
+            assert!(
+                after
+                    .labels
+                    .iter()
+                    .any(|(_, labels)| labels.to_string().contains("read-only"))
+            );
+        } else {
+            assert_eq!(before, after, "rejected retry must be immutable");
+        }
+    }
+}
+
 #[test]
 fn every_admission_error_variant_renders_a_human_readable_message() {
     let variants = vec![

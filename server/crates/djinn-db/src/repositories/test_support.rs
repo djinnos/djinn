@@ -7,8 +7,10 @@ use tokio::sync::broadcast;
 use crate::database::Database;
 
 mod refinement_read_only;
+mod test_support_retry;
 
 pub use refinement_read_only::*;
+pub use test_support_retry::*;
 
 /// Counts every demand-owned relation for one proposal and its target project.
 ///
