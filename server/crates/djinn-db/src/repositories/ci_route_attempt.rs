@@ -137,6 +137,7 @@ const ROW_COLUMNS: &str = "subject_kind, subject_id, provider_action_key, lane, 
     tier2_lease_id, tier2_lease_key, tier2_lease_state, tier2_lease_reason, \
     to_char(tier2_leased_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS tier2_leased_at, \
     tier2_resolution, lead_session_id, reopen_mode, diagnostic_reason, park_justification, \
+    lead_rejection, \
     provider_error::text AS provider_error, superseded_by_evidence::text AS superseded_by_evidence";
 
 /// `WHERE` fragment naming one row by its full subject-scoped primary key.
@@ -339,6 +340,69 @@ durable_enum! {
 }
 
 durable_enum! {
+    /// Why a delivered Lead result was replaced by the single diagnostic
+    /// fallback (proposal `nafu`, wave 5).
+    ///
+    /// # Why this is durable and not a log line
+    ///
+    /// The supervisor derives a fallback's [`CiDiagnosticReason`] from the
+    /// *route's* Tier-2 reason, so a Lead that timed out on a `causal_failure`
+    /// route is recorded with `no_grounded_remedy` — the identical spelling a
+    /// Lead that answered and genuinely found no remedy produces. Reporting
+    /// therefore conflates "Lead diagnosed" with "Lead never answered" unless
+    /// the rejection itself is stored. `None` means the delivered result was
+    /// accepted as submitted.
+    ///
+    /// This is the same closed set the supervisor validates against; it lives
+    /// here so the vocabulary is spelled once in Rust and once in migration
+    /// 193's CHECK, like every other durable enum in this module.
+    CiLeadRejection {
+        /// `approve` / `approve_conflict` on non-passing CI evidence.
+        ApprovedNonPassingCi => "approved_non_passing_ci",
+        /// A reopen naming both plans, or neither.
+        ReopenPlanAmbiguous => "reopen_plan_ambiguous",
+        /// A repair whose `verification_command` was not copied from
+        /// repository/task context or CI evidence.
+        VerificationCommandNotRepositoryValid => "verification_command_not_repository_valid",
+        /// A reopen whose directive is empty or cites no evidence handle.
+        DirectiveNotGrounded => "directive_not_grounded",
+        /// A `diagnostic_reason` outside the closed set.
+        DiagnosticReasonUnknown => "diagnostic_reason_unknown",
+        /// A park on a route the proposal says must reopen.
+        ParkUnavailableForRoute => "park_unavailable_for_route",
+        /// A park whose dossier is missing, incomplete, or cites no evidence.
+        ParkNotCited => "park_not_cited",
+        /// A supersede with no replacement tasks.
+        SupersedeWithoutReplacements => "supersede_without_replacements",
+        /// A decision string outside the five existing results.
+        UnknownDecision => "unknown_decision",
+        /// The session finalized through a tool that is not `submit_decision`.
+        UnsupportedFinalizeTool => "unsupported_finalize_tool",
+        /// The session produced no result at all.
+        NoResult => "no_result",
+        /// The session timed out. **The reason this enum exists**: without it
+        /// this case is indistinguishable from a delivered `no_grounded_remedy`.
+        TimedOut => "timed_out",
+    }
+}
+
+impl CiLeadRejection {
+    /// Whether Lead produced no adjudication at all, as opposed to producing
+    /// one this contract refused.
+    ///
+    /// The distinction is the operational one: the first three are a Lead that
+    /// never answered (prompt, deadline, or transport), the rest are a Lead
+    /// that answered something the contract does not allow.
+    #[must_use]
+    pub fn is_absent_result(self) -> bool {
+        matches!(
+            self,
+            Self::TimedOut | Self::NoResult | Self::UnsupportedFinalizeTool
+        )
+    }
+}
+
+durable_enum! {
     /// State of the current-evidence Tier-2 hold.
     CiTier2LeaseState {
         Open => "open",
@@ -488,6 +552,9 @@ pub struct CiRouteAttempt {
     pub reopen_mode: Option<CiReopenMode>,
     pub diagnostic_reason: Option<CiDiagnosticReason>,
     pub park_justification: Option<String>,
+    /// Why the delivered Lead result was replaced by the diagnostic fallback,
+    /// or `None` when it was accepted as submitted.
+    pub lead_rejection: Option<CiLeadRejection>,
 
     pub provider_error: Option<String>,
     pub superseded_by_evidence: Option<String>,
@@ -548,6 +615,7 @@ impl CiRouteAttempt {
                 CiDiagnosticReason::parse,
             )?,
             park_justification: row.try_get("park_justification")?,
+            lead_rejection: opt_enum(row.try_get("lead_rejection")?, CiLeadRejection::parse)?,
             provider_error: row.try_get("provider_error")?,
             superseded_by_evidence: row.try_get("superseded_by_evidence")?,
         })
@@ -779,6 +847,10 @@ pub struct CiTier2Resolution {
     pub reopen_mode: Option<CiReopenMode>,
     pub diagnostic_reason: Option<CiDiagnosticReason>,
     pub park_justification: Option<String>,
+    /// Set when this resolution is the **fallback** rather than Lead's own
+    /// result. See [`CiLeadRejection`] for why it cannot be inferred from
+    /// `diagnostic_reason`.
+    pub rejection: Option<CiLeadRejection>,
 }
 
 impl CiTier2Resolution {
@@ -793,6 +865,7 @@ impl CiTier2Resolution {
             reopen_mode: Some(CiReopenMode::Repair),
             diagnostic_reason: None,
             park_justification: None,
+            rejection: None,
         }
     }
 
@@ -804,6 +877,7 @@ impl CiTier2Resolution {
             reopen_mode: Some(CiReopenMode::Diagnose),
             diagnostic_reason: Some(reason),
             park_justification: None,
+            rejection: None,
         }
     }
 
@@ -815,6 +889,7 @@ impl CiTier2Resolution {
             reopen_mode: None,
             diagnostic_reason: None,
             park_justification: Some(justification.into()),
+            rejection: None,
         }
     }
 
@@ -826,10 +901,30 @@ impl CiTier2Resolution {
             reopen_mode: None,
             diagnostic_reason: None,
             park_justification: None,
+            rejection: None,
         }
     }
 
+    /// Mark this resolution as the fallback that replaced a delivered result.
+    ///
+    /// Only legal on a diagnostic reopen: the fallback is *always* one
+    /// diagnostic reopen, and a repair, park, or supersede is by definition a
+    /// result Lead produced and this contract accepted. [`Self::validate`]
+    /// enforces that, and so does migration 193's
+    /// `ci_route_attempts_rejection_pairing_check`.
+    #[must_use]
+    pub fn rejected_as(mut self, rejection: CiLeadRejection) -> Self {
+        self.rejection = Some(rejection);
+        self
+    }
+
     fn validate(&self) -> Result<()> {
+        if self.rejection.is_some() && self.reopen_mode != Some(CiReopenMode::Diagnose) {
+            return Err(DbError::InvalidData(format!(
+                "`{}` cannot carry a Lead rejection: the fallback is always one diagnostic reopen",
+                self.outcome.as_str()
+            )));
+        }
         if self.outcome.is_provider_finalization() {
             return Err(DbError::InvalidData(format!(
                 "`{}` asserts a provider call and cannot be a Tier-2 resolution",
@@ -919,6 +1014,16 @@ pub struct CiRouteAttemptRepository {
 }
 
 impl CiRouteAttemptRepository {
+    #[must_use]
+    /// The pool this repository reads and writes.
+    ///
+    /// Sibling module access only ([`super::ci_route_report`]), so the
+    /// reporting reads sit next to the writes they report on without either
+    /// side re-deriving a connection.
+    pub(crate) fn db(&self) -> &Database {
+        &self.db
+    }
+
     #[must_use]
     pub fn new(db: Database) -> Self {
         Self { db }
@@ -2290,7 +2395,8 @@ async fn resolve_lease_in_tx(
     sqlx::query(&format!(
         "UPDATE ci_route_attempts \
          SET tier2_lease_state = 'resolved', tier2_resolved_at = now(), tier2_resolution = $5, \
-             reopen_mode = $6, diagnostic_reason = $7, park_justification = $8, updated_at = now() \
+             reopen_mode = $6, diagnostic_reason = $7, park_justification = $8, \
+             lead_rejection = $9, updated_at = now() \
          WHERE {BY_PK} AND tier2_lease_id = $4"
     ))
     .bind(subject.kind.as_str())
@@ -2301,6 +2407,7 @@ async fn resolve_lease_in_tx(
     .bind(resolution.reopen_mode.map(CiReopenMode::as_str))
     .bind(resolution.diagnostic_reason.map(CiDiagnosticReason::as_str))
     .bind(resolution.park_justification.as_deref())
+    .bind(resolution.rejection.map(CiLeadRejection::as_str))
     .execute(&mut **tx)
     .await?;
     Ok(())

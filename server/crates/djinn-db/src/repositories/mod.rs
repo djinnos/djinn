@@ -7,6 +7,7 @@ pub mod chat_interruption_notice;
 pub mod ci_route_attempt;
 #[cfg(test)]
 pub mod ci_route_attempt_tests;
+pub mod ci_route_report;
 pub mod code_chunk;
 pub mod commit_file_changes;
 pub mod coordinator_incarnation;

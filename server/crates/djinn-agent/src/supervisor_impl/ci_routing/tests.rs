@@ -31,10 +31,30 @@ const CHECK: &str = "Server Test / test";
 /// A command that genuinely exists in repository/task context.
 const REPO_COMMAND: &str = "cargo test -p djinn-coordinator --lib ci_routing";
 
+/// The guard keys a real route carries. Wave 5 made these mandatory: a block
+/// that cannot name its row cannot be guarded, and an unguardable route is
+/// never applied.
+fn guard_keys() -> CiRouteGuardKeys {
+    CiRouteGuardKeys {
+        subject: CiRouteSubject::task("t123"),
+        provider_action_key: "pak-abc".to_owned(),
+        tier2_lease_id: "lease-abc".to_owned(),
+        identity: CiEvidenceIdentity {
+            lane: CiLane::PrHead,
+            pr_number: 907,
+            pr_head_sha: "abc1234".to_owned(),
+            run_id: 90210,
+            run_head_sha: "abc1234".to_owned(),
+            dequeue_id: None,
+        },
+    }
+}
+
 fn context(tier2_reason: CiTier2Reason) -> CiAdjudicationContext {
     CiAdjudicationContext {
         lane: CiLane::PrHead,
         origin_state: CiOriginState::PrDraft,
+        guard: guard_keys(),
         tier2_reason,
         repository_commands: vec![
             REPO_COMMAND.to_owned(),
@@ -145,7 +165,7 @@ fn valid_repair_reopen_dispatches_exactly_one_worker() {
     };
     assert_eq!(verification_command, REPO_COMMAND);
 
-    let resolution = durable_resolution(&adjudication.plan);
+    let resolution = durable_resolution(&adjudication);
     assert_eq!(resolution.outcome, CiRouteOutcome::RepairReopened);
     assert_eq!(resolution.reopen_mode, Some(CiReopenMode::Repair));
     assert_eq!(
@@ -202,7 +222,7 @@ fn invented_verification_command_downgrades_repair_to_diagnosis() {
         "the rejected command must be named so the worker knows what not to trust"
     );
 
-    let resolution = durable_resolution(&adjudication.plan);
+    let resolution = durable_resolution(&adjudication);
     assert_eq!(resolution.reopen_mode, Some(CiReopenMode::Diagnose));
     assert_eq!(
         resolution.diagnostic_reason,
@@ -313,7 +333,7 @@ fn valid_diagnostic_reopen_is_accepted_for_every_closed_reason() {
             }
         );
 
-        let resolution = durable_resolution(&adjudication.plan);
+        let resolution = durable_resolution(&adjudication);
         assert_eq!(resolution.outcome, CiRouteOutcome::DiagnosticReopened);
         assert_eq!(resolution.reopen_mode, Some(CiReopenMode::Diagnose));
         assert_eq!(resolution.diagnostic_reason, Some(reason));
@@ -463,7 +483,7 @@ fn cited_infrastructure_dead_end_parks_without_a_worker() {
     let adjudication = adjudicate(&ctx, LeadResponse::Submitted(&park_payload()));
     assert_eq!(adjudication.rejection, None);
 
-    let resolution = durable_resolution(&adjudication.plan);
+    let resolution = durable_resolution(&adjudication);
     assert_eq!(resolution.outcome, CiRouteOutcome::Parked);
     assert!(
         resolution
@@ -688,48 +708,69 @@ fn no_plan_mutates_the_dependency_graph() {
     }
 }
 
-// ── Context plumbing ───────────────────────────────────────────────────────
+// -- Context plumbing -------------------------------------------------------
 
-/// The context is read from the arbitration directive the coordinator writes.
-/// Its absence is the legacy path, and a malformed block is also the legacy
-/// path rather than a half-applied contract.
-#[test]
-fn ci_context_is_present_only_when_the_coordinator_wrote_a_complete_route_block() {
-    assert!(CiAdjudicationContext::from_arbiter_directive(None).is_none());
-    assert!(
-        CiAdjudicationContext::from_arbiter_directive(Some(&json!({"directive": "do the thing"})))
-            .is_none(),
-        "an ordinary intervention directive carries no CI route"
-    );
-    assert!(
-        CiAdjudicationContext::from_arbiter_directive(Some(&json!({
-            "ci_route": {"lane": "pr_head", "origin_state": "pr_draft"}
-        })))
-        .is_none(),
-        "a block that cannot name its Tier-2 reason cannot validate anything"
-    );
-    assert!(
-        CiAdjudicationContext::from_arbiter_directive(Some(&json!({
-            "ci_route": {
-                "lane": "not_a_lane",
-                "origin_state": "pr_draft",
-                "tier2_reason": "causal_failure",
-            }
-        })))
-        .is_none(),
-        "an unparseable lane cannot validate anything"
-    );
-
-    let ctx = CiAdjudicationContext::from_arbiter_directive(Some(&json!({
+/// A complete route block, as the coordinator's `route_directive` writes it.
+fn complete_route_block() -> serde_json::Value {
+    json!({
         "ci_route": {
             "lane": "merge_group",
             "origin_state": "pr_review",
             "tier2_reason": "retry_exhausted",
+            "subject_kind": "task",
+            "subject_id": "t123",
+            "provider_action_key": "pak-abc",
+            "tier2_lease_id": "lease-abc",
+            "pr_number": 907,
+            "pr_head_sha": "abc1234",
+            "run_id": 90210,
+            "run_head_sha": "abc1234",
+            "dequeue_id": "dq-1",
             "repository_commands": [REPO_COMMAND, "  ", ""],
             "evidence_references": [RUN_ID],
         }
-    })))
-    .expect("a complete block yields a context");
+    })
+}
+
+/// A block missing `field` -- every required key, one at a time.
+fn block_without(field: &str) -> serde_json::Value {
+    let mut block = complete_route_block();
+    block["ci_route"]
+        .as_object_mut()
+        .expect("ci_route is an object")
+        .remove(field)
+        .unwrap_or_else(|| panic!("`{field}` must exist in the complete block to be removed"));
+    block
+}
+
+/// Absence is the legacy path. That is the "feature disabled" row of the
+/// mixed-version matrix and it must stay byte-for-byte the old behaviour.
+#[test]
+fn an_absent_route_block_is_the_legacy_path() {
+    assert!(matches!(
+        CiAdjudicationContext::read_arbiter_directive(None),
+        CiDirectiveRead::NoRoute
+    ));
+    assert!(
+        matches!(
+            CiAdjudicationContext::read_arbiter_directive(Some(
+                &json!({"directive": "do the thing"})
+            )),
+            CiDirectiveRead::NoRoute
+        ),
+        "an ordinary intervention directive carries no CI route"
+    );
+}
+
+/// A complete block yields a context carrying **both** halves: the validation
+/// inputs and the guard keys.
+#[test]
+fn a_complete_route_block_carries_the_guard_keys() {
+    let CiDirectiveRead::Route(ctx) =
+        CiAdjudicationContext::read_arbiter_directive(Some(&complete_route_block()))
+    else {
+        panic!("a complete block yields a context");
+    };
     assert_eq!(ctx.lane, CiLane::MergeGroup);
     assert_eq!(ctx.origin_state, CiOriginState::PrReview);
     assert_eq!(ctx.tier2_reason, CiTier2Reason::RetryExhausted);
@@ -737,6 +778,96 @@ fn ci_context_is_present_only_when_the_coordinator_wrote_a_complete_route_block(
         ctx.repository_commands,
         vec![REPO_COMMAND.to_owned()],
         "blank commands are not commands"
+    );
+    // Without these the guard cannot name the row it must resolve, which is
+    // the whole reason wave 4 could not write the apply wiring.
+    assert_eq!(ctx.guard.provider_action_key, "pak-abc");
+    assert_eq!(ctx.guard.tier2_lease_id, "lease-abc");
+    assert_eq!(ctx.guard.subject, CiRouteSubject::task("t123"));
+    assert_eq!(ctx.guard.identity.pr_number, 907);
+    assert_eq!(ctx.guard.identity.run_id, 90210);
+    assert_eq!(ctx.guard.identity.dequeue_id.as_deref(), Some("dq-1"));
+}
+
+/// **Every** required key, removed one at a time, must yield `Malformed`.
+///
+/// Enumerated rather than sampled: a block that parses without
+/// `tier2_lease_id` is a route whose Lead result would be applied against
+/// whatever lease happens to be open, which is worse than not applying it.
+#[test]
+fn every_missing_required_key_is_malformed_not_legacy() {
+    for field in [
+        "lane",
+        "origin_state",
+        "tier2_reason",
+        "subject_kind",
+        "subject_id",
+        "provider_action_key",
+        "tier2_lease_id",
+        "pr_number",
+        "pr_head_sha",
+        "run_id",
+        "run_head_sha",
+        "evidence_references",
+    ] {
+        let read = CiAdjudicationContext::read_arbiter_directive(Some(&block_without(field)));
+        assert!(
+            matches!(read, CiDirectiveRead::Malformed(missing) if missing == field),
+            "a block without `{field}` must be Malformed, got {read:?}"
+        );
+    }
+    // `dequeue_id` is the one optional key: the PR-head lane has none.
+    assert!(matches!(
+        CiAdjudicationContext::read_arbiter_directive(Some(&block_without("dequeue_id"))),
+        CiDirectiveRead::Route(_)
+    ));
+    // An unparseable value is as unusable as an absent one.
+    let mut bad_lane = complete_route_block();
+    bad_lane["ci_route"]["lane"] = json!("not_a_lane");
+    assert!(matches!(
+        CiAdjudicationContext::read_arbiter_directive(Some(&bad_lane)),
+        CiDirectiveRead::Malformed("lane")
+    ));
+}
+
+/// An **empty** evidence bundle is refused rather than accepted-and-ignored.
+///
+/// This is the fail-closed half of the wave-5 grounding fix. Under the old
+/// rule an empty list made `is_grounded` accept any non-blank text, so a
+/// producer that forgot the references voided AC7's evidence requirement and
+/// nothing failed.
+#[test]
+fn an_empty_evidence_bundle_is_malformed() {
+    let mut block = complete_route_block();
+    block["ci_route"]["evidence_references"] = json!([]);
+    assert!(matches!(
+        CiAdjudicationContext::read_arbiter_directive(Some(&block)),
+        CiDirectiveRead::Malformed("evidence_references")
+    ));
+    // Blank strings are not references either.
+    block["ci_route"]["evidence_references"] = json!(["", "   "]);
+    assert!(matches!(
+        CiAdjudicationContext::read_arbiter_directive(Some(&block)),
+        CiDirectiveRead::Malformed("evidence_references")
+    ));
+}
+
+/// A context with no evidence handles grounds **nothing**.
+///
+/// The mutation this kills: restore the old
+/// `if self.evidence_references.is_empty() { return !text.trim().is_empty() }`
+/// fallback and this test goes red while the rest of the module stays green --
+/// which is exactly what happened before wave 5.
+#[test]
+fn an_empty_evidence_bundle_grounds_nothing() {
+    let mut ctx = causal_context();
+    ctx.evidence_references.clear();
+    let adjudication = adjudicate(&ctx, LeadResponse::Submitted(&repair_payload()));
+    assert_eq!(
+        adjudication.rejection,
+        Some(CiResultRejection::DirectiveNotGrounded),
+        "with no handles to cite a directive cannot be grounded; it must not fall \
+         back to `is not blank`"
     );
 }
 

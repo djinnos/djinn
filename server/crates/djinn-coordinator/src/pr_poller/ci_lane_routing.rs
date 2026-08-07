@@ -18,10 +18,11 @@ use djinn_provider::github_api::{
 
 use super::ci_provider::CiRouteProvider;
 use super::ci_routing::executor::{
-    CiAutoMergeTarget, CiIncarnationLiveness, CiLaneOutcome, CiLaneTarget, execute_route,
-    recover_calling_owners_at_startup, sweep_reserved_routes,
+    CiAutoMergeTarget, CiIncarnationLiveness, CiLaneOutcome, CiLaneTarget, CiTier2Handoff,
+    execute_route, recover_calling_owners_at_startup, sweep_reserved_routes,
 };
 use super::ci_routing::gate::CiRoutingGate;
+use super::ci_routing::tier2_dispatch::CiTier2Dispatch;
 use super::ci_routing::{
     CiCapture, CiCompleteEmptyRoute, CiIncompleteReason, CiObservation, CiRouteSubject,
 };
@@ -173,12 +174,63 @@ impl CoordinatorActor {
         pull_number: u64,
         head_sha: &str,
     ) -> CiLaneDisposition {
+        // `nafu` wave 5: an opened Tier-2 lease has to become a Lead session,
+        // or the route layer takes ownership of the evidence (suppressing the
+        // legacy path) and then does nothing with it — the task sits in
+        // `pr_draft`/`pr_review` with no remedy at all. Wave 3b returned a bare
+        // `lease_opened: true` and stopped here.
+        //
+        // At most one dispatch per settle: the head-scoped lease admits one
+        // adjudication per PR head across both lanes, so a lane that produced
+        // two Tier-2 routes has exactly one of them holding the lease and the
+        // other reporting `lease_opened: false`.
+        self.dispatch_opened_tier2_leases(outcomes, task_id).await;
         match fold(outcomes) {
             CiLaneDisposition::CompleteEmpty(route) => {
                 self.record_complete_empty(task_id, pull_number, head_sha, route)
                     .await
             }
             other => other,
+        }
+    }
+
+    /// Dispatch Lead for every route that actually took the Tier-2 lease.
+    ///
+    /// Reads the handoff, not the boolean: `lease_opened: true` without a
+    /// handoff would be a route with nothing to bind a session to, and the
+    /// executor only produces the two together.
+    async fn dispatch_opened_tier2_leases(&self, outcomes: &[CiLaneOutcome], task_id: &str) {
+        let handoffs: Vec<&CiTier2Handoff> = outcomes
+            .iter()
+            .filter_map(|outcome| match outcome {
+                CiLaneOutcome::Tier2 {
+                    handoff: Some(handoff),
+                    ..
+                } => Some(handoff.as_ref()),
+                _ => None,
+            })
+            .collect();
+        if handoffs.is_empty() {
+            return;
+        }
+        let task = match self.task_repo().get(task_id).await {
+            Ok(Some(task)) => task,
+            Ok(None) => return,
+            Err(error) => {
+                tracing::warn!(%error, task_id, "ci route: could not load the task to dispatch Lead");
+                return;
+            }
+        };
+        for handoff in handoffs {
+            let dispatch = self
+                .dispatch_ci_tier2_lead(&task, handoff, task.pr_url.as_deref())
+                .await;
+            // One dispatch per hold cycle. A second handoff in the same settle
+            // finds the row unconsumed and reports `AlreadyInFlight`, which is
+            // the head-level hold answering correctly rather than a failure.
+            if dispatch == CiTier2Dispatch::Dispatched {
+                break;
+            }
         }
     }
 
@@ -651,6 +703,24 @@ impl CoordinatorActor {
                 unverifiable = report.unverifiable,
                 "ci route sweep: pass complete"
             );
+        }
+
+        // `nafu` wave 5. Reporting is emitted from the sweep rather than from an
+        // operator-invoked tool, so the numbers exist without anyone having
+        // thought to ask for them — which is the difference between a report and
+        // a query someone could write.
+        self.emit_ci_route_report().await;
+
+        // While draining, take the rollback quiescence report on every pass.
+        // The proposal blocks a binary rollback on "one repository-checkable
+        // report" reading zero across six counts, and an operator watching a
+        // drain needs to see it converge, not to poll for it by hand. It is
+        // recorded whether or not it is clean: a blocked attempt is exactly what
+        // has to be auditable afterwards.
+        if gate == CiRoutingGate::Quiescing
+            && let Err(error) = self.record_ci_rollback_quiescence_report().await
+        {
+            tracing::warn!(%error, "ci route: rollback quiescence report failed");
         }
     }
 }

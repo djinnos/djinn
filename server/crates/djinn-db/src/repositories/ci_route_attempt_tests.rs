@@ -19,6 +19,7 @@
 //!   only a second method call proves the opposite of durability.
 
 use crate::database::Database;
+use crate::repositories::ci_route_attempt::CiLeadRejection;
 use crate::repositories::ci_route_attempt::{
     CI_CALLING_RECOVERY_TIMEOUT_SECS, CI_HEAD_BUDGET_LIMIT, CI_SIGNATURE_BUDGET_LIMIT, CiAction,
     CiActionPhase, CiCallingRecovery, CiCallingRecoveryAuthority, CiCallingRecoveryReason,
@@ -27,6 +28,7 @@ use crate::repositories::ci_route_attempt::{
     CiRouteAttemptRepository, CiRouteOutcome, CiRouteReservation, CiRouteSubject,
     CiTier2LeaseOutcome, CiTier2LeaseState, CiTier2Reason, CiTier2Resolution,
 };
+use crate::repositories::ci_route_report::{CiRouteQuiescenceAttestation, CiRouteReportFilter};
 use crate::repositories::coordinator_incarnation::CoordinatorIncarnationRepository;
 use crate::repositories::test_support::{UsageTestTaskSeed, make_project, seed_task_row};
 
@@ -1873,18 +1875,21 @@ async fn tier_two_resolution_payloads_are_mutually_exclusive() {
             reopen_mode: Some(CiReopenMode::Repair),
             diagnostic_reason: Some(CiDiagnosticReason::NoGroundedRemedy),
             park_justification: None,
+            rejection: None,
         },
         CiTier2Resolution {
             outcome: CiRouteOutcome::DiagnosticReopened,
             reopen_mode: Some(CiReopenMode::Diagnose),
             diagnostic_reason: None,
             park_justification: None,
+            rejection: None,
         },
         CiTier2Resolution {
             outcome: CiRouteOutcome::Parked,
             reopen_mode: None,
             diagnostic_reason: None,
             park_justification: Some("   ".to_owned()),
+            rejection: None,
         },
     ];
     for resolution in &contradictions {
@@ -2715,5 +2720,506 @@ fn assert_deferred(outcome: &CiCallingRecovery, expected: CiCallingRecoveryReaso
     match outcome {
         CiCallingRecovery::Deferred { reason, .. } => assert_eq!(*reason, expected),
         other => panic!("expected deferral {expected:?}, got {other:?}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Wave 5: reporting and the rollback quiescence report
+// ---------------------------------------------------------------------------
+
+/// Reopen and park counts must union **both** outcome columns.
+///
+/// Terminalization is write-once, so a route that already terminalized on its
+/// provider result keeps `terminal_outcome = action_failed` and records the
+/// Lead adjudication in `tier2_resolution`. A report keyed on
+/// `terminal_outcome` alone therefore drops **every reopen that followed a
+/// provider failure** — silently, and exactly the population an operator is
+/// looking at when they ask why routing is spending worker sessions.
+///
+/// This fixture builds one of each so the union is load-bearing: mutate
+/// `COALESCE(tier2_resolution, terminal_outcome)` back to `terminal_outcome`
+/// and `repair_reopens` drops from 2 to 1.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reopen_counts_union_both_outcome_columns() {
+    let f = fixture().await;
+    let repository = repo(&f.db);
+
+    // Route A: a plain Tier-2 route whose terminal outcome IS the adjudication.
+    let a = pr_head_identity(401, "headaaa");
+    repository
+        .reserve(&reservation(&f.subject, "key-a", a.clone(), "fp-a"))
+        .await
+        .unwrap();
+    let lease_a = open_lease(&repository, &f.subject, "key-a", &a, "lease-a").await;
+    assert!(
+        repository
+            .resolve_tier2_lease(
+                &f.subject,
+                "key-a",
+                &lease_a,
+                &a,
+                &CiTier2Resolution::repair(),
+            )
+            .await
+            .unwrap()
+    );
+
+    // Route B: charged, called, failed at the provider — so it terminalized on
+    // `action_failed` BEFORE Lead ever saw it — and then reopened.
+    let b = pr_head_identity(402, "headaaa");
+    repository
+        .reserve(&reservation(&f.subject, "key-b", b.clone(), "fp-b"))
+        .await
+        .unwrap();
+    let owner = incarnation();
+    repository
+        .charge_and_begin_calling(&f.subject, "key-b", &owner, &b)
+        .await
+        .unwrap();
+    assert!(
+        repository
+            .finalize_calling(
+                &f.subject,
+                "key-b",
+                &owner,
+                CiRouteOutcome::ActionFailed,
+                Some(r#"{"status":500}"#),
+            )
+            .await
+            .unwrap()
+    );
+    let lease_b = open_lease(&repository, &f.subject, "key-b", &b, "lease-b").await;
+    assert!(
+        repository
+            .resolve_tier2_lease(
+                &f.subject,
+                "key-b",
+                &lease_b,
+                &b,
+                &CiTier2Resolution::repair(),
+            )
+            .await
+            .unwrap()
+    );
+
+    let b_row = repository
+        .get(&f.subject, "key-b")
+        .await
+        .unwrap()
+        .expect("route b");
+    assert_eq!(
+        b_row.terminal_outcome,
+        Some(CiRouteOutcome::ActionFailed),
+        "the provider outcome is write-once and must survive the adjudication"
+    );
+    assert_eq!(
+        b_row.tier2_resolution,
+        Some(CiRouteOutcome::RepairReopened),
+        "so the reopen lives in the OTHER column — this is the whole trap"
+    );
+
+    let report = repository
+        .route_report(&CiRouteReportFilter::all())
+        .await
+        .unwrap();
+    assert_eq!(
+        report.repair_reopens, 2,
+        "both reopens must be counted; reading terminal_outcome alone finds one"
+    );
+    assert_eq!(
+        report.worker_reopens, 2,
+        "two reopens are two worker dispatches, wherever they were recorded"
+    );
+    assert_eq!(
+        report.provider_action_failures, 1,
+        "and the provider failure is still counted on its own column"
+    );
+}
+
+/// The three obsolete-suppression boundaries are reported **separately**.
+///
+/// They are different costs: pre-call spent nothing, before-lead wasted a
+/// lease, before-apply wasted a whole Lead session. Collapsing them into one
+/// "stale" number hides which of the three is happening.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_three_suppression_boundaries_are_reported_separately() {
+    let f = fixture().await;
+    let repository = repo(&f.db);
+
+    // Before the provider call: the head moved between reserve and charge.
+    let pre = pr_head_identity(501, "oldhead");
+    repository
+        .reserve(&reservation(&f.subject, "key-pre", pre.clone(), "fp"))
+        .await
+        .unwrap();
+    let moved = pr_head_identity(501, "newhead");
+    repository
+        .charge_and_begin_calling(&f.subject, "key-pre", &incarnation(), &moved)
+        .await
+        .unwrap();
+
+    // Before Lead dispatch: the lease request itself loses the compare-and-set.
+    let lead = pr_head_identity(502, "oldhead");
+    repository
+        .reserve(&reservation(&f.subject, "key-lead", lead.clone(), "fp2"))
+        .await
+        .unwrap();
+    let lead_moved = pr_head_identity(502, "newhead");
+    let outcome = repository
+        .open_tier2_lease(
+            &f.subject,
+            "key-lead",
+            &lead_moved,
+            "lease-key-502",
+            CiTier2Reason::CausalFailure,
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        outcome,
+        CiTier2LeaseOutcome::SupersededBeforeLead(_)
+    ));
+
+    // Before supervisor apply: the lease opened, Lead answered, and the head
+    // moved in between.
+    let apply = pr_head_identity(503, "oldhead");
+    repository
+        .reserve(&reservation(&f.subject, "key-apply", apply.clone(), "fp3"))
+        .await
+        .unwrap();
+    let lease = open_lease(&repository, &f.subject, "key-apply", &apply, "lease-503").await;
+    let apply_moved = pr_head_identity(503, "newhead");
+    assert!(
+        !repository
+            .resolve_tier2_lease(
+                &f.subject,
+                "key-apply",
+                &lease,
+                &apply_moved,
+                &CiTier2Resolution::repair(),
+            )
+            .await
+            .unwrap()
+    );
+
+    let report = repository
+        .route_report(&CiRouteReportFilter::all())
+        .await
+        .unwrap();
+    assert_eq!(report.suppressed_before_provider_call, 1);
+    assert_eq!(report.suppressed_before_lead_dispatch, 1);
+    assert_eq!(report.suppressed_before_supervisor_apply, 1);
+    assert_eq!(report.total_obsolete_suppressions(), 3);
+    assert_eq!(
+        report.worker_reopens, 0,
+        "not one of the three may dispatch a worker"
+    );
+}
+
+/// A Lead timeout and a delivered `no_grounded_remedy` write the same
+/// `diagnostic_reason` and must still be countable apart.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reporting_separates_an_absent_lead_result_from_a_delivered_diagnosis() {
+    let f = fixture().await;
+    let repository = repo(&f.db);
+
+    let delivered = pr_head_identity(601, "headddd");
+    repository
+        .reserve(&reservation(&f.subject, "key-d", delivered.clone(), "fp-d"))
+        .await
+        .unwrap();
+    let lease_d = open_lease(&repository, &f.subject, "key-d", &delivered, "lease-d").await;
+    repository
+        .resolve_tier2_lease(
+            &f.subject,
+            "key-d",
+            &lease_d,
+            &delivered,
+            &CiTier2Resolution::diagnose(CiDiagnosticReason::NoGroundedRemedy),
+        )
+        .await
+        .unwrap();
+
+    let absent = pr_head_identity(602, "headddd");
+    repository
+        .reserve(&reservation(&f.subject, "key-t", absent.clone(), "fp-t"))
+        .await
+        .unwrap();
+    let lease_t = open_lease(&repository, &f.subject, "key-t", &absent, "lease-t").await;
+    repository
+        .resolve_tier2_lease(
+            &f.subject,
+            "key-t",
+            &lease_t,
+            &absent,
+            &CiTier2Resolution::diagnose(CiDiagnosticReason::NoGroundedRemedy)
+                .rejected_as(CiLeadRejection::TimedOut),
+        )
+        .await
+        .unwrap();
+
+    let report = repository
+        .route_report(&CiRouteReportFilter::all())
+        .await
+        .unwrap();
+    assert_eq!(report.diagnostic_reopens, 2);
+    assert_eq!(
+        report.diagnostic_reopens_from_absent_result, 1,
+        "the timeout must be countable as `Lead never answered`"
+    );
+    assert_eq!(
+        report.diagnostic_reopens_from_rejected_result, 0,
+        "a timeout is not a refused result"
+    );
+}
+
+/// A rejection may only ride a diagnostic reopen. A repair that claims one is
+/// refused by the repository before the CHECK ever sees it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_rejection_cannot_ride_a_result_lead_actually_produced() {
+    let f = fixture().await;
+    let repository = repo(&f.db);
+    let identity = pr_head_identity(701, "headeee");
+    repository
+        .reserve(&reservation(&f.subject, "key-r", identity.clone(), "fp-r"))
+        .await
+        .unwrap();
+    let lease = open_lease(&repository, &f.subject, "key-r", &identity, "lease-r").await;
+    let error = repository
+        .resolve_tier2_lease(
+            &f.subject,
+            "key-r",
+            &lease,
+            &identity,
+            &CiTier2Resolution::repair().rejected_as(CiLeadRejection::TimedOut),
+        )
+        .await
+        .expect_err("a repair carrying a rejection is a contradiction");
+    assert!(
+        error.to_string().contains("rejection"),
+        "the refusal must name the reason, got {error}"
+    );
+    let row = repository.get(&f.subject, "key-r").await.unwrap().unwrap();
+    assert!(
+        row.holds_open_tier2_lease(),
+        "a refused resolution must not have half-applied"
+    );
+}
+
+/// The lane and time-window filters actually scope the report.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_report_is_scoped_by_lane_and_window() {
+    let f = fixture().await;
+    let repository = repo(&f.db);
+    let head = pr_head_identity(801, "headfff");
+    repository
+        .reserve(&reservation(&f.subject, "key-h", head, "fp-h"))
+        .await
+        .unwrap();
+    let group = merge_group_identity(802, "headfff", "dq-802");
+    repository
+        .reserve(&reservation(&f.subject, "key-g", group, "fp-g"))
+        .await
+        .unwrap();
+
+    let all = repository
+        .route_report(&CiRouteReportFilter::all())
+        .await
+        .unwrap();
+    assert_eq!(all.action_rerun_run + all.action_reenqueue, 2);
+
+    let head_only = repository
+        .route_report(&CiRouteReportFilter::all().lane(CiLane::PrHead))
+        .await
+        .unwrap();
+    assert_eq!(head_only.action_rerun_run, 1);
+    assert_eq!(
+        head_only.action_reenqueue, 0,
+        "the lane filter must exclude the merge-group route"
+    );
+
+    // A window entirely in the past contains neither.
+    let empty = repository
+        .route_report(&CiRouteReportFilter::all().until("2000-01-01T00:00:00Z"))
+        .await
+        .unwrap();
+    assert_eq!(empty.action_rerun_run, 0);
+    assert_eq!(empty.action_reenqueue, 0);
+}
+
+/// Rollback is blocked while anything is in flight, and the report says which
+/// thing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_rollback_report_blocks_on_every_non_zero_count() {
+    let f = fixture().await;
+    let repository = repo(&f.db);
+    let identity = pr_head_identity(901, "headggg");
+    repository
+        .reserve(&reservation(&f.subject, "key-q", identity.clone(), "fp-q"))
+        .await
+        .unwrap();
+
+    // A reserved row alone blocks.
+    let blocked = repository
+        .record_rollback_quiescence_report(
+            "quiescing",
+            "inc-1",
+            CiRouteQuiescenceAttestation {
+                registered_provider_futures: 0,
+                current_failed_identities: 0,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(!blocked.permits_rollback);
+    assert_eq!(blocked.reserved_rows, 1);
+    assert!(
+        blocked
+            .blocking_reasons()
+            .iter()
+            .any(|reason| reason.contains("reserved rows")),
+        "the report must name what is blocking, got {:?}",
+        blocked.blocking_reasons()
+    );
+
+    // Terminalize it, but attest a live provider future. Still blocked, and by
+    // a count SQL cannot see.
+    repository
+        .terminalize(&f.subject, "key-q", CiRouteOutcome::Held, None)
+        .await
+        .unwrap();
+    let still_blocked = repository
+        .record_rollback_quiescence_report(
+            "quiescing",
+            "inc-1",
+            CiRouteQuiescenceAttestation {
+                registered_provider_futures: 1,
+                current_failed_identities: 0,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        !still_blocked.permits_rollback,
+        "a live provider-action future blocks a rollback even with a clean table"
+    );
+    assert_eq!(still_blocked.reserved_rows, 0);
+    assert!(
+        still_blocked
+            .blocking_reasons()
+            .iter()
+            .any(|reason| reason.contains("provider-action futures"))
+    );
+}
+
+/// An `enabled` gate can never permit a rollback, whatever the counts say.
+///
+/// **Mutation target.** Drop the `gate_state != "enabled"` conjunct and this
+/// goes red; without it a report taken mid-flight would authorize a rollback
+/// against a table that is still being written to.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_enabled_gate_never_permits_a_rollback() {
+    let f = fixture().await;
+    let repository = repo(&f.db);
+    let clean = CiRouteQuiescenceAttestation {
+        registered_provider_futures: 0,
+        current_failed_identities: 0,
+    };
+    let enabled = repository
+        .record_rollback_quiescence_report("enabled", "inc-1", clean)
+        .await
+        .unwrap();
+    assert!(
+        !enabled.permits_rollback,
+        "new routes are still being admitted; the counts are a moving target"
+    );
+    assert!(!enabled.recomputed_verdict());
+
+    let quiescing = repository
+        .record_rollback_quiescence_report("quiescing", "inc-1", clean)
+        .await
+        .unwrap();
+    assert!(quiescing.permits_rollback, "the same counts, draining");
+    assert!(quiescing.recomputed_verdict());
+
+    // The report is durable and the latest one wins.
+    let latest = repository
+        .latest_rollback_quiescence_report()
+        .await
+        .unwrap()
+        .expect("a report was recorded");
+    assert_eq!(latest.id, quiescing.id);
+    assert!(latest.permits_rollback);
+}
+
+/// The evidence-advance high-watermark: a routed identity that is still the
+/// current failed evidence for its lane blocks a rollback, and a superseded or
+/// passed one does not.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_evidence_advance_watermark_counts_only_unadvanced_identities() {
+    let f = fixture().await;
+    let repository = repo(&f.db);
+
+    let old = pr_head_identity(1001, "oldhead");
+    repository
+        .reserve(&reservation(&f.subject, "key-old", old.clone(), "fp"))
+        .await
+        .unwrap();
+    assert_eq!(
+        repository.current_failed_identity_count().await.unwrap(),
+        1,
+        "one routed identity, nothing newer, not passed: it is still current"
+    );
+
+    // The head moves and a newer route is reserved for the same lane and PR.
+    let new = pr_head_identity(1002, "newhead");
+    // (Both rows carry PR 4242; only the head SHA and the run id differ, which
+    // is exactly the "advanced to distinct newer provider evidence" the
+    // watermark is asking about.)
+    repository
+        .reserve(&reservation(&f.subject, "key-new", new.clone(), "fp"))
+        .await
+        .unwrap();
+    assert_eq!(
+        repository.current_failed_identity_count().await.unwrap(),
+        1,
+        "the OLD identity advanced; the NEW one is now the current failed evidence"
+    );
+
+    // The PR goes green, which closes every reserved route on it as `passed`.
+    // (`pr_head_identity` fixes the PR number at 4242; the varying argument is
+    // the run id, which is what makes the two identities distinct.)
+    repository
+        .close_routes_for_newer_outcome(&f.subject, 4242, CiRouteOutcome::Passed, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        repository.current_failed_identity_count().await.unwrap(),
+        0,
+        "every routed identity has advanced or reached a passing state"
+    );
+}
+
+/// Helper: open a Tier-2 lease and return its id.
+async fn open_lease(
+    repository: &CiRouteAttemptRepository,
+    subject: &CiRouteSubject,
+    key: &str,
+    identity: &CiEvidenceIdentity,
+    lease_key: &str,
+) -> String {
+    match repository
+        .open_tier2_lease(
+            subject,
+            key,
+            identity,
+            lease_key,
+            CiTier2Reason::CausalFailure,
+        )
+        .await
+        .expect("open lease")
+    {
+        CiTier2LeaseOutcome::Opened { lease_id, .. } => lease_id,
+        other => panic!("expected an opened lease, got {other:?}"),
     }
 }

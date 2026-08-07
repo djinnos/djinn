@@ -119,10 +119,14 @@ pub use repositories::{
         CI_RESERVATION_RECOVERY_TIMEOUT_SECS, CI_SIGNATURE_BUDGET_LIMIT, CiAction, CiActionPhase,
         CiBudgetCounts, CiCallingRecovery, CiCallingRecoveryAuthority, CiCallingRecoveryReason,
         CiCallingRecoveryRecord, CiChargeOutcome, CiClass, CiDiagnosticReason, CiEvidenceIdentity,
-        CiLane, CiOriginState, CiQuiescenceProof, CiReopenMode, CiReserveOutcome,
+        CiLane, CiLeadRejection, CiOriginState, CiQuiescenceProof, CiReopenMode, CiReserveOutcome,
         CiReservedRecovery, CiRouteAttempt, CiRouteAttemptRepository, CiRouteOutcome,
         CiRouteQuiescence, CiRouteReservation, CiRouteSubject, CiSubjectKind, CiTier2LeaseOutcome,
         CiTier2LeaseState, CiTier2Reason, CiTier2Resolution,
+    },
+    ci_route_report::{
+        CiRollbackQuiescenceReport, CiRouteQuiescenceAttestation, CiRouteReport,
+        CiRouteReportFilter,
     },
     code_chunk::{
         ChunkAndEmbedReport, CodeChunk, CodeChunkEmbeddingProvider, CodeChunkRepairEmbeddingRow,

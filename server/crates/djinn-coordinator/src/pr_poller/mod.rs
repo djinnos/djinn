@@ -144,6 +144,8 @@ mod ci_helpers;
 // (`ci_routing::gate::CiRoutingGate`), so the `dead_code` allow is gone.
 mod ci_lane_routing;
 mod ci_provider;
+// Wave 5: reporting reads and the rollback quiescence report.
+mod ci_reporting;
 mod ci_routing;
 mod ci_snapshot;
 mod ci_triage;

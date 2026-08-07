@@ -36,11 +36,13 @@
 //!
 //! # What the executor deliberately does not do
 //!
-//! It does not dispatch Lead. Opening the Tier-2 lease is the end of the
-//! coordinator's half of the contract; the adjudication and the guarded
-//! application of its result are the supervisor's, and that wiring cannot be
-//! written from a tree where only one half is visible. It also never writes a
-//! `ci_route` directive, for the same reason.
+//! It does not dispatch Lead and it does not write a `ci_route` directive.
+//! Opening the Tier-2 lease is the end of *this* module's half of the
+//! contract; it returns the lease id and the route keys in a
+//! [`CiTier2Handoff`], and `ci_lane_routing` is what turns that into an
+//! arbitration row and a board transition. Keeping the split means the
+//! executor still holds no board handle, so "no board mutation on any branch"
+//! stays a property of the type signature rather than of the branch coverage.
 
 use djinn_db::{
     CiChargeOutcome, CiOriginState, CiReserveOutcome, CiReservedRecovery, CiRouteAttemptRepository,
@@ -137,9 +139,32 @@ pub(crate) enum CiLaneOutcome {
     Tier2 {
         reason: CiTier2Reason,
         lease_opened: bool,
+        /// Everything the Lead dispatch needs to name this route row, present
+        /// exactly when `lease_opened` is true (proposal `nafu`, wave 5).
+        ///
+        /// Wave 3b opened the lease and returned a bare bool, so nothing
+        /// downstream could say *which row* the Lead session it never
+        /// dispatched would have adjudicated. These are the keys the
+        /// supervisor's guard call needs, and they exist only here.
+        handoff: Option<Box<CiTier2Handoff>>,
     },
     /// Nothing happened, and the reason is not an answer about the evidence.
     Deferred(CiDeferral),
+}
+
+/// The durable handles that let a Lead session be bound to one route row.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CiTier2Handoff {
+    pub subject: CiRouteSubject,
+    pub provider_action_key: String,
+    pub tier2_lease_id: String,
+    pub identity: CiEvidenceIdentity,
+    pub origin_state: CiOriginState,
+    pub reason: CiTier2Reason,
+    /// Handles from the evidence bundle a Lead directive must cite. Non-empty
+    /// by construction — the supervisor's `is_grounded` fails closed on an
+    /// empty list, and `read_arbiter_directive` refuses a block without them.
+    pub evidence_references: Vec<String>,
 }
 
 impl CiLaneOutcome {
@@ -295,6 +320,7 @@ pub(crate) async fn execute_route(
             return CiLaneOutcome::Tier2 {
                 reason: CiTier2Reason::RetryExhausted,
                 lease_opened: false,
+                handoff: None,
             };
         }
         CiReserveOutcome::AlreadyPresent(attempt) => {
@@ -312,7 +338,16 @@ pub(crate) async fn execute_route(
         let reason = decision
             .tier2_reason()
             .unwrap_or(CiTier2Reason::EvidenceUnknown);
-        return open_tier2(routes, target, observation.observed_current, &keys, reason).await;
+        return open_tier2(
+            routes,
+            target,
+            observation.evidence,
+            observation.observed_current,
+            &keys,
+            reason,
+            blocking,
+        )
+        .await;
     };
 
     // Phase 2. Admission before the charge — see the module docs. It is also
@@ -356,9 +391,11 @@ pub(crate) async fn execute_route(
             return open_tier2(
                 routes,
                 target,
+                observation.evidence,
                 observation.observed_current,
                 &keys,
                 CiTier2Reason::RetryExhausted,
+                blocking,
             )
             .await;
         }
@@ -449,9 +486,11 @@ pub(crate) async fn execute_route(
     let escalated = open_tier2(
         routes,
         target,
+        observation.evidence,
         observation.observed_current,
         &keys,
         CiTier2Reason::ProviderActionFailed,
+        blocking,
     )
     .await;
     CiLaneOutcome::ProviderFailed {
@@ -466,12 +505,15 @@ pub(crate) async fn execute_route(
 }
 
 /// Open the head's Tier-2 lease under the current-identity compare-and-set.
+#[allow(clippy::too_many_arguments)]
 async fn open_tier2(
     routes: &CiRouteAttemptRepository,
     target: &CiLaneTarget<'_>,
+    evidence: &CiEvidenceIdentity,
     observed_current: &CiEvidenceIdentity,
     keys: &RouteKeys,
     reason: CiTier2Reason,
+    blocking: &[&CheckRun],
 ) -> CiLaneOutcome {
     // The caller-side guard `tier2_admission` documents: the repository's
     // supersession branch would happily terminalize a live `calling` row, and
@@ -484,6 +526,7 @@ async fn open_tier2(
                 CiLaneOutcome::Tier2 {
                     reason,
                     lease_opened: false,
+                    handoff: None,
                 }
             };
         }
@@ -504,9 +547,21 @@ async fn open_tier2(
         )
         .await
     {
-        Ok(CiTier2LeaseOutcome::Opened { .. }) => CiLaneOutcome::Tier2 {
+        Ok(CiTier2LeaseOutcome::Opened { lease_id, .. }) => CiLaneOutcome::Tier2 {
             reason,
             lease_opened: true,
+            // The one place these keys exist together. Everything downstream —
+            // the `ci_route` directive block, the supervisor's guard call —
+            // reads them from here.
+            handoff: Some(Box::new(CiTier2Handoff {
+                subject: target.subject.clone(),
+                provider_action_key: keys.action.clone(),
+                tier2_lease_id: lease_id,
+                identity: evidence.clone(),
+                origin_state: target.origin_state,
+                reason,
+                evidence_references: evidence_references(evidence, blocking),
+            })),
         },
         Ok(CiTier2LeaseOutcome::SupersededBeforeLead(attempt)) => CiLaneOutcome::Discarded(
             super::stale_field(&attempt.identity, observed_current).unwrap_or(CiStaleField::RunId),
@@ -521,6 +576,7 @@ async fn open_tier2(
         ) => CiLaneOutcome::Tier2 {
             reason,
             lease_opened: false,
+            handoff: None,
         },
         Err(error) => {
             tracing::warn!(%error, "ci route: failed to open the Tier-2 lease");
@@ -532,6 +588,34 @@ async fn open_tier2(
 // ---------------------------------------------------------------------------
 // Keys
 // ---------------------------------------------------------------------------
+
+/// The handles a Lead directive must cite to count as evidence-grounded.
+///
+/// Deliberately narrow: run id, both head SHAs, the dequeue id when there is
+/// one, and the blocking check names. Every one of them is a string that
+/// appears verbatim in the evidence bundle Lead is shown, so "cite one of
+/// these" is a check Lead can actually satisfy by quoting what it read — as
+/// opposed to a similarity score over prose, which is the fabrication the
+/// grounding rule exists to stop.
+///
+/// The list is never empty: `run_id` and the two SHAs are always present, so a
+/// route can never produce a block that the supervisor's fail-closed
+/// `is_grounded` would reject wholesale.
+fn evidence_references(identity: &CiEvidenceIdentity, blocking: &[&CheckRun]) -> Vec<String> {
+    let mut out = vec![
+        identity.run_id.to_string(),
+        identity.pr_head_sha.clone(),
+        identity.run_head_sha.clone(),
+    ];
+    if let Some(dequeue) = &identity.dequeue_id {
+        out.push(dequeue.clone());
+    }
+    out.extend(blocking.iter().map(|check| check.name.clone()));
+    out.retain(|reference| !reference.trim().is_empty());
+    out.sort();
+    out.dedup();
+    out
+}
 
 /// The four derived keys for one route, computed once.
 #[derive(Clone, Debug)]
