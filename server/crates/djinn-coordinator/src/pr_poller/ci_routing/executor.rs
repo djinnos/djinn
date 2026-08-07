@@ -1097,7 +1097,7 @@ pub(crate) async fn recover_calling_owners_at_startup(
 /// in the ledger that is a *fact* about where those futures went, rather than
 /// an inference from a clock.
 ///
-/// # Why an expired renewal lease is not `ProcessTerminated`
+/// # Why an expired renewal lease is not a proof
 ///
 /// It reads like process-death evidence and is not. Renewal is scoped to the
 /// coordinator's cancellation token, so it stops the instant leadership is
@@ -1109,6 +1109,20 @@ pub(crate) async fn recover_calling_owners_at_startup(
 /// `finalize_calling` is discarded, and a real episode is adjudicated
 /// `outcome_unknown`. Elapsed time is never by itself evidence that a `calling`
 /// owner is dead.
+///
+/// # Why process death is not a second proof either
+///
+/// The obvious candidate is the coordinator advisory lock: Postgres releases a
+/// session-scoped lock automatically when the holding backend goes away, so a
+/// release with no voluntary handoff behind it looks like a death certificate.
+/// It is not one. Postgres performs that release *at backend termination*,
+/// which is strictly before the client process can observe anything — so a live
+/// process whose lock connection was dropped by a failover, a restart, or a
+/// `pg_terminate_backend` is indistinguishable from a dead one for as long as
+/// it takes that process to notice and exit, with its provider futures running
+/// throughout. Bounding that interval requires elapsed time, which is the
+/// inference above. `CiQuiescenceProof` therefore has no process-death variant
+/// at all (migration 196), and this witness has exactly one input.
 ///
 /// # What "no proof" costs
 ///

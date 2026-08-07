@@ -418,17 +418,30 @@ durable_enum! {
 durable_enum! {
     /// How a former `calling` owner's provider futures were proven gone.
     ///
-    /// Note what is absent: elapsed time. The 300-second floor is a
-    /// *necessary* condition layered on top of one of these proofs, never a
-    /// substitute for one.
+    /// One proof and one absence, deliberately. Note what is *not* here:
+    /// elapsed time, an expired owner lease, and process death.
+    ///
+    /// The first two are the same mistake — the 300-second floor is a
+    /// *necessary* condition layered on top of the proof, never a substitute
+    /// for one. The third looks different and is not, because it has no
+    /// admissible witness. The only trace an abrupt death could leave is the
+    /// automatic release of the session-scoped coordinator advisory lock, and
+    /// Postgres performs that release at backend termination — strictly before
+    /// the client process can observe anything. A live process whose lock
+    /// connection was dropped by a failover or a restart is therefore
+    /// indistinguishable from a dead one until it notices and exits, with its
+    /// provider futures running throughout, and closing that interval needs
+    /// exactly the elapsed-time inference the proposal forbids. See migration
+    /// 196.
     CiQuiescenceProof {
         /// Leadership cancellation closed action admission, joined every
         /// leader-owned provider-action future, and recorded
         /// `provider_actions_drained_at` before releasing the advisory lock.
+        ///
+        /// The only value that authorises a handoff — and it is re-read from
+        /// the former incarnation's own row rather than believed, so a caller
+        /// cannot assert it into existence.
         GracefulDrain => "graceful_drain",
-        /// The owning process died, which destroyed its futures before its
-        /// advisory-lock session could close.
-        ProcessTerminated => "process_terminated",
         /// No proof. Recorded on deferrals so the deferral is auditable.
         None => "none",
     }
@@ -1749,10 +1762,11 @@ impl CiRouteAttemptRepository {
 
         // (4) quiescence. `None` is never enough, and a claimed graceful
         // drain is checked against the former incarnation's own record rather
-        // than believed.
+        // than believed. There is deliberately no third arm: every attestation
+        // this repository accepts is re-derived from durable state here, so no
+        // caller can win a row by asserting a proof it did not earn.
         let quiescent = match authority.quiescence_proof {
             CiQuiescenceProof::None => false,
-            CiQuiescenceProof::ProcessTerminated => true,
             CiQuiescenceProof::GracefulDrain => {
                 let drained: Option<Option<String>> = sqlx::query_scalar(
                     "SELECT provider_actions_drained_at FROM coordinator_incarnations WHERE id = $1",
