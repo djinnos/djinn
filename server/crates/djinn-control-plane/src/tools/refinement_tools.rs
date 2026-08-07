@@ -19,6 +19,7 @@ use crate::tools::proposal_ops::{
     ProposalRefinementStartResponse, ProposalRefinementStatusModel,
     ProposalRefinementStatusResponse, ProposalRefinementStopResponse, VerdictOverrideResponse,
 };
+use crate::tools::proposal_tools::feedback::human_feedback_disposition_contract_available;
 use crate::tools::refinement_helpers::validate_demand_evidence;
 pub use crate::tools::refinement_helpers::{
     ProposalRefinementDemandEvidenceParams, build_refinement_status,
@@ -57,6 +58,17 @@ fn err_refinement_status(error: impl Into<String>) -> ProposalRefinementStatusRe
 pub struct AdmissionRejection {
     pub code: &'static str,
     pub message: String,
+}
+
+/// Durable admission details. Boundary capture is owned by an actual admission,
+/// not by an idempotent request that merely finds the same round.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RefinementAdmission {
+    /// Exact durable run selected by admission. A feedback boundary uses this
+    /// after capture to mark its pending cohort admitted.
+    pub run_id: String,
+    pub pending_dispatch: bool,
+    pub admitted: bool,
 }
 
 impl std::fmt::Display for AdmissionRejection {
@@ -114,7 +126,7 @@ pub(crate) async fn admit_refinement_run(
     proposal_id: &str,
     source: RefinementAdmissionSource,
     explicit_owner_user_id: Option<&str>,
-) -> Result<bool, AdmissionRejection> {
+) -> Result<RefinementAdmission, AdmissionRejection> {
     // Every admission source — explicit start, demanded round, and
     // committed-revision resume alike — must leave the run attributed.
     // `proposals.refinement_owner_user_id` is the ONLY attribution
@@ -170,9 +182,9 @@ pub(crate) async fn admit_refinement_run(
             );
             rejection
         })?;
-    let run_id = match outcome {
-        RefinementAdmissionOutcome::Admitted { run_id, .. }
-        | RefinementAdmissionOutcome::Existing { run_id, .. } => run_id,
+    let (run_id, admitted) = match outcome {
+        RefinementAdmissionOutcome::Admitted { run_id, .. } => (run_id, true),
+        RefinementAdmissionOutcome::Existing { run_id, .. } => (run_id, false),
     };
     // Only ever write a resolved owner. Writing `None` here would clear an
     // attribution that the durable dispatcher depends on, turning a working run
@@ -182,9 +194,13 @@ pub(crate) async fn admit_refinement_run(
             .await
             .map_err(|error| admission_rejection(&RefinementAdmissionError::Database(error)))?;
     }
-    Ok(match server.state.coordinator().await {
-        Some(coordinator) => coordinator.wake_refinement_run(run_id).await.is_err(),
-        None => true,
+    Ok(RefinementAdmission {
+        run_id: run_id.clone(),
+        pending_dispatch: match server.state.coordinator().await {
+            Some(coordinator) => coordinator.wake_refinement_run(run_id).await.is_err(),
+            None => true,
+        },
+        admitted,
     })
 }
 
@@ -327,6 +343,17 @@ impl DjinnMcpServer {
             }
         }
 
+        // A start boundary captures unresolved feedback when capture is
+        // enabled. Do not admit/wake a run until the active Advocate and Judge
+        // schemas can drain that captured human-feedback obligation.
+        let controls = self.state.feedback_refinement_controls();
+        if controls.capture && !human_feedback_disposition_contract_available() {
+            return Json(err_refinement_start(
+                "human-feedback refinement capture requires compatible active Advocate and Judge role schemas"
+                    .to_owned(),
+            ));
+        }
+
         let refinement_owner_user_id = p
             .owner_user_id
             .clone()
@@ -337,7 +364,7 @@ impl DjinnMcpServer {
             .request_id
             .clone()
             .unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
-        let pending_dispatch = match admit_refinement_run(
+        let admission = match admit_refinement_run(
             self,
             &repo,
             &proposal.id,
@@ -353,13 +380,15 @@ impl DjinnMcpServer {
         )
         .await
         {
-            Ok(pending) => pending,
+            Ok(admission) => admission,
             Err(rejection) => return Json(err_refinement_start(rejection.message)),
         };
 
-        if let Err(error) = repo
-            .capture_feedback_refinement_boundary(&proposal.id)
-            .await
+        if controls.capture
+            && admission.admitted
+            && let Err(error) = repo
+                .capture_feedback_refinement_boundary(&proposal.id)
+                .await
         {
             return Json(err_refinement_start(format!(
                 "refinement was admitted but feedback boundary capture failed: {error}"
@@ -388,7 +417,9 @@ impl DjinnMcpServer {
         Json(ProposalRefinementStartResponse {
             proposal_id: Some(proposal.id),
             refinement: Some(refinement),
-            error: pending_dispatch.then(|| "accepted; dispatch pending".to_owned()),
+            error: admission
+                .pending_dispatch
+                .then(|| "accepted; dispatch pending".to_owned()),
         })
     }
 
@@ -508,6 +539,22 @@ impl DjinnMcpServer {
             }
         }
 
+        // Demand is also a capture boundary. Fail closed before durable
+        // admission so an incompatible tribunal cannot be woken for a newly
+        // materialized human-feedback generation.
+        let controls = self.state.feedback_refinement_controls();
+        if controls.capture && !human_feedback_disposition_contract_available() {
+            return Json(DemandRoundResponse {
+                proposal_id: Some(proposal.id),
+                accepted: false,
+                refinement: Some(current_refinement),
+                error: Some(
+                    "human-feedback refinement capture requires compatible active Advocate and Judge role schemas"
+                        .to_owned(),
+                ),
+            });
+        }
+
         let request_id = p
             .request_id
             .clone()
@@ -516,7 +563,7 @@ impl DjinnMcpServer {
             "reason:{}:request:{request_id}",
             p.reason.as_deref().unwrap_or("unspecified-demand")
         );
-        let pending_dispatch = match admit_refinement_run(
+        let admission = match admit_refinement_run(
             self,
             &repo,
             &proposal.id,
@@ -525,7 +572,7 @@ impl DjinnMcpServer {
         )
         .await
         {
-            Ok(pending) => pending,
+            Ok(admission) => admission,
             Err(rejection) => {
                 return Json(DemandRoundResponse {
                     proposal_id: Some(proposal.id),
@@ -536,9 +583,11 @@ impl DjinnMcpServer {
             }
         };
 
-        if let Err(error) = repo
-            .capture_feedback_refinement_boundary(&proposal.id)
-            .await
+        if controls.capture
+            && admission.admitted
+            && let Err(error) = repo
+                .capture_feedback_refinement_boundary(&proposal.id)
+                .await
         {
             return Json(DemandRoundResponse {
                 proposal_id: Some(proposal.id),
@@ -600,7 +649,9 @@ impl DjinnMcpServer {
             proposal_id: Some(proposal.id),
             accepted: true,
             refinement: Some(refinement),
-            error: pending_dispatch.then(|| "accepted; dispatch pending".to_owned()),
+            error: admission
+                .pending_dispatch
+                .then(|| "accepted; dispatch pending".to_owned()),
         })
     }
 

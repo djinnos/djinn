@@ -1167,6 +1167,59 @@ impl ProposalRepository {
         Ok(feedback)
     }
 
+    /// Commit a feedback boundary together with its durable handoff whenever a
+    /// non-resumable live run owns the proposal. This prevents a crash between
+    /// feedback insertion and `AlreadyActive` recovery from stranding work.
+    pub async fn add_feedback_with_severity_and_pending_handoff(
+        &self,
+        input: ProposalFeedbackCreateInput<'_>,
+        severity: &str,
+        persist_handoff_if_live: bool,
+    ) -> Result<(ProposalFeedback, bool)> {
+        self.db.ensure_initialized().await?;
+        if !matches!(severity, "advisory" | "blocking") {
+            return Err(Error::InvalidData(format!(
+                "invalid feedback severity: {severity}"
+            )));
+        }
+        let mut tx = self.db.pool().begin().await?;
+        let exists = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM proposals WHERE id=$1 FOR UPDATE)",
+        )
+        .bind(input.proposal_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if !exists {
+            return Err(Error::InvalidData(format!(
+                "proposal not found: {}",
+                input.proposal_id
+            )));
+        }
+        let id = uuid::Uuid::now_v7().to_string();
+        sqlx::query("INSERT INTO proposal_feedback (id,proposal_id,parent_id,author_kind,author_user_id,author_model,body,severity) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)")
+            .bind(&id).bind(input.proposal_id).bind(input.parent_id).bind(input.author_kind)
+            .bind(djinn_core::auth_context::current_user_id()).bind(input.author_model).bind(input.body).bind(severity)
+            .execute(&mut *tx).await?;
+        // Do not make persistence conditional on a liveness pre-check. Another
+        // transaction can admit a run after this lock is released; recording
+        // every activating boundary turns that race into recoverable pending
+        // work instead of a committed, stranded feedback row.
+        let handoff_persisted = persist_handoff_if_live && severity == "blocking";
+        if handoff_persisted {
+            sqlx::query("INSERT INTO pending_feedback_refinement_handoffs (id,proposal_id,boundary_feedback_id,cohort_owner) VALUES ($1,$2,$3,NOT EXISTS(SELECT 1 FROM pending_feedback_refinement_handoffs WHERE proposal_id=$2 AND state='pending' AND cohort_owner))")
+                .bind(uuid::Uuid::now_v7().to_string()).bind(input.proposal_id).bind(&id).execute(&mut *tx).await?;
+        }
+        let feedback: ProposalFeedback = sqlx::query_as("SELECT id,proposal_id,parent_id,author_kind,author_user_id,author_model,body,severity,withdrawn_at,withdrawn_by_user_id,resolved_at,resolved_revision_seq,resolved_by_user_id,created_at,updated_at FROM proposal_feedback WHERE id=$1")
+            .bind(&id).fetch_one(&mut *tx).await?;
+        tx.commit().await?;
+        self.events
+            .send(DjinnEventEnvelope::proposal_feedback_created(
+                input.proposal_id,
+                &feedback,
+            ));
+        Ok((feedback, handoff_persisted))
+    }
+
     /// Resolve a feedback entry: collapse it out of the active thread. Pass the
     /// revision that addressed it (when djinn applied a spec change) or `None`
     /// for a plain dismissal. Stamps the resolving user via `current_user_id()`.

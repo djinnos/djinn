@@ -291,6 +291,13 @@ pub struct AdmitRefinementRunRequest {
     pub heartbeat_grace_millis: i64,
 }
 
+/// Durable result for a feedback boundary which lost admission to a live run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingFeedbackRefinementHandoff {
+    pub boundary_feedback_id: String,
+    pub cohort_owner: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RefinementAdmissionOutcome {
     Admitted {
@@ -331,6 +338,68 @@ impl From<sqlx::Error> for RefinementAdmissionError {
 }
 
 impl ProposalRepository {
+    /// Consume a recovery boundary after immediate admission. If a process dies
+    /// before this write, the pending row deliberately remains drainable by the
+    /// owning run's terminal transition.
+    pub async fn complete_pending_feedback_refinement_handoff(
+        &self,
+        proposal_id: &str,
+        boundary_feedback_id: &str,
+        successor_run_id: &str,
+    ) -> std::result::Result<(), RefinementAdmissionError> {
+        self.db().ensure_initialized().await?;
+        sqlx::query(
+            "UPDATE pending_feedback_refinement_handoffs SET state='admitted', successor_run_id=$3, updated_at=to_char(transaction_timestamp() AT TIME ZONE 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') WHERE proposal_id=$1 AND boundary_feedback_id=$2 AND state='pending'",
+        )
+        .bind(proposal_id)
+        .bind(boundary_feedback_id)
+        .bind(successor_run_id)
+        .execute(self.db().pool())
+        .await?;
+        Ok(())
+    }
+
+    /// Persist a post-cutoff feedback boundary and elect one owner for its
+    /// proposal cohort. The proposal row lock serializes replay and concurrent
+    /// feedback with the lifecycle drain.
+    pub async fn persist_pending_feedback_refinement_handoff(
+        &self,
+        proposal_id: &str,
+        boundary_feedback_id: &str,
+    ) -> std::result::Result<PendingFeedbackRefinementHandoff, RefinementAdmissionError> {
+        self.db().ensure_initialized().await?;
+        let mut tx = self.db().pool().begin().await?;
+        let exists = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM proposals WHERE id=$1 FOR UPDATE)",
+        )
+        .bind(proposal_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if !exists {
+            return Err(RefinementAdmissionError::ProposalNotFound {
+                proposal_id: proposal_id.into(),
+            });
+        }
+        let existing = sqlx::query_scalar::<_, bool>("SELECT cohort_owner FROM pending_feedback_refinement_handoffs WHERE proposal_id=$1 AND boundary_feedback_id=$2")
+            .bind(proposal_id).bind(boundary_feedback_id).fetch_optional(&mut *tx).await?;
+        let cohort_owner = match existing {
+            Some(owner) => owner,
+            None => {
+                let owner_exists = sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM pending_feedback_refinement_handoffs WHERE proposal_id=$1 AND state='pending' AND cohort_owner)")
+                    .bind(proposal_id).fetch_one(&mut *tx).await?;
+                let owner = !owner_exists;
+                sqlx::query("INSERT INTO pending_feedback_refinement_handoffs (id,proposal_id,boundary_feedback_id,cohort_owner) VALUES ($1,$2,$3,$4)")
+                    .bind(uuid::Uuid::now_v7().to_string()).bind(proposal_id).bind(boundary_feedback_id).bind(owner)
+                    .execute(&mut *tx).await?;
+                owner
+            }
+        };
+        tx.commit().await?;
+        Ok(PendingFeedbackRefinementHandoff {
+            boundary_feedback_id: boundary_feedback_id.into(),
+            cohort_owner,
+        })
+    }
     /// Admit the first generation. A stale current run is left untouched; use
     /// `reap_and_admit` to make a destructive stale replacement explicit.
     pub async fn admit_refinement_run(
@@ -786,7 +855,7 @@ async fn resume_awaiting_review_park(
     Ok(intent_id)
 }
 
-async fn insert_admission(
+pub(crate) async fn insert_admission(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     request: &AdmitRefinementRunRequest,
     seq: i32,
