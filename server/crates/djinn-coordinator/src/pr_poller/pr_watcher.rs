@@ -148,6 +148,11 @@ impl CoordinatorActor {
                     pr = pull_number,
                     "PR poller: PR merged → closing task"
                 );
+                // `nafu`: a merge is authoritative over every pending route for
+                // this subject. Closing here is what stops a merged PR leaving
+                // its head's Tier-2 lease held against the next head.
+                poll_stack::boxed(|| self.close_ci_routes_on_success(&task.id, pull_number, true))
+                    .await;
                 poll_stack::boxed(|| {
                     self.apply_pr_merge(
                         &task.id,
@@ -196,24 +201,72 @@ impl CoordinatorActor {
                     // remediation attempt here is what burned six sessions on
                     // task `tlu1`: agents were sent to fix code that had never
                     // been shown to be broken.
-                    poll_stack::boxed(|| {
-                        self.retrigger_inconclusive_run(
+                    //
+                    // Proposal `nafu` wave 3b: when `ci_evidence_routing` is
+                    // on, the durable route layer owns this. It derives one
+                    // immutable evidence identity per Actions run, charges a
+                    // monotonic budget, and calls the provider exactly once per
+                    // evidence across polls and restarts — none of which the
+                    // in-memory `ci_inconclusive_retriggered` dedupe below can
+                    // do. The legacy helper stays the whole behaviour whenever
+                    // the route layer declines, which is every deployment until
+                    // the gate is enabled.
+                    let failing: Vec<&CheckRun> = checks
+                        .check_runs
+                        .iter()
+                        .filter(|cr| is_failing_conclusion(cr.conclusion.as_deref()))
+                        .collect();
+                    let gate = self.ci_routing_gate();
+                    let routed = poll_stack::boxed(|| {
+                        self.route_pr_head_ci_evidence(
                             gh_client,
                             &task.id,
                             &task.short_id,
-                            &pr.head.sha,
                             &owner,
                             &repo,
                             pull_number,
+                            &pr.head.sha,
                             &checks,
+                            &failing,
+                            gate,
                         )
                     })
                     .await;
-                    continue;
+                    // An authoritatively complete *empty* enumeration is the
+                    // lane's no-CI compatibility path, not remediation: the
+                    // route layer has already recorded current-head `Passing`,
+                    // so fall through to the undraft path rather than holding.
+                    if routed.complete_empty().is_some() {
+                        // fall through to the merge-conflict / undraft block
+                    } else {
+                        if !routed.is_routed() {
+                            poll_stack::boxed(|| {
+                                self.retrigger_inconclusive_run(
+                                    gh_client,
+                                    &task.id,
+                                    &task.short_id,
+                                    &pr.head.sha,
+                                    &owner,
+                                    &repo,
+                                    pull_number,
+                                    &checks,
+                                )
+                            })
+                            .await;
+                        }
+                        continue;
+                    }
                 }
                 CiStatus::Pending | CiStatus::Unknown => {
                     // No CI configured after min-age guard — treat as green.
-                    if checks.check_runs.is_empty() {
+                    //
+                    // `is_empty()` alone is not the question. A failed *first*
+                    // page of the check-run enumeration also returns zero runs,
+                    // with `total_count: 0`, so it is indistinguishable from a
+                    // repository with no CI by inspection. Only the provider's
+                    // completeness verdict separates them, and an unproven empty
+                    // set must hold rather than take this path to green.
+                    if ci_helpers::empty_check_set_is_authoritatively_green(&checks) {
                         tracing::info!(
                             task_id = %task.short_id,
                             pr = pull_number,
@@ -250,43 +303,83 @@ impl CoordinatorActor {
                             )
                         })
                         .collect();
-                    let handled = self
-                        .handle_ci_failure(
+                    // `nafu` wave 3b: a complete causal failure is a Tier-2
+                    // route — adjudicate the captured evidence before spending
+                    // another worker session. While the gate is off this
+                    // declines and `handle_ci_failure` is the whole behaviour.
+                    let gate = self.ci_routing_gate();
+                    let routed = poll_stack::boxed(|| {
+                        self.route_pr_head_ci_evidence(
                             gh_client,
-                            &task,
-                            &pr,
-                            &failed_checks,
-                            pr_url,
+                            &task.id,
+                            &task.short_id,
                             &owner,
                             &repo,
                             pull_number,
+                            &pr.head.sha,
+                            &checks,
+                            &failed_checks,
+                            gate,
                         )
-                        .await;
-                    if handled {
+                    })
+                    .await;
+                    // Complete-empty falls through to undraft (the route layer
+                    // recorded `Passing`); every other routed answer holds.
+                    if routed.is_routed() && routed.complete_empty().is_none() {
                         self.pr_status_cache.remove(&task.id);
                         self.pr_draft_first_seen.remove(&task.id);
                         self.review_stuck_sha_first_seen.remove(&task.id);
                         continue;
                     }
-                    // Advisory-only failures slipped through (required checks
-                    // are green).  Overwrite the failing snapshot with passing.
-                    poll_stack::boxed(|| {
-                        self.persist_ci_snapshot(
-                            &task.id,
-                            pull_number,
-                            &pr.head.sha,
-                            CiStatus::Passing,
-                            vec![],
-                            None,
-                            0,
-                            None,
-                        )
-                    })
-                    .await;
+                    if routed.complete_empty().is_none() {
+                        let handled = self
+                            .handle_ci_failure(
+                                gh_client,
+                                &task,
+                                &pr,
+                                &failed_checks,
+                                pr_url,
+                                &owner,
+                                &repo,
+                                pull_number,
+                            )
+                            .await;
+                        if handled {
+                            self.pr_status_cache.remove(&task.id);
+                            self.pr_draft_first_seen.remove(&task.id);
+                            self.review_stuck_sha_first_seen.remove(&task.id);
+                            continue;
+                        }
+                        // Advisory-only failures slipped through (required
+                        // checks are green). Overwrite the failing snapshot
+                        // with passing.
+                        poll_stack::boxed(|| {
+                            self.persist_ci_snapshot(
+                                &task.id,
+                                pull_number,
+                                &pr.head.sha,
+                                CiStatus::Passing,
+                                vec![],
+                                None,
+                                0,
+                                None,
+                            )
+                        })
+                        .await;
+                    }
                 }
                 CiStatus::Passing => {
                     // All required checks passed — proceed to merge-conflict
                     // check and undraft.
+                    //
+                    // `nafu`: a newer pass outranks everything, staleness
+                    // included. It closes this subject's route keys **without
+                    // refunding charges**, so a head that consumed its retry
+                    // budget and then went green does not hand the budget back.
+                    poll_stack::boxed(|| {
+                        self.close_ci_routes_on_success(&task.id, pull_number, false)
+                    })
+                    .await;
                 }
             }
 

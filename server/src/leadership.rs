@@ -52,6 +52,7 @@
 use std::time::Duration;
 
 use djinn_db::advisory_lock;
+use djinn_orchestration_types::ProviderActionScope;
 use sqlx::Connection;
 use sqlx::postgres::PgConnection;
 use tokio_util::sync::CancellationToken;
@@ -85,9 +86,64 @@ const POLL_INTERVAL: Duration = Duration::from_secs(2);
 /// `on_acquire`; it holds the lock until cancellation (or exits the process if
 /// the lock connection is lost). Spawn it as a background task alongside the
 /// HTTP server.
+/// How long leadership waits for the coordinator to quiesce its provider
+/// actions before releasing the advisory lock.
+///
+/// Strictly longer than the coordinator's own drain budget so the ordinary
+/// outcome is "the coordinator finished and stamped", never "leadership gave up
+/// while the coordinator was still joining". Exceeding it is reported and the
+/// lock is released without a graceful proof — a degraded but safe outcome,
+/// because `recover_calling_owner` requires the stamp and will defer without
+/// it.
+const PROVIDER_ACTION_DRAIN_WAIT: std::time::Duration = std::time::Duration::from_secs(45);
+
+/// Close the CI-route provider-action gate and wait for the coordinator's drain
+/// stamp (proposal `nafu`, wave 3).
+///
+/// # The ordering this fixes
+///
+/// Cancellation used to reach this function and `advisory_lock::release` in the
+/// same breath, while the coordinator's current tick — provider calls
+/// included — kept running detached. A new pod could then acquire the lock with
+/// a live `rerun_failed_jobs` future still in the old process. The lock is the
+/// exclusion authority for `calling` rows, so that made exclusion a claim
+/// rather than a fact.
+///
+/// The order is now: **cancellation → close admission → join provider actions →
+/// stamp `provider_actions_drained_at` → release the lock → allow a new
+/// acquisition**. Leadership owns the last two steps; the coordinator owns the
+/// middle two, because the stamp names *its* incarnation. This function is the
+/// join between them.
+///
+/// # Why the gate is closed here as well as in the coordinator
+///
+/// Belt and braces, and they fail differently. The coordinator closes admission
+/// as the first act of its own quiesce; closing it here too means a coordinator
+/// that is wedged, already gone, or never spawned still cannot have a *new*
+/// action admitted while leadership is winding down.
+async fn quiesce_provider_actions(scope: Option<&ProviderActionScope>) {
+    let Some(scope) = scope else {
+        return;
+    };
+    scope.close_admission();
+    if scope.wait_until_drained(PROVIDER_ACTION_DRAIN_WAIT).await {
+        tracing::info!(
+            "leadership: provider-action scope drained; releasing the coordinator advisory lock"
+        );
+    } else {
+        tracing::error!(
+            in_flight = scope.in_flight(),
+            "leadership: provider-action scope did not report a graceful drain within \
+             {PROVIDER_ACTION_DRAIN_WAIT:?}; releasing the advisory lock WITHOUT a drain proof. \
+             `calling` rows owned by this incarnation stay unrecoverable until process death.",
+        );
+    }
+}
+
 pub async fn run_with_leadership<F, Fut>(
     dsn: Option<String>,
     cancel: CancellationToken,
+    provider_action_scope: Option<ProviderActionScope>,
     on_acquire: F,
 ) where
     F: FnOnce() -> Fut,
@@ -100,6 +156,10 @@ pub async fn run_with_leadership<F, Fut>(
         );
         on_acquire().await;
         cancel.cancelled().await;
+        // No lock is held, so nothing is waiting on the proof — but the gate
+        // must still close, or a route admitted during shutdown would leave a
+        // charged `calling` row behind with no finalizer.
+        quiesce_provider_actions(provider_action_scope.as_ref()).await;
         return;
     };
 
@@ -164,7 +224,11 @@ pub async fn run_with_leadership<F, Fut>(
     loop {
         tokio::select! {
             _ = cancel.cancelled() => {
-                tracing::info!("leadership: shutting down — releasing coordinator advisory lock");
+                tracing::info!("leadership: shutting down — quiescing provider actions before releasing the coordinator advisory lock");
+                // Strictly before the release. A lock released while a provider
+                // future is alive is the one ordering `recover_calling_owner`
+                // cannot defend against, because it trusts lock ownership.
+                quiesce_provider_actions(provider_action_scope.as_ref()).await;
                 let _ = advisory_lock::release(&mut conn, LOCK_CLASSID, LOCK_OBJID).await;
                 return;
             }

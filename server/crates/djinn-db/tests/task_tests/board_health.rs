@@ -213,6 +213,139 @@ async fn board_health_returns_protocol_violations_section() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn board_health_liveness_exit_triggers_are_unique() {
+    let db = create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let project = create_test_project(&db).await;
+    let epic = create_test_epic(&db, &project.id).await;
+    let repo = TaskRepository::new(db.clone(), event_bus_for(&tx));
+    let task = repo
+        .create_fixture_in_project(
+            &project.id,
+            Some(&epic.id),
+            "Exit-trigger projection task",
+            "desc",
+            "design",
+            "task",
+            1,
+            "worker",
+            Some("open"),
+            None,
+        )
+        .await
+        .unwrap();
+    let session = create_test_session(&db, &project.id, &task.id).await;
+    let trigger_identity = format!("session_exit:{}", session.id);
+
+    // The production index prevents these rows. Remove it only in this isolated
+    // in-memory fixture to prove historical duplicate/replayed observations
+    // cannot inflate this projection.
+    sqlx::query("DROP INDEX idx_liveness_evidence_trigger_identity_unique")
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+    for (id, verdict, outcome_kind, outcome_reason, trigger, created_at) in [
+        (
+            "00000000-0000-0000-0000-000000000003",
+            "protocol_violation",
+            "protocol_violation",
+            "clean_exit_nonterminal",
+            Some(trigger_identity.as_str()),
+            "2030-01-01T00:00:00.000Z",
+        ),
+        (
+            "00000000-0000-0000-0000-000000000004",
+            "protocol_violation",
+            "protocol_violation",
+            "nonzero_exit_nonterminal",
+            Some(trigger_identity.as_str()),
+            "2030-01-01T00:00:00.000Z",
+        ),
+        (
+            "00000000-0000-0000-0000-000000000005",
+            "live",
+            "success",
+            "clean_exit_nonterminal",
+            None,
+            "2029-01-01T00:00:00.000Z",
+        ),
+        (
+            "00000000-0000-0000-0000-000000000006",
+            "dead",
+            "dead_reclaimed",
+            "hard_runtime_exceeded",
+            None,
+            "2028-01-01T00:00:00.000Z",
+        ),
+    ] {
+        sqlx::query(
+            "INSERT INTO liveness_evidence \
+             (id, session_id, task_id, verdict, trigger_identity, outcome_kind, outcome_reason, evidence, created_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, '{}', $8)",
+        )
+        .bind(id)
+        .bind(&session.id)
+        .bind(&task.id)
+        .bind(verdict)
+        .bind(trigger)
+        .bind(outcome_kind)
+        .bind(outcome_reason)
+        .bind(created_at)
+        .execute(db.pool())
+        .await
+        .unwrap();
+    }
+
+    let report = repo.board_health(24).await.unwrap();
+    let liveness = &report["liveness_outcomes"];
+    let recent = liveness["recent"].as_array().unwrap();
+    assert_eq!(
+        liveness["total"], 3,
+        "one exit result plus both legacy rows"
+    );
+    assert_eq!(liveness["by_verdict"]["protocol_violation"], 1);
+    assert_eq!(liveness["by_verdict"]["live"], 1);
+    assert_eq!(liveness["by_verdict"]["dead"], 1);
+    assert_eq!(recent.len(), 3);
+    assert_eq!(
+        recent[0]["outcome_reason"], "nonzero_exit_nonterminal",
+        "equal-timestamp duplicate selection must be stable by id"
+    );
+    assert_eq!(recent[1]["verdict"], "live");
+    assert_eq!(recent[2]["verdict"], "dead");
+    for field in [
+        "verdict",
+        "outcome_kind",
+        "outcome_reason",
+        "created_at",
+        "task_id",
+        "session_id",
+    ] {
+        assert!(
+            recent[0].get(field).is_some(),
+            "liveness field {field} changed"
+        );
+    }
+
+    let violations = &report["protocol_violations"];
+    let violation_recent = violations["recent"].as_array().unwrap();
+    assert_eq!(violations["total"], 1, "replays cannot inflate violations");
+    assert_eq!(violation_recent.len(), 1);
+    assert_eq!(
+        violation_recent[0]["outcome_reason"],
+        "nonzero_exit_nonterminal"
+    );
+    assert_eq!(violation_recent[0]["task_short_id"], task.short_id.as_str());
+    for field in ["task_short_id", "task_title", "task_status"] {
+        assert!(
+            violation_recent[0].get(field).is_some(),
+            "protocol-violation field {field} changed"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn board_health_stranded_ready_detects_stale_open_tasks() {
     let db = create_test_db();
     let (tx, _rx) = broadcast::channel(256);

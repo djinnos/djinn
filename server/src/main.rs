@@ -411,10 +411,16 @@ async fn async_main(cli: Cli) {
     };
     let leader_state = state.clone();
     let leader_cancel = cancel.clone();
+    // The same scope the coordinator admits its CI-route provider actions
+    // into. Leadership waits on it before releasing the advisory lock, so the
+    // lock cannot be handed to a new incarnation while a provider future from
+    // this one is alive (proposal `nafu`, wave 3).
+    let leader_action_scope = state.provider_action_scope();
     tokio::spawn(async move {
         djinn_server::leadership::run_with_leadership(
             lock_dsn,
             leader_cancel,
+            Some(leader_action_scope),
             move || async move {
                 leader_state.become_leader().await;
             },

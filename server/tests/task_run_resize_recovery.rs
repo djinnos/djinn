@@ -2087,7 +2087,7 @@ async fn only_the_leader_reconciles_across_a_real_advisory_lock_race() {
         pods.push(tokio::spawn(async move {
             let _rebuilt = rebuilt;
             let loop_cancel = cancel.clone();
-            djinn_server::leadership::run_with_leadership(Some(dsn), cancel, || async move {
+            djinn_server::leadership::run_with_leadership(Some(dsn), cancel, None, || async move {
                 acquired.fetch_add(1, Ordering::SeqCst);
                 // The PRODUCTION shape: a loop, not a single pass. A one-shot
                 // here would make the test hostage to any transient database

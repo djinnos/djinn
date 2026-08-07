@@ -11,6 +11,7 @@
 use crate::github_app::installations::prime_cache_for_tests;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+mod check_runs_completeness;
 mod checks;
 mod contents;
 mod create_pull_request;

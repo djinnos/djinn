@@ -6,7 +6,8 @@ use crate::github_api::types::{
     RequiredCheckUnreproducibleReason, WorkflowRun, WorkflowRunsResponse,
 };
 use crate::github_api::{
-    ActionsJob, ActionsJobStep, CheckAnnotation, CheckRun, GitHubApiClient, GitHubApiError,
+    ActionsJob, ActionsJobStep, CheckAnnotation, CheckRun, CheckSetCompleteness,
+    CheckSetIncompleteReason, GitHubApiClient, GitHubApiError,
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use futures::StreamExt;
@@ -247,50 +248,129 @@ impl GitHubApiClient {
     /// queue rejects a PR the *real* failing checks live here, not on the PR
     /// head (whose checks passed). Used to surface the actual failure to the
     /// reworking worker instead of GitHub's generic dequeue reason.
+    /// # This used to forge its own completeness verdict
+    ///
+    /// It fetched a single page of 100 and returned the body as-is. The
+    /// `completeness` field carries `#[serde(default)]`, and the default is
+    /// `Complete` — so a ref with more than 100 check runs silently truncated
+    /// **and told every caller the set was authoritative**. That defeats the
+    /// exact contract the field exists for: `CiCapture::prove_complete` takes
+    /// the provider's verdict rather than inspecting the list precisely because
+    /// the list cannot tell a truncated read from a small repository, and here
+    /// the verdict was a serde default rather than a computation.
+    ///
+    /// It now pages the same way `get_pull_request` does and computes the
+    /// verdict from the same three facts: a non-success page status, the
+    /// `MAX_PAGES` ceiling, and the response's own `total_count`.
     pub async fn list_check_runs_for_ref(
         &self,
         owner: &str,
         repo: &str,
         git_ref: &str,
     ) -> std::result::Result<CheckRunsResponse, GitHubApiError> {
-        let url = format!(
-            "{}/repos/{}/{}/commits/{}/check-runs?per_page=100",
-            self.base_url, owner, repo, git_ref
-        );
+        const PER_PAGE: u32 = 100;
+        const MAX_PAGES: u32 = 10; // 10 * 100 = 1000 check runs.
 
-        let resp = self
-            .send_with_retry(|token| {
-                let url = url.clone();
-                let http = self.http.clone();
-                async move {
-                    let resp = http
-                        .get(&url)
-                        .bearer_auth(&token)
-                        .header("Accept", "application/vnd.github+json")
-                        .header("X-GitHub-Api-Version", "2022-11-28")
-                        .send()
-                        .await?;
-                    handle_rate_limit(resp).await
+        let path = format!("/repos/{owner}/{repo}/commits/{git_ref}/check-runs");
+        let mut all_runs: Vec<CheckRun> = Vec::new();
+        let mut total_count: u32 = 0;
+        let mut hit_cap = false;
+        let mut failed_page: Option<u32> = None;
+
+        for page in 1..=MAX_PAGES {
+            let url = format!(
+                "{}/repos/{}/{}/commits/{}/check-runs?per_page={}&page={}",
+                self.base_url, owner, repo, git_ref, PER_PAGE, page
+            );
+
+            let resp = self
+                .send_with_retry(|token| {
+                    let url = url.clone();
+                    let http = self.http.clone();
+                    async move {
+                        let resp = http
+                            .get(&url)
+                            .bearer_auth(&token)
+                            .header("Accept", "application/vnd.github+json")
+                            .header("X-GitHub-Api-Version", "2022-11-28")
+                            .send()
+                            .await?;
+                        handle_rate_limit(resp).await
+                    }
+                })
+                .await?;
+
+            if !resp.status().is_success() {
+                // Page 1 keeps the historical behaviour of surfacing the error
+                // to the caller: there is no partial result to report, and the
+                // merge-group route treats an outright failure as
+                // `CheckApiError` rather than as an incomplete enumeration.
+                if page == 1 {
+                    let status = resp.status();
+                    let body = resp.text().await.unwrap_or_default();
+                    return Err(GitHubApiError::http(
+                        "list_check_runs_for_ref",
+                        path,
+                        status,
+                        body,
+                    ));
                 }
-            })
-            .await?;
+                tracing::warn!(
+                    owner,
+                    repo,
+                    git_ref,
+                    page,
+                    status = %resp.status(),
+                    "GitHubApiClient: check-runs page fetch failed; returning collected runs as INCOMPLETE",
+                );
+                failed_page = Some(page);
+                break;
+            }
 
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(GitHubApiError::http(
-                "list_check_runs_for_ref",
-                format!("/repos/{owner}/{repo}/commits/{git_ref}/check-runs"),
-                status,
-                body,
-            ));
+            let page_body: CheckRunsResponse = resp.json().await.map_err(|e| {
+                GitHubApiError::transport("list_check_runs_for_ref", path.clone(), e.to_string())
+            })?;
+            total_count = page_body.total_count;
+            let page_len = page_body.check_runs.len();
+            all_runs.extend(page_body.check_runs);
+
+            if (page_len as u32) < PER_PAGE {
+                break;
+            }
+            if page == MAX_PAGES {
+                hit_cap = true;
+            }
         }
-        resp.json().await.map_err(|e| {
-            GitHubApiError::transport(
-                "list_check_runs_for_ref",
-                format!("/repos/{owner}/{repo}/commits/{git_ref}/check-runs"),
-                e.to_string(),
-            )
+
+        // Same exoneration as the PR-head walk: a full final page is only
+        // truncation when the provider's own count says runs were left behind.
+        let truncated = hit_cap && all_runs.len() < total_count as usize;
+        if truncated {
+            tracing::error!(
+                owner,
+                repo,
+                git_ref,
+                max_pages = MAX_PAGES,
+                collected = all_runs.len(),
+                total_count,
+                "GitHubApiClient: ref check-run enumeration EXCEEDS the pagination ceiling",
+            );
+        }
+
+        let completeness = if failed_page.is_some() {
+            CheckSetCompleteness::Incomplete(CheckSetIncompleteReason::PageFetchFailed)
+        } else if truncated {
+            CheckSetCompleteness::Incomplete(CheckSetIncompleteReason::MaxPagesTruncated)
+        } else if all_runs.len() < total_count as usize {
+            CheckSetCompleteness::Incomplete(CheckSetIncompleteReason::ShortRead)
+        } else {
+            CheckSetCompleteness::Complete
+        };
+
+        Ok(CheckRunsResponse {
+            total_count,
+            check_runs: all_runs,
+            completeness,
         })
     }
 

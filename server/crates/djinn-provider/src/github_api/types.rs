@@ -365,11 +365,100 @@ pub struct CheckAnnotation {
     pub title: Option<String>,
 }
 
+/// Why a paged check-run enumeration could not be proven complete.
+///
+/// Each variant is a fact the paging loop observed, not an inference. They are
+/// ordered by where the loop can notice them, and they are deliberately kept
+/// apart rather than collapsed into one `incomplete` bit: the short-read case
+/// is provider-reported arithmetic, while the other two are transport facts
+/// the arithmetic cannot see.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckSetIncompleteReason {
+    /// A page request returned a non-success status. The walk stopped there and
+    /// the collected list is a prefix of the real set.
+    ///
+    /// This is the case the `total_count` comparison alone cannot catch: when
+    /// *page 1* fails, nothing was ever parsed, so `total_count` stays `0` and
+    /// `collected == total_count == 0` — an empty set that looks authoritative
+    /// and reaches a no-CI fast path.
+    PageFetchFailed,
+    /// The walk hit the `MAX_PAGES` ceiling with a full final page, so more
+    /// results certainly exist beyond the ceiling.
+    MaxPagesTruncated,
+    /// Every page succeeded, but fewer runs were collected than the provider's
+    /// own `total_count` reported.
+    ShortRead,
+}
+
+/// Whether a check-run enumeration is provably complete.
+///
+/// `Complete` is a *proof*, never a default assumption: a single successfully
+/// parsed page body is complete at the page level, and the multi-page
+/// aggregator in [`super::GitHubApiClient::get_pull_request`] overwrites the
+/// aggregate verdict before returning. Consumers that route on the check set
+/// must fail closed on `Incomplete` — an incomplete set may be missing the one
+/// causal check, so it can be neither "passing" nor "authoritatively empty".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckSetCompleteness {
+    #[default]
+    Complete,
+    Incomplete(CheckSetIncompleteReason),
+}
+
+impl CheckSetCompleteness {
+    pub fn is_complete(self) -> bool {
+        matches!(self, Self::Complete)
+    }
+
+    pub fn incomplete_reason(self) -> Option<CheckSetIncompleteReason> {
+        match self {
+            Self::Complete => None,
+            Self::Incomplete(reason) => Some(reason),
+        }
+    }
+}
+
 /// Summary of check runs for a PR head SHA.
+///
+/// `completeness` is not part of GitHub's payload: it is the verdict the paging
+/// loop computes from facts it already has (page status, the `MAX_PAGES`
+/// ceiling, and the `total_count` the response already carries). It is skipped
+/// on serialization so no persisted snapshot shape changes, and it defaults to
+/// [`CheckSetCompleteness::Complete`] on deserialization because a page body
+/// that parsed *is* a complete page.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CheckRunsResponse {
     pub total_count: u32,
     pub check_runs: Vec<CheckRun>,
+    #[serde(default, skip_serializing)]
+    pub completeness: CheckSetCompleteness,
+}
+
+impl CheckRunsResponse {
+    /// A provably complete enumeration.
+    pub fn complete(check_runs: Vec<CheckRun>) -> Self {
+        Self {
+            total_count: check_runs.len() as u32,
+            check_runs,
+            completeness: CheckSetCompleteness::Complete,
+        }
+    }
+
+    /// An enumeration that could not be proven complete. The collected runs are
+    /// retained for diagnostics; no consumer may route on them.
+    pub fn incomplete(
+        total_count: u32,
+        check_runs: Vec<CheckRun>,
+        reason: CheckSetIncompleteReason,
+    ) -> Self {
+        Self {
+            total_count,
+            check_runs,
+            completeness: CheckSetCompleteness::Incomplete(reason),
+        }
+    }
 }
 
 /// A pull request returned by the GitHub API.
