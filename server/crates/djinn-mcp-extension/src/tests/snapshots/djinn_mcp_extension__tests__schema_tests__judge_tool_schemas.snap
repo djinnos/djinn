@@ -898,7 +898,17 @@ expression: tool_schemas_judge()
         },
         "verification_command": {
           "type": "string",
-          "description": "Required for reopen. Executable command the next worker must run to verify the fix."
+          "description": "Required for a repair reopen. Executable command the next worker must run to verify the fix. When adjudicating a CI failure it must be copied from repository/task context or exposed directly as a command by CI evidence — never invented from a job name. Mutually exclusive with diagnostic_reason."
+        },
+        "diagnostic_reason": {
+          "type": "string",
+          "enum": [
+            "evidence_incomplete",
+            "provider_action_failed",
+            "no_grounded_remedy",
+            "no_repository_command"
+          ],
+          "description": "Required for a diagnostic reopen, which is the correct outcome when you cannot ground a remedy or cannot name a repository-valid verification command. Name what remains unknown in the directive and cite the reason here. Mutually exclusive with verification_command."
         },
         "exclude_models": {
           "type": "array",
