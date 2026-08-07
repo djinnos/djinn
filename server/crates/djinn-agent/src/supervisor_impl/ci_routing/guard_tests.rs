@@ -1045,6 +1045,43 @@ fn strip_line_comments(source: &str) -> String {
     out
 }
 
+/// The single argument of the call whose opening parenthesis has just been
+/// consumed, with its trailing comma and surrounding whitespace removed.
+///
+/// Paren-aware, because the argument this file cares about is itself a call
+/// (`directive.as_ref()`) and a naive scan to the first `)` would stop inside
+/// it. Panics rather than guessing if the argument list is not exactly one
+/// item — a second argument means the call's contract changed and the assertion
+/// built on it needs a human, not a silent pass.
+fn sole_argument(after_open_paren: &str) -> &str {
+    let mut depth = 1usize;
+    let mut end = after_open_paren.len();
+    for (index, character) in after_open_paren.char_indices() {
+        match character {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    end = index;
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let argument = after_open_paren[..end].trim().trim_end_matches(',').trim();
+    assert!(
+        !argument.is_empty(),
+        "vacuity: the call was given no argument at all",
+    );
+    assert_eq!(
+        argument.matches(',').count(),
+        0,
+        "expected a single-argument call, got `{argument}`",
+    );
+    argument
+}
+
 /// The supervisor's Lead stage arm is what reaches the `nafu` contract at all.
 ///
 /// SOURCE-LEVEL, and honestly labelled: `execute_stage` is the enclosing
@@ -1083,15 +1120,57 @@ fn strip_line_comments(source: &str) -> String {
 ///     definition alone) and the call assertion fails.
 /// (d) Inline `apply_lead_ci_result`'s body at the call site: the same failure,
 ///     for the same reason.
+/// (e) `read_arbiter_directive(directive.as_ref())` →
+///     `read_arbiter_directive(None)`: the *token* is still there, so the
+///     presence assertion below is satisfied and so is every arm-ordering
+///     assertion — while every Lead session answers `NoRoute` and takes the
+///     legacy path, a `diagnose` payload is rejected as `Failed`, the arbiter
+///     decision-failure counter is charged, and the task parks at the cap.
+///     `apply_lead_ci_result` becomes dead code with the whole `nafu` command
+///     list green. The ARGUMENT assertion is what fails.
+/// (f) Rebind `directive` from anything other than the arbitration row — e.g.
+///     `let directive: Option<serde_json::Value> = None;`: the binding
+///     assertion fails, which is the same mutation wearing a different hat.
 #[test]
 fn the_supervisors_lead_stage_arm_reads_the_route_and_applies_it_under_the_guard() {
     let code = strip_line_comments(include_str!("../stage.rs"));
 
+    const READ: &str = "ci_routing::CiAdjudicationContext::read_arbiter_directive(";
+    assert_eq!(
+        code.matches(READ).count(),
+        1,
+        "exactly one read of the route block in the Lead stage arm; without it \
+         every Lead session takes the legacy arbiter path and the feature is \
+         unreachable from production. A second one would inherit no guard",
+    );
+
+    // The ARGUMENT, not merely the call. `read_arbiter_directive(None)` leaves
+    // the token in place and reverts the whole feature.
+    let read = code.find(READ).expect("the read call is present") + READ.len();
+    let argument = sole_argument(&code[read..]);
+    assert_eq!(
+        argument, "directive.as_ref()",
+        "the Lead stage arm must hand the arbitration row's OWN directive to \
+         the reader; a literal `None` (or any other stand-in) makes every Lead \
+         session answer `NoRoute`, which is the feature-disabled row of the \
+         mixed-version matrix — permanently, in production",
+    );
+
+    // …and `directive` must be the row's, read from the hold cycle the
+    // coordinator wrote the `ci_route` block onto.
+    let binding = code
+        .find("let directive = {")
+        .expect("the Lead stage arm binds the arbitration directive");
     assert!(
-        code.contains("ci_routing::CiAdjudicationContext::read_arbiter_directive("),
-        "the Lead stage arm must READ the route block; without this call every \
-         Lead session takes the legacy arbiter path and the feature is \
-         unreachable from production",
+        binding < read,
+        "the directive is resolved BEFORE it is read; a later binding is a \
+         different value",
+    );
+    assert!(
+        code[binding..read].contains(".resolve_current_hold_cycle(&task.id)"),
+        "and it must come from THIS task's current arbitration hold cycle — the \
+         row `tier2_dispatch` writes the `ci_route` block onto. Any other \
+         source is a directive no coordinator produced",
     );
 
     // The application half, and that it is the GUARDED one.

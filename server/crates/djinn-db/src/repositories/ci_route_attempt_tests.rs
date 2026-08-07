@@ -4152,6 +4152,146 @@ async fn hold_observation_is_idempotent_across_restart() {
     assert_eq!(other.poll_sequence, 2);
 }
 
+/// One hold streak per `(repository, PR, head, lane, dequeue)` identity — on
+/// the PR-head lane, where `dequeue_id IS NULL`.
+///
+/// # Why NULL is the whole story here
+///
+/// `lock_or_create_streak` creates with `INSERT … ON CONFLICT DO NOTHING` and
+/// **no conflict target**, so the only thing standing between two simultaneous
+/// creations and two rows is `NULLS NOT DISTINCT` on
+/// `ci_incomplete_hold_streaks_identity_uniq` (migration 195). Drop that one
+/// clause and, under the default `NULLS DISTINCT`, every PR-head streak is
+/// unique to itself no matter how many of them exist: two concurrent
+/// coordinator polls mint two streaks for one head, each counts alone, and
+/// `CI_INCOMPLETE_HOLD_MAX_POLLS` is reached at twice the wall-clock — or
+/// never, if the polls keep splitting. The bounded hold silently becomes an
+/// unbounded one, which is the stall the bound exists to prevent.
+///
+/// Every other hold fixture in this file polls **sequentially**, and a
+/// sequential second poll finds the first row under `SELECT … FOR UPDATE`
+/// before it ever attempts an insert. So none of them touches the clause, and
+/// dropping it leaves the whole `nafu` command list at its baseline counts.
+///
+/// # The two halves
+///
+/// 1. **The race**, driven through the production repository: two reservations
+///    for one identity, concurrently, from a state where no row exists.
+/// 2. **The collapse**, deterministic: the creation statement
+///    `lock_or_create_streak` issues, replayed verbatim against the identity
+///    columns of the row that already exists. Under the index it is absorbed
+///    (`rows_affected() == 0`); without it, it silently mints a second streak.
+///    This half does not depend on how the runtime happened to interleave, so
+///    it holds the contract even if (1) is scheduled sequentially.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn one_pr_head_identity_holds_one_streak_across_concurrent_polls() {
+    let f = fixture().await;
+    let identity = hold_identity(&f.subject, "headsha-concurrent-identity");
+    assert!(
+        identity.dequeue_id.is_none(),
+        "vacuity: this fixture is about the PR-head lane, whose dequeue id is \
+         NULL — that is the column the identity index has to collapse",
+    );
+    assert_eq!(
+        count_rows(&f.db, "SELECT COUNT(*) FROM ci_incomplete_hold_streaks").await,
+        0,
+        "vacuity: no streak exists yet, so both reservations below race to \
+         CREATE one rather than finding it",
+    );
+
+    // ── (1) Two concurrent polls of one PR head ────────────────────────────
+    //
+    // Two repositories, as two coordinator ticks would hold: nothing is shared
+    // between them but the database.
+    let left = CiIncompleteHoldRepository::new(f.db.clone());
+    let right = CiIncompleteHoldRepository::new(f.db.clone());
+    let left_poll = uuid::Uuid::now_v7().to_string();
+    let right_poll = uuid::Uuid::now_v7().to_string();
+    let (first, second) = tokio::join!(
+        left.reserve_poll(&identity, &left_poll),
+        right.reserve_poll(&identity, &right_poll),
+    );
+    let first = first.expect("the first concurrent reservation");
+    let second = second.expect("the second concurrent reservation");
+
+    assert_eq!(
+        first.streak_id, second.streak_id,
+        "two polls of ONE PR head are one identity and must share one streak; \
+         separate streaks each count alone and the bound is never reached",
+    );
+    assert_eq!(
+        count_rows(&f.db, "SELECT COUNT(*) FROM ci_incomplete_hold_streaks").await,
+        1,
+        "exactly one hold row per repository/PR/head/lane/dequeue identity",
+    );
+    let mut sequences = [first.poll_sequence, second.poll_sequence];
+    sequences.sort_unstable();
+    assert_eq!(
+        sequences,
+        [1, 2],
+        "and both polls draw from that ONE streak's sequence space, so neither \
+         is silently ordering itself against a private counter",
+    );
+
+    // ── (2) The collapse, without relying on the scheduler ─────────────────
+    //
+    // The identity columns are read back off the surviving row so this replays
+    // the production statement against the production values rather than a
+    // hand-built approximation of them.
+    let (subject_kind, subject_id, repository_id, pr_number, pr_head_sha, lane, dequeue_id): (
+        String,
+        String,
+        String,
+        i64,
+        String,
+        String,
+        Option<String>,
+    ) = sqlx::query_as(
+        "SELECT subject_kind, subject_id, repository_id, pr_number, pr_head_sha, lane, dequeue_id \
+         FROM ci_incomplete_hold_streaks",
+    )
+    .fetch_one(f.db.pool())
+    .await
+    .expect("the single surviving streak");
+    assert!(
+        dequeue_id.is_none(),
+        "vacuity: the surviving row really does carry a NULL dequeue id",
+    );
+
+    // Verbatim from `lock_or_create_streak`: no conflict target, so the index
+    // is the entire guard.
+    let absorbed = sqlx::query(
+        "INSERT INTO ci_incomplete_hold_streaks \
+           (id, subject_kind, subject_id, repository_id, pr_number, pr_head_sha, lane, dequeue_id) \
+         VALUES ($8, $1, $2, $3, $4, $5, $6, $7) ON CONFLICT DO NOTHING",
+    )
+    .bind(&subject_kind)
+    .bind(&subject_id)
+    .bind(&repository_id)
+    .bind(pr_number)
+    .bind(&pr_head_sha)
+    .bind(&lane)
+    .bind(dequeue_id)
+    .bind(uuid::Uuid::now_v7().to_string())
+    .execute(f.db.pool())
+    .await
+    .expect("a duplicate creation is absorbed, never an error");
+
+    assert_eq!(
+        absorbed.rows_affected(),
+        0,
+        "the creation statement is `ON CONFLICT DO NOTHING` with NO target, so \
+         `NULLS NOT DISTINCT` on the identity index is the only thing that can \
+         absorb a duplicate PR-head streak. Without it this insert succeeds and \
+         one PR head owns two streaks",
+    );
+    assert_eq!(
+        count_rows(&f.db, "SELECT COUNT(*) FROM ci_incomplete_hold_streaks").await,
+        1,
+        "and the row count is what that means operationally",
+    );
+}
+
 /// Sequence reservation, not arrival time, is the authority order.
 ///
 /// A poll that reserved earlier but lands later is **superseded**: it writes

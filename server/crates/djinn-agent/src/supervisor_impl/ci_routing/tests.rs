@@ -1488,15 +1488,24 @@ mod lead_ci_routing {
     ///
     /// # Why the assertions are shaped this way
     ///
-    /// Asserting only "LeadRouteSuperseded encodes as 19" would still pass if
-    /// someone appended a twentieth variant after it — it would still be at
-    /// 19, and it would no longer be last. So the load-bearing assertion is
-    /// the *negative* one: index 19 decodes, and index 20 does not exist.
+    /// Asserting only "LeadRouteSuperseded encodes as 20" would still pass if
+    /// someone appended a twenty-first variant after it — it would still be at
+    /// 20, and it would no longer be last. So one load-bearing assertion is
+    /// the *negative* one: index 20 decodes, and index 21 does not exist.
     /// Together they say "this is the highest index the enum has", which is
     /// the only spelling of "appended last" the wire format can witness.
+    ///
+    /// That negative assertion is necessary and **not sufficient**, because it
+    /// answers a question about payload shapes rather than about position: a
+    /// re-tagged `{reason: String}` body fails to parse as most neighbouring
+    /// variants whatever their index. So the tail is additionally pinned
+    /// positionally — the three variants immediately below
+    /// `LeadRouteSuperseded` have their wire indices asserted too, which is
+    /// what makes an insertion *anywhere* in the enum move one of the numbers
+    /// this fixture reads.
     #[test]
     fn lead_route_superseded_is_the_last_wire_variant() {
-        use djinn_supervisor::StageOutcome;
+        use djinn_supervisor::{ModelTurnAdmissionStageOutcome, StageOutcome};
 
         let outcome = StageOutcome::LeadRouteSuperseded {
             reason: "head advanced".to_string(),
@@ -1527,10 +1536,31 @@ mod lead_ci_routing {
             index + 1
         );
 
-        // 3. Every variant an old worker already writes keeps its index, so
-        //    old-writer-to-new-reader still decodes. `WorkerDone` is index 0
-        //    and `Failed` is 14; if LeadRouteSuperseded had been inserted
-        //    rather than appended, one of these would have shifted.
+        // 3. It sits at the tail index, and the three variants immediately
+        //    before it sit at theirs.
+        //
+        //    Assertion 2 alone does NOT pin this, and the gap is not
+        //    theoretical. Move `LeadRouteSuperseded` up one slot, to just above
+        //    `ModelTurnAdmission`, and assertion 2 still passes — for
+        //    *payload-shape* reasons that have nothing to do with position: the
+        //    re-tagged body is `{reason: String}` and index+1 would then be
+        //    `ModelTurnAdmission(<nested enum>)`, which fails to parse, so
+        //    "index + 1 does not decode" reads as "nothing follows me". The two
+        //    anchors below it (`WorkerDone` = 0, `Failed` = 14) both sit BEFORE
+        //    the insertion point, so neither shifts either. Meanwhile
+        //    `ModelTurnAdmission`, `LeadParked` and `LeadSuperseded` have each
+        //    moved up by one, and an old worker's `LeadParked` frame decodes on
+        //    a new launcher as `LeadSuperseded` — a park read as a terminal
+        //    close.
+        //
+        //    So the tail is pinned POSITIONALLY: any insertion anywhere in the
+        //    enum shifts at least one of these five indices.
+        assert_eq!(
+            index, 20,
+            "LeadRouteSuperseded's wire index moved; every variant declared \
+             after the insertion point now decodes as a different outcome on a \
+             mixed-version fleet"
+        );
         for (expected, old) in [
             (0u32, StageOutcome::WorkerDone),
             (
@@ -1538,6 +1568,25 @@ mod lead_ci_routing {
                 StageOutcome::Failed {
                     reason: "boom".to_string(),
                     provider_failure: None,
+                },
+            ),
+            (
+                17u32,
+                StageOutcome::ModelTurnAdmission(ModelTurnAdmissionStageOutcome::Wait(
+                    djinn_db::ModelTurnAdmissionWait::Draining,
+                )),
+            ),
+            (
+                18u32,
+                StageOutcome::LeadParked {
+                    park_dossier_json: "{}".to_string(),
+                },
+            ),
+            (
+                19u32,
+                StageOutcome::LeadSuperseded {
+                    reason: "decomposed".to_string(),
+                    replacement_task_ids: vec!["t456".to_string()],
                 },
             ),
         ] {
