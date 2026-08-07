@@ -14,6 +14,39 @@ pub struct ToolSafetyAnnotations {
     pub concurrent_safe: bool,
 }
 
+pub fn tool_proposal_feedback_disposition() -> RmcpTool {
+    RmcpTool::new(
+        "proposal_feedback_disposition".to_string(),
+        "Propose an Advocate disposition for an unresolved `human_feedback` debate entry. Use `fixed_by_revision` with a newer revision on the same proposal, or `wont_fix` with non-empty reasoning. Only the Judge may accept or reject it.".to_string(),
+        object!({
+            "type": "object", "required": ["id", "disposition"],
+            "properties": {
+                "id": {"type": "string", "description": "Unresolved human_feedback debate entry id."},
+                "disposition": {"type": "string", "enum": ["fixed_by_revision", "wont_fix"]},
+                "fixed_by_revision": {"type": "integer", "description": "Required for fixed_by_revision; must be newer and on this proposal."},
+                "reason": {"type": "string", "minLength": 1, "description": "Required non-empty reasoning for wont_fix."}
+            },
+            "allOf": [
+                {"if": {"properties": {"disposition": {"const": "fixed_by_revision"}}}, "then": {"required": ["fixed_by_revision"]}},
+                {"if": {"properties": {"disposition": {"const": "wont_fix"}}}, "then": {"required": ["reason"]}}
+            ]
+        }),
+    )
+}
+
+/// Author withdrawal is exposed to the authenticated chat/control-plane MCP
+/// surface, never to a tribunal role surface.
+pub fn tool_proposal_feedback_withdraw() -> RmcpTool {
+    RmcpTool::new(
+        "proposal_feedback_withdraw".to_string(),
+        "Withdraw a feedback entry as its original author. This preserves captured source snapshots; a human-feedback obligation closes only when every captured blocking feedback row is withdrawn.".to_string(),
+        object!({
+            "type": "object", "required": ["id"],
+            "properties": {"id": {"type": "string", "description": "Feedback entry id authored by the authenticated caller."}}
+        }),
+    )
+}
+
 pub fn tool_memory_retrieval_outcomes_report() -> RmcpTool {
     RmcpTool::new(
         "memory_retrieval_outcomes_report".to_string(),
@@ -72,7 +105,7 @@ pub fn tool_evidence_exec() -> RmcpTool {
 pub fn tool_memory_recall_trace() -> RmcpTool {
     RmcpTool::new(
         "memory_recall_trace".to_string(),
-        "Inspect persisted memory-retrieval traces for the current project. Use mode=list to triage compact trace summaries with optional filters and bounded pagination, or mode=detail with trace_id to inspect one trace and its bounded note excerpts. List/detail expose rollout_label and trace_outcome separately from candidate outcome: rollout_label is the recorded deployment label, trace_outcome is injected, empty, error, legacy_unknown, disabled_off, disabled_kill_switch, or disabled_legacy, while candidate outcomes are injected or skipped. Allowed entry points: dispatch, jit_pitfalls, load_knowledge_context, format_knowledge_notes, memory_recall_trace. Allowed skipped reasons: not_top_k, min_confidence, budget_pruned, superseded_pruned, dedupe, search_error.".to_string(),
+        "Inspect persisted memory-retrieval traces for the current project. Use mode=list to triage compact trace summaries with optional filters and bounded pagination, or mode=detail with trace_id to inspect one trace and its bounded note excerpts. List/detail expose rollout_label and trace_outcome separately from candidate outcome: rollout_label is the recorded deployment label, trace_outcome is injected, empty, error, legacy_unknown, disabled_off, disabled_kill_switch, or disabled_legacy, while candidate outcomes are injected or skipped. Allowed entry points: dispatch, jit_pitfalls, load_knowledge_context, format_knowledge_notes, memory_recall_trace. Allowed skipped reasons: not_top_k, min_confidence, budget_pruned, oversized_skipped, superseded_pruned, dedupe, search_error.".to_string(),
         object!({
             "type": "object",
             "oneOf": [
@@ -89,7 +122,7 @@ pub fn tool_memory_recall_trace() -> RmcpTool {
                         "rollout_label": {"type": "string", "description": "Exact recorded rollout label filter."},
                         "trace_outcome": {"type": "string", "enum": ["injected", "empty", "error", "legacy_unknown", "disabled_off", "disabled_kill_switch", "disabled_legacy"], "description": "Trace-level outcome filter, distinct from candidate outcome."},
                         "outcome": {"type": "string", "enum": ["injected", "skipped"], "description": "Candidate outcome filter."},
-                        "skipped_reason": {"type": "string", "enum": ["not_top_k", "min_confidence", "budget_pruned", "superseded_pruned", "dedupe", "search_error"], "description": "Skipped-candidate reason filter."},
+                        "skipped_reason": {"type": "string", "enum": ["not_top_k", "min_confidence", "budget_pruned", "oversized_skipped", "superseded_pruned", "dedupe", "search_error"], "description": "Skipped-candidate reason filter."},
                         "limit": {"type": "integer", "minimum": 1, "maximum": 100, "description": "Maximum compact trace summaries to return (1-100; default is server-defined)."},
                         "offset": {"type": "integer", "minimum": 0, "description": "Zero-based summary page offset."}
                     },
@@ -422,12 +455,14 @@ pub fn tool_proposal_debate_list() -> RmcpTool {
 pub fn tool_proposal_debate_resolve() -> RmcpTool {
     RmcpTool::new(
         "proposal_debate_resolve".to_string(),
-        "Mark a debate-trail objection as resolved by entry `id` (from `proposal_debate_list`). The Judge or Advocate calls this for each blocking objection the revision genuinely satisfies. Pair with a `proposal_debate_append` rebuttal explaining how.".to_string(),
+        "Judge-only global resolution for a debate-trail objection by entry `id` (from `proposal_debate_list`). For `human_feedback`, supply `verdict=accept` or `reject`; rejection requires non-empty needs-work `reason`.".to_string(),
         object!({
             "type": "object",
             "required": ["id"],
             "properties": {
-                "id": {"type": "string", "description": "The debate-trail entry id to resolve (from proposal_debate_list)"}
+                "id": {"type": "string", "description": "The debate-trail entry id to resolve (from proposal_debate_list)"},
+                "verdict": {"type": "string", "enum": ["accept", "reject"], "description": "Required only for human_feedback."},
+                "reason": {"type": "string", "minLength": 1, "description": "Required needs-work reasoning when rejecting human_feedback."}
             }
         }),
     )

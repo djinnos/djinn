@@ -3,6 +3,7 @@ use djinn_core::models::Task;
 
 fn task_with_merge_commit_sha(merge_commit_sha: Option<&str>) -> Task {
     Task {
+        escalation_evidence_at: None,
         id: "task-1".into(),
         project_id: "project-1".into(),
         short_id: "T-1".into(),

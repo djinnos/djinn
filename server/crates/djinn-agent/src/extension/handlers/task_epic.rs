@@ -1000,7 +1000,7 @@ pub(super) async fn call_task_update_ac(
 /// Deprecated compatibility route for stale `request_lead` calls from
 /// worker/reviewer sessions that were dispatched before the drain cutover
 /// (epic 10qg).  Logs a typed `deprecated_request_lead` activity and routes
-/// through `dispatch_planner_escalation` WITHOUT transitioning the task to
+/// through `dispatch_arbiter_adjudication` WITHOUT transitioning the task to
 /// `needs_lead_intervention`.
 pub(crate) async fn call_request_lead(
     state: &AgentContext,
@@ -1056,7 +1056,7 @@ pub(crate) async fn call_request_lead(
         None => p.reason.clone(),
     };
     let _ = coordinator
-        .dispatch_planner_escalation(&task.id, &planner_reason, &task.project_id)
+        .dispatch_arbiter_adjudication(&task.id, &planner_reason, &task.project_id)
         .await;
 
     Ok(serde_json::json!({
@@ -1069,7 +1069,7 @@ pub(crate) async fn call_request_lead(
 
 /// Route a planner escalation request from any role (worker, reviewer, or lead).
 /// Logs a role-neutral Planner-request activity that preserves the caller's
-/// reason, then dispatches `dispatch_planner_escalation`.
+/// reason, then dispatches `dispatch_arbiter_adjudication`.
 pub(crate) async fn call_request_planner(
     state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
@@ -1101,7 +1101,7 @@ pub(crate) async fn call_request_planner(
     };
 
     let _ = coordinator
-        .dispatch_planner_escalation(&task.id, &p.reason, &task.project_id)
+        .dispatch_arbiter_adjudication(&task.id, &p.reason, &task.project_id)
         .await;
 
     Ok(serde_json::json!({

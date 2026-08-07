@@ -377,6 +377,12 @@ pub struct ProposalFeedbackModel {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub author_model: Option<String>,
     pub body: String,
+    /// `advisory` discussion does not gate readiness; `blocking` feedback does.
+    pub severity: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub withdrawn_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub withdrawn_by_user_id: Option<String>,
     /// When set, the feedback is resolved (addressed or dismissed) and collapsed
     /// out of the active thread.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -401,6 +407,9 @@ impl From<&ProposalFeedback> for ProposalFeedbackModel {
             author_user_id: f.author_user_id.clone(),
             author_model: f.author_model.clone(),
             body: f.body.clone(),
+            severity: f.severity.clone(),
+            withdrawn_at: f.withdrawn_at.clone(),
+            withdrawn_by_user_id: f.withdrawn_by_user_id.clone(),
             resolved_at: f.resolved_at.clone(),
             resolved_revision_seq: f.resolved_revision_seq,
             resolved_by_user_id: f.resolved_by_user_id.clone(),

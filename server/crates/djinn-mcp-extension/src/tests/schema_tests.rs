@@ -153,6 +153,8 @@ fn expected_safety_tuple(name: &str) -> Option<(bool, bool, bool, bool)> {
         | "proposal_update"
         | "proposal_block_patch"
         | "proposal_debate_append"
+        | "proposal_feedback_disposition"
+        | "proposal_feedback_withdraw"
         | "proposal_refinement_demand_evidence"
         | "submit_work"
         | "submit_review"
@@ -184,6 +186,7 @@ fn tool_names_for_role(role: &str) -> BTreeSet<String> {
         "advocate" => tool_schemas_advocate(),
         "adversary" => tool_schemas_adversary(),
         "judge" => tool_schemas_judge(),
+        "evidence_spike" => tool_schemas_evidence_spike(),
         _ => panic!("unknown role: {role}"),
     };
     schemas
@@ -322,6 +325,12 @@ fn tool_schemas_include_role_specific_tools() {
         "advocate must NOT resolve objections — the Judge adjudicates resolution"
     );
     assert!(
+        advocate
+            .iter()
+            .any(|n| n == "proposal_feedback_disposition"),
+        "advocate MUST expose the source-scoped human-feedback disposition operation"
+    );
+    assert!(
         advocate.iter().any(|n| n == "proposal_debate_append"),
         "advocate must have proposal_debate_append — its rebuttal channel \
          (kind=\"rebuttal\"); without it every objection can only be resolved \
@@ -388,6 +397,12 @@ fn tool_schemas_include_role_specific_tools() {
         !adversary.iter().any(|n| n == "proposal_blocks"),
         "adversary must not have proposal_blocks"
     );
+    assert!(
+        !adversary
+            .iter()
+            .any(|n| n == "proposal_feedback_disposition"),
+        "adversary must not disposition human feedback"
+    );
 
     let judge = schema_names(tool_schemas_judge());
     assert!(
@@ -411,6 +426,10 @@ fn tool_schemas_include_role_specific_tools() {
         judge.iter().any(|n| n == "proposal_debate_resolve"),
         "judge MUST have proposal_debate_resolve — it adjudicates which \
          objections the revision satisfies and clears them from the gate"
+    );
+    assert!(
+        !judge.iter().any(|n| n == "proposal_feedback_disposition"),
+        "Judge accepts or rejects a disposition through proposal_debate_resolve, never proposes one"
     );
     // Judge must NOT have write/edit tools.
     assert!(
@@ -459,6 +478,93 @@ fn worker_cannot_use_lead_only_tool() {
     assert!(is_tool_allowed_for_role("lead", "submit_decision"));
     // task_transition is not in the lead tool set (removed by ADR-036).
     assert!(!is_tool_allowed_for_role("lead", "task_transition"));
+}
+
+/// The feedback disposition is deliberately a source-scoped Advocate capability,
+/// while global resolution stays on the Judge surface for both ordinary and human
+/// objections. Keep this matrix explicit because it is startup-inspectable schema
+/// metadata used by coordinator capability checks.
+#[test]
+fn human_feedback_disposition_role_contract_is_source_scoped() {
+    assert!(
+        is_tool_allowed_for_role("advocate", "proposal_feedback_disposition"),
+        "Advocate must advertise proposal_feedback_disposition"
+    );
+    assert!(
+        !is_tool_allowed_for_role("advocate", "proposal_debate_resolve"),
+        "Advocate must never advertise global proposal_debate_resolve"
+    );
+
+    for role in [
+        "worker",
+        "reviewer",
+        "lead",
+        "planner",
+        "architect",
+        "adversary",
+        "judge",
+        "evidence_spike",
+    ] {
+        assert!(
+            !is_tool_allowed_for_role(role, "proposal_feedback_disposition"),
+            "{role} must not advertise the Advocate-only feedback disposition"
+        );
+    }
+
+    assert!(
+        is_tool_allowed_for_role("judge", "proposal_debate_resolve"),
+        "Judge must retain global resolution for ordinary and human-feedback objections"
+    );
+}
+
+#[test]
+fn judge_resolution_schema_supports_human_feedback_without_narrowing_ordinary_resolution() {
+    let schemas = tool_schemas_judge();
+    let schema = tool_schema(&schemas, "proposal_debate_resolve");
+    let input = &schema["inputSchema"];
+
+    assert_eq!(input["required"], serde_json::json!(["id"]));
+    assert_eq!(input["properties"]["id"]["type"], "string");
+    assert_eq!(
+        input["properties"]["verdict"]["enum"],
+        serde_json::json!(["accept", "reject"]),
+        "human_feedback resolution must expose accept/reject verdict"
+    );
+    assert_eq!(input["properties"]["reason"]["type"], "string");
+    assert_eq!(input["properties"]["reason"]["minLength"], 1);
+}
+
+#[test]
+fn feedback_write_schemas_preserve_disposition_variants_and_author_withdrawal() {
+    let disposition = serde_json::to_value(shared_schemas::tool_proposal_feedback_disposition())
+        .expect("serialize feedback disposition schema");
+    let input = &disposition["inputSchema"];
+    assert_eq!(input["required"], serde_json::json!(["id", "disposition"]));
+    assert_eq!(
+        input["properties"]["disposition"]["enum"],
+        serde_json::json!(["fixed_by_revision", "wont_fix"])
+    );
+    assert_eq!(
+        input["allOf"][0]["then"]["required"],
+        serde_json::json!(["fixed_by_revision"])
+    );
+    assert_eq!(
+        input["allOf"][1]["then"]["required"],
+        serde_json::json!(["reason"])
+    );
+    assert_eq!(input["properties"]["reason"]["minLength"], 1);
+
+    let withdrawal = serde_json::to_value(shared_schemas::tool_proposal_feedback_withdraw())
+        .expect("serialize feedback withdrawal schema");
+    assert_eq!(withdrawal["name"], "proposal_feedback_withdraw");
+    assert_eq!(
+        withdrawal["inputSchema"]["required"],
+        serde_json::json!(["id"])
+    );
+    assert_eq!(
+        withdrawal["inputSchema"]["properties"]["id"]["type"],
+        "string"
+    );
 }
 
 // ── schema structure / content tests ──────────────────────────────────

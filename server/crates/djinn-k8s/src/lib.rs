@@ -19,6 +19,7 @@ pub mod graph_warmer_identity;
 pub mod infra_death_log_tail;
 pub mod invocation_journal;
 pub mod job;
+pub mod js_install;
 pub mod kueue_preflight;
 pub mod label_value;
 pub mod launcher;

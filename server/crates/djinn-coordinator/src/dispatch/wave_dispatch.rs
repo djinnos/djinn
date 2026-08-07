@@ -358,7 +358,7 @@ impl CoordinatorActor {
                             "CoordinatorActor: PR push rejected (oversized blob in history) — escalating to Planner to rewrite history"
                         );
                         poll_stack::boxed(|| {
-                            self.dispatch_planner_escalation(
+                            self.dispatch_arbiter_adjudication(
                                 &task.id,
                                 &escalation_reason,
                                 &task.project_id,

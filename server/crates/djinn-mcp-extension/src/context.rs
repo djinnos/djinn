@@ -86,6 +86,34 @@ pub trait ExtensionContext: Send + Sync {
     /// argument.  Returns `None` on host-side contexts where the caller is
     /// expected to disambiguate.
     fn default_project_id(&self) -> Option<&str>;
+
+    /// The agent session this tool call belongs to, if the hosting context has
+    /// one.
+    ///
+    /// Used to attribute note accesses (`note_access_events`, migration 189) so
+    /// `P(memory_read | Injected)` can correlate a read back to the retrieval
+    /// trace that injected the note. `djinn-db` resolves the task run from
+    /// `sessions.task_run_id`, so a session identifier is sufficient
+    /// attribution and this trait does not need a second run-id method.
+    ///
+    /// # This default is a trap if left unoverridden
+    ///
+    /// A defaulted `None` that the real composition site never overrides would
+    /// make the metric read a permanent 0% with every test still green. The
+    /// production override lives on `djinn_agent::AgentContext`, and the
+    /// composition site that populates it is `AgentToolDispatcher::new` in
+    /// `djinn_agent::actors::slot::reply_loop`. Both are covered end-to-end by
+    /// `session_attribution_reaches_the_note_access_ledger` in
+    /// `djinn-agent/src/extension/tests/memory_dispatch_tests.rs`, which asserts
+    /// a persisted ledger row carries the real session id.
+    ///
+    /// Returning `None` is correct only for genuinely session-less contexts
+    /// (the host MCP surface, background jobs, tests). Those accesses are still
+    /// recorded — they are counted as unattributed in the report's diagnostics
+    /// rather than silently dropped.
+    fn session_id(&self) -> Option<&str> {
+        None
+    }
 }
 
 #[cfg(test)]

@@ -355,6 +355,15 @@ impl DjinnMcpServer {
             Err(rejection) => return Json(err_refinement_start(rejection.message)),
         };
 
+        if let Err(error) = repo
+            .capture_feedback_refinement_boundary(&proposal.id)
+            .await
+        {
+            return Json(err_refinement_start(format!(
+                "refinement was admitted but feedback boundary capture failed: {error}"
+            )));
+        }
+
         let refinement = ProposalRefinementStatusModel {
             active: true,
             run_id: None,
@@ -524,6 +533,20 @@ impl DjinnMcpServer {
                 });
             }
         };
+
+        if let Err(error) = repo
+            .capture_feedback_refinement_boundary(&proposal.id)
+            .await
+        {
+            return Json(DemandRoundResponse {
+                proposal_id: Some(proposal.id),
+                accepted: false,
+                refinement: Some(current_refinement),
+                error: Some(format!(
+                    "refinement was admitted but feedback boundary capture failed: {error}"
+                )),
+            });
+        }
 
         // Carry the human's note into the round that was just admitted.
         // `ProposalRepository::latest_current_revision_reviewer_feedback` — the

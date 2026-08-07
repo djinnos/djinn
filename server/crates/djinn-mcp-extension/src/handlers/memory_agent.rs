@@ -25,6 +25,21 @@ use crate::context::ExtensionContext;
 use crate::helpers::*;
 use crate::types::*;
 
+/// Attribution for the `note_access_events` ledger (migration 189).
+///
+/// This is the only place the session identity crosses from the extension
+/// boundary into the note-access ledger, so if
+/// [`ExtensionContext::session_id`] ever silently reverts to the `None`
+/// default the metric goes to 0% here. The end-to-end guard is
+/// `session_attribution_reaches_the_note_access_ledger` in
+/// `djinn-agent/src/extension/tests/memory_dispatch_tests.rs`.
+fn note_access_attribution(ctx: &dyn ExtensionContext) -> djinn_db::NoteAccessAttribution {
+    match ctx.session_id() {
+        Some(session_id) => djinn_db::NoteAccessAttribution::for_session(session_id),
+        None => djinn_db::NoteAccessAttribution::unattributed(),
+    }
+}
+
 pub(crate) async fn call_memory_read(
     ctx: &dyn ExtensionContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
@@ -40,6 +55,7 @@ pub(crate) async fn call_memory_read(
                 project: project_path,
                 identifier: p.identifier,
             },
+            &note_access_attribution(ctx),
         )
         .await,
     )
@@ -69,6 +85,7 @@ pub(crate) async fn call_memory_search(
                 edge_kinds: None,
             },
             task_id.as_deref(),
+            &note_access_attribution(ctx),
         )
         .await,
     )

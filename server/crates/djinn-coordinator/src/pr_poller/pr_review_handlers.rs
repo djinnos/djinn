@@ -193,7 +193,7 @@ impl CoordinatorActor {
                     "PR review loop exceeded {PR_REVIEW_ROUND_THRESHOLD} rounds without approval. PR: {}",
                     feedback.pr_url
                 );
-                self.dispatch_planner_escalation(task_id, &reason, &task.project_id)
+                self.dispatch_arbiter_adjudication(task_id, &reason, &task.project_id)
                     .await;
             }
         }

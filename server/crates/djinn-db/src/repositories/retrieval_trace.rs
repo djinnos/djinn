@@ -455,6 +455,14 @@ pub enum SkippedReason {
     MinConfidence,
     /// Candidate pruned due to token/prompt budget.
     BudgetPruned,
+    /// Candidate dropped whole because its fixed per-line overhead alone
+    /// exceeds the per-line byte cap, so no part of it could be rendered.
+    ///
+    /// Distinct from [`Self::BudgetPruned`]: a budget-pruned candidate lost a
+    /// competition for remaining space, while an oversized candidate could
+    /// never fit at any budget. Collapsing the two hides silently deleted
+    /// notes from the operator.
+    OversizedSkipped,
     /// Candidate pruned because it was superseded by a stronger candidate.
     SupersededPruned,
     /// Candidate removed by deduplication.
@@ -469,6 +477,7 @@ impl SkippedReason {
             Self::NotTopK => "not_top_k",
             Self::MinConfidence => "min_confidence",
             Self::BudgetPruned => "budget_pruned",
+            Self::OversizedSkipped => "oversized_skipped",
             Self::SupersededPruned => "superseded_pruned",
             Self::Dedupe => "dedupe",
             Self::SearchError => "search_error",
@@ -481,6 +490,7 @@ impl SkippedReason {
             "not_top_k" => Some(Self::NotTopK),
             "min_confidence" => Some(Self::MinConfidence),
             "budget_pruned" => Some(Self::BudgetPruned),
+            "oversized_skipped" => Some(Self::OversizedSkipped),
             "superseded_pruned" => Some(Self::SupersededPruned),
             "dedupe" => Some(Self::Dedupe),
             "search_error" => Some(Self::SearchError),
@@ -491,10 +501,11 @@ impl SkippedReason {
 
 impl SkippedReason {
     /// All variants for vocabulary tests.
-    pub const ALL_VARIANTS: [Self; 6] = [
+    pub const ALL_VARIANTS: [Self; 7] = [
         Self::NotTopK,
         Self::MinConfidence,
         Self::BudgetPruned,
+        Self::OversizedSkipped,
         Self::SupersededPruned,
         Self::Dedupe,
         Self::SearchError,
@@ -509,6 +520,7 @@ pub const SKIPPED_REASON_VALUES: &[&str] = &[
     "not_top_k",
     "min_confidence",
     "budget_pruned",
+    "oversized_skipped",
     "superseded_pruned",
     "dedupe",
     "search_error",
@@ -787,6 +799,8 @@ impl<'a> RetrievalTraceListFilter<'a> {
 }
 
 // ── Health rollup support ───────────────────────────────────────────────────
+
+pub mod injected_pull_rate;
 
 mod retrieval_trace_health;
 use retrieval_trace_health::*;
