@@ -39,7 +39,7 @@ describe("ProjectReadinessPage terminal HTTP detail", () => {
     await screen.findByTestId("readiness-terminal-detail");
     expect(screen.getByText("Readiness Owner (@readiness-owner)")).toBeInTheDocument();
     expect(screen.getByText(snapshot)).toBeInTheDocument();
-    expect(screen.getByText("agent-readiness-guardrails v1.1.0")).toBeInTheDocument();
+    expect(screen.getByText("agent-readiness-guardrails v1.2.0")).toBeInTheDocument();
     expect(screen.getByText("Score: 0.7777777777777778 — Band: ready")).toBeInTheDocument();
     expect(screen.getAllByRole("article", { name: /Readiness area/ })).toHaveLength(2);
     // The frozen composition is rendered whole, exactly as the route serializes it.
