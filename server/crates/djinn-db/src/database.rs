@@ -703,7 +703,8 @@ async fn clone_postgres_test_template(server_prefix: &str, test_db: &str) -> DbR
         .await
         .map_err(DbError::from)?;
 
-        let stmt = format!(r#"CREATE DATABASE "{test_db}" TEMPLATE djinn_test_template"#);
+        let strategy = clone_strategy_clause(&mut conn).await;
+        let stmt = format!(r#"CREATE DATABASE "{test_db}" TEMPLATE djinn_test_template{strategy}"#);
         sqlx::query(stmt.as_str())
             .execute(&mut conn)
             .await
@@ -721,6 +722,64 @@ async fn clone_postgres_test_template(server_prefix: &str, test_db: &str) -> DbR
 
     drop(conn);
     clone_result
+}
+
+/// Process-wide memo for [`clone_strategy_clause`]. The answer depends only on
+/// the server we are pointed at, which never changes within a test process.
+static CLONE_STRATEGY_CLAUSE: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
+
+/// Pick the `CREATE DATABASE … STRATEGY` clause for template clones.
+///
+/// PG16 defaults to `WAL_LOG`, which copies the template block by block and
+/// WAL-logs every block. `FILE_COPY` copies the directory at the filesystem
+/// level and writes one WAL record per tablespace instead.
+///
+/// FILE_COPY is not free: Postgres forces a checkpoint both *before* and
+/// *after* every `CREATE DATABASE` that uses it. Whether that trade wins is
+/// decided entirely by how expensive a checkpoint is — i.e. by `fsync`. On a
+/// durable cluster FILE_COPY is a large *regression*, not a win.
+///
+/// Local A/B on PG 16.14 against a clone of the real 190-migration template
+/// (~15MB), 120 clones at 8-way concurrency. WAL volume is exact and was
+/// identical across repeats; wall-clock was taken on a contended machine and
+/// indicates direction and rough magnitude only:
+///
+/// | cluster             | WAL_LOG           | FILE_COPY        |
+/// |---------------------|-------------------|------------------|
+/// | `fsync=on`  (stock) | 8.6s,  7.06 MB/clone | 46.7s, 0.006 MB/clone |
+/// | `fsync=off` (tuned) | 9.1s, 15.48 MB/clone |  5.8s, 0.001 MB/clone |
+///
+/// Two things follow. FILE_COPY removes essentially all clone WAL either way.
+/// But it is only *faster* once checkpoints are cheap: on the stock cluster it
+/// was ~5x slower than the default. Both clusters the suite is meant to run
+/// against set `fsync=off` (`docker-compose.yml` `postgres-test` and
+/// `scripts/ci-start-postgres.sh`), yet a developer or worker pod pointed at
+/// some other Postgres must not silently eat that regression — so probe the
+/// server once and opt in only when the precondition actually holds.
+///
+/// This does NOT change the template-connection contract. The "no other
+/// sessions may be connected to the source database" restriction is a property
+/// of `CREATE DATABASE` itself and applies identically to both strategies, so
+/// the shared advisory lock and `pg_terminate_backend` above stay exactly as
+/// load-bearing as they were.
+async fn clone_strategy_clause(conn: &mut sqlx::postgres::PgConnection) -> &'static str {
+    if let Some(cached) = CLONE_STRATEGY_CLAUSE.get() {
+        return *cached;
+    }
+
+    // A failed probe falls back to the Postgres default, never to FILE_COPY:
+    // the default is merely slower, FILE_COPY on the wrong cluster is much
+    // slower.
+    let fsync: Option<String> = sqlx::query_scalar::<_, String>("SHOW fsync")
+        .fetch_one(&mut *conn)
+        .await
+        .ok();
+    let clause: &'static str = if fsync.as_deref() == Some("off") {
+        " STRATEGY = FILE_COPY"
+    } else {
+        ""
+    };
+    *CLONE_STRATEGY_CLAUSE.get_or_init(|| clause)
 }
 
 fn is_safe_database_identifier(name: &str) -> bool {
