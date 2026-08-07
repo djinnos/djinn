@@ -8821,7 +8821,12 @@ async fn terminal_fixture(
     let (task, _) = create_task_with_note(db, tx, label).await;
     let tasks = TaskRepository::new(db.clone(), crate::events::event_bus_for(tx));
     tasks.set_status(&task.id, "in_progress").await.unwrap();
-    tasks.set_status(&task.id, task_status).await.unwrap();
+    // Avoid manufacturing an `in_progress -> in_progress` transition. A
+    // transition *from* a session-held state is positive handoff evidence, so
+    // that no-op row would accidentally exonerate a failed-handoff fixture.
+    if task_status != "in_progress" {
+        tasks.set_status(&task.id, task_status).await.unwrap();
+    }
     let sessions = SessionRepository::new(db.clone(), crate::events::event_bus_for(tx));
     let session = sessions
         .create(CreateSessionParams {
@@ -9029,6 +9034,27 @@ async fn failed_handoff_is_one_crashed_attempt() {
     .await;
     let attempt_id = seed_pending_attempt(&db, &task.id, "worker").await;
     let mut actor = coordinator_actor_for_tests(&db, &tx);
+
+    // Prove the durable classifier inputs before actor delivery: the task is
+    // still session-held, no Required handoff was confirmed, the addressed
+    // session is terminal failed, and no higher-precedence runtime/provider
+    // fact can explain the exit.
+    let liveness = djinn_db::LivenessRepository::new(db.clone());
+    let durable_state = liveness.load_current_state(&task.id).await.unwrap();
+    assert_eq!(durable_state.task_status.as_deref(), Some("in_progress"));
+    assert!(!durable_state.task_is_terminal);
+    assert_eq!(
+        durable_state.last_transition_from_status.as_deref(),
+        Some("open")
+    );
+    assert_eq!(session.status, "failed");
+    assert_eq!(session.task_id.as_deref(), Some(task.id.as_str()));
+    let classifier_input =
+        crate::dispatch::session_recovery::build_liveness_evidence(None, &durable_state);
+    assert!(!classifier_input.handed_off_from_session_held_status);
+    assert!(!classifier_input.hard_runtime_deadline_exceeded);
+    assert!(actor.health.peek_task_provider_failure(&task.id).is_none());
+
     actor
         .handle_event(terminal_session_event("failed", &session))
         .await;
@@ -9037,6 +9063,22 @@ async fn failed_handoff_is_one_crashed_attempt() {
         attempts.get(&attempt_id).await.unwrap().unwrap().outcome,
         "crashed"
     );
+    let immutable_exit = liveness
+        .get_session_liveness_fields(&session.id)
+        .await
+        .unwrap();
+    assert_eq!(immutable_exit.0.as_deref(), Some("protocol_violation"));
+    assert_eq!(immutable_exit.1.as_deref(), Some("crash"));
+    assert_eq!(
+        liveness
+            .count_evidence_for_session(&session.id, None)
+            .await
+            .unwrap(),
+        1
+    );
+
+    // Later recovery-visible state and replay cannot revise the winning
+    // `session_exit:{session_id}` observation.
     TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx))
         .set_status(&task.id, "needs_task_review")
         .await
@@ -9045,15 +9087,12 @@ async fn failed_handoff_is_one_crashed_attempt() {
         .classify_session_exit_liveness(&session.id, &task.id, None, "failed", "worker")
         .await
         .unwrap();
-    let liveness = djinn_db::LivenessRepository::new(db.clone());
     assert_eq!(
         liveness
             .get_session_liveness_fields(&session.id)
             .await
-            .unwrap()
-            .0
-            .as_deref(),
-        Some("protocol_violation")
+            .unwrap(),
+        immutable_exit
     );
     assert_eq!(
         liveness
