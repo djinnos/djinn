@@ -704,8 +704,7 @@ async fn clone_postgres_test_template(server_prefix: &str, test_db: &str) -> DbR
         .map_err(DbError::from)?;
 
         let strategy = clone_strategy_clause(&mut conn).await;
-        let stmt =
-            format!(r#"CREATE DATABASE "{test_db}" TEMPLATE djinn_test_template{strategy}"#);
+        let stmt = format!(r#"CREATE DATABASE "{test_db}" TEMPLATE djinn_test_template{strategy}"#);
         sqlx::query(stmt.as_str())
             .execute(&mut conn)
             .await
