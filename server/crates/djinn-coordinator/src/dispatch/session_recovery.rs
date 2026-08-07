@@ -3038,19 +3038,20 @@ impl CoordinatorActor {
             }
         };
 
-        // ── 2. Build evidence with exit code from session status ───────
-        // Map session terminal status → pod phase and exit code.
+        // ── 2. Build evidence from persisted session truth ─────────────
+        // Map the addressed row's terminal status → pod phase and exit code.
         // - completed → Succeeded, exit 0
         // - failed / interrupted → Failed, exit nonzero (1 as sentinel;
         //   the exact exit code is not stored on the session row)
-        let (exit_pod_phase, exit_code) = match session_status {
-            "completed" => (PodPhase::Succeeded, Some(0)),
-            "failed" | "interrupted" => (PodPhase::Failed, Some(1)),
-            _ => {
+        let (exit_pod_phase, exit_code) = match persisted_session_status {
+            DbSessionStatus::Completed => (PodPhase::Succeeded, Some(0)),
+            DbSessionStatus::Failed | DbSessionStatus::Interrupted => (PodPhase::Failed, Some(1)),
+            DbSessionStatus::Running | DbSessionStatus::Paused => {
                 tracing::debug!(
                     session_id = %session_id,
-                    session_status = %session_status,
-                    "classify_session_exit_liveness: non-terminal session status, skipping"
+                    persisted_session_status = %addressed_session.status,
+                    event_session_status = %session_status,
+                    "classify_session_exit_liveness: addressed session is non-terminal, skipping"
                 );
                 return None;
             }
@@ -3339,28 +3340,24 @@ pub(crate) fn build_liveness_evidence(
     };
 
     // ── DB session status ────────────────────────────────────────────
-    let db_session_status = db_state.active_session_status.as_deref().map(|s| match s {
-        "running" => DbSessionStatus::Running,
-        "completed" => DbSessionStatus::Completed,
-        "interrupted" => DbSessionStatus::Interrupted,
-        "failed" => DbSessionStatus::Failed,
-        "paused" => DbSessionStatus::Paused,
-        _ => DbSessionStatus::Running,
-    });
+    let db_session_status = db_state
+        .active_session_status
+        .as_deref()
+        .and_then(db_session_status_from_persisted);
 
     // ── DB task status ───────────────────────────────────────────────
-    let db_task_status = db_state.task_status.as_deref().map(|s| match s {
-        "open" => DbTaskStatus::Open,
-        "in_progress" => DbTaskStatus::InProgress,
-        "needs_task_review" => DbTaskStatus::NeedsTaskReview,
-        "in_task_review" => DbTaskStatus::InTaskReview,
-        "approved" => DbTaskStatus::Approved,
-        "pr_draft" => DbTaskStatus::PrDraft,
-        "pr_review" => DbTaskStatus::PrReview,
-        "needs_lead_intervention" => DbTaskStatus::NeedsLeadIntervention,
-        "in_lead_intervention" => DbTaskStatus::InLeadIntervention,
-        "closed" => DbTaskStatus::Closed,
-        _ => DbTaskStatus::Open,
+    let db_task_status = db_state.task_status.as_deref().and_then(|s| match s {
+        "open" => Some(DbTaskStatus::Open),
+        "in_progress" => Some(DbTaskStatus::InProgress),
+        "needs_task_review" => Some(DbTaskStatus::NeedsTaskReview),
+        "in_task_review" => Some(DbTaskStatus::InTaskReview),
+        "approved" => Some(DbTaskStatus::Approved),
+        "pr_draft" => Some(DbTaskStatus::PrDraft),
+        "pr_review" => Some(DbTaskStatus::PrReview),
+        "needs_lead_intervention" => Some(DbTaskStatus::NeedsLeadIntervention),
+        "in_lead_intervention" => Some(DbTaskStatus::InLeadIntervention),
+        "closed" => Some(DbTaskStatus::Closed),
+        _ => None,
     });
 
     // ── Claim TTL remaining ──────────────────────────────────────────

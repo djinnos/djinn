@@ -71,8 +71,10 @@ pub enum ActivitySignal {
 
 // ─── DB session status (normalized) ─────────────────────────────────────────
 
-/// Normalized DB session status. Maps from the `djinn_core::models::SessionStatus`
-/// wire values.
+/// Normalized DB session status. Maps from known
+/// `djinn_core::models::SessionStatus` wire values. Missing or unrecognized
+/// persisted values remain absent from [`LivenessEvidence`], rather than being
+/// fabricated as `Running`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DbSessionStatus {
@@ -483,10 +485,10 @@ pub struct ClassificationResult {
 /// 1. **Terminal task state** → noop/idempotent outcome
 /// 2. **Hard runtime cap exceeded** → `Dead` with `Timeout` outcome (forbids
 ///    extension)
-/// 3. **Protocol violation** → inconsistent clean/nonzero exit on a task that
-///    is positively known to be unsettled (still `open`/`in_progress`), with a
-///    session row positively known to still be running, and with no evidence
-///    that a session deliberately handed the task off to that status
+/// 3. **Protocol violation** → an observed clean/nonzero exit on a task that is
+///    positively known to be unsettled (still `open`/`in_progress`), with a
+///    known session status and no evidence that a session deliberately handed
+///    the task off to that status
 /// 4. **Dead** → absent/failed pod with no recent activity
 /// 5. **Slow** → activity signal absent/idle, pod running, below hard cap
 /// 6. **Live** → default when other conditions don't match
@@ -566,14 +568,8 @@ pub fn classify(evidence: &LivenessEvidence) -> ClassificationResult {
     // A protocol violation is a STRUCTURAL INCONSISTENCY, so every term must be
     // POSITIVE evidence. Absence is not guilt.
     //
-    // The previous rule mixed one positive guard with one fail-open one:
-    // precedence 1 needed `db_task_status.is_some_and(is_terminal)` to hold to
-    // exonerate, while this branch used `db_session_status.is_none_or(...)` to
-    // convict. Missing evidence therefore fell through precedence 1 AND
-    // satisfied this branch — an absent task row or session row convicted
-    // deterministically. Both terms are now `is_some_and`, so an unknown state
-    // is fail-safe: it produces no violation, and no destructive action either
-    // (the reaping paths are precedence 2/4, which are untouched).
+    // Every term is positive evidence. Unknown task or session state is
+    // fail-safe: it produces no violation and no exit-path destructive action.
     //
     // The task term is also tightened from "not closed" to "not settled": see
     // [`DbTaskStatus::is_settled`]. A session that exits with its task at a
@@ -583,10 +579,7 @@ pub fn classify(evidence: &LivenessEvidence) -> ClassificationResult {
         evidence.pod_phase,
         Some(PodPhase::Succeeded) | Some(PodPhase::Failed)
     );
-    let session_nonterminal = evidence
-        .db_session_status
-        .as_ref()
-        .is_some_and(|s| !s.is_terminal());
+    let known_session_status = evidence.db_session_status.is_some();
     let task_unsettled = evidence
         .db_task_status
         .as_ref()
@@ -601,7 +594,7 @@ pub fn classify(evidence: &LivenessEvidence) -> ClassificationResult {
     // session found it — claimed and unmoved — is genuinely stranded.
     let handed_off = evidence.handed_off_from_session_held_status;
 
-    if pod_exited && session_nonterminal && task_unsettled && !handed_off {
+    if pod_exited && known_session_status && task_unsettled && !handed_off {
         // Classify the type of protocol violation based on exit code
         let reason = match evidence.exit_code {
             Some(0) => LivenessReason::CleanExitNonterminal,

@@ -269,54 +269,62 @@ fn terminal_session_with_exited_pod_is_not_protocol_violation() {
     assert_ne!(result.verdict, Verdict::ProtocolViolation);
 }
 
-/// A persisted terminal session makes an exited pod expected, regardless of
-/// where the task state machine currently is. Keep this as an exhaustive
-/// table rather than relying on the handoff subset: `open` and `in_progress`
-/// are precisely the states that would otherwise satisfy the structural
-/// inconsistency guard.
+/// Terminal session truth is evidence, not an exoneration. The durable
+/// StageOutcome barrier has already made a Required handoff visible before this
+/// terminal observation; an unsettled task is therefore one positive violation.
 #[test]
-fn terminal_persisted_sessions_never_violate_protocol_for_any_task_status() {
-    let terminal_session_statuses = [
-        DbSessionStatus::Completed,
-        DbSessionStatus::Failed,
-        DbSessionStatus::Interrupted,
-    ];
-    let all_task_statuses = [
-        DbTaskStatus::Open,
-        DbTaskStatus::InProgress,
-        DbTaskStatus::NeedsTaskReview,
-        DbTaskStatus::InTaskReview,
-        DbTaskStatus::Approved,
-        DbTaskStatus::PrDraft,
-        DbTaskStatus::PrReview,
-        DbTaskStatus::NeedsLeadIntervention,
-        DbTaskStatus::InLeadIntervention,
-        DbTaskStatus::Closed,
-    ];
-
-    for session_status in terminal_session_statuses {
-        for task_status in all_task_statuses {
-            let mut ev = live_evidence();
-            ev.pod_phase = Some(PodPhase::Succeeded);
-            ev.exit_code = Some(0);
-            ev.db_session_status = Some(session_status);
-            ev.db_task_status = Some(task_status);
-
-            let result = classify(&ev);
-            assert_ne!(
-                result.verdict,
-                Verdict::ProtocolViolation,
-                "terminal persisted session {session_status:?} with task {task_status:?}"
-            );
-            if task_status == DbTaskStatus::Closed {
-                assert_eq!(
-                    result.outcome,
-                    Some(LivenessOutcome::KillNoop),
-                    "closed task must retain KillNoop precedence for {session_status:?}"
-                );
-            }
-        }
+fn terminal_session_status_matrix_classifies_truthfully() {
+    for (session_status, pod_phase, exit_code, reason) in [
+        (
+            DbSessionStatus::Completed,
+            PodPhase::Succeeded,
+            0,
+            LivenessReason::CleanExitNonterminal,
+        ),
+        (
+            DbSessionStatus::Failed,
+            PodPhase::Failed,
+            1,
+            LivenessReason::NonzeroExitNonterminal,
+        ),
+        (
+            DbSessionStatus::Interrupted,
+            PodPhase::Failed,
+            1,
+            LivenessReason::NonzeroExitNonterminal,
+        ),
+    ] {
+        let mut ev = live_evidence();
+        ev.pod_phase = Some(pod_phase);
+        ev.exit_code = Some(exit_code);
+        ev.db_session_status = Some(session_status);
+        ev.db_task_status = Some(DbTaskStatus::InProgress);
+        let result = classify(&ev);
+        assert_eq!(
+            result.verdict,
+            Verdict::ProtocolViolation,
+            "{session_status:?}"
+        );
+        assert_eq!(result.reason, Some(reason));
     }
+}
+
+#[test]
+fn terminal_session_handoff_and_missing_evidence_fail_closed() {
+    let mut ev = live_evidence();
+    ev.pod_phase = Some(PodPhase::Succeeded);
+    ev.exit_code = Some(0);
+    ev.db_session_status = Some(DbSessionStatus::Completed);
+    ev.db_task_status = Some(DbTaskStatus::Open);
+    ev.handed_off_from_session_held_status = true;
+    assert_ne!(classify(&ev).verdict, Verdict::ProtocolViolation);
+
+    ev.handed_off_from_session_held_status = false;
+    ev.db_session_status = None;
+    assert_ne!(classify(&ev).verdict, Verdict::ProtocolViolation);
+    ev.db_session_status = Some(DbSessionStatus::Completed);
+    ev.db_task_status = None;
+    assert_ne!(classify(&ev).verdict, Verdict::ProtocolViolation);
 }
 
 /// Terminal persisted status only exonerates the structural-exit rung. It must
