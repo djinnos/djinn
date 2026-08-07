@@ -247,10 +247,10 @@ async fn awaiting_review_park_drains_pending_feedback_cohort_exactly_once() {
     );
 
     let successor_count = sqlx::query_scalar::<_, i64>(
-        "SELECT count(*) FROM refinement_dispatch_intents i JOIN refinement_runs r ON r.id=i.run_id WHERE r.proposal_id=$1 AND r.idempotency_key=$2",
+        "SELECT count(*) FROM refinement_dispatch_intents WHERE run_id=$1 AND idempotency_key=$2",
     )
-    .bind(&proposal.id)
-    .bind(format!("pending-feedback/{}", feedback.id))
+    .bind(&run_id)
+    .bind(format!("pending-feedback/{}/demand-round", feedback.id))
     .fetch_one(db.pool())
     .await
     .unwrap();
@@ -268,7 +268,21 @@ async fn awaiting_review_park_drains_pending_feedback_cohort_exactly_once() {
     .fetch_one(db.pool())
     .await
     .unwrap();
-    assert_eq!(successor_count, 1, "one successor admission is durable");
+    let nonterminal_run_count = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) FROM refinement_runs WHERE proposal_id=$1 AND state IN ('running', 'parked')",
+    )
+    .bind(&proposal.id)
+    .fetch_one(db.pool())
+    .await
+    .unwrap();
+    assert_eq!(
+        successor_count, 1,
+        "one same-run demand successor is durable"
+    );
+    assert_eq!(
+        nonterminal_run_count, 1,
+        "park resume did not mint a second run"
+    );
     assert_eq!(pending_count, 0, "park drained the pending cohort");
     assert_eq!(captured_count, 1, "feedback source was captured once");
 }

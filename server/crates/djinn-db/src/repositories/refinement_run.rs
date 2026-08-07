@@ -810,7 +810,7 @@ async fn demand_intent_id(
 /// 'awaiting_review'`: a concurrent `resolve_refinement_human_review` that won
 /// the row lock first leaves the run terminal, and this CAS then matches zero
 /// rows rather than producing a second transition out of the same park.
-async fn resume_awaiting_review_park(
+pub(crate) async fn resume_awaiting_review_park(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     request: &AdmitRefinementRunRequest,
     run_id: &str,

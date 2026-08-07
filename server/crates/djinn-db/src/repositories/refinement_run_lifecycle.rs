@@ -381,6 +381,56 @@ async fn drain_pending_feedback_handoff(
     Ok(())
 }
 
+/// Consume the elected cohort at the awaiting-review boundary. Unlike a
+/// terminal boundary, this preserves the parked run: normal demand admission
+/// resumes the exact run and appends a single successor intent instead of
+/// inserting a second nonterminal run for the proposal.
+async fn drain_pending_feedback_handoff_from_awaiting_review_park(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    proposal_id: &str,
+    run_id: &str,
+    generation: i32,
+) -> IntentMutationResult<()> {
+    let row = sqlx::query("SELECT boundary_feedback_id FROM pending_feedback_refinement_handoffs WHERE proposal_id=$1 AND state='pending' AND cohort_owner FOR UPDATE")
+        .bind(proposal_id).fetch_optional(&mut **tx).await?;
+    let Some(row) = row else {
+        return Ok(());
+    };
+    let boundary: String = row.get("boundary_feedback_id");
+    let key = format!("pending-feedback/{boundary}");
+    let seq = sqlx::query_scalar::<_, i32>(
+        "SELECT latest_revision_seq FROM proposals WHERE id=$1 FOR UPDATE",
+    )
+    .bind(proposal_id)
+    .fetch_one(&mut **tx)
+    .await?;
+    resume_awaiting_review_park(
+        tx,
+        &AdmitRefinementRunRequest {
+            proposal_id: proposal_id.to_owned(),
+            idempotency_key: key,
+            source: RefinementAdmissionSource::Demand {
+                demand_id: boundary,
+            },
+            heartbeat_grace_millis: 60_000,
+        },
+        run_id,
+        generation,
+    )
+    .await
+    .map_err(|error| match error {
+        RefinementAdmissionError::Database(error) => RefinementIntentMutationError::Database(error),
+        error => RefinementIntentMutationError::InvalidRequest(error.to_string()),
+    })?;
+    capture_pending_feedback_sources(tx, proposal_id, seq).await?;
+    sqlx::query("UPDATE pending_feedback_refinement_handoffs SET state='admitted', successor_run_id=$2 WHERE proposal_id=$1 AND state='pending'")
+        .bind(proposal_id)
+        .bind(run_id)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
 /// Materialize every member of the elected cohort before its successor intent
 /// becomes visible.  The source-table existence check makes a retry after a
 /// crash/restart idempotent and prevents a boundary from being captured twice.
@@ -709,10 +759,24 @@ impl ProposalRepository {
         }
         // An awaiting-review park is a demand-admissible boundary: no role work
         // remains in flight, so a feedback cohort committed while this intent
-        // was running must resume through the same transaction. Awaiting
-        // evidence remains deliberately excluded because its evidence spike
-        // owns a separate resume path.
-        if park != Some(RefinementParkKind::AwaitingEvidence) {
+        // was running must resume through the same transaction and same run.
+        // Awaiting evidence remains deliberately excluded because its evidence
+        // spike owns a separate resume path.
+        if park == Some(RefinementParkKind::AwaitingReview) {
+            let proposal_id = sqlx::query_scalar::<_, String>(
+                "SELECT proposal_id FROM refinement_runs WHERE id=$1",
+            )
+            .bind(&source.run_id)
+            .fetch_one(&mut *tx)
+            .await?;
+            drain_pending_feedback_handoff_from_awaiting_review_park(
+                &mut tx,
+                &proposal_id,
+                &source.run_id,
+                source.generation,
+            )
+            .await?;
+        } else if park.is_none() {
             let proposal_id = sqlx::query_scalar::<_, String>(
                 "SELECT proposal_id FROM refinement_runs WHERE id=$1",
             )
