@@ -738,10 +738,17 @@ impl NoteRepository {
             if inputs.len() < 2 {
                 continue;
             }
-            // The previous per-seed call used a `0.0` floor with a strict `>`
-            // comparison; the batched query keeps that exact predicate so the
-            // edge set — and therefore the reported neighborhoods — is
-            // unchanged.
+            // Both halves of the old predicate are reproduced: the `0.0` floor
+            // with a strict `>` comparison, *and* the per-seed
+            // `ORDER BY score DESC LIMIT 16` truncation that
+            // `dedup_candidates_for_group` applied via `DEDUP_LIMIT`.
+            //
+            // The truncation is load-bearing here. These neighborhoods are
+            // connected components, so an untruncated edge set is strictly
+            // larger and can collapse a dense capped partition into one giant
+            // "likely duplicate" group the previous report never produced.
+            // The tie-break on `candidate_id` is new and makes the truncation
+            // deterministic; the old `ORDER BY score DESC` left ties arbitrary.
             let scores = consolidation_repo
                 .directed_score_matrix(
                     project_id,
@@ -749,6 +756,7 @@ impl NoteRepository {
                     note_type,
                     &inputs,
                     0.0,
+                    Some(AUDIT_DEDUP_PER_SEED_LIMIT),
                 )
                 .await?;
             for component in connected_components_from_score_matrix(&inputs, &scores) {
@@ -1128,6 +1136,12 @@ impl NoteRepository {
         Ok(ranked)
     }
 }
+
+/// Per-seed candidate truncation for the corpus audit's likely-duplicate
+/// neighborhoods. This is the `DEDUP_LIMIT` the previous per-seed
+/// `dedup_candidates_for_group` call applied; preserving it keeps the reported
+/// neighborhoods identical to the pre-batching behaviour.
+const AUDIT_DEDUP_PER_SEED_LIMIT: i64 = 16;
 
 /// Raw row shape for the set-based latest-revision load.
 #[derive(Debug, sqlx::FromRow)]

@@ -2,11 +2,12 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use djinn_core::models::{DjinnSettings, KnowledgeInjectionConfig};
 use djinn_db::{
     BoundedCluster, CONSOLIDATION_DEFAULT_SCORE_THRESHOLD, CommitConsolidationCanonical,
     ConsolidationCommitOutcome, ConsolidationPartitionKey, CreateCanonicalConsolidatedNote,
     CreateConsolidationRunMetric, Database, DbNoteGroup, NoteConsolidationRepository,
-    NoteRevisionReason,
+    NoteRevisionReason, PartitionPressureMetric, SettingsRepository,
 };
 use djinn_memory::ConsolidationCluster;
 use time::OffsetDateTime;
@@ -363,9 +364,12 @@ impl ConsolidationEnablement {
             project_id: non_blank(CONSOLIDATION_PROJECT_ENV),
             session_id: non_blank(CONSOLIDATION_SESSION_ENV),
             note_type: non_blank(CONSOLIDATION_NOTE_TYPE_ENV),
+            // A configured value that is not a finite *positive* number falls
+            // back to the default rather than arming an indiscriminate merge;
+            // the gate rejects it again before any synthesis.
             score_threshold: non_blank(CONSOLIDATION_THRESHOLD_ENV)
                 .and_then(|value| value.parse::<f64>().ok())
-                .filter(|value| value.is_finite())
+                .filter(|value| value.is_finite() && *value > 0.0)
                 .unwrap_or(CONSOLIDATION_DEFAULT_SCORE_THRESHOLD),
         }
     }
@@ -388,8 +392,79 @@ impl ConsolidationEnablement {
             note_type: note_type.clone(),
         };
         key.validate().map_err(|error| error.to_string())?;
+        // A non-positive threshold would admit every note to every other note,
+        // committing an arbitrary 8-note merge on a subtractive path. Refuse it
+        // rather than clamping, so the misconfiguration is visible.
+        djinn_db::minimum_valid_score_threshold(self.score_threshold)
+            .map_err(|error| error.to_string())?;
         Ok(key)
     }
+}
+
+/// Settings key holding the serialized `DjinnSettings` blob.
+const SETTINGS_RAW_KEY: &str = "settings.raw";
+
+/// Report per-`(project_id, note_type)` retrieval pressure once per housekeeping
+/// sweep (proposal `t5rn`, T6).
+///
+/// This is strictly report-only. It performs one read of the configured
+/// injection budget and one grouped snapshot query, emits the readings, and
+/// stops. It creates no prompt policy, no task, no cooldown, no deletion, and no
+/// automatic actuator, and it is never invoked on a write path.
+///
+/// `injectable_slots` is the configured `knowledge_injection_limit`. That budget
+/// is shared across the eligible note types rather than split per type, so the
+/// per-type ceiling is the whole limit: each type could in principle fill the
+/// entire context build. Reporting it per type keeps the ratio comparable
+/// across types without inventing a split the retrieval path does not implement.
+pub async fn report_partition_pressure(db: &Database) -> Vec<PartitionPressureMetric> {
+    let settings = match SettingsRepository::new(db.clone(), djinn_core::events::EventBus::noop())
+        .get(SETTINGS_RAW_KEY)
+        .await
+    {
+        Ok(setting) => setting
+            .map(|setting| DjinnSettings::from_db_value(&setting.value))
+            .unwrap_or_default(),
+        Err(error) => {
+            tracing::warn!(%error, "consolidation pressure: failed to load settings; using defaults");
+            DjinnSettings::default()
+        }
+    };
+    let injectable_slots = match KnowledgeInjectionConfig::from_settings_and_env(&settings) {
+        Ok(config) => i64::from(config.knowledge_injection_limit),
+        Err(error) => {
+            tracing::warn!(%error, "consolidation pressure: invalid knowledge injection config");
+            i64::from(KnowledgeInjectionConfig::DEFAULT_KNOWLEDGE_INJECTION_LIMIT)
+        }
+    };
+    let slots_by_note_type = djinn_db::CONSOLIDATION_ELIGIBLE_NOTE_TYPES
+        .iter()
+        .map(|note_type| ((*note_type).to_owned(), injectable_slots))
+        .collect::<std::collections::HashMap<_, _>>();
+
+    let metrics = match NoteConsolidationRepository::new(db.clone())
+        .partition_pressure_metrics(&slots_by_note_type)
+        .await
+    {
+        Ok(metrics) => metrics,
+        Err(error) => {
+            tracing::warn!(%error, "consolidation pressure: failed to snapshot partition pressure");
+            return Vec::new();
+        }
+    };
+
+    for metric in &metrics {
+        tracing::info!(
+            project_id = %metric.project_id,
+            note_type = %metric.note_type,
+            eligible_notes = metric.eligible_notes,
+            injectable_slots = metric.injectable_slots,
+            oversubscription_ratio = metric.oversubscription_ratio,
+            unbounded_pressure = metric.unbounded_pressure,
+            "consolidation partition pressure"
+        );
+    }
+    metrics
 }
 
 /// The committed effects of the single canonical transaction a run may perform.
@@ -1329,7 +1404,10 @@ mod tests {
         };
         let report = run_bounded_consolidation(&db, &config).await.unwrap();
 
-        assert!(report.write_result.is_none(), "a disabled run must not write");
+        assert!(
+            report.write_result.is_none(),
+            "a disabled run must not write"
+        );
         assert!(report.rejection_reason.is_none());
         assert_eq!(report.input_count, 12);
         assert!(
@@ -1427,9 +1505,7 @@ mod tests {
             report.input_count,
             djinn_db::CONSOLIDATION_MAX_PARTITION_INPUTS
         );
-        assert!(
-            report.admission_comparisons <= djinn_db::CONSOLIDATION_MAX_ADMISSION_COMPARISONS
-        );
+        assert!(report.admission_comparisons <= djinn_db::CONSOLIDATION_MAX_ADMISSION_COMPARISONS);
 
         let write_result = report
             .write_result

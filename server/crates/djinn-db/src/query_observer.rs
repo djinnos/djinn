@@ -17,16 +17,23 @@
 //!
 //! Compiled only under `cfg(test)` / the `test-support` feature. The subscriber
 //! is installed once per process as the global default and only accepts the
-//! `sqlx::query` target, so it neither swallows nor reorders anything else. The
-//! test harness runs one test per process, so a single active capture window is
-//! sufficient.
+//! `sqlx::query` target, so it neither swallows nor reorders anything else.
 //!
-//! A capture that never installs (because some other global subscriber won the
-//! race) records zero statements. Every assertion built on this observer must
-//! therefore carry a **lower** bound as well as an upper one, so an
-//! instrumentation failure fails the test instead of passing it vacuously.
+//! Capture is **task-scoped**, not global. `cargo test` runs the tests of one
+//! crate concurrently inside a single process, so a shared open/close window
+//! lets one test's `finish` truncate another test's in-flight measurement — and
+//! an empty trace is exactly what that looks like. Buffering into a
+//! `tokio::task_local` instead means each `capture_queries` call measures the
+//! statements issued by *its own* future and nothing else, under both `cargo
+//! test` and `cargo nextest`.
+//!
+//! A capture whose subscriber never installed (because some other global
+//! subscriber won the race) records zero statements. Every assertion built on
+//! this observer must therefore carry a **lower** bound as well as an upper
+//! one, so an instrumentation failure fails the test instead of passing it
+//! vacuously.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::future::Future;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use tracing::field::{Field, Visit};
@@ -68,20 +75,15 @@ impl QueryTrace {
     }
 }
 
-#[derive(Default)]
-struct Recorder {
-    active: AtomicBool,
-    statements: Mutex<Vec<String>>,
+type CaptureBuffer = Arc<Mutex<Vec<String>>>;
+
+tokio::task_local! {
+    /// Buffer for the innermost enclosing [`capture_queries`] call. Absent
+    /// outside a capture, in which case observed statements are discarded.
+    static CAPTURE_BUFFER: CaptureBuffer;
 }
 
-fn recorder() -> &'static Arc<Recorder> {
-    static RECORDER: OnceLock<Arc<Recorder>> = OnceLock::new();
-    RECORDER.get_or_init(|| Arc::new(Recorder::default()))
-}
-
-struct QueryCountingSubscriber {
-    recorder: Arc<Recorder>,
-}
+struct QueryCountingSubscriber;
 
 impl Subscriber for QueryCountingSubscriber {
     fn enabled(&self, metadata: &Metadata<'_>) -> bool {
@@ -105,14 +107,17 @@ impl Subscriber for QueryCountingSubscriber {
         if event.metadata().target() != "sqlx::query" {
             return;
         }
-        if !self.recorder.active.load(Ordering::SeqCst) {
-            return;
-        }
         let mut visitor = StatementVisitor::default();
         event.record(&mut visitor);
-        if let Ok(mut statements) = self.recorder.statements.lock() {
-            statements.push(visitor.statement.unwrap_or_default());
-        }
+        let statement = visitor.statement.unwrap_or_default();
+        // Outside a capture the task-local is unset and the statement is
+        // dropped, so unrelated concurrent tests cost nothing and cannot
+        // contaminate a measurement.
+        let _ = CAPTURE_BUFFER.try_with(|buffer| {
+            if let Ok(mut statements) = buffer.lock() {
+                statements.push(statement);
+            }
+        });
     }
 
     fn enter(&self, _span: &Id) {}
@@ -139,32 +144,26 @@ impl Visit for StatementVisitor {
     }
 }
 
-/// Open a capture window. Any previously buffered statements are discarded.
-pub fn start_query_capture() {
+fn install_subscriber() {
     static INSTALLED: OnceLock<()> = OnceLock::new();
     INSTALLED.get_or_init(|| {
-        let subscriber = QueryCountingSubscriber {
-            recorder: recorder().clone(),
-        };
         // Ignore an already-installed global default: the resulting empty trace
         // fails the lower bound of every assertion built on it.
-        let _ = tracing::subscriber::set_global_default(subscriber);
+        let _ = tracing::subscriber::set_global_default(QueryCountingSubscriber);
     });
-    let recorder = recorder();
-    if let Ok(mut statements) = recorder.statements.lock() {
-        statements.clear();
-    }
-    recorder.active.store(true, Ordering::SeqCst);
 }
 
-/// Close the capture window and take the observed statements.
-pub fn finish_query_capture() -> QueryTrace {
-    let recorder = recorder();
-    recorder.active.store(false, Ordering::SeqCst);
-    let statements = recorder
-        .statements
-        .lock()
-        .map(|mut guard| guard.drain(..).collect::<Vec<_>>())
-        .unwrap_or_default();
-    QueryTrace { statements }
+/// Run `future` and return its output alongside every SQL statement it issued.
+///
+/// Measurement is scoped to this future's task, so concurrent tests in the same
+/// process cannot truncate or pollute each other's traces.
+pub async fn capture_queries<F, T>(future: F) -> (T, QueryTrace)
+where
+    F: Future<Output = T>,
+{
+    install_subscriber();
+    let buffer: CaptureBuffer = Arc::new(Mutex::new(Vec::new()));
+    let value = CAPTURE_BUFFER.scope(buffer.clone(), future).await;
+    let statements = buffer.lock().map(|guard| guard.clone()).unwrap_or_default();
+    (value, QueryTrace { statements })
 }

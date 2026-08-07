@@ -10,7 +10,7 @@ use std::collections::HashMap;
 
 use super::*;
 use crate::error::DbResult;
-use crate::query_observer::{finish_query_capture, start_query_capture};
+use crate::query_observer::capture_queries;
 
 // ── fixture helpers ──────────────────────────────────────────────────────────
 
@@ -103,22 +103,18 @@ async fn note_status(db: &Database, note_id: &str) -> Option<String> {
 }
 
 async fn revision_count(db: &Database, note_id: &str) -> i64 {
-    sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM note_revision_events WHERE note_id = $1",
-    )
-    .bind(note_id)
-    .fetch_one(db.pool())
-    .await
-    .unwrap()
+    sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM note_revision_events WHERE note_id = $1")
+        .bind(note_id)
+        .fetch_one(db.pool())
+        .await
+        .unwrap()
 }
 
 async fn supersedes_edge_count(db: &Database) -> i64 {
-    sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM note_associations WHERE kind = 'supersedes'",
-    )
-    .fetch_one(db.pool())
-    .await
-    .unwrap()
+    sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM note_associations WHERE kind = 'supersedes'")
+        .fetch_one(db.pool())
+        .await
+        .unwrap()
 }
 
 async fn canonical_note_count(db: &Database) -> i64 {
@@ -232,18 +228,20 @@ async fn extraction_create_provenance_failure_rolls_back_note_and_revision() {
     repo.set_extraction_provenance_failure_for_test(false);
 
     // Neither an unpaired note mutation nor an orphan provenance row survives.
-    let notes: i64 = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM notes WHERE project_id = $1")
-        .bind(&project.id)
-        .fetch_one(db.pool())
-        .await
-        .unwrap();
-    assert_eq!(notes, 0);
-    let revisions: i64 =
-        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM note_revision_events WHERE project_id = $1")
+    let notes: i64 =
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM notes WHERE project_id = $1")
             .bind(&project.id)
             .fetch_one(db.pool())
             .await
             .unwrap();
+    assert_eq!(notes, 0);
+    let revisions: i64 = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM note_revision_events WHERE project_id = $1",
+    )
+    .bind(&project.id)
+    .fetch_one(db.pool())
+    .await
+    .unwrap();
     assert_eq!(revisions, 0);
     assert!(provenance_pairs(&db).await.is_empty());
 }
@@ -286,11 +284,12 @@ async fn extraction_update_provenance_failure_rolls_back_update_and_revision() {
     );
     repo.set_extraction_provenance_failure_for_test(false);
 
-    let persisted: String = sqlx::query_scalar::<_, String>("SELECT content FROM notes WHERE id = $1")
-        .bind(&note.id)
-        .fetch_one(db.pool())
-        .await
-        .unwrap();
+    let persisted: String =
+        sqlx::query_scalar::<_, String>("SELECT content FROM notes WHERE id = $1")
+            .bind(&note.id)
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
     assert_eq!(persisted, "original body about retry storms");
     assert_eq!(revision_count(&db, &note.id).await, baseline_revisions);
     assert_eq!(
@@ -545,7 +544,10 @@ fn bridge_chain_never_merges_through_a_shared_neighbor() {
         clusters.is_empty(),
         "complete-link admission must not form a transitive cluster from a bridge chain: {clusters:?}"
     );
-    assert!(comparisons > 0, "the fixture must actually exercise admission");
+    assert!(
+        comparisons > 0,
+        "the fixture must actually exercise admission"
+    );
     assert!(comparisons <= CONSOLIDATION_MAX_ADMISSION_COMPARISONS);
 }
 
@@ -572,7 +574,10 @@ fn dense_component_splits_into_bounded_groups_of_at_most_eight() {
         CONSOLIDATION_MAX_PARTITION_INPUTS / CONSOLIDATION_MAX_CLUSTER_SOURCES
     );
     for cluster in &clusters {
-        assert_eq!(cluster.source_note_ids.len(), CONSOLIDATION_MAX_CLUSTER_SOURCES);
+        assert_eq!(
+            cluster.source_note_ids.len(),
+            CONSOLIDATION_MAX_CLUSTER_SOURCES
+        );
         assert!(cluster.source_note_ids.len() >= CONSOLIDATION_MIN_CLUSTER_SOURCES);
     }
     assert!(
@@ -651,7 +656,10 @@ async fn partition_clustering_caps_inputs_and_issues_one_set_based_score_query()
             )
             .await
             .unwrap();
-        consolidation.add_provenance(&note.id, &session).await.unwrap();
+        consolidation
+            .add_provenance(&note.id, &session)
+            .await
+            .unwrap();
     }
 
     let partition = ConsolidationPartitionKey {
@@ -663,12 +671,9 @@ async fn partition_clustering_caps_inputs_and_issues_one_set_based_score_query()
     // The threshold is deliberately relaxed here so real `ts_rank` scores from
     // this fixture's short bodies clear it; the *bound* under test is the query
     // count and the input cap, not the tuned production threshold.
-    start_query_capture();
-    let outcome = consolidation
-        .bounded_clusters_for_partition(&partition, 1e-6)
-        .await
-        .unwrap();
-    let trace = finish_query_capture();
+    let (outcome, trace) =
+        capture_queries(consolidation.bounded_clusters_for_partition(&partition, 1e-6)).await;
+    let outcome = outcome.unwrap();
 
     assert_eq!(outcome.input_count, CONSOLIDATION_MAX_PARTITION_INPUTS);
     assert_eq!(outcome.overflow_count, 5);
@@ -786,8 +791,7 @@ async fn canonical_transaction_commits_every_effect_in_one_transaction() {
     let repo = NoteRepository::new(db.clone(), event_bus_for(&tx));
     let consolidation = NoteConsolidationRepository::new(db.clone());
     let session = make_session(&db, &project.id, None, "worker/canonical").await;
-    let fixture =
-        canonical_fixture(&repo, &consolidation, &project.id, &session, 3).await;
+    let fixture = canonical_fixture(&repo, &consolidation, &project.id, &session, 3).await;
     let source_ids = fixture.source_ids();
 
     let outcome = consolidation
@@ -800,7 +804,9 @@ async fn canonical_transaction_commits_every_effect_in_one_transaction() {
 
     // 1. an active canonical note exists
     assert_eq!(
-        note_status(&db, &committed.canonical_note_id).await.as_deref(),
+        note_status(&db, &committed.canonical_note_id)
+            .await
+            .as_deref(),
         Some("active")
     );
     // 2. its immutable creation revision carries consolidation attribution and
@@ -814,7 +820,10 @@ async fn canonical_transaction_commits_every_effect_in_one_transaction() {
     .await
     .unwrap();
     assert_eq!(subsystem.as_deref(), Some("consolidation"));
-    assert_eq!(attempt.as_deref(), Some(committed.consolidation_attempt_id.as_str()));
+    assert_eq!(
+        attempt.as_deref(),
+        Some(committed.consolidation_attempt_id.as_str())
+    );
     assert!(
         consolidation
             .is_consolidation_canonical(&committed.canonical_note_id)
@@ -822,12 +831,16 @@ async fn canonical_transaction_commits_every_effect_in_one_transaction() {
             .unwrap()
     );
     // 3. the reserved display tag
-    let tags: String = sqlx::query_scalar::<_, String>("SELECT tags::text FROM notes WHERE id = $1")
-        .bind(&committed.canonical_note_id)
-        .fetch_one(db.pool())
-        .await
-        .unwrap();
-    assert!(tags.contains(CONSOLIDATION_CANONICAL_TAG), "tags were {tags}");
+    let tags: String =
+        sqlx::query_scalar::<_, String>("SELECT tags::text FROM notes WHERE id = $1")
+            .bind(&committed.canonical_note_id)
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+    assert!(
+        tags.contains(CONSOLIDATION_CANONICAL_TAG),
+        "tags were {tags}"
+    );
     // 4. summary fields
     let (abstract_, overview): (Option<String>, Option<String>) =
         sqlx::query_as("SELECT abstract, overview FROM notes WHERE id = $1")
@@ -835,7 +848,10 @@ async fn canonical_transaction_commits_every_effect_in_one_transaction() {
             .fetch_one(db.pool())
             .await
             .unwrap();
-    assert_eq!(abstract_.as_deref(), Some("Retry storms amplify duplicate work."));
+    assert_eq!(
+        abstract_.as_deref(),
+        Some("Retry storms amplify duplicate work.")
+    );
     assert_eq!(
         overview.as_deref(),
         Some("Prefer idempotent recovery with backoff.")
@@ -876,8 +892,7 @@ async fn injected_failure_at_each_write_boundary_leaves_no_partial_effect() {
         let repo = NoteRepository::new(db.clone(), event_bus_for(&tx));
         let consolidation = NoteConsolidationRepository::new(db.clone());
         let session = make_session(&db, &project.id, None, "worker/boundary").await;
-        let fixture =
-            canonical_fixture(&repo, &consolidation, &project.id, &session, 3).await;
+        let fixture = canonical_fixture(&repo, &consolidation, &project.id, &session, 3).await;
         let source_ids = fixture.source_ids();
         let notes_before: i64 =
             sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM notes WHERE project_id = $1")
@@ -893,7 +908,9 @@ async fn injected_failure_at_each_write_boundary_leaves_no_partial_effect() {
             .await
             .expect_err("injected boundary failure must abort the transaction");
         assert!(
-            error.to_string().contains("forced consolidation write failure"),
+            error
+                .to_string()
+                .contains("forced consolidation write failure"),
             "unexpected error at {boundary:?}: {error}"
         );
         consolidation.set_canonical_write_failure_for_test(None);
@@ -906,7 +923,10 @@ async fn injected_failure_at_each_write_boundary_leaves_no_partial_effect() {
                 .fetch_one(db.pool())
                 .await
                 .unwrap();
-        assert_eq!(notes_after, notes_before, "boundary {boundary:?} leaked a note");
+        assert_eq!(
+            notes_after, notes_before,
+            "boundary {boundary:?} leaked a note"
+        );
         assert_eq!(canonical_note_count(&db).await, 0, "boundary {boundary:?}");
         assert_eq!(supersedes_edge_count(&db).await, 0, "boundary {boundary:?}");
         assert_eq!(
@@ -933,8 +953,7 @@ async fn concurrent_canonical_attempts_commit_at_most_one() {
     let repo = NoteRepository::new(db.clone(), event_bus_for(&tx));
     let consolidation = NoteConsolidationRepository::new(db.clone());
     let session = make_session(&db, &project.id, None, "worker/race").await;
-    let fixture =
-        canonical_fixture(&repo, &consolidation, &project.id, &session, 3).await;
+    let fixture = canonical_fixture(&repo, &consolidation, &project.id, &session, 3).await;
     let source_ids = fixture.source_ids();
 
     let left_db = db.clone();
@@ -978,9 +997,7 @@ async fn concurrent_canonical_attempts_commit_at_most_one() {
     let outcomes = [left.await.unwrap(), right.await.unwrap()];
     let committed = outcomes
         .iter()
-        .filter(|outcome| {
-            matches!(outcome, Ok(ConsolidationCommitOutcome::Committed(_)))
-        })
+        .filter(|outcome| matches!(outcome, Ok(ConsolidationCommitOutcome::Committed(_))))
         .count();
     assert_eq!(
         committed, 1,
@@ -1008,8 +1025,7 @@ async fn exact_attempt_identity_is_the_only_retry_witness() {
     let repo = NoteRepository::new(db.clone(), event_bus_for(&tx));
     let consolidation = NoteConsolidationRepository::new(db.clone());
     let session = make_session(&db, &project.id, None, "worker/retry").await;
-    let fixture =
-        canonical_fixture(&repo, &consolidation, &project.id, &session, 3).await;
+    let fixture = canonical_fixture(&repo, &consolidation, &project.id, &session, 3).await;
     let source_ids = fixture.source_ids();
 
     let ConsolidationCommitOutcome::Committed(committed) = consolidation
@@ -1049,15 +1065,13 @@ async fn retry_after_independent_supersession_reports_conflict_and_claims_nothin
     let repo = NoteRepository::new(db.clone(), event_bus_for(&tx));
     let consolidation = NoteConsolidationRepository::new(db.clone());
     let session = make_session(&db, &project.id, None, "worker/ambiguous").await;
-    let fixture =
-        canonical_fixture(&repo, &consolidation, &project.id, &session, 3).await;
+    let fixture = canonical_fixture(&repo, &consolidation, &project.id, &session, 3).await;
     let source_ids = fixture.source_ids();
 
     // Injected pre-commit failure: the attempt's outcome is unknown to the
     // client and nothing was written.
-    consolidation.set_canonical_write_failure_for_test(Some(
-        ConsolidationWriteBoundary::SupersedesEdges,
-    ));
+    consolidation
+        .set_canonical_write_failure_for_test(Some(ConsolidationWriteBoundary::SupersedesEdges));
     consolidation
         .commit_consolidation_canonical(fixture.request(&source_ids))
         .await
@@ -1082,7 +1096,10 @@ async fn retry_after_independent_supersession_reports_conflict_and_claims_nothin
     let ConsolidationCommitOutcome::Conflict(conflict) = retried else {
         panic!("all-superseded with no attempt-ID canonical must be a conflict, got {retried:?}");
     };
-    assert_eq!(conflict.reason, ConsolidationConflictReason::SourceNotEligible);
+    assert_eq!(
+        conflict.reason,
+        ConsolidationConflictReason::SourceNotEligible
+    );
     assert!(
         conflict
             .observed_source_statuses
@@ -1117,8 +1134,7 @@ async fn mixed_source_state_creates_nothing_and_reports_conflict() {
     let repo = NoteRepository::new(db.clone(), event_bus_for(&tx));
     let consolidation = NoteConsolidationRepository::new(db.clone());
     let session = make_session(&db, &project.id, None, "worker/mixed").await;
-    let fixture =
-        canonical_fixture(&repo, &consolidation, &project.id, &session, 3).await;
+    let fixture = canonical_fixture(&repo, &consolidation, &project.id, &session, 3).await;
     let source_ids = fixture.source_ids();
 
     sqlx::query("UPDATE notes SET status = 'superseded' WHERE id = $1")
@@ -1134,7 +1150,10 @@ async fn mixed_source_state_creates_nothing_and_reports_conflict() {
     let ConsolidationCommitOutcome::Conflict(conflict) = outcome else {
         panic!("a mixed source set must be a conflict, got {outcome:?}");
     };
-    assert_eq!(conflict.reason, ConsolidationConflictReason::SourceNotEligible);
+    assert_eq!(
+        conflict.reason,
+        ConsolidationConflictReason::SourceNotEligible
+    );
     assert_eq!(canonical_note_count(&db).await, 0);
     assert_eq!(supersedes_edge_count(&db).await, 0);
     assert_eq!(
@@ -1142,6 +1161,167 @@ async fn mixed_source_state_creates_nothing_and_reports_conflict() {
         Some("active"),
         "the still-active sources must be untouched"
     );
+}
+
+/// A canonical that is itself later superseded must not corrupt its own retry
+/// witness.
+///
+/// `note_associations` is order-normalized and direction-free, so an
+/// edge-derived endpoint set would gain the superseding note as a spurious
+/// member and flip a correctly committed attempt into a reported invariant
+/// violation. The witness reads the attempt's own immutable retirement
+/// revisions instead.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn retry_witness_survives_the_canonical_being_superseded_later() {
+    let tmp = crate::database::test_tempdir().unwrap();
+    let db = Database::open_in_memory().unwrap();
+    let (tx, _rx) = broadcast::channel(256);
+    let project = make_project(&db, tmp.path()).await;
+    let repo = NoteRepository::new(db.clone(), event_bus_for(&tx));
+    let consolidation = NoteConsolidationRepository::new(db.clone());
+    let session = make_session(&db, &project.id, None, "worker/second-gen").await;
+    let fixture = canonical_fixture(&repo, &consolidation, &project.id, &session, 3).await;
+    let source_ids = fixture.source_ids();
+
+    let ConsolidationCommitOutcome::Committed(committed) = consolidation
+        .commit_consolidation_canonical(fixture.request(&source_ids))
+        .await
+        .unwrap()
+    else {
+        panic!("first attempt must commit");
+    };
+
+    // An unrelated later note supersedes the canonical itself — reachable today
+    // through extraction's `DeprecateWithSupersedes`. This adds a `supersedes`
+    // edge touching the canonical whose other endpoint is NOT one of its
+    // sources.
+    let successor = repo
+        .create_db_note(
+            &project.id,
+            "Successor Pattern",
+            "A later note that supersedes the canonical.",
+            "pattern",
+            "[]",
+        )
+        .await
+        .unwrap();
+    repo.record_supersedes(&successor.id, &committed.canonical_note_id, 1.0)
+        .await
+        .unwrap();
+
+    // The undirected edge substrate now reports four endpoints for the
+    // canonical; the witness must still report exactly the three it retired.
+    let edge_endpoints: Vec<String> = sqlx::query_scalar::<_, String>(
+        "SELECT CASE WHEN note_a_id = $1 THEN note_b_id ELSE note_a_id END \
+         FROM note_associations WHERE kind = 'supersedes' \
+           AND (note_a_id = $1 OR note_b_id = $1)",
+    )
+    .bind(&committed.canonical_note_id)
+    .fetch_all(db.pool())
+    .await
+    .unwrap();
+    assert_eq!(
+        edge_endpoints.len(),
+        4,
+        "the fixture must actually make the undirected edge set ambiguous"
+    );
+
+    let witness = consolidation
+        .find_consolidation_attempt(&committed.consolidation_attempt_id)
+        .await
+        .unwrap()
+        .expect("the attempt is still locatable");
+    assert_eq!(
+        witness.supersedes_source_note_ids, source_ids,
+        "the witness must report the directed source set, not the edge neighborhood"
+    );
+    assert!(
+        witness
+            .final_source_statuses
+            .iter()
+            .all(|(_, status)| status == "superseded")
+    );
+
+    // And the retry still resolves to `AlreadyCommitted`, not a spurious
+    // invariant violation.
+    let retried = consolidation
+        .commit_consolidation_canonical(fixture.request(&source_ids))
+        .await
+        .unwrap();
+    let ConsolidationCommitOutcome::AlreadyCommitted(witness) = retried else {
+        panic!("retry after a second-generation supersession must not be a conflict: {retried:?}");
+    };
+    assert_eq!(witness.canonical_note_id, committed.canonical_note_id);
+    assert_eq!(
+        witness.final_source_statuses,
+        source_ids
+            .iter()
+            .map(|id| (id.clone(), "superseded".to_owned()))
+            .collect::<Vec<_>>(),
+        "an already-committed result must still report final source statuses"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn non_positive_score_threshold_is_rejected_rather_than_arming_a_total_merge() {
+    let tmp = crate::database::test_tempdir().unwrap();
+    let db = Database::open_in_memory().unwrap();
+    let (tx, _rx) = broadcast::channel(256);
+    let project = make_project(&db, tmp.path()).await;
+    let repo = NoteRepository::new(db.clone(), event_bus_for(&tx));
+    let consolidation = NoteConsolidationRepository::new(db.clone());
+    let session = make_session(&db, &project.id, None, "worker/threshold").await;
+
+    let mut note_ids = Vec::new();
+    for index in 0..12 {
+        let note = repo
+            .create_db_note(
+                &project.id,
+                &format!("Unrelated Note {index}"),
+                &format!("Wholly unrelated subject matter number {index}."),
+                "pattern",
+                "[]",
+            )
+            .await
+            .unwrap();
+        consolidation
+            .add_provenance(&note.id, &session)
+            .await
+            .unwrap();
+        note_ids.push(note.id);
+    }
+    let partition = ConsolidationPartitionKey {
+        project_id: project.id.clone(),
+        session_id: session.clone(),
+        note_type: "pattern".to_owned(),
+    };
+
+    for threshold in [0.0, -1.0, f64::NAN] {
+        let error = consolidation
+            .bounded_clusters_for_partition(&partition, threshold)
+            .await
+            .expect_err("a non-positive threshold must be refused, not clamped");
+        assert!(
+            error.to_string().contains("finite positive"),
+            "unexpected error for {threshold}: {error}"
+        );
+    }
+
+    // The strict comparison is what makes the refusal a defence in depth rather
+    // than the only barrier: even if a zero threshold reached the algorithm,
+    // absent pairs score 0.0 and `0.0 > 0.0` is false, so nothing is admitted.
+    let notes = consolidation
+        .select_eligible_partition_sources(&partition)
+        .await
+        .unwrap()
+        .notes;
+    assert_eq!(notes.len(), 12);
+    let (clusters, comparisons) = build_bounded_clusters(&notes, &[], 0.0);
+    assert!(
+        clusters.is_empty(),
+        "a zero threshold must never admit unrelated notes: {clusters:?}"
+    );
+    assert_eq!(comparisons, 12 * 11 / 2);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1157,8 +1337,7 @@ async fn generic_tag_update_cannot_restore_canonical_eligibility() {
     let repo = NoteRepository::new(db.clone(), event_bus_for(&tx));
     let consolidation = NoteConsolidationRepository::new(db.clone());
     let session = make_session(&db, &project.id, None, "worker/two-sweep").await;
-    let fixture =
-        canonical_fixture(&repo, &consolidation, &project.id, &session, 3).await;
+    let fixture = canonical_fixture(&repo, &consolidation, &project.id, &session, 3).await;
     let source_ids = fixture.source_ids();
 
     let ConsolidationCommitOutcome::Committed(committed) = consolidation
@@ -1189,7 +1368,10 @@ async fn generic_tag_update_cannot_restore_canonical_eligibility() {
             )
             .await
             .unwrap();
-        consolidation.add_provenance(&note.id, &session).await.unwrap();
+        consolidation
+            .add_provenance(&note.id, &session)
+            .await
+            .unwrap();
     }
 
     // A *generic* tag/content update strips the reserved display tag.
@@ -1201,17 +1383,20 @@ async fn generic_tag_update_cannot_restore_canonical_eligibility() {
     )
     .await
     .unwrap();
-    let tags: String = sqlx::query_scalar::<_, String>("SELECT tags::text FROM notes WHERE id = $1")
-        .bind(&committed.canonical_note_id)
-        .fetch_one(db.pool())
-        .await
-        .unwrap();
+    let tags: String =
+        sqlx::query_scalar::<_, String>("SELECT tags::text FROM notes WHERE id = $1")
+            .bind(&committed.canonical_note_id)
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
     assert!(
         !tags.contains(CONSOLIDATION_CANONICAL_TAG),
         "the fixture must actually remove the display tag; tags were {tags}"
     );
     assert_eq!(
-        note_status(&db, &committed.canonical_note_id).await.as_deref(),
+        note_status(&db, &committed.canonical_note_id)
+            .await
+            .as_deref(),
         Some("active"),
         "the canonical is still an active note, so only attribution can exclude it"
     );
@@ -1261,13 +1446,19 @@ async fn generic_tag_update_cannot_restore_canonical_eligibility() {
     let ConsolidationCommitOutcome::Conflict(conflict) = outcome else {
         panic!("submitting a canonical as a source must be rejected, got {outcome:?}");
     };
-    assert_eq!(conflict.reason, ConsolidationConflictReason::SourceNotEligible);
+    assert_eq!(
+        conflict.reason,
+        ConsolidationConflictReason::SourceNotEligible
+    );
     assert_eq!(
         canonical_note_count(&db).await,
         1,
         "the rejected second sweep must not create a canonical"
     );
-    for note_id in direct.iter().filter(|id| **id != committed.canonical_note_id) {
+    for note_id in direct
+        .iter()
+        .filter(|id| **id != committed.canonical_note_id)
+    {
         assert_eq!(
             note_status(&db, note_id).await.as_deref(),
             Some("active"),
@@ -1301,14 +1492,19 @@ async fn partition_pressure_is_passive_and_reports_zero_slot_pressure() {
         .await
         .unwrap();
     }
-    repo.create_db_note(&project.id, "Pressure Case", "pressure case body", "case", "[]")
-        .await
-        .unwrap();
+    repo.create_db_note(
+        &project.id,
+        "Pressure Case",
+        "pressure case body",
+        "case",
+        "[]",
+    )
+    .await
+    .unwrap();
 
     // A canonical is excluded from `eligible_notes` by the same immutable
     // attribution predicate the candidate query uses.
-    let fixture =
-        canonical_fixture(&repo, &consolidation, &project.id, &session, 3).await;
+    let fixture = canonical_fixture(&repo, &consolidation, &project.id, &session, 3).await;
     let source_ids = fixture.source_ids();
     consolidation
         .commit_consolidation_canonical(fixture.request(&source_ids))
@@ -1323,7 +1519,10 @@ async fn partition_pressure_is_passive_and_reports_zero_slot_pressure() {
             .unwrap();
 
     let slots = HashMap::from([("pattern".to_owned(), 2i64), ("case".to_owned(), 0i64)]);
-    let metrics = consolidation.partition_pressure_metrics(&slots).await.unwrap();
+    let metrics = consolidation
+        .partition_pressure_metrics(&slots)
+        .await
+        .unwrap();
 
     let pattern = metrics
         .iter()
@@ -1476,7 +1675,10 @@ async fn extracted_note_audit_is_set_based_on_a_large_mixed_revision_corpus() {
             .fetch_one(db.pool())
             .await
             .unwrap();
-    assert_eq!(note_count, expected_notes, "fixture must build the full corpus");
+    assert_eq!(
+        note_count, expected_notes,
+        "fixture must build the full corpus"
+    );
     let link_count: i64 = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*) FROM note_links l JOIN notes n ON n.id = l.source_id \
          WHERE n.project_id = $1",
@@ -1488,9 +1690,8 @@ async fn extracted_note_audit_is_set_based_on_a_large_mixed_revision_corpus() {
     assert_eq!(link_count, expected_links);
     assert!(expected_notes >= 13_000 && expected_links >= 26_000);
 
-    start_query_capture();
-    let report = repo.extracted_note_audit(&project.id).await.unwrap();
-    let trace = finish_query_capture();
+    let (report, trace) = capture_queries(repo.extracted_note_audit(&project.id)).await;
+    let report = report.unwrap();
 
     // Semantics are preserved: the corpus is fully scanned and still produces
     // likely-duplicate neighborhoods.
@@ -1505,6 +1706,39 @@ async fn extracted_note_audit_is_set_based_on_a_large_mixed_revision_corpus() {
             .iter()
             .any(|finding| finding.attribution.is_some()),
         "the set-based revision load must still attribute revisioned notes"
+    );
+
+    // Neighborhood shape, not just non-emptiness.
+    //
+    // These neighborhoods are connected components, and components are
+    // transitive: a per-seed degree bound does not bound component size, so a
+    // uniformly dense corpus legitimately collapses into one component. That is
+    // pre-existing behaviour, not a regression — the previous implementation
+    // clustered *every* db note of the type with no cap at all, so on this
+    // fixture it would have produced a single ~4,400-node neighborhood. What is
+    // genuinely bounded now is the input set: the 200-per-type cap is what keeps
+    // any neighborhood from spanning the whole corpus. (The per-seed top-16
+    // truncation is preserved for edge-set fidelity and is asserted directly in
+    // `audit_score_matrix_preserves_the_per_seed_top_16_truncation`.)
+    assert!(
+        report.merge_candidates.len() <= 3 * CONSOLIDATION_MAX_PARTITION_INPUTS,
+        "merge candidates must come only from the per-type 200 cap, got {}",
+        report.merge_candidates.len()
+    );
+    let widest_neighborhood = report
+        .merge_candidates
+        .iter()
+        .map(|finding| finding.related_note_ids.len())
+        .max()
+        .expect("a dense corpus reports at least one neighborhood");
+    assert!(
+        widest_neighborhood >= 1,
+        "a dense corpus must relate notes to each other"
+    );
+    assert!(
+        widest_neighborhood < CONSOLIDATION_MAX_PARTITION_INPUTS,
+        "no neighborhood may exceed the per-type input cap; widest was {widest_neighborhood} \
+         over a {expected_notes}-note corpus"
     );
 
     // Round-trip budget, measured from `sqlx`'s own query records. The lower
@@ -1538,6 +1772,95 @@ async fn extracted_note_audit_is_set_based_on_a_large_mixed_revision_corpus() {
         "expected one set-based inbound-link aggregate:\n{}",
         trace.rendered()
     );
+}
+
+/// The audit's score matrix must reproduce `dedup_candidates_for_group`'s
+/// per-seed `ORDER BY score DESC LIMIT 16`, and the canonical path must not.
+///
+/// This asserts the truncation on the query itself rather than on a downstream
+/// component shape, because connected components are transitive and cannot
+/// witness a per-seed degree bound.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn audit_score_matrix_preserves_the_per_seed_top_16_truncation() {
+    let tmp = crate::database::test_tempdir().unwrap();
+    let db = Database::open_in_memory().unwrap();
+    let (tx, _rx) = broadcast::channel(256);
+    let project = make_project(&db, tmp.path()).await;
+    let repo = NoteRepository::new(db.clone(), event_bus_for(&tx));
+    let consolidation = NoteConsolidationRepository::new(db.clone());
+
+    // 40 mutually similar notes: every seed matches far more than 16 candidates.
+    let mut inputs = Vec::new();
+    for index in 0..40 {
+        let note = repo
+            .create_db_note(
+                &project.id,
+                &format!("Truncation Fixture {index}"),
+                "Retry storms amplify duplicate recovery work during incident recovery.",
+                "pattern",
+                "[]",
+            )
+            .await
+            .unwrap();
+        inputs.push(ConsolidationNote {
+            id: note.id,
+            project_id: note.project_id,
+            permalink: note.permalink,
+            title: note.title,
+            note_type: note.note_type,
+            folder: note.folder,
+            scope_paths: note.scope_paths,
+            content: note.content,
+            abstract_: note.abstract_,
+            overview: note.overview,
+            confidence: note.confidence,
+        });
+    }
+
+    let untruncated = consolidation
+        .directed_score_matrix(&project.id, "patterns", "pattern", &inputs, 0.0, None)
+        .await
+        .unwrap();
+    let truncated = consolidation
+        .directed_score_matrix(&project.id, "patterns", "pattern", &inputs, 0.0, Some(16))
+        .await
+        .unwrap();
+
+    let max_degree = |rows: &[DirectedScoreRow]| {
+        let mut by_seed: HashMap<&str, usize> = HashMap::new();
+        for row in rows {
+            *by_seed.entry(row.seed_id.as_str()).or_default() += 1;
+        }
+        by_seed.values().copied().max().unwrap_or(0)
+    };
+
+    assert!(
+        max_degree(&untruncated) > 16,
+        "the fixture must produce seeds with more than 16 matching candidates, got {}",
+        max_degree(&untruncated)
+    );
+    assert_eq!(
+        max_degree(&truncated),
+        16,
+        "the audit path must keep the per-seed top-16 truncation"
+    );
+    assert!(
+        truncated.len() < untruncated.len(),
+        "truncation must actually remove rows"
+    );
+
+    // Every retained row must be one the untruncated matrix also produced: the
+    // truncation selects, it does not rescore.
+    let untruncated_pairs = untruncated
+        .iter()
+        .map(|row| (row.seed_id.as_str(), row.candidate_id.as_str()))
+        .collect::<std::collections::HashSet<_>>();
+    for row in &truncated {
+        assert!(
+            untruncated_pairs.contains(&(row.seed_id.as_str(), row.candidate_id.as_str())),
+            "truncated matrix produced a pair the untruncated one did not"
+        );
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

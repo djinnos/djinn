@@ -75,6 +75,7 @@ pub use consolidation_lifecycle::{
     EligibleSourceSelection, PartitionPressureMetric, ProvenanceBackfillReport,
     build_bounded_clusters, cluster_source_id_set, clusters_are_disjoint,
     connected_components_from_score_matrix, consolidation_attempt_id,
+    minimum_valid_score_threshold,
 };
 pub use djinn_memory::{
     BuildContextResponse, ConsolidatedNoteProvenance, ConsolidationCandidateEdge,

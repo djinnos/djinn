@@ -8,6 +8,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use super::consolidation::is_consolidation_eligible_note_type;
 use super::{
     NoteAssociationKind, NoteHistoryRequest, NoteRepository, NoteRevisionEventKind,
     NoteRevisionEventRow, NoteRevisionReason, NoteRevisionSnapshot, NoteRevisionSubsystem,
@@ -16,7 +17,6 @@ use super::{
     TrustedNoteRevisionAttribution, TrustedNoteRevisionProvenance, index_links_for_note,
     resolve_links_for_note,
 };
-use super::consolidation::is_consolidation_eligible_note_type;
 use crate::error::{DbError as Error, DbResult as Result};
 use crate::note_hash::note_content_hash;
 use djinn_memory::Note;

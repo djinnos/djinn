@@ -527,7 +527,13 @@ async fn catalog_concurrency_rollback_immutability_and_project_erasure_hold() {
             "task_id",
             "task_run_id",
             "reason",
-            "created_at"
+            "created_at",
+            // Added by migration 196 (proposal `t5rn`): the durable
+            // consolidation attempt identity. It is stamped on the canonical's
+            // `created` revision and on each retired source's `updated`
+            // revision, which is what makes the ambiguous-retry witness
+            // directed. Nullable, so every pre-existing row is unaffected.
+            "consolidation_attempt_id"
         ]
     );
     let constraints: Vec<String> = sqlx::query_scalar("SELECT constraint_name FROM information_schema.table_constraints WHERE table_name = 'note_revision_events' ORDER BY constraint_name").fetch_all(db.pool()).await.unwrap();

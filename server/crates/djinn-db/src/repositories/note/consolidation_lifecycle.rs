@@ -50,7 +50,36 @@ use crate::note_hash::note_content_hash;
 pub const CONSOLIDATION_MAX_PARTITION_INPUTS: usize = 200;
 
 /// Initial configurable complete-link admission threshold.
+///
+/// **This value is provisional and has not been validated against a production
+/// corpus.** `ts_rank` scores on short extracted bodies are frequently well
+/// below `0.15`, so the likely first-run behaviour is that nothing clusters at
+/// all. That is the intended safe failure mode — overflow and candidate metrics
+/// stay visible while no destructive merge occurs — but it is not evidence that
+/// the number is right, and no test here demonstrates the default producing a
+/// cluster from realistic text.
+///
+/// Tuning it is expected. Tuning it *downward toward zero* is the dangerous
+/// direction: admission is strictly greater-than and
+/// [`minimum_valid_score_threshold`] rejects non-positive values, so the
+/// degenerate "admit everything" configuration cannot be reached, but a very
+/// small positive threshold still merges weakly related notes. Lower it against
+/// measured score distributions, not by guessing.
 pub const CONSOLIDATION_DEFAULT_SCORE_THRESHOLD: f64 = 0.15;
+
+/// Reject a threshold that would arm an indiscriminate merge.
+///
+/// A non-positive or non-finite threshold is refused outright rather than
+/// clamped: silently substituting a safe value would hide a misconfiguration on
+/// a path that retires notes.
+pub fn minimum_valid_score_threshold(threshold: f64) -> Result<f64> {
+    if !threshold.is_finite() || threshold <= 0.0 {
+        return Err(Error::InvalidData(format!(
+            "consolidation score threshold must be a finite positive value, got {threshold}"
+        )));
+    }
+    Ok(threshold)
+}
 
 /// Smallest source count that makes a cluster qualifying.
 pub const CONSOLIDATION_MIN_CLUSTER_SOURCES: usize = 3;
@@ -321,9 +350,12 @@ pub struct ConsolidationAttemptWitness {
     pub note_type: String,
     pub session_id: Option<String>,
     pub canonical_body_digest: String,
-    /// `supersedes` endpoints of the located canonical, sorted ascending.
+    /// The attempt's *directed* source set, recovered from its own immutable
+    /// retirement revisions rather than from the undirected edge substrate.
     pub supersedes_source_note_ids: Vec<String>,
     pub canonical_provenance_session_ids: Vec<String>,
+    /// Observed `(note_id, status)` for every source this attempt retired.
+    pub final_source_statuses: Vec<(String, String)>,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -709,8 +741,20 @@ impl NoteConsolidationRepository {
     /// project/folder/type/storage scope. Only the round-trip fan-out changes:
     /// what used to be one query per seed is now one query per partition.
     ///
+    /// `per_seed_limit` reproduces the old call's `ORDER BY score DESC LIMIT 16`
+    /// truncation. The two consumers genuinely want different things:
+    ///
+    /// * the **corpus audit** must keep the truncation, because its
+    ///   likely-duplicate neighborhoods are connected components and an
+    ///   untruncated edge set collapses a dense partition into one giant
+    ///   neighborhood that the old report never produced;
+    /// * the **canonical transaction** must not truncate, because complete-link
+    ///   admission needs every in-set pair score to decide membership, and a
+    ///   missing pair reads as a score of zero.
+    ///
     /// Returns `(seed_id, candidate_id, score)` rows for consumption by
-    /// [`build_bounded_clusters`], ordered deterministically.
+    /// [`build_bounded_clusters`] or
+    /// [`connected_components_from_score_matrix`], ordered deterministically.
     pub async fn directed_score_matrix(
         &self,
         project_id: &str,
@@ -718,6 +762,7 @@ impl NoteConsolidationRepository {
         note_type: &str,
         notes: &[ConsolidationNote],
         score_threshold: f64,
+        per_seed_limit: Option<i64>,
     ) -> Result<Vec<DirectedScoreRow>> {
         self.db.ensure_initialized().await?;
         if notes.len() < 2 {
@@ -768,10 +813,19 @@ impl NoteConsolidationRepository {
                  FROM seeds s
                  JOIN scoped c ON c.id <> s.seed_id
                  WHERE c.search_vector @@ websearch_to_tsquery('english', s.query_text)
+               ),
+               above_threshold AS (
+                 SELECT seed_id, candidate_id, score,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY seed_id
+                            ORDER BY score DESC, candidate_id ASC
+                        ) AS seed_rank
+                 FROM ranked
+                 WHERE score > $7
                )
                SELECT seed_id, candidate_id, score
-               FROM ranked
-               WHERE score > $7
+               FROM above_threshold
+               WHERE $8::bigint IS NULL OR seed_rank <= $8::bigint
                ORDER BY seed_id ASC, candidate_id ASC"#,
         )
         .bind(seed_ids)
@@ -781,6 +835,7 @@ impl NoteConsolidationRepository {
         .bind(folder)
         .bind(note_type)
         .bind(score_threshold)
+        .bind(per_seed_limit)
         .fetch_all(self.db.pool())
         .await
         .map_err(Into::into)
@@ -793,6 +848,7 @@ impl NoteConsolidationRepository {
         partition: &ConsolidationPartitionKey,
         score_threshold: f64,
     ) -> Result<BoundedClusteringOutcome> {
+        let score_threshold = minimum_valid_score_threshold(score_threshold)?;
         let selection = self.select_eligible_partition_sources(partition).await?;
         let folder = folder_for_type(&partition.note_type).to_owned();
         let scores = self
@@ -802,6 +858,10 @@ impl NoteConsolidationRepository {
                 &partition.note_type,
                 &selection.notes,
                 score_threshold,
+                // Complete-link admission needs every in-set pair score: a
+                // truncated matrix would read as a zero score and silently
+                // reject legitimate members.
+                None,
             )
             .await?;
         let (clusters, admission_comparisons) =
@@ -840,20 +900,36 @@ impl NoteConsolidationRepository {
             return Ok(None);
         };
 
-        // A `supersedes` edge is stored canonical-pair normalized, so the
-        // canonical is whichever endpoint is not the source. Reading both
-        // columns and subtracting the canonical id recovers the exact endpoint
-        // set without depending on column order.
+        // The endpoint set comes from the attempt's own immutable retirement
+        // revisions, NOT from `note_associations`.
+        //
+        // `note_associations` is order-normalized (`note_a_id < note_b_id`) and
+        // carries no direction column, so an edge-derived set cannot tell "this
+        // canonical superseded X" from "X superseded this canonical". A
+        // canonical that is later deprecated with a superseding note — reachable
+        // today through extraction's `DeprecateWithSupersedes` — would gain a
+        // spurious endpoint, flipping a correctly committed attempt into a
+        // reported invariant violation. These ledger rows are directed by
+        // construction and immutable, so no later edge can perturb them.
         let mut endpoints: Vec<String> = sqlx::query_scalar(
-            r#"SELECT CASE WHEN note_a_id = $1 THEN note_b_id ELSE note_a_id END
-               FROM note_associations
-               WHERE kind = 'supersedes' AND (note_a_id = $1 OR note_b_id = $1)"#,
+            "SELECT note_id FROM note_revision_events \
+             WHERE consolidation_attempt_id = $1 AND event_kind = 'updated' \
+             ORDER BY note_id ASC",
         )
-        .bind(&row.note_id)
+        .bind(attempt_id)
         .fetch_all(self.db.pool())
         .await?;
         endpoints.sort();
         endpoints.dedup();
+
+        // Final status of every source this attempt retired, read from the
+        // notes themselves rather than assumed.
+        let final_source_statuses: Vec<(String, String)> = sqlx::query_as(
+            "SELECT id, status FROM notes WHERE id = ANY($1::text[]) ORDER BY id ASC",
+        )
+        .bind(&endpoints)
+        .fetch_all(self.db.pool())
+        .await?;
 
         let provenance_session_ids: Vec<String> = sqlx::query_scalar(
             "SELECT session_id FROM consolidated_note_provenance WHERE note_id = $1 \
@@ -872,6 +948,7 @@ impl NoteConsolidationRepository {
             canonical_body_digest: note_content_hash(&row.content),
             supersedes_source_note_ids: endpoints,
             canonical_provenance_session_ids: provenance_session_ids,
+            final_source_statuses,
         }))
     }
 
@@ -910,22 +987,19 @@ impl NoteConsolidationRepository {
         }
 
         let canonical_body_digest = note_content_hash(request.content);
-        let attempt_id = consolidation_attempt_id(
-            request.partition,
-            &sorted_sources,
-            &canonical_body_digest,
-        );
+        let attempt_id =
+            consolidation_attempt_id(request.partition, &sorted_sources, &canonical_body_digest);
 
         // An ambiguous retry must be decided by exact attempt identity, never by
         // source status.
         if let Some(witness) = self.find_consolidation_attempt(&attempt_id).await? {
-            return Ok(self.classify_attempt_witness(
+            return self.classify_attempt_witness(
                 &witness,
                 request.partition,
                 &sorted_sources,
                 &canonical_body_digest,
                 &attempt_id,
-            )?);
+            );
         }
 
         let mut tx = self.db.pool().begin().await?;
@@ -963,15 +1037,17 @@ impl NoteConsolidationRepository {
 
         if locked.len() != sorted_sources.len() {
             tx.rollback().await?;
-            return Ok(ConsolidationCommitOutcome::Conflict(ConsolidationConflict {
-                reason: ConsolidationConflictReason::SourceNotEligible,
-                detail: format!(
-                    "{} of {} requested sources are missing",
-                    sorted_sources.len() - locked.len(),
-                    sorted_sources.len()
-                ),
-                observed_source_statuses: observed_source_statuses.clone(),
-            }));
+            return Ok(ConsolidationCommitOutcome::Conflict(
+                ConsolidationConflict {
+                    reason: ConsolidationConflictReason::SourceNotEligible,
+                    detail: format!(
+                        "{} of {} requested sources are missing",
+                        sorted_sources.len() - locked.len(),
+                        sorted_sources.len()
+                    ),
+                    observed_source_statuses: observed_source_statuses.clone(),
+                },
+            ));
         }
 
         for row in &locked {
@@ -979,18 +1055,20 @@ impl NoteConsolidationRepository {
                 || row.note_type != request.partition.note_type
             {
                 tx.rollback().await?;
-                return Ok(ConsolidationCommitOutcome::Conflict(ConsolidationConflict {
-                    reason: ConsolidationConflictReason::PartitionMismatch,
-                    detail: format!(
-                        "source {} is {}/{}, not {}/{}",
-                        row.id,
-                        row.project_id,
-                        row.note_type,
-                        request.partition.project_id,
-                        request.partition.note_type
-                    ),
-                    observed_source_statuses: observed_source_statuses.clone(),
-                }));
+                return Ok(ConsolidationCommitOutcome::Conflict(
+                    ConsolidationConflict {
+                        reason: ConsolidationConflictReason::PartitionMismatch,
+                        detail: format!(
+                            "source {} is {}/{}, not {}/{}",
+                            row.id,
+                            row.project_id,
+                            row.note_type,
+                            request.partition.project_id,
+                            request.partition.note_type
+                        ),
+                        observed_source_statuses: observed_source_statuses.clone(),
+                    },
+                ));
             }
             if row.status != "active"
                 || row.storage != "db"
@@ -998,18 +1076,20 @@ impl NoteConsolidationRepository {
                 || !row.in_partition_session
             {
                 tx.rollback().await?;
-                return Ok(ConsolidationCommitOutcome::Conflict(ConsolidationConflict {
-                    reason: ConsolidationConflictReason::SourceNotEligible,
-                    detail: format!(
-                        "source {} failed revalidation (status={}, storage={}, consolidation_attributed={}, in_partition_session={})",
-                        row.id,
-                        row.status,
-                        row.storage,
-                        row.consolidation_attributed,
-                        row.in_partition_session
-                    ),
-                    observed_source_statuses: observed_source_statuses.clone(),
-                }));
+                return Ok(ConsolidationCommitOutcome::Conflict(
+                    ConsolidationConflict {
+                        reason: ConsolidationConflictReason::SourceNotEligible,
+                        detail: format!(
+                            "source {} failed revalidation (status={}, storage={}, consolidation_attributed={}, in_partition_session={})",
+                            row.id,
+                            row.status,
+                            row.storage,
+                            row.consolidation_attributed,
+                            row.in_partition_session
+                        ),
+                        observed_source_statuses: observed_source_statuses.clone(),
+                    },
+                ));
             }
         }
 
@@ -1060,19 +1140,21 @@ impl NoteConsolidationRepository {
                         .canonical_provenance_session_ids
                         .clone(),
                     supersedes_source_note_ids: witness.supersedes_source_note_ids.clone(),
-                    final_source_statuses: Vec::new(),
+                    final_source_statuses: witness.final_source_statuses.clone(),
                 },
             ));
         }
 
-        Ok(ConsolidationCommitOutcome::Conflict(ConsolidationConflict {
-            reason: ConsolidationConflictReason::AttemptIdentityMismatch,
-            detail: format!(
-                "attempt {attempt_id} located canonical {} but partition_matches={partition_matches}, digest_matches={digest_matches}, endpoints_match={endpoints_match}",
-                witness.canonical_note_id
-            ),
-            observed_source_statuses: Vec::new(),
-        }))
+        Ok(ConsolidationCommitOutcome::Conflict(
+            ConsolidationConflict {
+                reason: ConsolidationConflictReason::AttemptIdentityMismatch,
+                detail: format!(
+                    "attempt {attempt_id} located canonical {} but partition_matches={partition_matches}, digest_matches={digest_matches}, endpoints_match={endpoints_match}",
+                    witness.canonical_note_id
+                ),
+                observed_source_statuses: Vec::new(),
+            },
+        ))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1087,10 +1169,9 @@ impl NoteConsolidationRepository {
     ) -> Result<CommittedConsolidationCanonical> {
         let partition = request.partition;
         let canonical_id = uuid::Uuid::now_v7().to_string();
-        let tags_json =
-            serde_json::Value::Array(vec![serde_json::Value::String(
-                CONSOLIDATION_CANONICAL_TAG.to_owned(),
-            )]);
+        let tags_json = serde_json::Value::Array(vec![serde_json::Value::String(
+            CONSOLIDATION_CANONICAL_TAG.to_owned(),
+        )]);
         let scope_paths_json: serde_json::Value = serde_json::from_str(request.scope_paths)
             .map_err(|e| Error::InvalidData(format!("invalid json for notes.scope_paths: {e}")))?;
         let confidence = request
@@ -1221,12 +1302,17 @@ impl NoteConsolidationRepository {
             .bind(&row.id)
             .fetch_one(&mut **tx)
             .await?;
+            // The retirement revision carries this attempt's identity too. That
+            // is what makes the retry witness *directed*: the attempted source
+            // set is recoverable from immutable ledger rows instead of from the
+            // order-normalized, direction-free `note_associations` substrate.
             sqlx::query(
                 "INSERT INTO note_revision_events (id, project_id, note_id, note_seq, event_kind, \
                  content_before, content_after, confidence_before, confidence_after, actor_kind, \
-                 actor_id, subsystem, session_id, task_id, task_run_id, reason) \
+                 actor_id, subsystem, session_id, task_id, task_run_id, reason, \
+                 consolidation_attempt_id) \
                  VALUES ($1, $2, $3, $4, 'updated', $5, $5, $6, $6, 'system', NULL, \
-                 'consolidation', $7, NULL, NULL, $8)",
+                 'consolidation', $7, NULL, NULL, $8, $9)",
             )
             .bind(uuid::Uuid::now_v7().to_string())
             .bind(&partition.project_id)
@@ -1236,6 +1322,7 @@ impl NoteConsolidationRepository {
             .bind(row.confidence)
             .bind(&partition.session_id)
             .bind(request.reason.as_str())
+            .bind(attempt_id)
             .execute(&mut **tx)
             .await?;
             final_source_statuses.push((row.id.clone(), "superseded".to_owned()));
@@ -1254,7 +1341,10 @@ impl NoteConsolidationRepository {
     }
 
     fn fail_at(&self, boundary: ConsolidationWriteBoundary) -> Result<()> {
-        if self.canonical_write_failure.load(std::sync::atomic::Ordering::SeqCst) == boundary.code()
+        if self
+            .canonical_write_failure
+            .load(std::sync::atomic::Ordering::SeqCst)
+            == boundary.code()
         {
             return Err(Error::Internal(format!(
                 "forced consolidation write failure at boundary {boundary:?}"
@@ -1473,11 +1563,15 @@ pub fn build_bounded_clusters(
         consumed[seed] = true;
         let mut members = vec![seed];
 
-        for candidate in (seed + 1)..ordered.len() {
+        // `consumed` is indexed in lockstep with `ordered`, so iterating it
+        // directly yields both the candidate ordinal and its claimed flag.
+        // Nothing inside this loop mutates `consumed`; claims are applied after
+        // the group is known to qualify.
+        for (candidate, already_consumed) in consumed.iter().enumerate().skip(seed + 1) {
             if members.len() >= CONSOLIDATION_MAX_CLUSTER_SOURCES {
                 break;
             }
-            if consumed[candidate] {
+            if *already_consumed {
                 continue;
             }
             let mut admitted = true;
@@ -1487,8 +1581,17 @@ pub fn build_bounded_clusters(
                     Some(cached) => *cached,
                     None => {
                         admission_comparisons += 1;
+                        // Absent pairs score 0.0, and the comparison is strict
+                        // to match the matrix query's `WHERE score > $7`. With
+                        // `>=`, a threshold of 0 would make `0.0 >= 0.0` true
+                        // and admit *every* note to *every* other note — a
+                        // maximally destructive merge on a subtractive path,
+                        // reachable by the plausible operator action of setting
+                        // the threshold to zero to "disable filtering". The
+                        // enablement gate additionally rejects a non-positive
+                        // threshold outright.
                         let score = directed.get(&key).copied().unwrap_or(0.0);
-                        let outcome = score >= threshold;
+                        let outcome = score > threshold;
                         evaluated.insert(key, outcome);
                         outcome
                     }
@@ -1557,10 +1660,8 @@ pub fn connected_components_from_score_matrix(
 ) -> Vec<Vec<String>> {
     use std::collections::{BTreeMap, VecDeque};
 
-    let by_id: HashMap<&str, &ConsolidationNote> = notes
-        .iter()
-        .map(|note| (note.id.as_str(), note))
-        .collect();
+    let by_id: HashMap<&str, &ConsolidationNote> =
+        notes.iter().map(|note| (note.id.as_str(), note)).collect();
 
     let mut adjacency: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for row in scores {

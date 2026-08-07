@@ -1479,6 +1479,14 @@ impl CoordinatorActor {
         if self.prune_tick_counter >= 120 {
             self.prune_tick_counter = 0;
             poll_stack::boxed(|| self.prune_note_associations()).await;
+            // t5rn T6: passive per-(project, note_type) retrieval pressure,
+            // captured once per housekeeping sweep from one snapshot. Strictly
+            // report-only — no actuator, task, prompt policy, or deletion is
+            // derived from it, and it never runs on a write path.
+            poll_stack::boxed(|| async {
+                super::consolidation::report_partition_pressure(&self.db).await;
+            })
+            .await;
             if !self.should_skip_background_llm_work("hourly_note_consolidation") {
                 poll_stack::boxed(|| {
                     super::consolidation::run_note_consolidation(
