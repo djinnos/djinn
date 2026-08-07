@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::Ordering;
 
-#[cfg(feature = "test-support")]
+#[cfg(any(test, feature = "test-support"))]
 use std::sync::OnceLock;
 
 use crate::finalize_types::SubmitWork;
@@ -59,6 +59,42 @@ use super::streaming::{
 };
 use super::tool_dispatch::{ToolDispatchContext, collect_tool_results, tool_runtime_metadata};
 use djinn_db::{CompactionTrigger, SessionCompactionBoundaryRepository};
+
+/// Test-only observation of the production reply-loop attempt boundary.
+///
+/// Coordinator regressions use this to prove outer session-admission outcomes
+/// never reach the slot hand-off. The hook observes existing boundaries only;
+/// it cannot alter admission or launch behavior.
+#[cfg(any(test, feature = "test-support"))]
+pub type ReplyLoopBoundaryObserver = Arc<dyn Fn(&'static str) + Send + Sync>;
+
+#[cfg(any(test, feature = "test-support"))]
+static REPLY_LOOP_BOUNDARY_OBSERVER: OnceLock<Mutex<Option<ReplyLoopBoundaryObserver>>> =
+    OnceLock::new();
+
+#[cfg(any(test, feature = "test-support"))]
+pub fn set_reply_loop_boundary_observer(observer: Option<ReplyLoopBoundaryObserver>) {
+    *REPLY_LOOP_BOUNDARY_OBSERVER
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = observer;
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn observe_reply_loop_boundary(event: &'static str) {
+    if let Some(observer) = REPLY_LOOP_BOUNDARY_OBSERVER
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+        .cloned()
+    {
+        observer(event);
+    }
+}
+
+#[cfg(not(any(test, feature = "test-support")))]
+fn observe_reply_loop_boundary(_event: &'static str) {}
 
 /// Typed admission decision returned through the reply-loop error seam.
 ///
@@ -1017,6 +1053,7 @@ pub async fn run_reply_loop(
             // provider-agnostic conversation — covers all wire formats without
             // mutating stored history.
             let request_conversation = conversation.with_synthesized_tool_results();
+            observe_reply_loop_boundary("reply_loop_handoff");
             // The coordinator selected this model before handing the turn to the
             // slot, but it can be demoted while this reply loop is still alive.
             // Recheck the existing breaker at the actual attempt boundary,
@@ -1039,6 +1076,7 @@ pub async fn run_reply_loop(
                 tools,
                 tool_choice,
             ) {
+                observe_reply_loop_boundary("model_turn_prepare");
                 let coordinator = ModelTurnAdmissionCoordinator::new(
                     djinn_db::ModelTurnAdmissionRepository::new(slot_ctx.db.clone()),
                 );
@@ -1066,6 +1104,7 @@ pub async fn run_reply_loop(
                 let guard = launch_prepared_covered_attempt_with_lease(
                     preparation,
                     || {
+                        observe_reply_loop_boundary("covered_provider_launch");
                         let normalizer = Arc::new(Mutex::new(ProviderApiKeyNormalizerV1::new(policy)));
                         let receipt_clock = Arc::clone(&slot_ctx.clock);
                         let started = receipt_clock.now_instant();
@@ -1086,6 +1125,7 @@ pub async fn run_reply_loop(
                 Ok((None, Some(guard)))
             } else {
                 // Explicit uncovered compatibility path: no B2 claim was made.
+                observe_reply_loop_boundary("uncovered_provider_launch");
                 provider.stream(request_conversation.as_ref(), tools, tool_choice).await.map(|stream| (Some(stream), None))
             };
             let (stream, mut covered_attempt) = match stream_result {

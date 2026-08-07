@@ -32,6 +32,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
 use djinn_core::events::EventBus;
+use djinn_db::repositories::session::CreateSessionParams;
 use djinn_db::{
     BuildLeaseRepository, Database, ImageRepository, ProjectRepository, WarmGraphAttempt,
     WarmGraphAttemptStatus, WarmGraphOutcome,
@@ -60,6 +61,72 @@ async fn ledger_census(db: &Database) -> Vec<(&'static str, i64)> {
         ));
     }
     census
+}
+
+/// A pending outer session admission ends before the coordinator can hand work
+/// to the reply loop's model-turn preparation/launch boundary.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn session_pending_precedes_every_model_turn_boundary() {
+    let db = crate::test_helpers::create_test_db();
+    let (events_tx, _events_rx) = tokio::sync::broadcast::channel(256);
+    let fixture = seed_wnd1_ready_worker_tasks(&db, WND1_READY_TASK_COUNT).await;
+    configure_wnd1_user_max_sessions(&db, &fixture.created_by_user_id, &fixture.model_id, 1).await;
+    let target_task_id = fixture.task_ids[0].clone();
+    close_all_except(&db, &fixture, &target_task_id).await;
+    djinn_db::SessionRepository::new(db.clone(), EventBus::noop())
+        .create(CreateSessionParams {
+            project_id: &fixture.project_id,
+            task_id: Some(&fixture.task_ids[1]),
+            model: &fixture.model_id,
+            agent_type: "worker",
+            metadata_json: None,
+            task_run_id: None,
+            pricing: None,
+            cost_basis: None,
+        })
+        .await
+        .expect("seed active outer session");
+    let pool =
+        djinn_db::test_support::seed_model_turn_admission_fixture(&db, "enforce", "supported", 1)
+            .await;
+
+    let boundary_events = StdArc::new(StdMutex::new(Vec::new()));
+    let observed = StdArc::clone(&boundary_events);
+    djinn_slot::reply_loop::turn::set_reply_loop_boundary_observer(Some(StdArc::new(
+        move |event| {
+            observed.lock().expect("boundary events mutex").push(event);
+        },
+    )));
+    let (runtime, mut started_rx, _completed_rx) = RouteRuntime::new();
+    let mut actor = build_route_actor(&db, &events_tx, &runtime, 1);
+    actor.dispatch_ready_tasks(Some(&fixture.project_id)).await;
+    djinn_slot::reply_loop::turn::set_reply_loop_boundary_observer(None);
+
+    assert_eq!(
+        actor.dispatched, 0,
+        "pending outer admission must not dispatch a slot"
+    );
+    assert!(
+        started_rx.try_recv().is_err(),
+        "pending must not schedule a replacement dispatch"
+    );
+    assert!(
+        boundary_events
+            .lock()
+            .expect("boundary events mutex")
+            .is_empty(),
+        "pending must precede reply-loop handoff, preparation, and every provider launch"
+    );
+    assert_eq!(
+        djinn_db::test_support::model_turn_decision_count_fixture(&db, pool).await,
+        0
+    );
+    assert_eq!(
+        djinn_db::test_support::model_turn_accounting_fixture(&db, pool).await,
+        (0, 1, 0)
+    );
+    assert!(actor.inflight_dispatches.is_empty());
+    assert!(actor.provisional_admissions.is_empty());
 }
 
 /// The durable lifecycle is separate from the empty Kubernetes Job inventory.
