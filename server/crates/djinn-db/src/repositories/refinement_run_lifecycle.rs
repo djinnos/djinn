@@ -707,7 +707,12 @@ impl ProposalRepository {
                 generation: source.generation,
             });
         }
-        if park.is_none() {
+        // An awaiting-review park is a demand-admissible boundary: no role work
+        // remains in flight, so a feedback cohort committed while this intent
+        // was running must resume through the same transaction. Awaiting
+        // evidence remains deliberately excluded because its evidence spike
+        // owns a separate resume path.
+        if park != Some(RefinementParkKind::AwaitingEvidence) {
             let proposal_id = sqlx::query_scalar::<_, String>(
                 "SELECT proposal_id FROM refinement_runs WHERE id=$1",
             )

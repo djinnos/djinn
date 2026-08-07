@@ -157,6 +157,122 @@ async fn seed_parked_cross_surface_run(
     run_id
 }
 
+/// A feedback cohort committed while role work is in flight must drain when
+/// that role parks for human review. Retrying the already-consumed outcome is
+/// a no-op: it cannot mint another successor or capture the source twice.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn awaiting_review_park_drains_pending_feedback_cohort_exactly_once() {
+    let (_server, db) = test_server().await;
+    let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+    let proposal = repo
+        .create(ProposalCreateInput {
+            title: "Pending feedback review park",
+            body: "body",
+            acceptance_criteria: Some("[]"),
+            status: Some("in_review"),
+            body_format: None,
+        })
+        .await
+        .unwrap();
+    let (run_id, intent_id, generation) = match repo
+        .reap_and_admit(djinn_db::AdmitRefinementRunRequest {
+            proposal_id: proposal.id.clone(),
+            idempotency_key: "review-park-source".into(),
+            source: djinn_db::RefinementAdmissionSource::Demand {
+                demand_id: "review-park-source".into(),
+            },
+            heartbeat_grace_millis: 60_000,
+        })
+        .await
+        .unwrap()
+    {
+        djinn_db::RefinementAdmissionOutcome::Admitted {
+            run_id,
+            intent_id,
+            generation,
+        } => (run_id, intent_id, generation),
+        other => panic!("expected source admission, got {other:?}"),
+    };
+    let (feedback, persisted) = repo
+        .add_feedback_with_severity_and_pending_handoff(
+            djinn_db::ProposalFeedbackCreateInput {
+                proposal_id: &proposal.id,
+                parent_id: None,
+                author_kind: "user",
+                author_model: None,
+                body: "blocking feedback while judge is running",
+            },
+            "blocking",
+            true,
+        )
+        .await
+        .unwrap();
+    assert!(persisted);
+    assert!(
+        repo.claim_refinement_intent(djinn_db::ClaimRefinementIntentRequest {
+            run_id: run_id.clone(),
+            intent_id: intent_id.clone(),
+            generation,
+            owner: "review-park-owner".into(),
+            lease_millis: 60_000,
+        })
+        .await
+        .unwrap()
+        .is_some()
+    );
+    let transition = djinn_db::SourceIntentTransitionRequest {
+        run_id: run_id.clone(),
+        intent_id: intent_id.clone(),
+        generation,
+        expected_round: 1,
+        expected_phase: djinn_core::refinement_liveness::RefinementPhase::AdversaryAttack,
+        expected_role: djinn_core::refinement_liveness::RefinementRole::Adversary,
+    };
+    assert!(
+        repo.park_refinement_run_from_intent(djinn_db::ParkRefinementRunFromIntentRequest {
+            source: transition.clone(),
+            kind: djinn_core::refinement_liveness::RefinementParkKind::AwaitingReview,
+        })
+        .await
+        .unwrap()
+    );
+    assert!(
+        !repo
+            .park_refinement_run_from_intent(djinn_db::ParkRefinementRunFromIntentRequest {
+                source: transition,
+                kind: djinn_core::refinement_liveness::RefinementParkKind::AwaitingReview,
+            })
+            .await
+            .unwrap()
+    );
+
+    let successor_count = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) FROM refinement_dispatch_intents i JOIN refinement_runs r ON r.id=i.run_id WHERE r.proposal_id=$1 AND r.idempotency_key=$2",
+    )
+    .bind(&proposal.id)
+    .bind(format!("pending-feedback/{}", feedback.id))
+    .fetch_one(db.pool())
+    .await
+    .unwrap();
+    let pending_count = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) FROM pending_feedback_refinement_handoffs WHERE proposal_id=$1 AND state='pending'",
+    )
+    .bind(&proposal.id)
+    .fetch_one(db.pool())
+    .await
+    .unwrap();
+    let captured_count = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) FROM proposal_feedback_refinement_sources WHERE source_feedback_id=$1",
+    )
+    .bind(&feedback.id)
+    .fetch_one(db.pool())
+    .await
+    .unwrap();
+    assert_eq!(successor_count, 1, "one successor admission is durable");
+    assert_eq!(pending_count, 0, "park drained the pending cohort");
+    assert_eq!(captured_count, 1, "feedback source was captured once");
+}
+
 #[test]
 fn exact_status_serializes_every_shared_liveness_evidence_class() {
     let cases = [
