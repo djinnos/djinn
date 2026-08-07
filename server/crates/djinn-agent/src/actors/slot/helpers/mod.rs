@@ -8,9 +8,11 @@ pub mod provider_resolution;
 
 #[allow(unused_imports)]
 pub(crate) use djinn_slot::helpers::{
-    ACTION_EXCERPT_CAP, ActionExcerptDetail, KnowledgePackConfig, NotePackDisposition,
-    NotePackOutcome, PackedKnowledgeNotes, derive_task_scope_paths, format_knowledge_notes,
-    is_role_auto_code_context_enabled, pack_knowledge_notes, pack_ranked_knowledge_notes,
+    ACTION_EXCERPT_CAP, ActionExcerptDetail, BaseTreeProvider, DerivedTaskScope,
+    KnowledgePackConfig, ListedBaseTree, NotePackDisposition, NotePackOutcome,
+    PackedKnowledgeNotes, ScopeFallbackReason, derive_task_scope_path_tokens,
+    derive_task_scope_paths, format_knowledge_notes, is_role_auto_code_context_enabled,
+    pack_knowledge_notes, pack_ranked_knowledge_notes,
 };
 #[allow(unused_imports)]
 pub(crate) use feedback::{

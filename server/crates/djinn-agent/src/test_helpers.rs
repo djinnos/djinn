@@ -137,11 +137,15 @@ pub fn agent_context_from_db(db: Database, _cancel: CancellationToken) -> AgentC
 
 /// Invoke the real production `load_knowledge_context` path for integration tests.
 ///
-/// This is the same orchestration used by dispatch: it runs the production
-/// scope-overlap query, the capped trace-candidate query, deterministic
-/// classification, prompt packing, and fail-open trace persistence.  Exposed
-/// under `test-support` so the MCP tool tests in `djinn-control-plane` can
-/// prove the tracedrop outcomes without reimplementing the classifier.
+/// This is the same orchestration used by dispatch: base-tree-validated scope
+/// derivation, the ranked `KnowledgeInjectionV1` RRF search, prompt packing, and
+/// fail-open trace persistence.  Exposed under `test-support` so the MCP tool
+/// tests in `djinn-control-plane` can prove the trace drop outcomes without
+/// reimplementing the classifier.
+///
+/// `base_tree` is `None` here, which is the specified provider-unavailable
+/// fallback: scope is empty and ranking runs on task text plus the remaining
+/// signals.
 pub async fn run_load_knowledge_context_for_test(
     task: &Task,
     epic_context: Option<&str>,
@@ -153,6 +157,35 @@ pub async fn run_load_knowledge_context_for_test(
         task,
         epic_context,
         app_state,
+        None,
+    )
+    .await
+}
+
+/// Same as [`run_load_knowledge_context_for_test`], but with a synthetic
+/// base-revision tree built from `tracked_paths`.
+///
+/// Without a tree, `derive_task_scope_paths` returns an empty scope with
+/// `tree_provider_unavailable` (proposal `5205`), so the validated-scope signal
+/// contributes nothing. Tests that exercise scope-driven retrieval must supply
+/// the tracked paths their task text refers to.
+///
+/// `tracked_paths` are ordinary repository-relative paths supplied by the
+/// caller; nothing here reads the host filesystem or any real repository.
+pub async fn run_load_knowledge_context_with_base_tree_for_test(
+    task: &Task,
+    epic_context: Option<&str>,
+    app_state: &AgentContext,
+    tracked_paths: &[&str],
+) -> Option<String> {
+    let _knowledge_context_env =
+        crate::actors::slot::lifecycle::prompt_context::knowledge_context_test_env_guard();
+    let tree = djinn_slot::helpers::ListedBaseTree::from_tracked_files(tracked_paths);
+    crate::actors::slot::lifecycle::prompt_context::load_knowledge_context(
+        task,
+        epic_context,
+        app_state,
+        Some(&tree),
     )
     .await
 }

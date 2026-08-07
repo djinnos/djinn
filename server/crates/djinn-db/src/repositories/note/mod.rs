@@ -35,6 +35,7 @@ mod note_quality;
 pub mod replay_validation;
 mod revisions;
 pub mod rrf;
+pub mod scope_rank;
 mod scoring;
 mod search;
 
@@ -94,10 +95,21 @@ pub use revisions::{
     RevisionHistoryPage, RevisionLookupRequest, RevisionRangeRequest, SessionRevisionPage,
     SessionRevisionRequest, TrustedNoteRevisionAttribution, TrustedNoteRevisionProvenance,
 };
-pub use rrf::rrf_fuse;
+pub use rrf::{
+    KNOWLEDGE_INJECTION_CANDIDATE_WINDOW, RankingProfile, injection_rrf_k, rrf_fuse,
+    rrf_fuse_with_profile, rrf_fuse_with_ranks,
+};
+pub use scope_rank::{
+    ScopeCandidate, best_pair_score, component_distance, normalize_scope_path,
+    rank_scope_candidates,
+};
 pub use scoring::{
     CO_ACCESS_HIGH, CONFIDENCE_CEILING, CONFIDENCE_FLOOR, CONTRADICTION, STALE_CITATION,
     STALE_DECAY_SIGNAL, USER_CONFIRM, bayesian_update, decay_signal_for_elapsed_days,
+};
+pub use search::{
+    InjectionSignalRanks, KnowledgeInjectionCandidate, KnowledgeInjectionSearchParams,
+    KnowledgeInjectionSearchResult,
 };
 
 use file_helpers::build_catalog;
