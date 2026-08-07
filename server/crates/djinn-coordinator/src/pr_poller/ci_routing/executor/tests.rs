@@ -1304,7 +1304,7 @@ async fn only_the_former_owners_drain_stamp_recovers_a_calling_row() {
     let checks = [inconclusive_check("Quality Gate / test", 921)];
     let blocking = refs(&checks);
     let id = pr_head_identity(921);
-    let (key, fingerprint) = calling_row_owned_by(&f, &id, &blocking, &former).await;
+    let (_key, fingerprint) = calling_row_owned_by(&f, &id, &blocking, &former).await;
     assert_eq!(
         f.budgets(&id, &fingerprint).await,
         (1, 1),
