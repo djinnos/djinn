@@ -14,12 +14,56 @@ pub struct ScopeCandidate {
     pub scope_paths: Vec<String>,
 }
 
-/// Split a path into non-empty components after separator normalization.
+/// The canonical form of a scope path, or `None` when it can never be a safe
+/// repository-relative path.
+///
+/// Exposed so the SQL-side prefilter can normalize the *task* side of a
+/// comparison before binding, keeping that prefilter a genuine superset of what
+/// [`component_distance`] will accept.
+pub fn normalize_scope_path(path: &str) -> Option<String> {
+    normalized_components(path).map(|components| components.join("/"))
+}
+
+/// Split a path into components **after separator normalization**.
+///
+/// Mirrors the token normalization the slot-side path validator applies, so
+/// both sides of every comparison are normalized. Stored `scope_paths` are
+/// written by many producers over time and are not guaranteed to be canonical:
+/// a note scoped to `./src/app` or `src\app` must still compare equal to a task
+/// path of `src/app`.
+///
+/// 1. converts `\` separators to `/`,
+/// 2. removes a leading `./`,
+/// 3. collapses repeated separators, and
+/// 4. rejects absolute paths and any `.` or `..` component.
+///
+/// Git path case is preserved. Returns `None` for a path that can never be a
+/// safe repository-relative path; such a path is simply not comparable with
+/// anything, so it contributes no scope score.
 ///
 /// Comparison is component-based: raw string prefixes never match, so `src/a`
 /// is not an ancestor of `src/ab`.
-fn components(path: &str) -> Vec<&str> {
-    path.split('/').filter(|part| !part.is_empty()).collect()
+fn normalized_components(path: &str) -> Option<Vec<String>> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let unified = trimmed.replace('\\', "/");
+    if unified.starts_with('/') {
+        return None;
+    }
+    let stripped = unified.strip_prefix("./").unwrap_or(&unified);
+    let mut components = Vec::new();
+    for component in stripped.split('/') {
+        if component.is_empty() {
+            continue;
+        }
+        if component == "." || component == ".." {
+            return None;
+        }
+        components.push(component.to_owned());
+    }
+    (!components.is_empty()).then_some(components)
 }
 
 /// Component distance between a task path and a note scope path.
@@ -29,11 +73,8 @@ fn components(path: &str) -> Vec<&str> {
 ///   the absolute difference in component count.
 /// * `None` when the pair is not comparable.
 pub fn component_distance(left: &str, right: &str) -> Option<usize> {
-    let left = components(left);
-    let right = components(right);
-    if left.is_empty() || right.is_empty() {
-        return None;
-    }
+    let left = normalized_components(left)?;
+    let right = normalized_components(right)?;
     let shared = left.len().min(right.len());
     if left[..shared] != right[..shared] {
         return None;
@@ -142,6 +183,50 @@ mod tests {
     #[test]
     fn repeated_separators_do_not_change_comparability() {
         assert_eq!(component_distance("src//a///b", "src/a/b"), Some(0));
+    }
+
+    /// Stored `scope_paths` are written by many producers over time and are
+    /// not guaranteed canonical. Both sides of a comparison are normalized, so
+    /// a non-canonical note scope still matches an equivalent task path.
+    #[test]
+    fn stored_scope_paths_are_normalized_before_comparison() {
+        // Leading `./` on either side.
+        assert_eq!(component_distance("./src/app", "src/app"), Some(0));
+        assert_eq!(component_distance("src/app", "./src/app"), Some(0));
+        // Windows separators on either side.
+        assert_eq!(component_distance(r"src\app", "src/app"), Some(0));
+        assert_eq!(component_distance("src/app", r"src\app"), Some(0));
+        // Normalization composes with ancestor distance.
+        assert_eq!(
+            component_distance("./src/app/inner.rs", r"src\app"),
+            Some(1)
+        );
+        // Surrounding whitespace is not a component.
+        assert_eq!(component_distance("  src/app  ", "src/app"), Some(0));
+    }
+
+    #[test]
+    fn unsafe_stored_scope_paths_are_not_comparable_with_anything() {
+        // Absolute and traversal paths are rejected rather than resolved, so
+        // they contribute no scope score.
+        assert_eq!(component_distance("/src/app", "src/app"), None);
+        assert_eq!(component_distance("src/../etc", "src/app"), None);
+        assert_eq!(component_distance("src/./app", "src/app"), None);
+        assert_eq!(component_distance("", "src/app"), None);
+        assert_eq!(component_distance("   ", "src/app"), None);
+    }
+
+    #[test]
+    fn a_note_with_a_non_canonical_scope_path_still_ranks() {
+        // The end-to-end consequence: before normalization this note scored
+        // nothing at all because `[".", "src", "app"]` never matched.
+        let ranked = rank_scope_candidates(
+            &paths(&["src/app"]),
+            &[candidate("n-noncanonical", &["./src/app"])],
+            50,
+        );
+        assert_eq!(ids(&ranked), vec!["n-noncanonical"]);
+        assert_eq!(ranked[0].1, 1.0);
     }
 
     #[test]

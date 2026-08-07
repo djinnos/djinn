@@ -295,11 +295,14 @@ mod tests {
             .collect()
     }
 
+    /// One fusion fixture: the `(ranked_list, k)` signals plus its confidence
+    /// map, i.e. exactly the pair `rrf_fuse` is called with.
+    type DefaultFixture = (Vec<(Vec<(String, f64)>, f64)>, HashMap<String, f64>);
+
     /// The five-signal, k=60 shape `search_notes_inner` builds, plus the
     /// four-signal shape `run_rrf_discovery` builds, with a non-uniform
     /// confidence map so the multiplier actually participates.
-    fn representative_default_fixtures()
-    -> Vec<(Vec<(Vec<(String, f64)>, f64)>, HashMap<String, f64>)> {
+    fn representative_default_fixtures() -> Vec<DefaultFixture> {
         let mut confidence = HashMap::new();
         confidence.insert("n-alpha".to_owned(), 0.42);
         confidence.insert("n-bravo".to_owned(), 1.0);
@@ -479,11 +482,16 @@ mod tests {
 
     #[test]
     fn equal_scores_break_ties_by_note_id_ascending() {
-        // Two notes with identical per-signal ranks in mirrored lists fuse to
-        // exactly the same score; the surviving order must be by ID.
+        // Mirrored ranks: `aaa` is rank 1 in the first list and rank 2 in the
+        // second, `zzz` the other way round. Each therefore accumulates
+        // `1/61 + 1/62`, which ties exactly. The surviving order must be by ID.
+        //
+        // The within-list scores must differ: `rrf_fuse` sorts each list by
+        // score then ID, so two equal scores would collapse to the *same*
+        // ranks in both lists and the fused scores would not tie at all.
         let signals = vec![
-            (list(&[("zzz", 1.0), ("aaa", 1.0)]), 60.0),
-            (list(&[("aaa", 1.0), ("zzz", 1.0)]), 60.0),
+            (list(&[("aaa", 2.0), ("zzz", 1.0)]), 60.0),
+            (list(&[("zzz", 2.0), ("aaa", 1.0)]), 60.0),
         ];
         let fused = rrf_fuse_with_profile(
             &signals,

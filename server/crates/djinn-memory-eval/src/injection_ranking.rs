@@ -1092,7 +1092,11 @@ pub fn cmd_injection_ranking(
     }
     let corpus = load_corpus(&manifest_path)?;
     let report = evaluate(&corpus, thresholds)?;
-    println!("{}", serde_json::to_string_pretty(&report)?);
+    // Reported through `tracing`, matching every other command in this crate.
+    tracing::info!(
+        report = %serde_json::to_string_pretty(&report)?,
+        "=== Injection ranking evaluation ==="
+    );
     Ok(())
 }
 
