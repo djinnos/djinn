@@ -150,7 +150,9 @@ mod ci_lane_routing;
 mod ci_provider;
 // Wave 5: reporting reads and the rollback quiescence report.
 mod ci_reporting;
-mod ci_routing;
+// `pub(crate)` for `quiescence` alone: the coordinator actor's cancellation arm
+// is the caller of the drain that produces the CI-route quiescence proof.
+pub(crate) mod ci_routing;
 mod ci_snapshot;
 mod ci_triage;
 mod conversation_resolution;

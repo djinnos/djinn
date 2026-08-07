@@ -36,7 +36,11 @@
 //!
 //! Leadership waits on `wait_until_drained` — the drain *stamp* — not on
 //! emptiness, and in production the COORDINATOR writes that stamp
-//! (`djinn-coordinator/src/actor.rs`). With no coordinator, passing
+//! (`djinn-coordinator/src/pr_poller/ci_routing/quiescence.rs`, reached from
+//! the actor's cancellation arm). That producer has its own coverage in the
+//! coordinator's `ci_routing` suite, which proves the stamp is withheld until
+//! the join completes; this file proves only that leadership does not move the
+//! lock before the stamp exists. With no coordinator, passing
 //! `Some(scope)` would make shutdown block the full 45-second
 //! `PROVIDER_ACTION_DRAIN_WAIT` and then release the lock *without* a proof —
 //! a slow false-green that asserts nothing. Each test therefore spawns a

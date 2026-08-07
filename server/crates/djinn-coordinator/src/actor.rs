@@ -145,15 +145,6 @@ fn workload_inventory_from_warmer(
 /// persisted in the `dispatch_state` table via `DispatchStateRepository` (epic
 /// n6xw, proposal 8ipw). The other caches below are deliberately
 /// restart-safe-to-lose — they only feed poller/metrics decisions and are cheap
-/// How long shutdown waits for in-flight CI-route provider actions to finish.
-///
-/// Sized above the provider client's own request timeout so a call that is
-/// simply slow is joined rather than abandoned, and well below any orchestrator
-/// termination grace period so the bounded wait never becomes the reason a pod
-/// is SIGKILLed. Exceeding it is reported, not retried: the handoff loses its
-/// graceful proof and startup recovery defers.
-const PROVIDER_ACTION_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
-
 /// to rebuild on the next sweep.
 pub(super) struct CoordinatorActor {
     // Ryhl core
@@ -1102,64 +1093,24 @@ impl CoordinatorActor {
     /// still live. The `select!` arm awaits this inline for exactly that
     /// reason, and leadership waits on the scope rather than on a timer.
     ///
-    /// # What a failure means
+    /// # Why the ordering itself lives in `ci_routing::quiescence`
     ///
-    /// Nothing is stamped, so a later recovering incarnation finds
-    /// `provider_actions_drained_at` NULL and
-    /// `CiQuiescenceProof::GracefulDrain` unsatisfied. It then defers instead
-    /// of racing — indefinitely, because the stamp is the only quiescence fact
-    /// `CiIncarnationLiveness` can read and no clock substitutes for it. The
-    /// charged row waits for this incarnation's own fenced finalizer. Degraded
-    /// recovery latency, never lost exclusion — which is why every step here is
-    /// best-effort and none of them can panic the shutdown path.
+    /// So that it can be witnessed. The stamp is the sole input to
+    /// `CiIncarnationLiveness`, and a fixture can only prove it was *earned* by
+    /// driving this exact code with a live in-flight action and a recovering
+    /// incarnation on the same database. That fixture belongs beside the
+    /// handoff it protects, and under the same acceptance filter.
     async fn quiesce_provider_actions(&self) {
-        // 1. No new route may enter `calling`.
-        self.provider_action_scope.close_admission();
+        use crate::pr_poller::ci_routing::quiescence;
 
-        // 2. Join what is already inside. Bounded: a provider call runs under
-        //    the client's own request timeout, so an unbounded wait here would
-        //    only ever be a bug elsewhere — and hanging shutdown is a worse
-        //    failure than an unstamped handoff.
-        let joined = tokio::time::timeout(
-            PROVIDER_ACTION_DRAIN_TIMEOUT,
-            self.provider_action_scope.wait_until_empty(),
+        let incarnations = djinn_db::CoordinatorIncarnationRepository::new(self.db.clone());
+        quiescence::quiesce_provider_actions(
+            &self.provider_action_scope,
+            &incarnations,
+            &self.coordinator_incarnation_id,
+            quiescence::PROVIDER_ACTION_DRAIN_TIMEOUT,
         )
-        .await
-        .is_ok();
-        if !joined {
-            tracing::error!(
-                incarnation_id = %self.coordinator_incarnation_id,
-                in_flight = self.provider_action_scope.in_flight(),
-                "CoordinatorActor: provider-action scope did not drain; releasing leadership \
-                 WITHOUT a graceful-drain proof — startup recovery will defer on these rows",
-            );
-            return;
-        }
-
-        // 3. Stamp. `mark_provider_actions_drained` refuses a row that never
-        //    entered `draining`, so the two writes are ordered rather than
-        //    merged.
-        let repo = djinn_db::CoordinatorIncarnationRepository::new(self.db.clone());
-        if let Err(error) = repo.mark_draining(&self.coordinator_incarnation_id).await {
-            tracing::error!(incarnation_id = %self.coordinator_incarnation_id, %error, "CoordinatorActor: failed to mark incarnation draining");
-            return;
-        }
-        match repo
-            .mark_provider_actions_drained(&self.coordinator_incarnation_id)
-            .await
-        {
-            Ok(_) => {
-                // 4. Only now may leadership release the lock.
-                self.provider_action_scope.mark_drained();
-                tracing::info!(
-                    incarnation_id = %self.coordinator_incarnation_id,
-                    "CoordinatorActor: provider actions quiesced; leadership may release the lock",
-                );
-            }
-            Err(error) => {
-                tracing::error!(incarnation_id = %self.coordinator_incarnation_id, %error, "CoordinatorActor: failed to stamp provider_actions_drained_at");
-            }
-        }
+        .await;
     }
 
     /// Spawn the dedicated incarnation-lease renewal task.

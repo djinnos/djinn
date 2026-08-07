@@ -24,6 +24,7 @@
 //! recorder behind the same `#[async_trait]` seam the production path calls.
 
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use djinn_db::{
@@ -40,6 +41,9 @@ use djinn_provider::github_api::{
 use super::*;
 use crate::pr_poller::ci_lane_routing::CiLaneDisposition;
 use crate::pr_poller::ci_routing::gate::CiRoutingGate;
+use crate::pr_poller::ci_routing::quiescence::{
+    CiDrainOutcome, PROVIDER_ACTION_DRAIN_TIMEOUT, quiesce_provider_actions,
+};
 use crate::pr_poller::ci_routing::{CiCapture, CiRouteAttempt};
 
 // ---------------------------------------------------------------------------
@@ -1430,6 +1434,486 @@ async fn an_unrecorded_owner_has_no_quiescence_proof() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// EARNING the drain stamp
+// ---------------------------------------------------------------------------
+//
+// The three fixtures above prove the witness READS the stamp correctly. They
+// plant it with `mark_draining` / `mark_provider_actions_drained` directly, so
+// they say nothing about whether anything in production earns it — stubbing
+// `quiescence::quiesce_provider_actions` to stamp unconditionally leaves every
+// one of them green, which silently restores the pre-AC5 bug by another route.
+//
+// Since the witness reads exactly one fact, the ORDER in which that fact is
+// written is now the whole of `calling`-row exclusion. These fixtures drive the
+// production drain — the sole writer of the column — with a live provider
+// future held across it, because a premature stamp is only observable while
+// something is still in flight.
+
+/// How many times a sampling loop re-checks a "must not have happened yet"
+/// property, as a fixed COUNT rather than a wall-clock deadline: a slow machine
+/// makes the window longer, never thinner. One check would be a race a
+/// premature stamp could win.
+const DRAIN_SAMPLES: u32 = 20;
+const DRAIN_POLL: Duration = Duration::from_millis(25);
+/// Fewer, because each sample runs a full startup-handoff pass against Postgres.
+const HANDOFF_SAMPLES: u32 = 6;
+/// Generous: every transition waited on is sub-millisecond in the passing case,
+/// so a long ceiling costs nothing and removes the only source of flake.
+const PATIENCE: Duration = Duration::from_secs(30);
+
+/// Block until a spawned drain has reached step 1.
+///
+/// Mandatory before any sampling loop: without it the loop could run to
+/// completion before `quiesce_provider_actions` was ever polled, and would then
+/// be asserting that a future which had not started had not stamped — vacuous.
+async fn wait_until_admission_closed(scope: &ProviderActionScope) {
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    while !scope.is_admission_closed() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the spawned drain never closed admission, so nothing below is under test"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+async fn drain_stamp(f: &Fixture, incarnation: &str) -> Option<String> {
+    djinn_db::CoordinatorIncarnationRepository::new(f.db.clone())
+        .get(incarnation)
+        .await
+        .expect("ledger read")
+        .expect("the incarnation is registered")
+        .provider_actions_drained_at
+}
+
+/// The stamp is not written while a provider future is still in flight.
+///
+/// `provider_actions_drained_at` is the single fact `CiIncarnationLiveness`
+/// reads, so writing it early is writing a lie: the next incarnation believes
+/// the former owner's futures are gone while one is running in its address
+/// space. This drives the real `quiesce_provider_actions` with a live guard and
+/// samples the ledger throughout, so a stamp that lands before the join is
+/// caught rather than raced.
+///
+/// NAMED FAILING MUTATIONS. (a) Hoist the `mark_draining` +
+/// `mark_provider_actions_drained` block above the `wait_until_empty` timeout
+/// in `ci_routing::quiescence::quiesce_provider_actions`: the stamp lands
+/// within a millisecond of the spawn, so the very first sample reads
+/// `provider_actions_drained_at` as `Some` and fails — as does the
+/// `CiQuiescenceProof::None` assertion beside it. (b) Hoist
+/// `scope.mark_drained()` above the join: in a debug build its own
+/// `in_flight == 0` assertion panics the drain task, which the
+/// `!drain.is_finished()` vacuity guard catches; with assertions compiled out
+/// the loop's `!is_drained()` assertion fires instead — and that flag is what
+/// leadership releases the advisory lock on. (c) Make the final
+/// `Ok(outcome) => CiDrainOutcome::Stamped` unconditional on the join actually
+/// having happened, i.e. return `Stamped` from the `!joined` arm: the closing
+/// `outcome == Stamped` assertion still passes here, so this fixture does NOT
+/// kill that one — `a_drain_that_times_out_stamps_nothing_and_reports_no_proof`
+/// does, with a budget short enough to reach the timeout inside the test.
+///
+/// The `in_flight == 1` and `!drain.is_finished()` checks after the loop are
+/// the vacuity guards: they prove the window really did span a live future and
+/// an unfinished drain, rather than a scope that had quietly emptied. The
+/// window is deliberately far shorter than `PROVIDER_ACTION_DRAIN_TIMEOUT`, so
+/// what it observes is the join withholding the stamp, never the budget
+/// expiring.
+#[tokio::test]
+async fn the_drain_stamp_is_withheld_until_the_last_provider_future_is_joined() {
+    let f = fixture().await;
+    let incarnations = djinn_db::CoordinatorIncarnationRepository::new(f.db.clone());
+    let owner = uuid::Uuid::now_v7().to_string();
+    incarnations
+        .register(&owner)
+        .await
+        .expect("register the draining owner");
+    let liveness = CiIncarnationLiveness {
+        incarnations: djinn_db::CoordinatorIncarnationRepository::new(f.db.clone()),
+    };
+
+    // The stand-in for a live `rerun_failed_jobs` future.
+    let in_flight = f.scope.admit().expect("an open scope admits");
+
+    let drain = tokio::spawn({
+        let scope = f.scope.clone();
+        let db = f.db.clone();
+        let owner = owner.clone();
+        async move {
+            let incarnations = djinn_db::CoordinatorIncarnationRepository::new(db);
+            quiesce_provider_actions(&scope, &incarnations, &owner, PROVIDER_ACTION_DRAIN_TIMEOUT)
+                .await
+        }
+    });
+    wait_until_admission_closed(&f.scope).await;
+
+    for sample in 0..DRAIN_SAMPLES {
+        tokio::time::sleep(DRAIN_POLL).await;
+        assert!(
+            drain_stamp(&f, &owner).await.is_none(),
+            "sample {sample}: `provider_actions_drained_at` was written while a provider \
+             future was still in flight (in_flight={}); a new incarnation reading that \
+             stamp takes a charged `calling` row whose call may still be running",
+            f.scope.in_flight(),
+        );
+        assert_eq!(
+            liveness.quiescence_proof(&owner).await,
+            CiQuiescenceProof::None,
+            "sample {sample}: the witness must find no proof while the owner is joining"
+        );
+        assert!(
+            !f.scope.is_drained(),
+            "sample {sample}: leadership releases the advisory lock on this flag"
+        );
+    }
+
+    // Vacuity: the window above spanned a genuinely live future and a drain
+    // that had genuinely not finished.
+    assert_eq!(
+        f.scope.in_flight(),
+        1,
+        "the guard must still be held, or the loop proved nothing"
+    );
+    assert!(
+        !drain.is_finished(),
+        "the drain must still be inside its join, or the loop proved nothing"
+    );
+
+    // The future returns; only now is the stamp earned.
+    drop(in_flight);
+    let outcome = tokio::time::timeout(PATIENCE, drain)
+        .await
+        .expect("the drain must finish once the scope empties")
+        .expect("the drain task must not panic");
+
+    assert_eq!(outcome, CiDrainOutcome::Stamped);
+    assert!(
+        drain_stamp(&f, &owner).await.is_some(),
+        "a joined drain must stamp, or the handoff can never happen at all"
+    );
+    assert_eq!(
+        liveness.quiescence_proof(&owner).await,
+        CiQuiescenceProof::GracefulDrain
+    );
+    assert!(
+        f.scope.is_drained(),
+        "the scope's drained flag is what leadership waits on"
+    );
+    assert_eq!(f.scope.in_flight(), 0);
+}
+
+/// A drain that never joins stamps nothing at all.
+///
+/// This is the arm the AC5 fix exists for: leadership releases the advisory
+/// lock after its own 45-second wait whether or not the coordinator finished,
+/// so the *only* thing keeping a new incarnation off a live owner's `calling`
+/// row is that no proof was written. AC5: "elapsed time, owner-lease expiry,
+/// cancellation, or advisory-lock release without provider-action drain never
+/// authorizes `calling` recovery."
+///
+/// `draining_at` is asserted NULL as well, and that is not incidental tidiness.
+/// `mark_provider_actions_drained`'s own WHERE clause requires
+/// `draining_at IS NOT NULL`, so leaving it unwritten until the join succeeds
+/// is the database's independent refusal of an out-of-order stamp. A drain that
+/// recorded its *intent* before joining would disarm that second gate.
+///
+/// NAMED FAILING MUTATIONS. (a) Delete the `if !joined { return … }` guard: the
+/// timeout falls through to step 3, both columns are written, and every
+/// assertion below about NULL fails, as does the `CiQuiescenceProof::None` one.
+/// (b) Return `CiDrainOutcome::Stamped` on the timeout path (a "close enough"
+/// simplification): the first assertion fails. The vacuity guards —
+/// `in_flight == 1` and `is_admission_closed()` — prove the call really did
+/// time out with a live future rather than never running.
+#[tokio::test]
+async fn a_drain_that_times_out_stamps_nothing_and_reports_no_proof() {
+    let f = fixture().await;
+    let incarnations = djinn_db::CoordinatorIncarnationRepository::new(f.db.clone());
+    let owner = uuid::Uuid::now_v7().to_string();
+    incarnations
+        .register(&owner)
+        .await
+        .expect("register the draining owner");
+
+    // Held for the whole call: the join cannot complete.
+    let held = f.scope.admit().expect("an open scope admits");
+
+    let outcome =
+        quiesce_provider_actions(&f.scope, &incarnations, &owner, Duration::from_millis(150)).await;
+
+    assert_eq!(
+        outcome,
+        CiDrainOutcome::NotJoined,
+        "an unjoined drain is a degraded outcome and must report itself as one"
+    );
+    // Vacuity: the timeout is what ended the call, and the call really ran.
+    assert!(
+        f.scope.is_admission_closed(),
+        "step 1 must have run, or this fixture is asserting about a call that did nothing"
+    );
+    assert_eq!(
+        f.scope.in_flight(),
+        1,
+        "the future must still be live, or the call joined and the timeout is untested"
+    );
+    assert!(
+        !f.scope.is_drained(),
+        "a scope whose futures are still live must never report a drain"
+    );
+
+    let row = incarnations
+        .get(&owner)
+        .await
+        .expect("ledger read")
+        .expect("the incarnation is registered");
+    assert!(
+        row.provider_actions_drained_at.is_none(),
+        "an unjoined drain must hand the next incarnation no proof; releasing the lock \
+         without one costs recovery latency, releasing it WITH one costs exclusion"
+    );
+    assert!(
+        row.draining_at.is_none(),
+        "nothing is written before the join, so the repository's own \
+         `draining_at IS NOT NULL` precondition still stands between an \
+         out-of-order caller and the stamp"
+    );
+
+    let liveness = CiIncarnationLiveness {
+        incarnations: djinn_db::CoordinatorIncarnationRepository::new(f.db.clone()),
+    };
+    assert_eq!(
+        liveness.quiescence_proof(&owner).await,
+        CiQuiescenceProof::None
+    );
+
+    drop(held);
+}
+
+/// End to end: a charged `calling` row is not handed over while its owner's
+/// provider future is alive, and IS handed over once that owner's own drain has
+/// joined and stamped.
+///
+/// This is the property the whole wave-3 ordering exists to produce, asserted
+/// on the consequence rather than on the stamp: the recovering incarnation runs
+/// the real `recover_calling_owners_at_startup` against the real
+/// `CiIncarnationLiveness`, while the former owner runs the real
+/// `quiesce_provider_actions` with a guard standing in for the
+/// `rerun_failed_jobs` future behind that very row.
+///
+/// NAMED FAILING MUTATION: hoist the stamp above the join in
+/// `ci_routing::quiescence::quiesce_provider_actions`. The stamp then exists
+/// from the moment the drain starts, so
+/// `CiIncarnationLiveness` answers `GracefulDrain` at the first sample, the
+/// handoff takes the row, and the loop fails on `deferred == 1` /
+/// `outcome_unknown == 0` / `action_phase == Calling` — with the row's owner
+/// rewritten to the recovering incarnation, which is exactly the state that
+/// discards the old owner's fenced `finalize_calling` and either re-runs the
+/// provider mutation or adjudicates `outcome_unknown` an episode that
+/// succeeded.
+///
+/// Note that neither existing sibling catches this. `terminated_owner_handoff_
+/// recovers_calling_once` injects `FixedLiveness`, and
+/// `only_the_former_owners_drain_stamp_recovers_a_calling_row` plants the stamp
+/// by hand — a hand-planted stamp is by construction earned.
+#[tokio::test]
+async fn a_live_provider_future_blocks_the_calling_handoff_until_its_owner_stamps() {
+    let f = fixture().await;
+    let incarnations = djinn_db::CoordinatorIncarnationRepository::new(f.db.clone());
+    let former = uuid::Uuid::now_v7().to_string();
+    incarnations
+        .register(&former)
+        .await
+        .expect("register the former owner");
+
+    let checks = [inconclusive_check("Quality Gate / test", 923)];
+    let blocking = refs(&checks);
+    let id = pr_head_identity(923);
+    let (key, fingerprint) = calling_row_owned_by(&f, &id, &blocking, &former).await;
+    assert_eq!(
+        f.budgets(&id, &fingerprint).await,
+        (1, 1),
+        "the call was charged before the owner began shutting down"
+    );
+
+    // The former owner's scope, in its own process. The guard is the provider
+    // future behind the `calling` row planted above.
+    let owner_scope = ProviderActionScope::new();
+    let in_flight = owner_scope.admit().expect("an open scope admits");
+    let drain = tokio::spawn({
+        let scope = owner_scope.clone();
+        let db = f.db.clone();
+        let former = former.clone();
+        async move {
+            let incarnations = djinn_db::CoordinatorIncarnationRepository::new(db);
+            quiesce_provider_actions(
+                &scope,
+                &incarnations,
+                &former,
+                PROVIDER_ACTION_DRAIN_TIMEOUT,
+            )
+            .await
+        }
+    });
+    wait_until_admission_closed(&owner_scope).await;
+
+    let liveness = CiIncarnationLiveness {
+        incarnations: djinn_db::CoordinatorIncarnationRepository::new(f.db.clone()),
+    };
+
+    let before = f.effects().await;
+    for sample in 0..HANDOFF_SAMPLES {
+        tokio::time::sleep(DRAIN_POLL).await;
+        let report = handoff_with(&f, &liveness).await;
+        assert_eq!(
+            report.examined, 1,
+            "sample {sample}: the row is a candidate"
+        );
+        assert_eq!(
+            report.deferred, 1,
+            "sample {sample}: the former owner is mid-drain with a live provider \
+             future, so no proof exists and the row must be left alone"
+        );
+        assert_eq!(
+            report.outcome_unknown, 0,
+            "sample {sample}: recovering here runs the same provider mutation twice"
+        );
+        assert_eq!(report.superseded_after_call, 0);
+
+        let attempt = f.attempt(&id, CiAction::RerunRun).await;
+        assert_eq!(
+            attempt.action_phase,
+            CiActionPhase::Calling,
+            "sample {sample}: the row stays where its live owner left it"
+        );
+        assert_eq!(
+            attempt.owner_incarnation_id.as_deref(),
+            Some(former.as_str()),
+            "sample {sample}: the owner is not rewritten, so the former owner's \
+             fenced finalizer can still land"
+        );
+    }
+    let after = f.effects().await;
+    assert_no_effects_beyond_routes(&before, &after);
+
+    // The refusal is the missing quiescence proof, not the 300s floor — the row
+    // was aged past it when it was planted.
+    let reasons = recovery_reasons(&f, &key).await;
+    assert!(
+        reasons.contains(&CiCallingRecoveryReason::LiveOwnerDeferred),
+        "the deferral must be the quiescence predicate; got {reasons:?}"
+    );
+    assert!(
+        !reasons.contains(&CiCallingRecoveryReason::TimeoutNotElapsed),
+        "the recovery timeout has elapsed, or the quiescence predicate is never \
+         reached and this fixture proves nothing; got {reasons:?}"
+    );
+
+    // Vacuity: the whole window really did span a live future and an unfinished
+    // drain.
+    assert_eq!(owner_scope.in_flight(), 1);
+    assert!(!drain.is_finished());
+    assert!(
+        drain_stamp(&f, &former).await.is_none(),
+        "and the ledger really did hold no stamp throughout"
+    );
+
+    // ── The provider call returns; the owner joins and stamps. ──
+    drop(in_flight);
+    let outcome = tokio::time::timeout(PATIENCE, drain)
+        .await
+        .expect("the drain must finish once the scope empties")
+        .expect("the drain task must not panic");
+    assert_eq!(outcome, CiDrainOutcome::Stamped);
+    assert_eq!(
+        liveness.quiescence_proof(&former).await,
+        CiQuiescenceProof::GracefulDrain
+    );
+
+    let report = handoff_with(&f, &liveness).await;
+    assert_eq!(
+        report.outcome_unknown, 1,
+        "an EARNED stamp is what hands the row over; without this half the \
+         fixture above would also pass against a drain that never stamps at all"
+    );
+    assert_eq!(report.deferred, 0);
+    let attempt = f.attempt(&id, CiAction::RerunRun).await;
+    assert_eq!(attempt.action_phase, CiActionPhase::Terminal);
+    assert_eq!(
+        attempt.terminal_outcome,
+        Some(CiRouteOutcome::OutcomeUnknown)
+    );
+    assert_eq!(
+        f.budgets(&id, &fingerprint).await,
+        (1, 1),
+        "the charge is retained across the handoff"
+    );
+}
+
+/// A join that lands no ledger row does not claim a drain.
+///
+/// `mark_provider_actions_drained` is fenced and write-once, so it returns
+/// `Ok(false)` — not `Err` — when the ledger has no row for this incarnation.
+/// Treating that as success made `ProviderActionScope::mark_drained` assert a
+/// stamp that no recovering incarnation could ever read, and leadership then
+/// logged a graceful handoff it did not have. That is a reporting lie rather
+/// than an exclusion hole (the absent stamp still makes the next incarnation
+/// defer), but `drained` also feeds the rollback quiescence report, and a flag
+/// that can be true without its durable fact is not worth reading.
+///
+/// NAMED FAILING MUTATION: restore `Ok(_) => { scope.mark_drained(); … }` in
+/// `ci_routing::quiescence::quiesce_provider_actions` — i.e. stop distinguishing
+/// `Ok(true)` from `Ok(false)`. The scope is then marked drained and the
+/// `!is_drained()` assertion fails, as does the `NotStamped` one.
+#[tokio::test]
+async fn a_joined_drain_with_no_ledger_row_does_not_claim_a_stamp() {
+    let f = fixture().await;
+    let incarnations = djinn_db::CoordinatorIncarnationRepository::new(f.db.clone());
+    let unregistered = uuid::Uuid::now_v7().to_string();
+    assert!(
+        incarnations
+            .get(&unregistered)
+            .await
+            .expect("ledger read")
+            .is_none(),
+        "the incarnation must be absent, or this fixture is testing the registered path"
+    );
+
+    // The scope is empty, so the join succeeds immediately and the call reaches
+    // step 3 — which is the step under test.
+    let outcome = quiesce_provider_actions(
+        &f.scope,
+        &incarnations,
+        &unregistered,
+        PROVIDER_ACTION_DRAIN_TIMEOUT,
+    )
+    .await;
+
+    assert_eq!(outcome, CiDrainOutcome::NotStamped);
+    assert!(
+        f.scope.is_admission_closed(),
+        "the join half still runs: no new route may enter `calling` on the way out"
+    );
+    assert!(
+        !f.scope.is_drained(),
+        "the scope must not report a drain the ledger cannot corroborate"
+    );
+    assert!(
+        incarnations
+            .get(&unregistered)
+            .await
+            .expect("ledger read")
+            .is_none(),
+        "and the drain does not conjure the row it failed to find"
+    );
+
+    let liveness = CiIncarnationLiveness {
+        incarnations: djinn_db::CoordinatorIncarnationRepository::new(f.db.clone()),
+    };
+    assert_eq!(
+        liveness.quiescence_proof(&unregistered).await,
+        CiQuiescenceProof::None
+    );
+}
+
 /// A PR head that moved before the Tier-2 lease could open discards the
 /// obsolete route: no provider mutation, no lease, no board mutation, no
 /// worker.
@@ -1607,8 +2091,13 @@ async fn newer_success_before_supervisor_apply_is_noop() {
 /// The production ordering — cancellation, drain, lock release, then a NEW
 /// acquisition by a second connection — is pinned in
 /// `server/tests/leadership_quiescence.rs`, which passes a real scope and
-/// observes lock availability from its own Postgres session. Both halves are
-/// required: this one for the primitive, that one for the caller.
+/// observes lock availability from its own Postgres session. The coordinator's
+/// half — that the durable `provider_actions_drained_at` stamp is written only
+/// after the join, which is what a *later* incarnation reads — is pinned by
+/// `the_drain_stamp_is_withheld_until_the_last_provider_future_is_joined` and
+/// `a_live_provider_future_blocks_the_calling_handoff_until_its_owner_stamps`
+/// above. All three are required: this one for the primitive, those for the
+/// producer, and the leadership suite for the lock.
 #[tokio::test]
 async fn graceful_shutdown_quiesces_calling_before_lock_release() {
     let f = fixture().await;

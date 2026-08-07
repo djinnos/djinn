@@ -1602,6 +1602,9 @@ pub(crate) fn is_park(attempt: &CiRouteAttempt) -> bool {
 
 pub(crate) mod executor;
 pub(crate) mod gate;
+// The producer of the `provider_actions_drained_at` proof that
+// `executor::CiIncarnationLiveness` is the sole consumer of.
+pub(crate) mod quiescence;
 // Wave 5: the producer of the `ci_route` directive block and the only path
 // that turns an opened Tier-2 lease into a Lead session.
 pub(crate) mod tier2_dispatch;
