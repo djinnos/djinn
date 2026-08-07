@@ -127,6 +127,7 @@ fn warm_job(config: &KubernetesConfig) -> Job {
         "deadbeef",
         "registry.example/project:current",
         None,
+        &[],
     )
 }
 
@@ -137,6 +138,7 @@ fn scip_job(config: &KubernetesConfig) -> Job {
         "registry.example/project:current",
         "deadbeef1234567890",
         None,
+        &[],
     )
 }
 
@@ -304,6 +306,7 @@ fn label_scanner_rejects_explicit_job_and_pod_template_fixtures() {
         "deadbeef",
         "registry.example/project:current",
         None,
+        &[],
     );
 
     let mut job_labelled = rendered.clone();

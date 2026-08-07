@@ -170,7 +170,7 @@ impl Rendered {
 
         // One rendered warm Job; parse the warm container's own requests so a
         // change to the warm resource render (not just the config field) shows.
-        let warm = build_warm_job(&cfg, "fixture", "deadbeef", IMAGE, None);
+        let warm = build_warm_job(&cfg, "fixture", "deadbeef", IMAGE, None, &[]);
         let warm_container = &warm
             .spec
             .as_ref()

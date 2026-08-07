@@ -461,6 +461,7 @@ impl ScipIndexScheduler {
         head: Option<&MirrorHead>,
         image_tag: &str,
         policy: Option<&djinn_stack::environment::CargoCachePolicy>,
+        js_workspace_roots: &[String],
     ) -> ScipIndexDecision {
         let decision = self.evaluate(project_id, head).await;
         let Some(revision) = decision.dispatch_revision() else {
@@ -471,7 +472,14 @@ impl ScipIndexScheduler {
             );
             return decision;
         };
-        let job = build_scip_index_job(&self.config, project_id, image_tag, revision, policy);
+        let job = build_scip_index_job(
+            &self.config,
+            project_id,
+            image_tag,
+            revision,
+            policy,
+            js_workspace_roots,
+        );
         match self.dispatcher.dispatch(&self.config.namespace, job).await {
             Ok(name) => info!(
                 project_id,
@@ -1522,7 +1530,7 @@ mod tests {
         .with_warm_outcome_source(Arc::new(FixedWarmOutcomeSource(Ok(recovery_outcome()))));
         let head = head.map(quiescent);
         let decision = scheduler
-            .tick_project("proj", head.as_ref(), "img:tag", None)
+            .tick_project("proj", head.as_ref(), "img:tag", None, &[])
             .await;
         let created = dispatcher.0.lock().expect("lock").clone();
         (decision, created)

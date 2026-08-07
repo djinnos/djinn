@@ -340,6 +340,7 @@ async fn dispatch_one_scip() -> (Vec<(&'static str, i64)>, Vec<(&'static str, i6
             Some(&head),
             "reg.example:5000/djinn-project-scip:abc123",
             None,
+            &[],
         )
         .await;
     assert_eq!(
