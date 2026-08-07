@@ -1764,12 +1764,14 @@ jobs:
           nohup bash -c '
             for _ in $(seq 1 240); do
               sleep 15
-              # Scoped to THIS attempt. The unscoped `/runs/{id}/jobs` endpoint
-              # reports the latest record per job name, which at the start of a
-              # re-run is still the PREVIOUS attempt's result. A run whose gate
-              # concluded failure once could therefore never be re-run: the new
-              # attempt's watcher observed the old failure on its first poll and
-              # cancelled the re-run within ~15s, every time, forever.
+              # Attempt-scoped on purpose (no apostrophes below: this whole
+              # block is inside a single-quoted `bash -c`). The unscoped
+              # /runs/{id}/jobs endpoint reports the latest record per job
+              # NAME, so at the start of a re-run it still returns the
+              # PREVIOUS attempt results. A run whose gate concluded failure
+              # once could therefore never be re-run: the watcher on the new
+              # attempt saw that stale failure on its first poll and cancelled
+              # the re-run within ~15s, every time.
               failed=$(gh api "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}/jobs?per_page=100" \
                 --jq "[.jobs[] | select(.conclusion == \"failure\") | .name] | first // empty" 2>/dev/null || true)
               if [ -n "$failed" ]; then
