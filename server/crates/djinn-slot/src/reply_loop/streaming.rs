@@ -246,9 +246,13 @@ impl CoveredAttemptTerminalGuard {
     }
 
     /// Observe B1's singular terminal outcome and reconcile precisely this lease.
-    pub(super) async fn finish(&self, completed: bool) {
+    pub(super) fn finish(
+        &self,
+        completed: bool,
+    ) -> impl std::future::Future<Output = ()> + Send + 'static {
         self.schedule_settlement(!completed);
-        self.wait_for_settlement().await;
+        let settlement = self.settlement.clone();
+        async move { wait_for_settlement(settlement).await }
     }
 
     fn schedule_settlement(&self, abort: bool) {
@@ -276,15 +280,15 @@ impl CoveredAttemptTerminalGuard {
             );
         }
     }
+}
 
-    async fn wait_for_settlement(&self) {
-        while !self.settlement.complete.load(Ordering::Acquire) {
-            let notified = self.settlement.notify.notified();
-            if self.settlement.complete.load(Ordering::Acquire) {
-                return;
-            }
-            notified.await;
+async fn wait_for_settlement(settlement: Arc<CoveredAttemptSettlement>) {
+    while !settlement.complete.load(Ordering::Acquire) {
+        let notified = settlement.notify.notified();
+        if settlement.complete.load(Ordering::Acquire) {
+            return;
         }
+        notified.await;
     }
 }
 

@@ -2187,10 +2187,11 @@ fn inline_tool_results(conversation: &Conversation) -> Vec<PreCompactionToolResu
 #[cfg(test)]
 mod tests {
     use super::super::error_handling::ReplyLoopCancelled;
+    use super::super::model_turn_admission::ModelTurnAdmissionTestHooks;
     use super::*;
     use djinn_db::test_support::{
         model_turn_accounting_fixture, model_turn_lease_lifecycle_fixture,
-        seed_model_turn_admission_fixture,
+        model_turn_terminal_fixture, seed_model_turn_admission_fixture,
     };
     use djinn_db::{
         Database, ModelTurnBucketDebit, ModelTurnBucketKind, ModelTurnLeaseIdentity,
@@ -2425,8 +2426,10 @@ mod tests {
 
         let db = Database::ephemeral().await.expect("db");
         let pool = seed_model_turn_admission_fixture(&db, "enforce", "supported", 2).await;
-        let coordinator = ModelTurnAdmissionCoordinator::new(
+        let hooks = Arc::new(ModelTurnAdmissionTestHooks::default());
+        let coordinator = ModelTurnAdmissionCoordinator::with_test_hooks(
             djinn_db::ModelTurnAdmissionRepository::new(db.clone()),
+            hooks.clone(),
         );
         let preparation = coordinator
             .prepare(&covered_admission_plan(), admission_request(name))
@@ -2547,6 +2550,25 @@ mod tests {
             "reconciled",
             "{name}"
         );
+        let expected_terminal = if expect_done {
+            "completed"
+        } else if matches!(cancellation, MatrixCancellation::None) {
+            "failed"
+        } else {
+            "cancelled"
+        };
+        assert_eq!(
+            model_turn_terminal_fixture(&db, &lease.lease_id, lease.generation, &lease.request_id)
+                .await
+                .0,
+            expected_terminal,
+            "{name}: exact terminal identity"
+        );
+        assert_eq!(
+            hooks.reconciliations.lock().expect("observer").as_slice(),
+            [lease.clone()],
+            "{name}: exactly one exact-identity reconciliation"
+        );
         assert_eq!(
             model_turn_accounting_fixture(&db, pool).await,
             if expect_done { (0, 1, 0) } else { (0, 1, 1) },
@@ -2632,6 +2654,271 @@ mod tests {
             false,
         )
         .await;
+    }
+
+    #[tokio::test]
+    async fn pending_consumer_abort_drops_guard_and_settles_independently() {
+        use crate::test_helpers::agent_context_from_db;
+        use djinn_provider::{ProviderAttemptAbortResultV1, ProviderOutcomeV1};
+        use std::sync::atomic::AtomicU64;
+        use tokio_util::sync::CancellationToken;
+        let db = Database::ephemeral().await.expect("db");
+        seed_model_turn_admission_fixture(&db, "enforce", "supported", 2).await;
+        let hooks = Arc::new(ModelTurnAdmissionTestHooks::default());
+        let coordinator = ModelTurnAdmissionCoordinator::with_test_hooks(
+            djinn_db::ModelTurnAdmissionRepository::new(db.clone()),
+            hooks.clone(),
+        );
+        let preparation = coordinator
+            .prepare(
+                &covered_admission_plan(),
+                admission_request("consumer-abort"),
+            )
+            .await
+            .expect("prepare");
+        let lease = match &preparation {
+            ModelTurnPreparation::Permit(p) => p.lease.clone().expect("lease"),
+            other => panic!("{other:?}"),
+        };
+        let abort = ProviderAttemptAbortHandleV1::new();
+        let observed_abort = abort.clone();
+        let (outcome_tx, outcome_rx) = tokio::sync::oneshot::channel();
+        let polled = Arc::new(tokio::sync::Notify::new());
+        let stream_polled = polled.clone();
+        let events = futures::stream::poll_fn(move |_| {
+            stream_polled.notify_one();
+            std::task::Poll::Pending
+        });
+        let guard = launch_prepared_covered_attempt_with_lease(
+            preparation,
+            move || {
+                Ok((
+                    djinn_provider::provider::client::ProviderSseAttemptV1::for_test(
+                        Box::pin(events),
+                        abort,
+                        outcome_rx,
+                    ),
+                    Box::new(MatrixParser),
+                ))
+            },
+            coordinator,
+        )
+        .await
+        .expect("launch");
+        let owner_db = db.clone();
+        let owner = tokio::spawn(async move {
+            let mut guard = guard;
+            let cancel = CancellationToken::new();
+            let global = CancellationToken::new();
+            let slot = agent_context_from_db(owner_db, CancellationToken::new());
+            let metadata = super::super::tool_dispatch::tool_runtime_metadata(&[]);
+            let phase = Arc::new(Mutex::new(super::super::phase::SessionPhaseTracker::new(
+                &slot, "worker",
+            )));
+            let dispatch = super::super::tool_dispatch::ToolDispatchContext {
+                ctx: &slot,
+                task_id: "task",
+                worktree_path: std::path::Path::new("/var/tmp"),
+                role_name: "worker",
+                tool_metadata: &metadata,
+                tool_dispatcher: slot.tool_dispatcher.as_deref().expect("dispatcher"),
+                otel_session: None,
+                phase_tracker: None,
+                cancel: &cancel,
+                turn_inline_budget: None,
+            };
+            let activity = Arc::new(AtomicU64::new(0));
+            let rpc = Arc::new(AtomicU64::new(0));
+            let flush = Arc::new(AtomicU64::new(0));
+            let (mut current, mut input, mut output, mut read, mut write, mut reasoning) =
+                (0, 0, 0, 0, 0, 0);
+            consume_provider_stream(StreamLoopContext {
+                stream: None,
+                covered_attempt: Some(&mut guard),
+                tool_metadata: &metadata,
+                dispatch: &dispatch,
+                phase_tracker: &phase,
+                task_id: "task",
+                session_id: "session",
+                role_name: "worker",
+                project_path: "/var/tmp",
+                worktree_path: std::path::Path::new("/var/tmp"),
+                context_window: 100_000,
+                ctx: &slot,
+                cancel: &cancel,
+                global_cancel: &global,
+                activity_ts: &activity,
+                last_rpc_touch: &rpc,
+                last_token_flush: &flush,
+                compaction_attempts: 0,
+                current_context_tokens: &mut current,
+                total_tokens_in: &mut input,
+                total_tokens_out: &mut output,
+                total_cache_read: &mut read,
+                total_cache_write: &mut write,
+                total_reasoning_out: &mut reasoning,
+            })
+            .await
+        });
+        polled.notified().await;
+        owner.abort();
+        assert!(matches!(owner.await, Err(error) if error.is_cancelled()));
+        outcome_tx
+            .send(ProviderOutcomeV1 {
+                terminal: djinn_provider::ProviderAttemptTerminalV1::Aborted,
+                authoritative_usage: None,
+                observation: None,
+                abort: ProviderAttemptAbortResultV1::Confirmed,
+                token_emission: Default::default(),
+            })
+            .expect("outcome");
+        hooks.reconcile_finished.notified().await;
+        assert!(observed_abort.is_aborted());
+        assert_eq!(
+            hooks.reconciliations.lock().expect("observer").as_slice(),
+            [lease.clone()]
+        );
+        assert_eq!(
+            model_turn_terminal_fixture(&db, &lease.lease_id, lease.generation, &lease.request_id)
+                .await
+                .1,
+            "quarantined"
+        );
+    }
+
+    #[tokio::test]
+    async fn finish_owner_abort_overlaps_drop_and_reconciles_once() {
+        use djinn_provider::{ProviderAttemptAbortResultV1, ProviderOutcomeV1};
+        let db = Database::ephemeral().await.expect("db");
+        seed_model_turn_admission_fixture(&db, "enforce", "supported", 2).await;
+        let hooks = Arc::new(ModelTurnAdmissionTestHooks::default());
+        let coordinator = ModelTurnAdmissionCoordinator::with_test_hooks(
+            djinn_db::ModelTurnAdmissionRepository::new(db.clone()),
+            hooks.clone(),
+        );
+        let preparation = coordinator
+            .prepare(&covered_admission_plan(), admission_request("drop-race"))
+            .await
+            .expect("prepare");
+        let lease = match &preparation {
+            ModelTurnPreparation::Permit(p) => p.lease.clone().expect("lease"),
+            other => panic!("{other:?}"),
+        };
+        let abort = ProviderAttemptAbortHandleV1::new();
+        let observed_abort = abort.clone();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let guard = launch_prepared_covered_attempt_with_lease(
+            preparation,
+            move || {
+                Ok((
+                    djinn_provider::provider::client::ProviderSseAttemptV1::for_test(
+                        Box::pin(futures::stream::pending()),
+                        abort,
+                        rx,
+                    ),
+                    Box::new(MatrixParser),
+                ))
+            },
+            coordinator,
+        )
+        .await
+        .expect("launch");
+        let owner = tokio::spawn(async move {
+            guard.finish(false).await;
+        });
+        tokio::task::yield_now().await;
+        owner.abort();
+        assert!(matches!(owner.await, Err(error) if error.is_cancelled()));
+        tx.send(ProviderOutcomeV1 {
+            terminal: djinn_provider::ProviderAttemptTerminalV1::Aborted,
+            authoritative_usage: None,
+            observation: None,
+            abort: ProviderAttemptAbortResultV1::Confirmed,
+            token_emission: Default::default(),
+        })
+        .expect("outcome");
+        hooks.reconcile_finished.notified().await;
+        assert!(observed_abort.is_aborted());
+        assert_eq!(
+            hooks.reconciliations.lock().expect("observer").as_slice(),
+            [lease.clone()]
+        );
+        assert_eq!(
+            model_turn_terminal_fixture(&db, &lease.lease_id, lease.generation, &lease.request_id)
+                .await
+                .1,
+            "quarantined"
+        );
+    }
+
+    #[tokio::test]
+    async fn post_launch_mark_active_error_drops_guard_and_quarantines_exact_lease() {
+        use djinn_provider::{ProviderAttemptAbortResultV1, ProviderOutcomeV1};
+        let db = Database::ephemeral().await.expect("db");
+        seed_model_turn_admission_fixture(&db, "enforce", "supported", 2).await;
+        let hooks = Arc::new(ModelTurnAdmissionTestHooks::default());
+        hooks.fail_mark_active.store(true, Ordering::Release);
+        let coordinator = ModelTurnAdmissionCoordinator::with_test_hooks(
+            djinn_db::ModelTurnAdmissionRepository::new(db.clone()),
+            hooks.clone(),
+        );
+        let preparation = coordinator
+            .prepare(&covered_admission_plan(), admission_request("active-error"))
+            .await
+            .expect("prepare");
+        let lease = match &preparation {
+            ModelTurnPreparation::Permit(p) => p.lease.clone().expect("lease"),
+            other => panic!("{other:?}"),
+        };
+        let abort = ProviderAttemptAbortHandleV1::new();
+        let observed_abort = abort.clone();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let launched = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let launched2 = launched.clone();
+        let result = launch_prepared_covered_attempt_with_lease(
+            preparation,
+            move || {
+                launched2.store(true, Ordering::Release);
+                Ok((
+                    djinn_provider::provider::client::ProviderSseAttemptV1::for_test(
+                        Box::pin(futures::stream::pending()),
+                        abort,
+                        rx,
+                    ),
+                    Box::new(MatrixParser),
+                ))
+            },
+            coordinator,
+        )
+        .await;
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("mark_active must fail"),
+        };
+        assert!(launched.load(Ordering::Acquire));
+        assert!(error.to_string().contains("injected mark_active"));
+        assert!(observed_abort.is_aborted());
+        tx.send(ProviderOutcomeV1 {
+            terminal: djinn_provider::ProviderAttemptTerminalV1::Failed(
+                djinn_provider::ProviderAttemptLossV1::Transport,
+            ),
+            authoritative_usage: None,
+            observation: None,
+            abort: ProviderAttemptAbortResultV1::Confirmed,
+            token_emission: Default::default(),
+        })
+        .expect("outcome");
+        hooks.reconcile_reached.notified().await;
+        assert_eq!(
+            hooks.reconciliations.lock().expect("observer").as_slice(),
+            [lease.clone()]
+        );
+        assert_eq!(
+            model_turn_terminal_fixture(&db, &lease.lease_id, lease.generation, &lease.request_id)
+                .await
+                .1,
+            "quarantined"
+        );
     }
 
     #[tokio::test]
