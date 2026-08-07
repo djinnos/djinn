@@ -659,6 +659,25 @@ impl CoordinatorActor {
             && lane_under_user_cap(&running_by_lane, user, lane, lane_cap)
     }
 
+    /// Apply the unchanged resident admission conjunction at the outer
+    /// dispatch boundary. Model-turn/B2 admission is deliberately downstream:
+    /// it supplies no additional resident cap and cannot reinterpret roles.
+    pub(crate) fn resident_admission_allows(
+        running_by_model: &HashMap<(String, String), u32>,
+        running_by_lane: &HashMap<(String, djinn_core::models::ModelLane), u32>,
+        user: &str,
+        model: &str,
+        role: &str,
+        max_sessions: &HashMap<String, u32>,
+        lane_max_sessions: Option<&djinn_core::models::LaneMaxSessions>,
+    ) -> bool {
+        let lane = djinn_core::models::ModelLane::for_role(role);
+        let model_cap = max_sessions.get(model).copied().unwrap_or(1);
+        let lane_cap = lane_max_sessions.map(|limits| limits.lane(lane));
+        model_under_user_cap(running_by_model, user, model, model_cap)
+            && lane_under_user_cap(running_by_lane, user, lane, lane_cap)
+    }
+
     /// Clear an in-flight dispatch reservation from the ledger.
     ///
     /// Called on failure paths where a dispatch was reserved (via
@@ -2963,37 +2982,16 @@ impl CoordinatorActor {
                         .insert(c.to_string(), settings.and_then(|s| s.lane_max_sessions));
                 }
 
-                let lane = djinn_core::models::ModelLane::for_role(role);
-                let lane_cap = creator_lane_caps[c]
-                    .as_ref()
-                    .map(|limits| limits.lane(lane));
-                if !lane_under_user_cap(&running_by_user_lane, c, lane, lane_cap) {
-                    record_dispatch_outcome(djinn_telemetry::dispatch::OUTCOME_CAP);
-                    tracing::debug!(
-                        outcome = "cap",
-                        task_id = %task.short_id,
-                        role,
-                        lane = ?lane,
-                        lane_cap,
-                        "CoordinatorActor: task owner at per-lane concurrency cap — deferring"
-                    );
-                    super::respawn_guard::record_guard_deferred_attempt(
-                        &self.db,
-                        &task.id,
-                        role,
-                        djinn_core::models::task_attempt::GuardReason::Capacity,
-                        Some("capacity: user at per-lane concurrency cap"),
-                    )
-                    .await;
-                    continue;
-                }
                 let caps = &creator_caps[c];
                 model_ids.retain(|m| {
-                    model_under_user_cap(
+                    Self::resident_admission_allows(
                         &running_by_user_model,
+                        &running_by_user_lane,
                         c,
                         m,
-                        caps.get(m).copied().unwrap_or(1),
+                        role,
+                        caps,
+                        creator_lane_caps[c].as_ref(),
                     )
                 });
                 if model_ids.is_empty() {
