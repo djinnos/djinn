@@ -1,8 +1,8 @@
 // Feedback tools for proposals: add and resolve feedback entries.
 //
 // Feedback is plain discussion on a proposal — it is NOT applied to the spec
-// directly.  The proposal owner asks djinn in chat to apply feedback, which
-// rewrites the spec as a new revision and resolves the feedback.
+// directly. Blocking feedback starts or joins tribunal refinement; advisory
+// feedback remains stored discussion and never dispatches a refinement round.
 
 use rmcp::{Json, handler::server::wrapper::Parameters, schemars, tool, tool_router};
 use serde::Deserialize;
@@ -62,7 +62,7 @@ pub(super) fn err_feedback(error: impl Into<String>) -> ProposalFeedbackResponse
 impl DjinnMcpServer {
     /// Add a feedback entry (plain discussion) to a proposal.
     #[tool(
-        description = "Add a feedback comment to a proposal. Feedback is plain discussion — it is NOT applied to the spec directly; the proposal owner asks djinn in chat to apply it, which rewrites the spec as a new revision and resolves the feedback. `author_kind` is `user` (default) or `ai` (set `author_model` for AI). `parent_id` threads a reply."
+        description = "Add a feedback comment to a proposal. Feedback never rewrites the spec directly: blocking feedback on an in-review proposal starts or joins tribunal refinement, while advisory feedback is stored without dispatch. `author_kind` is `user` (default) or `ai` (set `author_model` for AI). `parent_id` threads a reply."
     )]
     pub async fn proposal_feedback_add(
         &self,

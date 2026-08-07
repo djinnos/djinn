@@ -1046,9 +1046,11 @@ pub(super) async fn completions_handler_impl(
     let mut tool_schemas =
         djinn_agent::chat_tools::filter_chat_allowed_mcp_schemas(all_mcp_schemas.clone());
     tool_schemas.extend(djinn_agent::chat_tools::chat_extension_tool_schemas());
-    // A proposal-scoped chat additionally gets the proposal-editing tools so
-    // djinn can rewrite the spec and resolve feedback. Off the global allowlist
-    // by design — added here only when this request resolved a proposal.
+    // A proposal-scoped chat additionally gets proposal feedback and tribunal
+    // controls. It deliberately cannot rewrite a spec or resolve feedback:
+    // blocking input starts/resumes refinement and advisory input is stored.
+    // These tools are off the global allowlist and added only after a proposal
+    // was resolved for this request.
     let extra_allowed_mcp: Vec<String> = if proposal_system.is_some() {
         tool_schemas.extend(djinn_agent::chat_tools::filter_proposal_scoped_mcp_schemas(
             all_mcp_schemas,
