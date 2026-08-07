@@ -679,13 +679,16 @@ async fn empty_target_subsystem_rejected() {
     assert_eq!(snap, after, "rejected demand must not mutate state");
 }
 
-// ── AC: Missing spec_unknown_anchor in body rejected ─────────────
+// ── AC: Non-empty spec_unknown_anchor is a caller assertion ──────
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn missing_spec_unknown_anchor_rejected() {
+async fn non_empty_spec_unknown_anchor_absent_from_body_accepted() {
     let (server, db, p, user_id, _judge_task_id) = setup_demand_test().await;
     let repo = ProposalRepository::new(db.clone(), EventBus::noop());
-    let snap = mutation_snapshot(&repo, &p.id).await;
+    let project_id = repo.targets(&p.id).await.unwrap()[0].project_id.clone();
+    let before =
+        djinn_db::test_support::atomic_evidence_demand_counts_for_test(&db, &p.id, &project_id)
+            .await;
 
     let mut params = valid_demand_params(&p.id);
     params["spec_unknown_anchor"] = serde_json::json!("this-text-does-not-appear-in-body");
@@ -699,20 +702,32 @@ async fn missing_spec_unknown_anchor_rejected() {
         .await
         .expect("tool should be registered");
 
-    let error = resp.get("error").and_then(|v| v.as_str()).unwrap();
+    assert_eq!(resp.get("accepted").and_then(|v| v.as_bool()), Some(true));
     assert!(
-        error.contains("not found"),
-        "should mention anchor not found: {error}"
+        resp.get("error").is_none(),
+        "caller-asserted anchor should be accepted: {resp}"
     );
+    let result = resp.get("result").expect("accepted response has result");
     assert!(
-        !resp
-            .get("accepted")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true)
+        result
+            .get("spike_task_id")
+            .and_then(|v| v.as_str())
+            .is_some(),
+        "accepted response has spike task: {resp}"
     );
 
-    let after = mutation_snapshot(&repo, &p.id).await;
-    assert_eq!(snap, after, "rejected demand must not mutate state");
+    let after =
+        djinn_db::test_support::atomic_evidence_demand_counts_for_test(&db, &p.id, &project_id)
+            .await;
+    assert_eq!(after.tasks, before.tasks + 1, "exactly one spike task");
+    assert_eq!(after.findings, before.findings + 1, "exactly one finding");
+    assert_eq!(after.attempts, before.attempts + 1, "exactly one attempt");
+    assert_eq!(after.debates, before.debates + 1, "exactly one debate row");
+    assert_eq!(
+        after.lifecycle_events,
+        before.lifecycle_events + 1,
+        "exactly one awaiting-evidence lifecycle event"
+    );
 }
 
 // ── AC: Empty insufficient_in_session_research rejected ──────────
