@@ -24,6 +24,7 @@
 //! recorder behind the same `#[async_trait]` seam the production path calls.
 
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use djinn_db::{
@@ -31,12 +32,18 @@ use djinn_db::{
     CiQuiescenceProof, CiRouteOutcome, CiRouteSubject, CiSubjectKind, Database,
 };
 use djinn_provider::github_api::{
-    CheckAnnotation, CheckRun, CheckRunsResponse, GitHubApiError, MergeMethod,
+    CheckAnnotation, CheckRun, CheckRunsResponse, CheckSetIncompleteReason, GitHubApiError,
+    MergeMethod, ReproductionJob, ReproductionStep, RequiredCheckReproduction,
+    RequiredCheckReproductionContext, RequiredCheckUnreproducible,
+    RequiredCheckUnreproducibleReason,
 };
 
 use super::*;
 use crate::pr_poller::ci_lane_routing::CiLaneDisposition;
 use crate::pr_poller::ci_routing::gate::CiRoutingGate;
+use crate::pr_poller::ci_routing::quiescence::{
+    CiDrainOutcome, PROVIDER_ACTION_DRAIN_TIMEOUT, quiesce_provider_actions,
+};
 use crate::pr_poller::ci_routing::{CiCapture, CiRouteAttempt};
 
 // ---------------------------------------------------------------------------
@@ -49,6 +56,8 @@ struct ProviderCalls {
     enable_auto_merge: usize,
     list_check_runs: usize,
     annotations: usize,
+    /// Wave 5's repair-corpus read. Deliberately NOT in `mutations`.
+    reproduction: usize,
 }
 
 impl ProviderCalls {
@@ -71,6 +80,15 @@ struct FakeState {
     fail_annotations: bool,
     /// What `list_check_runs_for_ref` returns when it does not fail.
     check_runs: Vec<CheckRun>,
+    /// The completeness verdict `list_check_runs_for_ref` reports. Defaults to
+    /// `Complete`; a fixture sets it to drive the merge-group lane's
+    /// *lane-level* incomplete captures, which are the ones that used to be
+    /// keyed on a fabricated identity.
+    check_runs_completeness: Option<CheckSetIncompleteReason>,
+    /// The command `required_check_reproduction_context` reports as the one CI
+    /// actually ran. `None` makes the check unreproducible, which is the case
+    /// that leaves a route with an empty repair corpus.
+    reproduction_command: Option<String>,
     /// Every `(owner, repo, run_id)` triple `rerun_failed_jobs` was asked for,
     /// so a fixture can prove *which* run was re-run, not just how many.
     reran: Vec<(String, String, u64)>,
@@ -79,6 +97,15 @@ struct FakeState {
 #[derive(Clone, Default)]
 struct FakeProvider {
     state: Arc<Mutex<FakeState>>,
+    /// When set, `list_check_runs_for_ref` parks here until it is notified.
+    ///
+    /// This is the seam that lets a fixture interleave two *real* logical polls
+    /// of one lane: the enumeration is the gap the ordering contract exists to
+    /// span, so pausing a poll inside it is the only way to make poll A's
+    /// reservation genuinely precede poll B's and poll A's apply genuinely
+    /// follow it. Nothing in the fixture chooses the sequences — the ledger
+    /// assigns them, and the fixture reads them back.
+    hold_enumeration: Option<Arc<tokio::sync::Notify>>,
 }
 
 impl FakeProvider {
@@ -92,6 +119,17 @@ impl FakeProvider {
             .expect("fake provider mutex")
             .reran
             .clone()
+    }
+
+    /// A provider whose enumeration parks until the returned handle is
+    /// notified. See [`FakeProvider::hold_enumeration`].
+    fn parked_enumeration() -> (Self, Arc<tokio::sync::Notify>) {
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let me = Self {
+            state: Arc::default(),
+            hold_enumeration: Some(gate.clone()),
+        };
+        (me, gate)
     }
 
     fn failing_mutations() -> Self {
@@ -116,6 +154,25 @@ impl FakeProvider {
 
     fn set_check_runs(&self, runs: Vec<CheckRun>) {
         self.state.lock().expect("fake provider mutex").check_runs = runs;
+    }
+
+    /// Make `list_check_runs_for_ref` report an incomplete enumeration rather
+    /// than failing outright — the shape a truncated or short read has.
+    fn set_check_runs_incomplete(&self, reason: CheckSetIncompleteReason) {
+        self.state
+            .lock()
+            .expect("fake provider mutex")
+            .check_runs_completeness = Some(reason);
+    }
+
+    /// The command `required_check_reproduction_context` reports. `None` makes
+    /// every check unreproducible, which is how the empty-corpus case is
+    /// exercised.
+    fn set_reproduction_command(&self, command: Option<String>) {
+        self.state
+            .lock()
+            .expect("fake provider mutex")
+            .reproduction_command = command;
     }
 }
 
@@ -170,12 +227,25 @@ impl CiRouteProvider for FakeProvider {
         _repo: &str,
         _git_ref: &str,
     ) -> Result<CheckRunsResponse, GitHubApiError> {
+        // Before the lock: a parked enumeration must not hold the mutex, and
+        // the await point is the whole point of the seam.
+        if let Some(gate) = &self.hold_enumeration {
+            gate.notified().await;
+        }
         let mut state = self.state.lock().expect("fake provider mutex");
         state.calls.list_check_runs += 1;
         if state.fail_check_runs {
             return Err(api_error("list_check_runs_for_ref"));
         }
-        Ok(CheckRunsResponse::complete(state.check_runs.clone()))
+        let runs = state.check_runs.clone();
+        Ok(match state.check_runs_completeness {
+            Some(reason) => CheckRunsResponse::incomplete(
+                u32::try_from(runs.len()).unwrap_or(u32::MAX) + 1,
+                runs,
+                reason,
+            ),
+            None => CheckRunsResponse::complete(runs),
+        })
     }
 
     async fn get_check_run_annotations(
@@ -190,6 +260,53 @@ impl CiRouteProvider for FakeProvider {
             return Err(api_error("get_check_run_annotations"));
         }
         Ok(Vec::new())
+    }
+
+    /// The repair-corpus read (wave 5).
+    ///
+    /// Counted like every other call so a fixture can prove it is a **read**:
+    /// `ProviderCalls::mutations` deliberately excludes it, and the discard
+    /// fixtures still assert zero mutations after a route that queried it.
+    async fn required_check_reproduction_context(
+        &self,
+        _owner: &str,
+        _repo: &str,
+        observed_head_sha: &str,
+        required_check_name: &str,
+    ) -> Result<RequiredCheckReproduction, GitHubApiError> {
+        let mut state = self.state.lock().expect("fake provider mutex");
+        state.calls.reproduction += 1;
+        let Some(command) = state.reproduction_command.clone() else {
+            return Ok(RequiredCheckReproduction::Unreproducible(
+                RequiredCheckUnreproducible {
+                    required_check_name: required_check_name.to_owned(),
+                    observed_head_sha: observed_head_sha.to_owned(),
+                    reason: RequiredCheckUnreproducibleReason::CommandNotFound,
+                    details: Some("fixture has no reproduction command".to_owned()),
+                },
+            ));
+        };
+        Ok(RequiredCheckReproduction::Reproducible(
+            RequiredCheckReproductionContext {
+                required_check_name: required_check_name.to_owned(),
+                observed_head_sha: observed_head_sha.to_owned(),
+                check_run_id: 1,
+                workflow_run_id: 1,
+                workflow_name: None,
+                job: ReproductionJob {
+                    id: 1,
+                    name: required_check_name.to_owned(),
+                    html_url: String::new(),
+                },
+                failing_step: ReproductionStep {
+                    number: 1,
+                    name: "run".to_owned(),
+                },
+                command,
+                setup_steps: Vec::new(),
+                log_tail: String::new(),
+            },
+        ))
     }
 }
 
@@ -353,7 +470,7 @@ fn pr_head_identity(run_id: i64) -> CiEvidenceIdentity {
         lane: CiLane::PrHead,
         pr_number: PR,
         pr_head_sha: HEAD.to_owned(),
-        run_id,
+        run_id: Some(run_id),
         run_head_sha: HEAD.to_owned(),
         dequeue_id: None,
     }
@@ -364,7 +481,7 @@ fn merge_group_identity(run_id: i64) -> CiEvidenceIdentity {
         lane: CiLane::MergeGroup,
         pr_number: PR,
         pr_head_sha: HEAD.to_owned(),
-        run_id,
+        run_id: Some(run_id),
         run_head_sha: "cccccccccccccccccccccccccccccccccccccccc".to_owned(),
         dequeue_id: Some(
             "refs/heads/gh-readonly-queue/main/pr-4242-a@2026-08-06T00:00:00Z".to_owned(),
@@ -403,6 +520,15 @@ fn causal_check(name: &str, run_id: u64) -> CheckRun {
 
 fn refs(runs: &[CheckRun]) -> Vec<&CheckRun> {
     runs.iter().collect()
+}
+
+/// The blocking predicate `pr_watcher`'s failing-CI branch passes.
+///
+/// A plain `fn` rather than a closure because the lane takes a function
+/// pointer: the enumeration it filters is the one the lane takes itself, under
+/// its own reserved sequence, so there is no captured slice to close over.
+fn failing_filter(cr: &CheckRun) -> bool {
+    crate::pr_poller::is_failing_conclusion(cr.conclusion.as_deref())
 }
 
 async fn run(
@@ -786,6 +912,14 @@ async fn live_calling_owner_after_acceptance_is_not_recovered() {
 /// After a quiescent handoff the row is recovered exactly once, keeps its
 /// charge, and opens at most one Tier-2 lease — with no provider query and no
 /// replay.
+///
+/// The injected `ProcessTerminated` is the repository's contract, not a claim
+/// about what production can observe. No production witness emits it:
+/// `CiIncarnationLiveness` reads exactly one fact, the former owner's
+/// `provider_actions_drained_at` stamp, because every available death signal is
+/// a clock in disguise. See `a_lapsed_owner_lease_is_not_a_quiescence_proof`
+/// below for why, and `only_the_former_owners_drain_stamp_recovers_a_calling_row`
+/// for the same recovery driven by the real witness.
 #[tokio::test]
 async fn terminated_owner_handoff_recovers_calling_once() {
     let f = fixture().await;
@@ -949,6 +1083,837 @@ async fn provider_finalizer_wins_owner_handoff_race() {
     assert!(!late, "terminalization is write-once");
 }
 
+// ---------------------------------------------------------------------------
+// The PRODUCTION liveness witness
+// ---------------------------------------------------------------------------
+//
+// Every handoff fixture above injects `FixedLiveness`, so until these three
+// existed the one production implementation of `CiOwnerLiveness` —
+// `CiIncarnationLiveness` — had no coverage at all: inverting it outright left
+// the whole coordinator suite green. These drive the real type against the real
+// `coordinator_incarnations` ledger on the same ephemeral Postgres.
+
+/// Plant a charged `calling` row owned by `owner`, aged past the 300s floor.
+///
+/// The route goes in through `reserve` + `charge_and_begin_calling` rather than
+/// a planted UPDATE, so the budgets are really charged and the phase is really
+/// the one the executor leaves behind at the provider boundary.
+async fn calling_row_owned_by(
+    f: &Fixture,
+    identity: &CiEvidenceIdentity,
+    blocking: &[&CheckRun],
+    owner: &str,
+) -> (String, String) {
+    let key = provider_action_key(&f.subject, identity, CiAction::RerunRun);
+    let fingerprint = transient_fingerprint(CiLane::PrHead, blocking);
+    f.routes
+        .reserve(&CiRouteReservation {
+            subject: f.subject.clone(),
+            provider_action_key: key.clone(),
+            identity: identity.clone(),
+            origin_state: CiOriginState::PrDraft,
+            class: djinn_db::CiClass::Inconclusive,
+            action: CiAction::RerunRun,
+            transient_fingerprint: fingerprint.clone(),
+            retry_budget_key: retry_budget_key(&f.subject, identity, &fingerprint),
+            head_budget_key: head_budget_key(&f.subject, identity.pr_number, &identity.pr_head_sha),
+        })
+        .await
+        .expect("reserve");
+    f.routes
+        .charge_and_begin_calling(&f.subject, &key, owner, identity)
+        .await
+        .expect("charge");
+    age_calling(f, &key, 400).await;
+    (key, fingerprint)
+}
+
+/// One startup handoff pass driven by the PRODUCTION witness.
+async fn handoff_with(f: &Fixture, liveness: &CiIncarnationLiveness) -> CiHandoffReport {
+    recover_calling_owners_at_startup(
+        &f.routes,
+        &FixedHead(Some(HEAD.to_owned())),
+        liveness,
+        &f.incarnation,
+        true,
+        CiRoutingGate::Enabled,
+    )
+    .await
+}
+
+async fn recovery_reasons(f: &Fixture, key: &str) -> Vec<CiCallingRecoveryReason> {
+    f.routes
+        .calling_recovery_audit(&f.subject, key)
+        .await
+        .expect("calling-recovery audit")
+        .iter()
+        .map(|record| record.recovery_reason)
+        .collect()
+}
+
+/// A former owner whose renewal lease has lapsed is NOT quiescent.
+///
+/// The lapsed lease is the trap this fixture exists for. Renewal is scoped to
+/// the coordinator's cancellation token, so it stops when leadership is
+/// cancelled and not when the process exits: a leader still joining its
+/// provider futures past its drain budget reads exactly like a dead one once
+/// the expiry window passes. Deriving `ProcessTerminated` from that expiry
+/// authorises a second `rerun_failed_jobs` against evidence whose first call
+/// may still be in flight, discards the old owner's fenced `finalize_calling`,
+/// and spends a Lead session adjudicating an episode that in fact succeeded —
+/// which AC5 forbids in terms: "elapsed time, owner-lease expiry, cancellation,
+/// or advisory-lock release without provider-action drain never authorizes
+/// `calling` recovery".
+///
+/// NAMED FAILING MUTATION: restore the deleted arm in
+/// `CiIncarnationLiveness::quiescence_proof` —
+/// `Ok(Some(_)) => match is_live(..) { Ok(Some(false)) => ProcessTerminated, .. }`.
+/// The backdated lease reads expired, so `quiescence_proof` answers
+/// `ProcessTerminated`, the first assertion fails, and the handoff below takes
+/// the row instead of deferring: `deferred` drops to 0, `outcome_unknown` rises
+/// to 1, the phase leaves `calling`, and the audit reason stops being
+/// `LiveOwnerDeferred`.
+#[tokio::test]
+async fn a_lapsed_owner_lease_is_not_a_quiescence_proof() {
+    let f = fixture().await;
+    let incarnations = djinn_db::CoordinatorIncarnationRepository::new(f.db.clone());
+
+    // Two real ledger rows: one renewed just now, one an hour stale.
+    let lapsed = uuid::Uuid::now_v7().to_string();
+    let fresh = uuid::Uuid::now_v7().to_string();
+    incarnations
+        .register(&lapsed)
+        .await
+        .expect("register the former owner");
+    incarnations
+        .register(&fresh)
+        .await
+        .expect("register the control incarnation");
+    djinn_db::test_support::backdate_coordinator_incarnation_lease(&f.db, &lapsed, "1 hour").await;
+
+    // The precondition, proven rather than assumed. Without it this fixture
+    // would pass against a heartbeat-reading witness for the wrong reason —
+    // because the row was seconds old, not because the witness ignores age.
+    // `fresh`'s own `last_renewed_at` is "now" in the column's exact stored
+    // spelling, so it is the one threshold that needs no clock arithmetic here.
+    let now_iso = incarnations
+        .get(&fresh)
+        .await
+        .expect("ledger read")
+        .expect("the control incarnation is registered")
+        .last_renewed_at;
+    assert_eq!(
+        incarnations
+            .is_live(&lapsed, &now_iso)
+            .await
+            .expect("liveness read"),
+        Some(false),
+        "the backdated lease must read expired, or the assertion below is vacuous"
+    );
+    assert_eq!(
+        incarnations
+            .is_live(&fresh, &now_iso)
+            .await
+            .expect("liveness read"),
+        Some(true),
+        "and the control must read live, or the threshold itself is wrong"
+    );
+
+    let liveness = CiIncarnationLiveness { incarnations };
+    assert_eq!(
+        liveness.quiescence_proof(&lapsed).await,
+        CiQuiescenceProof::None,
+        "an expired heartbeat says nothing about where the former owner's \
+         provider future went; only its own drain stamp does"
+    );
+
+    // End to end: a charged `calling` row owned by that lapsed incarnation must
+    // be left exactly where it is.
+    let checks = [inconclusive_check("Quality Gate / test", 920)];
+    let blocking = refs(&checks);
+    let id = pr_head_identity(920);
+    let (key, _) = calling_row_owned_by(&f, &id, &blocking, &lapsed).await;
+
+    let before = f.effects().await;
+    let report = handoff_with(&f, &liveness).await;
+    let after = f.effects().await;
+
+    assert_eq!(report.examined, 1, "the row is a handoff candidate");
+    assert_eq!(
+        report.deferred, 1,
+        "a lapsed lease is not a quiescence proof, so the row is deferred"
+    );
+    assert_eq!(
+        report.outcome_unknown, 0,
+        "and nothing is recovered: a second provider call is the cost of \
+         getting this wrong"
+    );
+    assert_eq!(report.superseded_after_call, 0);
+    assert_no_effects_beyond_routes(&before, &after);
+
+    let attempt = f.attempt(&id, CiAction::RerunRun).await;
+    assert_eq!(
+        attempt.action_phase,
+        CiActionPhase::Calling,
+        "the row stays where the former owner left it"
+    );
+    assert_eq!(
+        attempt.owner_incarnation_id.as_deref(),
+        Some(lapsed.as_str()),
+        "and the owner is not rewritten, so the former owner's fenced \
+         finalizer can still land"
+    );
+
+    let reasons = recovery_reasons(&f, &key).await;
+    assert!(
+        reasons.contains(&CiCallingRecoveryReason::LiveOwnerDeferred),
+        "the refusal must be the missing quiescence proof; got {reasons:?}"
+    );
+    assert!(
+        !reasons.contains(&CiCallingRecoveryReason::TimeoutNotElapsed),
+        "the 300s window has already elapsed, or the quiescence predicate is \
+         never reached; got {reasons:?}"
+    );
+}
+
+/// The former owner's drain stamp — and nothing weaker — recovers a `calling`
+/// row.
+///
+/// A differential: one incarnation, one route row, one startup handoff, run
+/// three times. The only thing that changes between passes is how far the
+/// former owner got through its own shutdown contract — unregistered, admission
+/// closed, futures joined and stamped.
+///
+/// NAMED FAILING MUTATIONS. (a) Stub `quiescence_proof` to a constant
+/// `CiQuiescenceProof::None`: the third pass recovers nothing, so
+/// `outcome_unknown` stays 0 and the phase never leaves `calling`. (b) Stub it
+/// to a constant `GracefulDrain`, or read `draining_at` in place of
+/// `provider_actions_drained_at`: the second pass takes a row whose owner has
+/// closed admission but has NOT yet joined its futures, so the `deferred` and
+/// `Calling` assertions there fail. Note that (b) is not caught by the
+/// repository's own check — `recover_calling_owner` re-reads
+/// `provider_actions_drained_at` only for a `GracefulDrain` claim, so a witness
+/// that manufactures that claim from `draining_at` would be believed on its
+/// second predicate and refused on the first. This asserts the witness.
+#[tokio::test]
+async fn only_the_former_owners_drain_stamp_recovers_a_calling_row() {
+    let f = fixture().await;
+    let incarnations = djinn_db::CoordinatorIncarnationRepository::new(f.db.clone());
+    let former = uuid::Uuid::now_v7().to_string();
+    incarnations
+        .register(&former)
+        .await
+        .expect("register the former owner");
+
+    let checks = [inconclusive_check("Quality Gate / test", 921)];
+    let blocking = refs(&checks);
+    let id = pr_head_identity(921);
+    let (_key, fingerprint) = calling_row_owned_by(&f, &id, &blocking, &former).await;
+    assert_eq!(
+        f.budgets(&id, &fingerprint).await,
+        (1, 1),
+        "the call was charged before the owner went away"
+    );
+
+    let liveness = CiIncarnationLiveness {
+        incarnations: djinn_db::CoordinatorIncarnationRepository::new(f.db.clone()),
+    };
+
+    // ── Pass 1: registered, renewing or not, nothing drained. ──
+    assert_eq!(
+        liveness.quiescence_proof(&former).await,
+        CiQuiescenceProof::None
+    );
+    assert_eq!(handoff_with(&f, &liveness).await.deferred, 1);
+
+    // ── Pass 2: admission is closed but the futures are not yet joined. ──
+    // This is the interesting half-state: the owner is on its way out and its
+    // `rerun_failed_jobs` future is still running.
+    assert!(
+        incarnations
+            .mark_draining(&former)
+            .await
+            .expect("mark draining"),
+        "the drain must actually start, or pass 2 tests nothing"
+    );
+    assert_eq!(
+        liveness.quiescence_proof(&former).await,
+        CiQuiescenceProof::None,
+        "a started drain is an intention, not a join"
+    );
+    let report = handoff_with(&f, &liveness).await;
+    assert_eq!(report.deferred, 1);
+    assert_eq!(report.outcome_unknown, 0);
+    assert_eq!(
+        f.attempt(&id, CiAction::RerunRun).await.action_phase,
+        CiActionPhase::Calling,
+        "a draining owner still owns its row"
+    );
+
+    // ── Pass 3: the scope emptied and the owner stamped its own row. ──
+    assert!(
+        incarnations
+            .mark_provider_actions_drained(&former)
+            .await
+            .expect("stamp the drain"),
+        "the stamp must land, or pass 3 tests nothing"
+    );
+    assert_eq!(
+        liveness.quiescence_proof(&former).await,
+        CiQuiescenceProof::GracefulDrain
+    );
+
+    let before = f.effects().await;
+    let report = handoff_with(&f, &liveness).await;
+    let after = f.effects().await;
+
+    assert_eq!(
+        report.outcome_unknown, 1,
+        "a stamped drain is the proof, and the still-current row becomes \
+         outcome_unknown"
+    );
+    assert_eq!(report.deferred, 0);
+    assert_eq!(report.superseded_after_call, 0);
+
+    let attempt = f.attempt(&id, CiAction::RerunRun).await;
+    assert_eq!(attempt.action_phase, CiActionPhase::Terminal);
+    assert_eq!(
+        attempt.terminal_outcome,
+        Some(CiRouteOutcome::OutcomeUnknown)
+    );
+    assert_eq!(
+        attempt.owner_incarnation_id.as_deref(),
+        Some(f.incarnation.as_str()),
+        "the handoff rewrites the owner to the recovering incarnation"
+    );
+    assert_eq!(
+        f.budgets(&id, &fingerprint).await,
+        (1, 1),
+        "the charge is retained across the handoff"
+    );
+    assert_eq!(
+        after.provider_mutations, before.provider_mutations,
+        "a handoff performs no provider query and no replay"
+    );
+    assert_eq!(after.worker_attempts, before.worker_attempts);
+    assert_eq!(after.task_status, before.task_status);
+    assert!(after.tier2_leases <= 1);
+}
+
+/// An owner the ledger never recorded is not a proof either.
+///
+/// NAMED FAILING MUTATION: fold the missing row into the drained arm — e.g.
+/// `Ok(row) if row.is_none_or(|r| r.provider_actions_drained_at.is_some())`.
+/// A vanished incarnation is precisely the case where nothing can attest that
+/// its futures are gone, so "no row" must read as "no proof".
+#[tokio::test]
+async fn an_unrecorded_owner_has_no_quiescence_proof() {
+    let f = fixture().await;
+    let liveness = CiIncarnationLiveness {
+        incarnations: djinn_db::CoordinatorIncarnationRepository::new(f.db.clone()),
+    };
+    let never_registered = uuid::Uuid::now_v7().to_string();
+
+    assert_eq!(
+        liveness.quiescence_proof(&never_registered).await,
+        CiQuiescenceProof::None
+    );
+
+    let checks = [inconclusive_check("Quality Gate / test", 922)];
+    let blocking = refs(&checks);
+    let id = pr_head_identity(922);
+    let (key, _) = calling_row_owned_by(&f, &id, &blocking, &never_registered).await;
+
+    let report = handoff_with(&f, &liveness).await;
+    assert_eq!(report.deferred, 1);
+    assert_eq!(report.outcome_unknown, 0);
+    assert!(
+        recovery_reasons(&f, &key)
+            .await
+            .contains(&CiCallingRecoveryReason::LiveOwnerDeferred)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// EARNING the drain stamp
+// ---------------------------------------------------------------------------
+//
+// The three fixtures above prove the witness READS the stamp correctly. They
+// plant it with `mark_draining` / `mark_provider_actions_drained` directly, so
+// they say nothing about whether anything in production earns it — stubbing
+// `quiescence::quiesce_provider_actions` to stamp unconditionally leaves every
+// one of them green, which silently restores the pre-AC5 bug by another route.
+//
+// Since the witness reads exactly one fact, the ORDER in which that fact is
+// written is now the whole of `calling`-row exclusion. These fixtures drive the
+// production drain — the sole writer of the column — with a live provider
+// future held across it, because a premature stamp is only observable while
+// something is still in flight.
+
+/// How many times a sampling loop re-checks a "must not have happened yet"
+/// property, as a fixed COUNT rather than a wall-clock deadline: a slow machine
+/// makes the window longer, never thinner. One check would be a race a
+/// premature stamp could win.
+const DRAIN_SAMPLES: u32 = 20;
+const DRAIN_POLL: Duration = Duration::from_millis(25);
+/// Fewer, because each sample runs a full startup-handoff pass against Postgres.
+const HANDOFF_SAMPLES: u32 = 6;
+/// Generous: every transition waited on is sub-millisecond in the passing case,
+/// so a long ceiling costs nothing and removes the only source of flake.
+const PATIENCE: Duration = Duration::from_secs(30);
+
+/// Block until a spawned drain has reached step 1.
+///
+/// Mandatory before any sampling loop: without it the loop could run to
+/// completion before `quiesce_provider_actions` was ever polled, and would then
+/// be asserting that a future which had not started had not stamped — vacuous.
+async fn wait_until_admission_closed(scope: &ProviderActionScope) {
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    while !scope.is_admission_closed() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the spawned drain never closed admission, so nothing below is under test"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+async fn drain_stamp(f: &Fixture, incarnation: &str) -> Option<String> {
+    djinn_db::CoordinatorIncarnationRepository::new(f.db.clone())
+        .get(incarnation)
+        .await
+        .expect("ledger read")
+        .expect("the incarnation is registered")
+        .provider_actions_drained_at
+}
+
+/// The stamp is not written while a provider future is still in flight.
+///
+/// `provider_actions_drained_at` is the single fact `CiIncarnationLiveness`
+/// reads, so writing it early is writing a lie: the next incarnation believes
+/// the former owner's futures are gone while one is running in its address
+/// space. This drives the real `quiesce_provider_actions` with a live guard and
+/// samples the ledger throughout, so a stamp that lands before the join is
+/// caught rather than raced.
+///
+/// NAMED FAILING MUTATIONS. (a) Hoist the `mark_draining` +
+/// `mark_provider_actions_drained` block above the `wait_until_empty` timeout
+/// in `ci_routing::quiescence::quiesce_provider_actions`: the stamp lands
+/// within a millisecond of the spawn, so the very first sample reads
+/// `provider_actions_drained_at` as `Some` and fails — as does the
+/// `CiQuiescenceProof::None` assertion beside it. (b) Hoist
+/// `scope.mark_drained()` above the join: in a debug build its own
+/// `in_flight == 0` assertion panics the drain task, which the
+/// `!drain.is_finished()` vacuity guard catches; with assertions compiled out
+/// the loop's `!is_drained()` assertion fires instead — and that flag is what
+/// leadership releases the advisory lock on. (c) Make the final
+/// `Ok(outcome) => CiDrainOutcome::Stamped` unconditional on the join actually
+/// having happened, i.e. return `Stamped` from the `!joined` arm: the closing
+/// `outcome == Stamped` assertion still passes here, so this fixture does NOT
+/// kill that one — `a_drain_that_times_out_stamps_nothing_and_reports_no_proof`
+/// does, with a budget short enough to reach the timeout inside the test.
+///
+/// The `in_flight == 1` and `!drain.is_finished()` checks after the loop are
+/// the vacuity guards: they prove the window really did span a live future and
+/// an unfinished drain, rather than a scope that had quietly emptied. The
+/// window is deliberately far shorter than `PROVIDER_ACTION_DRAIN_TIMEOUT`, so
+/// what it observes is the join withholding the stamp, never the budget
+/// expiring.
+#[tokio::test]
+async fn the_drain_stamp_is_withheld_until_the_last_provider_future_is_joined() {
+    let f = fixture().await;
+    let incarnations = djinn_db::CoordinatorIncarnationRepository::new(f.db.clone());
+    let owner = uuid::Uuid::now_v7().to_string();
+    incarnations
+        .register(&owner)
+        .await
+        .expect("register the draining owner");
+    let liveness = CiIncarnationLiveness {
+        incarnations: djinn_db::CoordinatorIncarnationRepository::new(f.db.clone()),
+    };
+
+    // The stand-in for a live `rerun_failed_jobs` future.
+    let in_flight = f.scope.admit().expect("an open scope admits");
+
+    let drain = tokio::spawn({
+        let scope = f.scope.clone();
+        let db = f.db.clone();
+        let owner = owner.clone();
+        async move {
+            let incarnations = djinn_db::CoordinatorIncarnationRepository::new(db);
+            quiesce_provider_actions(&scope, &incarnations, &owner, PROVIDER_ACTION_DRAIN_TIMEOUT)
+                .await
+        }
+    });
+    wait_until_admission_closed(&f.scope).await;
+
+    for sample in 0..DRAIN_SAMPLES {
+        tokio::time::sleep(DRAIN_POLL).await;
+        assert!(
+            drain_stamp(&f, &owner).await.is_none(),
+            "sample {sample}: `provider_actions_drained_at` was written while a provider \
+             future was still in flight (in_flight={}); a new incarnation reading that \
+             stamp takes a charged `calling` row whose call may still be running",
+            f.scope.in_flight(),
+        );
+        assert_eq!(
+            liveness.quiescence_proof(&owner).await,
+            CiQuiescenceProof::None,
+            "sample {sample}: the witness must find no proof while the owner is joining"
+        );
+        assert!(
+            !f.scope.is_drained(),
+            "sample {sample}: leadership releases the advisory lock on this flag"
+        );
+    }
+
+    // Vacuity: the window above spanned a genuinely live future and a drain
+    // that had genuinely not finished.
+    assert_eq!(
+        f.scope.in_flight(),
+        1,
+        "the guard must still be held, or the loop proved nothing"
+    );
+    assert!(
+        !drain.is_finished(),
+        "the drain must still be inside its join, or the loop proved nothing"
+    );
+
+    // The future returns; only now is the stamp earned.
+    drop(in_flight);
+    let outcome = tokio::time::timeout(PATIENCE, drain)
+        .await
+        .expect("the drain must finish once the scope empties")
+        .expect("the drain task must not panic");
+
+    assert_eq!(outcome, CiDrainOutcome::Stamped);
+    assert!(
+        drain_stamp(&f, &owner).await.is_some(),
+        "a joined drain must stamp, or the handoff can never happen at all"
+    );
+    assert_eq!(
+        liveness.quiescence_proof(&owner).await,
+        CiQuiescenceProof::GracefulDrain
+    );
+    assert!(
+        f.scope.is_drained(),
+        "the scope's drained flag is what leadership waits on"
+    );
+    assert_eq!(f.scope.in_flight(), 0);
+}
+
+/// A drain that never joins stamps nothing at all.
+///
+/// This is the arm the AC5 fix exists for: leadership releases the advisory
+/// lock after its own 45-second wait whether or not the coordinator finished,
+/// so the *only* thing keeping a new incarnation off a live owner's `calling`
+/// row is that no proof was written. AC5: "elapsed time, owner-lease expiry,
+/// cancellation, or advisory-lock release without provider-action drain never
+/// authorizes `calling` recovery."
+///
+/// `draining_at` is asserted NULL as well, and that is not incidental tidiness.
+/// `mark_provider_actions_drained`'s own WHERE clause requires
+/// `draining_at IS NOT NULL`, so leaving it unwritten until the join succeeds
+/// is the database's independent refusal of an out-of-order stamp. A drain that
+/// recorded its *intent* before joining would disarm that second gate.
+///
+/// NAMED FAILING MUTATIONS. (a) Delete the `if !joined { return … }` guard: the
+/// timeout falls through to step 3, both columns are written, and every
+/// assertion below about NULL fails, as does the `CiQuiescenceProof::None` one.
+/// (b) Return `CiDrainOutcome::Stamped` on the timeout path (a "close enough"
+/// simplification): the first assertion fails. The vacuity guards —
+/// `in_flight == 1` and `is_admission_closed()` — prove the call really did
+/// time out with a live future rather than never running.
+#[tokio::test]
+async fn a_drain_that_times_out_stamps_nothing_and_reports_no_proof() {
+    let f = fixture().await;
+    let incarnations = djinn_db::CoordinatorIncarnationRepository::new(f.db.clone());
+    let owner = uuid::Uuid::now_v7().to_string();
+    incarnations
+        .register(&owner)
+        .await
+        .expect("register the draining owner");
+
+    // Held for the whole call: the join cannot complete.
+    let held = f.scope.admit().expect("an open scope admits");
+
+    let outcome =
+        quiesce_provider_actions(&f.scope, &incarnations, &owner, Duration::from_millis(150)).await;
+
+    assert_eq!(
+        outcome,
+        CiDrainOutcome::NotJoined,
+        "an unjoined drain is a degraded outcome and must report itself as one"
+    );
+    // Vacuity: the timeout is what ended the call, and the call really ran.
+    assert!(
+        f.scope.is_admission_closed(),
+        "step 1 must have run, or this fixture is asserting about a call that did nothing"
+    );
+    assert_eq!(
+        f.scope.in_flight(),
+        1,
+        "the future must still be live, or the call joined and the timeout is untested"
+    );
+    assert!(
+        !f.scope.is_drained(),
+        "a scope whose futures are still live must never report a drain"
+    );
+
+    let row = incarnations
+        .get(&owner)
+        .await
+        .expect("ledger read")
+        .expect("the incarnation is registered");
+    assert!(
+        row.provider_actions_drained_at.is_none(),
+        "an unjoined drain must hand the next incarnation no proof; releasing the lock \
+         without one costs recovery latency, releasing it WITH one costs exclusion"
+    );
+    assert!(
+        row.draining_at.is_none(),
+        "nothing is written before the join, so the repository's own \
+         `draining_at IS NOT NULL` precondition still stands between an \
+         out-of-order caller and the stamp"
+    );
+
+    let liveness = CiIncarnationLiveness {
+        incarnations: djinn_db::CoordinatorIncarnationRepository::new(f.db.clone()),
+    };
+    assert_eq!(
+        liveness.quiescence_proof(&owner).await,
+        CiQuiescenceProof::None
+    );
+
+    drop(held);
+}
+
+/// End to end: a charged `calling` row is not handed over while its owner's
+/// provider future is alive, and IS handed over once that owner's own drain has
+/// joined and stamped.
+///
+/// This is the property the whole wave-3 ordering exists to produce, asserted
+/// on the consequence rather than on the stamp: the recovering incarnation runs
+/// the real `recover_calling_owners_at_startup` against the real
+/// `CiIncarnationLiveness`, while the former owner runs the real
+/// `quiesce_provider_actions` with a guard standing in for the
+/// `rerun_failed_jobs` future behind that very row.
+///
+/// NAMED FAILING MUTATION: hoist the stamp above the join in
+/// `ci_routing::quiescence::quiesce_provider_actions`. The stamp then exists
+/// from the moment the drain starts, so
+/// `CiIncarnationLiveness` answers `GracefulDrain` at the first sample, the
+/// handoff takes the row, and the loop fails on `deferred == 1` /
+/// `outcome_unknown == 0` / `action_phase == Calling` — with the row's owner
+/// rewritten to the recovering incarnation, which is exactly the state that
+/// discards the old owner's fenced `finalize_calling` and either re-runs the
+/// provider mutation or adjudicates `outcome_unknown` an episode that
+/// succeeded.
+///
+/// Note that neither existing sibling catches this. `terminated_owner_handoff_
+/// recovers_calling_once` injects `FixedLiveness`, and
+/// `only_the_former_owners_drain_stamp_recovers_a_calling_row` plants the stamp
+/// by hand — a hand-planted stamp is by construction earned.
+#[tokio::test]
+async fn a_live_provider_future_blocks_the_calling_handoff_until_its_owner_stamps() {
+    let f = fixture().await;
+    let incarnations = djinn_db::CoordinatorIncarnationRepository::new(f.db.clone());
+    let former = uuid::Uuid::now_v7().to_string();
+    incarnations
+        .register(&former)
+        .await
+        .expect("register the former owner");
+
+    let checks = [inconclusive_check("Quality Gate / test", 923)];
+    let blocking = refs(&checks);
+    let id = pr_head_identity(923);
+    let (key, fingerprint) = calling_row_owned_by(&f, &id, &blocking, &former).await;
+    assert_eq!(
+        f.budgets(&id, &fingerprint).await,
+        (1, 1),
+        "the call was charged before the owner began shutting down"
+    );
+
+    // The former owner's scope, in its own process. The guard is the provider
+    // future behind the `calling` row planted above.
+    let owner_scope = ProviderActionScope::new();
+    let in_flight = owner_scope.admit().expect("an open scope admits");
+    let drain = tokio::spawn({
+        let scope = owner_scope.clone();
+        let db = f.db.clone();
+        let former = former.clone();
+        async move {
+            let incarnations = djinn_db::CoordinatorIncarnationRepository::new(db);
+            quiesce_provider_actions(
+                &scope,
+                &incarnations,
+                &former,
+                PROVIDER_ACTION_DRAIN_TIMEOUT,
+            )
+            .await
+        }
+    });
+    wait_until_admission_closed(&owner_scope).await;
+
+    let liveness = CiIncarnationLiveness {
+        incarnations: djinn_db::CoordinatorIncarnationRepository::new(f.db.clone()),
+    };
+
+    let before = f.effects().await;
+    for sample in 0..HANDOFF_SAMPLES {
+        tokio::time::sleep(DRAIN_POLL).await;
+        let report = handoff_with(&f, &liveness).await;
+        assert_eq!(
+            report.examined, 1,
+            "sample {sample}: the row is a candidate"
+        );
+        assert_eq!(
+            report.deferred, 1,
+            "sample {sample}: the former owner is mid-drain with a live provider \
+             future, so no proof exists and the row must be left alone"
+        );
+        assert_eq!(
+            report.outcome_unknown, 0,
+            "sample {sample}: recovering here runs the same provider mutation twice"
+        );
+        assert_eq!(report.superseded_after_call, 0);
+
+        let attempt = f.attempt(&id, CiAction::RerunRun).await;
+        assert_eq!(
+            attempt.action_phase,
+            CiActionPhase::Calling,
+            "sample {sample}: the row stays where its live owner left it"
+        );
+        assert_eq!(
+            attempt.owner_incarnation_id.as_deref(),
+            Some(former.as_str()),
+            "sample {sample}: the owner is not rewritten, so the former owner's \
+             fenced finalizer can still land"
+        );
+    }
+    let after = f.effects().await;
+    assert_no_effects_beyond_routes(&before, &after);
+
+    // The refusal is the missing quiescence proof, not the 300s floor — the row
+    // was aged past it when it was planted.
+    let reasons = recovery_reasons(&f, &key).await;
+    assert!(
+        reasons.contains(&CiCallingRecoveryReason::LiveOwnerDeferred),
+        "the deferral must be the quiescence predicate; got {reasons:?}"
+    );
+    assert!(
+        !reasons.contains(&CiCallingRecoveryReason::TimeoutNotElapsed),
+        "the recovery timeout has elapsed, or the quiescence predicate is never \
+         reached and this fixture proves nothing; got {reasons:?}"
+    );
+
+    // Vacuity: the whole window really did span a live future and an unfinished
+    // drain.
+    assert_eq!(owner_scope.in_flight(), 1);
+    assert!(!drain.is_finished());
+    assert!(
+        drain_stamp(&f, &former).await.is_none(),
+        "and the ledger really did hold no stamp throughout"
+    );
+
+    // ── The provider call returns; the owner joins and stamps. ──
+    drop(in_flight);
+    let outcome = tokio::time::timeout(PATIENCE, drain)
+        .await
+        .expect("the drain must finish once the scope empties")
+        .expect("the drain task must not panic");
+    assert_eq!(outcome, CiDrainOutcome::Stamped);
+    assert_eq!(
+        liveness.quiescence_proof(&former).await,
+        CiQuiescenceProof::GracefulDrain
+    );
+
+    let report = handoff_with(&f, &liveness).await;
+    assert_eq!(
+        report.outcome_unknown, 1,
+        "an EARNED stamp is what hands the row over; without this half the \
+         fixture above would also pass against a drain that never stamps at all"
+    );
+    assert_eq!(report.deferred, 0);
+    let attempt = f.attempt(&id, CiAction::RerunRun).await;
+    assert_eq!(attempt.action_phase, CiActionPhase::Terminal);
+    assert_eq!(
+        attempt.terminal_outcome,
+        Some(CiRouteOutcome::OutcomeUnknown)
+    );
+    assert_eq!(
+        f.budgets(&id, &fingerprint).await,
+        (1, 1),
+        "the charge is retained across the handoff"
+    );
+}
+
+/// A join that lands no ledger row does not claim a drain.
+///
+/// `mark_provider_actions_drained` is fenced and write-once, so it returns
+/// `Ok(false)` — not `Err` — when the ledger has no row for this incarnation.
+/// Treating that as success made `ProviderActionScope::mark_drained` assert a
+/// stamp that no recovering incarnation could ever read, and leadership then
+/// logged a graceful handoff it did not have. That is a reporting lie rather
+/// than an exclusion hole (the absent stamp still makes the next incarnation
+/// defer), but `drained` also feeds the rollback quiescence report, and a flag
+/// that can be true without its durable fact is not worth reading.
+///
+/// NAMED FAILING MUTATION: restore `Ok(_) => { scope.mark_drained(); … }` in
+/// `ci_routing::quiescence::quiesce_provider_actions` — i.e. stop distinguishing
+/// `Ok(true)` from `Ok(false)`. The scope is then marked drained and the
+/// `!is_drained()` assertion fails, as does the `NotStamped` one.
+#[tokio::test]
+async fn a_joined_drain_with_no_ledger_row_does_not_claim_a_stamp() {
+    let f = fixture().await;
+    let incarnations = djinn_db::CoordinatorIncarnationRepository::new(f.db.clone());
+    let unregistered = uuid::Uuid::now_v7().to_string();
+    assert!(
+        incarnations
+            .get(&unregistered)
+            .await
+            .expect("ledger read")
+            .is_none(),
+        "the incarnation must be absent, or this fixture is testing the registered path"
+    );
+
+    // The scope is empty, so the join succeeds immediately and the call reaches
+    // step 3 — which is the step under test.
+    let outcome = quiesce_provider_actions(
+        &f.scope,
+        &incarnations,
+        &unregistered,
+        PROVIDER_ACTION_DRAIN_TIMEOUT,
+    )
+    .await;
+
+    assert_eq!(outcome, CiDrainOutcome::NotStamped);
+    assert!(
+        f.scope.is_admission_closed(),
+        "the join half still runs: no new route may enter `calling` on the way out"
+    );
+    assert!(
+        !f.scope.is_drained(),
+        "the scope must not report a drain the ledger cannot corroborate"
+    );
+    assert!(
+        incarnations
+            .get(&unregistered)
+            .await
+            .expect("ledger read")
+            .is_none(),
+        "and the drain does not conjure the row it failed to find"
+    );
+
+    let liveness = CiIncarnationLiveness {
+        incarnations: djinn_db::CoordinatorIncarnationRepository::new(f.db.clone()),
+    };
+    assert_eq!(
+        liveness.quiescence_proof(&unregistered).await,
+        CiQuiescenceProof::None
+    );
+}
+
 /// A PR head that moved before the Tier-2 lease could open discards the
 /// obsolete route: no provider mutation, no lease, no board mutation, no
 /// worker.
@@ -1102,13 +2067,37 @@ async fn newer_success_before_supervisor_apply_is_noop() {
     );
 }
 
-/// Graceful shutdown closes action admission, joins every in-flight provider
-/// future, and only then reports drained — in that order.
+/// A closed scope refuses new routes, and the drain stamp cannot be taken while
+/// an in-flight provider future is still live.
 ///
-/// The ordering is the whole point: leadership releases the advisory lock on
-/// this signal, and the lock is the exclusion authority for `calling` rows. A
+/// The ordering matters because leadership releases the advisory lock on the
+/// drain stamp, and the lock is the exclusion authority for `calling` rows. A
 /// scope that reported drained while a future was live would make exclusion a
 /// claim rather than a fact.
+///
+/// # What this test does NOT prove
+///
+/// It drives the scope by hand — this body calls `close_admission`,
+/// `wait_until_empty`, and `mark_drained` itself. So it pins the
+/// `ProviderActionScope` CONTRACT: that the primitive refuses admission when
+/// closed and withholds the drain stamp until in-flight reaches zero.
+///
+/// It does not prove that anything in production drives the scope that way,
+/// because it never calls `run_with_leadership`, never cancels a token, and
+/// never touches the advisory lock. A test cannot witness an ordering it is
+/// itself performing. Deleting the `quiesce_provider_actions(...)` call from
+/// `server/src/leadership.rs` leaves this test green.
+///
+/// The production ordering — cancellation, drain, lock release, then a NEW
+/// acquisition by a second connection — is pinned in
+/// `server/tests/leadership_quiescence.rs`, which passes a real scope and
+/// observes lock availability from its own Postgres session. The coordinator's
+/// half — that the durable `provider_actions_drained_at` stamp is written only
+/// after the join, which is what a *later* incarnation reads — is pinned by
+/// `the_drain_stamp_is_withheld_until_the_last_provider_future_is_joined` and
+/// `a_live_provider_future_blocks_the_calling_handoff_until_its_owner_stamps`
+/// above. All three are required: this one for the primitive, those for the
+/// producer, and the leadership suite for the lock.
 #[tokio::test]
 async fn graceful_shutdown_quiesces_calling_before_lock_release() {
     let f = fixture().await;
@@ -2002,8 +2991,7 @@ async fn the_pr_head_lane_executes_the_complete_empty_route() {
             "widgets",
             PR as u64,
             HEAD,
-            &CheckRunsResponse::complete(Vec::new()),
-            &[],
+            failing_filter,
             CiRoutingGate::Enabled,
         )
         .await;
@@ -2077,7 +3065,7 @@ async fn a_check_api_failure_after_correlation_routes_to_guarded_tier_two() {
         lane: CiLane::MergeGroup,
         pr_number: PR,
         pr_head_sha: HEAD.to_owned(),
-        run_id: 971,
+        run_id: Some(971),
         run_head_sha: MERGE_GROUP_SHA.to_owned(),
         dequeue_id: Some(DEQUEUE_ID.to_owned()),
     };
@@ -2169,6 +3157,331 @@ async fn an_unidentifiable_dequeue_leaves_the_lane_to_the_legacy_path() {
     assert_eq!(provider.calls().mutations(), 0);
 }
 
+// ===========================================================================
+// Lane-level captures are keyed on a real identity, or they are not keyed at all
+// ===========================================================================
+
+/// The fabricated identity `drive_lane` used to hand every lane-level capture.
+///
+/// Nothing may be findable at this key. It is the shape the audit named:
+/// `run_id: 0` with `dequeue_id: None`, which collapses two merge-group dequeues
+/// of one PR head onto a single `provider_action_key` — the second resolves
+/// `AlreadyPresent` and never gets a route, and `stale_field` can never
+/// supersede on a newer run or dequeue because both fields are constants.
+fn fabricated_merge_group_identity() -> CiEvidenceIdentity {
+    CiEvidenceIdentity {
+        lane: CiLane::MergeGroup,
+        pr_number: PR,
+        pr_head_sha: HEAD.to_owned(),
+        run_id: Some(0),
+        run_head_sha: HEAD.to_owned(),
+        dequeue_id: None,
+    }
+}
+
+/// Whether a route row exists at the key `identity` derives.
+async fn route_exists(h: &LaneHarness, identity: &CiEvidenceIdentity, action: CiAction) -> bool {
+    let subject = CiRouteSubject::task(h.task_id.clone());
+    CiRouteAttemptRepository::new(h.db.clone())
+        .get(&subject, &provider_action_key(&subject, identity, action))
+        .await
+        .expect("route read")
+        .is_some()
+}
+
+/// The merge-group lane's *lane-level* incomplete capture keys on a REAL
+/// identity — never on the synthetic `run_id: 0` / `dequeue_id: None` one.
+///
+/// Two things are pinned here, and revision 58 separates them:
+///
+/// * the **dequeue id** is a fact the poll named, and it stays. It is what keeps
+///   two dequeues of one head distinct, and dropping it is what let the second
+///   dequeue resolve `AlreadyPresent` and never get a route at all.
+/// * the **run id** is dropped, because `MaxPagesTruncated` is irrecoverable and
+///   revision 58 routes every irrecoverable reason under the run-absent
+///   identity. That is not a lost fact: it is the collapse that makes two
+///   irrecoverable reasons on one head share one row, one lease and one Lead
+///   session instead of opening a pair of each. The merge lane reaches these
+///   reasons *after* correlation named a run and the PR-head lane reaches them
+///   before, so keying on the run here would split one head's adjudication in
+///   two purely by which lane happened to observe it.
+#[tokio::test]
+async fn a_lane_level_merge_group_capture_keys_on_a_real_identity() {
+    let h = lane_harness().await;
+    let provider = FakeProvider::default();
+    // A truncated enumeration: not an enumeration *failure*, so it classifies
+    // to Tier 2 and really does write a route row.
+    provider.set_check_runs(vec![causal_check("merge-group / integration", 975)]);
+    provider.set_check_runs_incomplete(CheckSetIncompleteReason::MaxPagesTruncated);
+
+    let disposition = h
+        .actor
+        .route_merge_group_ci_evidence(
+            &provider,
+            &h.task_id,
+            "task-short",
+            "acme",
+            "widgets",
+            PR as u64,
+            HEAD,
+            "PR_node",
+            MergeMethod::Squash,
+            &[merge_group_run(975)],
+            Some(&dequeue_event()),
+            CiRoutingGate::Enabled,
+        )
+        .await;
+
+    assert!(disposition.is_routed());
+    assert_eq!(provider.calls().mutations(), 0, "no provider mutation");
+    assert_eq!(
+        djinn_db::test_support::ci_route_row_count_for_test(&h.db, &h.task_id).await,
+        1,
+        "precondition: this reason really does create a route row",
+    );
+
+    // The real dequeue id survives; the run is genuinely absent, not `0`.
+    let run_absent = CiEvidenceIdentity {
+        lane: CiLane::MergeGroup,
+        pr_number: PR,
+        pr_head_sha: HEAD.to_owned(),
+        run_id: None,
+        run_head_sha: HEAD.to_owned(),
+        dequeue_id: Some(DEQUEUE_ID.to_owned()),
+    };
+    assert!(
+        route_exists(&h, &run_absent, CiAction::AskLead).await,
+        "an irrecoverable lane-level capture must be keyed on the run-absent \
+         identity, carrying the dequeue id the poll actually named",
+    );
+    assert!(
+        !route_exists(&h, &merge_group_identity(975), CiAction::AskLead).await,
+        "and NOT on the correlated run: that would split one head's \
+         adjudication across the two lanes that reach this reason",
+    );
+    assert!(
+        !route_exists(&h, &fabricated_merge_group_identity(), CiAction::AskLead).await,
+        "no route row may be keyed on the synthetic `run_id: 0` identity",
+    );
+}
+
+/// Ambiguous correlation keeps its Tier-2 route (the proposal puts it there
+/// explicitly) — and keys it on the **real dequeue id**, which is what stops two
+/// dequeues of one head sharing a single provider-action key.
+///
+/// The dequeue id is resolved *before* correlation is attempted, so it was never
+/// unknown at this branch; it was simply dropped.
+#[tokio::test]
+async fn an_ambiguous_correlation_keys_its_route_on_the_real_dequeue() {
+    let h = lane_harness().await;
+    let provider = FakeProvider::default();
+
+    // Two terminal merge-group runs for one PR: the queue ran it twice and
+    // nothing can say which this dequeue refers to.
+    let disposition = h
+        .actor
+        .route_merge_group_ci_evidence(
+            &provider,
+            &h.task_id,
+            "task-short",
+            "acme",
+            "widgets",
+            PR as u64,
+            HEAD,
+            "PR_node",
+            MergeMethod::Squash,
+            &[merge_group_run(976), merge_group_run(977)],
+            Some(&dequeue_event()),
+            CiRoutingGate::Enabled,
+        )
+        .await;
+
+    assert!(disposition.is_routed());
+    assert_eq!(provider.calls().mutations(), 0);
+    assert_eq!(
+        djinn_db::test_support::ci_route_row_count_for_test(&h.db, &h.task_id).await,
+        1,
+    );
+
+    // The lane identity: everything real except `run_id`, which is genuinely
+    // ABSENT because "ambiguous" means no single run exists to name. Revision 58
+    // encodes that as NULL rather than the `0` sentinel this used to pin.
+    let lane_identity = CiEvidenceIdentity {
+        lane: CiLane::MergeGroup,
+        pr_number: PR,
+        pr_head_sha: HEAD.to_owned(),
+        run_id: None,
+        run_head_sha: HEAD.to_owned(),
+        dequeue_id: Some(DEQUEUE_ID.to_owned()),
+    };
+    assert!(
+        route_exists(&h, &lane_identity, CiAction::AskLead).await,
+        "the route must be keyed on the dequeue the poll actually named",
+    );
+    assert!(
+        !route_exists(&h, &fabricated_merge_group_identity(), CiAction::AskLead).await,
+        "dropping the dequeue id is what collapsed two dequeues onto one key",
+    );
+}
+
+/// No correlated merge-group run at all **holds**, and holding writes nothing.
+///
+/// This is `MergeGroupCorrelationUnavailable`. Nothing was named, so there is no
+/// run/lane identity a route row could honestly be keyed on — and AC5 admits to
+/// Tier 2 only "the closed complete-but-unusable cases with a constructible
+/// immutable run/lane identity". It used to take a Tier-2 row on the fabricated
+/// identity; now it waits for the queue run to appear, which a later poll gets
+/// for free.
+///
+/// It still suppresses the legacy remediation path: holding *is* the answer, and
+/// falling through would reopen the task for rework on the strength of evidence
+/// nobody has seen.
+#[tokio::test]
+async fn no_correlated_merge_group_run_holds_without_a_route_row() {
+    let h = lane_harness().await;
+    let provider = FakeProvider::default();
+
+    // A run for a *different* PR: the `pr-4242-` marker does not match, so the
+    // candidate set is empty.
+    let other_pr = djinn_provider::github_api::WorkflowRun {
+        head_branch: Some("gh-readonly-queue/main/pr-9999-abc".to_owned()),
+        ..merge_group_run(978)
+    };
+    let disposition = h
+        .actor
+        .route_merge_group_ci_evidence(
+            &provider,
+            &h.task_id,
+            "task-short",
+            "acme",
+            "widgets",
+            PR as u64,
+            HEAD,
+            "PR_node",
+            MergeMethod::Squash,
+            &[other_pr],
+            Some(&dequeue_event()),
+            CiRoutingGate::Enabled,
+        )
+        .await;
+
+    assert!(
+        disposition.is_routed(),
+        "a hold must not fall through to the legacy reopen",
+    );
+    assert_eq!(provider.calls().mutations(), 0);
+    assert_eq!(
+        djinn_db::test_support::ci_route_row_count_for_test(&h.db, &h.task_id).await,
+        0,
+        "an unnameable merge group may not create a route row",
+    );
+    assert_eq!(
+        djinn_db::test_support::ci_route_lease_count_for_test(&h.db, &h.task_id).await,
+        0,
+        "and may not spend a Lead adjudication",
+    );
+    assert_eq!(
+        djinn_db::test_support::task_attempt_count_for_test(&h.db, &h.task_id).await,
+        0,
+    );
+}
+
+/// A blocking check attributable to no Actions run takes ONE run-absent route.
+///
+/// `RunAttributionUnavailable`: there is no run identity to key on, and
+/// `rerun_failed_jobs` has no run to act on either.
+///
+/// Wave 3b made this **hold**, and revision 58 names that as a wedge: a check
+/// belonging to no nameable Actions run belongs to no nameable Actions run on
+/// every subsequent poll too, so the hold never resolved — no route, no
+/// adjudication, nothing on the board, and a CI gate that never cleared. It is
+/// irrecoverable, so it takes one diagnose-only Tier-2 route under `run_id`
+/// NULL. What it must NOT do is key that route on the fabricated `run_id: 0`
+/// identity, which is what collapsed two distinct observations onto one key.
+#[tokio::test]
+async fn an_unattributable_blocking_check_takes_one_run_absent_route() {
+    let h = lane_harness().await;
+    let provider = FakeProvider::default();
+
+    // No `run_id`, and an `html_url` that `parse_actions_run_id` cannot read.
+    let mut orphan = causal_check("External / policy", 979);
+    orphan.run_id = None;
+    orphan.html_url = "https://example.test/checks/1".to_owned();
+    provider.set_check_runs(vec![orphan]);
+
+    let disposition = h
+        .actor
+        .route_pr_head_ci_evidence(
+            &provider,
+            &h.task_id,
+            "task-short",
+            "acme",
+            "widgets",
+            PR as u64,
+            HEAD,
+            failing_filter,
+            CiRoutingGate::Enabled,
+        )
+        .await;
+
+    assert!(disposition.is_routed());
+    assert_eq!(
+        provider.calls().mutations(),
+        0,
+        "there is no run to re-run, so no provider mutation is legal",
+    );
+    assert_eq!(
+        djinn_db::test_support::ci_route_row_count_for_test(&h.db, &h.task_id).await,
+        1,
+        "exactly one diagnose-only route",
+    );
+    assert_eq!(
+        djinn_db::test_support::ci_route_lease_count_for_test(&h.db, &h.task_id).await,
+        1,
+        "under exactly one Tier-2 lease",
+    );
+
+    // Keyed on genuine absence, not on the `run_id: 0` sentinel.
+    let subject = CiRouteSubject::task(h.task_id.clone());
+    let run_absent = CiEvidenceIdentity {
+        lane: CiLane::PrHead,
+        pr_number: PR,
+        pr_head_sha: HEAD.to_owned(),
+        run_id: None,
+        run_head_sha: HEAD.to_owned(),
+        dequeue_id: None,
+    };
+    let routes = CiRouteAttemptRepository::new(h.db.clone());
+    let row = routes
+        .get(
+            &subject,
+            &provider_action_key(&subject, &run_absent, CiAction::AskLead),
+        )
+        .await
+        .expect("route read")
+        .expect("the route is keyed on the run-absent identity");
+    assert_eq!(row.identity.run_id, None);
+    assert!(
+        routes
+            .get(
+                &subject,
+                &provider_action_key(
+                    &subject,
+                    &CiEvidenceIdentity {
+                        // The `run_id: 0` sentinel revision 58 abolished.
+                        run_id: Some(0),
+                        ..run_absent.clone()
+                    },
+                    CiAction::AskLead
+                ),
+            )
+            .await
+            .expect("route read")
+            .is_none(),
+        "and nothing is findable at the fabricated sentinel key",
+    );
+}
+
 /// Both lane wrappers decline with the gate off, without touching the database.
 #[tokio::test]
 async fn the_lane_wrappers_decline_when_the_gate_is_off() {
@@ -2202,8 +3515,7 @@ async fn the_lane_wrappers_decline_when_the_gate_is_off() {
             "widgets",
             PR as u64,
             HEAD,
-            &CheckRunsResponse::complete(vec![inconclusive_check("q", 974)]),
-            &[],
+            failing_filter,
             CiRoutingGate::DisabledClean,
         )
         .await;
@@ -2405,5 +3717,1147 @@ async fn a_route_table_outage_fails_closed_on_both_lanes() {
         f.provider.calls().mutations(),
         0,
         "no provider mutation without a committed reservation",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The repair corpus (wave 5)
+// ---------------------------------------------------------------------------
+
+/// A Tier-2 route carries the commands CI actually ran, and reading them is a
+/// read.
+///
+/// Without this, `repository_commands` is empty on every route and
+/// `command_is_repository_valid` is always false — so **every** repair silently
+/// degrades to a diagnosis and no test notices, because a diagnosis is a
+/// perfectly valid outcome.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_tier_two_route_carries_the_commands_ci_actually_ran() {
+    let f = fixture().await;
+    f.provider
+        .set_reproduction_command(Some("cargo nextest run -p djinn-db".to_owned()));
+    let checks = vec![causal_check("Server Test / test", 77)];
+    let blocking = refs(&checks);
+    let id = pr_head_identity(77);
+    let before = f.effects().await;
+
+    let outcome = run(&f, &f.target(), &id, &id, &blocking).await;
+    let CiLaneOutcome::Tier2 {
+        handoff: Some(handoff),
+        lease_opened: true,
+        ..
+    } = outcome
+    else {
+        panic!("a complete causal failure opens an adjudication, got {outcome:?}");
+    };
+    assert_eq!(
+        handoff.repository_commands,
+        vec!["cargo nextest run -p djinn-db".to_owned()],
+        "the corpus must be the command the runner executed"
+    );
+    assert!(
+        !handoff.evidence_references.is_empty(),
+        "and the evidence bundle is never empty, or grounding fails closed"
+    );
+
+    let after = f.effects().await;
+    assert_eq!(
+        before.provider_mutations, after.provider_mutations,
+        "reading the reproduction context is a READ; it must mutate nothing"
+    );
+    assert!(
+        f.provider.calls().reproduction > 0,
+        "the corpus read must actually have happened"
+    );
+}
+
+/// An unreproducible check leaves the corpus empty rather than failing the
+/// route.
+///
+/// The route still escalates and still holds its lease; only the repair's
+/// command is unavailable, which is the degradation the proposal specifies
+/// ("if either the remedy or a valid command is unavailable, repair is invalid
+/// and Lead must use diagnose").
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unreproducible_check_still_opens_the_adjudication() {
+    let f = fixture().await;
+    f.provider.set_reproduction_command(None);
+    let checks = vec![causal_check("Server Test / test", 78)];
+    let blocking = refs(&checks);
+    let id = pr_head_identity(78);
+
+    let outcome = run(&f, &f.target(), &id, &id, &blocking).await;
+    let CiLaneOutcome::Tier2 {
+        handoff: Some(handoff),
+        lease_opened: true,
+        ..
+    } = outcome
+    else {
+        panic!("an unreproducible check must still escalate, got {outcome:?}");
+    };
+    assert!(
+        handoff.repository_commands.is_empty(),
+        "no command was exposed by CI, and none may be invented"
+    );
+}
+
+// ===========================================================================
+// The poll-ordering contract (proposal `nafu`, revision 58; ACs 9, 12, 14)
+// ===========================================================================
+//
+// # What these fixtures count
+//
+// One logical poll of one lane identity is three steps — reserve, enumerate,
+// apply — and the whole clause is about what happens when two of them
+// interleave. So none of these fixtures asserts the name of the enum the lane
+// returned. Every claim below is a count taken from real state:
+//
+// | Claim | Counted as |
+// | --- | --- |
+// | the streak's place in the authority order | `CiIncompleteHoldRepository::get` → `next_poll_sequence` / `last_applied_poll_sequence` |
+// | "this poll applied nothing" | one `ci_incomplete_hold_observations` row marked `superseded_observation` |
+// | no route | `SELECT count(*) FROM ci_route_attempts …` |
+// | no Tier-2 lease | `… WHERE tier2_lease_id IS NOT NULL` |
+// | no Lead session | `SELECT count(*) FROM task_arbitrations` — `dispatch_ci_tier2_lead` writes that row *before* it transitions the board, so it is the earliest durable trace a Lead adjudication leaves |
+// | no worker dispatch | `SELECT count(*) FROM task_attempts` |
+// | no board mutation | `tasks.status` plus `activity_log` |
+// | no Tier-1 charge | `SELECT count(*) FROM ci_route_budget_counters` |
+// | no provider mutation | [`FakeProvider`]'s own counters |
+//
+// # Why the interleaving is real
+//
+// [`FakeProvider::parked_enumeration`] parks a poll *inside* the provider call —
+// the exact gap the two short transactions straddle. A fixture that instead
+// called `reserve` twice and then `apply` twice in the order it wanted would be
+// performing the ordering it claims to witness: the sequences would be whatever
+// the fixture's call order made them. Here the fixture never picks a sequence.
+// It waits on the ledger ([`wait_for_reservations`]) and reads the assigned
+// sequences back out of it.
+
+/// The hold identity the PR-head lane derives for [`HEAD`].
+///
+/// Built with the production constructor rather than a literal struct, so a
+/// change to what the lane keys a streak on breaks these fixtures instead of
+/// silently giving them a streak nothing writes to.
+fn pr_head_hold_identity(task_id: &str) -> djinn_db::CiHoldIdentity {
+    crate::actor::CoordinatorActor::ci_hold_identity(
+        &CiRouteSubject::task(task_id),
+        "acme",
+        "widgets",
+        PR,
+        HEAD,
+        CiLane::PrHead,
+        None,
+    )
+}
+
+/// Count observations sitting in one terminal state.
+///
+/// `count_rows_for_test` is the only relation-counting seam `djinn-coordinator`
+/// has — a boundary test forbids a direct `sqlx` dependency — and it
+/// interpolates its argument into `SELECT count(*) FROM {…}`. Every argument
+/// passed here is a literal in this file.
+async fn observations_marked(db: &Database, outcome: &str) -> i64 {
+    djinn_db::test_support::count_rows_for_test(
+        db,
+        &format!("ci_incomplete_hold_observations WHERE apply_outcome = '{outcome}'"),
+    )
+    .await
+}
+
+async fn observation_rows(db: &Database) -> i64 {
+    djinn_db::test_support::count_rows_for_test(db, "ci_incomplete_hold_observations").await
+}
+
+async fn arbitration_rows(db: &Database) -> i64 {
+    djinn_db::test_support::count_rows_for_test(db, "task_arbitrations").await
+}
+
+/// Count budget counters that have actually been **charged**.
+///
+/// Not the row count: `reserve` inserts both counters at zero for every route
+/// it admits, so a row proves only that a route existed. `charged_count > 0` is
+/// what "consumed a Tier-1 charge" means, and it is the value the charging
+/// transaction writes.
+async fn charged_budget_counters(db: &Database) -> i64 {
+    djinn_db::test_support::count_rows_for_test(
+        db,
+        "ci_route_budget_counters WHERE charged_count > 0",
+    )
+    .await
+}
+
+/// Block until the ledger says `want` sequences have been reserved.
+///
+/// The wait is on **durable state**, never on a sleep long enough to "probably"
+/// be enough: these fixtures assert an order, so they have to observe it.
+async fn wait_for_reservations(
+    holds: &djinn_db::CiIncompleteHoldRepository,
+    identity: &djinn_db::CiHoldIdentity,
+    want: i64,
+) -> djinn_db::CiHoldStreak {
+    for _ in 0..2_000 {
+        if let Some(streak) = holds.get(identity).await.expect("streak read")
+            && streak.next_poll_sequence >= want
+        {
+            return streak;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    panic!("the ledger never reached {want} reserved sequences");
+}
+
+/// The whole remediation negative space, as counts over real tables.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct HoldNegativeSpace {
+    route_rows: i64,
+    tier2_leases: i64,
+    lead_sessions: i64,
+    worker_attempts: i64,
+    activity_rows: i64,
+    task_status: String,
+    tier1_charges: i64,
+    provider_mutations: usize,
+    has_ci_snapshot: bool,
+}
+
+async fn hold_negative_space(h: &LaneHarness, provider: &FakeProvider) -> HoldNegativeSpace {
+    use djinn_db::test_support as ts;
+    HoldNegativeSpace {
+        route_rows: ts::ci_route_row_count_for_test(&h.db, &h.task_id).await,
+        tier2_leases: ts::ci_route_lease_count_for_test(&h.db, &h.task_id).await,
+        lead_sessions: arbitration_rows(&h.db).await,
+        worker_attempts: ts::task_attempt_count_for_test(&h.db, &h.task_id).await,
+        activity_rows: ts::activity_row_count_for_test(&h.db, &h.task_id).await,
+        task_status: ts::task_status_for_test(&h.db, &h.task_id).await,
+        tier1_charges: charged_budget_counters(&h.db).await,
+        provider_mutations: provider.calls().mutations(),
+        has_ci_snapshot: h.ci_snapshot().await.is_some(),
+    }
+}
+
+/// The complete pre-escalation negative space, asserted in one place.
+///
+/// Every field is a COUNT over state the mechanism writes, so a route, lease,
+/// Lead session, worker, board row, charge, provider mutation or `Passing`
+/// snapshot that appeared would move one of them. None of it is derived from
+/// the disposition the lane returned.
+#[track_caller]
+fn assert_hold_is_free(before: &HoldNegativeSpace, after: &HoldNegativeSpace, what: &str) {
+    assert_eq!(after.route_rows, 0, "{what}: no route row may be created");
+    assert_eq!(
+        after.tier2_leases, 0,
+        "{what}: no Tier-2 lease may be opened"
+    );
+    assert_eq!(
+        after.lead_sessions, 0,
+        "{what}: no Lead adjudication may be dispatched"
+    );
+    assert_eq!(
+        after.tier1_charges, 0,
+        "{what}: a hold consumes no Tier-1 charge"
+    );
+    assert_eq!(
+        after.provider_mutations, 0,
+        "{what}: no provider mutation may be made"
+    );
+    assert!(
+        !after.has_ci_snapshot,
+        "{what}: an incomplete enumeration may not record a CI snapshot, \
+         least of all a Passing one"
+    );
+    assert_eq!(
+        before.worker_attempts, after.worker_attempts,
+        "{what}: no worker may be dispatched"
+    );
+    assert_eq!(
+        before.activity_rows, after.activity_rows,
+        "{what}: no board activity may be written"
+    );
+    assert_eq!(
+        before.task_status, after.task_status,
+        "{what}: the task status must be untouched"
+    );
+}
+
+/// Drive one whole logical poll of the real PR-head lane.
+///
+/// `incomplete` sets the enumeration verdict the provider reports; `None`
+/// leaves the provider as configured, which by default is an authoritatively
+/// complete (and empty) enumeration.
+async fn poll_pr_head(
+    h: &LaneHarness,
+    provider: &FakeProvider,
+    incomplete: Option<CheckSetIncompleteReason>,
+) -> CiLaneDisposition {
+    if let Some(reason) = incomplete {
+        provider.set_check_runs_incomplete(reason);
+    }
+    h.actor
+        .route_pr_head_ci_evidence(
+            provider,
+            &h.task_id,
+            "task-short",
+            "acme",
+            "widgets",
+            PR as u64,
+            HEAD,
+            failing_filter,
+            CiRoutingGate::Enabled,
+        )
+        .await
+}
+
+/// A recoverably-incomplete enumeration holds, and the hold buys nothing.
+///
+/// The clause is AC9's: the hold "authorizes no provider action, charge,
+/// session, worker, or board mutation". The only thing that may exist
+/// afterwards is one streak row at count 1 and one observation — and that is
+/// read out of the ledger, not inferred from the lane having said `Routed`.
+#[tokio::test]
+async fn recoverable_incomplete_set_holds_without_route_or_session() {
+    let h = lane_harness().await;
+    let provider = FakeProvider::default();
+    let before = hold_negative_space(&h, &provider).await;
+
+    let disposition = poll_pr_head(
+        &h,
+        &provider,
+        Some(CheckSetIncompleteReason::PageFetchFailed),
+    )
+    .await;
+
+    // Not `Legacy`: the ledger absorbed the result, so the caller must withhold
+    // its legacy remediation path too.
+    assert!(disposition.is_routed());
+    assert_eq!(
+        disposition.complete_empty(),
+        None,
+        "an incomplete enumeration is not the no-CI compatibility path",
+    );
+
+    // The negative space FIRST, because it is the clause: a hold that bought a
+    // route, a lease, a session, a worker, a charge or a board row has already
+    // broken the contract, whatever the streak says afterwards.
+    let after = hold_negative_space(&h, &provider).await;
+    assert_hold_is_free(&before, &after, "a recoverable incomplete poll");
+
+    let identity = pr_head_hold_identity(&h.task_id);
+    let streak = h
+        .actor
+        .ci_holds()
+        .get(&identity)
+        .await
+        .expect("streak read")
+        .expect("a recoverable incomplete poll creates its streak");
+    assert_eq!(streak.poll_count, 1, "one incomplete poll, counted once");
+    assert_eq!(streak.next_poll_sequence, 1);
+    assert_eq!(
+        streak.last_applied_poll_sequence, 1,
+        "the applied poll advances the retained high-watermark",
+    );
+    assert!(
+        !streak.has_escalated(),
+        "one poll is nowhere near the bound"
+    );
+    assert_eq!(observation_rows(&h.db).await, 1);
+    assert_eq!(observations_marked(&h.db, "applied_incomplete").await, 1);
+}
+
+/// A complete enumeration resets the streak — and **retains the row**.
+///
+/// "Reset, not deleted" is the load-bearing half. A deleted streak would look
+/// tidier and would silently re-admit every observation already overtaken: with
+/// the watermark gone, the next delayed apply finds a fresh row at sequence zero
+/// and counts itself. So this asserts the row still exists and that
+/// `last_applied_poll_sequence` did not decrease.
+#[tokio::test]
+async fn complete_snapshot_clears_hold_streak() {
+    let h = lane_harness().await;
+    let identity = pr_head_hold_identity(&h.task_id);
+    let holds = h.actor.ci_holds();
+
+    for expected in 1..=3 {
+        let provider = FakeProvider::default();
+        poll_pr_head(&h, &provider, Some(CheckSetIncompleteReason::ShortRead)).await;
+        let streak = holds
+            .get(&identity)
+            .await
+            .expect("streak read")
+            .expect("streak exists");
+        assert_eq!(streak.poll_count, expected);
+    }
+    let before = holds
+        .get(&identity)
+        .await
+        .expect("streak read")
+        .expect("streak exists");
+    assert_eq!(before.poll_count, 3);
+    assert_eq!(before.last_applied_poll_sequence, 3);
+
+    // One complete poll. The provider reports a complete, empty enumeration —
+    // the lane's no-CI compatibility path, which is a *complete* result.
+    let complete = FakeProvider::default();
+    let disposition = poll_pr_head(&h, &complete, None).await;
+    assert_eq!(
+        disposition.complete_empty(),
+        Some(CiCompleteEmptyRoute::PrHeadProceed),
+    );
+
+    let after = holds
+        .get(&identity)
+        .await
+        .expect("streak read")
+        .expect("RESET, NOT DELETED: the streak row must survive its own reset");
+    assert_eq!(after.id, before.id, "the same row, not a fresh one");
+    assert_eq!(
+        after.poll_count, 0,
+        "a complete enumeration clears the count"
+    );
+    assert!(!after.has_escalated());
+    assert_eq!(
+        after.last_applied_poll_sequence, 4,
+        "the retained high-watermark advances to the complete poll's sequence",
+    );
+    assert!(
+        after.last_applied_poll_sequence >= before.last_applied_poll_sequence,
+        "the high-watermark is retained across a reset: {} -> {}",
+        before.last_applied_poll_sequence,
+        after.last_applied_poll_sequence,
+    );
+    assert_eq!(after.next_poll_sequence, 4);
+    assert_eq!(observations_marked(&h.db, "applied_complete").await, 1);
+
+    // The reset is not a remedy; it is the absence of one.
+    let space = hold_negative_space(&h, &complete).await;
+    assert_eq!(space.route_rows, 0);
+    assert_eq!(space.tier2_leases, 0);
+    assert_eq!(space.lead_sessions, 0);
+    assert_eq!(space.worker_attempts, 0);
+    assert_eq!(space.tier1_charges, 0);
+    assert_eq!(space.provider_mutations, 0);
+}
+
+/// **The marquee.** A delayed incomplete poll cannot resurrect a cleared streak.
+///
+/// Poll A reserves its sequence and then parks *inside the provider call* — the
+/// gap the two short transactions straddle. Poll B then runs end to end,
+/// reserves the next sequence, applies a complete result, and clears the
+/// streak. Only then is A released.
+///
+/// Everything about the order is produced by the code:
+///
+/// * A's reservation precedes B's because A parks after `reserve_poll` has
+///   committed, and B waits on the **ledger** rather than on a sleep;
+/// * A's apply follows B's because A is not released until B's call returned;
+///   and
+/// * the sequences are read back out of `ci_incomplete_hold_streaks` rather
+///   than asserted from the order the calls appear in this function.
+///
+/// If `apply_poll`'s comparison against `last_applied_poll_sequence` stopped
+/// rejecting the overtaken observation, A would count — and the observation
+/// marked `superseded_observation`, which is the durable record that the
+/// ordering rule fired, would not exist.
+#[tokio::test]
+async fn delayed_incomplete_after_newer_complete_is_noop() {
+    let h = lane_harness().await;
+    let identity = pr_head_hold_identity(&h.task_id);
+    let holds = h.actor.ci_holds();
+
+    // Poll A: recoverably incomplete, parked inside its enumeration.
+    let (parked, release_a) = FakeProvider::parked_enumeration();
+    parked.set_check_runs_incomplete(CheckSetIncompleteReason::PageFetchFailed);
+
+    // Poll B: complete, and it must not start until A has actually reserved.
+    let complete = FakeProvider::default();
+
+    let a = poll_pr_head(&h, &parked, None);
+    let b = async {
+        let reserved_by_a = wait_for_reservations(&holds, &identity, 1).await;
+        assert_eq!(
+            reserved_by_a.next_poll_sequence, 1,
+            "A reserved first, and the ledger says so",
+        );
+        assert_eq!(
+            reserved_by_a.last_applied_poll_sequence, 0,
+            "A has reserved but not applied",
+        );
+
+        let disposition = poll_pr_head(&h, &complete, None).await;
+
+        let after_b = holds
+            .get(&identity)
+            .await
+            .expect("streak read")
+            .expect("streak exists");
+        // B's sequence is read out of the ledger, not asserted from call order.
+        assert_eq!(
+            after_b.next_poll_sequence, 2,
+            "B reserved the sequence after A's",
+        );
+        assert_eq!(
+            after_b.last_applied_poll_sequence, 2,
+            "B applied, so the watermark is B's sequence — above A's",
+        );
+        assert_eq!(
+            after_b.poll_count, 0,
+            "B's complete result cleared the count"
+        );
+
+        release_a.notify_one();
+        (disposition, after_b)
+    };
+    let (disposition_a, (disposition_b, after_b)) = tokio::join!(a, b);
+
+    assert_eq!(
+        disposition_b.complete_empty(),
+        Some(CiCompleteEmptyRoute::PrHeadProceed),
+        "B is the authoritative, complete observation",
+    );
+    // A is absorbed — and it does NOT fall through to legacy remediation either.
+    assert!(disposition_a.is_routed());
+    assert_eq!(disposition_a.complete_empty(), None);
+
+    let after_a = holds
+        .get(&identity)
+        .await
+        .expect("streak read")
+        .expect("streak exists");
+    assert_eq!(
+        after_a.poll_count, 0,
+        "the delayed incomplete poll must not restart the streak B cleared",
+    );
+    assert_eq!(
+        after_a.last_applied_poll_sequence, after_b.last_applied_poll_sequence,
+        "a superseded observation moves no watermark",
+    );
+    assert!(!after_a.has_escalated());
+    assert_eq!(after_a.next_poll_sequence, 2, "and reserves nothing new");
+
+    // The durable record that the ordering rule fired. This is the assertion the
+    // sequence-comparison mutation has to break: with the guard gone, A's
+    // observation is not marked superseded — it counts.
+    assert_eq!(
+        observations_marked(&h.db, "superseded_observation").await,
+        1,
+        "the overtaken observation must be recorded as superseded",
+    );
+    assert_eq!(observations_marked(&h.db, "applied_incomplete").await, 0);
+    assert_eq!(observations_marked(&h.db, "applied_complete").await, 1);
+    assert_eq!(observation_rows(&h.db).await, 2);
+
+    // Nothing at all was recreated.
+    let space = hold_negative_space(&h, &parked).await;
+    assert_eq!(space.route_rows, 0, "no route may be recreated");
+    assert_eq!(space.tier2_leases, 0, "no lease may be recreated");
+    assert_eq!(space.lead_sessions, 0, "no Lead session may be recreated");
+    assert_eq!(space.worker_attempts, 0, "no worker may be dispatched");
+    assert_eq!(space.tier1_charges, 0, "no charge may be consumed");
+    assert_eq!(space.provider_mutations, 0, "no provider mutation");
+    assert_eq!(
+        complete.calls().mutations(),
+        0,
+        "and none from the complete poll either",
+    );
+}
+
+/// A genuinely newer incomplete poll starts a fresh streak at one.
+///
+/// The mirror image of the fixture above, and the reason the ordering rule is a
+/// comparison rather than a latch: poll C is *newer* than the complete poll B,
+/// so it must count — from zero, because B cleared the streak, and not from the
+/// count the polls before B had accumulated.
+#[tokio::test]
+async fn newer_incomplete_after_complete_starts_at_one() {
+    let h = lane_harness().await;
+    let identity = pr_head_hold_identity(&h.task_id);
+    let holds = h.actor.ci_holds();
+    let baseline = hold_negative_space(&h, &FakeProvider::default()).await;
+
+    // Two incomplete polls, then a complete one: the streak is at zero with a
+    // watermark of 3.
+    for _ in 0..2 {
+        let p = FakeProvider::default();
+        poll_pr_head(&h, &p, Some(CheckSetIncompleteReason::PageFetchFailed)).await;
+    }
+    let complete = FakeProvider::default();
+    poll_pr_head(&h, &complete, None).await;
+    let after_b = holds
+        .get(&identity)
+        .await
+        .expect("streak read")
+        .expect("streak exists");
+    assert_eq!(after_b.poll_count, 0);
+    assert_eq!(after_b.last_applied_poll_sequence, 3);
+
+    // Poll C: reserved after B, so it is authoritative.
+    let c = FakeProvider::default();
+    let disposition = poll_pr_head(&h, &c, Some(CheckSetIncompleteReason::ShortRead)).await;
+    assert!(disposition.is_routed());
+    assert_eq!(disposition.complete_empty(), None);
+
+    let after_c = holds
+        .get(&identity)
+        .await
+        .expect("streak read")
+        .expect("streak exists");
+    assert_eq!(
+        after_c.poll_count, 1,
+        "a genuinely newer incomplete poll starts a FRESH streak rather than \
+         resuming the two polls before the reset",
+    );
+    assert_eq!(
+        after_c.last_applied_poll_sequence, 4,
+        "and its sequence is above B's, read from the ledger",
+    );
+    assert!(after_c.last_applied_poll_sequence > after_b.last_applied_poll_sequence);
+    assert!(!after_c.has_escalated());
+
+    // The complete poll in the middle recorded a `Passing` snapshot, which is
+    // its own compatibility path and not a remediation effect; everything the
+    // hold is forbidden to buy is still absent.
+    let after = hold_negative_space(&h, &c).await;
+    assert_eq!(after.route_rows, 0);
+    assert_eq!(after.tier2_leases, 0);
+    assert_eq!(after.lead_sessions, 0);
+    assert_eq!(after.tier1_charges, 0);
+    assert_eq!(after.provider_mutations, 0);
+    assert_eq!(baseline.worker_attempts, after.worker_attempts);
+    assert_eq!(baseline.task_status, after.task_status);
+}
+
+/// A result whose identity advanced between reserve and apply is a no-op.
+///
+/// # Why this drives the coordinator orchestration and not the lane wrapper
+///
+/// `apply_poll`'s first check compares the identity the poll *reserved* against
+/// the identity observed at apply time, and `CoordinatorActor::apply_ci_hold_poll`
+/// takes those as two parameters. Both lane wrappers currently pass the same
+/// value for both (`apply_and_drive(&poll, &hold_identity, …)`), so the branch
+/// is unreachable from `route_pr_head_ci_evidence` today — reported alongside
+/// this change rather than papered over. Driving the production orchestration
+/// directly is what lets the fixture witness the check that exists instead of
+/// asserting one that does not.
+#[tokio::test]
+async fn head_advance_clears_hold_streak() {
+    let h = lane_harness().await;
+    let holds = h.actor.ci_holds();
+    let baseline = hold_negative_space(&h, &FakeProvider::default()).await;
+    let head_a = pr_head_hold_identity(&h.task_id);
+    let head_b = djinn_db::CiHoldIdentity {
+        pr_head_sha: MOVED_HEAD.to_owned(),
+        ..head_a.clone()
+    };
+
+    // One ordinary incomplete poll on head A, so there is a count to protect.
+    let seeded = h
+        .actor
+        .reserve_ci_hold_poll(head_a.clone())
+        .await
+        .expect("reservation");
+    let seeded_outcome = h
+        .actor
+        .apply_ci_hold_poll(
+            &seeded,
+            &head_a,
+            false,
+            CiOriginState::PrDraft,
+            crate::pr_poller::ci_routing::CiIncompleteReason::EnumerationPageFailed,
+            &h.task_id,
+        )
+        .await;
+    assert_eq!(
+        seeded_outcome,
+        crate::pr_poller::ci_hold::CiHoldDisposition::Absorbed(
+            crate::pr_poller::ci_hold::CiHoldAbsorption::Held { poll_count: 1 }
+        ),
+    );
+
+    // A second poll reserves against head A — and the head moves before it can
+    // apply.
+    let stranded = h
+        .actor
+        .reserve_ci_hold_poll(head_a.clone())
+        .await
+        .expect("reservation");
+    assert_eq!(stranded.sequence(), 2, "reserved against head A");
+
+    let outcome = h
+        .actor
+        .apply_ci_hold_poll(
+            &stranded,
+            &head_b,
+            false,
+            CiOriginState::PrDraft,
+            crate::pr_poller::ci_routing::CiIncompleteReason::EnumerationPageFailed,
+            &h.task_id,
+        )
+        .await;
+    assert_eq!(
+        outcome,
+        crate::pr_poller::ci_hold::CiHoldDisposition::Absorbed(
+            crate::pr_poller::ci_hold::CiHoldAbsorption::IdentityAdvanced
+        ),
+    );
+
+    let a_after = holds
+        .get(&head_a)
+        .await
+        .expect("streak read")
+        .expect("head A's streak still exists");
+    assert_eq!(
+        a_after.poll_count, 1,
+        "the old head's count must not move: escalating it would open a \
+         diagnose route for a head nobody is on any more",
+    );
+    assert_eq!(
+        a_after.last_applied_poll_sequence, 1,
+        "and no watermark moves for a head that is no longer current",
+    );
+    assert!(!a_after.has_escalated());
+    assert_eq!(observations_marked(&h.db, "identity_advanced").await, 1);
+    assert!(
+        holds.get(&head_b).await.expect("streak read").is_none(),
+        "an identity-advanced no-op creates nothing for the new head either",
+    );
+
+    // A fresh poll on head B starts its own streak at one.
+    let fresh = h
+        .actor
+        .reserve_ci_hold_poll(head_b.clone())
+        .await
+        .expect("reservation");
+    let fresh_outcome = h
+        .actor
+        .apply_ci_hold_poll(
+            &fresh,
+            &head_b,
+            false,
+            CiOriginState::PrDraft,
+            crate::pr_poller::ci_routing::CiIncompleteReason::EnumerationPageFailed,
+            &h.task_id,
+        )
+        .await;
+    assert_eq!(
+        fresh_outcome,
+        crate::pr_poller::ci_hold::CiHoldDisposition::Absorbed(
+            crate::pr_poller::ci_hold::CiHoldAbsorption::Held { poll_count: 1 }
+        ),
+    );
+    let b_after = holds
+        .get(&head_b)
+        .await
+        .expect("streak read")
+        .expect("head B's streak");
+    assert_eq!(b_after.poll_count, 1, "head B starts at one");
+    assert_eq!(
+        b_after.next_poll_sequence, 1,
+        "head B's sequence space is its own",
+    );
+    assert_eq!(
+        holds
+            .get(&head_a)
+            .await
+            .expect("streak read")
+            .expect("head A")
+            .poll_count,
+        1,
+        "and head A's count is still untouched",
+    );
+
+    let after = hold_negative_space(&h, &FakeProvider::default()).await;
+    assert_hold_is_free(&baseline, &after, "an identity-advanced apply");
+}
+
+/// Eleven real polls, a restart, then two racing pollers: exactly one
+/// escalation at twelve.
+///
+/// # Why the streak is driven rather than seeded
+///
+/// A `poll_count = 11` written by a raw `UPDATE` proves nothing about the
+/// mechanism that produces it — it tests the bound against a number the fixture
+/// invented. All eleven polls here go through `route_pr_head_ci_evidence`, so
+/// the streak is produced by the thing being tested.
+///
+/// # Why the restart matters
+///
+/// The second actor is a fresh `CoordinatorActor` over the same database, which
+/// is what a coordinator restart is. It re-reads the streak, the watermark and
+/// the escalation marker from the ledger; nothing about the bound lives in
+/// process memory.
+///
+/// # Why the race is real
+///
+/// Both racers park inside their provider enumeration until the ledger shows
+/// both sequences reserved, so they genuinely overlap. Which of them applies
+/// first is not decided here — and both orders are correct:
+///
+/// * lower sequence first → it escalates at 12, and the higher one finds
+///   `escalated_at` already set (`AlreadyEscalated`);
+/// * higher sequence first → it escalates at 12, and the lower one is below the
+///   watermark (`Superseded`).
+///
+/// Either way there is exactly one `escalated_at`, one run-absent route row, one
+/// open Tier-2 lease, and one Lead adjudication.
+#[tokio::test]
+async fn count_eleven_race_escalates_once_at_twelve() {
+    let h = lane_harness().await;
+    let identity = pr_head_hold_identity(&h.task_id);
+    let holds = h.actor.ci_holds();
+    let baseline = hold_negative_space(&h, &FakeProvider::default()).await;
+
+    for expected in 1..=(djinn_db::CI_INCOMPLETE_HOLD_MAX_POLLS - 1) {
+        let p = FakeProvider::default();
+        let disposition =
+            poll_pr_head(&h, &p, Some(CheckSetIncompleteReason::PageFetchFailed)).await;
+        assert!(disposition.is_routed());
+        let streak = holds
+            .get(&identity)
+            .await
+            .expect("streak read")
+            .expect("streak exists");
+        assert_eq!(
+            streak.poll_count, expected,
+            "each real poll advances the streak by exactly one",
+        );
+        assert!(
+            !streak.has_escalated(),
+            "poll {expected} is below the bound of {}",
+            djinn_db::CI_INCOMPLETE_HOLD_MAX_POLLS,
+        );
+    }
+    let seeded = holds
+        .get(&identity)
+        .await
+        .expect("streak read")
+        .expect("streak exists");
+    assert_eq!(seeded.poll_count, 11);
+    assert_eq!(seeded.last_applied_poll_sequence, 11);
+    let eleven = hold_negative_space(&h, &FakeProvider::default()).await;
+    assert_hold_is_free(&baseline, &eleven, "eleven consecutive incomplete polls");
+
+    // ── Restart: a new actor and a new repository over the same database ────
+    let restarted = crate::actor::actor_with_test_db(h.db.clone());
+    let restarted_holds = restarted.ci_holds();
+    assert_eq!(
+        restarted_holds
+            .get(&identity)
+            .await
+            .expect("streak read")
+            .expect("the streak survives the restart")
+            .poll_count,
+        11,
+        "the bound is durable, not a number the process was holding",
+    );
+
+    // ── Two pollers, genuinely overlapping ─────────────────────────────────
+    let (first, release_first) = FakeProvider::parked_enumeration();
+    first.set_check_runs_incomplete(CheckSetIncompleteReason::PageFetchFailed);
+    let (second, release_second) = FakeProvider::parked_enumeration();
+    second.set_check_runs_incomplete(CheckSetIncompleteReason::PageFetchFailed);
+
+    let race_one = restarted.route_pr_head_ci_evidence(
+        &first,
+        &h.task_id,
+        "task-short",
+        "acme",
+        "widgets",
+        PR as u64,
+        HEAD,
+        failing_filter,
+        CiRoutingGate::Enabled,
+    );
+    let race_two = restarted.route_pr_head_ci_evidence(
+        &second,
+        &h.task_id,
+        "task-short",
+        "acme",
+        "widgets",
+        PR as u64,
+        HEAD,
+        failing_filter,
+        CiRoutingGate::Enabled,
+    );
+    let starter = async {
+        // Both sequences reserved before either result is applied. That is what
+        // makes this a race rather than two sequential polls.
+        let streak = wait_for_reservations(&restarted_holds, &identity, 13).await;
+        assert_eq!(streak.next_poll_sequence, 13);
+        assert_eq!(
+            streak.last_applied_poll_sequence, 11,
+            "neither racer has applied yet",
+        );
+        assert_eq!(streak.poll_count, 11);
+        release_first.notify_one();
+        release_second.notify_one();
+    };
+    let (one, two, ()) = tokio::join!(race_one, race_two, starter);
+    assert!(one.is_routed());
+    assert!(two.is_routed());
+
+    // ── Exactly one atomic transition at twelve ────────────────────────────
+    let escalated = restarted_holds
+        .get(&identity)
+        .await
+        .expect("streak read")
+        .expect("streak exists");
+    assert!(
+        escalated.has_escalated(),
+        "the twelfth authoritative incomplete poll must escalate",
+    );
+    assert_eq!(
+        escalated.poll_count,
+        djinn_db::CI_INCOMPLETE_HOLD_MAX_POLLS,
+        "the count stops at the bound: the loser must not increment past it",
+    );
+    assert_eq!(
+        escalated.last_applied_poll_sequence, 13,
+        "the winner of the race is the highest sequence either way",
+    );
+
+    assert_eq!(
+        observations_marked(&h.db, "escalated").await,
+        1,
+        "EXACTLY ONE observation may be the escalating one",
+    );
+    let superseded = observations_marked(&h.db, "superseded_observation").await;
+    let already = observations_marked(&h.db, "applied_incomplete").await
+        - (djinn_db::CI_INCOMPLETE_HOLD_MAX_POLLS - 1);
+    assert_eq!(
+        superseded + already,
+        1,
+        "the loser is exactly one observation, and is either superseded or \
+         already-escalated: superseded={superseded}, already_escalated={already}",
+    );
+    assert_eq!(observation_rows(&h.db).await, 13);
+
+    // One route, one lease, one adjudication — counted, not named.
+    assert_eq!(
+        djinn_db::test_support::ci_route_row_count_for_test(&h.db, &h.task_id).await,
+        1,
+        "one diagnose-only run-absent route, not two",
+    );
+    assert_eq!(
+        djinn_db::test_support::ci_route_lease_count_for_test(&h.db, &h.task_id).await,
+        1,
+        "one open Tier-2 lease, not two",
+    );
+    assert_eq!(
+        arbitration_rows(&h.db).await,
+        1,
+        "one Lead adjudication, not two",
+    );
+
+    // The route is keyed on the run-absent identity, and it is diagnose-only.
+    let run_absent = CiEvidenceIdentity {
+        lane: CiLane::PrHead,
+        pr_number: PR,
+        pr_head_sha: HEAD.to_owned(),
+        run_id: None,
+        run_head_sha: HEAD.to_owned(),
+        dequeue_id: None,
+    };
+    let subject = CiRouteSubject::task(h.task_id.clone());
+    let row = CiRouteAttemptRepository::new(h.db.clone())
+        .get(
+            &subject,
+            &provider_action_key(&subject, &run_absent, CiAction::AskLead),
+        )
+        .await
+        .expect("route read")
+        .expect("the escalation route is keyed on the run-absent identity");
+    assert_eq!(row.identity.run_id, None, "absence, never a sentinel");
+    assert_eq!(row.action, CiAction::AskLead);
+
+    // And an escalation still buys no provider call, no worker, and no charge.
+    assert_eq!(first.calls().mutations(), 0);
+    assert_eq!(second.calls().mutations(), 0);
+    assert_eq!(
+        djinn_db::test_support::task_attempt_count_for_test(&h.db, &h.task_id).await,
+        baseline.worker_attempts,
+        "an escalation asks Lead; it does not dispatch a worker",
+    );
+    assert_eq!(
+        charged_budget_counters(&h.db).await,
+        0,
+        "`ask_lead` consumes no Tier-1 charge",
+    );
+}
+
+/// One logical poll keeps its sequence, however many times it is retried.
+///
+/// A retry between reserve and apply — a serialization failure, a pool hiccup, a
+/// process restart mid-poll — must read back the sequence it was already
+/// assigned. If it reserved a second one it would look like a *newer* poll and
+/// would supersede its own earlier self, which is how a crash-loop silently eats
+/// a streak.
+#[tokio::test]
+async fn hold_observation_replay_preserves_its_sequence() {
+    let h = lane_harness().await;
+    let holds = h.actor.ci_holds();
+    let baseline = hold_negative_space(&h, &FakeProvider::default()).await;
+    let identity = pr_head_hold_identity(&h.task_id);
+    let poll_id = uuid::Uuid::now_v7().to_string();
+
+    let first = holds
+        .reserve_poll(&identity, &poll_id)
+        .await
+        .expect("first reservation");
+    assert!(!first.replayed, "the first reservation is not a replay");
+    assert_eq!(first.poll_sequence, 1);
+
+    let second = holds
+        .reserve_poll(&identity, &poll_id)
+        .await
+        .expect("replayed reservation");
+    assert!(
+        second.replayed,
+        "the same logical poll id must be recognised as a replay",
+    );
+    assert_eq!(
+        second.poll_sequence, first.poll_sequence,
+        "a replay reads back its own sequence rather than reserving another",
+    );
+    assert_eq!(second.streak_id, first.streak_id);
+
+    let streak = holds
+        .get(&identity)
+        .await
+        .expect("streak read")
+        .expect("streak exists");
+    assert_eq!(
+        streak.next_poll_sequence, 1,
+        "and the reservation counter advanced EXACTLY ONCE for two calls",
+    );
+    assert_eq!(
+        observation_rows(&h.db).await,
+        1,
+        "one logical poll is one observation row",
+    );
+
+    // A different logical poll on the same identity does get the next sequence,
+    // so the replay is keyed on the poll id and not on the identity.
+    let other = holds
+        .reserve_poll(&identity, &uuid::Uuid::now_v7().to_string())
+        .await
+        .expect("second logical poll");
+    assert!(!other.replayed);
+    assert_eq!(other.poll_sequence, 2);
+
+    let after = hold_negative_space(&h, &FakeProvider::default()).await;
+    assert_hold_is_free(&baseline, &after, "two reservations and no apply");
+}
+
+/// Two irrecoverable reasons on one PR head share ONE run-absent route row.
+///
+/// The executor-level twin of the key-derivation fixture in the sibling
+/// classifier suite: this one drives the real lane end to end against real
+/// Postgres and **counts rows in `ci_route_attempts`**, which is the claim the
+/// `NULLS NOT DISTINCT` unique index actually has to satisfy.
+///
+/// The two reasons are produced by different code paths on purpose:
+///
+/// * `CheckEnumerationUnavailable` from a `MaxPagesTruncated` enumeration
+///   verdict, reached in `capture_pr_head_evidence`'s first branch; and
+/// * `RunAttributionUnavailable` from a blocking check belonging to no nameable
+///   Actions run, reached four branches later.
+///
+/// Both are irrecoverable, so both take the diagnose-only route under `run_id`
+/// NULL — and the second must find the first's row rather than opening a second
+/// lease and spending a second Lead session.
+#[tokio::test]
+async fn irrecoverable_reasons_share_one_run_absent_route_row() {
+    let h = lane_harness().await;
+
+    // Reason one: the enumeration hit `MAX_PAGES`.
+    let truncated = FakeProvider::default();
+    let first = poll_pr_head(
+        &h,
+        &truncated,
+        Some(CheckSetIncompleteReason::MaxPagesTruncated),
+    )
+    .await;
+    assert!(first.is_routed());
+    assert_eq!(
+        first.complete_empty(),
+        None,
+        "an irrecoverable enumeration is not the no-CI path",
+    );
+
+    let subject = CiRouteSubject::task(h.task_id.clone());
+    let run_absent = CiEvidenceIdentity {
+        lane: CiLane::PrHead,
+        pr_number: PR,
+        pr_head_sha: HEAD.to_owned(),
+        run_id: None,
+        run_head_sha: HEAD.to_owned(),
+        dequeue_id: None,
+    };
+    let routes = CiRouteAttemptRepository::new(h.db.clone());
+    let key = provider_action_key(&subject, &run_absent, CiAction::AskLead);
+    let row = routes
+        .get(&subject, &key)
+        .await
+        .expect("route read")
+        .expect("an irrecoverable reason takes one diagnose-only route");
+    assert_eq!(row.identity.run_id, None, "absence, never a sentinel");
+    assert_eq!(row.action, CiAction::AskLead);
+    assert_eq!(
+        djinn_db::test_support::ci_route_row_count_for_test(&h.db, &h.task_id).await,
+        1,
+    );
+    let leases_after_first =
+        djinn_db::test_support::ci_route_lease_count_for_test(&h.db, &h.task_id).await;
+    let sessions_after_first = arbitration_rows(&h.db).await;
+    assert_eq!(leases_after_first, 1, "one lease for the first reason");
+
+    // Reason two: a blocking check attributable to no Actions run, on the same
+    // PR head, reached through a different branch entirely.
+    let orphaned = FakeProvider::default();
+    let mut orphan = causal_check("External / policy", 979);
+    orphan.run_id = None;
+    orphan.html_url = "https://example.test/checks/1".to_owned();
+    orphaned.set_check_runs(vec![orphan]);
+    let second = poll_pr_head(&h, &orphaned, None).await;
+    assert!(second.is_routed());
+
+    assert_eq!(
+        djinn_db::test_support::ci_route_row_count_for_test(&h.db, &h.task_id).await,
+        1,
+        "a later irrecoverable reason adds evidence to the SAME run-absent row; \
+         it does not open a second one",
+    );
+    assert_eq!(
+        djinn_db::test_support::ci_route_lease_count_for_test(&h.db, &h.task_id).await,
+        leases_after_first,
+        "and it opens no second Tier-2 lease",
+    );
+    assert_eq!(
+        arbitration_rows(&h.db).await,
+        sessions_after_first,
+        "and spends no second Lead session",
+    );
+    assert_eq!(truncated.calls().mutations(), 0);
+    assert_eq!(orphaned.calls().mutations(), 0);
+    assert_eq!(
+        charged_budget_counters(&h.db).await,
+        0,
+        "a diagnose-only route consumes no Tier-1 charge",
+    );
+    assert_eq!(
+        djinn_db::test_support::task_attempt_count_for_test(&h.db, &h.task_id).await,
+        0,
+        "and dispatches no worker",
+    );
+    // A hold streak that has already routed must not keep counting underneath
+    // the adjudication it already has.
+    assert!(
+        h.actor
+            .ci_holds()
+            .get(&pr_head_hold_identity(&h.task_id))
+            .await
+            .expect("streak read")
+            .is_none_or(|streak| streak.poll_count == 0),
+        "an irrecoverable reason is not a hold, so it accumulates no streak",
     );
 }

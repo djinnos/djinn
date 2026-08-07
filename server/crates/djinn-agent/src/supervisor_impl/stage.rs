@@ -756,7 +756,14 @@ async fn advertise_read_sources(
 ///
 /// The returned reopen is *not* yet applied: the caller must first win the
 /// atomic current-identity guard (`resolve_tier2_lease`). That ordering is
-/// [`ci_routing::board_effect`]'s job, not this function's.
+/// [`lead_ci_adjudication`] plus [`apply_lead_ci_result`]'s job, not this
+/// function's — this function is the **pre-guard** projection and exists for
+/// the tests that pin the validation contract on its own.
+///
+/// `#[cfg(test)]` rather than `#[allow(dead_code)]`: wave 5 moved the
+/// production path onto [`apply_lead_ci_result`], and a permissive projection
+/// that no longer runs in production must not be reachable from it.
+#[cfg(test)]
 pub(super) fn lead_stage_outcome_routed(
     finalize_name: &str,
     finalize_payload: Option<&serde_json::Value>,
@@ -770,6 +777,19 @@ pub(super) fn lead_stage_outcome_routed(
             terminal_disposition_required,
         );
     };
+    ci_routing::stage_outcome(&lead_ci_adjudication(finalize_name, finalize_payload, ci).plan)
+}
+
+/// Validate a Lead response against the CI contract, without applying anything.
+///
+/// Split out from [`lead_stage_outcome_routed`] so the guarded path can hold on
+/// to the [`ci_routing::CiAdjudication`] — the `rejection` inside it is what
+/// wave 5 persists, and projecting straight to a `StageOutcome` throws it away.
+pub(super) fn lead_ci_adjudication(
+    finalize_name: &str,
+    finalize_payload: Option<&serde_json::Value>,
+    ci: &ci_routing::CiAdjudicationContext,
+) -> ci_routing::CiAdjudication {
     let response = match (finalize_name, finalize_payload) {
         ("submit_decision", Some(payload)) => ci_routing::LeadResponse::Submitted(payload),
         ("submit_decision", None) | ("", _) => ci_routing::LeadResponse::Missing,
@@ -784,7 +804,90 @@ pub(super) fn lead_stage_outcome_routed(
             "ci_routing: Lead result replaced by the diagnostic fallback"
         );
     }
-    ci_routing::stage_outcome(&adjudication.plan)
+    adjudication
+}
+
+/// Adjudicate, run the atomic current-identity guard, and project the result
+/// the supervisor is **permitted** to apply (proposal `nafu`, wave 5).
+///
+/// This is the wiring wave 4 documented and could not write. Everything before
+/// it decides what a Lead result means; this decides whether it may happen at
+/// all, and it decides that by asking the repository — inside the transaction
+/// that persists the resolution — whether the evidence is still current.
+///
+/// The freshly observed head comes from a **re-read** of the task, not from the
+/// `task` this run started with: a value loaded at dispatch is as old as the
+/// Lead session, and noticing what moved during that session is the entire job.
+async fn apply_lead_ci_result(
+    agent_context: &AgentContext,
+    task_id: &str,
+    ci: &ci_routing::CiAdjudicationContext,
+    adjudication: &ci_routing::CiAdjudication,
+) -> StageOutcome {
+    use djinn_db::{CiRouteAttemptRepository, TaskRepository};
+
+    // `Task::ci_head_sha` is derived from the newest `task_pr_ci_snapshots`
+    // row, i.e. the PR head the board currently believes in. `None` means no
+    // snapshot exists to compare against — which is not evidence that the head
+    // moved, so the stored value stands and the guard's other half (a newer
+    // passing or merged observation, which resolves the lease outright) does
+    // the work.
+    let db = &agent_context.db;
+    let observed_head = TaskRepository::new(db.clone(), agent_context.event_bus.clone())
+        .get(task_id)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|task| task.ci_head_sha)
+        .unwrap_or_else(|| ci.guard.identity.pr_head_sha.clone());
+
+    let routes = CiRouteAttemptRepository::new(db.clone());
+    let effect = ci_routing::apply_under_guard(
+        &routes,
+        ci,
+        adjudication,
+        &ci_routing::CiObservedNow {
+            pr_head_sha: observed_head.clone(),
+        },
+    )
+    .await;
+
+    // The counted effects, logged rather than merely asserted in tests: this
+    // is the line an operator reads to see that a suppressed route dispatched
+    // zero workers and a current one dispatched exactly one.
+    let counts = effect.counts();
+    if effect.is_noop() {
+        tracing::info!(
+            task_id,
+            lane = ci.lane.as_str(),
+            key = %ci.guard.provider_action_key,
+            stored_head = %ci.guard.identity.pr_head_sha,
+            observed_head = %observed_head,
+            board_transitions = counts.board_transitions,
+            worker_dispatches = counts.worker_dispatches,
+            "ci_routing: superseded_before_apply — the Lead result was not applied"
+        );
+    } else {
+        tracing::info!(
+            task_id,
+            lane = ci.lane.as_str(),
+            key = %ci.guard.provider_action_key,
+            board_transitions = counts.board_transitions,
+            worker_dispatches = counts.worker_dispatches,
+            "ci_routing: current-identity guard held — applying the Lead result"
+        );
+    }
+    ci_routing::stage_outcome_after_guard(
+        &adjudication.plan,
+        &effect,
+        &format!(
+            "ci route {} superseded before apply (lane {}, stored head {}, observed head {})",
+            ci.guard.provider_action_key,
+            ci.lane.as_str(),
+            ci.guard.identity.pr_head_sha,
+            observed_head,
+        ),
+    )
 }
 
 /// Map a finished lead/arbiter stage's finalize tool + payload onto a
@@ -1915,15 +2018,62 @@ pub(crate) async fn execute_stage(
                                     .and_then(serde_json::Value::as_bool)
                             })
                             .unwrap_or(false);
-                        let ci_context = ci_routing::CiAdjudicationContext::from_arbiter_directive(
+                        match ci_routing::CiAdjudicationContext::read_arbiter_directive(
                             directive.as_ref(),
-                        );
-                        lead_stage_outcome_routed(
-                            finalize_name,
-                            final_output.finalize_payload.as_ref(),
-                            terminal_disposition_required,
-                            ci_context.as_ref(),
-                        )
+                        ) {
+                            // No route: the pre-existing arbiter contract, byte
+                            // for byte. This is the "feature disabled" row of
+                            // the mixed-version matrix.
+                            ci_routing::CiDirectiveRead::NoRoute => lead_stage_outcome(
+                                finalize_name,
+                                final_output.finalize_payload.as_ref(),
+                                terminal_disposition_required,
+                            ),
+                            // A route block that will not parse cannot be
+                            // guarded, and an unguardable route may not be
+                            // applied. It deliberately does NOT fall through to
+                            // the legacy path: that path rejects a `diagnose`
+                            // payload (no verification command) as a `Failed`
+                            // stage, which feeds the arbiter decision-failure
+                            // counter and parks the task at the cap — so a
+                            // producer bug in one JSON field would park tasks
+                            // whose Lead answered correctly.
+                            ci_routing::CiDirectiveRead::Malformed(field) => {
+                                tracing::warn!(
+                                    task_id = %task.short_id,
+                                    field,
+                                    "ci_routing: arbitration directive carries an unparseable \
+                                     `ci_route` block — applying nothing"
+                                );
+                                StageOutcome::LeadRouteSuperseded {
+                                    reason: format!(
+                                        "ci route block is unparseable at `{field}`; no Lead \
+                                         result was applied"
+                                    ),
+                                }
+                            }
+                            // The cumulative arbitration budget outranks the CI
+                            // contract: at the ceiling no reopen may buy another
+                            // worker cycle, whatever the route says.
+                            ci_routing::CiDirectiveRead::Route(_)
+                                if terminal_disposition_required =>
+                            {
+                                lead_stage_outcome(
+                                    finalize_name,
+                                    final_output.finalize_payload.as_ref(),
+                                    true,
+                                )
+                            }
+                            ci_routing::CiDirectiveRead::Route(ci) => {
+                                let adjudication = lead_ci_adjudication(
+                                    finalize_name,
+                                    final_output.finalize_payload.as_ref(),
+                                    &ci,
+                                );
+                                apply_lead_ci_result(agent_context, &task.id, &ci, &adjudication)
+                                    .await
+                            }
+                        }
                     }
                     // Refinement tribunal roles each finalize via their own
                     // configured tool: the Advocate `submit_work`, the Adversary

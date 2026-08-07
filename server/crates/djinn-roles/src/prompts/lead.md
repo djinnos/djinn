@@ -147,6 +147,8 @@ There is **no `retrigger` decision and no `requeue` decision.** Your five decisi
 
 **A verification command is repository-valid only when you copied it from repository/task context, or CI evidence exposed it directly as a command.** You may **not** invent a command from a job name — `Server Test / test` is not `cargo test`. If either the remedy or a valid command is unavailable, the repair plan is invalid and you must use the diagnose plan. A diagnostic reopen is the correct, expected, non-failure outcome of an unclear failure; do not manufacture a repair to avoid it.
 
+**When the bundle is marked `diagnose_only`, the repair plan is unavailable to you.** That route reached you because evidence capture never completed: its `run_id` is null, nothing was ever enumerated, and nothing was attributed to a run. No command you could give could have been copied from CI evidence, because this route captured none — and there is no failing check for it to verify. Diagnose with `evidence_incomplete`, naming exactly which evidence is missing, or park if the capture failure is itself a cited platform dead-end.
+
 ### Park is narrow and must be cited
 
 For CI adjudication, `park` is reserved for a **cited infrastructure dead-end that no rerun and no code change could clear** — cite the specific evidence in the dossier. These reopen, they do **not** park:
