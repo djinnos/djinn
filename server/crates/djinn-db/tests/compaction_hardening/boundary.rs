@@ -248,11 +248,20 @@ async fn nullable_trigger_telemetry_round_trips() {
         // Repository initialization validates the current migration ledger.
         // Apply any later, unrelated migrations only after migration 134 has
         // transformed the pre-change row, then expose that schema to the API.
-        let latest_version = migration_entries()
-            .last()
-            .map(|(version, _)| *version)
-            .expect("at least one migration");
-        for version in (MIGRATION_134 + 1)..=latest_version {
+        //
+        // Iterate the migrations that EXIST rather than the integer range
+        // between 135 and the newest. Version numbers are only guaranteed to
+        // be strictly increasing (`tests/migrations_immutable.rs`), never
+        // contiguous: a number claimed by a branch that is later abandoned or
+        // renumbered leaves a permanent hole, and a range loop turns that hole
+        // into `panic!("migration N exists")` in a test that has nothing to do
+        // with N.
+        let later: Vec<u64> = migration_entries()
+            .into_iter()
+            .map(|(version, _)| version)
+            .filter(|version| *version > MIGRATION_134)
+            .collect();
+        for version in later {
             apply_migration(&mut migration, version).await;
         }
         record_applied_migrations(&mut migration).await;
