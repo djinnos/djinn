@@ -1,4 +1,4 @@
--- Migration 189: durable internal identity for insert-once session-exit
+-- Migration 194: durable internal identity for insert-once session-exit
 -- liveness observations. This is deliberately nullable: existing and
 -- non-exit classification snapshots remain append-only and readable.
 
