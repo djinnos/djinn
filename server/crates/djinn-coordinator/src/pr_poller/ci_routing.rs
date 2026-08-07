@@ -90,10 +90,13 @@ use crate::types::{ProviderActionGuard, ProviderActionScope};
 use super::ci_triage::{self, CheckEvidence};
 
 pub(crate) use djinn_db::{
-    CI_HEAD_BUDGET_LIMIT, CI_SIGNATURE_BUDGET_LIMIT, CiAction, CiActionPhase, CiBudgetCounts,
-    CiClass, CiEvidenceIdentity, CiLane, CiReservedRecovery, CiRouteAttempt, CiRouteOutcome,
-    CiRouteSubject, CiTier2Reason,
+    CiAction, CiActionPhase, CiBudgetCounts, CiClass, CiEvidenceIdentity, CiLane,
+    CiReservedRecovery, CiRouteAttempt, CiRouteOutcome, CiRouteSubject, CiTier2Reason,
 };
+// Read only by `budget_ceilings`, which exists so a test can assert the numbers
+// the routing contract enforces are the numbers the repository charges against.
+#[cfg(test)]
+pub(crate) use djinn_db::{CI_HEAD_BUDGET_LIMIT, CI_SIGNATURE_BUDGET_LIMIT};
 
 // ---------------------------------------------------------------------------
 // Subject scope
@@ -388,13 +391,25 @@ impl CiIncompleteReason {
     /// `LogApiError` are Tier 2 because the proposal scopes them to "after an
     /// immutable run is known" — the run identity survives the error, so the
     /// route can be keyed. A page failure during enumeration has no run yet.
+    ///
+    /// # `CheckEnumerationUnavailable` is on the *other* side, and that is a fix
+    ///
+    /// It used to sit here with the other two, and that made it a permanent
+    /// wedge. A hold's whole premise is that "a later poll can turn this into an
+    /// evidence bundle for free" — true of a failed page (a provider incident)
+    /// and of a short read (the provider disagreeing with itself), and false of
+    /// pagination truncation. Truncation means the PR genuinely has more check
+    /// runs than `MAX_PAGES * PER_PAGE`, which is a property of the PR, not of
+    /// the moment: every subsequent enumeration returns the identical verdict,
+    /// so the route holds on every poll forever, with no route row, no
+    /// adjudication, and nothing on the board to say why the task stopped.
+    ///
+    /// It is instead complete-but-unusable current evidence: a real enumeration
+    /// whose contents no automatic action can read. That is the guarded Tier-2
+    /// row of the proposal's table, and it is bounded — the head-scoped lease
+    /// makes it exactly one Lead adjudication per PR head, not one per poll.
     pub(crate) fn is_enumeration_failure(self) -> bool {
-        matches!(
-            self,
-            Self::EnumerationPageFailed
-                | Self::CheckEnumerationUnavailable
-                | Self::PartialPagination
-        )
+        matches!(self, Self::EnumerationPageFailed | Self::PartialPagination)
     }
 }
 
@@ -478,6 +493,7 @@ impl<'a> CiCapture<'a> {
     }
 
     /// Whether this capture is the authoritatively complete *empty* one.
+    #[cfg(test)]
     pub(crate) fn is_complete_empty(&self) -> bool {
         matches!(self.0, Capture::CompleteEmpty)
     }
@@ -665,14 +681,6 @@ pub(crate) enum CiProviderActionKind {
 }
 
 impl CiProviderAction {
-    pub(crate) fn kind(&self) -> CiProviderActionKind {
-        self.kind
-    }
-
-    pub(crate) fn run_id(&self) -> i64 {
-        self.run_id
-    }
-
     /// Admit this action into the leader's provider-action scope.
     ///
     /// `None` means admission is closed — leadership is winding down — and the
@@ -686,6 +694,20 @@ impl CiProviderAction {
     /// provider call escapes the tracked scope" a property of the type rather
     /// than a convention every lane executor has to remember: a call site that
     /// skipped the scope would have nothing to pass to the provider.
+    ///
+    /// # This is load-bearing, and it was not
+    ///
+    /// The paragraph above used to be false. `CiProviderAction` exposed
+    /// `kind()` and `run_id()` as `pub(crate)`, so any module in the crate
+    /// could read the call target straight off the *unadmitted* value and call
+    /// `rerun_failed_jobs(owner, repo, action.run_id() as u64)` with no scope,
+    /// no guard, and no compiler complaint. The guarantee was a doc comment.
+    ///
+    /// Both accessors now live on [`AdmittedCiProviderAction`] and nowhere
+    /// else, so the only way to learn *which* call to make is to have already
+    /// entered the scope — and a scope that refused admission yields nothing to
+    /// read. That is the structural property the fixtures rely on when they
+    /// assert that a closed scope performs no provider mutation.
     pub(crate) fn admit(&self, scope: &ProviderActionScope) -> Option<AdmittedCiProviderAction> {
         scope.admit().map(|guard| AdmittedCiProviderAction {
             kind: self.kind,
@@ -740,6 +762,8 @@ pub(crate) enum CiRouteRationale {
     /// The provider call returned an explicit error.
     ProviderActionFailed,
     /// A `calling` row was legally handed off and its result is unknowable.
+    /// Produced by [`unknown_outcome_route`]; see its note.
+    #[allow(dead_code)]
     ProviderOutcomeUnknown,
     /// A newer passing observation closes the route.
     NewerPass,
@@ -813,6 +837,7 @@ impl CiRouteDecision {
         self.tier2_reason
     }
 
+    #[cfg(test)]
     pub(crate) fn opens_tier2_lease(&self) -> bool {
         self.tier2_reason.is_some()
     }
@@ -835,6 +860,7 @@ impl CiRouteDecision {
 
     /// Whether this decision consumes a Tier-1 retry charge. Only a decision
     /// carrying a provider authorization can.
+    #[cfg(test)]
     pub(crate) fn consumes_tier1_charge(&self) -> bool {
         self.provider_action.is_some()
     }
@@ -850,11 +876,13 @@ impl CiRouteDecision {
     /// exactly one place — a resolved Tier-2 lease carrying a validated Lead
     /// result (wave 4) — and this accessor exists so that invariant is
     /// asserted by tests rather than assumed.
+    #[cfg(test)]
     pub(crate) fn authorizes_board_transition(&self) -> bool {
         false
     }
 
     /// See [`Self::authorizes_board_transition`].
+    #[cfg(test)]
     pub(crate) fn authorizes_worker_dispatch(&self) -> bool {
         false
     }
@@ -1082,6 +1110,7 @@ pub(crate) fn classify(observation: &CiObservation<'_>) -> CiRouteDecision {
 /// Returned as a pair so a test can assert the numbers the routing contract
 /// actually enforces are the numbers the repository charges against — a local
 /// copy of `2` and `4` would drift the first time either is tuned.
+#[cfg(test)]
 pub(crate) fn budget_ceilings() -> (i64, i64) {
     (CI_SIGNATURE_BUDGET_LIMIT, CI_HEAD_BUDGET_LIMIT)
 }
@@ -1112,6 +1141,14 @@ pub(crate) fn provider_failure_route(class: CiClass) -> CiRouteDecision {
 
 /// The Tier-2 route for a `calling` row whose external result became unknowable
 /// after a quiescent exclusive startup handoff.
+// The classifier's name for a legally handed-off `calling` row whose external
+// result is unknowable. The *durable* transition is owned by
+// `recover_calling_owner`, which writes `outcome_unknown` and opens the lease in
+// one transaction; this is the decision-shaped view of the same fact, and wave 4
+// consumes it when it builds the Lead evidence bundle for such a route. Kept
+// beside its two siblings rather than deleted so the four Tier-2 entry reasons
+// stay one enumerable set.
+#[allow(dead_code)]
 pub(crate) fn unknown_outcome_route(class: CiClass) -> CiRouteDecision {
     CiRouteDecision::tier2(
         class,
@@ -1128,6 +1165,12 @@ pub(crate) fn unknown_outcome_route(class: CiClass) -> CiRouteDecision {
 /// terminal outcome, and they are distinguished because the proposal reports
 /// obsolete routes suppressed before the provider call, before Lead dispatch,
 /// and before supervisor application as separate counts.
+///
+/// Only `AfterCall` has a coordinator consumer today — the startup owner
+/// handoff. The other three name supersessions the *supervisor* detects (before
+/// Lead dispatch, and atomically with applying a Lead result), which is wave 4's
+/// half of the contract, and the wave-5 report counts all four separately.
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum CiRouteStage {
     /// Reserved, no provider call has happened.
@@ -1293,6 +1336,10 @@ pub(crate) fn may_open_tier2(attempt: &CiRouteAttempt) -> bool {
 /// report that reads `terminal_outcome` alone counts such a route as a provider
 /// failure and drops the reopen entirely — which is every reopen that followed
 /// a provider failure or an unknown outcome.
+// Read back by the wave-5 reporting surface (repair vs diagnostic reopens, parks
+// with cited cause). No coordinator path reads a resolved Tier-2 lease yet,
+// because nothing dispatches Lead yet.
+#[allow(dead_code)]
 pub(crate) fn is_reopen(attempt: &CiRouteAttempt) -> bool {
     matches!(
         attempt.adjudicated_outcome(),
@@ -1302,9 +1349,13 @@ pub(crate) fn is_reopen(attempt: &CiRouteAttempt) -> bool {
 
 /// Whether this route ended in a park. See [`is_reopen`] on why this reads the
 /// adjudicated outcome rather than the terminal one.
+#[allow(dead_code)]
 pub(crate) fn is_park(attempt: &CiRouteAttempt) -> bool {
     attempt.adjudicated_outcome() == Some(CiRouteOutcome::Parked)
 }
+
+pub(crate) mod executor;
+pub(crate) mod gate;
 
 #[cfg(test)]
 mod tests;

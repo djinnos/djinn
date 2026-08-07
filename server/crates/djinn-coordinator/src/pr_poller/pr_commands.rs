@@ -94,6 +94,8 @@ impl CoordinatorActor {
                 pr_url,
                 state.last_dequeue.as_ref(),
                 "merge_queue_dequeued",
+                current_sha,
+                pr_node_id,
             )
             .await;
             return;
@@ -124,6 +126,8 @@ impl CoordinatorActor {
                         pr_url,
                         state.last_dequeue.as_ref(),
                         "merge_queue_unmergeable",
+                        current_sha,
+                        pr_node_id,
                     )
                     .await;
                     return;
@@ -224,6 +228,12 @@ impl CoordinatorActor {
         pr_url: &str,
         dequeue: Option<&djinn_provider::github_api::DequeueEvent>,
         source: &str,
+        // `nafu` wave 3b: the merge-group route needs the PR's current head and
+        // its GraphQL node id — the first names the immutable evidence identity,
+        // the second is what `enable_auto_merge` mutates. Both are already in
+        // scope at every call site.
+        pr_head_sha: &str,
+        pr_node_id: &str,
     ) {
         let reason = match dequeue.and_then(|d| d.reason.clone()) {
             Some(reason) => reason,
@@ -287,20 +297,88 @@ impl CoordinatorActor {
         // reopening for another blind rework round.
         let mut mq_strike_count: i64 = 0;
         let mut mq_escalation_checks: Vec<String> = Vec::new();
-        let pr_marker = format!("pr-{pull_number}-");
         match gh_client
             .list_workflow_runs_for_event(owner, repo, "merge_group", 50)
             .await
         {
             Ok(runs) => {
-                // Runs are newest-first; take the most recent FAILED merge-group
-                // run whose branch belongs to this PR.
-                let failing_run = runs.into_iter().find(|r| {
-                    r.conclusion.as_deref() == Some("failure")
-                        && r.head_branch
-                            .as_deref()
-                            .is_some_and(|b| b.contains(&pr_marker))
-                });
+                // ── `nafu` wave 3b: the durable route layer gets first refusal ──
+                //
+                // Tier 1 only. An inconclusive merge-group run re-enters the
+                // queue via `enable_auto_merge`, stays `pr_review`, and
+                // dispatches no worker; everything else falls through to the
+                // reopen below exactly as before. Gate-off is a pure decline.
+                if self.ci_routing_gate().owns_routes() {
+                    // Resolved only when the gate is on: enabling auto-merge
+                    // with a method the repository forbids soft-fails and
+                    // forfeits the gating, but the extra `GET /repos` must not
+                    // be paid on every dequeue in a deployment where the
+                    // feature is off.
+                    let method = self
+                        .resolve_allowed_merge_methods(gh_client, owner, repo)
+                        .await
+                        .first()
+                        .copied()
+                        .unwrap_or(MergeMethod::Squash);
+                    if self
+                        .route_merge_group_ci_evidence(
+                            gh_client,
+                            task_id,
+                            task_short_id,
+                            owner,
+                            repo,
+                            pull_number,
+                            pr_head_sha,
+                            pr_node_id,
+                            method,
+                            &runs,
+                            dequeue,
+                        )
+                        .await
+                        .is_routed()
+                    {
+                        return;
+                    }
+                }
+
+                // ── Correlate the dequeue to exactly one terminal run ──────
+                //
+                // This used to be `runs.into_iter().find(|r| conclusion ==
+                // Some("failure") && branch contains "pr-<n>-")`, and it was
+                // wrong twice over.
+                //
+                // 1. **`failure` only.** A merge-group run that *times out* —
+                //    the single most common way this repository's heavy stages
+                //    die — matched nothing. No enrichment, no `mq_*` lane row,
+                //    so `mq_strike_count` stayed 0, so
+                //    `mq_rejection_requires_park` never fired, so the task
+                //    reopened blind forever. `correlate_merge_group_run` uses
+                //    the same `is_failing_conclusion` predicate the rest of the
+                //    poller does (`failure | timed_out | cancelled`).
+                //
+                // 2. **`find` over unpinned provider ordering.** "Runs are
+                //    newest-first" is GitHub's convention, not a guarantee, and
+                //    two terminal merge-group runs for one PR means the queue
+                //    ran it twice — which one this dequeue refers to is
+                //    genuinely unknown. `correlate_merge_group_run` answers
+                //    `Ambiguous` rather than picking, and a non-terminal
+                //    correlate is `NotTerminal` rather than a silent miss.
+                //
+                // The enrichment below is best-effort feedback, so both error
+                // arms degrade to the generic-reason path the `else` already
+                // had; the routing contract is what treats them as first-class.
+                let failing_run = correlate_merge_group_run(pull_number, &runs)
+                    .inspect_err(|err| {
+                        tracing::info!(
+                            task_id = %task_short_id,
+                            pr = pull_number,
+                            ?err,
+                            "PR poller: merge-group correlation did not yield one terminal run; \
+                             feedback stays generic"
+                        );
+                    })
+                    .ok()
+                    .cloned();
                 if let Some(run) = failing_run {
                     match gh_client
                         .list_check_runs_for_ref(owner, repo, &run.head_sha)

@@ -390,8 +390,7 @@ impl CoordinatorActor {
             // GitHub incident during one poll would mark the head green and let
             // the merge gate through.
             if (sha_changed || !self.pr_status_cache.contains_key(&task.id))
-                && checks.check_runs.is_empty()
-                && checks.completeness.is_complete()
+                && ci_helpers::empty_check_set_is_authoritatively_green(&checks)
             {
                 // No CI check-runs configured on this repo. A `pr_review` PR has
                 // already cleared the `pr_draft` min-age guard and been

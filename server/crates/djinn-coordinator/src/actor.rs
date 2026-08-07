@@ -294,6 +294,15 @@ pub(super) struct CoordinatorActor {
     pub(super) consolidation_runner: Arc<dyn ConsolidationRunner>,
     pub(super) mismatch_scan: crate::doctor::mismatch_scan::MismatchScanCoordinator,
     pub(super) last_stale_sweep: StdInstant,
+    /// Last pass of the CI-route reservation sweep (proposal `nafu`).
+    ///
+    /// Recurring rather than startup-only. Wave 3's own doc comment records
+    /// why: an exhausted reservation whose head Tier-2 lease is already held by
+    /// a peer stamps `retry_exhausted_at`, opens no lease, and stays in phase
+    /// `reserved`. Nothing in the repository re-drives it and the peer's lease
+    /// resolving does not wake it, so under a startup-only sweep that row sits
+    /// `reserved` until the process restarts.
+    pub(super) last_ci_route_sweep: StdInstant,
     /// ADR-051 §7 — timestamp of the last auto-dispatch safety-net sweep.
     pub(super) last_auto_dispatch_sweep: StdInstant,
     /// Timestamp of the last proposal-review backfill sweep (dispatches a
@@ -797,6 +806,7 @@ impl CoordinatorActor {
                 crate::events::event_bus_for(&events_tx),
             ),
             last_stale_sweep: SystemClock::new().now_instant(),
+            last_ci_route_sweep: SystemClock::new().now_instant(),
             last_auto_dispatch_sweep: SystemClock::new().now_instant(),
             last_proposal_review_sweep: SystemClock::new().now_instant(),
             last_graph_refresh: SystemClock::new().now_instant(),
@@ -1198,6 +1208,12 @@ impl CoordinatorActor {
         // `poll_stack::boxed` — see that module for why the coordinator's poll
         // chain cannot afford to build its sub-futures in the caller's frame.
         poll_stack::boxed(|| self.register_coordinator_incarnation()).await;
+        // Proposal `nafu`: hand off CI-route `calling` rows left behind by a
+        // former incarnation. Startup-only, and strictly *after* this
+        // incarnation's own lease exists — the handoff compare-and-sets from the
+        // former owner to this one, so this id must be registered first.
+        // Reaching here at all means the advisory lock was won.
+        poll_stack::boxed(|| self.recover_ci_calling_owners_at_startup()).await;
         // Keep the incarnation lease fresh from a dedicated task so a slow tick
         // never lets the reaper read this live coordinator as expired.
         self.spawn_incarnation_renewal();
@@ -1465,6 +1481,10 @@ impl CoordinatorActor {
             // for non-terminal tasks that sit outside poller-owned statuses.
             poll_stack::boxed(|| self.reconcile_blindspot_merged_prs()).await;
             self.last_stale_sweep = SystemClock::new().now_instant();
+        }
+        if self.last_ci_route_sweep.elapsed() >= crate::pr_poller::CI_ROUTE_SWEEP_INTERVAL {
+            poll_stack::boxed(|| self.sweep_ci_routes()).await;
+            self.last_ci_route_sweep = SystemClock::new().now_instant();
         }
         if self.last_auto_dispatch_sweep.elapsed() >= AUTO_DISPATCH_SWEEP_INTERVAL {
             poll_stack::boxed(|| self.sweep_stale_auto_dispatches()).await;

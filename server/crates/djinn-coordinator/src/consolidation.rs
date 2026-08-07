@@ -481,6 +481,7 @@ mod tests {
                 crate::events::event_bus_for(tx),
             ),
             last_stale_sweep: StdInstant::now(),
+            last_ci_route_sweep: StdInstant::now(),
             last_auto_dispatch_sweep: StdInstant::now(),
             last_proposal_review_sweep: StdInstant::now(),
             last_graph_refresh: StdInstant::now(),

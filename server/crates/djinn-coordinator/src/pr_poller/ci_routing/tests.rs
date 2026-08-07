@@ -215,8 +215,43 @@ fn fully_inconclusive_pr_head_run_is_tier_one_rerun() {
     let action = decision
         .provider_action()
         .expect("Tier 1 authorizes exactly one provider mutation");
-    assert_eq!(action.kind(), CiProviderActionKind::RerunFailedJobs);
-    assert_eq!(action.run_id(), 900);
+    // The call target is readable only through the scope. `CiProviderAction`
+    // itself no longer exposes `kind()`/`run_id()`, which is what stops a
+    // sibling module from calling the provider without ever entering the scope.
+    let scope = ProviderActionScope::new();
+    let admitted = action
+        .admit(&scope)
+        .expect("an open scope admits the Tier-1 action");
+    assert_eq!(admitted.kind(), CiProviderActionKind::RerunFailedJobs);
+    assert_eq!(admitted.run_id(), 900);
+}
+
+/// The structural claim [`CiProviderAction::admit`] makes, asserted rather than
+/// documented: there is no way to learn the call target without a live guard.
+///
+/// A closed scope yields `None`, and `None` carries neither the action kind nor
+/// the run id — so the sibling-module executor that used to be writable
+/// (`rerun_failed_jobs(owner, repo, action.run_id() as u64)`, no scope, clean
+/// compile) no longer has anything to pass.
+#[test]
+fn a_refused_admission_yields_no_call_target_at_all() {
+    let checks = [ran_then_cancelled("Quality Gate / test (1)", 900)];
+    let blocking = refs(&checks);
+    let id = pr_head_identity(900);
+    let decision = classify(&observe(&id, &id, complete(&blocking)));
+    let action = decision
+        .provider_action()
+        .expect("Tier 1 authorizes a call");
+
+    let scope = ProviderActionScope::new();
+    scope.close_admission();
+
+    assert!(
+        action.admit(&scope).is_none(),
+        "a closed scope must not hand out a call target"
+    );
+    assert_eq!(scope.counts().admitted_total, 0);
+    assert_eq!(scope.counts().refused_total, 1);
 }
 
 #[test]
@@ -232,8 +267,12 @@ fn fully_inconclusive_merge_group_run_re_enqueues() {
 
     assert_eq!(decision.class(), CiClass::Inconclusive);
     assert_eq!(decision.action(), CiAction::Reenqueue);
+    let scope = ProviderActionScope::new();
     assert_eq!(
-        decision.provider_action().map(CiProviderAction::kind),
+        decision
+            .provider_action()
+            .and_then(|a| a.admit(&scope))
+            .map(|a| a.kind()),
         Some(CiProviderActionKind::EnableAutoMerge)
     );
 }
@@ -408,12 +447,22 @@ fn incomplete_enumeration_cannot_masquerade_as_complete_empty() {
             decision.complete_empty_route().is_none(),
             "{reason:?} reached a lane no-CI fast path: {decision:?}"
         );
-        assert!(!decision.creates_route_row(), "{reason:?}: {decision:?}");
         assert!(
             !decision.consumes_tier1_charge(),
             "{reason:?}: {decision:?}"
         );
-        assert_no_effects(&decision);
+        assert!(
+            decision.provider_action().is_none(),
+            "{reason:?}: {decision:?}"
+        );
+        // Truncation is the one reason that earns a route row, because it is
+        // the one that cannot be re-polled away. The rest spend nothing.
+        if reason == CheckSetIncompleteReason::MaxPagesTruncated {
+            assert!(decision.creates_route_row(), "{reason:?}: {decision:?}");
+        } else {
+            assert!(!decision.creates_route_row(), "{reason:?}: {decision:?}");
+            assert_no_effects(&decision);
+        }
     }
 }
 
@@ -523,11 +572,26 @@ const EVERY_INCOMPLETE_REASON: [CiIncompleteReason; 11] = [
 /// is a second opinion rather than a restatement.
 fn expected_to_hold(reason: CiIncompleteReason) -> bool {
     match reason {
-        // "Any failed page, `MAX_PAGES` truncation, or collected count below
-        // reported `total_count` → Hold without a route row."
-        CiIncompleteReason::EnumerationPageFailed
-        | CiIncompleteReason::CheckEnumerationUnavailable
-        | CiIncompleteReason::PartialPagination => true,
+        // "Any failed page ... or collected count below reported
+        // `total_count` → Hold without a route row." Both are transient
+        // provider facts that a later poll can resolve for free.
+        CiIncompleteReason::EnumerationPageFailed | CiIncompleteReason::PartialPagination => true,
+        // `MAX_PAGES` truncation is deliberately NOT on the hold side, and the
+        // divergence from the proposal's sentence is the point.
+        //
+        // A hold's premise is "a later poll turns this into an evidence bundle
+        // for free". That is true of a failed page and of a short read. It is
+        // false of truncation: the PR genuinely has more check runs than
+        // `MAX_PAGES * PER_PAGE`, which is a property of the PR and not of the
+        // moment, so every subsequent enumeration returns the identical
+        // verdict. Held, such a PR's CI gate never resolves — no route row, no
+        // adjudication, no board signal, forever.
+        //
+        // It is complete-but-unusable current evidence instead: a real
+        // enumeration whose contents no automatic action can read. That is the
+        // guarded Tier-2 row, and the head-scoped lease bounds it to one Lead
+        // adjudication per PR head rather than one per poll.
+        CiIncompleteReason::CheckEnumerationUnavailable => false,
         // "Complete snapshot with missing or malformed timestamps, check/log
         // API error after an immutable run is known, or ambiguous merge-group
         // correlation → Tier 2 after the current-identity guard."
@@ -581,28 +645,51 @@ fn every_incomplete_evidence_case_fails_closed_without_provider_mutation() {
 /// The completeness gate reaches the *existing* merge gate, not just the new
 /// route — and it is not behind `ci_evidence_routing`.
 ///
-/// Three production sites decide "green" from an empty or all-passing check
-/// list, and all three are now guarded. This asserts the two lane fast paths at
-/// their actual predicate, because the bug they had was not a wrong branch: it
-/// was the right branch asked the wrong question. `is_empty()` is true of both
-/// "this repository has no CI" and "page 1 returned 500", and only the verdict
-/// separates them.
+/// # This test used to be a label
+///
+/// It asserted `CheckRunsResponse::incomplete(...).completeness.is_complete()`
+/// is false — a fact about a constructor — and put the claim it cared about
+/// ("the draft lane's no-CI branch and the review lane's `Passing` persist are
+/// both gated on this") in an *assertion message*. Deleting the completeness
+/// clause from either production branch left it green, because it never touched
+/// either branch.
+///
+/// Both branches now call one predicate,
+/// [`ci_helpers::empty_check_set_is_authoritatively_green`], and this drives
+/// that predicate. Removing the `completeness` conjunct from it fails here, and
+/// there is no second copy of the expression to drift.
 #[test]
 fn incomplete_check_set_never_records_passing() {
-    let runs = [make_passing_check("Quality Gate / build")];
+    use crate::pr_poller::ci_helpers::empty_check_set_is_authoritatively_green;
 
-    // The failed-first-page shape: zero runs, `total_count: 0`.
+    // The failed-first-page shape: zero runs, `total_count: 0` — byte-identical
+    // to a repository with no CI, which is the fast path to green.
     let failed_first_page =
         CheckRunsResponse::incomplete(0, Vec::new(), CheckSetIncompleteReason::PageFetchFailed);
     assert!(failed_first_page.check_runs.is_empty());
     assert!(
-        !failed_first_page.completeness.is_complete(),
-        "the draft lane's no-CI branch and the review lane's `Passing` persist \
-         are both gated on this being false",
+        !empty_check_set_is_authoritatively_green(&failed_first_page),
+        "a failed first page must not reach either lane's no-CI fast path",
     );
 
+    // Every other way an enumeration can fail to prove itself, with the same
+    // empty shape. None of them may authorize green.
+    for reason in [
+        CheckSetIncompleteReason::PageFetchFailed,
+        CheckSetIncompleteReason::MaxPagesTruncated,
+        CheckSetIncompleteReason::ShortRead,
+    ] {
+        let empty_but_unproven = CheckRunsResponse::incomplete(0, Vec::new(), reason);
+        assert!(
+            !empty_check_set_is_authoritatively_green(&empty_but_unproven),
+            "{reason:?} authorized the fast path to green",
+        );
+    }
+
     // The all-green-prefix shape: every fetched member passed, but the walk
-    // stopped early. Classifying on the collected list alone yields `Passing`.
+    // stopped early. It is not empty, so the fast path never applies — and the
+    // snapshot writer's own gate turns it into `Unknown` rather than `Passing`.
+    let runs = [make_passing_check("Quality Gate / build")];
     let short_read =
         CheckRunsResponse::incomplete(9, runs.to_vec(), CheckSetIncompleteReason::ShortRead);
     assert!(
@@ -611,13 +698,26 @@ fn incomplete_check_set_never_records_passing() {
             .iter()
             .all(|cr| cr.conclusion.as_deref() == Some("success")),
     );
-    assert!(!short_read.completeness.is_complete());
+    assert!(!empty_check_set_is_authoritatively_green(&short_read));
+    assert!(
+        short_read.completeness.incomplete_reason().is_some(),
+        "`record_ci_snapshot` returns Unknown on exactly this predicate",
+    );
 
     // And the genuine no-CI shape, which must still be allowed through — the
-    // gate has to be a filter, not a wall.
+    // gate has to be a filter, not a wall. A no-CI repository that stopped
+    // going green would wedge every task in `pr_draft` forever.
     let genuinely_empty = CheckRunsResponse::complete(Vec::new());
-    assert!(genuinely_empty.check_runs.is_empty());
-    assert!(genuinely_empty.completeness.is_complete());
+    assert!(
+        empty_check_set_is_authoritatively_green(&genuinely_empty),
+        "an authoritatively complete empty enumeration is still green",
+    );
+
+    // A complete enumeration that is *not* empty never takes the fast path
+    // either: it has checks to classify, and classification is the other path.
+    assert!(!empty_check_set_is_authoritatively_green(
+        &CheckRunsResponse::complete(runs.to_vec())
+    ));
 }
 
 fn make_passing_check(name: &str) -> CheckRun {
@@ -1135,20 +1235,30 @@ fn incomplete_check_set_holds_without_route_or_session() {
         let decision = classify(&observe(&id, &id, CiCapture::incomplete(routing_reason)));
 
         assert_eq!(
-            decision.action(),
-            CiAction::Hold,
-            "{routing_reason:?} must hold, not adjudicate: {decision:?}",
-        );
-        assert_eq!(
             decision.rationale(),
             CiRouteRationale::IncompleteEvidence(routing_reason),
         );
-        assert!(
-            !decision.creates_route_row(),
-            "{routing_reason:?} created a route row: {decision:?}",
-        );
+        // Whatever else it does, an incomplete enumeration never reaches the
+        // provider and never charges a retry slot.
+        assert!(decision.provider_action().is_none(), "{decision:?}");
         assert!(!decision.consumes_tier1_charge(), "{decision:?}");
-        assert_no_effects(&decision);
+
+        if expected_to_hold(routing_reason) {
+            assert_eq!(
+                decision.action(),
+                CiAction::Hold,
+                "{routing_reason:?} must hold, not adjudicate: {decision:?}",
+            );
+            assert!(
+                !decision.creates_route_row(),
+                "{routing_reason:?} created a route row: {decision:?}",
+            );
+            assert_no_effects(&decision);
+        } else {
+            // Truncation. It cannot be re-polled into completeness, so it takes
+            // the guarded, deduplicated Tier-2 route instead of an endless hold.
+            assert_lead_only(&decision, CiTier2Reason::EvidenceUnknown);
+        }
     }
 }
 

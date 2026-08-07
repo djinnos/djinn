@@ -1188,6 +1188,19 @@ impl GitHubApiClient {
             }
         }
 
+        // Reaching the ceiling is not the same fact as being truncated by it.
+        // `hit_cap` is set the moment page `MAX_PAGES` comes back *full*, which
+        // is exactly what a set of precisely `MAX_PAGES * PER_PAGE` runs looks
+        // like — a walk that collected everything. Testing the flag before the
+        // arithmetic that exonerates it declared such a PR permanently
+        // incomplete, and `MaxPagesTruncated` has no re-poll that can clear it,
+        // so that PR's CI gate wedged forever on a full enumeration.
+        //
+        // The provider's own `total_count` is the exoneration, and it is safe
+        // to trust it *in this direction only*: claiming completeness needs
+        // `collected >= total_count`, while the short-read branch below still
+        // catches the opposite disagreement.
+        let truncated = hit_cap && all_runs.len() < total_count as usize;
         if hit_cap {
             tracing::warn!(
                 owner,
@@ -1196,7 +1209,30 @@ impl GitHubApiClient {
                 max_pages = MAX_PAGES,
                 collected = all_runs.len(),
                 total_count,
-                "GitHubApiClient: check-runs pagination hit MAX_PAGES cap; some runs may be omitted",
+                truncated,
+                "GitHubApiClient: check-runs pagination reached the MAX_PAGES ceiling",
+            );
+        }
+        if truncated {
+            // Deliberately `error!`, not `warn!`. This is the one incompleteness
+            // reason no later poll can clear: the PR genuinely has more check
+            // runs than the ceiling, so every subsequent enumeration returns the
+            // identical verdict. It needs an operator, and the routing contract
+            // gives it a bounded escape by treating it as complete-but-unusable
+            // evidence (one guarded Lead adjudication) rather than as a
+            // re-pollable enumeration failure — see
+            // `CiIncompleteReason::is_enumeration_failure`.
+            tracing::error!(
+                owner,
+                repo,
+                head_sha = %pr.head.sha,
+                max_pages = MAX_PAGES,
+                per_page = PER_PAGE,
+                collected = all_runs.len(),
+                total_count,
+                "GitHubApiClient: check-run enumeration EXCEEDS the pagination ceiling and \
+                 cannot be completed by re-polling; this PR's CI evidence is permanently \
+                 truncated until the ceiling is raised",
             );
         }
 
@@ -1216,7 +1252,7 @@ impl GitHubApiClient {
                 "GitHubApiClient: check-run enumeration is INCOMPLETE (page fetch failed)",
             );
             CheckSetCompleteness::Incomplete(CheckSetIncompleteReason::PageFetchFailed)
-        } else if hit_cap {
+        } else if truncated {
             CheckSetCompleteness::Incomplete(CheckSetIncompleteReason::MaxPagesTruncated)
         } else if all_runs.len() < total_count as usize {
             tracing::warn!(

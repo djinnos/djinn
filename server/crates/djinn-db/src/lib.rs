@@ -24,10 +24,13 @@ pub mod test_support {
         AtomicEvidenceDemandCountsForTest, HousekeepingFixture, HousekeepingFixtureExpectedCounts,
         HousekeepingFixtureProject, RefinementLifecycleAuditRowForTest, RefinementRunAuditForTest,
         RefinementRunReadOnlySnapshotForTest, StructuredEvidenceHandoffCountsForTest,
-        UsageTestSessionSeed, UsageTestTaskSeed, add_blocker_edge,
+        UsageTestSessionSeed, UsageTestTaskSeed, activity_row_count_for_test, add_blocker_edge,
         apply_all_migrations_to_fresh_database, atomic_evidence_demand_counts_for_test,
         backdate_coordinator_incarnation_lease, backdate_task_attempt_created_at,
-        backdate_task_updated_at, build_multi_project_housekeeping_fixture, close_task_at,
+        backdate_task_updated_at, build_multi_project_housekeeping_fixture,
+        ci_route_age_calling_for_test, ci_route_age_reserved_for_test,
+        ci_route_force_calling_owner_for_test, ci_route_lease_count_for_test,
+        ci_route_plant_reserved_for_test, ci_route_row_count_for_test, close_task_at,
         complete_refinement_intent_without_successor_for_test,
         correlate_task_to_refinement_run_for_test, corrupt_credential_encrypted_value,
         corrupt_refinement_task_role_for_test, count_rows_for_test,
@@ -54,7 +57,7 @@ pub mod test_support {
         seed_readiness_detail_projection_for_test, seed_session_row, seed_session_row_with_id,
         seed_task_row, seed_workspace_coverage_for_test, set_model_turn_capability_fixture,
         set_task_short_id_for_test, structured_evidence_handoff_counts_for_test,
-        task_row_count_for_test,
+        task_attempt_count_for_test, task_row_count_for_test, task_status_for_test,
     };
 }
 

@@ -1,7 +1,7 @@
 // djinn:allow-oversize
 use super::*;
 use djinn_core::models::CiStatus;
-use djinn_provider::github_api::RequiredCheckReproduction;
+use djinn_provider::github_api::{CheckRunsResponse, RequiredCheckReproduction};
 
 use super::ci_failure_analysis::{
     compute_ci_failure_fingerprint, detect_scope_inversion, extract_crate_names,
@@ -1003,6 +1003,31 @@ pub(crate) fn is_advisory_check_name(name: &str) -> bool {
         "amplify",
     ];
     ADVISORY_MARKERS.iter().any(|m| lower.contains(m))
+}
+
+/// Whether an *empty* check-run enumeration authorizes a lane's no-CI fast
+/// path to green (proposal `nafu`).
+///
+/// # Both halves are load-bearing, and only one of them was tested
+///
+/// Two lanes take a fast path to `CiStatus::Passing` off the strength of an
+/// empty check-run set: `poll_pr_draft_tasks`'s "no CI configured after the
+/// min-age guard" branch, and `poll_pr_review_tasks`'s mirror of it. Both wrote
+/// the predicate inline, and deleting the `completeness` clause from either left
+/// the whole coordinator suite green — the only test naming the invariant
+/// asserted predicate values and put the production claim in an assertion
+/// *message*.
+///
+/// The clause is what separates two byte-identical inputs. A repository with no
+/// CI returns `total_count: 0` and zero runs; so does a *failed first page* of
+/// the enumeration, because nothing was ever parsed. Only the provider's own
+/// verdict tells them apart, so a GitHub incident during one poll would
+/// otherwise mark the head green and let the merge gate through.
+///
+/// Defined once here and called from both branches, so a test of this function
+/// is a test of the production predicate rather than of a copy of it.
+pub(crate) fn empty_check_set_is_authoritatively_green(checks: &CheckRunsResponse) -> bool {
+    checks.check_runs.is_empty() && checks.completeness.is_complete()
 }
 
 /// From the set of failed check-runs, return only those that are *blocking*
