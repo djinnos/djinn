@@ -268,6 +268,7 @@ pub enum StageOutcome {
         tokens_in: i64,
         tokens_out: i64,
     },
+    ModelTurnAdmission(ModelTurnAdmissionStageOutcome),
     /// Arbiter `submit_decision(decision="park")` — the arbiter parked the
     /// task with a structured `park_dossier` describing the hold. Maps to a
     /// human-review hold on the board; the task cannot be auto-closed by an
@@ -318,6 +319,13 @@ pub struct StageExecutionResult {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ParkReason {
     Budget,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum ModelTurnAdmissionStageOutcome {
+    Wait(djinn_db::ModelTurnAdmissionWait),
+    Rejected(djinn_db::ModelTurnAdmissionRejection),
+    DispatchFenced(djinn_db::ModelTurnLeaseMutationOutcome),
 }
 
 impl StageOutcome {

@@ -68,7 +68,9 @@ use djinn_core::models::{SessionFailureCause, SessionStatus, Task};
 use djinn_core::tool_error::ToolError;
 use djinn_db::ProjectRepository;
 use djinn_runtime::spec::{RoleKind, TaskRunSpec};
-use djinn_supervisor::{ParkReason, StageError, StageOutcome, SupervisorServices};
+use djinn_supervisor::{
+    ModelTurnAdmissionStageOutcome, ParkReason, StageError, StageOutcome, SupervisorServices,
+};
 use djinn_workspace::Workspace;
 
 use crate::AgentType;
@@ -98,7 +100,9 @@ use crate::actors::slot::reply_loop::error_handling::{
 use crate::actors::slot::reply_loop::loop_guard::{
     LoopGuardError, LoopGuardKind as ReplyLoopGuardKind,
 };
-use crate::actors::slot::reply_loop::{ReplyLoopContext, run_reply_loop};
+use crate::actors::slot::reply_loop::{
+    ModelTurnAdmissionOutcome, ReplyLoopContext, run_reply_loop,
+};
 use crate::context::AgentContext;
 use crate::roles::{AgentRole, role_impl_for};
 use djinn_core::cancel_origin::CancelOrigin;
@@ -250,6 +254,20 @@ fn classify_reply_loop_failure(err: &anyhow::Error) -> ReplyLoopFailureClass {
     } else {
         ReplyLoopFailureClass::Other
     }
+}
+
+/// Preserve typed Phase A admission data for cancellable stage scheduling.
+fn stage_outcome_for_model_turn_admission_error(error: &anyhow::Error) -> Option<StageOutcome> {
+    let outcome = match error.downcast_ref::<ModelTurnAdmissionOutcome>()? {
+        ModelTurnAdmissionOutcome::Wait(wait) => ModelTurnAdmissionStageOutcome::Wait(wait.clone()),
+        ModelTurnAdmissionOutcome::Rejected(rejection) => {
+            ModelTurnAdmissionStageOutcome::Rejected(rejection.clone())
+        }
+        ModelTurnAdmissionOutcome::DispatchFenced(outcome) => {
+            ModelTurnAdmissionStageOutcome::DispatchFenced(outcome.clone())
+        }
+    };
+    Some(StageOutcome::ModelTurnAdmission(outcome))
 }
 
 /// Append the cancellation trigger to a diagnostic, so a cancelled session
@@ -1705,7 +1723,9 @@ pub(crate) async fn execute_stage(
     });
     let stage_outcome = match reply_result {
         Err(e) => {
-            if e.downcast_ref::<BudgetWindDownIgnored>().is_some() {
+            if let Some(outcome) = stage_outcome_for_model_turn_admission_error(&e) {
+                outcome
+            } else if e.downcast_ref::<BudgetWindDownIgnored>().is_some() {
                 StageOutcome::Parked {
                     reason: ParkReason::Budget,
                     summary: None,
