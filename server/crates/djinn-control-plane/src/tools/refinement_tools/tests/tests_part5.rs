@@ -617,7 +617,7 @@ async fn round_mismatch_rejected() {
     );
 }
 
-// ── AC: against_revision_seq exceeds latest rejected ─────────────
+// ── AC: future against_revision_seq rejected ─────────────────────
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn against_revision_seq_exceeds_latest_rejected() {
@@ -663,6 +663,71 @@ async fn against_revision_seq_exceeds_latest_rejected() {
         snap,
         atomic_demand_snapshot(&db, &repo, &p.id, &project_id).await,
         "revision mismatch must not mutate any demand-owned relation"
+    );
+}
+
+// ── AC: stale against_revision_seq rejected ──────────────────────
+
+/// Advance the persisted proposal head before sending a demand bound to the
+/// previous revision. This is deliberately distinct from the future-sequence
+/// case above: an older, once-current revision must also fail before the
+/// composed demand transaction creates any task or evidence state.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stale_against_revision_seq_rejected_without_demand_mutation() {
+    let (server, db, p, user_id, _judge_task_id) = setup_demand_test().await;
+    let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+
+    let advanced = repo
+        .update(
+            &p.id,
+            djinn_db::ProposalUpdateInput {
+                title: "Demand Validation Test",
+                body: "This spec contains anchor-text for validation after revision advance.",
+                acceptance_criteria: "[]",
+                status: "draft",
+                superseded_by: None,
+                body_format: None,
+                event_metadata: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        advanced.latest_revision_seq > p.latest_revision_seq,
+        "fixture must advance the active revision: {} > {}",
+        advanced.latest_revision_seq,
+        p.latest_revision_seq
+    );
+    let project_id = repo.targets(&p.id).await.unwrap()[0].project_id.clone();
+    let before = atomic_demand_snapshot(&db, &repo, &p.id, &project_id).await;
+
+    let mut params = valid_demand_params(&p.id);
+    params["against_revision_seq"] = serde_json::json!(p.latest_revision_seq);
+
+    let resp = djinn_core::auth_context::SESSION_USER_ID
+        .scope(Some(user_id), async {
+            server
+                .dispatch_tool("proposal_refinement_demand_evidence", params)
+                .await
+        })
+        .await
+        .expect("tool should be registered");
+
+    let error = resp.get("error").and_then(|v| v.as_str()).unwrap();
+    assert!(
+        error.contains("does not match the proposal's active revision seq"),
+        "stale revision must be rejected as an exact revision mismatch: {error}"
+    );
+    assert!(
+        !resp
+            .get("accepted")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true)
+    );
+    assert_eq!(
+        before,
+        atomic_demand_snapshot(&db, &repo, &p.id, &project_id).await,
+        "stale revision demand must not mutate task, typed, legacy, debate, or lifecycle state"
     );
 }
 
