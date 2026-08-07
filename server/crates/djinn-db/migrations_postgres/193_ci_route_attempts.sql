@@ -1,4 +1,4 @@
--- Migration 191: durable CI evidence-route attempts, monotonic retry budgets,
+-- Migration 193: durable CI evidence-route attempts, monotonic retry budgets,
 -- calling-recovery audit, and coordinator provider-action drain proof.
 --
 -- Proposal `nafu` wave 1 ("Route CI failures through bounded retries and

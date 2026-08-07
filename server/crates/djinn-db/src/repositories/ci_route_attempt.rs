@@ -149,7 +149,7 @@ const BY_PK: &str = "subject_kind = $1 AND subject_id = $2 AND provider_action_k
 /// A trivial two-way string mapping.
 ///
 /// Every durable vocabulary below is spelled exactly once in Rust and once in
-/// migration 191's `CHECK ... IN (...)`. Keeping the two in one place per enum
+/// migration 193's `CHECK ... IN (...)`. Keeping the two in one place per enum
 /// is what stops a new variant from binding as an unchecked string that the
 /// CHECK then rejects at 3am instead of at compile time.
 macro_rules! durable_enum {
@@ -195,7 +195,7 @@ durable_enum! {
     /// is carried alongside it. Every key on the table is scoped by it.
     CiSubjectKind {
         /// A board task. The only kind wave 1 writes, and the only kind with
-        /// database-enforced referential integrity (migration 191 derives
+        /// database-enforced referential integrity (migration 193 derives
         /// `task_id` from the subject and puts the foreign key on it).
         Task => "task",
         /// Reserved for a proposal-branch PR, which has no owning task and
@@ -1665,7 +1665,7 @@ impl CiRouteAttemptRepository {
     /// is a task today and one PR maps to one task, so no two subjects share a
     /// PR head and the distinction is invisible. It stops being invisible the
     /// moment a non-task subject shares a head — see the `tier2_lease_key`
-    /// note in migration 191.
+    /// note in migration 193.
     ///
     /// # Errors
     ///

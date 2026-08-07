@@ -213,7 +213,7 @@ fn authority(
 // Migration round trip
 // ---------------------------------------------------------------------------
 
-/// Migration 191 round trip: every column the repository binds survives a
+/// Migration 193 round trip: every column the repository binds survives a
 /// write and a read back through a *different* connection pool.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn migration_round_trips_every_route_attempt_field() {
@@ -2655,7 +2655,7 @@ async fn the_tier_two_head_hold_stops_at_the_subject_boundary() {
     }
 
     // Two Lead adjudications, one PR head, two subjects. Documented in
-    // migration 191 as what the first non-task subject inherits.
+    // migration 193 as what the first non-task subject inherits.
     let open: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM ci_route_attempts WHERE tier2_lease_state = 'open'",
     )
