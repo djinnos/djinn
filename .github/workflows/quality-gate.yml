@@ -2087,6 +2087,18 @@ jobs:
           path: server/nextest-timing/timing-${{ matrix.shardIndex }}.json
           if-no-files-found: warn
           retention-days: 30
+  # ADVISORY LANE. The quality gate routes this job's result through
+  # `advisory`, not `check` — a failure here is annotated and does not block.
+  # The full justification, and the 2026-08-06 incident that forced it, is on
+  # `SERVER_TEST_TIMING` in the `quality-gate` job.
+  #
+  # Do not try to make this job zero-`uses:` to dodge `Set up job` action
+  # resolution: the upload cannot be expressed as `gh api`. The REST API has no
+  # artifact-create endpoint, and the internal upload service requires
+  # ACTIONS_RUNTIME_TOKEN, which the runner injects for JavaScript/container
+  # action steps only and NOT for `run:` steps. Dropping the two
+  # download-artifact steps alone buys nothing: resolution is ONE batched call
+  # per job, so any single remaining `uses:` keeps the job exposed.
   nextest-timing-publish:
     name: Publish Nextest Timing
     needs:
@@ -2576,6 +2588,38 @@ jobs:
           AARCH64: ${{ needs.preflight.outputs.aarch64 }}:${{ needs.server-aarch64-check.result }}
           SERVER_TEST_PLAN: ${{ needs.preflight.outputs.serverTest }}:${{ needs.nextest-plan.result }}
           SERVER_TEST_SHARDS: ${{ needs.preflight.outputs.serverTest }}:${{ needs.server-test.result }}
+          # ADVISORY (routed through `advisory`, not `check`, below). This is
+          # the only lane in this gate that does not block, and it is the only
+          # one that may be: it publishes the shard TIMING artifact, which the
+          # planner consumes to balance shards by duration. The planner's own
+          # contract, stated at its restore loop, is that timing "influence[s]
+          # balancing only, never selection" — every failure mode there already
+          # falls through to "using cold-start balancing" and the run proceeds.
+          # So a missing timing artifact is, by construction, not a correctness
+          # signal; the next run just cold-starts (or picks an older candidate
+          # from the five pages it pages through).
+          #
+          # Why it had to change: on 2026-08-06 GitHub Actions could not resolve
+          # action download info ("Service Unavailable" / "Internal Server
+          # Error") for actions/{up,down}load-artifact@v4. Action resolution is
+          # one batched API call per JOB, made during `Set up job` before any
+          # step runs, so a job dies whole. On run 31113025510, 22 of 27 jobs
+          # were green INCLUDING all eight test shards; `Publish Nextest Timing`
+          # died at setup, and this gate fail-closed on it and discarded 212
+          # job-minutes of green test signal.
+          #
+          # This lane cannot be made structurally immune the way the
+          # `quality-gate` job itself is (zero `uses:`, so it never makes the
+          # resolution call): publishing an artifact REQUIRES
+          # actions/upload-artifact. There is no REST endpoint to create an
+          # artifact, and the internal upload API needs ACTIONS_RUNTIME_TOKEN,
+          # which the runner injects only for JavaScript/container action steps
+          # and NOT for `run:` steps. Downgrading the lane is therefore the fix,
+          # and it is a strictly better one: it also covers runner-allocation
+          # failures, artifact-API 5xx at runtime, and the 10-minute timeout.
+          #
+          # NOT a general "tolerate infra death" policy. Only telemetry lanes
+          # qualify. A test shard that dies at `Set up job` ran zero tests.
           SERVER_TEST_TIMING: ${{ needs.preflight.outputs.serverTest }}:${{ needs.nextest-timing-publish.result }}
           SQLX: ${{ needs.preflight.outputs.sqlxFreshness }}:${{ needs.server-sqlx-freshness.result }}
           MEMORY: ${{ needs.preflight.outputs.memoryEval }}:${{ needs.memory-eval.result }}
@@ -2592,9 +2636,25 @@ jobs:
             if [ "$selected" = false ] && [ "$result" = skipped ]; then return; fi
             echo "lane $lane selected=$selected result=$result"; return 1
           }
+          # Advisory lanes are annotated loudly and never block.
+          #
+          # ONLY legitimate for a lane that produces TELEMETRY: one whose output
+          # cannot change which tests run, whether they passed, or what ships.
+          # A lane that executes or verifies anything must stay on `check`.
+          # In particular this must never be extended to a test shard: a shard
+          # that dies at `Set up job` ran zero tests, and passing it would be a
+          # green-with-zero-executions trap.
+          advisory() {
+            local lane=$1 pair=$2 selected=${2%%:*} result=${2#*:}
+            if check "$@"; then return 0; fi
+            echo "::warning title=Advisory lane $lane did not succeed::lane $lane selected=$selected result=$result. This lane is telemetry-only and does NOT block the merge, but it did not do its job — investigate before the next planner run."
+            return 0
+          }
           check server-guards "$GUARDS"; check clippy "$CLIPPY"
           check deploy-render-gate "$RENDER_GATE"; check cutover-preflight "$CUTOVER_PREFLIGHT"
           check aarch64 "$AARCH64"
-          check server-test-plan "$SERVER_TEST_PLAN"; check server-test-shards "$SERVER_TEST_SHARDS"; check server-test-timing "$SERVER_TEST_TIMING"
+          check server-test-plan "$SERVER_TEST_PLAN"; check server-test-shards "$SERVER_TEST_SHARDS"
+          # Timing is the ONE advisory lane. See the SERVER_TEST_TIMING comment above.
+          advisory server-test-timing "$SERVER_TEST_TIMING"
           check sqlx-freshness "$SQLX"; check memory-eval "$MEMORY"
           check local-dev-contracts "$TILT_CONTRACTS"; check qa-smoke "$QA_SMOKE"; check ui "$UI"
