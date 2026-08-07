@@ -1017,6 +1017,16 @@ pub async fn run_reply_loop(
             // provider-agnostic conversation — covers all wire formats without
             // mutating stored history.
             let request_conversation = conversation.with_synthesized_tool_results();
+            // The coordinator selected this model before handing the turn to the
+            // slot, but it can be demoted while this reply loop is still alive.
+            // Recheck the existing breaker at the actual attempt boundary,
+            // before B1 planning, B2 preparation, or any provider bytes. This
+            // code only observes the breaker; it never resets or owns it.
+            if !slot_ctx.health_tracker.is_available(None, model_id) {
+                return Err(anyhow::anyhow!(
+                    "selected model circuit breaker remains open: {model_id}"
+                ));
+            }
             phase_tracker.lock().unwrap_or_else(std::sync::PoisonError::into_inner).enter_provider_wait();
             // Covered adapters construct the plan from this exact request
             // body. `prepare` persists the decision and commits the dispatch
@@ -2257,6 +2267,159 @@ mod tests {
             owner_pod_uid: Some("pod".into()),
             generation: 1,
         }
+    }
+
+    struct CoveredBoundaryProbeProvider {
+        events: Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    impl CoveredBoundaryProbeProvider {
+        fn record(&self, event: &'static str) {
+            self.events
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(event);
+        }
+    }
+
+    impl LlmProvider for CoveredBoundaryProbeProvider {
+        fn name(&self) -> &str {
+            "provider"
+        }
+
+        fn stream<'a>(
+            &'a self,
+            _: &'a Conversation,
+            _: &'a [serde_json::Value],
+            _: Option<djinn_provider::provider::ToolChoice>,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = anyhow::Result<
+                            std::pin::Pin<
+                                Box<
+                                    dyn futures::Stream<
+                                            Item = anyhow::Result<
+                                                djinn_provider::provider::StreamEvent,
+                                            >,
+                                        > + Send,
+                                >,
+                            >,
+                        >,
+                    > + Send
+                    + 'a,
+            >,
+        > {
+            self.record("uncovered_network");
+            Box::pin(async { Err(anyhow::anyhow!("breaker must prevent stream fallback")) })
+        }
+
+        fn provider_attempt_plan_v1(
+            &self,
+            _: &str,
+            _: &Conversation,
+            _: &[serde_json::Value],
+            _: Option<djinn_provider::provider::ToolChoice>,
+        ) -> Result<ProviderAttemptPlanV1, ProviderAttemptRouteCoverageV1> {
+            self.record("plan");
+            Ok(covered_admission_plan())
+        }
+
+        fn start_sse_attempt_v1(
+            &self,
+            _: &Conversation,
+            _: &[serde_json::Value],
+            _: Option<djinn_provider::provider::ToolChoice>,
+            _: ProviderAttemptContextV1,
+        ) -> Result<
+            djinn_provider::provider::client::ProviderSseAttemptV1,
+            ProviderAttemptRouteCoverageV1,
+        > {
+            self.record("b1_network");
+            Err(ProviderAttemptRouteCoverageV1::Uncovered(
+                djinn_provider::ProviderAttemptUncoveredReasonV1::SerializationUnavailable,
+            ))
+        }
+    }
+
+    /// An already-open existing breaker is a hard stop at the actual reply-loop
+    /// attempt boundary. The probe is deliberately capable of B2 coverage, so
+    /// moving this check after plan construction, preparation, or B1 fails the
+    /// ordered event and durable-side-effect assertions below.
+    #[tokio::test]
+    async fn open_breaker_stops_covered_reply_loop_before_b2_preparation() {
+        let db = Database::ephemeral().await.expect("db");
+        let pool = seed_model_turn_admission_fixture(&db, "enforce", "supported", 2).await;
+        let slot_ctx = crate::test_helpers::agent_context_from_db(
+            db.clone(),
+            tokio_util::sync::CancellationToken::new(),
+        );
+        for _ in 0..3 {
+            slot_ctx.health_tracker.record_failure(None, "model");
+        }
+        assert!(
+            !slot_ctx.health_tracker.is_available(None, "model"),
+            "fixture precondition: the existing breaker is open"
+        );
+
+        let events = Arc::new(Mutex::new(vec!["breaker_open"]));
+        let provider = CoveredBoundaryProbeProvider {
+            events: Arc::clone(&events),
+        };
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let compaction_cs = CompactionCriticalSection::new();
+        let worktree_path = std::path::Path::new("/workspace");
+        let mut conversation = Conversation::new();
+        conversation.push(Message::user("do not dispatch"));
+
+        let (result, ..) = run_reply_loop(
+            ReplyLoopContext {
+                provider: &provider,
+                credential_record_id: "credential-slot",
+                tools: &[],
+                task_id: "open-breaker-task",
+                task_short_id: "breaker",
+                session_id: "open-breaker-session",
+                project_path: "/workspace",
+                worktree_path,
+                role_name: "worker",
+                finalize_tool_names: &[],
+                context_window: 10_000,
+                model_id: "model",
+                cancel: &cancel,
+                global_cancel: &cancel,
+                ctx: &slot_ctx,
+                active_skill_names: &[],
+                active_mcp_server_names: &[],
+                max_turns_override: Some(1),
+                compaction_cs: &compaction_cs,
+                session_budget: None,
+            },
+            &mut conversation,
+            false,
+        )
+        .await;
+
+        let error = result.expect_err("open breaker must stop the reply loop");
+        assert!(error.to_string().contains("circuit breaker remains open"));
+        assert_eq!(
+            events
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_slice(),
+            ["breaker_open"],
+            "no plan, B1 launch, fallback stream, or provider network boundary may follow the open breaker"
+        );
+        assert_eq!(model_turn_decision_count_fixture(&db, pool).await, 0);
+        assert_eq!(
+            model_turn_accounting_fixture(&db, pool).await,
+            (0, 2, 0),
+            "no B2 acquisition or dispatch fence may change pool accounting"
+        );
+        assert!(
+            !slot_ctx.health_tracker.is_available(None, "model"),
+            "admission, cleanup, and the fixture must observe but never reset the breaker"
+        );
     }
 
     #[tokio::test]
