@@ -29,6 +29,14 @@ pub(crate) mod disposition {
     pub use djinn_coordinator::supervisor_impl::disposition::*;
 }
 
+/// Proposal `nafu` wave 4: the CI-route Lead adjudication contract.
+///
+/// Lives beside `pr` rather than inside it. The proposal's file map named
+/// `supervisor_impl/pr.rs` as the home for "validate repair/diagnostic reopen
+/// and narrow park", but that module owns PR *opening* — it never sees a Lead
+/// result. The Lead result validator this contract extends is
+/// [`stage::lead_stage_outcome`], so the new fence lives next to it.
+pub(crate) mod ci_routing;
 pub(crate) mod pr;
 #[cfg(test)]
 mod pr_close;

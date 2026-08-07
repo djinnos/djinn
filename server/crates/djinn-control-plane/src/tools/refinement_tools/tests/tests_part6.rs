@@ -45,18 +45,34 @@ async fn cross_proposal_judge_task_rejected() {
         .await
         .unwrap();
 
-    // Start refinement for BOTH proposals.
+    // Start refinement for BOTH proposals. `refinement.active` is decided by
+    // the exact admitted run, not by the legacy lifecycle row, so p2 needs a
+    // LIVE run of its own: without it the demand would be rejected for
+    // refinement-absence and this test would never reach the authority gate it
+    // exists to exercise.
     repo.record_refinement_lifecycle(&p1.id, "refinement_start", None)
         .await
         .unwrap();
     repo.record_refinement_lifecycle(&p2.id, "refinement_start", None)
         .await
         .unwrap();
+    let (run_1, generation_1) = admit_refinement_run(&repo, &p1.id, "cross-proposal-p1").await;
+    let _run_2 = admit_refinement_run(&repo, &p2.id, "cross-proposal-p2").await;
 
     let user_id = create_test_user(&db, "cross-proposal-judge").await;
     let project_id = link_proposal_to_project(&db, &repo, &p1.id).await;
-    // Create Judge task for proposal p1 — NOT p2.
-    let _judge_task_p1 = create_judge_task(&db, &project_id, &p1.id, &user_id).await;
+    // Create Judge task for proposal p1 — NOT p2, and materialize its exact
+    // authority tuple so a real, caller-owned authority exists somewhere. The
+    // rejection below therefore proves proposal scoping, not the trivial case
+    // of no authority task existing at all.
+    let judge_task_p1 = create_judge_task(&db, &project_id, &p1.id, &user_id).await;
+    djinn_db::test_support::materialize_judge_authority_for_test(
+        &db,
+        &judge_task_p1,
+        &run_1,
+        i64::from(generation_1),
+    )
+    .await;
 
     // Also link p2 to the project so spike creation would succeed if
     // validation didn't reject first.
@@ -77,8 +93,9 @@ async fn cross_proposal_judge_task_rejected() {
 
     let error = resp.get("error").and_then(|v| v.as_str()).unwrap();
     assert!(
-        error.contains("no active Judge task"),
-        "should mention no Judge task for this proposal: {error}"
+        error
+            .contains("no active Adversary or Judge task in flight for this proposal's refinement"),
+        "should mention no Adversary or Judge authority task for this proposal: {error}"
     );
     assert!(
         !resp

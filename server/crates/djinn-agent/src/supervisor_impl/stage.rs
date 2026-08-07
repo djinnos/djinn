@@ -105,6 +105,7 @@ use crate::actors::slot::reply_loop::{
 };
 use crate::context::AgentContext;
 use crate::roles::{AgentRole, role_impl_for};
+use crate::supervisor_impl::ci_routing;
 use djinn_core::cancel_origin::CancelOrigin;
 use djinn_provider::message::{Conversation, Message};
 use djinn_provider::provider::LlmProvider;
@@ -732,6 +733,58 @@ async fn advertise_read_sources(
         });
     }
     out
+}
+
+/// Map a finished lead/arbiter stage onto a [`StageOutcome`], applying the CI
+/// adjudication contract when the session was dispatched under a Tier-2 CI
+/// route (proposal `nafu`, wave 4).
+///
+/// Precedence is deliberate and, in one case, deliberately *not* what the CI
+/// contract alone would say:
+///
+/// 1. `terminal_disposition_required` wins. It means the cumulative
+///    arbitration budget is exhausted, so no approve or reopen can start
+///    another PR-poller or worker cycle at all. The CI contract's "uncertainty
+///    reopens rather than parks" rule is scoped to a route that still *has* a
+///    cycle to spend; it does not lift a budget ceiling that predates it.
+/// 2. Otherwise, a CI route adjudicates through
+///    [`ci_routing::adjudicate`], which is total: an invalid, unsupported,
+///    missing, or timed-out result becomes one diagnostic reopen rather than
+///    a `Failed` stage, because the proposal forbids a second Lead session
+///    for the same evidence.
+/// 3. Otherwise, the pre-existing arbiter validation below runs unchanged.
+///
+/// The returned reopen is *not* yet applied: the caller must first win the
+/// atomic current-identity guard (`resolve_tier2_lease`). That ordering is
+/// [`ci_routing::board_effect`]'s job, not this function's.
+pub(super) fn lead_stage_outcome_routed(
+    finalize_name: &str,
+    finalize_payload: Option<&serde_json::Value>,
+    terminal_disposition_required: bool,
+    ci: Option<&ci_routing::CiAdjudicationContext>,
+) -> StageOutcome {
+    let (Some(ci), false) = (ci, terminal_disposition_required) else {
+        return lead_stage_outcome(
+            finalize_name,
+            finalize_payload,
+            terminal_disposition_required,
+        );
+    };
+    let response = match (finalize_name, finalize_payload) {
+        ("submit_decision", Some(payload)) => ci_routing::LeadResponse::Submitted(payload),
+        ("submit_decision", None) | ("", _) => ci_routing::LeadResponse::Missing,
+        (other, _) => ci_routing::LeadResponse::Unsupported(other),
+    };
+    let adjudication = ci_routing::adjudicate(ci, response);
+    if let Some(rejection) = &adjudication.rejection {
+        tracing::warn!(
+            ?rejection,
+            lane = ci.lane.as_str(),
+            tier2_reason = ci.tier2_reason.as_str(),
+            "ci_routing: Lead result replaced by the diagnostic fallback"
+        );
+    }
+    ci_routing::stage_outcome(&adjudication.plan)
 }
 
 /// Map a finished lead/arbiter stage's finalize tool + payload onto a
@@ -1840,7 +1893,12 @@ pub(crate) async fn execute_stage(
                         },
                     },
                     RoleKind::Lead => {
-                        let terminal_disposition_required = {
+                        // One read serves both gates: the arbitration row's
+                        // structured directive carries the cumulative-budget
+                        // flag and, when the coordinator dispatched this Lead
+                        // under a Tier-2 CI lease, the `ci_route` block that
+                        // switches on the `nafu` adjudication contract.
+                        let directive = {
                             use djinn_db::repositories::task_arbitration::TaskArbitrationRepository;
                             TaskArbitrationRepository::new(agent_context.db.clone())
                                 .resolve_current_hold_cycle(&task.id)
@@ -1848,17 +1906,23 @@ pub(crate) async fn execute_stage(
                                 .ok()
                                 .and_then(|(_, record)| record)
                                 .and_then(|record| record.directive)
-                                .and_then(|directive| {
-                                    directive
-                                        .get("terminal_disposition_required")
-                                        .and_then(serde_json::Value::as_bool)
-                                })
-                                .unwrap_or(false)
                         };
-                        lead_stage_outcome(
+                        let terminal_disposition_required = directive
+                            .as_ref()
+                            .and_then(|directive| {
+                                directive
+                                    .get("terminal_disposition_required")
+                                    .and_then(serde_json::Value::as_bool)
+                            })
+                            .unwrap_or(false);
+                        let ci_context = ci_routing::CiAdjudicationContext::from_arbiter_directive(
+                            directive.as_ref(),
+                        );
+                        lead_stage_outcome_routed(
                             finalize_name,
                             final_output.finalize_payload.as_ref(),
                             terminal_disposition_required,
+                            ci_context.as_ref(),
                         )
                     }
                     // Refinement tribunal roles each finalize via their own

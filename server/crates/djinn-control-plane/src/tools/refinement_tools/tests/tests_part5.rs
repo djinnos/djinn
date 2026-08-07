@@ -20,7 +20,8 @@ pub(super) fn valid_demand_params(proposal_id: &str) -> serde_json::Value {
         "target_subsystem": "auth",
         "spec_unknown_anchor": "anchor-text",
         "insufficient_in_session_research": "No integration tests cover token expiry edge case",
-        "expected_findings": "Evidence that token refresh is or is not required"
+        "expected_findings": "Evidence that token refresh is or is not required",
+        "load_bearing_category": "feasibility"
     })
 }
 
@@ -140,6 +141,35 @@ async fn create_spike_task(db: &Database, project_id: &str, short_label: &str) -
         .id
 }
 
+/// Admit a real running refinement run and return `(run_id, generation)`.
+///
+/// `refinement.active` is decided by the exact admitted run; the legacy
+/// `refinement_start` lifecycle row is display-only. Any test that must reach a
+/// check downstream of "refinement active" needs this, not the lifecycle row.
+pub(super) async fn admit_refinement_run(
+    repo: &ProposalRepository,
+    proposal_id: &str,
+    label: &str,
+) -> (String, i32) {
+    let outcome = repo
+        .reap_and_admit(djinn_db::AdmitRefinementRunRequest {
+            proposal_id: proposal_id.to_owned(),
+            idempotency_key: format!("{label}/{proposal_id}"),
+            source: djinn_db::RefinementAdmissionSource::Demand {
+                demand_id: format!("{label}/{proposal_id}"),
+            },
+            heartbeat_grace_millis: 60_000,
+        })
+        .await
+        .unwrap();
+    match outcome {
+        djinn_db::RefinementAdmissionOutcome::Admitted {
+            run_id, generation, ..
+        } => (run_id, generation),
+        other => panic!("expected admitted refinement run, got {other:?}"),
+    }
+}
+
 /// Set up a proposal with body containing "anchor-text", start
 /// refinement, create a user, project, and Judge task, and return
 /// (server, db, proposal, user_id, judge_task_id).
@@ -179,15 +209,25 @@ pub(super) async fn setup_demand_test() -> (
         })
         .await
         .unwrap();
-    assert!(matches!(
-        outcome,
-        djinn_db::RefinementAdmissionOutcome::Admitted { .. }
-    ));
+    let (run_id, generation) = match outcome {
+        djinn_db::RefinementAdmissionOutcome::Admitted {
+            run_id, generation, ..
+        } => (run_id, generation),
+        other => panic!("expected admitted refinement run, got {other:?}"),
+    };
 
     // Create user, project, and Judge task for authorization.
     let user_id = create_test_user(&db, "judge-user").await;
     let project_id = link_proposal_to_project(&db, &repo, &p.id).await;
     let judge_task_id = create_judge_task(&db, &project_id, &p.id, &user_id).await;
+    // Titles are display-only; materialize the exact Judge authority tuple.
+    djinn_db::test_support::materialize_judge_authority_for_test(
+        &db,
+        &judge_task_id,
+        &run_id,
+        i64::from(generation),
+    )
+    .await;
 
     let updated = repo.get(&p.id).await.unwrap().unwrap();
     (server, db, updated, user_id, judge_task_id)
@@ -275,8 +315,8 @@ async fn wrong_user_rejected() {
 
     let error = resp.get("error").and_then(|v| v.as_str()).unwrap();
     assert!(
-        error.contains("not the active Judge"),
-        "should mention Judge auth failure: {error}"
+        error.contains("not the active Adversary or Judge"),
+        "should mention evidence-authority failure: {error}"
     );
     assert!(
         !resp
@@ -306,10 +346,36 @@ async fn no_judge_task_in_flight_rejected() {
         .await
         .unwrap();
 
-    // Start refinement but do NOT create a Judge task.
+    // Admit a REAL running refinement run, but create no Judge or Adversary
+    // task. `refinement.active` is decided by the run, not by the legacy
+    // lifecycle row, so the lifecycle row alone would leave the refinement
+    // inactive and this test would silently duplicate
+    // `inactive_refinement_rejected` instead of exercising its own AC.
+    //
+    // A live run with no materialized authority task is the one state in
+    // which "no authority task in flight" is the true and only reason.
     repo.record_refinement_lifecycle(&p.id, "refinement_start", None)
         .await
         .unwrap();
+    let outcome = repo
+        .reap_and_admit(djinn_db::AdmitRefinementRunRequest {
+            proposal_id: p.id.clone(),
+            idempotency_key: format!("no-judge-task/{}", p.id),
+            source: djinn_db::RefinementAdmissionSource::Demand {
+                demand_id: format!("no-judge-task/{}", p.id),
+            },
+            heartbeat_grace_millis: 60_000,
+        })
+        .await
+        .unwrap();
+    assert!(
+        matches!(
+            outcome,
+            djinn_db::RefinementAdmissionOutcome::Admitted { .. }
+        ),
+        "test needs a live refinement run so the rejection is authority-absence, \
+         not refinement-absence: {outcome:?}"
+    );
 
     let user_id = create_test_user(&db, "no-judge-user").await;
     let snap = mutation_snapshot(&repo, &p.id).await;
@@ -328,8 +394,16 @@ async fn no_judge_task_in_flight_rejected() {
 
     let error = resp.get("error").and_then(|v| v.as_str()).unwrap();
     assert!(
-        error.contains("no active Judge task"),
-        "should mention no Judge task: {error}"
+        error.contains("no active Adversary or Judge task in flight"),
+        "should mention no authority task in flight: {error}"
+    );
+    // This AC is authority-absence with a LIVE run. It must never collapse
+    // into the refinement-absence rejection owned by
+    // `inactive_refinement_rejected`, or a regression that merges the two
+    // paths would pass both tests.
+    assert!(
+        !error.contains("refinement is not active"),
+        "authority-absence must stay distinct from refinement-absence: {error}"
     );
     assert!(
         !resp
@@ -388,6 +462,13 @@ async fn terminal_proposal_rejected() {
         error.contains("terminal"),
         "should mention terminal status: {error}"
     );
+    // No refinement run is admitted here, so the authority lookup would also
+    // come back empty. Terminal status is the more specific cause and must
+    // win; it must not be reported as missing authority.
+    assert!(
+        !error.contains("no active Adversary or Judge task in flight"),
+        "a terminal proposal must not masquerade as authority-absence: {error}"
+    );
     assert!(
         !resp
             .get("accepted")
@@ -438,8 +519,16 @@ async fn inactive_refinement_rejected() {
 
     let error = resp.get("error").and_then(|v| v.as_str()).unwrap();
     assert!(
-        error.contains("not active"),
+        error.contains("refinement is not active"),
         "should mention inactive refinement: {error}"
+    );
+    // A Judge task exists here (see above) but no refinement run does, so the
+    // authority lookup would also come back empty. The rejection must name
+    // the real cause — no run — and not borrow the authority-absence reason
+    // owned by `no_judge_task_in_flight_rejected`.
+    assert!(
+        !error.contains("no active Adversary or Judge task in flight"),
+        "refinement-absence must stay distinct from authority-absence: {error}"
     );
 }
 
@@ -465,8 +554,14 @@ async fn round_mismatch_rejected() {
 
     let error = resp.get("error").and_then(|v| v.as_str()).unwrap();
     assert!(
-        error.contains("does not match"),
+        error.contains("does not match the current refinement round"),
         "should mention round mismatch: {error}"
+    );
+    // `round` is an input to the authority correlation, so a wrong round must
+    // report itself as a round mismatch and never as missing authority.
+    assert!(
+        !error.contains("no active Adversary or Judge task in flight"),
+        "a wrong round must not masquerade as authority-absence: {error}"
     );
     assert!(
         !resp
@@ -500,9 +595,18 @@ async fn against_revision_seq_exceeds_latest_rejected() {
         .expect("tool should be registered");
 
     let error = resp.get("error").and_then(|v| v.as_str()).unwrap();
+    // A demand is authority for the EXACT active revision, so a seq beyond
+    // `latest_revision_seq` is rejected as a mismatch rather than as an
+    // "exceeds" bound — the check is `!=`, not `>`.
     assert!(
-        error.contains("exceeds"),
-        "should mention revision seq exceeds: {error}"
+        error.contains("does not match the proposal's active revision seq"),
+        "should mention revision seq mismatch: {error}"
+    );
+    // `against_revision_seq` is an input to the authority correlation, so a
+    // stale or future seq must report itself and never as missing authority.
+    assert!(
+        !error.contains("no active Adversary or Judge task in flight"),
+        "a stale revision seq must not masquerade as authority-absence: {error}"
     );
     assert!(
         !resp
@@ -668,13 +772,16 @@ async fn empty_target_subsystem_rejected() {
     assert_eq!(snap, after, "rejected demand must not mutate state");
 }
 
-// ── AC: Missing spec_unknown_anchor in body rejected ─────────────
+// ── AC: Non-empty spec_unknown_anchor is a caller assertion ──────
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn missing_spec_unknown_anchor_rejected() {
+async fn non_empty_spec_unknown_anchor_absent_from_body_accepted() {
     let (server, db, p, user_id, _judge_task_id) = setup_demand_test().await;
     let repo = ProposalRepository::new(db.clone(), EventBus::noop());
-    let snap = mutation_snapshot(&repo, &p.id).await;
+    let project_id = repo.targets(&p.id).await.unwrap()[0].project_id.clone();
+    let before =
+        djinn_db::test_support::atomic_evidence_demand_counts_for_test(&db, &p.id, &project_id)
+            .await;
 
     let mut params = valid_demand_params(&p.id);
     params["spec_unknown_anchor"] = serde_json::json!("this-text-does-not-appear-in-body");
@@ -688,20 +795,32 @@ async fn missing_spec_unknown_anchor_rejected() {
         .await
         .expect("tool should be registered");
 
-    let error = resp.get("error").and_then(|v| v.as_str()).unwrap();
+    assert_eq!(resp.get("accepted").and_then(|v| v.as_bool()), Some(true));
     assert!(
-        error.contains("not found"),
-        "should mention anchor not found: {error}"
+        resp.get("error").is_none(),
+        "caller-asserted anchor should be accepted: {resp}"
     );
+    let result = resp.get("result").expect("accepted response has result");
     assert!(
-        !resp
-            .get("accepted")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true)
+        result
+            .get("spike_task_id")
+            .and_then(|v| v.as_str())
+            .is_some(),
+        "accepted response has spike task: {resp}"
     );
 
-    let after = mutation_snapshot(&repo, &p.id).await;
-    assert_eq!(snap, after, "rejected demand must not mutate state");
+    let after =
+        djinn_db::test_support::atomic_evidence_demand_counts_for_test(&db, &p.id, &project_id)
+            .await;
+    assert_eq!(after.tasks, before.tasks + 1, "exactly one spike task");
+    assert_eq!(after.findings, before.findings + 1, "exactly one finding");
+    assert_eq!(after.attempts, before.attempts + 1, "exactly one attempt");
+    assert_eq!(after.debates, before.debates + 1, "exactly one debate row");
+    assert_eq!(
+        after.lifecycle_events,
+        before.lifecycle_events + 1,
+        "exactly one awaiting-evidence lifecycle event"
+    );
 }
 
 // ── AC: Empty insufficient_in_session_research rejected ──────────
@@ -838,8 +957,12 @@ async fn existing_open_linked_spike_rejected() {
 
     let error = resp.get("error").and_then(|v| v.as_str()).unwrap();
     assert!(
-        error.contains("already has an open linked evidence spike"),
-        "should mention existing spike: {error}"
+        error.contains("active_evidence_conflict"),
+        "should return the stable active-demand conflict: {error}"
+    );
+    assert_eq!(
+        resp.get("conflict_code").and_then(|v| v.as_str()),
+        Some("active_evidence_conflict")
     );
     assert!(
         !resp
@@ -1028,14 +1151,23 @@ async fn valid_demand_accepted() {
 
 // ── AC: Duplicate demand cannot create two open spikes ───────────
 
-/// Verify that a second valid demand after an accepted first demand
-/// is rejected because the proposal already has an open linked spike.
-/// This is the sequential duplicate scenario; concurrent races are
-/// protected at the DB level by the atomic set_structured_needs_evidence_spike.
+/// A second demand issued while a spike is already open must never allocate a
+/// second one, whichever way it duplicates:
+///
+/// * an **identical** re-delivery is a replay of the same allocation — the
+///   normalized demand hash matches the open finding, so the caller gets the
+///   existing spike back and no demand-owned relation grows;
+/// * a **different** claim is an unresolved-evidence conflict — it is rejected
+///   with the stable `active_evidence_conflict` code and writes nothing.
+///
+/// Both branches are asserted here because only counting rows distinguishes a
+/// replay from a silent second allocation; an `accepted: true` on its own would
+/// not.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn duplicate_demand_after_accepted_rejected() {
+async fn duplicate_demand_after_accepted_creates_no_second_spike() {
     let (server, db, p, user_id, _judge_task_id) = setup_demand_test().await;
     let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+    let project_id = repo.targets(&p.id).await.unwrap()[0].project_id.clone();
 
     // First demand — should succeed and create a spike.
     let resp1 = djinn_core::auth_context::SESSION_USER_ID
@@ -1058,16 +1190,25 @@ async fn duplicate_demand_after_accepted_rejected() {
         "first demand should be accepted: {:?}",
         resp1.get("error"),
     );
-    let first_spike = resp1
-        .get("result")
-        .and_then(|r| r.get("spike_task_id"))
+    let result1 = resp1.get("result").expect("accepted response has result");
+    let first_spike = result1
+        .get("spike_task_id")
         .and_then(|v| v.as_str())
         .expect("first demand should have spike_task_id")
         .to_string();
+    assert_eq!(
+        result1.get("replayed").and_then(|v| v.as_bool()),
+        Some(false),
+        "the first demand allocates rather than replays: {resp1}"
+    );
 
-    // Second demand — should be rejected by validation gate (step 11).
+    let after_first =
+        djinn_db::test_support::atomic_evidence_demand_counts_for_test(&db, &p.id, &project_id)
+            .await;
+
+    // Second, byte-identical demand — a normalized replay of the same claim.
     let resp2 = djinn_core::auth_context::SESSION_USER_ID
-        .scope(Some(user_id), async {
+        .scope(Some(user_id.clone()), async {
             server
                 .dispatch_tool(
                     "proposal_refinement_demand_evidence",
@@ -1078,20 +1219,60 @@ async fn duplicate_demand_after_accepted_rejected() {
         .await
         .expect("tool should be registered");
 
+    let result2 = resp2
+        .get("result")
+        .expect("replayed demand returns the existing allocation");
+    assert_eq!(
+        result2.get("spike_task_id").and_then(|v| v.as_str()),
+        Some(first_spike.as_str()),
+        "a replay must return the FIRST spike, never a new one: {resp2}"
+    );
+    assert_eq!(
+        result2.get("replayed").and_then(|v| v.as_bool()),
+        Some(true),
+        "an identical re-delivery must report itself as a replay: {resp2}"
+    );
+    assert_eq!(
+        djinn_db::test_support::atomic_evidence_demand_counts_for_test(&db, &p.id, &project_id)
+            .await,
+        after_first,
+        "a replay must not write any demand-owned relation"
+    );
+
+    // Third demand, a DIFFERENT claim while the first spike is still open.
+    // Its normalized hash does not match the open finding, so it is an
+    // unresolved-evidence conflict rather than a replay.
+    let mut divergent = valid_demand_params(&p.id);
+    divergent["question"] = serde_json::json!("Does module Y reject expired refresh tokens?");
+    let resp3 = djinn_core::auth_context::SESSION_USER_ID
+        .scope(Some(user_id), async {
+            server
+                .dispatch_tool("proposal_refinement_demand_evidence", divergent)
+                .await
+        })
+        .await
+        .expect("tool should be registered");
+
     assert!(
-        !resp2
+        !resp3
             .get("accepted")
             .and_then(|v| v.as_bool())
             .unwrap_or(true),
-        "second demand should be rejected"
+        "a divergent demand against an open spike must be rejected: {resp3}"
     );
-    let error = resp2.get("error").and_then(|v| v.as_str()).unwrap_or("");
-    assert!(
-        error.contains("already has an open linked evidence spike"),
-        "should mention existing spike: {error}"
+    assert_eq!(
+        resp3.get("conflict_code").and_then(|v| v.as_str()),
+        Some("active_evidence_conflict"),
+        "should carry the stable active-demand conflict code: {resp3}"
+    );
+    assert_eq!(
+        djinn_db::test_support::atomic_evidence_demand_counts_for_test(&db, &p.id, &project_id)
+            .await,
+        after_first,
+        "a conflicting demand must not write any demand-owned relation"
     );
 
-    // Verify exactly one spike is linked to the proposal.
+    // Exactly one spike remains linked, and it is the first one.
     let updated = repo.get(&p.id).await.unwrap().unwrap();
     assert_eq!(
         updated.linked_spike_task_id.as_deref(),
@@ -1105,5 +1286,161 @@ async fn duplicate_demand_after_accepted_rejected() {
     assert_eq!(
         ne_count, 1,
         "should have exactly one needs_evidence debate entry"
+    );
+}
+
+// ── Atomic authority race fence ───────────────────────────────────
+
+/// Snapshot every relation owned by the atomic-demand boundary. The authority
+/// task itself is deliberately excluded because the test changes it after
+/// preflight to model a handoff race.
+async fn atomic_demand_snapshot(
+    db: &Database,
+    repo: &ProposalRepository,
+    proposal_id: &str,
+    project_id: &str,
+) -> (
+    djinn_db::test_support::AtomicEvidenceDemandCountsForTest,
+    Option<String>,
+    Option<String>,
+) {
+    let counts =
+        djinn_db::test_support::atomic_evidence_demand_counts_for_test(db, proposal_id, project_id)
+            .await;
+    let proposal = repo.get(proposal_id).await.unwrap().unwrap();
+    (
+        counts,
+        proposal.linked_spike_task_id,
+        proposal.needs_evidence_claim,
+    )
+}
+
+fn atomic_demand_claim(authority_task_id: &str) -> djinn_core::models::NeedsEvidenceClaim {
+    djinn_core::models::NeedsEvidenceClaim {
+        question: "Does module X handle token expiry correctly?".to_owned(),
+        target_subsystem: "auth".to_owned(),
+        spec_unknown_anchor: "anchor-text".to_owned(),
+        insufficient_in_session_research: "No integration tests cover token expiry edge case"
+            .to_owned(),
+        expected_findings: "Evidence that token refresh is or is not required".to_owned(),
+        round: 1,
+        against_revision_seq: 1,
+        created_by_task_id: authority_task_id.to_owned(),
+    }
+}
+
+/// Preflight can pass and then lose its authority before the repository
+/// transaction begins. The repository must reject before allocating any of its
+/// task, typed, legacy, debate, or lifecycle rows.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn atomic_demand_rejects_authority_handoff_after_preflight_without_writes() {
+    let (_server, db, proposal, user_id, judge_task_id) = setup_demand_test().await;
+    let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+    let project_id = repo.targets(&proposal.id).await.unwrap()[0]
+        .project_id
+        .clone();
+
+    let preflight = djinn_core::auth_context::SESSION_USER_ID
+        .scope(Some(user_id), async {
+            crate::tools::refinement_helpers::verify_active_judge_authorization(
+                &repo,
+                &proposal.id,
+                1,
+                1,
+            )
+            .await
+        })
+        .await;
+    assert_eq!(
+        preflight.unwrap(),
+        judge_task_id,
+        "fixture must pass preflight"
+    );
+
+    // Model a role handoff between handler validation and transaction entry.
+    djinn_db::TaskRepository::new(db.clone(), EventBus::noop())
+        .set_status(&judge_task_id, "closed")
+        .await
+        .unwrap();
+    let before = atomic_demand_snapshot(&db, &repo, &proposal.id, &project_id).await;
+    let claim = atomic_demand_claim(&judge_task_id);
+    let labels = serde_json::json!(["refinement-evidence", "read-only"]);
+
+    let error = repo
+        .demand_evidence_atomically(djinn_db::AtomicEvidenceDemandInput {
+            proposal_id: &proposal.id,
+            project_id: &project_id,
+            claim: &claim,
+            title: "Evidence spike: token expiry",
+            description: "Read-only evidence investigation",
+            labels: &labels,
+            load_bearing_category: "feasibility",
+        })
+        .await
+        .expect_err("handoff after preflight must be rejected");
+    assert!(
+        error
+            .to_string()
+            .contains("stale_evidence_demand_authority"),
+        "must return stable stale rejection: {error}"
+    );
+    assert_eq!(
+        before,
+        atomic_demand_snapshot(&db, &repo, &proposal.id, &project_id).await,
+        "stale demand must not write any demand-owned relation"
+    );
+}
+
+/// A normalized duplicate still replays after the authority recheck rather
+/// than allocating another task, finding, attempt, legacy projection, debate,
+/// or lifecycle row.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn atomic_demand_normalized_replay_survives_authority_fence() {
+    let (_server, db, proposal, _user_id, judge_task_id) = setup_demand_test().await;
+    let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+    let project_id = repo.targets(&proposal.id).await.unwrap()[0]
+        .project_id
+        .clone();
+    let claim = atomic_demand_claim(&judge_task_id);
+    let labels = serde_json::json!(["refinement-evidence", "read-only"]);
+
+    let first = repo
+        .demand_evidence_atomically(djinn_db::AtomicEvidenceDemandInput {
+            proposal_id: &proposal.id,
+            project_id: &project_id,
+            claim: &claim,
+            title: "Evidence spike: token expiry",
+            description: "Read-only evidence investigation",
+            labels: &labels,
+            load_bearing_category: "feasibility",
+        })
+        .await
+        .unwrap();
+    assert!(!first.replayed);
+    let before_replay = atomic_demand_snapshot(&db, &repo, &proposal.id, &project_id).await;
+
+    let replay = repo
+        .demand_evidence_atomically(djinn_db::AtomicEvidenceDemandInput {
+            proposal_id: &proposal.id,
+            project_id: &project_id,
+            claim: &claim,
+            title: "Evidence spike: token expiry",
+            description: "Read-only evidence investigation",
+            labels: &labels,
+            load_bearing_category: "feasibility",
+        })
+        .await
+        .unwrap();
+    assert!(
+        replay.replayed,
+        "identical demand must use normalized replay"
+    );
+    assert_eq!(replay.finding_id, first.finding_id);
+    assert_eq!(replay.attempt_id, first.attempt_id);
+    assert_eq!(replay.spike_task_id, first.spike_task_id);
+    assert_eq!(
+        before_replay,
+        atomic_demand_snapshot(&db, &repo, &proposal.id, &project_id).await,
+        "replay must not allocate duplicate demand-owned rows"
     );
 }

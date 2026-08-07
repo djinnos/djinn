@@ -30,4 +30,4 @@ expression: section
 - `task_archive_activity(id)`
 - `task_reset_counters(id)`
 - `task_kill_session(id)`
-- `submit_decision(decision, task_id, created_tasks?, directive?, evidence?, exclude_models?, park_dossier?, rationale?, verification_command?)`
+- `submit_decision(decision, task_id, created_tasks?, diagnostic_reason?, directive?, evidence?, exclude_models?, park_dossier?, rationale?, verification_command?)`

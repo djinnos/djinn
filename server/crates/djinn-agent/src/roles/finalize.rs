@@ -70,8 +70,14 @@ pub struct SubmitDecision {
     pub park_dossier: Option<serde_json::Value>,
     /// Directive — required for `reopen`.
     pub directive: Option<String>,
-    /// Verification command — required for `reopen`.
+    /// Verification command — required for a repair `reopen`, forbidden for a
+    /// diagnostic one.
     pub verification_command: Option<String>,
+    /// Closed diagnostic reason — required for a diagnostic `reopen` on a CI
+    /// route, forbidden for a repair (proposal `nafu`). Mirrors
+    /// `djinn_db::CiDiagnosticReason`; the supervisor validator in
+    /// `supervisor_impl::ci_routing` parses it into the closed set.
+    pub diagnostic_reason: Option<String>,
     /// Models excluded from next dispatch — optional for `reopen`.
     #[serde(default)]
     pub exclude_models: Vec<String>,
