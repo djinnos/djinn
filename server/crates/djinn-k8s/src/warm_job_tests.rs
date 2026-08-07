@@ -405,7 +405,14 @@ fn builds_warm_job_manifest_with_expected_shape() {
 #[test]
 fn durable_attempt_stamp_reaches_leased_and_unleased_pods_without_renaming_them() {
     let cfg = KubernetesConfig::for_testing();
-    let mut plain = build_warm_job(&cfg, "proj-xyz", "deadbeef", "example/warm:latest", None, &[]);
+    let mut plain = build_warm_job(
+        &cfg,
+        "proj-xyz",
+        "deadbeef",
+        "example/warm:latest",
+        None,
+        &[],
+    );
     let mut leased = build_leased_warm_job(
         &cfg,
         "proj-xyz",
@@ -449,7 +456,14 @@ fn durable_attempt_stamp_reaches_leased_and_unleased_pods_without_renaming_them(
 #[test]
 fn warm_pod_never_renders_a_launcher_sidecar() {
     let cfg = KubernetesConfig::for_testing();
-    let plain = build_warm_job(&cfg, "proj-xyz", "deadbeef", "example/warm:latest", None, &[]);
+    let plain = build_warm_job(
+        &cfg,
+        "proj-xyz",
+        "deadbeef",
+        "example/warm:latest",
+        None,
+        &[],
+    );
     let leased = build_leased_warm_job(
         &cfg,
         "proj-xyz",
@@ -618,7 +632,14 @@ fn warm_manifest_preserves_shared_cache_lock_prerequisites() {
 fn warm_manifest_keys_subcore_limit_as_mold_jobs_one() {
     let mut cfg = KubernetesConfig::for_testing();
     cfg.warm_cpu_limit = "500m".into();
-    let job = build_warm_job(&cfg, "mold-one", "deadbeef", "example/warm:latest", None, &[]);
+    let job = build_warm_job(
+        &cfg,
+        "mold-one",
+        "deadbeef",
+        "example/warm:latest",
+        None,
+        &[],
+    );
     let container = &job
         .spec
         .as_ref()
@@ -800,7 +821,15 @@ fn warm_script_installs_each_declared_js_workspace_root() {
         None,
         &roots,
     );
-    let cmd = job.spec.as_ref().unwrap().template.spec.as_ref().unwrap().containers[0]
+    let cmd = job
+        .spec
+        .as_ref()
+        .unwrap()
+        .template
+        .spec
+        .as_ref()
+        .unwrap()
+        .containers[0]
         .command
         .clone()
         .unwrap();

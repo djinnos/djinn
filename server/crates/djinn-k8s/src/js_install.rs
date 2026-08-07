@@ -118,9 +118,12 @@ fn is_safe_relative_root(root: &str) -> bool {
     }
     // The root is interpolated into a double-quoted shell word. Refuse anything
     // that could break out of it or expand.
-    !root
-        .chars()
-        .any(|c| matches!(c, '"' | '\'' | '$' | '`' | '\\' | '\n' | '\r' | ';' | '&' | '|'))
+    !root.chars().any(|c| {
+        matches!(
+            c,
+            '"' | '\'' | '$' | '`' | '\\' | '\n' | '\r' | ';' | '&' | '|'
+        )
+    })
 }
 
 /// Render the JS dependency-install preamble for a warm or SCIP Pod script.
@@ -334,7 +337,9 @@ mod tests {
         // The lockfile tests must run AFTER cd-ing into the workspace dir, so
         // that a root-level lockfile cannot select the package manager.
         let cd_at = script.find("cd \"$_dir\"").expect("cds into workspace dir");
-        let pnpm_at = script.find("-f pnpm-lock.yaml").expect("tests pnpm lockfile");
+        let pnpm_at = script
+            .find("-f pnpm-lock.yaml")
+            .expect("tests pnpm lockfile");
         assert!(
             cd_at < pnpm_at,
             "lockfile detection must happen inside the workspace root, not before it"

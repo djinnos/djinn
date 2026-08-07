@@ -717,7 +717,8 @@ mod tests {
         }
         // The warm Job, by contrast, pays for its CPU with a build lease and is
         // deliberately NOT protected — proving this assertion reads the render.
-        let warm = crate::warm_job::build_warm_job(&cfg, "proj-xyz", "deadbeef", "img:t", None, &[]);
+        let warm =
+            crate::warm_job::build_warm_job(&cfg, "proj-xyz", "deadbeef", "img:t", None, &[]);
         assert!(
             !warm
                 .metadata
@@ -800,7 +801,8 @@ mod tests {
         cfg.warm_cpu_limit = "6".into();
         cfg.scip_cpu_limit = "2".into();
 
-        let warm = crate::warm_job::build_warm_job(&cfg, "proj-xyz", "deadbeef", "img:t", None, &[]);
+        let warm =
+            crate::warm_job::build_warm_job(&cfg, "proj-xyz", "deadbeef", "img:t", None, &[]);
         let warm_env: BTreeMap<String, String> = warm
             .spec
             .as_ref()

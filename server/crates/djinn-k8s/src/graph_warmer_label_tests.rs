@@ -43,7 +43,14 @@ fn leased_manifest_is_deterministic_and_closed_until_its_uid_is_authorized() {
     let retry = LeasedWarmJobIdentity::new(PROJECT_ID, "warm-request-019f", REVISION, 73);
     assert_eq!(identity.object_name, retry.object_name);
 
-    let job = build_leased_warm_job(&cfg, PROJECT_ID, "example/warm:latest", None, &identity, &[]);
+    let job = build_leased_warm_job(
+        &cfg,
+        PROJECT_ID,
+        "example/warm:latest",
+        None,
+        &identity,
+        &[],
+    );
     assert_eq!(
         job.metadata.name.as_deref(),
         Some(identity.object_name.as_str())
