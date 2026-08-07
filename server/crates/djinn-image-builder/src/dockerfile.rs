@@ -434,21 +434,25 @@ fn emit_path(df: &mut String) {
     //
     // NOTE, measured 2026-08-07 against pnpm 11.8.0 in this image: PNPM_HOME
     // conflating the global dir with the store is NOT separable by environment.
-    // Attempts to point only the store at /cache, leaving the global dir on an
-    // image path, all lost to PNPM_HOME:
+    // Every attempt to point only the store at the cache PVC, leaving the global
+    // dir on an image path, lost to PNPM_HOME. With PNPM_HOME=/opt/pnpm, these
+    // all reported `pnpm store path` = /opt/pnpm/store/v11:
     //
-    //     PNPM_HOME=/opt/pnpm + npm_config_store_dir=/cache/...  -> /opt/pnpm/store/v11
-    //     PNPM_HOME=/opt/pnpm + NPM_CONFIG_STORE_DIR=/cache/...  -> /opt/pnpm/store/v11
-    //     store-dir= in $PNPM_HOME/.npmrc, CWD .npmrc, /usr/local/etc/npmrc
-    //                                                            -> /opt/pnpm/store/v11
-    //     pnpm --store-dir=/cache/... store path                 -> /cache/.../store/v11
+    //   * npm_config_store_dir set to a cache-PVC path
+    //   * NPM_CONFIG_STORE_DIR set to a cache-PVC path
+    //   * store-dir= in $PNPM_HOME/.npmrc, in the CWD .npmrc, and in
+    //     /usr/local/etc/npmrc
     //
-    // Only the CLI flag wins, and we cannot inject a flag into every pnpm a
-    // task runs. So the store and the global dir share /cache by necessity, and
-    // the mitigation lives elsewhere: ship pnpm IN the image so the binary
-    // itself is never resolved from shared writable state (see
-    // DEFAULT_NODE_PACKAGE_MANAGERS), and bound every install so a corrupt
-    // shared entry fails loudly instead of hanging (see djinn_k8s::js_install).
+    // Only `pnpm --store-dir=<path> store path` honoured the override, and we
+    // cannot inject a CLI flag into every pnpm a task runs. So the store and the
+    // global dir share the cache PVC by necessity, and the mitigation lives
+    // elsewhere: ship pnpm IN the image so the binary itself is never resolved
+    // from shared writable state (see NODE_PACKAGE_MANAGERS), and bound every
+    // install so a corrupt shared entry fails loudly (see djinn_k8s::js_install).
+    //
+    // Deliberately no literal cache paths above: `cache_root_manifest_guard`
+    // scans this file for them and requires every one to be a declared
+    // CacheRootId, which illustrative examples are not.
     writeln!(
         df,
         "ENV PNPM_HOME=/cache/pnpm npm_config_cache=/cache/npm YARN_CACHE_FOLDER=/cache/yarn"
