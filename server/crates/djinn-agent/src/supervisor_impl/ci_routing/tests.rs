@@ -636,7 +636,7 @@ fn invalid_unsupported_and_timed_out_results_convert_to_one_diagnosis() {
 
     for (response, expected) in cases {
         let adjudication = adjudicate(&ctx, response);
-        assert_eq!(adjudication.rejection, Some(expected.clone()));
+        assert_eq!(adjudication.rejection, Some(expected));
         assert!(
             matches!(adjudication.plan, CiLeadPlan::DiagnosticReopen { .. }),
             "{expected:?} must become a diagnostic reopen"

@@ -94,6 +94,7 @@ impl Harness {
             origin_state: origin,
             reason: CiTier2Reason::CausalFailure,
             evidence_references: vec!["90210".to_owned(), HEAD.to_owned()],
+            repository_commands: vec!["cargo test -p djinn-db".to_owned()],
         }
     }
 }
@@ -277,6 +278,71 @@ fn every_tier_two_reason_can_reach_a_lead_dispatch() {
         assert!(
             dispatchable_reason(reason),
             "{reason:?} must be dispatchable"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The repair corpus
+// ---------------------------------------------------------------------------
+
+/// A handoff's `repository_commands` must reach the block verbatim.
+///
+/// The supervisor compares a repair's `verification_command` against this list
+/// by whitespace-normalized **exact equality**, so a corpus that is reordered,
+/// re-quoted, or truncated on the way through is a corpus that matches nothing
+/// — and every repair silently becomes a diagnosis.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_repair_corpus_reaches_the_block_verbatim() {
+    let h = harness("pr_draft").await;
+    let mut handoff = h.handoff(CiOriginState::PrDraft, CiLane::PrHead);
+    handoff.repository_commands = vec![
+        "cargo test -p djinn-db ci_route_attempt".to_owned(),
+        "cargo clippy --workspace --all-targets".to_owned(),
+    ];
+    let task = h.task().await;
+    h.actor.dispatch_ci_tier2_lead(&task, &handoff, None).await;
+
+    let directive = h.directive().await.expect("directive");
+    let commands: Vec<String> = directive["ci_route"]["repository_commands"]
+        .as_array()
+        .expect("repository_commands is an array")
+        .iter()
+        .map(|value| value.as_str().expect("a command string").to_owned())
+        .collect();
+    assert_eq!(
+        commands, handoff.repository_commands,
+        "the corpus is compared by exact equality; any rewrite makes it match nothing"
+    );
+}
+
+/// An empty corpus is legal and is written as an empty array, not omitted.
+///
+/// A check that could not be reproduced yields no command. That must still
+/// produce a parseable block — `repository_commands` is optional to the reader
+/// precisely because this case is real — and every repair on the route then
+/// degrades to a diagnosis rather than being accepted with an invented command.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unreproducible_check_yields_an_empty_corpus_not_a_broken_block() {
+    let h = harness("pr_draft").await;
+    let mut handoff = h.handoff(CiOriginState::PrDraft, CiLane::PrHead);
+    handoff.repository_commands.clear();
+    let task = h.task().await;
+    assert_eq!(
+        h.actor.dispatch_ci_tier2_lead(&task, &handoff, None).await,
+        CiTier2Dispatch::Dispatched
+    );
+    let directive = h.directive().await.expect("directive");
+    assert_eq!(
+        directive["ci_route"]["repository_commands"],
+        serde_json::json!([]),
+        "an empty corpus is a real outcome and must not omit the key"
+    );
+    // Every other required key is still present, so the block still parses.
+    for key in SUPERVISOR_REQUIRED_KEYS {
+        assert!(
+            directive["ci_route"].get(*key).is_some(),
+            "`{key}` must survive an empty corpus"
         );
     }
 }

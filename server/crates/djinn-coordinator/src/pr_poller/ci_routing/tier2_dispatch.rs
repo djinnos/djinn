@@ -212,15 +212,17 @@ fn route_directive(handoff: &CiTier2Handoff) -> serde_json::Value {
             "run_head_sha": handoff.identity.run_head_sha,
             "dequeue_id": handoff.identity.dequeue_id,
             "evidence_references": handoff.evidence_references,
-            // Deliberately empty. Wave 5 has no repository-command source that
-            // is not either project configuration (out of scope) or a command
-            // invented from a job name (forbidden), so every repair degrades to
-            // a diagnosis until a wave supplies a real corpus. That is the
-            // conservative direction — a diagnosis dispatches the same single
-            // worker and asks it to derive the command from the repository —
-            // and it is visible in reporting as
-            // `verification_command_not_repository_valid` rather than silent.
-            "repository_commands": Vec::<String>::new(),
+            // The commands the failing checks actually executed, read from the
+            // Actions job logs by `reproduction_commands`. This is the
+            // proposal's second permitted source — "directly exposed as a
+            // command by CI evidence" — not project configuration and not a
+            // command derived from a job name.
+            //
+            // Legitimately empty when no blocking check was reproducible, in
+            // which case every repair on this route degrades to a diagnosis and
+            // shows up in reporting as
+            // `verification_command_not_repository_valid` rather than silently.
+            "repository_commands": handoff.repository_commands,
         }
     })
 }

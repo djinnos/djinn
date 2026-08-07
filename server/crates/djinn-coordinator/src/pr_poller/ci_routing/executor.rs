@@ -48,7 +48,9 @@ use djinn_db::{
     CiChargeOutcome, CiOriginState, CiReserveOutcome, CiReservedRecovery, CiRouteAttemptRepository,
     CiRouteReservation, CiTier2LeaseOutcome,
 };
-use djinn_provider::github_api::{CheckRun, GitHubApiError, MergeMethod};
+use djinn_provider::github_api::{
+    CheckRun, GitHubApiError, MergeMethod, RequiredCheckReproduction,
+};
 
 use crate::pr_poller::ci_provider::CiRouteProvider;
 use crate::types::ProviderActionScope;
@@ -165,6 +167,10 @@ pub(crate) struct CiTier2Handoff {
     /// by construction — the supervisor's `is_grounded` fails closed on an
     /// empty list, and `read_arbiter_directive` refuses a block without them.
     pub evidence_references: Vec<String>,
+    /// The only corpus a repair's `verification_command` may be drawn from.
+    /// May legitimately be empty — an unreproducible check yields no command —
+    /// in which case every repair on this route degrades to a diagnosis.
+    pub repository_commands: Vec<String>,
 }
 
 impl CiLaneOutcome {
@@ -340,6 +346,7 @@ pub(crate) async fn execute_route(
             .unwrap_or(CiTier2Reason::EvidenceUnknown);
         return open_tier2(
             routes,
+            provider,
             target,
             observation.evidence,
             observation.observed_current,
@@ -390,6 +397,7 @@ pub(crate) async fn execute_route(
             drop(admitted);
             return open_tier2(
                 routes,
+                provider,
                 target,
                 observation.evidence,
                 observation.observed_current,
@@ -485,6 +493,7 @@ pub(crate) async fn execute_route(
     let _ = provider_failure_route(decision.class());
     let escalated = open_tier2(
         routes,
+        provider,
         target,
         observation.evidence,
         observation.observed_current,
@@ -508,6 +517,7 @@ pub(crate) async fn execute_route(
 #[allow(clippy::too_many_arguments)]
 async fn open_tier2(
     routes: &CiRouteAttemptRepository,
+    provider: &dyn CiRouteProvider,
     target: &CiLaneTarget<'_>,
     evidence: &CiEvidenceIdentity,
     observed_current: &CiEvidenceIdentity,
@@ -537,6 +547,15 @@ async fn open_tier2(
         }
     }
 
+    // The repair validator's corpus, read once for this route.
+    //
+    // A repair is invalid without a repository-valid command, so an empty
+    // corpus makes every repair degrade to a diagnosis. That degradation is
+    // safe but it is not free — a diagnosis costs the same worker session and
+    // asks it to re-derive what CI already printed — so the corpus is fetched
+    // here rather than left empty.
+    let commands = reproduction_commands(provider, target, evidence, blocking).await;
+
     match routes
         .open_tier2_lease(
             target.subject,
@@ -557,6 +576,7 @@ async fn open_tier2(
                 subject: target.subject.clone(),
                 provider_action_key: keys.action.clone(),
                 tier2_lease_id: lease_id,
+                repository_commands: commands,
                 identity: evidence.clone(),
                 origin_state: target.origin_state,
                 reason,
@@ -588,6 +608,59 @@ async fn open_tier2(
 // ---------------------------------------------------------------------------
 // Keys
 // ---------------------------------------------------------------------------
+
+/// The commands the failing checks actually executed, for the repair
+/// validator's corpus (proposal `nafu`, wave 5).
+///
+/// # Why this is not "inventing a command from a job name"
+///
+/// The proposal forbids exactly that, and permits a command "directly exposed
+/// as a command by CI evidence". This is the latter, literally: the strings
+/// come from `parse_actions_run_commands` over the Actions **job log**, so each
+/// one is a line the runner ran. Nothing here derives a command from a check
+/// name, a workflow name, or a build tool.
+///
+/// Bounded on purpose. Only the first [`MAX_REPRODUCTION_CHECKS`] blocking
+/// checks are queried: each call is two GitHub reads, this runs only on a route
+/// that is already escalating to Lead, and a run with thirty failing checks has
+/// long since stopped being one diagnosable failure.
+///
+/// Failures are silent and non-fatal. An unreproducible check, a rate limit, or
+/// a log that no longer exists yields fewer commands — which costs a repair its
+/// command and produces a diagnosis, never a wrong one.
+async fn reproduction_commands(
+    provider: &dyn CiRouteProvider,
+    target: &CiLaneTarget<'_>,
+    evidence: &CiEvidenceIdentity,
+    blocking: &[&CheckRun],
+) -> Vec<String> {
+    let mut commands: Vec<String> = Vec::new();
+    for check in blocking.iter().take(MAX_REPRODUCTION_CHECKS) {
+        let context = provider
+            .required_check_reproduction_context(
+                target.owner,
+                target.repo,
+                &evidence.run_head_sha,
+                &check.name,
+            )
+            .await;
+        let Ok(RequiredCheckReproduction::Reproducible(context)) = context else {
+            continue;
+        };
+        // The failing command, plus the setup commands that ran before it. A
+        // repair whose remedy is "run the setup step the workflow runs" is as
+        // legitimate as one naming the failing command itself.
+        commands.push(context.command);
+        commands.extend(context.setup_steps.into_iter().map(|step| step.command));
+    }
+    commands.retain(|command| !command.trim().is_empty());
+    commands.sort();
+    commands.dedup();
+    commands
+}
+
+/// How many blocking checks a Tier-2 route will query for reproduction context.
+const MAX_REPRODUCTION_CHECKS: usize = 3;
 
 /// The handles a Lead directive must cite to count as evidence-grounded.
 ///

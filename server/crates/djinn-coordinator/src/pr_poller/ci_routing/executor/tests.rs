@@ -31,7 +31,9 @@ use djinn_db::{
     CiQuiescenceProof, CiRouteOutcome, CiRouteSubject, CiSubjectKind, Database,
 };
 use djinn_provider::github_api::{
-    CheckAnnotation, CheckRun, CheckRunsResponse, GitHubApiError, MergeMethod,
+    CheckAnnotation, CheckRun, CheckRunsResponse, GitHubApiError, MergeMethod, ReproductionJob,
+    ReproductionStep, RequiredCheckReproduction, RequiredCheckReproductionContext,
+    RequiredCheckUnreproducible, RequiredCheckUnreproducibleReason,
 };
 
 use super::*;
@@ -49,6 +51,8 @@ struct ProviderCalls {
     enable_auto_merge: usize,
     list_check_runs: usize,
     annotations: usize,
+    /// Wave 5's repair-corpus read. Deliberately NOT in `mutations`.
+    reproduction: usize,
 }
 
 impl ProviderCalls {
@@ -71,6 +75,10 @@ struct FakeState {
     fail_annotations: bool,
     /// What `list_check_runs_for_ref` returns when it does not fail.
     check_runs: Vec<CheckRun>,
+    /// The command `required_check_reproduction_context` reports as the one CI
+    /// actually ran. `None` makes the check unreproducible, which is the case
+    /// that leaves a route with an empty repair corpus.
+    reproduction_command: Option<String>,
     /// Every `(owner, repo, run_id)` triple `rerun_failed_jobs` was asked for,
     /// so a fixture can prove *which* run was re-run, not just how many.
     reran: Vec<(String, String, u64)>,
@@ -116,6 +124,16 @@ impl FakeProvider {
 
     fn set_check_runs(&self, runs: Vec<CheckRun>) {
         self.state.lock().expect("fake provider mutex").check_runs = runs;
+    }
+
+    /// The command `required_check_reproduction_context` reports. `None` makes
+    /// every check unreproducible, which is how the empty-corpus case is
+    /// exercised.
+    fn set_reproduction_command(&self, command: Option<String>) {
+        self.state
+            .lock()
+            .expect("fake provider mutex")
+            .reproduction_command = command;
     }
 }
 
@@ -190,6 +208,53 @@ impl CiRouteProvider for FakeProvider {
             return Err(api_error("get_check_run_annotations"));
         }
         Ok(Vec::new())
+    }
+
+    /// The repair-corpus read (wave 5).
+    ///
+    /// Counted like every other call so a fixture can prove it is a **read**:
+    /// `ProviderCalls::mutations` deliberately excludes it, and the discard
+    /// fixtures still assert zero mutations after a route that queried it.
+    async fn required_check_reproduction_context(
+        &self,
+        _owner: &str,
+        _repo: &str,
+        observed_head_sha: &str,
+        required_check_name: &str,
+    ) -> Result<RequiredCheckReproduction, GitHubApiError> {
+        let mut state = self.state.lock().expect("fake provider mutex");
+        state.calls.reproduction += 1;
+        let Some(command) = state.reproduction_command.clone() else {
+            return Ok(RequiredCheckReproduction::Unreproducible(
+                RequiredCheckUnreproducible {
+                    required_check_name: required_check_name.to_owned(),
+                    observed_head_sha: observed_head_sha.to_owned(),
+                    reason: RequiredCheckUnreproducibleReason::CommandNotFound,
+                    details: Some("fixture has no reproduction command".to_owned()),
+                },
+            ));
+        };
+        Ok(RequiredCheckReproduction::Reproducible(
+            RequiredCheckReproductionContext {
+                required_check_name: required_check_name.to_owned(),
+                observed_head_sha: observed_head_sha.to_owned(),
+                check_run_id: 1,
+                workflow_run_id: 1,
+                workflow_name: None,
+                job: ReproductionJob {
+                    id: 1,
+                    name: required_check_name.to_owned(),
+                    html_url: String::new(),
+                },
+                failing_step: ReproductionStep {
+                    number: 1,
+                    name: "run".to_owned(),
+                },
+                command,
+                setup_steps: Vec::new(),
+                log_tail: String::new(),
+            },
+        ))
     }
 }
 
@@ -2405,5 +2470,86 @@ async fn a_route_table_outage_fails_closed_on_both_lanes() {
         f.provider.calls().mutations(),
         0,
         "no provider mutation without a committed reservation",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The repair corpus (wave 5)
+// ---------------------------------------------------------------------------
+
+/// A Tier-2 route carries the commands CI actually ran, and reading them is a
+/// read.
+///
+/// Without this, `repository_commands` is empty on every route and
+/// `command_is_repository_valid` is always false — so **every** repair silently
+/// degrades to a diagnosis and no test notices, because a diagnosis is a
+/// perfectly valid outcome.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_tier_two_route_carries_the_commands_ci_actually_ran() {
+    let f = fixture().await;
+    f.provider
+        .set_reproduction_command(Some("cargo nextest run -p djinn-db".to_owned()));
+    let checks = vec![causal_check("Server Test / test", 77)];
+    let blocking = refs(&checks);
+    let id = pr_head_identity(77);
+    let before = f.effects().await;
+
+    let outcome = run(&f, &f.target(), &id, &id, &blocking).await;
+    let CiLaneOutcome::Tier2 {
+        handoff: Some(handoff),
+        lease_opened: true,
+        ..
+    } = outcome
+    else {
+        panic!("a complete causal failure opens an adjudication, got {outcome:?}");
+    };
+    assert_eq!(
+        handoff.repository_commands,
+        vec!["cargo nextest run -p djinn-db".to_owned()],
+        "the corpus must be the command the runner executed"
+    );
+    assert!(
+        !handoff.evidence_references.is_empty(),
+        "and the evidence bundle is never empty, or grounding fails closed"
+    );
+
+    let after = f.effects().await;
+    assert_eq!(
+        before.provider_mutations, after.provider_mutations,
+        "reading the reproduction context is a READ; it must mutate nothing"
+    );
+    assert!(
+        f.provider.calls().reproduction > 0,
+        "the corpus read must actually have happened"
+    );
+}
+
+/// An unreproducible check leaves the corpus empty rather than failing the
+/// route.
+///
+/// The route still escalates and still holds its lease; only the repair's
+/// command is unavailable, which is the degradation the proposal specifies
+/// ("if either the remedy or a valid command is unavailable, repair is invalid
+/// and Lead must use diagnose").
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unreproducible_check_still_opens_the_adjudication() {
+    let f = fixture().await;
+    f.provider.set_reproduction_command(None);
+    let checks = vec![causal_check("Server Test / test", 78)];
+    let blocking = refs(&checks);
+    let id = pr_head_identity(78);
+
+    let outcome = run(&f, &f.target(), &id, &id, &blocking).await;
+    let CiLaneOutcome::Tier2 {
+        handoff: Some(handoff),
+        lease_opened: true,
+        ..
+    } = outcome
+    else {
+        panic!("an unreproducible check must still escalate, got {outcome:?}");
+    };
+    assert!(
+        handoff.repository_commands.is_empty(),
+        "no command was exposed by CI, and none may be invented"
     );
 }
