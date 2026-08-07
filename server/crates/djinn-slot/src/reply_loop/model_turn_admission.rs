@@ -96,7 +96,16 @@ impl PreparationOwnership {
         let Some(identity) = state.as_ref() else {
             return Ok(ModelTurnLeaseMutationOutcome::Fenced);
         };
-        let outcome = self.repository.mark_active(identity).await?;
+        let outcome = match self.repository.mark_active(identity).await {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                // B1 has already accepted the launch when this is called.
+                // Do not let a preparation drop refund a possibly-sent lease:
+                // the terminal guard owns this identity from that point.
+                *state = None;
+                return Err(error);
+            }
+        };
         if matches!(
             outcome,
             ModelTurnLeaseMutationOutcome::Applied | ModelTurnLeaseMutationOutcome::Idempotent

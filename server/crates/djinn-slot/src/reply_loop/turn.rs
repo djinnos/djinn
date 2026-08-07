@@ -118,18 +118,26 @@ async fn launch_prepared_covered_attempt<T>(
     }
 }
 
-/// Production hand-off: after `mark_active`, the terminal guard owns this
-/// precise lease rather than leaving any later exit to reconstruct ownership.
-async fn launch_prepared_covered_attempt_with_lease<T>(
+/// B1 acceptance is the launch linearization point. Construct the terminal
+/// owner before awaiting `mark_active`, so an active-write failure drops the
+/// guard (abort/observe/reconcile) rather than a pre-send permit (refund).
+async fn launch_prepared_covered_attempt_with_lease(
     preparation: ModelTurnPreparation,
-    launch: impl FnOnce() -> anyhow::Result<T>,
-) -> anyhow::Result<(T, Option<djinn_db::ModelTurnLeaseIdentity>)> {
+    launch: impl FnOnce() -> anyhow::Result<(
+        djinn_provider::provider::client::ProviderSseAttemptV1,
+        Box<dyn djinn_provider::provider::ProviderSseFrameParserV1>,
+    )>,
+    coordinator: ModelTurnAdmissionCoordinator,
+) -> anyhow::Result<CoveredAttemptTerminalGuard> {
     match preparation {
         ModelTurnPreparation::Permit(mut permit) => {
             let lease = permit.lease.clone();
-            let launched = launch()?;
+            let (attempt, parser) = launch()?;
+            // Keep this in scope across `mark_active`; its Drop owns every
+            // post-dispatch early return, including a database partition here.
+            let guard = CoveredAttemptTerminalGuard::new(attempt, parser, coordinator, lease);
             permit.mark_active().await.map_err(anyhow::Error::from)?;
-            Ok((launched, lease))
+            Ok(guard)
         }
         ModelTurnPreparation::Wait(wait) => {
             Err(anyhow::Error::new(ModelTurnAdmissionOutcome::Wait(wait)))
@@ -1029,7 +1037,7 @@ pub async fn run_reply_loop(
                         return Err(anyhow::anyhow!("covered admission plan became uncovered"));
                     }
                 };
-                let ((attempt, parser), lease) = launch_prepared_covered_attempt_with_lease(
+                let guard = launch_prepared_covered_attempt_with_lease(
                     preparation,
                     || {
                         let normalizer = Arc::new(Mutex::new(ProviderApiKeyNormalizerV1::new(policy)));
@@ -1045,8 +1053,9 @@ pub async fn run_reply_loop(
                         let parser = provider.sse_frame_parser_v1().ok_or_else(|| anyhow::anyhow!("covered B1 route has no authoritative frame parser"))?;
                         Ok((attempt, parser))
                     },
+                    coordinator.clone(),
                 ).await?;
-                Ok((None, Some(CoveredAttemptTerminalGuard::new(attempt, parser, coordinator, lease))))
+                Ok((None, Some(guard)))
             } else {
                 // Explicit uncovered compatibility path: no B2 claim was made.
                 provider.stream(request_conversation.as_ref(), tools, tool_choice).await.map(|stream| (Some(stream), None))
@@ -2281,6 +2290,77 @@ mod tests {
             "active"
         );
         assert_eq!(model_turn_accounting_fixture(&db, pool).await, (1, 1, 0));
+    }
+
+    #[tokio::test]
+    async fn fake_covered_attempt_reconciles_transport_loss_exactly_once() {
+        struct EmptyParser;
+        impl djinn_provider::provider::ProviderSseFrameParserV1 for EmptyParser {
+            fn parse(
+                &mut self,
+                _: djinn_provider::provider::client::SseFrame,
+            ) -> Vec<anyhow::Result<djinn_provider::provider::StreamEvent>> {
+                Vec::new()
+            }
+        }
+
+        let db = Database::ephemeral().await.expect("db");
+        let pool = seed_model_turn_admission_fixture(&db, "enforce", "supported", 2).await;
+        let coordinator = ModelTurnAdmissionCoordinator::new(
+            djinn_db::ModelTurnAdmissionRepository::new(db.clone()),
+        );
+        let preparation = coordinator
+            .prepare(&covered_admission_plan(), admission_request("fake-transport-loss"))
+            .await
+            .expect("prepare");
+        let lease = match &preparation {
+            ModelTurnPreparation::Permit(permit) => permit.lease.clone().expect("enforced lease"),
+            other => panic!("expected fenced permit, got {other:?}"),
+        };
+        let abort = ProviderAttemptAbortHandleV1::new();
+        let observed_abort = abort.clone();
+        let (outcome_tx, outcome_rx) = tokio::sync::oneshot::channel();
+        outcome_tx
+            .send(djinn_provider::ProviderOutcomeV1 {
+                terminal: djinn_provider::ProviderAttemptTerminalV1::Failed(
+                    djinn_provider::ProviderAttemptLossV1::Transport,
+                ),
+                authoritative_usage: None,
+                observation: None,
+                abort: djinn_provider::ProviderAttemptAbortResultV1::Confirmed,
+                token_emission: Default::default(),
+            })
+            .expect("one terminal outcome");
+        let guard = launch_prepared_covered_attempt_with_lease(
+            preparation,
+            move || {
+                Ok((
+                    djinn_provider::provider::client::ProviderSseAttemptV1::for_test(
+                        Box::pin(futures::stream::empty()),
+                        abort,
+                        outcome_rx,
+                    ),
+                    Box::new(EmptyParser),
+                ))
+            },
+            coordinator,
+        )
+        .await
+        .expect("covered launch");
+
+        guard.finish(false).await;
+        guard.finish(false).await;
+
+        assert!(observed_abort.is_aborted(), "loss cleanup must abort B1 I/O");
+        assert_eq!(
+            model_turn_lease_lifecycle_fixture(&db, &lease.lease_id).await,
+            "reconciled"
+        );
+        assert_eq!(
+            model_turn_accounting_fixture(&db, pool).await,
+            (0, 1, 1),
+            "unconfirmed usage remains quarantined after repeated terminal signals"
+        );
     }
 
     #[tokio::test]
