@@ -2,7 +2,7 @@
 //! Role-specific prompt-context assembly: conflict, activity, epic, knowledge,
 //! code-graph, and CI directives → rendered system prompt with extensions + skills.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use djinn_core::extension_diagnostics::ExtensionLoadDiagnosticV1;
 use djinn_core::models::Task;
@@ -34,6 +34,7 @@ pub(crate) struct KnowledgeContextTestEnvGuard {
     _lock: std::sync::MutexGuard<'static, ()>,
     rollout: Option<std::ffi::OsString>,
     legacy: Option<std::ffi::OsString>,
+    mirror_root: Option<std::ffi::OsString>,
 }
 
 // Only in-crate unit tests mutate the rollout variables. Test-support callers
@@ -57,6 +58,13 @@ impl KnowledgeContextTestEnvGuard {
         // SAFETY: this guard serializes all knowledge-context rollout tests.
         unsafe { std::env::set_var(KNOWLEDGE_CONTEXT_LEGACY_ENV, value) }
     }
+
+    /// Point bare-mirror resolution at `root` for the life of this guard, so a
+    /// test can stand up the repository that `resolve_base_tree_root` reads.
+    pub(super) fn set_mirror_root(&mut self, root: &std::path::Path) {
+        // SAFETY: this guard serializes all knowledge-context rollout tests.
+        unsafe { std::env::set_var(MIRROR_ROOT_ENV, root) }
+    }
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -73,6 +81,10 @@ impl Drop for KnowledgeContextTestEnvGuard {
                 Some(value) => std::env::set_var(KNOWLEDGE_CONTEXT_LEGACY_ENV, value),
                 None => std::env::remove_var(KNOWLEDGE_CONTEXT_LEGACY_ENV),
             }
+            match &self.mirror_root {
+                Some(value) => std::env::set_var(MIRROR_ROOT_ENV, value),
+                None => std::env::remove_var(MIRROR_ROOT_ENV),
+            }
         }
     }
 }
@@ -85,9 +97,16 @@ pub(crate) fn knowledge_context_test_env_guard() -> KnowledgeContextTestEnvGuard
     KnowledgeContextTestEnvGuard {
         rollout: std::env::var_os(KNOWLEDGE_CONTEXT_ROLLOUT_ENV),
         legacy: std::env::var_os(KNOWLEDGE_CONTEXT_LEGACY_ENV),
+        mirror_root: std::env::var_os(MIRROR_ROOT_ENV),
         _lock: lock,
     }
 }
+
+/// Mirror-root override honoured by [`crate::repo_access::mirror_root`], saved
+/// and restored by [`KnowledgeContextTestEnvGuard`] because base-tree
+/// resolution reads it.
+#[cfg(any(test, feature = "test-support"))]
+const MIRROR_ROOT_ENV: &str = "DJINN_MIRROR_ROOT";
 
 mod ci_directive;
 mod diagnostics;
@@ -483,18 +502,46 @@ pub(crate) async fn project_target_branch(task: &Task, app_state: &AgentContext)
     }
 }
 
+/// Resolve the filesystem root whose Git history holds the attempt's base
+/// revision.
+///
+/// **This is not `project_path`.** `PromptContextInputs::project_path` is the
+/// value the prompt hands to MCP tools as `project=…`, and dispatch sets it to
+/// `task.project_id` — a UUID, deliberately, because `ProjectRepository::resolve`
+/// accepts ids and `owner/repo` slugs but not filesystem paths
+/// (`supervisor_impl::stage`). Handing that UUID to `git` made
+/// [`load_base_tree`] return `None` for *every* production dispatch, so
+/// `derive_task_scope_paths` recorded `tree_provider_unavailable`, the validated
+/// scope was always empty, and knowledge injection degenerated to its lexical
+/// signal alone.
+///
+/// The server and every task-run pod carry the project's **bare mirror** at
+/// `{mirror_root}/{project_id}.git`, which holds exactly the revision an attempt
+/// branches from, so that is the primary source. A `project_path` that really is
+/// a directory (local runs, worker worktrees, tests) is the fallback. Returning
+/// `None` keeps the specified degradation: empty scope with a typed reason.
+pub(crate) fn resolve_base_tree_root(project_id: &str, project_path: &str) -> Option<PathBuf> {
+    let mirror = crate::repo_access::mirror_path(project_id);
+    if mirror.is_dir() {
+        return Some(mirror);
+    }
+    let direct = Path::new(project_path);
+    direct.is_dir().then(|| direct.to_path_buf())
+}
+
 /// Build the base-revision tree provider for `task`'s attempt.
 ///
-/// Resolution order is `origin/<target>`, then `<target>`, then `HEAD`. Every
-/// failure mode returns `None`, which [`derive_task_scope_paths`] turns into an
-/// explicit empty scope with a typed fallback reason: provider unavailability is
-/// a specified degradation, never a hard error and never a licence to trust
-/// unvalidated prose tokens.
+/// Resolution order is `origin/<target>`, then `<target>`, then `HEAD`. A bare
+/// mirror publishes the upstream branch as a local head (`refs/heads/main`, no
+/// `origin/` remote-tracking ref), which is why plain `<target>` must stay in
+/// the ladder. Every failure mode returns `None`, which
+/// [`derive_task_scope_paths`] turns into an explicit empty scope with a typed
+/// fallback reason: provider unavailability is a specified degradation, never a
+/// hard error and never a licence to trust unvalidated prose tokens.
 pub(crate) async fn load_base_tree(
-    project_path: &str,
+    repo_root: &Path,
     target_branch: &str,
 ) -> Option<ListedBaseTree> {
-    let repo_root = std::path::Path::new(project_path);
     if !repo_root.exists() {
         return None;
     }
@@ -1338,7 +1385,10 @@ pub(crate) async fn assemble_prompt_context(inputs: PromptContextInputs<'_>) -> 
                 task_id = %task.short_id,
             );
             async move {
-                load_base_tree(project_path, &project_target_branch(task, app_state).await).await
+                // The base tree comes from the project's own repository, which
+                // `project_path` does not name (see `resolve_base_tree_root`).
+                let root = resolve_base_tree_root(&task.project_id, project_path)?;
+                load_base_tree(&root, &project_target_branch(task, app_state).await).await
             }
             .instrument(span)
         }
@@ -1797,3 +1847,7 @@ mod ci_directive_tests;
 #[cfg(test)]
 #[path = "knowledge_trace_tests.rs"]
 mod knowledge_trace_tests;
+
+#[cfg(test)]
+#[path = "injection_wiring_tests.rs"]
+mod injection_wiring_tests;
