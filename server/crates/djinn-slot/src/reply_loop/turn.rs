@@ -3202,7 +3202,10 @@ mod tests {
         );
         cancelled_coordinator.wait_for_cleanup().await;
         assert_eq!(launches.load(Ordering::SeqCst), 0, "no B1/network launch");
-        assert_eq!(model_turn_decision_count_fixture(&cancelled_db, cancelled_pool).await, 0);
+        assert_eq!(
+            model_turn_decision_count_fixture(&cancelled_db, cancelled_pool).await,
+            0
+        );
         assert_eq!(
             model_turn_accounting_fixture(&cancelled_db, cancelled_pool).await,
             (0, 2, 0),
