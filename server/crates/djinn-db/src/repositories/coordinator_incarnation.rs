@@ -27,11 +27,11 @@ pub struct CoordinatorIncarnation {
     pub registered_at: String,
     pub last_renewed_at: String,
     /// Set when leadership cancellation closed provider-action admission
-    /// (migration 191). Present without `provider_actions_drained_at` means
+    /// (migration 193). Present without `provider_actions_drained_at` means
     /// the drain started and has not finished.
     pub draining_at: Option<String>,
     /// Set only after the registered provider-action scope is empty
-    /// (migration 191). This is the timestamp that turns advisory-lock
+    /// (migration 193). This is the timestamp that turns advisory-lock
     /// release into an *exclusion proof* for CI route `calling` rows: until
     /// it exists, a former owner's provider future may still be live and
     /// `ci_route_attempt::recover_calling_owner` refuses the handoff.

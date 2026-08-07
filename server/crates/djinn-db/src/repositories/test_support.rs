@@ -1153,7 +1153,7 @@ pub async fn make_coordinator_incarnation_vanish_after_first_read(
     // real table and forgotten here turns the first read into a *lookup
     // error*, and the branch this fixture exists to reach is never entered —
     // the test still fails, but on the wrong classification, and the reason is
-    // three crates away. Migration 191's `draining_at` /
+    // three crates away. Migration 193's `draining_at` /
     // `provider_actions_drained_at` are NULL here because a vanished lease has
     // no drain history to report.
     let sql = format!(
