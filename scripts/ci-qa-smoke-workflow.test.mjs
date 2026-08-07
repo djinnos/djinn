@@ -286,7 +286,7 @@ test('qa-smoke builds, precompiles, and directly executes in deterministic order
     'no qa-smoke step may use nested cargo-run lock execution');
 });
 
-test('qa-smoke preserves rooted evidence and uploads it even after failures', () => {
+test('qa-smoke preserves rooted evidence and uploads it after failures but not cancellation', () => {
   const qa = parseJobs(readFileSync(WORKFLOW, 'utf8')).jobs.get('qa-smoke');
   assert.ok(qa, 'qa-smoke job must exist');
   const run = stepText(namedStep(qa, 'Run deterministic qa smoke and coverage gate'));
@@ -299,12 +299,88 @@ test('qa-smoke preserves rooted evidence and uploads it even after failures', ()
 
   const upload = namedStep(qa, 'Upload qa smoke evidence');
   const uploadSource = stepText(upload);
-  assert.match(uploadSource, /^ {8}if:\s*always\(\)\s*$/m, 'evidence upload must be unconditional');
+  // NOT `always()`. See the new-contract test below and the workflow comment:
+  // `always()` also fires on cancellation, and combined with
+  // `if-no-files-found: error` it manufactured a qa-smoke `failure` on the
+  // fully-green, externally-cancelled run 31137003502.
+  assert.doesNotMatch(uploadSource, /^ {8}if:.*\balways\(\)/m,
+    'evidence upload must not run on a cancelled run');
   assert.match(uploadSource, /actions\/upload-artifact@v4/, 'evidence must be an artifact');
   assert.match(uploadSource, /^ {10}path:\s*qa\/evidence\/smoke-ci\s*$/m,
     'artifact path must be rooted at qa/evidence/smoke-ci');
   assert.match(uploadSource, /^ {10}if-no-files-found:\s*error\s*$/m,
     'missing smoke evidence must fail the job');
+});
+
+// Evaluate a step `if:` the way the Actions runner does, for the two inputs
+// that decide this defect: the job's status so far, and the outcome of the
+// step that PRODUCES the evidence. Asserting behaviour rather than an exact
+// string keeps the contract honest without pinning one spelling — both
+// `!cancelled() && …` and `success() || failure()` are legitimate answers to
+// the cancellation half.
+function evaluateGuard(expression, { jobStatus, producerOutcome }) {
+  const resolved = expression
+    .replace(/^\$\{\{\s*/, '')
+    .replace(/\s*\}\}$/, '')
+    .replace(/\balways\(\)/g, 'true')
+    .replace(/\bcancelled\(\)/g, String(jobStatus === 'cancelled'))
+    .replace(/\bsuccess\(\)/g, String(jobStatus === 'success'))
+    .replace(/\bfailure\(\)/g, String(jobStatus === 'failure'))
+    .replace(/\bsteps\.[A-Za-z0-9_]+\.outcome\b/g, JSON.stringify(producerOutcome))
+    .replace(/'/g, '"')
+    // `!=` is parked on a sentinel first so the `==` rewrite cannot see it
+    // and turn `!=` into `!===`.
+    .replace(/!=/g, '\u0000')
+    .replace(/==/g, '===')
+    .replace(/\u0000/g, '!==');
+
+  // Fail closed rather than eval anything unexpected: if a future guard uses a
+  // context this evaluator does not model, that must be a loud test failure,
+  // not a silently-true assertion.
+  assert.match(resolved, /^[\s\w!&|()="<>.]*$/,
+    `guard uses an expression this test cannot model: ${expression}`);
+  return Boolean(new Function(`"use strict"; return (${resolved});`)());
+}
+
+test('cancellation cannot manufacture a qa-smoke failure', () => {
+  const qa = parseJobs(readFileSync(WORKFLOW, 'utf8')).jobs.get('qa-smoke');
+  assert.ok(qa, 'qa-smoke job must exist');
+
+  const producer = namedStep(qa, 'Run deterministic qa smoke and coverage gate');
+  const producerId = stepText(producer).match(/^ {8}id:\s*(\S+)\s*$/m)?.[1];
+  assert.ok(producerId, 'the smoke step must carry an id so the upload can key on its outcome');
+
+  const guard = stepText(namedStep(qa, 'Upload qa smoke evidence')).match(/^ {8}if:\s*(.+?)\s*$/m)?.[1];
+  assert.ok(guard, 'the evidence upload must carry an explicit guard');
+  assert.ok(guard.includes(producerId),
+    'the evidence upload must key on the smoke step it uploads the output of');
+
+  // THE REGRESSION. Run 31137003502: cancelled externally, so the precompile
+  // ended `cancelled` and the smoke step never ran. `if-no-files-found: error`
+  // on a path that was never created is a step failure, so the upload MUST NOT
+  // run here — otherwise a cancellation becomes a required-check failure.
+  assert.equal(evaluateGuard(guard, { jobStatus: 'cancelled', producerOutcome: 'skipped' }), false,
+    'a cancelled run must not run the evidence upload');
+
+  // The same hazard's other door: an earlier step (template build, runner
+  // build, precompile) fails on its own, so the smoke step is `skipped` and
+  // wrote nothing. Uploading would bury that real root cause under a spurious
+  // "No files were found" error.
+  assert.equal(evaluateGuard(guard, { jobStatus: 'failure', producerOutcome: 'skipped' }), false,
+    'a skipped producer must not trigger the evidence upload');
+
+  // ...while the ORIGINAL intent survives intact: evidence from a smoke run
+  // that actually ran is uploaded whether it passed or failed. The failing
+  // case is the one an investigator most needs.
+  assert.equal(evaluateGuard(guard, { jobStatus: 'failure', producerOutcome: 'failure' }), true,
+    'evidence from a smoke run that RAN and FAILED must still upload');
+  assert.equal(evaluateGuard(guard, { jobStatus: 'success', producerOutcome: 'success' }), true,
+    'evidence from a passing smoke run must still upload');
+
+  // `always()` is exactly what shipped, and it fails the first assertion —
+  // proving these cases discriminate rather than passing on anything.
+  assert.equal(evaluateGuard('always()', { jobStatus: 'cancelled', producerOutcome: 'skipped' }), true,
+    'the shipped always() guard must be shown to run on cancellation');
 });
 
 test('Quality Gate aggregates qa-smoke results fail-closed', () => {
