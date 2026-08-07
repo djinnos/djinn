@@ -3857,6 +3857,7 @@ mod build_epoch_bridge_tests {
             djinn_core::doctor::RetrievalHealthConfig::default(),
             Arc::new(djinn_telemetry::memory_retrieval::MemoryRetrievalMetrics::new()),
             KnowledgeInjectionConfig::default(),
+            Arc::new(djinn_core::clock::SystemClock::new()),
         )
     }
 
@@ -4188,6 +4189,7 @@ mod build_epoch_bridge_tests {
             djinn_core::doctor::RetrievalHealthConfig::default(),
             Arc::new(djinn_telemetry::memory_retrieval::MemoryRetrievalMetrics::new()),
             resolved,
+            Arc::new(djinn_core::clock::SystemClock::new()),
         );
 
         assert_eq!(state.agent_context().knowledge_injection, resolved);
