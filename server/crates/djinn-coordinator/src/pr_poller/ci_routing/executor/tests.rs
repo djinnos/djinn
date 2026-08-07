@@ -4816,7 +4816,16 @@ async fn head_advance_clears_hold_streak() {
 ///   watermark (`Superseded`).
 ///
 /// Either way there is exactly one `escalated_at`, one run-absent route row, one
-/// open Tier-2 lease, and one Lead adjudication.
+/// open Tier-2 lease, and one Lead adjudication — bound to that route, because
+/// an arbitration row that exists and a route that names it are different
+/// claims, and only the second one `unapplied_lead_results` can read.
+///
+/// This is the escalating poll's own dispatch, where the lease id the payload
+/// minted and the one the row stores are the same value: this poll is the one
+/// that inserted the row. The other two entries into `dispatch_escalated_hold`
+/// — a conflicting insert and the `AlreadyEscalated` re-drive — cannot rely on
+/// that, and are covered by
+/// `an_escalated_hold_redrive_binds_the_lease_its_route_holds`.
 #[tokio::test]
 async fn count_eleven_race_escalates_once_at_twelve() {
     let h = lane_harness().await;
@@ -4987,6 +4996,29 @@ async fn count_eleven_race_escalates_once_at_twelve() {
     assert_eq!(row.identity.run_id, None, "absence, never a sentinel");
     assert_eq!(row.action, CiAction::AskLead);
 
+    // …and the adjudication is BOUND to that route rather than merely coincident
+    // with it. Counting `task_arbitrations` proves the escalation wrote *an*
+    // arbitration; only `lead_session_id` proves it wrote the one this route is
+    // adjudicated under, which is what `unapplied_lead_results` reads. Exactly
+    // one attach happens however the race lands: whichever poll creates the
+    // arbitration is the one that binds, and the other finds it unconsumed and
+    // answers `AlreadyInFlight` before reaching the attach.
+    let adjudication =
+        djinn_db::repositories::task_arbitration::TaskArbitrationRepository::new(h.db.clone())
+            .get_latest_for_task(&h.task_id)
+            .await
+            .expect("arbitration read")
+            .expect("the escalation dispatches one Lead session");
+    assert_eq!(
+        row.lead_session_count, 1,
+        "one Lead session attached to the escalated route, not zero and not two",
+    );
+    assert_eq!(
+        row.lead_session_id.as_deref(),
+        Some(adjudication.id.as_str()),
+        "and the route names the arbitration row adjudicating it",
+    );
+
     // And an escalation still buys no provider call, no worker, and no charge.
     assert_eq!(first.calls().mutations(), 0);
     assert_eq!(second.calls().mutations(), 0);
@@ -4999,6 +5031,284 @@ async fn count_eleven_race_escalates_once_at_twelve() {
         charged_budget_counters(&h.db).await,
         0,
         "`ask_lead` consumes no Tier-1 charge",
+    );
+}
+
+/// An escalated hold's re-drive binds the lease its ROW holds, not the one its
+/// payload minted.
+///
+/// # Why the sibling twelve-poll fixture cannot see this
+///
+/// It asserts `arbitration_rows == 1` and never reads `lead_session_*`, and the
+/// escalating poll there is also the one that INSERTS the route — so the id it
+/// minted and the id the row stores are the same value by accident of timing,
+/// and every attach matches its fence. Both other ways into
+/// `dispatch_escalated_hold` break that coincidence:
+///
+/// * `escalation_route` mints `tier2_lease_id` fresh on every call while
+///   `insert_escalation_route` writes it `ON CONFLICT DO NOTHING`, so
+///   `Escalated { route_inserted: false }` dispatches against an id no row
+///   holds; and
+/// * the `AlreadyEscalated` re-drive — the recovery for "the lease committed
+///   but the dispatch did not" — always mints its id after the row was written.
+///
+/// This fixture drives the second one, because it is the case where the
+/// re-drive is the poll that finally creates the arbitration: escalate with the
+/// dispatch unable to land, then poll again and require that the Lead session
+/// the re-drive dispatches is bound to the durable lease.
+///
+/// The escalating poll is handed a task id that names no row, which is exactly
+/// `dispatch_escalated_hold`'s own `Ok(None) => return` arm and exactly the
+/// production shape its `AlreadyEscalated` comment describes: the ledger's
+/// transaction commits the route and its open lease, and the board-side half —
+/// which cannot be in that transaction — does not happen. Nothing else about
+/// the fixture is arranged; the streak, the route, the lease and both
+/// dispatches are the production ones.
+///
+/// # Why the binding, and not just the arbitration row
+///
+/// The stored lease id fences BOTH ends of the adjudication.
+/// `attach_lead_session` writes `lead_session_id` only when the id matches, and
+/// the supervisor hands the directive's `tier2_lease_id` to
+/// `resolve_tier2_lease`, which is fenced on the same column. A Lead session
+/// dispatched under a minted id therefore looks completely successful — row,
+/// directive, board transition — while `unapplied_lead_results` reads
+/// "quiescent" and the result, whenever it arrives, can never be applied. The
+/// escalation would spend a session and stay wedged, which is the failure the
+/// re-drive exists to prevent.
+///
+/// NAMED FAILING MUTATIONS.
+/// (a) Restore `tier2_lease_id: escalation.tier2_lease_id.clone()` in the
+///     handoff (i.e. drop the read-back): the re-drive's minted id names no
+///     row, so `attach_lead_session` misses its fence — `lead_session_count`
+///     stays `0` and `lead_session_id` NULL — and the directive assertion fails
+///     with the minted id in place of the stored one. Every other observable
+///     (arbitration row, directive block, board state) is unchanged, which is
+///     why nothing else here catches it.
+/// (b) Delete the `dispatch_escalated_hold` call from the `AlreadyEscalated`
+///     arm: no arbitration row exists at all, so the `expect` on the
+///     arbitration fails. The route keeps an open lease with nothing
+///     adjudicating it, and the lease is head-scoped, so it also blocks every
+///     other Tier-2 route for that head.
+/// (c) Drop the `holds_open_tier2_lease()` guard, or read the lease id without
+///     requiring the lease to be open: phase three's re-drive over a RESOLVED
+///     lease dispatches a second Lead session, opening a second hold cycle
+///     whose result `resolve_tier2_lease` can never apply — `arbitration_rows`
+///     becomes 2.
+/// (d) Bind the row's id but leave the directive on the payload's (two sources
+///     for one lease): the directive assertion fails alone, and the supervisor
+///     would resolve nothing.
+#[tokio::test]
+async fn an_escalated_hold_redrive_binds_the_lease_its_route_holds() {
+    let h = lane_harness().await;
+    let identity = pr_head_hold_identity(&h.task_id);
+    let hold_reason = crate::pr_poller::ci_routing::CiIncompleteReason::EnumerationPageFailed;
+    // Named once: every poll below is the same logical lane observation, and a
+    // second reason would start a different argument than the one under test.
+    let poll_once = async |task_id: &str| {
+        let poll = h
+            .actor
+            .reserve_ci_hold_poll(identity.clone())
+            .await
+            .expect("reservation");
+        h.actor
+            .apply_ci_hold_poll(
+                &poll,
+                &identity,
+                false,
+                CiOriginState::PrDraft,
+                hold_reason,
+                task_id,
+            )
+            .await
+    };
+
+    // ── Phase one: the lease commits and the dispatch does not ──────────────
+    let orphan_task = uuid::Uuid::now_v7().to_string();
+    for expected in 1..=djinn_db::CI_INCOMPLETE_HOLD_MAX_POLLS {
+        let absorbed = if expected == djinn_db::CI_INCOMPLETE_HOLD_MAX_POLLS {
+            crate::pr_poller::ci_hold::CiHoldAbsorption::Escalated {
+                route_inserted: true,
+            }
+        } else {
+            crate::pr_poller::ci_hold::CiHoldAbsorption::Held {
+                poll_count: expected,
+            }
+        };
+        assert_eq!(
+            poll_once(&orphan_task).await,
+            crate::pr_poller::ci_hold::CiHoldDisposition::Absorbed(absorbed),
+            "poll {expected} of {}",
+            djinn_db::CI_INCOMPLETE_HOLD_MAX_POLLS,
+        );
+    }
+
+    let subject = CiRouteSubject::task(h.task_id.clone());
+    let run_absent = CiEvidenceIdentity {
+        lane: CiLane::PrHead,
+        pr_number: PR,
+        pr_head_sha: HEAD.to_owned(),
+        run_id: None,
+        run_head_sha: HEAD.to_owned(),
+        dequeue_id: None,
+    };
+    let routes = CiRouteAttemptRepository::new(h.db.clone());
+    let key = provider_action_key(&subject, &run_absent, CiAction::AskLead);
+    let escalated = routes
+        .get(&subject, &key)
+        .await
+        .expect("route read")
+        .expect("the escalating transaction writes the run-absent route");
+    let lease_id = escalated
+        .tier2_lease_id
+        .clone()
+        .expect("the escalation opens the lease on the INSERT itself");
+    assert!(
+        escalated.holds_open_tier2_lease(),
+        "precondition: the durable lease is open and unadjudicated",
+    );
+    assert_eq!(
+        escalated.lead_session_count, 0,
+        "precondition: the dispatch did NOT land — otherwise phase two would be \
+         witnessing a binding that already existed",
+    );
+    assert_eq!(escalated.lead_session_id, None);
+    assert_eq!(
+        arbitration_rows(&h.db).await,
+        0,
+        "precondition: no Lead session was dispatched for the escalation",
+    );
+    assert_eq!(
+        djinn_db::test_support::task_status_for_test(&h.db, &h.task_id).await,
+        "pr_review",
+        "precondition: and the board never entered the Lead lane",
+    );
+
+    // ── Phase two: the re-drive is the poll that dispatches ─────────────────
+    assert_eq!(
+        poll_once(&h.task_id).await,
+        crate::pr_poller::ci_hold::CiHoldDisposition::Absorbed(
+            crate::pr_poller::ci_hold::CiHoldAbsorption::AlreadyEscalated
+        ),
+        "an escalated streak absorbs every later poll",
+    );
+
+    let arbitrations =
+        djinn_db::repositories::task_arbitration::TaskArbitrationRepository::new(h.db.clone());
+    let arbitration = arbitrations
+        .get_latest_for_task(&h.task_id)
+        .await
+        .expect("arbitration read")
+        .expect("the re-drive dispatches the Lead session the escalation could not");
+    let bound = routes
+        .get(&subject, &key)
+        .await
+        .expect("route read")
+        .expect("the route is still the run-absent one");
+    assert_eq!(
+        bound.tier2_lease_id.as_deref(),
+        Some(lease_id.as_str()),
+        "the re-drive opens no second lease, so the only id it may bind is the \
+         one the row already held",
+    );
+    assert_eq!(
+        bound.lead_session_count, 1,
+        "the re-drive's Lead session must be attached to the route it adjudicates",
+    );
+    assert_eq!(
+        bound.lead_session_id.as_deref(),
+        Some(arbitration.id.as_str()),
+        "and it must name the arbitration row this route is adjudicated under",
+    );
+    let directive = arbitration
+        .directive
+        .clone()
+        .expect("the dispatch writes the directive the Lead session reads");
+    assert_eq!(
+        directive["ci_route"]["tier2_lease_id"].as_str(),
+        Some(lease_id.as_str()),
+        "the supervisor hands this id to `resolve_tier2_lease`, which is fenced \
+         on the STORED lease: a minted id makes the adjudication unappliable",
+    );
+    assert_eq!(
+        directive["ci_route"]["provider_action_key"].as_str(),
+        Some(key.as_str()),
+        "and the directive names the route the lease belongs to",
+    );
+    assert_eq!(
+        djinn_db::test_support::ci_route_row_count_for_test(&h.db, &h.task_id).await,
+        1,
+        "one run-absent route, not one per poll",
+    );
+    assert_eq!(
+        djinn_db::test_support::ci_route_lease_count_for_test(&h.db, &h.task_id).await,
+        1,
+        "and one Tier-2 lease",
+    );
+    assert_eq!(arbitration_rows(&h.db).await, 1, "and one Lead session");
+    assert_eq!(
+        djinn_db::test_support::task_status_for_test(&h.db, &h.task_id).await,
+        "needs_lead_intervention",
+        "the re-drive escalates the board as well as binding the route",
+    );
+
+    // ── Phase three: a resolved lease ends this route's trip to Tier 2 ──────
+    //
+    // The adjudication is applied and consumed, which is what a Lead result
+    // landing looks like. Later incomplete polls keep arriving — the head's CI
+    // is still incomplete — and every one of them lands on `AlreadyEscalated`
+    // again. Dispatching there would open a SECOND hold cycle against a lease
+    // that is closed, so its result could never be applied: a session spent to
+    // be discarded.
+    assert!(
+        routes
+            .resolve_tier2_lease(
+                &subject,
+                &key,
+                &lease_id,
+                &run_absent,
+                &djinn_db::CiTier2Resolution::diagnose(
+                    djinn_db::CiDiagnosticReason::EvidenceIncomplete
+                ),
+            )
+            .await
+            .expect("resolve"),
+        "precondition: the adjudication applies and closes the lease",
+    );
+    assert!(
+        arbitrations
+            .mark_consumed(&h.task_id, arbitration.hold_cycle)
+            .await
+            .expect("consume"),
+        "precondition: and its arbitration is consumed, so nothing is in flight",
+    );
+
+    assert_eq!(
+        poll_once(&h.task_id).await,
+        crate::pr_poller::ci_hold::CiHoldDisposition::Absorbed(
+            crate::pr_poller::ci_hold::CiHoldAbsorption::AlreadyEscalated
+        ),
+    );
+    assert_eq!(
+        arbitration_rows(&h.db).await,
+        1,
+        "a route routes to Tier 2 at most once, ever: a re-drive over a resolved \
+         lease must dispatch NOTHING",
+    );
+    assert_eq!(
+        routes
+            .get(&subject, &key)
+            .await
+            .expect("route read")
+            .expect("route")
+            .lead_session_count,
+        1,
+        "and it attaches no second session to the route it can no longer resolve",
+    );
+    assert_eq!(
+        djinn_db::test_support::task_attempt_count_for_test(&h.db, &h.task_id).await,
+        0,
+        "none of this dispatches a worker",
     );
 }
 
@@ -6111,6 +6421,128 @@ fn a_routed_pr_draft_disposition_turns_the_legacy_remedy_off() {
         "the legacy failure remedy must sit INSIDE the complete-empty guard; \
          outside it, a no-CI enumeration the route layer already recorded \
          `Passing` gets remediated as a failure",
+    );
+}
+
+/// The merge-queue lane's routed disposition LEAVES `handle_queue_failure`.
+///
+/// The merge-group twin of the guard above, and source-level for the same
+/// reason: `handle_queue_failure` takes a `&GitHubApiClient` built by
+/// `resolve_installation_client` against the hard-coded `api.github.com`, so no
+/// fixture in this crate can drive it. Every behavioural merge-group fixture
+/// enters at `route_merge_group_ci_evidence` and asserts what the *callee*
+/// answered.
+///
+/// The sibling `the_pr_poller_hands_the_live_gate_to_both_lane_routers` pins
+/// that this call site exists and is handed the live gate. Neither it nor
+/// anything else pins the `return;` — and this router call sits in the MIDDLE
+/// of `handle_queue_failure`, not at its head, so without the early return a
+/// routed merge-group failure keeps running through the rest of the function
+/// and reaches both legacy remedies: the same-signature park and then the
+/// generic `PrCiFailed` reopen. One dequeue would buy an evidence-led Tier-2
+/// adjudication AND the blind reopen that adjudication exists to replace — the
+/// double-spent session this proposal is for — with the whole `nafu` command
+/// list green, because the callee still answers exactly what every behavioural
+/// fixture asserts.
+///
+/// NAMED FAILING MUTATIONS.
+/// (a) Delete the `return;` from the `.is_routed()` branch: the containment
+///     assertion fails. In production the routed dequeue would fall through to
+///     `apply_pr_transition(PrCiFailed)` in addition to its route.
+/// (b) Replace `return;` with a bare log, or with anything that does not leave
+///     the function: same assertion, same reason.
+/// (c) Move the router call (and its branch) BELOW the reopen: the ordering
+///     assertion fails — the legacy remedy would already have been spent by the
+///     time the route layer got first refusal.
+/// (d) Invert the branch to `if !self.route_merge_group_ci_evidence(..)…`: the
+///     routed disposition would fall through to both legacy remedies and the
+///     DECLINED one would return — the same double-spend with the cases
+///     swapped, and a shape the containment check alone cannot tell apart. The
+///     unnegated-head assertion is what fails.
+/// (e) Add a second `route_merge_group_ci_evidence` call site or a second
+///     legacy remedy anywhere in the file: the occurrence counts fail, which
+///     forces a new caller to be looked at rather than silently inheriting no
+///     guard.
+#[test]
+fn a_routed_merge_group_disposition_replaces_the_legacy_queue_remedy() {
+    let code = strip_line_comments(include_str!("../../pr_commands.rs"));
+
+    let find = |needle: &str, what: &str| -> usize {
+        code.find(needle)
+            .unwrap_or_else(|| panic!("{what}: `{needle}` is not in pr_commands.rs"))
+    };
+    let count = |needle: &str| code.matches(needle).count();
+
+    const ROUTER: &str = ".route_merge_group_ci_evidence(";
+    const ROUTED: &str = ".is_routed()";
+    const LEGACY_PARK: &str = "self.escalate_ci_failure_and_park(";
+    const LEGACY_REOPEN: &str = "TransitionAction::PrCiFailed";
+
+    assert_eq!(
+        count(ROUTER),
+        1,
+        "one merge-group router call site in this file",
+    );
+    assert_eq!(
+        count(ROUTED),
+        1,
+        "one routed-disposition test, so the branch located below is that one",
+    );
+    assert_eq!(
+        count(LEGACY_PARK),
+        1,
+        "one same-signature park; a second one would inherit no guard",
+    );
+    assert_eq!(
+        count(LEGACY_REOPEN),
+        1,
+        "one generic queue reopen; a second one would inherit no guard",
+    );
+
+    let router = find(ROUTER, "the merge-group router call");
+    let routed = find(ROUTED, "the routed-disposition test");
+    let park = find(LEGACY_PARK, "the same-signature park");
+    let reopen = find(LEGACY_REOPEN, "the generic queue reopen");
+    assert!(
+        router < routed,
+        "the disposition must be read from the router's own return value",
+    );
+
+    // The branch must test the routed disposition UNNEGATED. `if !…is_routed()`
+    // keeps a `return;` inside a well-formed block — containment alone cannot
+    // tell the two apart — while returning on the declined path and handing the
+    // ROUTED one to both legacy remedies.
+    let if_start = code[..router]
+        .rfind("if ")
+        .expect("the router call must sit in an `if` condition");
+    let head: Vec<&str> = code[if_start..router].split_whitespace().collect();
+    assert_eq!(
+        head.join(" "),
+        "if self",
+        "the routed branch must be entered when the route layer HANDLED the \
+         dequeue, not when it declined",
+    );
+
+    // The branch the routed disposition opens, and where it closes. `block_end`
+    // is what tells "inside the branch" from "after it" — the whole difference
+    // between a legacy remedy REPLACED by a route and one that runs in addition
+    // to it.
+    let after_routed = routed + ROUTED.len();
+    let open = after_routed
+        + code[after_routed..]
+            .find('{')
+            .expect("the routed disposition must open a branch");
+    let block = block_end(&code, open);
+    assert!(
+        code[open..block].contains("return;"),
+        "a routed merge-group failure must LEAVE `handle_queue_failure`; falling \
+         out of this branch hands the same dequeue to the legacy remedies as well",
+    );
+    assert!(
+        block < park && park < reopen,
+        "and it must leave BEFORE either legacy remedy is reachable: the park at \
+         {park} and the reopen at {reopen} both follow the routed branch, which \
+         ends at {block}",
     );
 }
 
