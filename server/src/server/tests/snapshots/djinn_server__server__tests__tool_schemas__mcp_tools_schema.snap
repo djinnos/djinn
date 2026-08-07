@@ -18003,6 +18003,13 @@ expression: signatures
         "proposal_id": {
           "description": "Proposal UUID or short_id.",
           "type": "string"
+        },
+        "severity": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
@@ -18070,8 +18077,24 @@ expression: signatures
                 "null"
               ]
             },
+            "severity": {
+              "description": "`advisory` discussion does not gate readiness; `blocking` feedback does.",
+              "type": "string"
+            },
             "updated_at": {
               "type": "string"
+            },
+            "withdrawn_at": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "withdrawn_by_user_id": {
+              "type": [
+                "string",
+                "null"
+              ]
             }
           },
           "required": [
@@ -18079,6 +18102,7 @@ expression: signatures
             "proposal_id",
             "author_kind",
             "body",
+            "severity",
             "created_at",
             "updated_at"
           ],
@@ -18457,8 +18481,24 @@ expression: signatures
                 "null"
               ]
             },
+            "severity": {
+              "description": "`advisory` discussion does not gate readiness; `blocking` feedback does.",
+              "type": "string"
+            },
             "updated_at": {
               "type": "string"
+            },
+            "withdrawn_at": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "withdrawn_by_user_id": {
+              "type": [
+                "string",
+                "null"
+              ]
             }
           },
           "required": [
@@ -18466,6 +18506,7 @@ expression: signatures
             "proposal_id",
             "author_kind",
             "body",
+            "severity",
             "created_at",
             "updated_at"
           ],
@@ -18573,8 +18614,24 @@ expression: signatures
                 "null"
               ]
             },
+            "severity": {
+              "description": "`advisory` discussion does not gate readiness; `blocking` feedback does.",
+              "type": "string"
+            },
             "updated_at": {
               "type": "string"
+            },
+            "withdrawn_at": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "withdrawn_by_user_id": {
+              "type": [
+                "string",
+                "null"
+              ]
             }
           },
           "required": [
@@ -18582,6 +18639,7 @@ expression: signatures
             "proposal_id",
             "author_kind",
             "body",
+            "severity",
             "created_at",
             "updated_at"
           ],
@@ -21789,8 +21847,24 @@ expression: signatures
                 "null"
               ]
             },
+            "severity": {
+              "description": "`advisory` discussion does not gate readiness; `blocking` feedback does.",
+              "type": "string"
+            },
             "updated_at": {
               "type": "string"
+            },
+            "withdrawn_at": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "withdrawn_by_user_id": {
+              "type": [
+                "string",
+                "null"
+              ]
             }
           },
           "required": [
@@ -21798,6 +21872,7 @@ expression: signatures
             "proposal_id",
             "author_kind",
             "body",
+            "severity",
             "created_at",
             "updated_at"
           ],
