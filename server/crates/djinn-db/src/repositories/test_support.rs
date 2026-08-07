@@ -111,6 +111,48 @@ pub async fn materialize_judge_authority_for_test(
     tx.commit().await.unwrap();
 }
 
+/// Switch an already-materialized Judge authority tuple to Adversary authority.
+///
+/// Both persisted role columns are updated in one transaction so consumer tests
+/// cannot observe or accidentally construct a split authority tuple.
+///
+/// **Not for production use.** Panics on SQL errors.
+pub async fn switch_to_adversary_authority_for_test(db: &Database, task_id: &str) {
+    db.ensure_initialized().await.unwrap();
+    let mut tx = db.pool().begin().await.unwrap();
+    sqlx::query("UPDATE refinement_dispatch_intents SET role = 'adversary' WHERE task_id = $1")
+        .bind(task_id)
+        .execute(&mut *tx)
+        .await
+        .expect("failed to switch authority intent to Adversary");
+    sqlx::query(
+        "UPDATE tasks SET agent_type = 'adversary', refinement_role = 'adversary' WHERE id = $1",
+    )
+    .bind(task_id)
+    .execute(&mut *tx)
+    .await
+    .expect("failed to switch authority task to Adversary");
+    tx.commit().await.unwrap();
+}
+
+/// Install a late fault that rejects proposal debate inserts.
+///
+/// Atomic evidence-demand tests use this boundary after the transaction has
+/// staged its task, typed finding/attempt, and legacy projection writes.
+///
+/// **Not for production use.** Panics on SQL errors.
+pub async fn reject_atomic_demand_debate_inserts_for_test(db: &Database) {
+    db.ensure_initialized().await.unwrap();
+    sqlx::query("CREATE FUNCTION reject_atomic_demand_debate_for_test() RETURNS trigger AS $$ BEGIN RAISE EXCEPTION 'injected atomic demand debate failure'; END; $$ LANGUAGE plpgsql")
+        .execute(db.pool())
+        .await
+        .expect("failed to install atomic demand debate fault function");
+    sqlx::query("CREATE TRIGGER reject_atomic_demand_debate_for_test BEFORE INSERT ON proposal_debate_trail FOR EACH ROW EXECUTE FUNCTION reject_atomic_demand_debate_for_test()")
+        .execute(db.pool())
+        .await
+        .expect("failed to install atomic demand debate fault trigger");
+}
+
 /// Override a task short id for identifier-resolution regressions.
 ///
 /// **Not for production use.** Panics on SQL errors.

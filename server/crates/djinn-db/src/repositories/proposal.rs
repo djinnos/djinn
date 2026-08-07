@@ -1976,9 +1976,9 @@ impl ProposalRepository {
                 // is silently ignored.
             }
             "needs_evidence" => {
-                if input.agent_role != "judge" {
+                if !matches!(input.agent_role, "judge" | "adversary") {
                     return Err(Error::InvalidData(format!(
-                        "needs_evidence debate entry requires agent_role = \"judge\", got {:?}",
+                        "needs_evidence debate entry requires agent_role = \"judge\" or \"adversary\", got {:?}",
                         input.agent_role
                     )));
                 }
