@@ -46,11 +46,12 @@ proposal spec below as the source of truth and the feedback as input to weigh â€
    - Keep the workflow lazy: do not embed the full block catalog or skill body
      in the prompt text; call/pull them on demand only when needed.
 
-4. **Resolve the feedback you addressed.** After the spec change lands, call
-   `proposal_feedback_resolve` for the feedback id(s) you acted on, passing
-   `resolved_revision_seq` = the revision the change landed in. For feedback the
-   user explicitly chose to skip/dismiss, call `proposal_feedback_resolve`
-   WITHOUT a revision (a plain dismissal).
+4. **Account for each human-feedback objection.** For the source-scoped
+   `human_feedback` debate entry, call `proposal_feedback_disposition` after
+   the spec change lands: use `fixed_by_revision` with the newer revision that
+   fixed it, or `wont_fix` with a specific non-empty reason. This is pending
+   Advocate input; the Judge alone accepts or rejects it. Do not call
+   `proposal_debate_resolve`.
 
 5. **Summarize briefly** in chat: what you changed, which revision it landed in,
    and what you skipped and why.

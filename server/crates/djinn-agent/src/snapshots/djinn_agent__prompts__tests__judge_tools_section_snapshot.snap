@@ -22,7 +22,7 @@ expression: section
 - `memory_build_context(edge_kinds?, limit?, min_confidence?, query?, task_id?)`
 - `proposal_show(id, fields?, revision_bodies?)`
 - `proposal_debate_list(proposal_id)`
-- `proposal_debate_resolve(id)`
+- `proposal_debate_resolve(id, reason?, verdict?)`
 - `proposal_debate_append(against_revision_seq, agent_role, body, kind, proposal_id, round, blocking?)`
 - `proposal_refinement_demand_evidence(against_revision_seq, expected_findings, insufficient_in_session_research, proposal_id, question, round, spec_unknown_anchor, target_subsystem)`
 - `task_comment_add(body, id)`

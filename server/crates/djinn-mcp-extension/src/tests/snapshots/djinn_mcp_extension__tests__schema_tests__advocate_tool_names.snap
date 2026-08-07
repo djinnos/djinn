@@ -28,6 +28,7 @@ expression: names
   "proposal_show",
   "proposal_debate_list",
   "proposal_debate_append",
+  "proposal_feedback_disposition",
   "proposal_update",
   "proposal_ac_set",
   "proposal_block_patch",
