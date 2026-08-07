@@ -8370,6 +8370,7 @@ export namespace ProposalFeedbackAddInputSchema {
    * Proposal UUID or short_id.
    */
   proposal_id: string
+  severity?: string
   [k: string]: any
   }
 
@@ -8404,7 +8405,13 @@ export namespace ProposalFeedbackAddOutputSchema {
    * a spec change).
    */
   resolved_revision_seq?: number
+  /**
+   * `advisory` discussion does not gate readiness; `blocking` feedback does.
+   */
+  severity: string
   updated_at: string
+  withdrawn_at?: string
+  withdrawn_by_user_id?: string
   [k: string]: any
   }
 
@@ -8551,7 +8558,13 @@ export namespace ProposalFeedbackResolveOutputSchema {
    * a spec change).
    */
   resolved_revision_seq?: number
+  /**
+   * `advisory` discussion does not gate readiness; `blocking` feedback does.
+   */
+  severity: string
   updated_at: string
+  withdrawn_at?: string
+  withdrawn_by_user_id?: string
   [k: string]: any
   }
 
@@ -8597,7 +8610,13 @@ export namespace ProposalFeedbackWithdrawOutputSchema {
    * a spec change).
    */
   resolved_revision_seq?: number
+  /**
+   * `advisory` discussion does not gate readiness; `blocking` feedback does.
+   */
+  severity: string
   updated_at: string
+  withdrawn_at?: string
+  withdrawn_by_user_id?: string
   [k: string]: any
   }
 
@@ -10244,7 +10263,13 @@ export namespace ProposalShowOutputSchema {
    * a spec change).
    */
   resolved_revision_seq?: number
+  /**
+   * `advisory` discussion does not gate readiness; `blocking` feedback does.
+   */
+  severity: string
   updated_at: string
+  withdrawn_at?: string
+  withdrawn_by_user_id?: string
   [k: string]: any
   }
   /**
