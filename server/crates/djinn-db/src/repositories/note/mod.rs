@@ -12,6 +12,8 @@ use std::sync::Arc;
 use crate::database::Database;
 use crate::error::{DbError as Error, DbResult as Result};
 
+mod abstract_regeneration;
+mod access_events;
 mod association;
 pub(crate) mod consolidation;
 mod context;
@@ -42,6 +44,15 @@ mod search;
 // `UpdateNoteIndexParams`, `ReindexSummary`, …) was deleted because notes
 // are no longer mirrored to disk.
 
+pub use abstract_regeneration::{
+    AbstractVintageCoverage, DEFAULT_ABSTRACT_REGEN_ATTEMPT_LIMIT, StaleAbstractNote,
+    abstract_vintage_coverage, exhausted_abstract_regeneration_notes,
+    record_abstract_regeneration_attempt, record_abstract_regeneration_success,
+    select_stale_abstract_note_ids,
+};
+pub use access_events::{
+    NoteAccessAttribution, NoteAccessEvent, NoteAccessSource, note_access_events_for_note,
+};
 pub use association::{
     NoteAssociationEntry, NoteAssociationKind, NoteAssociationProvenanceRow,
     NoteAssociationProvenanceUpsert, NoteAssociationSource,

@@ -2169,3 +2169,281 @@ fn memory_search_contract_present_in_all_operational_prompts() {
 
     assert_memory_search_contract(include_str!("proposal_address.md"), "proposal_address.md");
 }
+
+// ── u46i R3: the injected-knowledge pull scaffold ──────────────────────────────
+
+/// The fixture note rendered as the first injected entry. Its slug is unique so
+/// the scaffold's own worked-example entry can never be mistaken for it.
+const KNOWLEDGE_FIXTURE_ENTRY: &str = "- **[Pitfall] pitfalls/u46i-r3-fixture-entry**";
+
+fn knowledge_fixture() -> String {
+    format!(
+        "{KNOWLEDGE_FIXTURE_ENTRY}: applies when the fixture condition holds\n  \
+         action: … truncated; memory_read(pitfalls/u46i-r3-fixture-entry)"
+    )
+}
+
+/// Render a worker prompt with injected notes and return only the scaffold —
+/// the text between the `## Relevant Knowledge` header and the first injected
+/// entry. Asserting on this slice proves the scaffold *precedes* the notes
+/// rather than merely appearing somewhere in the prompt.
+fn render_knowledge_scaffold() -> String {
+    let task = make_task();
+    let mut ctx = make_ctx();
+    ctx.knowledge_context = Some(knowledge_fixture());
+    let prompt = render_prompt(AgentType::Worker, &task, &ctx);
+
+    let Some(section_start) = prompt.find("## Relevant Knowledge") else {
+        panic!("the knowledge section must render when knowledge_context is present");
+    };
+    let Some(notes_offset) = prompt[section_start..].find(KNOWLEDGE_FIXTURE_ENTRY) else {
+        panic!("the injected notes must render inside the knowledge section");
+    };
+    prompt[section_start..section_start + notes_offset].to_string()
+}
+
+/// R3 element 1 — coverage map: what is in context vs. what is one call away.
+#[test]
+fn knowledge_scaffold_carries_a_coverage_map() {
+    let scaffold = render_knowledge_scaffold();
+    assert!(
+        scaffold.contains("Coverage map"),
+        "the coverage map must be labelled so it is identifiable: {scaffold}"
+    );
+    assert!(
+        scaffold.contains("In context:") && scaffold.contains("one call away"),
+        "the coverage map must name both sides of the boundary: {scaffold}"
+    );
+    assert!(
+        scaffold.contains("action:") && scaffold.contains("condition under"),
+        "the in-context side must name the applicability condition and action excerpt: {scaffold}"
+    );
+    assert!(
+        scaffold.contains("reproduction steps")
+            && scaffold.contains("diagnostics")
+            && scaffold.contains("related notes"),
+        "the one-call-away side must enumerate the full note body: {scaffold}"
+    );
+}
+
+/// R3 element 2 — enumerated pull triggers.
+#[test]
+fn knowledge_scaffold_enumerates_pull_triggers() {
+    let scaffold = render_knowledge_scaffold();
+    assert!(
+        scaffold.contains("Pull triggers"),
+        "the trigger list must be labelled: {scaffold}"
+    );
+    for trigger in [
+        "… truncated; memory_read(<permalink>)",
+        "condition matches what you are about to do",
+        "regeneration, migration, deploy",
+        "CI failure",
+    ] {
+        assert!(
+            scaffold.contains(trigger),
+            "the trigger list must enumerate `{trigger}`: {scaffold}"
+        );
+    }
+}
+
+/// R3 element 3 — the negative list, distinguishable from the trigger list.
+#[test]
+fn knowledge_scaffold_carries_a_negative_list_distinct_from_the_triggers() {
+    let scaffold = render_knowledge_scaffold();
+    let Some(triggers_at) = scaffold.find("Pull triggers") else {
+        panic!("the trigger list must exist before the negative list can be distinguished");
+    };
+    let Some(negatives_at) = scaffold.find("Negative list") else {
+        panic!("the scaffold must carry a separately labelled negative list: {scaffold}");
+    };
+    assert!(
+        negatives_at > triggers_at,
+        "the negative list must be its own section after the triggers, not interleaved: {scaffold}"
+    );
+    assert!(
+        scaffold.contains("do NOT pull when"),
+        "the negative list must state the skip condition explicitly: {scaffold}"
+    );
+    for skip in [
+        "already fully answers",
+        "does not match this task",
+        "already read that permalink",
+        "just in case",
+    ] {
+        assert!(
+            scaffold.contains(skip),
+            "the negative list must enumerate `{skip}`: {scaffold}"
+        );
+    }
+}
+
+/// R3 element 4 — a worked example that includes the empty-result branch.
+#[test]
+fn knowledge_scaffold_works_an_example_including_the_empty_result_branch() {
+    let scaffold = render_knowledge_scaffold();
+    assert!(
+        scaffold.contains("Worked example"),
+        "the worked example must be labelled: {scaffold}"
+    );
+    assert!(
+        scaffold.contains("memory_read(identifier=\"pitfalls/"),
+        "the worked example must show the exact call with a real-shaped handle: {scaffold}"
+    );
+    assert!(
+        scaffold.contains("Empty-result branch"),
+        "the worked example must branch on an empty result: {scaffold}"
+    );
+    assert!(
+        scaffold.contains("returns nothing or errors"),
+        "the empty-result branch must name the empty/error outcome: {scaffold}"
+    );
+    assert!(
+        scaffold.contains("never loop") && scaffold.contains("invent its contents"),
+        "the empty-result branch must forbid retry loops and fabrication: {scaffold}"
+    );
+}
+
+/// R3 element 5 — the anti-refusal clause, naming the literal refusal strings.
+#[test]
+fn knowledge_scaffold_names_the_literal_refusal_strings() {
+    let scaffold = render_knowledge_scaffold();
+    assert!(
+        scaffold.contains("Anti-refusal"),
+        "the anti-refusal clause must be labelled: {scaffold}"
+    );
+    for refusal in [
+        "\"I don't have access to that note\"",
+        "\"I cannot read files\"",
+        "\"this appears to be truncated\"",
+    ] {
+        assert!(
+            scaffold.contains(refusal),
+            "the anti-refusal clause must name the literal string {refusal}: {scaffold}"
+        );
+    }
+    assert!(
+        scaffold.contains("Make the call first"),
+        "the anti-refusal clause must state the required behaviour instead: {scaffold}"
+    );
+}
+
+/// R3 element 6 — handles are copied from the index, never fabricated.
+#[test]
+fn knowledge_scaffold_requires_handles_to_come_from_the_index() {
+    let scaffold = render_knowledge_scaffold();
+    assert!(
+        scaffold.contains("Handles come from this index"),
+        "the handle rule must be labelled: {scaffold}"
+    );
+    assert!(
+        scaffold.contains("copied verbatim"),
+        "the handle rule must require verbatim copying: {scaffold}"
+    );
+    assert!(
+        scaffold.contains("Never guess one") && scaffold.contains("never slugify a title"),
+        "the handle rule must forbid guessing and slugifying titles: {scaffold}"
+    );
+    assert!(
+        scaffold.contains("memory_search(query=...)"),
+        "the handle rule must route uncovered needs to `memory_search`: {scaffold}"
+    );
+}
+
+/// R3 element 7 — asymmetric budget: grounded pulls free, search metered.
+#[test]
+fn knowledge_scaffold_states_an_asymmetric_budget() {
+    let scaffold = render_knowledge_scaffold();
+    assert!(
+        scaffold.contains("Budget is asymmetric"),
+        "the budget rule must be labelled: {scaffold}"
+    );
+    assert!(
+        scaffold.contains("are unlimited and encouraged"),
+        "grounded pulls must be declared unlimited: {scaffold}"
+    );
+    assert!(
+        scaffold.contains("metered: at most 3"),
+        "speculative search must carry a concrete small budget: {scaffold}"
+    );
+    assert!(
+        scaffold.contains("prefer a grounded pull to a speculative search"),
+        "the budget rule must state the preference order: {scaffold}"
+    );
+}
+
+/// The whole point of the scaffold is that it is a pointer expander — it must
+/// still name the pull tool and the truncation marker it keys off.
+#[test]
+fn injected_knowledge_section_documents_the_memory_read_pull_path() {
+    let scaffold = render_knowledge_scaffold();
+    assert!(
+        scaffold.contains("memory_read"),
+        "the copy above injected notes must name `memory_read`: {scaffold}"
+    );
+    assert!(
+        scaffold.contains("permalink"),
+        "the copy must tell the agent to pass the shown permalink: {scaffold}"
+    );
+    assert!(
+        scaffold.contains("truncated"),
+        "the copy must explain that excerpts can be truncated: {scaffold}"
+    );
+}
+
+/// The scaffold is a per-dispatch token cost. It must not render at all when
+/// there are no notes to pull.
+#[test]
+fn knowledge_scaffold_does_not_render_without_injected_notes() {
+    let task = make_task();
+
+    for (label, knowledge) in [
+        ("None", None),
+        ("empty", Some(String::new())),
+        ("whitespace", Some("   \n\t \n".to_string())),
+    ] {
+        let mut ctx = make_ctx();
+        ctx.knowledge_context = knowledge;
+        let prompt = render_prompt(AgentType::Worker, &task, &ctx);
+        assert!(
+            !prompt.contains("## Relevant Knowledge"),
+            "the knowledge header must not render for {label} knowledge_context"
+        );
+        assert!(
+            !prompt.contains("Pull triggers"),
+            "the pull scaffold must not render for {label} knowledge_context"
+        );
+        assert!(
+            !prompt.contains("Budget is asymmetric"),
+            "the budget clause must not render for {label} knowledge_context"
+        );
+    }
+}
+
+/// Size guard: the scaffold rides on every dispatch that has notes, so it must
+/// not silently bloat. Proposal u46i targets ~1.5-3 KB.
+#[test]
+fn knowledge_scaffold_stays_under_its_byte_ceiling() {
+    /// Ceiling for the R3 pull scaffold, in bytes.
+    const SCAFFOLD_BYTE_CEILING: usize = 3_200;
+
+    let size = KNOWLEDGE_PULL_SCAFFOLD.len();
+    assert!(
+        size <= SCAFFOLD_BYTE_CEILING,
+        "the pull scaffold is {size} bytes, over the {SCAFFOLD_BYTE_CEILING}-byte ceiling; \
+         tighten it or raise the ceiling deliberately"
+    );
+    assert!(
+        size >= 1_200,
+        "the pull scaffold is only {size} bytes — it has lost required R3 elements"
+    );
+
+    // The rendered section is the scaffold plus the header and the notes; it must
+    // not have grown a second copy of the scaffold anywhere.
+    let scaffold = render_knowledge_scaffold();
+    assert_eq!(
+        scaffold.matches("Coverage map").count(),
+        1,
+        "the scaffold must render exactly once"
+    );
+}

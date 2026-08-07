@@ -3940,6 +3940,10 @@ fn build_worker_agent_context(
         memory_intent_planner: djinn_agent::context::MemoryIntentPlannerConfig::from_env(),
         knowledge_injection,
         compaction_cs: djinn_slot::reply_loop::CompactionCriticalSection::default(),
+        // Stamped per session by
+        // `djinn_agent::actors::slot::reply_loop::tool_dispatch_context`; the
+        // pod-wide context serves no single session.
+        session_id: None,
     }
 }
 

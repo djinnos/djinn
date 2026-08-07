@@ -1,7 +1,18 @@
 use super::{
     KnowledgePackConfig, NotePackDisposition, format_knowledge_notes, pack_knowledge_notes,
-    pack_ranked_knowledge_notes,
+    pack_ranked_knowledge_notes, rendered_line_overhead_bytes,
 };
+
+/// The shortest summary the renderer will ever emit; a line cannot render at
+/// all unless its fixed overhead plus this fits `line_byte_cap`.
+const MINIMUM_SUMMARY_BYTES: usize = "(no abstract)".len();
+
+/// The largest cap at which `note` still cannot be rendered — one byte below
+/// the shortest line it could produce. Derived rather than hard-coded so R1's
+/// overhead change cannot silently turn a drop test into a fits test.
+fn largest_cap_that_still_drops(note: &Note) -> usize {
+    rendered_line_overhead_bytes(note) + MINIMUM_SUMMARY_BYTES - 1
+}
 use djinn_memory::Note;
 
 // New tests appended below the existing test suite in helpers/tests.rs.
@@ -69,14 +80,12 @@ fn format_knowledge_notes_appends_permalink_on_each_line() {
 
     assert!(
         rendered.contains(
-            "**[Pitfall] Refinement target-less**: Refinements on proposals without a target project die as opaque agent_failure. (permalink: pitfalls/refinement-target-less)",
+            "**[Pitfall] pitfalls/refinement-target-less**: Refinements on proposals without a target project die as opaque agent_failure.",
         ),
         "expected pitfall line with permalink, got: {rendered}"
     );
     assert!(
-        rendered.contains(
-            "**[Pattern] Anchor Note**: Use anchors for retrieval. (permalink: patterns/anchor)",
-        ),
+        rendered.contains("**[Pattern] patterns/anchor**: Use anchors for retrieval."),
         "expected pattern line with permalink, got: {rendered}"
     );
     assert!(
@@ -100,7 +109,7 @@ fn format_knowledge_notes_permalink_visible_when_line_fits_within_budget() {
     let rendered = format_knowledge_notes(&notes, 2000);
     assert_eq!(
         rendered,
-        "- **[Case] Sample Case**: Short case abstract. (permalink: cases/sample-case)"
+        "- **[Case] cases/sample-case**: Short case abstract."
     );
 }
 
@@ -127,8 +136,8 @@ fn format_knowledge_notes_budget_counts_permalink_in_truncation() {
             0.5,
         ),
     ];
-    let first_line = "- **[Note] short**: a (permalink: a/short)";
-    let second_line = "- **[Note] medium-summary-text**: b (permalink: b/medium-summary)";
+    let first_line = "- **[Note] a/short**: a";
+    let second_line = "- **[Note] b/medium-summary**: b";
     let used_after_first = first_line.len() + 1;
     let budget = used_after_first + second_line.len() - 1;
 
@@ -138,7 +147,7 @@ fn format_knowledge_notes_budget_counts_permalink_in_truncation() {
         "expected only the first line (with permalink) within budget, got: {rendered:?}"
     );
     assert!(
-        !rendered.contains("(permalink: b/medium-summary)"),
+        !rendered.contains("b/medium-summary"),
         "second note's permalink leaked past budget: {rendered}"
     );
 }
@@ -155,7 +164,7 @@ fn format_knowledge_notes_budget_rejects_line_whose_permalink_itself_overflows()
         0.5,
     )];
 
-    let rendered = format_knowledge_notes(&notes, 100);
+    let rendered = format_knowledge_notes(&notes, largest_cap_that_still_drops(&notes[0]));
     assert!(
         rendered.is_empty(),
         "single-line overflow must drop the note rather than partial-emit, got: {rendered:?}"
@@ -201,9 +210,9 @@ fn pack_knowledge_notes_rendered_matches_format_knowledge_notes() {
         format_knowledge_notes(&notes, 2000),
     );
 
-    // Tight budget: only first fits.
-    let first_line = "- **[Pitfall] Refinement target-less**: Refinements on proposals without a target project die as opaque agent_failure. (permalink: pitfalls/refinement-target-less)";
-    let budget = first_line.len();
+    // Tight budget: only the first entry fits. Derived from what the renderer
+    // actually emits, so R1's overhead change cannot make this stale.
+    let budget = format_knowledge_notes(&notes[..1], 2000).len();
     assert_eq!(
         pack_knowledge_notes(&notes, budget).rendered,
         format_knowledge_notes(&notes, budget),
@@ -291,7 +300,7 @@ fn pack_knowledge_notes_budget_prunes_first_overflow_and_all_subsequent() {
     ];
 
     // Budget only fits the first line.
-    let first_line = "- **[Note] short**: a (permalink: a/short)";
+    let first_line = "- **[Note] a/short**: a";
     let budget = first_line.len();
 
     let packed = pack_knowledge_notes(&notes, budget);
@@ -391,8 +400,7 @@ fn pack_knowledge_notes_injected_char_estimate_matches_rendered_line_length() {
     )];
 
     let packed = pack_knowledge_notes(&notes, 2000);
-    let expected_line =
-        "- **[Case] Sample Case**: Short case abstract. (permalink: cases/sample-case)";
+    let expected_line = "- **[Case] cases/sample-case**: Short case abstract.";
     assert_eq!(packed.rendered, expected_line);
     assert_eq!(
         packed.outcomes[0].estimated_rendered_chars,
@@ -441,7 +449,7 @@ fn pack_knowledge_notes_budget_permalink_overflow_prunes() {
         0.5,
     )];
 
-    let packed = pack_knowledge_notes(&notes, 100);
+    let packed = pack_knowledge_notes(&notes, largest_cap_that_still_drops(&notes[0]));
     assert!(
         packed.rendered.is_empty(),
         "single-line overflow must drop the note, got: {:?}",
@@ -487,7 +495,9 @@ fn pack_knowledge_notes_budget_exhausted_skips_content_for_later_notes() {
         ),
     ];
 
-    let budget = 50; // tiny budget; nothing fits
+    // Tiny budget; nothing fits. R1 halved per-line overhead, so this had to
+    // shrink from 50 to stay below the shortest renderable line.
+    let budget = 30;
     let packed = pack_knowledge_notes(&notes, budget);
 
     assert_eq!(packed.outcomes.len(), 2);
@@ -509,10 +519,12 @@ fn pack_knowledge_notes_budget_exhausted_skips_content_for_later_notes() {
 fn ranked_packer_partitions_universe_and_skips_oversized_rank_one() {
     let notes = vec![
         fixture_note("note", "low", "a/low", Some("a"), None, "", 0.2),
+        // R1: overhead is now driven by the permalink, not the title, so the
+        // oversized candidate is one whose *permalink* cannot fit the cap.
         fixture_note(
             "note",
-            &"x".repeat(100),
-            "b/large",
+            "large",
+            &format!("b/{}", "x".repeat(100)),
             Some("b"),
             None,
             "",
@@ -551,10 +563,11 @@ fn ranked_packer_partitions_universe_and_skips_oversized_rank_one() {
 fn ranked_packer_injects_rank_eleven_after_ten_oversized_top_k_notes() {
     let mut notes = (0..10)
         .map(|i| {
+            // R1: oversized-ness now comes from the permalink, not the title.
             fixture_note(
                 "note",
-                &format!("{}-{i}", "x".repeat(80)),
-                &format!("a/{i}"),
+                &format!("rank {i}"),
+                &format!("a/{}-{i}", "x".repeat(80)),
                 Some("x"),
                 None,
                 "",
@@ -592,7 +605,8 @@ fn ranked_packer_injects_rank_eleven_after_ten_oversized_top_k_notes() {
         packed.outcomes[10].disposition,
         NotePackDisposition::Injected
     );
-    assert!(packed.rendered.contains("rank eleven"));
+    // R1: the line is labelled by permalink, so identify the survivor by it.
+    assert!(packed.rendered.contains("a/eleven"));
 }
 
 #[test]
@@ -661,7 +675,8 @@ fn ranked_packer_uses_l0_fallback_and_utf8_safe_summary_truncation() {
         " éééééééééé ",
         1.0,
     );
-    let metadata = "- **[Note] é**: ".len() + " (permalink: a/e)".len();
+    // R1: the rendered line labels with the permalink, not the title.
+    let metadata = "- **[Note] a/e**: ".len();
     let packed = pack_ranked_knowledge_notes(
         &[note],
         KnowledgePackConfig {
