@@ -1187,3 +1187,92 @@ async fn an_ordinary_blocker_close_emits_no_outcome_event() {
     let refreshed = repo.get(&source.id).await.unwrap().unwrap();
     assert_eq!(refreshed.status, "open");
 }
+
+/// **AC2.** Consuming an arbitration row clears the evidence epoch, whatever
+/// decision consumed it.
+///
+/// The epoch used to be nulled ONLY by the child-close transaction, which
+/// covers `park` (it creates a child) and nothing else. `approve`,
+/// `approve_conflict`, `reopen` and `supersede` consume the row and create no
+/// child, so the epoch survived them — and because the stamp is conditional on
+/// `escalation_evidence_at IS NULL`, the NEXT escalation's stamp was a silent
+/// no-op and its park guards measured the PREVIOUS adjudication's floor.
+///
+/// This asserts the durable column across the full cycle: stamped, cleared by
+/// the consume, and a genuinely NEW value stamped by the next escalation.
+/// Without the fix the third assertion fails — the second stamp returns the
+/// stale first epoch.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn consuming_an_arbitration_row_clears_the_evidence_epoch() {
+    use crate::repositories::task_arbitration::{
+        CreateArbitrationParams, TaskArbitrationRepository,
+    };
+
+    let db = Database::open_in_memory().unwrap();
+    let repo = TaskRepository::new(db.clone(), silent_bus());
+    let project = make_project(&db).await;
+    let epic_id = make_epic(&db, &project.id).await;
+    let source = repo
+        .create_fixture_with_ac(
+            &epic_id, "Source", "d", "d", "task", 1, "worker", None, None,
+        )
+        .await
+        .unwrap();
+    let arb = TaskArbitrationRepository::new(db.clone());
+    let empty = serde_json::json!([]);
+
+    // Cycle 0: stamped atomically with the row, exactly as production does.
+    let (_created, first) = arb
+        .try_create_with_evidence_epoch(CreateArbitrationParams {
+            task_id: &source.id,
+            hold_cycle: 0,
+            deadline_at: None,
+            mirror_head_sha: None,
+            github_head_sha: None,
+            pr_url: None,
+            failing_ci_job_ids: &empty,
+            dossier: None,
+            directive: Some(&serde_json::json!({ "decision": "approve" })),
+            verification_command: None,
+            excluded_models: &empty,
+        })
+        .await
+        .unwrap();
+    let first = first.expect("cycle 0 stamps an epoch");
+
+    // An `approve` consumes the row and creates NO adjudication child.
+    assert!(arb.mark_consumed(&source.id, 0).await.unwrap());
+    assert!(
+        repo.escalation_evidence_at(&source.id)
+            .await
+            .unwrap()
+            .is_none(),
+        "consuming the row is the adjudication clearing: the epoch must clear with it, even \
+         though no child was created and so no child-close transaction ever runs"
+    );
+
+    // A later trigger opens cycle 1 and must get a NEW epoch, not the stale one.
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    let (_created, second) = arb
+        .try_create_with_evidence_epoch(CreateArbitrationParams {
+            task_id: &source.id,
+            hold_cycle: 1,
+            deadline_at: None,
+            mirror_head_sha: None,
+            github_head_sha: None,
+            pr_url: None,
+            failing_ci_job_ids: &empty,
+            dossier: None,
+            directive: None,
+            verification_command: None,
+            excluded_models: &empty,
+        })
+        .await
+        .unwrap();
+    let second = second.expect("cycle 1 stamps an epoch");
+    assert_ne!(
+        second, first,
+        "a new trigger after the adjudication cleared must stamp a NEW epoch; reusing {first} \
+         would make cycle 1's guards count attempts belonging to cycle 0"
+    );
+}

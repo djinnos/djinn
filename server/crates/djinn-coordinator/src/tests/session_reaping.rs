@@ -7829,6 +7829,24 @@ async fn evidence_reap_is_live_lookup_error_counts_as_crashed_unproven() {
     let sj: serde_json::Value = serde_json::from_str(row.summary_json.as_deref().unwrap()).unwrap();
     assert_eq!(sj["failure_class"], "orphaned_pending_attempt_unproven");
     assert_eq!(sj["owner_classification"], "lookup_error");
+
+    // `lookup_error` alone does NOT identify which of the two reads failed:
+    // `classify_orphan_owner` emits it for a failed `get()` and for a failed
+    // `is_live()`. The two are distinguishable only by their evidence — the
+    // `get()` branch builds `OwnerLeaseEvidence { ..Default::default() }` and
+    // therefore carries no lease timestamps, while the `is_live()` branch
+    // copies them off the resolved row.
+    //
+    // Asserting the timestamps is what makes this test discriminate. Without
+    // it, anything that breaks the FIRST read — a column added to
+    // `coordinator_incarnations` and forgotten in the fixture view, say — keeps
+    // this assertion green while the branch under test goes unexecuted.
+    assert_eq!(
+        sj["owner_lease_registered_at"], inc.registered_at,
+        "the get() read must have SUCCEEDED; a lookup_error without lease \
+         timestamps means the first read failed and this test proved nothing"
+    );
+    assert_eq!(sj["owner_lease_last_renewed_at"], inc.last_renewed_at);
 }
 
 /// A non-NULL dispatch group is terminalized through the exact-group repository
