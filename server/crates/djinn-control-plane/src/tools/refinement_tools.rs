@@ -984,11 +984,11 @@ impl DjinnMcpServer {
             accepted: true,
             result: Some(NeedsEvidenceDemandResult {
                 claim: claim.question.clone(),
-                spike_task_id: Some(allocated.allocation.spike_task_id),
+                spike_task_id: Some(allocated.spike_task_id),
                 against_revision_seq: p.against_revision_seq,
                 round: p.round,
                 finding_id: Some(allocated.finding_id),
-                attempt_id: Some(allocated.allocation.attempt_id),
+                attempt_id: Some(allocated.attempt_id),
                 lifecycle: Some("spike_active".into()),
                 replayed: Some(allocated.replayed),
             }),
