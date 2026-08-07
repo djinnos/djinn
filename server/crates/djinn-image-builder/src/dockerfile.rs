@@ -431,6 +431,24 @@ fn emit_path(df: &mut String) {
     // installed. Baked as image ENV (not per-language RUN blocks) so warm Pods
     // and task-run Pods inherit identical values from the image, with no runtime
     // override in djinn-k8s/src/job.rs.
+    //
+    // NOTE, measured 2026-08-07 against pnpm 11.8.0 in this image: PNPM_HOME
+    // conflating the global dir with the store is NOT separable by environment.
+    // Attempts to point only the store at /cache, leaving the global dir on an
+    // image path, all lost to PNPM_HOME:
+    //
+    //     PNPM_HOME=/opt/pnpm + npm_config_store_dir=/cache/...  -> /opt/pnpm/store/v11
+    //     PNPM_HOME=/opt/pnpm + NPM_CONFIG_STORE_DIR=/cache/...  -> /opt/pnpm/store/v11
+    //     store-dir= in $PNPM_HOME/.npmrc, CWD .npmrc, /usr/local/etc/npmrc
+    //                                                            -> /opt/pnpm/store/v11
+    //     pnpm --store-dir=/cache/... store path                 -> /cache/.../store/v11
+    //
+    // Only the CLI flag wins, and we cannot inject a flag into every pnpm a
+    // task runs. So the store and the global dir share /cache by necessity, and
+    // the mitigation lives elsewhere: ship pnpm IN the image so the binary
+    // itself is never resolved from shared writable state (see
+    // DEFAULT_NODE_PACKAGE_MANAGERS), and bound every install so a corrupt
+    // shared entry fails loudly instead of hanging (see djinn_k8s::js_install).
     writeln!(
         df,
         "ENV PNPM_HOME=/cache/pnpm npm_config_cache=/cache/npm YARN_CACHE_FOLDER=/cache/yarn"
@@ -612,6 +630,23 @@ fn aggregate_node_versions<'a>(
     out
 }
 
+/// Package managers installed into a node image, beyond the `npm` that ships
+/// with node itself.
+///
+/// Installed when the config declares no package manager anywhere. Without a
+/// fallback, a repo whose JS workspace uses pnpm (declared only by its
+/// `pnpm-lock.yaml`, which this builder cannot see — it renders a Dockerfile,
+/// it does not read the tree) produced an image with NO pnpm on `PATH` at all.
+/// Every consumer then had to find one at runtime, and what they found was a
+/// copy that had been bootstrapped onto the shared, writable `/cache` PVC —
+/// i.e. the package-manager binary itself became shared mutable state. A
+/// corrupted entry there is what silently killed every JS-touching task for
+/// three weeks (see `djinn_k8s::js_install`).
+///
+/// An explicit `default_package_manager` or per-workspace `package_manager`
+/// still wins; this only fills the hole when the config is silent.
+const DEFAULT_NODE_PACKAGE_MANAGERS: &[&str] = &["pnpm"];
+
 fn aggregate_node_pms<'a>(node: &'a NodeLanguage, config: &'a EnvironmentConfig) -> Vec<&'a str> {
     let mut seen: BTreeSet<&str> = BTreeSet::new();
     let mut out: Vec<&str> = Vec::new();
@@ -625,6 +660,9 @@ fn aggregate_node_pms<'a>(node: &'a NodeLanguage, config: &'a EnvironmentConfig)
         if seen.insert(pm) {
             out.push(pm);
         }
+    }
+    if out.is_empty() {
+        out.extend_from_slice(DEFAULT_NODE_PACKAGE_MANAGERS);
     }
     out
 }
@@ -1153,6 +1191,54 @@ mod tests {
         let df = generate_dockerfile(&cfg, &agent_worker(), DEFAULT_LAUNCHER_PROTOCOL).unwrap();
         assert!(df.dockerfile.contains("NODE_VERSIONS=\"22 20\""));
         assert!(df.dockerfile.contains("PACKAGE_MANAGERS=\"pnpm yarn\""));
+    }
+
+    /// djinn's own shape, and the regression this default exists for: node is
+    /// enabled and JS workspaces are declared, but NO package manager is named
+    /// anywhere (the choice lives in `ui/pnpm-lock.yaml`, which this builder
+    /// never sees). That produced an image with no pnpm on PATH, which is how
+    /// the binary ended up being resolved from the shared writable /cache PVC.
+    #[test]
+    fn node_without_a_declared_package_manager_still_installs_one() {
+        let mut cfg = minimal_valid_config();
+        cfg.languages.node = Some(djinn_stack::environment::NodeLanguage {
+            default_version: "26".into(),
+            default_package_manager: None,
+        });
+        cfg.workspaces = vec![djinn_stack::environment::Workspace {
+            slug: None,
+            name: None,
+            tags: Vec::new(),
+            root: "ui".into(),
+            language: "node".into(),
+            toolchain: None,
+            version: None,
+            package_manager: None,
+            cargo_features: Vec::new(),
+            cargo_all_features: false,
+        }];
+        let df = generate_dockerfile(&cfg, &agent_worker(), DEFAULT_LAUNCHER_PROTOCOL).unwrap();
+        assert!(
+            df.dockerfile.contains("PACKAGE_MANAGERS=\"pnpm\""),
+            "a node image with no declared package manager must still ship one:\n{}",
+            df.dockerfile
+        );
+    }
+
+    /// An explicit declaration must still win over the fallback.
+    #[test]
+    fn declared_package_manager_overrides_the_default() {
+        let mut cfg = minimal_valid_config();
+        cfg.languages.node = Some(djinn_stack::environment::NodeLanguage {
+            default_version: "22".into(),
+            default_package_manager: Some("yarn".into()),
+        });
+        let df = generate_dockerfile(&cfg, &agent_worker(), DEFAULT_LAUNCHER_PROTOCOL).unwrap();
+        assert!(df.dockerfile.contains("PACKAGE_MANAGERS=\"yarn\""));
+        assert!(
+            !df.dockerfile.contains("PACKAGE_MANAGERS=\"pnpm"),
+            "the fallback must not be appended when a manager is declared"
+        );
     }
 
     #[test]
