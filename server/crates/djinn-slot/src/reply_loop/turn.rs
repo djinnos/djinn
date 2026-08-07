@@ -127,11 +127,24 @@ async fn launch_prepared_covered_attempt_with_lease(
         Box<dyn djinn_provider::provider::ProviderSseFrameParserV1>,
     )>,
     coordinator: ModelTurnAdmissionCoordinator,
+    cancel: tokio_util::sync::CancellationToken,
+    global_cancel: tokio_util::sync::CancellationToken,
 ) -> anyhow::Result<CoveredAttemptTerminalGuard> {
     match preparation {
         ModelTurnPreparation::Permit(mut permit) => {
             let lease = permit.lease.clone();
-            let (attempt, parser) = launch()?;
+            // Observe scheduling cancellation before B1 can create an attempt.
+            // Once B1 accepts, the terminal guard owns abort and reconciliation.
+            let (attempt, parser) = tokio::select! {
+                biased;
+                _ = cancel.cancelled() => return Err(anyhow::Error::new(
+                    super::error_handling::ReplyLoopCancelled::session(),
+                )),
+                _ = global_cancel.cancelled() => return Err(anyhow::Error::new(
+                    super::error_handling::ReplyLoopCancelled::supervisor_shutdown(),
+                )),
+                launched = async { launch() } => launched,
+            }?;
             // Keep this in scope across `mark_active`; its Drop owns every
             // post-dispatch early return, including a database partition here.
             let guard = CoveredAttemptTerminalGuard::new(attempt, parser, coordinator, lease);
@@ -139,6 +152,10 @@ async fn launch_prepared_covered_attempt_with_lease(
             Ok(guard)
         }
         ModelTurnPreparation::Wait(wait) => {
+            // A wait has already been selected as the typed supervisor
+            // scheduling result. Cancellation cannot replace it or create a B1
+            // replacement attempt.
+            let _cancellation_observed = cancel.is_cancelled() || global_cancel.is_cancelled();
             Err(anyhow::Error::new(ModelTurnAdmissionOutcome::Wait(wait)))
         }
         ModelTurnPreparation::Rejected(rejection) => Err(anyhow::Error::new(
@@ -1053,6 +1070,8 @@ pub async fn run_reply_loop(
                         Ok((attempt, parser))
                     },
                     coordinator.clone(),
+                    cancel.clone(),
+                    global_cancel.clone(),
                 ).await?;
                 Ok((None, Some(guard)))
             } else {
@@ -2189,8 +2208,9 @@ mod tests {
     use super::super::model_turn_admission::ModelTurnAdmissionTestHooks;
     use super::*;
     use djinn_db::test_support::{
-        model_turn_accounting_fixture, model_turn_lease_lifecycle_fixture,
-        model_turn_terminal_fixture, seed_model_turn_admission_fixture,
+        model_turn_accounting_fixture, model_turn_decision_count_fixture,
+        model_turn_lease_lifecycle_fixture, model_turn_terminal_fixture,
+        seed_model_turn_admission_fixture,
     };
     use djinn_db::{
         Database, ModelTurnBucketDebit, ModelTurnBucketKind, ModelTurnLeaseIdentity,
@@ -2347,6 +2367,8 @@ mod tests {
                 ))
             },
             coordinator,
+            tokio_util::sync::CancellationToken::new(),
+            tokio_util::sync::CancellationToken::new(),
         )
         .await
         .expect("covered launch");
@@ -2468,6 +2490,8 @@ mod tests {
                 ))
             },
             coordinator,
+            tokio_util::sync::CancellationToken::new(),
+            tokio_util::sync::CancellationToken::new(),
         )
         .await
         .expect("launch");
@@ -2701,6 +2725,8 @@ mod tests {
                 ))
             },
             coordinator,
+            tokio_util::sync::CancellationToken::new(),
+            tokio_util::sync::CancellationToken::new(),
         )
         .await
         .expect("launch");
@@ -2820,6 +2846,8 @@ mod tests {
                 ))
             },
             coordinator,
+            tokio_util::sync::CancellationToken::new(),
+            tokio_util::sync::CancellationToken::new(),
         )
         .await
         .expect("launch");
@@ -2894,6 +2922,8 @@ mod tests {
                 ))
             },
             coordinator,
+            tokio_util::sync::CancellationToken::new(),
+            tokio_util::sync::CancellationToken::new(),
         )
         .await;
         let error = match result {
@@ -3070,6 +3100,114 @@ mod tests {
                 "expected concrete {expected} outcome, got {outcome:?}"
             );
         }
+    }
+
+    /// Cancellation reaches the same covered scheduling seam as production.
+    /// A draining pool gives us a typed wait; cancelling its schedule twice must
+    /// preserve that result and must not cross the B1 launch closure.
+    #[tokio::test]
+    async fn cancelling_typed_wait_at_production_turn_scheduling_seam_is_idempotent() {
+        let db = Database::ephemeral().await.expect("db");
+        let pool = seed_model_turn_admission_fixture(&db, "draining", "supported", 2).await;
+        let coordinator = ModelTurnAdmissionCoordinator::new(
+            djinn_db::ModelTurnAdmissionRepository::new(db.clone()),
+        );
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        let global_cancellation = tokio_util::sync::CancellationToken::new();
+        let launches = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        let preparation = coordinator
+            .prepare(
+                &covered_admission_plan(),
+                admission_request("scheduled-draining-wait"),
+            )
+            .await
+            .expect("typed wait preparation");
+        assert!(matches!(
+            &preparation,
+            ModelTurnPreparation::Wait(djinn_db::ModelTurnAdmissionWait::Draining)
+        ));
+
+        // This is the reply-loop's real cancellation signal, not a second
+        // admission preparation. Repeating it is an idempotent scheduler action.
+        cancellation.cancel();
+        cancellation.cancel();
+        let launches_at_boundary = launches.clone();
+        let error = match launch_prepared_covered_attempt_with_lease(
+            preparation,
+            move || {
+                launches_at_boundary.fetch_add(1, Ordering::SeqCst);
+                panic!("a typed wait must not reach the B1 launch closure");
+            },
+            coordinator.clone(),
+            cancellation.clone(),
+            global_cancellation,
+        )
+        .await
+        {
+            Err(error) => error,
+            Ok(_) => panic!("typed wait must return through the scheduling seam"),
+        };
+        assert!(matches!(
+            error.downcast_ref::<ModelTurnAdmissionOutcome>(),
+            Some(ModelTurnAdmissionOutcome::Wait(
+                djinn_db::ModelTurnAdmissionWait::Draining
+            ))
+        ));
+        coordinator.wait_for_cleanup().await;
+
+        assert_eq!(launches.load(Ordering::SeqCst), 0, "no B1/network launch");
+        assert_eq!(model_turn_decision_count_fixture(&db, pool).await, 0);
+        assert_eq!(
+            model_turn_accounting_fixture(&db, pool).await,
+            (0, 2, 0),
+            "wait cancellation leaves no pending, acquired, quarantined, or cleanup state"
+        );
+
+        // The same already-cancelled scheduling signal must also win over a
+        // fenced permit. This makes the test fail if the seam ignores
+        // cancellation and reaches the B1 closure.
+        let cancelled_db = Database::ephemeral().await.expect("db");
+        let cancelled_pool =
+            seed_model_turn_admission_fixture(&cancelled_db, "enforce", "supported", 2).await;
+        let cancelled_coordinator = ModelTurnAdmissionCoordinator::new(
+            djinn_db::ModelTurnAdmissionRepository::new(cancelled_db.clone()),
+        );
+        let cancelled_preparation = cancelled_coordinator
+            .prepare(
+                &covered_admission_plan(),
+                admission_request("cancelled-before-b1-launch"),
+            )
+            .await
+            .expect("fenced permit preparation");
+        let launches_at_boundary = launches.clone();
+        let cancellation_error = match launch_prepared_covered_attempt_with_lease(
+            cancelled_preparation,
+            move || {
+                launches_at_boundary.fetch_add(1, Ordering::SeqCst);
+                panic!("cancelled scheduling must not reach the B1 launch closure");
+            },
+            cancelled_coordinator.clone(),
+            cancellation,
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        {
+            Err(error) => error,
+            Ok(_) => panic!("cancellation must win before B1 launch"),
+        };
+        assert_eq!(
+            cancellation_error.downcast_ref::<ReplyLoopCancelled>(),
+            Some(&ReplyLoopCancelled::session())
+        );
+        cancelled_coordinator.wait_for_cleanup().await;
+        assert_eq!(launches.load(Ordering::SeqCst), 0, "no B1/network launch");
+        assert_eq!(model_turn_decision_count_fixture(&cancelled_db, cancelled_pool).await, 0);
+        assert_eq!(
+            model_turn_accounting_fixture(&cancelled_db, cancelled_pool).await,
+            (0, 2, 0),
+            "cancelled scheduling refunds its unsent lease without accounting residue"
+        );
     }
 
     #[test]
