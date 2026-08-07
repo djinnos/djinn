@@ -9,6 +9,21 @@ pub enum LexicalSearchBackend {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LexicalSearchMode {
     Ranked,
+    /// Same ranking and SQL as [`LexicalSearchMode::Ranked`], but the query
+    /// terms are **disjoined** instead of conjoined.
+    ///
+    /// `Ranked` AND-joins the first 12 terms, which turns the lexical signal
+    /// into a boolean gate: a whole task title plus description has to appear in
+    /// one note before that note is returned at all. Measured against the
+    /// production corpus, 22 of 25 recent tasks matched **zero** notes that way.
+    /// That is acceptable for a user-typed search box, where precision is the
+    /// point, and wrong for one contributing list of a reciprocal-rank fusion,
+    /// where the fusion — not the term parser — decides what wins.
+    ///
+    /// Disjunction makes it a *ranker*: `ts_rank` already scores documents by
+    /// how much of the query they cover, so the caller's `LIMIT` keeps the most
+    /// lexically related notes and drops the rest.
+    RankedAny,
     Dedup,
     Contradiction,
     Discovery,
@@ -98,27 +113,54 @@ pub fn sanitize_sqlite_fts5_query(raw: &str) -> Option<String> {
     )
 }
 
-pub fn sanitize_postgres_tsquery(raw: &str) -> Option<String> {
-    let tokens = raw
+/// Disjunctive counterpart to [`sanitize_sqlite_fts5_query`], for
+/// [`LexicalSearchMode::RankedAny`]. FTS5's implicit operator is `AND`, so the
+/// `OR` has to be written out.
+pub fn sanitize_sqlite_fts5_query_any(raw: &str) -> Option<String> {
+    let tokens: Vec<&str> = raw
         .split(|c: char| !c.is_alphanumeric() && c != '_')
+        .filter(|t| {
+            let t = t.to_uppercase();
+            !t.is_empty() && t != "AND" && t != "OR" && t != "NOT" && t != "NEAR"
+        })
+        .collect();
+    if tokens.is_empty() {
+        return None;
+    }
+    Some(
+        tokens
+            .into_iter()
+            .map(|t| format!("\"{t}\""))
+            .collect::<Vec<_>>()
+            .join(" OR "),
+    )
+}
+
+/// The query terms both Postgres sanitizers share: `[A-Za-z0-9_]` runs with
+/// surrounding underscores trimmed, boolean keywords dropped so they cannot be
+/// reinterpreted as `tsquery` operators, capped at 12.
+fn postgres_tsquery_terms(raw: &str) -> Vec<&str> {
+    raw.split(|c: char| !c.is_alphanumeric() && c != '_')
         .map(|term| term.trim_matches('_'))
         .filter(|term| {
             let upper = term.to_uppercase();
             !term.is_empty() && upper != "AND" && upper != "OR" && upper != "NOT"
         })
         .take(12)
-        .collect::<Vec<_>>();
+        .collect()
+}
 
+/// Render the shared terms as a `to_tsquery` expression joined by `joiner`.
+///
+/// Longer terms get the `:*` prefix-match operator so partial tokens still hit.
+/// [`postgres_tsquery_terms`] strips everything except `[A-Za-z0-9_]`, so the
+/// lexemes are safe to interpolate into the tsquery string — but we still pass
+/// the whole expression as a *bound parameter* to `to_tsquery`, never as raw SQL.
+fn render_postgres_tsquery(raw: &str, joiner: &str) -> Option<String> {
+    let tokens = postgres_tsquery_terms(raw);
     if tokens.is_empty() {
         return None;
     }
-
-    // Build a valid Postgres `to_tsquery` expression. Terms are AND-joined
-    // (`&`) and longer terms get the `:*` prefix-match operator so partial
-    // tokens still hit. The sanitizer above strips everything except
-    // [A-Za-z0-9_], so the lexemes are safe to interpolate into the tsquery
-    // string — but we still pass the whole expression as a *bound parameter*
-    // to `to_tsquery`, never as raw SQL.
     Some(
         tokens
             .into_iter()
@@ -130,8 +172,20 @@ pub fn sanitize_postgres_tsquery(raw: &str) -> Option<String> {
                 }
             })
             .collect::<Vec<_>>()
-            .join(" & "),
+            .join(joiner),
     )
+}
+
+pub fn sanitize_postgres_tsquery(raw: &str) -> Option<String> {
+    render_postgres_tsquery(raw, " & ")
+}
+
+/// Disjunctive counterpart to [`sanitize_postgres_tsquery`], for
+/// [`LexicalSearchMode::RankedAny`]. Same terms, same prefix operators, `|`
+/// instead of `&`, so the expression scores partial overlap instead of
+/// requiring every term.
+pub fn sanitize_postgres_tsquery_any(raw: &str) -> Option<String> {
+    render_postgres_tsquery(raw, " | ")
 }
 
 pub fn build_lexical_search_plan(
@@ -139,9 +193,17 @@ pub fn build_lexical_search_plan(
     mode: LexicalSearchMode,
     raw_query: &str,
 ) -> Result<Option<LexicalSearchPlan>> {
-    let query = match backend {
-        LexicalSearchBackend::SqliteFts5 => sanitize_sqlite_fts5_query(raw_query),
-        LexicalSearchBackend::PostgresTsvector => sanitize_postgres_tsquery(raw_query),
+    // Term joining is a per-mode decision, not a per-backend one: `RankedAny`
+    // disjoins so the lexical list ranks rather than gates (see the variant).
+    let query = match (backend, mode) {
+        (LexicalSearchBackend::SqliteFts5, LexicalSearchMode::RankedAny) => {
+            sanitize_sqlite_fts5_query_any(raw_query)
+        }
+        (LexicalSearchBackend::SqliteFts5, _) => sanitize_sqlite_fts5_query(raw_query),
+        (LexicalSearchBackend::PostgresTsvector, LexicalSearchMode::RankedAny) => {
+            sanitize_postgres_tsquery_any(raw_query)
+        }
+        (LexicalSearchBackend::PostgresTsvector, _) => sanitize_postgres_tsquery(raw_query),
     };
 
     let Some(query) = query else {
@@ -158,6 +220,18 @@ pub fn build_lexical_search_plan(
             score_descending: false,
             replacement_notes: vec![
                 "Uses FTS5 virtual table and bm25() column weighting.",
+                "MySQL replacement should order by MATCH() score DESC instead of bm25 ASC.",
+            ],
+        },
+        (LexicalSearchBackend::SqliteFts5, LexicalSearchMode::RankedAny) => LexicalSearchPlan {
+            backend,
+            mode,
+            sql: "SELECT n.id, bm25(notes_fts, 3.0, 1.0, 2.0) as bm25_score\nFROM notes_fts\nJOIN notes n ON notes_fts.rowid = n.rowid\nWHERE notes_fts MATCH $11\n  AND n.project_id = $22\n  AND n.status = 'active'\n  AND ($33 = '' OR n.folder = $43)\n  AND ($54 = '' OR n.note_type = $64)\nORDER BY bm25(notes_fts, 3.0, 1.0, 2.0)\nLIMIT $75".to_owned(),
+            query,
+            score_alias: "bm25_score",
+            score_descending: false,
+            replacement_notes: vec![
+                "Same SQL as Ranked; only the sanitized MATCH expression differs (OR-joined terms).",
                 "MySQL replacement should order by MATCH() score DESC instead of bm25 ASC.",
             ],
         },
@@ -208,6 +282,20 @@ pub fn build_lexical_search_plan(
             score_descending: true,
             replacement_notes: vec![
                 "Uses the generated `notes.search_vector` tsvector + GIN index.",
+                "Ranks with ts_rank() (higher = better) instead of bm25.",
+            ],
+        },
+        (LexicalSearchBackend::PostgresTsvector, LexicalSearchMode::RankedAny) => LexicalSearchPlan {
+            backend,
+            mode,
+            // Bind order (see `ranked_lexical_scores`): $1 query, $2 project_id,
+            // $3/$4 folder (guard + equality), $5/$6 note_type, $7 limit.
+            sql: "SELECT n.id, ts_rank(n.search_vector, to_tsquery('english', $1))::float8 AS fulltext_score\nFROM notes n\nWHERE n.project_id = $2\n  AND n.status = 'active'\n  AND ($3 = '' OR n.folder = $4)\n  AND ($5 = '' OR n.note_type = $6)\n  AND n.search_vector @@ to_tsquery('english', $1)\nORDER BY fulltext_score DESC, n.id ASC\nLIMIT $7".to_owned(),
+            query,
+            score_alias: "fulltext_score",
+            score_descending: true,
+            replacement_notes: vec![
+                "Same SQL as Ranked; only the sanitized tsquery differs (`|` instead of `&`).",
                 "Ranks with ts_rank() (higher = better) instead of bm25.",
             ],
         },
@@ -325,6 +413,62 @@ mod tests {
     fn postgres_thresholds_must_be_non_negative() {
         assert!(validate_postgres_tsvector_threshold(0.0).is_ok());
         assert!(validate_postgres_tsvector_threshold(-0.1).is_err());
+    }
+
+    /// `RankedAny` must disjoin, keeping the terms, the prefix operators, and
+    /// the 12-term cap identical to `Ranked`. Only the operator differs, so the
+    /// two modes stay comparable ranked lists over the same query.
+    #[test]
+    fn postgres_any_sanitizer_disjoins_the_same_terms() {
+        assert_eq!(
+            sanitize_postgres_tsquery("rust sqlite _ bm25"),
+            Some("rust:* & sqlite:* & bm25:*".to_owned())
+        );
+        assert_eq!(
+            sanitize_postgres_tsquery_any("rust sqlite _ bm25"),
+            Some("rust:* | sqlite:* | bm25:*".to_owned())
+        );
+    }
+
+    #[test]
+    fn sqlite_any_sanitizer_writes_the_or_operator() {
+        // FTS5's implicit operator is AND, so disjunction has to be explicit.
+        assert_eq!(
+            sanitize_sqlite_fts5_query("rust sqlite"),
+            Some("\"rust\" \"sqlite\"".to_owned())
+        );
+        assert_eq!(
+            sanitize_sqlite_fts5_query_any("rust sqlite"),
+            Some("\"rust\" OR \"sqlite\"".to_owned())
+        );
+    }
+
+    /// The two ranked modes must stay SQL- and bind-identical: they share one
+    /// execution helper, so a divergent bind order would silently misbind.
+    #[test]
+    fn ranked_any_plan_is_sql_identical_to_ranked() {
+        for backend in [
+            LexicalSearchBackend::PostgresTsvector,
+            LexicalSearchBackend::SqliteFts5,
+        ] {
+            let ranked =
+                build_lexical_search_plan(backend, LexicalSearchMode::Ranked, "alpha beta")
+                    .unwrap()
+                    .unwrap();
+            let any =
+                build_lexical_search_plan(backend, LexicalSearchMode::RankedAny, "alpha beta")
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(ranked.sql, any.sql, "{backend:?}");
+            assert_eq!(ranked.score_alias, any.score_alias, "{backend:?}");
+            assert_eq!(ranked.score_descending, any.score_descending, "{backend:?}");
+            assert_eq!(
+                ranked.needs_query_bind(),
+                any.needs_query_bind(),
+                "{backend:?}"
+            );
+            assert_ne!(ranked.query, any.query, "{backend:?}");
+        }
     }
 
     #[test]
