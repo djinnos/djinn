@@ -5430,6 +5430,68 @@ async fn the_ticks_sweep_block_closes_a_stranded_reservation_and_takes_the_rollb
     );
 }
 
+/// The final argument of the call whose open paren `args` starts just after.
+///
+/// Shared by the two call-site guards below, which both need to know *what* a
+/// production call site was handed rather than merely that it exists.
+fn final_argument(args: &str) -> &str {
+    let mut depth = 1usize;
+    let mut end = args.len();
+    for (index, character) in args.char_indices() {
+        match character {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    end = index;
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    args[..end]
+        .trim()
+        .trim_end_matches(',')
+        .rsplit(',')
+        .next()
+        .unwrap_or_default()
+        .trim()
+}
+
+/// One Rust source with its `//` line comments removed.
+///
+/// The source-level guards below match on *code*. Without this, a comment that
+/// merely names the token under guard would satisfy the assertion the guard
+/// exists to make — which is the failure mode a source guard is most vulnerable
+/// to, and the one that would let this whole family of tests be "fixed" by
+/// writing prose. Quote- and escape-aware, so a `//` inside a string literal is
+/// left alone rather than truncating the line it sits on.
+fn strip_line_comments(source: &str) -> String {
+    let mut out = String::with_capacity(source.len());
+    for line in source.lines() {
+        let bytes = line.as_bytes();
+        let mut quoted = false;
+        let mut index = 0usize;
+        let mut end = line.len();
+        while index < bytes.len() {
+            match bytes[index] {
+                b'\\' if quoted => index += 1,
+                b'"' => quoted = !quoted,
+                b'/' if !quoted && bytes.get(index + 1) == Some(&b'/') => {
+                    end = index;
+                    break;
+                }
+                _ => {}
+            }
+            index += 1;
+        }
+        out.push_str(&line[..end]);
+        out.push('\n');
+    }
+    out
+}
+
 /// The PR poller hands both lane routers the LIVE gate.
 ///
 /// Source-level, and honestly labelled as such, for exactly the reason
@@ -5455,32 +5517,6 @@ async fn the_ticks_sweep_block_closes_a_stranded_reservation_and_takes_the_rollb
 /// (d) Deleting a router call site outright: the call count no longer matches.
 #[test]
 fn the_pr_poller_hands_the_live_gate_to_both_lane_routers() {
-    // The final argument of the call whose open paren `args` starts just after.
-    fn final_argument(args: &str) -> &str {
-        let mut depth = 1usize;
-        let mut end = args.len();
-        for (index, character) in args.char_indices() {
-            match character {
-                '(' => depth += 1,
-                ')' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        end = index;
-                        break;
-                    }
-                }
-                _ => {}
-            }
-        }
-        args[..end]
-            .trim()
-            .trim_end_matches(',')
-            .rsplit(',')
-            .next()
-            .unwrap_or_default()
-            .trim()
-    }
-
     for (label, source, expected_calls) in [
         ("pr_watcher", include_str!("../../pr_watcher.rs"), 2usize),
         ("pr_commands", include_str!("../../pr_commands.rs"), 1usize),
@@ -5513,5 +5549,461 @@ fn the_pr_poller_hands_the_live_gate_to_both_lane_routers() {
             !source.contains("CiRoutingGate::"),
             "{label}: the poller must never name a gate posture; it reads one",
         );
+    }
+}
+
+// ===========================================================================
+// `close_ci_routes_on_success`: the callee, then its two call sites
+// ===========================================================================
+
+/// A newer pass or merge terminalizes this subject's open route and unblocks
+/// the rollback gate.
+///
+/// Behavioural, over the production repository and the production rollback
+/// report. The assertion is the stored `terminal_outcome` and the durable
+/// quiescence row, never the name of the branch the method took.
+///
+/// The chain is the one the proposal's rollback safety argument rests on: an
+/// open route row keeps `current_failed_identity_count` above zero, which keeps
+/// `permits_rollback` false, so a coordinator that never closes its routes on
+/// success can never be rolled back — the drain would sit at "1 route identity
+/// that is still the current failed evidence for its lane" forever, for a PR
+/// that merged.
+///
+/// NAMED FAILING MUTATIONS.
+/// (a) Delete the `close_routes_for_newer_outcome` call from
+///     `close_ci_routes_on_success`: the row stays `Reserved` with
+///     `terminal_outcome: None`, and the report stays blocked.
+/// (b) Drop the `gate.owns_routes()` guard: the `DisabledClean` phase — taken
+///     first, on the same row — closes a row the disabled feature must not own.
+/// (c) Invert `if !decision.closes_route() { return; }`, or hand `classify` a
+///     capture other than `merged()`/`passing()`: nothing closes, as in (a).
+/// (d) Swap `CiRouteOutcome::Merged` and `CiRouteOutcome::Passed`: the outcome
+///     assertion fails in both halves of the loop.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn close_ci_routes_on_success_terminalizes_the_route_and_unblocks_rollback() {
+    for (merged, expected) in [
+        (false, CiRouteOutcome::Passed),
+        (true, CiRouteOutcome::Merged),
+    ] {
+        let (db, task_id, subject) = wiring_subject("ci-close-on-success").await;
+        let routes = CiRouteAttemptRepository::new(db.clone());
+        let mut actor = crate::actor::actor_with_test_db(db.clone());
+
+        let checks = [inconclusive_check("Quality Gate / test", 993)];
+        let blocking = refs(&checks);
+        let id = pr_head_identity(993);
+        let fingerprint = transient_fingerprint(CiLane::PrHead, &blocking);
+        let key = plant_reservation(&routes, &subject, &id, &fingerprint).await;
+
+        let before = route_row(&routes, &subject, &key).await;
+        assert_eq!(
+            before.action_phase,
+            CiActionPhase::Reserved,
+            "precondition: one open route for this PR",
+        );
+        assert_eq!(before.terminal_outcome, None);
+
+        // ── The disabled feature owns no routes ─────────────────────────────
+        //
+        // Taken first, and on the same row the draining phase below closes, so
+        // it is a real control rather than a separate fixture that could pass
+        // for reasons of its own.
+        actor.test_ci_routing_gate = Some(CiRoutingGate::DisabledClean);
+        actor
+            .close_ci_routes_on_success(&task_id, PR as u64, merged)
+            .await;
+        assert_eq!(
+            route_row(&routes, &subject, &key).await.action_phase,
+            CiActionPhase::Reserved,
+            "`DisabledClean` owns no route rows, so the close must not touch one",
+        );
+
+        // ── Draining, with the route still open ─────────────────────────────
+        actor.test_ci_routing_gate = Some(CiRoutingGate::Quiescing);
+        let blocked = actor
+            .record_ci_rollback_quiescence_report()
+            .await
+            .expect("quiescence report");
+        assert_eq!(
+            blocked.current_failed_identities, 1,
+            "an open route is still the current failed evidence for its lane",
+        );
+        assert!(
+            !blocked.permits_rollback,
+            "and that alone blocks a binary rollback: {:?}",
+            blocked.blocking_reasons(),
+        );
+
+        // ── The newer authoritative outcome ─────────────────────────────────
+        actor
+            .close_ci_routes_on_success(&task_id, PR as u64, merged)
+            .await;
+
+        let after = route_row(&routes, &subject, &key).await;
+        assert_eq!(
+            after.action_phase,
+            CiActionPhase::Terminal,
+            "a newer pass or merge outranks the open route, staleness included",
+        );
+        assert_eq!(
+            after.terminal_outcome,
+            Some(expected),
+            "and records which authoritative outcome closed it (merged: {merged})",
+        );
+
+        let clean = actor
+            .record_ci_rollback_quiescence_report()
+            .await
+            .expect("quiescence report");
+        assert_eq!(
+            clean.current_failed_identities, 0,
+            "the closed identity has advanced, so the high-watermark is clear",
+        );
+        assert!(
+            clean.permits_rollback,
+            "and the drain is now clean: {:?}",
+            clean.blocking_reasons(),
+        );
+        assert_eq!(
+            clean.permits_rollback,
+            clean.recomputed_verdict(),
+            "the stored verdict must agree with the function it is checked against",
+        );
+    }
+}
+
+/// Both production call sites of `close_ci_routes_on_success` still exist, in
+/// the branches whose behaviour depends on them.
+///
+/// SOURCE-LEVEL, and honestly labelled: this is not an integration test and
+/// does not pretend to be one. Both call sites sit *after*
+/// `gh_client.get_pull_request(..)` inside `poll_pr_draft_tasks`, and
+/// `resolve_installation_client` builds `GitHubApiClient::for_installation`,
+/// which hard-codes `api.github.com` — the crate carries no HTTP double and no
+/// base-URL seam on that path, so nothing here can reach either branch. The
+/// fixture above proves the callee end to end; this one proves production still
+/// reaches it.
+///
+/// It has to exist because deleting *both* calls leaves the method entirely
+/// dead — `warning: method close_ci_routes_on_success is never used` is the only
+/// signal — with the whole `nafu` command list green, while a merged PR silently
+/// stops closing its head's Tier-2 lease.
+///
+/// Comments are stripped before matching, so a comment naming the method
+/// satisfies nothing here.
+///
+/// NAMED FAILING MUTATIONS.
+/// (a) Delete either call site: the call count is no longer 2.
+/// (b) Delete both: the same failure, one assertion earlier.
+/// (c) Inline the method's body at either site: the call token disappears, so
+///     the count fails exactly as a deletion does.
+/// (d) Pass the same flag at both sites (both `true`, or both `false`): the
+///     `["true", "false"]` assertion fails — and a merged PR would record
+///     `passed`, or a passing one `merged`.
+/// (e) Move the merged-branch call after `apply_pr_merge`, or out of the
+///     `pr.merged == Some(true)` branch entirely: the first range assertion
+///     fails.
+/// (f) Move the passing-branch call out of the `CiStatus::Passing` arm: the
+///     second range assertion fails.
+/// (g) Shadow the lane-routing method with a local `fn` of the same name in
+///     `pr_watcher.rs`: the no-local-definition assertion fails.
+#[test]
+fn the_pr_poller_closes_ci_routes_on_both_merge_and_pass() {
+    const CALL: &str = "self.close_ci_routes_on_success(";
+
+    let code = strip_line_comments(include_str!("../../pr_watcher.rs"));
+
+    let mut sites: Vec<(usize, &str)> = Vec::new();
+    let mut cursor = 0usize;
+    while let Some(offset) = code[cursor..].find(CALL) {
+        let at = cursor + offset;
+        sites.push((at, final_argument(&code[at + CALL.len()..])));
+        cursor = at + CALL.len();
+    }
+
+    assert_eq!(
+        sites.len(),
+        2,
+        "the merged branch and the passing branch each close this subject's \
+         routes; a changed count needs this test updated, not ignored",
+    );
+    assert_eq!(
+        sites
+            .iter()
+            .map(|(_, argument)| *argument)
+            .collect::<Vec<_>>(),
+        vec!["true", "false"],
+        "the merged branch closes with `merged: true` and the passing branch \
+         with `merged: false`, in that file order",
+    );
+    assert!(
+        !code.contains("fn close_ci_routes_on_success"),
+        "pr_watcher must CALL the lane-routing method, not define one of its own",
+    );
+
+    // ── Each call site sits in the branch that needs it ─────────────────────
+    let merged_branch = code
+        .find("if pr.merged == Some(true) {")
+        .expect("the merged branch is in pr_watcher.rs");
+    let apply_merge = code
+        .find("self.apply_pr_merge(")
+        .expect("the merge transition is in pr_watcher.rs");
+    let passing_arm = code
+        .find("CiStatus::Passing => {")
+        .expect("the passing arm is in pr_watcher.rs");
+    let after_the_match = passing_arm
+        + code[passing_arm..]
+            .find("if pr.mergeable == Some(false) {")
+            .expect("the conflict check follows the CI match");
+
+    assert!(
+        (merged_branch..apply_merge).contains(&sites[0].0),
+        "the merged close must run inside the merged branch and BEFORE \
+         `apply_pr_merge`, or a merge closes the task while its route rows stay \
+         open",
+    );
+    assert!(
+        (passing_arm..after_the_match).contains(&sites[1].0),
+        "the passing close must run inside the `CiStatus::Passing` arm, which is \
+         the only place a newer pass is known",
+    );
+}
+
+/// The sweep EMITS the routing report.
+///
+/// Behavioural, over the report's only production observable. That observable is
+/// a `tracing::info!` event by design — the proposal asks for reporting, not for
+/// a reporting table, and inventing a durable row to make this assertable would
+/// be inventing the thing under test. So the log is not a proxy for the
+/// behaviour, it *is* the behaviour, and `tracing_test` is how this crate
+/// already asserts on one (see
+/// `failover_chain_logging_captures_candidate_events` in
+/// `dispatch::task_dispatch`).
+///
+/// Without this, `self.emit_ci_route_report().await;` could be deleted from
+/// `sweep_ci_routes` with the entire `nafu` command list green: the sibling
+/// sweep fixture asserts the swept ROW, and every count the report reads is
+/// already asserted by `djinn-db`'s own report tests — from a caller that is not
+/// the coordinator.
+///
+/// NAMED FAILING MUTATIONS.
+/// (a) Delete `self.emit_ci_route_report().await;` from `sweep_ci_routes`:
+///     nothing emits the event and both assertions fail.
+/// (b) Move it ABOVE `sweep_reserved_routes` in `sweep_ci_routes`: the sweep has
+///     not yet superseded the planted row, every count the early return tests is
+///     zero, the report returns silently, and both assertions fail.
+/// (c) Put it behind the `gate == CiRoutingGate::Quiescing` arm the rollback
+///     report uses: this fixture runs `Enabled`, so nothing is emitted.
+/// (d) Invert `emit_ci_route_report`'s early return (emit only when every count
+///     is zero): the same failure.
+/// (e) Drop `suppressed_before_provider_call` from the emitted fields: the
+///     second assertion fails while the first still passes, which is why the
+///     count is asserted and not only the message.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tracing_test::traced_test]
+async fn the_route_sweep_emits_the_routing_report() {
+    let (db, task_id, subject) = wiring_subject("ci-route-report-wiring").await;
+    let routes = CiRouteAttemptRepository::new(db.clone());
+
+    let mut actor = crate::actor::actor_with_test_db(db.clone());
+    actor.test_ci_routing_gate = Some(CiRoutingGate::Enabled);
+
+    // A head that has MOVED past the reservation's: the sweep supersedes the row
+    // pre-call, which is the one count that makes the report non-silent.
+    actor
+        .persist_ci_snapshot(
+            &task_id,
+            PR as u64,
+            MOVED_HEAD,
+            djinn_core::models::CiStatus::Pending,
+            Vec::new(),
+            None,
+            0,
+            None,
+        )
+        .await;
+
+    let checks = [inconclusive_check("Quality Gate / test", 994)];
+    let blocking = refs(&checks);
+    let id = pr_head_identity(994);
+    let fingerprint = transient_fingerprint(CiLane::PrHead, &blocking);
+    let key = plant_reservation(&routes, &subject, &id, &fingerprint).await;
+    djinn_db::test_support::ci_route_age_reserved_for_test(&db, &subject.id, &key, 600).await;
+
+    assert!(
+        !logs_contain("ci route report"),
+        "precondition: nothing has reported yet",
+    );
+
+    actor.last_ci_route_sweep = a_sweep_interval_ago();
+    actor.drive_tick_for_test().await;
+
+    assert_eq!(
+        route_row(&routes, &subject, &key).await.terminal_outcome,
+        Some(CiRouteOutcome::SupersededPreCall),
+        "precondition for the report: the sweep produced something to report",
+    );
+    assert!(
+        logs_contain("ci route report"),
+        "the sweep must emit the routing report without anyone asking for it",
+    );
+    assert!(
+        logs_contain("suppressed_before_provider_call=1"),
+        "and it must carry the counts, not merely the message",
+    );
+}
+
+/// AC11: the routing modules CONSUME `ci_triage`, and no branch keys on a
+/// forbidden class.
+///
+/// SOURCE-LEVEL, and it cannot be anything else. No observable distinguishes
+/// `ci_triage::is_inconclusive(blocking)` from a byte-identical copy of its body
+/// pasted into this module, so no behavioural mutation can kill a test of
+/// provenance — which is exactly why AC11 had no test at all until this one.
+/// What *is* checkable is that the call token is present and that no local
+/// definition shadows it, and that pair is precisely what "consumed rather than
+/// reimplemented" means.
+///
+/// # A fingerprint keyed on the job name is not a branch
+///
+/// `transient_fingerprint` hashes `cr.name.trim().to_lowercase()` into its
+/// preimage, so the job name genuinely *is* an input to `nafu` code. AC11
+/// forbids a branch keyed on the job name — a decision that comes out different
+/// because a check happens to be called one thing rather than another. A hash
+/// input is the opposite of that: every name is treated identically, and two
+/// runs of the same failing job share a budget precisely because the hash does
+/// not care what the job is. So the assertion below is written against
+/// *comparisons* applied to the key classes rather than against their
+/// appearance, and this paragraph is the reason it has to be.
+///
+/// NAMED FAILING MUTATIONS.
+/// (a) Replace `ci_triage::is_inconclusive(blocking)` in `classify` with a local
+///     reimplementation (`blocking.iter().all(|cr| …)`): the call token is gone
+///     and the first assertion fails.
+/// (b) Copy `ci_triage`'s predicate into a routing module as
+///     `fn is_inconclusive`: the no-local-definition assertion fails.
+/// (c) Add `if cr.name.contains("Quality Gate") { … }` — or any comparison on a
+///     check name, `target.repo`, `target.owner`, or `repository_id` — anywhere
+///     in a routing module: the forbidden-branch assertion fails, naming the
+///     file and line.
+/// (d) Special-case a migration framework, a build tool, an artifact type, or a
+///     provider incident label (`"sqlx"`, `"cargo"`, `"incident"`, …): the
+///     forbidden-vocabulary assertion fails. A branch on one of those classes
+///     has to name it.
+#[test]
+fn the_routing_modules_consume_ci_triage_and_branch_on_no_forbidden_key() {
+    // Every `nafu`-owned production module in this crate. Test modules are
+    // separate files and are deliberately excluded: a fixture may say whatever
+    // it likes about a job name.
+    const ROUTING_MODULES: [(&str, &str); 8] = [
+        ("ci_routing.rs", include_str!("../../ci_routing.rs")),
+        (
+            "ci_lane_routing.rs",
+            include_str!("../../ci_lane_routing.rs"),
+        ),
+        ("ci_hold.rs", include_str!("../../ci_hold.rs")),
+        ("ci_reporting.rs", include_str!("../../ci_reporting.rs")),
+        ("ci_routing/executor.rs", include_str!("../executor.rs")),
+        ("ci_routing/gate.rs", include_str!("../gate.rs")),
+        ("ci_routing/quiescence.rs", include_str!("../quiescence.rs")),
+        (
+            "ci_routing/tier2_dispatch.rs",
+            include_str!("../tier2_dispatch.rs"),
+        ),
+    ];
+
+    // The evidence-ranking entry points AC11 requires be consumed.
+    const CONSUMED: [&str; 3] = [
+        "ci_triage::is_inconclusive(",
+        "ci_triage::check_evidence(",
+        "ci_triage::completed_after_start(",
+    ];
+
+    // Field accesses that reach a forbidden key class.
+    const FORBIDDEN_KEYS: [&str; 4] = [".name", "target.repo", "target.owner", "repository_id"];
+
+    // What turns reading a key class into branching on one.
+    const COMPARISONS: [&str; 6] = [
+        "==",
+        "!=",
+        ".contains(",
+        ".starts_with(",
+        ".ends_with(",
+        ".eq_ignore_ascii_case(",
+    ];
+
+    // Migration frameworks, build tools, artifact types, and incident labels. A
+    // branch on any of those classes has to name one of these words.
+    const FORBIDDEN_VOCABULARY: [&str; 15] = [
+        "sqlx",
+        "diesel",
+        "flyway",
+        "liquibase",
+        "alembic",
+        "cargo",
+        "gradle",
+        "maven",
+        "bazel",
+        "webpack",
+        "npm",
+        "pnpm",
+        "artifact",
+        "incident",
+        "outage",
+    ];
+
+    let classifier = strip_line_comments(ROUTING_MODULES[0].1);
+    for consumed in CONSUMED {
+        assert!(
+            classifier.contains(consumed),
+            "the classifier must CONSUME `{consumed}`: the ranking that decides \
+             Tier 1 is `ci_triage`'s, and a second copy of it here is the \
+             reimplementation AC11 forbids",
+        );
+    }
+
+    for (label, source) in ROUTING_MODULES {
+        let code = strip_line_comments(source);
+
+        for consumed in CONSUMED {
+            let local = consumed
+                .trim_start_matches("ci_triage::")
+                .trim_end_matches('(');
+            assert!(
+                !code.contains(&format!("fn {local}")),
+                "{label}: `{local}` belongs to `ci_triage`; a local definition of \
+                 it is a reimplementation, however faithful",
+            );
+        }
+
+        for (index, line) in code.lines().enumerate() {
+            if !FORBIDDEN_KEYS.iter().any(|key| line.contains(key)) {
+                continue;
+            }
+            let number = index + 1;
+            let text = line.trim();
+            for comparison in COMPARISONS {
+                assert!(
+                    !line.contains(comparison),
+                    "{label}:{number}: `{text}` applies `{comparison}` to a \
+                     forbidden key class. AC11 allows a job name, repository, or \
+                     owner to be *carried* — hashed into a fingerprint, logged, \
+                     cited as evidence, passed to the provider — and forbids a \
+                     route decision that differs because of one.",
+                );
+            }
+        }
+
+        let lowered = code.to_ascii_lowercase();
+        for forbidden in FORBIDDEN_VOCABULARY {
+            assert!(
+                !lowered.contains(forbidden),
+                "{label}: routing code must not name `{forbidden}`. A branch keyed \
+                 on a migration framework, build tool, artifact type, or provider \
+                 incident label has to name one, and AC11 forbids every such \
+                 branch — the contract is keyed on execution evidence alone.",
+            );
+        }
     }
 }
