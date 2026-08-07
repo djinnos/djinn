@@ -1186,6 +1186,10 @@ mod tests {
                 assert!(created.error.is_none(), "write failed: {:?}", created.error);
                 let id = created.id.clone().expect("note created");
 
+                // Read the PERSISTED row back through the repository, not the
+                // tool's return value: the defect this test exists for was a
+                // wrong value being written, and a response body echoing the
+                // same wrong value would have agreed with it.
                 let persisted = repo.get(&id).await.unwrap().expect("note row");
                 assert_eq!(
                     persisted.confidence, CONFIDENCE_CEILING,
@@ -1194,23 +1198,12 @@ mod tests {
                      binds confidence explicitly"
                 );
 
-                // Negative control: the assertion above is only meaningful if the
-                // stored column default agrees with it. If someone changes the
-                // default without changing the writer (or vice versa), the two
-                // halves of AC2 would silently disagree again.
-                let column_default: Option<String> = sqlx::query_scalar(
-                    "SELECT column_default FROM information_schema.columns \
-                     WHERE table_name = 'notes' AND column_name = 'confidence'",
-                )
-                .fetch_one(db.pool())
-                .await
-                .expect("read stored column default");
-                let column_default = column_default.expect("notes.confidence has a default");
-                assert!(
-                    column_default.starts_with(&CONFIDENCE_CEILING.to_string()),
-                    "stored notes.confidence default `{column_default}` disagrees with the \
-                     value the production creation path writes ({CONFIDENCE_CEILING})"
-                );
+                // The other half of AC2 — that the stored `notes.confidence`
+                // column default agrees with the value written here — is
+                // asserted in djinn-db, where reading `information_schema`
+                // does not cross the raw-SQL boundary:
+                // `stored_confidence_default_equals_the_constant_production_writes`
+                // in tests/migrations_note_confidence_range_repair.rs.
             })
             .await;
     }

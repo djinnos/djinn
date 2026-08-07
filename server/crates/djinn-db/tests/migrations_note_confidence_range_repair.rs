@@ -306,6 +306,74 @@ async fn migration_201_clamps_out_of_range_confidence_and_is_idempotent() {
     .await;
 }
 
+/// The other half of AC2: the stored `notes.confidence` column default must
+/// equal the constant the production creation path writes.
+///
+/// These two numbers are structurally independent. The column default lives in
+/// migration 197; the value new authored notes actually receive is a Rust
+/// constant bound explicitly by `mutate_with_revision`, so the default is never
+/// exercised on that path and cannot enforce anything. They silently disagreed
+/// from #2168 until this change — the default said `0.975`, every authored note
+/// was created at `0.5`, and the migration test stayed green because it only
+/// ever asked whether the default EXISTED.
+///
+/// The behavioural half — that `memory_write` persists `CONFIDENCE_CEILING` —
+/// is asserted through the repository layer in djinn-control-plane's
+/// `memory_write_creates_notes_at_the_confidence_ceiling`. This is the half
+/// that needs `information_schema`, so it lives here rather than crossing the
+/// raw-SQL boundary out of djinn-db.
+#[tokio::test]
+async fn stored_confidence_default_equals_the_constant_production_writes() {
+    // Pin the local copy to the real constant first, so a change to
+    // `CONFIDENCE_CEILING` cannot leave this file asserting a stale literal.
+    assert_eq!(
+        CONFIDENCE_CEILING,
+        djinn_db::repositories::note::CONFIDENCE_CEILING,
+        "this file's CONFIDENCE_CEILING copy has drifted from the production constant"
+    );
+    assert_eq!(
+        CONFIDENCE_FLOOR,
+        djinn_db::repositories::note::CONFIDENCE_FLOOR,
+        "this file's CONFIDENCE_FLOOR copy has drifted from the production constant"
+    );
+
+    with_temp_database("conf_default", |db_url| async move {
+        let mut conn = PgConnection::connect(&db_url)
+            .await
+            .expect("connect migration database");
+        apply_prior_migrations(&mut conn).await;
+        apply_migration_201(&mut conn).await;
+
+        let column_default: Option<String> = sqlx::query_scalar(
+            "SELECT column_default FROM information_schema.columns \
+             WHERE table_name = 'notes' AND column_name = 'confidence'",
+        )
+        .fetch_one(&mut conn)
+        .await
+        .expect("read stored column default");
+        let column_default = column_default.expect("notes.confidence has a stored default");
+
+        // Postgres renders the default with a type annotation, e.g. `0.975`.
+        // Compare on the leading numeric literal rather than the whole string.
+        let rendered = column_default
+            .split("::")
+            .next()
+            .unwrap_or(&column_default)
+            .trim()
+            .to_owned();
+        let parsed: f64 = rendered.parse().unwrap_or_else(|_| {
+            panic!("notes.confidence default `{column_default}` is not numeric")
+        });
+        assert_eq!(
+            parsed,
+            djinn_db::repositories::note::CONFIDENCE_CEILING,
+            "stored notes.confidence default `{column_default}` disagrees with the constant \
+             the production creation path writes"
+        );
+    })
+    .await;
+}
+
 /// Negative control for the whole file: on a database with no notes at all the
 /// migration still applies cleanly. A deployment-neutral migration must be
 /// correct for an operator whose `notes` table is empty.
