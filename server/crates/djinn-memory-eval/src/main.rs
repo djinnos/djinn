@@ -2,6 +2,7 @@ mod commands;
 mod deterministic_embeddings;
 mod fixtures;
 pub mod injection_probe;
+pub mod injection_ranking;
 mod loader;
 mod metrics;
 pub mod qa;
@@ -59,6 +60,37 @@ enum Commands {
         #[arg(long = "task-path")]
         task_paths: Vec<String>,
     },
+    /// Evaluate knowledge-injection ranking against a judged corpus
+    /// (proposal `5205`).
+    ///
+    /// The corpus is deliberately NOT committed to this repository: relevance
+    /// judgments, production trace IDs, and a captured baseline are
+    /// per-deployment empirical artifacts. Each operator supplies their own via
+    /// `--manifest`; the default location is git-ignored.
+    ///
+    /// Exits non-zero on any oracle-integrity failure (missing or malformed
+    /// manifest, any recorded hash not matching the bytes on disk, missing
+    /// provenance, a manifest recording the identity of its own commit, or a
+    /// cutoff/window/budget outside the contract), on an nDCG@10 improvement
+    /// below `--require-ndcg-delta`, on a Recall@10 drop above
+    /// `--max-recall-drop`, on any repeated ordering or disposition mismatch,
+    /// on a packed result above the manifest byte ceiling, and on a
+    /// no-backfill regression.
+    InjectionRanking {
+        /// Path to the corpus manifest. Defaults to the git-ignored
+        /// `fixtures/local/injection-ranking-v1.manifest.json`.
+        #[arg(long)]
+        manifest: Option<std::path::PathBuf>,
+        /// How many times each case is replayed to prove determinism.
+        #[arg(long, default_value_t = 1)]
+        repeat: usize,
+        /// Required absolute macro nDCG@10 improvement over the baseline.
+        #[arg(long = "require-ndcg-delta", default_value_t = 0.10)]
+        require_ndcg_delta: f64,
+        /// Largest tolerated absolute macro Recall@10 drop below the baseline.
+        #[arg(long = "max-recall-drop", default_value_t = 0.02)]
+        max_recall_drop: f64,
+    },
 }
 
 #[tokio::main]
@@ -88,5 +120,19 @@ async fn main() -> anyhow::Result<()> {
         Commands::InjectionProbe { task_paths } => {
             commands::cmd_injection_probe(&crate_root, &task_paths).await
         }
+        Commands::InjectionRanking {
+            manifest,
+            repeat,
+            require_ndcg_delta,
+            max_recall_drop,
+        } => injection_ranking::cmd_injection_ranking(
+            &crate_root,
+            manifest,
+            injection_ranking::Thresholds {
+                repeat,
+                require_ndcg_delta,
+                max_recall_drop,
+            },
+        ),
     }
 }
