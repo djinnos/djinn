@@ -308,6 +308,16 @@ struct Inner {
     /// stuck-task recovery to avoid releasing a task while its background work
     /// is still running.
     pub background_work_tasks: djinn_agent::actors::coordinator::BackgroundWorkTracker,
+    /// The leader-scoped CI-route provider-action registry (proposal `nafu`,
+    /// wave 3).
+    ///
+    /// Held here rather than inside the coordinator because two independent
+    /// tasks need the same one: the coordinator admits and joins its provider
+    /// actions through it, and `leadership.rs` waits on it before releasing the
+    /// coordinator advisory lock. It outlives any single coordinator spawn, so
+    /// a coordinator restart within one leadership term does not hand a new
+    /// scope to a leadership task still watching the old one.
+    pub provider_action_scope: djinn_orchestration_types::ProviderActionScope,
     /// Per-session file read timestamps used to enforce read-before-edit/write.
     pub file_time: Arc<FileTime>,
     pub lsp: LspManager,
@@ -617,6 +627,7 @@ impl AppState {
                 coordinator: Arc::new(tokio::sync::Mutex::new(None)),
                 pool: Mutex::new(None),
                 background_work_tasks: Arc::new(std::sync::Mutex::new(HashSet::new())),
+                provider_action_scope: djinn_orchestration_types::ProviderActionScope::new(),
                 file_time: Arc::new(FileTime::new()),
                 lsp: LspManager::new(),
                 active_tasks: djinn_agent::context::ActivityTracker::default(),
@@ -1633,6 +1644,15 @@ impl AppState {
         &self.inner.cancel
     }
 
+    /// The leader-scoped CI-route provider-action registry (proposal `nafu`).
+    ///
+    /// `leadership.rs` waits on this before releasing the coordinator advisory
+    /// lock, which is what turns "the lock is held" into a proof that no
+    /// provider-action future is alive.
+    pub fn provider_action_scope(&self) -> djinn_orchestration_types::ProviderActionScope {
+        self.inner.provider_action_scope.clone()
+    }
+
     /// The process-wide durable CPU lease authority (`build_leases`).
     ///
     /// Handed out rather than reconstructed because the cap, the arming latch
@@ -1930,6 +1950,7 @@ impl AppState {
             self.inner.background_work_tasks.clone(),
             self.inner.lsp.clone(),
         )
+        .with_provider_action_scope(self.inner.provider_action_scope.clone())
         .with_graph_warmer(self.graph_warmer().await)
         .with_mirror(self.inner.mirror.clone())
         .with_runtime_ops(Arc::new(self.clone()))

@@ -17,8 +17,8 @@
 
 use super::*;
 use crate::pr_poller::ci_snapshot::evidence::{
-    self, CiLaneEvidence, capture_merge_group_evidence, capture_pr_head_evidence,
-    correlate_merge_group_run, dequeue_identity,
+    CiLaneEvidence, CiMergeGroupCorrelationError, capture_merge_group_evidence,
+    capture_pr_head_evidence, correlate_merge_group_run, dequeue_identity,
 };
 use djinn_db::CiActionPhase;
 use djinn_provider::github_api::{CheckRun, CheckRunOutput, CheckRunsResponse, DequeueEvent};
@@ -112,14 +112,20 @@ fn with_annotations(mut cr: CheckRun, count: u64) -> CheckRun {
 }
 
 fn checks_response(runs: &[CheckRun]) -> CheckRunsResponse {
-    CheckRunsResponse {
-        total_count: runs.len() as u32,
-        check_runs: runs.to_vec(),
-    }
+    CheckRunsResponse::complete(runs.to_vec())
 }
 
 fn refs(runs: &[CheckRun]) -> Vec<&CheckRun> {
     runs.iter().collect()
+}
+
+/// A capture built from a **provably complete** enumeration.
+///
+/// Tests go through `prove_complete` for the same reason production does: it is
+/// the only constructor, and routing a hand-named `FailedComplete` past it is
+/// how a non-terminal run would acquire a Tier-1 provider authorization.
+fn complete<'a>(blocking: &'a [&'a CheckRun]) -> CiCapture<'a> {
+    CiCapture::prove_complete(CheckSetCompleteness::Complete, blocking)
 }
 
 fn observe<'a>(
@@ -183,13 +189,7 @@ fn one_causal_check_vetoes_automation_for_the_whole_run() {
     let blocking = refs(&checks);
     let id = pr_head_identity(900);
 
-    let decision = classify(&observe(
-        &id,
-        &id,
-        CiCapture::FailedComplete {
-            blocking: &blocking,
-        },
-    ));
+    let decision = classify(&observe(&id, &id, complete(&blocking)));
 
     assert_eq!(decision.class(), CiClass::CausalFailure);
     assert_eq!(decision.rationale(), CiRouteRationale::CausalFailure);
@@ -207,13 +207,7 @@ fn fully_inconclusive_pr_head_run_is_tier_one_rerun() {
     assert!(crate::pr_poller::ci_triage::is_inconclusive(&blocking));
     let id = pr_head_identity(900);
 
-    let decision = classify(&observe(
-        &id,
-        &id,
-        CiCapture::FailedComplete {
-            blocking: &blocking,
-        },
-    ));
+    let decision = classify(&observe(&id, &id, complete(&blocking)));
 
     assert_eq!(decision.class(), CiClass::Inconclusive);
     assert_eq!(decision.action(), CiAction::RerunRun);
@@ -234,13 +228,7 @@ fn fully_inconclusive_merge_group_run_re_enqueues() {
         "refs/heads/gh-readonly-queue/main/pr-41-abc@2026-08-06T09:00:00Z",
     );
 
-    let decision = classify(&observe(
-        &id,
-        &id,
-        CiCapture::FailedComplete {
-            blocking: &blocking,
-        },
-    ));
+    let decision = classify(&observe(&id, &id, complete(&blocking)));
 
     assert_eq!(decision.class(), CiClass::Inconclusive);
     assert_eq!(decision.action(), CiAction::Reenqueue);
@@ -250,28 +238,225 @@ fn fully_inconclusive_merge_group_run_re_enqueues() {
     );
 }
 
-#[test]
-fn empty_blocking_set_on_a_failed_run_is_not_proof_of_transience() {
-    // Absence of a blocking check on a run that concluded RED is unexplained,
-    // not transient. It must never reach the Tier-1 provider action.
-    let id = pr_head_identity(900);
-    let decision = classify(&observe(
-        &id,
-        &id,
-        CiCapture::FailedComplete { blocking: &[] },
-    ));
+/// Everything a *remediation* route can produce is absent.
+///
+/// Broader than [`assert_no_effects`]: it also denies the durable row and the
+/// Tier-1 charge, which is what the proposal's "creates no remediation state"
+/// phrase actually means. Expressed as capability absence so a later branch
+/// that grows one of these fails here rather than passing quietly.
+#[track_caller]
+fn assert_outside_remediation(decision: &CiRouteDecision) {
+    assert_no_effects(decision);
+    assert!(
+        !decision.creates_route_row(),
+        "a route row is remediation state: {decision:?}"
+    );
+    assert!(
+        !decision.consumes_tier1_charge(),
+        "no Tier-1 charge may be consumed: {decision:?}"
+    );
+    assert!(!decision.closes_route(), "{decision:?}");
+}
 
-    assert_eq!(decision.class(), CiClass::Unknown);
+/// Rev 49's PR-head complete-empty row.
+///
+/// The draft lane already has a no-CI path — `PrDraftCiAction::Proceed` after
+/// the minimum-age guard — and this evidence must land on it rather than on any
+/// remediation route. Wave 2 sent it to Tier 2 on the reasoning that "a red run
+/// with nothing blocking is unexplained"; rev 49 supersedes that, because on a
+/// repository with no CI configured *every* poll produces this shape, and Tier 2
+/// there is a Lead session per poll for a repository that has no CI to fix.
+#[test]
+fn complete_empty_pr_head_proceeds_after_minimum_age() {
+    let id = pr_head_identity(900);
+    let decision = classify(&observe(&id, &id, complete(&[])));
+
     assert_eq!(decision.rationale(), CiRouteRationale::EmptyBlockingSet);
-    assert_lead_only(&decision, CiTier2Reason::EvidenceUnknown);
+    assert_eq!(
+        decision.complete_empty_route(),
+        Some(CiCompleteEmptyRoute::PrHeadProceed),
+        "the draft lane's compatibility path is Proceed-after-min-age, and the \
+         guard itself stays where it already lives",
+    );
+    assert_outside_remediation(&decision);
+
+    // The lane executor's own no-CI branch and this route agree on which action
+    // to take. Asserting the mapping, not just the enum name, is what stops the
+    // two from drifting.
+    assert_eq!(
+        crate::pr_poller::decide_pr_draft_ci_action(djinn_core::models::CiStatus::Unknown, false),
+        crate::pr_poller::PrDraftCiAction::Proceed {
+            needs_passing_persist: true
+        },
+    );
+}
+
+/// Rev 49's merge-group complete-empty row.
+///
+/// The review lane differs from the draft lane and the proposal is explicit
+/// that they must not be collapsed. A `pr_review` PR has already cleared the
+/// draft minimum-age guard, so there is nothing left to wait for; the existing
+/// path persists `Passing` for the current head, and the merge gate — which
+/// maps `Unknown` to `Hold` — is then free to progress. Recording nothing here
+/// would wedge every no-CI repository in `pr_review` permanently.
+#[test]
+fn complete_empty_merge_group_records_passing_and_allows_gate() {
+    let id = merge_group_identity(
+        7,
+        "refs/heads/gh-readonly-queue/main/pr-41-abc@2026-08-06T09:00:00Z",
+    );
+    let decision = classify(&observe(&id, &id, complete(&[])));
+
+    assert_eq!(decision.rationale(), CiRouteRationale::EmptyBlockingSet);
+    assert_eq!(
+        decision.complete_empty_route(),
+        Some(CiCompleteEmptyRoute::MergeGroupRecordPassing),
+    );
+    assert_outside_remediation(&decision);
+
+    // `Passing` is what unblocks the existing gate; the no-CI-shaped `Unknown`
+    // that a bare `record_ci_snapshot` would leave behind holds it forever.
+    // That is the fact this route depends on, so it is asserted rather than
+    // assumed.
+    use crate::pr_poller::ci_helpers::{CiMergeGateVerdict, ci_merge_gate_verdict};
+    use djinn_core::models::CiStatus;
+    assert_eq!(
+        ci_merge_gate_verdict(Some(&gate_snapshot(CiStatus::Passing)), HEAD),
+        CiMergeGateVerdict::Allow
+    );
+    assert_eq!(
+        ci_merge_gate_verdict(Some(&gate_snapshot(CiStatus::Unknown)), HEAD),
+        CiMergeGateVerdict::Hold,
+        "recording nothing leaves `Unknown`, which holds forever on a no-CI repo",
+    );
+}
+
+/// A current-head snapshot carrying only the status under test.
+fn gate_snapshot(ci_status: djinn_core::models::CiStatus) -> djinn_core::models::TaskPrCiSnapshot {
+    djinn_core::models::TaskPrCiSnapshot {
+        task_id: SUBJECT_A.to_owned(),
+        pr_number: 41,
+        head_sha: HEAD.to_owned(),
+        ci_status,
+        ..Default::default()
+    }
+}
+
+/// The two lanes are not the same route, and the classifier is what keeps them
+/// apart. A single collapsed "complete empty" answer would send the review lane
+/// down the draft lane's minimum-age path — which it has already passed — or
+/// the draft lane down a `Passing` persist it has not yet earned.
+#[test]
+fn the_two_complete_empty_lanes_do_not_collapse() {
+    let pr_head = pr_head_identity(900);
+    let merge_group = merge_group_identity(7, "refs/heads/gh-readonly-queue/main/pr-41-abc@t");
+
+    let a = classify(&observe(&pr_head, &pr_head, complete(&[])));
+    let b = classify(&observe(&merge_group, &merge_group, complete(&[])));
+
+    assert_ne!(a.complete_empty_route(), b.complete_empty_route());
+}
+
+/// Complete-empty is still evidence about *a head*, and a superseded head
+/// cannot drive a lane to green.
+#[test]
+fn stale_complete_empty_is_discarded_rather_than_proceeding() {
+    let evidence = pr_head_identity(900);
+    let current = CiEvidenceIdentity {
+        pr_head_sha: OTHER_HEAD.to_owned(),
+        ..pr_head_identity(900)
+    };
+
+    let decision = classify(&observe(&evidence, &current, complete(&[])));
+
+    assert_eq!(decision.action(), CiAction::Discard);
+    assert_eq!(
+        decision.rationale(),
+        CiRouteRationale::Stale(CiStaleField::PrHeadSha)
+    );
+    assert!(
+        decision.complete_empty_route().is_none(),
+        "a stale head must not reach either lane's no-CI fast path: {decision:?}"
+    );
+    assert_no_effects(&decision);
+}
+
+/// The seal, stated as a test.
+///
+/// A failed *first* page returns zero runs with `total_count: 0` — byte-for-byte
+/// the shape of a repository with no CI. The only thing separating them is the
+/// provider's verdict, and `prove_complete` is where that verdict is consulted.
+/// If it were ever bypassed, an outage on page 1 would drive both lanes to
+/// green.
+#[test]
+fn incomplete_enumeration_cannot_masquerade_as_complete_empty() {
+    let id = pr_head_identity(900);
+
+    for reason in [
+        CheckSetIncompleteReason::PageFetchFailed,
+        CheckSetIncompleteReason::MaxPagesTruncated,
+        CheckSetIncompleteReason::ShortRead,
+    ] {
+        let capture = CiCapture::prove_complete(CheckSetCompleteness::Incomplete(reason), &[]);
+        assert!(
+            !capture.is_complete_empty(),
+            "{reason:?} must not read as complete-empty"
+        );
+
+        let decision = classify(&observe(&id, &id, capture));
+        assert!(
+            decision.complete_empty_route().is_none(),
+            "{reason:?} reached a lane no-CI fast path: {decision:?}"
+        );
+        assert!(!decision.creates_route_row(), "{reason:?}: {decision:?}");
+        assert!(
+            !decision.consumes_tier1_charge(),
+            "{reason:?}: {decision:?}"
+        );
+        assert_no_effects(&decision);
+    }
+}
+
+/// The seal's other half: a set of checks that have not finished cannot be
+/// proven complete, whatever the caller believes.
+///
+/// This is the concrete hazard. `is_inconclusive` is "no member is causal", and
+/// an `in_progress` check is not causal *yet* — so a hand-built complete capture
+/// over running checks classifies as Tier 1 and authorizes `rerun_failed_jobs`
+/// against a run that is still going.
+#[test]
+fn a_running_check_set_cannot_be_proven_complete() {
+    let mut running = ran_then_cancelled("Quality Gate / test (1)", 900);
+    running.status = "in_progress".to_owned();
+    running.conclusion = None;
+    let blocking = vec![&running];
+
+    // The trap, demonstrated: were this set accepted as complete, the existing
+    // Tier-1 predicate would say yes.
+    assert!(crate::pr_poller::ci_triage::is_inconclusive(&blocking));
+
+    let capture = CiCapture::prove_complete(CheckSetCompleteness::Complete, &blocking);
+    let id = pr_head_identity(900);
+    let decision = classify(&observe(&id, &id, capture));
+
+    assert_eq!(decision.action(), CiAction::Hold);
+    assert_eq!(
+        decision.rationale(),
+        CiRouteRationale::Pending(CiPendingReason::RequiredCheckNonTerminal),
+    );
+    assert!(
+        decision.provider_action().is_none(),
+        "a live run must never carry provider-mutation authority: {decision:?}"
+    );
+    assert!(!decision.creates_route_row(), "{decision:?}");
 }
 
 #[test]
 fn a_passing_or_merged_observation_creates_no_route() {
     let id = pr_head_identity(900);
     for (capture, rationale) in [
-        (CiCapture::Passing, CiRouteRationale::NewerPass),
-        (CiCapture::Merged, CiRouteRationale::NewerMerge),
+        (CiCapture::passing(), CiRouteRationale::NewerPass),
+        (CiCapture::merged(), CiRouteRationale::NewerMerge),
     ] {
         let decision = classify(&observe(&id, &id, capture));
         assert_eq!(decision.rationale(), rationale);
@@ -286,7 +471,7 @@ fn a_newer_pass_or_merge_outranks_stale_and_causal_evidence() {
     // suppress older pending adjudications rather than being suppressed.
     let evidence = pr_head_identity(900);
     let current = pr_head_identity(901);
-    for capture in [CiCapture::Passing, CiCapture::Merged] {
+    for capture in [CiCapture::passing(), CiCapture::merged()] {
         let decision = classify(&observe(&evidence, &current, capture));
         assert!(decision.closes_route(), "{decision:?}");
         assert_no_effects(&decision);
@@ -304,7 +489,7 @@ fn a_non_terminal_run_or_check_holds_and_spends_nothing() {
         CiPendingReason::RunNonTerminal,
         CiPendingReason::RequiredCheckNonTerminal,
     ] {
-        let decision = classify(&observe(&id, &id, CiCapture::NonTerminal(reason)));
+        let decision = classify(&observe(&id, &id, CiCapture::non_terminal(reason)));
         assert_eq!(decision.action(), CiAction::Hold, "{reason:?}");
         assert_eq!(decision.rationale(), CiRouteRationale::Pending(reason));
         // A hold reaches neither the provider NOR Lead: the snapshot is not
@@ -313,15 +498,18 @@ fn a_non_terminal_run_or_check_holds_and_spends_nothing() {
     }
 }
 
-/// The proposal's closed unknown/incomplete set, verbatim, minus the four
-/// stale-identity cases (which are the discard test below) and the two pending
-/// cases (which hold). Every one fails closed: Lead may adjudicate, the
-/// provider may not be touched.
-const CLOSED_INCOMPLETE_SET: [CiIncompleteReason; 10] = [
+/// Every reason the classifier can be handed, listed exhaustively.
+///
+/// The `match` is what makes it exhaustive: adding a variant to
+/// [`CiIncompleteReason`] fails to compile here until it is placed on one side
+/// of the partition, which is the only thing that stops a new reason from
+/// silently inheriting whichever default the classifier happens to have.
+const EVERY_INCOMPLETE_REASON: [CiIncompleteReason; 11] = [
     CiIncompleteReason::MissingStartTimestamp,
     CiIncompleteReason::MissingCompletionTimestamp,
     CiIncompleteReason::MalformedExecutionInterval,
     CiIncompleteReason::NonPositiveExecutionInterval,
+    CiIncompleteReason::EnumerationPageFailed,
     CiIncompleteReason::CheckEnumerationUnavailable,
     CiIncompleteReason::PartialPagination,
     CiIncompleteReason::CheckApiError,
@@ -330,26 +518,189 @@ const CLOSED_INCOMPLETE_SET: [CiIncompleteReason; 10] = [
     CiIncompleteReason::MergeGroupCorrelationUnavailable,
 ];
 
+/// Which side of the proposal's partition a reason belongs to, spelled out
+/// independently of the implementation's `is_enumeration_failure` so the test
+/// is a second opinion rather than a restatement.
+fn expected_to_hold(reason: CiIncompleteReason) -> bool {
+    match reason {
+        // "Any failed page, `MAX_PAGES` truncation, or collected count below
+        // reported `total_count` → Hold without a route row."
+        CiIncompleteReason::EnumerationPageFailed
+        | CiIncompleteReason::CheckEnumerationUnavailable
+        | CiIncompleteReason::PartialPagination => true,
+        // "Complete snapshot with missing or malformed timestamps, check/log
+        // API error after an immutable run is known, or ambiguous merge-group
+        // correlation → Tier 2 after the current-identity guard."
+        CiIncompleteReason::MissingStartTimestamp
+        | CiIncompleteReason::MissingCompletionTimestamp
+        | CiIncompleteReason::MalformedExecutionInterval
+        | CiIncompleteReason::NonPositiveExecutionInterval
+        | CiIncompleteReason::CheckApiError
+        | CiIncompleteReason::LogApiError
+        | CiIncompleteReason::AmbiguousMergeGroupCorrelation
+        | CiIncompleteReason::MergeGroupCorrelationUnavailable
+        | CiIncompleteReason::RunAttributionUnavailable => false,
+    }
+}
+
+/// The partition, asserted end to end.
+///
+/// Both sides refuse the provider. They differ in what they are allowed to
+/// *spend*: an enumeration failure spends nothing at all, while complete-but-
+/// unusable evidence has a constructible immutable identity and therefore earns
+/// one deduplicated Lead adjudication.
 #[test]
 fn every_incomplete_evidence_case_fails_closed_without_provider_mutation() {
     let id = pr_head_identity(900);
-    for reason in CLOSED_INCOMPLETE_SET {
-        let decision = classify(&observe(&id, &id, CiCapture::Incomplete(reason)));
+    for reason in EVERY_INCOMPLETE_REASON
+        .into_iter()
+        .chain([CiIncompleteReason::RunAttributionUnavailable])
+    {
+        let decision = classify(&observe(&id, &id, CiCapture::incomplete(reason)));
         assert_eq!(decision.class(), CiClass::Unknown, "{reason:?}");
         assert_eq!(
             decision.rationale(),
             CiRouteRationale::IncompleteEvidence(reason)
         );
-        assert_lead_only(&decision, CiTier2Reason::EvidenceUnknown);
+        assert!(
+            decision.provider_action().is_none(),
+            "{reason:?} carried provider-mutation authority: {decision:?}",
+        );
+
+        if expected_to_hold(reason) {
+            assert_eq!(decision.action(), CiAction::Hold, "{reason:?}");
+            assert!(!decision.creates_route_row(), "{reason:?}: {decision:?}");
+            assert_no_effects(&decision);
+        } else {
+            assert_lead_only(&decision, CiTier2Reason::EvidenceUnknown);
+            assert!(decision.creates_route_row(), "{reason:?}: {decision:?}");
+        }
     }
-    // Plus the one the proposal does not name but this repository produces:
-    // a blocking check with no attributable Actions run.
-    let decision = classify(&observe(
-        &id,
-        &id,
-        CiCapture::Incomplete(CiIncompleteReason::RunAttributionUnavailable),
-    ));
-    assert_lead_only(&decision, CiTier2Reason::EvidenceUnknown);
+}
+
+/// The completeness gate reaches the *existing* merge gate, not just the new
+/// route — and it is not behind `ci_evidence_routing`.
+///
+/// Three production sites decide "green" from an empty or all-passing check
+/// list, and all three are now guarded. This asserts the two lane fast paths at
+/// their actual predicate, because the bug they had was not a wrong branch: it
+/// was the right branch asked the wrong question. `is_empty()` is true of both
+/// "this repository has no CI" and "page 1 returned 500", and only the verdict
+/// separates them.
+#[test]
+fn incomplete_check_set_never_records_passing() {
+    let runs = [make_passing_check("Quality Gate / build")];
+
+    // The failed-first-page shape: zero runs, `total_count: 0`.
+    let failed_first_page =
+        CheckRunsResponse::incomplete(0, Vec::new(), CheckSetIncompleteReason::PageFetchFailed);
+    assert!(failed_first_page.check_runs.is_empty());
+    assert!(
+        !failed_first_page.completeness.is_complete(),
+        "the draft lane's no-CI branch and the review lane's `Passing` persist \
+         are both gated on this being false",
+    );
+
+    // The all-green-prefix shape: every fetched member passed, but the walk
+    // stopped early. Classifying on the collected list alone yields `Passing`.
+    let short_read =
+        CheckRunsResponse::incomplete(9, runs.to_vec(), CheckSetIncompleteReason::ShortRead);
+    assert!(
+        short_read
+            .check_runs
+            .iter()
+            .all(|cr| cr.conclusion.as_deref() == Some("success")),
+    );
+    assert!(!short_read.completeness.is_complete());
+
+    // And the genuine no-CI shape, which must still be allowed through — the
+    // gate has to be a filter, not a wall.
+    let genuinely_empty = CheckRunsResponse::complete(Vec::new());
+    assert!(genuinely_empty.check_runs.is_empty());
+    assert!(genuinely_empty.completeness.is_complete());
+}
+
+fn make_passing_check(name: &str) -> CheckRun {
+    let mut cr = causal(name, 900);
+    cr.conclusion = Some("success".to_owned());
+    cr
+}
+
+// ---------------------------------------------------------------------------
+// The provider-action scope
+// ---------------------------------------------------------------------------
+
+/// The lane executor's route to the provider runs through the scope, and a
+/// closed scope has no route at all.
+///
+/// This is the "cancellation → action drain → lock release" order expressed
+/// where it is enforceable in this crate. Leadership releases the coordinator
+/// advisory lock only after the scope reports a graceful drain, and the scope
+/// cannot report one while admission is open. So a Tier-1 decision that arrives
+/// after admission closed has nothing to call the provider *with* — the call
+/// target only exists on an admitted action.
+#[test]
+fn a_closed_action_scope_denies_the_tier_one_call_target() {
+    let checks = [ran_then_cancelled("Quality Gate / test (1)", 900)];
+    let blocking = refs(&checks);
+    let id = pr_head_identity(900);
+    let decision = classify(&observe(&id, &id, complete(&blocking)));
+
+    let action = decision
+        .provider_action()
+        .expect("Tier 1 authorizes one provider mutation");
+
+    let scope = ProviderActionScope::new();
+    {
+        let admitted = action
+            .admit(&scope)
+            .expect("an open scope admits the action");
+        assert_eq!(admitted.kind(), CiProviderActionKind::RerunFailedJobs);
+        assert_eq!(admitted.run_id(), 900);
+        assert_eq!(
+            scope.in_flight(),
+            1,
+            "an admitted action is visible to the drain",
+        );
+    }
+    assert_eq!(scope.in_flight(), 0, "dropping the action leaves the scope");
+
+    // Now the drain sequence's first step.
+    scope.close_admission();
+    assert!(
+        action.admit(&scope).is_none(),
+        "a route classified Tier 1 after admission closed must not reach the provider",
+    );
+
+    // And the decision itself is unchanged — closing admission suppresses the
+    // *call*, it does not reclassify the evidence. The row this decision would
+    // have opened simply never enters `calling`, which is what leaves the
+    // charge unspent for the next leader.
+    assert_eq!(decision.action(), CiAction::RerunRun);
+}
+
+/// The scope is the join between the two halves of the handoff proof, and
+/// "empty" is not the signal leadership waits on.
+#[tokio::test]
+async fn the_drain_signal_is_the_stamp_not_the_emptiness() {
+    let scope = ProviderActionScope::new();
+    scope.close_admission();
+    scope.wait_until_empty().await;
+
+    assert!(
+        !scope
+            .wait_until_drained(std::time::Duration::from_millis(50))
+            .await,
+        "an empty but unstamped scope is not a graceful handoff — releasing the \
+         advisory lock here would hand a new incarnation a proof it does not have",
+    );
+
+    scope.mark_drained();
+    assert!(
+        scope
+            .wait_until_drained(std::time::Duration::from_secs(5))
+            .await
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -402,13 +753,7 @@ fn every_stale_identity_discards_without_provider_lease_board_or_worker() {
         // Deliberately paired with INCONCLUSIVE evidence, the one class that
         // would otherwise authorize a provider call. If the guard were
         // evaluated after the Tier-1 branch, this is the case that would leak.
-        let decision = classify(&observe(
-            &evidence,
-            &current,
-            CiCapture::FailedComplete {
-                blocking: &blocking,
-            },
-        ));
+        let decision = classify(&observe(&evidence, &current, complete(&blocking)));
         assert_eq!(decision.action(), CiAction::Discard, "{field:?}");
         assert_eq!(decision.rationale(), CiRouteRationale::Stale(field));
         assert_no_effects(&decision);
@@ -426,12 +771,10 @@ fn a_stale_route_stays_discarded_for_every_capture() {
     let blocking = refs(&checks);
 
     let captures = [
-        CiCapture::FailedComplete {
-            blocking: &blocking,
-        },
-        CiCapture::FailedComplete { blocking: &[] },
-        CiCapture::Incomplete(CiIncompleteReason::CheckApiError),
-        CiCapture::NonTerminal(CiPendingReason::RunNonTerminal),
+        complete(&blocking),
+        complete(&[]),
+        CiCapture::incomplete(CiIncompleteReason::CheckApiError),
+        CiCapture::non_terminal(CiPendingReason::RunNonTerminal),
     ];
     for capture in captures {
         let decision = classify(&observe(&evidence, &current, capture));
@@ -466,13 +809,7 @@ fn tier1_decision() -> CiRouteDecision {
     let checks = [ran_then_cancelled("Quality Gate / test (1)", 900)];
     let blocking = refs(&checks);
     let id = pr_head_identity(900);
-    classify(&observe(
-        &id,
-        &id,
-        CiCapture::FailedComplete {
-            blocking: &blocking,
-        },
-    ))
+    classify(&observe(&id, &id, complete(&blocking)))
 }
 
 #[test]
@@ -513,24 +850,12 @@ fn budget_never_changes_a_route_that_was_not_tier_one() {
     let evidence = pr_head_identity(900);
     let stale_current = pr_head_identity(901);
 
-    let causal_route = classify(&observe(
-        &evidence,
-        &evidence,
-        CiCapture::FailedComplete {
-            blocking: &blocking,
-        },
-    ));
-    let discarded = classify(&observe(
-        &evidence,
-        &stale_current,
-        CiCapture::FailedComplete {
-            blocking: &blocking,
-        },
-    ));
+    let causal_route = classify(&observe(&evidence, &evidence, complete(&blocking)));
+    let discarded = classify(&observe(&evidence, &stale_current, complete(&blocking)));
     let held = classify(&observe(
         &evidence,
         &evidence,
-        CiCapture::NonTerminal(CiPendingReason::RunNonTerminal),
+        CiCapture::non_terminal(CiPendingReason::RunNonTerminal),
     ));
 
     for spent in [counts(0, 0), counts(2, 4)] {
@@ -767,17 +1092,101 @@ fn the_transient_fingerprint_is_order_independent_and_evidence_sensitive() {
 // Evidence capture: complete terminal evidence identity
 // ---------------------------------------------------------------------------
 
+/// Every way the enumeration can fail holds, and none of them creates
+/// remediation state.
+///
+/// The verdict comes from the provider, not from re-deriving `collected <
+/// total_count` here: the short-read row below is the only one that comparison
+/// would catch, and the failed-page row is the one where it is actively wrong.
 #[test]
-fn a_short_check_enumeration_is_a_proven_partial_read() {
+fn incomplete_check_set_holds_without_route_or_session() {
     let runs = [ran_then_cancelled("Quality Gate / test (1)", 900)];
     let blocking = refs(&runs);
-    let mut response = checks_response(&runs);
-    response.total_count = 7;
+    let id = pr_head_identity(900);
 
-    match capture_pr_head_evidence(41, HEAD, &response, &blocking) {
-        CiLaneEvidence::Incomplete(CiIncompleteReason::PartialPagination) => {}
-        other => panic!("expected partial pagination, got {other:?}"),
+    for (provider_reason, routing_reason, total, collected) in [
+        (
+            CheckSetIncompleteReason::PageFetchFailed,
+            CiIncompleteReason::EnumerationPageFailed,
+            0,
+            0,
+        ),
+        (
+            CheckSetIncompleteReason::MaxPagesTruncated,
+            CiIncompleteReason::CheckEnumerationUnavailable,
+            1,
+            1,
+        ),
+        (
+            CheckSetIncompleteReason::ShortRead,
+            CiIncompleteReason::PartialPagination,
+            7,
+            1,
+        ),
+    ] {
+        let response =
+            CheckRunsResponse::incomplete(total, runs[..collected].to_vec(), provider_reason);
+
+        match capture_pr_head_evidence(41, HEAD, &response, &blocking) {
+            CiLaneEvidence::Incomplete(got) => assert_eq!(got, routing_reason),
+            other => panic!("expected {routing_reason:?}, got {other:?}"),
+        }
+
+        let decision = classify(&observe(&id, &id, CiCapture::incomplete(routing_reason)));
+
+        assert_eq!(
+            decision.action(),
+            CiAction::Hold,
+            "{routing_reason:?} must hold, not adjudicate: {decision:?}",
+        );
+        assert_eq!(
+            decision.rationale(),
+            CiRouteRationale::IncompleteEvidence(routing_reason),
+        );
+        assert!(
+            !decision.creates_route_row(),
+            "{routing_reason:?} created a route row: {decision:?}",
+        );
+        assert!(!decision.consumes_tier1_charge(), "{decision:?}");
+        assert_no_effects(&decision);
     }
+}
+
+/// Repeated incomplete polls, including across a restart, stay in the same
+/// negative space — and then a complete snapshot classifies normally.
+///
+/// The point is the *absence of an accumulator*. A retry counter or a synthetic
+/// observation identity keyed on incomplete evidence is explicitly out of
+/// scope, so nothing may change between poll 1 and poll 50: the decision is a
+/// pure function of the capture, and the same capture must give the same route
+/// forever.
+#[test]
+fn repeated_incomplete_polls_remain_side_effect_free() {
+    let id = pr_head_identity(900);
+    let incomplete = CiCapture::incomplete(CiIncompleteReason::EnumerationPageFailed);
+
+    let first = classify(&observe(&id, &id, incomplete));
+    for _ in 0..50 {
+        let again = classify(&observe(&id, &id, incomplete));
+        assert_eq!(
+            again, first,
+            "an incomplete poll accumulated state across polls",
+        );
+        assert!(!again.creates_route_row());
+        assert!(!again.consumes_tier1_charge());
+        assert_no_effects(&again);
+    }
+
+    // A restart changes nothing: there is no in-memory or durable counter for
+    // the classifier to have lost or kept.
+    assert_eq!(classify(&observe(&id, &id, incomplete)), first);
+
+    // And once the provider recovers, the same identity classifies normally.
+    let runs = [ran_then_cancelled("Quality Gate / test (1)", 900)];
+    let blocking = refs(&runs);
+    let recovered = classify(&observe(&id, &id, complete(&blocking)));
+    assert_eq!(recovered.action(), CiAction::RerunRun);
+    assert!(recovered.creates_route_row());
 }
 
 #[test]
@@ -816,7 +1225,7 @@ fn timestamp_completeness_is_checked_in_a_fixed_order() {
         let runs = [check];
         let blocking = refs(&runs);
         assert_eq!(
-            evidence::blocking_evidence_completeness(&blocking),
+            super::blocking_evidence_completeness(&blocking),
             Some(expected)
         );
     }
@@ -842,7 +1251,7 @@ fn a_hard_failure_that_claims_it_never_ran_is_contradictory_not_transient() {
     );
     assert!(crate::pr_poller::ci_triage::is_inconclusive(&blocking));
     assert_eq!(
-        evidence::blocking_evidence_completeness(&blocking),
+        super::blocking_evidence_completeness(&blocking),
         Some(CiIncompleteReason::NonPositiveExecutionInterval),
         "routing layers a fail-closed guard on top rather than editing ci_triage"
     );
@@ -864,7 +1273,7 @@ fn a_plain_never_executed_aggregator_stays_tier_one_eligible() {
         never_executed("Publish Nextest Timing", 900),
     ];
     let blocking = refs(&runs);
-    assert_eq!(evidence::blocking_evidence_completeness(&blocking), None);
+    assert_eq!(super::blocking_evidence_completeness(&blocking), None);
 
     let captured = capture_pr_head_evidence(41, HEAD, &checks_response(&runs), &blocking);
     let CiLaneEvidence::Runs(routes) = captured else {
@@ -948,7 +1357,9 @@ fn merge_group_correlation_is_unavailable_or_ambiguous_rather_than_guessed() {
     // Nothing correlates.
     assert_eq!(
         correlate_merge_group_run(41, &[run(1, "main", "failure")]).err(),
-        Some(CiIncompleteReason::MergeGroupCorrelationUnavailable)
+        Some(CiMergeGroupCorrelationError::Unusable(
+            CiIncompleteReason::MergeGroupCorrelationUnavailable
+        ))
     );
     // A neighbouring PR number must not correlate: the trailing dash in the
     // `pr-41-` marker is what keeps `pr-411-` out.
@@ -958,7 +1369,9 @@ fn merge_group_correlation_is_unavailable_or_ambiguous_rather_than_guessed() {
             &[run(1, "gh-readonly-queue/main/pr-411-abc", "failure")]
         )
         .err(),
-        Some(CiIncompleteReason::MergeGroupCorrelationUnavailable)
+        Some(CiMergeGroupCorrelationError::Unusable(
+            CiIncompleteReason::MergeGroupCorrelationUnavailable
+        ))
     );
     // Exactly one correlates.
     let single = [run(9, "gh-readonly-queue/main/pr-41-abc", "failure")];
@@ -971,8 +1384,56 @@ fn merge_group_correlation_is_unavailable_or_ambiguous_rather_than_guessed() {
     ];
     assert_eq!(
         correlate_merge_group_run(41, &ambiguous).err(),
-        Some(CiIncompleteReason::AmbiguousMergeGroupCorrelation)
+        Some(CiMergeGroupCorrelationError::Unusable(
+            CiIncompleteReason::AmbiguousMergeGroupCorrelation
+        ))
     );
+}
+
+/// A merge-group run that correlates perfectly but has not finished is the
+/// proposal's **Hold** row, not Tier 2.
+///
+/// Wave 2 returned `MergeGroupCorrelationUnavailable` here — an
+/// unknown-*evidence* reason, which the classifier fails closed to a guarded
+/// Tier 2. That spends a route row and a Lead session on a run that is simply
+/// still running, and which the very next poll would have classified for free.
+/// The proposal's table says "run or any required check is pending/non-terminal
+/// → Hold; wait for a terminal snapshot, do not classify".
+#[test]
+fn a_non_terminal_merge_group_run_holds_rather_than_asking_lead() {
+    let running = djinn_provider::github_api::WorkflowRun {
+        id: 9,
+        workflow_id: None,
+        name: None,
+        path: None,
+        head_branch: Some("gh-readonly-queue/main/pr-41-abc".to_owned()),
+        head_sha: "9".repeat(40),
+        status: Some("in_progress".to_owned()),
+        conclusion: Some("failure".to_owned()),
+    };
+
+    let err = correlate_merge_group_run(41, std::slice::from_ref(&running))
+        .expect_err("a non-terminal run cannot be correlated evidence");
+    assert_eq!(
+        err,
+        CiMergeGroupCorrelationError::NotTerminal(CiPendingReason::RunNonTerminal),
+    );
+
+    // And the route it produces spends nothing.
+    let id = merge_group_identity(9, "refs/heads/gh-readonly-queue/main/pr-41-abc@t");
+    let evidence: CiLaneEvidence<'_> = err.into();
+    let capture = evidence
+        .lane_capture()
+        .expect("a non-run lane evidence always yields a capture");
+    let decision = classify(&observe(&id, &id, capture));
+
+    assert_eq!(decision.action(), CiAction::Hold);
+    assert_eq!(
+        decision.rationale(),
+        CiRouteRationale::Pending(CiPendingReason::RunNonTerminal),
+    );
+    assert!(!decision.creates_route_row(), "{decision:?}");
+    assert_no_effects(&decision);
 }
 
 #[test]

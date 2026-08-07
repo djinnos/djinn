@@ -96,6 +96,15 @@ impl CoordinatorDeps {
         self.inner = self.inner.with_rpc_registry(registry);
         self
     }
+
+    /// Share the leader's provider-action scope (proposal `nafu`, wave 3).
+    pub fn with_provider_action_scope(
+        mut self,
+        scope: djinn_orchestration_types::ProviderActionScope,
+    ) -> Self {
+        self.inner = self.inner.with_provider_action_scope(scope);
+        self
+    }
 }
 
 /// Spawn a coordinator actor from agent-side deps.

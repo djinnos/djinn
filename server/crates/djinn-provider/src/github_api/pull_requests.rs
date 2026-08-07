@@ -3,7 +3,10 @@ use crate::github_api::GitHubApiError;
 use anyhow::{Result, anyhow};
 
 use crate::github_api::transport::handle_rate_limit;
-use crate::github_api::types::{CompareResponse, PrFile, RequiredStatusChecksResponse};
+use crate::github_api::types::{
+    CheckSetCompleteness, CheckSetIncompleteReason, CompareResponse, PrFile,
+    RequiredStatusChecksResponse,
+};
 use crate::github_api::{
     AutoMergeRequest, CheckRun, CheckRunsResponse, CreatePrParams, DequeueEvent, GitHubApiClient,
     MergeMethod, MergeQueueEntry, MergeQueueEntryState, PrMergeQueueState, PullRequest,
@@ -1127,6 +1130,14 @@ impl GitHubApiClient {
         let mut all_runs: Vec<CheckRun> = Vec::new();
         let mut total_count: u32 = 0;
         let mut hit_cap = false;
+        // The completeness verdict is a proof obligation of this loop. Three
+        // facts can defeat it, and the loop is the only place all three are
+        // visible: a non-success page status, the `MAX_PAGES` ceiling, and the
+        // `total_count` the response already carries. Only the third is
+        // arithmetic — and on its own it is wrong, because a *page-1* failure
+        // leaves `total_count == 0` alongside zero collected runs, which
+        // compares equal and reads as an authoritative empty set.
+        let mut failed_page: Option<u32> = None;
 
         for page in 1..=MAX_PAGES {
             let checks_url = format!(
@@ -1153,10 +1164,11 @@ impl GitHubApiClient {
 
             if !checks_resp.status().is_success() {
                 tracing::warn!(
-                    "GitHubApiClient: check-runs fetch failed ({}) on page {}, returning what was collected",
+                    "GitHubApiClient: check-runs fetch failed ({}) on page {}, returning what was collected as INCOMPLETE",
                     checks_resp.status(),
                     page
                 );
+                failed_page = Some(page);
                 break;
             }
 
@@ -1188,9 +1200,42 @@ impl GitHubApiClient {
             );
         }
 
+        // Order matters. A failed page is the most specific fact — it explains
+        // why the arithmetic below would agree, and it is the only one that
+        // survives a page-1 failure — so it is reported first. Truncation is
+        // next because a truncated walk's `total_count` may also be short.
+        // The count comparison is last and is never asked to stand alone.
+        let completeness = if let Some(page) = failed_page {
+            tracing::warn!(
+                owner,
+                repo,
+                head_sha = %pr.head.sha,
+                page,
+                collected = all_runs.len(),
+                total_count,
+                "GitHubApiClient: check-run enumeration is INCOMPLETE (page fetch failed)",
+            );
+            CheckSetCompleteness::Incomplete(CheckSetIncompleteReason::PageFetchFailed)
+        } else if hit_cap {
+            CheckSetCompleteness::Incomplete(CheckSetIncompleteReason::MaxPagesTruncated)
+        } else if all_runs.len() < total_count as usize {
+            tracing::warn!(
+                owner,
+                repo,
+                head_sha = %pr.head.sha,
+                collected = all_runs.len(),
+                total_count,
+                "GitHubApiClient: check-run enumeration is INCOMPLETE (short read)",
+            );
+            CheckSetCompleteness::Incomplete(CheckSetIncompleteReason::ShortRead)
+        } else {
+            CheckSetCompleteness::Complete
+        };
+
         let checks = CheckRunsResponse {
             total_count,
             check_runs: all_runs,
+            completeness,
         };
 
         Ok((pr, checks))
