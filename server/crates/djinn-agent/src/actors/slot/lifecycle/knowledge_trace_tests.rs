@@ -925,7 +925,7 @@ async fn load_knowledge_context_rendered_matches_pack_knowledge_notes() {
     let notes = note_repo
         .query_by_scope_overlap(
             &project_id,
-            &derive_task_scope_paths(&task, None),
+            &derive_task_scope_path_tokens(&task, None),
             KNOWLEDGE_NOTE_TYPES,
             KNOWLEDGE_MIN_CONFIDENCE,
             app_state.knowledge_injection.knowledge_injection_limit as usize,

@@ -10,7 +10,7 @@ use djinn_core::models::Task;
 use crate::actors::slot::MergeConflictMetadata;
 use crate::actors::slot::helpers::{
     COMBINED_BRIEF_TOTAL_CHARS, KnowledgePackConfig, NotePackDisposition,
-    build_reviewer_diff_context, build_role_code_graph_context, derive_task_scope_paths,
+    build_reviewer_diff_context, build_role_code_graph_context, derive_task_scope_path_tokens,
     extract_worker_context, format_attempt_history, pack_ranked_knowledge_notes, recent_feedback,
 };
 use crate::actors::slot::lifecycle::attempt_context;
@@ -478,7 +478,13 @@ async fn load_knowledge_context_with_planner(
     rollout: &RolloutMode,
     cancellation: &CancellationToken,
 ) -> Option<String> {
-    let task_paths = derive_task_scope_paths(task, epic_context);
+    // NOTE (proposal 5205): this entry point still uses the *unvalidated*
+    // extractor. The validated, base-tree-checked
+    // `djinn_slot::helpers::derive_task_scope_paths` and the ranked
+    // `NoteRepository::search_knowledge_injection_candidates` path both exist,
+    // but the production cutover is deliberately not flipped here — see the
+    // proposal's delivery order, step 4.
+    let task_paths = derive_task_scope_path_tokens(task, epic_context);
     if cancellation.is_cancelled() {
         persist_cancelled_knowledge_trace(task, &task_paths, app_state, planner, rollout).await;
         return None;
@@ -1188,7 +1194,7 @@ pub(crate) async fn assemble_prompt_context(inputs: PromptContextInputs<'_>) -> 
     // Each child measures its own wall-clock time so the child-span
     // metric reports per-child duration, not the phase aggregate.
     let epic_context_ref = epic_context.as_deref();
-    let task_paths_for_code_graph = derive_task_scope_paths(task, epic_context_ref);
+    let task_paths_for_code_graph = derive_task_scope_path_tokens(task, epic_context_ref);
     let (
         (knowledge_context, _knowledge_elapsed),
         ((prior_attempts, completed_dependency_parents, activity_text), _attempt_elapsed),
