@@ -578,6 +578,54 @@ fn every_incomplete_evidence_case_fails_closed_without_provider_mutation() {
     }
 }
 
+/// The completeness gate reaches the *existing* merge gate, not just the new
+/// route — and it is not behind `ci_evidence_routing`.
+///
+/// Three production sites decide "green" from an empty or all-passing check
+/// list, and all three are now guarded. This asserts the two lane fast paths at
+/// their actual predicate, because the bug they had was not a wrong branch: it
+/// was the right branch asked the wrong question. `is_empty()` is true of both
+/// "this repository has no CI" and "page 1 returned 500", and only the verdict
+/// separates them.
+#[test]
+fn incomplete_check_set_never_records_passing() {
+    let runs = [make_passing_check("Quality Gate / build")];
+
+    // The failed-first-page shape: zero runs, `total_count: 0`.
+    let failed_first_page =
+        CheckRunsResponse::incomplete(0, Vec::new(), CheckSetIncompleteReason::PageFetchFailed);
+    assert!(failed_first_page.check_runs.is_empty());
+    assert!(
+        !failed_first_page.completeness.is_complete(),
+        "the draft lane's no-CI branch and the review lane's `Passing` persist \
+         are both gated on this being false",
+    );
+
+    // The all-green-prefix shape: every fetched member passed, but the walk
+    // stopped early. Classifying on the collected list alone yields `Passing`.
+    let short_read =
+        CheckRunsResponse::incomplete(9, runs.to_vec(), CheckSetIncompleteReason::ShortRead);
+    assert!(
+        short_read
+            .check_runs
+            .iter()
+            .all(|cr| cr.conclusion.as_deref() == Some("success")),
+    );
+    assert!(!short_read.completeness.is_complete());
+
+    // And the genuine no-CI shape, which must still be allowed through — the
+    // gate has to be a filter, not a wall.
+    let genuinely_empty = CheckRunsResponse::complete(Vec::new());
+    assert!(genuinely_empty.check_runs.is_empty());
+    assert!(genuinely_empty.completeness.is_complete());
+}
+
+fn make_passing_check(name: &str) -> CheckRun {
+    let mut cr = causal(name, 900);
+    cr.conclusion = Some("success".to_owned());
+    cr
+}
+
 // ---------------------------------------------------------------------------
 // The provider-action scope
 // ---------------------------------------------------------------------------

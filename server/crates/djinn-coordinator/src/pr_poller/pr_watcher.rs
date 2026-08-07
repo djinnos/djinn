@@ -213,7 +213,14 @@ impl CoordinatorActor {
                 }
                 CiStatus::Pending | CiStatus::Unknown => {
                     // No CI configured after min-age guard — treat as green.
-                    if checks.check_runs.is_empty() {
+                    //
+                    // `is_empty()` alone is not the question. A failed *first*
+                    // page of the check-run enumeration also returns zero runs,
+                    // with `total_count: 0`, so it is indistinguishable from a
+                    // repository with no CI by inspection. Only the provider's
+                    // completeness verdict separates them, and an unproven empty
+                    // set must hold rather than take this path to green.
+                    if checks.check_runs.is_empty() && checks.completeness.is_complete() {
                         tracing::info!(
                             task_id = %task.short_id,
                             pr = pull_number,

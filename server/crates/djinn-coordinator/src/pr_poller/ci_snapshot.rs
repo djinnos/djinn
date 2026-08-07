@@ -180,6 +180,35 @@ impl CoordinatorActor {
         let mut primary_check_id: Option<u64> = None;
         let mut failure_fingerprint: Option<String> = None;
 
+        // ── Completeness gate (proposal `nafu`; NOT behind the routing flag) ──
+        //
+        // This corrects the *existing* merge gate, so it applies to every
+        // binary regardless of `ci_evidence_routing`. An enumeration the
+        // provider could not finish is a prefix, and a prefix whose fetched
+        // members all passed classifies below as `Passing` — a green merge
+        // verdict for a set that may contain the one causal failure nobody saw.
+        // The empty prefix left by a failed *first* page is worse still: it is
+        // byte-identical to "this repository has no CI" and reaches both lanes'
+        // fast path to green.
+        //
+        // Return `Unknown` and write nothing. `Unknown` maps to `Hold` at the
+        // gate, the two lane fast paths below check completeness before acting
+        // on emptiness, and the next poll re-reads. No counter, no synthetic
+        // identity, no route row — an incomplete read converts an unproven
+        // result into a wait and nothing else.
+        if let Some(reason) = checks.completeness.incomplete_reason() {
+            tracing::warn!(
+                task_id = %task_short_id,
+                pr = pull_number,
+                head_sha = &head_sha[..head_sha.len().min(12)],
+                collected = checks.check_runs.len(),
+                total_count = checks.total_count,
+                ?reason,
+                "PR poller: check-run enumeration is INCOMPLETE — holding without recording a CI verdict"
+            );
+            return CiStatus::Unknown;
+        }
+
         let ci_status = if checks.check_runs.is_empty() {
             // No checks exist — repo has no CI configured. After the
             // minimum-age guard elapses, the poller treats this as green

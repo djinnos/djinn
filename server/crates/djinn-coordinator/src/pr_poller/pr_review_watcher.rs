@@ -383,8 +383,15 @@ impl CoordinatorActor {
                 .map(|cached| cached != &current_sha)
                 .unwrap_or(true);
 
+            // The completeness clause is load-bearing, not defensive. This
+            // branch persists `Passing` for the current head off the strength of
+            // an empty check-run set, and a failed *first* page of the
+            // enumeration returns exactly that shape. Without the verdict, a
+            // GitHub incident during one poll would mark the head green and let
+            // the merge gate through.
             if (sha_changed || !self.pr_status_cache.contains_key(&task.id))
                 && checks.check_runs.is_empty()
+                && checks.completeness.is_complete()
             {
                 // No CI check-runs configured on this repo. A `pr_review` PR has
                 // already cleared the `pr_draft` min-age guard and been
