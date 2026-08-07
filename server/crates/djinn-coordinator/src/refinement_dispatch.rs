@@ -153,13 +153,40 @@ impl DurableDispatchBlock {
     }
 }
 
-/// Shared readiness/feedback context injected into every tribunal role task.
+/// Shared readiness context plus deliberately separate feedback channels.
+///
+/// Ordinary reviewer feedback remains available to every tribunal role.
+/// Immutable captured human-feedback obligations are source-aware work for the
+/// Advocate and Judge only; they must not alter an Adversary's context.
 pub(super) struct RefinementRoleContext {
     /// Rendered current-head DoR failures and `SpecLintResultV1` summary, plus
     /// any advocate spec-lint correction owed for this same round.
     pub readiness_context: String,
-    /// Latest human reviewer feedback recorded against the current revision.
+    /// Latest current-revision reviewer feedback.
     pub reviewer_feedback: Option<String>,
+    /// Immutable boundary-captured feedback obligations.
+    pub human_feedback_context: Option<String>,
+}
+
+impl RefinementRoleContext {
+    fn feedback_for_phase(
+        reviewer_feedback: Option<String>,
+        human_feedback_context: Option<String>,
+        phase: RefinementPhase,
+    ) -> Option<String> {
+        let obligations = matches!(
+            phase,
+            RefinementPhase::AdvocateRevision | RefinementPhase::JudgeAdjudication
+        )
+        .then_some(human_feedback_context)
+        .flatten();
+        match (reviewer_feedback, obligations) {
+            (Some(reviewer), Some(obligations)) => Some(format!("{reviewer}\n\n{obligations}")),
+            (Some(reviewer), None) => Some(reviewer),
+            (None, Some(obligations)) => Some(obligations),
+            (None, None) => None,
+        }
+    }
 }
 
 impl CoordinatorActor {
@@ -507,6 +534,7 @@ impl CoordinatorActor {
                         let RefinementRoleContext {
                             readiness_context,
                             reviewer_feedback,
+                            human_feedback_context,
                         } = self
                             .build_refinement_role_context(
                                 &run.proposal_id,
@@ -514,6 +542,11 @@ impl CoordinatorActor {
                                 refinement_phase_for_intent(lease.phase),
                             )
                             .await;
+                        let reviewer_feedback = RefinementRoleContext::feedback_for_phase(
+                            reviewer_feedback,
+                            human_feedback_context,
+                            refinement_phase_for_intent(lease.phase),
+                        );
                         let Some(task_id) = self
                             .create_refinement_task_with_context_and_correlation(
                                 &run.proposal_id,
@@ -1179,9 +1212,51 @@ impl CoordinatorActor {
             }
         };
 
+        let human_feedback_context = match proposal_repo.debate_trail(proposal_id).await {
+            Ok(entries) => {
+                let mut obligations = Vec::new();
+                for entry in entries
+                    .iter()
+                    .filter(|entry| entry.kind == "human_feedback")
+                {
+                    match proposal_repo
+                        .feedback_refinement_generation_for_debate(&entry.id)
+                        .await
+                    {
+                        Ok(Some(generation)) => {
+                            let sources = generation.sources.iter().map(|source| format!(
+                                "{{id={}, severity={}, author_kind={}, author_user_id={:?}, author_model={:?}, body={:?}}}",
+                                source.source_feedback_id, source.source_severity, source.source_author_kind,
+                                source.source_author_user_id, source.source_author_model, source.source_body
+                            )).collect::<Vec<_>>().join(", ");
+                            obligations.push(format!(
+                                "- id={} generation={} state={} pending_disposition={} against_revision={} sources=[{}]",
+                                entry.id, generation.injection.generation, generation.injection.state,
+                                generation.injection.state == "injected" && entry.resolved_at.is_none(),
+                                entry.against_revision_seq, sources
+                            ));
+                        }
+                        Ok(None) => {}
+                        Err(error) => obligations.push(format!(
+                            "- id={} generation unavailable ({error}); do not approve",
+                            entry.id
+                        )),
+                    }
+                }
+                (!obligations.is_empty()).then(|| format!(
+                    "Immutable human-feedback obligations (not adversary objections). Advocate must propose a disposition; Judge must accept or reject it.\n{}",
+                    obligations.join("\n")
+                ))
+            }
+            Err(error) => Some(format!(
+                "Human-feedback obligation read failed ({error}); do not approve this round."
+            )),
+        };
+
         RefinementRoleContext {
             readiness_context,
             reviewer_feedback,
+            human_feedback_context,
         }
     }
 
@@ -1529,9 +1604,15 @@ impl CoordinatorActor {
         let RefinementRoleContext {
             readiness_context,
             reviewer_feedback,
+            human_feedback_context,
         } = self
             .build_refinement_role_context(&proposal_id, run_id, phase)
             .await;
+        let reviewer_feedback = RefinementRoleContext::feedback_for_phase(
+            reviewer_feedback,
+            human_feedback_context,
+            phase,
+        );
 
         // ── Step 3: Create the refinement task (first DB side effect) ────────
         //

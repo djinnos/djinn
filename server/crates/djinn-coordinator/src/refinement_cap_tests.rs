@@ -1684,3 +1684,46 @@ async fn persisted_and_in_memory_refinement_owner_mismatch_fails_closed() {
         .expect("list tasks after owner-mismatch dispatch attempt");
     assert!(tasks.iter().all(|task| task.issue_type != "refinement"));
 }
+
+/// Captured source rows are an Advocate/Judge-only contract. Ordinary reviewer
+/// feedback remains unchanged for the Adversary, but the immutable obligations
+/// (generation, severity, and disposition state) must never enter its task.
+#[test]
+fn captured_human_feedback_is_not_in_adversary_context() {
+    let reviewer = Some("ordinary current-revision reviewer note".to_owned());
+    let obligations = Some(
+        "Immutable human-feedback obligations (not adversary objections). \\
+         - id=feedback-row generation=7 state=injected pending_disposition=true \\
+         sources=[{severity=blocking}]"
+            .to_owned(),
+    );
+
+    let adversary = super::RefinementRoleContext::feedback_for_phase(
+        reviewer.clone(),
+        obligations.clone(),
+        super::super::refinement::RefinementPhase::AdversaryAttack,
+    )
+    .expect("ordinary feedback remains available");
+    assert!(adversary.contains("ordinary current-revision reviewer note"));
+    assert!(
+        !adversary.contains("Immutable human-feedback obligations"),
+        "Adversary context must remain free of source-aware obligations: {adversary}"
+    );
+
+    for phase in [
+        super::super::refinement::RefinementPhase::AdvocateRevision,
+        super::super::refinement::RefinementPhase::JudgeAdjudication,
+    ] {
+        let context = super::RefinementRoleContext::feedback_for_phase(
+            reviewer.clone(),
+            obligations.clone(),
+            phase,
+        )
+        .expect("role context");
+        assert!(context.contains("ordinary current-revision reviewer note"));
+        assert!(context.contains("Immutable human-feedback obligations"));
+        assert!(context.contains("generation=7"));
+        assert!(context.contains("severity=blocking"));
+        assert!(context.contains("pending_disposition=true"));
+    }
+}
