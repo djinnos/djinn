@@ -15,6 +15,8 @@ pub(crate) mod error_handling {
     pub(crate) use djinn_slot::reply_loop::error_handling::*;
 }
 
+pub(crate) use djinn_slot::reply_loop::ModelTurnAdmissionOutcome;
+
 #[cfg(test)]
 mod resource_tests;
 

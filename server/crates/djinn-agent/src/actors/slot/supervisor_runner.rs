@@ -13,9 +13,10 @@ use djinn_db::repositories::task_run::TaskRunRepository;
 use djinn_db::repositories::task_run_outcome::TaskRunOutcomeRepository;
 use djinn_db::{TaskRepository, task_branch_name};
 use djinn_runtime::{
-    InfraDeathLogTailCapture, LoopGuardKind, ProviderFailureClass, ResolvedCredentials,
-    ResumeLifecycleMetadata, SessionRuntime, StreamEvent, TaskRunOutcome, TaskRunReport,
-    TerminalRuntimeEvidenceKind, TerminalRuntimeObservation, TestRuntime,
+    InfraDeathLogTailCapture, LoopGuardKind, ModelTurnAdmissionTerminalOutcome,
+    ProviderFailureClass, ResolvedCredentials, ResumeLifecycleMetadata, SessionRuntime,
+    StreamEvent, TaskRunOutcome, TaskRunReport, TerminalRuntimeEvidenceKind,
+    TerminalRuntimeObservation, TestRuntime,
 };
 use djinn_slot::{TerminalExtractionContext, TerminalExtractionOutcome};
 
@@ -330,6 +331,15 @@ fn run_outcome_name(outcome: &TaskRunOutcome) -> &'static str {
         TaskRunOutcome::LoopGuardTripped { .. } => "loop_guard_tripped",
         TaskRunOutcome::Parked { .. } => "parked",
         TaskRunOutcome::EnvironmentalNonAttempt { .. } => "environmental_non_attempt",
+        TaskRunOutcome::ModelTurnAdmission(ModelTurnAdmissionTerminalOutcome::Wait(..)) => {
+            "model_turn_admission_wait"
+        }
+        TaskRunOutcome::ModelTurnAdmission(ModelTurnAdmissionTerminalOutcome::Rejected(..)) => {
+            "model_turn_admission_rejected"
+        }
+        TaskRunOutcome::ModelTurnAdmission(ModelTurnAdmissionTerminalOutcome::DispatchFenced(
+            ..,
+        )) => "model_turn_admission_dispatch_fenced",
     }
 }
 
@@ -348,6 +358,13 @@ fn attempt_outcome_for_terminal_report(
         // Environmental non-attempt: terminalize so nothing wedges, but with
         // the strike-exempt environmental outcome (no quality/park penalty).
         TaskRunOutcome::EnvironmentalNonAttempt { .. } => AttemptOutcome::Interrupted,
+        TaskRunOutcome::ModelTurnAdmission(ModelTurnAdmissionTerminalOutcome::Wait(..))
+        | TaskRunOutcome::ModelTurnAdmission(ModelTurnAdmissionTerminalOutcome::DispatchFenced(
+            ..,
+        )) => AttemptOutcome::Cancelled,
+        TaskRunOutcome::ModelTurnAdmission(ModelTurnAdmissionTerminalOutcome::Rejected(..)) => {
+            AttemptOutcome::Crashed
+        }
         // The run genuinely completed. Any row of its dispatch group that is
         // still `pending` (the bookkeeping sibling that `submit_work`'s
         // latest-row advancement did not touch) is completed with the run.
@@ -2161,6 +2178,24 @@ fn terminal_extraction_context(report: &TaskRunReport) -> TerminalExtractionCont
             classification: "environmental_non_attempt".to_string(),
             reason: Some(reason.clone()),
         },
+        TaskRunOutcome::ModelTurnAdmission(ModelTurnAdmissionTerminalOutcome::Wait(..)) => {
+            TerminalExtractionOutcome::Failed {
+                classification: "model_turn_admission_wait".to_string(),
+                reason: None,
+            }
+        }
+        TaskRunOutcome::ModelTurnAdmission(ModelTurnAdmissionTerminalOutcome::Rejected(..)) => {
+            TerminalExtractionOutcome::Failed {
+                classification: "model_turn_admission_rejected".to_string(),
+                reason: None,
+            }
+        }
+        TaskRunOutcome::ModelTurnAdmission(ModelTurnAdmissionTerminalOutcome::DispatchFenced(
+            ..,
+        )) => TerminalExtractionOutcome::Failed {
+            classification: "model_turn_admission_dispatch_fenced".to_string(),
+            reason: None,
+        },
     };
 
     // TaskRunReport has no typed review-decision field. In particular, a park
@@ -2300,6 +2335,9 @@ fn report_to_terminal_status(report: &TaskRunReport) -> TaskRunStatus {
         // false because `stages_completed` is always empty for this outcome,
         // so no quality/arbiter/park penalties are applied.
         TaskRunOutcome::EnvironmentalNonAttempt { .. } => TaskRunStatus::Completed,
+        TaskRunOutcome::ModelTurnAdmission(ModelTurnAdmissionTerminalOutcome::Wait(..))
+        | TaskRunOutcome::ModelTurnAdmission(ModelTurnAdmissionTerminalOutcome::DispatchFenced(..)) => TaskRunStatus::Interrupted,
+        TaskRunOutcome::ModelTurnAdmission(ModelTurnAdmissionTerminalOutcome::Rejected(..)) => TaskRunStatus::Failed,
     }
 }
 
