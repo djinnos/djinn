@@ -2351,8 +2351,14 @@ mod tests {
         .await
         .expect("covered launch");
 
-        guard.finish(false).await;
-        guard.finish(false).await;
+        // Poll repeated finish signals concurrently; both race the same atomic
+        // scheduler and guard Drop subsequently converges on it again.
+        tokio::join!(
+            guard.finish(false),
+            guard.finish(false),
+            guard.finish(false)
+        );
+        drop(guard);
 
         assert!(
             observed_abort.is_aborted(),
@@ -2367,6 +2373,316 @@ mod tests {
             (0, 1, 1),
             "unconfirmed usage remains quarantined after repeated terminal signals"
         );
+    }
+
+    struct MatrixParser;
+
+    impl djinn_provider::provider::ProviderSseFrameParserV1 for MatrixParser {
+        fn parse(
+            &mut self,
+            frame: djinn_provider::provider::client::SseFrame,
+        ) -> Vec<anyhow::Result<StreamEvent>> {
+            use djinn_provider::provider::client::SseFrame;
+            match frame {
+                SseFrame::Done => vec![Ok(StreamEvent::Done)],
+                SseFrame::Data(value) if value == "delta" => {
+                    vec![Ok(StreamEvent::Delta(ContentBlock::Text {
+                        text: "partial".into(),
+                    }))]
+                }
+                SseFrame::Data(value) if value == "provider" => {
+                    vec![Err(anyhow::Error::new(ProviderError::ProviderInternal {
+                        status: 503,
+                    }))]
+                }
+                SseFrame::Data(value) if value == "protocol" => {
+                    vec![Err(anyhow::Error::new(ProviderError::InvalidOutput))]
+                }
+                SseFrame::Data(_) => Vec::new(),
+            }
+        }
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum MatrixCancellation {
+        None,
+        Session,
+        Supervisor,
+    }
+
+    async fn run_covered_stream_matrix_case(
+        name: &str,
+        frames: Vec<anyhow::Result<djinn_provider::provider::client::SseFrame>>,
+        terminal: djinn_provider::ProviderAttemptTerminalV1,
+        cancellation: MatrixCancellation,
+        expect_done: bool,
+        expect_error: bool,
+    ) {
+        use crate::test_helpers::agent_context_from_db;
+        use djinn_provider::{ProviderAttemptAbortResultV1, ProviderOutcomeV1};
+        use std::sync::atomic::AtomicU64;
+        use tokio_util::sync::CancellationToken;
+
+        let db = Database::ephemeral().await.expect("db");
+        let pool = seed_model_turn_admission_fixture(&db, "enforce", "supported", 2).await;
+        let coordinator = ModelTurnAdmissionCoordinator::new(
+            djinn_db::ModelTurnAdmissionRepository::new(db.clone()),
+        );
+        let preparation = coordinator
+            .prepare(&covered_admission_plan(), admission_request(name))
+            .await
+            .expect("prepare");
+        let lease = match &preparation {
+            ModelTurnPreparation::Permit(permit) => permit.lease.clone().expect("lease"),
+            other => panic!("expected permit, got {other:?}"),
+        };
+        let abort = ProviderAttemptAbortHandleV1::new();
+        let observed_abort = abort.clone();
+        let (outcome_tx, outcome_rx) = tokio::sync::oneshot::channel();
+        outcome_tx
+            .send(ProviderOutcomeV1 {
+                terminal,
+                authoritative_usage: expect_done.then_some(djinn_db::ModelTurnAuthoritativeUsage {
+                    request_units: 1,
+                    input_units: 0,
+                    output_units: 0,
+                    combined_units: 0,
+                }),
+                observation: None,
+                abort: ProviderAttemptAbortResultV1::Confirmed,
+                token_emission: Default::default(),
+            })
+            .expect("singular outcome");
+        let mut guard = launch_prepared_covered_attempt_with_lease(
+            preparation,
+            move || {
+                Ok((
+                    djinn_provider::provider::client::ProviderSseAttemptV1::for_test(
+                        Box::pin(futures::stream::iter(frames)),
+                        abort,
+                        outcome_rx,
+                    ),
+                    Box::new(MatrixParser),
+                ))
+            },
+            coordinator,
+        )
+        .await
+        .expect("launch");
+
+        let cancel = CancellationToken::new();
+        let global_cancel = CancellationToken::new();
+        match cancellation {
+            MatrixCancellation::None => {}
+            MatrixCancellation::Session => cancel.cancel(),
+            MatrixCancellation::Supervisor => global_cancel.cancel(),
+        }
+        let slot_ctx = agent_context_from_db(db.clone(), CancellationToken::new());
+        let tool_metadata = super::super::tool_dispatch::tool_runtime_metadata(&[]);
+        let phase_tracker = Arc::new(Mutex::new(super::super::phase::SessionPhaseTracker::new(
+            &slot_ctx, "worker",
+        )));
+        let dispatch = super::super::tool_dispatch::ToolDispatchContext {
+            ctx: &slot_ctx,
+            task_id: "task",
+            worktree_path: std::path::Path::new("/var/tmp"),
+            role_name: "worker",
+            tool_metadata: &tool_metadata,
+            tool_dispatcher: slot_ctx.tool_dispatcher.as_deref().expect("dispatcher"),
+            otel_session: None,
+            phase_tracker: None,
+            cancel: &cancel,
+            turn_inline_budget: None,
+        };
+        let activity = Arc::new(AtomicU64::new(0));
+        let rpc = Arc::new(AtomicU64::new(0));
+        let flush = Arc::new(AtomicU64::new(0));
+        let (mut current, mut input, mut output, mut read, mut write, mut reasoning) =
+            (0, 0, 0, 0, 0, 0);
+        let result = consume_provider_stream(StreamLoopContext {
+            stream: None,
+            covered_attempt: Some(&mut guard),
+            tool_metadata: &tool_metadata,
+            dispatch: &dispatch,
+            phase_tracker: &phase_tracker,
+            task_id: "task",
+            session_id: "session",
+            role_name: "worker",
+            project_path: "/var/tmp",
+            worktree_path: std::path::Path::new("/var/tmp"),
+            context_window: 100_000,
+            ctx: &slot_ctx,
+            cancel: &cancel,
+            global_cancel: &global_cancel,
+            activity_ts: &activity,
+            last_rpc_touch: &rpc,
+            last_token_flush: &flush,
+            compaction_attempts: 0,
+            current_context_tokens: &mut current,
+            total_tokens_in: &mut input,
+            total_tokens_out: &mut output,
+            total_cache_read: &mut read,
+            total_cache_write: &mut write,
+            total_reasoning_out: &mut reasoning,
+        })
+        .await;
+        assert_eq!(result.is_err(), expect_error, "{name}");
+        if let Ok(state) = &result {
+            assert_eq!(state.provider_done, expect_done, "{name}");
+            match cancellation {
+                MatrixCancellation::None => {}
+                MatrixCancellation::Session => {
+                    assert_eq!(state.interrupted, Some(ReplyLoopCancelled::session()))
+                }
+                MatrixCancellation::Supervisor => assert_eq!(
+                    state.interrupted,
+                    Some(ReplyLoopCancelled::supervisor_shutdown())
+                ),
+            }
+        }
+        guard.finish(expect_done).await;
+        assert_eq!(observed_abort.is_aborted(), !expect_done, "{name}");
+        assert_eq!(
+            model_turn_lease_lifecycle_fixture(&db, &lease.lease_id).await,
+            "reconciled",
+            "{name}"
+        );
+        assert_eq!(
+            model_turn_accounting_fixture(&db, pool).await,
+            if expect_done { (0, 1, 0) } else { (0, 1, 1) },
+            "{name}"
+        );
+    }
+
+    #[tokio::test]
+    async fn covered_attempt_stream_terminal_matrix() {
+        use djinn_provider::provider::client::SseFrame;
+        use djinn_provider::{
+            ProviderAttemptLossV1 as Loss, ProviderAttemptTerminalV1 as Terminal,
+        };
+        run_covered_stream_matrix_case(
+            "done",
+            vec![Ok(SseFrame::Done)],
+            Terminal::Completed,
+            MatrixCancellation::None,
+            true,
+            false,
+        )
+        .await;
+        run_covered_stream_matrix_case(
+            "provider-loss",
+            vec![Ok(SseFrame::Data("provider".into()))],
+            Terminal::Failed(Loss::ProviderRejected),
+            MatrixCancellation::None,
+            false,
+            true,
+        )
+        .await;
+        run_covered_stream_matrix_case(
+            "protocol-loss",
+            vec![Ok(SseFrame::Data("protocol".into()))],
+            Terminal::Failed(Loss::Protocol),
+            MatrixCancellation::None,
+            false,
+            true,
+        )
+        .await;
+        run_covered_stream_matrix_case(
+            "transport-loss",
+            vec![Err(anyhow::Error::new(ProviderError::Transport))],
+            Terminal::Failed(Loss::Transport),
+            MatrixCancellation::None,
+            false,
+            true,
+        )
+        .await;
+        run_covered_stream_matrix_case(
+            "eof",
+            vec![],
+            Terminal::Failed(Loss::Transport),
+            MatrixCancellation::None,
+            false,
+            false,
+        )
+        .await;
+        run_covered_stream_matrix_case(
+            "truncated",
+            vec![Ok(SseFrame::Data("delta".into()))],
+            Terminal::Failed(Loss::Protocol),
+            MatrixCancellation::None,
+            false,
+            false,
+        )
+        .await;
+        run_covered_stream_matrix_case(
+            "session-cancel",
+            vec![Ok(SseFrame::Done)],
+            Terminal::Aborted,
+            MatrixCancellation::Session,
+            false,
+            false,
+        )
+        .await;
+        run_covered_stream_matrix_case(
+            "supervisor-shutdown",
+            vec![Ok(SseFrame::Done)],
+            Terminal::Aborted,
+            MatrixCancellation::Supervisor,
+            false,
+            false,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn stale_generation_terminal_cleanup_cannot_mutate_live_lease() {
+        use djinn_provider::{ProviderAttemptAbortResultV1, ProviderOutcomeV1};
+
+        let db = Database::ephemeral().await.expect("db");
+        let pool = seed_model_turn_admission_fixture(&db, "enforce", "supported", 2).await;
+        let coordinator = ModelTurnAdmissionCoordinator::new(
+            djinn_db::ModelTurnAdmissionRepository::new(db.clone()),
+        );
+        let preparation = coordinator
+            .prepare(&covered_admission_plan(), admission_request("replacement"))
+            .await
+            .expect("prepare");
+        let mut permit = match preparation {
+            ModelTurnPreparation::Permit(permit) => permit,
+            other => panic!("expected permit, got {other:?}"),
+        };
+        let live = permit.lease.clone().expect("lease");
+        permit.mark_active().await.expect("active");
+        let stale = ModelTurnLeaseIdentity {
+            generation: live.generation + 1,
+            ..live.clone()
+        };
+        let abort = ProviderAttemptAbortHandleV1::new();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tx.send(ProviderOutcomeV1 {
+            terminal: djinn_provider::ProviderAttemptTerminalV1::Aborted,
+            authoritative_usage: None,
+            observation: None,
+            abort: ProviderAttemptAbortResultV1::Confirmed,
+            token_emission: Default::default(),
+        })
+        .expect("outcome");
+        let guard = CoveredAttemptTerminalGuard::new(
+            djinn_provider::provider::client::ProviderSseAttemptV1::for_test(
+                Box::pin(futures::stream::empty()),
+                abort,
+                rx,
+            ),
+            Box::new(MatrixParser),
+            coordinator,
+            Some(stale),
+        );
+        guard.finish(false).await;
+        assert_eq!(
+            model_turn_lease_lifecycle_fixture(&db, &live.lease_id).await,
+            "active"
+        );
+        assert_eq!(model_turn_accounting_fixture(&db, pool).await, (1, 1, 0));
     }
 
     #[tokio::test]
@@ -3047,7 +3363,8 @@ mod tests {
         };
 
         let state = consume_provider_stream(StreamLoopContext {
-            stream,
+            stream: Some(stream),
+            covered_attempt: None,
             tool_metadata: &tool_metadata,
             dispatch: &dispatch_ctx,
             phase_tracker: &phase_tracker,
@@ -3155,7 +3472,8 @@ mod tests {
         let mut total_reasoning_out = 0;
 
         let mut state = consume_provider_stream(StreamLoopContext {
-            stream,
+            stream: Some(stream),
+            covered_attempt: None,
             tool_metadata: &tool_metadata,
             dispatch: &dispatch_ctx,
             phase_tracker: &phase_tracker,
