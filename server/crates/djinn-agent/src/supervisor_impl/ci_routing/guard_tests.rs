@@ -53,6 +53,7 @@ struct Guarded {
     subject: CiRouteSubject,
     lease_id: String,
     identity: CiEvidenceIdentity,
+    tier2_reason: CiTier2Reason,
 }
 
 fn identity(head: &str) -> CiEvidenceIdentity {
@@ -60,7 +61,7 @@ fn identity(head: &str) -> CiEvidenceIdentity {
         lane: CiLane::PrHead,
         pr_number: PR,
         pr_head_sha: head.to_owned(),
-        run_id: RUN,
+        run_id: Some(RUN),
         run_head_sha: HEAD.to_owned(),
         dequeue_id: None,
     }
@@ -69,6 +70,30 @@ fn identity(head: &str) -> CiEvidenceIdentity {
 /// A reserved route with an open Tier-2 lease, exactly as the coordinator
 /// leaves it before dispatching Lead.
 async fn guarded() -> Guarded {
+    guarded_route(
+        identity(HEAD),
+        CiClass::CausalFailure,
+        CiTier2Reason::CausalFailure,
+    )
+    .await
+}
+
+/// The same, for a route whose evidence identity **names no run** — what
+/// `tier2_diagnose_only` reserves after irrecoverable incompleteness.
+///
+/// The row really carries `run_id IS NULL`, so the repository's own
+/// `is_run_absent` fence is live underneath these fixtures rather than mocked.
+async fn run_absent_guarded() -> Guarded {
+    let mut identity = identity(HEAD);
+    identity.run_id = None;
+    guarded_route(identity, CiClass::Unknown, CiTier2Reason::EvidenceUnknown).await
+}
+
+async fn guarded_route(
+    identity: CiEvidenceIdentity,
+    class: CiClass,
+    tier2_reason: CiTier2Reason,
+) -> Guarded {
     let db = Database::open_in_memory().expect("ephemeral test database");
     let project =
         djinn_db::test_support::make_project(&db, std::path::Path::new("ci-apply-guard")).await;
@@ -84,7 +109,6 @@ async fn guarded() -> Guarded {
     .await;
     let subject = CiRouteSubject::task(task_id);
     let routes = CiRouteAttemptRepository::new(db.clone());
-    let identity = identity(HEAD);
 
     let reserved = routes
         .reserve(&CiRouteReservation {
@@ -92,7 +116,7 @@ async fn guarded() -> Guarded {
             provider_action_key: KEY.to_owned(),
             identity: identity.clone(),
             origin_state: CiOriginState::PrDraft,
-            class: CiClass::CausalFailure,
+            class,
             action: CiAction::AskLead,
             transient_fingerprint: "fp".to_owned(),
             retry_budget_key: "rbk".to_owned(),
@@ -103,13 +127,7 @@ async fn guarded() -> Guarded {
     assert!(matches!(reserved, CiReserveOutcome::Reserved(_)));
 
     let lease = routes
-        .open_tier2_lease(
-            &subject,
-            KEY,
-            &identity,
-            "lease-key",
-            CiTier2Reason::CausalFailure,
-        )
+        .open_tier2_lease(&subject, KEY, &identity, "lease-key", tier2_reason)
         .await
         .expect("lease");
     let CiTier2LeaseOutcome::Opened { lease_id, .. } = lease else {
@@ -122,6 +140,7 @@ async fn guarded() -> Guarded {
         subject,
         lease_id,
         identity,
+        tier2_reason,
     }
 }
 
@@ -136,9 +155,15 @@ impl Guarded {
                 tier2_lease_id: self.lease_id.clone(),
                 identity: self.identity.clone(),
             },
-            tier2_reason: CiTier2Reason::CausalFailure,
+            tier2_reason: self.tier2_reason,
             repository_commands: vec!["cargo test -p djinn-db".to_owned()],
-            evidence_references: vec![RUN_REF.to_owned(), HEAD.to_owned()],
+            // A run-absent route never named a run, so `RUN_REF` is not one of
+            // its handles. Handing it one anyway would let a directive ground
+            // itself on evidence the route does not have.
+            evidence_references: match self.identity.run_id {
+                Some(_) => vec![RUN_REF.to_owned(), HEAD.to_owned()],
+                None => vec![HEAD.to_owned()],
+            },
         }
     }
 
@@ -549,6 +574,150 @@ async fn a_delivered_diagnosis_carries_no_rejection() {
         row.lead_rejection, None,
         "and this is the only column that tells them apart"
     );
+}
+
+// ---------------------------------------------------------------------------
+// The run-absent route is diagnose-only, and still guarded
+// ---------------------------------------------------------------------------
+
+/// A repair Lead submitted on a run-absent route, well-formed and with a
+/// repository-valid command.
+fn rejected_repair(ctx: &CiAdjudicationContext) -> CiAdjudication {
+    let payload = serde_json::json!({
+        "decision": "reopen",
+        "directive": format!(
+            "enumeration for head {HEAD} never completed, so no run was attributed"
+        ),
+        "verification_command": "cargo test -p djinn-db",
+    });
+    let adjudication = adjudicate(ctx, LeadResponse::Submitted(&payload));
+    assert_eq!(
+        adjudication.rejection,
+        Some(CiResultRejection::RepairUnavailableForRoute),
+        "the fixture depends on the repair being refused for the ROUTE"
+    );
+    adjudication
+}
+
+/// The refused repair becomes exactly one diagnostic reopen — one worker — and
+/// the durable row says the repair was refused rather than that Lead diagnosed.
+///
+/// This is the positive half. `resolve_tier2_lease` refuses a
+/// `repair_reopened` resolution on a run-absent row outright, so if the
+/// validator ever stopped converting the plan this call would come back a
+/// no-op with the lease still open — which is why the assertion is on the
+/// persisted row and not on the returned plan.
+#[tokio::test]
+async fn a_rejected_repair_on_a_current_run_absent_route_becomes_one_diagnosis() {
+    let g = run_absent_guarded().await;
+    assert!(
+        g.row().await.is_run_absent(),
+        "the seeded row must really carry a NULL run id"
+    );
+    let ctx = g.context();
+    let adjudication = rejected_repair(&ctx);
+
+    let effect = apply_under_guard(
+        &g.routes,
+        &ctx,
+        &adjudication,
+        &CiObservedNow {
+            pr_head_sha: HEAD.to_owned(),
+        },
+    )
+    .await;
+
+    let counts = effect.counts();
+    assert_eq!(counts.board_transitions, 1);
+    assert_eq!(
+        counts.worker_dispatches, 1,
+        "a refused repair still costs exactly one worker, via the diagnosis"
+    );
+
+    let row = g.row().await;
+    assert_eq!(
+        row.adjudicated_outcome(),
+        Some(CiRouteOutcome::DiagnosticReopened),
+        "a repair reopen must never become durable on a run-absent route"
+    );
+    assert_eq!(row.reopen_mode, Some(djinn_db::CiReopenMode::Diagnose));
+    assert_eq!(
+        row.diagnostic_reason,
+        Some(djinn_db::CiDiagnosticReason::EvidenceIncomplete),
+        "revision 58 names this reason for the run-absent route"
+    );
+    assert_eq!(
+        row.lead_rejection,
+        Some(djinn_db::CiLeadRejection::RepairUnavailableForRoute),
+        "durably recorded, not merely logged: without this column a refused \
+         repair is byte-identical to a diagnosis Lead chose"
+    );
+    assert!(
+        !row.lead_rejection
+            .expect("just asserted")
+            .is_absent_result(),
+        "Lead answered; the contract refused the answer"
+    );
+}
+
+/// The refusal is not an escape hatch from the guard. A refused repair on a
+/// route whose head has moved performs no reopen and dispatches no worker,
+/// exactly like an accepted one.
+///
+/// **Mutation target.** Convert the refused repair through anything that
+/// bypasses `apply_under_guard` — or make the `names_no_run` rejection return
+/// early with its own transition — and this fails on the effect counts, on the
+/// task status, on the worker-attempt count, and on the durable outcome.
+#[tokio::test]
+async fn a_rejected_repair_on_a_stale_run_absent_route_applies_nothing() {
+    let g = run_absent_guarded().await;
+    let ctx = g.context();
+    let adjudication = rejected_repair(&ctx);
+    let status_before = g.task_status().await;
+    let attempts_before = g.worker_attempts().await;
+
+    let effect = apply_under_guard(
+        &g.routes,
+        &ctx,
+        &adjudication,
+        &CiObservedNow {
+            pr_head_sha: MOVED_HEAD.to_owned(),
+        },
+    )
+    .await;
+
+    assert!(effect.is_noop(), "a stale route may apply nothing");
+    assert_eq!(
+        effect.counts(),
+        CiEffectCounts::default(),
+        "no board transition and no worker dispatch"
+    );
+
+    let row = g.row().await;
+    assert_eq!(
+        row.adjudicated_outcome(),
+        Some(CiRouteOutcome::SupersededBeforeApply),
+        "the refused repair must be closed by the same guard as every other result"
+    );
+    assert_eq!(row.reopen_mode, None);
+    assert_eq!(
+        row.lead_rejection, None,
+        "nothing was adjudicated, so nothing records a rejection"
+    );
+    assert_eq!(
+        g.task_status().await,
+        status_before,
+        "no board mutation: the task status must be untouched"
+    );
+    assert_eq!(
+        g.worker_attempts().await,
+        attempts_before,
+        "no worker dispatch: no task attempt may be created"
+    );
+    assert!(matches!(
+        stage_outcome_after_guard(&adjudication.plan, &effect, "stale"),
+        StageOutcome::LeadRouteSuperseded { .. }
+    ));
 }
 
 // ---------------------------------------------------------------------------

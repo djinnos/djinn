@@ -115,15 +115,20 @@ pub use repositories::{
     chat_interruption_notice::{
         ChatInterruptionNotice, ChatInterruptionNoticeRepository, CreateChatInterruptionNotice,
     },
+    ci_incomplete_hold::{
+        CI_INCOMPLETE_HOLD_MAX_POLLS, CiHoldApply, CiHoldEscalationRoute, CiHoldIdentity,
+        CiHoldObservation, CiHoldReservation, CiHoldStreak, CiIncompleteHoldRepository,
+    },
     ci_route_attempt::{
         CI_CALLING_RECOVERY_TIMEOUT_SECS, CI_HEAD_BUDGET_LIMIT,
         CI_RESERVATION_RECOVERY_TIMEOUT_SECS, CI_SIGNATURE_BUDGET_LIMIT, CiAction, CiActionPhase,
         CiBudgetCounts, CiCallingRecovery, CiCallingRecoveryAuthority, CiCallingRecoveryReason,
         CiCallingRecoveryRecord, CiChargeOutcome, CiClass, CiDiagnosticReason, CiEvidenceIdentity,
-        CiLane, CiLeadRejection, CiOriginState, CiQuiescenceProof, CiReopenMode, CiReserveOutcome,
-        CiReservedRecovery, CiRouteAttempt, CiRouteAttemptRepository, CiRouteOutcome,
-        CiRouteQuiescence, CiRouteReservation, CiRouteSubject, CiSubjectKind, CiTier2LeaseOutcome,
-        CiTier2LeaseState, CiTier2Reason, CiTier2Resolution,
+        CiLane, CiLeadRejection, CiLeadSessionAttachment, CiOriginState, CiQuiescenceProof,
+        CiReopenMode, CiReserveOutcome, CiReservedRecovery, CiRouteAttempt,
+        CiRouteAttemptRepository, CiRouteOutcome, CiRouteQuiescence, CiRouteReservation,
+        CiRouteSubject, CiSubjectKind, CiTier2LeaseOutcome, CiTier2LeaseState, CiTier2Reason,
+        CiTier2Resolution,
     },
     ci_route_report::{
         CiRollbackQuiescenceReport, CiRouteQuiescenceAttestation, CiRouteReport,

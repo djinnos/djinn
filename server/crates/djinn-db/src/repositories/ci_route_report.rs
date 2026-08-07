@@ -130,7 +130,32 @@ pub struct CiRouteReport {
     /// Obsolete after the provider call, discovered at startup recovery.
     pub superseded_after_call: i64,
     /// Evidence that deterministically held without a route decision.
+    ///
+    /// A **route row** whose single terminal outcome is `held`. Not to be
+    /// confused with [`Self::recoverable_holds`], which counts a different
+    /// population entirely — see that field.
     pub held: i64,
+
+    // ── the bounded incomplete-evidence hold ──────────────────────────────
+    //
+    // These two read `ci_incomplete_hold_streaks`, NOT `ci_route_attempts`,
+    // and that is the whole point of reporting them separately.
+    /// Hold streaks currently holding: `poll_count > 0` and not yet escalated.
+    ///
+    /// **Disjoint from [`Self::held`], not a subset of it.** A recoverable hold
+    /// writes *no route row at all* — that is what "hold and poll again" means
+    /// — so it is invisible to every other count in this report. `held` counts
+    /// routes that reached a terminal `held` outcome, which is a decision;
+    /// this counts lanes that have not reached any decision yet. Two numbers
+    /// that never overlap, and an operator asking why nothing is merging needs
+    /// this one.
+    pub recoverable_holds: i64,
+    /// Hold streaks that reached the bound and escalated, each of which spent
+    /// exactly one diagnose-only run-absent Tier-2 route.
+    ///
+    /// Counted from `escalated_at`, so it stays true after the escalation's
+    /// route has terminalized.
+    pub bounded_hold_escalations: i64,
 
     // ── recovery ──────────────────────────────────────────────────────────
     /// Pre-call resumptions summed across rows. N resumptions still charge once.
@@ -149,7 +174,9 @@ pub struct CiRouteReport {
     // ── Tier 2 ────────────────────────────────────────────────────────────
     /// Leases opened. One per current-evidence adjudication.
     pub tier2_leases_opened: i64,
-    /// Lead sessions actually dispatched and bound to a lease.
+    /// Lead **sessions** actually dispatched and bound to a lease, summed over
+    /// `lead_session_count`. Two sessions on one route count as two — which is
+    /// the whole reason that column exists.
     pub lead_invocations: i64,
     /// Grounded remedies with a repository-valid command.
     pub repair_reopens: i64,
@@ -164,8 +191,13 @@ pub struct CiRouteReport {
     /// from the line above because the remedy is different: this one is a
     /// deadline or a prompt, that one is a contract violation.
     pub diagnostic_reopens_from_absent_result: i64,
-    /// Parks, every one of which carries a cited justification (the repository
-    /// refuses a park without one).
+    /// Parks that carry a **non-blank justification**, filtered on the
+    /// justification text rather than on the `parked` label.
+    ///
+    /// Migration 195's `ci_route_attempts_park_cited_check` makes an uncited
+    /// park unstorable, so in practice this equals the park count — and that
+    /// equality is the assertion, not an excuse to stop measuring it. A filter
+    /// on the label alone would report the same number with the CHECK dropped.
     pub parks_with_cited_cause: i64,
     pub supersedes: i64,
 
@@ -350,7 +382,12 @@ impl CiRouteAttemptRepository {
                COUNT(*) FILTER (WHERE retry_exhausted_at IS NOT NULL)      AS retry_exhausted,
 
                COUNT(*) FILTER (WHERE tier2_lease_state IS NOT NULL)  AS tier2_leases_opened,
-               COUNT(*) FILTER (WHERE lead_session_id IS NOT NULL)    AS lead_invocations,
+               -- Lead SESSIONS, not routes-that-had-a-session. `lead_session_id`
+               -- is one slot holding the FIRST session, so counting non-NULL
+               -- ids caps this metric at one per route -- and Lead sessions per
+               -- merged PR is the exact cost the proposal bounds, so the cap
+               -- sat on the number being watched.
+               COALESCE(SUM(lead_session_count), 0)::bigint          AS lead_invocations,
 
                COUNT(*) FILTER (WHERE adjudicated = 'repair_reopened')     AS repair_reopens,
                COUNT(*) FILTER (WHERE adjudicated = 'diagnostic_reopened') AS diagnostic_reopens,
@@ -361,11 +398,28 @@ impl CiRouteAttemptRepository {
                COUNT(*) FILTER (WHERE adjudicated = 'diagnostic_reopened'
                                   AND lead_rejection IN ('timed_out', 'no_result', 'unsupported_finalize_tool'))
                                                                           AS diagnostic_reopens_absent,
-               COUNT(*) FILTER (WHERE adjudicated = 'parked')     AS parks_with_cited_cause,
+               -- The CITED cause, not the label. Filtering on `adjudicated =
+               -- 'parked'` alone would have made this metric a restatement of
+               -- the outcome column: it would report the same number whether or
+               -- not any park carried a justification. Migration 195's
+               -- `ci_route_attempts_park_cited_check` makes the two agree, which
+               -- is the point — the metric and the constraint are now
+               -- independent witnesses of one fact instead of one fact quoted
+               -- twice.
+               COUNT(*) FILTER (WHERE adjudicated = 'parked'
+                                  AND park_justification IS NOT NULL
+                                  AND btrim(park_justification) <> '') AS parks_with_cited_cause,
                COUNT(*) FILTER (WHERE adjudicated = 'superseded') AS supersedes,
                COUNT(*) FILTER (WHERE adjudicated IN ('repair_reopened', 'diagnostic_reopened'))
                                                                   AS worker_reopens,
-               COUNT(DISTINCT pr_number) FILTER (WHERE terminal_outcome = 'merged') AS merged_prs,
+               -- The DENOMINATOR of both per-merged-PR ratios, so an
+               -- undercount here inflates every cost number in the report.
+               -- `terminal_outcome = 'merged'` misses a merge that landed in
+               -- `tier2_resolution` — which is what happens whenever the route
+               -- had already terminalized on its provider result, i.e. exactly
+               -- the population that reached Lead. Same `adjudicated` reading
+               -- as every other outcome count here.
+               COUNT(DISTINCT pr_number) FILTER (WHERE adjudicated = 'merged') AS merged_prs,
                COUNT(*) FILTER (WHERE terminal_outcome = 'passed') AS passed
              FROM scoped",
         )
@@ -397,6 +451,31 @@ impl CiRouteAttemptRepository {
         .fetch_one(self.db().pool())
         .await?;
 
+        // The bounded hold lives on its own table and is scoped by the streak's
+        // OWN lane and `created_at`.
+        //
+        // `created_at` rather than `updated_at`, deliberately: a hold that has
+        // been polling for hours has a fresh `updated_at`, so an
+        // `updated_at`-keyed window would report it in every window except the
+        // one it started in — and a long-running hold is exactly the population
+        // an operator asking "why is nothing merging" is looking for. Keying on
+        // creation matches `reserved_at` above, which is the same choice for
+        // the same reason.
+        let holds = sqlx::query(
+            "SELECT
+               COUNT(*) FILTER (WHERE poll_count > 0 AND escalated_at IS NULL) AS recoverable_holds,
+               COUNT(*) FILTER (WHERE escalated_at IS NOT NULL) AS bounded_hold_escalations
+             FROM ci_incomplete_hold_streaks
+             WHERE ($1::text IS NULL OR lane = $1)
+               AND ($2::text IS NULL OR created_at >= $2::timestamptz)
+               AND ($3::text IS NULL OR created_at <  $3::timestamptz)",
+        )
+        .bind(lane)
+        .bind(filter.since.as_deref())
+        .bind(filter.until.as_deref())
+        .fetch_one(self.db().pool())
+        .await?;
+
         Ok(CiRouteReport {
             class_inconclusive: row.try_get("class_inconclusive")?,
             class_causal_failure: row.try_get("class_causal_failure")?,
@@ -416,6 +495,8 @@ impl CiRouteAttemptRepository {
                 .try_get("suppressed_before_supervisor_apply")?,
             superseded_after_call: row.try_get("superseded_after_call")?,
             held: row.try_get("held")?,
+            recoverable_holds: holds.try_get("recoverable_holds")?,
+            bounded_hold_escalations: holds.try_get("bounded_hold_escalations")?,
             resumed_pre_call_recoveries: row.try_get("resumed_pre_call_recoveries")?,
             quiescent_owner_recoveries: recoveries.try_get("quiescent_owner_recoveries")?,
             live_owner_recovery_deferrals: recoveries.try_get("live_owner_recovery_deferrals")?,
@@ -444,6 +525,18 @@ impl CiRouteAttemptRepository {
     /// an old binary — which ignores these rows entirely — would handle again
     /// from scratch, which is the exact failure the proposal's rollback gate
     /// exists to prevent.
+    ///
+    /// # Run-absent identities
+    ///
+    /// `run_id` is nullable since migration 195. The advance test is written as
+    /// a **row-constructor** `IS DISTINCT FROM`, which is NULL-safe in both
+    /// directions: `(sha, NULL) IS DISTINCT FROM (sha, NULL)` is `false` (the
+    /// same identity, so no advance) and `(sha, 7) IS DISTINCT FROM (sha, NULL)`
+    /// is `true` (a run-absent capture followed by a real run *is* an advance).
+    /// A plain `newer.run_id <> a.run_id` would evaluate to NULL and be dropped
+    /// by the `WHERE`, so a run-absent row would never be seen to advance and
+    /// the rollback gate would stay red forever. This is asserted by test, not
+    /// by this paragraph.
     ///
     /// # Errors
     ///

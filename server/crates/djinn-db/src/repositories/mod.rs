@@ -4,6 +4,7 @@ pub mod build_admission_denial;
 pub mod build_lease;
 pub mod build_pod_permit;
 pub mod chat_interruption_notice;
+pub mod ci_incomplete_hold;
 pub mod ci_route_attempt;
 #[cfg(test)]
 pub mod ci_route_attempt_tests;

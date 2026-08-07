@@ -137,6 +137,10 @@ pub(crate) fn merge_queue_lane_escalation_section(
 }
 mod ci_failure_analysis;
 mod ci_helpers;
+// Revision 58: the bounded-hold ordering contract. Owns the two short
+// transactions that bracket a provider enumeration and the sequence that makes
+// reservation order — rather than response-arrival order — authoritative.
+mod ci_hold;
 // Proposal `nafu`: the CI route classifier, its durable executors, and the
 // `ci_evidence_routing` gate. Wave 2 landed the classifier with no call sites
 // and disabled the feature by absence; wave 3b wired both lane executors and

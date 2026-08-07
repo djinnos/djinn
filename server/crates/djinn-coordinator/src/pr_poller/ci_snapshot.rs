@@ -624,7 +624,7 @@ pub(crate) mod evidence {
                     lane: CiLane::PrHead,
                     pr_number,
                     pr_head_sha: pr_head_sha.to_owned(),
-                    run_id: i64::try_from(run_id).unwrap_or(i64::MAX),
+                    run_id: Some(i64::try_from(run_id).unwrap_or(i64::MAX)),
                     // The PR-head lane's run head SHA *is* the PR head: the checks
                     // were enumerated for that ref.
                     run_head_sha: pr_head_sha.to_owned(),
@@ -678,14 +678,15 @@ pub(crate) mod evidence {
     ///   not a wait. Its two reasons then part company at the classifier, and
     ///   the difference is which identity exists:
     ///   * `AmbiguousMergeGroupCorrelation` — two or more terminal runs were
-    ///     named and we cannot say which this dequeue refers to. The proposal
-    ///     puts it on the guarded Tier-2 route explicitly, and its lane
-    ///     identity (lane, PR, PR head, **and the real dequeue id**) is
-    ///     constructible, so it takes a route row.
-    ///   * `MergeGroupCorrelationUnavailable` — *no* run was named at all.
-    ///     There is no run identity to key on and nothing for an adjudication
-    ///     to read, so it **holds** with no route row; see
-    ///     [`CiIncompleteReason::no_run_was_named`].
+    ///     named and we cannot say which this dequeue refers to. "Ambiguous" is
+    ///     stable: re-asking returns the same several runs. So it is
+    ///     **irrecoverable** and takes one diagnose-only route under the
+    ///     run-absent identity, carrying its real dequeue id — only the run is
+    ///     absent, and absence is spelled `None`, never a sentinel.
+    ///   * `MergeGroupCorrelationUnavailable` — *no* run was named **yet**. The
+    ///     queue run can appear on a later poll at no cost, so it is
+    ///     **recoverable** and takes the bounded hold with no route row. See
+    ///     [`CiIncompleteReason::recoverability`].
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub(crate) enum CiMergeGroupCorrelationError {
         NotTerminal(CiPendingReason),
@@ -781,7 +782,7 @@ pub(crate) mod evidence {
                 lane: CiLane::MergeGroup,
                 pr_number,
                 pr_head_sha: pr_head_sha.to_owned(),
-                run_id: i64::try_from(run.id).unwrap_or(i64::MAX),
+                run_id: Some(i64::try_from(run.id).unwrap_or(i64::MAX)),
                 run_head_sha: run.head_sha.clone(),
                 dequeue_id: Some(dequeue_id.to_owned()),
             },

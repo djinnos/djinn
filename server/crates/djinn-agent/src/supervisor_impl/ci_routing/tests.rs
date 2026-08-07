@@ -47,7 +47,7 @@ fn guard_keys() -> CiRouteGuardKeys {
             lane: CiLane::PrHead,
             pr_number: 907,
             pr_head_sha: "abc1234".to_owned(),
-            run_id: 90210,
+            run_id: Some(90210),
             run_head_sha: "abc1234".to_owned(),
             dequeue_id: None,
         },
@@ -472,6 +472,298 @@ fn approve_on_a_ci_route_becomes_a_diagnosis() {
     }
 }
 
+// ── The run-absent, diagnose-only route ────────────────────────────────────
+//
+// Revision 58 collapses every irrecoverable incompleteness — `MAX_PAGES`
+// truncation, unavailable run attribution, ambiguous merge-group correlation,
+// the four `blocking_evidence_completeness` timestamp reasons, and a bounded
+// hold that reached its limit — onto one Tier-2 row whose evidence identity
+// names **no run**. Lead sees a route where no run was named and no
+// blocking-check set was enumerated, so there is nothing to repair from.
+//
+// The three fixtures below are deliberately a rejection, its narrowness, and
+// its parser: a rejection proven only from the refusing side cannot show that
+// it refused the right thing.
+
+/// The route the coordinator opens when enumeration never completed: no run,
+/// and a bundle of the handles it *does* have (the head, and the completeness
+/// reason) rather than the run/check handles it never got.
+fn run_absent_context() -> CiAdjudicationContext {
+    let mut ctx = context(CiTier2Reason::EvidenceUnknown);
+    ctx.guard.identity.run_id = None;
+    ctx.evidence_references = vec![
+        "abc1234".to_owned(),
+        "check_enumeration_unavailable".to_owned(),
+    ];
+    ctx
+}
+
+/// A directive that cites this route's actual handles.
+fn run_absent_directive() -> String {
+    "Check-run enumeration for head abc1234 returned check_enumeration_unavailable on every \
+     poll, so no run was ever attributed."
+        .to_owned()
+}
+
+/// **The named acceptance fixture** (`ci_routing::run_absent_route_rejects_repair_and_approve`).
+///
+/// Both invalid results converge on one `evidence_incomplete` diagnosis, and
+/// each records *which* invalid result it was.
+///
+/// **Mutation target — repair.** The repair payload carries a genuinely
+/// repository-valid command, so deleting the `names_no_run` arm in
+/// `adjudicate_reopen` does not fall through to
+/// `VerificationCommandNotRepositoryValid`; it accepts the repair outright and
+/// this fails on the rejection, on the plan, and on the durable outcome. That
+/// is the point of using a valid command here: an invented one would have made
+/// the assertion pass with the guard deleted.
+#[test]
+fn run_absent_route_rejects_repair_and_approve() {
+    let ctx = run_absent_context();
+    assert_eq!(
+        ctx.guard.identity.run_id, None,
+        "the fixture must actually be run-absent, or it proves nothing"
+    );
+
+    // ── repair ──────────────────────────────────────────────────────────
+    let repair = json!({
+        "task_id": "t123",
+        "decision": "reopen",
+        "directive": run_absent_directive(),
+        // Copied from task context, so it IS repository-valid. The repair is
+        // refused for the route, not for the command.
+        "verification_command": REPO_COMMAND,
+    });
+    let adjudication = adjudicate(&ctx, LeadResponse::Submitted(&repair));
+
+    assert_eq!(
+        adjudication.rejection,
+        Some(CiResultRejection::RepairUnavailableForRoute),
+        "a repair on a route that names no run is refused for the ROUTE; \
+         `verification_command_not_repository_valid` would name the wrong fault"
+    );
+    let CiLeadPlan::DiagnosticReopen {
+        reason,
+        ref directive,
+    } = adjudication.plan
+    else {
+        panic!("expected a diagnosis, got {:?}", adjudication.plan);
+    };
+    assert_eq!(
+        reason,
+        CiDiagnosticReason::EvidenceIncomplete,
+        "revision 58: the only diagnostic reopen a run-absent route may produce"
+    );
+    assert!(
+        directive.contains(REPO_COMMAND),
+        "the refusal must quote the command it refused, or Lead cannot tell \
+         which half of its plan was rejected: {directive}"
+    );
+
+    let resolution = durable_resolution(&adjudication);
+    assert_eq!(
+        resolution.outcome,
+        CiRouteOutcome::DiagnosticReopened,
+        "a repair reopen must never become durable on this route"
+    );
+    assert_eq!(resolution.reopen_mode, Some(CiReopenMode::Diagnose));
+    assert_eq!(
+        resolution.rejection,
+        Some(CiResultRejection::RepairUnavailableForRoute),
+        "the durable row must say the repair was refused, not merely that a \
+         diagnosis happened"
+    );
+
+    // ── approve ─────────────────────────────────────────────────────────
+    for decision in ["approve", "approve_conflict"] {
+        let payload = json!({
+            "task_id": "t123",
+            "decision": decision,
+            "evidence": {"source": "ci_run", "summary": "nothing failed that I can see"},
+        });
+        let adjudication = adjudicate(&ctx, LeadResponse::Submitted(&payload));
+        assert_eq!(
+            adjudication.rejection,
+            Some(CiResultRejection::ApprovedNonPassingCi),
+            "`{decision}` cannot apply to a route whose evidence was never captured"
+        );
+        assert!(
+            matches!(
+                adjudication.plan,
+                CiLeadPlan::DiagnosticReopen {
+                    reason: CiDiagnosticReason::EvidenceIncomplete,
+                    ..
+                }
+            ),
+            "approve degrades to the route's own boundary, got {:?}",
+            adjudication.plan
+        );
+    }
+}
+
+/// The rejection is **narrow**: the same route accepts the two results
+/// revision 58 leaves legal — a diagnostic reopen and a cited park.
+///
+/// Without this, `run_absent_route_rejects_repair_and_approve` would still pass
+/// if the route rejected everything, which is a different bug with the same
+/// green tick.
+///
+/// **Mutation target — park.** Delete the `names_no_run` arm of
+/// `park_is_available` and the park half fails with
+/// `ParkUnavailableForRoute`, because the route's Tier-2 reason is
+/// `evidence_unknown` and the general rule denies park to uncertainty.
+#[test]
+fn run_absent_route_accepts_diagnose_and_a_cited_park() {
+    let ctx = run_absent_context();
+
+    // ── diagnose ────────────────────────────────────────────────────────
+    let payload = json!({
+        "task_id": "t123",
+        "decision": "reopen",
+        "directive": run_absent_directive(),
+        "diagnostic_reason": "evidence_incomplete",
+    });
+    let adjudication = adjudicate(&ctx, LeadResponse::Submitted(&payload));
+    assert_eq!(
+        adjudication.rejection, None,
+        "a diagnose is the result this route exists to collect; it must be \
+         accepted as submitted"
+    );
+    assert!(matches!(
+        adjudication.plan,
+        CiLeadPlan::DiagnosticReopen {
+            reason: CiDiagnosticReason::EvidenceIncomplete,
+            ..
+        }
+    ));
+    expect_single_worker_reopen(&board_effect(
+        &ctx,
+        &adjudication.plan,
+        CiGuardOutcome::Current,
+    ));
+
+    // ── park ────────────────────────────────────────────────────────────
+    let payload = json!({
+        "task_id": "t123",
+        "decision": "park",
+        "park_dossier": {
+            "hold_description": "The checks API has not returned a complete page set for this PR.",
+            "failure_analysis": "Enumeration for head abc1234 hit check_enumeration_unavailable on \
+                                 twelve consecutive polls; no rerun and no code change in this \
+                                 repository can complete it.",
+        },
+    });
+    let adjudication = adjudicate(&ctx, LeadResponse::Submitted(&payload));
+    assert_eq!(
+        adjudication.rejection, None,
+        "revision 58 leaves a platform-evidence park legal on a run-absent route"
+    );
+    let resolution = durable_resolution(&adjudication);
+    assert_eq!(resolution.outcome, CiRouteOutcome::Parked);
+    assert!(
+        resolution
+            .park_justification
+            .as_deref()
+            .is_some_and(|j| j.contains("check_enumeration_unavailable")),
+        "the durable park justification must carry the citation"
+    );
+    let counts = board_effect(&ctx, &adjudication.plan, CiGuardOutcome::Current).counts();
+    assert_eq!(counts.board_transitions, 1);
+    assert_eq!(counts.worker_dispatches, 0, "a park dispatches no worker");
+}
+
+/// The diagnose-only boundary is a property of the **identity**, not of the
+/// Tier-2 reason: pair a run-absent identity with any reason in the closed set
+/// and the fallback still reads `evidence_incomplete`.
+///
+/// Read this as a fence, not as a live behaviour change. Every run-absent route
+/// the coordinator opens today is `tier2_diagnose_only`, which names
+/// `evidence_unknown`, and that reason already maps to `evidence_incomplete` —
+/// so four of the five rows below are pairings no producer currently emits.
+/// They are asserted anyway because revision 58 scopes the guarantee to the
+/// identity, and a producer that later opens a run-absent route under a
+/// different reason must not silently start telling Lead its remedy was
+/// ungrounded when what actually happened is that nothing was ever enumerated.
+///
+/// **Mutation target.** Delete the `names_no_run` arm of `boundary_reason` and
+/// the `retry_exhausted`, `causal_failure`, `provider_action_failed`, and
+/// `outcome_unknown` rows fail.
+#[test]
+fn every_run_absent_fallback_cites_evidence_incomplete() {
+    for reason in [
+        CiTier2Reason::CausalFailure,
+        CiTier2Reason::EvidenceUnknown,
+        CiTier2Reason::ProviderActionFailed,
+        CiTier2Reason::OutcomeUnknown,
+        CiTier2Reason::RetryExhausted,
+    ] {
+        let mut ctx = run_absent_context();
+        ctx.tier2_reason = reason;
+        let adjudication = adjudicate(&ctx, LeadResponse::TimedOut);
+        assert_eq!(
+            adjudication.rejection,
+            Some(CiResultRejection::TimedOut),
+            "a timeout is still a timeout on `{}`",
+            reason.as_str()
+        );
+        assert!(
+            matches!(
+                adjudication.plan,
+                CiLeadPlan::DiagnosticReopen {
+                    reason: CiDiagnosticReason::EvidenceIncomplete,
+                    ..
+                }
+            ),
+            "a run-absent route's boundary is `evidence_incomplete` whatever its \
+             Tier-2 reason says; `{}` produced {:?}",
+            reason.as_str(),
+            adjudication.plan
+        );
+    }
+}
+
+/// The parser's half: absence is `null` or the missing key, and **nothing
+/// else**. A `0` or a negative value is malformed rather than an in-band
+/// sentinel that reads as "no run" here and as "run zero" in the column.
+///
+/// **Mutation target.** Widen the arm to `value.as_i64()` without the `id > 0`
+/// test and the sentinel half fails; make absence `Malformed("run_id")` again
+/// and the first half fails.
+#[test]
+fn run_absent_route_block_parses_and_rejects_a_sentinel() {
+    for absent in [None, Some(json!(null))] {
+        let mut block = complete_route_block();
+        match absent {
+            None => {
+                block["ci_route"]
+                    .as_object_mut()
+                    .expect("ci_route is an object")
+                    .remove("run_id");
+            }
+            Some(ref null) => block["ci_route"]["run_id"] = null.clone(),
+        }
+        let CiDirectiveRead::Route(ctx) =
+            CiAdjudicationContext::read_arbiter_directive(Some(&block))
+        else {
+            panic!("a run-absent block is a route, not a malformed one: {absent:?}");
+        };
+        assert_eq!(
+            ctx.guard.identity.run_id, None,
+            "absence must reach the identity as None"
+        );
+    }
+
+    for sentinel in [json!(0), json!(-1), json!("90210"), json!(90210.5)] {
+        let mut block = complete_route_block();
+        block["ci_route"]["run_id"] = sentinel.clone();
+        let read = CiAdjudicationContext::read_arbiter_directive(Some(&block));
+        assert!(
+            matches!(read, CiDirectiveRead::Malformed("run_id")),
+            "`{sentinel}` is not a run and is not absence; got {read:?}"
+        );
+    }
+}
+
 // ── Narrow, cited park ─────────────────────────────────────────────────────
 
 /// A cited infrastructure dead-end on a causal route parks, and parks alone —
@@ -812,7 +1104,7 @@ fn a_complete_route_block_carries_the_guard_keys() {
     assert_eq!(ctx.guard.tier2_lease_id, "lease-abc");
     assert_eq!(ctx.guard.subject, CiRouteSubject::task("t123"));
     assert_eq!(ctx.guard.identity.pr_number, 907);
-    assert_eq!(ctx.guard.identity.run_id, 90210);
+    assert_eq!(ctx.guard.identity.run_id, Some(90210));
     assert_eq!(ctx.guard.identity.dequeue_id.as_deref(), Some("dq-1"));
 }
 
@@ -833,7 +1125,6 @@ fn every_missing_required_key_is_malformed_not_legacy() {
         "tier2_lease_id",
         "pr_number",
         "pr_head_sha",
-        "run_id",
         "run_head_sha",
         "evidence_references",
     ] {
@@ -843,11 +1134,18 @@ fn every_missing_required_key_is_malformed_not_legacy() {
             "a block without `{field}` must be Malformed, got {read:?}"
         );
     }
-    // `dequeue_id` is the one optional key: the PR-head lane has none.
-    assert!(matches!(
-        CiAdjudicationContext::read_arbiter_directive(Some(&block_without("dequeue_id"))),
-        CiDirectiveRead::Route(_)
-    ));
+    // `dequeue_id` is optional: the PR-head lane has none. `run_id` became
+    // optional in revision 58 -- its absence is the run-absent route, which
+    // `run_absent_route_block_parses_and_rejects_a_sentinel` covers.
+    for optional in ["dequeue_id", "run_id"] {
+        assert!(
+            matches!(
+                CiAdjudicationContext::read_arbiter_directive(Some(&block_without(optional))),
+                CiDirectiveRead::Route(_)
+            ),
+            "`{optional}` is optional and its absence must still parse"
+        );
+    }
     // An unparseable value is as unusable as an absent one.
     let mut bad_lane = complete_route_block();
     bad_lane["ci_route"]["lane"] = json!("not_a_lane");
@@ -1164,5 +1462,92 @@ mod lead_ci_routing {
             &plan,
             CiGuardOutcome::from_resolve(false),
         ));
+    }
+
+    /// `lead_ci_routing::lead_route_superseded_is_the_last_wire_variant` — the
+    /// fixture the proposal names for the mixed-version rollout row.
+    ///
+    /// # What "appended last" actually has to mean
+    ///
+    /// The worker/launcher `StageOutcome` envelope is **positional** bincode:
+    /// the variant is written as a leading `u32` index derived from
+    /// declaration order, and nothing else in the frame identifies it. That
+    /// makes the rollout contract entirely a property of where
+    /// `LeadRouteSuperseded` sits in the enum:
+    ///
+    /// * declared **last**, an old launcher has no index for it and the whole
+    ///   frame fails to decode — which is the forbidden direction, and is
+    ///   supposed to fail loudly rather than silently decode as some other
+    ///   outcome; and
+    /// * every pre-existing variant keeps the index an old worker already
+    ///   writes, so old-writer-to-new-reader stays safe.
+    ///
+    /// Inserting the variant anywhere *else* silently renumbers every variant
+    /// after it, and an old worker's `LeadClose` frame would decode on a new
+    /// launcher as `LeadEscalate`. That is the regression this pins.
+    ///
+    /// # Why the assertions are shaped this way
+    ///
+    /// Asserting only "LeadRouteSuperseded encodes as 19" would still pass if
+    /// someone appended a twentieth variant after it — it would still be at
+    /// 19, and it would no longer be last. So the load-bearing assertion is
+    /// the *negative* one: index 19 decodes, and index 20 does not exist.
+    /// Together they say "this is the highest index the enum has", which is
+    /// the only spelling of "appended last" the wire format can witness.
+    #[test]
+    fn lead_route_superseded_is_the_last_wire_variant() {
+        use djinn_supervisor::StageOutcome;
+
+        let outcome = StageOutcome::LeadRouteSuperseded {
+            reason: "head advanced".to_string(),
+        };
+        let frame = bincode::serialize(&outcome).expect("serialize");
+
+        // The variant index is the first four bytes, little-endian.
+        let index = u32::from_le_bytes(frame[..4].try_into().expect("4-byte tag"));
+
+        // 1. It round-trips as itself, so the index below is really this
+        //    variant's and not an accident of the payload.
+        let decoded: StageOutcome = bincode::deserialize(&frame).expect("round trip");
+        assert!(
+            matches!(decoded, StageOutcome::LeadRouteSuperseded { .. }),
+            "LeadRouteSuperseded must decode as itself"
+        );
+
+        // 2. Nothing is declared after it. Re-tag the same payload one index
+        //    higher: if a variant were appended below LeadRouteSuperseded this
+        //    would decode, and the variant would not be last.
+        let mut beyond = frame.clone();
+        beyond[..4].copy_from_slice(&(index + 1).to_le_bytes());
+        assert!(
+            bincode::deserialize::<StageOutcome>(&beyond).is_err(),
+            "index {} decoded, so LeadRouteSuperseded is not the last variant — a variant \
+             appended after it renumbers nothing but breaks the 'old launcher rejects the \
+             frame' contract this fixture exists to hold",
+            index + 1
+        );
+
+        // 3. Every variant an old worker already writes keeps its index, so
+        //    old-writer-to-new-reader still decodes. `WorkerDone` is index 0
+        //    and `Failed` is 14; if LeadRouteSuperseded had been inserted
+        //    rather than appended, one of these would have shifted.
+        for (expected, old) in [
+            (0u32, StageOutcome::WorkerDone),
+            (
+                14u32,
+                StageOutcome::Failed {
+                    reason: "boom".to_string(),
+                    provider_failure: None,
+                },
+            ),
+        ] {
+            let bytes = bincode::serialize(&old).expect("serialize old variant");
+            assert_eq!(
+                u32::from_le_bytes(bytes[..4].try_into().expect("4-byte tag")),
+                expected,
+                "an existing variant's wire index shifted: an old worker's frame would now \
+                 decode as a different outcome"
+            );
+        }
     }
 }

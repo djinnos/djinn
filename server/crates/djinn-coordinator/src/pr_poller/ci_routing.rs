@@ -130,7 +130,13 @@ pub(crate) use djinn_db::{CI_HEAD_BUDGET_LIMIT, CI_SIGNATURE_BUDGET_LIMIT};
 /// which is the only safe way to change a key's field set: a silent change
 /// would make in-flight `reserved` and `calling` rows unfindable and permit a
 /// second provider-call episode for evidence that already had one.
-const KEY_SCHEMA: &str = "nafu1";
+/// `nafu2` because revision 58 made `run_id` absent-able. The field vector
+/// changed shape, and a silent change would make in-flight `reserved` and
+/// `calling` rows unfindable and permit a second provider-call episode for
+/// evidence that already had one. Nothing in production carries a `nafu1` key —
+/// the routing gate has never been enabled — so the bump costs nothing and the
+/// alternative costs correctness the first time it is wrong.
+const KEY_SCHEMA: &str = "nafu2";
 
 /// Accumulates length-prefixed fields into an unambiguous hash pre-image.
 ///
@@ -164,6 +170,20 @@ impl KeyPreimage {
 
     fn num(self, value: i64) -> Self {
         self.field(&value.to_string())
+    }
+
+    /// An absent numeric field. Uses the same `some`/`none` discriminator as
+    /// [`Self::opt`], so an absent run id and a run id that happens to render
+    /// as the string `none` cannot collide, and — critically — an absent run id
+    /// and *any* present run id produce different pre-images. That is the hash
+    /// side of the same guarantee the `NULLS NOT DISTINCT` unique index gives
+    /// the database: every irrecoverable reason on one head collapses onto one
+    /// row, and no present run ever collapses into it.
+    fn opt_num(self, value: Option<i64>) -> Self {
+        match value {
+            Some(v) => self.field("some").num(v),
+            None => self.field("none"),
+        }
     }
 
     /// `None` and `Some("")` must not collide: an absent dequeue id is a
@@ -207,7 +227,7 @@ pub(crate) fn provider_action_key(
         .field(identity.lane.as_str())
         .num(identity.pr_number)
         .field(&identity.pr_head_sha)
-        .num(identity.run_id)
+        .opt_num(identity.run_id)
         .field(&identity.run_head_sha)
         .opt(identity.dequeue_id.as_deref())
         .field(action.as_str())
@@ -369,94 +389,119 @@ pub(crate) enum CiIncompleteReason {
     RunAttributionUnavailable,
 }
 
+/// How an incomplete-evidence reason is bounded.
+///
+/// This is the discriminator proposal `nafu` settled on in revision 58, and it
+/// replaces the two predicates that stood here before (`is_enumeration_failure`
+/// and `no_run_was_named`). Those split the reason set by *what went wrong*.
+/// This one splits it by the only question that changes what the platform
+/// should do: **can a later poll of the same head answer differently?**
+///
+/// The old split produced two wrong answers that revision 58 names explicitly.
+/// `RunAttributionUnavailable` held forever, because a blocking check that
+/// belongs to no nameable Actions run belongs to no nameable Actions run on
+/// every subsequent poll too — nothing about re-asking changes it. And the four
+/// timestamp reasons took a Tier-2 route keyed on a fabricated `run_id: 0`,
+/// because the lane fails closed on them *before* it attributes runs, so there
+/// was no run to name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CiIncompleteRecoverability {
+    /// A later poll of the same head can supply the missing evidence for free.
+    ///
+    /// Holds — no route row, no lease, no Lead session, no worker, no charge —
+    /// but **not forever**: [`CI_INCOMPLETE_HOLD_MAX_POLLS`] consecutive
+    /// incomplete polls on one current PR-head SHA escalate the hold into the
+    /// irrecoverable row. The bound is enforced durably, by the streak ledger,
+    /// not by anything in this module; a classifier has no memory of previous
+    /// polls and must not pretend to.
+    Recoverable,
+    /// Every later enumeration of the same head returns the identical verdict.
+    ///
+    /// A hold would never resolve: no route row, no adjudication, no board
+    /// signal, and a CI gate that never clears. So it takes **one** diagnose-only
+    /// Tier-2 route under the run-absent evidence identity — `run_id` NULL,
+    /// `run_head_sha` the observed head, the lane's real dequeue id — where
+    /// `approve` and `repair` are both invalid.
+    ///
+    /// Every reason here shares that identity, and the unique index compares
+    /// NULLs as **not** distinct, so two different irrecoverable reasons on one
+    /// head collapse onto one row. A later reason adds evidence; it opens no
+    /// second lease and no second Lead session.
+    Irrecoverable,
+    /// The enumeration succeeded and named an immutable run; only its
+    /// *contents* are unusable.
+    ///
+    /// This is the proposal's "complete snapshot with a check/log API error
+    /// after an immutable run is known" row, and it is neither of the two
+    /// above: it is not re-pollable into completeness, and it does not need the
+    /// run-absent identity because a real run/lane identity is constructible.
+    /// It takes the ordinary guarded Tier-2 route, keyed on the run it names.
+    CompleteButUnusable,
+}
+
 impl CiIncompleteReason {
-    /// Whether the *enumeration itself* failed, as opposed to the enumeration
-    /// succeeding and its contents being unusable.
+    /// Whether a later poll of the same head could answer differently.
     ///
-    /// This predicate is the difference between two rows of the proposal's
-    /// table that both look like "we don't know":
-    ///
-    /// * **Enumeration failure → hold, with no route row.** The set we hold is
-    ///   not an immutable CI evidence bundle at all; a later poll can turn it
-    ///   into one for free. Spending a route row, a Tier-2 lease, and a Lead
-    ///   session on it would mean paying for adjudication of evidence that does
-    ///   not exist yet — and, because incomplete polls repeat, paying again on
-    ///   every poll until the provider recovers.
-    /// * **Complete but unusable → Tier 2 after the current-identity guard.**
-    ///   Here the evidence *is* an immutable bundle with a constructible
-    ///   run/lane identity; it is simply one no automatic action can read. That
-    ///   has a deduplicated adjudication and will not fix itself.
-    ///
-    /// Note which side the two API-error reasons sit on. `CheckApiError` and
-    /// `LogApiError` are Tier 2 because the proposal scopes them to "after an
-    /// immutable run is known" — the run identity survives the error, so the
-    /// route can be keyed. A page failure during enumeration has no run yet.
-    ///
-    /// # `CheckEnumerationUnavailable` is on the *other* side, and that is a fix
-    ///
-    /// It used to sit here with the other two, and that made it a permanent
-    /// wedge. A hold's whole premise is that "a later poll can turn this into an
-    /// evidence bundle for free" — true of a failed page (a provider incident)
-    /// and of a short read (the provider disagreeing with itself), and false of
-    /// pagination truncation. Truncation means the PR genuinely has more check
-    /// runs than `MAX_PAGES * PER_PAGE`, which is a property of the PR, not of
-    /// the moment: every subsequent enumeration returns the identical verdict,
-    /// so the route holds on every poll forever, with no route row, no
-    /// adjudication, and nothing on the board to say why the task stopped.
-    ///
-    /// It is instead complete-but-unusable current evidence: a real enumeration
-    /// whose contents no automatic action can read. That is the guarded Tier-2
-    /// row of the proposal's table, and it is bounded — the head-scoped lease
-    /// makes it exactly one Lead adjudication per PR head, not one per poll.
-    pub(crate) fn is_enumeration_failure(self) -> bool {
-        matches!(self, Self::EnumerationPageFailed | Self::PartialPagination)
+    /// Exhaustive with no wildcard arm, deliberately: a new reason must be
+    /// classified here or the build fails, which is the only mechanism that
+    /// stops a reason from silently defaulting into a permanent hold.
+    pub(crate) fn recoverability(self) -> CiIncompleteRecoverability {
+        match self {
+            // ── Recoverable ───────────────────────────────────────────────
+            //
+            // A failed page is a provider incident. A short read is the
+            // provider disagreeing with itself. A merge-group run that has not
+            // appeared yet is a queue that has not got there yet. All three can
+            // clear on the next poll at no cost, which is exactly what the
+            // bounded hold is for.
+            Self::EnumerationPageFailed
+            | Self::PartialPagination
+            | Self::MergeGroupCorrelationUnavailable => CiIncompleteRecoverability::Recoverable,
+
+            // ── Irrecoverable ─────────────────────────────────────────────
+            //
+            // `CheckEnumerationUnavailable` is `MAX_PAGES` truncation: the PR
+            // genuinely has more check runs than the ceiling, which is a
+            // property of the PR and not of the moment.
+            //
+            // `RunAttributionUnavailable` is a blocking check that belongs to
+            // no Actions run this poller can name. Re-asking returns the same
+            // check with the same absent run. This one previously *held*, and
+            // revision 58 moved it here by name.
+            //
+            // `AmbiguousMergeGroupCorrelation` is several runs where one was
+            // needed; "ambiguous" is stable, and no single run exists to name.
+            //
+            // The four `blocking_evidence_completeness` timestamp reasons are
+            // properties of check runs that have already concluded. A concluded
+            // check does not grow a `started_at` later.
+            Self::CheckEnumerationUnavailable
+            | Self::RunAttributionUnavailable
+            | Self::AmbiguousMergeGroupCorrelation
+            | Self::MissingStartTimestamp
+            | Self::MissingCompletionTimestamp
+            | Self::MalformedExecutionInterval
+            | Self::NonPositiveExecutionInterval => CiIncompleteRecoverability::Irrecoverable,
+
+            // ── Complete but unusable ─────────────────────────────────────
+            //
+            // Both are scoped by the proposal to "after an immutable run is
+            // known", so the run identity survives the error and the route can
+            // be keyed on it. Nothing here is absent; something here is broken.
+            Self::CheckApiError | Self::LogApiError => {
+                CiIncompleteRecoverability::CompleteButUnusable
+            }
+        }
     }
 
-    /// Whether the reason means **no run was ever named** — as distinct from
-    /// an enumeration that failed, and from several runs being named at once.
-    ///
-    /// This is the second hold predicate, and it is deliberately *not* folded
-    /// into [`Self::is_enumeration_failure`]: neither of these is an
-    /// enumeration failure (the enumeration finished perfectly), so putting
-    /// them there would make that predicate's name a lie and would corrupt the
-    /// report, which distinguishes "the provider did not finish telling us"
-    /// from "the provider told us and there was nothing to point at".
-    ///
-    /// # Why they must hold rather than take the guarded Tier-2 route
-    ///
-    /// AC5 admits to Tier 2 "the closed complete-but-unusable cases **with a
-    /// constructible immutable run/lane identity**". These two have neither:
-    ///
-    /// * `MergeGroupCorrelationUnavailable` — zero terminal merge-group runs
-    ///   correlate to this PR. Nothing was named, so there is no run identity,
-    ///   and a later poll can produce one for free once the queue run appears.
-    /// * `RunAttributionUnavailable` — a blocking check belongs to no Actions
-    ///   run we can name, so there is no run identity *and* `rerun_failed_jobs`
-    ///   has nothing to act on.
-    ///
-    /// Routing them to Tier 2 anyway is what forced the lane executor to
-    /// fabricate `run_id: 0` / `dequeue_id: None` for the route row's
-    /// provider-action key — collapsing two distinct observations of the same
-    /// PR head onto one key, so the second resolved `AlreadyPresent` and never
-    /// got a route at all. AC9 and AC14 forbid that synthetic identity by name,
-    /// and the fix is to stop creating the row, not to invent the fields.
-    ///
-    /// # Why `AmbiguousMergeGroupCorrelation` is deliberately NOT here
-    ///
-    /// The proposal body puts it on the Tier-2 side explicitly — "missing or
-    /// malformed execution timestamps, check/log API error after immutable run
-    /// identification, or ambiguous merge-group correlation follows the guarded
-    /// Tier-2 route". Ambiguity is *several* runs named, not none, and its
-    /// lane identity (lane, PR number, PR head SHA, **and the real dequeue id**)
-    /// is constructible without fabricating anything that distinguishes one
-    /// dequeue from another. Its `run_id` stays `0` because no single run
-    /// exists to name — that residual is enumerated explicitly in
-    /// `ci_routing::tests`, not hidden.
-    pub(crate) fn no_run_was_named(self) -> bool {
-        matches!(
-            self,
-            Self::MergeGroupCorrelationUnavailable | Self::RunAttributionUnavailable
-        )
+    /// Whether this reason routes under the run-absent evidence identity.
+    pub(crate) fn is_run_absent(self) -> bool {
+        self.recoverability() == CiIncompleteRecoverability::Irrecoverable
+    }
+
+    /// Whether this reason takes the bounded hold.
+    pub(crate) fn is_recoverable(self) -> bool {
+        self.recoverability() == CiIncompleteRecoverability::Recoverable
     }
 }
 
@@ -508,6 +553,15 @@ enum Capture<'a> {
     FailedComplete { blocking: &'a [&'a CheckRun] },
     /// A terminal failing run whose evidence set could not be completed.
     Incomplete(CiIncompleteReason),
+    /// A **recoverable** incompleteness whose bounded hold reached
+    /// [`CI_INCOMPLETE_HOLD_MAX_POLLS`] consecutive polls on one current head.
+    ///
+    /// It carries the reason it held on, because the diagnostic route has to be
+    /// able to say what it was waiting for. It classifies exactly like an
+    /// irrecoverable reason — one diagnose-only run-absent Tier 2 — which is
+    /// the whole point of the bound: a hold that cannot resolve stops being a
+    /// hold.
+    EscalatedHold(CiIncompleteReason),
 }
 
 impl<'a> CiCapture<'a> {
@@ -531,10 +585,20 @@ impl<'a> CiCapture<'a> {
         Self(Capture::Incomplete(reason))
     }
 
-    /// The incompleteness reason, when this capture is incomplete.
+    /// A recoverable incompleteness whose durable bounded hold is spent.
+    ///
+    /// Only the hold ledger may construct this: the bound is a fact about the
+    /// *previous eleven polls*, and a classifier that could decide it from the
+    /// current observation alone would be inventing memory it does not have.
+    pub(crate) fn escalated_hold(reason: CiIncompleteReason) -> Self {
+        Self(Capture::EscalatedHold(reason))
+    }
+
+    /// The incompleteness reason, when this capture is incomplete — including
+    /// an escalated hold, which is still an incomplete observation.
     pub(crate) fn incomplete_reason(&self) -> Option<CiIncompleteReason> {
         match self.0 {
-            Capture::Incomplete(reason) => Some(reason),
+            Capture::Incomplete(reason) | Capture::EscalatedHold(reason) => Some(reason),
             _ => None,
         }
     }
@@ -595,21 +659,19 @@ impl<'a> CiCapture<'a> {
 /// that outgrew the ceiling, and a short read is the provider disagreeing with
 /// itself.
 ///
-/// They do **not** route identically, and the split is two-way:
+/// They do **not** route identically, and the split follows
+/// [`CiIncompleteReason::recoverability`]:
 ///
 /// * `PageFetchFailed` → `EnumerationPageFailed` and `ShortRead` →
-///   `PartialPagination` are enumeration failures
-///   ([`CiIncompleteReason::is_enumeration_failure`]), so they **hold** and
+///   `PartialPagination` are **recoverable**, so they take the bounded hold and
 ///   write no route row. A later poll can turn either into a real evidence
-///   bundle for free.
-/// * `MaxPagesTruncated` → `CheckEnumerationUnavailable` is deliberately *not*
-///   an enumeration failure, so it does **not** hold: truncation is a property
-///   of the PR rather than of the moment, so every subsequent enumeration
-///   returns the identical verdict and a hold is a permanent wedge with nothing
-///   on the board to explain it. See the rationale on
-///   [`CiIncompleteReason::is_enumeration_failure`] — and note it is the one
-///   route row still keyed on a placeholder `run_id`, which is a known
-///   deviation from the proposal's table under separate review.
+///   bundle for free — and if twelve consecutive polls do not, the hold
+///   escalates rather than wedging.
+/// * `MaxPagesTruncated` → `CheckEnumerationUnavailable` is **irrecoverable**:
+///   truncation is a property of the PR rather than of the moment, so every
+///   subsequent enumeration returns the identical verdict. It takes one
+///   diagnose-only Tier-2 route under the run-absent identity — `run_id` NULL,
+///   never a sentinel.
 fn enumeration_incomplete_reason(reason: CheckSetIncompleteReason) -> CiIncompleteReason {
     match reason {
         CheckSetIncompleteReason::PageFetchFailed => CiIncompleteReason::EnumerationPageFailed,
@@ -892,6 +954,17 @@ pub(crate) struct CiRouteDecision {
     complete_empty: Option<CiCompleteEmptyRoute>,
     creates_route_row: bool,
     closes_route: bool,
+    /// Whether this route must be keyed on the **run-absent** evidence
+    /// identity: `run_id` NULL rather than a fabricated sentinel.
+    ///
+    /// Carried on the decision rather than left to the lane executor to infer,
+    /// because the executor is where the sentinel used to be invented and
+    /// inference is exactly what let it happen.
+    run_absent: bool,
+    /// Whether the Tier-2 adjudication this route opens is **diagnose-only**:
+    /// `approve` and `repair` are invalid and the only legal outcomes are an
+    /// `evidence_incomplete` diagnostic reopen or a cited platform park.
+    diagnose_only: bool,
 }
 
 impl CiRouteDecision {
@@ -916,6 +989,29 @@ impl CiRouteDecision {
     /// The **only** authorization to open a Tier-2 lease and dispatch Lead.
     pub(crate) fn tier2_reason(&self) -> Option<CiTier2Reason> {
         self.tier2_reason
+    }
+
+    /// Whether the route row this decision writes must carry a NULL `run_id`.
+    ///
+    /// True exactly for the irrecoverable-incompleteness routes and the
+    /// escalated hold. Proposal `nafu` revision 58 forbids an in-band sentinel
+    /// by name, so this is the flag the lane executor reads instead of
+    /// inventing `run_id: 0` when it has nothing to name.
+    pub(crate) fn requires_run_absent_identity(&self) -> bool {
+        self.run_absent
+    }
+
+    /// Whether the Tier-2 adjudication is diagnose-only.
+    ///
+    /// `approve` and `repair` are invalid on such a route; the only legal
+    /// outcomes are an `evidence_incomplete` diagnostic reopen or a cited
+    /// platform-evidence park. Enforced in three places on purpose — here, in
+    /// the supervisor's reopen validator, and in the repository's
+    /// `resolve_tier2_lease` — because this decision is the only one of the
+    /// three that knows *why*, and the other two are the ones a delayed or
+    /// replayed Lead result actually passes through.
+    pub(crate) fn is_diagnose_only(&self) -> bool {
+        self.diagnose_only
     }
 
     #[cfg(test)]
@@ -982,6 +1078,8 @@ impl CiRouteDecision {
             // the synthetic identity the scope explicitly rules out.
             creates_route_row: false,
             closes_route: false,
+            run_absent: false,
+            diagnose_only: false,
         }
     }
 
@@ -1002,6 +1100,8 @@ impl CiRouteDecision {
             complete_empty: None,
             creates_route_row: false,
             closes_route: false,
+            run_absent: false,
+            diagnose_only: false,
         }
     }
 
@@ -1015,6 +1115,29 @@ impl CiRouteDecision {
             complete_empty: None,
             creates_route_row: false,
             closes_route: false,
+            run_absent: false,
+            diagnose_only: false,
+        }
+    }
+
+    /// The one diagnose-only Tier-2 route an irrecoverable incompleteness — or
+    /// an escalated bounded hold — takes, under the run-absent identity.
+    ///
+    /// Separate from [`Self::tier2`] rather than a parameter on it, because the
+    /// two differ in what Lead is *allowed to answer*, and a boolean argument
+    /// at seven call sites is how that distinction goes missing.
+    fn tier2_diagnose_only(rationale: CiRouteRationale) -> Self {
+        Self {
+            class: CiClass::Unknown,
+            action: CiAction::AskLead,
+            rationale,
+            provider_action: None,
+            tier2_reason: Some(CiTier2Reason::EvidenceUnknown),
+            complete_empty: None,
+            creates_route_row: true,
+            closes_route: false,
+            run_absent: true,
+            diagnose_only: true,
         }
     }
 
@@ -1032,6 +1155,8 @@ impl CiRouteDecision {
             complete_empty: None,
             creates_route_row: true,
             closes_route: false,
+            run_absent: false,
+            diagnose_only: false,
         }
     }
 
@@ -1045,6 +1170,8 @@ impl CiRouteDecision {
             complete_empty: None,
             creates_route_row: true,
             closes_route: false,
+            run_absent: false,
+            diagnose_only: false,
         }
     }
 
@@ -1070,6 +1197,8 @@ impl CiRouteDecision {
             }),
             creates_route_row: false,
             closes_route: false,
+            run_absent: false,
+            diagnose_only: false,
         }
     }
 
@@ -1083,6 +1212,8 @@ impl CiRouteDecision {
             complete_empty: None,
             creates_route_row: false,
             closes_route: true,
+            run_absent: false,
+            diagnose_only: false,
         }
     }
 }
@@ -1101,9 +1232,9 @@ impl CiRouteDecision {
 /// | every blocking check cancelled/never executed (`is_inconclusive`) | Tier 1, subject to budget |
 /// | empty blocking set on a completed run | Tier 2 after the guard |
 /// | run or any required check non-terminal | Hold |
-/// | failed enumeration page, or collected count below `total_count` | Hold, no route row |
-/// | no merge-group run correlated, or a blocking check attributable to no run | Hold, no route row |
-/// | missing/malformed timestamps, check or log API error, ambiguous merge-group correlation, `MAX_PAGES` truncation | Tier 2 after the guard |
+/// | **recoverable** incompleteness: failed page, short read, merge-group correlation not yet observable | Bounded hold, no route row |
+/// | **irrecoverable** incompleteness: `MAX_PAGES` truncation, run attribution unavailable, ambiguous merge-group correlation, any timestamp reason, or an escalated hold | One diagnose-only Tier 2 under the run-absent identity |
+/// | check or log API error after an immutable run is known | Tier 2 after the guard, keyed on the run it names |
 /// | stale run head, PR head, merge-group, or dequeue identity | Discard |
 /// | passing complete set | existing passing path |
 /// | merged task/PR | existing merged path |
@@ -1124,7 +1255,7 @@ pub(crate) fn classify(observation: &CiObservation<'_>) -> CiRouteDecision {
 
     let (class, complete) = match observation.capture.0 {
         Capture::NonTerminal(_) | Capture::CompleteEmpty => (CiClass::Unknown, None),
-        Capture::Incomplete(reason) => (
+        Capture::Incomplete(reason) | Capture::EscalatedHold(reason) => (
             CiClass::Unknown,
             Some(CiRouteRationale::IncompleteEvidence(reason)),
         ),
@@ -1160,27 +1291,63 @@ pub(crate) fn classify(observation: &CiObservation<'_>) -> CiRouteDecision {
     match (observation.capture.0, complete) {
         (Capture::NonTerminal(reason), _) => CiRouteDecision::hold(class, reason),
         (Capture::CompleteEmpty, _) => CiRouteDecision::complete_empty(observation.evidence.lane),
-        // Two independent reasons to hold, kept as two predicates because they
-        // are two different facts and the report separates them:
+
+        // ── Recoverable incompleteness → bounded hold ─────────────────────
         //
-        // * the enumeration failed — this is not an evidence bundle yet, and a
-        //   later poll can turn it into one for free;
-        // * no run was ever named — there is no run/lane identity to key a
-        //   route row on, and creating one would mean fabricating the fields
-        //   that distinguish one observation from the next.
+        // No route row, no lease, no Lead session, no worker, no charge: a
+        // later poll of the same head can supply the missing evidence for
+        // free, so paying for adjudication now would mean paying again on
+        // every poll until the provider recovers.
         //
-        // Either way: no route row, no lease, no session, and re-poll.
-        (Capture::Incomplete(reason), _)
-            if reason.is_enumeration_failure() || reason.no_run_was_named() =>
-        {
+        // The hold is bounded, but nothing here bounds it. The bound is
+        // twelve *consecutive* incomplete polls on one current head, which is
+        // a fact about polls this classifier never saw. The durable streak
+        // ledger owns it and hands back `Capture::EscalatedHold` when it is
+        // spent — which is the arm directly below.
+        (Capture::Incomplete(reason), _) if reason.is_recoverable() => {
             CiRouteDecision::hold_incomplete(reason)
         }
-        (_, Some(CiRouteRationale::Inconclusive)) => {
-            CiRouteDecision::tier1(observation.evidence.lane, observation.evidence.run_id)
+
+        // ── Irrecoverable incompleteness → one diagnose-only Tier 2 ───────
+        //
+        // Every later enumeration of the same head returns the identical
+        // verdict, so a hold never resolves: the task would sit with no route
+        // row, no adjudication, nothing on the board, and a CI gate that never
+        // clears. Revision 58 routes it instead — once — under the run-absent
+        // identity, where `approve` and `repair` are both invalid.
+        //
+        // The escalated hold lands here too, and deliberately in the same arm:
+        // "this reason will never answer" and "this reason has not answered in
+        // twelve polls" are the same operational fact, and giving them two
+        // routes would give one head two Lead sessions.
+        (Capture::Incomplete(reason), _) if reason.is_run_absent() => {
+            CiRouteDecision::tier2_diagnose_only(CiRouteRationale::IncompleteEvidence(reason))
         }
+        (Capture::EscalatedHold(reason), _) => {
+            CiRouteDecision::tier2_diagnose_only(CiRouteRationale::IncompleteEvidence(reason))
+        }
+
+        // ── Tier 1 ────────────────────────────────────────────────────────
+        //
+        // `rerun_failed_jobs(owner, repo, run_id)` is singular, so a Tier-1
+        // authorization without a run id is unconstructible rather than
+        // merely unwise. `FailedComplete` only ever arrives from the per-run
+        // fan-out, which always names one — but saying so in the type instead
+        // of in a comment is what stops a future lane-level capture from
+        // reaching a provider call with nothing to call it on.
+        (_, Some(CiRouteRationale::Inconclusive)) => match observation.evidence.run_id {
+            Some(run_id) => CiRouteDecision::tier1(observation.evidence.lane, run_id),
+            None => CiRouteDecision::tier2_diagnose_only(CiRouteRationale::IncompleteEvidence(
+                CiIncompleteReason::RunAttributionUnavailable,
+            )),
+        },
         (_, Some(rationale @ CiRouteRationale::CausalFailure)) => {
             CiRouteDecision::tier2(class, rationale, CiTier2Reason::CausalFailure)
         }
+        // What is left is exactly `CompleteButUnusable`: a complete snapshot
+        // with a check or log API error after an immutable run is known. It
+        // keeps the run it names, so it takes the ordinary guarded Tier-2
+        // route and Lead may still repair from it.
         (_, Some(rationale)) => {
             CiRouteDecision::tier2(class, rationale, CiTier2Reason::EvidenceUnknown)
         }

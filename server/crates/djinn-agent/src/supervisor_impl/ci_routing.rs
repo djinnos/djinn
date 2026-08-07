@@ -202,8 +202,24 @@ impl CiAdjudicationContext {
         let Some(pr_number) = route.get("pr_number").and_then(serde_json::Value::as_i64) else {
             return CiDirectiveRead::Malformed("pr_number");
         };
-        let Some(run_id) = route.get("run_id").and_then(serde_json::Value::as_i64) else {
-            return CiDirectiveRead::Malformed("run_id");
+
+        // `run_id` is the run-absent switch (revision 58). An absent key or an
+        // explicit `null` is a route whose lane capture failed closed before any
+        // run was attributed, and such a route is diagnose-only — see
+        // [`CiAdjudicationContext::names_no_run`].
+        //
+        // A value that is present but not a *positive* integer is malformed
+        // rather than absent. That is the same rule as the column's
+        // `CHECK (run_id IS NULL OR run_id > 0)`: absence is spelled `null` and
+        // nothing else, so a `0` or a `-1` cannot become an in-band sentinel
+        // that reads as "no run" on one side of the boundary and as "run zero"
+        // on the other.
+        let run_id = match route.get("run_id") {
+            None | Some(serde_json::Value::Null) => None,
+            Some(value) => match value.as_i64() {
+                Some(id) if id > 0 => Some(id),
+                _ => return CiDirectiveRead::Malformed("run_id"),
+            },
         };
 
         // The evidence bundle is required, not optional. `is_grounded` fails
@@ -242,6 +258,31 @@ impl CiAdjudicationContext {
         }))
     }
 
+    /// Whether this route's evidence identity **names no run** (revision 58).
+    ///
+    /// A run-absent route is what the coordinator opens when irrecoverable
+    /// incompleteness left it with nothing to attribute a run to: `MAX_PAGES`
+    /// truncation, unavailable run attribution, ambiguous merge-group
+    /// correlation, one of the four `blocking_evidence_completeness` timestamp
+    /// reasons, or a bounded hold that reached `CI_INCOMPLETE_HOLD_MAX_POLLS`.
+    /// All of them collapse onto one row under this identity.
+    ///
+    /// **Such a route is diagnose-only.** Lead is looking at a route where no
+    /// run was ever named and no blocking-check set was ever enumerated, so
+    /// there is nothing to repair *from*: a `verification_command` on this
+    /// route cannot have been copied from CI evidence, because there is no CI
+    /// evidence. `approve` and `repair` are therefore both invalid and the only
+    /// legal results are an `evidence_incomplete` diagnostic reopen or a park.
+    ///
+    /// This is the agent-side half of the rule; the database-side half is
+    /// `CiRouteAttempt::is_run_absent`, which `resolve_tier2_lease` consults to
+    /// refuse a `repair_reopened` resolution outright. Neither is redundant:
+    /// this one produces the explanation Lead can act on, that one holds even
+    /// for a call site that never came through here.
+    fn names_no_run(&self) -> bool {
+        self.guard.identity.run_id.is_none()
+    }
+
     /// Whether `park` is available at all for this route.
     ///
     /// The proposal is explicit: "Uncertainty, exhausted budget, provider
@@ -249,7 +290,20 @@ impl CiAdjudicationContext {
     /// Those four map exactly onto the Tier-2 reason set minus
     /// [`CiTier2Reason::CausalFailure`], so the check is a closed match rather
     /// than a heuristic over the dossier's prose.
+    ///
+    /// A run-absent route is the one exception, and revision 58 names it: its
+    /// legal results are "an `evidence_incomplete` diagnostic reopen or a
+    /// platform-evidence park". The general rule denies park to uncertainty
+    /// because a worker can still be sent to *resolve* the uncertainty from the
+    /// evidence; here there is no evidence to resolve it from, and enumeration
+    /// that never completes after a bounded hold is precisely the cited
+    /// platform dead-end park exists for. Without this arm the route's Tier-2
+    /// reason (`evidence_unknown` for every run-absent route the coordinator
+    /// opens) would make park unreachable and leave diagnose as the only exit.
     fn park_is_available(&self) -> bool {
+        if self.names_no_run() {
+            return true;
+        }
         match self.tier2_reason {
             CiTier2Reason::CausalFailure => true,
             CiTier2Reason::EvidenceUnknown
@@ -263,7 +317,19 @@ impl CiAdjudicationContext {
     ///
     /// Used whenever a result degrades for a reason other than a missing or
     /// invented command (which has its own, more precise reason).
+    ///
+    /// The run-absent arm comes first because the boundary is a property of the
+    /// *identity* there, not of the Tier-2 reason: revision 58 says the only
+    /// diagnostic reopen such a route may produce is an `evidence_incomplete`
+    /// one, and that must stay true whichever reason a future producer pairs
+    /// with a run-absent identity. Today every run-absent route the coordinator
+    /// opens carries `evidence_unknown`, which maps here anyway — so this arm
+    /// changes no live behaviour and exists to keep the guarantee identity-
+    /// scoped rather than reason-scoped.
     fn boundary_reason(&self) -> CiDiagnosticReason {
+        if self.names_no_run() {
+            return CiDiagnosticReason::EvidenceIncomplete;
+        }
         match self.tier2_reason {
             CiTier2Reason::EvidenceUnknown => CiDiagnosticReason::EvidenceIncomplete,
             CiTier2Reason::ProviderActionFailed | CiTier2Reason::OutcomeUnknown => {
@@ -600,6 +666,27 @@ fn adjudicate_reopen(
     match (verification_command, raw_reason) {
         // ── Repair ─────────────────────────────────────────────────────────
         (Some(command), None) => {
+            // Diagnose-only first, and deliberately *before* the command
+            // check. A repository command is still in scope on a run-absent
+            // route — task/project context supplies commands whether or not CI
+            // ran — so a repair here can be perfectly well-formed and still be
+            // ungroundable, and rejecting it for the command would name the
+            // wrong fault. What is missing is the run: nothing enumerated a
+            // blocking-check set, so no finding exists for the command to
+            // verify. See [`CiAdjudicationContext::names_no_run`].
+            if ctx.names_no_run() {
+                return CiAdjudication::route_fallback(
+                    ctx,
+                    CiResultRejection::RepairUnavailableForRoute,
+                    format!(
+                        "This route names no CI run and enumerated no blocking checks, so a \
+                         repair has nothing to verify: Lead proposed `{command}`, which cannot \
+                         have been copied from CI evidence because this route captured none. \
+                         Establish what evidence is missing before changing code. Lead's finding \
+                         was: {directive}"
+                    ),
+                );
+            }
             if ctx.command_is_repository_valid(command) {
                 CiAdjudication::accepted(CiLeadPlan::RepairReopen {
                     directive: directive.to_owned(),

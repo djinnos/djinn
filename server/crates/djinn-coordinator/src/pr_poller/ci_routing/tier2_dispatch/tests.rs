@@ -87,7 +87,7 @@ impl Harness {
                 lane,
                 pr_number: PR,
                 pr_head_sha: HEAD.to_owned(),
-                run_id: 90210,
+                run_id: Some(90210),
                 run_head_sha: HEAD.to_owned(),
                 dequeue_id: (lane == CiLane::MergeGroup).then(|| "dq-1".to_owned()),
             },

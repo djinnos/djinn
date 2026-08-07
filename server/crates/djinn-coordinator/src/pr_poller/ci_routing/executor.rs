@@ -676,15 +676,17 @@ const MAX_REPRODUCTION_CHECKS: usize = 3;
 /// opposed to a similarity score over prose, which is the fabrication the
 /// grounding rule exists to stop.
 ///
-/// The list is never empty: `run_id` and the two SHAs are always present, so a
-/// route can never produce a block that the supervisor's fail-closed
-/// `is_grounded` would reject wholesale.
+/// The list is never empty: the two SHAs are always present, so a route can
+/// never produce a block that the supervisor's fail-closed `is_grounded` would
+/// reject wholesale — including on a **run-absent** route, where there is no run
+/// id to cite. Emitting a placeholder there would hand Lead a reference it could
+/// quote to look grounded while citing nothing, which is the opposite of what
+/// this list is for.
 fn evidence_references(identity: &CiEvidenceIdentity, blocking: &[&CheckRun]) -> Vec<String> {
-    let mut out = vec![
-        identity.run_id.to_string(),
-        identity.pr_head_sha.clone(),
-        identity.run_head_sha.clone(),
-    ];
+    let mut out = vec![identity.pr_head_sha.clone(), identity.run_head_sha.clone()];
+    if let Some(run_id) = identity.run_id {
+        out.push(run_id.to_string());
+    }
     if let Some(dequeue) = &identity.dequeue_id {
         out.push(dequeue.clone());
     }

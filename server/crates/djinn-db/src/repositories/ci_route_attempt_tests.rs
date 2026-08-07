@@ -19,7 +19,10 @@
 //!   only a second method call proves the opposite of durability.
 
 use crate::database::Database;
-use crate::repositories::ci_route_attempt::CiLeadRejection;
+use crate::repositories::ci_incomplete_hold::{
+    CI_INCOMPLETE_HOLD_MAX_POLLS, CiHoldApply, CiHoldEscalationRoute, CiHoldIdentity,
+    CiIncompleteHoldRepository,
+};
 use crate::repositories::ci_route_attempt::{
     CI_CALLING_RECOVERY_TIMEOUT_SECS, CI_HEAD_BUDGET_LIMIT, CI_SIGNATURE_BUDGET_LIMIT, CiAction,
     CiActionPhase, CiCallingRecovery, CiCallingRecoveryAuthority, CiCallingRecoveryReason,
@@ -28,6 +31,7 @@ use crate::repositories::ci_route_attempt::{
     CiRouteAttemptRepository, CiRouteOutcome, CiRouteReservation, CiRouteSubject,
     CiTier2LeaseOutcome, CiTier2LeaseState, CiTier2Reason, CiTier2Resolution,
 };
+use crate::repositories::ci_route_attempt::{CiLeadRejection, CiLeadSessionAttachment};
 use crate::repositories::ci_route_report::{CiRouteQuiescenceAttestation, CiRouteReportFilter};
 use crate::repositories::coordinator_incarnation::CoordinatorIncarnationRepository;
 use crate::repositories::test_support::{UsageTestTaskSeed, make_project, seed_task_row};
@@ -96,7 +100,7 @@ fn pr_head_identity(run_id: i64, head: &str) -> CiEvidenceIdentity {
         lane: CiLane::PrHead,
         pr_number: 4242,
         pr_head_sha: head.to_owned(),
-        run_id,
+        run_id: Some(run_id),
         run_head_sha: head.to_owned(),
         dequeue_id: None,
     }
@@ -107,7 +111,7 @@ fn merge_group_identity(run_id: i64, head: &str, dequeue: &str) -> CiEvidenceIde
         lane: CiLane::MergeGroup,
         pr_number: 4242,
         pr_head_sha: head.to_owned(),
-        run_id,
+        run_id: Some(run_id),
         run_head_sha: head.to_owned(),
         dequeue_id: Some(dequeue.to_owned()),
     }
@@ -1545,17 +1549,19 @@ async fn current_evidence_tier_two_leases_are_mutually_exclusive_across_lanes() 
     assert_eq!(open, 1);
 
     // The dispatched Lead session binds to the exact lease.
-    assert!(
+    assert_eq!(
         restarted
             .attach_lead_session(&f.subject, "key-lease-1", &lease_id, "session-alpha")
             .await
-            .unwrap()
+            .unwrap(),
+        CiLeadSessionAttachment::Attached { session_count: 1 }
     );
-    assert!(
-        !restarted
+    assert_eq!(
+        restarted
             .attach_lead_session(&f.subject, "key-lease-1", "not-the-lease", "session-beta")
             .await
-            .unwrap()
+            .unwrap(),
+        CiLeadSessionAttachment::NotFound
     );
 
     let quiescence = restarted.quiescence_counts().await.unwrap();
@@ -2040,11 +2046,12 @@ async fn provider_failure_then_tier_two_records_both_outcomes() {
     let CiTier2LeaseOutcome::Opened { lease_id, .. } = opened else {
         panic!("an action_failed row may route once to Tier 2");
     };
-    assert!(
+    assert_eq!(
         repository
             .attach_lead_session(&f.subject, "key-both", &lease_id, "session-both")
             .await
-            .unwrap()
+            .unwrap(),
+        CiLeadSessionAttachment::Attached { session_count: 1 }
     );
     assert!(
         repository
@@ -2702,7 +2709,7 @@ async fn spend_signature_budget(f: &Fixture, identity: &CiEvidenceIdentity, fing
     let repository = repo(&f.db);
     for run in 100..(100 + CI_SIGNATURE_BUDGET_LIMIT) {
         let mut spent = identity.clone();
-        spent.run_id = run;
+        spent.run_id = Some(run);
         let key = format!("key-spend-{run}");
         repository
             .reserve(&reservation(&f.subject, &key, spent.clone(), fingerprint))
@@ -3222,4 +3229,1342 @@ async fn open_lease(
         CiTier2LeaseOutcome::Opened { lease_id, .. } => lease_id,
         other => panic!("expected an opened lease, got {other:?}"),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Wave 5, revision 58: the run-absent identity, the append-only Lead session
+// count, the database-side guards, and the bounded incomplete-evidence hold.
+//
+// Every fixture below was mutation-proven: the guard it names was temporarily
+// broken (trigger dropped, CHECK dropped, comparison inverted, overwrite
+// restored) and the fixture was confirmed to FAIL before the guard was
+// restored. A test that survives the deletion of the thing it tests is not
+// evidence.
+// ---------------------------------------------------------------------------
+
+/// An evidence identity that **names no run**: the honest encoding for a lane
+/// capture that failed closed before runs were attributed.
+fn run_absent_identity(lane: CiLane, head: &str, dequeue: Option<&str>) -> CiEvidenceIdentity {
+    CiEvidenceIdentity {
+        lane,
+        pr_number: 4242,
+        pr_head_sha: head.to_owned(),
+        run_id: None,
+        run_head_sha: head.to_owned(),
+        dequeue_id: dequeue.map(str::to_owned),
+    }
+}
+
+/// A reservation whose action is `ask_lead` — the only action a run-absent
+/// route may carry, since there is nothing to re-run.
+fn ask_lead_reservation(
+    subject: &CiRouteSubject,
+    key: &str,
+    identity: CiEvidenceIdentity,
+    fingerprint: &str,
+) -> CiRouteReservation {
+    let mut input = reservation(subject, key, identity, fingerprint);
+    input.action = CiAction::AskLead;
+    input.class = CiClass::Unknown;
+    input
+}
+
+fn hold_identity(subject: &CiRouteSubject, head: &str) -> CiHoldIdentity {
+    CiHoldIdentity {
+        subject: subject.clone(),
+        repository_id: "djinnos/djinn".to_owned(),
+        pr_number: 4242,
+        pr_head_sha: head.to_owned(),
+        lane: CiLane::PrHead,
+        dequeue_id: None,
+    }
+}
+
+/// The one diagnose-only run-absent route an escalating hold inserts.
+fn escalation_route(subject: &CiRouteSubject, head: &str) -> CiHoldEscalationRoute {
+    CiHoldEscalationRoute {
+        reservation: ask_lead_reservation(
+            subject,
+            &format!("key-escalation-{head}"),
+            run_absent_identity(CiLane::PrHead, head, None),
+            "fp-hold",
+        ),
+        tier2_lease_id: format!("lease-hold-{head}"),
+        tier2_lease_key: tier2_lease_key(4242, head),
+        tier2_reason: CiTier2Reason::EvidenceUnknown,
+    }
+}
+
+/// One complete poll: reserve, (pretend to enumerate), apply.
+async fn one_poll(
+    holds: &CiIncompleteHoldRepository,
+    identity: &CiHoldIdentity,
+    escalation: &CiHoldEscalationRoute,
+    complete: bool,
+) -> CiHoldApply {
+    let poll_id = uuid::Uuid::now_v7().to_string();
+    holds
+        .reserve_poll(identity, &poll_id)
+        .await
+        .expect("reserve a poll sequence");
+    holds
+        .apply_poll(identity, identity, &poll_id, complete, escalation)
+        .await
+        .expect("apply a poll")
+}
+
+async fn count_rows(db: &Database, sql: &str) -> i64 {
+    sqlx::query_scalar(sql)
+        .fetch_one(db.pool())
+        .await
+        .expect("count rows")
+}
+
+// ---------------------------------------------------------------------------
+// The run-absent identity
+// ---------------------------------------------------------------------------
+
+/// The `run_id = 0` sentinel is unrepresentable, and two run-absent captures of
+/// one lane/PR/head/dequeue collapse onto **one** row.
+///
+/// The collapse is the `NULLS NOT DISTINCT` claim. Under the default
+/// `NULLS DISTINCT` each run-absent row is unique to itself, so two different
+/// irrecoverable reasons would each open a route, each take a Tier-2 lease, and
+/// "at most one provider-call episode per evidence identity" would hold only
+/// for identities that happened to name a run.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_absent_identities_reject_the_sentinel_and_collapse_onto_one_row() {
+    let f = fixture().await;
+    let repository = repo(&f.db);
+
+    // (a) The sentinel and every other non-positive run id are refused before
+    //     the CHECK fires, with a message that names the field.
+    for sentinel in [0_i64, -1] {
+        let mut identity = pr_head_identity(1, "headsha-sentinel");
+        identity.run_id = Some(sentinel);
+        let err = repository
+            .reserve(&reservation(
+                &f.subject,
+                &format!("key-sentinel-{sentinel}"),
+                identity,
+                "fp-sentinel",
+            ))
+            .await
+            .expect_err("a non-positive run id is not a provider run");
+        let message = err.to_string();
+        assert!(
+            message.contains("run_id") && message.contains("None"),
+            "the refusal must name the field and the correct encoding, got: {message}"
+        );
+    }
+    assert_eq!(
+        count_rows(&f.db, "SELECT COUNT(*) FROM ci_route_attempts").await,
+        0,
+        "a refused reservation writes nothing"
+    );
+
+    // (b) The database refuses the sentinel too, whatever writes it. This is
+    //     the enforcement; the Rust guard above is only the readable error.
+    let raw = sqlx::query(
+        "INSERT INTO ci_route_attempts (subject_kind, subject_id, provider_action_key, lane, \
+           pr_number, pr_head_sha, run_id, run_head_sha, origin_state, class, action, \
+           transient_fingerprint, retry_budget_key, head_budget_key, action_phase) \
+         VALUES ('task', $1, 'key-raw-sentinel', 'pr_head', 4242, 'h', 0, 'h', 'pr_draft', \
+                 'unknown', 'ask_lead', 'fp', 'sig', 'head', 'reserved')",
+    )
+    .bind(&f.task_id)
+    .execute(f.db.pool())
+    .await
+    .expect_err("ci_route_attempts_run_id_positive_check");
+    assert!(
+        raw.to_string().contains("run_id_positive"),
+        "expected the positivity CHECK, got: {raw}"
+    );
+
+    // (c) Two DIFFERENT irrecoverable reasons on one lane/PR/head/dequeue.
+    //     Different caller-computed keys, one identity.
+    let identity = run_absent_identity(CiLane::PrHead, "headsha-absent", None);
+    let first = repository
+        .reserve(&ask_lead_reservation(
+            &f.subject,
+            "key-reason-truncated",
+            identity.clone(),
+            "fp-absent",
+        ))
+        .await
+        .unwrap();
+    let first = match first {
+        CiReserveOutcome::Reserved(attempt) => *attempt,
+        other => panic!("expected a fresh reservation, got {other:?}"),
+    };
+    assert!(first.is_run_absent());
+
+    let second = repository
+        .reserve(&ask_lead_reservation(
+            &f.subject,
+            "key-reason-missing-timestamp",
+            identity.clone(),
+            "fp-absent",
+        ))
+        .await
+        .unwrap();
+    match second {
+        CiReserveOutcome::AlreadyPresent(attempt) => assert_eq!(
+            attempt.provider_action_key, "key-reason-truncated",
+            "the second reason collapses onto the FIRST reason's row"
+        ),
+        other => panic!("two run-absent captures of one identity are one identity, got {other:?}"),
+    }
+
+    assert_eq!(
+        count_rows(&f.db, "SELECT COUNT(*) FROM ci_route_attempts").await,
+        1,
+        "NULLS NOT DISTINCT: one identity, one row, one route"
+    );
+
+    // A genuinely different identity still gets its own row, so the collapse is
+    // not simply "run-absent rows all collide".
+    let elsewhere = run_absent_identity(CiLane::PrHead, "headsha-elsewhere", None);
+    assert!(matches!(
+        repository
+            .reserve(&ask_lead_reservation(
+                &f.subject,
+                "key-other-head",
+                elsewhere,
+                "fp-absent",
+            ))
+            .await
+            .unwrap(),
+        CiReserveOutcome::Reserved(_)
+    ));
+    assert_eq!(
+        count_rows(&f.db, "SELECT COUNT(*) FROM ci_route_attempts").await,
+        2
+    );
+}
+
+/// A run-absent route is **diagnose-only**: the repair reopen is refused and
+/// the diagnose reopen is accepted, on the same row.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_repair_reopen_on_a_run_absent_route_is_rejected() {
+    let f = fixture().await;
+    let repository = repo(&f.db);
+    let identity = run_absent_identity(CiLane::PrHead, "headsha-diagnose-only", None);
+    repository
+        .reserve(&ask_lead_reservation(
+            &f.subject,
+            "key-absent",
+            identity.clone(),
+            "fp-absent",
+        ))
+        .await
+        .unwrap();
+    let lease_id = open_lease(
+        &repository,
+        &f.subject,
+        "key-absent",
+        &identity,
+        &tier2_lease_key(4242, "headsha-diagnose-only"),
+    )
+    .await;
+
+    let err = repository
+        .resolve_tier2_lease(
+            &f.subject,
+            "key-absent",
+            &lease_id,
+            &identity,
+            &CiTier2Resolution::repair(),
+        )
+        .await
+        .expect_err("a run-absent route has nothing to re-run");
+    let message = err.to_string();
+    assert!(
+        message.contains("diagnose-only"),
+        "expected the diagnose-only refusal, got: {message}"
+    );
+
+    // Nothing was written: the lease is still open and the row is not terminal.
+    let untouched = repository
+        .get(&f.subject, "key-absent")
+        .await
+        .unwrap()
+        .expect("row survives a refused resolution");
+    assert_eq!(untouched.tier2_lease_state, Some(CiTier2LeaseState::Open));
+    assert!(untouched.tier2_resolution.is_none());
+    assert!(!untouched.is_terminal());
+
+    // The diagnose resolution on the identical row is accepted.
+    assert!(
+        repository
+            .resolve_tier2_lease(
+                &f.subject,
+                "key-absent",
+                &lease_id,
+                &identity,
+                &CiTier2Resolution::diagnose(CiDiagnosticReason::EvidenceIncomplete)
+                    .rejected_as(CiLeadRejection::RepairUnavailableForRoute),
+            )
+            .await
+            .unwrap()
+    );
+    let resolved = repository
+        .get(&f.subject, "key-absent")
+        .await
+        .unwrap()
+        .expect("row");
+    assert_eq!(
+        resolved.adjudicated_outcome(),
+        Some(CiRouteOutcome::DiagnosticReopened)
+    );
+    assert_eq!(
+        resolved.lead_rejection,
+        Some(CiLeadRejection::RepairUnavailableForRoute),
+        "the durable record says WHY the repair was replaced"
+    );
+
+    // And a route that DOES name a run accepts the repair, so the refusal is
+    // scoped to run-absence rather than to repairs generally.
+    let with_run = pr_head_identity(9, "headsha-has-a-run");
+    repository
+        .reserve(&reservation(
+            &f.subject,
+            "key-with-run",
+            with_run.clone(),
+            "fp-run",
+        ))
+        .await
+        .unwrap();
+    let lease_id = open_lease(
+        &repository,
+        &f.subject,
+        "key-with-run",
+        &with_run,
+        &tier2_lease_key(4242, "headsha-has-a-run"),
+    )
+    .await;
+    assert!(
+        repository
+            .resolve_tier2_lease(
+                &f.subject,
+                "key-with-run",
+                &lease_id,
+                &with_run,
+                &CiTier2Resolution::repair(),
+            )
+            .await
+            .unwrap()
+    );
+}
+
+/// The evidence-advance watermark is NULL-safe over run ids.
+///
+/// `(pr_head_sha, run_id) IS DISTINCT FROM (...)` over a row constructor, not a
+/// plain `<>`: with NULL run ids a plain comparison evaluates to NULL, the
+/// `WHERE` drops the row, and a run-absent identity would never be seen to
+/// advance — so the rollback gate would stay red forever. Asserted, not
+/// assumed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_evidence_advance_watermark_is_null_safe_over_run_ids() {
+    let f = fixture().await;
+    let repository = repo(&f.db);
+
+    let absent = run_absent_identity(CiLane::PrHead, "headsha-absent-1", None);
+    repository
+        .reserve(&ask_lead_reservation(
+            &f.subject,
+            "key-absent-1",
+            absent,
+            "fp",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        repository.current_failed_identity_count().await.unwrap(),
+        1,
+        "one run-absent routed identity, nothing newer: still current"
+    );
+
+    // A SECOND run-absent identity on a new head. `(sha, NULL)` vs
+    // `(other_sha, NULL)` must read as DISTINCT, or the first never advances.
+    let advanced = run_absent_identity(CiLane::PrHead, "headsha-absent-2", None);
+    repository
+        .reserve(&ask_lead_reservation(
+            &f.subject,
+            "key-absent-2",
+            advanced,
+            "fp",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        repository.current_failed_identity_count().await.unwrap(),
+        1,
+        "the older run-absent identity advanced; only the newer one is current"
+    );
+
+    // And a run-PRESENT row on a third head: `(sha, 7)` vs `(sha, NULL)` must
+    // also read as distinct in both directions.
+    repository
+        .reserve(&reservation(
+            &f.subject,
+            "key-present",
+            pr_head_identity(7, "headsha-absent-3"),
+            "fp",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        repository.current_failed_identity_count().await.unwrap(),
+        1,
+        "a run-absent identity is advanced by a later run-present one"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Database-side guards
+// ---------------------------------------------------------------------------
+
+/// Budget monotonicity is enforced by a **trigger**, not by the repository's
+/// habit of never writing a decrement.
+///
+/// The decrement here is raw SQL that never touches Rust, which is the point:
+/// 193's `charged_count >= 0` is satisfied by 2 -> 1, so before the trigger the
+/// only thing standing between a refund path and a silently reset budget was
+/// every future writer remembering.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn charged_count_decrease_is_rejected() {
+    let f = fixture().await;
+    let repository = repo(&f.db);
+    let identity = pr_head_identity(700, "headsha-monotonic");
+    let input = reservation(&f.subject, "key-mono", identity.clone(), "fp-mono");
+    repository.reserve(&input).await.unwrap();
+    repository
+        .charge_and_begin_calling(&f.subject, "key-mono", &incarnation(), &identity)
+        .await
+        .unwrap();
+    let before = repository
+        .budget_counts(&f.subject, &input.retry_budget_key, &input.head_budget_key)
+        .await
+        .unwrap();
+    assert_eq!(before.signature, 1);
+    assert_eq!(before.head, 1);
+
+    let err = sqlx::query("UPDATE ci_route_budget_counters SET charged_count = charged_count - 1")
+        .execute(f.db.pool())
+        .await
+        .expect_err("the trigger refuses any decrease of charged_count");
+    let message = err.to_string();
+    assert!(
+        message.contains("monotonic"),
+        "expected the monotonicity trigger, got: {message}"
+    );
+    assert_eq!(
+        err.as_database_error()
+            .and_then(sqlx::error::DatabaseError::code),
+        Some(std::borrow::Cow::Borrowed("23514")),
+        "the trigger raises check_violation, so callers classify it exactly as \
+         they classify the CHECKs beside it"
+    );
+
+    let after = repository
+        .budget_counts(&f.subject, &input.retry_budget_key, &input.head_budget_key)
+        .await
+        .unwrap();
+    assert_eq!(
+        after, before,
+        "the refused decrement wrote nothing to either counter"
+    );
+
+    // An INCREASE is still legal, so the trigger bounds direction rather than
+    // freezing the row.
+    sqlx::query("UPDATE ci_route_budget_counters SET charged_count = charged_count + 1")
+        .execute(f.db.pool())
+        .await
+        .expect("a monotonic increment is unaffected");
+    let raised = repository
+        .budget_counts(&f.subject, &input.retry_budget_key, &input.head_budget_key)
+        .await
+        .unwrap();
+    assert_eq!(raised.signature, 2);
+}
+
+/// A park must cite its cause, and the CHECK is what proves it — not the Rust
+/// guard, and not the report's own filter.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn park_without_justification_is_rejected() {
+    let f = fixture().await;
+    let repository = repo(&f.db);
+    let identity = pr_head_identity(800, "headsha-park");
+    repository
+        .reserve(&reservation(
+            &f.subject,
+            "key-park",
+            identity.clone(),
+            "fp-park",
+        ))
+        .await
+        .unwrap();
+    let lease_id = open_lease(
+        &repository,
+        &f.subject,
+        "key-park",
+        &identity,
+        &tier2_lease_key(4242, "headsha-park"),
+    )
+    .await;
+
+    // (a) The repository refusal, for the readable message.
+    for blank in ["", "   "] {
+        let err = repository
+            .resolve_tier2_lease(
+                &f.subject,
+                "key-park",
+                &lease_id,
+                &identity,
+                &CiTier2Resolution::park(blank),
+            )
+            .await
+            .expect_err("a park without a cited cause is not a park");
+        assert!(
+            err.to_string().contains("cited justification"),
+            "got: {err}"
+        );
+    }
+
+    // (b) The CHECK, which is the actual enforcement. Raw SQL, no Rust guard in
+    //     the path: this is what makes `parks_with_cited_cause` a measurement
+    //     rather than a restatement of the `parked` label.
+    let update_err = sqlx::query(
+        "UPDATE ci_route_attempts SET tier2_resolution = 'parked' \
+         WHERE provider_action_key = 'key-park'",
+    )
+    .execute(f.db.pool())
+    .await
+    .expect_err("ci_route_attempts_park_cited_check");
+    assert!(
+        update_err.to_string().contains("park_cited"),
+        "expected the park CHECK, got: {update_err}"
+    );
+
+    let blank_err = sqlx::query(
+        "UPDATE ci_route_attempts SET tier2_resolution = 'parked', park_justification = '   ' \
+         WHERE provider_action_key = 'key-park'",
+    )
+    .execute(f.db.pool())
+    .await
+    .expect_err("btrim: whitespace is not a citation");
+    assert!(
+        blank_err.to_string().contains("park_cited"),
+        "expected the park CHECK, got: {blank_err}"
+    );
+
+    let insert_err = sqlx::query(
+        "INSERT INTO ci_route_attempts (subject_kind, subject_id, provider_action_key, lane, \
+           pr_number, pr_head_sha, run_id, run_head_sha, origin_state, class, action, \
+           transient_fingerprint, retry_budget_key, head_budget_key, action_phase, \
+           terminal_outcome) \
+         VALUES ('task', $1, 'key-park-raw', 'pr_head', 4242, 'h2', 5, 'h2', 'pr_draft', \
+                 'unknown', 'ask_lead', 'fp', 'sig2', 'head2', 'terminal', 'parked')",
+    )
+    .bind(&f.task_id)
+    .execute(f.db.pool())
+    .await
+    .expect_err("an uncited park cannot be inserted either");
+    assert!(
+        insert_err.to_string().contains("park_cited"),
+        "expected the park CHECK, got: {insert_err}"
+    );
+
+    // (c) A cited park is accepted, and the report counts it.
+    assert!(
+        repository
+            .resolve_tier2_lease(
+                &f.subject,
+                "key-park",
+                &lease_id,
+                &identity,
+                &CiTier2Resolution::park("runner image pull failed for 6h; infra dead end"),
+            )
+            .await
+            .unwrap()
+    );
+    let report = repository
+        .route_report(&CiRouteReportFilter::all())
+        .await
+        .unwrap();
+    assert_eq!(report.parks_with_cited_cause, 1);
+
+    // (d) The metric is an INDEPENDENT witness, not a restatement of the label.
+    //     With the CHECK in place an uncited park cannot exist, so the only way
+    //     to show the report filter is doing work is to simulate the CHECK
+    //     regressing and confirm the metric still refuses to count the park.
+    //     A filter of `adjudicated = 'parked'` alone would count it.
+    sqlx::query("ALTER TABLE ci_route_attempts DROP CONSTRAINT ci_route_attempts_park_cited_check")
+        .execute(f.db.pool())
+        .await
+        .expect("simulate the CHECK regressing");
+    sqlx::query(
+        "INSERT INTO ci_route_attempts (subject_kind, subject_id, provider_action_key, lane, \
+           pr_number, pr_head_sha, run_id, run_head_sha, origin_state, class, action, \
+           transient_fingerprint, retry_budget_key, head_budget_key, action_phase, \
+           terminal_outcome) \
+         VALUES ('task', $1, 'key-uncited-park', 'pr_head', 4243, 'h3', 6, 'h3', 'pr_draft', \
+                 'unknown', 'ask_lead', 'fp', 'sig3', 'head3', 'terminal', 'parked')",
+    )
+    .bind(&f.task_id)
+    .execute(f.db.pool())
+    .await
+    .expect("the CHECK is gone, so the uncited park lands");
+
+    let regressed = repository
+        .route_report(&CiRouteReportFilter::all())
+        .await
+        .unwrap();
+    assert_eq!(
+        regressed.parks_with_cited_cause, 1,
+        "the uncited park is a `parked` row and is still NOT counted: the metric \
+         measures the cited cause, not the label"
+    );
+}
+
+/// A second Lead session on one route **increments** rather than overwriting.
+///
+/// The old behaviour was a blind `SET lead_session_id = $5`, which made
+/// `lead_invocations` structurally incapable of exceeding one per route — so
+/// the proposal's cost bound could never observe its own overrun.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn second_lead_session_increments_rather_than_overwrites() {
+    let f = fixture().await;
+    let repository = repo(&f.db);
+    let identity = pr_head_identity(900, "headsha-two-sessions");
+    repository
+        .reserve(&reservation(
+            &f.subject,
+            "key-sessions",
+            identity.clone(),
+            "fp-sessions",
+        ))
+        .await
+        .unwrap();
+    let lease_id = open_lease(
+        &repository,
+        &f.subject,
+        "key-sessions",
+        &identity,
+        &tier2_lease_key(4242, "headsha-two-sessions"),
+    )
+    .await;
+
+    assert_eq!(
+        repository
+            .attach_lead_session(&f.subject, "key-sessions", &lease_id, "session-a")
+            .await
+            .unwrap(),
+        CiLeadSessionAttachment::Attached { session_count: 1 },
+        "the first attach reports one"
+    );
+    assert_eq!(
+        repository
+            .attach_lead_session(&f.subject, "key-sessions", &lease_id, "session-b")
+            .await
+            .unwrap(),
+        CiLeadSessionAttachment::Attached { session_count: 2 },
+        "the second attach is an ADDITIONAL session, not a correction of the first"
+    );
+
+    let row = repository
+        .get(&f.subject, "key-sessions")
+        .await
+        .unwrap()
+        .expect("row");
+    assert_eq!(row.lead_session_count, 2);
+    assert_eq!(
+        row.lead_session_id.as_deref(),
+        Some("session-a"),
+        "the FIRST session id is the audit handle and is never overwritten"
+    );
+
+    let report = repository
+        .route_report(&CiRouteReportFilter::all())
+        .await
+        .unwrap();
+    assert_eq!(
+        report.lead_invocations, 2,
+        "two Lead sessions on one route cost two Lead sessions"
+    );
+
+    // The fence is unchanged: a stale lease id attaches nothing and counts
+    // nothing.
+    assert_eq!(
+        repository
+            .attach_lead_session(&f.subject, "key-sessions", "not-the-lease", "session-c")
+            .await
+            .unwrap(),
+        CiLeadSessionAttachment::NotFound
+    );
+    assert_eq!(
+        repository
+            .get(&f.subject, "key-sessions")
+            .await
+            .unwrap()
+            .expect("row")
+            .lead_session_count,
+        2,
+        "a refused attach does not increment"
+    );
+}
+
+/// A merge recorded only in `tier2_resolution` still counts toward the
+/// per-merged-PR denominator.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn merged_prs_counts_a_merge_that_landed_in_the_tier_two_column() {
+    let f = fixture().await;
+    let repository = repo(&f.db);
+    let identity = pr_head_identity(950, "headsha-merged-late");
+    repository
+        .reserve(&reservation(
+            &f.subject,
+            "key-merged",
+            identity.clone(),
+            "fp-merged",
+        ))
+        .await
+        .unwrap();
+    let owner = incarnation();
+    repository
+        .charge_and_begin_calling(&f.subject, "key-merged", &owner, &identity)
+        .await
+        .unwrap();
+    // The route terminalizes on its PROVIDER result, so `terminal_outcome` is
+    // write-once and spent.
+    assert!(
+        repository
+            .finalize_calling(
+                &f.subject,
+                "key-merged",
+                &owner,
+                CiRouteOutcome::ActionFailed,
+                None,
+            )
+            .await
+            .unwrap()
+    );
+    // It routes to Tier 2 — which `action_failed` legally may — and the PR
+    // merges while that adjudication is open, so the merge lands in
+    // `tier2_resolution` and `terminal_outcome` keeps the provider failure.
+    open_lease(
+        &repository,
+        &f.subject,
+        "key-merged",
+        &identity,
+        &tier2_lease_key(4242, "headsha-merged-late"),
+    )
+    .await;
+    repository
+        .close_routes_for_newer_outcome(&f.subject, 4242, CiRouteOutcome::Merged, None)
+        .await
+        .unwrap();
+
+    let row = repository
+        .get(&f.subject, "key-merged")
+        .await
+        .unwrap()
+        .expect("row");
+    assert_eq!(row.terminal_outcome, Some(CiRouteOutcome::ActionFailed));
+    assert_eq!(row.tier2_resolution, Some(CiRouteOutcome::Merged));
+
+    let report = repository
+        .route_report(&CiRouteReportFilter::all())
+        .await
+        .unwrap();
+    assert_eq!(
+        report.merged_prs, 1,
+        "reading only `terminal_outcome` would miss every merge that followed a \
+         provider failure and inflate every per-merged-PR ratio in the report"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The bounded incomplete-evidence hold
+// ---------------------------------------------------------------------------
+
+/// A retry of the SAME logical poll reads back its sequence instead of
+/// reserving a second one — across a genuinely new repository over the same
+/// database.
+///
+/// Without this, a crash-loop between reserve and apply burns sequence space,
+/// and every observation still in flight looks superseded because the
+/// watermark race has moved on without them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hold_observation_is_idempotent_across_restart() {
+    let f = fixture().await;
+    let identity = hold_identity(&f.subject, "headsha-idempotent");
+    let poll_id = uuid::Uuid::now_v7().to_string();
+
+    let first = {
+        let holds = CiIncompleteHoldRepository::new(f.db.clone());
+        holds.reserve_poll(&identity, &poll_id).await.unwrap()
+    };
+    assert!(!first.replayed, "the first reservation is not a replay");
+    assert_eq!(
+        first.poll_sequence, 1,
+        "sequences start at one, so zero can mean `nothing applied yet`"
+    );
+
+    // The process died and came back: a brand-new repository over a brand-new
+    // pool, built from nothing but the connection string.
+    let dsn = f.db.test_dsn().expect("ephemeral database exposes a DSN");
+    let handle = Database::reopen_test(&dsn).expect("reopen after simulated restart");
+    let restarted = CiIncompleteHoldRepository::new(handle.clone());
+
+    let second = restarted.reserve_poll(&identity, &poll_id).await.unwrap();
+    assert!(
+        second.replayed,
+        "the same poll id is a replay, not a new poll"
+    );
+    assert_eq!(second.poll_sequence, first.poll_sequence);
+    assert_eq!(second.streak_id, first.streak_id);
+
+    let streak = restarted
+        .get(&identity)
+        .await
+        .unwrap()
+        .expect("the streak survives the restart");
+    assert_eq!(
+        streak.next_poll_sequence, 1,
+        "the retry reserved NO second sequence"
+    );
+    assert_eq!(streak.poll_count, 0, "reserving is not counting");
+    assert_eq!(streak.last_applied_poll_sequence, 0);
+    assert_eq!(
+        count_rows(
+            &f.db,
+            "SELECT COUNT(*) FROM ci_incomplete_hold_observations"
+        )
+        .await,
+        1,
+        "one logical poll, one observation row"
+    );
+
+    // A DIFFERENT poll id does reserve a second sequence.
+    let other = restarted
+        .reserve_poll(&identity, &uuid::Uuid::now_v7().to_string())
+        .await
+        .unwrap();
+    assert!(!other.replayed);
+    assert_eq!(other.poll_sequence, 2);
+}
+
+/// Sequence reservation, not arrival time, is the authority order.
+///
+/// A poll that reserved earlier but lands later is **superseded**: it writes
+/// its own marker and nothing else. Without that, a late incomplete answer
+/// arriving after an on-time complete one resurrects a streak that had
+/// legitimately reset — the lane is green and the hold escalates anyway.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_late_poll_is_superseded_and_changes_nothing() {
+    let f = fixture().await;
+    let holds = CiIncompleteHoldRepository::new(f.db.clone());
+    let identity = hold_identity(&f.subject, "headsha-ordering");
+    let escalation = escalation_route(&f.subject, "headsha-ordering");
+
+    // A reserves first...
+    let a = uuid::Uuid::now_v7().to_string();
+    let reserved_a = holds.reserve_poll(&identity, &a).await.unwrap();
+    assert_eq!(reserved_a.poll_sequence, 1);
+
+    // ...but B reserves second and lands FIRST, with complete evidence.
+    let b = uuid::Uuid::now_v7().to_string();
+    let reserved_b = holds.reserve_poll(&identity, &b).await.unwrap();
+    assert_eq!(reserved_b.poll_sequence, 2);
+    assert_eq!(
+        holds
+            .apply_poll(&identity, &identity, &b, true, &escalation)
+            .await
+            .unwrap(),
+        CiHoldApply::Reset { poll_sequence: 2 }
+    );
+
+    let after_reset = holds.get(&identity).await.unwrap().expect("streak");
+    assert_eq!(after_reset.last_applied_poll_sequence, 2);
+    assert_eq!(after_reset.poll_count, 0);
+    assert!(
+        !after_reset.has_escalated(),
+        "a complete enumeration clears the escalation marker"
+    );
+
+    // Now A lands. Its sequence is BEHIND the watermark, so it is superseded.
+    assert_eq!(
+        holds
+            .apply_poll(&identity, &identity, &a, false, &escalation)
+            .await
+            .unwrap(),
+        CiHoldApply::Superseded,
+        "an overtaken observation applies nothing, whatever it observed"
+    );
+
+    let after_late = holds.get(&identity).await.unwrap().expect("streak");
+    assert_eq!(
+        after_late.poll_count, 0,
+        "the superseded incomplete answer did NOT increment"
+    );
+    assert_eq!(
+        after_late.last_applied_poll_sequence, 2,
+        "and did NOT move the retained high-watermark backwards"
+    );
+    assert!(!after_late.has_escalated());
+    assert_eq!(
+        count_rows(&f.db, "SELECT COUNT(*) FROM ci_route_attempts").await,
+        0,
+        "and dispatched nothing"
+    );
+
+    // The loser is still auditable: an ordering contract whose losers leave no
+    // trace cannot be checked.
+    let observation = holds.observation(&a).await.unwrap().expect("observation");
+    assert_eq!(
+        observation.apply_outcome.as_deref(),
+        Some("superseded_observation")
+    );
+    assert!(observation.applied_at.is_some());
+
+    // A genuinely newer incomplete poll counts normally: the streak was reset,
+    // not broken.
+    let c = uuid::Uuid::now_v7().to_string();
+    assert_eq!(
+        holds
+            .reserve_poll(&identity, &c)
+            .await
+            .unwrap()
+            .poll_sequence,
+        3
+    );
+    assert_eq!(
+        holds
+            .apply_poll(&identity, &identity, &c, false, &escalation)
+            .await
+            .unwrap(),
+        CiHoldApply::Held { poll_count: 1 }
+    );
+    assert_eq!(
+        holds
+            .get(&identity)
+            .await
+            .unwrap()
+            .expect("streak")
+            .last_applied_poll_sequence,
+        3
+    );
+}
+
+/// A head advance leaves the old streak ineligible to apply, and the new head
+/// starts a fresh streak at one.
+///
+/// The identity check runs BEFORE the sequence comparison, deliberately: a
+/// delayed apply for a head that has since moved must not increment — let alone
+/// escalate — the old head's streak, because that would open a diagnose route
+/// for a head nobody is on any more.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn head_advance_clears_hold_streak() {
+    let f = fixture().await;
+    let holds = CiIncompleteHoldRepository::new(f.db.clone());
+    let old = hold_identity(&f.subject, "headsha-old");
+    let new = hold_identity(&f.subject, "headsha-new");
+    let escalation = escalation_route(&f.subject, "headsha-old");
+
+    // One real incomplete poll on the old head, so the streak is non-trivial.
+    assert_eq!(
+        one_poll(&holds, &old, &escalation, false).await,
+        CiHoldApply::Held { poll_count: 1 }
+    );
+
+    // A poll reserves against the old head, and the head moves during the
+    // provider enumeration.
+    let stale = uuid::Uuid::now_v7().to_string();
+    holds.reserve_poll(&old, &stale).await.unwrap();
+    assert_eq!(
+        holds
+            .apply_poll(&old, &new, &stale, false, &escalation)
+            .await
+            .unwrap(),
+        CiHoldApply::IdentityAdvanced
+    );
+
+    let old_streak = holds.get(&old).await.unwrap().expect("old streak");
+    assert_eq!(
+        old_streak.poll_count, 1,
+        "the stale apply did not increment the old head's streak"
+    );
+    assert_eq!(
+        old_streak.last_applied_poll_sequence, 1,
+        "nor advance its watermark"
+    );
+    assert!(!old_streak.has_escalated());
+    assert_eq!(
+        holds
+            .observation(&stale)
+            .await
+            .unwrap()
+            .expect("observation")
+            .apply_outcome
+            .as_deref(),
+        Some("identity_advanced")
+    );
+
+    // The new head is a fresh row that counts from one.
+    assert!(
+        holds.get(&new).await.unwrap().is_none(),
+        "the new head has no streak until it is polled"
+    );
+    assert_eq!(
+        one_poll(
+            &holds,
+            &new,
+            &escalation_route(&f.subject, "headsha-new"),
+            false
+        )
+        .await,
+        CiHoldApply::Held { poll_count: 1 }
+    );
+    let new_streak = holds.get(&new).await.unwrap().expect("new streak");
+    assert_eq!(new_streak.poll_count, 1);
+    assert_eq!(new_streak.next_poll_sequence, 1);
+    assert_ne!(new_streak.id, old_streak.id);
+}
+
+/// The twelfth consecutive incomplete poll escalates **exactly once**, under a
+/// real race, and inserts **exactly one** diagnose-only run-absent route in the
+/// same transaction.
+///
+/// `poll_count` reaches 11 by driving eleven real applies rather than by a raw
+/// UPDATE: a streak fabricated with SQL proves nothing about the mechanism that
+/// is supposed to produce it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_twelfth_incomplete_poll_escalates_exactly_once_under_a_race() {
+    let f = fixture().await;
+    let holds = CiIncompleteHoldRepository::new(f.db.clone());
+    let identity = hold_identity(&f.subject, "headsha-escalate");
+    let escalation = escalation_route(&f.subject, "headsha-escalate");
+
+    for expected in 1..CI_INCOMPLETE_HOLD_MAX_POLLS {
+        assert_eq!(
+            one_poll(&holds, &identity, &escalation, false).await,
+            CiHoldApply::Held {
+                poll_count: expected
+            },
+            "poll {expected} is below the bound and holds"
+        );
+    }
+    let seeded = holds.get(&identity).await.unwrap().expect("streak");
+    assert_eq!(seeded.poll_count, CI_INCOMPLETE_HOLD_MAX_POLLS - 1);
+    assert!(!seeded.has_escalated());
+    assert_eq!(
+        count_rows(&f.db, "SELECT COUNT(*) FROM ci_route_attempts").await,
+        0,
+        "eleven consecutive incomplete polls have dispatched nothing"
+    );
+
+    // The report sees the hold even though it has written no route row — which
+    // is the reason `recoverable_holds` is not derivable from `held`.
+    let holding = repo(&f.db)
+        .route_report(&CiRouteReportFilter::all())
+        .await
+        .unwrap();
+    assert_eq!(holding.recoverable_holds, 1);
+    assert_eq!(holding.bounded_hold_escalations, 0);
+    assert_eq!(
+        holding.held, 0,
+        "a recoverable hold is NOT a `held` route: it is disjoint, not a subset"
+    );
+
+    // Two pollers now reserve, then race their applies. Both observed
+    // incomplete evidence; both are entitled to try.
+    let (first, second) = (
+        uuid::Uuid::now_v7().to_string(),
+        uuid::Uuid::now_v7().to_string(),
+    );
+    holds.reserve_poll(&identity, &first).await.unwrap();
+    holds.reserve_poll(&identity, &second).await.unwrap();
+
+    let left = CiIncompleteHoldRepository::new(f.db.clone());
+    let right = CiIncompleteHoldRepository::new(f.db.clone());
+    let (a, b) = tokio::join!(
+        left.apply_poll(&identity, &identity, &first, false, &escalation),
+        right.apply_poll(&identity, &identity, &second, false, &escalation),
+    );
+    let outcomes = [a.unwrap(), b.unwrap()];
+
+    let escalations = outcomes
+        .iter()
+        .filter(|o| {
+            matches!(
+                o,
+                CiHoldApply::Escalated {
+                    poll_count: CI_INCOMPLETE_HOLD_MAX_POLLS,
+                    route_inserted: true
+                }
+            )
+        })
+        .count();
+    assert_eq!(
+        escalations, 1,
+        "exactly one poller escalates; got {outcomes:?}"
+    );
+    let losers = outcomes
+        .iter()
+        .filter(|o| matches!(o, CiHoldApply::Superseded | CiHoldApply::AlreadyEscalated))
+        .count();
+    assert_eq!(
+        losers, 1,
+        "the other poller is overtaken or finds the streak already escalated; got {outcomes:?}"
+    );
+
+    let streak = holds.get(&identity).await.unwrap().expect("streak");
+    assert!(streak.has_escalated(), "escalated_at is set");
+    assert_eq!(streak.poll_count, CI_INCOMPLETE_HOLD_MAX_POLLS);
+    assert_eq!(
+        count_rows(
+            &f.db,
+            "SELECT COUNT(*) FROM ci_incomplete_hold_observations WHERE apply_outcome = 'escalated'"
+        )
+        .await,
+        1,
+        "escalated_at was reached through exactly one observation"
+    );
+
+    // One route, one lease, one Lead session's worth of work — and it is the
+    // run-absent diagnose-only route.
+    assert_eq!(
+        count_rows(
+            &f.db,
+            "SELECT COUNT(*) FROM ci_route_attempts WHERE run_id IS NULL"
+        )
+        .await,
+        1,
+        "the escalation inserts exactly one diagnose-only run-absent route"
+    );
+    let route = repo(&f.db)
+        .get(&f.subject, "key-escalation-headsha-escalate")
+        .await
+        .unwrap()
+        .expect("the escalation route");
+    assert!(route.is_run_absent());
+    assert_eq!(route.action, CiAction::AskLead);
+    assert_eq!(route.tier2_lease_state, Some(CiTier2LeaseState::Open));
+    assert_eq!(
+        route.tier2_lease_reason,
+        Some(CiTier2Reason::EvidenceUnknown)
+    );
+
+    let escalated = repo(&f.db)
+        .route_report(&CiRouteReportFilter::all())
+        .await
+        .unwrap();
+    assert_eq!(
+        escalated.bounded_hold_escalations, 1,
+        "the escalation is reportable"
+    );
+    assert_eq!(
+        escalated.recoverable_holds, 0,
+        "and it is no longer a recoverable hold: the two are mutually exclusive"
+    );
+
+    // A thirteenth incomplete poll neither counts nor dispatches again.
+    assert_eq!(
+        one_poll(&holds, &identity, &escalation, false).await,
+        CiHoldApply::AlreadyEscalated
+    );
+    let after = holds.get(&identity).await.unwrap().expect("streak");
+    assert_eq!(
+        after.poll_count, CI_INCOMPLETE_HOLD_MAX_POLLS,
+        "an escalated streak stops counting"
+    );
+    assert_eq!(
+        after.escalated_at, streak.escalated_at,
+        "and escalated_at is stamped once, never re-stamped"
+    );
+    assert_eq!(
+        count_rows(&f.db, "SELECT COUNT(*) FROM ci_route_attempts").await,
+        1,
+        "and opens no second lease and no second Lead session"
+    );
+}
+
+/// The escalation marker and the route it authorizes commit **together**.
+///
+/// Proven by making the route insert fail inside the apply transaction: if the
+/// two were sequential, `escalated_at` would survive the failure and the hold
+/// would be permanently silent with nothing dispatched — the worst of both
+/// outcomes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_escalation_route_rolls_back_the_escalation_marker() {
+    let f = fixture().await;
+    let holds = CiIncompleteHoldRepository::new(f.db.clone());
+    let identity = hold_identity(&f.subject, "headsha-atomic");
+    let escalation = escalation_route(&f.subject, "headsha-atomic");
+
+    for _ in 1..CI_INCOMPLETE_HOLD_MAX_POLLS {
+        one_poll(&holds, &identity, &escalation, false).await;
+    }
+
+    // Make the route insert impossible, without touching the streak table.
+    sqlx::query("ALTER TABLE ci_route_attempts ADD CONSTRAINT reject_all_for_test CHECK (false)")
+        .execute(f.db.pool())
+        .await
+        .expect("install the injected refusal");
+
+    let poll_id = uuid::Uuid::now_v7().to_string();
+    holds.reserve_poll(&identity, &poll_id).await.unwrap();
+    let err = holds
+        .apply_poll(&identity, &identity, &poll_id, false, &escalation)
+        .await
+        .expect_err("the route insert fails, so the whole apply fails");
+    assert!(
+        err.to_string().contains("reject_all_for_test"),
+        "expected the injected refusal, got: {err}"
+    );
+
+    let streak = holds.get(&identity).await.unwrap().expect("streak");
+    assert!(
+        !streak.has_escalated(),
+        "escalated_at rolled back with the route insert: a hold that could not \
+         dispatch has NOT escalated"
+    );
+    assert_eq!(
+        streak.poll_count,
+        CI_INCOMPLETE_HOLD_MAX_POLLS - 1,
+        "and the increment rolled back too"
+    );
+    assert_eq!(
+        streak.last_applied_poll_sequence,
+        CI_INCOMPLETE_HOLD_MAX_POLLS - 1,
+        "and the high-watermark did not advance, so the poll can be retried"
+    );
+
+    // With the refusal removed, the same bound is reached and dispatched.
+    sqlx::query("ALTER TABLE ci_route_attempts DROP CONSTRAINT reject_all_for_test")
+        .execute(f.db.pool())
+        .await
+        .expect("remove the injected refusal");
+    assert_eq!(
+        one_poll(&holds, &identity, &escalation, false).await,
+        CiHoldApply::Escalated {
+            poll_count: CI_INCOMPLETE_HOLD_MAX_POLLS,
+            route_inserted: true
+        }
+    );
+}
+
+/// The escalation route may not fabricate an identity, and an apply that has
+/// nothing to apply to is a no-op rather than an error.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_escalation_route_that_names_a_run_is_refused() {
+    let f = fixture().await;
+    let holds = CiIncompleteHoldRepository::new(f.db.clone());
+    let identity = hold_identity(&f.subject, "headsha-validate");
+
+    let mut fabricated = escalation_route(&f.subject, "headsha-validate");
+    fabricated.reservation.identity.run_id = Some(77);
+    let poll_id = uuid::Uuid::now_v7().to_string();
+    holds.reserve_poll(&identity, &poll_id).await.unwrap();
+    let err = holds
+        .apply_poll(&identity, &identity, &poll_id, false, &fabricated)
+        .await
+        .expect_err("a hold escalates because no run was resolved");
+    assert!(err.to_string().contains("run_id = 77"), "got: {err}");
+
+    let mut wrong_action = escalation_route(&f.subject, "headsha-validate");
+    wrong_action.reservation.action = CiAction::RerunRun;
+    let err = holds
+        .apply_poll(&identity, &identity, &poll_id, false, &wrong_action)
+        .await
+        .expect_err("an escalation authorizes an adjudication, not a rerun");
+    assert!(err.to_string().contains("rerun_run"), "got: {err}");
+
+    // The refusals happened at the API boundary, so nothing was applied.
+    assert_eq!(
+        holds
+            .get(&identity)
+            .await
+            .unwrap()
+            .expect("streak")
+            .poll_count,
+        0
+    );
+
+    // An apply against an identity that has no streak is NotFound, never a side
+    // effect.
+    let never_polled = hold_identity(&f.subject, "headsha-never-polled");
+    assert_eq!(
+        holds
+            .apply_poll(
+                &never_polled,
+                &never_polled,
+                &uuid::Uuid::now_v7().to_string(),
+                false,
+                &escalation_route(&f.subject, "headsha-never-polled"),
+            )
+            .await
+            .unwrap(),
+        CiHoldApply::NotFound
+    );
+    assert!(holds.get(&never_polled).await.unwrap().is_none());
+
+    // And an apply for an unknown observation on a KNOWN streak is NotFound too.
+    assert_eq!(
+        holds
+            .apply_poll(
+                &identity,
+                &identity,
+                "no-such-observation",
+                false,
+                &escalation_route(&f.subject, "headsha-validate"),
+            )
+            .await
+            .unwrap(),
+        CiHoldApply::NotFound
+    );
+}
+
+/// The sequence high-watermarks never retreat, whatever writes them.
+///
+/// The repository never issues a decrease, which is exactly why the trigger is
+/// here: "retained high-watermark" is the property the entire ordering contract
+/// rests on, and an operational `UPDATE ... SET last_applied_poll_sequence = 0`
+/// to "unstick" a streak would silently re-admit every superseded observation.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hold_sequence_watermarks_never_retreat() {
+    let f = fixture().await;
+    let holds = CiIncompleteHoldRepository::new(f.db.clone());
+    let identity = hold_identity(&f.subject, "headsha-watermark");
+    let escalation = escalation_route(&f.subject, "headsha-watermark");
+    one_poll(&holds, &identity, &escalation, false).await;
+    one_poll(&holds, &identity, &escalation, false).await;
+    let before = holds.get(&identity).await.unwrap().expect("streak");
+    assert_eq!(before.next_poll_sequence, 2);
+    assert_eq!(before.last_applied_poll_sequence, 2);
+
+    for (column, needle) in [
+        ("last_applied_poll_sequence", "high-watermark"),
+        ("next_poll_sequence", "monotonic"),
+    ] {
+        let err = sqlx::query(&format!(
+            "UPDATE ci_incomplete_hold_streaks SET {column} = 0"
+        ))
+        .execute(f.db.pool())
+        .await
+        .expect_err("the monotonicity trigger refuses a retreat");
+        assert!(
+            err.to_string().contains(needle),
+            "expected the {column} guard, got: {err}"
+        );
+    }
+
+    let after = holds.get(&identity).await.unwrap().expect("streak");
+    assert_eq!(after.next_poll_sequence, before.next_poll_sequence);
+    assert_eq!(
+        after.last_applied_poll_sequence,
+        before.last_applied_poll_sequence
+    );
 }

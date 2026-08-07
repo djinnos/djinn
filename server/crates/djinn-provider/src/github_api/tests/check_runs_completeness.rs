@@ -15,7 +15,8 @@
 
 use super::seed_installation_token;
 use crate::github_api::{
-    CheckRunsResponse, CheckSetCompleteness, CheckSetIncompleteReason, GitHubApiClient,
+    CheckRunsResponse, CheckSetCompleteness, CheckSetIncompleteReason, CheckSetRecoverability,
+    GitHubApiClient,
 };
 use wiremock::matchers::{method, path, path_regex, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -466,5 +467,94 @@ async fn ref_enumeration_pages_and_reports_its_own_completeness() {
         checks.completeness,
         CheckSetCompleteness::Incomplete(CheckSetIncompleteReason::PageFetchFailed),
         "a page-1 failure has no partial result and must not read as an empty set",
+    );
+}
+
+/// Every incomplete verdict carries its own recoverability, and the split is
+/// the one proposal `nafu` revision 58 routes on.
+///
+/// # Why this lives with the provider and not with the router
+///
+/// "Can re-asking answer differently?" is a fact about the enumeration, and the
+/// enumeration is the only thing that knows how it failed. A router that
+/// re-derived it from the reason spelling would be a second opinion nothing
+/// holds to the first — and the first time the two disagreed, a truncated PR
+/// would hold forever with nothing on the board to explain it, which is exactly
+/// the wedge revision 58 exists to close.
+///
+/// The membership is pinned, not merely spot-checked: a new
+/// `CheckSetIncompleteReason` cannot be silently filed as recoverable, because
+/// this asserts the whole partition rather than one member of it.
+#[test]
+fn truncation_is_irrecoverable_short_read_is_recoverable() {
+    assert_eq!(
+        CheckSetIncompleteReason::MaxPagesTruncated.recoverability(),
+        CheckSetRecoverability::Irrecoverable,
+        "truncation is a property of the ref, not of the moment: every later \
+         walk hits the same ceiling, so holding for a better answer waits \
+         forever",
+    );
+    assert_eq!(
+        CheckSetIncompleteReason::ShortRead.recoverability(),
+        CheckSetRecoverability::Recoverable,
+        "a short read is the provider disagreeing with itself between \
+         `total_count` and the pages it served; the next poll is a fresh answer",
+    );
+    assert_eq!(
+        CheckSetIncompleteReason::PageFetchFailed.recoverability(),
+        CheckSetRecoverability::Recoverable,
+        "a non-success page is a provider incident, and the next poll is a \
+         fresh request",
+    );
+
+    // The partition, pinned. Anything new must be classified deliberately.
+    let irrecoverable: Vec<CheckSetIncompleteReason> = [
+        CheckSetIncompleteReason::PageFetchFailed,
+        CheckSetIncompleteReason::MaxPagesTruncated,
+        CheckSetIncompleteReason::ShortRead,
+    ]
+    .into_iter()
+    .filter(|reason| reason.recoverability() == CheckSetRecoverability::Irrecoverable)
+    .collect();
+    assert_eq!(
+        irrecoverable,
+        vec![CheckSetIncompleteReason::MaxPagesTruncated],
+        "exactly one enumeration verdict is irrecoverable. A new one filed here \
+         escalates a real PR to a diagnose-only Lead adjudication on its first \
+         incomplete poll; a new one filed on the other side holds it forever.",
+    );
+}
+
+/// The verdicts a real paging walk produces carry recoverability end to end.
+///
+/// Separate from the table above deliberately: that one proves the mapping,
+/// this one proves the walk actually reaches it. A mapping nothing produces is
+/// a mapping that measures nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn walked_verdicts_carry_their_recoverability() {
+    let server = MockServer::start().await;
+    let install_id = seed_installation_token();
+    mount_pr(&server).await;
+
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/repos/djinnos/server/commits/.*/check-runs$"))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&server)
+        .await;
+
+    let client = GitHubApiClient::for_installation_with_base_url(install_id, server.uri());
+    let checks = client
+        .list_check_runs_for_ref("djinnos", "server", "somesha")
+        .await
+        .expect("a page failure is an incomplete enumeration, not a transport error");
+    let reason = checks
+        .completeness
+        .incomplete_reason()
+        .expect("a failed page is not a complete enumeration");
+    assert_eq!(
+        reason.recoverability(),
+        CheckSetRecoverability::Recoverable,
+        "a failed page must reach the caller as recoverable, so it takes the \
+         bounded hold rather than one diagnose-only route on its first poll",
     );
 }

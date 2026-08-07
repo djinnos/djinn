@@ -93,6 +93,15 @@ struct FakeState {
 #[derive(Clone, Default)]
 struct FakeProvider {
     state: Arc<Mutex<FakeState>>,
+    /// When set, `list_check_runs_for_ref` parks here until it is notified.
+    ///
+    /// This is the seam that lets a fixture interleave two *real* logical polls
+    /// of one lane: the enumeration is the gap the ordering contract exists to
+    /// span, so pausing a poll inside it is the only way to make poll A's
+    /// reservation genuinely precede poll B's and poll A's apply genuinely
+    /// follow it. Nothing in the fixture chooses the sequences — the ledger
+    /// assigns them, and the fixture reads them back.
+    hold_enumeration: Option<Arc<tokio::sync::Notify>>,
 }
 
 impl FakeProvider {
@@ -106,6 +115,17 @@ impl FakeProvider {
             .expect("fake provider mutex")
             .reran
             .clone()
+    }
+
+    /// A provider whose enumeration parks until the returned handle is
+    /// notified. See [`FakeProvider::hold_enumeration`].
+    fn parked_enumeration() -> (Self, Arc<tokio::sync::Notify>) {
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let me = Self {
+            state: Arc::default(),
+            hold_enumeration: Some(gate.clone()),
+        };
+        (me, gate)
     }
 
     fn failing_mutations() -> Self {
@@ -203,6 +223,11 @@ impl CiRouteProvider for FakeProvider {
         _repo: &str,
         _git_ref: &str,
     ) -> Result<CheckRunsResponse, GitHubApiError> {
+        // Before the lock: a parked enumeration must not hold the mutex, and
+        // the await point is the whole point of the seam.
+        if let Some(gate) = &self.hold_enumeration {
+            gate.notified().await;
+        }
         let mut state = self.state.lock().expect("fake provider mutex");
         state.calls.list_check_runs += 1;
         if state.fail_check_runs {
@@ -441,7 +466,7 @@ fn pr_head_identity(run_id: i64) -> CiEvidenceIdentity {
         lane: CiLane::PrHead,
         pr_number: PR,
         pr_head_sha: HEAD.to_owned(),
-        run_id,
+        run_id: Some(run_id),
         run_head_sha: HEAD.to_owned(),
         dequeue_id: None,
     }
@@ -452,7 +477,7 @@ fn merge_group_identity(run_id: i64) -> CiEvidenceIdentity {
         lane: CiLane::MergeGroup,
         pr_number: PR,
         pr_head_sha: HEAD.to_owned(),
-        run_id,
+        run_id: Some(run_id),
         run_head_sha: "cccccccccccccccccccccccccccccccccccccccc".to_owned(),
         dequeue_id: Some(
             "refs/heads/gh-readonly-queue/main/pr-4242-a@2026-08-06T00:00:00Z".to_owned(),
@@ -491,6 +516,15 @@ fn causal_check(name: &str, run_id: u64) -> CheckRun {
 
 fn refs(runs: &[CheckRun]) -> Vec<&CheckRun> {
     runs.iter().collect()
+}
+
+/// The blocking predicate `pr_watcher`'s failing-CI branch passes.
+///
+/// A plain `fn` rather than a closure because the lane takes a function
+/// pointer: the enumeration it filters is the one the lane takes itself, under
+/// its own reserved sequence, so there is no captured slice to close over.
+fn failing_filter(cr: &CheckRun) -> bool {
+    crate::pr_poller::is_failing_conclusion(cr.conclusion.as_deref())
 }
 
 async fn run(
@@ -2109,8 +2143,7 @@ async fn the_pr_head_lane_executes_the_complete_empty_route() {
             "widgets",
             PR as u64,
             HEAD,
-            &CheckRunsResponse::complete(Vec::new()),
-            &[],
+            failing_filter,
             CiRoutingGate::Enabled,
         )
         .await;
@@ -2184,7 +2217,7 @@ async fn a_check_api_failure_after_correlation_routes_to_guarded_tier_two() {
         lane: CiLane::MergeGroup,
         pr_number: PR,
         pr_head_sha: HEAD.to_owned(),
-        run_id: 971,
+        run_id: Some(971),
         run_head_sha: MERGE_GROUP_SHA.to_owned(),
         dequeue_id: Some(DEQUEUE_ID.to_owned()),
     };
@@ -2292,7 +2325,7 @@ fn fabricated_merge_group_identity() -> CiEvidenceIdentity {
         lane: CiLane::MergeGroup,
         pr_number: PR,
         pr_head_sha: HEAD.to_owned(),
-        run_id: 0,
+        run_id: Some(0),
         run_head_sha: HEAD.to_owned(),
         dequeue_id: None,
     }
@@ -2308,17 +2341,24 @@ async fn route_exists(h: &LaneHarness, identity: &CiEvidenceIdentity, action: Ci
         .is_some()
 }
 
-/// The merge-group lane's *lane-level* incomplete capture keys on the run the
-/// correlation named — because that run is right there in scope.
+/// The merge-group lane's *lane-level* incomplete capture keys on a REAL
+/// identity — never on the synthetic `run_id: 0` / `dequeue_id: None` one.
 ///
-/// `capture_merge_group_evidence` runs strictly after
-/// `correlate_merge_group_run` has named exactly one terminal run, so every
-/// verdict it can return has a real immutable identity available. The call site
-/// nevertheless passed `None`, so a truncated merge-group enumeration took a
-/// Tier-2 route row keyed on `run_id: 0` / `dequeue_id: None` while the real run
-/// id, the real run head SHA, and the real dequeue id were all in scope.
+/// Two things are pinned here, and revision 58 separates them:
+///
+/// * the **dequeue id** is a fact the poll named, and it stays. It is what keeps
+///   two dequeues of one head distinct, and dropping it is what let the second
+///   dequeue resolve `AlreadyPresent` and never get a route at all.
+/// * the **run id** is dropped, because `MaxPagesTruncated` is irrecoverable and
+///   revision 58 routes every irrecoverable reason under the run-absent
+///   identity. That is not a lost fact: it is the collapse that makes two
+///   irrecoverable reasons on one head share one row, one lease and one Lead
+///   session instead of opening a pair of each. The merge lane reaches these
+///   reasons *after* correlation named a run and the PR-head lane reaches them
+///   before, so keying on the run here would split one head's adjudication in
+///   two purely by which lane happened to observe it.
 #[tokio::test]
-async fn a_lane_level_merge_group_capture_keys_on_the_correlated_run() {
+async fn a_lane_level_merge_group_capture_keys_on_a_real_identity() {
     let h = lane_harness().await;
     let provider = FakeProvider::default();
     // A truncated enumeration: not an enumeration *failure*, so it classifies
@@ -2352,14 +2392,28 @@ async fn a_lane_level_merge_group_capture_keys_on_the_correlated_run() {
         "precondition: this reason really does create a route row",
     );
 
+    // The real dequeue id survives; the run is genuinely absent, not `0`.
+    let run_absent = CiEvidenceIdentity {
+        lane: CiLane::MergeGroup,
+        pr_number: PR,
+        pr_head_sha: HEAD.to_owned(),
+        run_id: None,
+        run_head_sha: HEAD.to_owned(),
+        dequeue_id: Some(DEQUEUE_ID.to_owned()),
+    };
     assert!(
-        route_exists(&h, &merge_group_identity(975), CiAction::AskLead).await,
-        "the lane-level capture must be keyed on the correlated run — run id, \
-         run head SHA, and dequeue id were all already known",
+        route_exists(&h, &run_absent, CiAction::AskLead).await,
+        "an irrecoverable lane-level capture must be keyed on the run-absent \
+         identity, carrying the dequeue id the poll actually named",
+    );
+    assert!(
+        !route_exists(&h, &merge_group_identity(975), CiAction::AskLead).await,
+        "and NOT on the correlated run: that would split one head's \
+         adjudication across the two lanes that reach this reason",
     );
     assert!(
         !route_exists(&h, &fabricated_merge_group_identity(), CiAction::AskLead).await,
-        "no route row may be keyed on the synthetic identity",
+        "no route row may be keyed on the synthetic `run_id: 0` identity",
     );
 }
 
@@ -2401,14 +2455,14 @@ async fn an_ambiguous_correlation_keys_its_route_on_the_real_dequeue() {
         1,
     );
 
-    // The lane identity: everything real except `run_id`, which stays 0 because
-    // "ambiguous" means no single run exists to name. That residual is the one
-    // this fixture pins — it must not silently grow a second field.
+    // The lane identity: everything real except `run_id`, which is genuinely
+    // ABSENT because "ambiguous" means no single run exists to name. Revision 58
+    // encodes that as NULL rather than the `0` sentinel this used to pin.
     let lane_identity = CiEvidenceIdentity {
         lane: CiLane::MergeGroup,
         pr_number: PR,
         pr_head_sha: HEAD.to_owned(),
-        run_id: 0,
+        run_id: None,
         run_head_sha: HEAD.to_owned(),
         dequeue_id: Some(DEQUEUE_ID.to_owned()),
     };
@@ -2484,13 +2538,20 @@ async fn no_correlated_merge_group_run_holds_without_a_route_row() {
     );
 }
 
-/// A blocking check attributable to no Actions run **holds** on the PR-head lane.
+/// A blocking check attributable to no Actions run takes ONE run-absent route.
 ///
 /// `RunAttributionUnavailable`: there is no run identity to key on, and
-/// `rerun_failed_jobs` has no run to act on either. It used to take a Tier-2 row
-/// on the fabricated `run_id: 0` identity.
+/// `rerun_failed_jobs` has no run to act on either.
+///
+/// Wave 3b made this **hold**, and revision 58 names that as a wedge: a check
+/// belonging to no nameable Actions run belongs to no nameable Actions run on
+/// every subsequent poll too, so the hold never resolved — no route, no
+/// adjudication, nothing on the board, and a CI gate that never cleared. It is
+/// irrecoverable, so it takes one diagnose-only Tier-2 route under `run_id`
+/// NULL. What it must NOT do is key that route on the fabricated `run_id: 0`
+/// identity, which is what collapsed two distinct observations onto one key.
 #[tokio::test]
-async fn an_unattributable_blocking_check_holds_without_a_route_row() {
+async fn an_unattributable_blocking_check_takes_one_run_absent_route() {
     let h = lane_harness().await;
     let provider = FakeProvider::default();
 
@@ -2498,8 +2559,7 @@ async fn an_unattributable_blocking_check_holds_without_a_route_row() {
     let mut orphan = causal_check("External / policy", 979);
     orphan.run_id = None;
     orphan.html_url = "https://example.test/checks/1".to_owned();
-    let runs = vec![orphan];
-    let blocking = refs(&runs);
+    provider.set_check_runs(vec![orphan]);
 
     let disposition = h
         .actor
@@ -2511,22 +2571,66 @@ async fn an_unattributable_blocking_check_holds_without_a_route_row() {
             "widgets",
             PR as u64,
             HEAD,
-            &CheckRunsResponse::complete(runs.clone()),
-            &blocking,
+            failing_filter,
             CiRoutingGate::Enabled,
         )
         .await;
 
-    assert!(disposition.is_routed(), "holding is the answer");
-    assert_eq!(provider.calls().mutations(), 0);
+    assert!(disposition.is_routed());
+    assert_eq!(
+        provider.calls().mutations(),
+        0,
+        "there is no run to re-run, so no provider mutation is legal",
+    );
     assert_eq!(
         djinn_db::test_support::ci_route_row_count_for_test(&h.db, &h.task_id).await,
-        0,
-        "no run was named, so nothing may be keyed on a fabricated one",
+        1,
+        "exactly one diagnose-only route",
     );
     assert_eq!(
         djinn_db::test_support::ci_route_lease_count_for_test(&h.db, &h.task_id).await,
-        0,
+        1,
+        "under exactly one Tier-2 lease",
+    );
+
+    // Keyed on genuine absence, not on the `run_id: 0` sentinel.
+    let subject = CiRouteSubject::task(h.task_id.clone());
+    let run_absent = CiEvidenceIdentity {
+        lane: CiLane::PrHead,
+        pr_number: PR,
+        pr_head_sha: HEAD.to_owned(),
+        run_id: None,
+        run_head_sha: HEAD.to_owned(),
+        dequeue_id: None,
+    };
+    let routes = CiRouteAttemptRepository::new(h.db.clone());
+    let row = routes
+        .get(
+            &subject,
+            &provider_action_key(&subject, &run_absent, CiAction::AskLead),
+        )
+        .await
+        .expect("route read")
+        .expect("the route is keyed on the run-absent identity");
+    assert_eq!(row.identity.run_id, None);
+    assert!(
+        routes
+            .get(
+                &subject,
+                &provider_action_key(
+                    &subject,
+                    &CiEvidenceIdentity {
+                        // The `run_id: 0` sentinel revision 58 abolished.
+                        run_id: Some(0),
+                        ..run_absent.clone()
+                    },
+                    CiAction::AskLead
+                ),
+            )
+            .await
+            .expect("route read")
+            .is_none(),
+        "and nothing is findable at the fabricated sentinel key",
     );
 }
 
@@ -2563,8 +2667,7 @@ async fn the_lane_wrappers_decline_when_the_gate_is_off() {
             "widgets",
             PR as u64,
             HEAD,
-            &CheckRunsResponse::complete(vec![inconclusive_check("q", 974)]),
-            &[],
+            failing_filter,
             CiRoutingGate::DisabledClean,
         )
         .await;
@@ -2847,5 +2950,1066 @@ async fn an_unreproducible_check_still_opens_the_adjudication() {
     assert!(
         handoff.repository_commands.is_empty(),
         "no command was exposed by CI, and none may be invented"
+    );
+}
+
+// ===========================================================================
+// The poll-ordering contract (proposal `nafu`, revision 58; ACs 9, 12, 14)
+// ===========================================================================
+//
+// # What these fixtures count
+//
+// One logical poll of one lane identity is three steps — reserve, enumerate,
+// apply — and the whole clause is about what happens when two of them
+// interleave. So none of these fixtures asserts the name of the enum the lane
+// returned. Every claim below is a count taken from real state:
+//
+// | Claim | Counted as |
+// | --- | --- |
+// | the streak's place in the authority order | `CiIncompleteHoldRepository::get` → `next_poll_sequence` / `last_applied_poll_sequence` |
+// | "this poll applied nothing" | one `ci_incomplete_hold_observations` row marked `superseded_observation` |
+// | no route | `SELECT count(*) FROM ci_route_attempts …` |
+// | no Tier-2 lease | `… WHERE tier2_lease_id IS NOT NULL` |
+// | no Lead session | `SELECT count(*) FROM task_arbitrations` — `dispatch_ci_tier2_lead` writes that row *before* it transitions the board, so it is the earliest durable trace a Lead adjudication leaves |
+// | no worker dispatch | `SELECT count(*) FROM task_attempts` |
+// | no board mutation | `tasks.status` plus `activity_log` |
+// | no Tier-1 charge | `SELECT count(*) FROM ci_route_budget_counters` |
+// | no provider mutation | [`FakeProvider`]'s own counters |
+//
+// # Why the interleaving is real
+//
+// [`FakeProvider::parked_enumeration`] parks a poll *inside* the provider call —
+// the exact gap the two short transactions straddle. A fixture that instead
+// called `reserve` twice and then `apply` twice in the order it wanted would be
+// performing the ordering it claims to witness: the sequences would be whatever
+// the fixture's call order made them. Here the fixture never picks a sequence.
+// It waits on the ledger ([`wait_for_reservations`]) and reads the assigned
+// sequences back out of it.
+
+/// The hold identity the PR-head lane derives for [`HEAD`].
+///
+/// Built with the production constructor rather than a literal struct, so a
+/// change to what the lane keys a streak on breaks these fixtures instead of
+/// silently giving them a streak nothing writes to.
+fn pr_head_hold_identity(task_id: &str) -> djinn_db::CiHoldIdentity {
+    crate::actor::CoordinatorActor::ci_hold_identity(
+        &CiRouteSubject::task(task_id),
+        "acme",
+        "widgets",
+        PR,
+        HEAD,
+        CiLane::PrHead,
+        None,
+    )
+}
+
+/// Count observations sitting in one terminal state.
+///
+/// `count_rows_for_test` is the only relation-counting seam `djinn-coordinator`
+/// has — a boundary test forbids a direct `sqlx` dependency — and it
+/// interpolates its argument into `SELECT count(*) FROM {…}`. Every argument
+/// passed here is a literal in this file.
+async fn observations_marked(db: &Database, outcome: &str) -> i64 {
+    djinn_db::test_support::count_rows_for_test(
+        db,
+        &format!("ci_incomplete_hold_observations WHERE apply_outcome = '{outcome}'"),
+    )
+    .await
+}
+
+async fn observation_rows(db: &Database) -> i64 {
+    djinn_db::test_support::count_rows_for_test(db, "ci_incomplete_hold_observations").await
+}
+
+async fn arbitration_rows(db: &Database) -> i64 {
+    djinn_db::test_support::count_rows_for_test(db, "task_arbitrations").await
+}
+
+/// Count budget counters that have actually been **charged**.
+///
+/// Not the row count: `reserve` inserts both counters at zero for every route
+/// it admits, so a row proves only that a route existed. `charged_count > 0` is
+/// what "consumed a Tier-1 charge" means, and it is the value the charging
+/// transaction writes.
+async fn charged_budget_counters(db: &Database) -> i64 {
+    djinn_db::test_support::count_rows_for_test(
+        db,
+        "ci_route_budget_counters WHERE charged_count > 0",
+    )
+    .await
+}
+
+/// Block until the ledger says `want` sequences have been reserved.
+///
+/// The wait is on **durable state**, never on a sleep long enough to "probably"
+/// be enough: these fixtures assert an order, so they have to observe it.
+async fn wait_for_reservations(
+    holds: &djinn_db::CiIncompleteHoldRepository,
+    identity: &djinn_db::CiHoldIdentity,
+    want: i64,
+) -> djinn_db::CiHoldStreak {
+    for _ in 0..2_000 {
+        if let Some(streak) = holds.get(identity).await.expect("streak read")
+            && streak.next_poll_sequence >= want
+        {
+            return streak;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    panic!("the ledger never reached {want} reserved sequences");
+}
+
+/// The whole remediation negative space, as counts over real tables.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct HoldNegativeSpace {
+    route_rows: i64,
+    tier2_leases: i64,
+    lead_sessions: i64,
+    worker_attempts: i64,
+    activity_rows: i64,
+    task_status: String,
+    tier1_charges: i64,
+    provider_mutations: usize,
+    has_ci_snapshot: bool,
+}
+
+async fn hold_negative_space(h: &LaneHarness, provider: &FakeProvider) -> HoldNegativeSpace {
+    use djinn_db::test_support as ts;
+    HoldNegativeSpace {
+        route_rows: ts::ci_route_row_count_for_test(&h.db, &h.task_id).await,
+        tier2_leases: ts::ci_route_lease_count_for_test(&h.db, &h.task_id).await,
+        lead_sessions: arbitration_rows(&h.db).await,
+        worker_attempts: ts::task_attempt_count_for_test(&h.db, &h.task_id).await,
+        activity_rows: ts::activity_row_count_for_test(&h.db, &h.task_id).await,
+        task_status: ts::task_status_for_test(&h.db, &h.task_id).await,
+        tier1_charges: charged_budget_counters(&h.db).await,
+        provider_mutations: provider.calls().mutations(),
+        has_ci_snapshot: h.ci_snapshot().await.is_some(),
+    }
+}
+
+/// The complete pre-escalation negative space, asserted in one place.
+///
+/// Every field is a COUNT over state the mechanism writes, so a route, lease,
+/// Lead session, worker, board row, charge, provider mutation or `Passing`
+/// snapshot that appeared would move one of them. None of it is derived from
+/// the disposition the lane returned.
+#[track_caller]
+fn assert_hold_is_free(before: &HoldNegativeSpace, after: &HoldNegativeSpace, what: &str) {
+    assert_eq!(after.route_rows, 0, "{what}: no route row may be created");
+    assert_eq!(
+        after.tier2_leases, 0,
+        "{what}: no Tier-2 lease may be opened"
+    );
+    assert_eq!(
+        after.lead_sessions, 0,
+        "{what}: no Lead adjudication may be dispatched"
+    );
+    assert_eq!(
+        after.tier1_charges, 0,
+        "{what}: a hold consumes no Tier-1 charge"
+    );
+    assert_eq!(
+        after.provider_mutations, 0,
+        "{what}: no provider mutation may be made"
+    );
+    assert!(
+        !after.has_ci_snapshot,
+        "{what}: an incomplete enumeration may not record a CI snapshot, \
+         least of all a Passing one"
+    );
+    assert_eq!(
+        before.worker_attempts, after.worker_attempts,
+        "{what}: no worker may be dispatched"
+    );
+    assert_eq!(
+        before.activity_rows, after.activity_rows,
+        "{what}: no board activity may be written"
+    );
+    assert_eq!(
+        before.task_status, after.task_status,
+        "{what}: the task status must be untouched"
+    );
+}
+
+/// Drive one whole logical poll of the real PR-head lane.
+///
+/// `incomplete` sets the enumeration verdict the provider reports; `None`
+/// leaves the provider as configured, which by default is an authoritatively
+/// complete (and empty) enumeration.
+async fn poll_pr_head(
+    h: &LaneHarness,
+    provider: &FakeProvider,
+    incomplete: Option<CheckSetIncompleteReason>,
+) -> CiLaneDisposition {
+    if let Some(reason) = incomplete {
+        provider.set_check_runs_incomplete(reason);
+    }
+    h.actor
+        .route_pr_head_ci_evidence(
+            provider,
+            &h.task_id,
+            "task-short",
+            "acme",
+            "widgets",
+            PR as u64,
+            HEAD,
+            failing_filter,
+            CiRoutingGate::Enabled,
+        )
+        .await
+}
+
+/// A recoverably-incomplete enumeration holds, and the hold buys nothing.
+///
+/// The clause is AC9's: the hold "authorizes no provider action, charge,
+/// session, worker, or board mutation". The only thing that may exist
+/// afterwards is one streak row at count 1 and one observation — and that is
+/// read out of the ledger, not inferred from the lane having said `Routed`.
+#[tokio::test]
+async fn recoverable_incomplete_set_holds_without_route_or_session() {
+    let h = lane_harness().await;
+    let provider = FakeProvider::default();
+    let before = hold_negative_space(&h, &provider).await;
+
+    let disposition = poll_pr_head(
+        &h,
+        &provider,
+        Some(CheckSetIncompleteReason::PageFetchFailed),
+    )
+    .await;
+
+    // Not `Legacy`: the ledger absorbed the result, so the caller must withhold
+    // its legacy remediation path too.
+    assert!(disposition.is_routed());
+    assert_eq!(
+        disposition.complete_empty(),
+        None,
+        "an incomplete enumeration is not the no-CI compatibility path",
+    );
+
+    // The negative space FIRST, because it is the clause: a hold that bought a
+    // route, a lease, a session, a worker, a charge or a board row has already
+    // broken the contract, whatever the streak says afterwards.
+    let after = hold_negative_space(&h, &provider).await;
+    assert_hold_is_free(&before, &after, "a recoverable incomplete poll");
+
+    let identity = pr_head_hold_identity(&h.task_id);
+    let streak = h
+        .actor
+        .ci_holds()
+        .get(&identity)
+        .await
+        .expect("streak read")
+        .expect("a recoverable incomplete poll creates its streak");
+    assert_eq!(streak.poll_count, 1, "one incomplete poll, counted once");
+    assert_eq!(streak.next_poll_sequence, 1);
+    assert_eq!(
+        streak.last_applied_poll_sequence, 1,
+        "the applied poll advances the retained high-watermark",
+    );
+    assert!(
+        !streak.has_escalated(),
+        "one poll is nowhere near the bound"
+    );
+    assert_eq!(observation_rows(&h.db).await, 1);
+    assert_eq!(observations_marked(&h.db, "applied_incomplete").await, 1);
+}
+
+/// A complete enumeration resets the streak — and **retains the row**.
+///
+/// "Reset, not deleted" is the load-bearing half. A deleted streak would look
+/// tidier and would silently re-admit every observation already overtaken: with
+/// the watermark gone, the next delayed apply finds a fresh row at sequence zero
+/// and counts itself. So this asserts the row still exists and that
+/// `last_applied_poll_sequence` did not decrease.
+#[tokio::test]
+async fn complete_snapshot_clears_hold_streak() {
+    let h = lane_harness().await;
+    let identity = pr_head_hold_identity(&h.task_id);
+    let holds = h.actor.ci_holds();
+
+    for expected in 1..=3 {
+        let provider = FakeProvider::default();
+        poll_pr_head(&h, &provider, Some(CheckSetIncompleteReason::ShortRead)).await;
+        let streak = holds
+            .get(&identity)
+            .await
+            .expect("streak read")
+            .expect("streak exists");
+        assert_eq!(streak.poll_count, expected);
+    }
+    let before = holds
+        .get(&identity)
+        .await
+        .expect("streak read")
+        .expect("streak exists");
+    assert_eq!(before.poll_count, 3);
+    assert_eq!(before.last_applied_poll_sequence, 3);
+
+    // One complete poll. The provider reports a complete, empty enumeration —
+    // the lane's no-CI compatibility path, which is a *complete* result.
+    let complete = FakeProvider::default();
+    let disposition = poll_pr_head(&h, &complete, None).await;
+    assert_eq!(
+        disposition.complete_empty(),
+        Some(CiCompleteEmptyRoute::PrHeadProceed),
+    );
+
+    let after = holds
+        .get(&identity)
+        .await
+        .expect("streak read")
+        .expect("RESET, NOT DELETED: the streak row must survive its own reset");
+    assert_eq!(after.id, before.id, "the same row, not a fresh one");
+    assert_eq!(
+        after.poll_count, 0,
+        "a complete enumeration clears the count"
+    );
+    assert!(!after.has_escalated());
+    assert_eq!(
+        after.last_applied_poll_sequence, 4,
+        "the retained high-watermark advances to the complete poll's sequence",
+    );
+    assert!(
+        after.last_applied_poll_sequence >= before.last_applied_poll_sequence,
+        "the high-watermark is retained across a reset: {} -> {}",
+        before.last_applied_poll_sequence,
+        after.last_applied_poll_sequence,
+    );
+    assert_eq!(after.next_poll_sequence, 4);
+    assert_eq!(observations_marked(&h.db, "applied_complete").await, 1);
+
+    // The reset is not a remedy; it is the absence of one.
+    let space = hold_negative_space(&h, &complete).await;
+    assert_eq!(space.route_rows, 0);
+    assert_eq!(space.tier2_leases, 0);
+    assert_eq!(space.lead_sessions, 0);
+    assert_eq!(space.worker_attempts, 0);
+    assert_eq!(space.tier1_charges, 0);
+    assert_eq!(space.provider_mutations, 0);
+}
+
+/// **The marquee.** A delayed incomplete poll cannot resurrect a cleared streak.
+///
+/// Poll A reserves its sequence and then parks *inside the provider call* — the
+/// gap the two short transactions straddle. Poll B then runs end to end,
+/// reserves the next sequence, applies a complete result, and clears the
+/// streak. Only then is A released.
+///
+/// Everything about the order is produced by the code:
+///
+/// * A's reservation precedes B's because A parks after `reserve_poll` has
+///   committed, and B waits on the **ledger** rather than on a sleep;
+/// * A's apply follows B's because A is not released until B's call returned;
+///   and
+/// * the sequences are read back out of `ci_incomplete_hold_streaks` rather
+///   than asserted from the order the calls appear in this function.
+///
+/// If `apply_poll`'s comparison against `last_applied_poll_sequence` stopped
+/// rejecting the overtaken observation, A would count — and the observation
+/// marked `superseded_observation`, which is the durable record that the
+/// ordering rule fired, would not exist.
+#[tokio::test]
+async fn delayed_incomplete_after_newer_complete_is_noop() {
+    let h = lane_harness().await;
+    let identity = pr_head_hold_identity(&h.task_id);
+    let holds = h.actor.ci_holds();
+
+    // Poll A: recoverably incomplete, parked inside its enumeration.
+    let (parked, release_a) = FakeProvider::parked_enumeration();
+    parked.set_check_runs_incomplete(CheckSetIncompleteReason::PageFetchFailed);
+
+    // Poll B: complete, and it must not start until A has actually reserved.
+    let complete = FakeProvider::default();
+
+    let a = poll_pr_head(&h, &parked, None);
+    let b = async {
+        let reserved_by_a = wait_for_reservations(&holds, &identity, 1).await;
+        assert_eq!(
+            reserved_by_a.next_poll_sequence, 1,
+            "A reserved first, and the ledger says so",
+        );
+        assert_eq!(
+            reserved_by_a.last_applied_poll_sequence, 0,
+            "A has reserved but not applied",
+        );
+
+        let disposition = poll_pr_head(&h, &complete, None).await;
+
+        let after_b = holds
+            .get(&identity)
+            .await
+            .expect("streak read")
+            .expect("streak exists");
+        // B's sequence is read out of the ledger, not asserted from call order.
+        assert_eq!(
+            after_b.next_poll_sequence, 2,
+            "B reserved the sequence after A's",
+        );
+        assert_eq!(
+            after_b.last_applied_poll_sequence, 2,
+            "B applied, so the watermark is B's sequence — above A's",
+        );
+        assert_eq!(
+            after_b.poll_count, 0,
+            "B's complete result cleared the count"
+        );
+
+        release_a.notify_one();
+        (disposition, after_b)
+    };
+    let (disposition_a, (disposition_b, after_b)) = tokio::join!(a, b);
+
+    assert_eq!(
+        disposition_b.complete_empty(),
+        Some(CiCompleteEmptyRoute::PrHeadProceed),
+        "B is the authoritative, complete observation",
+    );
+    // A is absorbed — and it does NOT fall through to legacy remediation either.
+    assert!(disposition_a.is_routed());
+    assert_eq!(disposition_a.complete_empty(), None);
+
+    let after_a = holds
+        .get(&identity)
+        .await
+        .expect("streak read")
+        .expect("streak exists");
+    assert_eq!(
+        after_a.poll_count, 0,
+        "the delayed incomplete poll must not restart the streak B cleared",
+    );
+    assert_eq!(
+        after_a.last_applied_poll_sequence, after_b.last_applied_poll_sequence,
+        "a superseded observation moves no watermark",
+    );
+    assert!(!after_a.has_escalated());
+    assert_eq!(after_a.next_poll_sequence, 2, "and reserves nothing new");
+
+    // The durable record that the ordering rule fired. This is the assertion the
+    // sequence-comparison mutation has to break: with the guard gone, A's
+    // observation is not marked superseded — it counts.
+    assert_eq!(
+        observations_marked(&h.db, "superseded_observation").await,
+        1,
+        "the overtaken observation must be recorded as superseded",
+    );
+    assert_eq!(observations_marked(&h.db, "applied_incomplete").await, 0);
+    assert_eq!(observations_marked(&h.db, "applied_complete").await, 1);
+    assert_eq!(observation_rows(&h.db).await, 2);
+
+    // Nothing at all was recreated.
+    let space = hold_negative_space(&h, &parked).await;
+    assert_eq!(space.route_rows, 0, "no route may be recreated");
+    assert_eq!(space.tier2_leases, 0, "no lease may be recreated");
+    assert_eq!(space.lead_sessions, 0, "no Lead session may be recreated");
+    assert_eq!(space.worker_attempts, 0, "no worker may be dispatched");
+    assert_eq!(space.tier1_charges, 0, "no charge may be consumed");
+    assert_eq!(space.provider_mutations, 0, "no provider mutation");
+    assert_eq!(
+        complete.calls().mutations(),
+        0,
+        "and none from the complete poll either",
+    );
+}
+
+/// A genuinely newer incomplete poll starts a fresh streak at one.
+///
+/// The mirror image of the fixture above, and the reason the ordering rule is a
+/// comparison rather than a latch: poll C is *newer* than the complete poll B,
+/// so it must count — from zero, because B cleared the streak, and not from the
+/// count the polls before B had accumulated.
+#[tokio::test]
+async fn newer_incomplete_after_complete_starts_at_one() {
+    let h = lane_harness().await;
+    let identity = pr_head_hold_identity(&h.task_id);
+    let holds = h.actor.ci_holds();
+    let baseline = hold_negative_space(&h, &FakeProvider::default()).await;
+
+    // Two incomplete polls, then a complete one: the streak is at zero with a
+    // watermark of 3.
+    for _ in 0..2 {
+        let p = FakeProvider::default();
+        poll_pr_head(&h, &p, Some(CheckSetIncompleteReason::PageFetchFailed)).await;
+    }
+    let complete = FakeProvider::default();
+    poll_pr_head(&h, &complete, None).await;
+    let after_b = holds
+        .get(&identity)
+        .await
+        .expect("streak read")
+        .expect("streak exists");
+    assert_eq!(after_b.poll_count, 0);
+    assert_eq!(after_b.last_applied_poll_sequence, 3);
+
+    // Poll C: reserved after B, so it is authoritative.
+    let c = FakeProvider::default();
+    let disposition = poll_pr_head(&h, &c, Some(CheckSetIncompleteReason::ShortRead)).await;
+    assert!(disposition.is_routed());
+    assert_eq!(disposition.complete_empty(), None);
+
+    let after_c = holds
+        .get(&identity)
+        .await
+        .expect("streak read")
+        .expect("streak exists");
+    assert_eq!(
+        after_c.poll_count, 1,
+        "a genuinely newer incomplete poll starts a FRESH streak rather than \
+         resuming the two polls before the reset",
+    );
+    assert_eq!(
+        after_c.last_applied_poll_sequence, 4,
+        "and its sequence is above B's, read from the ledger",
+    );
+    assert!(after_c.last_applied_poll_sequence > after_b.last_applied_poll_sequence);
+    assert!(!after_c.has_escalated());
+
+    // The complete poll in the middle recorded a `Passing` snapshot, which is
+    // its own compatibility path and not a remediation effect; everything the
+    // hold is forbidden to buy is still absent.
+    let after = hold_negative_space(&h, &c).await;
+    assert_eq!(after.route_rows, 0);
+    assert_eq!(after.tier2_leases, 0);
+    assert_eq!(after.lead_sessions, 0);
+    assert_eq!(after.tier1_charges, 0);
+    assert_eq!(after.provider_mutations, 0);
+    assert_eq!(baseline.worker_attempts, after.worker_attempts);
+    assert_eq!(baseline.task_status, after.task_status);
+}
+
+/// A result whose identity advanced between reserve and apply is a no-op.
+///
+/// # Why this drives the coordinator orchestration and not the lane wrapper
+///
+/// `apply_poll`'s first check compares the identity the poll *reserved* against
+/// the identity observed at apply time, and `CoordinatorActor::apply_ci_hold_poll`
+/// takes those as two parameters. Both lane wrappers currently pass the same
+/// value for both (`apply_and_drive(&poll, &hold_identity, …)`), so the branch
+/// is unreachable from `route_pr_head_ci_evidence` today — reported alongside
+/// this change rather than papered over. Driving the production orchestration
+/// directly is what lets the fixture witness the check that exists instead of
+/// asserting one that does not.
+#[tokio::test]
+async fn head_advance_clears_hold_streak() {
+    let h = lane_harness().await;
+    let holds = h.actor.ci_holds();
+    let baseline = hold_negative_space(&h, &FakeProvider::default()).await;
+    let head_a = pr_head_hold_identity(&h.task_id);
+    let head_b = djinn_db::CiHoldIdentity {
+        pr_head_sha: MOVED_HEAD.to_owned(),
+        ..head_a.clone()
+    };
+
+    // One ordinary incomplete poll on head A, so there is a count to protect.
+    let seeded = h
+        .actor
+        .reserve_ci_hold_poll(head_a.clone())
+        .await
+        .expect("reservation");
+    let seeded_outcome = h
+        .actor
+        .apply_ci_hold_poll(
+            &seeded,
+            &head_a,
+            false,
+            CiOriginState::PrDraft,
+            crate::pr_poller::ci_routing::CiIncompleteReason::EnumerationPageFailed,
+            &h.task_id,
+        )
+        .await;
+    assert_eq!(
+        seeded_outcome,
+        crate::pr_poller::ci_hold::CiHoldDisposition::Absorbed(
+            crate::pr_poller::ci_hold::CiHoldAbsorption::Held { poll_count: 1 }
+        ),
+    );
+
+    // A second poll reserves against head A — and the head moves before it can
+    // apply.
+    let stranded = h
+        .actor
+        .reserve_ci_hold_poll(head_a.clone())
+        .await
+        .expect("reservation");
+    assert_eq!(stranded.sequence(), 2, "reserved against head A");
+
+    let outcome = h
+        .actor
+        .apply_ci_hold_poll(
+            &stranded,
+            &head_b,
+            false,
+            CiOriginState::PrDraft,
+            crate::pr_poller::ci_routing::CiIncompleteReason::EnumerationPageFailed,
+            &h.task_id,
+        )
+        .await;
+    assert_eq!(
+        outcome,
+        crate::pr_poller::ci_hold::CiHoldDisposition::Absorbed(
+            crate::pr_poller::ci_hold::CiHoldAbsorption::IdentityAdvanced
+        ),
+    );
+
+    let a_after = holds
+        .get(&head_a)
+        .await
+        .expect("streak read")
+        .expect("head A's streak still exists");
+    assert_eq!(
+        a_after.poll_count, 1,
+        "the old head's count must not move: escalating it would open a \
+         diagnose route for a head nobody is on any more",
+    );
+    assert_eq!(
+        a_after.last_applied_poll_sequence, 1,
+        "and no watermark moves for a head that is no longer current",
+    );
+    assert!(!a_after.has_escalated());
+    assert_eq!(observations_marked(&h.db, "identity_advanced").await, 1);
+    assert!(
+        holds.get(&head_b).await.expect("streak read").is_none(),
+        "an identity-advanced no-op creates nothing for the new head either",
+    );
+
+    // A fresh poll on head B starts its own streak at one.
+    let fresh = h
+        .actor
+        .reserve_ci_hold_poll(head_b.clone())
+        .await
+        .expect("reservation");
+    let fresh_outcome = h
+        .actor
+        .apply_ci_hold_poll(
+            &fresh,
+            &head_b,
+            false,
+            CiOriginState::PrDraft,
+            crate::pr_poller::ci_routing::CiIncompleteReason::EnumerationPageFailed,
+            &h.task_id,
+        )
+        .await;
+    assert_eq!(
+        fresh_outcome,
+        crate::pr_poller::ci_hold::CiHoldDisposition::Absorbed(
+            crate::pr_poller::ci_hold::CiHoldAbsorption::Held { poll_count: 1 }
+        ),
+    );
+    let b_after = holds
+        .get(&head_b)
+        .await
+        .expect("streak read")
+        .expect("head B's streak");
+    assert_eq!(b_after.poll_count, 1, "head B starts at one");
+    assert_eq!(
+        b_after.next_poll_sequence, 1,
+        "head B's sequence space is its own",
+    );
+    assert_eq!(
+        holds
+            .get(&head_a)
+            .await
+            .expect("streak read")
+            .expect("head A")
+            .poll_count,
+        1,
+        "and head A's count is still untouched",
+    );
+
+    let after = hold_negative_space(&h, &FakeProvider::default()).await;
+    assert_hold_is_free(&baseline, &after, "an identity-advanced apply");
+}
+
+/// Eleven real polls, a restart, then two racing pollers: exactly one
+/// escalation at twelve.
+///
+/// # Why the streak is driven rather than seeded
+///
+/// A `poll_count = 11` written by a raw `UPDATE` proves nothing about the
+/// mechanism that produces it — it tests the bound against a number the fixture
+/// invented. All eleven polls here go through `route_pr_head_ci_evidence`, so
+/// the streak is produced by the thing being tested.
+///
+/// # Why the restart matters
+///
+/// The second actor is a fresh `CoordinatorActor` over the same database, which
+/// is what a coordinator restart is. It re-reads the streak, the watermark and
+/// the escalation marker from the ledger; nothing about the bound lives in
+/// process memory.
+///
+/// # Why the race is real
+///
+/// Both racers park inside their provider enumeration until the ledger shows
+/// both sequences reserved, so they genuinely overlap. Which of them applies
+/// first is not decided here — and both orders are correct:
+///
+/// * lower sequence first → it escalates at 12, and the higher one finds
+///   `escalated_at` already set (`AlreadyEscalated`);
+/// * higher sequence first → it escalates at 12, and the lower one is below the
+///   watermark (`Superseded`).
+///
+/// Either way there is exactly one `escalated_at`, one run-absent route row, one
+/// open Tier-2 lease, and one Lead adjudication.
+#[tokio::test]
+async fn count_eleven_race_escalates_once_at_twelve() {
+    let h = lane_harness().await;
+    let identity = pr_head_hold_identity(&h.task_id);
+    let holds = h.actor.ci_holds();
+    let baseline = hold_negative_space(&h, &FakeProvider::default()).await;
+
+    for expected in 1..=(djinn_db::CI_INCOMPLETE_HOLD_MAX_POLLS - 1) {
+        let p = FakeProvider::default();
+        let disposition =
+            poll_pr_head(&h, &p, Some(CheckSetIncompleteReason::PageFetchFailed)).await;
+        assert!(disposition.is_routed());
+        let streak = holds
+            .get(&identity)
+            .await
+            .expect("streak read")
+            .expect("streak exists");
+        assert_eq!(
+            streak.poll_count, expected,
+            "each real poll advances the streak by exactly one",
+        );
+        assert!(
+            !streak.has_escalated(),
+            "poll {expected} is below the bound of {}",
+            djinn_db::CI_INCOMPLETE_HOLD_MAX_POLLS,
+        );
+    }
+    let seeded = holds
+        .get(&identity)
+        .await
+        .expect("streak read")
+        .expect("streak exists");
+    assert_eq!(seeded.poll_count, 11);
+    assert_eq!(seeded.last_applied_poll_sequence, 11);
+    let eleven = hold_negative_space(&h, &FakeProvider::default()).await;
+    assert_hold_is_free(&baseline, &eleven, "eleven consecutive incomplete polls");
+
+    // ── Restart: a new actor and a new repository over the same database ────
+    let restarted = crate::actor::actor_with_test_db(h.db.clone());
+    let restarted_holds = restarted.ci_holds();
+    assert_eq!(
+        restarted_holds
+            .get(&identity)
+            .await
+            .expect("streak read")
+            .expect("the streak survives the restart")
+            .poll_count,
+        11,
+        "the bound is durable, not a number the process was holding",
+    );
+
+    // ── Two pollers, genuinely overlapping ─────────────────────────────────
+    let (first, release_first) = FakeProvider::parked_enumeration();
+    first.set_check_runs_incomplete(CheckSetIncompleteReason::PageFetchFailed);
+    let (second, release_second) = FakeProvider::parked_enumeration();
+    second.set_check_runs_incomplete(CheckSetIncompleteReason::PageFetchFailed);
+
+    let race_one = restarted.route_pr_head_ci_evidence(
+        &first,
+        &h.task_id,
+        "task-short",
+        "acme",
+        "widgets",
+        PR as u64,
+        HEAD,
+        failing_filter,
+        CiRoutingGate::Enabled,
+    );
+    let race_two = restarted.route_pr_head_ci_evidence(
+        &second,
+        &h.task_id,
+        "task-short",
+        "acme",
+        "widgets",
+        PR as u64,
+        HEAD,
+        failing_filter,
+        CiRoutingGate::Enabled,
+    );
+    let starter = async {
+        // Both sequences reserved before either result is applied. That is what
+        // makes this a race rather than two sequential polls.
+        let streak = wait_for_reservations(&restarted_holds, &identity, 13).await;
+        assert_eq!(streak.next_poll_sequence, 13);
+        assert_eq!(
+            streak.last_applied_poll_sequence, 11,
+            "neither racer has applied yet",
+        );
+        assert_eq!(streak.poll_count, 11);
+        release_first.notify_one();
+        release_second.notify_one();
+    };
+    let (one, two, ()) = tokio::join!(race_one, race_two, starter);
+    assert!(one.is_routed());
+    assert!(two.is_routed());
+
+    // ── Exactly one atomic transition at twelve ────────────────────────────
+    let escalated = restarted_holds
+        .get(&identity)
+        .await
+        .expect("streak read")
+        .expect("streak exists");
+    assert!(
+        escalated.has_escalated(),
+        "the twelfth authoritative incomplete poll must escalate",
+    );
+    assert_eq!(
+        escalated.poll_count,
+        djinn_db::CI_INCOMPLETE_HOLD_MAX_POLLS,
+        "the count stops at the bound: the loser must not increment past it",
+    );
+    assert_eq!(
+        escalated.last_applied_poll_sequence, 13,
+        "the winner of the race is the highest sequence either way",
+    );
+
+    assert_eq!(
+        observations_marked(&h.db, "escalated").await,
+        1,
+        "EXACTLY ONE observation may be the escalating one",
+    );
+    let superseded = observations_marked(&h.db, "superseded_observation").await;
+    let already = observations_marked(&h.db, "applied_incomplete").await
+        - (djinn_db::CI_INCOMPLETE_HOLD_MAX_POLLS - 1);
+    assert_eq!(
+        superseded + already,
+        1,
+        "the loser is exactly one observation, and is either superseded or \
+         already-escalated: superseded={superseded}, already_escalated={already}",
+    );
+    assert_eq!(observation_rows(&h.db).await, 13);
+
+    // One route, one lease, one adjudication — counted, not named.
+    assert_eq!(
+        djinn_db::test_support::ci_route_row_count_for_test(&h.db, &h.task_id).await,
+        1,
+        "one diagnose-only run-absent route, not two",
+    );
+    assert_eq!(
+        djinn_db::test_support::ci_route_lease_count_for_test(&h.db, &h.task_id).await,
+        1,
+        "one open Tier-2 lease, not two",
+    );
+    assert_eq!(
+        arbitration_rows(&h.db).await,
+        1,
+        "one Lead adjudication, not two",
+    );
+
+    // The route is keyed on the run-absent identity, and it is diagnose-only.
+    let run_absent = CiEvidenceIdentity {
+        lane: CiLane::PrHead,
+        pr_number: PR,
+        pr_head_sha: HEAD.to_owned(),
+        run_id: None,
+        run_head_sha: HEAD.to_owned(),
+        dequeue_id: None,
+    };
+    let subject = CiRouteSubject::task(h.task_id.clone());
+    let row = CiRouteAttemptRepository::new(h.db.clone())
+        .get(
+            &subject,
+            &provider_action_key(&subject, &run_absent, CiAction::AskLead),
+        )
+        .await
+        .expect("route read")
+        .expect("the escalation route is keyed on the run-absent identity");
+    assert_eq!(row.identity.run_id, None, "absence, never a sentinel");
+    assert_eq!(row.action, CiAction::AskLead);
+
+    // And an escalation still buys no provider call, no worker, and no charge.
+    assert_eq!(first.calls().mutations(), 0);
+    assert_eq!(second.calls().mutations(), 0);
+    assert_eq!(
+        djinn_db::test_support::task_attempt_count_for_test(&h.db, &h.task_id).await,
+        baseline.worker_attempts,
+        "an escalation asks Lead; it does not dispatch a worker",
+    );
+    assert_eq!(
+        charged_budget_counters(&h.db).await,
+        0,
+        "`ask_lead` consumes no Tier-1 charge",
+    );
+}
+
+/// One logical poll keeps its sequence, however many times it is retried.
+///
+/// A retry between reserve and apply — a serialization failure, a pool hiccup, a
+/// process restart mid-poll — must read back the sequence it was already
+/// assigned. If it reserved a second one it would look like a *newer* poll and
+/// would supersede its own earlier self, which is how a crash-loop silently eats
+/// a streak.
+#[tokio::test]
+async fn hold_observation_replay_preserves_its_sequence() {
+    let h = lane_harness().await;
+    let holds = h.actor.ci_holds();
+    let baseline = hold_negative_space(&h, &FakeProvider::default()).await;
+    let identity = pr_head_hold_identity(&h.task_id);
+    let poll_id = uuid::Uuid::now_v7().to_string();
+
+    let first = holds
+        .reserve_poll(&identity, &poll_id)
+        .await
+        .expect("first reservation");
+    assert!(!first.replayed, "the first reservation is not a replay");
+    assert_eq!(first.poll_sequence, 1);
+
+    let second = holds
+        .reserve_poll(&identity, &poll_id)
+        .await
+        .expect("replayed reservation");
+    assert!(
+        second.replayed,
+        "the same logical poll id must be recognised as a replay",
+    );
+    assert_eq!(
+        second.poll_sequence, first.poll_sequence,
+        "a replay reads back its own sequence rather than reserving another",
+    );
+    assert_eq!(second.streak_id, first.streak_id);
+
+    let streak = holds
+        .get(&identity)
+        .await
+        .expect("streak read")
+        .expect("streak exists");
+    assert_eq!(
+        streak.next_poll_sequence, 1,
+        "and the reservation counter advanced EXACTLY ONCE for two calls",
+    );
+    assert_eq!(
+        observation_rows(&h.db).await,
+        1,
+        "one logical poll is one observation row",
+    );
+
+    // A different logical poll on the same identity does get the next sequence,
+    // so the replay is keyed on the poll id and not on the identity.
+    let other = holds
+        .reserve_poll(&identity, &uuid::Uuid::now_v7().to_string())
+        .await
+        .expect("second logical poll");
+    assert!(!other.replayed);
+    assert_eq!(other.poll_sequence, 2);
+
+    let after = hold_negative_space(&h, &FakeProvider::default()).await;
+    assert_hold_is_free(&baseline, &after, "two reservations and no apply");
+}
+
+/// Two irrecoverable reasons on one PR head share ONE run-absent route row.
+///
+/// The executor-level twin of the key-derivation fixture in the sibling
+/// classifier suite: this one drives the real lane end to end against real
+/// Postgres and **counts rows in `ci_route_attempts`**, which is the claim the
+/// `NULLS NOT DISTINCT` unique index actually has to satisfy.
+///
+/// The two reasons are produced by different code paths on purpose:
+///
+/// * `CheckEnumerationUnavailable` from a `MaxPagesTruncated` enumeration
+///   verdict, reached in `capture_pr_head_evidence`'s first branch; and
+/// * `RunAttributionUnavailable` from a blocking check belonging to no nameable
+///   Actions run, reached four branches later.
+///
+/// Both are irrecoverable, so both take the diagnose-only route under `run_id`
+/// NULL — and the second must find the first's row rather than opening a second
+/// lease and spending a second Lead session.
+#[tokio::test]
+async fn irrecoverable_reasons_share_one_run_absent_route_row() {
+    let h = lane_harness().await;
+
+    // Reason one: the enumeration hit `MAX_PAGES`.
+    let truncated = FakeProvider::default();
+    let first = poll_pr_head(
+        &h,
+        &truncated,
+        Some(CheckSetIncompleteReason::MaxPagesTruncated),
+    )
+    .await;
+    assert!(first.is_routed());
+    assert_eq!(
+        first.complete_empty(),
+        None,
+        "an irrecoverable enumeration is not the no-CI path",
+    );
+
+    let subject = CiRouteSubject::task(h.task_id.clone());
+    let run_absent = CiEvidenceIdentity {
+        lane: CiLane::PrHead,
+        pr_number: PR,
+        pr_head_sha: HEAD.to_owned(),
+        run_id: None,
+        run_head_sha: HEAD.to_owned(),
+        dequeue_id: None,
+    };
+    let routes = CiRouteAttemptRepository::new(h.db.clone());
+    let key = provider_action_key(&subject, &run_absent, CiAction::AskLead);
+    let row = routes
+        .get(&subject, &key)
+        .await
+        .expect("route read")
+        .expect("an irrecoverable reason takes one diagnose-only route");
+    assert_eq!(row.identity.run_id, None, "absence, never a sentinel");
+    assert_eq!(row.action, CiAction::AskLead);
+    assert_eq!(
+        djinn_db::test_support::ci_route_row_count_for_test(&h.db, &h.task_id).await,
+        1,
+    );
+    let leases_after_first =
+        djinn_db::test_support::ci_route_lease_count_for_test(&h.db, &h.task_id).await;
+    let sessions_after_first = arbitration_rows(&h.db).await;
+    assert_eq!(leases_after_first, 1, "one lease for the first reason");
+
+    // Reason two: a blocking check attributable to no Actions run, on the same
+    // PR head, reached through a different branch entirely.
+    let orphaned = FakeProvider::default();
+    let mut orphan = causal_check("External / policy", 979);
+    orphan.run_id = None;
+    orphan.html_url = "https://example.test/checks/1".to_owned();
+    orphaned.set_check_runs(vec![orphan]);
+    let second = poll_pr_head(&h, &orphaned, None).await;
+    assert!(second.is_routed());
+
+    assert_eq!(
+        djinn_db::test_support::ci_route_row_count_for_test(&h.db, &h.task_id).await,
+        1,
+        "a later irrecoverable reason adds evidence to the SAME run-absent row; \
+         it does not open a second one",
+    );
+    assert_eq!(
+        djinn_db::test_support::ci_route_lease_count_for_test(&h.db, &h.task_id).await,
+        leases_after_first,
+        "and it opens no second Tier-2 lease",
+    );
+    assert_eq!(
+        arbitration_rows(&h.db).await,
+        sessions_after_first,
+        "and spends no second Lead session",
+    );
+    assert_eq!(truncated.calls().mutations(), 0);
+    assert_eq!(orphaned.calls().mutations(), 0);
+    assert_eq!(
+        charged_budget_counters(&h.db).await,
+        0,
+        "a diagnose-only route consumes no Tier-1 charge",
+    );
+    assert_eq!(
+        djinn_db::test_support::task_attempt_count_for_test(&h.db, &h.task_id).await,
+        0,
+        "and dispatches no worker",
+    );
+    // A hold streak that has already routed must not keep counting underneath
+    // the adjudication it already has.
+    assert!(
+        h.actor
+            .ci_holds()
+            .get(&pr_head_hold_identity(&h.task_id))
+            .await
+            .expect("streak read")
+            .is_none_or(|streak| streak.poll_count == 0),
+        "an irrecoverable reason is not a hold, so it accumulates no streak",
     );
 }

@@ -208,7 +208,18 @@ fn route_directive(handoff: &CiTier2Handoff) -> serde_json::Value {
             "tier2_lease_id": handoff.tier2_lease_id,
             "pr_number": handoff.identity.pr_number,
             "pr_head_sha": handoff.identity.pr_head_sha,
+            // `null` when no run was ever named. Absence is spelled as absence —
+            // there is no in-band sentinel, and revision 58 forbids one — so a
+            // reader that expected a number gets nothing rather than `0`.
             "run_id": handoff.identity.run_id,
+            // The run-absent route is DIAGNOSE-ONLY: `approve` and `repair` are
+            // both invalid on it. Stated as its own flag rather than left for
+            // Lead to infer from `run_id: null`, because "infer the constraint
+            // from a missing field" is not a rule a model can be held to — and
+            // the supervisor rejects a repair here regardless, so an inference
+            // that went the other way would cost a whole Lead session to
+            // discover.
+            "diagnose_only": handoff.identity.run_id.is_none(),
             "run_head_sha": handoff.identity.run_head_sha,
             "dequeue_id": handoff.identity.dequeue_id,
             "evidence_references": handoff.evidence_references,
@@ -233,9 +244,16 @@ fn ci_dossier(handoff: &CiTier2Handoff) -> serde_json::Value {
         "kind": "ci_evidence_routing_dossier",
         "summary": format!(
             "CI evidence on the {} lane reached Tier 2 ({}). Adjudicate from the captured \
-             evidence only: no rerun, no requeue, and no approval of non-passing CI.",
+             evidence only: no rerun, no requeue, and no approval of non-passing CI.{}",
             handoff.identity.lane.as_str(),
             handoff.reason.as_str(),
+            if handoff.identity.run_id.is_none() {
+                " No workflow run was ever named for this evidence and no check \
+                 set was enumerated, so there is nothing to repair from: this \
+                 route is diagnose-only and a repair plan will be rejected."
+            } else {
+                ""
+            },
         ),
         "lane": handoff.identity.lane.as_str(),
         "origin_state": handoff.origin_state.as_str(),
@@ -243,6 +261,7 @@ fn ci_dossier(handoff: &CiTier2Handoff) -> serde_json::Value {
         "pr_number": handoff.identity.pr_number,
         "pr_head_sha": handoff.identity.pr_head_sha,
         "run_id": handoff.identity.run_id,
+        "diagnose_only": handoff.identity.run_id.is_none(),
         "run_head_sha": handoff.identity.run_head_sha,
         "dequeue_id": handoff.identity.dequeue_id,
         "evidence_references": handoff.evidence_references,
