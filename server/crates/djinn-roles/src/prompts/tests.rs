@@ -8,12 +8,12 @@ use serde_json::json;
 ///
 /// This is the djinn-roles equivalent of `djinn_agent::prompts::render_prompt`.
 /// Tests that only need template content (not tool-schema content) use this.
-fn render_prompt(agent_type: AgentType, task: &Task, ctx: &TaskContext) -> String {
+pub(crate) fn render_prompt(agent_type: AgentType, task: &Task, ctx: &TaskContext) -> String {
     let config = agent_type.role_config();
     render_prompt_for_role(config, Vec::new, task, ctx)
 }
 
-fn make_task() -> Task {
+pub(crate) fn make_task() -> Task {
     Task {
         id: "task-123".into(),
         project_id: "project-1".into(),
@@ -79,7 +79,7 @@ fn make_task() -> Task {
     }
 }
 
-fn make_ctx() -> TaskContext {
+pub(crate) fn make_ctx() -> TaskContext {
     TaskContext {
         project_path: "/home/user/project".into(),
         workspace_path: "/home/user/project/.task-runtime/worktrees/t123".into(),

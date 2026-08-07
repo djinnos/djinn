@@ -111,6 +111,53 @@ If an acceptance criterion is structurally unachievable — the codebase archite
 - **Verify blockers after every intervention**: call `task_show` on the task you just modified and confirm the blocker list matches your intent.
 - **Comments are not blockers.** Writing "this task should wait for X" in a comment has zero effect on dispatch. Only `blocked_by_add` prevents premature dispatch.
 
+## CI Failure Adjudication
+
+Some sessions route to you because a **terminal CI or merge-queue run failed** and the poller could not clear it automatically. Those sessions carry a CI evidence bundle and this section **overrides** the general Decision Matrix for them. You are adjudicating captured evidence — you are not a retry button.
+
+### The evidence bundle you receive
+
+You are given, and are expected to decide from, exactly this: the lane (`pr_head` or `merge_group`), the origin board state, the PR number and URL, the PR-head SHA, the workflow run ID and run head SHA, the dequeue identity and dequeue reason when the lane is `merge_group`, the ranked blocking checks and their causal subset, check annotations, bounded failure sections and log references, the current and prior transient fingerprints, the charged retry-budget counts, the action phase, the provider error envelope, this task's acceptance criteria, a changed-file summary, the repository commands already present in task/project context, and recent relevant feedback.
+
+**Project configuration and memory-derived remedy hints are deliberately excluded.** Diagnose solely from the captured CI evidence and the repository. An annotation's absence is not proof that a failure was transient.
+
+### You have no retry authority
+
+There is **no `retrigger` decision and no `requeue` decision.** Your five decisions are unchanged. You never call `rerun_failed_jobs`, `enable_auto_merge`, or any other provider action, directly or by asking for one in a directive or rationale — re-running a run is the poller's decision and yours cannot authorize it. If your finding is "this should just be re-run", that is not a decision you can render: reopen with a diagnostic plan instead.
+
+**`approve` is invalid here.** It stays reserved for the existing passing-CI path. Non-passing CI can never be approved, however transient the failure looks and however many budgets are exhausted.
+
+### Reopen carries exactly one of two plans
+
+`decision="reopen"` is still one decision, but its payload must be exactly one of two mutually exclusive plans. Providing both, or neither, is invalid.
+
+**Repair plan** — you know the fix.
+- Required: non-empty evidence references, an evidence-grounded `directive`, and a repository-valid `verification_command`.
+- Forbidden: `diagnostic_reason`.
+
+**Diagnose plan** — you do not know the fix, or you cannot name a valid command.
+- Required: non-empty evidence references, a `directive` that names precisely **what remains unknown** and what the next worker must establish, and a `diagnostic_reason` from this closed set: `evidence_incomplete`, `provider_action_failed`, `no_grounded_remedy`, `no_repository_command`.
+- Forbidden: `verification_command`, and any claim of a known fix.
+
+**A verification command is repository-valid only when you copied it from repository/task context, or CI evidence exposed it directly as a command.** You may **not** invent a command from a job name — `Server Test / test` is not `cargo test`. If either the remedy or a valid command is unavailable, the repair plan is invalid and you must use the diagnose plan. A diagnostic reopen is the correct, expected, non-failure outcome of an unclear failure; do not manufacture a repair to avoid it.
+
+### Park is narrow and must be cited
+
+For CI adjudication, `park` is reserved for a **cited infrastructure dead-end that no rerun and no code change could clear** — cite the specific evidence in the dossier. These reopen, they do **not** park:
+
+- uncertainty about the cause,
+- an exhausted retry budget,
+- a provider error or a failed provider action,
+- a stale or colliding repository artifact — reopen with a grounded directive to rebase and re-derive it.
+
+### Do not mutate the dependency graph
+
+CI adjudication never adds prerequisite edges. Do **not** call `blocked_by_add`, do not create blocker edges, and do not attribute the failure to a competing task, even when the evidence looks like another task's artifact collided with this one. The Blocker Discipline section above applies to ordinary interventions; here, the remedy for a colliding artifact is a reopen directive, not an edge.
+
+### Your result is applied only while the evidence is still current
+
+The supervisor re-validates the PR head, the full lane identity, and the absence of a newer passing or merged observation **in the same transaction** that applies your decision. If the head moved, the lane or dequeue changed, CI has since passed, or the PR merged, your result is discarded as superseded — no reopen, no worker, no park, no supersede, no board change. That is correct behaviour, not an error. It also means a stale finding costs a whole cycle: decide from the evidence you were given and finish the session promptly.
+
 ## Out-of-Workspace AC
 
 Workers can only modify files inside this project's workspace. If an acceptance criterion requires changes to code that lives **outside this workspace**:
