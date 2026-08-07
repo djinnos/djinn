@@ -88,6 +88,7 @@ async fn persist_evidence_round_trip() {
         session_id: Some(session_id.clone()),
         task_id: Some(task_id.clone()),
         task_run_id: Some(task_run_id.clone()),
+        trigger_identity: None,
         verdict: "dead".to_string(),
         outcome_kind: Some("dead_reclaimed".to_string()),
         outcome_reason: None,
@@ -268,6 +269,7 @@ async fn record_claim_extension_round_trip() {
         session_id: Some(session_id.clone()),
         task_id: None,
         task_run_id: Some(task_run_id.clone()),
+        trigger_identity: None,
         verdict: "slow".to_string(),
         outcome_kind: Some("slow_extended".to_string()),
         outcome_reason: None,
@@ -364,6 +366,7 @@ async fn persist_evidence_terminal_task_noop_outcome() {
         session_id: Some(session_id.clone()),
         task_id: Some(task_id.clone()),
         task_run_id: Some(task_run_id.clone()),
+        trigger_identity: None,
         verdict: "live".to_string(),
         outcome_kind: Some("kill_noop".to_string()),
         outcome_reason: None,
@@ -389,6 +392,7 @@ async fn persist_evidence_terminal_task_noop_outcome() {
         session_id: Some(session_id.clone()),
         task_id: Some(task_id.clone()),
         task_run_id: Some(task_run_id.clone()),
+        trigger_identity: None,
         verdict: "live".to_string(),
         outcome_kind: Some("kill_noop".to_string()),
         outcome_reason: None,
@@ -420,6 +424,7 @@ async fn multiple_evidence_snapshots_overwrite_denormalized() {
         session_id: Some(session_id.clone()),
         task_id: Some(task_id.clone()),
         task_run_id: Some(task_run_id.clone()),
+        trigger_identity: None,
         verdict: "slow".to_string(),
         outcome_kind: None,
         outcome_reason: None,
@@ -435,6 +440,7 @@ async fn multiple_evidence_snapshots_overwrite_denormalized() {
         session_id: Some(session_id.clone()),
         task_id: Some(task_id.clone()),
         task_run_id: Some(task_run_id.clone()),
+        trigger_identity: None,
         verdict: "dead".to_string(),
         outcome_kind: Some("dead_reclaimed".to_string()),
         outcome_reason: None,
@@ -470,6 +476,7 @@ async fn persist_evidence_without_task_run() {
         session_id: Some(session_id.clone()),
         task_id: Some(task_id.clone()),
         task_run_id: None,
+        trigger_identity: None,
         verdict: "live".to_string(),
         outcome_kind: None,
         outcome_reason: None,
@@ -530,6 +537,7 @@ async fn persist_task_scoped_evidence_skips_ambiguous_denormalization() {
             session_id: None,
             task_id: Some(task_id.clone()),
             task_run_id: None,
+            trigger_identity: None,
             verdict: "dead".to_string(),
             outcome_kind: Some(outcome_kind.to_string()),
             outcome_reason: None,
@@ -585,6 +593,7 @@ async fn persist_evidence_rejects_missing_owner_without_audit_row() {
             session_id: None,
             task_id: None,
             task_run_id: None,
+            trigger_identity: None,
             verdict: "live".to_string(),
             outcome_kind: Some("task_not_found".to_string()),
             outcome_reason: None,
@@ -611,6 +620,7 @@ async fn persist_evidence_rejects_missing_session_foreign_key_without_audit_row(
             session_id: Some("missing-session".to_string()),
             task_id: Some(task_id.clone()),
             task_run_id: None,
+            trigger_identity: None,
             verdict: "dead".to_string(),
             outcome_kind: Some("terminated".to_string()),
             outcome_reason: None,
@@ -657,6 +667,7 @@ async fn persist_evidence_rolls_back_insert_and_session_update_when_task_run_upd
             session_id: Some(session_id.clone()),
             task_id: Some(task_id.clone()),
             task_run_id: Some(task_run_id.clone()),
+            trigger_identity: None,
             verdict: "dead".to_string(),
             outcome_kind: Some("terminated".to_string()),
             outcome_reason: None,
@@ -684,4 +695,136 @@ async fn persist_evidence_rolls_back_insert_and_session_update_when_task_run_upd
             .await
             .unwrap();
     assert_eq!(task_run_outcome, None);
+}
+
+#[tokio::test]
+async fn session_exit_trigger_is_insert_once_and_replays_are_immutable() {
+    let db = Database::open_in_memory().unwrap();
+    let (_, task_id, session_id, task_run_id) = seed_full_fixture(&db).await;
+    let repo = LivenessRepository::new(db.clone());
+    let trigger_identity = format!("session_exit:{session_id}");
+
+    let first = LivenessEvidenceSnapshot {
+        session_id: Some(session_id.clone()),
+        task_id: Some(task_id.clone()),
+        task_run_id: Some(task_run_id.clone()),
+        trigger_identity: Some(trigger_identity.clone()),
+        verdict: "protocol_violation".to_owned(),
+        outcome_kind: Some("protocol_violation".to_owned()),
+        outcome_reason: Some("clean_exit_nonterminal".to_owned()),
+        evidence: json!({"sample": "first", "exit_code": 0}),
+    };
+    let replay = LivenessEvidenceSnapshot {
+        session_id: Some(session_id.clone()),
+        task_id: Some(task_id.clone()),
+        task_run_id: Some(task_run_id.clone()),
+        trigger_identity: Some(trigger_identity.clone()),
+        verdict: "dead".to_owned(),
+        outcome_kind: Some("dead_reclaimed".to_owned()),
+        outcome_reason: None,
+        evidence: json!({"sample": "losing replay", "exit_code": 1}),
+    };
+
+    let (first_result, replay_result) = tokio::join!(
+        repo.persist_evidence(&first),
+        repo.persist_evidence(&replay),
+    );
+    let first_id = first_result.unwrap();
+    let replay_id = replay_result.unwrap();
+    assert_eq!(first_id, replay_id);
+
+    let evidence_row = sqlx::query(
+        "SELECT session_id, task_id, task_run_id, verdict, outcome_kind, outcome_reason, evidence, created_at
+         FROM liveness_evidence WHERE id = $1",
+    )
+    .bind(&first_id)
+    .fetch_one(db.pool())
+    .await
+    .unwrap();
+    let original_session_id: String = evidence_row.get("session_id");
+    let original_task_id: Option<String> = evidence_row.get("task_id");
+    let original_task_run_id: Option<String> = evidence_row.get("task_run_id");
+    let original_verdict: String = evidence_row.get("verdict");
+    let original_kind: Option<String> = evidence_row.get("outcome_kind");
+    let original_reason: Option<String> = evidence_row.get("outcome_reason");
+    let original_evidence: serde_json::Value = evidence_row.get("evidence");
+    let original_created_at: String = evidence_row.get("created_at");
+
+    sqlx::query("UPDATE tasks SET status = 'closed' WHERE id = $1")
+        .bind(&task_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+    let replay_after_state_change = repo.persist_evidence(&replay).await.unwrap();
+    assert_eq!(replay_after_state_change, first_id);
+
+    let evidence_row = sqlx::query(
+        "SELECT session_id, task_id, task_run_id, verdict, outcome_kind, outcome_reason, evidence, created_at
+         FROM liveness_evidence WHERE id = $1",
+    )
+    .bind(&first_id)
+    .fetch_one(db.pool())
+    .await
+    .unwrap();
+    assert_eq!(
+        evidence_row.get::<String, _>("session_id"),
+        original_session_id
+    );
+    assert_eq!(
+        evidence_row.get::<Option<String>, _>("task_id"),
+        original_task_id
+    );
+    assert_eq!(
+        evidence_row.get::<Option<String>, _>("task_run_id"),
+        original_task_run_id
+    );
+    assert_eq!(evidence_row.get::<String, _>("verdict"), original_verdict);
+    assert_eq!(
+        evidence_row.get::<Option<String>, _>("outcome_kind"),
+        original_kind
+    );
+    assert_eq!(
+        evidence_row.get::<Option<String>, _>("outcome_reason"),
+        original_reason
+    );
+    assert_eq!(
+        evidence_row.get::<serde_json::Value, _>("evidence"),
+        original_evidence
+    );
+    assert_eq!(
+        evidence_row.get::<String, _>("created_at"),
+        original_created_at
+    );
+    let row_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM liveness_evidence WHERE trigger_identity = $1")
+            .bind(&trigger_identity)
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+    assert_eq!(row_count, 1);
+
+    let session_projection: (Option<String>, Option<String>, Option<serde_json::Value>) =
+        sqlx::query_as(
+            "SELECT liveness_verdict, liveness_outcome_kind, liveness_evidence
+             FROM sessions WHERE id = $1",
+        )
+        .bind(&session_id)
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+    assert_eq!(
+        session_projection.0.as_deref(),
+        Some(original_verdict.as_str())
+    );
+    assert_eq!(session_projection.1, original_kind);
+    assert_eq!(session_projection.2, Some(original_evidence.clone()));
+    let run_projection: (Option<String>, Option<serde_json::Value>) = sqlx::query_as(
+        "SELECT liveness_outcome_kind, liveness_evidence FROM task_runs WHERE id = $1",
+    )
+    .bind(&task_run_id)
+    .fetch_one(db.pool())
+    .await
+    .unwrap();
+    assert_eq!(run_projection.0, original_kind);
+    assert_eq!(run_projection.1, Some(original_evidence));
 }

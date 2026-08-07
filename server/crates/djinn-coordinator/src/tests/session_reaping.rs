@@ -6456,19 +6456,22 @@ async fn hard_cap_takes_precedence_over_slow_extension_budget_in_stall_path() {
 // verdicts depending on the task's terminal state at the moment of the call.
 // The same `(session_status="completed", session_status="failed")` input produces
 // ProtocolViolation/CleanExitNonterminal when the task is nonterminal and
-// KillNoop when the task is already terminal. These are distinct outcomes with
-// distinct evidence — the protocol-violation path increments retry accounting,
-// while KillNoop preserves terminal state and does not. A regression that
-// short-circuits the terminal check would merge them.
+// KillNoop when the task is already terminal. These are distinct returned
+// outcomes — the protocol-violation path increments retry accounting, while
+// KillNoop preserves terminal state and does not. A regression that
+// short-circuits the terminal check would merge them. Persistence is a
+// separate concern: all of these calls deliver the one
+// `session_exit:{session_id}` trigger, which is insert-once and immutable.
 
 /// `classify_session_exit_liveness` produces two distinct, non-overlapping
 /// verdicts for the same session status depending on whether the task is
 /// nonterminal (ProtocolViolation with CleanExitNonterminal) or already
-/// terminal (KillNoop). Calling the same input twice on a nonterminal task
-/// is idempotent — no extra evidence rows are appended beyond the per-call
-/// record (because the second call sees the same task state and produces the
-/// same verdict). After the task transitions to terminal, the next call
-/// produces KillNoop instead.
+/// terminal (KillNoop). The returned verdict/outcome is recomputed from live
+/// task state on every call, so it still tracks the terminal transition.
+/// Persistence, by contrast, is keyed on the durable
+/// `session_exit:{session_id}` trigger: a session exits once, so every repeat
+/// call is a replay of that one delivery and returns the already-recorded
+/// immutable observation instead of appending a second row.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn classify_session_exit_clean_nonterminal_vs_terminal_are_distinct_and_idempotent() {
     use djinn_db::{CreateSessionParams, SessionRepository};
@@ -6547,8 +6550,8 @@ async fn classify_session_exit_clean_nonterminal_vs_terminal_are_distinct_and_id
         .await
         .unwrap();
     assert_eq!(
-        pv_count, 2,
-        "two calls on the nonterminal path produce two evidence rows (one per call) — no extra rows from a regression that loops the classifier"
+        pv_count, 1,
+        "the two calls are replays of one `session_exit:{{session_id}}` delivery — insert-once keeps exactly one observation, and a regression that loops the classifier or drops the trigger identity would push this above 1"
     );
     let kill_noop_count = liveness_repo
         .count_evidence_for_session(&session.id, Some("kill_noop"))
@@ -6585,28 +6588,39 @@ async fn classify_session_exit_clean_nonterminal_vs_terminal_are_distinct_and_id
         "terminal-task precedence returns verdict=Live (moot), outcome=KillNoop"
     );
 
-    // The terminal-task classification appended exactly one kill_noop row.
+    // The terminal-task classification is a replay of the same durable exit
+    // trigger, so it records nothing: the winning immutable observation stands
+    // even though the re-sampled verdict is now KillNoop.
     let kill_noop_after = liveness_repo
         .count_evidence_for_session(&session.id, Some("kill_noop"))
         .await
         .unwrap();
     assert_eq!(
-        kill_noop_after, 1,
-        "terminal-task classification must append exactly one kill_noop row (idempotent on the terminal path)"
+        kill_noop_after, 0,
+        "a replayed exit trigger must NOT append a kill_noop row over the already-recorded observation"
     );
     let pv_count_after = liveness_repo
         .count_evidence_for_session(&session.id, Some("success"))
         .await
         .unwrap();
     assert_eq!(
-        pv_count_after, 2,
-        "terminal-task classification must NOT append more ProtocolViolation rows — the path is distinct"
+        pv_count_after, 1,
+        "the winning observation keeps its original taxonomy — a replay may neither append nor rewrite it"
+    );
+    let total_after = liveness_repo
+        .count_evidence_for_session(&session.id, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        total_after, 1,
+        "one session exit is one logical liveness observation, regardless of how many times it is delivered"
     );
 
-    // ── Idempotency on the terminal path: a third call appends another row ──
-    // (Each call to classify_session_exit_liveness is intentionally append-only;
-    //  idempotency here means the verdict/outcome are stable, not that the
-    //  evidence row count is fixed. The append-only chain is the audit trail.)
+    // ── Idempotency on the terminal path: a third call still records nothing ──
+    // (`classify_session_exit_liveness` recomputes the verdict from live task
+    //  state on every call, but persistence is insert-once on the
+    //  `session_exit:{session_id}` trigger. The single immutable row — not an
+    //  append-only chain — is the audit record for this exit.)
     let r3 = actor
         .classify_session_exit_liveness(&session.id, &task.id, Some(run_id), "completed", "worker")
         .await
@@ -6621,8 +6635,16 @@ async fn classify_session_exit_clean_nonterminal_vs_terminal_are_distinct_and_id
         .await
         .unwrap();
     assert_eq!(
-        kill_noop_third, 2,
-        "append-only evidence chain: each call appends one row; verdict/outcome are stable"
+        kill_noop_third, 0,
+        "further replays stay inert: verdict/outcome are stable and no kill_noop row is ever appended"
+    );
+    let total_third = liveness_repo
+        .count_evidence_for_session(&session.id, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        total_third, 1,
+        "the exit observation count is fixed at one across arbitrarily many replays"
     );
 }
 
@@ -8517,12 +8539,15 @@ async fn terminal_persisted_exit_rows_cover_every_task_status() {
             assert_eq!(after_repeat.outcome, after.outcome);
             assert_eq!(after_repeat.terminal_at, after.terminal_at);
             assert_eq!(attempts.list_for_task(&task.id).await.unwrap().len(), 1);
-            assert!(
+            // A terminal delivery has one durable `session_exit:{session_id}`
+            // trigger. Replaying it returns the original immutable observation
+            // rather than appending a second liveness-evidence row.
+            assert_eq!(
                 evidence
                     .count_evidence_for_session(&session.id, None)
                     .await
-                    .unwrap()
-                    >= 2
+                    .unwrap(),
+                1
             );
         }
     }
