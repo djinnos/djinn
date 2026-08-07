@@ -470,6 +470,110 @@ async fn ref_enumeration_pages_and_reports_its_own_completeness() {
     );
 }
 
+/// The ref walk detects its own `MAX_PAGES` ceiling — and reports it as the
+/// IRRECOVERABLE reason.
+///
+/// The PR-head walk's ceiling is pinned twice (by
+/// [`truncation_and_short_read_are_incomplete`] and by
+/// [`a_walk_that_exactly_fills_the_ceiling_is_complete`]); this walk had
+/// neither, and it is the one the `nafu` route layer actually reads. Both lane
+/// entry points enumerate through `list_check_runs_for_ref` — never through
+/// `get_pull_request`, whose response was fetched before the lane knew the head
+/// SHA its hold identity is keyed on.
+///
+/// So `else if truncated { MaxPagesTruncated }` could be deleted from
+/// `list_check_runs_for_ref` with the whole acceptance list green, and the
+/// failure would be quiet rather than loud: a truncated walk falls through to
+/// the next arm and reports `ShortRead`, which is **recoverable**. The router
+/// then takes the bounded hold and re-polls a ref whose every later walk hits
+/// the identical ceiling — twelve wasted polls and then an escalation whose
+/// reason names the wrong fact, instead of the one diagnose-only route the
+/// irrecoverable verdict earns immediately.
+///
+/// NAMED FAILING MUTATIONS.
+/// (a) Delete the `else if truncated` arm: the first half reads `ShortRead`.
+/// (b) Delete `hit_cap = true` or the `page == MAX_PAGES` guard around it: the
+///     same failure, one step earlier.
+/// (c) Drop the `&& all_runs.len() < total_count as usize` exoneration from
+///     `truncated`: the second half — ten full pages the provider's own count
+///     says left nothing behind — reads `MaxPagesTruncated` and fails.
+/// (d) Reclassify `MaxPagesTruncated` as recoverable: the recoverability
+///     assertion fails here as well as in the partition test below, which is
+///     deliberate — this one names the consequence on the walk that produces it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ref_enumeration_reports_the_ceiling_as_irrecoverable_truncation() {
+    // --- ten full pages with runs still unseen: genuine truncation ---------
+    let server = MockServer::start().await;
+    let install_id = seed_installation_token();
+    for p in 1..=10u64 {
+        let start = (p - 1) * 100;
+        Mock::given(method("GET"))
+            .and(path_regex(REF_CHECK_RUNS_PATH))
+            .and(query_param("page", p.to_string()))
+            .respond_with(ResponseTemplate::new(200).set_body_json(page(1500, start..start + 100)))
+            .mount(&server)
+            .await;
+    }
+
+    let client = GitHubApiClient::for_installation_with_base_url(install_id, server.uri());
+    let checks = client
+        .list_check_runs_for_ref("djinnos", "server", "queuesha")
+        .await
+        .unwrap();
+    assert_eq!(
+        checks.check_runs.len(),
+        1000,
+        "precondition: the walk really did stop at the ceiling",
+    );
+    assert_eq!(
+        checks.total_count, 1500,
+        "precondition: the provider's own count says 500 runs were left behind",
+    );
+    assert_eq!(
+        checks.completeness,
+        CheckSetCompleteness::Incomplete(CheckSetIncompleteReason::MaxPagesTruncated),
+    );
+    assert_eq!(
+        CheckSetIncompleteReason::MaxPagesTruncated.recoverability(),
+        CheckSetRecoverability::Irrecoverable,
+        "and it must be the irrecoverable verdict: a recoverable one holds and \
+         re-polls a ref that answers identically every time",
+    );
+
+    // --- Vacuity: a full ceiling the count exonerates is still complete -----
+    //
+    // Without this, deleting the exoneration from `truncated` would satisfy
+    // everything above while declaring every thousand-check ref permanently
+    // incomplete.
+    let server = MockServer::start().await;
+    let install_id = seed_installation_token();
+    for p in 1..=10u64 {
+        let start = (p - 1) * 100;
+        Mock::given(method("GET"))
+            .and(path_regex(REF_CHECK_RUNS_PATH))
+            .and(query_param("page", p.to_string()))
+            .respond_with(ResponseTemplate::new(200).set_body_json(page(1000, start..start + 100)))
+            .mount(&server)
+            .await;
+    }
+
+    let client = GitHubApiClient::for_installation_with_base_url(install_id, server.uri());
+    let checks = client
+        .list_check_runs_for_ref("djinnos", "server", "queuesha")
+        .await
+        .unwrap();
+    assert_eq!(
+        checks.check_runs.len(),
+        checks.total_count as usize,
+        "precondition: the provider's own count agrees with what arrived",
+    );
+    assert_eq!(
+        checks.completeness,
+        CheckSetCompleteness::Complete,
+        "a walk that exactly fills the ceiling left nothing behind",
+    );
+}
+
 /// Every incomplete verdict carries its own recoverability, and the split is
 /// the one proposal `nafu` revision 58 routes on.
 ///

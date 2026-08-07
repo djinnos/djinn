@@ -731,8 +731,27 @@ async fn a_rejected_repair_on_a_stale_run_absent_route_applies_nothing() {
 /// block into. Overwriting it made a task that was mid-adjudication read as
 /// `NoRoute` on the very next look.
 ///
-/// **Mutation target.** Restore the old from-scratch construction and this goes
-/// red on both the route block and the budget flag.
+/// **What this actually witnesses**, and what it does not. This fixture calls
+/// `merge_reopen_into_directive` directly; it never reaches
+/// `start_monitored_reopen`. So restoring the from-scratch
+/// `json!({"decision": .., "directive": ..})` *at the call site* leaves this
+/// green — an earlier version of this comment claimed otherwise, and that claim
+/// was wrong. The call site is pinned separately by
+/// [`the_reopen_writer_merges_into_the_existing_arbitration_directive`] below;
+/// what is pinned here is the merge semantics that call site depends on.
+///
+/// NAMED FAILING MUTATIONS, all inside `merge_reopen_into_directive`.
+/// (a) Rebuild the object from scratch (`json!({})` instead of cloning
+///     `existing`): the `ci_route` and `terminal_disposition_required`
+///     assertions fail — the route block and the cumulative-budget flag are the
+///     two facts the column carries besides the reopen itself.
+/// (b) Copy only the recognised keys forward instead of cloning: the same two
+///     assertions fail as soon as either key is missed, which is how the budget
+///     flag was lost the first time.
+/// (c) Make the `None` case inherit a default body: the two-key length
+///     assertion on `fresh` fails — a plain arbiter reopen invents nothing.
+/// (d) Drop the `is_object()` filter: the scalar case stops producing
+///     `decision: "reopen"` (it panics on `as_object_mut` instead).
 #[test]
 fn applying_a_reopen_preserves_the_route_block_and_the_budget_flag() {
     use crate::direct_services::merge_reopen_into_directive;
@@ -778,4 +797,164 @@ fn applying_a_reopen_preserves_the_route_block_and_the_budget_flag() {
     // rather than panicked on.
     let scalar = merge_reopen_into_directive(Some(&serde_json::json!("legacy text")), "d");
     assert_eq!(scalar["decision"], "reopen");
+}
+
+// ---------------------------------------------------------------------------
+// The production call sites that reach any of the above
+// ---------------------------------------------------------------------------
+
+/// One Rust source with its `//` line comments removed.
+///
+/// The guards below match on *code*. Without this, a comment that merely names
+/// the token under guard would satisfy the assertion the guard exists to make.
+/// Quote- and escape-aware, so a `//` inside a string literal is left alone
+/// rather than truncating the line it sits on.
+fn strip_line_comments(source: &str) -> String {
+    let mut out = String::with_capacity(source.len());
+    for line in source.lines() {
+        let bytes = line.as_bytes();
+        let mut quoted = false;
+        let mut index = 0usize;
+        let mut end = line.len();
+        while index < bytes.len() {
+            match bytes[index] {
+                b'\\' if quoted => index += 1,
+                b'"' => quoted = !quoted,
+                b'/' if !quoted && bytes.get(index + 1) == Some(&b'/') => {
+                    end = index;
+                    break;
+                }
+                _ => {}
+            }
+            index += 1;
+        }
+        out.push_str(&line[..end]);
+        out.push('\n');
+    }
+    out
+}
+
+/// The supervisor's Lead stage arm is what reaches the `nafu` contract at all.
+///
+/// SOURCE-LEVEL, and honestly labelled: `execute_stage` is the enclosing
+/// function, and driving it needs a live session, a slot, a provider transport
+/// and a finalize round trip — none of which this crate carries a double for.
+/// Every behavioural fixture in this file and in the sibling `tests.rs`
+/// therefore enters *below* that arm, at [`apply_under_guard`],
+/// [`stage_outcome_after_guard`], [`adjudicate`], or at the `#[cfg(test)]`
+/// projection `stage::lead_stage_outcome_routed`. So the arm itself is
+/// unwitnessed, and three separate deletions inside it leave the whole `nafu`
+/// command list green while the feature stops existing in production:
+///
+/// * dropping the `read_arbiter_directive` match reverts every Lead session to
+///   the legacy arbiter contract — the "feature disabled" row of the
+///   mixed-version matrix, permanently;
+/// * dropping the `Malformed` arm lets an unparseable `ci_route` block fall
+///   through to that legacy path, which rejects a `diagnose` payload as a
+///   `Failed` stage and parks the task at the arbiter cap — a producer bug in
+///   one JSON field parking tasks whose Lead answered correctly;
+/// * replacing `apply_lead_ci_result` with the bare projection
+///   `ci_routing::stage_outcome(&adjudication.plan)` restores exactly the
+///   wave-4 behaviour wave 5 replaced: the reopen is applied without ever
+///   winning `resolve_tier2_lease`, so a Lead result lands on evidence a newer
+///   head has already superseded.
+///
+/// NAMED FAILING MUTATIONS.
+/// (a) Delete the `ci_routing::CiAdjudicationContext::read_arbiter_directive(`
+///     call from the `RoleKind::Lead` arm: the first assertion fails.
+/// (b) Delete the `CiDirectiveRead::Malformed(..)` arm, or make it fall through
+///     to `lead_stage_outcome`: the ordering assertion fails, because
+///     `LeadRouteSuperseded` no longer sits between the `Malformed` arm and the
+///     `Route` arm.
+/// (c) Replace `apply_lead_ci_result(..)` at the call site with
+///     `ci_routing::stage_outcome(..)` or with the `#[cfg(test)]`
+///     `lead_stage_outcome_routed(..)`: the occurrence count drops to one (the
+///     definition alone) and the call assertion fails.
+/// (d) Inline `apply_lead_ci_result`'s body at the call site: the same failure,
+///     for the same reason.
+#[test]
+fn the_supervisors_lead_stage_arm_reads_the_route_and_applies_it_under_the_guard() {
+    let code = strip_line_comments(include_str!("../stage.rs"));
+
+    assert!(
+        code.contains("ci_routing::CiAdjudicationContext::read_arbiter_directive("),
+        "the Lead stage arm must READ the route block; without this call every \
+         Lead session takes the legacy arbiter path and the feature is \
+         unreachable from production",
+    );
+
+    // The application half, and that it is the GUARDED one.
+    assert_eq!(
+        code.matches("apply_lead_ci_result(").count(),
+        2,
+        "exactly two occurrences: the definition and its single production call \
+         site. One means the call was deleted, inlined, or swapped for the \
+         pre-guard projection",
+    );
+    assert!(
+        code.contains("async fn apply_lead_ci_result("),
+        "and one of them must be the definition",
+    );
+
+    // The unparseable block fails closed, and does so BEFORE the route arm.
+    let malformed = code
+        .find("ci_routing::CiDirectiveRead::Malformed(")
+        .expect("the Lead arm must answer an unparseable route block");
+    let route_arm = code
+        .find("ci_routing::CiDirectiveRead::Route(")
+        .expect("the Lead arm must answer a parsed route block");
+    assert!(
+        malformed < route_arm,
+        "the match arms are read in order; `Malformed` must be answered before \
+         `Route`",
+    );
+    assert!(
+        code[malformed..route_arm].contains("StageOutcome::LeadRouteSuperseded"),
+        "an unguardable route block must apply nothing; falling through to the \
+         legacy path parks a task whose Lead answered correctly",
+    );
+}
+
+/// The reopen writer MERGES into the directive rather than rebuilding it.
+///
+/// SOURCE-LEVEL for one specific reason: the sibling fixture
+/// [`applying_a_reopen_preserves_the_route_block_and_the_budget_flag`] calls
+/// `merge_reopen_into_directive` directly, so its own "restore the old
+/// from-scratch construction and this goes red" note is not true of the *call
+/// site*. Restoring `json!({"decision": "reopen", "directive": directive})` at
+/// `start_monitored_reopen` leaves that fixture green, because it never reaches
+/// `start_monitored_reopen` — and the consequence is the wave-5 bug verbatim: a
+/// Lead reopen overwrites the `ci_route` block on the arbitration row it came
+/// from, so the very next read of that hold cycle answers `NoRoute` and the
+/// guard has no row to name.
+///
+/// Driving `start_monitored_reopen` behaviourally is out of reach here: it is a
+/// `DirectServices` method that needs a dispatch ledger, a slot pool and a
+/// monitored session, none of which this crate carries a double for.
+///
+/// NAMED FAILING MUTATIONS.
+/// (a) Replace the call with a from-scratch `serde_json::json!({..})`: the
+///     binding assertion fails and the occurrence count drops to one.
+/// (b) Delete the call and the binding entirely: the same two failures.
+/// (c) Add a second reopen writer that rebuilds the directive: the count
+///     assertion fails, which is what forces a new writer to be looked at.
+#[test]
+fn the_reopen_writer_merges_into_the_existing_arbitration_directive() {
+    let code = strip_line_comments(include_str!("../../direct_services.rs"));
+
+    assert!(
+        code.contains("let directive_json = merge_reopen_into_directive("),
+        "`start_monitored_reopen` must MERGE the reopen payload into the row's \
+         existing directive; rebuilding it destroys the `ci_route` block the \
+         guard reads on the next look",
+    );
+    assert_eq!(
+        code.matches("merge_reopen_into_directive(").count(),
+        2,
+        "exactly two occurrences: the definition and its single call site",
+    );
+    assert!(
+        code.contains("fn merge_reopen_into_directive("),
+        "and one of them must be the definition",
+    );
 }
