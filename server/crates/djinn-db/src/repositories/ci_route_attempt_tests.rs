@@ -2432,6 +2432,254 @@ async fn identical_keys_on_two_subjects_do_not_collide() {
 }
 
 // ---------------------------------------------------------------------------
+// A live `calling` row belongs to its owner, whichever door you knock on
+// ---------------------------------------------------------------------------
+
+/// The Tier-2 doors must not steal a row whose provider call is in flight.
+///
+/// `open_tier2_lease` used to: handed a superseding observed identity, its
+/// guard branch terminalized the row `superseded_before_lead` even in
+/// `calling`, and the owner's later `finalize_calling` then returned `false`
+/// and dropped a real provider result on the floor with nothing reported. That
+/// is the same steal already fenced out of `terminalize` and
+/// `close_routes_for_newer_outcome`; this proves the third and fourth doors
+/// are shut too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tier_two_doors_never_close_a_live_calling_row() {
+    let f = fixture().await;
+    let repository = repo(&f.db);
+    let identity = pr_head_identity(1, "headsha-inflight");
+    let input = reservation(&f.subject, "key-inflight", identity.clone(), "fp-a");
+    repository.reserve(&input).await.unwrap();
+    let owner = incarnation();
+    repository
+        .charge_and_begin_calling(&f.subject, "key-inflight", &owner, &identity)
+        .await
+        .unwrap();
+
+    // The PR head moved while the provider call was in flight. This is the
+    // exact input that used to steal the row.
+    let superseding = pr_head_identity(2, "headsha-moved");
+    let outcome = repository
+        .open_tier2_lease(
+            &f.subject,
+            "key-inflight",
+            &superseding,
+            &tier2_lease_key(4242, "headsha-moved"),
+            CiTier2Reason::CausalFailure,
+        )
+        .await
+        .unwrap();
+    assert!(
+        matches!(outcome, CiTier2LeaseOutcome::OwnedByProviderCall(_)),
+        "a row in calling belongs to its owner, got {outcome:?}"
+    );
+
+    // Nothing moved: not the phase, not the owner, not the lease.
+    let row = repository
+        .get(&f.subject, "key-inflight")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.action_phase, CiActionPhase::Calling);
+    assert!(row.terminal_outcome.is_none());
+    assert_eq!(row.owner_incarnation_id.as_deref(), Some(owner.as_str()));
+    assert!(!row.has_routed_to_tier2());
+
+    // The specific durable lie this prevents. The row is CHARGED — a provider
+    // call really was authorized and really did execute — so recording it as
+    // `superseded_before_lead` would mean the table says "we never called the
+    // provider" about a row whose own counters say we did. Being authoritative
+    // about that one fact is the entire reason this table exists.
+    assert_eq!(row.charged_signature_count, Some(1));
+    assert_eq!(row.charged_head_count, Some(1));
+    assert!(
+        row.superseded_by_evidence.is_none(),
+        "a charged, in-flight call must never be recorded as a supersession"
+    );
+
+    // THE POINT: the owner's provider result still lands. Before the fix this
+    // returned `false` and the result was lost.
+    assert!(
+        repository
+            .finalize_calling(
+                &f.subject,
+                "key-inflight",
+                &owner,
+                CiRouteOutcome::Retriggered,
+                None,
+            )
+            .await
+            .unwrap(),
+        "the owner's finalizer must still win; a stolen row makes it a silent no-op"
+    );
+    let row = repository
+        .get(&f.subject, "key-inflight")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.terminal_outcome, Some(CiRouteOutcome::Retriggered));
+}
+
+/// The same fence in the helper every non-owner terminalization funnels
+/// through, exercised directly rather than via one public method.
+///
+/// A row that legally holds an open Tier-2 lease is charged to `calling` out
+/// from under the adjudication, and the delayed Lead result then arrives with
+/// a superseding identity — the branch that terminalizes
+/// `superseded_before_apply`. It must apply nothing and close nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_delayed_lead_result_cannot_close_a_row_that_is_now_calling() {
+    let f = fixture().await;
+    let repository = repo(&f.db);
+    let identity = pr_head_identity(1, "headsha-delayed");
+    let input = reservation(&f.subject, "key-delayed", identity.clone(), "fp-a");
+    repository.reserve(&input).await.unwrap();
+
+    let opened = repository
+        .open_tier2_lease(
+            &f.subject,
+            "key-delayed",
+            &identity,
+            &tier2_lease_key(4242, "headsha-delayed"),
+            CiTier2Reason::CausalFailure,
+        )
+        .await
+        .unwrap();
+    let CiTier2LeaseOutcome::Opened { lease_id, .. } = opened else {
+        panic!("expected a lease on a reserved row");
+    };
+    repository
+        .attach_lead_session(&f.subject, "key-delayed", &lease_id, "session-delayed")
+        .await
+        .unwrap();
+
+    // The row is charged to `calling` while Lead is thinking.
+    let owner = incarnation();
+    let charged = repository
+        .charge_and_begin_calling(&f.subject, "key-delayed", &owner, &identity)
+        .await
+        .unwrap();
+    assert!(matches!(charged, CiChargeOutcome::Charged { .. }));
+
+    // Lead answers late, against evidence that has since moved.
+    let applied = repository
+        .resolve_tier2_lease(
+            &f.subject,
+            "key-delayed",
+            &lease_id,
+            &pr_head_identity(9, "headsha-elsewhere"),
+            &CiTier2Resolution::repair(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        !applied,
+        "a delayed result applies nothing to a calling row"
+    );
+
+    let row = repository
+        .get(&f.subject, "key-delayed")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        row.action_phase,
+        CiActionPhase::Calling,
+        "the row must still belong to its provider-call owner"
+    );
+    assert!(row.terminal_outcome.is_none());
+    assert!(row.reopen_mode.is_none());
+    assert!(
+        repository
+            .finalize_calling(
+                &f.subject,
+                "key-delayed",
+                &owner,
+                CiRouteOutcome::ActionFailed,
+                None,
+            )
+            .await
+            .unwrap(),
+        "the owner's finalizer must still win"
+    );
+}
+
+/// The Tier-2 head hold is **per subject**, not global — the documented
+/// consequence of scoping every key by subject.
+///
+/// This is not a bug to fix; it is the price of making a key collision unable
+/// to swallow a foreign route, and it is invisible while every subject is a
+/// task and one PR maps to one task. The test exists so the boundary is
+/// pinned: if someone later widens the index to make the hold global, this
+/// fails and they are forced to notice the lost-route class reopening.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_tier_two_head_hold_stops_at_the_subject_boundary() {
+    let f = fixture().await;
+    let repository = repo(&f.db);
+    let other_task = seed_task_row(
+        &f.db,
+        UsageTestTaskSeed {
+            project_id: &f.project_id,
+            status: "pr_draft",
+            close_reason: None,
+            total_reopen_count: 0,
+        },
+    )
+    .await;
+    let other = CiRouteSubject::task(&other_task);
+
+    let head = "headsha-shared-hold";
+    let identity = pr_head_identity(1, head);
+    let lease_key = tier2_lease_key(4242, head);
+
+    for (subject, key) in [(&f.subject, "key-hold-mine"), (&other, "key-hold-theirs")] {
+        repository
+            .reserve(&reservation(subject, key, identity.clone(), "fp-a"))
+            .await
+            .unwrap();
+        let outcome = repository
+            .open_tier2_lease(
+                subject,
+                key,
+                &identity,
+                &lease_key,
+                CiTier2Reason::CausalFailure,
+            )
+            .await
+            .unwrap();
+        assert!(
+            matches!(outcome, CiTier2LeaseOutcome::Opened { .. }),
+            "the hold is per subject, so `{key}` must get its own adjudication"
+        );
+    }
+
+    // Two Lead adjudications, one PR head, two subjects. Documented in
+    // migration 191 as what the first non-task subject inherits.
+    let open: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM ci_route_attempts WHERE tier2_lease_state = 'open'",
+    )
+    .fetch_one(f.db.pool())
+    .await
+    .unwrap();
+    assert_eq!(open, 2);
+
+    // And the head budget is per subject too: the same head key charges
+    // independently on each side.
+    let head_key = format!("head:4242:{head}");
+    for subject in [&f.subject, &other] {
+        let counts = repository
+            .budget_counts(subject, "sig:unused", &head_key)
+            .await
+            .unwrap();
+        assert_eq!(
+            counts.head, 0,
+            "each subject starts its own head budget for the same PR head"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Helpers used by more than one test
 // ---------------------------------------------------------------------------
 

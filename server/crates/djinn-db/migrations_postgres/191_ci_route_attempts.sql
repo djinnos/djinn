@@ -26,13 +26,15 @@
 --     process survived to hear it. There is deliberately no refund path and no
 --     reversible accounting column.
 --
---  3. AT MOST ONE TIER-2 (Lead) ADJUDICATION PER CURRENT EVIDENCE.
---     A PARTIAL UNIQUE INDEX on the subject-scoped lease key, restricted to
---     `open` leases, makes concurrent openers mutually exclusive; resolving a
---     lease releases the key for genuinely newer evidence. A given ROW may
---     still only ever route to Tier 2 once — that is enforced in the
---     repository, which refuses to re-lease a row whose lease already
---     resolved.
+--  3. AT MOST ONE TIER-2 (Lead) ADJUDICATION PER CURRENT EVIDENCE,
+--     PER SUBJECT. A PARTIAL UNIQUE INDEX on the subject-scoped lease key,
+--     restricted to `open` leases, makes concurrent openers mutually
+--     exclusive within a subject; resolving a lease releases the key for
+--     genuinely newer evidence. It is NOT globally exclusive — see the
+--     `tier2_lease_key` column note for what that means and when it starts to
+--     matter. A given ROW may still only ever route to Tier 2 once, which is
+--     enforced in the repository: it refuses to re-lease a row whose lease
+--     already resolved.
 --
 -- The `reserved` -> `calling` -> terminal phase column carries the fourth
 -- invariant, the one the whole pre-call recovery contract rests on: a
@@ -150,11 +152,51 @@ CREATE TABLE ci_route_attempts (
 
     -- ---- Tier 2 ----------------------------------------------------------
     -- `tier2_lease_key` is the current-evidence scope. It carries the PR
-    -- number and PR-head SHA and NOT the lane, the run id, or the dequeue id:
-    -- at most one Lead adjudication may be open per PR head ACROSS BOTH LANES,
-    -- which is the "head-level hold" the proposal's retry-storm safeguard
-    -- names. A lane-scoped key would permit two concurrent adjudications for
-    -- one head and defeat it.
+    -- number and PR-head SHA and NOT the lane, the run id, or the dequeue id,
+    -- so one PR head cannot hold two concurrent Lead adjudications by having
+    -- failed in both lanes. A lane-scoped key would defeat that outright.
+    --
+    -- THIS SCOPE IS A CHOICE, NOT A DERIVATION. Proposal `nafu` describes the
+    -- lease three different and mutually incompatible ways:
+    --
+    --   * "a unique evidence-scoped route lease"  (lane transitions table)
+    --       -> would include the run id, so two runs on one head each get an
+    --          adjudication;
+    --   * "at most one Lead adjudication for current evidence"
+    --                                             (Idempotency section)
+    --       -> ambiguous between the two others;
+    --   * "a head-level hold while current provider failure or unknown
+    --      outcome is adjudicated"                (Risks section)
+    --       -> head only.
+    --
+    -- Head scope is the most conservative of the three: it admits the fewest
+    -- Lead sessions and is the only reading under which the retry-storm
+    -- safeguard the Risks section names actually exists. That is why it was
+    -- chosen. It is NOT implied by the other two statements, and a later wave
+    -- that reads the lane-transitions wording literally would widen the hold
+    -- and reintroduce concurrent adjudications for one head. Resolve the spec
+    -- before changing this.
+    --
+    -- Be precise about the extent of the hold, because it is NOT global. The
+    -- unique index below is `(subject_kind, subject_id, tier2_lease_key)`, so
+    -- the hold is **per subject, per PR head across both lanes** — two
+    -- different subjects CAN hold the identical lease key open at the same
+    -- time. The same is true of the head budget counter and of the
+    -- pass/merge close, which are also subject-scoped.
+    --
+    -- That is the deliberate flip side of the subject scoping: scoping is what
+    -- makes a key collision unable to swallow a foreign route, and that
+    -- property was judged more important than a globally exclusive hold.
+    --
+    -- It is harmless today ONLY because every subject is a task and one PR
+    -- maps to one task, so no two subjects share a PR head. **The first wave
+    -- that writes a non-task subject must re-derive this**: if a `proposal`
+    -- subject and a `task` subject ever share a PR head, the head budget for
+    -- that head doubles (4 per subject rather than 4 in total) and two Lead
+    -- adjudications can be open for it at once. Neither is a schema bug; both
+    -- are consequences of the scope, and whichever wave introduces the overlap
+    -- owns deciding whether to widen the hold or to keep the subjects
+    -- genuinely disjoint.
     tier2_lease_id          VARCHAR(36)  NULL,
     tier2_lease_key         VARCHAR(128) NULL,
     tier2_lease_state       VARCHAR(16)  NULL,
