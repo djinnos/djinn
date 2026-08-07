@@ -249,7 +249,18 @@ impl CoordinatorActor {
     /// would be mutating process-global state that every other test in the
     /// binary can observe. The environment is read here, at the call site, and
     /// nowhere else.
+    ///
+    /// The one exception is `CoordinatorActor::test_ci_routing_gate`, which
+    /// is `#[cfg(test)]` and `None` everywhere else. It exists so the AC12
+    /// wiring fixtures can drive the *production* startup path and the
+    /// *production* tick — both of which read the gate through this method —
+    /// without touching the process environment. See that field for why the
+    /// environment is not usable there.
     pub(crate) fn ci_routing_gate(&self) -> CiRoutingGate {
+        #[cfg(test)]
+        if let Some(gate) = self.test_ci_routing_gate {
+            return gate;
+        }
         CiRoutingGate::from_env()
     }
 

@@ -188,6 +188,20 @@ pub(super) struct CoordinatorActor {
     /// path.
     #[cfg(test)]
     pub(super) test_use_live_credential_resolution: bool,
+    /// Narrow test seam for [`CoordinatorActor::ci_routing_gate`] (proposal
+    /// `nafu`, AC12). `None` — the default, and the only value production ever
+    /// holds — leaves `DJINN_CI_EVIDENCE_ROUTING` as the sole authority.
+    ///
+    /// The gate is read from the process environment, which is right for
+    /// production and useless to a fixture: `cargo test` runs this crate's
+    /// tests as threads in ONE process, so a test that set the variable would
+    /// be setting it for every other test in the binary. With the gate off,
+    /// `recover_ci_calling_owners_at_startup` and `sweep_ci_routes` both return
+    /// before touching anything — so a test driving the real startup path or
+    /// the real tick could not tell a wired call site from a deleted one, which
+    /// is precisely the gap the AC12 wiring fixtures close.
+    #[cfg(test)]
+    pub(super) test_ci_routing_gate: Option<crate::pr_poller::ci_routing::gate::CiRoutingGate>,
     /// Per-project PR creation errors (project_id → error message).
     pub(super) pr_errors: HashMap<String, String>,
     /// Durable dispatch-state: per-task dispatch tracking (task UUID → last
@@ -773,6 +787,8 @@ impl CoordinatorActor {
             model_priorities: HashMap::new(),
             #[cfg(test)]
             test_use_live_credential_resolution: false,
+            #[cfg(test)]
+            test_ci_routing_gate: None,
             pr_errors: HashMap::new(),
             last_dispatched: HashMap::new(),
             inflight_dispatches: HashMap::new(),
@@ -1282,6 +1298,30 @@ impl CoordinatorActor {
     pub(crate) async fn drive_dispatch_loop_for_test(&mut self) {
         self.run_dispatch_loop(StartupLegacySettingsImportsComplete)
             .await;
+    }
+
+    /// Drive [`Self::run_tick`] — the production 30-second pass, not a copy of
+    /// it — exactly once, so a sibling test module can witness the passes it
+    /// owns.
+    ///
+    /// The CI-route sweep has no other trigger anywhere in the tree: the
+    /// `CI_ROUTE_SWEEP_INTERVAL` block below is the only caller of
+    /// `sweep_ci_routes`, which is in turn the only caller of
+    /// `emit_ci_route_report` and of `record_ci_rollback_quiescence_report`.
+    /// Nothing in this crate ran `run_tick`, so that whole block could be
+    /// deleted with the suite green: reserved routes stranded by a crash would
+    /// never be swept, and the rollback quiescence report an operator is meant
+    /// to watch converge would never be taken.
+    ///
+    /// A shim rather than widening `run_tick`'s visibility, for the same reason
+    /// [`Self::drive_dispatch_loop_for_test`] is one. Driving it *once* rather
+    /// than through the loop is deliberate: the `.await` returning is a
+    /// happens-before edge, so the assertions that follow read a finished pass
+    /// rather than whatever a sleep happened to race with.
+    #[cfg(test)]
+    pub(crate) async fn drive_tick_for_test(&mut self) {
+        // Boxed, exactly as the loop's tick arm boxes it — see `poll_stack`.
+        poll_stack::boxed(|| self.run_tick()).await;
     }
 
     /// Enter the normal, potentially infinite dispatch loop only after the
