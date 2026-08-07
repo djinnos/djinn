@@ -3136,6 +3136,11 @@ mod tests {
         assert!(launched.load(Ordering::Acquire));
         assert!(error.to_string().contains("injected mark_active"));
         assert!(observed_abort.is_aborted());
+        // `reconcile_reached` fires before the repository mutation so tests can
+        // deliberately suspend it. This case needs the durable terminal row,
+        // so subscribe to completion before releasing the B1 outcome.
+        let reconcile_finished = hooks.reconcile_finished.notified();
+        tokio::pin!(reconcile_finished);
         tx.send(ProviderOutcomeV1 {
             terminal: djinn_provider::ProviderAttemptTerminalV1::Failed(
                 djinn_provider::ProviderAttemptLossV1::Transport,
@@ -3146,7 +3151,7 @@ mod tests {
             token_emission: Default::default(),
         })
         .expect("outcome");
-        hooks.reconcile_reached.notified().await;
+        reconcile_finished.await;
         assert_eq!(
             hooks.reconciliations.lock().expect("observer").as_slice(),
             std::slice::from_ref(&lease)
