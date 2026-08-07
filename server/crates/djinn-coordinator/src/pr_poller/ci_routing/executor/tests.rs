@@ -3282,6 +3282,169 @@ async fn an_annotation_failure_after_correlation_routes_to_guarded_tier_two() {
     );
 }
 
+/// A lane-opened Tier-2 lease becomes a Lead session, bound to that route.
+///
+/// `CiLaneRouting::settle` calls `dispatch_opened_tier2_leases`, and until this
+/// fixture existed that call could be deleted with the entire `nafu` command
+/// list green. Every other lane fixture asserts the *lease* (`1`) and the
+/// absence of a worker (`0`), and neither number moves when the dispatch is
+/// removed. The one fixture that does assert an arbitration row — the
+/// twelve-poll hold escalation — reaches Lead through `ci_hold`'s own
+/// `dispatch_escalated_hold`, a different call site entirely, so it stays green
+/// too.
+///
+/// The consequence of the deletion is precisely the wedge the comment at that
+/// call site describes: the lane withholds the legacy remediation path because
+/// an adjudication is pending, and nothing ever adjudicates. The task sits in
+/// `pr_review` with an open head-scoped lease that also blocks every other
+/// Tier-2 route for that head.
+///
+/// `lead_session_id` is asserted, not merely the arbitration count: a row that
+/// happens to exist proves the coordinator wrote *an* arbitration, while the
+/// binding proves it wrote the one **this** route is adjudicated under. That
+/// binding is also what makes `unapplied_lead_results` in the rollback
+/// quiescence report mean "a Lead was dispatched" rather than "a lease exists".
+///
+/// # What this fixture found on its first run
+///
+/// A real one, and not the call site it was written to guard. The dispatch
+/// bound the route under `format!("arbitration:{task_id}:{hold_cycle}")` — a
+/// ~50 character string — and `ci_route_attempts.lead_session_id` is
+/// `VARCHAR(36)`. Postgres refuses an over-long value rather than truncating
+/// it, the dispatch logged the resulting error at `warn` and escalated the
+/// board anyway, so every other observable effect of a Tier-2 dispatch landed
+/// while the binding never did on any lane. The two counters that read this
+/// column — `unapplied_lead_results` and the route report's `lead_invocations`
+/// — were therefore pinned at zero by construction. Nothing else could have
+/// caught it: the `tier2_dispatch` fixtures hand the dispatch a handoff whose
+/// route row does not exist, so their attach misses the fence and returns
+/// `NotFound` before the column is ever written. The dispatch now binds the
+/// arbitration row's own id.
+///
+/// NAMED FAILING MUTATIONS.
+/// (a) Delete `self.dispatch_opened_tier2_leases(outcomes, task_id).await;`
+///     from `settle`: no arbitration row, the task stays `pr_review`, and the
+///     route row's `lead_session_count` stays `0`.
+/// (b) Read the boolean instead of the handoff in `dispatch_opened_tier2_leases`
+///     (`Tier2 { lease_opened: true, .. } => …` with no handoff to bind): there
+///     is nothing to pass to `dispatch_ci_tier2_lead`, so it cannot compile —
+///     and if it is made to, the `provider_action_key` assertion fails.
+/// (c) Move the dispatch above `fold` and into the `CompleteEmpty` arm: this
+///     route is not complete-empty, so nothing dispatches, as in (a).
+/// (d) Drop the `attach_lead_session` call from `dispatch_ci_tier2_lead`: the
+///     arbitration and the board transition still land, and the two
+///     `lead_session_*` assertions fail alone.
+/// (e) Bind any handle that is not a row id — the old
+///     `arbitration:{task_id}:{hold_cycle}`, or anything else over 36
+///     characters: the `UPDATE` is refused by the column type, the dispatch
+///     swallows the error, and (d)'s two assertions fail in exactly the same
+///     way. That is the mutation this fixture actually caught.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_lane_opened_tier2_lease_becomes_a_lead_session_bound_to_its_route() {
+    let h = lane_harness().await;
+    let provider = FakeProvider::default();
+    provider.set_check_runs(vec![causal_check("merge-group / integration", 980)]);
+
+    assert_eq!(
+        arbitration_rows(&h.db).await,
+        0,
+        "precondition: nothing has adjudicated anything yet",
+    );
+    assert_eq!(
+        djinn_db::test_support::task_status_for_test(&h.db, &h.task_id).await,
+        "pr_review",
+        "precondition: the task starts in this lane's origin state",
+    );
+
+    let disposition = h
+        .actor
+        .route_merge_group_ci_evidence(
+            &provider,
+            &h.task_id,
+            "task-short",
+            "acme",
+            "widgets",
+            PR as u64,
+            HEAD,
+            "PR_node",
+            MergeMethod::Squash,
+            &[merge_group_run(980)],
+            Some(&dequeue_event()),
+            CiRoutingGate::Enabled,
+        )
+        .await;
+
+    assert!(disposition.is_routed());
+    assert_eq!(
+        djinn_db::test_support::ci_route_lease_count_for_test(&h.db, &h.task_id).await,
+        1,
+        "precondition: a complete causal failure opens exactly one adjudication",
+    );
+
+    // ── The lease became a Lead session ─────────────────────────────────────
+    assert_eq!(
+        arbitration_rows(&h.db).await,
+        1,
+        "an opened lease must become a Lead session, or the lane suppresses the \
+         legacy path and nothing adjudicates in its place",
+    );
+    assert_eq!(
+        djinn_db::test_support::task_status_for_test(&h.db, &h.task_id).await,
+        "needs_lead_intervention",
+        "and the board must enter the only lane a Lead session runs from",
+    );
+
+    // ── …and it is bound to THIS route, not merely coincident with it ───────
+    let identity = CiEvidenceIdentity {
+        lane: CiLane::MergeGroup,
+        pr_number: PR,
+        pr_head_sha: HEAD.to_owned(),
+        run_id: Some(980),
+        run_head_sha: MERGE_GROUP_SHA.to_owned(),
+        dequeue_id: Some(DEQUEUE_ID.to_owned()),
+    };
+    let subject = CiRouteSubject::task(h.task_id.clone());
+    let key = provider_action_key(&subject, &identity, CiAction::AskLead);
+    let row = CiRouteAttemptRepository::new(h.db.clone())
+        .get(&subject, &key)
+        .await
+        .expect("route read")
+        .expect("a complete causal merge-group failure takes one Tier-2 route");
+    assert_eq!(
+        row.lead_session_count, 1,
+        "exactly one Lead session is attached to the route it adjudicates",
+    );
+    let arbitration =
+        djinn_db::repositories::task_arbitration::TaskArbitrationRepository::new(h.db.clone())
+            .get_latest_for_task(&h.task_id)
+            .await
+            .expect("arbitration read")
+            .expect("the dispatch writes the arbitration this route is adjudicated under");
+    assert_eq!(
+        row.lead_session_id.as_deref(),
+        Some(arbitration.id.as_str()),
+        "the route must name the arbitration row adjudicating it, not merely have \
+         some session id",
+    );
+
+    let directive = arbitration
+        .directive
+        .expect("the dispatch writes the directive the Lead session reads");
+    assert_eq!(
+        directive["ci_route"]["provider_action_key"].as_str(),
+        Some(key.as_str()),
+        "the block Lead reads must name the route the lease was opened on",
+    );
+
+    // ── And the adjudication spends nothing else ────────────────────────────
+    assert_eq!(provider.calls().mutations(), 0, "no provider mutation");
+    assert_eq!(
+        djinn_db::test_support::task_attempt_count_for_test(&h.db, &h.task_id).await,
+        0,
+        "a Tier-2 adjudication dispatches no worker",
+    );
+}
+
 /// A dequeue this poll cannot name leaves the lane to the legacy path rather
 /// than inventing an identity it could not revalidate on a later poll.
 #[tokio::test]
@@ -4653,7 +4816,16 @@ async fn head_advance_clears_hold_streak() {
 ///   watermark (`Superseded`).
 ///
 /// Either way there is exactly one `escalated_at`, one run-absent route row, one
-/// open Tier-2 lease, and one Lead adjudication.
+/// open Tier-2 lease, and one Lead adjudication — bound to that route, because
+/// an arbitration row that exists and a route that names it are different
+/// claims, and only the second one `unapplied_lead_results` can read.
+///
+/// This is the escalating poll's own dispatch, where the lease id the payload
+/// minted and the one the row stores are the same value: this poll is the one
+/// that inserted the row. The other two entries into `dispatch_escalated_hold`
+/// — a conflicting insert and the `AlreadyEscalated` re-drive — cannot rely on
+/// that, and are covered by
+/// `an_escalated_hold_redrive_binds_the_lease_its_route_holds`.
 #[tokio::test]
 async fn count_eleven_race_escalates_once_at_twelve() {
     let h = lane_harness().await;
@@ -4824,6 +4996,29 @@ async fn count_eleven_race_escalates_once_at_twelve() {
     assert_eq!(row.identity.run_id, None, "absence, never a sentinel");
     assert_eq!(row.action, CiAction::AskLead);
 
+    // …and the adjudication is BOUND to that route rather than merely coincident
+    // with it. Counting `task_arbitrations` proves the escalation wrote *an*
+    // arbitration; only `lead_session_id` proves it wrote the one this route is
+    // adjudicated under, which is what `unapplied_lead_results` reads. Exactly
+    // one attach happens however the race lands: whichever poll creates the
+    // arbitration is the one that binds, and the other finds it unconsumed and
+    // answers `AlreadyInFlight` before reaching the attach.
+    let adjudication =
+        djinn_db::repositories::task_arbitration::TaskArbitrationRepository::new(h.db.clone())
+            .get_latest_for_task(&h.task_id)
+            .await
+            .expect("arbitration read")
+            .expect("the escalation dispatches one Lead session");
+    assert_eq!(
+        row.lead_session_count, 1,
+        "one Lead session attached to the escalated route, not zero and not two",
+    );
+    assert_eq!(
+        row.lead_session_id.as_deref(),
+        Some(adjudication.id.as_str()),
+        "and the route names the arbitration row adjudicating it",
+    );
+
     // And an escalation still buys no provider call, no worker, and no charge.
     assert_eq!(first.calls().mutations(), 0);
     assert_eq!(second.calls().mutations(), 0);
@@ -4836,6 +5031,284 @@ async fn count_eleven_race_escalates_once_at_twelve() {
         charged_budget_counters(&h.db).await,
         0,
         "`ask_lead` consumes no Tier-1 charge",
+    );
+}
+
+/// An escalated hold's re-drive binds the lease its ROW holds, not the one its
+/// payload minted.
+///
+/// # Why the sibling twelve-poll fixture cannot see this
+///
+/// It asserts `arbitration_rows == 1` and never reads `lead_session_*`, and the
+/// escalating poll there is also the one that INSERTS the route — so the id it
+/// minted and the id the row stores are the same value by accident of timing,
+/// and every attach matches its fence. Both other ways into
+/// `dispatch_escalated_hold` break that coincidence:
+///
+/// * `escalation_route` mints `tier2_lease_id` fresh on every call while
+///   `insert_escalation_route` writes it `ON CONFLICT DO NOTHING`, so
+///   `Escalated { route_inserted: false }` dispatches against an id no row
+///   holds; and
+/// * the `AlreadyEscalated` re-drive — the recovery for "the lease committed
+///   but the dispatch did not" — always mints its id after the row was written.
+///
+/// This fixture drives the second one, because it is the case where the
+/// re-drive is the poll that finally creates the arbitration: escalate with the
+/// dispatch unable to land, then poll again and require that the Lead session
+/// the re-drive dispatches is bound to the durable lease.
+///
+/// The escalating poll is handed a task id that names no row, which is exactly
+/// `dispatch_escalated_hold`'s own `Ok(None) => return` arm and exactly the
+/// production shape its `AlreadyEscalated` comment describes: the ledger's
+/// transaction commits the route and its open lease, and the board-side half —
+/// which cannot be in that transaction — does not happen. Nothing else about
+/// the fixture is arranged; the streak, the route, the lease and both
+/// dispatches are the production ones.
+///
+/// # Why the binding, and not just the arbitration row
+///
+/// The stored lease id fences BOTH ends of the adjudication.
+/// `attach_lead_session` writes `lead_session_id` only when the id matches, and
+/// the supervisor hands the directive's `tier2_lease_id` to
+/// `resolve_tier2_lease`, which is fenced on the same column. A Lead session
+/// dispatched under a minted id therefore looks completely successful — row,
+/// directive, board transition — while `unapplied_lead_results` reads
+/// "quiescent" and the result, whenever it arrives, can never be applied. The
+/// escalation would spend a session and stay wedged, which is the failure the
+/// re-drive exists to prevent.
+///
+/// NAMED FAILING MUTATIONS.
+/// (a) Restore `tier2_lease_id: escalation.tier2_lease_id.clone()` in the
+///     handoff (i.e. drop the read-back): the re-drive's minted id names no
+///     row, so `attach_lead_session` misses its fence — `lead_session_count`
+///     stays `0` and `lead_session_id` NULL — and the directive assertion fails
+///     with the minted id in place of the stored one. Every other observable
+///     (arbitration row, directive block, board state) is unchanged, which is
+///     why nothing else here catches it.
+/// (b) Delete the `dispatch_escalated_hold` call from the `AlreadyEscalated`
+///     arm: no arbitration row exists at all, so the `expect` on the
+///     arbitration fails. The route keeps an open lease with nothing
+///     adjudicating it, and the lease is head-scoped, so it also blocks every
+///     other Tier-2 route for that head.
+/// (c) Drop the `holds_open_tier2_lease()` guard, or read the lease id without
+///     requiring the lease to be open: phase three's re-drive over a RESOLVED
+///     lease dispatches a second Lead session, opening a second hold cycle
+///     whose result `resolve_tier2_lease` can never apply — `arbitration_rows`
+///     becomes 2.
+/// (d) Bind the row's id but leave the directive on the payload's (two sources
+///     for one lease): the directive assertion fails alone, and the supervisor
+///     would resolve nothing.
+#[tokio::test]
+async fn an_escalated_hold_redrive_binds_the_lease_its_route_holds() {
+    let h = lane_harness().await;
+    let identity = pr_head_hold_identity(&h.task_id);
+    let hold_reason = crate::pr_poller::ci_routing::CiIncompleteReason::EnumerationPageFailed;
+    // Named once: every poll below is the same logical lane observation, and a
+    // second reason would start a different argument than the one under test.
+    let poll_once = async |task_id: &str| {
+        let poll = h
+            .actor
+            .reserve_ci_hold_poll(identity.clone())
+            .await
+            .expect("reservation");
+        h.actor
+            .apply_ci_hold_poll(
+                &poll,
+                &identity,
+                false,
+                CiOriginState::PrDraft,
+                hold_reason,
+                task_id,
+            )
+            .await
+    };
+
+    // ── Phase one: the lease commits and the dispatch does not ──────────────
+    let orphan_task = uuid::Uuid::now_v7().to_string();
+    for expected in 1..=djinn_db::CI_INCOMPLETE_HOLD_MAX_POLLS {
+        let absorbed = if expected == djinn_db::CI_INCOMPLETE_HOLD_MAX_POLLS {
+            crate::pr_poller::ci_hold::CiHoldAbsorption::Escalated {
+                route_inserted: true,
+            }
+        } else {
+            crate::pr_poller::ci_hold::CiHoldAbsorption::Held {
+                poll_count: expected,
+            }
+        };
+        assert_eq!(
+            poll_once(&orphan_task).await,
+            crate::pr_poller::ci_hold::CiHoldDisposition::Absorbed(absorbed),
+            "poll {expected} of {}",
+            djinn_db::CI_INCOMPLETE_HOLD_MAX_POLLS,
+        );
+    }
+
+    let subject = CiRouteSubject::task(h.task_id.clone());
+    let run_absent = CiEvidenceIdentity {
+        lane: CiLane::PrHead,
+        pr_number: PR,
+        pr_head_sha: HEAD.to_owned(),
+        run_id: None,
+        run_head_sha: HEAD.to_owned(),
+        dequeue_id: None,
+    };
+    let routes = CiRouteAttemptRepository::new(h.db.clone());
+    let key = provider_action_key(&subject, &run_absent, CiAction::AskLead);
+    let escalated = routes
+        .get(&subject, &key)
+        .await
+        .expect("route read")
+        .expect("the escalating transaction writes the run-absent route");
+    let lease_id = escalated
+        .tier2_lease_id
+        .clone()
+        .expect("the escalation opens the lease on the INSERT itself");
+    assert!(
+        escalated.holds_open_tier2_lease(),
+        "precondition: the durable lease is open and unadjudicated",
+    );
+    assert_eq!(
+        escalated.lead_session_count, 0,
+        "precondition: the dispatch did NOT land — otherwise phase two would be \
+         witnessing a binding that already existed",
+    );
+    assert_eq!(escalated.lead_session_id, None);
+    assert_eq!(
+        arbitration_rows(&h.db).await,
+        0,
+        "precondition: no Lead session was dispatched for the escalation",
+    );
+    assert_eq!(
+        djinn_db::test_support::task_status_for_test(&h.db, &h.task_id).await,
+        "pr_review",
+        "precondition: and the board never entered the Lead lane",
+    );
+
+    // ── Phase two: the re-drive is the poll that dispatches ─────────────────
+    assert_eq!(
+        poll_once(&h.task_id).await,
+        crate::pr_poller::ci_hold::CiHoldDisposition::Absorbed(
+            crate::pr_poller::ci_hold::CiHoldAbsorption::AlreadyEscalated
+        ),
+        "an escalated streak absorbs every later poll",
+    );
+
+    let arbitrations =
+        djinn_db::repositories::task_arbitration::TaskArbitrationRepository::new(h.db.clone());
+    let arbitration = arbitrations
+        .get_latest_for_task(&h.task_id)
+        .await
+        .expect("arbitration read")
+        .expect("the re-drive dispatches the Lead session the escalation could not");
+    let bound = routes
+        .get(&subject, &key)
+        .await
+        .expect("route read")
+        .expect("the route is still the run-absent one");
+    assert_eq!(
+        bound.tier2_lease_id.as_deref(),
+        Some(lease_id.as_str()),
+        "the re-drive opens no second lease, so the only id it may bind is the \
+         one the row already held",
+    );
+    assert_eq!(
+        bound.lead_session_count, 1,
+        "the re-drive's Lead session must be attached to the route it adjudicates",
+    );
+    assert_eq!(
+        bound.lead_session_id.as_deref(),
+        Some(arbitration.id.as_str()),
+        "and it must name the arbitration row this route is adjudicated under",
+    );
+    let directive = arbitration
+        .directive
+        .clone()
+        .expect("the dispatch writes the directive the Lead session reads");
+    assert_eq!(
+        directive["ci_route"]["tier2_lease_id"].as_str(),
+        Some(lease_id.as_str()),
+        "the supervisor hands this id to `resolve_tier2_lease`, which is fenced \
+         on the STORED lease: a minted id makes the adjudication unappliable",
+    );
+    assert_eq!(
+        directive["ci_route"]["provider_action_key"].as_str(),
+        Some(key.as_str()),
+        "and the directive names the route the lease belongs to",
+    );
+    assert_eq!(
+        djinn_db::test_support::ci_route_row_count_for_test(&h.db, &h.task_id).await,
+        1,
+        "one run-absent route, not one per poll",
+    );
+    assert_eq!(
+        djinn_db::test_support::ci_route_lease_count_for_test(&h.db, &h.task_id).await,
+        1,
+        "and one Tier-2 lease",
+    );
+    assert_eq!(arbitration_rows(&h.db).await, 1, "and one Lead session");
+    assert_eq!(
+        djinn_db::test_support::task_status_for_test(&h.db, &h.task_id).await,
+        "needs_lead_intervention",
+        "the re-drive escalates the board as well as binding the route",
+    );
+
+    // ── Phase three: a resolved lease ends this route's trip to Tier 2 ──────
+    //
+    // The adjudication is applied and consumed, which is what a Lead result
+    // landing looks like. Later incomplete polls keep arriving — the head's CI
+    // is still incomplete — and every one of them lands on `AlreadyEscalated`
+    // again. Dispatching there would open a SECOND hold cycle against a lease
+    // that is closed, so its result could never be applied: a session spent to
+    // be discarded.
+    assert!(
+        routes
+            .resolve_tier2_lease(
+                &subject,
+                &key,
+                &lease_id,
+                &run_absent,
+                &djinn_db::CiTier2Resolution::diagnose(
+                    djinn_db::CiDiagnosticReason::EvidenceIncomplete
+                ),
+            )
+            .await
+            .expect("resolve"),
+        "precondition: the adjudication applies and closes the lease",
+    );
+    assert!(
+        arbitrations
+            .mark_consumed(&h.task_id, arbitration.hold_cycle)
+            .await
+            .expect("consume"),
+        "precondition: and its arbitration is consumed, so nothing is in flight",
+    );
+
+    assert_eq!(
+        poll_once(&h.task_id).await,
+        crate::pr_poller::ci_hold::CiHoldDisposition::Absorbed(
+            crate::pr_poller::ci_hold::CiHoldAbsorption::AlreadyEscalated
+        ),
+    );
+    assert_eq!(
+        arbitration_rows(&h.db).await,
+        1,
+        "a route routes to Tier 2 at most once, ever: a re-drive over a resolved \
+         lease must dispatch NOTHING",
+    );
+    assert_eq!(
+        routes
+            .get(&subject, &key)
+            .await
+            .expect("route read")
+            .expect("route")
+            .lead_session_count,
+        1,
+        "and it attaches no second session to the route it can no longer resolve",
+    );
+    assert_eq!(
+        djinn_db::test_support::task_attempt_count_for_test(&h.db, &h.task_id).await,
+        0,
+        "none of this dispatches a worker",
     );
 }
 
@@ -5430,6 +5903,68 @@ async fn the_ticks_sweep_block_closes_a_stranded_reservation_and_takes_the_rollb
     );
 }
 
+/// The final argument of the call whose open paren `args` starts just after.
+///
+/// Shared by the two call-site guards below, which both need to know *what* a
+/// production call site was handed rather than merely that it exists.
+fn final_argument(args: &str) -> &str {
+    let mut depth = 1usize;
+    let mut end = args.len();
+    for (index, character) in args.char_indices() {
+        match character {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    end = index;
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    args[..end]
+        .trim()
+        .trim_end_matches(',')
+        .rsplit(',')
+        .next()
+        .unwrap_or_default()
+        .trim()
+}
+
+/// One Rust source with its `//` line comments removed.
+///
+/// The source-level guards below match on *code*. Without this, a comment that
+/// merely names the token under guard would satisfy the assertion the guard
+/// exists to make — which is the failure mode a source guard is most vulnerable
+/// to, and the one that would let this whole family of tests be "fixed" by
+/// writing prose. Quote- and escape-aware, so a `//` inside a string literal is
+/// left alone rather than truncating the line it sits on.
+fn strip_line_comments(source: &str) -> String {
+    let mut out = String::with_capacity(source.len());
+    for line in source.lines() {
+        let bytes = line.as_bytes();
+        let mut quoted = false;
+        let mut index = 0usize;
+        let mut end = line.len();
+        while index < bytes.len() {
+            match bytes[index] {
+                b'\\' if quoted => index += 1,
+                b'"' => quoted = !quoted,
+                b'/' if !quoted && bytes.get(index + 1) == Some(&b'/') => {
+                    end = index;
+                    break;
+                }
+                _ => {}
+            }
+            index += 1;
+        }
+        out.push_str(&line[..end]);
+        out.push('\n');
+    }
+    out
+}
+
 /// The PR poller hands both lane routers the LIVE gate.
 ///
 /// Source-level, and honestly labelled as such, for exactly the reason
@@ -5455,32 +5990,6 @@ async fn the_ticks_sweep_block_closes_a_stranded_reservation_and_takes_the_rollb
 /// (d) Deleting a router call site outright: the call count no longer matches.
 #[test]
 fn the_pr_poller_hands_the_live_gate_to_both_lane_routers() {
-    // The final argument of the call whose open paren `args` starts just after.
-    fn final_argument(args: &str) -> &str {
-        let mut depth = 1usize;
-        let mut end = args.len();
-        for (index, character) in args.char_indices() {
-            match character {
-                '(' => depth += 1,
-                ')' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        end = index;
-                        break;
-                    }
-                }
-                _ => {}
-            }
-        }
-        args[..end]
-            .trim()
-            .trim_end_matches(',')
-            .rsplit(',')
-            .next()
-            .unwrap_or_default()
-            .trim()
-    }
-
     for (label, source, expected_calls) in [
         ("pr_watcher", include_str!("../../pr_watcher.rs"), 2usize),
         ("pr_commands", include_str!("../../pr_commands.rs"), 1usize),
@@ -5513,5 +6022,764 @@ fn the_pr_poller_hands_the_live_gate_to_both_lane_routers() {
             !source.contains("CiRoutingGate::"),
             "{label}: the poller must never name a gate posture; it reads one",
         );
+    }
+}
+
+// ===========================================================================
+// `close_ci_routes_on_success`: the callee, then its two call sites
+// ===========================================================================
+
+/// A newer pass or merge terminalizes this subject's open route and unblocks
+/// the rollback gate.
+///
+/// Behavioural, over the production repository and the production rollback
+/// report. The assertion is the stored `terminal_outcome` and the durable
+/// quiescence row, never the name of the branch the method took.
+///
+/// The chain is the one the proposal's rollback safety argument rests on: an
+/// open route row keeps `current_failed_identity_count` above zero, which keeps
+/// `permits_rollback` false, so a coordinator that never closes its routes on
+/// success can never be rolled back — the drain would sit at "1 route identity
+/// that is still the current failed evidence for its lane" forever, for a PR
+/// that merged.
+///
+/// NAMED FAILING MUTATIONS.
+/// (a) Delete the `close_routes_for_newer_outcome` call from
+///     `close_ci_routes_on_success`: the row stays `Reserved` with
+///     `terminal_outcome: None`, and the report stays blocked.
+/// (b) Drop the `gate.owns_routes()` guard: the `DisabledClean` phase — taken
+///     first, on the same row — closes a row the disabled feature must not own.
+/// (c) Invert `if !decision.closes_route() { return; }`, or hand `classify` a
+///     capture other than `merged()`/`passing()`: nothing closes, as in (a).
+/// (d) Swap `CiRouteOutcome::Merged` and `CiRouteOutcome::Passed`: the outcome
+///     assertion fails in both halves of the loop.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn close_ci_routes_on_success_terminalizes_the_route_and_unblocks_rollback() {
+    for (merged, expected) in [
+        (false, CiRouteOutcome::Passed),
+        (true, CiRouteOutcome::Merged),
+    ] {
+        let (db, task_id, subject) = wiring_subject("ci-close-on-success").await;
+        let routes = CiRouteAttemptRepository::new(db.clone());
+        let mut actor = crate::actor::actor_with_test_db(db.clone());
+
+        let checks = [inconclusive_check("Quality Gate / test", 993)];
+        let blocking = refs(&checks);
+        let id = pr_head_identity(993);
+        let fingerprint = transient_fingerprint(CiLane::PrHead, &blocking);
+        let key = plant_reservation(&routes, &subject, &id, &fingerprint).await;
+
+        let before = route_row(&routes, &subject, &key).await;
+        assert_eq!(
+            before.action_phase,
+            CiActionPhase::Reserved,
+            "precondition: one open route for this PR",
+        );
+        assert_eq!(before.terminal_outcome, None);
+
+        // ── The disabled feature owns no routes ─────────────────────────────
+        //
+        // Taken first, and on the same row the draining phase below closes, so
+        // it is a real control rather than a separate fixture that could pass
+        // for reasons of its own.
+        actor.test_ci_routing_gate = Some(CiRoutingGate::DisabledClean);
+        actor
+            .close_ci_routes_on_success(&task_id, PR as u64, merged)
+            .await;
+        assert_eq!(
+            route_row(&routes, &subject, &key).await.action_phase,
+            CiActionPhase::Reserved,
+            "`DisabledClean` owns no route rows, so the close must not touch one",
+        );
+
+        // ── Draining, with the route still open ─────────────────────────────
+        actor.test_ci_routing_gate = Some(CiRoutingGate::Quiescing);
+        let blocked = actor
+            .record_ci_rollback_quiescence_report()
+            .await
+            .expect("quiescence report");
+        assert_eq!(
+            blocked.current_failed_identities, 1,
+            "an open route is still the current failed evidence for its lane",
+        );
+        assert!(
+            !blocked.permits_rollback,
+            "and that alone blocks a binary rollback: {:?}",
+            blocked.blocking_reasons(),
+        );
+
+        // ── The newer authoritative outcome ─────────────────────────────────
+        actor
+            .close_ci_routes_on_success(&task_id, PR as u64, merged)
+            .await;
+
+        let after = route_row(&routes, &subject, &key).await;
+        assert_eq!(
+            after.action_phase,
+            CiActionPhase::Terminal,
+            "a newer pass or merge outranks the open route, staleness included",
+        );
+        assert_eq!(
+            after.terminal_outcome,
+            Some(expected),
+            "and records which authoritative outcome closed it (merged: {merged})",
+        );
+
+        let clean = actor
+            .record_ci_rollback_quiescence_report()
+            .await
+            .expect("quiescence report");
+        assert_eq!(
+            clean.current_failed_identities, 0,
+            "the closed identity has advanced, so the high-watermark is clear",
+        );
+        assert!(
+            clean.permits_rollback,
+            "and the drain is now clean: {:?}",
+            clean.blocking_reasons(),
+        );
+        assert_eq!(
+            clean.permits_rollback,
+            clean.recomputed_verdict(),
+            "the stored verdict must agree with the function it is checked against",
+        );
+    }
+}
+
+/// Both production call sites of `close_ci_routes_on_success` still exist, in
+/// the branches whose behaviour depends on them.
+///
+/// SOURCE-LEVEL, and honestly labelled: this is not an integration test and
+/// does not pretend to be one. Both call sites sit *after*
+/// `gh_client.get_pull_request(..)` inside `poll_pr_draft_tasks`, and
+/// `resolve_installation_client` builds `GitHubApiClient::for_installation`,
+/// which hard-codes `api.github.com` — the crate carries no HTTP double and no
+/// base-URL seam on that path, so nothing here can reach either branch. The
+/// fixture above proves the callee end to end; this one proves production still
+/// reaches it.
+///
+/// It has to exist because deleting *both* calls leaves the method entirely
+/// dead — `warning: method close_ci_routes_on_success is never used` is the only
+/// signal — with the whole `nafu` command list green, while a merged PR silently
+/// stops closing its head's Tier-2 lease.
+///
+/// Comments are stripped before matching, so a comment naming the method
+/// satisfies nothing here.
+///
+/// NAMED FAILING MUTATIONS.
+/// (a) Delete either call site: the call count is no longer 2.
+/// (b) Delete both: the same failure, one assertion earlier.
+/// (c) Inline the method's body at either site: the call token disappears, so
+///     the count fails exactly as a deletion does.
+/// (d) Pass the same flag at both sites (both `true`, or both `false`): the
+///     `["true", "false"]` assertion fails — and a merged PR would record
+///     `passed`, or a passing one `merged`.
+/// (e) Move the merged-branch call after `apply_pr_merge`, or out of the
+///     `pr.merged == Some(true)` branch entirely: the first range assertion
+///     fails.
+/// (f) Move the passing-branch call out of the `CiStatus::Passing` arm: the
+///     second range assertion fails.
+/// (g) Shadow the lane-routing method with a local `fn` of the same name in
+///     `pr_watcher.rs`: the no-local-definition assertion fails.
+#[test]
+fn the_pr_poller_closes_ci_routes_on_both_merge_and_pass() {
+    const CALL: &str = "self.close_ci_routes_on_success(";
+
+    let code = strip_line_comments(include_str!("../../pr_watcher.rs"));
+
+    let mut sites: Vec<(usize, &str)> = Vec::new();
+    let mut cursor = 0usize;
+    while let Some(offset) = code[cursor..].find(CALL) {
+        let at = cursor + offset;
+        sites.push((at, final_argument(&code[at + CALL.len()..])));
+        cursor = at + CALL.len();
+    }
+
+    assert_eq!(
+        sites.len(),
+        2,
+        "the merged branch and the passing branch each close this subject's \
+         routes; a changed count needs this test updated, not ignored",
+    );
+    assert_eq!(
+        sites
+            .iter()
+            .map(|(_, argument)| *argument)
+            .collect::<Vec<_>>(),
+        vec!["true", "false"],
+        "the merged branch closes with `merged: true` and the passing branch \
+         with `merged: false`, in that file order",
+    );
+    assert!(
+        !code.contains("fn close_ci_routes_on_success"),
+        "pr_watcher must CALL the lane-routing method, not define one of its own",
+    );
+
+    // ── Each call site sits in the branch that needs it ─────────────────────
+    let merged_branch = code
+        .find("if pr.merged == Some(true) {")
+        .expect("the merged branch is in pr_watcher.rs");
+    let apply_merge = code
+        .find("self.apply_pr_merge(")
+        .expect("the merge transition is in pr_watcher.rs");
+    let passing_arm = code
+        .find("CiStatus::Passing => {")
+        .expect("the passing arm is in pr_watcher.rs");
+    let after_the_match = passing_arm
+        + code[passing_arm..]
+            .find("if pr.mergeable == Some(false) {")
+            .expect("the conflict check follows the CI match");
+
+    assert!(
+        (merged_branch..apply_merge).contains(&sites[0].0),
+        "the merged close must run inside the merged branch and BEFORE \
+         `apply_pr_merge`, or a merge closes the task while its route rows stay \
+         open",
+    );
+    assert!(
+        (passing_arm..after_the_match).contains(&sites[1].0),
+        "the passing close must run inside the `CiStatus::Passing` arm, which is \
+         the only place a newer pass is known",
+    );
+}
+
+/// The end of the `{`-delimited block that starts at `open`.
+///
+/// Used by the disposition-branch guard below to tell "inside the branch" from
+/// "after the branch" — the whole difference between a legacy remedy that is
+/// *replaced* by a route and one that runs *in addition to* it.
+fn block_end(code: &str, open: usize) -> usize {
+    let bytes = code.as_bytes();
+    assert_eq!(
+        bytes[open], b'{',
+        "block_end must start on an opening brace"
+    );
+    let mut depth = 0usize;
+    for (index, byte) in bytes.iter().enumerate().skip(open) {
+        match *byte {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return index;
+                }
+            }
+            _ => {}
+        }
+    }
+    panic!("unbalanced braces from offset {open}");
+}
+
+/// The PR-draft lane's two legacy remedies are *replaced* by a route, never run
+/// alongside one.
+///
+/// SOURCE-LEVEL, and honestly labelled, for the reason the sibling guards above
+/// carry: both branches sit after `gh_client.get_pull_request(..)` inside
+/// `poll_pr_draft_tasks`, and `resolve_installation_client` builds
+/// `GitHubApiClient::for_installation`, which hard-codes `GITHUB_API_BASE`
+/// (`api.github.com`). This crate carries no HTTP double and no base-URL seam on
+/// that path, so no fixture here can reach either branch; every behavioural
+/// fixture in this file enters at `route_pr_head_ci_evidence` and asserts what
+/// the *callee* answered.
+///
+/// The sibling guards pin the *presence* of the two router calls and the live
+/// gate. Neither pins the BRANCH SHAPE around them, and the shape is the whole
+/// contract: a `CiLaneOutcome` that routed must turn the legacy machinery OFF.
+/// Delete a guard and the legacy remedy runs **in addition to** the route rather
+/// than instead of it, so one routed failure buys both an evidence-led remedy
+/// and the old generic `PrCiFailed` reopen — the double-spent session this
+/// proposal exists to stop — with the entire `nafu` command list green, because
+/// the callee still returns exactly what every behavioural fixture asserts.
+///
+/// NAMED FAILING MUTATIONS.
+/// (a) Delete `if !routed.is_routed() {` around `retrigger_inconclusive_run`:
+///     the guard string is gone, so the `expect` on it fails. A routed
+///     inconclusive run would then be retriggered by the route layer AND by the
+///     in-memory legacy dedupe, double-charging the same evidence.
+/// (b) Invert it to `if routed.is_routed() {`: the same `expect` fails, because
+///     the guard is matched with its `!` — and the legacy retrigger would fire
+///     only when the route layer already handled the run.
+/// (c) Move `retrigger_inconclusive_run` out of that block: the containment
+///     assertion fails.
+/// (d) Move the `continue;` INSIDE the `!routed.is_routed()` block: the
+///     "continue after the block" assertion fails — a routed inconclusive lane
+///     would fall through to the undraft path and un-draft a PR whose CI said
+///     nothing.
+/// (e) Delete `if routed.is_routed() && routed.complete_empty().is_none() {`
+///     from the failing arm, or drop its `continue;`: the corresponding
+///     `expect`/containment assertion fails, and a routed causal failure would
+///     reach `handle_ci_failure` as well as its Tier-2 route.
+/// (f) Delete `if routed.complete_empty().is_none() {` around
+///     `handle_ci_failure`: that `expect` fails. An authoritatively complete
+///     *empty* enumeration — the no-CI compatibility path, already recorded
+///     `Passing` by the route layer — would be handed to the legacy failure
+///     remedy.
+/// (g) Reorder so `handle_ci_failure` precedes either guard: the ordering
+///     assertions fail.
+/// (h) Add a second call to either legacy remedy anywhere in the file: the
+///     occurrence-count assertions fail, which is what forces a new caller to be
+///     looked at rather than silently inheriting no guard.
+#[test]
+fn a_routed_pr_draft_disposition_turns_the_legacy_remedy_off() {
+    let code = strip_line_comments(include_str!("../../pr_watcher.rs"));
+
+    let find = |needle: &str, what: &str| -> usize {
+        code.find(needle)
+            .unwrap_or_else(|| panic!("{what}: `{needle}` is not in pr_watcher.rs"))
+    };
+    let count = |needle: &str| code.matches(needle).count();
+
+    // ── Arm boundaries. Everything below is asserted WITHIN one arm, so a
+    //    guard that drifted into a neighbouring arm reads as deleted. ────────
+    let inconclusive_arm = find("CiStatus::Inconclusive => {", "the inconclusive arm");
+    let pending_arm = find(
+        "CiStatus::Pending | CiStatus::Unknown => {",
+        "the pending arm",
+    );
+    let failing_arm = find("CiStatus::Failing => {", "the failing arm");
+    let passing_arm = find("CiStatus::Passing => {", "the passing arm");
+    assert!(
+        inconclusive_arm < pending_arm && pending_arm < failing_arm && failing_arm < passing_arm,
+        "the four CI-status arms are read in file order; a changed order needs \
+         this test updated, not ignored",
+    );
+
+    // ── Inconclusive: the legacy retrigger is the else-branch of the route ──
+    const RETRIGGER: &str = "self.retrigger_inconclusive_run(";
+    const ROUTED_GUARD: &str = "if !routed.is_routed() {";
+    assert_eq!(
+        count(RETRIGGER),
+        1,
+        "one legacy retrigger call site; a second one would inherit no guard",
+    );
+    let retrigger = find(RETRIGGER, "the legacy retrigger");
+    let routed_guard = find(ROUTED_GUARD, "the routed-disposition guard");
+    assert!(
+        (inconclusive_arm..pending_arm).contains(&retrigger)
+            && (inconclusive_arm..pending_arm).contains(&routed_guard),
+        "both live in the inconclusive arm",
+    );
+    let routed_block = block_end(&code, routed_guard + ROUTED_GUARD.len() - 1);
+    assert!(
+        (routed_guard..routed_block).contains(&retrigger),
+        "the legacy retrigger must run ONLY when the route layer declined; \
+         outside that block it runs in addition to the route",
+    );
+    assert!(
+        code[routed_block..pending_arm].contains("continue;"),
+        "and the hold must be OUTSIDE that block — a routed inconclusive run \
+         holds too, it just holds without a second retrigger",
+    );
+
+    // The no-CI compatibility path is the one thing that does NOT hold.
+    let complete_empty = find(
+        "if routed.complete_empty().is_some() {",
+        "the complete-empty fall-through",
+    );
+    assert!(
+        (inconclusive_arm..routed_guard).contains(&complete_empty),
+        "an authoritatively complete EMPTY enumeration falls through to undraft \
+         before the hold, or a repository with no CI wedges in `pr_draft`",
+    );
+
+    // ── Failing: routed holds, and complete-empty is never a failure ────────
+    const LEGACY_FAILURE: &str = ".handle_ci_failure(";
+    const HOLD_GUARD: &str = "if routed.is_routed() && routed.complete_empty().is_none() {";
+    const EMPTY_GUARD: &str = "if routed.complete_empty().is_none() {";
+    assert_eq!(
+        count(LEGACY_FAILURE),
+        1,
+        "one legacy failure-remedy call site in this lane",
+    );
+    let legacy_failure = find(LEGACY_FAILURE, "the legacy failure remedy");
+    let hold_guard = find(HOLD_GUARD, "the routed-holds guard");
+    let empty_guard = find(EMPTY_GUARD, "the complete-empty guard");
+    assert!(
+        (failing_arm..passing_arm).contains(&legacy_failure)
+            && (failing_arm..passing_arm).contains(&hold_guard)
+            && (failing_arm..passing_arm).contains(&empty_guard),
+        "all three live in the failing arm",
+    );
+    assert!(
+        hold_guard < empty_guard && empty_guard < legacy_failure,
+        "the routed hold is answered first, then complete-empty, and only then \
+         is the legacy remedy reachable",
+    );
+    let hold_block = block_end(&code, hold_guard + HOLD_GUARD.len() - 1);
+    assert!(
+        code[hold_guard..hold_block].contains("continue;"),
+        "a routed causal failure must LEAVE the poll; falling out of this block \
+         hands the same evidence to `handle_ci_failure` as well",
+    );
+    assert!(
+        hold_block < empty_guard,
+        "and it must leave before the legacy remedy's own guard",
+    );
+    let empty_block = block_end(&code, empty_guard + EMPTY_GUARD.len() - 1);
+    assert!(
+        (empty_guard..empty_block).contains(&legacy_failure),
+        "the legacy failure remedy must sit INSIDE the complete-empty guard; \
+         outside it, a no-CI enumeration the route layer already recorded \
+         `Passing` gets remediated as a failure",
+    );
+}
+
+/// The merge-queue lane's routed disposition LEAVES `handle_queue_failure`.
+///
+/// The merge-group twin of the guard above, and source-level for the same
+/// reason: `handle_queue_failure` takes a `&GitHubApiClient` built by
+/// `resolve_installation_client` against the hard-coded `api.github.com`, so no
+/// fixture in this crate can drive it. Every behavioural merge-group fixture
+/// enters at `route_merge_group_ci_evidence` and asserts what the *callee*
+/// answered.
+///
+/// The sibling `the_pr_poller_hands_the_live_gate_to_both_lane_routers` pins
+/// that this call site exists and is handed the live gate. Neither it nor
+/// anything else pins the `return;` — and this router call sits in the MIDDLE
+/// of `handle_queue_failure`, not at its head, so without the early return a
+/// routed merge-group failure keeps running through the rest of the function
+/// and reaches both legacy remedies: the same-signature park and then the
+/// generic `PrCiFailed` reopen. One dequeue would buy an evidence-led Tier-2
+/// adjudication AND the blind reopen that adjudication exists to replace — the
+/// double-spent session this proposal is for — with the whole `nafu` command
+/// list green, because the callee still answers exactly what every behavioural
+/// fixture asserts.
+///
+/// NAMED FAILING MUTATIONS.
+/// (a) Delete the `return;` from the `.is_routed()` branch: the containment
+///     assertion fails. In production the routed dequeue would fall through to
+///     `apply_pr_transition(PrCiFailed)` in addition to its route.
+/// (b) Replace `return;` with a bare log, or with anything that does not leave
+///     the function: same assertion, same reason.
+/// (c) Move the router call (and its branch) BELOW the reopen: the ordering
+///     assertion fails — the legacy remedy would already have been spent by the
+///     time the route layer got first refusal.
+/// (d) Invert the branch to `if !self.route_merge_group_ci_evidence(..)…`: the
+///     routed disposition would fall through to both legacy remedies and the
+///     DECLINED one would return — the same double-spend with the cases
+///     swapped, and a shape the containment check alone cannot tell apart. The
+///     unnegated-head assertion is what fails.
+/// (e) Add a second `route_merge_group_ci_evidence` call site or a second
+///     legacy remedy anywhere in the file: the occurrence counts fail, which
+///     forces a new caller to be looked at rather than silently inheriting no
+///     guard.
+#[test]
+fn a_routed_merge_group_disposition_replaces_the_legacy_queue_remedy() {
+    let code = strip_line_comments(include_str!("../../pr_commands.rs"));
+
+    let find = |needle: &str, what: &str| -> usize {
+        code.find(needle)
+            .unwrap_or_else(|| panic!("{what}: `{needle}` is not in pr_commands.rs"))
+    };
+    let count = |needle: &str| code.matches(needle).count();
+
+    const ROUTER: &str = ".route_merge_group_ci_evidence(";
+    const ROUTED: &str = ".is_routed()";
+    const LEGACY_PARK: &str = "self.escalate_ci_failure_and_park(";
+    const LEGACY_REOPEN: &str = "TransitionAction::PrCiFailed";
+
+    assert_eq!(
+        count(ROUTER),
+        1,
+        "one merge-group router call site in this file",
+    );
+    assert_eq!(
+        count(ROUTED),
+        1,
+        "one routed-disposition test, so the branch located below is that one",
+    );
+    assert_eq!(
+        count(LEGACY_PARK),
+        1,
+        "one same-signature park; a second one would inherit no guard",
+    );
+    assert_eq!(
+        count(LEGACY_REOPEN),
+        1,
+        "one generic queue reopen; a second one would inherit no guard",
+    );
+
+    let router = find(ROUTER, "the merge-group router call");
+    let routed = find(ROUTED, "the routed-disposition test");
+    let park = find(LEGACY_PARK, "the same-signature park");
+    let reopen = find(LEGACY_REOPEN, "the generic queue reopen");
+    assert!(
+        router < routed,
+        "the disposition must be read from the router's own return value",
+    );
+
+    // The branch must test the routed disposition UNNEGATED. `if !…is_routed()`
+    // keeps a `return;` inside a well-formed block — containment alone cannot
+    // tell the two apart — while returning on the declined path and handing the
+    // ROUTED one to both legacy remedies.
+    let if_start = code[..router]
+        .rfind("if ")
+        .expect("the router call must sit in an `if` condition");
+    let head: Vec<&str> = code[if_start..router].split_whitespace().collect();
+    assert_eq!(
+        head.join(" "),
+        "if self",
+        "the routed branch must be entered when the route layer HANDLED the \
+         dequeue, not when it declined",
+    );
+
+    // The branch the routed disposition opens, and where it closes. `block_end`
+    // is what tells "inside the branch" from "after it" — the whole difference
+    // between a legacy remedy REPLACED by a route and one that runs in addition
+    // to it.
+    let after_routed = routed + ROUTED.len();
+    let open = after_routed
+        + code[after_routed..]
+            .find('{')
+            .expect("the routed disposition must open a branch");
+    let block = block_end(&code, open);
+    assert!(
+        code[open..block].contains("return;"),
+        "a routed merge-group failure must LEAVE `handle_queue_failure`; falling \
+         out of this branch hands the same dequeue to the legacy remedies as well",
+    );
+    assert!(
+        block < park && park < reopen,
+        "and it must leave BEFORE either legacy remedy is reachable: the park at \
+         {park} and the reopen at {reopen} both follow the routed branch, which \
+         ends at {block}",
+    );
+}
+
+/// The sweep EMITS the routing report.
+///
+/// Behavioural, over the report's only production observable. That observable is
+/// a `tracing::info!` event by design — the proposal asks for reporting, not for
+/// a reporting table, and inventing a durable row to make this assertable would
+/// be inventing the thing under test. So the log is not a proxy for the
+/// behaviour, it *is* the behaviour, and `tracing_test` is how this crate
+/// already asserts on one (see
+/// `failover_chain_logging_captures_candidate_events` in
+/// `dispatch::task_dispatch`).
+///
+/// Without this, `self.emit_ci_route_report().await;` could be deleted from
+/// `sweep_ci_routes` with the entire `nafu` command list green: the sibling
+/// sweep fixture asserts the swept ROW, and every count the report reads is
+/// already asserted by `djinn-db`'s own report tests — from a caller that is not
+/// the coordinator.
+///
+/// NAMED FAILING MUTATIONS.
+/// (a) Delete `self.emit_ci_route_report().await;` from `sweep_ci_routes`:
+///     nothing emits the event and both assertions fail.
+/// (b) Move it ABOVE `sweep_reserved_routes` in `sweep_ci_routes`: the sweep has
+///     not yet superseded the planted row, every count the early return tests is
+///     zero, the report returns silently, and both assertions fail.
+/// (c) Put it behind the `gate == CiRoutingGate::Quiescing` arm the rollback
+///     report uses: this fixture runs `Enabled`, so nothing is emitted.
+/// (d) Invert `emit_ci_route_report`'s early return (emit only when every count
+///     is zero): the same failure.
+/// (e) Drop `suppressed_before_provider_call` from the emitted fields: the
+///     second assertion fails while the first still passes, which is why the
+///     count is asserted and not only the message.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tracing_test::traced_test]
+async fn the_route_sweep_emits_the_routing_report() {
+    let (db, task_id, subject) = wiring_subject("ci-route-report-wiring").await;
+    let routes = CiRouteAttemptRepository::new(db.clone());
+
+    let mut actor = crate::actor::actor_with_test_db(db.clone());
+    actor.test_ci_routing_gate = Some(CiRoutingGate::Enabled);
+
+    // A head that has MOVED past the reservation's: the sweep supersedes the row
+    // pre-call, which is the one count that makes the report non-silent.
+    actor
+        .persist_ci_snapshot(
+            &task_id,
+            PR as u64,
+            MOVED_HEAD,
+            djinn_core::models::CiStatus::Pending,
+            Vec::new(),
+            None,
+            0,
+            None,
+        )
+        .await;
+
+    let checks = [inconclusive_check("Quality Gate / test", 994)];
+    let blocking = refs(&checks);
+    let id = pr_head_identity(994);
+    let fingerprint = transient_fingerprint(CiLane::PrHead, &blocking);
+    let key = plant_reservation(&routes, &subject, &id, &fingerprint).await;
+    djinn_db::test_support::ci_route_age_reserved_for_test(&db, &subject.id, &key, 600).await;
+
+    assert!(
+        !logs_contain("ci route report"),
+        "precondition: nothing has reported yet",
+    );
+
+    actor.last_ci_route_sweep = a_sweep_interval_ago();
+    actor.drive_tick_for_test().await;
+
+    assert_eq!(
+        route_row(&routes, &subject, &key).await.terminal_outcome,
+        Some(CiRouteOutcome::SupersededPreCall),
+        "precondition for the report: the sweep produced something to report",
+    );
+    assert!(
+        logs_contain("ci route report"),
+        "the sweep must emit the routing report without anyone asking for it",
+    );
+    assert!(
+        logs_contain("suppressed_before_provider_call=1"),
+        "and it must carry the counts, not merely the message",
+    );
+}
+
+/// AC11: the routing modules CONSUME `ci_triage`, and no branch keys on a
+/// forbidden class.
+///
+/// SOURCE-LEVEL, and it cannot be anything else. No observable distinguishes
+/// `ci_triage::is_inconclusive(blocking)` from a byte-identical copy of its body
+/// pasted into this module, so no behavioural mutation can kill a test of
+/// provenance — which is exactly why AC11 had no test at all until this one.
+/// What *is* checkable is that the call token is present and that no local
+/// definition shadows it, and that pair is precisely what "consumed rather than
+/// reimplemented" means.
+///
+/// # A fingerprint keyed on the job name is not a branch
+///
+/// `transient_fingerprint` hashes `cr.name.trim().to_lowercase()` into its
+/// preimage, so the job name genuinely *is* an input to `nafu` code. AC11
+/// forbids a branch keyed on the job name — a decision that comes out different
+/// because a check happens to be called one thing rather than another. A hash
+/// input is the opposite of that: every name is treated identically, and two
+/// runs of the same failing job share a budget precisely because the hash does
+/// not care what the job is. So the assertion below is written against
+/// *comparisons* applied to the key classes rather than against their
+/// appearance, and this paragraph is the reason it has to be.
+///
+/// NAMED FAILING MUTATIONS.
+/// (a) Replace `ci_triage::is_inconclusive(blocking)` in `classify` with a local
+///     reimplementation (`blocking.iter().all(|cr| …)`): the call token is gone
+///     and the first assertion fails.
+/// (b) Copy `ci_triage`'s predicate into a routing module as
+///     `fn is_inconclusive`: the no-local-definition assertion fails.
+/// (c) Add `if cr.name.contains("Quality Gate") { … }` — or any comparison on a
+///     check name, `target.repo`, `target.owner`, or `repository_id` — anywhere
+///     in a routing module: the forbidden-branch assertion fails, naming the
+///     file and line.
+/// (d) Special-case a migration framework, a build tool, an artifact type, or a
+///     provider incident label (`"sqlx"`, `"cargo"`, `"incident"`, …): the
+///     forbidden-vocabulary assertion fails. A branch on one of those classes
+///     has to name it.
+#[test]
+fn the_routing_modules_consume_ci_triage_and_branch_on_no_forbidden_key() {
+    // Every `nafu`-owned production module in this crate. Test modules are
+    // separate files and are deliberately excluded: a fixture may say whatever
+    // it likes about a job name.
+    const ROUTING_MODULES: [(&str, &str); 8] = [
+        ("ci_routing.rs", include_str!("../../ci_routing.rs")),
+        (
+            "ci_lane_routing.rs",
+            include_str!("../../ci_lane_routing.rs"),
+        ),
+        ("ci_hold.rs", include_str!("../../ci_hold.rs")),
+        ("ci_reporting.rs", include_str!("../../ci_reporting.rs")),
+        ("ci_routing/executor.rs", include_str!("../executor.rs")),
+        ("ci_routing/gate.rs", include_str!("../gate.rs")),
+        ("ci_routing/quiescence.rs", include_str!("../quiescence.rs")),
+        (
+            "ci_routing/tier2_dispatch.rs",
+            include_str!("../tier2_dispatch.rs"),
+        ),
+    ];
+
+    // The evidence-ranking entry points AC11 requires be consumed.
+    const CONSUMED: [&str; 3] = [
+        "ci_triage::is_inconclusive(",
+        "ci_triage::check_evidence(",
+        "ci_triage::completed_after_start(",
+    ];
+
+    // Field accesses that reach a forbidden key class.
+    const FORBIDDEN_KEYS: [&str; 4] = [".name", "target.repo", "target.owner", "repository_id"];
+
+    // What turns reading a key class into branching on one.
+    const COMPARISONS: [&str; 6] = [
+        "==",
+        "!=",
+        ".contains(",
+        ".starts_with(",
+        ".ends_with(",
+        ".eq_ignore_ascii_case(",
+    ];
+
+    // Migration frameworks, build tools, artifact types, and incident labels. A
+    // branch on any of those classes has to name one of these words.
+    const FORBIDDEN_VOCABULARY: [&str; 15] = [
+        "sqlx",
+        "diesel",
+        "flyway",
+        "liquibase",
+        "alembic",
+        "cargo",
+        "gradle",
+        "maven",
+        "bazel",
+        "webpack",
+        "npm",
+        "pnpm",
+        "artifact",
+        "incident",
+        "outage",
+    ];
+
+    let classifier = strip_line_comments(ROUTING_MODULES[0].1);
+    for consumed in CONSUMED {
+        assert!(
+            classifier.contains(consumed),
+            "the classifier must CONSUME `{consumed}`: the ranking that decides \
+             Tier 1 is `ci_triage`'s, and a second copy of it here is the \
+             reimplementation AC11 forbids",
+        );
+    }
+
+    for (label, source) in ROUTING_MODULES {
+        let code = strip_line_comments(source);
+
+        for consumed in CONSUMED {
+            let local = consumed
+                .trim_start_matches("ci_triage::")
+                .trim_end_matches('(');
+            assert!(
+                !code.contains(&format!("fn {local}")),
+                "{label}: `{local}` belongs to `ci_triage`; a local definition of \
+                 it is a reimplementation, however faithful",
+            );
+        }
+
+        for (index, line) in code.lines().enumerate() {
+            if !FORBIDDEN_KEYS.iter().any(|key| line.contains(key)) {
+                continue;
+            }
+            let number = index + 1;
+            let text = line.trim();
+            for comparison in COMPARISONS {
+                assert!(
+                    !line.contains(comparison),
+                    "{label}:{number}: `{text}` applies `{comparison}` to a \
+                     forbidden key class. AC11 allows a job name, repository, or \
+                     owner to be *carried* — hashed into a fingerprint, logged, \
+                     cited as evidence, passed to the provider — and forbids a \
+                     route decision that differs because of one.",
+                );
+            }
+        }
+
+        let lowered = code.to_ascii_lowercase();
+        for forbidden in FORBIDDEN_VOCABULARY {
+            assert!(
+                !lowered.contains(forbidden),
+                "{label}: routing code must not name `{forbidden}`. A branch keyed \
+                 on a migration framework, build tool, artifact type, or provider \
+                 incident label has to name one, and AC11 forbids every such \
+                 branch — the contract is keyed on execution evidence alone.",
+            );
+        }
     }
 }
