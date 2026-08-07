@@ -4,23 +4,27 @@
 //! emission, activity tracking, and host-callback RPCs (touch_activity,
 //! flush_session_tokens).  No `djinn-agent` imports.
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
 
 use djinn_core::events::DjinnEventEnvelope;
+use djinn_db::ModelTurnLeaseIdentity;
+use djinn_provider::ProviderOutcomeV1;
 use djinn_provider::message::ContentBlock;
-use djinn_provider::provider::StreamEvent;
+use djinn_provider::provider::client::ProviderSseAttemptV1;
+use djinn_provider::provider::{ProviderSseFrameParserV1, StreamEvent};
 
 use super::budget::record_provider_usage;
 use super::error_handling::{
     MAX_COMPACTION_RETRIES, ReplyLoopCancelled, is_context_length_error,
     is_orphaned_tool_call_error,
 };
+use super::model_turn_admission::ModelTurnAdmissionCoordinator;
 use super::tool_dispatch::{
     MAX_TOOL_CONCURRENCY, ToolDispatchContext, ToolRuntimeMetadataMap, is_side_query_tool,
     make_tool_future,
@@ -180,8 +184,141 @@ impl StreamTurnState {
 pub(super) type ProviderStream =
     Pin<Box<dyn futures::Stream<Item = anyhow::Result<StreamEvent>> + Send>>;
 
+/// Sole post-dispatch owner of a covered B1 attempt and its fenced lease.
+/// Raw B1 frames are adapted only through the authoritative `StreamEvent` seam.
+pub(super) struct CoveredAttemptTerminalGuard {
+    attempt: Arc<tokio::sync::Mutex<Option<ProviderSseAttemptV1>>>,
+    /// Available even while `next_event` is polling under the attempt mutex,
+    /// so cancellation can request B1 abort immediately.
+    abort: djinn_provider::ProviderAttemptAbortHandleV1,
+    parser: Box<dyn ProviderSseFrameParserV1>,
+    pending: VecDeque<anyhow::Result<StreamEvent>>,
+    coordinator: ModelTurnAdmissionCoordinator,
+    identity: Option<ModelTurnLeaseIdentity>,
+    settlement: Arc<CoveredAttemptSettlement>,
+}
+
+/// Independently-owned terminal state. Once scheduled, the runtime task—not
+/// the reply-loop future—owns observation of B1's one-shot and reconciliation.
+struct CoveredAttemptSettlement {
+    scheduled: AtomicBool,
+    complete: AtomicBool,
+    notify: tokio::sync::Notify,
+}
+
+impl CoveredAttemptTerminalGuard {
+    pub(super) fn new(
+        attempt: ProviderSseAttemptV1,
+        parser: Box<dyn ProviderSseFrameParserV1>,
+        coordinator: ModelTurnAdmissionCoordinator,
+        identity: Option<ModelTurnLeaseIdentity>,
+    ) -> Self {
+        let abort = attempt.abort.clone();
+        Self {
+            attempt: Arc::new(tokio::sync::Mutex::new(Some(attempt))),
+            abort,
+            parser,
+            pending: VecDeque::new(),
+            coordinator,
+            identity,
+            settlement: Arc::new(CoveredAttemptSettlement {
+                scheduled: AtomicBool::new(false),
+                complete: AtomicBool::new(false),
+                notify: tokio::sync::Notify::new(),
+            }),
+        }
+    }
+
+    async fn next_event(&mut self) -> Option<anyhow::Result<StreamEvent>> {
+        loop {
+            if let Some(event) = self.pending.pop_front() {
+                return Some(event);
+            }
+            let frame = {
+                let mut attempt = self.attempt.lock().await;
+                attempt.as_mut()?.events.next().await
+            }?;
+            match frame {
+                Ok(frame) => self.pending.extend(self.parser.parse(frame)),
+                Err(error) => return Some(Err(error)),
+            }
+        }
+    }
+
+    /// Observe B1's singular terminal outcome and reconcile precisely this lease.
+    pub(super) fn finish(
+        &self,
+        completed: bool,
+    ) -> impl std::future::Future<Output = ()> + Send + 'static {
+        self.schedule_settlement(!completed);
+        let settlement = self.settlement.clone();
+        async move { wait_for_settlement(settlement).await }
+    }
+
+    fn schedule_settlement(&self, abort: bool) {
+        if self.settlement.scheduled.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        if abort {
+            self.abort.abort();
+        }
+        let attempt = self.attempt.clone();
+        let coordinator = self.coordinator.clone();
+        let identity = self.identity.clone();
+        let settlement = self.settlement.clone();
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                settle_covered_attempt(attempt, coordinator, identity).await;
+                settlement.complete.store(true, Ordering::Release);
+                settlement.notify.notify_waiters();
+            });
+        } else {
+            // No safe synchronous way exists to await B1's one-shot here.
+            // Preserve the Phase A quarantine rather than refunding it.
+            tracing::error!(
+                "covered attempt dropped without a Tokio runtime; retaining conservative quarantine"
+            );
+        }
+    }
+}
+
+async fn wait_for_settlement(settlement: Arc<CoveredAttemptSettlement>) {
+    while !settlement.complete.load(Ordering::Acquire) {
+        let notified = settlement.notify.notified();
+        if settlement.complete.load(Ordering::Acquire) {
+            return;
+        }
+        notified.await;
+    }
+}
+
+async fn settle_covered_attempt(
+    attempt: Arc<tokio::sync::Mutex<Option<ProviderSseAttemptV1>>>,
+    coordinator: ModelTurnAdmissionCoordinator,
+    identity: Option<ModelTurnLeaseIdentity>,
+) {
+    let Some(mut attempt) = attempt.lock().await.take() else {
+        return;
+    };
+    let outcome: ProviderOutcomeV1 = attempt.outcome().await;
+    if let Some(identity) = identity
+        && let Err(error) = coordinator.reconcile(identity, &outcome).await
+    {
+        tracing::error!(error = %error, "covered attempt reconciliation failed; retaining conservative quarantine");
+    }
+}
+
+impl Drop for CoveredAttemptTerminalGuard {
+    fn drop(&mut self) {
+        // Scheduling precedes every awaited operation, so cancellation of
+        // `finish` cannot suppress cleanup.
+        self.schedule_settlement(true);
+    }
+}
+
 pub(super) struct StreamLoopContext<'a> {
-    pub stream: ProviderStream,
+    pub stream: Option<ProviderStream>,
+    pub covered_attempt: Option<&'a mut CoveredAttemptTerminalGuard>,
     pub tool_metadata: &'a ToolRuntimeMetadataMap,
     pub dispatch: &'a ToolDispatchContext<'a>,
     pub phase_tracker: &'a Arc<Mutex<super::phase::SessionPhaseTracker>>,
@@ -299,7 +436,15 @@ pub(super) async fn consume_provider_stream(
             Some(result) = streaming_inflight.next() => {
                 state.streaming_results.push(result);
             }
-            evt = ctx.stream.next() => {
+            evt = async {
+                match ctx.covered_attempt.as_deref_mut() {
+                    Some(attempt) => attempt.next_event().await,
+                    None => match ctx.stream.as_mut() {
+                        Some(stream) => stream.next().await,
+                        None => None,
+                    },
+                }
+            } => {
                 let Some(evt) = evt else {
                     state.early_stream_end = true;
                     break;

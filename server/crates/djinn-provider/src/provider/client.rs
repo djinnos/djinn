@@ -88,6 +88,23 @@ pub struct ProviderSseAttemptV1 {
 }
 
 impl ProviderSseAttemptV1 {
+    /// Constructs a deterministic attempt for consumer-boundary tests.
+    ///
+    /// Production adapters must use `start_sse_attempt_v1`; this merely lets a
+    /// downstream consumer prove it observes the same singular B1 outcome.
+    #[doc(hidden)]
+    pub fn for_test(
+        events: Pin<Box<dyn Stream<Item = anyhow::Result<SseFrame>> + Send>>,
+        abort: ProviderAttemptAbortHandleV1,
+        outcome: oneshot::Receiver<ProviderOutcomeV1>,
+    ) -> Self {
+        Self {
+            events,
+            abort,
+            outcome,
+        }
+    }
+
     pub async fn outcome(&mut self) -> ProviderOutcomeV1 {
         (&mut self.outcome)
             .await
