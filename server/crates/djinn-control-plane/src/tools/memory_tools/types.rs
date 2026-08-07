@@ -387,6 +387,8 @@ pub struct ReadParams {
     pub project: String,
     /// Note permalink (e.g. "decisions/my-adr") or title.
     pub identifier: String,
+    /// Optional caller-supplied id identifying ONE logical read invocation, max 64 characters. Reusing it on a retry makes the access count exactly once; omitting it makes every attempt a distinct access.
+    pub invocation_id: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]

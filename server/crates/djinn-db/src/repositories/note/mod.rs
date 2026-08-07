@@ -52,7 +52,8 @@ pub use abstract_regeneration::{
     select_stale_abstract_note_ids,
 };
 pub use access_events::{
-    NoteAccessAttribution, NoteAccessEvent, NoteAccessSource, note_access_events_for_note,
+    ExplicitAccessOutcome, INVOCATION_ID_MAX_CHARS, NoteAccessAttribution, NoteAccessEvent,
+    NoteAccessSource, access_event_timestamp, note_access_events_for_note,
 };
 pub use association::{
     NoteAssociationEntry, NoteAssociationKind, NoteAssociationProvenanceRow,
@@ -104,8 +105,8 @@ pub use scope_rank::{
     rank_scope_candidates,
 };
 pub use scoring::{
-    CO_ACCESS_HIGH, CONFIDENCE_CEILING, CONFIDENCE_FLOOR, CONTRADICTION, STALE_CITATION,
-    STALE_DECAY_SIGNAL, USER_CONFIRM, bayesian_update, decay_signal_for_elapsed_days,
+    CONFIDENCE_CEILING, CONFIDENCE_FLOOR, CONTRADICTION, STALE_CITATION, STALE_DECAY_SIGNAL,
+    USER_CONFIRM, bayesian_update, decay_signal_for_elapsed_days,
 };
 pub use search::{
     InjectionSignalRanks, KnowledgeInjectionCandidate, KnowledgeInjectionSearchParams,

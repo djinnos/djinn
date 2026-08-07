@@ -54,6 +54,10 @@ pub(crate) async fn call_memory_read(
             SharedMemoryReadParams {
                 project: project_path,
                 identifier: p.identifier,
+                // The agent-facing `memory_read` tool schema does not expose an
+                // invocation id, so every attempt on this path is explicitly a
+                // distinct invocation (9xih backward-compatible behaviour).
+                invocation_id: None,
             },
             &note_access_attribution(ctx),
         )

@@ -2,6 +2,46 @@ use super::ops;
 use super::revision_readers;
 use super::*;
 
+/// Maximum accepted length, in characters, of a caller-supplied
+/// `memory_read` `invocation_id`.
+///
+/// Bound to `note_access_events.invocation_id VARCHAR(64)` (migration 197), and
+/// counted in characters because that is what Postgres `VARCHAR(n)` counts.
+/// Over-limit ids are rejected rather than truncated: truncation would fold two
+/// distinct invocations onto one replay key and silently drop a real access.
+pub(crate) const INVOCATION_ID_MAX_CHARS: usize =
+    djinn_db::repositories::note::INVOCATION_ID_MAX_CHARS;
+
+/// Resolve the invocation identity for one `memory_read` attempt.
+///
+/// * `Some(id)` — a caller asserting retry identity. Validated (nonblank,
+///   bounded) and returned trimmed. Two attempts carrying the same id are one
+///   logical invocation and count once.
+/// * `None` — a legacy caller. A fresh UUID is minted per attempt, so each
+///   attempt is explicitly a DISTINCT invocation and retries cannot be
+///   deduplicated. This is the documented backward-compatible behaviour, not an
+///   oversight: the server has no other way to tell a retry from an intentional
+///   second read.
+///
+/// Callers must run this BEFORE resolving the note, so an invalid id is
+/// rejected without touching any note state.
+pub(crate) fn resolve_invocation_id(supplied: Option<&str>) -> Result<String, String> {
+    let Some(raw) = supplied else {
+        return Ok(uuid::Uuid::now_v7().to_string());
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("invocation_id must not be blank".to_owned());
+    }
+    let length = trimmed.chars().count();
+    if length > INVOCATION_ID_MAX_CHARS {
+        return Err(format!(
+            "invocation_id must be at most {INVOCATION_ID_MAX_CHARS} characters, got {length}"
+        ));
+    }
+    Ok(trimmed.to_owned())
+}
+
 #[tool_router(router = memory_reads_router, vis = "pub(super)")]
 impl DjinnMcpServer {
     /// Read a note by permalink or title. Updates last_accessed timestamp.
