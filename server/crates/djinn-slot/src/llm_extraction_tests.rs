@@ -79,18 +79,50 @@ impl std::io::Write for CapturedLogsWriter {
 // per-task worktree directory is no longer created.  Task #13 will drop the
 // column outright.
 
-static SEMANTIC_DUPLICATE_CANDIDATE_ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+/// Per-PROJECT seam for the semantic-duplicate candidate lookup.
+///
+/// This was a `OnceLock<String>`, which made it a process-global that only the
+/// FIRST test to run could ever write. The candidate lookup is a bare `fn`
+/// pointer (it cannot capture), so both tests that need this seam wrote to the
+/// same cell — and whichever ran second silently received the OTHER test's note
+/// id, from another test's database. Its novelty judge then answered
+/// `already_known` with an id no candidate matched, a second note was created,
+/// and `dedup_notes.len()` read 2 instead of 1. That is why the suite failed
+/// only when run whole and passed when the test was run alone.
+///
+/// Keyed on `project_id` — which the lookup already receives, and which is
+/// unique per fixture — so concurrent tests resolve their OWN candidate and no
+/// ordering assumption is needed.
+static SEMANTIC_DUPLICATE_CANDIDATE_IDS: std::sync::Mutex<
+    Option<std::collections::HashMap<String, String>>,
+> = std::sync::Mutex::new(None);
+
+fn set_semantic_duplicate_candidate_id(project_id: &str, note_id: &str) {
+    SEMANTIC_DUPLICATE_CANDIDATE_IDS
+        .lock()
+        .expect("semantic duplicate candidate map")
+        .get_or_insert_with(std::collections::HashMap::new)
+        .insert(project_id.to_owned(), note_id.to_owned());
+}
+
+fn semantic_duplicate_candidate_id(project_id: &str) -> String {
+    SEMANTIC_DUPLICATE_CANDIDATE_IDS
+        .lock()
+        .expect("semantic duplicate candidate map")
+        .as_ref()
+        .and_then(|ids| ids.get(project_id).cloned())
+        .expect("semantic duplicate candidate id configured for this project")
+}
 
 fn semantic_duplicate_candidate_lookup(
-    _project_id: &str,
+    project_id: &str,
     _folder: &str,
     _note_type: &str,
     _candidate_abstract: &str,
 ) -> Vec<NoteDedupCandidate> {
-    let existing_id = SEMANTIC_DUPLICATE_CANDIDATE_ID
-        .get()
-        .expect("semantic duplicate candidate id configured");
-    vec![novelty_candidate(existing_id)]
+    vec![novelty_candidate(&semantic_duplicate_candidate_id(
+        project_id,
+    ))]
 }
 
 struct TestFixture {
@@ -707,6 +739,7 @@ async fn llm_extraction_graceful_degradation_no_provider_configured() {
         .with_ansi(false)
         .with_level(true)
         .finish();
+    let _capture = crate::test_log_capture::lock().await;
     let dispatch = tracing::dispatcher::Dispatch::new(subscriber);
     let guard = tracing::dispatcher::set_default(&dispatch);
     run_llm_extraction(fixture.session_id.clone(), taxonomy, ctx).await;
@@ -799,7 +832,7 @@ async fn llm_extraction_semantic_duplicate_skips_create_and_boosts_existing_conf
             djinn_provider::provider::StreamEvent::Done,
         ],
     ]));
-    let _ = SEMANTIC_DUPLICATE_CANDIDATE_ID.set(existing.id.clone());
+    set_semantic_duplicate_candidate_id(&fixture.project.id, &existing.id);
     run_llm_extraction_with_provider_and_candidate_lookup(
         fixture.session_id.clone(),
         taxonomy,
@@ -1423,6 +1456,7 @@ async fn admission_gate_drops_case_missing_required_section() {
         .with_ansi(false)
         .with_level(true)
         .finish();
+    let _capture = crate::test_log_capture::lock().await;
     let dispatch = tracing::dispatcher::Dispatch::new(subscriber);
     let guard = tracing::dispatcher::set_default(&dispatch);
     run_llm_extraction_with_provider(fixture.session_id.clone(), taxonomy, ctx, provider).await;
@@ -1685,13 +1719,10 @@ async fn admission_gate_preserves_novelty_dedup() {
     ]));
     // Override the candidate lookup to surface the existing note as the only
     // semantic-duplicate candidate, so the novelty judge picks it.
-    let _ = SEMANTIC_DUPLICATE_CANDIDATE_ID.set(existing.id.clone());
+    set_semantic_duplicate_candidate_id(&fixture.project.id, &existing.id);
     let lookup: fn(&str, &str, &str, &str) -> Vec<djinn_db::NoteDedupCandidate> =
-        |_project_id, _folder, _note_type, _candidate_abstract| {
-            let id = SEMANTIC_DUPLICATE_CANDIDATE_ID
-                .get()
-                .expect("semantic duplicate candidate id configured")
-                .clone();
+        |project_id, _folder, _note_type, _candidate_abstract| {
+            let id = semantic_duplicate_candidate_id(project_id);
             vec![NoteDedupCandidate {
                 id,
                 permalink: "cases/existing-anchor-target".to_string(),

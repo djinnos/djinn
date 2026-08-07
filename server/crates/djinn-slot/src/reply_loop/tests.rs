@@ -5250,6 +5250,7 @@ async fn rendered_worker_prompt_uses_signature_only_tool_section() {
     let tool_schemas_fn = djinn_mcp_extension::tool_defs::tool_schemas_worker;
     let role_config = djinn_roles::config::config_for(djinn_roles::AgentType::Worker);
     let task = djinn_core::models::Task {
+        escalation_evidence_at: None,
         id: "test-task-id".to_string(),
         project_id: "test-project-id".to_string(),
         short_id: "t-wzz6".to_string(),

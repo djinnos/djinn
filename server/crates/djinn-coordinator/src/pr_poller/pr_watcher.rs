@@ -858,7 +858,7 @@ impl CoordinatorActor {
 
             self.review_stuck_sha_first_seen.remove(&task.id);
             let handled = self
-                .route_planner_intervention(
+                .route_arbiter_adjudication(
                     &task,
                     "reviewer",
                     &reason,

@@ -115,9 +115,7 @@ async fn three_transient_provider_faults_route_no_planner_remediation() {
     replay_failed_reappearances(&mut actor, &task.id, "reviewer", TRANSIENT, passes).await;
 
     assert!(
-        planner_intervention_markers(&repo, &task.id)
-            .await
-            .is_empty(),
+        arbiter_dispatch_markers(&repo, &task.id).await.is_empty(),
         "a run of transient provider faults must never route a planner-remediation \
          intervention — the provider failed, the task did not"
     );
@@ -185,24 +183,55 @@ async fn request_attributable_provider_failures_still_escalate_at_threshold() {
         "each request-attributable failure advances the provider-failure streak"
     );
     assert!(
-        planner_intervention_markers(&repo, &task.id)
-            .await
-            .is_empty(),
+        arbiter_dispatch_markers(&repo, &task.id).await.is_empty(),
         "below the threshold nothing is routed"
     );
 
     // The threshold strike escalates.
     replay_failed_reappearances(&mut actor, &task.id, "reviewer", REQUEST_FAULT, 1).await;
     assert_eq!(
-        planner_intervention_markers(&repo, &task.id).await.len(),
+        arbiter_dispatch_markers(&repo, &task.id).await.len(),
         1,
         "the {FAILURE_ESCALATION_THRESHOLD}th consecutive request-attributable provider failure \
-         must still route a planner-remediation intervention"
+         must still route the task to adjudication"
+    );
+
+    // 4etb: the escalation's durable side effect is no longer a blocking
+    // remediation CHILD — rung 1 and `RemediationKind::Planner` are retired, so
+    // trigger D routes the source straight to the forensic arbiter. What must
+    // exist is the arbiter entry contract: the source parked in
+    // `needs_lead_intervention` behind an unconsumed hold-cycle-0 arbitration
+    // row carrying the escalation's reason. Asserting the child would now pass
+    // for a build where nothing was adjudicated at all.
+    let escalated = repo.get(&task.id).await.unwrap().unwrap();
+    assert_eq!(
+        escalated.status, "needs_lead_intervention",
+        "the escalated source must be handed to the arbiter, not left dispatchable"
+    );
+    let arbitration =
+        djinn_db::repositories::task_arbitration::TaskArbitrationRepository::new(db.clone())
+            .get_by_task_and_cycle(&task.id, 0)
+            .await
+            .unwrap()
+            .expect("the escalation must open hold cycle 0");
+    assert!(
+        arbitration.consumed_at.is_none(),
+        "the arbiter for this escalation must still be in flight"
+    );
+    let dossier = arbitration
+        .dossier
+        .expect("the arbiter must be handed a dossier");
+    assert!(
+        dossier["trigger_reason"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("REQUEST-attributable provider error"),
+        "the trigger's own reason must reach the arbiter verbatim; got: {dossier}"
     );
     assert_eq!(
         remediation_blocker_count(&repo, &task.id).await,
-        1,
-        "the escalation still creates the remediation task that holds the source task"
+        0,
+        "no human-review hold or remediation child may be minted on this path"
     );
 }
 
@@ -229,7 +258,7 @@ async fn transient_provider_fault_cannot_force_close_a_task_at_the_cap() {
         Some(&task.id),
         "coordinator",
         "system",
-        PLANNER_INTERVENTION_MARKER,
+        ARBITER_DISPATCHED_MARKER,
         &serde_json::json!({ "reopen_count": task.reopen_count }).to_string(),
     )
     .await
@@ -273,7 +302,7 @@ async fn request_attributable_failure_at_the_cap_still_force_closes() {
         Some(&task.id),
         "coordinator",
         "system",
-        PLANNER_INTERVENTION_MARKER,
+        ARBITER_DISPATCHED_MARKER,
         &serde_json::json!({ "reopen_count": task.reopen_count }).to_string(),
     )
     .await
@@ -347,9 +376,7 @@ async fn auto_disabled_model_breaker_blocks_the_escalation() {
     replay_failed_reappearances(&mut actor, &task.id, "reviewer", REQUEST_FAULT, passes).await;
 
     assert!(
-        planner_intervention_markers(&repo, &task.id)
-            .await
-            .is_empty(),
+        arbiter_dispatch_markers(&repo, &task.id).await.is_empty(),
         "a tripped model-wide breaker is evidence the MODEL is at fault; the task must not be \
          escalated over it"
     );

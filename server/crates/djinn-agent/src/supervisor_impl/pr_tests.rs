@@ -253,6 +253,7 @@ async fn no_op_nudge_comment_uses_ac_delta_hint() {
 
 fn settled_noop_task() -> Task {
     Task {
+        escalation_evidence_at: None,
         id: "task-uuid".into(),
         project_id: "project-uuid".into(),
         short_id: "noop1".into(),

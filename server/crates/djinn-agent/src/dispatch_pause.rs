@@ -93,6 +93,7 @@ mod tests {
 
     fn task(project_id: &str, created_by_user_id: &str) -> Task {
         Task {
+            escalation_evidence_at: None,
             id: "task-id".to_owned(),
             short_id: "task".to_owned(),
             epic_id: None,

@@ -533,12 +533,23 @@ async fn ceiling_pr_handoff_is_invariant_across_pr_snapshot_observations() {
             "{} must not create a fresh remediation blocker",
             case.name
         );
+        // 4etb: the exhausted rung hands off through
+        // `apply_exhausted_ladder_ownership`, whose handoff reason is
+        // `adjudication_ladder_exhausted_pr_handoff`. The marker EVENT is still
+        // the poller-owned `pr_terminal_handoff` written by
+        // `respawn_guard::handoff_pr_to_poller` — the same durable contract,
+        // reached from the new caller.
         assert!(
             repo.list_activity(&task.id)
                 .await
                 .unwrap()
                 .iter()
-                .any(|entry| { entry.payload.contains("terminal_close_deferred_pr_handoff") }),
+                .any(|entry| {
+                    entry.event_type == "pr_terminal_handoff"
+                        && entry
+                            .payload
+                            .contains("adjudication_ladder_exhausted_pr_handoff")
+                }),
             "{} must record the identical durable PR handoff",
             case.name
         );
@@ -558,6 +569,30 @@ async fn ceiling_pr_handoff_is_invariant_across_pr_snapshot_observations() {
     let no_pr_after = repo.get(&no_pr.id).await.unwrap().unwrap();
     assert_eq!(no_pr_after.status, "closed");
     assert!(no_pr_after.close_reason.is_some());
+    // 4etb: the no-PR branch closes through the single terminal gate carrying
+    // the CONTRACTUAL reason prefix operators match on. `close_reason` holds the
+    // transition's class (`force_closed`); the contractual text is the
+    // transition reason on the `status_changed` entry.
+    let close_reason_text = repo
+        .query_activity(ActivityQuery {
+            task_id: Some(no_pr.id.clone()),
+            event_type: Some("status_changed".to_owned()),
+            limit: 50,
+            ..ActivityQuery::default()
+        })
+        .await
+        .unwrap()
+        .into_iter()
+        .filter_map(|e| serde_json::from_str::<serde_json::Value>(&e.payload).ok())
+        .filter(|p| p["to_status"] == "closed")
+        .filter_map(|p| p["reason"].as_str().map(str::to_owned))
+        .next()
+        .expect("the terminal close must carry a reason");
+    assert!(
+        close_reason_text.starts_with(djinn_db::repositories::task::LADDER_EXHAUSTED_CLOSE_REASON),
+        "the exhausted no-PR close must carry the contractual reason prefix; got: \
+         {close_reason_text}"
+    );
 }
 
 /// At the ceiling: the loop-breaker terminally fails (ForceClose) the source

@@ -320,7 +320,7 @@ impl CoordinatorActor {
     /// `running_by_user_model` map after a planner intervention dispatched a
     /// new session inside the `dispatch_ready_tasks` loop.
     ///
-    /// `dispatch_planner_escalation` records its admission into
+    /// `dispatch_arbiter_adjudication` records its admission into
     /// `self.inflight_dispatches` via `record_inflight_dispatch`, but the
     /// local `running_by_user_model` was seeded at the top of the pass and
     /// won't reflect the new entry. Re-overlaying ensures the next task in
@@ -342,7 +342,7 @@ impl CoordinatorActor {
     ///
     /// This is the single shared admission-recording path. Both
     /// `dispatch_ready_tasks` (worker/reviewer/lead/architect) and
-    /// `dispatch_planner_escalation` call it, so a just-dispatched session of
+    /// `dispatch_arbiter_adjudication` call it, so a just-dispatched session of
     /// any role counts against the cap for a same-tick second admission
     /// (the worker + reviewer overshoot gap).
     pub(crate) async fn record_inflight_dispatch(
@@ -626,7 +626,7 @@ impl CoordinatorActor {
     // each caller re-implementing the cap-check + ledger logic.
     //
     // These methods are used by both `dispatch_ready_tasks` (and
-    // `dispatch_planner_escalation`) and `refinement_dispatch::
+    // `dispatch_arbiter_adjudication`) and `refinement_dispatch::
     // dispatch_next_refinement_phase`, so refinement tribunal dispatch and
     // normal task dispatch go through the exact same cap/ledger code path.
 
@@ -1112,7 +1112,9 @@ impl CoordinatorActor {
                     // is evaluated, so the fallback-rescued session does not
                     // demote or cooldown a model whose chain was not
                     // exhausted.
-                    return DispatchOutcome::Dispatched;
+                    return DispatchOutcome::Dispatched {
+                        model_id: model_id.clone(),
+                    };
                 }
                 Err(PoolError::AtCapacity { .. }) => {
                     any_at_capacity = true;
@@ -2292,7 +2294,7 @@ impl CoordinatorActor {
                 // same creator, potentially the same model). Bump the local
                 // per-(creator, model) count so a later task in THIS pass sees
                 // reduced capacity — the inflight ledger is already updated
-                // inside dispatch_planner_escalation, but the local
+                // inside dispatch_arbiter_adjudication, but the local
                 // running_by_user_model was seeded before this admission.
                 poll_stack::boxed(|| {
                     self.bump_local_cap_for_last_planner_admission(
@@ -2438,13 +2440,22 @@ impl CoordinatorActor {
                             // runs complete but the task never converges (the
                             // review-cycle bounce that never passes through `open`,
                             // so trigger A's reopen_count never arms). Route it to
-                            // a Planner intervention instead of riding the ladder
-                            // to the terminal close at MAX_DISPATCH_FAILURES, which
+                            // the forensic arbiter instead of riding the ladder to
+                            // the terminal close at MAX_DISPATCH_FAILURES, which
                             // would force-close a task whose durable work may be
-                            // fine. Falls through to the ordinary ladder when the
-                            // Planner was already routed for this loop (idempotency
-                            // marker) — the terminal close then remains the final
-                            // backstop.
+                            // fine.
+                            //
+                            // 4etb: the arbiter rung ALWAYS handles a first
+                            // escalation, so for a role that arms this trigger the
+                            // dispatch-failure cap is no longer the backstop — the
+                            // adjudication ladder is, and it is strictly better
+                            // instrumented (three bounded arbiter hold cycles, one
+                            // final disposition, at most three terminal-rung
+                            // rounds, then the exhausted-ladder ownership contract
+                            // that lands the source with a NAMED owner rather than
+                            // a bare force-close). The cap still backs the paths
+                            // that never arm this trigger: a typed provider
+                            // failure, and any tick the arbiter rung declines.
                             //
                             // A reappearance whose prior session was CANCELLED or
                             // reclaimed before the run could conclude is excluded
@@ -2684,7 +2695,15 @@ impl CoordinatorActor {
             // fallback strings from failed session lookups are skipped.
             // Degrades to the unfiltered list when exclusion would empty it
             // (only one viable model → plan-lane retry, then park at the bound).
-            if role == "worker" && task.intervention_count >= 1 {
+            // 4etb: rotation is NO LONGER gated on `intervention_count >= 1`.
+            // With rung 1 retired nothing advances that counter, so the gate
+            // would have disabled rotation on exactly the escalations that need
+            // it — every first escalation. The canonical evidence epoch inside
+            // `post_intervention_history` is the real gate now: it returns an
+            // empty history (and therefore no exclusions) for a task that has
+            // never been escalated, so an unescalated worker dispatch is
+            // unaffected.
+            if role == "worker" {
                 let history = poll_stack::boxed(|| self.post_intervention_history(&task)).await;
                 let rotation_excluded = history.rotation_excluded_models();
                 if !rotation_excluded.is_empty() {
@@ -3135,7 +3154,9 @@ impl CoordinatorActor {
                 .await;
 
             match outcome {
-                DispatchOutcome::Dispatched => {
+                DispatchOutcome::Dispatched {
+                    model_id: used_model,
+                } => {
                     record_dispatch_outcome(djinn_telemetry::dispatch::OUTCOME_OK);
                     tracing::info!(outcome = "ok", task_id = %task.short_id, role);
                     tracing::info!(
@@ -3195,10 +3216,12 @@ impl CoordinatorActor {
                     // pass respect the cap before the session row is visible.
                     {
                         let c = creator.as_str();
-                        if let Some(used) = model_ids
-                            .iter()
-                            .find(|m| self.health.is_available(Some(c), m))
+                        // The model the failover chain ACCEPTED, carried out of
+                        // `try_dispatch_to_pool`. Re-deriving it here with
+                        // `find(is_available)` mis-attributed every
+                        // capacity-driven failover (see `DispatchOutcome`).
                         {
+                            let used = &used_model;
                             *running_by_user_model
                                 .entry((c.to_string(), used.clone()))
                                 .or_insert(0) += 1;
@@ -3374,6 +3397,7 @@ mod inflight_ledger_tests {
 
     fn task(project_id: &str, creator: Option<&str>) -> Task {
         Task {
+            escalation_evidence_at: None,
             id: "task-uuid".to_owned(),
             project_id: project_id.to_owned(),
             short_id: "task".to_owned(),
@@ -5208,7 +5232,7 @@ mod failover_chain_tests {
             .await;
 
         assert!(
-            matches!(outcome, DispatchOutcome::Dispatched),
+            matches!(outcome, DispatchOutcome::Dispatched { .. }),
             "dispatch should succeed on model-b after model-a breaker is open"
         );
 
@@ -5280,7 +5304,7 @@ mod failover_chain_tests {
             .await;
 
         assert!(
-            matches!(outcome, DispatchOutcome::Dispatched),
+            matches!(outcome, DispatchOutcome::Dispatched { .. }),
             "dispatch should succeed on model-b after model-a breaker is open"
         );
 
@@ -5387,7 +5411,7 @@ mod failover_chain_tests {
             .await;
 
         assert!(
-            matches!(outcome, DispatchOutcome::Dispatched),
+            matches!(outcome, DispatchOutcome::Dispatched { .. }),
             "dispatch should succeed on model-c after model-a and model-b breaker-open"
         );
 
@@ -5443,7 +5467,7 @@ mod failover_chain_tests {
             .await;
 
         assert!(
-            matches!(outcome, DispatchOutcome::Dispatched),
+            matches!(outcome, DispatchOutcome::Dispatched { .. }),
             "dispatch should succeed on model-b (first eligible in order)"
         );
 
@@ -5531,7 +5555,7 @@ mod failover_chain_tests {
             )
             .await;
 
-        assert!(matches!(outcome, DispatchOutcome::Dispatched));
+        assert!(matches!(outcome, DispatchOutcome::Dispatched { .. }));
 
         // The dispatch_fn should have been called for model-b (first eligible,
         // succeeds), but NOT for model-a (breaker-open) or model-c (chain
@@ -5611,7 +5635,7 @@ mod failover_chain_tests {
             .await;
 
         assert!(
-            matches!(outcome, DispatchOutcome::Dispatched),
+            matches!(outcome, DispatchOutcome::Dispatched { .. }),
             "dispatch should succeed on model-b after model-a breaker-open"
         );
 
@@ -5737,7 +5761,7 @@ mod failover_chain_tests {
             .await;
 
         assert!(
-            matches!(outcome, DispatchOutcome::Dispatched),
+            matches!(outcome, DispatchOutcome::Dispatched { .. }),
             "dispatch should succeed on model-b after model-a breaker-open"
         );
 
@@ -5883,7 +5907,7 @@ mod failover_chain_tests {
             .await;
 
         assert!(
-            matches!(outcome, DispatchOutcome::Dispatched),
+            matches!(outcome, DispatchOutcome::Dispatched { .. }),
             "dispatch should succeed on model-b after model-a breaker-open"
         );
 
@@ -6016,7 +6040,7 @@ mod failover_chain_tests {
 
         // ── AC3a: dispatch should succeed on model-b ─────────────────────
         assert!(
-            matches!(outcome, DispatchOutcome::Dispatched),
+            matches!(outcome, DispatchOutcome::Dispatched { .. }),
             "dispatch should succeed on model-b after model-a pool error"
         );
 
@@ -6120,6 +6144,7 @@ mod failover_chain_tests {
         // Build a minimal Task for the side-effect method (only `id` and
         // `short_id` are read by `apply_chain_exhaustion_side_effects`).
         let task = djinn_core::models::Task {
+            escalation_evidence_at: None,
             id: "exhausted-task-uuid".to_owned(),
             project_id: String::new(),
             short_id: "exhausted-task".to_owned(),
@@ -6327,6 +6352,7 @@ mod failover_chain_tests {
         );
 
         let task = djinn_core::models::Task {
+            escalation_evidence_at: None,
             id: "breaker-task-uuid".to_owned(),
             project_id: String::new(),
             short_id: "breaker-task".to_owned(),
@@ -6632,7 +6658,7 @@ mod failover_chain_tests {
 
         // ── Outcome: dispatch succeeded via fallback. ────────────────────────
         assert!(
-            matches!(outcome, DispatchOutcome::Dispatched),
+            matches!(outcome, DispatchOutcome::Dispatched { .. }),
             "dispatch should succeed on model-b after model-a pool error; got {outcome:?}"
         );
         let attempted = attempted_models.lock().unwrap().clone();
@@ -6870,6 +6896,7 @@ mod failover_chain_tests {
         // Build a minimal Task for `apply_chain_exhaustion_side_effects` (only
         // `id` and `short_id` are read for streak/persist paths).
         let task = djinn_core::models::Task {
+            escalation_evidence_at: None,
             id: "breaker-elig-task-uuid".to_owned(),
             project_id: String::new(),
             short_id: "breaker-elig-task".to_owned(),
@@ -6963,7 +6990,7 @@ mod failover_chain_tests {
                 .await;
 
             assert!(
-                matches!(outcome, DispatchOutcome::Dispatched),
+                matches!(outcome, DispatchOutcome::Dispatched { .. }),
                 "step 1 chain {chain}: fallback should rescue the dispatch; got {outcome:?}"
             );
 
@@ -7298,7 +7325,7 @@ mod failover_chain_tests {
             )
             .await;
         assert!(
-            matches!(outcome, DispatchOutcome::Dispatched),
+            matches!(outcome, DispatchOutcome::Dispatched { .. }),
             "fallback should rescue the dispatch on model-b; got {outcome:?}"
         );
 
@@ -8020,7 +8047,11 @@ mod build_admission_route_tests {
                     models: vec![djinn_slot::ModelSlotConfig {
                         model_id: WND1_STABLE_MODEL_ID.to_owned(),
                         max_slots,
-                        roles: ["worker".to_owned(), "planner".to_owned()]
+                        // `lead` is the role the 4etb adjudication route lands
+                        // on: the arbiter runs ON the escalated source, so a
+                        // pool without a lead slot would silently make the
+                        // route test unobservable.
+                        roles: ["worker".to_owned(), "planner".to_owned(), "lead".to_owned()]
                             .into_iter()
                             .collect(),
                     }],
@@ -8350,8 +8381,7 @@ mod build_admission_route_tests {
         );
     }
 
-    /// The planner-escalation route still dispatches, and dispatches a NEW
-    /// review task rather than re-dispatching its source.
+    /// The adjudication route still reaches the slot pool.
     ///
     /// This test used to be a build-admission assertion — that a Light planner
     /// took a zero-slot permit and left no journal row. With the pre-create
@@ -8359,6 +8389,17 @@ mod build_admission_route_tests {
     /// about, but the route claim underneath it is untouched and is exactly the
     /// thing a deletion could silently break: the escalation reaching the slot
     /// pool at all.
+    ///
+    /// 4etb changed WHERE that route lands, not whether it lands. Rung 1 and
+    /// `RemediationKind::Planner` are retired, so
+    /// [`CoordinatorActor::dispatch_arbiter_adjudication`] no longer creates a
+    /// NEW review task and dispatches it inline. It escalates the SOURCE to the
+    /// forensic arbiter: the source moves to `needs_lead_intervention` behind an
+    /// unconsumed hold-cycle-0 arbitration row, and the ordinary ready pass then
+    /// dispatches the `lead` arbiter onto it. Both halves are asserted, because
+    /// asserting only the status change would pass for a build where the
+    /// escalated task never reaches a slot at all — the exact regression this
+    /// test exists to catch.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn planner_escalation_route_dispatches_a_new_review_task() {
         let db = crate::test_helpers::create_test_db();
@@ -8370,37 +8411,53 @@ mod build_admission_route_tests {
         let (runtime, mut started_rx, _completed_rx) = RouteRuntime::new();
         let mut actor = build_route_actor(&db, &events_tx, &runtime, 1);
 
-        // Close all fixture tasks so the source task doesn't also dispatch.
+        // Close every other fixture task so the source is the only candidate.
         let source_task_id = fixture.task_ids[0].clone();
         close_all_except(&db, &fixture, &source_task_id).await;
-        // Also close the source so it doesn't dispatch as a worker — the
-        // planner escalation creates its OWN review task.
         let task_repo = TaskRepository::new(db.clone(), djinn_core::events::EventBus::noop());
-        task_repo
-            .set_status(&source_task_id, "closed")
-            .await
-            .expect("close source task");
 
-        // Dispatch through the actual planner-escalation route.
+        // Route through the real adjudication entry point.
         actor
-            .dispatch_planner_escalation(
+            .dispatch_arbiter_adjudication(
                 &source_task_id,
                 "test planner escalation reason",
                 &fixture.project_id,
             )
             .await;
+
+        let escalated = task_repo
+            .get(&source_task_id)
+            .await
+            .expect("read escalated source")
+            .expect("escalated source exists");
         assert_eq!(
-            actor.dispatched, 1,
-            "planner escalation must dispatch through the route"
+            escalated.status, "needs_lead_intervention",
+            "the adjudication route must hand the source to the forensic arbiter"
+        );
+        let arbitration =
+            djinn_db::repositories::task_arbitration::TaskArbitrationRepository::new(db.clone())
+                .get_by_task_and_cycle(&source_task_id, 0)
+                .await
+                .expect("read arbitration ledger")
+                .expect("the route must open hold cycle 0");
+        assert!(
+            arbitration.consumed_at.is_none(),
+            "the arbiter opened by the route must be in flight"
         );
 
+        // …and the escalated source actually reaches the pool as the arbiter.
+        actor.dispatch_ready_tasks(Some(&fixture.project_id)).await;
+        assert_eq!(
+            actor.dispatched, 1,
+            "the adjudication route must dispatch through the slot pool"
+        );
         let dispatched_id = started_rx
             .recv()
             .await
-            .expect("pool runner must fire for the planner task");
-        assert_ne!(
+            .expect("pool runner must fire for the arbiter session");
+        assert_eq!(
             dispatched_id, source_task_id,
-            "planner escalation creates a new review task"
+            "the arbiter adjudicates the escalated source itself"
         );
 
         runtime.release(&dispatched_id).await;

@@ -66,6 +66,7 @@ async fn setup_pending_attempt(db: &Database) -> (Task, String) {
 /// other fields are zeroed/empty.
 fn test_task(short_id: &str) -> Task {
     Task {
+        escalation_evidence_at: None,
         id: short_id.into(),
         project_id: "p1".into(),
         short_id: short_id.into(),

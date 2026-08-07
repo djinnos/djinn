@@ -1614,6 +1614,7 @@ mod tests {
 
     fn fixture_task() -> Task {
         Task {
+            escalation_evidence_at: None,
             id: String::new(),
             project_id: "p".into(),
             short_id: "T-1".into(),

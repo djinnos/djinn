@@ -3930,6 +3930,7 @@ mod tests {
 
     fn fixture_task(task_id: &str, project_id: &str) -> Task {
         Task {
+            escalation_evidence_at: None,
             id: task_id.to_string(),
             project_id: project_id.to_string(),
             short_id: "lg-1".into(),

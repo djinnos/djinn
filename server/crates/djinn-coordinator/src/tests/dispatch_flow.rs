@@ -328,7 +328,7 @@ async fn dispatch_span_records_task_and_model_fields() {
         )
         .await;
 
-    assert!(matches!(outcome, DispatchOutcome::Dispatched));
+    assert!(matches!(outcome, DispatchOutcome::Dispatched { .. }));
     let dispatch_span = layer
         .spans()
         .into_iter()
