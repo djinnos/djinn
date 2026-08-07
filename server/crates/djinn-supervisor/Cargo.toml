@@ -49,3 +49,15 @@ djinn-db = { path = "../djinn-db", features = ["test-support"] }
 tempfile = "3"
 tokio = { version = "1", features = ["full", "test-util"] }
 tracing-subscriber = "0.3"
+# `#[tracing_test::traced_test]` — a PROCESS-GLOBAL capture subscriber, which is
+# the only kind that is correct under `cargo test` at default parallelism.
+# `tracing::dispatcher::set_default` is thread-local, but `Interest` is cached
+# per callsite in a PROCESS-GLOBAL registry: whichever thread first hits a
+# callsite decides its interest for every thread, and a sibling test hitting it
+# with no dispatcher installed caches `Interest::never()` — permanently, because
+# nothing rebuilds the cache afterwards. The events then never reach the
+# thread-local capture and the assertion looks like a missing emission.
+# `tracing-test` installs its subscriber with `set_global_default` over a LEAKED
+# `Dispatch`, so no thread is ever without one. See `djinn-coordinator`, which
+# uses the same crate for the same reason.
+tracing-test = "0.2"
