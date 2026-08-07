@@ -1,4 +1,4 @@
--- Migration 196 (proposal t5rn): open and bound the note consolidation
+-- Migration 198 (proposal t5rn): open and bound the note consolidation
 -- lifecycle.
 --
 -- Every statement below is purely structural: nothing references a particular

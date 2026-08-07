@@ -2526,7 +2526,7 @@ fn render_working_spec_document(
             .collect::<Vec<_>>()
             .join("\n")
     };
-    // The constraint sentence is the shared constant migration 198 matches on
+    // The constraint sentence is the shared constant migration 199 matches on
     // verbatim, so the renderer and the legacy predicate cannot drift.
     format!(
         "# Working Spec\n\n## Active objective\n- Task {task_short_id}: {task_title}\n- {task_description}\n\n## Relevant scope\n{scope_lines}\n\n## Constraints\n- {constraint}\n- Keep mutable hypotheses and open questions here instead of promoting them to durable case/pattern/pitfall notes.\n\n## Current hypotheses\n- Session-local understanding may evolve as implementation continues.\n\n## Open questions\n- Which parts of this working context should be promoted or discarded when the task completes?\n\n## Captured session knowledge\n{section}",
