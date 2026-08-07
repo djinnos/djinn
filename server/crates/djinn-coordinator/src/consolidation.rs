@@ -470,6 +470,7 @@ mod tests {
             dispatch_failure_streak: std::collections::HashMap::new(),
             breaker_open_backoff_streak: std::collections::HashMap::new(),
             background_work_tracker: BackgroundWorkTracker::default(),
+            provider_action_scope: crate::types::ProviderActionScope::new(),
             stranded_ready_source: None,
             doctor_registry: crate::actor::new_doctor_registry_handle(),
             closed_parent_open_children_source: None,

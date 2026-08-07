@@ -7,6 +7,7 @@
 //! the types that both sides need.
 
 pub mod coordinator;
+pub mod provider_action_scope;
 pub mod slot;
 pub mod trigger;
 
@@ -16,6 +17,9 @@ pub use coordinator::{
     BackgroundWorkTracker, BreakerDebugEntry, CoordinatorDebugSnapshot, DebugCooldown,
     DebugDispatchState, DebugFailureStreak, DebugInflightEntry, DebugSlot, DebugTotals,
     DispatchPauseView, PR_REVIEW_FEEDBACK_EVENT,
+};
+pub use provider_action_scope::{
+    ProviderActionGuard, ProviderActionScope, ProviderActionScopeCounts,
 };
 pub use slot::{
     MERGE_CONFLICT_PREFIX, MergeConflictMetadata, ModelSlotConfig, SlotInfo, SlotPoolConfig,
