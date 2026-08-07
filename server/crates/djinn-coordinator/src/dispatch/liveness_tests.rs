@@ -655,10 +655,9 @@ fn wire(status: DbTaskStatus) -> String {
         .unwrap_or_default()
 }
 
-/// TRIPWIRE. `is_settled` includes two session-held statuses. That overlap is
-/// deliberate: once the supervisor's durable barrier has settled the session
-/// and read back its Required transition, these review/intervention boundaries
-/// are confirmed handoff destinations rather than evidence of abandonment.
+/// TRIPWIRE. `is_settled` includes two session-held statuses for its broader
+/// callers. The exit classifier must overlay ownership/handoff evidence rather
+/// than treating this overlap as intrinsic exoneration.
 ///
 /// If this fails, someone changed one of the two lists. Read that doc
 /// before "fixing" the test — the two helpers are one axis, and moving
@@ -701,54 +700,36 @@ fn is_settled_overlaps_session_held_on_exactly_the_two_claim_statuses() {
     );
 }
 
-/// A completed reviewer exit at a confirmed review boundary is exonerated.
-/// The durable supervisor barrier settles the session only after its Required
-/// transition has been applied and read back, so this packet uses the addressed
-/// session's truthful `Completed` status rather than a fabricated running row.
+/// Truthful terminal exits that remain in reviewer/lead claim states require a
+/// confirmed transition. The 7luh barrier makes the single read-back decisive.
 #[test]
-fn completed_reviewer_handoff_is_exonerated_by_settled_boundary() {
-    // Exactly what classify_session_exit_liveness builds for a completed session
-    // whose supervisor-confirmed Required transition reaches in_task_review.
-    let ev = LivenessEvidence {
-        pod_phase: Some(PodPhase::Succeeded),
-        activity: ActivitySignal::Idle,
-        db_session_status: Some(DbSessionStatus::Completed),
-        db_task_status: Some(DbTaskStatus::InTaskReview),
-        claim_ttl_remaining: None,
-        extension_budget_exhausted: false,
-        hard_runtime_deadline_exceeded: false,
-        exit_code: Some(0),
-        handed_off_from_session_held_status: true,
-        transient_provider_fault: false,
-    };
+fn terminal_reviewer_and_lead_claims_require_confirmed_handoff() {
+    for (session_status, phase, exit_code) in [
+        (DbSessionStatus::Completed, PodPhase::Succeeded, 0),
+        (DbSessionStatus::Failed, PodPhase::Failed, 1),
+        (DbSessionStatus::Interrupted, PodPhase::Failed, 1),
+    ] {
+        for task_status in [DbTaskStatus::InTaskReview, DbTaskStatus::InLeadIntervention] {
+            let mut ev = live_evidence();
+            ev.pod_phase = Some(phase);
+            ev.exit_code = Some(exit_code);
+            ev.db_session_status = Some(session_status);
+            ev.db_task_status = Some(task_status);
+            ev.handed_off_from_session_held_status = false;
+            assert_eq!(
+                classify(&ev).verdict,
+                Verdict::ProtocolViolation,
+                "{session_status:?} at {task_status:?} without Required handoff"
+            );
 
-    let result = classify(&ev);
-    assert_eq!(
-        result.verdict,
-        Verdict::Live,
-        "a confirmed reviewer handoff is not a protocol violation"
-    );
-    assert_eq!(result.outcome, None, "the handoff needs no exit action");
-    assert_eq!(result.reason, None);
-
-    // The settled review boundary itself keeps it out of the violation branch.
-    assert!(
-        DbTaskStatus::InTaskReview.is_settled(),
-        "the confirmed review boundary is a valid Required handoff destination"
-    );
-
-    // And every later branch is structurally unreachable for a clean exit:
-    // Succeeded is neither absent-or-failed (precedence 4) nor running
-    // (precedence 5), so `Live` is the fall-through, not a judgement.
-    let mut crashed = ev.clone();
-    crashed.pod_phase = Some(PodPhase::Failed);
-    crashed.exit_code = Some(1);
-    assert_eq!(
-        classify(&crashed).verdict,
-        Verdict::Dead,
-        "the same packet with a Failed pod DOES reach precedence 4 — only \
-         the clean-exit shape falls all the way through"
-    );
+            ev.handed_off_from_session_held_status = true;
+            assert_ne!(
+                classify(&ev).verdict,
+                Verdict::ProtocolViolation,
+                "{session_status:?} at {task_status:?} with confirmed handoff"
+            );
+        }
+    }
 }
 
 /// Explicit regression for #2748: a reviewer that rejected work back to the

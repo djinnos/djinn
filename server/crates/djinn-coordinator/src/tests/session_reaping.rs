@@ -8557,11 +8557,13 @@ async fn terminal_persisted_exit_rows_cover_every_task_status() {
             ("open", true),
             ("needs_task_review", false),
             ("in_task_review", false),
+            ("in_task_review", true),
             ("approved", false),
             ("pr_draft", false),
             ("pr_review", false),
             ("needs_lead_intervention", false),
             ("in_lead_intervention", false),
+            ("in_lead_intervention", true),
             ("closed", false),
         ] {
             let (task, _) = create_task_with_note(
@@ -8633,8 +8635,10 @@ async fn terminal_persisted_exit_rows_cover_every_task_status() {
                 .classify_session_exit_liveness(&session.id, &task.id, None, event, "worker")
                 .await
                 .expect("persisted terminal row must classify");
-            let required_handoff_absent =
-                matches!(task_status, "open" | "in_progress") && !confirmed_handoff;
+            let required_handoff_absent = matches!(
+                task_status,
+                "open" | "in_progress" | "in_task_review" | "in_lead_intervention"
+            ) && !confirmed_handoff;
             assert_eq!(
                 result.verdict == crate::dispatch::liveness::Verdict::ProtocolViolation,
                 required_handoff_absent,
