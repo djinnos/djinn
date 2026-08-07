@@ -48,10 +48,45 @@ use crate::types::ProviderActionScope;
 /// is SIGKILLed. Exceeding it is reported, not retried: the handoff loses its
 /// graceful proof and startup recovery defers.
 ///
-/// Strictly *shorter* than leadership's own `PROVIDER_ACTION_DRAIN_WAIT`, so
-/// the ordinary outcome is "the coordinator finished and stamped", never
-/// "leadership gave up while the coordinator was still joining".
+/// Strictly *shorter* than [`PROVIDER_ACTION_DRAIN_WAIT`], so the ordinary
+/// outcome is "the coordinator finished and stamped", never "leadership gave up
+/// while the coordinator was still joining".
 pub(crate) const PROVIDER_ACTION_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How long leadership waits for the drain stamp before releasing the
+/// coordinator advisory lock.
+///
+/// # Why this number lives here and not in `server/src/leadership.rs`
+///
+/// It is not independently choosable. The two budgets are one contract: the
+/// coordinator's join runs *inside* the window leadership keeps the lock open,
+/// so `PROVIDER_ACTION_DRAIN_TIMEOUT < PROVIDER_ACTION_DRAIN_WAIT` is the
+/// difference between "the coordinator finished and stamped" and "leadership
+/// gave up while the coordinator was still joining, and released the lock with
+/// the stamp attempt still outstanding". Written down in two crates the
+/// relation was documented in both and asserted in neither — so a bump to
+/// either number could invert it silently. One owner, one assertion (below),
+/// and leadership consumes it.
+///
+/// Exceeding it is reported and the lock is released without a graceful proof —
+/// degraded but safe, and the safety is entirely on the *proof* side rather
+/// than the lock side: `recover_calling_owner` takes a row only against the
+/// former owner's own `provider_actions_drained_at` stamp. A new lock owner
+/// that finds no stamp defers indefinitely, so an early release costs recovery
+/// latency and can never cost exclusion.
+pub const PROVIDER_ACTION_DRAIN_WAIT: Duration = Duration::from_secs(45);
+
+// The ordering above, enforced at compile time rather than in prose.
+//
+// A `const` assertion cannot be skipped, filtered out, or left un-run, which is
+// what a relation between two constants deserves. The unit test at the bottom
+// of this file exists as well, because a compile error names a file and a line
+// while a test failure names the consequence.
+const _: () = assert!(
+    PROVIDER_ACTION_DRAIN_TIMEOUT.as_nanos() < PROVIDER_ACTION_DRAIN_WAIT.as_nanos(),
+    "the coordinator's drain budget must expire strictly inside leadership's, or \
+     the stamp attempt outlives the window in which the advisory lock is held"
+);
 
 /// What one quiesce attempt actually achieved.
 ///
@@ -160,4 +195,39 @@ pub(crate) async fn quiesce_provider_actions(
         "CoordinatorActor: provider actions quiesced; leadership may release the lock",
     );
     CiDrainOutcome::Stamped
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PROVIDER_ACTION_DRAIN_TIMEOUT, PROVIDER_ACTION_DRAIN_WAIT};
+
+    /// The two drain budgets are one contract, and this is the direction of it.
+    ///
+    /// The coordinator joins its provider futures and writes
+    /// `provider_actions_drained_at` while leadership is still holding the
+    /// advisory lock. If the coordinator's budget were the longer of the two,
+    /// leadership would release the lock first and the stamp attempt would land
+    /// (or not) *after* a new incarnation could already have acquired the lock
+    /// and run startup recovery — a stamp written into that window is a proof
+    /// about futures whose owner no longer holds the exclusion authority the
+    /// proof is read under.
+    ///
+    /// NAMED FAILING MUTATIONS: raise `PROVIDER_ACTION_DRAIN_TIMEOUT` to 45s or
+    /// above, or lower `PROVIDER_ACTION_DRAIN_WAIT` to 30s or below. Either
+    /// inverts (or ties) the relation and this fails — as does the `const _`
+    /// assertion beside the constants, which fails at compile time and so also
+    /// catches the mutation in crates that never run this filter.
+    #[test]
+    fn the_drain_budget_expires_strictly_inside_leaderships_wait() {
+        assert!(
+            PROVIDER_ACTION_DRAIN_TIMEOUT < PROVIDER_ACTION_DRAIN_WAIT,
+            "the coordinator's drain budget ({PROVIDER_ACTION_DRAIN_TIMEOUT:?}) must expire \
+             strictly inside leadership's ({PROVIDER_ACTION_DRAIN_WAIT:?}), or the stamp \
+             attempt outlives the window in which the advisory lock is still held"
+        );
+        // Vacuity: both budgets are real waits. A zeroed constant would satisfy
+        // the ordering above while quiescing nothing at all.
+        assert!(!PROVIDER_ACTION_DRAIN_TIMEOUT.is_zero());
+        assert!(!PROVIDER_ACTION_DRAIN_WAIT.is_zero());
+    }
 }
