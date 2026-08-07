@@ -364,12 +364,12 @@ impl TaskArbitrationRepository {
     /// already consumed or missing.
     pub async fn mark_consumed(&self, task_id: &str, hold_cycle: i32) -> Result<bool> {
         self.db.ensure_initialized().await?;
-        let result = sqlx::query(ARBITRATION_MARK_CONSUMED)
+        let consumed: i64 = sqlx::query_scalar(ARBITRATION_MARK_CONSUMED)
             .bind(task_id)
             .bind(hold_cycle)
-            .execute(self.db.pool())
+            .fetch_one(self.db.pool())
             .await?;
-        Ok(result.rows_affected() > 0)
+        Ok(consumed > 0)
     }
 
     /// Mark an unconsumed arbitration as failed (terminal for this cycle).
@@ -596,12 +596,56 @@ const ARBITRATION_SELECT_LIST_FOR_TASK: &str = r#"
     ORDER BY hold_cycle ASC
 "#;
 
+// 4etb: clear the canonical evidence epoch when the adjudication genuinely
+// ENDS — in the same statement that consumes the row.
+//
+// The epoch was previously nulled only by `apply_adjudication_child_close_tx`,
+// which covers `park` (it creates the child whose close runs that path) and
+// nothing else. `approve`, `approve_conflict` and `supersede` consume the row
+// and create NO child, so the epoch survived them — and because
+// `stamp_escalation_evidence_epoch_tx` is conditional on
+// `escalation_evidence_at IS NULL`, a LATER escalation's stamp was a silent
+// no-op and its park guards measured a floor from an episode already closed.
+//
+// DECISION-AWARE on purpose. Clearing on every consume is wrong and was tried:
+// a `reopen` consumes the row and hands the source ONE monitored worker
+// attempt, and that attempt is precisely the evidence the next cycle's guards
+// must weigh. Clearing there re-stamps the epoch after it, hiding it, and the
+// guards decline forever — the exact livelock this proposal exists to end.
+// (Observed as six `tests::intervention` failures.) The same reasoning excludes
+// the stale-row self-consume, which immediately opens a fresh cycle in the same
+// episode.
+//
+// Written as ONE statement with CTEs rather than an explicit transaction:
+// `mark_consumed` is called from paths already holding a transaction on
+// `tasks`, and opening a second deadlocked against them.
 const ARBITRATION_MARK_CONSUMED: &str = r#"
-    UPDATE task_arbitrations
-    SET state = 'consumed',
-        consumed_at = to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
-        updated_at = to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
-    WHERE task_id = $1 AND hold_cycle = $2 AND state = 'unconsumed'
+    WITH target AS (
+        SELECT task_id, hold_cycle,
+               (directive ->> 'decision') AS decision
+          FROM task_arbitrations
+         WHERE task_id = $1 AND hold_cycle = $2 AND state = 'unconsumed'
+    ), consumed AS (
+        UPDATE task_arbitrations a
+        SET state = 'consumed',
+            consumed_at = to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+            updated_at = to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+        FROM target t
+        WHERE a.task_id = t.task_id AND a.hold_cycle = t.hold_cycle
+              AND a.state = 'unconsumed'
+        RETURNING a.task_id
+    ), cleared AS (
+        UPDATE tasks
+        SET escalation_evidence_at = NULL
+        WHERE id IN (
+                SELECT task_id FROM target
+                 WHERE decision IN ('approve', 'approve_conflict', 'supersede')
+              )
+          AND EXISTS (SELECT 1 FROM consumed)
+          AND escalation_evidence_at IS NOT NULL
+        RETURNING id
+    )
+    SELECT COUNT(*)::bigint FROM consumed
 "#;
 
 const ARBITRATION_MARK_FAILED: &str = r#"
