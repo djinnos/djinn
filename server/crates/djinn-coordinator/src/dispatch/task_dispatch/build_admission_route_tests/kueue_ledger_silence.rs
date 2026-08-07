@@ -32,6 +32,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
 use djinn_core::events::EventBus;
+use djinn_core::models::LaneMaxSessions;
 use djinn_db::repositories::session::CreateSessionParams;
 use djinn_db::{
     BuildLeaseRepository, Database, ImageRepository, ProjectRepository, WarmGraphAttempt,
@@ -127,6 +128,96 @@ async fn session_pending_precedes_every_model_turn_boundary() {
     );
     assert!(actor.inflight_dispatches.is_empty());
     assert!(actor.provisional_admissions.is_empty());
+}
+
+/// A rejected outer lane admission ends at the same coordinator boundary as a
+/// pending model admission. An explicit lane ceiling remains a resident
+/// rejection, rather than becoming a model-turn decision.
+///
+/// The model cap deliberately has room for a second session. This makes the
+/// existing worker session reject on its role-mapped `implement` lane alone,
+/// exercising the other conjunct of the production outer-admission caller.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn session_lane_rejection_precedes_every_model_turn_boundary() {
+    let db = crate::test_helpers::create_test_db();
+    let (events_tx, _events_rx) = tokio::sync::broadcast::channel(256);
+    let fixture = seed_wnd1_ready_worker_tasks(&db, WND1_READY_TASK_COUNT).await;
+    configure_wnd1_user_max_sessions(&db, &fixture.created_by_user_id, &fixture.model_id, 2).await;
+    djinn_db::UserSettingsRepository::new(db.clone())
+        .upsert_lane_max_sessions(
+            &fixture.created_by_user_id,
+            &LaneMaxSessions {
+                plan: 2,
+                implement: 1,
+                review: 2,
+            },
+        )
+        .await
+        .expect("configure full worker lane cap");
+    let target_task_id = fixture.task_ids[0].clone();
+    close_all_except(&db, &fixture, &target_task_id).await;
+    djinn_db::SessionRepository::new(db.clone(), EventBus::noop())
+        .create(CreateSessionParams {
+            project_id: &fixture.project_id,
+            task_id: Some(&fixture.task_ids[1]),
+            model: &fixture.model_id,
+            agent_type: "worker",
+            metadata_json: None,
+            task_run_id: None,
+            pricing: None,
+            cost_basis: None,
+        })
+        .await
+        .expect("seed active session that fills the worker lane");
+    let pool =
+        djinn_db::test_support::seed_model_turn_admission_fixture(&db, "enforce", "supported", 1)
+            .await;
+
+    let boundary_events = StdArc::new(StdMutex::new(Vec::new()));
+    let observed = StdArc::clone(&boundary_events);
+    djinn_slot::reply_loop::turn::set_reply_loop_boundary_observer(Some(StdArc::new(
+        move |event| {
+            observed.lock().expect("boundary events mutex").push(event);
+        },
+    )));
+    let (runtime, mut started_rx, _completed_rx) = RouteRuntime::new();
+    let mut actor = build_route_actor(&db, &events_tx, &runtime, 1);
+    actor.dispatch_ready_tasks(Some(&fixture.project_id)).await;
+    djinn_slot::reply_loop::turn::set_reply_loop_boundary_observer(None);
+
+    assert_eq!(
+        actor.dispatched, 0,
+        "rejected outer lane admission must not dispatch a slot"
+    );
+    assert!(
+        started_rx.try_recv().is_err(),
+        "rejection must not schedule a replacement dispatch"
+    );
+    assert!(
+        boundary_events
+            .lock()
+            .expect("boundary events mutex")
+            .is_empty(),
+        "rejection must precede reply-loop handoff, preparation, and every provider launch"
+    );
+    assert_eq!(
+        djinn_db::test_support::model_turn_decision_count_fixture(&db, pool).await,
+        0,
+        "outer rejection must not persist a model-turn decision"
+    );
+    assert_eq!(
+        djinn_db::test_support::model_turn_accounting_fixture(&db, pool).await,
+        (0, 1, 0),
+        "outer rejection must leave no pending, acquired, dispatching, or active lease"
+    );
+    assert!(
+        actor.inflight_dispatches.is_empty(),
+        "outer rejection must leave no coordinator dispatch reservation"
+    );
+    assert!(
+        actor.provisional_admissions.is_empty(),
+        "outer rejection must leave no provisional admission"
+    );
 }
 
 /// The durable lifecycle is separate from the empty Kubernetes Job inventory.
