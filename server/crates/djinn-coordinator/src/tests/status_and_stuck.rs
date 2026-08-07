@@ -148,13 +148,22 @@ async fn stuck_detection_releases_orphaned_in_progress_task() {
     );
 }
 
+/// AC1 (9xih): a failed close records its marker but must NOT penalise the
+/// confidence of the notes the task referenced. Task failure after injection is
+/// a task outcome, not epistemic evidence about the note.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn failed_closed_task_applies_failure_confidence_once() {
+async fn failed_closed_task_records_marker_without_penalising_note_confidence() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
     let _handle = spawn_coordinator(&db, &tx);
     let (task, note) = create_task_with_note(&db, &tx, "failed-close").await;
     let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+    let note_repo = NoteRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+    let before = note_repo.get(&note.id).await.unwrap().unwrap().confidence;
+    // `create_task_with_note` parks the note at 0.5. The removed 0.1 signal
+    // would have driven that prior to 0.1, so the equality assertion below is a
+    // real behavioural difference and not an arithmetic no-op at the ceiling.
+    assert_eq!(before, 0.5, "fixture prior must be movable by the old signal");
 
     repo.set_status_with_reason(&task.id, "closed", Some("failed"))
         .await
@@ -163,11 +172,18 @@ async fn failed_closed_task_applies_failure_confidence_once() {
     // FAILED_CLOSE marker instead of a fixed sleep (which flaked under
     // load — the coordinator actor processes the status_changed event
     // asynchronously and 100ms is not a hard upper bound on latency).
+    //
+    // This wait is what makes the confidence assertion below meaningful: it
+    // proves the coordinator finished handling the outcome, so an unchanged
+    // confidence is "did not penalise", not "has not run yet".
     wait_for_outcome_marker(&repo, &task.id, TASK_OUTCOME_FAILED_CLOSE, 0).await;
 
-    let note_repo = NoteRepository::new(db.clone(), crate::events::event_bus_for(&tx));
-    let note_after = note_repo.get(&note.id).await.unwrap().unwrap();
-    assert!(note_after.confidence < 0.5);
+    let after = note_repo.get(&note.id).await.unwrap().unwrap().confidence;
+    assert_eq!(
+        after, before,
+        "a failed close must not mutate referenced-note confidence \
+         (before {before}, after {after})"
+    );
 
     let markers = repo
         .query_activity(ActivityQuery {
@@ -186,16 +202,33 @@ async fn failed_closed_task_applies_failure_confidence_once() {
     let payload: serde_json::Value = serde_json::from_str(&markers[0].payload).unwrap();
     assert_eq!(payload["kind"], TASK_OUTCOME_FAILED_CLOSE);
     assert_eq!(payload["reopen_count"], 0);
+    // Observability survives the removal of the penalty: the marker still names
+    // the note the failing task referenced.
+    assert_eq!(
+        payload["referenced_notes"]
+            .as_array()
+            .expect("referenced_notes array")
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .collect::<Vec<_>>(),
+        vec![note.id.as_str()]
+    );
 }
 
+/// Marker idempotency across reopens — one marker per `reopen_count`.
+///
+/// Since 9xih the *only* side effect is the marker; the confidence penalty that
+/// used to accompany it is gone, and this test now also pins that no reopen at
+/// any depth moves the referenced note's confidence.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn reopened_twice_applies_failure_once_per_reopen_count() {
+async fn reopened_twice_records_marker_once_per_reopen_count() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
     let _handle = spawn_coordinator(&db, &tx);
     let (task, note) = create_task_with_note(&db, &tx, "reopen-twice").await;
     let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
     let note_repo = NoteRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+    let before = note_repo.get(&note.id).await.unwrap().unwrap().confidence;
 
     repo.set_status_with_reason(&task.id, "closed", Some("failed"))
         .await
@@ -211,7 +244,11 @@ async fn reopened_twice_applies_failure_once_per_reopen_count() {
     let reopened_once = repo.get(&task.id).await.unwrap().unwrap();
     assert_eq!(reopened_once.reopen_count, 1);
     let after_first = note_repo.get(&note.id).await.unwrap().unwrap().confidence;
-    assert!(after_first < 0.5, "first reopen should reduce confidence");
+    assert_eq!(
+        after_first, before,
+        "a reopen must not mutate referenced-note confidence \
+         (before {before}, after {after_first})"
+    );
 
     // Duplicate open→open: the coordinator must treat this as a no-op
     // (marker for reopen_count=1 already exists).  Assert idempotency as
@@ -236,13 +273,14 @@ async fn reopened_twice_applies_failure_once_per_reopen_count() {
     let reopened_twice = repo.get(&task.id).await.unwrap().unwrap();
     assert_eq!(reopened_twice.reopen_count, 2);
     let after_second = note_repo.get(&note.id).await.unwrap().unwrap().confidence;
-    assert!(
-        after_second <= after_first,
-        "second reopen should not increase confidence, got after_second={after_second}, after_first={after_first}"
+    assert_eq!(
+        after_second, before,
+        "no number of reopens may mutate referenced-note confidence \
+         (before {before}, after {after_second})"
     );
     // Exactly two new markers between the duplicate no-op and now:
     // one FAILED_CLOSE(reopen_count=1) and one REOPEN_COUNT(reopen_count=2).
-    // If the duplicate open→open had wrongly applied a penalty, we'd
+    // If the duplicate open→open had wrongly been handled again, we'd
     // see three.
     let markers_after = outcome_marker_count(&repo, &task.id).await;
     assert_eq!(

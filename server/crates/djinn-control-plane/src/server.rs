@@ -36,7 +36,6 @@ use crate::tools::memory_tools::contradiction::{
 };
 use crate::tools::memory_tools::summaries::spawn_summary_backfill_worker;
 
-const HIGH_CONFIDENCE_THRESHOLD: f64 = 0.8;
 const GRAPH_SCHEMA_RESOURCE_TEMPLATE_URI: &str = "djinn://project/{id}/graph-schema";
 const GRAPH_SCHEMA_RESOURCE_MIME_TYPE: &str = "application/json";
 
@@ -53,6 +52,15 @@ impl CoAccessBatch {
         }
     }
 
+    /// Persist the session's co-access edges.
+    ///
+    /// This writes `note_associations` and NOTHING else. It used to also apply
+    /// `CO_ACCESS_HIGH` to every lower-confidence note that shared a session
+    /// with a high-confidence one — an unbounded epistemic feedback loop
+    /// (proposal 9xih): raising a note's confidence made it more injectable,
+    /// which made it more likely to be co-read, which raised it again. Being
+    /// read alongside a trusted note is evidence about retrieval, not about
+    /// truth, so it may not reach `update_confidence` at all.
     pub(crate) async fn flush(&self, state: &McpState) {
         if self.note_ids.len() < 2 {
             return;
@@ -64,53 +72,6 @@ impl CoAccessBatch {
                 if let Err(error) = repo.upsert_association(note_a, note_b, 1).await {
                     warn!(%error, note_a, note_b, "failed to flush co-access association");
                 }
-            }
-        }
-
-        let confidence_map = match repo.note_confidence_map(&self.note_ids).await {
-            Ok(map) => map,
-            Err(error) => {
-                warn!(%error, "failed to load note confidence map for co-access flush");
-                return;
-            }
-        };
-
-        let high_confidence_notes: HashSet<&str> = self
-            .note_ids
-            .iter()
-            .filter_map(|note_id| {
-                confidence_map
-                    .get(note_id)
-                    .copied()
-                    .filter(|confidence| *confidence > HIGH_CONFIDENCE_THRESHOLD)
-                    .map(|_| note_id.as_str())
-            })
-            .collect();
-
-        if high_confidence_notes.is_empty() {
-            return;
-        }
-
-        for note_id in self.note_ids.iter().filter(|note_id| {
-            confidence_map
-                .get(*note_id)
-                .is_some_and(|confidence| *confidence <= HIGH_CONFIDENCE_THRESHOLD)
-        }) {
-            let has_high_confidence_partner = self.note_ids.iter().any(|candidate| {
-                candidate != note_id && high_confidence_notes.contains(candidate.as_str())
-            });
-
-            if !has_high_confidence_partner {
-                continue;
-            }
-
-            if let Err(error) = repo
-                .update_confidence(note_id, djinn_db::repositories::note::CO_ACCESS_HIGH)
-                .await
-            {
-                warn!(%error, note_id, "failed to update co-access confidence");
-            } else {
-                debug!(note_id, "applied high-confidence co-access boost");
             }
         }
     }
@@ -241,6 +202,13 @@ impl DjinnMcpServer {
         )
     }
 
+    /// Note this note in the session's in-memory co-access set.
+    ///
+    /// Session-level telemetry only. Per 9xih this must never mutate
+    /// `notes.confidence` nor the persisted access fields (`access_count`,
+    /// `last_accessed`) — the only writer of those is
+    /// `NoteRepository::record_explicit_access`, reached from a successful
+    /// `memory_read` result construction.
     pub(crate) async fn record_memory_read(&self, note_id: &str) {
         self.co_access_batch.write().await.record_read(note_id);
     }

@@ -190,6 +190,59 @@ mod tests {
         assert!(new_confidence >= 0.97);
     }
 
+    /// AC2 (9xih): confirming an untouched note may not demote it.
+    ///
+    /// Before 9xih, new notes defaulted to `1.0` while `bayesian_update` clamps
+    /// to `CONFIDENCE_CEILING` (0.975). Applying the *positive* `USER_CONFIRM`
+    /// signal therefore dropped a fresh note from 1.0 to 0.975 — strictly below
+    /// every note nobody had bothered to confirm. Confirming a note pushed it
+    /// down the confidence ordering that gates injection eligibility.
+    ///
+    /// This runs the real `memory_confirm` tool against two notes created by
+    /// the real repository, so the schema default (migration 195) is what is
+    /// actually under test.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn confirming_a_new_note_never_sorts_it_below_an_untouched_note() {
+        let (server, db, project_id, path) = make_server().await;
+        let repo = NoteRepository::new(db.clone(), EventBus::noop());
+
+        let untouched = make_note(&db, &project_id, &path, "Untouched Default").await;
+        let to_confirm = make_note(&db, &project_id, &path, "Confirmed Default").await;
+
+        // The premise: new notes are created at the ceiling, not above it.
+        assert_eq!(
+            to_confirm.confidence,
+            note::CONFIDENCE_CEILING,
+            "a new note must default to CONFIDENCE_CEILING; got {}",
+            to_confirm.confidence
+        );
+        assert_eq!(untouched.confidence, note::CONFIDENCE_CEILING);
+
+        let response = server
+            .memory_confirm(Parameters(MemoryConfirmParams {
+                project: project_id.clone(),
+                identifier: to_confirm.permalink.clone(),
+                comment: None,
+            }))
+            .await
+            .0;
+        assert_eq!(response.error, None);
+
+        // Read both back out of the database rather than trusting the response.
+        let confirmed_after = repo.get(&to_confirm.id).await.unwrap().unwrap().confidence;
+        let untouched_after = repo.get(&untouched.id).await.unwrap().unwrap().confidence;
+
+        assert!(
+            confirmed_after >= untouched_after,
+            "USER_CONFIRM demoted a note below an untouched peer: \
+             confirmed={confirmed_after}, untouched={untouched_after}"
+        );
+        assert_eq!(
+            untouched_after, untouched.confidence,
+            "confirming one note must not disturb another"
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn confirm_resolves_by_note_id() {
         let (server, db, project_id, path) = make_server().await;
