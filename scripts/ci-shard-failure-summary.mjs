@@ -63,9 +63,13 @@ const ANSI_ESCAPE = new RegExp(`${String.fromCharCode(27)}\\[[0-9;?]*[ -/]*[@-~]
  * optional ISO prefix is for the other log a human ever has in hand — the one
  * downloaded from the Actions API, where every line is timestamp-prefixed — so
  * the same parser can be pointed at it while debugging.
+ *
+ * The `TRY <n>` counter is captured, not just skipped: it is the only evidence
+ * in the log that retries were spent, which is what
+ * scripts/ci-retry-flake-summary.mjs reports on GREEN runs.
  */
 const STATUS_LINE =
-  /^(?:\d{4}-\d{2}-\d{2}T[\d:.]+Z )?\s*(?:TRY\s+\d+\s+)?([A-Z][A-Z-]*)\s+\[[^\]]*\]\s+(?:\([^)]*\)\s+)?(\S.*?)\s*$/;
+  /^(?:\d{4}-\d{2}-\d{2}T[\d:.]+Z )?\s*(?:TRY\s+(\d+)\s+)?([A-Z][A-Z-]*)\s+\[[^\]]*\]\s+(?:\([^)]*\)\s+)?(\S.*?)\s*$/;
 
 /** Terminal failure statuses. LEAK-FAIL precedes FAIL so it is not split. */
 const FAILURE_STATUS = /^(?:LEAK-FAIL|FAIL|TIMEOUT|SIG[A-Z]+)$/;
@@ -77,18 +81,31 @@ export function stripAnsi(text) {
   return String(text).replace(ANSI_ESCAPE, '');
 }
 
+/** True for statuses that end the attempt in failure: FAIL, LEAK-FAIL, TIMEOUT, SIG<NAME>. */
+export function isFailureStatus(status) {
+  return FAILURE_STATUS.test(status);
+}
+
+/** True for statuses that end the attempt in success (PASS/LEAK). */
+export function isSuccessStatus(status) {
+  return SUCCESS_STATUS.test(status);
+}
+
 /**
- * Parse one nextest status line into `{ status, id }`, or null if the line is
- * not a status line. `id` is the normalized `<binary-id> <test-name>`.
+ * Parse one nextest status line into `{ status, id, attempt }`, or null if the
+ * line is not a status line. `id` is the normalized `<binary-id> <test-name>`;
+ * `attempt` is the `TRY <n>` counter, or 1 when nextest printed no counter
+ * (the first and only attempt).
  */
 export function parseStatusLine(line) {
   const match = STATUS_LINE.exec(stripAnsi(line));
   if (match === null) return null;
-  const status = match[1];
+  const status = match[2];
   if (!FAILURE_STATUS.test(status) && !SUCCESS_STATUS.test(status)) return null;
-  const id = match[2].replace(/\s+/g, ' ');
+  const id = match[3].replace(/\s+/g, ' ');
   if (id.length === 0) return null;
-  return { status, id };
+  const attempt = match[1] === undefined ? 1 : Number.parseInt(match[1], 10);
+  return { status, id, attempt };
 }
 
 /**

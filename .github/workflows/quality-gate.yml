@@ -235,6 +235,11 @@ jobs:
       # the file being produced.
       - name: Verify nextest per-test timing contract
         run: node --test scripts/ci-nextest-timing.test.mjs
+      # Retry telemetry shares the shard-failure parser. It is proven here for
+      # the same reason: the only alternative is an inline grep nobody can test,
+      # and this one runs on GREEN lanes where a wrong answer is invisible.
+      - name: Verify retry-absorbed flake telemetry contract
+        run: node --test scripts/ci-retry-flake-summary.test.mjs
       - name: Verify MCP tool-schema golden manifest contract
         run: node --test scripts/tool-goldens.test.mjs
       # Cheap (filesystem walk, no build): fails if a NEW derived tool-schema
@@ -2127,6 +2132,43 @@ jobs:
             echo "::error title=Server shard failed before checkout::$message"
             printf '### Server shard failure\n\n%s\n' "$message" >> "$GITHUB_STEP_SUMMARY"
           fi
+      - name: Surface retry-absorbed flakes
+        # Deliberately `always()`, NOT `failure()`. Every profile used here
+        # inherits [profile.ci]'s `retries = { count = 2 }`, so a test that
+        # fails once and passes on a re-run leaves this lane GREEN and leaves
+        # no signal anywhere. Measured over 619 shard logs from 80 SUCCESSFUL
+        # merge_group runs: 33 of the 80 (41.2%) absorbed at least one flake,
+        # 34 instances total, against a 2.1% visible failure rate — roughly
+        # 20x under-reporting.
+        #
+        # This step is PURE TELEMETRY and must stay that way. The script always
+        # exits 0 (a parse problem degrades to a `::notice::`), and the `|| true`
+        # below covers node itself failing to start: a bug in reporting must
+        # never turn a lane whose tests passed into a red one. It also does not
+        # touch `retries` — whether to keep three attempts is a separate call,
+        # and it cannot be made honestly until the cost is on the page.
+        if: always() && steps.shard.outputs.active == 'true'
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -uo pipefail
+          flake_script="$GITHUB_WORKSPACE/scripts/ci-retry-flake-summary.mjs"
+          if [[ -f "$flake_script" ]]; then
+            node "$flake_script" \
+              --shard "${{ matrix.shard }}" \
+              --log "$RUNNER_TEMP/nextest-run.log" \
+              --summary "$GITHUB_STEP_SUMMARY" \
+              --json "$GITHUB_WORKSPACE/server/nextest-flake/flake-${{ matrix.shardIndex }}.json" || true
+          fi
+          exit 0
+      - name: Upload shard retry-flake report
+        if: always() && steps.shard.outputs.active == 'true'
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: nextest-flake-${{ github.run_id }}-${{ matrix.shard }}
+          path: server/nextest-flake/flake-${{ matrix.shardIndex }}.json
+          if-no-files-found: ignore
+          retention-days: 30
       - name: Upload retained shard timing data
         if: always() && steps.shard.outputs.active == 'true'
         uses: actions/upload-artifact@v4
@@ -2593,6 +2635,39 @@ jobs:
         run: pnpm test
       - name: Production build
         run: pnpm build
+  nextest-flake-report:
+    name: Retry-Absorbed Flakes
+    # Run-level rollup of the per-shard retry telemetry. A single shard saying
+    # "1 absorbed flake" reads as noise; "this run absorbed 3" is the statistic
+    # that showed 41.2% of green merge_group runs were quietly flaky.
+    #
+    # This job is deliberately ABSENT from `quality-gate`'s `needs` list, and
+    # must stay absent: it reports on runs whose tests already passed, so
+    # letting it block a merge would convert a measurement into an outage. It
+    # is `always()` so a red sibling shard still gets its retry ledger printed,
+    # and every step swallows its own errors.
+    needs:
+      - preflight
+      - server-test
+    if: always() && needs.preflight.outputs.serverTest == 'true' && github.event_name != 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download shard retry-flake reports
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          pattern: nextest-flake-${{ github.run_id }}-*
+          path: nextest-flake-shards
+          merge-multiple: true
+      - name: Report run-level retry-absorbed flake count
+        run: |
+          set -uo pipefail
+          node scripts/ci-retry-flake-summary.mjs \
+            --aggregate nextest-flake-shards \
+            --summary "$GITHUB_STEP_SUMMARY" || true
+          exit 0
   quality-gate:
     name: Quality Gate
     runs-on: ubuntu-latest

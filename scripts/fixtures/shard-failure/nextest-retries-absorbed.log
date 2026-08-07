@@ -1,0 +1,13 @@
+[32;1m Nextest run[0m ID [1m3f0d5c1e-6b2a-4f77-9b41-2c8ad1f0e5b9[0m with nextest profile: [1mmerge-group[0m
+[32;1m    Starting[0m [1m2842[0m tests across [1m110[0m binaries
+[32;1m        PASS[0m [   0.011s] (1/2842) [35;1mdjinn-runtime[0m [36mspec::tests[0m[36m::[0m[34;1mtask_run_spec_roundtrips[0m
+[35;1m  TRY 1 FAIL[0m [   0.526s] (─────────) [35;1mdjinn-server[0m [36mserver::chat::tests::handler[0m[36m::[0m[34;1mcompletions_rejects_non_uuid_session[0m
+[33;1m   DELAY 2/3[0m by   0.625s (─────────) [35;1mdjinn-server[0m [36mserver::chat::tests::handler[0m[36m::[0m[34;1mcompletions_rejects_non_uuid_session[0m
+[33;1m  TRY 2 PASS[0m [   0.501s] (12/2842) [35;1mdjinn-server[0m [36mserver::chat::tests::handler[0m[36m::[0m[34;1mcompletions_rejects_non_uuid_session[0m
+[35;1m  TRY 1 FAIL[0m [   1.204s] (─────────) [35;1mdjinn-k8s[0m [36msession::tests[0m[36m::[0m[34;1mkill_session_then_has_session_is_false[0m
+[35;1m  TRY 2 FAIL[0m [   1.187s] (─────────) [35;1mdjinn-k8s[0m [36msession::tests[0m[36m::[0m[34;1mkill_session_then_has_session_is_false[0m
+[33;1m  TRY 3 PASS[0m [   1.150s] (988/2842) [35;1mdjinn-k8s[0m [36msession::tests[0m[36m::[0m[34;1mkill_session_then_has_session_is_false[0m
+[35;1m  TRY 1 TIMEOUT[0m [  60.000s] (─────────) [35;1mdjinn-worker[0m [36mcancel::tests[0m[36m::[0m[34;1mcancellation_drains_inflight[0m
+[33;1m  TRY 2 LEAK[0m [   2.004s] (1701/2842) [35;1mdjinn-worker[0m [36mcancel::tests[0m[36m::[0m[34;1mcancellation_drains_inflight[0m
+──────────────────
+[32;1m     Summary[0m [ 196.905s] [1m2842[0m tests run: [1m2842[0m [32;1mpassed[0m ([1m3[0m [33;1mflaky[0m), [1m0[0m [33;1mskipped[0m
