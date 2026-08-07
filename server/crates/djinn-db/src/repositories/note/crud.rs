@@ -888,7 +888,31 @@ impl NoteRepository {
         Ok(())
     }
 
-    pub async fn touch_accessed(&self, id: &str) -> Result<()> {
+    /// Record a note access.
+    ///
+    /// This does two things, and the second one is the reason the signature
+    /// takes a `source`:
+    ///
+    /// 1. It bumps the destructive `notes.last_accessed` / `notes.access_count`
+    ///    scalars used by temporal/co-access scoring.
+    /// 2. It appends a row to the `note_access_events` ledger (migration 189)
+    ///    so `P(memory_read | Injected)` has a join side. The scalars in (1)
+    ///    are last-write-wins and can never answer that question.
+    ///
+    /// `source` is mandatory rather than defaulted because the two callers mean
+    /// different things: `memory_search` touches every returned result (ADR-054)
+    /// while only `memory_read` is an explicit pull. Defaulting would make the
+    /// metric wrong by construction.
+    ///
+    /// The ledger append is fail-open: a ledger write error is logged and
+    /// swallowed so that instrumentation can never break a note read. The
+    /// scalar update is not — it retains its previous error behaviour.
+    pub async fn touch_accessed(
+        &self,
+        id: &str,
+        source: super::NoteAccessSource,
+        attribution: &super::NoteAccessAttribution,
+    ) -> Result<()> {
         self.db.ensure_initialized().await?;
         let note = self
             .get_summary_state(id)
@@ -904,6 +928,22 @@ impl NoteRepository {
         )
         .execute(self.db.pool())
         .await?;
+
+        if let Err(error) = super::access_events::record_note_access(
+            &self.db,
+            &note.project_id,
+            id,
+            source,
+            attribution,
+        )
+        .await
+        {
+            tracing::warn!(
+                note_id = %id,
+                %error,
+                "failed to append note access event; injected-pull-rate coverage will under-count"
+            );
+        }
 
         if note.abstract_.is_none() || note.overview.is_none() {
             self.events

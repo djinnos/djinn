@@ -13,6 +13,14 @@
 //   4. Repeat until `dry_rounds_required` consecutive rounds with no new blocking
 //      objection ("dry rounds") — then invoke the Judge.
 //   5. Judge adjudicates (produces a verdict via debate trail).
+//   6. A blocking verdict re-opens the loop at the Adversary (step 2). If that
+//      Adversary is dry, the round goes to the Advocate anyway so the verdict's
+//      prescribed remedy is implemented — see `process_adversary_pass`.
+//
+// NOTE: `dry_rounds_required` is NOT enforced anywhere in the tree.
+// `consecutive_dry_rounds` is incremented and reset but never compared against
+// it, so step 4 above has never been true: a single dry pass invokes the Judge.
+// Filed as a separate defect; do not read the constant as a live contract.
 //
 // Guards:
 //   - Hard round cap (default 5).
@@ -61,11 +69,16 @@ pub fn role_for_phase(phase: RefinementPhase) -> RefinementRole {
 
 /// The current phase of the refinement loop.
 ///
-/// v2 tribunal order: each round runs `Adversary → Advocate → Judge`. The
+/// v2 tribunal order: every round runs `Adversary → Advocate → Judge`. The
 /// Adversary opens (red-teams the current spec), the Advocate responds
 /// (revises to address objections), and the Judge rules whether to loop again
 /// or surface the result to the human. The human is NOT in the loop — they
 /// only review the converged result once, via `AwaitingHumanReview`.
+///
+/// The Advocate step is skipped only when the Adversary is dry **and** the
+/// Judge has no outstanding blocking verdict. A dry round that still owes the
+/// Judge a remedy goes to the Advocate — see
+/// [`RefinementLoopState::pending_blocking_verdict`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RefinementPhase {
     /// Waiting for the Adversary to red-team the current spec. (Round opener.)
@@ -216,6 +229,23 @@ pub struct RefinementLoopState {
     /// separate from proposal revisions: a rejected candidate did not change
     /// the head and must be corrected in the same refinement round.
     pub pending_advocate_lint_violations: Vec<AdvocateLintViolation>,
+    /// Whether the Judge's latest verdict was blocking and no Advocate revision
+    /// has answered it yet.
+    ///
+    /// A needs-work verdict prescribes a remedy, and only the Advocate can write
+    /// it into the proposal body. But by the time the Judge rejects, it has
+    /// usually resolved every objection the Adversary filed — so the next
+    /// Adversary pass is legitimately dry, and a dry pass used to skip the
+    /// Advocate and hand an unchanged spec straight back to the Judge. The
+    /// remedy could then never be implemented by any role.
+    ///
+    /// This flag is what makes a dry pass route to the Advocate instead. It is
+    /// derived state, not an independent source of truth: the durable authority
+    /// is `ProposalRepository::latest_judge_verdict`, and both projection
+    /// rebuild paths (`refinement_recovery`, `refinement_inflight`) rehydrate it
+    /// from there via [`RefinementLoopState::with_pending_blocking_verdict`], so
+    /// it survives a coordinator restart.
+    pub pending_blocking_verdict: bool,
     /// Set when the loop terminates.
     pub stop_reason: Option<StopReason>,
 }
@@ -252,6 +282,7 @@ impl RefinementLoopState {
             round_blocking_objections: Vec::new(),
             dispatch_failures: 0,
             pending_advocate_lint_violations: Vec::new(),
+            pending_blocking_verdict: false,
             stop_reason: None,
         }
     }
@@ -284,6 +315,22 @@ impl RefinementLoopState {
             self.snapshot_revision_seq = seq;
             self.current_revision_seq = seq;
         }
+        self
+    }
+
+    /// Rehydrate [`RefinementLoopState::pending_blocking_verdict`] from the
+    /// durable debate trail. Every projection rebuilt from the ledger must call
+    /// this: `new` seeds the flag `false`, so a run recovered while parked at
+    /// `AdversaryAttack` after a needs-work verdict would send its next dry
+    /// pass back to the Judge and re-strand the verdict the restart interrupted.
+    ///
+    /// The caller supplies `ProposalRepository::latest_judge_verdict(..).blocking`.
+    /// That read is only consulted on the dry branch of `process_adversary_pass`
+    /// — i.e. while the phase is `AdversaryAttack`, which is reachable only
+    /// before any Advocate revision has answered the latest verdict — so the
+    /// latest-verdict row is an exact witness at the point of use.
+    pub fn with_pending_blocking_verdict(mut self, pending: bool) -> Self {
+        self.pending_blocking_verdict = pending;
         self
     }
 
@@ -368,9 +415,15 @@ impl RefinementLoopState {
 
     /// Record an advocate revision. Advances the working revision seq and
     /// hands the round to the Judge to rule.
+    ///
+    /// The revision answers whatever the Judge's last blocking verdict
+    /// prescribed, so the outstanding-verdict flag is cleared here: the Judge is
+    /// about to rule on the new revision, and that ruling — not this one — is
+    /// what decides whether a remedy is still owed.
     pub fn record_advocate_revision(&mut self, new_revision_seq: i32) {
         self.current_revision_seq = new_revision_seq;
         self.pending_advocate_lint_violations.clear();
+        self.pending_blocking_verdict = false;
         self.phase = RefinementPhase::JudgeAdjudication;
     }
 
@@ -384,10 +437,18 @@ impl RefinementLoopState {
     /// Process an adversary attack pass — the round opener. Records objections
     /// for repeat-signature detection, then routes:
     /// - blocking objections found → the Advocate revises to address them;
-    /// - no blocking objections (dry) → skip the Advocate (nothing to fix) and
-    ///   let the Judge rule directly;
+    /// - no blocking objections (dry) **with an outstanding blocking judge
+    ///   verdict** → the Advocate still runs, to implement the remedy that
+    ///   verdict prescribed (see [`RefinementLoopState::pending_blocking_verdict`]);
+    /// - no blocking objections (dry) and nothing owed to the Judge → skip the
+    ///   Advocate (nothing to fix) and let the Judge rule directly;
     /// - the same blocking objection repeating across rounds → the loop is
     ///   stuck, so escalate to the human reviewer.
+    ///
+    /// Dry accounting is identical in both dry branches: a dry pass is a dry
+    /// pass regardless of what the Judge left outstanding, and the reported
+    /// outcome stays [`AdversaryPassOutcome::Dry`] because it describes the
+    /// Adversary's own output, not the phase that follows.
     ///
     /// Pure state-machine logic — the caller persists objections through the
     /// debate-trail primitives.
@@ -414,8 +475,20 @@ impl RefinementLoopState {
 
         if blocking_count == 0 || result.explicit_dry {
             self.consecutive_dry_rounds += 1;
-            // Nothing for the advocate to fix — straight to the judge.
-            self.phase = RefinementPhase::JudgeAdjudication;
+            // A dry Adversary does NOT mean there is nothing to revise. When the
+            // Judge's last verdict was blocking, it prescribed a remedy that only
+            // the Advocate can write into the body — and by then the Judge has
+            // usually resolved every objection the Adversary filed, so the
+            // Adversary legitimately has nothing left to raise. Routing straight
+            // to the Judge here is what stranded those verdicts forever: the
+            // Judge re-read an unchanged spec, rejected it again, and the round
+            // burned. Give the Advocate the round instead.
+            self.phase = if self.pending_blocking_verdict {
+                RefinementPhase::AdvocateRevision
+            } else {
+                // Genuinely nothing owed — straight to the judge.
+                RefinementPhase::JudgeAdjudication
+            };
             return AdversaryPassOutcome::Dry;
         }
 
@@ -429,11 +502,21 @@ impl RefinementLoopState {
     ///   single accept/reject review;
     /// - blocking ("not ready") → run another round (Adversary first), unless
     ///   the round cap is hit, in which case escalate to the human.
+    ///
+    /// A blocking verdict also records that the Judge left a remedy outstanding
+    /// ([`RefinementLoopState::pending_blocking_verdict`]). The round still
+    /// opens at the Adversary — every revision stays adversarially reviewed and
+    /// the round keeps its three-spawn shape — but if that Adversary comes up
+    /// dry, `process_adversary_pass` hands the round to the Advocate instead of
+    /// bouncing an unchanged spec back to the Judge.
     pub fn record_judge_verdict(&mut self, result: &JudgeVerdictResult) {
         if !result.blocking {
+            // A ready verdict supersedes any earlier needs-work verdict.
+            self.pending_blocking_verdict = false;
             self.phase = RefinementPhase::AwaitingHumanReview;
             return;
         }
+        self.pending_blocking_verdict = true;
         if self.current_round >= self.config.max_rounds {
             self.escalate(StopReason::RoundCap);
             return;
@@ -643,12 +726,17 @@ pub fn build_verdict_debate_params<'a>(
 mod tests {
     use super::*;
 
+    /// Derived from the shipped defaults, not hardcoded: the spawn-budget test
+    /// below asserts a relationship between the round cap and the spawn cap, and
+    /// that assertion is only meaningful if it runs against the values
+    /// production actually uses. Hardcoding them would let a default change
+    /// silently break the `RoundCap`-before-`SpawnCap` guarantee.
     fn test_config() -> RefinementConfig {
         RefinementConfig {
-            max_rounds: 5,
-            dry_rounds_required: 2,
-            max_total_spawns: 16,
-            repeat_objection_threshold: 2,
+            max_rounds: DEFAULT_MAX_ROUNDS,
+            dry_rounds_required: DEFAULT_DRY_ROUNDS_REQUIRED,
+            max_total_spawns: DEFAULT_MAX_TOTAL_SPAWNS,
+            repeat_objection_threshold: DEFAULT_REPEAT_OBJECTION_THRESHOLD,
         }
     }
 
@@ -765,7 +853,8 @@ mod tests {
             explicit_dry: false,
         });
         state.record_advocate_revision(1);
-        // Judge still finds the spec lacking → next round, adversary first.
+        // Judge still finds the spec lacking → next round, adversary first, so
+        // the revision that was just rejected is still red-teamed.
         state.record_judge_verdict(&JudgeVerdictResult {
             body: "Still needs work.".into(),
             blocking: true,
@@ -773,6 +862,247 @@ mod tests {
         assert_eq!(state.phase, RefinementPhase::AdversaryAttack);
         assert_eq!(state.current_round, 2);
         assert!(!state.is_complete());
+        // The remedy the verdict prescribed is recorded as still owed.
+        assert!(state.pending_blocking_verdict);
+    }
+
+    /// The wedge. A blocking verdict prescribes a remedy only the Advocate can
+    /// write, and by the time the Judge rejects it has usually resolved every
+    /// objection the Adversary filed — so the next Adversary pass is genuinely
+    /// dry. A dry pass used to skip the Advocate and hand the unchanged spec
+    /// straight back to the Judge, which re-rejected it. The remedy could never
+    /// be implemented by any role, and the run burned rounds to the cap.
+    ///
+    /// A dry pass that still owes the Judge a remedy must reach the Advocate.
+    #[test]
+    fn dry_adversary_with_an_outstanding_verdict_routes_to_the_advocate() {
+        let mut state = RefinementLoopState::with_config("p1", 0, test_config());
+
+        // Round 1: the Adversary objects, the Advocate revises, the Judge
+        // rejects with a prescribed remedy and resolves the objection.
+        state.process_adversary_pass(&AdversaryPassResult {
+            objections: vec![blocking_objection("Missing rollback path")],
+            explicit_dry: false,
+        });
+        state.record_advocate_revision(1);
+        state.record_judge_verdict(&JudgeVerdictResult {
+            body: "needs-work: AC 3 is untestable; replace it with a measurable \
+                   assertion on the emitted row count."
+                .into(),
+            blocking: true,
+        });
+        assert_eq!(state.phase, RefinementPhase::AdversaryAttack);
+        assert_eq!(state.current_round, 2);
+
+        // Round 2: the Adversary has nothing left to raise — every objection it
+        // filed is resolved. This is the exact state that used to dead-end.
+        let outcome = state.process_adversary_pass(&AdversaryPassResult {
+            objections: vec![],
+            explicit_dry: true,
+        });
+
+        assert_eq!(
+            outcome,
+            AdversaryPassOutcome::Dry,
+            "the pass is still dry — only the phase it routes to changes"
+        );
+        assert_eq!(
+            state.phase,
+            RefinementPhase::AdvocateRevision,
+            "a dry pass owing the Judge a remedy must reach the only role that \
+             can revise the body"
+        );
+        assert!(!state.is_complete());
+        assert!(!state.is_awaiting_human_review());
+        assert!(state.stop_reason.is_none());
+        // Dry accounting is untouched by the reroute.
+        assert_eq!(state.consecutive_dry_rounds, 1);
+        assert_eq!(
+            state.current_round, 2,
+            "the reroute does not advance the round"
+        );
+
+        // The Advocate's revision answers the verdict and hands the round back
+        // to the Judge, so the loop keeps moving.
+        state.record_advocate_revision(2);
+        assert_eq!(state.phase, RefinementPhase::JudgeAdjudication);
+        assert!(
+            !state.pending_blocking_verdict,
+            "a revision answers the outstanding verdict"
+        );
+    }
+
+    /// A dry pass with NOTHING owed must still go straight to the Judge. The
+    /// reroute is conditional, not a blanket "dry means advocate".
+    #[test]
+    fn dry_adversary_without_an_outstanding_verdict_still_goes_to_the_judge() {
+        let mut state = RefinementLoopState::with_config("p1", 0, test_config());
+        assert!(!state.pending_blocking_verdict);
+
+        state.process_adversary_pass(&AdversaryPassResult {
+            objections: vec![],
+            explicit_dry: true,
+        });
+        assert_eq!(state.phase, RefinementPhase::JudgeAdjudication);
+
+        // A ready verdict clears the flag, so a later dry pass is not rerouted
+        // by a stale needs-work from an earlier round.
+        state.pending_blocking_verdict = true;
+        state.record_judge_verdict(&JudgeVerdictResult {
+            body: "Ready.".into(),
+            blocking: false,
+        });
+        assert!(
+            !state.pending_blocking_verdict,
+            "a ready verdict supersedes any earlier needs-work"
+        );
+    }
+
+    /// The outstanding-verdict bit is rebuilt from the durable debate trail, so
+    /// a run recovered mid-round does not re-strand the verdict the restart
+    /// interrupted.
+    #[test]
+    fn rehydrated_outstanding_verdict_reroutes_a_dry_pass_after_a_restart() {
+        // A projection rebuilt from the ledger: phase and round come from the
+        // intent, the outstanding-verdict bit from `latest_judge_verdict`.
+        let mut state = RefinementLoopState::with_config("p1", 4, test_config())
+            .with_pending_blocking_verdict(true);
+        state.phase = RefinementPhase::AdversaryAttack;
+        state.current_round = 3;
+
+        state.process_adversary_pass(&AdversaryPassResult {
+            objections: vec![],
+            explicit_dry: true,
+        });
+        assert_eq!(
+            state.phase,
+            RefinementPhase::AdvocateRevision,
+            "a recovered run must honor the verdict the trail still shows outstanding"
+        );
+
+        // The same projection without the rehydration falls back to the
+        // pre-existing routing — this is what the recovery read prevents.
+        let mut unrehydrated = RefinementLoopState::with_config("p1", 4, test_config());
+        unrehydrated.phase = RefinementPhase::AdversaryAttack;
+        unrehydrated.current_round = 3;
+        unrehydrated.process_adversary_pass(&AdversaryPassResult {
+            objections: vec![],
+            explicit_dry: true,
+        });
+        assert_eq!(unrehydrated.phase, RefinementPhase::JudgeAdjudication);
+    }
+
+    /// The reroute must not cost extra agent spawns. `SpawnCap` *terminates* a
+    /// run; `RoundCap` *parks* it for human review. If a dry-with-verdict round
+    /// ever costs more than the round it replaces, `SpawnCap` preempts
+    /// `RoundCap` and a reviewable park silently becomes a dead run.
+    ///
+    /// Both adversary behaviors are exercised, because they are NOT the same
+    /// cost and the binding one is the non-dry path:
+    ///
+    /// - always dry: round 1 is Adversary+Judge (nothing owed yet), rounds 2..N
+    ///   are Adversary+Advocate+Judge — `3N-1` spawns.
+    /// - always blocking: every round is Adversary+Advocate+Judge, the GLOBAL
+    ///   maximum at `3N`. Unchanged from `main`, since the reroute only ever
+    ///   fires on a dry pass.
+    ///
+    /// The spawn count is DERIVED from the phases the state machine actually
+    /// asks for — one agent per dispatchable phase — rather than a schedule this
+    /// test hard-codes. A change that visits an extra phase per round therefore
+    /// blows the budget and trips `record_spawn`, instead of passing because the
+    /// test's own model was updated to match.
+    #[test]
+    fn worst_case_verdict_runs_park_on_the_round_cap_not_the_spawn_cap() {
+        let config = test_config();
+
+        for adversary_is_dry in [true, false] {
+            let mut state = RefinementLoopState::with_config("p1", 0, config.clone());
+            let mut visited: Vec<RefinementPhase> = Vec::new();
+            let mut revision = 0;
+            let mut objection = 0;
+
+            // The Judge rejects every round, so the loop runs to the round cap.
+            while !state.is_awaiting_human_review() && !state.is_complete() {
+                assert!(
+                    visited.len() < 64,
+                    "the loop must terminate through a cap, not run forever"
+                );
+                state
+                    .record_spawn()
+                    .unwrap_or_else(|reason| panic!("spawn budget exhausted at {reason:?}"));
+                visited.push(state.phase);
+                match state.phase {
+                    RefinementPhase::AdversaryAttack => {
+                        // Distinct bodies: identical ones would trip
+                        // repeat-objection escalation and end the run early.
+                        objection += 1;
+                        state.process_adversary_pass(&AdversaryPassResult {
+                            objections: if adversary_is_dry {
+                                vec![]
+                            } else {
+                                vec![blocking_objection(&format!("distinct issue {objection}"))]
+                            },
+                            explicit_dry: adversary_is_dry,
+                        });
+                    }
+                    RefinementPhase::AdvocateRevision => {
+                        revision += 1;
+                        state.record_advocate_revision(revision);
+                    }
+                    RefinementPhase::JudgeAdjudication => {
+                        state.record_judge_verdict(&JudgeVerdictResult {
+                            body: format!("needs-work: round {}", state.current_round),
+                            blocking: true,
+                        });
+                    }
+                    other => panic!("non-dispatchable phase reached the dispatch loop: {other:?}"),
+                }
+            }
+
+            // Parked for a human on the ROUND cap — not terminated on the spawn
+            // cap.
+            assert_eq!(
+                state.stop_reason,
+                Some(StopReason::RoundCap),
+                "dry={adversary_is_dry}"
+            );
+            assert!(state.is_awaiting_human_review(), "dry={adversary_is_dry}");
+            assert!(!state.is_complete(), "dry={adversary_is_dry}");
+            assert_eq!(state.current_round, config.max_rounds);
+            assert!(
+                visited.len() as i32 <= config.max_total_spawns,
+                "dry={adversary_is_dry}: run asked for {} spawns, budget is {}: {visited:?}",
+                visited.len(),
+                config.max_total_spawns
+            );
+
+            let advocate_turns = visited
+                .iter()
+                .filter(|phase| **phase == RefinementPhase::AdvocateRevision)
+                .count();
+            if adversary_is_dry {
+                // The reroute actually happened: every dry round after the first
+                // owed the Judge a remedy and ran the Advocate.
+                assert_eq!(
+                    advocate_turns,
+                    (config.max_rounds - 1) as usize,
+                    "every dry round after the first must run the Advocate: {visited:?}"
+                );
+                assert_eq!(visited.len() as i32, 3 * config.max_rounds - 1);
+            } else {
+                // Unchanged from `main`: the Adversary's objections drive the
+                // Advocate, and the reroute never fires.
+                assert_eq!(
+                    advocate_turns, config.max_rounds as usize,
+                    "every blocking round runs the Advocate: {visited:?}"
+                );
+                assert_eq!(
+                    visited.len() as i32,
+                    3 * config.max_rounds,
+                    "the non-dry path is the global spawn maximum"
+                );
+            }
+        }
     }
 
     #[test]
@@ -830,9 +1160,11 @@ mod tests {
             blocking: true,
         });
         assert_eq!(state.current_round, 2);
+        assert_eq!(state.phase, RefinementPhase::AdversaryAttack);
 
         // Round 2: the same objection (different casing/whitespace) repeats →
-        // the tribunal is stuck, escalate to the human.
+        // the tribunal is stuck, escalate to the human. Reachable on every
+        // judge-rejected round because those rounds still open at the Adversary.
         let outcome = state.process_adversary_pass(&AdversaryPassResult {
             objections: vec![blocking_objection("missing  problem  statement")],
             explicit_dry: false,

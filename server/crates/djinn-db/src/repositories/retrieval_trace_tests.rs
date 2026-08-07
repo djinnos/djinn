@@ -688,7 +688,23 @@ fn skipped_reason_vocabulary_is_exact() {
     let mut expected: Vec<&str> = SKIPPED_REASON_VALUES.to_vec();
     expected.sort();
     assert_eq!(actual, expected);
-    assert_eq!(SKIPPED_REASON_VALUES.len(), 6);
+    assert_eq!(SKIPPED_REASON_VALUES.len(), 7);
+    // `oversized_skipped` is a distinct disposition from `budget_pruned`: a
+    // note whose fixed per-line overhead alone exceeds the line cap is DROPPED
+    // whole, not out-competed for remaining space (proposal u46i AC4).
+    assert!(SKIPPED_REASON_VALUES.contains(&"oversized_skipped"));
+    assert_eq!(
+        SkippedReason::parse("oversized_skipped"),
+        Some(SkippedReason::OversizedSkipped)
+    );
+    assert_eq!(
+        SkippedReason::OversizedSkipped.as_str(),
+        "oversized_skipped"
+    );
+    assert_ne!(
+        SkippedReason::OversizedSkipped.as_str(),
+        SkippedReason::BudgetPruned.as_str()
+    );
 }
 
 #[test]
@@ -829,9 +845,10 @@ fn validate_candidates_accepts_injected_and_valid_skipped() {
         skipped_candidate("n2", 2, 0.3, SkippedReason::NotTopK),
         skipped_candidate("n3", 3, 0.2, SkippedReason::MinConfidence),
         skipped_candidate("n4", 4, 0.1, SkippedReason::BudgetPruned),
-        skipped_candidate("n5", 5, 0.05, SkippedReason::SupersededPruned),
-        skipped_candidate("n6", 6, 0.04, SkippedReason::Dedupe),
-        skipped_candidate("n7", 7, 0.01, SkippedReason::SearchError),
+        skipped_candidate("n5", 5, 0.08, SkippedReason::OversizedSkipped),
+        skipped_candidate("n6", 6, 0.05, SkippedReason::SupersededPruned),
+        skipped_candidate("n7", 7, 0.04, SkippedReason::Dedupe),
+        skipped_candidate("n8", 8, 0.01, SkippedReason::SearchError),
     ];
     // All combinations are valid: injected has None, skipped have valid reasons.
     assert!(validate_candidates(&candidates).is_ok());
@@ -862,9 +879,10 @@ async fn candidate_invariants_survive_round_trip() {
         skipped_candidate("skip-not-top-k", 2, 0.30, SkippedReason::NotTopK),
         skipped_candidate("skip-min-conf", 3, 0.20, SkippedReason::MinConfidence),
         skipped_candidate("skip-budget", 4, 0.15, SkippedReason::BudgetPruned),
-        skipped_candidate("skip-superseded", 5, 0.10, SkippedReason::SupersededPruned),
-        skipped_candidate("skip-dedupe", 6, 0.08, SkippedReason::Dedupe),
-        skipped_candidate("skip-search-err", 7, 0.01, SkippedReason::SearchError),
+        skipped_candidate("skip-oversized", 5, 0.12, SkippedReason::OversizedSkipped),
+        skipped_candidate("skip-superseded", 6, 0.10, SkippedReason::SupersededPruned),
+        skipped_candidate("skip-dedupe", 7, 0.08, SkippedReason::Dedupe),
+        skipped_candidate("skip-search-err", 8, 0.01, SkippedReason::SearchError),
     ]);
 
     let row = repo
@@ -886,12 +904,12 @@ async fn candidate_invariants_survive_round_trip() {
         .unwrap();
 
     let typed = row.candidates_typed();
-    assert_eq!(typed.len(), 7);
+    assert_eq!(typed.len(), 8);
 
     // The first candidate is injected (skipped_reason == None).
     assert!(typed[0].skipped_reason.is_none());
 
-    // The remaining six each carry a distinct, valid skipped_reason.
+    // The remaining seven each carry a distinct, valid skipped_reason.
     let reasons: Vec<SkippedReason> = typed[1..]
         .iter()
         .map(|c| c.skipped_reason.unwrap())
@@ -902,10 +920,23 @@ async fn candidate_invariants_survive_round_trip() {
             SkippedReason::NotTopK,
             SkippedReason::MinConfidence,
             SkippedReason::BudgetPruned,
+            SkippedReason::OversizedSkipped,
             SkippedReason::SupersededPruned,
             SkippedReason::Dedupe,
             SkippedReason::SearchError,
         ]
+    );
+
+    // The persisted JSON — not just the Rust enum — must distinguish the two
+    // drop dispositions, because that is what the operator reads back.
+    let persisted = row.candidates.as_array().expect("candidates array");
+    assert_eq!(
+        persisted[4]["skipped_reason"].as_str(),
+        Some("oversized_skipped")
+    );
+    assert_eq!(
+        persisted[3]["skipped_reason"].as_str(),
+        Some("budget_pruned")
     );
 
     // Every round-tripped candidate passes the invariant check.
@@ -1233,6 +1264,61 @@ async fn health_rollup_aggregates_mixed_outcomes_and_skip_reasons() {
     assert_eq!(ep.zero_result_trace_count, 1);
     assert_eq!(ep.candidate_count, 3);
     assert_eq!(ep.injected_count, 1);
+}
+
+/// A note dropped because its fixed overhead exceeds the line cap must roll up
+/// under its own counter, not be folded into `budget_pruned` (proposal u46i
+/// AC4). This also runs the untyped health-rollup SQL, which fails at RUNTIME
+/// — never at compile time — if the new `oversized_skipped_count` column and
+/// the `FromRow` field disagree.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn health_rollup_separates_oversized_skipped_from_budget_pruned() {
+    let db = test_db();
+    let project_id = "019f4900-0000-7000-8000-000000000112";
+    seed_project(&db, project_id).await;
+    let repo = RetrievalTraceRepository::new(db.clone());
+
+    let candidates = json!([
+        injected_candidate("n1", 1, 0.95),
+        skipped_candidate("n2", 2, 0.40, SkippedReason::BudgetPruned),
+        skipped_candidate("n3", 3, 0.30, SkippedReason::OversizedSkipped),
+        skipped_candidate("n4", 4, 0.20, SkippedReason::OversizedSkipped),
+    ]);
+
+    wl!(
+        &repo,
+        &db,
+        project_id,
+        Dispatch,
+        candidates,
+        "2026-07-01T00:00:00.000Z"
+    );
+
+    let rollup = repo
+        .health_rollup(
+            project_id,
+            "2026-07-01T00:00:00.000Z",
+            "2026-07-01T01:00:00.000Z",
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(rollup.combined.skipped_count, 3);
+    assert_eq!(
+        rollup.combined.skip_reason_counts.budget_pruned, 1,
+        "the budget-pruned note must not absorb the oversized drops"
+    );
+    assert_eq!(
+        rollup.combined.skip_reason_counts.oversized_skipped, 2,
+        "both dropped notes must be visible under their own counter"
+    );
+
+    let ep = rollup
+        .per_entry_point
+        .get(&Dispatch)
+        .expect("dispatch evidence present");
+    assert_eq!(ep.skip_reason_counts.budget_pruned, 1);
+    assert_eq!(ep.skip_reason_counts.oversized_skipped, 2);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

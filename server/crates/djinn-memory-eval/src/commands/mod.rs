@@ -756,6 +756,53 @@ pub async fn cmd_qa_judge(crate_root: &std::path::Path) -> Result<()> {
     crate::qa_judge::execute_qa_judge(crate_root).await
 }
 
+/// Run the session-start injection probe: exercise the production
+/// `NoteRepository::query_by_scope_overlap` entry point against the committed
+/// fixtures and render the result through `pack_ranked_knowledge_notes` under
+/// the shipped `KnowledgeInjectionConfig::DEFAULT_*` settings, so the final
+/// packed prompt text (not just repository ranking) can be inspected.
+///
+/// Deterministic and LLM-free. Writes its artifact next to the Phase 1/2
+/// reports and never touches Phase 1 baselines.
+pub async fn cmd_injection_probe(
+    crate_root: &std::path::Path,
+    task_paths: &[String],
+) -> Result<()> {
+    let output =
+        crate::injection_probe::execute_injection_probe_from_disk(crate_root, task_paths).await?;
+
+    info!("=== Session-start injection probe ===");
+    info!(
+        retrieved = output.retrieved_permalinks.len(),
+        injected_bytes = output.injected_bytes,
+        budget = output.total_byte_budget,
+        line_cap = output.line_byte_cap,
+        top_k = output.top_k,
+        "scope-overlap retrieval packed"
+    );
+    for candidate in &output.candidates {
+        info!(
+            permalink = %candidate.permalink,
+            disposition = ?candidate.disposition,
+            action_excerpt = ?candidate.action_excerpt,
+            rendered_bytes = ?candidate.rendered_bytes,
+            "candidate"
+        );
+    }
+
+    let target_dir = std::path::PathBuf::from("target/memory-eval");
+    std::fs::create_dir_all(&target_dir)
+        .with_context(|| format!("creating output directory {}", target_dir.display()))?;
+    let report_json =
+        serde_json::to_string_pretty(&output).context("serializing injection probe output")?;
+    let report_path = target_dir.join("injection-probe.json");
+    std::fs::write(&report_path, report_json)
+        .with_context(|| format!("writing {}", report_path.display()))?;
+    info!(path = %report_path.display(), "injection probe report written");
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
