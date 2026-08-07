@@ -319,6 +319,16 @@ pub enum StageOutcome {
     ///
     /// Also produced when the `ci_route` block is present but unparseable: a
     /// route that cannot be guarded must not be applied.
+    ///
+    /// # Declared LAST, and it has to stay that way
+    ///
+    /// The worker/launcher envelope is positional bincode: the variant index is
+    /// derived from declaration order and nothing else in the frame identifies
+    /// it. Inserting anything above this variant silently renumbers it and
+    /// every variant between — an old worker's `LeadParked` frame would decode
+    /// on a new launcher as `LeadSuperseded`, a human-review hold read as a
+    /// terminal close. `lead_ci_routing::lead_route_superseded_is_the_last_wire_variant`
+    /// pins the tail positionally for exactly that reason.
     LeadRouteSuperseded {
         /// Why the guard refused, for the log and the run outcome.
         reason: String,

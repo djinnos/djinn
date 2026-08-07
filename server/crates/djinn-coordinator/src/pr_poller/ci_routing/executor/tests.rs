@@ -3029,6 +3029,227 @@ fn from_env_delegates_to_the_covered_lookup() {
     );
 }
 
+/// …and the poller's accessor must actually CALL it.
+///
+/// SOURCE-LEVEL, and honestly labelled, for the reason the accessor's own doc
+/// comment gives: `CoordinatorActor::ci_routing_gate` carries a `#[cfg(test)]`
+/// seam (`test_ci_routing_gate`) precisely so no fixture has to mutate
+/// process-global environment, and **every** fixture in this file sets it. That
+/// same seam is what leaves the production fall-through unwitnessed. Replace
+/// `CiRoutingGate::from_env()` with `CiRoutingGate::DisabledClean` and
+/// `DJINN_CI_EVIDENCE_ROUTING` is read by nothing in the tree — the feature is
+/// permanently unreachable in production, on every deploy, with no operator
+/// action that can turn it on — while the whole `nafu` command list stays at
+/// its baseline counts, because the fixtures never reach this line.
+///
+/// This is the *same shape* the gate module confesses next door:
+/// `unwrap_or_default()` → `unwrap_or(Enabled)` inside `from_env` turned the
+/// feature on fleet-wide with 2148 tests green. That mutation was closed by
+/// moving the default into `from_lookup` and pinning `from_env` above. This is
+/// the other half — the *call to* `from_env` — and it fails in the opposite
+/// direction: silently off rather than silently on.
+///
+/// NAMED FAILING MUTATIONS.
+/// (a) `CiRoutingGate::from_env()` → any `CiRoutingGate::<posture>` literal:
+///     the `from_env()` assertion fails AND the posture ban fails.
+/// (b) `CiRoutingGate::from_env()` → `CiRoutingGate::default()`: the same two.
+/// (c) Dropping the `#[cfg(test)]` on the override so the seam ships: the seam
+///     assertion fails — a production binary whose gate can be overridden from
+///     memory is not a gate.
+/// (d) Deleting or renaming the accessor: the uniqueness `expect` fails, which
+///     is what forces a new accessor to be looked at rather than silently
+///     inheriting no guard.
+#[test]
+fn the_ci_routing_gate_accessor_reads_the_environment_in_production() {
+    const SIGNATURE: &str = "pub(crate) fn ci_routing_gate(&self) -> CiRoutingGate {";
+    let source = strip_line_comments(include_str!("../../ci_lane_routing.rs"));
+    assert_eq!(
+        source.matches(SIGNATURE).count(),
+        1,
+        "exactly one gate accessor; a changed count needs this test updated, \
+         not ignored",
+    );
+
+    let body = source
+        .split(SIGNATURE)
+        .nth(1)
+        .expect("ci_lane_routing.rs defines the gate accessor");
+    let body = &body[..body
+        .find("\n    }")
+        .expect("the accessor body terminates at its own indentation")];
+    assert!(
+        !body.trim().is_empty(),
+        "vacuity guard: the extracted accessor body is empty, so nothing below \
+         is being asserted about anything",
+    );
+
+    assert!(
+        body.contains("CiRoutingGate::from_env()"),
+        "the accessor's production fall-through must READ the environment \
+         through the covered constructor; without this call the gate variable \
+         is never read and the whole feature is unreachable in production. \
+         Found:\n{body}",
+    );
+    for posture in ["DisabledClean", "Quiescing", "Enabled", "default()"] {
+        assert!(
+            !body.contains(&format!("CiRoutingGate::{posture}")),
+            "the accessor RESOLVES a posture, it never names one; found \
+             `CiRoutingGate::{posture}` in:\n{body}",
+        );
+    }
+    assert!(
+        body.contains("#[cfg(test)]") && body.contains("self.test_ci_routing_gate"),
+        "the one permitted override is the `#[cfg(test)]` seam; an \
+         unconditional override would ship a gate production cannot trust. \
+         Found:\n{body}",
+    );
+}
+
+/// The recurring reservation sweep has to fire inside a process lifetime.
+///
+/// The sweep fixtures below drive the production tick by winding
+/// `last_ci_route_sweep` back with [`a_sweep_interval_ago`] — which is defined
+/// as `2 * CI_ROUTE_SWEEP_INTERVAL`, i.e. *relative to the constant under
+/// test*. That is a second opinion from the same witness: set
+/// `RESERVED_SWEEP_INTERVAL` to a year and every one of those fixtures still
+/// passes, because the fixture's idea of "long enough ago" moves with it, while
+/// in production the sweep never runs once. The rows it exists for are exactly
+/// the ones no poller revisits — a `reserved` row whose head has moved — so
+/// they would sit stranded, holding their charge, until the process restarts.
+///
+/// So the bound here is ABSOLUTE, in units the constant cannot redefine.
+///
+/// NAMED FAILING MUTATIONS.
+/// (a) `from_secs(60)` → any value above five minutes: the ceiling fails.
+/// (b) `from_secs(60)` → a sub-second value: the floor fails (that is a hot
+///     loop over the route table on every tick, not a sweep).
+/// (c) Pointing `CI_ROUTE_SWEEP_INTERVAL` at a second, independent constant:
+///     the equality fails, because the tick and the recovery contract would be
+///     free to drift apart.
+#[test]
+fn the_reserved_sweep_interval_is_bounded_in_absolute_time() {
+    const CEILING: Duration = Duration::from_secs(5 * 60);
+    const FLOOR: Duration = Duration::from_secs(1);
+
+    assert!(
+        RESERVED_SWEEP_INTERVAL <= CEILING,
+        "the reserved sweep must fire within a process lifetime: \
+         {RESERVED_SWEEP_INTERVAL:?} exceeds the {CEILING:?} ceiling, which \
+         strands every `reserved` row the polling path cannot revisit until \
+         the coordinator restarts",
+    );
+    assert!(
+        RESERVED_SWEEP_INTERVAL >= FLOOR,
+        "and it must remain a sweep: {RESERVED_SWEEP_INTERVAL:?} is below the \
+         {FLOOR:?} floor, which makes it a hot loop over the route table",
+    );
+    assert_eq!(
+        crate::pr_poller::CI_ROUTE_SWEEP_INTERVAL,
+        RESERVED_SWEEP_INTERVAL,
+        "the tick's interval IS the executor's constant; a second, independent \
+         constant lets the tick and the recovery contract drift apart",
+    );
+}
+
+/// The coordinator admits into the LEADER's provider-action scope.
+///
+/// `CoordinatorActor::new` destructures `CoordinatorDeps` and moves the scope
+/// across. Replace that move with a fresh `ProviderActionScope::new()` and the
+/// actor admits every `rerun_failed_jobs` future into a private registry nobody
+/// waits on: `server/src/leadership.rs` polls the scope *it* built, reads zero
+/// in flight, and releases the coordinator advisory lock while a provider
+/// mutation is still running — which is the single thing AC "the lock is not
+/// released while a provider future is live" forbids. Every other fixture in
+/// this file reads the scope back off the actor it built, so the actor agrees
+/// with itself and all of them stay green.
+///
+/// Behavioural: no new seam is needed. `provider_action_scope` is already
+/// `pub(super)` and `CoordinatorDeps::with_provider_action_scope` is the same
+/// builder production uses.
+///
+/// NAMED FAILING MUTATIONS.
+/// (a) `provider_action_scope,` → `provider_action_scope: ProviderActionScope::new()`
+///     in `CoordinatorActor::new`: the leader-to-actor assertion fails on the
+///     first admit.
+/// (b) Dropping `.with_provider_action_scope(..)` from the deps builder: the
+///     same failure, for the same reason.
+/// (c) Making `ProviderActionScope::clone` deep rather than `Arc`-shared: both
+///     directions fail.
+#[tokio::test]
+async fn the_actor_admits_into_the_leaders_provider_action_scope() {
+    let db = Database::open_in_memory().expect("ephemeral test database");
+    let leader = ProviderActionScope::new();
+    let actor = crate::actor::actor_with_test_db_and_scope(db, leader.clone());
+
+    // Vacuity: both halves start empty, so a non-zero reading below is caused
+    // by the admit and not by the fixture's own setup.
+    assert_eq!(leader.in_flight(), 0, "vacuity: the leader starts empty");
+    assert_eq!(
+        actor.provider_action_scope.in_flight(),
+        0,
+        "vacuity: the actor starts empty",
+    );
+
+    // Leader → actor. This is the direction leadership reads.
+    let held = leader.admit().expect("an open scope admits");
+    assert_eq!(
+        actor.provider_action_scope.in_flight(),
+        1,
+        "the actor must share the LEADER's scope; a private one reports zero \
+         while a provider future is live, and the advisory lock is released \
+         out from under it",
+    );
+    drop(held);
+    assert_eq!(actor.provider_action_scope.in_flight(), 0);
+
+    // Actor → leader. This is the direction the routing executor writes.
+    let held = actor
+        .provider_action_scope
+        .admit()
+        .expect("an open scope admits");
+    assert_eq!(
+        leader.in_flight(),
+        1,
+        "a future the coordinator admitted must be visible to the half that \
+         holds the advisory lock",
+    );
+    drop(held);
+    assert_eq!(leader.in_flight(), 0);
+
+    // And the rollback posture is one fact, not two.
+    leader.close_admission();
+    assert!(
+        actor.provider_action_scope.is_admission_closed(),
+        "closing admission on the leader's half must close the coordinator's; \
+         two scopes would let the coordinator keep admitting after leadership \
+         declared the drain",
+    );
+
+    // ── The one hop above this that nothing can read back ──────────────────
+    //
+    // Production reaches `CoordinatorActor::new` through
+    // `CoordinatorHandle::spawn`, which rebuilds the deps with a struct-update
+    // to default the consolidation runner. `..deps` carries the scope; naming
+    // the field explicitly there would silently replace it, and `spawn` returns
+    // a handle with no scope accessor, so no fixture can observe the swap.
+    // Adding an accessor purely to observe it would be inventing the seam under
+    // test, so this hop is asserted textually: the spawn helper may not name a
+    // scope at all.
+    let handle = strip_line_comments(include_str!("../../../handle.rs"));
+    assert!(
+        handle.contains("..deps"),
+        "`CoordinatorHandle::spawn` must carry the caller's deps forward with a \
+         struct update; enumerating the fields makes a dropped one a silent \
+         behaviour change rather than a compile error",
+    );
+    assert!(
+        !handle.contains("ProviderActionScope"),
+        "and it must never name the scope: the only correct value is the one \
+         `AppState` built, and spawning with a fresh one hands leadership an \
+         empty registry to wait on",
+    );
+}
+
 // ===========================================================================
 // The complete-empty compatibility paths
 // ===========================================================================
@@ -6518,6 +6739,12 @@ fn a_routed_pr_draft_disposition_turns_the_legacy_remedy_off() {
 ///     legacy remedy anywhere in the file: the occurrence counts fail, which
 ///     forces a new caller to be looked at rather than silently inheriting no
 ///     guard.
+/// (f) Qualify the condition — `… .is_routed() && false`, or `&& gate ==
+///     CiRoutingGate::Enabled`, or any other conjunct: the head is still
+///     `if self`, `return;` is still inside a well-formed block, and the block
+///     still ends before both remedies, so (a)–(e) all hold. The
+///     nothing-between-the-disposition-and-the-brace assertion is what fails,
+///     and it is the only one that can.
 #[test]
 fn a_routed_merge_group_disposition_replaces_the_legacy_queue_remedy() {
     let code = strip_line_comments(include_str!("../../pr_commands.rs"));
@@ -6593,6 +6820,26 @@ fn a_routed_merge_group_disposition_replaces_the_legacy_queue_remedy() {
         "a routed merge-group failure must LEAVE `handle_queue_failure`; falling \
          out of this branch hands the same dequeue to the legacy remedies as well",
     );
+
+    // …and the disposition must be the WHOLE condition.
+    //
+    // Everything above pins the head (`if self`), the body (`return;`) and the
+    // ordering (before both remedies). That leaves exactly one place a conjunct
+    // can hide — between `.is_routed()` and the brace it opens — and a conjunct
+    // there is not cosmetic: `… .is_routed() && false` satisfies every one of
+    // those assertions while the branch becomes unreachable, so the route layer
+    // takes the evidence AND `handle_queue_failure` runs on to
+    // `PrCiFailed`. One dequeue then reopens the task for rework and re-enters
+    // the queue, which is the double-spend the whole proposal exists to stop.
+    let qualifier = code[after_routed..open].trim();
+    assert!(
+        qualifier.is_empty(),
+        "the routed disposition is the ENTIRE branch condition; found \
+         `{qualifier}` between `.is_routed()` and the branch it opens. A \
+         conjunct there turns the early return off while the head, the body and \
+         the ordering all still read correctly",
+    );
+
     assert!(
         block < park && park < reopen,
         "and it must leave BEFORE either legacy remedy is reachable: the park at \
