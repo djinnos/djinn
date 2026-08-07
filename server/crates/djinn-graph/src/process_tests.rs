@@ -158,13 +158,28 @@ async fn timeout_reaps_whole_process_group() {
     assert!(!out.status.success());
     assert!(killed_by_signal(&out.status).is_some());
 
-    let pgid: i32 = String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .next()
-        .unwrap_or("")
-        .trim()
-        .parse()
-        .expect("child should have printed its pgid");
+    // KNOWN FLAKE, NOT YET ROOT-CAUSED (~1 in 80 runs; CI run 30961668804,
+    // shard-5, `child should have printed its pgid: ParseIntError { kind:
+    // Empty }` after 0.237s). The fixture publishes its identity through TWO
+    // extra `fork`+`exec`s (`ps`, `tr`) whose output only reaches this pipe
+    // when `tr` exits and flushes — so anything that stops the pipeline
+    // completing inside the 200ms deadline (a slow exec under CI contention, a
+    // failed `fork`, an OOM kill) loses the identity silently, and SIGTERM at
+    // the deadline discards `tr`'s buffer. The deliberate non-fix: a 640-run
+    // sweep of that exact pipeline (idle and under 48-way CPU load; 160 of them
+    // at the production 200ms deadline, the rest at 100/50/25ms) produced ZERO
+    // empty publications, so "the pipeline is merely too slow" is UNCONFIRMED,
+    // and shortening it would be a guess that hides the real cause. Carry both
+    // streams onto the panic instead, so the next occurrence names its own
+    // cause rather than needing a re-diagnosis.
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let first_line = stdout.lines().next().unwrap_or("").trim();
+    let pgid: i32 = first_line.parse().unwrap_or_else(|err| {
+        panic!(
+            "child should have printed its pgid: {err}; stdout={stdout:?} stderr={:?}",
+            String::from_utf8_lossy(&out.stderr)
+        )
+    });
 
     // The supervisor should have already ensured the direct child's process
     // group was cleaned up.  On systems where PID 1 reaps orphans promptly,
