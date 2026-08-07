@@ -15,6 +15,7 @@ mod tests {
 
     use djinn_core::auth_context::{REVISION_CALLER_CONTEXT, TrustedRevisionCallerContext};
     use djinn_core::events::EventBus;
+    use djinn_db::repositories::note::CONFIDENCE_CEILING;
     use djinn_db::{Database, NoteRepository, ProjectRepository};
     use rmcp::{Json, handler::server::wrapper::Parameters};
     use tokio::time::sleep;
@@ -23,7 +24,8 @@ mod tests {
         server::DjinnMcpServer,
         state::stubs::test_mcp_state,
         tools::memory_tools::{
-            BrokenLinksParams, EditParams, ListParams, ReadParams, WriteParams, ops,
+            BrokenLinksParams, EditParams, ListParams, MemoryConfirmParams, ReadParams,
+            WriteParams, ops,
             write_dedup_types::{MemoryWriteDedupDecider, MemoryWriteDedupDecision},
         },
     };
@@ -1134,6 +1136,152 @@ mod tests {
                 assert_eq!(
                     error.count, 1,
                     "missing candidate should record exactly one error"
+                );
+            })
+            .await;
+    }
+
+    // ── proposal 9xih AC2, asserted on the PRODUCTION creation path ─────────
+    //
+    // `notes.confidence` carries a column default of `CONFIDENCE_CEILING`, and
+    // a migration test proves that default is stored and that a bare INSERT
+    // lands on it. That proves the default EXISTS; it does not prove any note
+    // the system actually makes GETS it, because every production writer goes
+    // through `mutate_with_revision`, which binds `confidence` explicitly and
+    // therefore never exercises the column default.
+    //
+    // These two tests go through `memory_write` / `memory_confirm` — the real
+    // authored-note path — so the column default and the value new notes
+    // actually receive cannot drift apart again in silence.
+
+    /// AC2, first clause: a note created through `memory_write` starts at the
+    /// confidence ceiling, not at the session-extraction prior.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn memory_write_creates_notes_at_the_confidence_ceiling() {
+        let caller = TrustedRevisionCallerContext::authenticated_human("writes-test-user")
+            .expect("valid test revision caller");
+        REVISION_CALLER_CONTEXT
+            .scope(Some(caller), async {
+                let tmp = workspace_tempdir();
+                let db = Database::open_in_memory().unwrap();
+                let state = test_mcp_state(db.clone());
+                let project = create_project(&db, tmp.path()).await;
+                let server = DjinnMcpServer::new(state);
+                let repo = NoteRepository::new(db.clone(), EventBus::noop());
+
+                let Json(created) = server
+                    .memory_write(Parameters(WriteParams {
+                        reason: "record an authored design decision".to_string(),
+                        project: project.slug(),
+                        title: "Authored Confidence Baseline".to_string(),
+                        content: "An authored note asserting a decision the author believes."
+                            .to_string(),
+                        note_type: "design".to_string(),
+                        status: None,
+                        tags: None,
+                        scope_paths: None,
+                        retrieval_anchor: None,
+                    }))
+                    .await;
+                assert!(created.error.is_none(), "write failed: {:?}", created.error);
+                let id = created.id.clone().expect("note created");
+
+                let persisted = repo.get(&id).await.unwrap().expect("note row");
+                assert_eq!(
+                    persisted.confidence, CONFIDENCE_CEILING,
+                    "memory_write must create notes at CONFIDENCE_CEILING; the column \
+                     default is dead code for this path because the revision mutation \
+                     binds confidence explicitly"
+                );
+
+                // Negative control: the assertion above is only meaningful if the
+                // stored column default agrees with it. If someone changes the
+                // default without changing the writer (or vice versa), the two
+                // halves of AC2 would silently disagree again.
+                let column_default: Option<String> = sqlx::query_scalar(
+                    "SELECT column_default FROM information_schema.columns \
+                     WHERE table_name = 'notes' AND column_name = 'confidence'",
+                )
+                .fetch_one(db.pool())
+                .await
+                .expect("read stored column default");
+                let column_default = column_default.expect("notes.confidence has a default");
+                assert!(
+                    column_default.starts_with(&CONFIDENCE_CEILING.to_string()),
+                    "stored notes.confidence default `{column_default}` disagrees with the \
+                     value the production creation path writes ({CONFIDENCE_CEILING})"
+                );
+            })
+            .await;
+    }
+
+    /// AC2, ordering clause: applying `USER_CONFIRM` must never move a note
+    /// BELOW an otherwise untouched peer.
+    ///
+    /// The hazard is real whenever any writer can park a note above the
+    /// ceiling: `update_confidence` clamps the posterior back to the ceiling,
+    /// so confirming an above-ceiling note demotes it under a peer nobody
+    /// touched. This exercises the property end to end through `memory_write`
+    /// + `memory_confirm`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn user_confirm_never_lowers_a_note_below_an_untouched_peer() {
+        let caller = TrustedRevisionCallerContext::authenticated_human("writes-test-user")
+            .expect("valid test revision caller");
+        REVISION_CALLER_CONTEXT
+            .scope(Some(caller), async {
+                let tmp = workspace_tempdir();
+                let db = Database::open_in_memory().unwrap();
+                let state = test_mcp_state(db.clone());
+                let project = create_project(&db, tmp.path()).await;
+                let server = DjinnMcpServer::new(state);
+                let repo = NoteRepository::new(db.clone(), EventBus::noop());
+
+                let mut ids = Vec::new();
+                for title in ["Confirmed Peer", "Untouched Peer"] {
+                    let Json(created) = server
+                        .memory_write(Parameters(WriteParams {
+                            reason: "record an authored design decision".to_string(),
+                            project: project.slug(),
+                            title: title.to_string(),
+                            content: format!("Distinct authored body for {title}."),
+                            note_type: "design".to_string(),
+                            status: None,
+                            tags: None,
+                            scope_paths: None,
+                            retrieval_anchor: None,
+                        }))
+                        .await;
+                    assert!(created.error.is_none(), "write failed: {:?}", created.error);
+                    ids.push(created.id.clone().expect("note created"));
+                }
+                let (confirmed_id, untouched_id) = (ids[0].clone(), ids[1].clone());
+
+                let untouched_before = repo.get(&untouched_id).await.unwrap().unwrap().confidence;
+
+                let Json(response) = server
+                    .memory_confirm(Parameters(MemoryConfirmParams {
+                        project: project.slug(),
+                        identifier: confirmed_id.clone(),
+                        comment: None,
+                    }))
+                    .await;
+                assert!(
+                    response.error.is_none(),
+                    "confirm failed: {:?}",
+                    response.error
+                );
+
+                let confirmed_after = repo.get(&confirmed_id).await.unwrap().unwrap().confidence;
+                let untouched_after = repo.get(&untouched_id).await.unwrap().unwrap().confidence;
+
+                assert_eq!(
+                    untouched_after, untouched_before,
+                    "confirming one note must not move its peer"
+                );
+                assert!(
+                    confirmed_after >= untouched_after,
+                    "USER_CONFIRM lowered the confirmed note ({confirmed_after}) below an \
+                     untouched peer ({untouched_after}); proposal 9xih AC2 forbids this"
                 );
             })
             .await;

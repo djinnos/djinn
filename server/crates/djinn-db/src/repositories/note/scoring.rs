@@ -530,6 +530,39 @@ mod tests {
         );
     }
 
+    /// AC2's ordering clause, generalized: applying `USER_CONFIRM` to ANY note
+    /// inside the epistemic range never moves it below where it started, so it
+    /// can never fall below an untouched peer.
+    ///
+    /// The clause holds *because* the range invariant holds, and only then. The
+    /// second half of this test is the counterexample: any prior ABOVE the
+    /// ceiling is demoted by confirmation, because `bayesian_update` clamps the
+    /// posterior back down. That is not hypothetical — an unclamped extraction
+    /// duplicate boost put real notes there, which is why the range is now
+    /// enforced at every writer (`set_confidence`, `update_confidence`, and
+    /// `mutate_with_revision`) and repaired in stored data by migration 201.
+    #[test]
+    fn user_confirm_is_monotone_across_the_whole_epistemic_range() {
+        let mut prior = CONFIDENCE_FLOOR;
+        while prior <= CONFIDENCE_CEILING {
+            let confirmed = bayesian_update(prior, USER_CONFIRM);
+            assert!(
+                confirmed >= prior,
+                "USER_CONFIRM lowered a note from {prior} to {confirmed}; it would then \
+                 sort below any untouched peer (proposal 9xih AC2)"
+            );
+            prior += 0.005;
+        }
+
+        // The counterexample that makes the invariant load-bearing.
+        let above_ceiling = 0.9863813229571984_f64;
+        assert!(
+            bayesian_update(above_ceiling, USER_CONFIRM) < above_ceiling,
+            "an above-ceiling note MUST be demoted by confirmation; if this ever stops \
+             being true the range invariant has stopped being what protects AC2"
+        );
+    }
+
     #[test]
     fn repeated_low_signals_never_cross_floor() {
         let mut confidence = 0.5;

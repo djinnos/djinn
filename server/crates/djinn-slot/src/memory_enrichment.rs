@@ -30,7 +30,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use djinn_db::repositories::note::{
-    MemoryEntityKind, MemoryEntityRef, MemoryEntityType, NoteAssociationKind,
+    CONFIDENCE_FLOOR, MemoryEntityKind, MemoryEntityRef, MemoryEntityType, NoteAssociationKind,
     NoteRevisionCreateState, NoteRevisionDesiredState, NoteRevisionEventKind, NoteRevisionMutation,
     NoteRevisionReason, NoteRevisionSubsystem, TrustedNoteRevisionAttribution,
     TrustedNoteRevisionProvenance, folder_for_type,
@@ -486,7 +486,14 @@ async fn persist_entity(
                 tags: "[]".to_owned(),
                 retrieval_anchor: Some(canonical_name.to_owned()),
                 scope_paths: "[]".to_owned(),
-                confidence: 0.0,
+                // `CONFIDENCE_FLOOR`, not `0.0`: entity and claim notes are
+                // structural scaffolding for the memory graph, not asserted
+                // knowledge, so they sit at the bottom of the epistemic range
+                // — but `notes.confidence` is bounded by
+                // `[CONFIDENCE_FLOOR, CONFIDENCE_CEILING]`, and `0.0` was
+                // outside it. Both values are far below `STALE_CITATION`, so
+                // injection eligibility is unchanged.
+                confidence: CONFIDENCE_FLOOR,
             }),
             attribution: TrustedNoteRevisionAttribution::system(NoteRevisionSubsystem::Enrichment),
             provenance: TrustedNoteRevisionProvenance::default(),
@@ -531,7 +538,14 @@ async fn persist_claim(
                 tags: "[]".to_owned(),
                 retrieval_anchor: Some(statement.to_owned()),
                 scope_paths: "[]".to_owned(),
-                confidence: 0.0,
+                // `CONFIDENCE_FLOOR`, not `0.0`: entity and claim notes are
+                // structural scaffolding for the memory graph, not asserted
+                // knowledge, so they sit at the bottom of the epistemic range
+                // — but `notes.confidence` is bounded by
+                // `[CONFIDENCE_FLOOR, CONFIDENCE_CEILING]`, and `0.0` was
+                // outside it. Both values are far below `STALE_CITATION`, so
+                // injection eligibility is unchanged.
+                confidence: CONFIDENCE_FLOOR,
             }),
             attribution: TrustedNoteRevisionAttribution::system(NoteRevisionSubsystem::Enrichment),
             provenance: TrustedNoteRevisionProvenance::default(),
