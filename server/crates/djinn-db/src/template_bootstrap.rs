@@ -161,10 +161,12 @@ const ADVISORY_LOCK_WAIT_TIMEOUT_MS: u32 = 60_000;
 pub(crate) async fn bound_advisory_lock_wait(
     conn: &mut sqlx::postgres::PgConnection,
 ) -> DbResult<()> {
-    sqlx::query(&format!("SET lock_timeout = {ADVISORY_LOCK_WAIT_TIMEOUT_MS}"))
-        .execute(conn)
-        .await
-        .map_err(DbError::from)?;
+    sqlx::query(&format!(
+        "SET lock_timeout = {ADVISORY_LOCK_WAIT_TIMEOUT_MS}"
+    ))
+    .execute(conn)
+    .await
+    .map_err(DbError::from)?;
     Ok(())
 }
 
