@@ -154,6 +154,23 @@ test('escape sequences and split-color test paths normalize to `<binary-id> <tes
   assert.deepEqual(parseStatusLine(line), {
     status: 'FAIL',
     id: 'djinn-runtime spec::tests::task_run_spec_roundtrips',
+    // No `TRY n` prefix means nextest printed the first and only attempt.
+    attempt: 1,
+  });
+});
+
+test('the TRY counter is captured, not just skipped', () => {
+  // scripts/ci-retry-flake-summary.mjs reads absorbed flakes off this number.
+  // Dropping it here would silently zero that report on every green run.
+  assert.deepEqual(parseStatusLine('  TRY 3 FAIL [   0.483s] (2477/2842) crate test_name'), {
+    status: 'FAIL',
+    id: 'crate test_name',
+    attempt: 3,
+  });
+  assert.deepEqual(parseStatusLine('  TRY 2 PASS [   0.501s] (12/2842) crate test_name'), {
+    status: 'PASS',
+    id: 'crate test_name',
+    attempt: 2,
   });
 });
 
