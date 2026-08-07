@@ -439,7 +439,10 @@ pub(super) async fn consume_provider_stream(
             evt = async {
                 match ctx.covered_attempt.as_deref_mut() {
                     Some(attempt) => attempt.next_event().await,
-                    None => ctx.stream.as_mut().expect("stream source").next().await,
+                    None => match ctx.stream.as_mut() {
+                        Some(stream) => stream.next().await,
+                        None => None,
+                    },
                 }
             } => {
                 let Some(evt) = evt else {

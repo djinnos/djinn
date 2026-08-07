@@ -5,7 +5,6 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::Ordering;
 
-use futures::StreamExt;
 #[cfg(feature = "test-support")]
 use std::sync::OnceLock;
 
