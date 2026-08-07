@@ -68,7 +68,9 @@ use djinn_core::models::{SessionFailureCause, SessionStatus, Task};
 use djinn_core::tool_error::ToolError;
 use djinn_db::ProjectRepository;
 use djinn_runtime::spec::{RoleKind, TaskRunSpec};
-use djinn_supervisor::{ParkReason, StageError, StageOutcome, SupervisorServices};
+use djinn_supervisor::{
+    ModelTurnAdmissionStageOutcome, ParkReason, StageError, StageOutcome, SupervisorServices,
+};
 use djinn_workspace::Workspace;
 
 use crate::AgentType;
@@ -98,7 +100,9 @@ use crate::actors::slot::reply_loop::error_handling::{
 use crate::actors::slot::reply_loop::loop_guard::{
     LoopGuardError, LoopGuardKind as ReplyLoopGuardKind,
 };
-use crate::actors::slot::reply_loop::{ReplyLoopContext, run_reply_loop};
+use crate::actors::slot::reply_loop::{
+    ModelTurnAdmissionOutcome, ReplyLoopContext, run_reply_loop,
+};
 use crate::context::AgentContext;
 use crate::roles::{AgentRole, role_impl_for};
 use crate::supervisor_impl::ci_routing;
@@ -251,6 +255,20 @@ fn classify_reply_loop_failure(err: &anyhow::Error) -> ReplyLoopFailureClass {
     } else {
         ReplyLoopFailureClass::Other
     }
+}
+
+/// Preserve typed Phase A admission data for cancellable stage scheduling.
+fn stage_outcome_for_model_turn_admission_error(error: &anyhow::Error) -> Option<StageOutcome> {
+    let outcome = match error.downcast_ref::<ModelTurnAdmissionOutcome>()? {
+        ModelTurnAdmissionOutcome::Wait(wait) => ModelTurnAdmissionStageOutcome::Wait(wait.clone()),
+        ModelTurnAdmissionOutcome::Rejected(rejection) => {
+            ModelTurnAdmissionStageOutcome::Rejected(rejection.clone())
+        }
+        ModelTurnAdmissionOutcome::DispatchFenced(outcome) => {
+            ModelTurnAdmissionStageOutcome::DispatchFenced(outcome.clone())
+        }
+    };
+    Some(StageOutcome::ModelTurnAdmission(outcome))
 }
 
 /// Append the cancellation trigger to a diagnostic, so a cancelled session
@@ -1758,7 +1776,9 @@ pub(crate) async fn execute_stage(
     });
     let stage_outcome = match reply_result {
         Err(e) => {
-            if e.downcast_ref::<BudgetWindDownIgnored>().is_some() {
+            if let Some(outcome) = stage_outcome_for_model_turn_admission_error(&e) {
+                outcome
+            } else if e.downcast_ref::<BudgetWindDownIgnored>().is_some() {
                 StageOutcome::Parked {
                     reason: ParkReason::Budget,
                     summary: None,
@@ -2092,7 +2112,96 @@ fn worker_stage_outcome(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use djinn_supervisor::{
+        model_turn_admission_task_run_status, model_turn_admission_terminal_outcome,
+    };
     use std::sync::Mutex;
+
+    #[test]
+    fn model_turn_admission_mapper_preserves_wait_payload() {
+        let error = anyhow::Error::new(ModelTurnAdmissionOutcome::Wait(
+            djinn_db::ModelTurnAdmissionWait::Draining,
+        ));
+        let Some(StageOutcome::ModelTurnAdmission(admission)) =
+            stage_outcome_for_model_turn_admission_error(&error)
+        else {
+            panic!("wait must remain a typed admission stage outcome");
+        };
+        assert!(matches!(
+            admission,
+            ModelTurnAdmissionStageOutcome::Wait(djinn_db::ModelTurnAdmissionWait::Draining)
+        ));
+        let terminal = model_turn_admission_terminal_outcome(admission);
+        assert!(matches!(
+            terminal,
+            djinn_supervisor::ModelTurnAdmissionTerminalOutcome::Wait(
+                djinn_db::ModelTurnAdmissionWait::Draining
+            )
+        ));
+        assert_eq!(
+            model_turn_admission_task_run_status(&terminal),
+            djinn_core::models::TaskRunStatus::Interrupted,
+            "wait must use the cancellable/interrupted scheduling path"
+        );
+    }
+
+    #[test]
+    fn model_turn_admission_mapper_preserves_rejection_payload() {
+        let error = anyhow::Error::new(ModelTurnAdmissionOutcome::Rejected(
+            djinn_db::ModelTurnAdmissionRejection::Off,
+        ));
+        let Some(StageOutcome::ModelTurnAdmission(admission)) =
+            stage_outcome_for_model_turn_admission_error(&error)
+        else {
+            panic!("rejection must remain a typed admission stage outcome");
+        };
+        assert!(matches!(
+            admission,
+            ModelTurnAdmissionStageOutcome::Rejected(djinn_db::ModelTurnAdmissionRejection::Off)
+        ));
+        let terminal = model_turn_admission_terminal_outcome(admission);
+        assert!(matches!(
+            terminal,
+            djinn_supervisor::ModelTurnAdmissionTerminalOutcome::Rejected(
+                djinn_db::ModelTurnAdmissionRejection::Off
+            )
+        ));
+        assert_eq!(
+            model_turn_admission_task_run_status(&terminal),
+            djinn_core::models::TaskRunStatus::Failed,
+            "rejection must use the terminal admission-error path"
+        );
+    }
+
+    #[test]
+    fn model_turn_admission_mapper_preserves_dispatch_fence_payload() {
+        let error = anyhow::Error::new(ModelTurnAdmissionOutcome::DispatchFenced(
+            djinn_db::ModelTurnLeaseMutationOutcome::Fenced,
+        ));
+        let Some(StageOutcome::ModelTurnAdmission(admission)) =
+            stage_outcome_for_model_turn_admission_error(&error)
+        else {
+            panic!("dispatch fence must remain a typed admission stage outcome");
+        };
+        assert!(matches!(
+            admission,
+            ModelTurnAdmissionStageOutcome::DispatchFenced(
+                djinn_db::ModelTurnLeaseMutationOutcome::Fenced
+            )
+        ));
+        let terminal = model_turn_admission_terminal_outcome(admission);
+        assert!(matches!(
+            terminal,
+            djinn_supervisor::ModelTurnAdmissionTerminalOutcome::DispatchFenced(
+                djinn_db::ModelTurnLeaseMutationOutcome::Fenced
+            )
+        ));
+        assert_eq!(
+            model_turn_admission_task_run_status(&terminal),
+            djinn_core::models::TaskRunStatus::Interrupted,
+            "dispatch fence must use the cancellable/interrupted scheduling path"
+        );
+    }
 
     #[derive(Debug, PartialEq, Eq)]
     struct RecordedSettlement {
@@ -3970,8 +4079,8 @@ mod tests {
             "call_request_lead must log a deprecated_request_lead typed activity"
         );
         assert!(
-            fn_body.contains("dispatch_planner_escalation"),
-            "call_request_lead must route through dispatch_planner_escalation"
+            fn_body.contains("dispatch_arbiter_adjudication"),
+            "call_request_lead must route through dispatch_arbiter_adjudication"
         );
         // Must NOT transition to needs_lead_intervention.
         // Strip `//` comment lines before searching so that explanatory

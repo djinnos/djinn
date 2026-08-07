@@ -9488,6 +9488,172 @@ expression: signatures
     }
   },
   {
+    "name": "memory_injected_pull_rate_report",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "end": {
+          "type": "string"
+        },
+        "project": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "project_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "start": {
+          "type": "string"
+        },
+        "timezone": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "start",
+        "end",
+        "timezone"
+      ],
+      "type": "object"
+    },
+    "output_schema": {
+      "$defs": {
+        "InjectedPullRateDiagnosticsSchema": {
+          "properties": {
+            "identityless_candidate_count": {
+              "description": "Injected candidates with no stable note_id in the stored candidate JSON.",
+              "format": "int64",
+              "type": "integer"
+            },
+            "memory_read_event_count": {
+              "description": "`memory_read` ledger rows in the window. Zero alongside a non-zero\nattributable_candidate_count means the ledger has no coverage yet.",
+              "format": "int64",
+              "type": "integer"
+            },
+            "memory_search_event_count": {
+              "description": "`memory_search` rows, reported for contrast only. A search result touch\nis not a pull and never enters the numerator.",
+              "format": "int64",
+              "type": "integer"
+            },
+            "unattributable_candidate_count": {
+              "description": "Injected candidates whose trace has neither task_run_id nor session_id;\nexcluded from the denominator, never counted as \"not pulled\".",
+              "format": "int64",
+              "type": "integer"
+            },
+            "unattributed_memory_read_event_count": {
+              "description": "`memory_read` rows carrying neither a task run nor a session.",
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "unattributable_candidate_count",
+            "identityless_candidate_count",
+            "memory_read_event_count",
+            "unattributed_memory_read_event_count",
+            "memory_search_event_count"
+          ],
+          "type": "object"
+        },
+        "InjectedPullRateReportSchema": {
+          "properties": {
+            "attributable_candidate_count": {
+              "description": "Injected candidates whose trace carries a task run or session. This is\nthe denominator of `pull_rate` — NOT `injected_candidate_count`.",
+              "format": "int64",
+              "type": "integer"
+            },
+            "diagnostics": {
+              "$ref": "#/$defs/InjectedPullRateDiagnosticsSchema"
+            },
+            "evidence": {
+              "description": "Read this BEFORE `pull_rate`. One of `no_injected_candidates`,\n`no_attributable_candidates`, `no_access_ledger_coverage`, `measured`.\nOnly `measured` makes `pull_rate` a real measurement.",
+              "type": "string"
+            },
+            "injected_candidate_count": {
+              "description": "Every candidate a trace in the window recorded as `injected`, including\ncandidates that carry no run attribution.",
+              "format": "int64",
+              "type": "integer"
+            },
+            "injected_note_count": {
+              "description": "Distinct notes among those candidates.",
+              "format": "int64",
+              "type": "integer"
+            },
+            "project_id": {
+              "type": "string"
+            },
+            "pull_rate": {
+              "description": "`pulled_candidate_count / attributable_candidate_count`. Null when the\ndenominator is zero; never a bare 0.0 standing in for \"no data\".",
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "pulled_candidate_count": {
+              "description": "Attributable injected candidates followed by a `memory_read` of the same\nnote by the same run or session. The numerator of `pull_rate`.",
+              "format": "int64",
+              "type": "integer"
+            },
+            "timezone": {
+              "type": "string"
+            },
+            "window_end": {
+              "type": "string"
+            },
+            "window_start": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "project_id",
+            "window_start",
+            "window_end",
+            "timezone",
+            "injected_candidate_count",
+            "injected_note_count",
+            "attributable_candidate_count",
+            "pulled_candidate_count",
+            "evidence",
+            "diagnostics"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "report": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/InjectedPullRateReportSchema"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "type": "object"
+    }
+  },
+  {
     "name": "memory_list",
     "read_only": false,
     "destructive": true,
@@ -17837,6 +18003,13 @@ expression: signatures
         "proposal_id": {
           "description": "Proposal UUID or short_id.",
           "type": "string"
+        },
+        "severity": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
@@ -17904,8 +18077,24 @@ expression: signatures
                 "null"
               ]
             },
+            "severity": {
+              "description": "`advisory` discussion does not gate readiness; `blocking` feedback does.",
+              "type": "string"
+            },
             "updated_at": {
               "type": "string"
+            },
+            "withdrawn_at": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "withdrawn_by_user_id": {
+              "type": [
+                "string",
+                "null"
+              ]
             }
           },
           "required": [
@@ -17913,6 +18102,7 @@ expression: signatures
             "proposal_id",
             "author_kind",
             "body",
+            "severity",
             "created_at",
             "updated_at"
           ],
@@ -18291,8 +18481,24 @@ expression: signatures
                 "null"
               ]
             },
+            "severity": {
+              "description": "`advisory` discussion does not gate readiness; `blocking` feedback does.",
+              "type": "string"
+            },
             "updated_at": {
               "type": "string"
+            },
+            "withdrawn_at": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "withdrawn_by_user_id": {
+              "type": [
+                "string",
+                "null"
+              ]
             }
           },
           "required": [
@@ -18300,6 +18506,140 @@ expression: signatures
             "proposal_id",
             "author_kind",
             "body",
+            "severity",
+            "created_at",
+            "updated_at"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "feedback": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProposalFeedbackModel"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "type": "object"
+    }
+  },
+  {
+    "name": "proposal_feedback_withdraw",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "id": {
+          "description": "Feedback entry UUID. Only its original author may withdraw it.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    },
+    "output_schema": {
+      "$defs": {
+        "ProposalFeedbackModel": {
+          "properties": {
+            "author_kind": {
+              "description": "`user` or `ai`.",
+              "type": "string"
+            },
+            "author_model": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "author_user_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "body": {
+              "type": "string"
+            },
+            "created_at": {
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "parent_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "proposal_id": {
+              "type": "string"
+            },
+            "resolved_at": {
+              "description": "When set, the feedback is resolved (addressed or dismissed) and collapsed\nout of the active thread.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "resolved_by_user_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "resolved_revision_seq": {
+              "description": "The revision that addressed this feedback (`null` when dismissed without\na spec change).",
+              "format": "int32",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "severity": {
+              "description": "`advisory` discussion does not gate readiness; `blocking` feedback does.",
+              "type": "string"
+            },
+            "updated_at": {
+              "type": "string"
+            },
+            "withdrawn_at": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "withdrawn_by_user_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "id",
+            "proposal_id",
+            "author_kind",
+            "body",
+            "severity",
             "created_at",
             "updated_at"
           ],
@@ -21507,8 +21847,24 @@ expression: signatures
                 "null"
               ]
             },
+            "severity": {
+              "description": "`advisory` discussion does not gate readiness; `blocking` feedback does.",
+              "type": "string"
+            },
             "updated_at": {
               "type": "string"
+            },
+            "withdrawn_at": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "withdrawn_by_user_id": {
+              "type": [
+                "string",
+                "null"
+              ]
             }
           },
           "required": [
@@ -21516,6 +21872,7 @@ expression: signatures
             "proposal_id",
             "author_kind",
             "body",
+            "severity",
             "created_at",
             "updated_at"
           ],

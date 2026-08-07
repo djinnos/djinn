@@ -708,6 +708,48 @@ impl CoordinatorActor {
                 blocking: true,
             });
         if !verdict.blocking {
+            // A ready verdict cannot bypass a boundary-captured human-feedback
+            // obligation. Rejected and missing dispositions remain `injected`;
+            // only accepted fixed-by-revision or reasoned wont-fix write a
+            // terminal state. This intentionally leaves adversary/dry counts
+            // untouched because it is Judge-only outcome accounting.
+            let mut pending_human_feedback = Vec::new();
+            for human_feedback in entries
+                .iter()
+                .filter(|entry| entry.kind == "human_feedback")
+            {
+                match repo
+                    .feedback_refinement_generation_for_debate(&human_feedback.id)
+                    .await
+                {
+                    // Full author withdrawal is terminal just like an accepted
+                    // disposition. The repository resolves the linked debate
+                    // entry as it changes the injection to this state, so a
+                    // historical row must not be resurrected as pending.
+                    Ok(Some(generation))
+                        if matches!(
+                            generation.injection.state.as_str(),
+                            "accepted" | "wont_fix" | "withdrawn_by_author"
+                        ) => {}
+                    Ok(Some(generation)) => pending_human_feedback.push(format!(
+                        "{} (generation {}, state {})",
+                        human_feedback.id,
+                        generation.injection.generation,
+                        generation.injection.state
+                    )),
+                    Ok(None) | Err(_) => pending_human_feedback.push(format!(
+                        "{} (missing generation/disposition)",
+                        human_feedback.id
+                    )),
+                }
+            }
+            if !pending_human_feedback.is_empty() {
+                verdict.blocking = true;
+                verdict.body = format!(
+                    "Judge ready verdict converted to needs-work: every immutable human-feedback obligation requires an accepted disposition. Pending: {}",
+                    pending_human_feedback.join(", ")
+                );
+            }
             let Some(readiness) = self.evaluate_proposal_readiness(proposal_id).await else {
                 tracing::warn!(
                     proposal_id,

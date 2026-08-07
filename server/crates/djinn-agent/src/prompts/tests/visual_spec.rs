@@ -591,14 +591,20 @@ fn marked_architect_readiness_task_injects_guardrails_and_unmarked_task_does_not
         (apply_skills(&base, &skills), native_skill_names)
     }
 
+    // Track the registered pin rather than a literal: this task must RESOLVE
+    // against the native registry, so a hardcoded version turns every catalog
+    // bump into an unrelated-looking failure here.
+    let readiness_version = crate::native_skills::AGENT_READINESS_GUARDRAILS_VERSION;
+
     let mut marked = make_task();
-    marked.title = "Analyze readiness with agent-readiness-guardrails 1.1.0".into();
-    marked.description = "Readiness analysis must use agent-readiness-guardrails 1.1.0.".into();
+    marked.title = format!("Analyze readiness with agent-readiness-guardrails {readiness_version}");
+    marked.description =
+        format!("Readiness analysis must use agent-readiness-guardrails {readiness_version}.");
     marked.labels = "[\"readiness\"]".into();
     marked.execution_context = Some(
         djinn_core::models::TaskExecutionContext::readiness_guardrail_analysis(
             "agent-readiness-guardrails",
-            "1.1.0",
+            readiness_version,
         )
         .unwrap(),
     );
@@ -616,7 +622,7 @@ fn marked_architect_readiness_task_injects_guardrails_and_unmarked_task_does_not
         ),
         Some(NativeSkillTrigger::ReadinessGuardrail {
             skill_name: "agent-readiness-guardrails".into(),
-            skill_version: "1.1.0".into(),
+            skill_version: readiness_version.into(),
         })
     );
     assert_eq!(

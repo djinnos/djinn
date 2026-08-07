@@ -131,6 +131,7 @@ pub fn agent_context_from_db(db: Database, _cancel: CancellationToken) -> AgentC
         reconciliation_sweep: crate::context::ReconciliationSweepConfig::default(),
         shell_launch: None,
         compaction_cs: djinn_slot::reply_loop::CompactionCriticalSection::default(),
+        session_id: None,
     }
 }
 

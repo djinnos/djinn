@@ -43,7 +43,14 @@ fn leased_manifest_is_deterministic_and_closed_until_its_uid_is_authorized() {
     let retry = LeasedWarmJobIdentity::new(PROJECT_ID, "warm-request-019f", REVISION, 73);
     assert_eq!(identity.object_name, retry.object_name);
 
-    let job = build_leased_warm_job(&cfg, PROJECT_ID, "example/warm:latest", None, &identity);
+    let job = build_leased_warm_job(
+        &cfg,
+        PROJECT_ID,
+        "example/warm:latest",
+        None,
+        &identity,
+        &[],
+    );
     assert_eq!(
         job.metadata.name.as_deref(),
         Some(identity.object_name.as_str())
@@ -232,6 +239,7 @@ fn dispatched_warm_job_identifiers_are_kubernetes_legal() {
         REVISION,
         "reg.example:5000/p:abc123",
         None,
+        &[],
     );
     stamp_admission_identity(&mut job, &warm_request(PROJECT_ID, REVISION));
 
@@ -248,6 +256,7 @@ fn admission_labels_carry_the_identity_reconciliation_reads_back() {
         REVISION,
         "reg.example:5000/p:abc123",
         None,
+        &[],
     );
     let request = warm_request(PROJECT_ID, REVISION);
     stamp_admission_identity(&mut job, &request);

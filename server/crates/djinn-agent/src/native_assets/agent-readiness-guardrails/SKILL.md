@@ -1,7 +1,7 @@
 # Agent readiness guardrails (S0)
 
 Use this catalog only when the task supplies the exact platform pin
-`agent-readiness-guardrails@1.1.0`. Evaluate each applicable composition
+`agent-readiness-guardrails@1.2.0`. Evaluate each applicable composition
 selector against repository evidence. A guardrail is not satisfied by an
 intention, an unrun command, or a path that is unrelated to the delivered
 surface.
@@ -46,11 +46,11 @@ pass. `not_applicable` needs a concrete stack or surface rationale.
 
 ### Guardrail: CONTRACT-API-001 — API-contract/type-codegen drift protection
 - **Composition selector:** UI or client consumes typed API responses.
-- **Expected controls:** generated or schema-checked response types, CI drift verification, and render smoke coverage for critical fields.
-- **Evidence example:** a server DTO/schema is the source of truth, the client imports its generated type, CI runs the drift check, and a smoke test renders a critical value.
-- **Anti-pattern:** hand-maintained optional client mirrors or endpoint tests that omit fields hidden by UI fallbacks.
-- **Remediation template:** `protect-api-contract-codegen-drift` — establish a source schema, generation/check command, CI gate, and render smoke.
-- **Confidence rule:** high requires both schema/drift proof and rendered-field proof.
+- **Expected controls:** a source schema; generated or schema-checked response types; one repository-local executable generation/update command that refreshes every derived artifact of that schema; CI drift verification whose failure output names that command; and render smoke coverage for critical fields.
+- **Evidence example:** readiness cites the source schema, the generated client type import, the command definition, the drift-check definition and its failure hint, the CI invocation, and a critical-field render smoke test. A `Makefile` target, package script, checked-in script, or CI/test source is acceptable repository evidence; the command does not have to be executed to determine catalog compliance.
+- **Anti-pattern:** a drift check exists but authors must discover or manually sequence the regeneration steps themselves; the failure output does not name the command; hand-maintained optional client mirrors or endpoint tests hide fields missing behind UI fallbacks.
+- **Remediation template:** `protect-api-contract-codegen-drift` — establish the source schema, one generation/update command, a check that names that command on failure, a CI gate, and render smoke.
+- **Confidence rule:** high requires repository evidence for the command and its named failure hint, plus schema/drift proof and rendered-field proof. If either the command or the named failure hint is absent, the control is noncompliant — not high or medium confidence.
 
 ### Guardrail: TEST-DB-001 — DB-backed integration tests
 - **Composition selector:** behavior persists, queries, migrates, or enforces database constraints.

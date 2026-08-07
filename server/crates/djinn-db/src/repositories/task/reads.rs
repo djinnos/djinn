@@ -28,7 +28,7 @@ impl TaskRepository {
                     status, priority, owner, labels::text AS labels, acceptance_criteria::text AS acceptance_criteria,
                     reopen_count, continuation_count,
                     total_reopen_count,
-                    intervention_count, last_intervention_at,
+                    intervention_count, last_intervention_at, escalation_evidence_at,
                     created_at, updated_at, closed_at,
                     close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs::text AS memory_refs,
                     agent_type, execution_context, created_by_user_id, refinement_run_id, refinement_intent_id, refinement_generation, refinement_round, refinement_phase, refinement_role,
@@ -69,7 +69,7 @@ impl TaskRepository {
                     status, priority, owner, labels::text AS labels, acceptance_criteria::text AS acceptance_criteria,
                     reopen_count, continuation_count,
                     total_reopen_count,
-                    intervention_count, last_intervention_at,
+                    intervention_count, last_intervention_at, escalation_evidence_at,
                     created_at, updated_at, closed_at,
                     close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs::text AS memory_refs,
                     agent_type, execution_context, created_by_user_id, refinement_run_id, refinement_intent_id, refinement_generation, refinement_round, refinement_phase, refinement_role,
@@ -129,7 +129,7 @@ impl TaskRepository {
                     status, priority, owner, labels::text AS labels, acceptance_criteria::text AS acceptance_criteria,
                     reopen_count, continuation_count,
                     total_reopen_count,
-                    intervention_count, last_intervention_at,
+                    intervention_count, last_intervention_at, escalation_evidence_at,
                     created_at, updated_at, closed_at,
                     close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs::text AS memory_refs,
                     agent_type, execution_context, created_by_user_id, refinement_run_id, refinement_intent_id, refinement_generation, refinement_round, refinement_phase, refinement_role,
@@ -181,7 +181,7 @@ impl TaskRepository {
                     status, priority, owner, labels::text AS labels, acceptance_criteria::text AS acceptance_criteria,
                     reopen_count, continuation_count,
                     total_reopen_count,
-                    intervention_count, last_intervention_at,
+                    intervention_count, last_intervention_at, escalation_evidence_at,
                     created_at, updated_at, closed_at,
                     close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs::text AS memory_refs,
                     agent_type, execution_context, created_by_user_id, refinement_run_id, refinement_intent_id, refinement_generation, refinement_round, refinement_phase, refinement_role,
@@ -232,7 +232,7 @@ impl TaskRepository {
                     status, priority, owner, labels::text AS labels, acceptance_criteria::text AS acceptance_criteria,
                     reopen_count, continuation_count,
                     total_reopen_count,
-                    intervention_count, last_intervention_at,
+                    intervention_count, last_intervention_at, escalation_evidence_at,
                     created_at, updated_at, closed_at,
                     close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs::text AS memory_refs,
                     agent_type, execution_context, created_by_user_id, refinement_run_id, refinement_intent_id, refinement_generation, refinement_round, refinement_phase, refinement_role,
@@ -274,7 +274,7 @@ impl TaskRepository {
                     status, priority, owner, labels::text AS labels, acceptance_criteria::text AS acceptance_criteria,
                     reopen_count, continuation_count,
                     total_reopen_count,
-                    intervention_count, last_intervention_at,
+                    intervention_count, last_intervention_at, escalation_evidence_at,
                     created_at, updated_at, closed_at,
                     close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs::text AS memory_refs,
                     agent_type, execution_context, created_by_user_id, refinement_run_id, refinement_intent_id, refinement_generation, refinement_round, refinement_phase, refinement_role,
@@ -319,7 +319,7 @@ impl TaskRepository {
                     status, priority, owner, labels::text AS labels, acceptance_criteria::text AS acceptance_criteria,
                     reopen_count, continuation_count,
                     total_reopen_count,
-                    intervention_count, last_intervention_at,
+                    intervention_count, last_intervention_at, escalation_evidence_at,
                     created_at, updated_at, closed_at,
                     close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs::text AS memory_refs,
                     agent_type, execution_context, created_by_user_id, refinement_run_id, refinement_intent_id, refinement_generation, refinement_round, refinement_phase, refinement_role,
@@ -365,7 +365,7 @@ impl TaskRepository {
                     status, priority, owner, labels::text AS labels, acceptance_criteria::text AS acceptance_criteria,
                     reopen_count, continuation_count,
                     total_reopen_count,
-                    intervention_count, last_intervention_at,
+                    intervention_count, last_intervention_at, escalation_evidence_at,
                     created_at, updated_at, closed_at,
                     close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs::text AS memory_refs,
                     agent_type, execution_context, created_by_user_id, refinement_run_id, refinement_intent_id, refinement_generation, refinement_round, refinement_phase, refinement_role,
@@ -413,7 +413,7 @@ impl TaskRepository {
                     status, priority, owner, labels::text AS labels, acceptance_criteria::text AS acceptance_criteria,
                     reopen_count, continuation_count,
                     total_reopen_count,
-                    intervention_count, last_intervention_at,
+                    intervention_count, last_intervention_at, escalation_evidence_at,
                     created_at, updated_at, closed_at,
                     close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs::text AS memory_refs,
                     agent_type, execution_context, created_by_user_id, refinement_run_id, refinement_intent_id, refinement_generation, refinement_round, refinement_phase, refinement_role,
@@ -449,7 +449,7 @@ impl TaskRepository {
                     status, priority, owner, labels::text AS labels, acceptance_criteria::text AS acceptance_criteria,
                     reopen_count, continuation_count,
                     total_reopen_count,
-                    intervention_count, last_intervention_at,
+                    intervention_count, last_intervention_at, escalation_evidence_at,
                     created_at, updated_at, closed_at,
                     close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs::text AS memory_refs,
                     agent_type, execution_context, created_by_user_id, refinement_run_id, refinement_intent_id, refinement_generation, refinement_round, refinement_phase, refinement_role,
@@ -572,10 +572,11 @@ impl TaskRepository {
                     total_reopen_count,
                     intervention_count, last_intervention_at,
                     created_at, updated_at, closed_at,
-                    close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs, execution_context, created_by_user_id, refinement_run_id, refinement_intent_id, refinement_generation, refinement_round, refinement_phase, refinement_role
+                    close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs, execution_context, created_by_user_id, refinement_run_id, refinement_intent_id, refinement_generation, refinement_round, refinement_phase, refinement_role,
+                    escalation_evidence_at
                  ) VALUES (
                     $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb,
-                    $13::jsonb, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26::jsonb, $27::jsonb, $28, $29, $30, $31, $32, $33, $34
+                    $13::jsonb, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26::jsonb, $27::jsonb, $28, $29, $30, $31, $32, $33, $34, $35
                  )
                  ON CONFLICT (id) DO UPDATE SET
                     project_id          = EXCLUDED.project_id,
@@ -593,6 +594,7 @@ impl TaskRepository {
                     total_reopen_count  = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.total_reopen_count ELSE tasks.total_reopen_count END,
                     intervention_count  = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.intervention_count ELSE tasks.intervention_count END,
                     last_intervention_at = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.last_intervention_at ELSE tasks.last_intervention_at END,
+                    escalation_evidence_at = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.escalation_evidence_at ELSE tasks.escalation_evidence_at END,
                     closed_at           = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.closed_at ELSE tasks.closed_at END,
                     close_reason        = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.close_reason ELSE tasks.close_reason END,
                     merge_commit_sha    = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.merge_commit_sha ELSE tasks.merge_commit_sha END,
@@ -638,6 +640,7 @@ impl TaskRepository {
             .bind(&execution_context)
             .bind(&created_by_user_id)
             .bind(&task.refinement_run_id).bind(&task.refinement_intent_id).bind(task.refinement_generation).bind(task.refinement_round).bind(&task.refinement_phase).bind(&task.refinement_role)
+            .bind(&task.escalation_evidence_at)
             .execute(&mut *tx)
             .await;
 
@@ -772,10 +775,11 @@ impl TaskRepository {
                     total_reopen_count,
                     intervention_count, last_intervention_at,
                     created_at, updated_at, closed_at,
-                    close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs, execution_context, created_by_user_id, refinement_run_id, refinement_intent_id, refinement_generation, refinement_round, refinement_phase, refinement_role
+                    close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs, execution_context, created_by_user_id, refinement_run_id, refinement_intent_id, refinement_generation, refinement_round, refinement_phase, refinement_role,
+                    escalation_evidence_at
                  ) VALUES (
                     $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb,
-                    $13::jsonb, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26::jsonb, $27::jsonb, $28, $29, $30, $31, $32, $33, $34
+                    $13::jsonb, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26::jsonb, $27::jsonb, $28, $29, $30, $31, $32, $33, $34, $35
                  )
                  ON CONFLICT (id) DO UPDATE SET
                     project_id          = EXCLUDED.project_id,
@@ -793,6 +797,7 @@ impl TaskRepository {
                     total_reopen_count  = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.total_reopen_count ELSE tasks.total_reopen_count END,
                     intervention_count  = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.intervention_count ELSE tasks.intervention_count END,
                     last_intervention_at = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.last_intervention_at ELSE tasks.last_intervention_at END,
+                    escalation_evidence_at = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.escalation_evidence_at ELSE tasks.escalation_evidence_at END,
                     closed_at           = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.closed_at ELSE tasks.closed_at END,
                     close_reason        = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.close_reason ELSE tasks.close_reason END,
                     merge_commit_sha    = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.merge_commit_sha ELSE tasks.merge_commit_sha END,
@@ -843,6 +848,7 @@ impl TaskRepository {
             .bind(task.refinement_round)
             .bind(&task.refinement_phase)
             .bind(&task.refinement_role)
+            .bind(&task.escalation_evidence_at)
             .execute(&mut **tx)
             .await;
 

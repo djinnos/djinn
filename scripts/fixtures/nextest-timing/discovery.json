@@ -1,0 +1,90 @@
+{
+  "rust-suites": {
+    "djinn-runtime": {
+      "package-name": "djinn-runtime",
+      "binary-name": "djinn-runtime",
+      "binary-id": "djinn-runtime",
+      "status": "listed",
+      "testcases": {
+        "spec::tests::task_run_report_bincode_roundtrip": {
+          "filter-match": {
+            "status": "matches"
+          },
+          "ignored": false
+        },
+        "spec::tests::failed_outcome_throttle_bincode_roundtrip": {
+          "filter-match": {
+            "status": "matches"
+          },
+          "ignored": false
+        },
+        "spec::tests::never_reached_before_cancellation": {
+          "filter-match": {
+            "status": "matches"
+          },
+          "ignored": false
+        }
+      }
+    },
+    "djinn-server": {
+      "package-name": "djinn-server",
+      "binary-name": "djinn-server",
+      "binary-id": "djinn-server",
+      "status": "listed",
+      "testcases": {
+        "server::chat::tests::handler::completions_rejects_non_uuid_session": {
+          "filter-match": {
+            "status": "matches"
+          },
+          "ignored": false
+        },
+        "server::chat::tests::compaction::newer_boundary_with_stale_tail_hash_falls_back": {
+          "filter-match": {
+            "status": "matches"
+          },
+          "ignored": false
+        }
+      }
+    },
+    "djinn-provider::stream_event_consumer_audit": {
+      "package-name": "djinn-provider",
+      "binary-name": "stream_event_consumer_audit",
+      "binary-id": "djinn-provider::stream_event_consumer_audit",
+      "status": "listed",
+      "testcases": {
+        "checked_in_classification_covers_every_production_stream_event_match": {
+          "filter-match": {
+            "status": "matches"
+          },
+          "ignored": false
+        }
+      }
+    },
+    "djinn-server::coordinator_dispatch": {
+      "package-name": "djinn-server",
+      "binary-name": "coordinator_dispatch",
+      "binary-id": "djinn-server::coordinator_dispatch",
+      "status": "listed",
+      "testcases": {
+        "dispatch_settles_under_sustained_load": {
+          "filter-match": {
+            "status": "matches"
+          },
+          "ignored": false
+        },
+        "pool_teardown_leaks_a_child": {
+          "filter-match": {
+            "status": "matches"
+          },
+          "ignored": false
+        },
+        "wedged_admission_probe": {
+          "filter-match": {
+            "status": "matches"
+          },
+          "ignored": false
+        }
+      }
+    }
+  }
+}

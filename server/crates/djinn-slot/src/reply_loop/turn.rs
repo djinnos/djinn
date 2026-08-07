@@ -82,6 +82,40 @@ impl std::fmt::Display for ModelTurnAdmissionOutcome {
 
 impl std::error::Error for ModelTurnAdmissionOutcome {}
 
+/// Complete the covered provider hand-off after admission has committed its
+/// dispatching fence.
+///
+/// Admission preparation remains owned by `ModelTurnAdmissionCoordinator`; it
+/// returns only after the durable fence has committed. This helper owns the
+/// remaining launch boundary: B1 must accept the launch before the same permit
+/// is marked active. The callbacks are intentionally the only injectable
+/// boundaries, so deterministic tests exercise this production ordering.
+async fn launch_prepared_covered_attempt<T>(
+    preparation: ModelTurnPreparation,
+    launch: impl FnOnce() -> anyhow::Result<T>,
+    after_active: impl FnOnce(),
+) -> anyhow::Result<T> {
+    match preparation {
+        ModelTurnPreparation::Permit(mut permit) => {
+            // A rejected launch drops this still-dispatching permit, which
+            // conservatively cancels the definitely-unsent lease.
+            let launched = launch()?;
+            permit.mark_active().await.map_err(anyhow::Error::from)?;
+            after_active();
+            Ok(launched)
+        }
+        ModelTurnPreparation::Wait(wait) => {
+            Err(anyhow::Error::new(ModelTurnAdmissionOutcome::Wait(wait)))
+        }
+        ModelTurnPreparation::Rejected(rejection) => Err(anyhow::Error::new(
+            ModelTurnAdmissionOutcome::Rejected(rejection),
+        )),
+        ModelTurnPreparation::DispatchFenced { outcome, .. } => Err(anyhow::Error::new(
+            ModelTurnAdmissionOutcome::DispatchFenced(outcome),
+        )),
+    }
+}
+
 /// True when `model_id` (a `provider/model` string) is served by the Codex /
 /// OpenAI consumer backend that signals over-quota by answering a turn with an
 /// empty 200.
@@ -947,7 +981,7 @@ pub async fn run_reply_loop(
                 let coordinator = ModelTurnAdmissionCoordinator::new(
                     djinn_db::ModelTurnAdmissionRepository::new(slot_ctx.db.clone()),
                 );
-                match coordinator
+                let preparation = coordinator
                     .prepare(
                         &plan,
                         ModelTurnAdmissionRequest {
@@ -961,17 +995,19 @@ pub async fn run_reply_loop(
                         },
                     )
                     .await
-                    .map_err(anyhow::Error::from)?
-                {
-                    ModelTurnPreparation::Permit(mut permit) => {
-                        let djinn_provider::ProviderAttemptRouteCoverageV1::Covered { policy, .. } = plan.coverage else {
-                            return Err(anyhow::anyhow!("covered admission plan became uncovered"));
-                        };
+                    .map_err(anyhow::Error::from)?;
+                let policy = match &plan.coverage {
+                    djinn_provider::ProviderAttemptRouteCoverageV1::Covered { policy, .. } => *policy,
+                    djinn_provider::ProviderAttemptRouteCoverageV1::Uncovered(_) => {
+                        return Err(anyhow::anyhow!("covered admission plan became uncovered"));
+                    }
+                };
+                let (attempt, mut parser) = launch_prepared_covered_attempt(
+                    preparation,
+                    || {
                         let normalizer = Arc::new(Mutex::new(ProviderApiKeyNormalizerV1::new(policy)));
                         let receipt_clock = Arc::clone(&slot_ctx.clock);
                         let started = receipt_clock.now_instant();
-                        // A launch failure drops this pre-active permit and its
-                        // Drop implementation cancels the prepared lease.
                         let attempt = provider.start_sse_attempt_v1(
                             request_conversation.as_ref(), tools, tool_choice,
                             ProviderAttemptContextV1::new(turns as u64, policy, normalizer, move || ProviderReceiptTimeV1 {
@@ -982,35 +1018,26 @@ pub async fn run_reply_loop(
                                     .as_millis() as u64,
                             }),
                         ).map_err(|coverage| anyhow::anyhow!("covered B1 launch rejected: {coverage:?}"))?;
-                        let mut parser = provider.sse_frame_parser_v1().ok_or_else(||
+                        let parser = provider.sse_frame_parser_v1().ok_or_else(||
                             anyhow::anyhow!("covered B1 route has no authoritative frame parser"))?;
-                        // The dispatching fence committed in prepare; active is
-                        // committed only after B1 accepted the launch.
-                        permit.mark_active().await.map_err(anyhow::Error::from)?;
-                        Ok(Box::pin(async_stream::stream! {
-                            let mut frames = attempt.events;
-                            while let Some(frame) = frames.next().await {
-                                match frame {
-                                    Ok(frame) => for event in parser.parse(frame) {
-                                        let failed = event.is_err();
-                                        yield event;
-                                        if failed { return; }
-                                    },
-                                    Err(error) => { yield Err(error); return; }
-                                }
-                            }
-                        }) as super::streaming::ProviderStream)
+                        Ok((attempt, parser))
+                    },
+                    || {},
+                )
+                .await?;
+                Ok(Box::pin(async_stream::stream! {
+                    let mut frames = attempt.events;
+                    while let Some(frame) = frames.next().await {
+                        match frame {
+                            Ok(frame) => for event in parser.parse(frame) {
+                                let failed = event.is_err();
+                                yield event;
+                                if failed { return; }
+                            },
+                            Err(error) => { yield Err(error); return; }
+                        }
                     }
-                    ModelTurnPreparation::Wait(wait) => {
-                        return Err(anyhow::Error::new(ModelTurnAdmissionOutcome::Wait(wait)));
-                    }
-                    ModelTurnPreparation::Rejected(rejection) => {
-                        return Err(anyhow::Error::new(ModelTurnAdmissionOutcome::Rejected(rejection)));
-                    }
-                    ModelTurnPreparation::DispatchFenced { outcome, .. } => {
-                        return Err(anyhow::Error::new(ModelTurnAdmissionOutcome::DispatchFenced(outcome)));
-                    }
-                }
+                }) as super::streaming::ProviderStream)
             } else {
                 // Explicit uncovered compatibility path: no B2 claim was made.
                 provider.stream(request_conversation.as_ref(), tools, tool_choice).await
@@ -2139,7 +2166,205 @@ fn inline_tool_results(conversation: &Conversation) -> Vec<PreCompactionToolResu
 mod tests {
     use super::super::error_handling::ReplyLoopCancelled;
     use super::*;
+    use djinn_db::test_support::{
+        model_turn_accounting_fixture, model_turn_lease_lifecycle_fixture,
+        seed_model_turn_admission_fixture,
+    };
+    use djinn_db::{
+        Database, ModelTurnBucketDebit, ModelTurnBucketKind, ModelTurnLeaseIdentity,
+        ModelTurnLeaseMutationOutcome,
+    };
     use djinn_provider::provider::ProviderError;
+    use djinn_provider::{
+        ProviderAbortCapabilityV1, ProviderAdmissionPolicyV1, ProviderAttemptAbortHandleV1,
+        ProviderAttemptCapabilitiesV1, ProviderAttemptPlanV1, ProviderAttemptRouteCoverageV1,
+        ProviderAttemptScopeV1, ProviderCredentialRecordScopeV1, ProviderHiddenRetryCapabilityV1,
+        ProviderOutputReservationSourceV1,
+    };
+
+    fn covered_admission_plan() -> ProviderAttemptPlanV1 {
+        ProviderAttemptPlanV1 {
+            scope: ProviderAttemptScopeV1 {
+                credential: ProviderCredentialRecordScopeV1::from_credential_record_id(
+                    "credential-slot",
+                ),
+                provider_id: "provider".into(),
+                model_id: "model".into(),
+            },
+            coverage: ProviderAttemptRouteCoverageV1::Covered {
+                capabilities: ProviderAttemptCapabilitiesV1 {
+                    hidden_retries: ProviderHiddenRetryCapabilityV1::Disabled,
+                    abort: ProviderAbortCapabilityV1::Supported,
+                },
+                supported_bucket_bindings: vec![ModelTurnBucketKind::Request],
+                policy: ProviderAdmissionPolicyV1::Proactive,
+            },
+            debits: vec![ModelTurnBucketDebit {
+                bucket_kind: ModelTurnBucketKind::Request,
+                units: 1,
+            }],
+            output_reservation_source: ProviderOutputReservationSourceV1::ExplicitLimit,
+            abort: ProviderAttemptAbortHandleV1::new(),
+        }
+    }
+
+    fn admission_request(id: &str) -> ModelTurnAdmissionRequest {
+        ModelTurnAdmissionRequest {
+            credential_id: "credential-slot".into(),
+            request_id: id.into(),
+            owner_pod_uid: Some("pod".into()),
+            generation: 1,
+        }
+    }
+
+    #[tokio::test]
+    async fn covered_launch_helper_fences_launches_then_marks_active() {
+        let db = Database::ephemeral().await.expect("db");
+        let pool = seed_model_turn_admission_fixture(&db, "enforce", "supported", 2).await;
+        let coordinator = ModelTurnAdmissionCoordinator::new(
+            djinn_db::ModelTurnAdmissionRepository::new(db.clone()),
+        );
+        let preparation = coordinator
+            .prepare(
+                &covered_admission_plan(),
+                admission_request("ordered-launch"),
+            )
+            .await
+            .expect("prepare");
+        let lease = match &preparation {
+            ModelTurnPreparation::Permit(permit) => permit.lease.clone().expect("enforced lease"),
+            other => panic!("expected fenced permit, got {other:?}"),
+        };
+        assert_eq!(
+            model_turn_lease_lifecycle_fixture(&db, &lease.lease_id).await,
+            "dispatching"
+        );
+
+        let events = Arc::new(Mutex::new(vec!["mark_dispatching"]));
+        let launched_events = events.clone();
+        let active_events = events.clone();
+        assert_eq!(
+            launch_prepared_covered_attempt(
+                preparation,
+                move || {
+                    launched_events
+                        .lock()
+                        .expect("events")
+                        .push("network_launch");
+                    Ok("launched")
+                },
+                move || active_events.lock().expect("events").push("mark_active"),
+            )
+            .await
+            .expect("covered launch"),
+            "launched"
+        );
+        assert_eq!(
+            events.lock().expect("events").as_slice(),
+            ["mark_dispatching", "network_launch", "mark_active"]
+        );
+        assert_eq!(
+            model_turn_lease_lifecycle_fixture(&db, &lease.lease_id).await,
+            "active"
+        );
+        assert_eq!(model_turn_accounting_fixture(&db, pool).await, (1, 1, 0));
+    }
+
+    #[tokio::test]
+    async fn covered_launch_rejection_cleans_up_definitely_unsent_permit() {
+        let db = Database::ephemeral().await.expect("db");
+        let pool = seed_model_turn_admission_fixture(&db, "enforce", "supported", 2).await;
+        let coordinator = ModelTurnAdmissionCoordinator::new(
+            djinn_db::ModelTurnAdmissionRepository::new(db.clone()),
+        );
+        let preparation = coordinator
+            .prepare(
+                &covered_admission_plan(),
+                admission_request("rejected-launch"),
+            )
+            .await
+            .expect("prepare");
+        let lease = match &preparation {
+            ModelTurnPreparation::Permit(permit) => permit.lease.clone().expect("enforced lease"),
+            other => panic!("expected fenced permit, got {other:?}"),
+        };
+        let events = Arc::new(Mutex::new(vec!["mark_dispatching"]));
+        let launch_events = events.clone();
+        let error = launch_prepared_covered_attempt(
+            preparation,
+            move || {
+                launch_events.lock().expect("events").push("network_launch");
+                Err::<(), _>(anyhow::anyhow!("fake B1 rejected launch"))
+            },
+            || panic!("active must not be marked after rejected launch"),
+        )
+        .await
+        .expect_err("launch rejection must escape");
+        assert!(error.to_string().contains("fake B1 rejected launch"));
+        coordinator.wait_for_cleanup().await;
+        assert_eq!(
+            events.lock().expect("events").as_slice(),
+            ["mark_dispatching", "network_launch"]
+        );
+        assert_eq!(
+            model_turn_lease_lifecycle_fixture(&db, &lease.lease_id).await,
+            "reconciled",
+            "a launch rejection must cancel the definitely-unsent dispatching lease"
+        );
+        assert_eq!(model_turn_accounting_fixture(&db, pool).await, (0, 2, 0));
+    }
+
+    #[tokio::test]
+    async fn covered_launch_helper_preserves_typed_non_permit_outcomes_without_launching() {
+        let identity = ModelTurnLeaseIdentity::new(1, "fenced");
+        for (preparation, expected) in [
+            (
+                ModelTurnPreparation::Wait(djinn_db::ModelTurnAdmissionWait::Draining),
+                "wait",
+            ),
+            (
+                ModelTurnPreparation::Rejected(djinn_db::ModelTurnAdmissionRejection::Off),
+                "rejected",
+            ),
+            (
+                ModelTurnPreparation::DispatchFenced {
+                    identity,
+                    outcome: ModelTurnLeaseMutationOutcome::Fenced,
+                },
+                "dispatch_fenced",
+            ),
+        ] {
+            let attempted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let launch_attempted = attempted.clone();
+            let error = launch_prepared_covered_attempt(
+                preparation,
+                move || {
+                    launch_attempted.store(true, Ordering::SeqCst);
+                    Ok(())
+                },
+                || panic!("non-permit preparation must not mark active"),
+            )
+            .await
+            .expect_err("non-permit preparation must be returned through the turn seam");
+            assert!(!attempted.load(Ordering::SeqCst), "B1 must not launch");
+            let outcome = error
+                .downcast_ref::<ModelTurnAdmissionOutcome>()
+                .expect("non-permit preparation must remain downcastable");
+            assert!(
+                matches!(
+                    (expected, outcome),
+                    ("wait", ModelTurnAdmissionOutcome::Wait(_))
+                        | ("rejected", ModelTurnAdmissionOutcome::Rejected(_))
+                        | (
+                            "dispatch_fenced",
+                            ModelTurnAdmissionOutcome::DispatchFenced(_)
+                        )
+                ),
+                "expected concrete {expected} outcome, got {outcome:?}"
+            );
+        }
+    }
+
     #[test]
     fn empty_turn_terminal_error_is_breaker_classifiable() {
         for kind in ["no-event", "assistant"] {

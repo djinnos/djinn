@@ -903,6 +903,20 @@ pub enum TaskRunOutcome {
         /// `pre_task_cancelled`, or `service_readiness_failed`.
         reason: String,
     },
+    /// Typed model-turn admission control flow. Waits and dispatch fences stay
+    /// cancellable retries; rejections remain admission errors, not provider
+    /// diagnostics.
+    ///
+    /// Appended to preserve prior bincode terminal-report discriminants.
+    ModelTurnAdmission(ModelTurnAdmissionTerminalOutcome),
+}
+
+/// Phase A admission payload carried intact to host scheduling.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum ModelTurnAdmissionTerminalOutcome {
+    Wait(djinn_db::ModelTurnAdmissionWait),
+    Rejected(djinn_db::ModelTurnAdmissionRejection),
+    DispatchFenced(djinn_db::ModelTurnLeaseMutationOutcome),
 }
 
 /// Return value of `TaskRunSupervisor::run`.

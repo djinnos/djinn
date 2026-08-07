@@ -136,6 +136,7 @@ mod tests {
 
     fn task_with_status(status: &str) -> Task {
         Task {
+            escalation_evidence_at: None,
             id: "task-id".to_owned(),
             project_id: "project-id".to_owned(),
             short_id: "task".to_owned(),

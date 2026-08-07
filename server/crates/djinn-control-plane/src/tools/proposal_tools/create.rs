@@ -472,26 +472,20 @@ impl DjinnMcpServer {
             {
                 return Json(err_single(e));
             }
-            // Composed gate (task cuzf): block import that would leave an
-            // `in_review` proposal failing DoR or tribunal conditions.
-            if existing.status == "in_review" {
-                let target_count = repo
-                    .targets(&existing.id)
-                    .await
-                    .map(|t| t.len())
-                    .unwrap_or(0);
-                let gate = evaluate_composed_gate(
-                    &repo,
-                    &existing,
-                    imported.body,
-                    &imported.acceptance_criteria_json,
-                    target_count,
-                )
-                .await;
-                if let Some(err) = gate.to_error_string() {
-                    return Json(err_single(err));
-                }
-            }
+            // The composed gate (task cuzf) used to run here when
+            // `existing.status == "in_review"`. Import writes `existing.status`
+            // straight back and never changes it, so that branch could only ever
+            // fire on an in-place edit of an already-`in_review` proposal — the
+            // same defect fixed in `proposal_update` below, where the gate now
+            // keys off the `!in_review -> in_review` transition instead. There is
+            // no such transition on this path, so the gate is retired here rather
+            // than made conditional on one that cannot occur.
+            //
+            // Spec integrity is unaffected: `ProposalRepository::update` routes
+            // every material revision through `insert_revision_checked`, which
+            // lints the candidate body and fails closed with
+            // `SPEC_LINT_REJECTED`. Block-tag validation already ran above via
+            // `resolve_body_format_and_validate`.
             match repo
                 .update(
                     &existing.id,
@@ -1054,10 +1048,39 @@ impl DjinnMcpServer {
             return Json(err_single(e));
         }
 
-        // Composed gate (task cuzf): block entering `in_review` when
-        // DoR or tribunal conditions are not met. Existing body/MDX/AC-count
+        // Composed gate (task cuzf): block *entering* `in_review` when DoR or
+        // tribunal conditions are not met. Existing body/MDX/AC-count
         // validation already passed above.
-        if status == "in_review" {
+        //
+        // `status` defaults to `existing.status`, so gating on `status ==
+        // "in_review"` alone also fired on every in-place edit of a proposal
+        // that was *already* `in_review` — including an edit that changes no
+        // status at all. That made a needs-work judge verdict edit-lock the
+        // very body it demands changing: the tribunal Advocate's primary action
+        // is `proposal_update(body=...)`, and gate step 2c blocks on a
+        // `needs-work` `latest_judge_verdict` unless a human override is
+        // current. Restrict the gate to the transition it was written for.
+        //
+        // What an in-place `in_review` edit no longer runs, stated plainly:
+        //   - candidate DoR structure checks (problem/scope/objective/
+        //     dependencies/open-questions coverage, AC and target counts);
+        //   - the unresolved-blocking-debate-entry check;
+        //   - needs-evidence spike parking;
+        //   - the needs-work-verdict check itself (the point of the change).
+        // The edit can therefore leave an `in_review` proposal failing DoR.
+        // That is bounded and deliberate: `in_review` is not a gate, it is a
+        // status. Every path that consumes readiness — `proposal_signoff`,
+        // `proposal_graduate`, and re-entry into `in_review` — still runs the
+        // full composed gate, so a DoR-failing head cannot be signed off,
+        // graduated, or re-promoted. `proposal_show`'s `build_gate_status`
+        // keeps reporting the failures to reviewers.
+        //
+        // Spec integrity is NOT dropped: every material revision write goes
+        // through `ProposalRepository::insert_revision_checked`, which lints the
+        // candidate body and fails closed with `SPEC_LINT_REJECTED` on any
+        // error — independently of this gate.
+        let entering_in_review = status == "in_review" && existing.status != "in_review";
+        if entering_in_review {
             let target_count = repo
                 .targets(&existing.id)
                 .await

@@ -450,6 +450,24 @@ pub enum BootTokenExchangeResult {
 
 impl AppState {
     pub fn new(db: Database, cancel: CancellationToken) -> Self {
+        Self::new_with_health_clock(db, cancel, Arc::new(djinn_core::clock::SystemClock::new()))
+    }
+
+    /// Like [`new`](Self::new), but the model-health circuit breaker reads
+    /// `health_clock` instead of the system clock.
+    ///
+    /// The breaker's observable state — `open` vs `half_open`, the rendered
+    /// cooldown deadline, the `djinn_breaker_state` gauge — is a pure function
+    /// of "how long ago did this bucket trip". A fixture that trips the breaker
+    /// and then asserts on it through the HTTP surface is therefore racing the
+    /// five-second `INITIAL_COOLDOWN` against its own setup work. Injecting a
+    /// `TestClock` here removes the race by construction rather than by
+    /// widening the cooldown.
+    pub fn new_with_health_clock(
+        db: Database,
+        cancel: CancellationToken,
+        health_clock: Arc<dyn djinn_core::clock::Clock>,
+    ) -> Self {
         let runtime = DatabaseRuntimeManager::new(
             crate::db::runtime::DatabaseRuntimeConfig::postgres(db.bootstrap_info().target.clone()),
         );
@@ -460,6 +478,7 @@ impl AppState {
             djinn_core::doctor::RetrievalHealthConfig::default(),
             Arc::new(djinn_telemetry::memory_retrieval::MemoryRetrievalMetrics::new()),
             KnowledgeInjectionConfig::default(),
+            health_clock,
         )
     }
 
@@ -478,9 +497,11 @@ impl AppState {
             retrieval_config,
             retrieval_metrics,
             knowledge_injection_config,
+            Arc::new(djinn_core::clock::SystemClock::new()),
         ))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn new_inner(
         db: Database,
         db_runtime: DatabaseRuntimeManager,
@@ -488,6 +509,7 @@ impl AppState {
         retrieval_config: djinn_core::doctor::RetrievalHealthConfig,
         retrieval_metrics: Arc<djinn_telemetry::memory_retrieval::MemoryRetrievalMetrics>,
         knowledge_injection_config: KnowledgeInjectionConfig,
+        health_clock: Arc<dyn djinn_core::clock::Clock>,
     ) -> Self {
         let (events, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
         let mirror = Arc::new(MirrorManager::new(mirrors_root()));
@@ -587,7 +609,7 @@ impl AppState {
                     provider_catalog_refresh::refresh_interval_from_env(),
                 provider_catalog_refresh_started: AtomicBool::new(false),
                 build_epoch_loop_started: AtomicBool::new(false),
-                health_tracker: HealthTracker::new(),
+                health_tracker: HealthTracker::with_clock(health_clock),
                 retrieval_config,
                 retrieval_metrics,
                 knowledge_injection_config,
@@ -1802,6 +1824,10 @@ impl AppState {
             // authority. Shell dispatch therefore remains unavailable here.
             shell_launch: None,
             compaction_cs: djinn_slot::reply_loop::CompactionCriticalSection::default(),
+            // The process-wide host context serves no single session. The reply
+            // loop stamps the session id onto its per-session clone via
+            // `djinn_agent::actors::slot::reply_loop::tool_dispatch_context`.
+            session_id: None,
         }
     }
 
@@ -3831,6 +3857,7 @@ mod build_epoch_bridge_tests {
             djinn_core::doctor::RetrievalHealthConfig::default(),
             Arc::new(djinn_telemetry::memory_retrieval::MemoryRetrievalMetrics::new()),
             KnowledgeInjectionConfig::default(),
+            Arc::new(djinn_core::clock::SystemClock::new()),
         )
     }
 
@@ -4162,6 +4189,7 @@ mod build_epoch_bridge_tests {
             djinn_core::doctor::RetrievalHealthConfig::default(),
             Arc::new(djinn_telemetry::memory_retrieval::MemoryRetrievalMetrics::new()),
             resolved,
+            Arc::new(djinn_core::clock::SystemClock::new()),
         );
 
         assert_eq!(state.agent_context().knowledge_injection, resolved);

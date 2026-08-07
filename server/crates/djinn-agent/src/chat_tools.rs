@@ -323,12 +323,14 @@ pub fn is_chat_allowed_mcp_tool(name: &str) -> bool {
     CHAT_ALLOWED_MCP_TOOLS.contains(&name)
 }
 
-/// Proposal-editing tools exposed ONLY when a chat is scoped to a proposal
-/// (the "Address with djinn" flow). They are deliberately kept off
+/// Proposal-feedback and tribunal tools exposed ONLY when a chat is scoped to
+/// a proposal. They are deliberately kept off
 /// [`CHAT_ALLOWED_MCP_TOOLS`] so a plain chat can't reach into proposals — they
 /// are added per-request only when the handler resolves a `proposal_id`, and
 /// the requesting user must be authenticated (the proposal edit gate runs as
-/// that user). This is an authenticated proposal scoping control; schema
+/// that user). Chat deliberately has no proposal-spec mutation authority:
+/// blocking feedback is sent to refinement, while advisory feedback remains
+/// stored discussion. This is an authenticated proposal scoping control; schema
 /// compatibility for the underlying provider formats is owned by the
 /// `djinn-provider` projection layer and its corpus/golden tests (see
 /// `server/crates/djinn-provider/tests/tool_schema_projection_corpus.rs`
@@ -336,12 +338,10 @@ pub fn is_chat_allowed_mcp_tool(name: &str) -> bool {
 /// of each tool added here.
 pub const PROPOSAL_SCOPED_MCP_TOOLS: &[&str] = &[
     "proposal_show",
-    "proposal_update",
-    "proposal_feedback_resolve",
     "proposal_feedback_add",
-    "proposal_block_patch",
-    "get_block_catalog",
-    "proposal_blocks",
+    "proposal_refinement_start",
+    "proposal_refinement_demand_round",
+    "proposal_refinement_status",
 ];
 
 /// `true` when `name` is one of the proposal-scoped tools (see
@@ -1100,5 +1100,36 @@ mod tests {
             .find(|schema| schema.get("name").and_then(|name| name.as_str()) == Some("memory_read"))
             .expect("memory_read schema retained");
         assert_eq!(safety_tuple(memory_read), (true, false, true, false));
+    }
+}
+
+#[cfg(test)]
+mod proposal_scoped_chat_tests {
+    use super::*;
+
+    /// Apply-feedback chat intent is deliberately constrained to adding feedback
+    /// and starting/resuming refinement. Keeping this assertion at the exposed
+    /// schema boundary prevents a later allowlist edit from reintroducing a
+    /// proposal revision side effect.
+    #[test]
+    fn proposal_chat_apply_feedback_surface_cannot_mutate_a_revision() {
+        for tool in [
+            "proposal_show",
+            "proposal_feedback_add",
+            "proposal_refinement_start",
+            "proposal_refinement_demand_round",
+            "proposal_refinement_status",
+        ] {
+            assert!(
+                is_proposal_scoped_mcp_tool(tool),
+                "proposal chat must retain {tool} for feedback/refinement routing"
+            );
+        }
+        for forbidden in ["proposal_update", "proposal_feedback_resolve"] {
+            assert!(
+                !is_proposal_scoped_mcp_tool(forbidden),
+                "apply-feedback chat must never expose {forbidden}"
+            );
+        }
     }
 }

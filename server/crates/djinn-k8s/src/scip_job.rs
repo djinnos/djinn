@@ -204,6 +204,7 @@ pub fn build_scip_index_job(
     project_image_tag: &str,
     revision: &str,
     policy: Option<&djinn_stack::environment::CargoCachePolicy>,
+    js_workspace_roots: &[String],
 ) -> Job {
     let sanitized_project = sanitize_id(project_id);
     let job_name = scip_index_job_name(project_id, revision);
@@ -226,22 +227,14 @@ unset GIT_CONFIG_NOSYSTEM
 printf '[safe]\n\tdirectory = *\n' > "$GIT_CONFIG_SYSTEM"
 UPSTREAM_URL="$(git -C "{mirror_path}" config remote.origin.url)"
 git clone --depth 1000 --single-branch "$UPSTREAM_URL" "{project_root}"
-cd "{project_root}"
-if [ -f pnpm-lock.yaml ]; then
-  ( corepack enable >/dev/null 2>&1 || true; \
-    corepack pnpm install --frozen-lockfile || pnpm install --frozen-lockfile || pnpm install ) || true
-elif [ -f yarn.lock ]; then
-  ( corepack enable >/dev/null 2>&1 || true; \
-    corepack yarn install --frozen-lockfile || yarn install ) || true
-elif [ -f package-lock.json ]; then
-  ( npm ci || npm install ) || true
-fi
+cd "{project_root}"{js_install}
 exec {bin} scip-index "{project_id}"
 "#,
         mirror_path = mirror_path,
         project_root = project_root,
         bin = WARM_COMMAND_BIN,
         project_id = project_id,
+        js_install = crate::js_install::js_install_preamble(&project_root, js_workspace_roots),
     );
 
     let mut env = vec![
@@ -468,6 +461,7 @@ mod tests {
             "reg.example:5000/p:abc",
             "deadbeef1234567890",
             None,
+            &[],
         )
     }
 
@@ -723,7 +717,8 @@ mod tests {
         }
         // The warm Job, by contrast, pays for its CPU with a build lease and is
         // deliberately NOT protected — proving this assertion reads the render.
-        let warm = crate::warm_job::build_warm_job(&cfg, "proj-xyz", "deadbeef", "img:t", None);
+        let warm =
+            crate::warm_job::build_warm_job(&cfg, "proj-xyz", "deadbeef", "img:t", None, &[]);
         assert!(
             !warm
                 .metadata
@@ -806,7 +801,8 @@ mod tests {
         cfg.warm_cpu_limit = "6".into();
         cfg.scip_cpu_limit = "2".into();
 
-        let warm = crate::warm_job::build_warm_job(&cfg, "proj-xyz", "deadbeef", "img:t", None);
+        let warm =
+            crate::warm_job::build_warm_job(&cfg, "proj-xyz", "deadbeef", "img:t", None, &[]);
         let warm_env: BTreeMap<String, String> = warm
             .spec
             .as_ref()

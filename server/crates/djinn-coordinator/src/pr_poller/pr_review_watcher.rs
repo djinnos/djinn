@@ -597,7 +597,7 @@ impl CoordinatorActor {
                             "PR poller: unreproducible required-CI check routing to lead/human intervention"
                         );
                         let handled = self
-                            .route_planner_intervention(
+                            .route_arbiter_adjudication(
                                 &task,
                                 "worker",
                                 &reason,

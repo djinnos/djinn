@@ -261,7 +261,7 @@ impl TaskRepository {
                     t.issue_type, t.status, t.priority, t.owner, t.labels::text AS labels,
                     t.acceptance_criteria::text AS acceptance_criteria, t.reopen_count, t.continuation_count,
                     t.total_reopen_count,
-                    t.intervention_count, t.last_intervention_at,
+                    t.intervention_count, t.last_intervention_at, t.escalation_evidence_at,
                     t.created_at, t.updated_at, t.closed_at,
                     t.close_reason, t.merge_commit_sha, t.pr_url, t.merge_conflict_metadata, t.memory_refs::text AS memory_refs,
                     t.agent_type, t.execution_context, t.created_by_user_id,

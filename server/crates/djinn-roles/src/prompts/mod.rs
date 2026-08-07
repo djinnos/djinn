@@ -43,6 +43,16 @@ pub const JUDGE_TEMPLATE: &str = include_str!("judge.md");
 
 // ─── Mode section constants ────────────────────────────────────────────────────
 
+/// Proposal u46i R3: the "pull scaffold" rendered immediately above the injected
+/// knowledge notes. A permalink alone does not make pull happen — the scaffold
+/// carries a coverage map, enumerated triggers plus a negative list, a worked
+/// example including the empty-result branch, an anti-refusal clause naming the
+/// literal refusal strings, a handles-come-from-the-index rule, and an
+/// asymmetric budget (grounded pulls unlimited, speculative search metered).
+/// Rendered only when `TaskContext::knowledge_context` is non-blank, so a task
+/// with no injected notes pays nothing for it.
+pub const KNOWLEDGE_PULL_SCAFFOLD: &str = include_str!("knowledge-pull.md");
+
 pub(crate) const WORKER_RESEARCH: &str = include_str!("worker/research.md");
 pub(crate) const WORKER_CONFLICT: &str = include_str!("worker/conflict.md");
 
@@ -283,11 +293,12 @@ pub fn render_prompt_for_role(
     };
     out = out.replace("{{epic_context_section}}", &epic_context_section);
 
+    // u46i R3: the injected notes are pointers, so the block leads with the pull
+    // scaffold that makes the pull actually happen.
     let knowledge_context_section = match &ctx.knowledge_context {
         Some(text) if !text.trim().is_empty() => format!(
-            "## Relevant Knowledge\n\n\
-             The following patterns, pitfalls, and cases were learned from previous work \
-             in the code areas this task touches.\n\n{text}\n"
+            "## Relevant Knowledge\n\n{}\n{text}\n",
+            KNOWLEDGE_PULL_SCAFFOLD.trim_end()
         ),
         _ => String::new(),
     };

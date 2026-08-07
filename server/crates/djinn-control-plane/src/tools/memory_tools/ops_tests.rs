@@ -152,6 +152,7 @@ mod tests {
                     project: setup.project.clone(),
                     identifier: setup.permalink.clone(),
                 },
+                &djinn_db::NoteAccessAttribution::unattributed(),
             )
             .await;
 
@@ -199,6 +200,7 @@ mod tests {
                     project: setup.project.clone(),
                     identifier: note.permalink.clone(),
                 },
+                &djinn_db::NoteAccessAttribution::unattributed(),
             )
             .await;
 
@@ -231,6 +233,7 @@ mod tests {
                 project: setup.project.clone(),
                 identifier: probe.to_string(),
             },
+            &djinn_db::NoteAccessAttribution::unattributed(),
         )
         .await;
 
@@ -291,6 +294,7 @@ mod tests {
                 project: setup.project.clone(),
                 identifier: format!("memory://{design_permalink}.md"),
             },
+            &djinn_db::NoteAccessAttribution::unattributed(),
         )
         .await;
 
@@ -449,6 +453,7 @@ mod tests {
                 edge_kinds: None,
             },
             Some("task-123"),
+            &djinn_db::NoteAccessAttribution::unattributed(),
         )
         .await;
 
@@ -515,6 +520,7 @@ mod tests {
                 edge_kinds: None,
             },
             None,
+            &djinn_db::NoteAccessAttribution::unattributed(),
         )
         .await;
 
@@ -633,6 +639,7 @@ mod tests {
                 edge_kinds: None,
             },
             None,
+            &djinn_db::NoteAccessAttribution::unattributed(),
         )
         .await;
 
@@ -695,6 +702,7 @@ mod tests {
                 edge_kinds: None,
             },
             None,
+            &djinn_db::NoteAccessAttribution::unattributed(),
         )
         .await;
 
@@ -1093,7 +1101,13 @@ mod tests {
             entity_types: None,
             edge_kinds: None,
         };
-        let result = ops::memory_search(&setup.server, params, None).await;
+        let result = ops::memory_search(
+            &setup.server,
+            params,
+            None,
+            &djinn_db::NoteAccessAttribution::unattributed(),
+        )
+        .await;
         assert!(
             result.error.is_none(),
             "unexpected error: {:?}",
@@ -1130,7 +1144,13 @@ mod tests {
             entity_types: None,
             edge_kinds: None,
         };
-        let result = ops::memory_search(&setup.server, params, None).await;
+        let result = ops::memory_search(
+            &setup.server,
+            params,
+            None,
+            &djinn_db::NoteAccessAttribution::unattributed(),
+        )
+        .await;
         assert!(
             result.error.is_none(),
             "unexpected error: {:?}",
@@ -1241,7 +1261,13 @@ mod tests {
             entity_types: None,
             edge_kinds: None,
         };
-        let result = ops::memory_search(&setup.server, params, None).await;
+        let result = ops::memory_search(
+            &setup.server,
+            params,
+            None,
+            &djinn_db::NoteAccessAttribution::unattributed(),
+        )
+        .await;
         assert!(result.error.is_some(), "expected error for invalid project");
 
         let metrics = setup.server.state.retrieval_metrics();
@@ -1267,7 +1293,13 @@ mod tests {
             entity_types: None,
             edge_kinds: None,
         };
-        let result = ops::memory_search(&setup.server, params, None).await;
+        let result = ops::memory_search(
+            &setup.server,
+            params,
+            None,
+            &djinn_db::NoteAccessAttribution::unattributed(),
+        )
+        .await;
         assert!(
             result.error.is_none(),
             "unexpected error: {:?}",

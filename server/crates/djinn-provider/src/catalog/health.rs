@@ -424,14 +424,43 @@ pub struct HealthTracker {
     /// by the coordinator at its redispatch streak/cooldown site. Independent of
     /// the `(scope, model)` breaker buckets above.
     task_failures: Arc<Mutex<HashMap<String, TaskFailureSignal>>>,
+    /// The time source every breaker transition reads.
+    ///
+    /// Cooldown deadlines, half-open reclassification and the rolling
+    /// trip-rate window are all *time* predicates, so without a seam here the
+    /// only way to test them is to race the wall clock: a test that trips the
+    /// breaker and then reads it back is really asserting that the five-second
+    /// [`INITIAL_COOLDOWN`] outlasts whatever else the test does in between.
+    /// That is the mechanism behind the `debug_dispatch_state` and `/metrics`
+    /// wedge-fixture flakes — under a loaded runner the cooldown truthfully
+    /// expired mid-test and `debug_snapshot` correctly reported `half_open`.
+    ///
+    /// Held inside the shared handle (not per-clone) so every clone of a
+    /// tracker observes the same clock: `AppState` hands clones to the
+    /// coordinator, the metrics scraper and the debug endpoint, and they must
+    /// agree on what time it is.
+    clock: Arc<dyn Clock>,
 }
 
 impl HealthTracker {
     pub fn new() -> Self {
+        Self::with_clock(Arc::new(SystemClock::new()))
+    }
+
+    /// Like [`new`](Self::new), but every breaker transition reads the supplied
+    /// clock instead of the system one — the deterministic-test seam.
+    pub fn with_clock(clock: Arc<dyn Clock>) -> Self {
         Self {
             inner: Arc::new(Mutex::new(HashMap::new())),
             task_failures: Arc::new(Mutex::new(HashMap::new())),
+            clock,
         }
+    }
+
+    /// The single monotonic read for this tracker. Every cooldown deadline,
+    /// availability check and trip-window prune goes through here.
+    fn now(&self) -> Instant {
+        self.clock.now_instant()
     }
 
     /// Record the most recent typed provider failure for a task (side-channel
@@ -516,7 +545,7 @@ impl HealthTracker {
     /// exhausted chain. Instead, this advances a separate breaker-eligible
     /// consecutive-failure counter scoped to chain exhaustions only.
     pub fn apply_breaker_check_for(&self, scope: Option<&str>, model_id: &str) {
-        let now = SystemClock::new().now_instant();
+        let now = self.now();
         let mut map = self.inner.lock().unwrap();
         let key = HealthKey::new(scope, model_id);
         let Some(state) = map.get_mut(&key) else {
@@ -569,7 +598,7 @@ impl HealthTracker {
     /// Record a successful invocation.  Resets consecutive failure counter;
     /// clears auto-disable state if the cooldown has expired.
     pub fn record_success(&self, scope: Option<&str>, model_id: &str) {
-        let now = SystemClock::new().now_instant();
+        let now = self.now();
         let mut map = self.inner.lock().unwrap();
         let state = map.entry(HealthKey::new(scope, model_id)).or_default();
         state.consecutive_failures = 0;
@@ -598,7 +627,7 @@ impl HealthTracker {
     /// Record a failed invocation.  Trips the circuit breaker when the
     /// consecutive failure threshold is reached.
     pub fn record_failure(&self, scope: Option<&str>, model_id: &str) {
-        let now = SystemClock::new().now_instant();
+        let now = self.now();
         let mut map = self.inner.lock().unwrap();
         let key = HealthKey::new(scope, model_id);
         let state = map.entry(key.clone()).or_default();
@@ -677,7 +706,7 @@ impl HealthTracker {
     /// `InvalidRequest` and `InvalidOutput` continue through
     /// [`record_failure`]/[`record_stall`] and still trip at three strikes.
     pub fn record_transient_failure(&self, scope: Option<&str>, model_id: &str) {
-        let now = SystemClock::new().now_instant();
+        let now = self.now();
         let mut map = self.inner.lock().unwrap();
         let key = HealthKey::new(scope, model_id);
         let state = map.entry(key.clone()).or_default();
@@ -760,7 +789,7 @@ impl HealthTracker {
     /// genuine trip — ratcheting the cap and counting toward the hard-disable
     /// ceiling. A single success fully resets that streak.
     pub fn record_stall(&self, scope: Option<&str>, model_id: &str, escalate: bool) {
-        let now = SystemClock::new().now_instant();
+        let now = self.now();
         let mut map = self.inner.lock().unwrap();
         let key = HealthKey::new(scope, model_id);
         let state = map.entry(key.clone()).or_default();
@@ -847,7 +876,7 @@ impl HealthTracker {
     /// Returns `true` when the `(scope, model)` bucket is not circuit-breaker
     /// disabled (or when its cooldown has expired).
     pub fn is_available(&self, scope: Option<&str>, model_id: &str) -> bool {
-        let now = SystemClock::new().now_instant();
+        let now = self.now();
         let map = self.inner.lock().unwrap();
         map.get(&HealthKey::new(scope, model_id))
             .is_none_or(|s| s.is_available(now))
@@ -872,7 +901,7 @@ impl HealthTracker {
 
     /// Return health state for all tracked buckets, sorted by `(scope, model)`.
     pub fn all_health(&self) -> Vec<ModelHealth> {
-        let now = SystemClock::new().now_instant();
+        let now = self.now();
         let map = self.inner.lock().unwrap();
         let mut health: Vec<_> = map.iter().map(|(key, s)| s.to_health(key, now)).collect();
         health.sort_by(|a, b| {
@@ -899,8 +928,11 @@ impl HealthTracker {
                 .collect()
         };
 
-        let now = SystemClock::new().now_instant();
-        let wall_now = ::time::OffsetDateTime::now_utc();
+        let now = self.now();
+        // Wall time comes from the same seam as the monotonic read so the
+        // rendered `until` deadline stays consistent with the `open`/`half_open`
+        // classification computed from `now` (and so both are test-controlled).
+        let wall_now = ::time::OffsetDateTime::from(self.clock.now());
         let mut snapshot: Vec<_> = entries
             .into_iter()
             .filter_map(
@@ -945,7 +977,7 @@ impl HealthTracker {
     /// `djinn_breaker_state{scope,model}` gauge as Closed=`0.0`, HalfOpen=`0.5`,
     /// Open=`1.0`.
     pub fn breaker_metric_snapshot(&self) -> Vec<BreakerMetricSnapshot> {
-        let now = SystemClock::new().now_instant();
+        let now = self.now();
         let map = self.inner.lock().unwrap();
         let mut snapshot: Vec<_> = map
             .iter()
@@ -978,7 +1010,7 @@ impl HealthTracker {
 
     /// Replace all tracked health state with a persisted snapshot.
     pub fn restore_all(&self, snapshot: Vec<ModelHealth>) {
-        let now = SystemClock::new().now_instant();
+        let now = self.now();
         let mut map = self.inner.lock().unwrap();
         map.clear();
         for health in snapshot {
@@ -1029,7 +1061,7 @@ impl HealthTracker {
     /// Return health state for a single `(scope, model)` bucket (returns zero
     /// state if untracked).
     pub fn model_health(&self, scope: Option<&str>, model_id: &str) -> ModelHealth {
-        let now = SystemClock::new().now_instant();
+        let now = self.now();
         let key = HealthKey::new(scope, model_id);
         let map = self.inner.lock().unwrap();
         map.get(&key)

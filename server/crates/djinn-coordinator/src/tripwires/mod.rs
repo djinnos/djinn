@@ -63,8 +63,8 @@ pub use engine::{
 };
 #[allow(unused_imports)]
 pub use hold_release::{
-    DEFAULT_HOLD_RELEASE_RATIONALE, HUMAN_RELEASE_ACTOR, HUMAN_RELEASE_ROLE,
-    build_hold_release_key, build_hold_released_payload,
+    ARBITER_RELEASE_ACTOR, ARBITER_RELEASE_ROLE, DEFAULT_HOLD_RELEASE_RATIONALE,
+    HUMAN_RELEASE_ACTOR, HUMAN_RELEASE_ROLE, build_hold_release_key, build_hold_released_payload,
 };
 #[allow(unused_imports)]
 pub use policy::{

@@ -15,6 +15,8 @@ pub(crate) mod error_handling {
     pub(crate) use djinn_slot::reply_loop::error_handling::*;
 }
 
+pub(crate) use djinn_slot::reply_loop::ModelTurnAdmissionOutcome;
+
 #[cfg(test)]
 mod resource_tests;
 
@@ -99,7 +101,24 @@ pub(crate) fn format_resource_contents(contents: &[rmcp::model::ResourceContents
     out
 }
 
-struct AgentToolDispatcher {
+/// Stamp the session identity onto the per-session clone of `AgentContext`.
+///
+/// This is the production composition site for
+/// `djinn_mcp_extension::ExtensionContext::session_id`. That trait method has a
+/// `None` default; if nothing overrode it — or if the override existed but this
+/// site never populated the field — every `note_access_events` row would be
+/// written unattributed and `P(memory_read | Injected)` would read a permanent
+/// 0% with all tests still green. `session_attribution_reaches_the_note_access_ledger`
+/// (`crate::extension::tests::memory_dispatch_tests`) drives a real
+/// `memory_read` through a context built *here* and asserts the persisted row
+/// carries this session id.
+pub(crate) fn tool_dispatch_context(app_state: &AgentContext, session_id: &str) -> AgentContext {
+    let mut context = app_state.clone();
+    context.session_id = Some(session_id.to_owned());
+    context
+}
+
+pub(crate) struct AgentToolDispatcher {
     app_state: AgentContext,
     services: &'static dyn djinn_supervisor::SupervisorServices,
     mcp_registry: Option<&'static crate::mcp_client::McpToolRegistry>,
@@ -116,7 +135,19 @@ struct AgentToolDispatcher {
 }
 
 impl AgentToolDispatcher {
-    fn new(
+    /// The dispatch context this dispatcher composed, including the session
+    /// attribution stamped by [`tool_dispatch_context`].
+    ///
+    /// Test-only: production code reaches the context through the dispatcher's
+    /// own trait methods. This accessor exists so
+    /// `session_attribution_reaches_the_note_access_ledger` can drive the real
+    /// constructor and then dispatch through the composed context.
+    #[cfg(test)]
+    pub(crate) fn app_state(&self) -> &AgentContext {
+        &self.app_state
+    }
+
+    pub(crate) fn new(
         app_state: &AgentContext,
         services: &dyn djinn_supervisor::SupervisorServices,
         mcp_registry: Option<&crate::mcp_client::McpToolRegistry>,
@@ -142,7 +173,7 @@ impl AgentToolDispatcher {
             >(registry)
         });
         Self {
-            app_state: app_state.clone(),
+            app_state: tool_dispatch_context(app_state, session_id),
             services: services_static,
             mcp_registry: registry_static,
             output_stash: Mutex::new(OutputStash::with_session_id(session_id)),

@@ -11,9 +11,13 @@
 // to run. A check that only says "snapshot mismatched" costs an agent session
 // and a CI cycle; that is the loop this whole mechanism exists to close.
 //
-// Deliberately NOT fail-closed: if the tree it was pointed at is incomplete
-// (a discovery root is missing), it warns and exits 0. A guard that cannot see
-// the tree must not wedge the merge queue.
+// Missing discovery roots are an INCOMPLETE-COVERAGE warning, not a verdict.
+// A root this cannot scan makes that root's artifact set unknown and nothing
+// else: unknown evidence is never converted into success, and known-bad
+// evidence from a root that IS present is never discarded because some other
+// root is unreadable. So `indeterminate` and `ok` are computed independently —
+// a partial checkout still fails on a candidate it can prove is unregistered,
+// and a checkout with no roots at all warns without inventing violations.
 //
 // Flags:
 //   --json     emit the structured result instead of human-readable output
@@ -29,6 +33,7 @@ import {
   entryPatterns,
   loadManifest,
   matchesGlob,
+  patternUnderRoot,
   repoRoot,
   staleArtifactPatterns,
 } from "./lib/tool-goldens.mjs";
@@ -60,18 +65,42 @@ export function findSilentGuards(manifest, root = repoRoot) {
 
 /** Pure classification of a tree. Callers own the printing and the exit code. */
 export function evaluate(manifest, root = repoRoot) {
-  const { candidates, missingRoots, scanned } = discoverCandidates(manifest, root);
+  const { candidates, missingRoots, scanned, perRoot } = discoverCandidates(manifest, root);
   const { declared, excluded, unlisted } = classifyCandidates(manifest, candidates);
   const silentGuards = findSilentGuards(manifest, root);
-  const stalePatterns = staleArtifactPatterns(manifest, scanned);
 
-  // Indeterminate input is a warning, never a failure.
+  // A pattern that lives under a root nobody could scan did not "match
+  // nothing" — it was never looked for. Reporting it as stale would tell an
+  // author to delete a perfectly valid manifest entry.
+  const stalePatterns = staleArtifactPatterns(manifest, scanned).filter(
+    (pattern) => !missingRoots.some((missing) => patternUnderRoot(pattern, missing))
+  );
+
+  // `indeterminate` describes COVERAGE. `ok` describes what was OBSERVED.
+  // They are deliberately independent: incomplete coverage never erases an
+  // unregistered artifact found under a root that was present.
   const indeterminate = missingRoots.length > 0;
-  const failures = indeterminate ? [] : [...unlisted];
 
   return {
     indeterminate,
     missingRoots,
+    scannedRoots: perRoot.filter((entry) => entry.present).map((entry) => entry.root),
+    roots: perRoot.map((entry) => {
+      const perRootClassification = entry.present
+        ? classifyCandidates(manifest, entry.candidates)
+        : { declared: [], excluded: [], unlisted: [] };
+      return {
+        root: entry.root,
+        present: entry.present,
+        counts: {
+          candidates: entry.candidates.length,
+          declared: perRootClassification.declared.length,
+          excluded: perRootClassification.excluded.length,
+          unlisted: perRootClassification.unlisted.length,
+        },
+        unlisted: perRootClassification.unlisted,
+      };
+    }),
     counts: {
       candidates: candidates.length,
       declared: declared.length,
@@ -80,18 +109,19 @@ export function evaluate(manifest, root = repoRoot) {
     },
     declared,
     excluded,
-    unlisted: failures,
+    unlisted,
     silentGuards,
     stalePatterns,
-    ok: failures.length === 0 && silentGuards.length === 0,
+    ok: unlisted.length === 0 && silentGuards.length === 0,
   };
 }
 
 function report(manifest, result) {
   for (const root of result.missingRoots) {
     console.warn(
-      `::warning title=Tool-golden guard inconclusive::discovery root '${root}' is missing, ` +
-        `so the artifact set could not be determined. Not failing.`
+      `::warning title=Tool-golden coverage incomplete::discovery root '${root}' is missing, ` +
+        `so no artifact under it was inspected. Findings below cover only ` +
+        `${result.scannedRoots.join(", ") || "no root"}.`
     );
   }
   for (const pattern of result.stalePatterns) {
@@ -134,9 +164,16 @@ function report(manifest, result) {
   }
 
   if (result.ok) {
+    const counts =
+      `${result.counts.declared} declared artifact file(s), ` +
+      `${result.counts.excluded} hand-authored file(s), 0 unregistered`;
+    // Never claim full completeness off a partial scan.
     console.log(
-      `tool-schema goldens: ${result.counts.declared} declared artifact file(s), ` +
-        `${result.counts.excluded} hand-authored file(s), 0 unregistered.`
+      result.indeterminate
+        ? `tool-schema goldens: ${counts} under ${result.scannedRoots.join(", ") || "no root"}. ` +
+            `Coverage is INCOMPLETE — ${result.missingRoots.join(", ")} could not be scanned, ` +
+            `so this is not a full inventory proof.`
+        : `tool-schema goldens: ${counts}.`
     );
   }
 }

@@ -70,7 +70,9 @@ pub use create::ProposalListResponse;
 
 // Re-export feedback parameter types so `crate::tools::proposal_tools::...`
 // stays stable for dispatch.rs and MCP-extension consumers.
-pub use feedback::{ProposalFeedbackAddParams, ProposalFeedbackResolveParams};
+pub use feedback::{
+    ProposalFeedbackAddParams, ProposalFeedbackResolveParams, ProposalFeedbackWithdrawParams,
+};
 
 // Re-export lifecycle parameter/response types so `crate::tools::proposal_tools::...`
 // stays stable for dispatch.rs and MCP-extension consumers.
