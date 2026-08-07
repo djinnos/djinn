@@ -1764,7 +1764,13 @@ jobs:
           nohup bash -c '
             for _ in $(seq 1 240); do
               sleep 15
-              failed=$(gh api "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?per_page=100" \
+              # Scoped to THIS attempt. The unscoped `/runs/{id}/jobs` endpoint
+              # reports the latest record per job name, which at the start of a
+              # re-run is still the PREVIOUS attempt's result. A run whose gate
+              # concluded failure once could therefore never be re-run: the new
+              # attempt's watcher observed the old failure on its first poll and
+              # cancelled the re-run within ~15s, every time, forever.
+              failed=$(gh api "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}/jobs?per_page=100" \
                 --jq "[.jobs[] | select(.conclusion == \"failure\") | .name] | first // empty" 2>/dev/null || true)
               if [ -n "$failed" ]; then
                 echo "Lane $failed failed — cancelling run ${{ github.run_id }} to save the remaining shard minutes (attribution is on the failed lane'"'"'s run-level annotation)."
