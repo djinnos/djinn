@@ -699,7 +699,13 @@ async fn touch_accessed_does_not_emit_event() {
         .unwrap();
     let _ = rx.recv().await.unwrap(); // NoteUpdated
 
-    repo.touch_accessed(&note.id).await.unwrap();
+    repo.touch_accessed(
+        &note.id,
+        crate::repositories::note::NoteAccessSource::MemoryRead,
+        &crate::repositories::note::NoteAccessAttribution::unattributed(),
+    )
+    .await
+    .unwrap();
 
     // No event should be in the channel when summaries already exist.
     assert!(rx.try_recv().is_err());
@@ -719,7 +725,13 @@ async fn touch_accessed_increments_access_count() {
         .unwrap();
 
     for _ in 0..3 {
-        repo.touch_accessed(&note.id).await.unwrap();
+        repo.touch_accessed(
+            &note.id,
+            crate::repositories::note::NoteAccessSource::MemoryRead,
+            &crate::repositories::note::NoteAccessAttribution::unattributed(),
+        )
+        .await
+        .unwrap();
     }
 
     let updated = repo.get(&note.id).await.unwrap().unwrap();
@@ -740,7 +752,13 @@ async fn touch_accessed_emits_missing_summary_signal_when_summaries_are_missing(
         .unwrap();
     let _ = rx.recv().await.unwrap(); // NoteCreated
 
-    repo.touch_accessed(&note.id).await.unwrap();
+    repo.touch_accessed(
+        &note.id,
+        crate::repositories::note::NoteAccessSource::MemoryRead,
+        &crate::repositories::note::NoteAccessAttribution::unattributed(),
+    )
+    .await
+    .unwrap();
 
     let envelope = rx.recv().await.unwrap();
     assert_eq!(envelope.entity_type, "note");

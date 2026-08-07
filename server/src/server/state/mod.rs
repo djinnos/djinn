@@ -1802,6 +1802,10 @@ impl AppState {
             // authority. Shell dispatch therefore remains unavailable here.
             shell_launch: None,
             compaction_cs: djinn_slot::reply_loop::CompactionCriticalSection::default(),
+            // The process-wide host context serves no single session. The reply
+            // loop stamps the session id onto its per-session clone via
+            // `djinn_agent::actors::slot::reply_loop::tool_dispatch_context`.
+            session_id: None,
         }
     }
 

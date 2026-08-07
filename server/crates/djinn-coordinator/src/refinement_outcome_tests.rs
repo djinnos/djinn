@@ -207,6 +207,9 @@ fn verdict_scoping_ignores_stale_prior_run_approve() {
     });
     assert_eq!(state.phase, RefinementPhase::AdversaryAttack);
     assert!(!state.is_awaiting_human_review());
+    // …and the round it re-opens carries the outstanding remedy, so a dry
+    // Adversary hands the round to the Advocate rather than stranding it.
+    assert!(state.pending_blocking_verdict);
 }
 
 /// Belt-and-braces: even with no `refinement_start` boundary recorded

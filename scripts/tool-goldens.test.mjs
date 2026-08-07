@@ -128,7 +128,7 @@ test("every discovered candidate is declared or explicitly not derived", () => {
   assert.ok(result.counts.declared > 0);
 });
 
-test("discovery is inconclusive rather than failing when a root is missing", () => {
+test("discovery is inconclusive rather than failing when every root is missing", () => {
   // The fail-closed version of this guard would wedge the merge queue on any
   // checkout it cannot fully see. It must warn instead.
   const empty = mkdtempSync(path.join(os.tmpdir(), "tool-goldens-empty-"));
@@ -139,6 +139,106 @@ test("discovery is inconclusive rather than failing when a root is missing", () 
     assert.deepEqual(result.unlisted, []);
   } finally {
     rmSync(empty, { recursive: true, force: true });
+  }
+});
+
+// ── the per-root completeness truth table ──────────────────────────────────
+//
+// `indeterminate` means coverage is incomplete. It must NOT erase `unlisted`.
+// The bug these encode: `failures = indeterminate ? [] : unlisted` threw away
+// a violation proven under a root that was present because an unrelated root
+// was absent, and the command then exited 0 on a tree it knew was broken.
+
+const UNREGISTERED_ARTIFACT =
+  "server/crates/made-up/tests/snapshots/made_up__new_tool_schemas.snap";
+
+/**
+ * A tree with the manifest's guard files stubbed in, so `ok` is decided by the
+ * artifact classification under test rather than incidentally by absent guards.
+ * Guard files are `.rs`/`ui/package.json`, so none of them is itself a
+ * discovery candidate.
+ */
+function makeTree({ roots, unregistered }) {
+  const root = mkdtempSync(path.join(os.tmpdir(), "tool-goldens-tree-"));
+  for (const rel of roots) mkdirSync(path.join(root, rel), { recursive: true });
+  for (const artifact of manifest.artifacts) {
+    const guard = path.join(root, artifact.guard.file);
+    mkdirSync(path.dirname(guard), { recursive: true });
+    writeFileSync(guard, `// regenerate with ${manifest.regenerateCommand}\n`);
+  }
+  if (unregistered) {
+    const abs = path.join(root, unregistered);
+    mkdirSync(path.dirname(abs), { recursive: true });
+    writeFileSync(abs, '---\nsource: x\n---\n[{"name":"x","inputSchema":{}}]\n');
+  }
+  return root;
+}
+
+test("all roots present plus an unregistered artifact fails with complete coverage", () => {
+  const root = makeTree({
+    roots: manifest.discovery.roots,
+    unregistered: UNREGISTERED_ARTIFACT,
+  });
+  try {
+    const result = evaluate(manifest, root);
+    assert.deepEqual(result.missingRoots, []);
+    assert.equal(result.indeterminate, false);
+    assert.deepEqual(
+      result.unlisted.map((candidate) => candidate.path),
+      [UNREGISTERED_ARTIFACT]
+    );
+    assert.deepEqual(result.silentGuards, [], "guards were stubbed, so they cannot decide ok");
+    assert.equal(result.ok, false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a missing root with no known violation warns and still succeeds", () => {
+  const [present, ...missing] = manifest.discovery.roots;
+  const root = makeTree({ roots: [present], unregistered: null });
+  try {
+    const result = evaluate(manifest, root);
+    assert.deepEqual(result.missingRoots, missing);
+    assert.equal(result.indeterminate, true);
+    assert.deepEqual(result.unlisted, []);
+    assert.deepEqual(result.silentGuards, []);
+    assert.equal(result.ok, true);
+    // Success here is explicitly not a full-inventory claim.
+    assert.deepEqual(result.scannedRoots, [present]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a missing root does not suppress an unregistered artifact under a present root", () => {
+  const [present, ...missing] = manifest.discovery.roots;
+  assert.ok(
+    UNREGISTERED_ARTIFACT.startsWith(`${present}/`),
+    "the fixture artifact must live under the root that stays present"
+  );
+  const root = makeTree({ roots: [present], unregistered: UNREGISTERED_ARTIFACT });
+  try {
+    const result = evaluate(manifest, root);
+    assert.equal(result.indeterminate, true, "coverage is incomplete");
+    assert.deepEqual(result.missingRoots, missing);
+    assert.deepEqual(
+      result.unlisted.map((candidate) => candidate.path),
+      [UNREGISTERED_ARTIFACT],
+      "a violation proven under a present root survives an unrelated missing root"
+    );
+    assert.deepEqual(result.silentGuards, []);
+    assert.equal(result.ok, false, "known-bad evidence is not discarded as unknown");
+    // The violation is attributed to the root that proved it.
+    const provingRoot = result.roots.find((entry) => entry.root === present);
+    assert.equal(provingRoot.counts.unlisted, 1);
+    for (const absent of missing) {
+      const entry = result.roots.find((candidate) => candidate.root === absent);
+      assert.equal(entry.present, false);
+      assert.equal(entry.counts.candidates, 0);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });
 
@@ -158,8 +258,28 @@ test("an undeclared derived artifact is reported as unlisted", () => {
     const { unlisted } = classifyCandidates(manifest, candidates);
     assert.deepEqual(
       unlisted.map((candidate) => candidate.path),
-      ["server/crates/made-up/tests/snapshots/made_up__new_tool_schemas.snap"]
+      [UNREGISTERED_ARTIFACT]
     );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a pattern under a missing root is not reported as stale", () => {
+  // "matched nothing" and "was never looked for" are different facts. Calling
+  // the second one stale tells an author to delete a valid manifest entry.
+  const [present, ...missing] = manifest.discovery.roots;
+  const root = makeTree({ roots: [present], unregistered: null });
+  try {
+    const result = evaluate(manifest, root);
+    for (const pattern of result.stalePatterns) {
+      for (const absent of missing) {
+        assert.ok(
+          !pattern.startsWith(`${absent}/`),
+          `${pattern} lives under unscanned root ${absent} and cannot be known stale`
+        );
+      }
+    }
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

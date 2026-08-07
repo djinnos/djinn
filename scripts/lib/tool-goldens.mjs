@@ -291,49 +291,70 @@ function walk(dir, ignoreDirs, out) {
  * Walk `discovery.roots` and return every repo-relative path that looks like a
  * derived tool-schema artifact.
  *
- * `missingRoots` is the indeterminacy signal: a caller that finds it non-empty
- * has NOT seen the whole tree and must warn rather than fail. That is the only
- * way this guard can decline to answer — it never fails closed on a partial
- * checkout, because a guard that wedges the merge queue is worse than a guard
- * that misses one artifact for one run.
+ * Results are retained PER ROOT (`perRoot`) and only then aggregated. That
+ * separation is the whole point: an absent root makes the artifact set for
+ * THAT root unknown, and nothing more. Observations already made under the
+ * roots that are present stay on the record.
+ *
+ * `missingRoots` is therefore an incomplete-coverage signal, not a licence to
+ * discard evidence. A caller that finds it non-empty has not seen the whole
+ * tree and must say so — but it must still act on what it did see.
  */
 export function discoverCandidates(manifest, root = repoRoot) {
   const { roots, ignoreDirs, extensions, contentMarkers, pathMarkers } = manifest.discovery;
-  const missingRoots = [];
-  const files = [];
+  const perRoot = [];
 
-  for (const rel of roots) {
-    const abs = path.join(root, rel);
+  const relativize = (abs) => path.relative(root, abs).split(path.sep).join("/");
+
+  for (const declaredRoot of roots) {
+    const abs = path.join(root, declaredRoot);
     if (!existsSync(abs) || !statSync(abs).isDirectory()) {
-      missingRoots.push(rel);
+      perRoot.push({ root: declaredRoot, present: false, candidates: [], scanned: [] });
       continue;
     }
-    walk(abs, ignoreDirs, files);
-  }
 
-  const scanned = files.map((abs) => path.relative(root, abs).split(path.sep).join("/")).sort();
-  const candidates = [];
-  for (const abs of files) {
-    const rel = path.relative(root, abs).split(path.sep).join("/");
-    if (!extensions.some((ext) => rel.endsWith(ext))) continue;
+    const files = walk(abs, ignoreDirs, []);
+    const candidates = [];
+    for (const file of files) {
+      const rel = relativize(file);
+      if (!extensions.some((ext) => rel.endsWith(ext))) continue;
 
-    let reason = null;
-    if (pathMarkers.some((marker) => rel.includes(marker))) {
-      reason = "path";
-    } else {
-      let content;
-      try {
-        content = readFileSync(abs, "utf8");
-      } catch {
-        continue;
+      let reason = null;
+      if (pathMarkers.some((marker) => rel.includes(marker))) {
+        reason = "path";
+      } else {
+        let content;
+        try {
+          content = readFileSync(file, "utf8");
+        } catch {
+          continue;
+        }
+        if (contentMarkers.some((marker) => content.includes(marker))) reason = "content";
       }
-      if (contentMarkers.some((marker) => content.includes(marker))) reason = "content";
+      if (reason) candidates.push({ path: rel, root: declaredRoot, reason });
     }
-    if (reason) candidates.push({ path: rel, reason });
+
+    candidates.sort((a, b) => a.path.localeCompare(b.path));
+    perRoot.push({
+      root: declaredRoot,
+      present: true,
+      candidates,
+      scanned: files.map(relativize).sort(),
+    });
   }
 
-  candidates.sort((a, b) => a.path.localeCompare(b.path));
-  return { candidates, missingRoots, scanned };
+  const missingRoots = perRoot.filter((entry) => !entry.present).map((entry) => entry.root);
+  const scanned = perRoot.flatMap((entry) => entry.scanned).sort();
+  const candidates = perRoot
+    .flatMap((entry) => entry.candidates)
+    .sort((a, b) => a.path.localeCompare(b.path));
+
+  return { candidates, missingRoots, scanned, perRoot };
+}
+
+/** True when `pattern` can only ever match inside `root`. */
+export function patternUnderRoot(pattern, root) {
+  return pattern === root || pattern.startsWith(`${root}/`);
 }
 
 /**

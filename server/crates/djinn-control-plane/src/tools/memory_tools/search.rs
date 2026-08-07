@@ -14,7 +14,16 @@ impl DjinnMcpServer {
         &self,
         Parameters(p): Parameters<SearchParams>,
     ) -> Json<MemorySearchResponse> {
-        Json(ops::memory_search(self, p, None).await)
+        // Host-side MCP surface: no agent session (see `memory_read`).
+        Json(
+            ops::memory_search(
+                self,
+                p,
+                None,
+                &djinn_db::NoteAccessAttribution::unattributed(),
+            )
+            .await,
+        )
     }
 
     /// Returns the full knowledge graph for visualization — all notes with
