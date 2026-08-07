@@ -694,6 +694,18 @@ async fn a_supersede_before_the_close_reads_source_changed() {
 /// **If the applied-directive term were dropped from the comparison**, this
 /// close would read `source_unchanged` and this test would fail — while every
 /// other close test in this file would still pass.
+///
+/// **What this does NOT prove.** The fixture reaches `directive_injected = TRUE`
+/// by calling `mark_directive_injected` directly. In production that flag is
+/// flipped only when a WORKER prompt is built (`prompt_context.rs`), and while
+/// an adjudication child is open the source is blocked behind it, so no worker
+/// prompt exists — the field therefore cannot actually move between the
+/// creation snapshot and the close on this path. The term is wired correctly
+/// and is proven so here, but it is inert in production today. That is the
+/// conservative direction: a field that never moves can only ever under-report
+/// a change, never invent one, so it cannot cause a wrong disposition. Stated
+/// explicitly so nobody reads this test as evidence that the arbiter's
+/// reopen-with-directive case is exercised end to end — it is not.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_applied_arbiter_directive_alone_reads_source_changed() {
     use crate::repositories::task_arbitration::{
