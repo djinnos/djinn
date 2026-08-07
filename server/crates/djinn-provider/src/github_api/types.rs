@@ -391,6 +391,46 @@ pub enum CheckSetIncompleteReason {
     ShortRead,
 }
 
+/// Whether re-asking the provider could produce a different verdict.
+///
+/// This is a fact about the *enumeration*, so it belongs beside the verdict
+/// rather than in the consumer that routes on it. Proposal `nafu` revision 58
+/// makes it the discriminator for the whole incomplete-evidence contract — a
+/// recoverable verdict takes a bounded hold, an irrecoverable one takes one
+/// diagnose-only route — and a consumer that had to re-derive it from the
+/// reason would be a second opinion nothing holds to the first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckSetRecoverability {
+    /// A later enumeration of the same ref can succeed at no cost.
+    Recoverable,
+    /// Every later enumeration of the same ref returns the identical verdict.
+    Irrecoverable,
+}
+
+impl CheckSetIncompleteReason {
+    /// Whether a later enumeration of the same ref could answer differently.
+    ///
+    /// Exhaustive with no wildcard arm: a new reason must be classified here or
+    /// the build fails, which is the only mechanism that stops one from
+    /// silently defaulting into a hold that never resolves.
+    #[must_use]
+    pub fn recoverability(self) -> CheckSetRecoverability {
+        match self {
+            // A non-success page is a provider incident, and the next poll is
+            // a fresh request. A short read is the provider disagreeing with
+            // itself between `total_count` and the pages it served, which is
+            // also a property of the moment.
+            Self::PageFetchFailed | Self::ShortRead => CheckSetRecoverability::Recoverable,
+            // Truncation means this ref genuinely has more check runs than
+            // `MAX_PAGES * PER_PAGE`. That is a property of the ref, not of the
+            // moment: every subsequent walk hits the same ceiling and returns
+            // the same verdict, so holding for a better answer waits forever.
+            Self::MaxPagesTruncated => CheckSetRecoverability::Irrecoverable,
+        }
+    }
+}
+
 /// Whether a check-run enumeration is provably complete.
 ///
 /// `Complete` is a *proof*, never a default assumption: a single successfully

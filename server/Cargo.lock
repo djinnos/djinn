@@ -1123,6 +1123,7 @@ dependencies = [
  "async-trait",
  "axum 0.8.9",
  "base64 0.22.1",
+ "bincode",
  "djinn-agent",
  "djinn-cgroup-launcher",
  "djinn-compaction",

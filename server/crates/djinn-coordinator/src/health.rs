@@ -44,22 +44,12 @@ const STARTUP_TASK_RUN_THRESHOLD_SECS: i64 = 10;
 /// while staying safely clear of any real starting attempt.
 const ORPHANED_PENDING_ATTEMPT_THRESHOLD_SECS: i64 = 5 * 60;
 
-/// The ISO timestamp before which a coordinator incarnation's renewal is
-/// considered expired, using the same threshold convention as the orphaned-
-/// attempt reaper.
-///
-/// Exposed for the CI-route startup owner handoff (proposal `nafu`), which
-/// needs "did this former owner's process die" as one of its two quiescence
-/// proofs. Sharing the constant is deliberate: two different expiry windows for
-/// the same lease would let one sweep read an incarnation as dead while another
-/// reads it as live.
-pub(crate) fn orphan_threshold_iso() -> String {
-    let cutoff = time::OffsetDateTime::now_utc()
-        - time::Duration::seconds(ORPHANED_PENDING_ATTEMPT_THRESHOLD_SECS);
-    cutoff
-        .format(&time::format_description::well_known::Rfc3339)
-        .unwrap_or_default()
-}
+// NOTE: this threshold is deliberately NOT exported for the CI-route startup
+// owner handoff (proposal `nafu`). A lapsed renewal means renewal stopped, and
+// renewal stops at cancellation — not at process death — so a leader still
+// winding down past its drain budget is indistinguishable from a dead one here.
+// The handoff's only quiescence proof is the former owner's own
+// `provider_actions_drained_at` stamp; see `CiIncarnationLiveness`.
 
 /// Startup-only AGE gate for the orphaned-pending-attempt reaper, decoupled from
 /// the owner-lease liveness threshold above. At cold start any pre-boot `pending`

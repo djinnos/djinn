@@ -161,6 +161,29 @@ const REQUIRED_CLAUSES: &[Clause] = &[
         "If either the remedy or a valid command is unavailable, the repair plan is invalid and \
          you must use the diagnose plan.",
     ),
+    // ── The run-absent, diagnose-only route (revision 58) ────────────────
+    //
+    // Keyed on the coordinator's explicit `diagnose_only` flag rather than on
+    // the absent `run_id`. "Infer the restriction from a field that is not
+    // there" is not a rule a model can be held to, and the supervisor rejects
+    // the repair either way — so an inference that went the other way costs a
+    // whole Lead session to discover. The flag's spelling is pinned on the
+    // producing side by `tier2_dispatch`'s own tests; this is the consuming
+    // side of the same name.
+    clause(
+        "run_absent.no_repair",
+        "**When the bundle is marked `diagnose_only`, the repair plan is unavailable to you.**",
+    ),
+    clause(
+        "run_absent.why",
+        "No command you could give could have been copied from CI evidence, because this route \
+         captured none",
+    ),
+    clause(
+        "run_absent.exits",
+        "Diagnose with `evidence_incomplete`, naming exactly which evidence is missing, or park \
+         if the capture failure is itself a cited platform dead-end.",
+    ),
     // ── Narrow, cited park ──────────────────────────────────────────────
     clause(
         "park.cited_dead_end",
@@ -438,6 +461,61 @@ fn lead_prompt_lists_exactly_the_closed_diagnostic_reason_set() {
         listed.matches('`').count(),
         closed_set.len() * 2,
         "the diagnose plan must list exactly four reasons, got: {listed}"
+    );
+}
+
+// ── The run-absent, diagnose-only route ────────────────────────────────────
+
+/// Revision 58's run-absent route: `repair` is unavailable, and the prompt must
+/// say **why**, or the model reads the restriction as arbitrary and argues with
+/// it.
+///
+/// The supervisor's `ci_routing::run_absent_route_rejects_repair_and_approve`
+/// enforces the same rule on the delivered result. This test is what stops the
+/// two from drifting: a validator that silently refuses a plan the prompt still
+/// invites costs a whole Lead session per occurrence.
+#[test]
+fn lead_prompt_makes_repair_unavailable_on_a_run_absent_route() {
+    let prompt = lead_prompt();
+    let section = ci_section(&prompt).expect("CI section present");
+
+    // Keyed on the flag, not on the absent field. Lead is told which routes
+    // this applies to by a marker it can see, because "notice that `run_id` is
+    // missing" is not an instruction a model can be held to.
+    assert!(
+        section.contains("marked `diagnose_only`"),
+        "the CI section must name the flag the coordinator sets on these routes"
+    );
+    assert!(
+        section.contains("the repair plan is unavailable to you"),
+        "the CI section must tell Lead that repair is unavailable on a route \
+         that names no run"
+    );
+    // The reason, not just the rule. Both halves of it: no run was named, and
+    // no check set was enumerated.
+    assert!(
+        section.contains(
+            "evidence capture never completed: its `run_id` is null, nothing was ever \
+             enumerated, and nothing was attributed to a run"
+        ),
+        "the CI section must say why repair is unavailable, not merely that it is"
+    );
+    assert!(
+        section.contains(
+            "could have been copied from CI evidence, because this route captured \
+                          none"
+        ),
+        "the CI section must connect the unavailability to the verification command"
+    );
+    // And it must leave the two legal exits open, or the model has been told
+    // what it cannot do and not what it should.
+    assert!(
+        section.contains("Diagnose with `evidence_incomplete`"),
+        "the CI section must name the diagnostic reason this route takes"
+    );
+    assert!(
+        section.contains("or park if the capture failure is itself a cited platform dead-end"),
+        "the CI section must leave the cited park open as the other legal exit"
     );
 }
 

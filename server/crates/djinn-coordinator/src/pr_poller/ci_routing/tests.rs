@@ -48,7 +48,7 @@ fn pr_head_identity(run_id: i64) -> CiEvidenceIdentity {
         lane: CiLane::PrHead,
         pr_number: 41,
         pr_head_sha: HEAD.to_owned(),
-        run_id,
+        run_id: Some(run_id),
         run_head_sha: HEAD.to_owned(),
         dequeue_id: None,
     }
@@ -59,7 +59,7 @@ fn merge_group_identity(run_id: i64, dequeue: &str) -> CiEvidenceIdentity {
         lane: CiLane::MergeGroup,
         pr_number: 41,
         pr_head_sha: HEAD.to_owned(),
-        run_id,
+        run_id: Some(run_id),
         run_head_sha: "cccccccccccccccccccccccccccccccccccccccc".to_owned(),
         dequeue_id: Some(dequeue.to_owned()),
     }
@@ -558,7 +558,7 @@ fn a_non_terminal_run_or_check_holds_and_spends_nothing() {
 /// [`CiIncompleteReason`] fails to compile here until it is placed on one side
 /// of the partition, which is the only thing that stops a new reason from
 /// silently inheriting whichever default the classifier happens to have.
-const EVERY_INCOMPLETE_REASON: [CiIncompleteReason; 11] = [
+const EVERY_INCOMPLETE_REASON: [CiIncompleteReason; 12] = [
     CiIncompleteReason::MissingStartTimestamp,
     CiIncompleteReason::MissingCompletionTimestamp,
     CiIncompleteReason::MalformedExecutionInterval,
@@ -570,45 +570,357 @@ const EVERY_INCOMPLETE_REASON: [CiIncompleteReason; 11] = [
     CiIncompleteReason::LogApiError,
     CiIncompleteReason::AmbiguousMergeGroupCorrelation,
     CiIncompleteReason::MergeGroupCorrelationUnavailable,
+    CiIncompleteReason::RunAttributionUnavailable,
 ];
 
-/// Which side of the proposal's partition a reason belongs to, spelled out
-/// independently of the implementation's `is_enumeration_failure` so the test
-/// is a second opinion rather than a restatement.
-fn expected_to_hold(reason: CiIncompleteReason) -> bool {
+/// What a reason is allowed to do, and — when it writes a route row — what the
+/// row is allowed to be keyed on.
+///
+/// The `match` below is exhaustive with **no wildcard arm**, so a new
+/// `CiIncompleteReason` does not compile until somebody classifies it. That is
+/// the mechanism, and it is deliberately spelled out here independently of
+/// `CiIncompleteReason::recoverability` so this stays a second opinion rather
+/// than a restatement of the predicate it is checking.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum IdentityDiscipline {
+    /// Bounded hold: no route row, so no identity is persisted at all.
+    Holds,
+    /// Writes a route row, and every field of the identity it is keyed on is a
+    /// fact the provider reported.
+    RowOnRealIdentity,
+    /// Writes ONE diagnose-only route row under the **run-absent** identity:
+    /// `run_id` is `None`, not a sentinel.
+    ///
+    /// Revision 58 replaced the `run_id: 0` placeholder with genuine absence,
+    /// backed by `CHECK (run_id IS NULL OR run_id > 0)` and a unique index that
+    /// compares NULLs as **not** distinct — so every member of this set on one
+    /// head collapses onto one row and one Lead session, rather than each
+    /// inventing its own key or all of them colliding on `0`.
+    RowOnRunAbsentIdentity,
+}
+
+/// Which side of the proposal's partition a reason belongs to.
+///
+/// The judgement is per *reason*, taken over every path that can produce it.
+fn identity_discipline(reason: CiIncompleteReason) -> IdentityDiscipline {
     match reason {
-        // "Any failed page ... or collected count below reported
-        // `total_count` → Hold without a route row." Both are transient
-        // provider facts that a later poll can resolve for free.
-        CiIncompleteReason::EnumerationPageFailed | CiIncompleteReason::PartialPagination => true,
-        // `MAX_PAGES` truncation is deliberately NOT on the hold side, and the
-        // divergence from the proposal's sentence is the point.
+        // -- Recoverable -> bounded hold -------------------------------------
         //
-        // A hold's premise is "a later poll turns this into an evidence bundle
-        // for free". That is true of a failed page and of a short read. It is
-        // false of truncation: the PR genuinely has more check runs than
-        // `MAX_PAGES * PER_PAGE`, which is a property of the PR and not of the
-        // moment, so every subsequent enumeration returns the identical
-        // verdict. Held, such a PR's CI gate never resolves — no route row, no
-        // adjudication, no board signal, forever.
+        // A failed page is a provider incident; a short read is the provider
+        // disagreeing with itself; a merge-group run that has not appeared is a
+        // queue that has not got there yet. All three can clear on the next
+        // poll at no cost. The hold is bounded -- twelve consecutive incomplete
+        // polls on one head escalate -- but the bound lives in the durable
+        // streak ledger, not in the classifier, so from here they hold.
+        CiIncompleteReason::EnumerationPageFailed
+        | CiIncompleteReason::PartialPagination
+        | CiIncompleteReason::MergeGroupCorrelationUnavailable => IdentityDiscipline::Holds,
+
+        // -- Complete but unusable -> ordinary Tier 2 on a real identity -----
         //
-        // It is complete-but-unusable current evidence instead: a real
-        // enumeration whose contents no automatic action can read. That is the
-        // guarded Tier-2 row, and the head-scoped lease bounds it to one Lead
-        // adjudication per PR head rather than one per poll.
-        CiIncompleteReason::CheckEnumerationUnavailable => false,
-        // "Complete snapshot with missing or malformed timestamps, check/log
-        // API error after an immutable run is known, or ambiguous merge-group
-        // correlation → Tier 2 after the current-identity guard."
-        CiIncompleteReason::MissingStartTimestamp
+        // Produced only *after* an immutable run is known --
+        // `route_merge_group_ci_evidence` reaches them strictly after
+        // `correlate_merge_group_run` succeeded -- so the identity is that
+        // run's and Lead may still repair from it.
+        CiIncompleteReason::CheckApiError | CiIncompleteReason::LogApiError => {
+            IdentityDiscipline::RowOnRealIdentity
+        }
+
+        // -- Irrecoverable -> one diagnose-only run-absent route -------------
+        //
+        // Every one of these returns the identical verdict on every subsequent
+        // enumeration of the same head, so a hold would never resolve: no route
+        // row, no adjudication, nothing on the board, and a CI gate that never
+        // clears.
+        //
+        // `CheckEnumerationUnavailable` is `MAX_PAGES` truncation -- a property
+        // of the PR, not of the moment.
+        //
+        // `RunAttributionUnavailable` is a blocking check belonging to no
+        // nameable Actions run; re-asking returns the same check with the same
+        // absent run. This one previously HELD, forever, and revision 58 moved
+        // it here by name.
+        //
+        // `AmbiguousMergeGroupCorrelation` is several runs where one was
+        // needed. Its dequeue id is real, which is what keeps two dequeues of
+        // one head distinct; only the run is absent.
+        //
+        // The four timestamp reasons are properties of check runs that have
+        // already concluded -- a concluded check does not grow a `started_at`
+        // later -- and `capture_pr_head_evidence` reaches them before run
+        // attribution, so there is genuinely no run to name.
+        CiIncompleteReason::CheckEnumerationUnavailable
+        | CiIncompleteReason::RunAttributionUnavailable
+        | CiIncompleteReason::AmbiguousMergeGroupCorrelation
+        | CiIncompleteReason::MissingStartTimestamp
         | CiIncompleteReason::MissingCompletionTimestamp
         | CiIncompleteReason::MalformedExecutionInterval
-        | CiIncompleteReason::NonPositiveExecutionInterval
-        | CiIncompleteReason::CheckApiError
-        | CiIncompleteReason::LogApiError
-        | CiIncompleteReason::AmbiguousMergeGroupCorrelation
-        | CiIncompleteReason::MergeGroupCorrelationUnavailable
-        | CiIncompleteReason::RunAttributionUnavailable => false,
+        | CiIncompleteReason::NonPositiveExecutionInterval => {
+            IdentityDiscipline::RowOnRunAbsentIdentity
+        }
+    }
+}
+
+fn expected_to_hold(reason: CiIncompleteReason) -> bool {
+    identity_discipline(reason) == IdentityDiscipline::Holds
+}
+
+/// Every reason either holds and writes nothing, or writes a row whose identity
+/// is honest -- a real run, or an explicitly absent one.
+///
+/// This test carries two obligations the `match` alone cannot. It pins the
+/// *membership* of the run-absent set, so a reason cannot be quietly refiled;
+/// and it re-derives the routing from `classify` itself rather than from the
+/// predicate `classify` consults, so the two have to agree.
+#[test]
+fn every_incomplete_reason_either_holds_or_names_a_real_identity() {
+    let id = pr_head_identity(900);
+
+    let run_absent: Vec<CiIncompleteReason> = EVERY_INCOMPLETE_REASON
+        .into_iter()
+        .filter(|reason| identity_discipline(*reason) == IdentityDiscipline::RowOnRunAbsentIdentity)
+        .collect();
+    assert_eq!(
+        run_absent,
+        vec![
+            CiIncompleteReason::MissingStartTimestamp,
+            CiIncompleteReason::MissingCompletionTimestamp,
+            CiIncompleteReason::MalformedExecutionInterval,
+            CiIncompleteReason::NonPositiveExecutionInterval,
+            CiIncompleteReason::CheckEnumerationUnavailable,
+            CiIncompleteReason::AmbiguousMergeGroupCorrelation,
+            CiIncompleteReason::RunAttributionUnavailable,
+        ],
+        "the run-absent set changed. Revision 58 fixes it at exactly the \
+         `MAX_PAGES` truncation, unavailable run attribution, ambiguous \
+         merge-group correlation, and the four `blocking_evidence_completeness` \
+         timestamp reasons. A reason that is genuinely re-pollable belongs in \
+         the bounded hold; one that names a run belongs on its real identity.",
+    );
+
+    for reason in EVERY_INCOMPLETE_REASON {
+        let decision = classify(&observe(&id, &id, CiCapture::incomplete(reason)));
+        match identity_discipline(reason) {
+            IdentityDiscipline::Holds => {
+                assert_eq!(decision.action(), CiAction::Hold, "{reason:?}");
+                assert!(
+                    !decision.creates_route_row(),
+                    "{reason:?} holds, so it may not create a route row: {decision:?}",
+                );
+                assert!(
+                    !decision.requires_run_absent_identity(),
+                    "{reason:?} holds, so it names no identity at all: {decision:?}",
+                );
+                assert_no_effects(&decision);
+            }
+            IdentityDiscipline::RowOnRealIdentity => {
+                assert!(
+                    decision.creates_route_row(),
+                    "{reason:?} is classified as writing a route row: {decision:?}",
+                );
+                assert!(
+                    !decision.requires_run_absent_identity(),
+                    "{reason:?} names a real run, so its row must be keyed on it: {decision:?}",
+                );
+                assert!(
+                    !decision.is_diagnose_only(),
+                    "{reason:?} names a real run, so Lead may still repair from it: {decision:?}",
+                );
+                assert_lead_only(&decision, CiTier2Reason::EvidenceUnknown);
+            }
+            IdentityDiscipline::RowOnRunAbsentIdentity => {
+                assert!(
+                    decision.creates_route_row(),
+                    "{reason:?} is classified as writing a route row: {decision:?}",
+                );
+                assert!(
+                    decision.requires_run_absent_identity(),
+                    "{reason:?} has no run to name, so its row must be run-absent \
+                     rather than keyed on a sentinel: {decision:?}",
+                );
+                assert!(
+                    decision.is_diagnose_only(),
+                    "{reason:?} routes under the run-absent identity, where \
+                     `approve` and `repair` are both invalid: {decision:?}",
+                );
+                assert_lead_only(&decision, CiTier2Reason::EvidenceUnknown);
+            }
+        }
+    }
+}
+
+/// An escalated bounded hold takes the same route an irrecoverable reason does.
+///
+/// This is the bound's whole point: a hold that has not resolved in twelve
+/// consecutive polls on one head stops being a hold. It must land on the
+/// identical decision -- one diagnose-only Tier 2 under the run-absent identity
+/// -- or a head could hold forever on one path and adjudicate on another.
+#[test]
+fn bounded_hold_escalates_to_diagnose_only_tier_two() {
+    let id = pr_head_identity(901);
+
+    for reason in EVERY_INCOMPLETE_REASON
+        .into_iter()
+        .filter(|reason| reason.is_recoverable())
+    {
+        let held = classify(&observe(&id, &id, CiCapture::incomplete(reason)));
+        assert_eq!(held.action(), CiAction::Hold, "{reason:?} must hold first");
+        assert!(!held.creates_route_row(), "{reason:?}");
+
+        let escalated = classify(&observe(&id, &id, CiCapture::escalated_hold(reason)));
+        assert!(
+            escalated.creates_route_row(),
+            "an escalated {reason:?} hold must write the route the hold refused to: {escalated:?}",
+        );
+        assert!(escalated.requires_run_absent_identity(), "{reason:?}");
+        assert!(escalated.is_diagnose_only(), "{reason:?}");
+        assert!(
+            escalated.provider_action().is_none(),
+            "an escalated hold authorizes no provider action: {escalated:?}",
+        );
+        assert!(
+            !escalated.consumes_tier1_charge(),
+            "an escalated hold consumes no Tier-1 charge: {escalated:?}",
+        );
+        assert_lead_only(&escalated, CiTier2Reason::EvidenceUnknown);
+    }
+}
+
+/// Two different irrecoverable reasons on one lane identity share ONE row.
+///
+/// The mechanism is the run-absent identity plus the `NULLS NOT DISTINCT`
+/// unique index: the provider-action key is derived from the identity, and
+/// absence hashes to one pre-image, so the second reason resolves to the
+/// existing row instead of opening a second lease and a second Lead session.
+#[test]
+fn irrecoverable_reasons_share_one_run_absent_route_row() {
+    let subject = CiRouteSubject::task("11111111-1111-4111-8111-111111111111");
+    let absent = CiEvidenceIdentity {
+        lane: CiLane::PrHead,
+        pr_number: 902,
+        pr_head_sha: "head902".to_owned(),
+        run_id: None,
+        run_head_sha: "head902".to_owned(),
+        dequeue_id: None,
+    };
+    let first = provider_action_key(&subject, &absent, CiAction::AskLead);
+    let second = provider_action_key(&subject, &absent, CiAction::AskLead);
+    assert_eq!(
+        first, second,
+        "every irrecoverable reason on one lane identity must derive one key",
+    );
+
+    // ...and a route that DOES name a run must not collapse into it.
+    let named = CiEvidenceIdentity {
+        run_id: Some(1),
+        ..absent.clone()
+    };
+    assert_ne!(
+        provider_action_key(&subject, &named, CiAction::AskLead),
+        first,
+        "an absent run and a present run must never share a key",
+    );
+}
+
+/// Absence is spelled `None`, and no sentinel is constructible.
+#[test]
+fn run_absent_identity_has_null_not_sentinel_run_id() {
+    let id = pr_head_identity(903);
+    for reason in EVERY_INCOMPLETE_REASON
+        .into_iter()
+        .filter(|reason| reason.is_run_absent())
+    {
+        let decision = classify(&observe(&id, &id, CiCapture::incomplete(reason)));
+        assert!(decision.requires_run_absent_identity(), "{reason:?}");
+    }
+
+    // The lane executors build the identity, and the type is what forbids the
+    // sentinel: `run_id` is an `Option<i64>`, so `0` is not a value absence can
+    // be spelled as. The database carries the same rule
+    // (`CHECK (run_id IS NULL OR run_id > 0)`) so a future caller that
+    // reintroduced one would fail the INSERT rather than collide silently.
+    let absent = CiEvidenceIdentity {
+        lane: CiLane::PrHead,
+        pr_number: 903,
+        pr_head_sha: "head903".to_owned(),
+        run_id: None,
+        run_head_sha: "head903".to_owned(),
+        dequeue_id: None,
+    };
+    assert!(absent.run_id.is_none());
+}
+
+/// The provider's recoverability verdict and the classifier's must agree.
+///
+/// # Why this needs its own test
+///
+/// `CheckSetIncompleteReason::recoverability` (in `djinn-provider`) and
+/// `CiIncompleteReason::recoverability` (here) are two independent spellings of
+/// one fact, bridged by [`enumeration_incomplete_reason`]. Nothing in the type
+/// system holds them together, and the failure mode of drift is silent and
+/// one-directional:
+///
+/// * if the provider called a truncated walk **recoverable** while the
+///   classifier called it irrecoverable, nothing would break — the classifier
+///   wins, and the bridge is the only consumer;
+/// * if the classifier called it **recoverable** while the provider called it
+///   irrecoverable, a truncated PR would take the bounded hold, every one of
+///   those twelve polls would return the identical verdict, and the head would
+///   spend twelve polls' latency to reach an escalation it could have taken on
+///   the first — with nothing on the board in the meantime to explain the
+///   delay. That is the wedge revision 58 exists to close.
+///
+/// So the agreement is asserted over the **whole** provider reason set, mapped
+/// through the production bridge rather than through a table repeated here.
+#[test]
+fn the_provider_and_the_classifier_agree_on_recoverability() {
+    use djinn_provider::github_api::{CheckSetIncompleteReason, CheckSetRecoverability};
+
+    // Every variant, listed so that adding one to the provider without adding
+    // it here is a visible omission rather than an untested reason.
+    const EVERY_PROVIDER_REASON: [CheckSetIncompleteReason; 3] = [
+        CheckSetIncompleteReason::PageFetchFailed,
+        CheckSetIncompleteReason::MaxPagesTruncated,
+        CheckSetIncompleteReason::ShortRead,
+    ];
+
+    for provider_reason in EVERY_PROVIDER_REASON {
+        let mapped = enumeration_incomplete_reason(provider_reason);
+        let provider_says = provider_reason.recoverability();
+        let classifier_says = mapped.recoverability();
+
+        let expected = match provider_says {
+            CheckSetRecoverability::Recoverable => CiIncompleteRecoverability::Recoverable,
+            CheckSetRecoverability::Irrecoverable => CiIncompleteRecoverability::Irrecoverable,
+        };
+        assert_eq!(
+            classifier_says, expected,
+            "the provider calls {provider_reason:?} {provider_says:?}, but the \
+             classifier calls the reason it maps to ({mapped:?}) \
+             {classifier_says:?}. A recoverable classifier verdict over an \
+             irrecoverable enumeration holds twelve times for an answer that \
+             cannot change.",
+        );
+
+        // And the routing follows from it, so the agreement is not merely
+        // nominal: a recoverable verdict holds and writes nothing, an
+        // irrecoverable one takes the diagnose-only run-absent route.
+        let id = pr_head_identity(904);
+        let decision = classify(&observe(&id, &id, CiCapture::incomplete(mapped)));
+        match provider_says {
+            CheckSetRecoverability::Recoverable => {
+                assert_eq!(decision.action(), CiAction::Hold, "{provider_reason:?}");
+                assert!(!decision.creates_route_row(), "{provider_reason:?}");
+            }
+            CheckSetRecoverability::Irrecoverable => {
+                assert!(decision.creates_route_row(), "{provider_reason:?}");
+                assert!(
+                    decision.requires_run_absent_identity(),
+                    "{provider_reason:?}"
+                );
+                assert!(decision.is_diagnose_only(), "{provider_reason:?}");
+            }
+        }
     }
 }
 
@@ -621,10 +933,7 @@ fn expected_to_hold(reason: CiIncompleteReason) -> bool {
 #[test]
 fn every_incomplete_evidence_case_fails_closed_without_provider_mutation() {
     let id = pr_head_identity(900);
-    for reason in EVERY_INCOMPLETE_REASON
-        .into_iter()
-        .chain([CiIncompleteReason::RunAttributionUnavailable])
-    {
+    for reason in EVERY_INCOMPLETE_REASON {
         let decision = classify(&observe(&id, &id, CiCapture::incomplete(reason)));
         assert_eq!(decision.class(), CiClass::Unknown, "{reason:?}");
         assert_eq!(
@@ -833,7 +1142,7 @@ fn stale_variants() -> Vec<(CiStaleField, CiEvidenceIdentity, CiEvidenceIdentity
         }),
         (CiStaleField::RunId, pr_head.clone(), {
             let mut o = pr_head.clone();
-            o.run_id = 901;
+            o.run_id = Some(901);
             o
         }),
         (CiStaleField::RunHeadSha, pr_head.clone(), {
@@ -893,7 +1202,7 @@ fn stale_field_names_the_first_divergence_deterministically() {
     let evidence = pr_head_identity(900);
     let mut current = evidence.clone();
     current.pr_head_sha = OTHER_HEAD.to_owned();
-    current.run_id = 901;
+    current.run_id = Some(901);
     // Two fields diverge; the earlier one in identity order is named, always.
     assert_eq!(
         stale_field(&evidence, &current),
@@ -1347,7 +1656,7 @@ fn timestamp_completeness_is_checked_in_a_fixed_order() {
 }
 
 #[test]
-fn a_hard_failure_that_claims_it_never_ran_is_contradictory_not_transient() {
+fn hard_failure_with_non_positive_interval_is_not_tier_one() {
     // `failure` is a verdict about the lane's own work; a non-positive
     // interval says the lane never dispatched work. Both cannot be true, and
     // `ci_triage` resolves the pair toward NeverExecuted — which would make
@@ -1422,9 +1731,9 @@ fn each_distinct_actions_run_becomes_its_own_evidence_identity() {
         panic!("expected complete per-run evidence");
     };
     assert_eq!(routes.len(), 2);
-    assert_eq!(routes[0].identity.run_id, 900);
+    assert_eq!(routes[0].identity.run_id, Some(900));
     assert_eq!(routes[0].blocking.len(), 2);
-    assert_eq!(routes[1].identity.run_id, 901);
+    assert_eq!(routes[1].identity.run_id, Some(901));
     assert_eq!(routes[1].blocking.len(), 1);
 
     let s = subject();
@@ -1834,9 +2143,11 @@ fn dummy_attempt(phase: CiActionPhase) -> CiRouteAttempt {
         tier2_leased_at: None,
         tier2_resolution: None,
         lead_session_id: None,
+        lead_session_count: 0,
         reopen_mode: None,
         diagnostic_reason: None,
         park_justification: None,
+        lead_rejection: None,
         provider_error: None,
         superseded_by_evidence: None,
     }
@@ -2052,7 +2363,7 @@ async fn the_head_budget_a_route_derives_is_charged_once_per_lane_up_to_four() {
         // A distinct transient fingerprint per route, so only the HEAD ceiling
         // can be the thing that stops the fifth.
         let mut input = reservation(s, identity);
-        let fingerprint = format!("fp-{}-{}", identity.run_id, identity.lane.as_str());
+        let fingerprint = format!("fp-{:?}-{}", identity.run_id, identity.lane.as_str());
         input.transient_fingerprint = fingerprint.clone();
         input.retry_budget_key = retry_budget_key(s, identity, &fingerprint);
 

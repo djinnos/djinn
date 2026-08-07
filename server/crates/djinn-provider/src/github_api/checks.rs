@@ -262,6 +262,12 @@ impl GitHubApiClient {
     /// It now pages the same way `get_pull_request` does and computes the
     /// verdict from the same three facts: a non-success page status, the
     /// `MAX_PAGES` ceiling, and the response's own `total_count`.
+    ///
+    /// The symmetry with the PR-head walk is exact, and that includes the first
+    /// page: a non-success status on *any* page yields
+    /// `Ok(Incomplete(PageFetchFailed))` with whatever prefix was collected,
+    /// which for page 1 is the empty prefix. Only transport and JSON-decode
+    /// failures return `Err`.
     pub async fn list_check_runs_for_ref(
         &self,
         owner: &str,
@@ -301,20 +307,24 @@ impl GitHubApiClient {
                 .await?;
 
             if !resp.status().is_success() {
-                // Page 1 keeps the historical behaviour of surfacing the error
-                // to the caller: there is no partial result to report, and the
-                // merge-group route treats an outright failure as
-                // `CheckApiError` rather than as an incomplete enumeration.
-                if page == 1 {
-                    let status = resp.status();
-                    let body = resp.text().await.unwrap_or_default();
-                    return Err(GitHubApiError::http(
-                        "list_check_runs_for_ref",
-                        path,
-                        status,
-                        body,
-                    ));
-                }
+                // Every non-success page — *including page 1* — is the same
+                // fact: the enumeration is a prefix and cannot prove itself
+                // complete. There is deliberately no `page == 1` special case.
+                //
+                // It used to return `Err` here, and that made this walk
+                // disagree with the PR-head walk in `get_pull_request` about
+                // one identical fact. The asymmetry mattered: a page-1 failure
+                // has *no partial result*, so the collected count and
+                // `total_count` both sit at zero and compare equal — which is
+                // byte-identical to "this ref has no CI". Carrying the failed
+                // page explicitly is the only thing that separates the two, and
+                // the routing contract then holds and re-polls rather than
+                // spending a route row on evidence that does not exist yet.
+                //
+                // Genuine transport and JSON-decode failures are a different
+                // fact and still return `Err` (see `send_with_retry` above and
+                // the `resp.json()` mapping below); that is what keeps
+                // `CiIncompleteReason::CheckApiError` reachable.
                 tracing::warn!(
                     owner,
                     repo,
@@ -1082,6 +1092,23 @@ impl GitHubApiClient {
             .iter()
             .find(|check| check.name == required_check_name)
         else {
+            // An enumeration that could not prove itself complete cannot prove
+            // the check is *absent* either — the prefix simply may not contain
+            // it. Reporting `CheckRunNotFound` here would turn a provider
+            // incident (or a PR past the pagination ceiling) into an
+            // authoritative verdict about the repository, and the caller in
+            // `ci_helpers` reads an `Unreproducible` answer as a successful
+            // fetch and renders it as the intervention reason.
+            if let Some(reason) = checks.completeness.incomplete_reason() {
+                return Err(GitHubApiError::transport(
+                    "required_check_reproduction_context",
+                    format!("/repos/{owner}/{repo}/commits/{observed_head_sha}/check-runs"),
+                    format!(
+                        "check-run enumeration is incomplete ({reason:?}); \
+                         cannot prove {required_check_name:?} is absent"
+                    ),
+                ));
+            }
             return Ok(unreproducible(
                 required_check_name,
                 observed_head_sha,
