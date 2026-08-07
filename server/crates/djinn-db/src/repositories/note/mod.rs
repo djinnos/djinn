@@ -16,6 +16,7 @@ mod abstract_regeneration;
 mod access_events;
 mod association;
 pub(crate) mod consolidation;
+pub(crate) mod consolidation_lifecycle;
 mod context;
 mod crud;
 mod embedding_associations;
@@ -60,6 +61,20 @@ pub use association::{
 pub use consolidation::{
     CreateCanonicalConsolidatedNote, CreateConsolidationRunMetric,
     CreatedCanonicalConsolidatedNote, NoteConsolidationRepository,
+    is_consolidation_eligible_note_type,
+};
+pub use consolidation_lifecycle::{
+    BoundedCluster, BoundedClusteringOutcome, CONSOLIDATION_ATTEMPT_VERSION,
+    CONSOLIDATION_BACKFILL_BATCH_ROWS, CONSOLIDATION_CANONICAL_TAG,
+    CONSOLIDATION_DEFAULT_SCORE_THRESHOLD, CONSOLIDATION_ELIGIBLE_NOTE_TYPES,
+    CONSOLIDATION_MAX_ADMISSION_COMPARISONS, CONSOLIDATION_MAX_CLUSTER_SOURCES,
+    CONSOLIDATION_MAX_PARTITION_INPUTS, CONSOLIDATION_MIN_CLUSTER_SOURCES,
+    CommitConsolidationCanonical, CommittedConsolidationCanonical, ConsolidationAttemptWitness,
+    ConsolidationCommitOutcome, ConsolidationConflict, ConsolidationConflictReason,
+    ConsolidationPartitionKey, ConsolidationWriteBoundary, DirectedScoreRow,
+    EligibleSourceSelection, PartitionPressureMetric, ProvenanceBackfillReport,
+    build_bounded_clusters, cluster_source_id_set, clusters_are_disjoint,
+    consolidation_attempt_id,
 };
 pub use djinn_memory::{
     BuildContextResponse, ConsolidatedNoteProvenance, ConsolidationCandidateEdge,
@@ -257,6 +272,9 @@ pub struct NoteRepository {
     vector_store: Arc<dyn NoteVectorStore>,
     revision_event_failure: std::sync::Arc<std::sync::atomic::AtomicBool>,
     association_failure: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Test-only seam proving that a failed `(note_id, session_id)` provenance
+    /// insert rolls back the extraction note mutation *and* its revision.
+    extraction_provenance_failure: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl NoteRepository {
@@ -269,6 +287,7 @@ impl NoteRepository {
             vector_store: Arc::new(NoopNoteVectorStore) as Arc<dyn NoteVectorStore>,
             revision_event_failure: mutation::revision_failure_flag(),
             association_failure: mutation::revision_failure_flag(),
+            extraction_provenance_failure: mutation::revision_failure_flag(),
         }
     }
 

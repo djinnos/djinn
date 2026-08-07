@@ -14,8 +14,14 @@ mod template_bootstrap;
 #[cfg(any(test, feature = "test-support"))]
 mod migration_150_test_support;
 
+/// Real SQL round-trip instrumentation, sourced from `sqlx`'s own query
+/// records rather than from any counter this crate maintains.
+#[cfg(any(test, feature = "test-support"))]
+pub mod query_observer;
+
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support {
+    pub use crate::query_observer::{QueryTrace, finish_query_capture, start_query_capture};
     pub use crate::migration_150_test_support::{
         Migration150Fixture, Migration150HistoricalWrapperValues, Migration150OrdinaryPreset,
         with_migration_150_fixture,
@@ -207,10 +213,18 @@ pub use repositories::{
     models::ModelsRepository,
     note::{
         AnchorProposerKind, BackfillRetrievalAnchorOptions, BackfillRetrievalAnchorReport,
-        CONTRADICTION, ConsolidatedNoteProvenance, ConsolidationCandidateEdge,
-        ConsolidationCluster, ConsolidationNote, ConsolidationRunMetric, ContradictionCandidate,
-        CreateCanonicalConsolidatedNote, CreateConsolidationRunMetric,
-        CreatedCanonicalConsolidatedNote, DbNoteGroup, EligibleEmbeddingNote, EmbeddedNote,
+        BoundedCluster, BoundedClusteringOutcome, CONSOLIDATION_ATTEMPT_VERSION,
+        CONSOLIDATION_BACKFILL_BATCH_ROWS, CONSOLIDATION_CANONICAL_TAG,
+        CONSOLIDATION_DEFAULT_SCORE_THRESHOLD, CONSOLIDATION_ELIGIBLE_NOTE_TYPES,
+        CONSOLIDATION_MAX_ADMISSION_COMPARISONS, CONSOLIDATION_MAX_CLUSTER_SOURCES,
+        CONSOLIDATION_MAX_PARTITION_INPUTS, CONSOLIDATION_MIN_CLUSTER_SOURCES, CONTRADICTION,
+        CommitConsolidationCanonical, CommittedConsolidationCanonical, ConsolidatedNoteProvenance,
+        ConsolidationAttemptWitness, ConsolidationCandidateEdge, ConsolidationCluster,
+        ConsolidationCommitOutcome, ConsolidationConflict, ConsolidationConflictReason,
+        ConsolidationNote, ConsolidationPartitionKey, ConsolidationRunMetric,
+        ConsolidationWriteBoundary, ContradictionCandidate, CreateCanonicalConsolidatedNote,
+        CreateConsolidationRunMetric, CreatedCanonicalConsolidatedNote, DbNoteGroup,
+        DirectedScoreRow, EligibleEmbeddingNote, EligibleSourceSelection, EmbeddedNote,
         EmbeddingAssociationRefreshStats, EmbeddingCandidate, LexicalSearchBackend,
         LexicalSearchMode, LexicalSearchPlan, LlmAnchorProposer, MemoryEntityAssociation,
         MemoryEntityKind, MemoryEntityRef, MemoryEntityType, NoopNoteVectorStore,
@@ -223,17 +237,20 @@ pub use repositories::{
         NoteRevisionMutation, NoteRevisionMutationResult, NoteRevisionReason, NoteRevisionSnapshot,
         NoteRevisionSubsystem, NoteRevisionUpdateState, NoteRevisionValidationError,
         NoteSearchParams, NoteStatus, NoteSupersedesAssociation, NoteVectorStore,
-        PromptBudgetReport, ProposedBackfillAnchor, QdrantConfig, QdrantNoteVectorStore,
+        PartitionPressureMetric, PromptBudgetReport, ProposedBackfillAnchor,
+        ProvenanceBackfillReport, QdrantConfig, QdrantNoteVectorStore,
         QueryReplayReport, REVISION_PAGE_MAX, RankingReport, ReplayCriteria, ReplayFixture,
         ReplayNote, ReplayQuery, ReplayReport, RevisionCursor, RevisionCursorError,
         RevisionHistoryPage, RevisionLookupRequest, RevisionRangeRequest, STALE_CITATION,
         STALE_DECAY_SIGNAL, SessionRevisionPage, SessionRevisionRequest,
         TrustedNoteRevisionAttribution, TrustedNoteRevisionProvenance, UpsertNoteEmbedding,
-        anchor_embedding_replay_fixture, assess_note_quality, build_lexical_search_plan,
-        decay_signal_for_elapsed_days, embedding_content_hash, embedding_document_text,
-        executable_lexical_search_sql, folder_for_type, folder_for_type_with_status,
-        generate_anchor_embedding_replay_report, infer_embedding_branch_from_worktree,
-        infer_note_type, is_singleton, legacy_embedding_document_text, lexical_search_threshold,
+        anchor_embedding_replay_fixture, assess_note_quality, build_bounded_clusters,
+        build_lexical_search_plan, cluster_source_id_set, clusters_are_disjoint,
+        consolidation_attempt_id, decay_signal_for_elapsed_days, embedding_content_hash,
+        embedding_document_text, executable_lexical_search_sql, folder_for_type,
+        folder_for_type_with_status, generate_anchor_embedding_replay_report,
+        infer_embedding_branch_from_worktree, infer_note_type, is_consolidation_eligible_note_type,
+        is_singleton, legacy_embedding_document_text, lexical_search_threshold,
         looks_task_local, normalize_lexical_score, normalize_virtual_note_path,
         note_access_events_for_note, permalink_for, permalink_for_with_status,
         permalink_from_virtual_note_path, propose_anchor_deterministic,

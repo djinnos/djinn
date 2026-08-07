@@ -60,6 +60,12 @@ pub mod note_status {
     pub const ACTIVE: &str = "active";
     pub const ARCHIVED: &str = "archived";
     pub const DEPRECATED: &str = "deprecated";
+    /// A source note retired by an atomic canonical consolidation transaction
+    /// (proposal `t5rn`). Like `archived` and `deprecated` this is a reversible
+    /// status change, never a deletion. It is deliberately distinct from
+    /// `archived` so a lifecycle sweep and a consolidation retirement remain
+    /// distinguishable in the corpus.
+    pub const SUPERSEDED: &str = "superseded";
 
     pub fn normalize(status: Option<&str>) -> String {
         status
@@ -70,7 +76,7 @@ pub mod note_status {
     }
 
     pub fn is_valid(status: &str) -> bool {
-        matches!(status, ACTIVE | ARCHIVED | DEPRECATED)
+        matches!(status, ACTIVE | ARCHIVED | DEPRECATED | SUPERSEDED)
     }
 }
 

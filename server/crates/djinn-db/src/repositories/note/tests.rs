@@ -14,6 +14,7 @@ use super::*;
 mod association;
 mod association_source_aware;
 mod consolidation_housekeeping;
+mod consolidation_lifecycle;
 mod crud_storage;
 mod embedding_associations;
 mod embeddings;
