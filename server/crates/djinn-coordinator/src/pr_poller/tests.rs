@@ -522,6 +522,7 @@ fn genuinely_no_review_non_queue_merge_stays_not_applicable() {
 /// Only `id` and `status` are load-bearing; everything else is filler.
 fn task(id: &str, status: &str) -> Task {
     Task {
+        escalation_evidence_at: None,
         id: id.to_string(),
         project_id: "p".to_string(),
         short_id: id.to_string(),
@@ -2863,7 +2864,7 @@ fn sa4x_same_signature_count_2_triggers_escalation_independent_of_reopen_count()
     // Second observation with the same fingerprint: same_signature_count = 2.
     // The pr_poller reads prior_same_sig_count=1 from the durable snapshot,
     // increments to total_consecutive=2, and since 2 >= SAME_CI_SIGNATURE_THRESHOLD(2),
-    // escalates via route_planner_intervention + park_source_open.
+    // escalates via route_arbiter_adjudication + park_source_open.
     let second = build_failing_snapshot_input(
         "task-sa4x-1",
         42,
@@ -4973,6 +4974,7 @@ fn mq_rejection_park_threshold_is_the_documented_three() {
 
 fn mq_section_task() -> djinn_core::models::Task {
     djinn_core::models::Task {
+        escalation_evidence_at: None,
         id: "task-uuid".to_string(),
         project_id: String::new(),
         short_id: "t-mq".to_string(),

@@ -41,6 +41,7 @@ use tokio_util::sync::CancellationToken;
 
 fn fixture_task(id: &str) -> Task {
     Task {
+        escalation_evidence_at: None,
         id: id.to_string(),
         project_id: "p1".into(),
         short_id: "T-1".into(),

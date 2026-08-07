@@ -560,6 +560,19 @@ pub struct Task {
     pub total_reopen_count: i64,
     pub intervention_count: i64,
     pub last_intervention_at: Option<String>,
+    /// 4etb: canonical escalation evidence epoch. Stamped exactly once, in the
+    /// transaction that opens an arbiter escalation, when an in-scope trigger
+    /// first moves the task from "not awaiting adjudication" to "awaiting
+    /// arbiter adjudication". Cleared when the adjudication clears, so a new
+    /// trigger stamps a new epoch.
+    ///
+    /// Park guards derive their evidence floor as
+    /// `max(escalation_evidence_at, last_intervention_at, human_review_resolved_at)`
+    /// and count only attempts/submissions at or after it — the direct-arbiter
+    /// route has no `last_intervention_at` on a first escalation, so without
+    /// this column the floor is empty and every guard reads unbounded history.
+    #[cfg_attr(feature = "sqlx", sqlx(default))]
+    pub escalation_evidence_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     pub closed_at: Option<String>,
@@ -2647,7 +2660,7 @@ mod tests {
 
     // ── Arbiter-entry park-rung regressions (7f8u) ────────────────────────────
     //
-    // The second-strike park rung in `route_planner_intervention` may observe
+    // The second-strike park rung in `route_arbiter_adjudication` may observe
     // any non-terminal status.  When the coordinator chooses arbiter dispatch
     // instead of an immediate human-review hold, it will use
     // `TransitionAction::Escalate` to enter `NeedsLeadIntervention` (the Lead
@@ -2658,7 +2671,7 @@ mod tests {
     #[test]
     fn escalate_accepts_all_park_rung_source_statuses() {
         // These are the exact statuses `ParkForRemediation` accepts — the same
-        // set `route_planner_intervention` may observe at the park rung.
+        // set `route_arbiter_adjudication` may observe at the park rung.
         let park_rung_sources = [
             TaskStatus::Open,
             TaskStatus::InProgress,

@@ -609,7 +609,7 @@ async fn clear_budget_park_dispatch_state(app_state: &AgentContext, task: &Task)
 
 /// Route a loop-guard trip to the Planner for intervention when the report
 /// outcome is `LoopGuardTripped`.
-async fn route_loop_guard_planner_intervention_if_needed(
+async fn route_loop_guard_arbiter_adjudication_if_needed(
     app_state: &AgentContext,
     report: &TaskRunReport,
     task: &Task,
@@ -648,7 +648,7 @@ async fn route_loop_guard_planner_intervention_if_needed(
     match app_state.coordinator().await {
         Some(coordinator) => {
             if let Err(e) = coordinator
-                .route_loop_guard_planner_intervention(&task.id, role, &reason)
+                .route_loop_guard_arbiter_adjudication(&task.id, role, &reason)
                 .await
             {
                 tracing::warn!(
@@ -860,7 +860,7 @@ pub(super) async fn dispatch_task_runtime(
             dispatch_post_settlement_host_operations(
                 &report,
                 || {
-                    route_loop_guard_planner_intervention_if_needed(
+                    route_loop_guard_arbiter_adjudication_if_needed(
                         &app_state,
                         &report,
                         &task,

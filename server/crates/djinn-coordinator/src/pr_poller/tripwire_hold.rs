@@ -230,7 +230,15 @@ impl CoordinatorActor {
             return;
         }
 
-        // ── Arbiter-adjudicated (default): autonomous planner escalation ─────
+        // ── Arbiter-adjudicated (default) ───────────────────────────────────
+        //
+        // 4etb: this used to mint a terminal `PlannerEscalation` directly,
+        // skipping the forensic rung entirely — a tripwire hold reached the
+        // TERMINAL rung on its first offence, with no arbiter ever seeing the
+        // dossier. Route it to the arbiter like every other in-scope trigger.
+        // The dossier is passed through VERBATIM: classification and finding
+        // text are owned by the tripwire engine (and by proposal `nafu` for CI),
+        // never reinterpreted here.
         let dossier =
             build_tripwire_adjudication_dossier(task, tripwire_result, head_sha, &enforcement);
         tracing::info!(
@@ -238,16 +246,17 @@ impl CoordinatorActor {
             head_sha = %head_sha,
             adjudication = "arbiter",
             enforcement_findings = enforcement.len(),
-            "PR poller: tripwire gate held — creating autonomous planner-park escalation (no human hold, no source label)"
+            "PR poller: tripwire gate held — routing directly to the forensic arbiter (no human hold, no source label)"
         );
-        self.create_remediation_task(
-            &task.id,
-            &dossier,
-            &task.project_id,
-            crate::dispatch::RemediationKind::PlannerEscalation,
-        )
+        let quality_strikes = self
+            .task_repo()
+            .quality_reopen_count(&task.id)
+            .await
+            .unwrap_or(0);
+        poll_stack::boxed(|| {
+            self.route_arbiter_adjudication(task, "worker", &dossier, None, quality_strikes)
+        })
         .await;
-        self.park_source_open(&task.id, &dossier).await;
     }
 }
 

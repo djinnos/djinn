@@ -52,6 +52,8 @@ pub mod pool;
 pub mod reply_loop;
 pub mod session_extraction;
 mod supervisor_runner;
+#[cfg(test)]
+mod test_log_capture;
 
 #[cfg(test)]
 mod finalize_handlers_tests;

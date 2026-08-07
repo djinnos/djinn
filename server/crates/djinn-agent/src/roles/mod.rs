@@ -473,6 +473,7 @@ mod tests {
 
     fn make_task_with_type(status: &str, issue_type: &str) -> Task {
         Task {
+            escalation_evidence_at: None,
             id: "task-123".into(),
             project_id: "project-1".into(),
             short_id: "t123".into(),
