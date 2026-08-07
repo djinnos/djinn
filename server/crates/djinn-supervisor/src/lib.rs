@@ -4079,6 +4079,12 @@ mod tests {
         /// Records every `transition_task` call so tests can assert exactly
         /// which board transitions a run requested (and which it must NOT).
         transitions: std::sync::Arc<std::sync::Mutex<Vec<TransitionCall>>>,
+        /// Records the arbitration-lifecycle service calls a run made, by name.
+        ///
+        /// Deliberately a second recorder rather than more entries in
+        /// `transitions`: these are not board transitions, and the fixtures that
+        /// assert an exact transition sequence must keep asserting exactly that.
+        service_calls: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     }
 
     #[async_trait]
@@ -4331,10 +4337,12 @@ mod tests {
             _verification_command: String,
             _exclude_models: Vec<String>,
         ) -> Result<(), String> {
+            self.record_service_call("start_monitored_reopen");
             Ok(())
         }
 
         async fn complete_monitored_reopen(&self, _task_id: String) -> Result<(), String> {
+            self.record_service_call("complete_monitored_reopen");
             Ok(())
         }
 
@@ -4343,7 +4351,17 @@ mod tests {
             _task_id: String,
             _is_infra_failure: bool,
         ) -> Result<bool, String> {
+            self.record_service_call("record_arbiter_session_termination");
             Ok(false)
+        }
+    }
+
+    impl ScriptedLoopGuardServices {
+        fn record_service_call(&self, name: &str) {
+            self.service_calls
+                .lock()
+                .expect("service calls mutex poisoned")
+                .push(name.to_owned());
         }
     }
 
@@ -4387,6 +4405,7 @@ mod tests {
             execute_stage_calls: execute_stage_calls.clone(),
             expected_role: RoleKind::Worker,
             transitions: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            service_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         });
         let supervisor = TaskRunSupervisor::new(Arc::clone(&mirror), services);
         let spec = TaskRunSpec {
@@ -4462,6 +4481,7 @@ mod tests {
             execute_stage_calls: execute_stage_calls.clone(),
             expected_role: RoleKind::Worker,
             transitions: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            service_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         });
         let supervisor = TaskRunSupervisor::new(Arc::clone(&mirror), services);
         let spec = TaskRunSpec {
@@ -4736,6 +4756,7 @@ mod tests {
                 execute_stage_calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
                 expected_role: role,
                 transitions: Arc::clone(&calls),
+                service_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             });
             let supervisor =
                 TaskRunSupervisor::with_test_run_observer(mirror, services, Arc::clone(&calls));
@@ -5175,6 +5196,416 @@ mod tests {
         assert!(calls.iter().any(|c| c.action == "settle:Interrupted"));
     }
 
+    // =======================================================================
+    // Proposal `nafu` wave 5 — `StageOutcome::LeadRouteSuperseded`
+    // =======================================================================
+    //
+    // Three production sites in this crate consume the variant: the telemetry
+    // label in `emit_stage_outcome_event`, the `InterruptedOrFailed` row of
+    // `session_exit_barrier_plan`, and the no-op arm of the run loop. Until
+    // this family none of them was reachable from any acceptance command —
+    // the proposal's six filters build `djinn-coordinator`, `djinn-db`,
+    // `djinn-roles`, `djinn-agent`, `djinn-provider` and `djinn-server`, and
+    // not one of them builds `djinn-supervisor`'s tests.
+    //
+    // What the variant is FOR is why that gap mattered. A Lead route that lost
+    // the atomic current-identity guard is not a role failure. `Failed` on a
+    // Lead role calls `record_arbiter_session_termination`, which increments
+    // the arbiter decision-failure counter and parks the task with a generated
+    // dossier at the cap — so a task whose only sin was a PR head that moved
+    // twice would be parked for it. Route this variant to the failure/park
+    // path and that parking behaviour comes straight back.
+
+    /// Everything one scripted Lead-flow run did, as counts and call names
+    /// rather than the name of the branch it took.
+    struct LeadCaseObservations {
+        outcome: TaskRunOutcome,
+        transitions: Vec<TransitionCall>,
+        service_calls: Vec<String>,
+        task_run_statuses: Vec<TaskRunStatus>,
+        stage_runs: usize,
+    }
+
+    /// Drive the PRODUCTION run loop (`TaskRunSupervisor::run`) through the
+    /// Lead flow with a scripted stage outcome.
+    ///
+    /// The only thing scripted is what `execute_stage` returns; the transition,
+    /// arbitration-lifecycle and task-run-status calls are the ones the real
+    /// loop makes.
+    async fn run_lead_stage_case(id: &str, outcome: StageOutcome) -> LeadCaseObservations {
+        let root = tempfile::tempdir_in(std::env::current_dir().expect("current dir"))
+            .expect("temp test root");
+        let source = root.path().join("source");
+        make_source_repo(&source);
+
+        let project_id = "project-lead-route-superseded";
+        let mirror = Arc::new(MirrorManager::new(root.path().join("mirrors")));
+        mirror
+            .ensure_mirror(project_id, &format!("file://{}", source.display()))
+            .await
+            .expect("install fixture mirror");
+
+        let transitions = Arc::new(Mutex::new(Vec::new()));
+        let service_calls = Arc::new(Mutex::new(Vec::new()));
+        let updated_statuses = Arc::new(Mutex::new(Vec::new()));
+        let stage_runs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let services: Arc<dyn SupervisorServices> = Arc::new(ScriptedLoopGuardServices {
+            cancel: CancellationToken::new(),
+            task: fixture_task(id, project_id),
+            outcome,
+            updated_statuses: Arc::clone(&updated_statuses),
+            fail_start_transition: false,
+            execute_stage_calls: Arc::clone(&stage_runs),
+            expected_role: RoleKind::Lead,
+            transitions: Arc::clone(&transitions),
+            service_calls: Arc::clone(&service_calls),
+        });
+        let supervisor = TaskRunSupervisor::new(Arc::clone(&mirror), services);
+        let report = supervisor
+            .run(TaskRunSpec {
+                task_run_id: format!("run-{id}"),
+                task_attempt_id: None,
+                task_id: id.into(),
+                execution_generation: 0,
+                project_id: project_id.into(),
+                trigger: TaskRunTrigger::NewTask,
+                base_branch: "main".into(),
+                task_branch: format!("djinn/{id}"),
+                flow: SupervisorFlow::Lead,
+                model_id_per_role: Default::default(),
+                read_source_project_ids: Vec::new(),
+                knowledge_injection: djinn_core::models::KnowledgeInjectionConfig::default(),
+                github_owner: None,
+                github_install_token: None,
+                commit_author_name: None,
+                commit_author_email: None,
+                resume_lifecycle_metadata: None,
+                is_evidence_spike: false,
+            })
+            .await
+            .expect("scripted supervisor run");
+
+        LeadCaseObservations {
+            outcome: report.outcome,
+            transitions: transitions
+                .lock()
+                .expect("transitions mutex poisoned")
+                .clone(),
+            service_calls: service_calls
+                .lock()
+                .expect("service calls mutex poisoned")
+                .clone(),
+            task_run_statuses: updated_statuses
+                .lock()
+                .expect("updated statuses mutex poisoned")
+                .clone(),
+            stage_runs: stage_runs.load(std::sync::atomic::Ordering::SeqCst),
+        }
+    }
+
+    /// The refused route has no durable board handoff to guarantee.
+    ///
+    /// Site: the `LeadRouteSuperseded` row of [`session_exit_barrier_plan`].
+    /// Deleting that row is a compile error (the match is exhaustive over
+    /// `StageOutcome`), so the reachable mutation is retargeting it — and that
+    /// is what this kills.
+    ///
+    /// NAMED FAILING MUTATIONS.
+    /// (a) Any `SessionExitBarrierPlan::Required { .. }` in place of
+    ///     `InterruptedOrFailed`: the first assertion fails. In production the
+    ///     supervisor would then wait for — and warn about — a transition the
+    ///     guard's whole contract forbids it from performing.
+    /// (b) `TerminalEvidenceOnly` instead: the first assertion fails, and the
+    ///     truthful-status assertion would rewrite an already-interrupted
+    ///     session as `Failed`.
+    /// (c) Merging the arm into `LeadEscalate`'s
+    ///     (`LeadInterventionComplete` → `open`): the first assertion fails —
+    ///     and that is the board mutation plus next-worker dispatch the
+    ///     variant exists to avoid.
+    #[test]
+    fn lead_route_superseded_exit_barrier_promises_no_board_handoff() {
+        let task = fixture_task("lead-route-superseded-plan", "barrier-project");
+        let plan = session_exit_barrier_plan(
+            &StageOutcome::LeadRouteSuperseded {
+                reason: "pr head moved while Lead was adjudicating".into(),
+            },
+            RoleKind::Lead,
+            &task,
+        );
+
+        assert_eq!(
+            plan,
+            SessionExitBarrierPlan::InterruptedOrFailed,
+            "the guard already wrote `superseded_before_apply` in its own \
+             transaction; there is no board handoff left for the barrier to wait on",
+        );
+
+        // Vacuity guard: `InterruptedOrFailed` is a decision this function
+        // makes, not what it returns for everything. The sibling Lead outcomes
+        // on the SAME task and role do demand a durable handoff.
+        for (sibling, expected) in [
+            (
+                StageOutcome::LeadEscalate {
+                    reason: "escalate".into(),
+                },
+                SessionExitBarrierPlan::Required {
+                    action: SessionExitBarrierAction::LeadInterventionComplete,
+                    expected_target: "open",
+                },
+            ),
+            (
+                StageOutcome::LeadParked {
+                    park_dossier_json: "{}".into(),
+                },
+                SessionExitBarrierPlan::Required {
+                    action: SessionExitBarrierAction::ArbiterPark,
+                    expected_target: "open",
+                },
+            ),
+        ] {
+            assert_eq!(
+                session_exit_barrier_plan(&sibling, RoleKind::Lead, &task),
+                expected,
+                "control: {sibling:?} still requires its durable handoff",
+            );
+        }
+
+        // And truthful terminal evidence survives the plan: an interrupted or
+        // paused session is not rewritten into a failure.
+        for status in [
+            djinn_core::models::SessionStatus::Interrupted,
+            djinn_core::models::SessionStatus::Paused,
+        ] {
+            assert_eq!(
+                settlement_status_after_exit_barrier(plan, status),
+                status,
+                "an already-{status:?} session is truthful evidence",
+            );
+        }
+    }
+
+    /// The run loop applies nothing, charges nothing, and leaves the task in
+    /// the posture the coordinator already redispatches from.
+    ///
+    /// Site: the `LeadRouteSuperseded` arm of the production run loop, driven
+    /// end to end through `TaskRunSupervisor::run` on the Lead flow. Deleting
+    /// the arm is a compile error; the reachable mutations are the ones that
+    /// make it *do* something, and each is named below.
+    ///
+    /// NAMED FAILING MUTATIONS.
+    /// (a) `result = Some(TaskRunOutcome::Failed { .. })` instead of
+    ///     `Interrupted`: the outcome assertion fails, the task-run status
+    ///     assertion fails (`Failed`, not `Interrupted`), and — because
+    ///     `complete_monitored_reopen` is skipped only for `Interrupted` — the
+    ///     empty-service-calls assertion fails too. In production that is the
+    ///     arbitration row consumed out from under the next Lead dispatch.
+    /// (b) Falling the arm through to the `StageOutcome::Failed` arm (or
+    ///     copying its body): `record_arbiter_session_termination` appears in
+    ///     `service_calls` and the assertion fails. That call is the arbiter
+    ///     decision-failure charge that parks the task at the cap — the exact
+    ///     regression the variant exists to prevent.
+    /// (c) Adding a `transition_task` of any kind (`lead_intervention_complete`,
+    ///     `arbiter_park`, `force_close`): the transition assertion fails,
+    ///     because only the pre-stage claim may reach the board.
+    /// (d) Adding a `start_monitored_reopen` so the reason is surfaced to a
+    ///     worker: it appears in `service_calls` and the assertion fails — that
+    ///     is a directive injection and a worker dispatch for evidence a newer
+    ///     head already superseded.
+    /// (e) Removing the `break` so the loop continues: `stage_runs` exceeds 1.
+    #[tokio::test]
+    async fn lead_route_superseded_run_applies_nothing_and_stays_interrupted() {
+        let observed = run_lead_stage_case(
+            "lead-route-superseded-apply",
+            StageOutcome::LeadRouteSuperseded {
+                reason: "pr head moved while Lead was adjudicating".into(),
+            },
+        )
+        .await;
+
+        // Vacuity guard: the run really reached the Lead stage. Without this
+        // every negative below would also hold for a run that aborted before
+        // the arm was ever evaluated.
+        assert_eq!(
+            observed.stage_runs, 1,
+            "the fixture must actually reach the Lead stage exactly once",
+        );
+        assert!(
+            observed
+                .transitions
+                .iter()
+                .any(|call| call.action == "lead_intervention_start"),
+            "and the pre-stage claim must have fired, or the recorder proves \
+             nothing: {:?}",
+            observed.transitions,
+        );
+
+        assert!(
+            matches!(observed.outcome, TaskRunOutcome::Interrupted),
+            "a refused route is Interrupted, never Failed: `Failed` on a Lead \
+             role feeds the arbiter decision-failure counter and parks at the \
+             cap, got {:?}",
+            observed.outcome,
+        );
+        assert_eq!(
+            observed.task_run_statuses,
+            vec![TaskRunStatus::Interrupted],
+            "and the task_run row terminalizes Interrupted, so the coordinator \
+             redispatches rather than booking a failure",
+        );
+        assert!(
+            observed.service_calls.is_empty(),
+            "the arm's contract is everything it does NOT do: no arbiter \
+             termination charge, no directive injection, and no consumption of \
+             the arbitration row (which must stay unconsumed for the next Lead \
+             dispatch). Got {:?}",
+            observed.service_calls,
+        );
+        assert!(
+            observed.transitions.iter().all(|call| matches!(
+                call.action.as_str(),
+                "lead_intervention_start" | "transition_complete:lead_intervention_start"
+            )),
+            "only the pre-stage claim may reach the board; the refused route \
+             fires no transition of its own: {:?}",
+            observed.transitions,
+        );
+    }
+
+    /// Control: the counters the arm above must not move are counters that DO
+    /// move, on the same harness, for the sibling Lead outcomes.
+    ///
+    /// Without this, every negative in
+    /// [`lead_route_superseded_run_applies_nothing_and_stays_interrupted`]
+    /// would still hold if the recorders were dead or the Lead flow never
+    /// reached the arbitration-lifecycle calls at all.
+    ///
+    /// NAMED FAILING MUTATIONS.
+    /// (a) Drop the `record_service_call` from
+    ///     `record_arbiter_session_termination` or `start_monitored_reopen` in
+    ///     the fixture: the corresponding `contains` fails here, which is what
+    ///     stops the sibling test from passing vacuously.
+    /// (b) Drop the `role_kind == RoleKind::Lead` arbiter-accounting block from
+    ///     the production `Failed` arm: the first `contains` fails.
+    /// (c) Drop the `start_monitored_reopen` call from the production
+    ///     `LeadReopen` arm: the second `contains` fails.
+    #[tokio::test]
+    async fn lead_route_superseded_siblings_prove_those_counters_do_move() {
+        let failed = run_lead_stage_case(
+            "lead-route-superseded-control-failed",
+            StageOutcome::Failed {
+                reason: "lead session ended without a decision".into(),
+                provider_failure: None,
+            },
+        )
+        .await;
+        assert!(
+            failed
+                .service_calls
+                .iter()
+                .any(|call| call.as_str() == "record_arbiter_session_termination"),
+            "control: a Lead `Failed` DOES charge the arbiter decision-failure \
+             counter — the charge that parks a task at the cap. Got {:?}",
+            failed.service_calls,
+        );
+        assert!(
+            failed.task_run_statuses.contains(&TaskRunStatus::Failed),
+            "control: and it books the run as a failure: {:?}",
+            failed.task_run_statuses,
+        );
+
+        let reopen = run_lead_stage_case(
+            "lead-route-superseded-control-reopen",
+            StageOutcome::LeadReopen {
+                reason: "repair".into(),
+                directive: "fix the missing re-export".into(),
+                verification_command: "true".into(),
+                exclude_models: vec![],
+            },
+        )
+        .await;
+        assert!(
+            reopen
+                .service_calls
+                .iter()
+                .any(|call| call.as_str() == "start_monitored_reopen"),
+            "control: a Lead reopen DOES inject a directive for the next worker: {:?}",
+            reopen.service_calls,
+        );
+        assert!(
+            reopen
+                .transitions
+                .iter()
+                .any(|call| call.action == "lead_intervention_complete"),
+            "control: and it DOES mutate the board: {:?}",
+            reopen.transitions,
+        );
+        assert_eq!(
+            reopen.stage_runs, 1,
+            "both controls ran the same single Lead stage as the fixture above",
+        );
+        assert_eq!(failed.stage_runs, 1);
+    }
+
+    /// The stage-outcome telemetry names the supersession as itself.
+    ///
+    /// Site: the `LeadRouteSuperseded` label in `emit_stage_outcome_event`,
+    /// reached through the production run loop rather than by calling the
+    /// emitter directly — an unlabelled supersession is indistinguishable from
+    /// a Lead failure in the pod log, which is the only place an operator can
+    /// see one happen.
+    ///
+    /// NAMED FAILING MUTATIONS.
+    /// (a) Relabel the arm `"failed"` (or reuse any sibling label): the
+    ///     positive assertion fails and the `outcome="failed"` ban fails.
+    /// (b) Delete the `emit_stage_outcome_event(..)` call from the run loop:
+    ///     `supervisor.stage_outcome` never appears and the first assertion
+    ///     fails — deleting the label arm itself is a compile error, so this is
+    ///     the deletion that has to be caught here.
+    /// (c) Move the emit after the outcome `match` (so a `break`ing arm skips
+    ///     it): same failure as (b), because every Lead outcome breaks.
+    #[tokio::test]
+    async fn lead_route_superseded_emits_its_own_stage_outcome_label() {
+        let logs = CapturedLogs::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::INFO)
+            .with_writer(logs.clone())
+            .with_span_events(tracing_subscriber::fmt::format::FmtSpan::NONE)
+            .with_target(true)
+            .with_ansi(false)
+            .with_level(true)
+            .finish();
+        let dispatch = tracing::dispatcher::Dispatch::new(subscriber);
+        let _guard = tracing::dispatcher::set_default(&dispatch);
+
+        let observed = run_lead_stage_case(
+            "lead-route-superseded-telemetry",
+            StageOutcome::LeadRouteSuperseded {
+                reason: "a newer passing observation landed".into(),
+            },
+        )
+        .await;
+        assert_eq!(observed.stage_runs, 1, "the fixture reached the Lead stage");
+
+        let captured = logs.take();
+        assert!(
+            captured.contains("supervisor.stage_outcome")
+                && captured.contains("outcome=\"lead_route_superseded\"")
+                && captured.contains("task_id=lead-route-superseded-telemetry"),
+            "the run must emit a stage-outcome event that names the supersession \
+             and the task it happened to, got:\n{captured}",
+        );
+        for sibling in [
+            "outcome=\"failed\"",
+            "outcome=\"lead_escalate\"",
+            "outcome=\"lead_parked\"",
+        ] {
+            assert!(
+                !captured.contains(sibling),
+                "a superseded route must not be reported as {sibling}, got:\n{captured}",
+            );
+        }
+    }
+
     #[test]
     fn cargo_target_run_dir_helper_matches_expected_cache_path() {
         let task_run_id = "019eb956-ac3a-7492-b51c-bcd904f65a21";
@@ -5309,6 +5740,7 @@ mod tests {
             execute_stage_calls: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             expected_role: RoleKind::Worker,
             transitions: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            service_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         });
         let supervisor = TaskRunSupervisor::new(Arc::clone(&mirror), services);
         let spec = TaskRunSpec {
@@ -5389,6 +5821,7 @@ mod tests {
             execute_stage_calls: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             expected_role: RoleKind::Worker,
             transitions: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            service_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         });
         let provider_supervisor = TaskRunSupervisor::new(Arc::clone(&mirror), provider_services);
         let provider_spec = TaskRunSpec {
@@ -5495,6 +5928,7 @@ mod tests {
             execute_stage_calls: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             expected_role: RoleKind::Worker,
             transitions: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            service_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         });
         let supervisor = TaskRunSupervisor::new(Arc::clone(&mirror), services);
         let spec = TaskRunSpec {
@@ -5566,6 +6000,7 @@ mod tests {
             execute_stage_calls: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             expected_role: RoleKind::Worker,
             transitions: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            service_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         });
         let summary_supervisor = TaskRunSupervisor::new(Arc::clone(&mirror), summary_services);
         let summary_spec = TaskRunSpec {
@@ -6101,6 +6536,7 @@ mod tests {
             execute_stage_calls: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             expected_role: RoleKind::Planner,
             transitions: transitions.clone(),
+            service_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         });
         let supervisor = TaskRunSupervisor::new(Arc::clone(&mirror), services);
         let spec = TaskRunSpec {
@@ -6194,6 +6630,7 @@ mod tests {
             execute_stage_calls: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             expected_role: RoleKind::Planner,
             transitions: transitions.clone(),
+            service_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         });
         let supervisor = TaskRunSupervisor::new(Arc::clone(&mirror), services);
         let spec = TaskRunSpec {

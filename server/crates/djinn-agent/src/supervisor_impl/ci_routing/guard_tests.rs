@@ -731,8 +731,27 @@ async fn a_rejected_repair_on_a_stale_run_absent_route_applies_nothing() {
 /// block into. Overwriting it made a task that was mid-adjudication read as
 /// `NoRoute` on the very next look.
 ///
-/// **Mutation target.** Restore the old from-scratch construction and this goes
-/// red on both the route block and the budget flag.
+/// **What this actually witnesses**, and what it does not. This fixture calls
+/// `merge_reopen_into_directive` directly; it never reaches
+/// `start_monitored_reopen`. So restoring the from-scratch
+/// `json!({"decision": .., "directive": ..})` *at the call site* leaves this
+/// green — an earlier version of this comment claimed otherwise, and that claim
+/// was wrong. The call site is pinned separately by
+/// [`the_reopen_writer_merges_into_the_existing_arbitration_directive`] below;
+/// what is pinned here is the merge semantics that call site depends on.
+///
+/// NAMED FAILING MUTATIONS, all inside `merge_reopen_into_directive`.
+/// (a) Rebuild the object from scratch (`json!({})` instead of cloning
+///     `existing`): the `ci_route` and `terminal_disposition_required`
+///     assertions fail — the route block and the cumulative-budget flag are the
+///     two facts the column carries besides the reopen itself.
+/// (b) Copy only the recognised keys forward instead of cloning: the same two
+///     assertions fail as soon as either key is missed, which is how the budget
+///     flag was lost the first time.
+/// (c) Make the `None` case inherit a default body: the two-key length
+///     assertion on `fresh` fails — a plain arbiter reopen invents nothing.
+/// (d) Drop the `is_object()` filter: the scalar case stops producing
+///     `decision: "reopen"` (it panics on `as_object_mut` instead).
 #[test]
 fn applying_a_reopen_preserves_the_route_block_and_the_budget_flag() {
     use crate::direct_services::merge_reopen_into_directive;

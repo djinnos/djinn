@@ -5911,6 +5911,187 @@ fn the_pr_poller_closes_ci_routes_on_both_merge_and_pass() {
     );
 }
 
+/// The end of the `{`-delimited block that starts at `open`.
+///
+/// Used by the disposition-branch guard below to tell "inside the branch" from
+/// "after the branch" — the whole difference between a legacy remedy that is
+/// *replaced* by a route and one that runs *in addition to* it.
+fn block_end(code: &str, open: usize) -> usize {
+    let bytes = code.as_bytes();
+    assert_eq!(
+        bytes[open], b'{',
+        "block_end must start on an opening brace"
+    );
+    let mut depth = 0usize;
+    for (index, byte) in bytes.iter().enumerate().skip(open) {
+        match *byte {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return index;
+                }
+            }
+            _ => {}
+        }
+    }
+    panic!("unbalanced braces from offset {open}");
+}
+
+/// The PR-draft lane's two legacy remedies are *replaced* by a route, never run
+/// alongside one.
+///
+/// SOURCE-LEVEL, and honestly labelled, for the reason the sibling guards above
+/// carry: both branches sit after `gh_client.get_pull_request(..)` inside
+/// `poll_pr_draft_tasks`, and `resolve_installation_client` builds
+/// `GitHubApiClient::for_installation`, which hard-codes `GITHUB_API_BASE`
+/// (`api.github.com`). This crate carries no HTTP double and no base-URL seam on
+/// that path, so no fixture here can reach either branch; every behavioural
+/// fixture in this file enters at `route_pr_head_ci_evidence` and asserts what
+/// the *callee* answered.
+///
+/// The sibling guards pin the *presence* of the two router calls and the live
+/// gate. Neither pins the BRANCH SHAPE around them, and the shape is the whole
+/// contract: a `CiLaneOutcome` that routed must turn the legacy machinery OFF.
+/// Delete a guard and the legacy remedy runs **in addition to** the route rather
+/// than instead of it, so one routed failure buys both an evidence-led remedy
+/// and the old generic `PrCiFailed` reopen — the double-spent session this
+/// proposal exists to stop — with the entire `nafu` command list green, because
+/// the callee still returns exactly what every behavioural fixture asserts.
+///
+/// NAMED FAILING MUTATIONS.
+/// (a) Delete `if !routed.is_routed() {` around `retrigger_inconclusive_run`:
+///     the guard string is gone, so the `expect` on it fails. A routed
+///     inconclusive run would then be retriggered by the route layer AND by the
+///     in-memory legacy dedupe, double-charging the same evidence.
+/// (b) Invert it to `if routed.is_routed() {`: the same `expect` fails, because
+///     the guard is matched with its `!` — and the legacy retrigger would fire
+///     only when the route layer already handled the run.
+/// (c) Move `retrigger_inconclusive_run` out of that block: the containment
+///     assertion fails.
+/// (d) Move the `continue;` INSIDE the `!routed.is_routed()` block: the
+///     "continue after the block" assertion fails — a routed inconclusive lane
+///     would fall through to the undraft path and un-draft a PR whose CI said
+///     nothing.
+/// (e) Delete `if routed.is_routed() && routed.complete_empty().is_none() {`
+///     from the failing arm, or drop its `continue;`: the corresponding
+///     `expect`/containment assertion fails, and a routed causal failure would
+///     reach `handle_ci_failure` as well as its Tier-2 route.
+/// (f) Delete `if routed.complete_empty().is_none() {` around
+///     `handle_ci_failure`: that `expect` fails. An authoritatively complete
+///     *empty* enumeration — the no-CI compatibility path, already recorded
+///     `Passing` by the route layer — would be handed to the legacy failure
+///     remedy.
+/// (g) Reorder so `handle_ci_failure` precedes either guard: the ordering
+///     assertions fail.
+/// (h) Add a second call to either legacy remedy anywhere in the file: the
+///     occurrence-count assertions fail, which is what forces a new caller to be
+///     looked at rather than silently inheriting no guard.
+#[test]
+fn a_routed_pr_draft_disposition_turns_the_legacy_remedy_off() {
+    let code = strip_line_comments(include_str!("../../pr_watcher.rs"));
+
+    let find = |needle: &str, what: &str| -> usize {
+        code.find(needle)
+            .unwrap_or_else(|| panic!("{what}: `{needle}` is not in pr_watcher.rs"))
+    };
+    let count = |needle: &str| code.matches(needle).count();
+
+    // ── Arm boundaries. Everything below is asserted WITHIN one arm, so a
+    //    guard that drifted into a neighbouring arm reads as deleted. ────────
+    let inconclusive_arm = find("CiStatus::Inconclusive => {", "the inconclusive arm");
+    let pending_arm = find(
+        "CiStatus::Pending | CiStatus::Unknown => {",
+        "the pending arm",
+    );
+    let failing_arm = find("CiStatus::Failing => {", "the failing arm");
+    let passing_arm = find("CiStatus::Passing => {", "the passing arm");
+    assert!(
+        inconclusive_arm < pending_arm && pending_arm < failing_arm && failing_arm < passing_arm,
+        "the four CI-status arms are read in file order; a changed order needs \
+         this test updated, not ignored",
+    );
+
+    // ── Inconclusive: the legacy retrigger is the else-branch of the route ──
+    const RETRIGGER: &str = "self.retrigger_inconclusive_run(";
+    const ROUTED_GUARD: &str = "if !routed.is_routed() {";
+    assert_eq!(
+        count(RETRIGGER),
+        1,
+        "one legacy retrigger call site; a second one would inherit no guard",
+    );
+    let retrigger = find(RETRIGGER, "the legacy retrigger");
+    let routed_guard = find(ROUTED_GUARD, "the routed-disposition guard");
+    assert!(
+        (inconclusive_arm..pending_arm).contains(&retrigger)
+            && (inconclusive_arm..pending_arm).contains(&routed_guard),
+        "both live in the inconclusive arm",
+    );
+    let routed_block = block_end(&code, routed_guard + ROUTED_GUARD.len() - 1);
+    assert!(
+        (routed_guard..routed_block).contains(&retrigger),
+        "the legacy retrigger must run ONLY when the route layer declined; \
+         outside that block it runs in addition to the route",
+    );
+    assert!(
+        code[routed_block..pending_arm].contains("continue;"),
+        "and the hold must be OUTSIDE that block — a routed inconclusive run \
+         holds too, it just holds without a second retrigger",
+    );
+
+    // The no-CI compatibility path is the one thing that does NOT hold.
+    let complete_empty = find(
+        "if routed.complete_empty().is_some() {",
+        "the complete-empty fall-through",
+    );
+    assert!(
+        (inconclusive_arm..routed_guard).contains(&complete_empty),
+        "an authoritatively complete EMPTY enumeration falls through to undraft \
+         before the hold, or a repository with no CI wedges in `pr_draft`",
+    );
+
+    // ── Failing: routed holds, and complete-empty is never a failure ────────
+    const LEGACY_FAILURE: &str = ".handle_ci_failure(";
+    const HOLD_GUARD: &str = "if routed.is_routed() && routed.complete_empty().is_none() {";
+    const EMPTY_GUARD: &str = "if routed.complete_empty().is_none() {";
+    assert_eq!(
+        count(LEGACY_FAILURE),
+        1,
+        "one legacy failure-remedy call site in this lane",
+    );
+    let legacy_failure = find(LEGACY_FAILURE, "the legacy failure remedy");
+    let hold_guard = find(HOLD_GUARD, "the routed-holds guard");
+    let empty_guard = find(EMPTY_GUARD, "the complete-empty guard");
+    assert!(
+        (failing_arm..passing_arm).contains(&legacy_failure)
+            && (failing_arm..passing_arm).contains(&hold_guard)
+            && (failing_arm..passing_arm).contains(&empty_guard),
+        "all three live in the failing arm",
+    );
+    assert!(
+        hold_guard < empty_guard && empty_guard < legacy_failure,
+        "the routed hold is answered first, then complete-empty, and only then \
+         is the legacy remedy reachable",
+    );
+    let hold_block = block_end(&code, hold_guard + HOLD_GUARD.len() - 1);
+    assert!(
+        code[hold_guard..hold_block].contains("continue;"),
+        "a routed causal failure must LEAVE the poll; falling out of this block \
+         hands the same evidence to `handle_ci_failure` as well",
+    );
+    assert!(
+        hold_block < empty_guard,
+        "and it must leave before the legacy remedy's own guard",
+    );
+    let empty_block = block_end(&code, empty_guard + EMPTY_GUARD.len() - 1);
+    assert!(
+        (empty_guard..empty_block).contains(&legacy_failure),
+        "the legacy failure remedy must sit INSIDE the complete-empty guard; \
+         outside it, a no-CI enumeration the route layer already recorded \
+         `Passing` gets remediated as a failure",
+    );
+}
+
 /// The sweep EMITS the routing report.
 ///
 /// Behavioural, over the report's only production observable. That observable is
