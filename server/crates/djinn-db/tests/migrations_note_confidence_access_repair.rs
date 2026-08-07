@@ -1,4 +1,4 @@
-//! Migration coverage for 195 — confidence ceiling normalization, legacy
+//! Migration coverage for 197 — confidence ceiling normalization, legacy
 //! access rebase, and the invocation-keyed `note_access_events` era (9xih).
 //!
 //! Every fixture row in this file is constructed by the test itself. No id,
@@ -10,9 +10,9 @@ use std::path::{Path, PathBuf};
 use sqlx::postgres::{PgConnection, PgPool, PgPoolOptions};
 use sqlx::{Connection, Executor};
 
-const MIGRATION_VERSION: u64 = 195;
-const MIGRATION_FILE: &str = "195_note_confidence_access_repair.sql";
-const MIGRATION_OPERATOR_ID: &str = "00000000-0000-7000-8000-000000000195";
+const MIGRATION_VERSION: u64 = 197;
+const MIGRATION_FILE: &str = "197_note_confidence_access_repair.sql";
+const MIGRATION_OPERATOR_ID: &str = "00000000-0000-7000-8000-000000000197";
 const CREATOR_CONTRACT_VERSION: u64 = 142;
 
 /// Must equal `djinn_db::repositories::note::CONFIDENCE_CEILING`.
@@ -107,7 +107,7 @@ async fn seed_migration_operator(conn: &mut PgConnection) {
     conn.execute(
         format!(
             "INSERT INTO users (id, github_id, github_login) VALUES \
-             ('{MIGRATION_OPERATOR_ID}', 9000000195, 'confidence-access-migration-operator') \
+             ('{MIGRATION_OPERATOR_ID}', 9000000197, 'confidence-access-migration-operator') \
              ON CONFLICT DO NOTHING"
         )
         .as_str(),
@@ -140,12 +140,12 @@ async fn apply_prior_migrations(conn: &mut PgConnection) {
     }
 }
 
-async fn apply_migration_195(conn: &mut PgConnection) {
+async fn apply_migration_197(conn: &mut PgConnection) {
     let sql =
-        std::fs::read_to_string(migrations_dir().join(MIGRATION_FILE)).expect("read migration 195");
+        std::fs::read_to_string(migrations_dir().join(MIGRATION_FILE)).expect("read migration 197");
     conn.execute(sql.as_str())
         .await
-        .expect("apply migration 195");
+        .expect("apply migration 197");
 }
 
 // ── Fixture helpers. Every id below is minted by the test. ───────────────────
@@ -253,7 +253,7 @@ async fn notes_confidence_column_default(pool: &PgPool) -> String {
 /// AC2 + AC4 on a populated database, then AC2 + AC4 again after an idempotent
 /// re-run. Every assertion reads state back out of Postgres.
 #[tokio::test]
-async fn migration_195_normalizes_confidence_rebases_access_and_is_idempotent() {
+async fn migration_197_normalizes_confidence_rebases_access_and_is_idempotent() {
     with_temp_database("conf_access", |db_url| async move {
         let mut conn = PgConnection::connect(&db_url)
             .await
@@ -318,7 +318,7 @@ async fn migration_195_normalizes_confidence_rebases_access_and_is_idempotent() 
         // the unique index on `(invocation_id, note_id)` non-trivial: all of
         // these rows will carry `invocation_id IS NULL`, so index creation is
         // only possible because Postgres treats NULLs as DISTINCT. If that
-        // assumption were wrong, `apply_migration_195` below would fail
+        // assumption were wrong, `apply_migration_197` below would fail
         // outright on a populated deployment.
         let legacy_read_event = seed_legacy_access_event(
             &mut conn,
@@ -349,7 +349,7 @@ async fn migration_195_normalizes_confidence_rebases_access_and_is_idempotent() 
             "the two same-note legacy rows must be distinct rows"
         );
 
-        apply_migration_195(&mut conn).await;
+        apply_migration_197(&mut conn).await;
 
         let pool = PgPoolOptions::new()
             .max_connections(2)
@@ -534,7 +534,7 @@ async fn migration_195_normalizes_confidence_rebases_access_and_is_idempotent() 
         )
         .await;
 
-        apply_migration_195(&mut conn).await;
+        apply_migration_197(&mut conn).await;
 
         for note in [&at_one, &below_one, &already_neutral, &near_floor] {
             let (confidence, access_count, last_accessed, created_at) =
@@ -582,13 +582,13 @@ async fn migration_195_normalizes_confidence_rebases_access_and_is_idempotent() 
 /// time: every statement must be a well-formed no-op, and the resulting schema
 /// must be identical to the populated case.
 #[tokio::test]
-async fn migration_195_is_a_safe_no_op_on_an_empty_database() {
+async fn migration_197_is_a_safe_no_op_on_an_empty_database() {
     with_temp_database("conf_empty", |db_url| async move {
         let mut conn = PgConnection::connect(&db_url)
             .await
             .expect("connect migration database");
         apply_prior_migrations(&mut conn).await;
-        apply_migration_195(&mut conn).await;
+        apply_migration_197(&mut conn).await;
 
         let pool = PgPoolOptions::new()
             .max_connections(1)

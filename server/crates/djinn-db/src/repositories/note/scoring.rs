@@ -512,7 +512,7 @@ mod tests {
 
     #[test]
     fn user_confirm_never_demotes_a_note_at_the_ceiling_default() {
-        // Migration 195 sets the new-note default to CONFIDENCE_CEILING. The
+        // Migration 197 sets the new-note default to CONFIDENCE_CEILING. The
         // defect it repairs: with the old 1.0 default, confirming a note
         // *lowered* it to 0.975, sorting it below every untouched peer.
         let untouched = CONFIDENCE_CEILING;
@@ -525,7 +525,7 @@ mod tests {
         let legacy_default_confirmed = bayesian_update(1.0, USER_CONFIRM);
         assert!(
             legacy_default_confirmed < 1.0,
-            "the pre-195 defect must still be demonstrable: confirming a 1.0 note \
+            "the pre-197 defect must still be demonstrable: confirming a 1.0 note \
              clamps to {CONFIDENCE_CEILING}, which is why the default had to move"
         );
     }

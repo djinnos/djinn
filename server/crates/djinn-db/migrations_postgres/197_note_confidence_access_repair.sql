@@ -1,4 +1,4 @@
--- Migration 195: separate retrieval utility from epistemic confidence and open
+-- Migration 197: separate retrieval utility from epistemic confidence and open
 -- a clean, invocation-keyed note-access accounting era (proposal 9xih).
 --
 -- DEPLOYMENT-NEUTRAL BY CONSTRUCTION. Every statement below is a predicate over

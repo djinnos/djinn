@@ -5,7 +5,7 @@ use super::*;
 /// Maximum accepted length, in characters, of a caller-supplied
 /// `memory_read` `invocation_id`.
 ///
-/// Bound to `note_access_events.invocation_id VARCHAR(64)` (migration 195), and
+/// Bound to `note_access_events.invocation_id VARCHAR(64)` (migration 197), and
 /// counted in characters because that is what Postgres `VARCHAR(n)` counts.
 /// Over-limit ids are rejected rather than truncated: truncation would fold two
 /// distinct invocations onto one replay key and silently drop a real access.

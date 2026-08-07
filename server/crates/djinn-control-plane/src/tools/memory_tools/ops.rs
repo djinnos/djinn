@@ -146,7 +146,7 @@ fn permalink_candidates(identifier: &str) -> Vec<String> {
 /// This used to call `NoteRepository::touch_accessed`, so appearing in a result
 /// set incremented `access_count` and advanced `last_accessed` exactly like an
 /// explicit `memory_read` did. The two became indistinguishable in those
-/// scalars, which is why migration 195 has to rebase them rather than partition
+/// scalars, which is why migration 197 has to rebase them rather than partition
 /// them.
 ///
 /// A note the agent never asked for by name is not an access. Search-result

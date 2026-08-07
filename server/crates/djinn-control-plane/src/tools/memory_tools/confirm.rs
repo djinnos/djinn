@@ -199,7 +199,7 @@ mod tests {
     /// down the confidence ordering that gates injection eligibility.
     ///
     /// This runs the real `memory_confirm` tool against two notes created by
-    /// the real repository, so the schema default (migration 195) is what is
+    /// the real repository, so the schema default (migration 197) is what is
     /// actually under test.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn confirming_a_new_note_never_sorts_it_below_an_untouched_note() {

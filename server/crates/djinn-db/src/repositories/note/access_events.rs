@@ -21,7 +21,7 @@ use crate::error::DbResult as Result;
 /// Maximum stored length, in characters, of a caller-supplied invocation id.
 ///
 /// Bound to the `note_access_events.invocation_id VARCHAR(64)` column added by
-/// migration 195. Callers must reject longer ids *before* note resolution
+/// migration 197. Callers must reject longer ids *before* note resolution
 /// rather than letting Postgres truncate or error mid-transaction — a truncated
 /// id would silently collide two distinct invocations into one replay key.
 pub const INVOCATION_ID_MAX_CHARS: usize = 64;
@@ -132,7 +132,7 @@ pub struct NoteAccessEvent {
     pub task_run_id: Option<String>,
     pub source: String,
     pub created_at: String,
-    /// Caller-keyed invocation this row belongs to (migration 195).
+    /// Caller-keyed invocation this row belongs to (migration 197).
     ///
     /// NULL for every pre-9xih row: those predate invocation keying and can
     /// never satisfy a replay probe. A non-null value is exactly what makes a
@@ -197,7 +197,7 @@ async fn resolve_task_run_id(
 /// won, advance the note's access counters — in one transaction.
 ///
 /// The ledger insert is the gate, not a side note. `(invocation_id, note_id)` is
-/// unique (migration 195), so a conflict *is* a caller retry of one logical
+/// unique (migration 197), so a conflict *is* a caller retry of one logical
 /// invocation and `ON CONFLICT DO NOTHING` reports zero affected rows. The
 /// counter update runs only on the winning insert, which is what makes a replay
 /// leave both `access_count` and `last_accessed` untouched.
