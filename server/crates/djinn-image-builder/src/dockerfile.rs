@@ -630,39 +630,50 @@ fn aggregate_node_versions<'a>(
     out
 }
 
-/// Package managers installed into a node image, beyond the `npm` that ships
-/// with node itself.
+/// Package managers every node image ships, beyond the `npm` bundled with node.
 ///
-/// Installed when the config declares no package manager anywhere. Without a
-/// fallback, a repo whose JS workspace uses pnpm (declared only by its
-/// `pnpm-lock.yaml`, which this builder cannot see — it renders a Dockerfile,
-/// it does not read the tree) produced an image with NO pnpm on `PATH` at all.
-/// Every consumer then had to find one at runtime, and what they found was a
-/// copy that had been bootstrapped onto the shared, writable `/cache` PVC —
-/// i.e. the package-manager binary itself became shared mutable state. A
-/// corrupted entry there is what silently killed every JS-touching task for
-/// three weeks (see `djinn_k8s::js_install`).
+/// Selecting node used to give you node and npm and nothing else: pnpm/yarn are
+/// separate `npm install -g` steps in `install-node.sh`, and those ran ONLY when
+/// the config explicitly named a manager. That made the image contents depend on
+/// a config field that is routinely empty — `detect.rs` populates
+/// `package_manager` from `packageManager` in package.json (falling back to
+/// lockfiles), but a user-edited config drops those detected values and nothing
+/// re-derives them.
 ///
-/// An explicit `default_package_manager` or per-workspace `package_manager`
-/// still wins; this only fills the hole when the config is silent.
-const DEFAULT_NODE_PACKAGE_MANAGERS: &[&str] = &["pnpm"];
+/// The failure was not "the wrong manager is installed", it was "no manager is
+/// installed": a repo whose JS workspace uses pnpm got an image with no pnpm on
+/// `PATH` at all. Every consumer then had to find one at runtime, and what they
+/// found was a copy bootstrapped onto the shared, writable `/cache` PVC — the
+/// package-manager BINARY became shared mutable state. A corrupted entry there
+/// silently killed every JS-touching task for three weeks (see
+/// `djinn_k8s::js_install`).
+///
+/// So this ships whenever node is SELECTED, rather than being contingent on a
+/// package manager also being declared. It is not unconditional: a config with
+/// no node language emits no node block at all (see `emit_node_block`), so a
+/// Rust-only or Python-only image is unaffected. A few MB against node's own
+/// ~147MB is a cheap price for removing the class of failure above. Anything the
+/// config DOES declare is still installed, unioned with this.
+///
+/// Kept to pnpm deliberately — yarn/bun remain declaration-driven, since neither
+/// has shown the same failure and each is one more thing to keep current.
+const NODE_PACKAGE_MANAGERS: &[&str] = &["pnpm"];
 
 fn aggregate_node_pms<'a>(node: &'a NodeLanguage, config: &'a EnvironmentConfig) -> Vec<&'a str> {
     let mut seen: BTreeSet<&str> = BTreeSet::new();
     let mut out: Vec<&str> = Vec::new();
-    for pm in node.default_package_manager.as_deref().into_iter().chain(
-        config
-            .workspaces
-            .iter()
-            .filter(|ws| ws.language == "node")
-            .filter_map(|ws| ws.package_manager.as_deref()),
+    for pm in NODE_PACKAGE_MANAGERS.iter().copied().chain(
+        node.default_package_manager.as_deref().into_iter().chain(
+            config
+                .workspaces
+                .iter()
+                .filter(|ws| ws.language == "node")
+                .filter_map(|ws| ws.package_manager.as_deref()),
+        ),
     ) {
         if seen.insert(pm) {
             out.push(pm);
         }
-    }
-    if out.is_empty() {
-        out.extend_from_slice(DEFAULT_NODE_PACKAGE_MANAGERS);
     }
     out
 }
@@ -1225,19 +1236,38 @@ mod tests {
         );
     }
 
-    /// An explicit declaration must still win over the fallback.
+    /// A declared manager is installed IN ADDITION to pnpm, not instead of it.
     #[test]
-    fn declared_package_manager_overrides_the_default() {
+    fn declared_package_manager_is_unioned_with_the_node_default() {
         let mut cfg = minimal_valid_config();
         cfg.languages.node = Some(djinn_stack::environment::NodeLanguage {
             default_version: "22".into(),
             default_package_manager: Some("yarn".into()),
         });
         let df = generate_dockerfile(&cfg, &agent_worker(), DEFAULT_LAUNCHER_PROTOCOL).unwrap();
-        assert!(df.dockerfile.contains("PACKAGE_MANAGERS=\"yarn\""));
         assert!(
-            !df.dockerfile.contains("PACKAGE_MANAGERS=\"pnpm"),
-            "the fallback must not be appended when a manager is declared"
+            df.dockerfile.contains("PACKAGE_MANAGERS=\"pnpm yarn\""),
+            "declaring yarn must not drop pnpm:\n{}",
+            df.dockerfile
+        );
+    }
+
+    /// The install is gated on NODE being selected, not applied globally: a
+    /// config with no node language must emit no node block, and therefore no
+    /// package-manager install at all.
+    #[test]
+    fn no_node_language_ships_no_package_manager() {
+        let mut cfg = minimal_valid_config();
+        cfg.languages.node = None;
+        let df = generate_dockerfile(&cfg, &agent_worker(), DEFAULT_LAUNCHER_PROTOCOL).unwrap();
+        assert!(
+            !df.dockerfile.contains("PACKAGE_MANAGERS="),
+            "a non-node image must not install any package manager:\n{}",
+            df.dockerfile
+        );
+        assert!(
+            !df.dockerfile.contains("install-node.sh"),
+            "a non-node image must not run the node installer at all"
         );
     }
 
