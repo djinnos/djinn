@@ -47,8 +47,8 @@
 
 use djinn_db::{
     CiEvidenceIdentity, CiHoldApply, CiHoldEscalationRoute, CiHoldIdentity,
-    CiIncompleteHoldRepository, CiLane, CiOriginState, CiRouteReservation, CiRouteSubject,
-    CiTier2Reason,
+    CiIncompleteHoldRepository, CiLane, CiOriginState, CiRouteAttemptRepository,
+    CiRouteReservation, CiRouteSubject, CiTier2Reason,
 };
 
 use super::ci_routing::executor::CiTier2Handoff;
@@ -292,9 +292,38 @@ impl CoordinatorActor {
 
     /// Turn an escalated hold's durable route into one Lead session.
     ///
-    /// The handoff is rebuilt from the escalation payload rather than read back
-    /// from the row, because the payload is what the ledger actually wrote —
-    /// reading it back would only prove that `SELECT` inverts `INSERT`.
+    /// The handoff is rebuilt from the escalation payload — which is what the
+    /// ledger was asked to write — with exactly **one** value read back from
+    /// the row: the Tier-2 lease id. That one is not a `SELECT` proving that it
+    /// inverts an `INSERT`; it is the only field whose payload value can differ
+    /// from the durable one, and both paths into this function can produce that
+    /// difference:
+    ///
+    /// * [`escalation_route`] mints `tier2_lease_id` fresh on **every** call,
+    ///   and `insert_escalation_route` writes it `ON CONFLICT DO NOTHING`. When
+    ///   a run-absent route for this identity already existed
+    ///   (`route_inserted == false`), the stored lease is the pre-existing
+    ///   row's and this poll's minted id names no row at all.
+    /// * The [`CiHoldApply::AlreadyEscalated`] re-drive — the recovery for "the
+    ///   lease committed but the dispatch did not" — carries a payload minted
+    ///   after the row was written, so its id is always the wrong one.
+    ///
+    /// Binding the payload's id in either case is not a cosmetic miss.
+    /// `attach_lead_session` is fenced on the stored lease id, so the route
+    /// keeps `lead_session_id` NULL — `unapplied_lead_results` then reads
+    /// "quiescent" with an adjudication in flight — and the `tier2_lease_id`
+    /// the directive carries is the id the supervisor hands
+    /// `resolve_tier2_lease`, which is fenced on the same column. A Lead
+    /// session dispatched under a lease id no row holds can therefore never
+    /// have its result applied: the escalation would spend a session and stay
+    /// wedged, which is the exact failure this dispatch exists to prevent.
+    ///
+    /// A row that is absent, or whose lease is no longer open, dispatches
+    /// **nothing**. There is no lease to bind to and no lease to resolve under,
+    /// so a session started here could only be discarded — and the absent case
+    /// is real: `insert_escalation_route` also conflicts when a *different* row
+    /// on this subject already holds the head's Tier-2 lease, and that row's
+    /// adjudication is the one that owns the head.
     ///
     /// `evidence_references` deliberately omits a run id: there is none, and a
     /// placeholder would be a handle Lead could quote to look grounded while
@@ -312,6 +341,45 @@ impl CoordinatorActor {
                 return;
             }
         };
+        let subject = &escalation.reservation.subject;
+        let key = &escalation.reservation.provider_action_key;
+        let route = match CiRouteAttemptRepository::new(self.db.clone())
+            .get(subject, key)
+            .await
+        {
+            Ok(Some(route)) => route,
+            Ok(None) => {
+                tracing::warn!(
+                    task_id,
+                    key = %key,
+                    "ci hold: the escalated route names no row on this subject, so the \
+                     head's Tier-2 lease is held elsewhere; dispatching nothing"
+                );
+                return;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    task_id,
+                    key = %key,
+                    "ci hold: could not read the escalated route's lease; the next poll \
+                     lands on `AlreadyEscalated` and retries the dispatch"
+                );
+                return;
+            }
+        };
+        let lease_id = match (route.holds_open_tier2_lease(), route.tier2_lease_id) {
+            (true, Some(lease_id)) => lease_id,
+            _ => {
+                tracing::warn!(
+                    task_id,
+                    key = %key,
+                    "ci hold: the escalated route holds no open Tier-2 lease, so a Lead \
+                     session dispatched here could bind to nothing and resolve nothing"
+                );
+                return;
+            }
+        };
         let identity = &escalation.reservation.identity;
         let mut references = vec![identity.pr_head_sha.clone(), identity.run_head_sha.clone()];
         if let Some(dequeue) = &identity.dequeue_id {
@@ -323,7 +391,7 @@ impl CoordinatorActor {
         let handoff = CiTier2Handoff {
             subject: escalation.reservation.subject.clone(),
             provider_action_key: escalation.reservation.provider_action_key.clone(),
-            tier2_lease_id: escalation.tier2_lease_id.clone(),
+            tier2_lease_id: lease_id,
             identity: identity.clone(),
             origin_state: escalation.reservation.origin_state,
             reason: escalation.tier2_reason,
@@ -419,6 +487,13 @@ fn escalation_route(
                 &identity.pr_head_sha,
             ),
         },
+        // PROPOSED, not authoritative. `insert_escalation_route` writes this
+        // `ON CONFLICT DO NOTHING`, so it becomes the row's lease only when this
+        // poll is the one that inserts the row; every other call — a conflicting
+        // insert, and every `AlreadyEscalated` re-drive, both of which mint a
+        // fresh one here — leaves a durable lease that this value does not name.
+        // That is why `dispatch_escalated_hold` binds the lease id it reads back
+        // from the row rather than this one.
         tier2_lease_id: uuid::Uuid::now_v7().to_string(),
         tier2_lease_key: tier2_lease_key(
             &identity.subject,

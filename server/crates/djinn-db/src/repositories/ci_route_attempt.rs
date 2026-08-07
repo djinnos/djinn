@@ -2065,9 +2065,19 @@ impl CiRouteAttemptRepository {
     /// post-increment total, so a caller can tell a first attach
     /// (`session_count == 1`) from an additional one without re-reading the row.
     ///
+    /// # `lead_session_id` is a row id, not a composed handle
+    ///
+    /// The column is `VARCHAR(36)`: exactly one UUID. Postgres does not
+    /// truncate an over-long value into a `VARCHAR(n)` column, it refuses the
+    /// statement with `22001` — which arrives here as `Err`, not as
+    /// [`CiLeadSessionAttachment::NotFound`]. A caller that composes a handle
+    /// out of a task id and a counter therefore fails **every** attach while
+    /// every other effect of its dispatch lands, which is how the coordinator's
+    /// Tier-2 dispatch went a whole wave binding nothing. Pass an id.
+    ///
     /// # Errors
     ///
-    /// Database failures.
+    /// Database failures, including a `lead_session_id` longer than the column.
     pub async fn attach_lead_session(
         &self,
         subject: &CiRouteSubject,

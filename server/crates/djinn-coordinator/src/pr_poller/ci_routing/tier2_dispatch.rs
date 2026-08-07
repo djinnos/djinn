@@ -13,7 +13,8 @@
 //!
 //! 1. write the route's keys into the arbitration row's `directive` column, so
 //!    the supervisor can name the exact row its guard must resolve;
-//! 2. bind the row to the lease with `attach_lead_session`, so the quiescence
+//! 2. bind the row to the lease with `attach_lead_session` — by its own row id,
+//!    which is what `lead_session_id` is sized to hold — so the quiescence
 //!    report can count "leases with a dispatched adjudication whose result has
 //!    not been applied";
 //! 3. `Escalate` the task into `needs_lead_intervention`, which is the only
@@ -36,7 +37,7 @@
 #[cfg(test)]
 use djinn_db::{CiLane, CiOriginState, CiTier2Reason};
 use djinn_db::{
-    CiRouteAttemptRepository,
+    CiLeadSessionAttachment, CiRouteAttemptRepository,
     repositories::task_arbitration::{CreateArbitrationParams, TaskArbitrationRepository},
 };
 
@@ -109,8 +110,12 @@ impl CoordinatorActor {
                 excluded_models: &serde_json::Value::Array(Vec::new()),
             })
             .await;
-        match created {
-            Ok(djinn_db::repositories::task_arbitration::TryCreateResult::Created(_)) => {}
+        // The id of the row that was just written, kept rather than discarded:
+        // it is the handle the route is bound to below.
+        let arbitration_id = match created {
+            Ok(djinn_db::repositories::task_arbitration::TryCreateResult::Created(record)) => {
+                record.id
+            }
             Ok(_) => return CiTier2Dispatch::AlreadyInFlight,
             Err(error) => {
                 tracing::warn!(
@@ -120,28 +125,60 @@ impl CoordinatorActor {
                 );
                 return CiTier2Dispatch::ArbitrationUnavailable;
             }
-        }
+        };
 
         // Bind the route to the session that will adjudicate it. The lease id
         // fences this: a stale caller cannot attach to a lease that has already
         // been resolved. It is what makes `unapplied_lead_results` in the
         // rollback quiescence report mean "a Lead was actually dispatched"
         // rather than "a lease exists".
+        //
+        // The bound handle is the **arbitration row's own id**. It used to be
+        // `format!("arbitration:{task_id}:{hold_cycle}")`, which is a ~50
+        // character string — and `ci_route_attempts.lead_session_id` is
+        // `VARCHAR(36)`, sized for exactly one row id. Postgres does not
+        // truncate an over-long value, it refuses the statement (22001), so
+        // EVERY Tier-2 dispatch on every lane failed to bind and the failure
+        // was invisible: the error was logged at `warn` and the dispatch
+        // carried on to escalate the board. The consequence was not cosmetic —
+        // `unapplied_lead_results` and the report's `lead_invocations` both
+        // count on this column, so both were structurally pinned at zero and a
+        // rollback could read "quiescent" with Lead adjudications in flight.
+        //
+        // The row id is also the better handle on its own terms: it names the
+        // exact `task_arbitrations` row this route is adjudicated under, rather
+        // than a string that had to be re-derived to be useful.
         let routes = CiRouteAttemptRepository::new(self.db.clone());
-        if let Err(error) = routes
+        match routes
             .attach_lead_session(
                 &handoff.subject,
                 &handoff.provider_action_key,
                 &handoff.tier2_lease_id,
-                &format!("arbitration:{}:{hold_cycle}", task.id),
+                &arbitration_id,
             )
             .await
         {
-            tracing::warn!(
-                task_id = %task.short_id,
-                %error,
-                "ci route: could not bind the Lead dispatch to its Tier-2 lease"
-            );
+            Ok(CiLeadSessionAttachment::Attached { .. }) => {}
+            // Reported, not swallowed. A fence miss means the arbitration row
+            // exists and no route names it, which is precisely the state the
+            // rollback report cannot see — and it is the shape the over-long
+            // id bug hid behind for a whole wave.
+            Ok(CiLeadSessionAttachment::NotFound) => {
+                tracing::warn!(
+                    task_id = %task.short_id,
+                    key = %handoff.provider_action_key,
+                    lease_id = %handoff.tier2_lease_id,
+                    "ci route: no open Tier-2 lease matched the Lead dispatch, so the \
+                     adjudication is not bound to its route"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    task_id = %task.short_id,
+                    %error,
+                    "ci route: could not bind the Lead dispatch to its Tier-2 lease"
+                );
+            }
         }
 
         // Last, and only now. `Escalate` is the single production transition
@@ -179,6 +216,7 @@ impl CoordinatorActor {
             reason = handoff.reason.as_str(),
             key = %handoff.provider_action_key,
             hold_cycle,
+            arbitration_id = %arbitration_id,
             "ci route: dispatched Lead under a Tier-2 lease"
         );
         CiTier2Dispatch::Dispatched
