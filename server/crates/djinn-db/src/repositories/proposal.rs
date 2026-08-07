@@ -12,6 +12,7 @@ use crate::database::Database;
 use crate::repositories::epic::EpicRepository;
 use crate::repositories::note::NoteRepository;
 use crate::repositories::note::{LexicalSearchBackend, sanitize_postgres_tsquery};
+use crate::repositories::task::{EffectiveCreatorProvenance, resolve_effective_creator};
 use crate::repositories::typed_evidence::{
     DemandTypedEvidenceInput, TypedEvidenceRepository, legacy_demand_hash, normalized_demand_hash,
 };
@@ -3633,11 +3634,21 @@ impl ProposalRepository {
             return Err(Error::InvalidTransition("active_evidence_conflict".into()));
         }
         let task_id = uuid::Uuid::now_v7().to_string();
-        let creator: String =
-            sqlx::query_scalar("SELECT created_by_user_id FROM tasks WHERE id=$1")
-                .bind(&input.claim.created_by_task_id)
-                .fetch_one(&mut *tx)
-                .await?;
+        // Attribute the spike through the shared provenance boundary while this
+        // transaction is open, exactly like every other task producer. The
+        // authority task is the source of record; the proposal owner is the
+        // declared fallback. A creatorless outcome fails closed there rather
+        // than reaching a NULL-capable insert here.
+        let created_by_user_id = resolve_effective_creator(
+            &mut tx,
+            EffectiveCreatorProvenance {
+                explicit_user_id: None,
+                source_task_id: Some(&input.claim.created_by_task_id),
+                proposal_id: Some(input.proposal_id),
+            },
+            None,
+        )
+        .await?;
         let authority_role: String = sqlx::query_scalar("SELECT agent_type FROM tasks WHERE id=$1")
             .bind(&input.claim.created_by_task_id)
             .fetch_one(&mut *tx)
@@ -3648,7 +3659,7 @@ impl ProposalRepository {
             ));
         }
         sqlx::query("INSERT INTO tasks (id,project_id,short_id,title,description,design,issue_type,priority,owner,status,labels,acceptance_criteria,created_by_user_id,agent_type) VALUES ($1,$2,$3,$4,$5,'','spike',0,'','open',$6,'[]'::jsonb,$7,'architect')")
-            .bind(&task_id).bind(input.project_id).bind(format!("e{}", &task_id[..7])).bind(input.title).bind(input.description).bind(input.labels).bind(creator).execute(&mut *tx).await?;
+            .bind(&task_id).bind(input.project_id).bind(format!("e{}", &task_id[..7])).bind(input.title).bind(input.description).bind(input.labels).bind(&created_by_user_id).execute(&mut *tx).await?;
         let demand = DemandTypedEvidenceInput {
             finding_id: uuid::Uuid::now_v7().to_string(),
             proposal_id: input.proposal_id.into(),

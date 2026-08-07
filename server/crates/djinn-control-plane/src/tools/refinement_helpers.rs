@@ -205,7 +205,7 @@ pub(crate) async fn verify_active_judge_authorization(
 /// 9. **`spec_unknown_anchor` present in reviewed body** — the anchor text
 ///    must appear in the proposal revision being reviewed.
 /// 10. **`insufficient_in_session_research` non-empty** — must state what
-///    normal Judge research could not answer.
+///     normal Judge research could not answer.
 /// 11. **Needs-evidence cap not exhausted** — uses persisted substrate
 ///     helpers (no in-memory counters).
 /// 12. **No existing open linked evidence spike** — a proposal can have at

@@ -15,10 +15,10 @@
       "provenance_kind": "explicit_proposal_owner"
     },
     {
-      "path": "server/crates/djinn-control-plane/src/tools/refinement_tools.rs",
-      "enclosing_symbol": "proposal_refinement_demand_evidence",
-      "boundary_method": "create_in_project_with_provenance",
-      "provenance_kind": "explicit_proposal_owner"
+      "path": "server/crates/djinn-db/src/repositories/proposal.rs",
+      "enclosing_symbol": "demand_evidence_atomically",
+      "boundary_method": "resolve_effective_creator",
+      "provenance_kind": "explicit_source_creator"
     },
     {
       "path": "server/crates/djinn-coordinator/src/rules.rs",

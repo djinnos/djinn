@@ -141,6 +141,35 @@ async fn create_spike_task(db: &Database, project_id: &str, short_label: &str) -
         .id
 }
 
+/// Admit a real running refinement run and return `(run_id, generation)`.
+///
+/// `refinement.active` is decided by the exact admitted run; the legacy
+/// `refinement_start` lifecycle row is display-only. Any test that must reach a
+/// check downstream of "refinement active" needs this, not the lifecycle row.
+pub(super) async fn admit_refinement_run(
+    repo: &ProposalRepository,
+    proposal_id: &str,
+    label: &str,
+) -> (String, i32) {
+    let outcome = repo
+        .reap_and_admit(djinn_db::AdmitRefinementRunRequest {
+            proposal_id: proposal_id.to_owned(),
+            idempotency_key: format!("{label}/{proposal_id}"),
+            source: djinn_db::RefinementAdmissionSource::Demand {
+                demand_id: format!("{label}/{proposal_id}"),
+            },
+            heartbeat_grace_millis: 60_000,
+        })
+        .await
+        .unwrap();
+    match outcome {
+        djinn_db::RefinementAdmissionOutcome::Admitted {
+            run_id, generation, ..
+        } => (run_id, generation),
+        other => panic!("expected admitted refinement run, got {other:?}"),
+    }
+}
+
 /// Set up a proposal with body containing "anchor-text", start
 /// refinement, create a user, project, and Judge task, and return
 /// (server, db, proposal, user_id, judge_task_id).
@@ -1122,14 +1151,23 @@ async fn valid_demand_accepted() {
 
 // ── AC: Duplicate demand cannot create two open spikes ───────────
 
-/// Verify that a second valid demand after an accepted first demand
-/// is rejected because the proposal already has an open linked spike.
-/// This is the sequential duplicate scenario; concurrent races are
-/// protected at the DB level by the atomic set_structured_needs_evidence_spike.
+/// A second demand issued while a spike is already open must never allocate a
+/// second one, whichever way it duplicates:
+///
+/// * an **identical** re-delivery is a replay of the same allocation — the
+///   normalized demand hash matches the open finding, so the caller gets the
+///   existing spike back and no demand-owned relation grows;
+/// * a **different** claim is an unresolved-evidence conflict — it is rejected
+///   with the stable `active_evidence_conflict` code and writes nothing.
+///
+/// Both branches are asserted here because only counting rows distinguishes a
+/// replay from a silent second allocation; an `accepted: true` on its own would
+/// not.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn duplicate_demand_after_accepted_rejected() {
+async fn duplicate_demand_after_accepted_creates_no_second_spike() {
     let (server, db, p, user_id, _judge_task_id) = setup_demand_test().await;
     let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+    let project_id = repo.targets(&p.id).await.unwrap()[0].project_id.clone();
 
     // First demand — should succeed and create a spike.
     let resp1 = djinn_core::auth_context::SESSION_USER_ID
@@ -1152,16 +1190,25 @@ async fn duplicate_demand_after_accepted_rejected() {
         "first demand should be accepted: {:?}",
         resp1.get("error"),
     );
-    let first_spike = resp1
-        .get("result")
-        .and_then(|r| r.get("spike_task_id"))
+    let result1 = resp1.get("result").expect("accepted response has result");
+    let first_spike = result1
+        .get("spike_task_id")
         .and_then(|v| v.as_str())
         .expect("first demand should have spike_task_id")
         .to_string();
+    assert_eq!(
+        result1.get("replayed").and_then(|v| v.as_bool()),
+        Some(false),
+        "the first demand allocates rather than replays: {resp1}"
+    );
 
-    // Second demand — should be rejected by validation gate (step 11).
+    let after_first =
+        djinn_db::test_support::atomic_evidence_demand_counts_for_test(&db, &p.id, &project_id)
+            .await;
+
+    // Second, byte-identical demand — a normalized replay of the same claim.
     let resp2 = djinn_core::auth_context::SESSION_USER_ID
-        .scope(Some(user_id), async {
+        .scope(Some(user_id.clone()), async {
             server
                 .dispatch_tool(
                     "proposal_refinement_demand_evidence",
@@ -1172,20 +1219,60 @@ async fn duplicate_demand_after_accepted_rejected() {
         .await
         .expect("tool should be registered");
 
+    let result2 = resp2
+        .get("result")
+        .expect("replayed demand returns the existing allocation");
+    assert_eq!(
+        result2.get("spike_task_id").and_then(|v| v.as_str()),
+        Some(first_spike.as_str()),
+        "a replay must return the FIRST spike, never a new one: {resp2}"
+    );
+    assert_eq!(
+        result2.get("replayed").and_then(|v| v.as_bool()),
+        Some(true),
+        "an identical re-delivery must report itself as a replay: {resp2}"
+    );
+    assert_eq!(
+        djinn_db::test_support::atomic_evidence_demand_counts_for_test(&db, &p.id, &project_id)
+            .await,
+        after_first,
+        "a replay must not write any demand-owned relation"
+    );
+
+    // Third demand, a DIFFERENT claim while the first spike is still open.
+    // Its normalized hash does not match the open finding, so it is an
+    // unresolved-evidence conflict rather than a replay.
+    let mut divergent = valid_demand_params(&p.id);
+    divergent["question"] = serde_json::json!("Does module Y reject expired refresh tokens?");
+    let resp3 = djinn_core::auth_context::SESSION_USER_ID
+        .scope(Some(user_id), async {
+            server
+                .dispatch_tool("proposal_refinement_demand_evidence", divergent)
+                .await
+        })
+        .await
+        .expect("tool should be registered");
+
     assert!(
-        !resp2
+        !resp3
             .get("accepted")
             .and_then(|v| v.as_bool())
             .unwrap_or(true),
-        "second demand should be rejected"
+        "a divergent demand against an open spike must be rejected: {resp3}"
     );
-    let error = resp2.get("error").and_then(|v| v.as_str()).unwrap_or("");
-    assert!(
-        error.contains("already has an open linked evidence spike"),
-        "should mention existing spike: {error}"
+    assert_eq!(
+        resp3.get("conflict_code").and_then(|v| v.as_str()),
+        Some("active_evidence_conflict"),
+        "should carry the stable active-demand conflict code: {resp3}"
+    );
+    assert_eq!(
+        djinn_db::test_support::atomic_evidence_demand_counts_for_test(&db, &p.id, &project_id)
+            .await,
+        after_first,
+        "a conflicting demand must not write any demand-owned relation"
     );
 
-    // Verify exactly one spike is linked to the proposal.
+    // Exactly one spike remains linked, and it is the first one.
     let updated = repo.get(&p.id).await.unwrap().unwrap();
     assert_eq!(
         updated.linked_spike_task_id.as_deref(),
