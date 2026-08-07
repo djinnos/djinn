@@ -34,7 +34,9 @@ use djinn_k8s::pod_resize::PodResizeError;
 use djinn_k8s::pod_resize_fixture::{ApiFault, StoredTaskRunPod};
 use djinn_k8s::runtime::{JobAdmission, LauncherObservationError, ObservedLauncherSidecar};
 use djinn_server::task_run_resize_bootstrap::TaskRunPodSurface;
-use djinn_server::task_run_resize_drop::{ResizeDropClock, TaskRunResizeDropBridge};
+use djinn_server::task_run_resize_drop::{
+    DROP_CONFIRMATION_BUDGET, DROP_MAX_BACKOFF, ResizeDropClock, TaskRunResizeDropBridge,
+};
 use djinn_server::task_run_resize_reconcile::{
     ResizeReconcileGate, ResizeReconcileMode, ResizeReconcilePass, SkipReason,
     TaskRunResizeReconciler,
@@ -49,6 +51,18 @@ const CEILING: &str = "4";
 const CEILING_MILLICORES: i64 = 4000;
 const LIFTED_MILLICORES: u64 = 4000;
 const BUILD_SLOT_CAP: i64 = 8;
+
+/// The `release_lease` gate's wait budget in these fixtures, spent on
+/// [`StallingClock`] and not on the wall clock.
+///
+/// DERIVED from the drop's own confirmation window rather than written as a
+/// number. What a test of the held-lease boundary needs is "strictly longer
+/// than the window the drop may spend before it quarantines", and `apply_drop`
+/// cannot leave that window later than [`DROP_CONFIRMATION_BUDGET`] measured on
+/// this same clock. The quarantine therefore precedes the gate's answer for a
+/// structural reason, at any value of the drop's backoff constants and at any
+/// speed of the machine underneath.
+const GATE_BUDGET: Duration = Duration::from_secs(DROP_CONFIRMATION_BUDGET.as_secs() + 5);
 
 // ── The apiserver surface ──────────────────────────────────────────────────
 
@@ -82,24 +96,63 @@ impl TaskRunPodSurface for FixtureSurface {
     }
 }
 
-/// A clock that never waits and, after `stall_after` sleeps, never returns.
+/// The one timeline in this file: virtual, and driven entirely by the drop.
 ///
-/// The stall is what keeps the unbounded quarantine loop inside the gate's own
-/// wait budget without the test spending 45 real seconds on it.
+/// Two roles share it, told apart by the only thing that distinguishes them and
+/// nothing more clever than that — the duration asked for. `TaskRunResizeDrop`'s
+/// schedule is capped at [`DROP_MAX_BACKOFF`], so:
+///
+/// * a sleep **at or under** that cap is one of the drop's own backoffs. It
+///   ADVANCES virtual time and returns immediately, which is what lets a test
+///   spend the drop's 30-second confirmation window in microseconds.
+/// * a sleep **longer** than it is the budget `TaskRunResizeDropBridge` spends
+///   in `confirm_drop`. It OBSERVES virtual time, and expires only once the
+///   drop's own backoffs have carried the clock past it.
+///
+/// Why that matters: the gate used to bound itself with a real
+/// `tokio::time::timeout` while the drop it was bounding ran on this injected
+/// clock — two timelines, and the wall-clock one decided the verdict. A sibling
+/// test's `CREATE DATABASE … TEMPLATE` stalling the shared cluster past the
+/// budget was enough to make the gate answer before `require_drop` had written
+/// `drop_required`, so the assertion about a QUARANTINED row read `Lifted`
+/// (CI run `30884032730`). With both roles on this clock, "the drop quarantines
+/// before the gate gives up" is a consequence of the drop's own schedule, and
+/// Postgres may take as long as it likes.
+///
+/// `stall_after` is a BACKSTOP, not the mechanism: after that many backoffs the
+/// drop parks forever, and because a parked drop can never advance this clock
+/// again, every instant a budget wait is still owed has effectively passed —
+/// so the clock publishes that rather than leaving the waiter hung.
 struct StallingClock {
     base: tokio::time::Instant,
-    offset: std::sync::Mutex<Duration>,
+    /// Virtual time since [`Self::new`], published so a budget wait is woken by
+    /// the very backoffs that advance it.
+    elapsed: tokio::sync::watch::Sender<Duration>,
     sleeps: std::sync::Mutex<usize>,
     stall_after: usize,
 }
 
 impl StallingClock {
     fn new(stall_after: usize) -> Self {
+        let (elapsed, _) = tokio::sync::watch::channel(Duration::ZERO);
         Self {
             base: tokio::time::Instant::now(),
-            offset: std::sync::Mutex::new(Duration::ZERO),
+            elapsed,
             sleeps: std::sync::Mutex::new(0),
             stall_after,
+        }
+    }
+
+    /// Block until virtual time reaches `deadline`.
+    async fn observe_until(&self, deadline: Duration) {
+        let mut ticks = self.elapsed.subscribe();
+        while *ticks.borrow_and_update() < deadline {
+            if ticks.changed().await.is_err() {
+                // The clock outlives every waiter, so this is unreachable.
+                // Parking rather than returning keeps a clock that was dropped
+                // from ever being read as an expired budget.
+                std::future::pending::<()>().await;
+            }
         }
     }
 }
@@ -107,17 +160,29 @@ impl StallingClock {
 #[async_trait]
 impl ResizeDropClock for StallingClock {
     fn now(&self) -> tokio::time::Instant {
-        self.base + *self.offset.lock().expect("clock")
+        self.base + *self.elapsed.borrow()
     }
 
     async fn sleep(&self, duration: Duration) {
+        if duration > DROP_MAX_BACKOFF {
+            // The gate's budget. It observes the timeline; it never moves it.
+            let deadline = *self.elapsed.borrow() + duration;
+            self.observe_until(deadline).await;
+            return;
+        }
+
         let count = {
             let mut sleeps = self.sleeps.lock().expect("clock");
             *sleeps += 1;
-            *self.offset.lock().expect("clock") += duration;
             *sleeps
         };
+        self.elapsed.send_modify(|elapsed| *elapsed += duration);
         if count >= self.stall_after {
+            // Parked for good. Nothing left can advance this clock, so let any
+            // budget wait see the rest of its window pass: a broken budget then
+            // fails an assertion instead of hanging the suite.
+            self.elapsed
+                .send_modify(|elapsed| *elapsed += Duration::from_secs(86_400));
             std::future::pending::<()>().await;
         }
         tokio::task::yield_now().await;
@@ -325,6 +390,11 @@ fn status_millicores(cluster: &StoredTaskRunPod) -> Option<u64> {
 
 /// A `DirectServices` over the real coordinator lease service, with the real
 /// server-side drop bridge installed as the terminal gate.
+///
+/// `gate_budget` is spent on `clock`, not on the wall clock — see
+/// [`StallingClock`]. For a drop that settles it is unreachable by
+/// construction, and for one that does not it expires exactly where the drop's
+/// own schedule puts it.
 fn direct_services(
     ledgers: &Ledgers,
     surface: Arc<dyn TaskRunPodSurface>,
@@ -418,6 +488,16 @@ async fn occupying_lease(services: &DirectServices, identity: &LeaseIdentity) ->
 ///
 /// Note which ledger each assertion reads. Asserting only that the permit row
 /// changed would be a success log from the wrong store.
+///
+/// # Nothing here is decided by the wall clock
+///
+/// Every quantity that orders this test — the drop's backoff schedule, its
+/// `DROP_CONFIRMATION_BUDGET`, and the gate's own [`GATE_BUDGET`] — is measured
+/// by the injected [`StallingClock`]. The drop's backoffs are what carry that
+/// clock forward, so the gate cannot answer until the drop has spent more
+/// virtual time than its own confirmation window allows, which it can only do
+/// from inside the quarantine loop. A contended Postgres makes this test
+/// slower; it cannot make it fail.
 #[tokio::test]
 async fn a_quarantined_drop_holds_the_build_lease_in_the_other_ledger() {
     let ledgers = Ledgers::lifted("held").await;
@@ -425,12 +505,12 @@ async fn a_quarantined_drop_holds_the_build_lease_in_the_other_ledger() {
     let services = direct_services(
         &ledgers,
         surface,
-        Arc::new(StallingClock::new(24)),
-        // Leave enough wall-clock budget for the durable `lifted -> drop_required`
-        // transition even when CI's shared Postgres is contended. The stalling
-        // clock still makes the quarantine loop pending, so this timeout tests
-        // the held-lease boundary rather than racing the transition itself.
-        Duration::from_secs(2),
+        // 64 backoffs is a BACKSTOP against a drop that stops making progress,
+        // not the thing that ends the wait: crossing GATE_BUDGET takes the drop
+        // its 30-second confirmation window (17 backoffs) plus a handful of
+        // quarantine-loop backoffs, all of them virtual.
+        Arc::new(StallingClock::new(64)),
+        GATE_BUDGET,
     );
 
     let identity = ledgers.lease_identity();
@@ -462,22 +542,33 @@ async fn a_quarantined_drop_holds_the_build_lease_in_the_other_ledger() {
         })
         .await;
 
+    // LEDGER 2 FIRST, and deliberately so. `LeaseUnavailable` is the handler's
+    // answer for EVERY unsettled drop, so reading it first reports the same
+    // verdict whether the gate held the lease for the right reason or gave up
+    // before the drop had taken durable ownership of the row at all. That is
+    // exactly how CI run `30884032730` presented: the `LeaseUnavailable`
+    // assertion passed, and the failure surfaced three lines later as
+    // `the permit must still owe a drop: Lifted` — a symptom, at the wrong
+    // assertion, with the real cause (a wall-clock budget expiring inside a
+    // fixture whose clock was injected) invisible. Naming the lifecycle state
+    // first makes a genuine failure attributable.
+    let permit = ledgers.permit_state().await;
+    assert_eq!(
+        permit,
+        BuildPodPermitState::Quarantined,
+        "the drop's own {DROP_CONFIRMATION_BUDGET:?} confirmation window is \
+         shorter than the gate's {GATE_BUDGET:?} budget and BOTH are measured \
+         on the injected clock, so the row must have been quarantined before \
+         the gate could answer. Any other state is a broken drop — a `Lifted` \
+         or `DropApplying` row here means the quarantine transition itself was \
+         lost, not that the machine was slow"
+    );
+
     // The handler must NOT report a release.
     assert!(
         matches!(released, LeaseResult::LeaseUnavailable),
-        "an unsettled drop must not acknowledge terminal: {released:?}"
-    );
-
-    // LEDGER 2: the permit is in a nonterminal resize state.
-    let permit = ledgers.permit_state().await;
-    assert!(
-        matches!(
-            permit,
-            BuildPodPermitState::DropRequired
-                | BuildPodPermitState::DropApplying
-                | BuildPodPermitState::Quarantined
-        ),
-        "the permit must still owe a drop: {permit:?}"
+        "an unsettled drop must not acknowledge terminal; the permit is \
+         {permit:?} and the handler answered {released:?}"
     );
 
     // LEDGER 1, after — THE ASSERTION THAT MATTERS. `build_leases`, not
