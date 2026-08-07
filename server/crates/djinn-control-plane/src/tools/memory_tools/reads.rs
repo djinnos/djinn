@@ -10,7 +10,10 @@ impl DjinnMcpServer {
         &self,
         Parameters(p): Parameters<ReadParams>,
     ) -> Json<MemoryNoteResponse> {
-        Json(ops::memory_read(self, p).await)
+        // Host-side MCP surface: no agent session, so the note-access ledger row
+        // is recorded unattributed and counts toward the injected-pull-rate
+        // report's coverage diagnostics rather than its denominator.
+        Json(ops::memory_read(self, p, &djinn_db::NoteAccessAttribution::unattributed()).await)
     }
 
     /// Return a note's immutable revision history from the ledger,

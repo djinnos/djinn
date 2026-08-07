@@ -1,5 +1,17 @@
 use super::*;
 
+/// Attribution for the `note_access_events` ledger (migration 189), read from
+/// the same `AgentContext` field the extension boundary exposes through
+/// `ExtensionContext::session_id`. This agent-local fallback is only reached for
+/// tools the extension dispatch returns `Unhandled` for, but it must stay
+/// consistent or the ledger would lose attribution on that path.
+fn note_access_attribution(state: &AgentContext) -> djinn_db::NoteAccessAttribution {
+    match state.session_id.as_deref() {
+        Some(session_id) => djinn_db::NoteAccessAttribution::for_session(session_id),
+        None => djinn_db::NoteAccessAttribution::unattributed(),
+    }
+}
+
 pub(super) async fn call_memory_read(
     state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
@@ -15,6 +27,7 @@ pub(super) async fn call_memory_read(
                 project: project_path,
                 identifier: p.identifier,
             },
+            &note_access_attribution(state),
         )
         .await,
     )
@@ -44,6 +57,7 @@ pub(super) async fn call_memory_search(
                 edge_kinds: None,
             },
             task_id.as_deref(),
+            &note_access_attribution(state),
         )
         .await,
     )

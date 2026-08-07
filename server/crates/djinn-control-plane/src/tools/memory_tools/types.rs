@@ -181,6 +181,123 @@ pub struct RetrievalOutcomesReportDiagnosticsSchema {
     pub unrecorded_run_count: u64,
 }
 
+/// Explicit timezone-aware half-open interval for the injected-pull-rate
+/// report. Same shape and conventions as [`RetrievalOutcomesReportParams`].
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct InjectedPullRateReportParams {
+    pub project: Option<String>,
+    pub project_id: Option<String>,
+    pub start: String,
+    pub end: String,
+    pub timezone: String,
+}
+
+/// The database aggregation is returned verbatim, including the evidence
+/// classification and every coverage diagnostic.
+#[derive(Serialize)]
+pub struct MemoryInjectedPullRateReportResponse {
+    pub report:
+        Option<djinn_db::repositories::retrieval_trace::injected_pull_rate::InjectedPullRateReport>,
+    pub error: Option<String>,
+}
+
+/// Typed MCP projection of the injected-pull-rate report. The runtime response
+/// keeps the DB aggregation verbatim; this mirror makes every returned field
+/// visible in the direct control-plane tool's output schema.
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct MemoryInjectedPullRateReportSchemaResponse {
+    pub report: Option<InjectedPullRateReportSchema>,
+    pub error: Option<String>,
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct InjectedPullRateReportSchema {
+    pub project_id: String,
+    pub window_start: String,
+    pub window_end: String,
+    pub timezone: String,
+    /// Every candidate a trace in the window recorded as `injected`, including
+    /// candidates that carry no run attribution.
+    #[schemars(with = "i64")]
+    pub injected_candidate_count: u64,
+    /// Distinct notes among those candidates.
+    #[schemars(with = "i64")]
+    pub injected_note_count: u64,
+    /// Injected candidates whose trace carries a task run or session. This is
+    /// the denominator of `pull_rate` — NOT `injected_candidate_count`.
+    #[schemars(with = "i64")]
+    pub attributable_candidate_count: u64,
+    /// Attributable injected candidates followed by a `memory_read` of the same
+    /// note by the same run or session. The numerator of `pull_rate`.
+    #[schemars(with = "i64")]
+    pub pulled_candidate_count: u64,
+    /// `pulled_candidate_count / attributable_candidate_count`. Null when the
+    /// denominator is zero; never a bare 0.0 standing in for "no data".
+    pub pull_rate: Option<f64>,
+    /// Read this BEFORE `pull_rate`. One of `no_injected_candidates`,
+    /// `no_attributable_candidates`, `no_access_ledger_coverage`, `measured`.
+    /// Only `measured` makes `pull_rate` a real measurement.
+    pub evidence: String,
+    pub diagnostics: InjectedPullRateDiagnosticsSchema,
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct InjectedPullRateDiagnosticsSchema {
+    /// Injected candidates whose trace has neither task_run_id nor session_id;
+    /// excluded from the denominator, never counted as "not pulled".
+    #[schemars(with = "i64")]
+    pub unattributable_candidate_count: u64,
+    /// Injected candidates with no stable note_id in the stored candidate JSON.
+    #[schemars(with = "i64")]
+    pub identityless_candidate_count: u64,
+    /// `memory_read` ledger rows in the window. Zero alongside a non-zero
+    /// attributable_candidate_count means the ledger has no coverage yet.
+    #[schemars(with = "i64")]
+    pub memory_read_event_count: u64,
+    /// `memory_read` rows carrying neither a task run nor a session.
+    #[schemars(with = "i64")]
+    pub unattributed_memory_read_event_count: u64,
+    /// `memory_search` rows, reported for contrast only. A search result touch
+    /// is not a pull and never enters the numerator.
+    #[schemars(with = "i64")]
+    pub memory_search_event_count: u64,
+}
+
+impl From<MemoryInjectedPullRateReportResponse> for MemoryInjectedPullRateReportSchemaResponse {
+    fn from(response: MemoryInjectedPullRateReportResponse) -> Self {
+        Self {
+            report: response.report.map(|report| InjectedPullRateReportSchema {
+                project_id: report.project_id,
+                window_start: report.window_start,
+                window_end: report.window_end,
+                timezone: report.timezone,
+                injected_candidate_count: report.injected_candidate_count,
+                injected_note_count: report.injected_note_count,
+                attributable_candidate_count: report.attributable_candidate_count,
+                pulled_candidate_count: report.pulled_candidate_count,
+                pull_rate: report.pull_rate,
+                evidence: serde_json::to_value(report.evidence)
+                    .ok()
+                    .and_then(|value| value.as_str().map(ToOwned::to_owned))
+                    .unwrap_or_default(),
+                diagnostics: InjectedPullRateDiagnosticsSchema {
+                    unattributable_candidate_count: report
+                        .diagnostics
+                        .unattributable_candidate_count,
+                    identityless_candidate_count: report.diagnostics.identityless_candidate_count,
+                    memory_read_event_count: report.diagnostics.memory_read_event_count,
+                    unattributed_memory_read_event_count: report
+                        .diagnostics
+                        .unattributed_memory_read_event_count,
+                    memory_search_event_count: report.diagnostics.memory_search_event_count,
+                },
+            }),
+            error: response.error,
+        }
+    }
+}
+
 impl From<MemoryRetrievalOutcomesReportResponse> for MemoryRetrievalOutcomesReportSchemaResponse {
     fn from(response: MemoryRetrievalOutcomesReportResponse) -> Self {
         Self {

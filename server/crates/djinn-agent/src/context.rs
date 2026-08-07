@@ -544,6 +544,20 @@ pub struct AgentContext {
     /// loop via `SlotContext`. `AgentContext` carries a clone for the legacy
     /// agent-side helper that builds `SlotContext` from `AgentContext`.
     pub compaction_cs: CompactionCriticalSection,
+    /// The agent session whose tool calls this context is serving.
+    ///
+    /// Populated by [`crate::actors::slot::reply_loop::tool_dispatch_context`],
+    /// which is the *only* production composition site: the reply loop clones
+    /// the process-wide `AgentContext` per session and stamps the session id on
+    /// the clone. Every other construction (server boundary, coordinator,
+    /// tests) leaves it `None`, which is correct — those contexts serve no
+    /// single session.
+    ///
+    /// It exists to attribute note accesses (`note_access_events`, migration
+    /// 189) so `P(memory_read | Injected)` can correlate a read back to the
+    /// retrieval trace that injected the note. `djinn-db` resolves the task run
+    /// from `sessions.task_run_id`, so the session id alone is enough.
+    pub session_id: Option<String>,
 }
 
 /// Cross-project shell authority for the single task run represented by an
@@ -1258,5 +1272,17 @@ impl djinn_mcp_extension::ExtensionContext for AgentContext {
 
     fn default_project_id(&self) -> Option<&str> {
         self.default_project_id.as_deref()
+    }
+
+    /// Override of the defaulted trait method. If this override is ever removed
+    /// or the field stops being populated, every note-access ledger row loses
+    /// its attribution and `P(memory_read | Injected)` silently reads 0% with
+    /// no test failing — which is why
+    /// `session_attribution_reaches_the_note_access_ledger`
+    /// (`src/extension/tests/memory_dispatch_tests.rs`) asserts a *persisted*
+    /// row carrying the real session id, composed through
+    /// [`crate::actors::slot::reply_loop::tool_dispatch_context`].
+    fn session_id(&self) -> Option<&str> {
+        self.session_id.as_deref()
     }
 }

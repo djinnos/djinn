@@ -5,7 +5,7 @@
     "status": "completed_with_errors",
     "repository_snapshot": "d34db33fd34db33fd34db33fd34db33fd34db33f",
     "skill_name": "agent-readiness-guardrails",
-    "skill_version": "1.1.0",
+    "skill_version": "1.2.0",
     "expected_area_count": 2,
     "created_at": "2026-07-30T12:00:00Z",
     "completed_at": "2026-07-30T12:01:00Z"
