@@ -2050,6 +2050,47 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
+    #[test]
+    fn model_turn_admission_mapper_preserves_wait_payload() {
+        let error = anyhow::Error::new(ModelTurnAdmissionOutcome::Wait(
+            djinn_db::ModelTurnAdmissionWait::Draining,
+        ));
+        assert!(matches!(
+            stage_outcome_for_model_turn_admission_error(&error),
+            Some(StageOutcome::ModelTurnAdmission(ModelTurnAdmissionStageOutcome::Wait(
+                djinn_db::ModelTurnAdmissionWait::Draining
+            )))
+        ));
+    }
+
+    #[test]
+    fn model_turn_admission_mapper_preserves_rejection_payload() {
+        let error = anyhow::Error::new(ModelTurnAdmissionOutcome::Rejected(
+            djinn_db::ModelTurnAdmissionRejection::Off,
+        ));
+        assert!(matches!(
+            stage_outcome_for_model_turn_admission_error(&error),
+            Some(StageOutcome::ModelTurnAdmission(ModelTurnAdmissionStageOutcome::Rejected(
+                djinn_db::ModelTurnAdmissionRejection::Off
+            )))
+        ));
+    }
+
+    #[test]
+    fn model_turn_admission_mapper_preserves_dispatch_fence_payload() {
+        let error = anyhow::Error::new(ModelTurnAdmissionOutcome::DispatchFenced(
+            djinn_db::ModelTurnLeaseMutationOutcome::Fenced,
+        ));
+        assert!(matches!(
+            stage_outcome_for_model_turn_admission_error(&error),
+            Some(StageOutcome::ModelTurnAdmission(
+                ModelTurnAdmissionStageOutcome::DispatchFenced(
+                    djinn_db::ModelTurnLeaseMutationOutcome::Fenced
+                )
+            ))
+        ));
+    }
+
     #[derive(Debug, PartialEq, Eq)]
     struct RecordedSettlement {
         session_id: String,

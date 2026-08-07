@@ -61,8 +61,8 @@ pub use services::{BranchPublicationResult, SupervisorServices};
 // Re-export runtime spec types at the crate root so the thin
 // `djinn_agent::supervisor` shim preserves every existing import path.
 pub use djinn_runtime::spec::{
-    LoopGuardKind, RoleKind, SupervisorFlow, TaskRunOutcome, TaskRunReport, TaskRunSpec,
-    role_sequence,
+    LoopGuardKind, ModelTurnAdmissionTerminalOutcome, RoleKind, SupervisorFlow, TaskRunOutcome,
+    TaskRunReport, TaskRunSpec, role_sequence,
 };
 
 /// Root under the shared cache PVC for per-task-run Cargo target directories.
@@ -337,6 +337,7 @@ impl StageOutcome {
                 | StageOutcome::Escalate { .. }
                 | StageOutcome::Failed { .. }
                 | StageOutcome::Parked { .. }
+                | StageOutcome::ModelTurnAdmission(..)
                 | StageOutcome::LoopGuardTripped { .. }
                 | StageOutcome::ReviewerRejected { .. }
                 | StageOutcome::VerifierFailed { .. }
@@ -380,6 +381,9 @@ fn emit_stage_outcome_event(
         StageOutcome::Failed { .. } => "failed",
         StageOutcome::LoopGuardTripped { .. } => "loop_guard_tripped",
         StageOutcome::Parked { .. } => "parked",
+        StageOutcome::ModelTurnAdmission(ModelTurnAdmissionStageOutcome::Wait(..)) => "model_turn_admission_wait",
+        StageOutcome::ModelTurnAdmission(ModelTurnAdmissionStageOutcome::Rejected(..)) => "model_turn_admission_rejected",
+        StageOutcome::ModelTurnAdmission(ModelTurnAdmissionStageOutcome::DispatchFenced(..)) => "model_turn_admission_dispatch_fenced",
     };
 
     tracing::info!(
@@ -552,6 +556,7 @@ fn session_exit_barrier_plan(
         StageOutcome::LoopGuardTripped { .. } | StageOutcome::Parked { .. } => {
             SessionExitBarrierPlan::InterruptedOrFailed
         }
+        StageOutcome::ModelTurnAdmission(..) => SessionExitBarrierPlan::InterruptedOrFailed,
     }
 }
 
@@ -3419,6 +3424,14 @@ impl TaskRunSupervisor {
                         });
                         break;
                     }
+                    StageOutcome::ModelTurnAdmission(admission) => {
+                        result = Some(TaskRunOutcome::ModelTurnAdmission(match admission {
+                            ModelTurnAdmissionStageOutcome::Wait(wait) => ModelTurnAdmissionTerminalOutcome::Wait(wait),
+                            ModelTurnAdmissionStageOutcome::Rejected(rejection) => ModelTurnAdmissionTerminalOutcome::Rejected(rejection),
+                            ModelTurnAdmissionStageOutcome::DispatchFenced(fence) => ModelTurnAdmissionTerminalOutcome::DispatchFenced(fence),
+                        }));
+                        break;
+                    }
                     StageOutcome::LoopGuardTripped {
                         kind,
                         offending_signature,
@@ -3616,6 +3629,9 @@ impl TaskRunSupervisor {
             // Completed so the task_run row is terminal without triggering
             // failure accounting.
             TaskRunOutcome::EnvironmentalNonAttempt { .. } => TaskRunStatus::Completed,
+            TaskRunOutcome::ModelTurnAdmission(ModelTurnAdmissionTerminalOutcome::Wait(..))
+            | TaskRunOutcome::ModelTurnAdmission(ModelTurnAdmissionTerminalOutcome::DispatchFenced(..)) => TaskRunStatus::Interrupted,
+            TaskRunOutcome::ModelTurnAdmission(ModelTurnAdmissionTerminalOutcome::Rejected(..)) => TaskRunStatus::Failed,
             TaskRunOutcome::Failed { .. } => TaskRunStatus::Failed,
             TaskRunOutcome::LoopGuardTripped { .. } => TaskRunStatus::Failed,
             TaskRunOutcome::Interrupted => TaskRunStatus::Interrupted,

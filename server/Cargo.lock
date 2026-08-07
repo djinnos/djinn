@@ -1740,6 +1740,7 @@ dependencies = [
  "bincode",
  "bytes",
  "djinn-core",
+ "djinn-db",
  "djinn-launcher-protocol",
  "futures",
  "serde",
