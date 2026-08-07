@@ -150,7 +150,37 @@ impl NoteRepository {
         query: &str,
         limit: i64,
     ) -> Result<Vec<(String, f64)>> {
-        let Some(plan) = self.lexical_search_plan(LexicalSearchMode::Ranked, query)? else {
+        self.ranked_lexical_scores_in_mode(
+            LexicalSearchMode::Ranked,
+            project_id,
+            folder,
+            note_type,
+            query,
+            limit,
+        )
+        .await
+    }
+
+    /// [`Self::ranked_lexical_scores`] with the term-joining mode chosen by the
+    /// caller. Both modes share the same SQL, bind order, and scoring; only the
+    /// sanitized query expression differs.
+    async fn ranked_lexical_scores_in_mode(
+        &self,
+        mode: LexicalSearchMode,
+        project_id: &str,
+        folder: &str,
+        note_type: &str,
+        query: &str,
+        limit: i64,
+    ) -> Result<Vec<(String, f64)>> {
+        debug_assert!(
+            matches!(
+                mode,
+                LexicalSearchMode::Ranked | LexicalSearchMode::RankedAny
+            ),
+            "only the Ranked plans share this bind order"
+        );
+        let Some(plan) = self.lexical_search_plan(mode, query)? else {
             return Ok(vec![]);
         };
         // NOTE: dynamic SQL (backend-specific FTS query built from a runtime plan) — compile-time check not possible
@@ -1015,13 +1045,31 @@ impl NoteRepository {
         // *eligible* rows to retain per signal.
         let raw_limit = window.saturating_mul(INJECTION_RAW_SIGNAL_MULTIPLIER);
 
-        let lexical_scores = self
-            .ranked_lexical_scores(project_id, "", "", query, raw_limit as i64)
-            .await?;
+        // The lexical list is one contributing signal of a fusion, not the
+        // eligibility gate, so it disjoins its terms (`RankedAny`). AND-joining
+        // a whole task title plus description returned zero notes for 22 of 25
+        // sampled production tasks, and with scope/semantic/graph contributing
+        // nothing that single empty list was the entire candidate universe.
+        //
+        // Lexical and scope read disjoint predicates over the same table and
+        // neither feeds the other, so they overlap rather than serialize. Both
+        // are hundreds of milliseconds against the production corpus and this
+        // runs on the dispatch prompt path, where the retired scope-overlap
+        // query already cost ~1.5s on average.
+        let (lexical_scores, scope_scores) = tokio::join!(
+            self.ranked_lexical_scores_in_mode(
+                LexicalSearchMode::RankedAny,
+                project_id,
+                "",
+                "",
+                query,
+                raw_limit as i64,
+            ),
+            self.ranked_scope_signal(project_id, task_paths, note_types, window),
+        );
+        let lexical_scores = lexical_scores?;
+        let scope_scores = scope_scores?;
         let semantic_scores = semantic_scores.unwrap_or_default();
-        let scope_scores = self
-            .ranked_scope_signal(project_id, task_paths, note_types, window)
-            .await?;
 
         // `seed_ids` are only the *seeds* for spreading activation, not the
         // candidate universe. Graph proximity returns neighbours outside its
