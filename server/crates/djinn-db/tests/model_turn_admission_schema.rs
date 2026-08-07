@@ -216,16 +216,24 @@ async fn fresh_initialization_installs_v1_marker_and_enforces_credential_identit
     .await;
 }
 
+/// Migration 173 is the sole definer of the admission *tables*, and applied
+/// migrations are immutable (`scripts/check-migrations-immutable.sh`), so its
+/// identity/no-secret shape can be read straight from the file.
+///
+/// The retention *trigger* is deliberately NOT asserted here. A trigger can be
+/// replaced by any later migration — 176 already replaced 173's — so a text
+/// assertion against a fixed migration number silently stops describing the
+/// live schema the moment that happens. See
+/// `bounded_observation_trigger_contract_matches_the_effective_schema`, which
+/// reads the trigger back out of the catalog of a fully migrated database.
 #[test]
-fn migration_has_bounded_non_secret_observation_contract() {
+fn migration_has_non_secret_admission_identity_contract() {
     let migration = std::fs::read_to_string(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/migrations_postgres/173_model_turn_admission.sql"
     ))
     .expect("read migration 173");
     for required in [
-        "model_turn_observations_bounded",
-        "OFFSET 256",
         "model_turn_lease_terminals",
         "REFERENCES credentials(id)",
         "model_turn_admission_schema",
@@ -243,6 +251,87 @@ fn migration_has_bounded_non_secret_observation_contract() {
         !migration.contains("encrypted_value"),
         "admission storage must not duplicate credential material"
     );
+}
+
+/// Assert the retention trigger that a fully migrated database actually
+/// installs, not the text of whichever migration happened to define it first.
+///
+/// Migration 173 installed an `AFTER INSERT` trigger that took the parent
+/// pool row `FOR UPDATE` *after* the foreign-key check had already taken
+/// `FOR KEY SHARE` on that same row, so two same-pool inserts could deadlock
+/// upgrading one another's FK locks. Migration 176 replaced it with a
+/// `BEFORE INSERT` trigger that takes a per-pool advisory lock before the FK
+/// check runs and trims to 255 existing rows so the incoming row lands on the
+/// 256-row bound. Reading the catalog keeps this contract attached to the
+/// effective schema: a migration 191+ that replaces or drops the trigger is
+/// checked against these properties instead of sailing past a stale string
+/// match on a superseded file.
+#[tokio::test]
+async fn bounded_observation_trigger_contract_matches_the_effective_schema() {
+    // Keep the suffix short: the generated database name is
+    // `djinn_model_turn_{suffix}_{32 hex}`, and Postgres truncates identifiers
+    // at 63 bytes.
+    with_temp_database("trigger", |database_url| async move {
+        djinn_db::test_support::apply_all_migrations_to_fresh_database(&database_url).await;
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&database_url)
+            .await
+            .expect("connect migrated database");
+
+        let installed: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pg_trigger \
+             WHERE tgrelid = 'model_turn_observations'::regclass AND NOT tgisinternal",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("count the user triggers on model_turn_observations");
+        assert_eq!(
+            installed, 1,
+            "exactly one user trigger must bound model_turn_observations; \
+             dropping or duplicating the retention trigger is a regression"
+        );
+
+        let (row_level, before_insert_timing, on_insert, body): (bool, bool, bool, String) =
+            sqlx::query_as(
+                "SELECT (t.tgtype::int & 1) = 1, (t.tgtype::int & 2) = 2, \
+                        (t.tgtype::int & 4) = 4, coalesce(p.prosrc, '') \
+                   FROM pg_trigger t \
+                   JOIN pg_proc p ON p.oid = t.tgfoid \
+                  WHERE t.tgrelid = 'model_turn_observations'::regclass \
+                    AND NOT t.tgisinternal \
+                    AND t.tgname = 'model_turn_observations_bounded'",
+            )
+            .fetch_one(&pool)
+            .await
+            .expect("read the installed retention trigger from the catalog");
+
+        assert!(
+            row_level && before_insert_timing && on_insert,
+            "retention must run as a BEFORE INSERT row trigger so its per-pool lock is \
+             taken before the foreign-key check locks the parent pool row; observed \
+             row_level={row_level} before={before_insert_timing} insert={on_insert}"
+        );
+        assert!(
+            body.contains("pg_advisory_xact_lock(NEW.pool_id)"),
+            "retention must serialize on a transaction-scoped per-pool advisory lock; \
+             installed body: {body}"
+        );
+        assert!(
+            !body.contains("model_turn_pools"),
+            "retention must not lock or read the parent pool row — that is the \
+             FOR UPDATE lock upgrade that deadlocked against the foreign-key \
+             FOR KEY SHARE; installed body: {body}"
+        );
+        assert!(
+            body.contains("OFFSET 255"),
+            "a BEFORE INSERT trim must retain 255 existing rows so the incoming row \
+             lands exactly on the 256-row bound; installed body: {body}"
+        );
+
+        pool.close().await;
+    })
+    .await;
 }
 
 #[tokio::test]
