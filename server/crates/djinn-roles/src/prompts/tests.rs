@@ -2859,14 +2859,54 @@ fn planner_decomposition_mode_carries_the_merge_test_and_the_ladder() {
     );
 }
 
-/// AC5 — truncation sentinel for the Planner decomposition prompt.
-///
-/// `render_prompt_for_role` applies `MAX_SYSTEM_PROMPT_CHARS` **before** it
-/// returns, so a post-cap length assertion proves nothing: a truncated prompt is
-/// exactly as long as the cap. `smart_truncate` keeps a head and a tail and
-/// drops the middle, so the only way to detect that the prompt outgrew its
-/// budget is to assert that text from the FINAL stable section still renders —
-/// together with the guidance added ahead of it.
+// ── AC5: what actually detects prompt-cap truncation ─────────────────────────
+//
+// `render_prompt_for_role` applies `MAX_SYSTEM_PROMPT_CHARS` **before** it
+// returns, so a post-cap length assertion proves nothing: a truncated prompt is
+// exactly as long as the cap. Only the prompt's *content* can reveal it.
+//
+// WHICH content is the part that is easy to get backwards. `smart_truncate`
+// (`mod.rs`) preserves a HEAD and a TAIL and drops the MIDDLE. With the 48,000
+// cap:
+//
+//     usable      = 48_000 - 80 (separator reserve) = 47_920
+//     head_budget = 47_920 * 60 / 100              = 28_752   (absolute offset)
+//     tail_budget = 47_920 - 28_752                = 19_168   (distance from end)
+//     dropped     = [28_752, len - 19_168)
+//
+// The head bound is an ABSOLUTE offset and the tail bound is a DISTANCE FROM
+// THE END. So a byte survives if it is either within the first 28,752 bytes or
+// within the last 19,168 — and a sentinel taken from the FINAL section is, by
+// construction, in the second set. It can never detect truncation. Measured on
+// the current renders, the final-section sentinels sit 351 bytes (Judge) and
+// 3,119 bytes (Planner decomposition) from the end, both far inside the 19,168
+// always-preserved tail. AC5 names those sentinels literally, so they are
+// asserted below for literal compliance — but they are NOT the guard.
+//
+// The two checks that can actually fire are:
+//
+//   1. The MIDDLE sentinel — a stable literal in the droppable region, i.e. at
+//      a distance GREATER than 19,168 from the end. Only the first
+//      `len - 19_168` bytes of each prompt qualify (7,468 for the Judge, 4,101
+//      for Planner decomposition), which is why the sentinels chosen below are
+//      early-file section headings rather than late ones.
+//   2. `!prompt.contains("bytes omitted")` — `smart_truncate` always injects
+//      that marker when it fires, so this catches truncation unconditionally,
+//      wherever the growth lands.
+//
+// KEEP BOTH. They are the load-bearing assertions in these two tests; the
+// final-section sentinels are the AC-literal ones and are inert at current
+// sizes. Do not delete either as redundant.
+//
+// One honest limit: `render_prompt` here passes `Vec::new` for tool schemas, so
+// these renders (~26.6K Judge, ~23.3K Planner decomposition) carry ~21-24K of
+// slack against the cap. Production renders include the real tool section —
+// `mod.rs` documents the decomposition prompt at ~35K — so the real headroom is
+// closer to ~10K. These tests therefore under-report truncation risk by roughly
+// the size of the tool section, which is inherent to testing the template layer
+// in isolation.
+
+/// AC5 — truncation sentinels for the Planner decomposition prompt.
 ///
 /// This is the documented failure mode: the old 31K cap silently truncated the
 /// tail of `planner/decomposition.md`, and the planner never saw guidance it had
@@ -2878,21 +2918,41 @@ fn planner_decomposition_tail_survives_the_prompt_cap() {
     let ctx = make_ctx();
     let prompt = render_prompt(AgentType::Planner, &decomposition_task, &ctx);
 
-    // Sentinels from the final stable section of `planner/decomposition.md`
-    // (B5. Submit Planning) — the last thing the file says.
+    // LOAD-BEARING (1): a sentinel in the region `smart_truncate` actually
+    // drops. `## Workflow B: Wave Decomposition` heads the mode section and
+    // `### B1.` follows it; B1 sits at offset ~3,302, which is 19,967 bytes from
+    // the end — 799 bytes past the 19,168-byte preserved tail, so it is inside
+    // the droppable middle. Do not replace it with a later heading: everything
+    // after offset 4,101 is in the always-preserved tail and cannot fail.
+    assert!(
+        prompt.contains("### B1. Orient to the Epic (keep brief)"),
+        "the middle of the decomposition prompt must still render — this heading \
+         sits in smart_truncate's dropped region, so losing it means prompt growth \
+         pushed the render past MAX_SYSTEM_PROMPT_CHARS"
+    );
+
+    // LOAD-BEARING (2): `smart_truncate` always injects this marker when it
+    // fires, so this catches truncation wherever the growth landed.
+    assert!(
+        !prompt.contains("bytes omitted"),
+        "the decomposition prompt must not be truncated"
+    );
+
+    // AC-literal, and inert by construction: both of these sit inside the
+    // always-preserved 19,168-byte tail (3,119 and 3,048 bytes from the end).
+    // They are asserted because AC5 names the final stable section, not because
+    // they can detect truncation.
     assert!(
         prompt.contains("### B5. Submit Planning"),
-        "the final section of decomposition.md must still render — prompt growth has \
-         pushed it past MAX_SYSTEM_PROMPT_CHARS and smart_truncate dropped it"
+        "the final section of decomposition.md must still render"
     );
     assert!(
         prompt.contains("Wave N: created X tasks"),
-        "the final instruction of decomposition.md must still render — prompt growth \
-         has pushed it past MAX_SYSTEM_PROMPT_CHARS and smart_truncate dropped it"
+        "the final instruction of decomposition.md must still render"
     );
 
     // The SAME render must carry the merge-test guidance, so a future addition
-    // cannot buy its own visibility by evicting the tail.
+    // cannot buy its own visibility by evicting other guidance.
     assert!(
         prompt.contains(MERGE_TEST_PROOF),
         "the same decomposition render must carry the merge-test rule"
@@ -2901,35 +2961,46 @@ fn planner_decomposition_tail_survives_the_prompt_cap() {
         prompt.contains(LADDER_FIRST_APPLICABLE),
         "the same decomposition render must carry the ordered disposal ladder"
     );
-
-    // A truncated render carries `smart_truncate`'s notice; it must be absent.
-    assert!(
-        !prompt.contains("bytes omitted"),
-        "the decomposition prompt must not be truncated"
-    );
 }
 
-/// AC5 — truncation sentinel for the Judge prompt, same rationale: the cap is
-/// applied before `render_prompt_for_role` returns, so only a tail sentinel can
-/// detect that the merge-test dimension pushed the tail out.
+/// AC5 — truncation sentinels for the Judge prompt, same mechanism: the cap is
+/// applied before `render_prompt_for_role` returns, so only content can reveal
+/// truncation, and only content in the dropped middle can reveal it positionally.
 #[test]
 fn judge_prompt_tail_survives_the_prompt_cap() {
     let task = make_task();
     let ctx = make_ctx();
     let prompt = render_prompt(AgentType::Judge, &task, &ctx);
 
-    // Sentinels from the final stable section of `judge.md` (Session Completion).
+    // LOAD-BEARING (1): a sentinel in the region `smart_truncate` actually
+    // drops. This heading sits at offset ~6,020, which is 20,616 bytes from the
+    // end — 1,448 bytes past the 19,168-byte preserved tail, so it is inside the
+    // droppable middle. Do not replace it with a later heading: everything after
+    // offset 7,468 is in the always-preserved tail and cannot fail.
+    assert!(
+        prompt.contains("### 2. Reject / needs-work (not ready)"),
+        "the middle of the judge prompt must still render — this heading sits in \
+         smart_truncate's dropped region, so losing it means prompt growth pushed \
+         the render past MAX_SYSTEM_PROMPT_CHARS"
+    );
+
+    // LOAD-BEARING (2): the unconditional truncation marker.
+    assert!(
+        !prompt.contains("bytes omitted"),
+        "the judge prompt must not be truncated"
+    );
+
+    // AC-literal, and inert by construction: both of these sit inside the
+    // always-preserved 19,168-byte tail (351 and 216 bytes from the end).
     assert!(
         prompt.contains("## Session Completion"),
-        "the final section of judge.md must still render — prompt growth has pushed \
-         it past MAX_SYSTEM_PROMPT_CHARS and smart_truncate dropped it"
+        "the final section of judge.md must still render"
     );
     assert!(
         prompt.contains(
             "end your session by calling `submit_decision` with a short summary of your adjudication"
         ),
-        "the final instruction of judge.md must still render — prompt growth has \
-         pushed it past MAX_SYSTEM_PROMPT_CHARS and smart_truncate dropped it"
+        "the final instruction of judge.md must still render"
     );
 
     // The SAME render must carry the merge-test dimension.
@@ -2940,10 +3011,5 @@ fn judge_prompt_tail_survives_the_prompt_cap() {
     assert!(
         prompt.contains("Achievability — the merge test"),
         "the same judge render must carry the named merge-test DoD dimension"
-    );
-
-    assert!(
-        !prompt.contains("bytes omitted"),
-        "the judge prompt must not be truncated"
     );
 }
