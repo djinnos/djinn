@@ -2774,6 +2774,20 @@ impl CoordinatorActor {
 /// method.
 #[cfg(test)]
 pub(crate) fn actor_with_test_db(db: Database) -> CoordinatorActor {
+    actor_with_test_db_and_scope(db, ProviderActionScope::new())
+}
+
+/// As [`actor_with_test_db`], with the leader's provider-action scope injected
+/// through the same `CoordinatorDeps::with_provider_action_scope` builder
+/// `server/src/leadership.rs` uses in production.
+///
+/// Separate from [`actor_with_test_db`] only so the existing callers keep their
+/// one-argument call; the constructor path is identical.
+#[cfg(test)]
+pub(crate) fn actor_with_test_db_and_scope(
+    db: Database,
+    provider_action_scope: ProviderActionScope,
+) -> CoordinatorActor {
     use crate::test_helpers;
     use djinn_slot::{ModelSlotConfig, SlotPoolConfig};
     use std::collections::HashSet;
@@ -2811,7 +2825,8 @@ pub(crate) fn actor_with_test_db(db: Database) -> CoordinatorActor {
             std::sync::Arc::new(RoleRegistry::new()),
             BackgroundWorkTracker::default(),
             djinn_lsp::LspManager::new(),
-        ),
+        )
+        .with_provider_action_scope(provider_action_scope),
         receiver,
         sender,
         status_tx,
