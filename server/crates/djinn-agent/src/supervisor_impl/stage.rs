@@ -2048,6 +2048,9 @@ fn worker_stage_outcome(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use djinn_supervisor::{
+        model_turn_admission_task_run_status, model_turn_admission_terminal_outcome,
+    };
     use std::sync::Mutex;
 
     #[test]
@@ -2055,12 +2058,27 @@ mod tests {
         let error = anyhow::Error::new(ModelTurnAdmissionOutcome::Wait(
             djinn_db::ModelTurnAdmissionWait::Draining,
         ));
+        let Some(StageOutcome::ModelTurnAdmission(admission)) =
+            stage_outcome_for_model_turn_admission_error(&error)
+        else {
+            panic!("wait must remain a typed admission stage outcome");
+        };
         assert!(matches!(
-            stage_outcome_for_model_turn_admission_error(&error),
-            Some(StageOutcome::ModelTurnAdmission(ModelTurnAdmissionStageOutcome::Wait(
-                djinn_db::ModelTurnAdmissionWait::Draining
-            )))
+            admission,
+            ModelTurnAdmissionStageOutcome::Wait(djinn_db::ModelTurnAdmissionWait::Draining)
         ));
+        let terminal = model_turn_admission_terminal_outcome(admission);
+        assert!(matches!(
+            terminal,
+            djinn_supervisor::ModelTurnAdmissionTerminalOutcome::Wait(
+                djinn_db::ModelTurnAdmissionWait::Draining
+            )
+        ));
+        assert_eq!(
+            model_turn_admission_task_run_status(&terminal),
+            djinn_core::models::TaskRunStatus::Interrupted,
+            "wait must use the cancellable/interrupted scheduling path"
+        );
     }
 
     #[test]
@@ -2068,12 +2086,27 @@ mod tests {
         let error = anyhow::Error::new(ModelTurnAdmissionOutcome::Rejected(
             djinn_db::ModelTurnAdmissionRejection::Off,
         ));
+        let Some(StageOutcome::ModelTurnAdmission(admission)) =
+            stage_outcome_for_model_turn_admission_error(&error)
+        else {
+            panic!("rejection must remain a typed admission stage outcome");
+        };
         assert!(matches!(
-            stage_outcome_for_model_turn_admission_error(&error),
-            Some(StageOutcome::ModelTurnAdmission(ModelTurnAdmissionStageOutcome::Rejected(
-                djinn_db::ModelTurnAdmissionRejection::Off
-            )))
+            admission,
+            ModelTurnAdmissionStageOutcome::Rejected(djinn_db::ModelTurnAdmissionRejection::Off)
         ));
+        let terminal = model_turn_admission_terminal_outcome(admission);
+        assert!(matches!(
+            terminal,
+            djinn_supervisor::ModelTurnAdmissionTerminalOutcome::Rejected(
+                djinn_db::ModelTurnAdmissionRejection::Off
+            )
+        ));
+        assert_eq!(
+            model_turn_admission_task_run_status(&terminal),
+            djinn_core::models::TaskRunStatus::Failed,
+            "rejection must use the terminal admission-error path"
+        );
     }
 
     #[test]
@@ -2081,14 +2114,29 @@ mod tests {
         let error = anyhow::Error::new(ModelTurnAdmissionOutcome::DispatchFenced(
             djinn_db::ModelTurnLeaseMutationOutcome::Fenced,
         ));
+        let Some(StageOutcome::ModelTurnAdmission(admission)) =
+            stage_outcome_for_model_turn_admission_error(&error)
+        else {
+            panic!("dispatch fence must remain a typed admission stage outcome");
+        };
         assert!(matches!(
-            stage_outcome_for_model_turn_admission_error(&error),
-            Some(StageOutcome::ModelTurnAdmission(
-                ModelTurnAdmissionStageOutcome::DispatchFenced(
-                    djinn_db::ModelTurnLeaseMutationOutcome::Fenced
-                )
-            ))
+            admission,
+            ModelTurnAdmissionStageOutcome::DispatchFenced(
+                djinn_db::ModelTurnLeaseMutationOutcome::Fenced
+            )
         ));
+        let terminal = model_turn_admission_terminal_outcome(admission);
+        assert!(matches!(
+            terminal,
+            djinn_supervisor::ModelTurnAdmissionTerminalOutcome::DispatchFenced(
+                djinn_db::ModelTurnLeaseMutationOutcome::Fenced
+            )
+        ));
+        assert_eq!(
+            model_turn_admission_task_run_status(&terminal),
+            djinn_core::models::TaskRunStatus::Interrupted,
+            "dispatch fence must use the cancellable/interrupted scheduling path"
+        );
     }
 
     #[derive(Debug, PartialEq, Eq)]

@@ -328,6 +328,35 @@ pub enum ModelTurnAdmissionStageOutcome {
     DispatchFenced(djinn_db::ModelTurnLeaseMutationOutcome),
 }
 
+/// Carry a typed admission result across the stage/terminal boundary without
+/// reducing it to a diagnostic string.
+pub fn model_turn_admission_terminal_outcome(
+    admission: ModelTurnAdmissionStageOutcome,
+) -> ModelTurnAdmissionTerminalOutcome {
+    match admission {
+        ModelTurnAdmissionStageOutcome::Wait(wait) => ModelTurnAdmissionTerminalOutcome::Wait(wait),
+        ModelTurnAdmissionStageOutcome::Rejected(rejection) => {
+            ModelTurnAdmissionTerminalOutcome::Rejected(rejection)
+        }
+        ModelTurnAdmissionStageOutcome::DispatchFenced(fence) => {
+            ModelTurnAdmissionTerminalOutcome::DispatchFenced(fence)
+        }
+    }
+}
+
+/// Classify a typed admission terminal outcome through the cancellable task-run
+/// scheduling seam. A wait or dispatch fence is retryable/interrupted; an
+/// explicit rejection is a terminal admission failure.
+pub fn model_turn_admission_task_run_status(
+    admission: &ModelTurnAdmissionTerminalOutcome,
+) -> TaskRunStatus {
+    match admission {
+        ModelTurnAdmissionTerminalOutcome::Wait(..)
+        | ModelTurnAdmissionTerminalOutcome::DispatchFenced(..) => TaskRunStatus::Interrupted,
+        ModelTurnAdmissionTerminalOutcome::Rejected(..) => TaskRunStatus::Failed,
+    }
+}
+
 impl StageOutcome {
     /// Whether this outcome should short-circuit the role sequence.
     pub fn is_terminal(&self) -> bool {
@@ -381,9 +410,15 @@ fn emit_stage_outcome_event(
         StageOutcome::Failed { .. } => "failed",
         StageOutcome::LoopGuardTripped { .. } => "loop_guard_tripped",
         StageOutcome::Parked { .. } => "parked",
-        StageOutcome::ModelTurnAdmission(ModelTurnAdmissionStageOutcome::Wait(..)) => "model_turn_admission_wait",
-        StageOutcome::ModelTurnAdmission(ModelTurnAdmissionStageOutcome::Rejected(..)) => "model_turn_admission_rejected",
-        StageOutcome::ModelTurnAdmission(ModelTurnAdmissionStageOutcome::DispatchFenced(..)) => "model_turn_admission_dispatch_fenced",
+        StageOutcome::ModelTurnAdmission(ModelTurnAdmissionStageOutcome::Wait(..)) => {
+            "model_turn_admission_wait"
+        }
+        StageOutcome::ModelTurnAdmission(ModelTurnAdmissionStageOutcome::Rejected(..)) => {
+            "model_turn_admission_rejected"
+        }
+        StageOutcome::ModelTurnAdmission(ModelTurnAdmissionStageOutcome::DispatchFenced(..)) => {
+            "model_turn_admission_dispatch_fenced"
+        }
     };
 
     tracing::info!(
@@ -3425,11 +3460,9 @@ impl TaskRunSupervisor {
                         break;
                     }
                     StageOutcome::ModelTurnAdmission(admission) => {
-                        result = Some(TaskRunOutcome::ModelTurnAdmission(match admission {
-                            ModelTurnAdmissionStageOutcome::Wait(wait) => ModelTurnAdmissionTerminalOutcome::Wait(wait),
-                            ModelTurnAdmissionStageOutcome::Rejected(rejection) => ModelTurnAdmissionTerminalOutcome::Rejected(rejection),
-                            ModelTurnAdmissionStageOutcome::DispatchFenced(fence) => ModelTurnAdmissionTerminalOutcome::DispatchFenced(fence),
-                        }));
+                        result = Some(TaskRunOutcome::ModelTurnAdmission(
+                            model_turn_admission_terminal_outcome(admission),
+                        ));
                         break;
                     }
                     StageOutcome::LoopGuardTripped {
@@ -3629,9 +3662,9 @@ impl TaskRunSupervisor {
             // Completed so the task_run row is terminal without triggering
             // failure accounting.
             TaskRunOutcome::EnvironmentalNonAttempt { .. } => TaskRunStatus::Completed,
-            TaskRunOutcome::ModelTurnAdmission(ModelTurnAdmissionTerminalOutcome::Wait(..))
-            | TaskRunOutcome::ModelTurnAdmission(ModelTurnAdmissionTerminalOutcome::DispatchFenced(..)) => TaskRunStatus::Interrupted,
-            TaskRunOutcome::ModelTurnAdmission(ModelTurnAdmissionTerminalOutcome::Rejected(..)) => TaskRunStatus::Failed,
+            TaskRunOutcome::ModelTurnAdmission(admission) => {
+                model_turn_admission_task_run_status(admission)
+            }
             TaskRunOutcome::Failed { .. } => TaskRunStatus::Failed,
             TaskRunOutcome::LoopGuardTripped { .. } => TaskRunStatus::Failed,
             TaskRunOutcome::Interrupted => TaskRunStatus::Interrupted,
