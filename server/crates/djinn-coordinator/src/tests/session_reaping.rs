@@ -8843,6 +8843,101 @@ async fn terminal_fixture(
     (task, session)
 }
 
+/// A replayable terminal observation captured from the named historical exit.
+/// The identity and every classifier input are fixture facts, not test labels.
+#[derive(Clone, Copy)]
+struct KnownSessionExitFixture {
+    session_id: &'static str,
+    terminal_status: djinn_core::models::SessionStatus,
+    task_status: &'static str,
+    transition_from_status: &'static str,
+    transition_to_status: &'static str,
+}
+
+async fn known_terminal_fixture(
+    db: &Database,
+    tx: &broadcast::Sender<DjinnEventEnvelope>,
+    fixture: KnownSessionExitFixture,
+) -> (djinn_core::models::Task, djinn_core::models::SessionRecord) {
+    use djinn_core::models::TransitionAction;
+    use djinn_db::{CreateSessionParams, SessionRepository};
+
+    let (task, _) = create_task_with_note(db, tx, fixture.session_id).await;
+    let tasks = TaskRepository::new(db.clone(), crate::events::event_bus_for(tx));
+    tasks.set_status(&task.id, "in_progress").await.unwrap();
+    match fixture.task_status {
+        "in_progress" => {}
+        "needs_task_review" => {
+            tasks
+                .transition(
+                    &task.id,
+                    TransitionAction::SubmitTaskReview,
+                    "supervisor",
+                    "system",
+                    None,
+                    None,
+                )
+                .await
+                .unwrap();
+        }
+        "closed" => {
+            tasks.set_status(&task.id, "closed").await.unwrap();
+        }
+        status => panic!("unsupported known fixture task status: {status}"),
+    }
+
+    let sessions = SessionRepository::new(db.clone(), crate::events::event_bus_for(tx));
+    let created = sessions
+        .create(CreateSessionParams {
+            project_id: &task.project_id,
+            task_id: Some(&task.id),
+            model: "openai/gpt-5.5",
+            agent_type: "worker",
+            metadata_json: None,
+            task_run_id: None,
+            pricing: None,
+            cost_basis: None,
+        })
+        .await
+        .unwrap();
+    // Production allocation stays v7. The oracle installs the historical
+    // identity on its isolated test row before it acquires dependants.
+    sqlx::query("UPDATE sessions SET id = $1 WHERE id = $2")
+        .bind(fixture.session_id)
+        .bind(&created.id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+    let session = sessions
+        .update(
+            fixture.session_id,
+            fixture.terminal_status,
+            1,
+            1,
+            0,
+            0,
+            None,
+        )
+        .await
+        .unwrap();
+
+    // Verify the exact facts the actor's single read-back consumes.
+    assert_eq!(session.id, fixture.session_id);
+    assert_eq!(session.status, fixture.terminal_status.as_str());
+    assert_eq!(session.task_id.as_deref(), Some(task.id.as_str()));
+    let state = djinn_db::LivenessRepository::new(db.clone())
+        .load_current_state(&task.id)
+        .await
+        .unwrap();
+    assert_eq!(state.task_status.as_deref(), Some(fixture.task_status));
+    assert_eq!(
+        state.last_transition_from_status.as_deref(),
+        Some(fixture.transition_from_status)
+    );
+    assert_eq!(fixture.transition_to_status, fixture.task_status);
+    (task, session)
+}
+
 /// The durable Required transition is written before the production terminal
 /// event entry point is called; fixture order, not elapsed time, is the oracle.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -9009,28 +9104,59 @@ async fn concurrent_session_exit_is_insert_once() {
     );
 }
 
-/// Historical labels are immutable fixture facts. Five known exits span
-/// completed/failed/interrupted terminal truth; the separate genuine fixture is
-/// the sole violation. No timing delta participates in this oracle.
+/// Five named, persisted exits span completed/failed/interrupted truth. Their
+/// exact session IDs, terminal rows, task rows, and final transitions are
+/// replayed through `handle_event`; no timing delta participates in the oracle.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn known_session_exit_replay_oracle() {
     use djinn_core::models::SessionStatus;
+    use djinn_db::TaskAttemptRepository;
 
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
     let mut actor = coordinator_actor_for_tests(&db, &tx);
     let liveness = djinn_db::LivenessRepository::new(db.clone());
     let known = [
-        ("019fcc80", SessionStatus::Completed, "needs_task_review"),
-        ("019fcc82", SessionStatus::Failed, "needs_task_review"),
-        ("019fcc84", SessionStatus::Interrupted, "needs_task_review"),
-        ("019fcc30", SessionStatus::Completed, "closed"),
-        ("019fcc22", SessionStatus::Failed, "closed"),
+        KnownSessionExitFixture {
+            session_id: "019fcc80",
+            terminal_status: SessionStatus::Completed,
+            task_status: "needs_task_review",
+            transition_from_status: "in_progress",
+            transition_to_status: "needs_task_review",
+        },
+        KnownSessionExitFixture {
+            session_id: "019fcc82",
+            terminal_status: SessionStatus::Failed,
+            task_status: "needs_task_review",
+            transition_from_status: "in_progress",
+            transition_to_status: "needs_task_review",
+        },
+        KnownSessionExitFixture {
+            session_id: "019fcc84",
+            terminal_status: SessionStatus::Interrupted,
+            task_status: "needs_task_review",
+            transition_from_status: "in_progress",
+            transition_to_status: "needs_task_review",
+        },
+        KnownSessionExitFixture {
+            session_id: "019fcc30",
+            terminal_status: SessionStatus::Completed,
+            task_status: "closed",
+            transition_from_status: "in_progress",
+            transition_to_status: "closed",
+        },
+        KnownSessionExitFixture {
+            session_id: "019fcc22",
+            terminal_status: SessionStatus::Failed,
+            task_status: "closed",
+            transition_from_status: "in_progress",
+            transition_to_status: "closed",
+        },
     ];
     let mut false_violations = 0;
-    for (label, status, task_status) in known {
-        let (_, session) = terminal_fixture(&db, &tx, label, status, task_status).await;
-        let event = terminal_session_event(status.as_str(), &session);
+    for fixture in known {
+        let (_, session) = known_terminal_fixture(&db, &tx, fixture).await;
+        let event = terminal_session_event(fixture.terminal_status.as_str(), &session);
         actor.handle_event(event.clone()).await;
         actor.handle_event(event).await;
         false_violations += usize::from(
@@ -9048,20 +9174,61 @@ async fn known_session_exit_replay_oracle() {
                 .await
                 .unwrap(),
             1,
-            "{label} must be insert-once"
+            "{} must be insert-once",
+            fixture.session_id
         );
     }
-    let (_, genuine) = terminal_fixture(
-        &db,
-        &tx,
-        "genuine failed-handoff fixture",
-        SessionStatus::Failed,
-        "in_progress",
-    )
-    .await;
+    let genuine_fixture = KnownSessionExitFixture {
+        session_id: "genuine-failed-handoff-recovery",
+        terminal_status: SessionStatus::Failed,
+        task_status: "in_progress",
+        transition_from_status: "open",
+        transition_to_status: "in_progress",
+    };
+    let (_, genuine) = known_terminal_fixture(&db, &tx, genuine_fixture).await;
     actor
         .handle_event(terminal_session_event("failed", &genuine))
         .await;
+
+    // The production actor receives this terminal event, but its one addressed
+    // session read-back cannot acquire the row. Fail closed: do not invent a
+    // classification, immutable observation, or failed attempt from the event.
+    let unavailable_fixture = KnownSessionExitFixture {
+        session_id: "failed-evidence-acquisition",
+        terminal_status: SessionStatus::Interrupted,
+        task_status: "needs_task_review",
+        transition_from_status: "in_progress",
+        transition_to_status: "needs_task_review",
+    };
+    let (unavailable_task, unavailable_session) =
+        known_terminal_fixture(&db, &tx, unavailable_fixture).await;
+    let unavailable_attempt = seed_pending_attempt(&db, &unavailable_task.id, "worker").await;
+    sqlx::query("DELETE FROM sessions WHERE id = $1")
+        .bind(&unavailable_session.id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+    actor
+        .handle_event(terminal_session_event("interrupted", &unavailable_session))
+        .await;
+    assert_eq!(
+        liveness
+            .count_evidence_for_session(&unavailable_session.id, None)
+            .await
+            .unwrap(),
+        0,
+        "failed acquisition must not fabricate an immutable exit observation"
+    );
+    assert_eq!(
+        TaskAttemptRepository::new(db.clone())
+            .get(&unavailable_attempt)
+            .await
+            .unwrap()
+            .unwrap()
+            .outcome,
+        "pending",
+        "failed acquisition must not infer a failed attempt"
+    );
     assert_eq!(
         false_violations, 0,
         "known-session oracle is 0/5 false violations"

@@ -72,6 +72,10 @@ filetime = "0.2"
 insta = { version = "1", features = ["json"] }
 tracing-test = "0.2"
 djinn-slot = { path = "../djinn-slot", features = ["test-support"] }
+# Test-only fixture setup installs named historical session IDs and simulates an
+# unavailable addressed row through dynamic SQL; production code remains on the
+# repository APIs.
+sqlx = { version = "0.8", default-features = false, features = ["postgres", "runtime-tokio-rustls"] }
 
 [lints.clippy]
 # Workspace lint baseline (manually replicated because this crate also carries
