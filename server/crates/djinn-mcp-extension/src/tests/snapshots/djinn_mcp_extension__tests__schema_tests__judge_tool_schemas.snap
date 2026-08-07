@@ -772,7 +772,8 @@ expression: tool_schemas_judge()
         "target_subsystem",
         "spec_unknown_anchor",
         "insufficient_in_session_research",
-        "expected_findings"
+        "expected_findings",
+        "load_bearing_category"
       ],
       "properties": {
         "proposal_id": {
@@ -806,6 +807,18 @@ expression: tool_schemas_judge()
         "expected_findings": {
           "type": "string",
           "description": "What the evidence spike should produce to resolve the claim"
+        },
+        "load_bearing_category": {
+          "type": "string",
+          "enum": [
+            "feasibility",
+            "safety",
+            "integrity",
+            "compatibility",
+            "rollout",
+            "core_acceptance_criteria"
+          ],
+          "description": "Which load-bearing threshold the claim meets. Declare it yourself; the server will not infer it from the question prose."
         }
       }
     },
