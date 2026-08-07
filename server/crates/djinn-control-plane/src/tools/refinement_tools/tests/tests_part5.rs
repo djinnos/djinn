@@ -185,7 +185,9 @@ pub(super) async fn setup_demand_test() -> (
     let p = repo
         .create(ProposalCreateInput {
             title: "Demand Validation Test",
-            body: "This spec contains anchor-text for validation.",
+            // These are deliberately only prose/UI question inventory. The
+            // demand path must never synthesize typed evidence from them.
+            body: "This spec contains anchor-text for validation.\n\n## Open questions\nIs token expiry safe?\n\n<QuestionForm id=\"questions\">\nDoes the repository need refresh tokens?\n</QuestionForm>",
             acceptance_criteria: Some("[]"),
             status: None,
             body_format: None,
@@ -230,6 +232,24 @@ pub(super) async fn setup_demand_test() -> (
     .await;
 
     let updated = repo.get(&p.id).await.unwrap().unwrap();
+    // The setup body intentionally contains prose, an Open questions heading,
+    // and a QuestionForm. They are UI text only: setup must not synthesize
+    // typed evidence or its legacy active-demand projection.
+    let demand_counts =
+        djinn_db::test_support::atomic_evidence_demand_counts_for_test(&db, &p.id, &project_id)
+            .await;
+    assert_eq!(
+        demand_counts.findings, 0,
+        "prose and QuestionForm must not create findings"
+    );
+    assert_eq!(
+        demand_counts.attempts, 0,
+        "prose and QuestionForm must not create attempts"
+    );
+    assert!(
+        updated.linked_spike_task_id.is_none() && updated.needs_evidence_claim.is_none(),
+        "prose and QuestionForm must not create legacy evidence state"
+    );
     (server, db, updated, user_id, judge_task_id)
 }
 
@@ -263,7 +283,8 @@ pub(super) async fn mutation_snapshot(
 async fn no_session_identity_rejected() {
     let (server, db, p, _user_id, _judge_task_id) = setup_demand_test().await;
     let repo = ProposalRepository::new(db.clone(), EventBus::noop());
-    let snap = mutation_snapshot(&repo, &p.id).await;
+    let project_id = repo.targets(&p.id).await.unwrap()[0].project_id.clone();
+    let snap = atomic_demand_snapshot(&db, &repo, &p.id, &project_id).await;
 
     // Call dispatch_tool WITHOUT a SESSION_USER_ID scope — simulates
     // an unauthenticated caller or background path with no session.
@@ -287,8 +308,11 @@ async fn no_session_identity_rejected() {
             .unwrap_or(true)
     );
 
-    let after = mutation_snapshot(&repo, &p.id).await;
-    assert_eq!(snap, after, "rejected demand must not mutate state");
+    assert_eq!(
+        snap,
+        atomic_demand_snapshot(&db, &repo, &p.id, &project_id).await,
+        "unauthenticated demand must not mutate any demand-owned relation"
+    );
 }
 
 // ── AC: Non-Judge caller rejected (wrong user) ──────────────────
@@ -297,7 +321,8 @@ async fn no_session_identity_rejected() {
 async fn wrong_user_rejected() {
     let (server, db, p, _user_id, _judge_task_id) = setup_demand_test().await;
     let repo = ProposalRepository::new(db.clone(), EventBus::noop());
-    let snap = mutation_snapshot(&repo, &p.id).await;
+    let project_id = repo.targets(&p.id).await.unwrap()[0].project_id.clone();
+    let snap = atomic_demand_snapshot(&db, &repo, &p.id, &project_id).await;
 
     // Call as a DIFFERENT user — not the one attributed to the Judge task.
     let impostor_id = create_test_user(&db, "impostor-user").await;
@@ -325,8 +350,11 @@ async fn wrong_user_rejected() {
             .unwrap_or(true)
     );
 
-    let after = mutation_snapshot(&repo, &p.id).await;
-    assert_eq!(snap, after, "rejected demand must not mutate state");
+    assert_eq!(
+        snap,
+        atomic_demand_snapshot(&db, &repo, &p.id, &project_id).await,
+        "unauthorized demand must not mutate any demand-owned relation"
+    );
 }
 
 // ── AC: No Judge task in flight rejected ─────────────────────────
@@ -538,7 +566,8 @@ async fn inactive_refinement_rejected() {
 async fn round_mismatch_rejected() {
     let (server, db, p, user_id, _judge_task_id) = setup_demand_test().await;
     let repo = ProposalRepository::new(db.clone(), EventBus::noop());
-    let snap = mutation_snapshot(&repo, &p.id).await;
+    let project_id = repo.targets(&p.id).await.unwrap()[0].project_id.clone();
+    let snap = atomic_demand_snapshot(&db, &repo, &p.id, &project_id).await;
 
     let mut params = valid_demand_params(&p.id);
     params["round"] = serde_json::json!(99); // Wrong round.
@@ -570,17 +599,21 @@ async fn round_mismatch_rejected() {
             .unwrap_or(true)
     );
 
-    let after = mutation_snapshot(&repo, &p.id).await;
-    assert_eq!(snap, after, "rejected demand must not mutate state");
+    assert_eq!(
+        snap,
+        atomic_demand_snapshot(&db, &repo, &p.id, &project_id).await,
+        "round mismatch must not mutate any demand-owned relation"
+    );
 }
 
-// ── AC: against_revision_seq exceeds latest rejected ─────────────
+// ── AC: future against_revision_seq rejected ─────────────────────
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn against_revision_seq_exceeds_latest_rejected() {
     let (server, db, p, user_id, _judge_task_id) = setup_demand_test().await;
     let repo = ProposalRepository::new(db.clone(), EventBus::noop());
-    let snap = mutation_snapshot(&repo, &p.id).await;
+    let project_id = repo.targets(&p.id).await.unwrap()[0].project_id.clone();
+    let snap = atomic_demand_snapshot(&db, &repo, &p.id, &project_id).await;
 
     let mut params = valid_demand_params(&p.id);
     params["against_revision_seq"] = serde_json::json!(999);
@@ -615,8 +648,76 @@ async fn against_revision_seq_exceeds_latest_rejected() {
             .unwrap_or(true)
     );
 
-    let after = mutation_snapshot(&repo, &p.id).await;
-    assert_eq!(snap, after, "rejected demand must not mutate state");
+    assert_eq!(
+        snap,
+        atomic_demand_snapshot(&db, &repo, &p.id, &project_id).await,
+        "revision mismatch must not mutate any demand-owned relation"
+    );
+}
+
+// ── AC: stale against_revision_seq rejected ──────────────────────
+
+/// Advance the persisted proposal head before sending a demand bound to the
+/// previous revision. This is deliberately distinct from the future-sequence
+/// case above: an older, once-current revision must also fail before the
+/// composed demand transaction creates any task or evidence state.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stale_against_revision_seq_rejected_without_demand_mutation() {
+    let (server, db, p, user_id, _judge_task_id) = setup_demand_test().await;
+    let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+
+    let advanced = repo
+        .update(
+            &p.id,
+            djinn_db::ProposalUpdateInput {
+                title: "Demand Validation Test",
+                body: "This spec contains anchor-text for validation after revision advance.",
+                acceptance_criteria: "[]",
+                status: "draft",
+                superseded_by: None,
+                body_format: None,
+                event_metadata: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        advanced.latest_revision_seq > p.latest_revision_seq,
+        "fixture must advance the active revision: {} > {}",
+        advanced.latest_revision_seq,
+        p.latest_revision_seq
+    );
+    let project_id = repo.targets(&p.id).await.unwrap()[0].project_id.clone();
+    let before = atomic_demand_snapshot(&db, &repo, &p.id, &project_id).await;
+
+    let mut params = valid_demand_params(&p.id);
+    params["against_revision_seq"] = serde_json::json!(p.latest_revision_seq);
+
+    let resp = djinn_core::auth_context::SESSION_USER_ID
+        .scope(Some(user_id), async {
+            server
+                .dispatch_tool("proposal_refinement_demand_evidence", params)
+                .await
+        })
+        .await
+        .expect("tool should be registered");
+
+    let error = resp.get("error").and_then(|v| v.as_str()).unwrap();
+    assert!(
+        error.contains("does not match the proposal's active revision seq"),
+        "stale revision must be rejected as an exact revision mismatch: {error}"
+    );
+    assert!(
+        !resp
+            .get("accepted")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true)
+    );
+    assert_eq!(
+        before,
+        atomic_demand_snapshot(&db, &repo, &p.id, &project_id).await,
+        "stale revision demand must not mutate task, typed, legacy, debate, or lifecycle state"
+    );
 }
 
 // ── AC: Empty question rejected ──────────────────────────────────
@@ -697,14 +798,19 @@ async fn question_without_question_mark_rejected() {
 async fn generic_question_pattern_rejected() {
     let (server, db, p, user_id, _judge_task_id) = setup_demand_test().await;
     let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+    let project_id = repo.targets(&p.id).await.unwrap()[0].project_id.clone();
 
-    for pattern in &[
-        "Please investigate further if this is correct?",
-        "Can we improve the token handling?",
-        "Should we design more tests for this?",
+    for (pattern, rejection) in [
+        ("Please investigate further if this is correct?", "generic"),
+        ("Can we improve the token handling?", "generic"),
+        ("Should we design more tests for this?", "generic"),
+        ("Is blue better than green?", "preference-only"),
+        (
+            "Which function currently parses this header?",
+            "repository-answerable",
+        ),
     ] {
-        let snap = mutation_snapshot(&repo, &p.id).await;
-
+        let snap = atomic_demand_snapshot(&db, &repo, &p.id, &project_id).await;
         let mut params = valid_demand_params(&p.id);
         params["question"] = serde_json::json!(pattern);
 
@@ -720,9 +826,8 @@ async fn generic_question_pattern_rejected() {
 
         let error = resp.get("error").and_then(|v| v.as_str()).unwrap();
         assert!(
-            error.contains("generic"),
-            "pattern '{}' should be rejected as generic: {error}",
-            pattern,
+            error.contains(rejection),
+            "pattern '{pattern}' should be rejected as {rejection}: {error}",
         );
         assert!(
             !resp
@@ -730,9 +835,11 @@ async fn generic_question_pattern_rejected() {
                 .and_then(|v| v.as_bool())
                 .unwrap_or(true)
         );
-
-        let after = mutation_snapshot(&repo, &p.id).await;
-        assert_eq!(snap, after, "rejected demand must not mutate state");
+        assert_eq!(
+            snap,
+            atomic_demand_snapshot(&db, &repo, &p.id, &project_id).await,
+            "rejected question '{pattern}' must not mutate any demand-owned relation"
+        );
     }
 }
 
@@ -1196,6 +1303,16 @@ async fn duplicate_demand_after_accepted_creates_no_second_spike() {
         .and_then(|v| v.as_str())
         .expect("first demand should have spike_task_id")
         .to_string();
+    let first_finding = result1
+        .get("finding_id")
+        .and_then(|v| v.as_str())
+        .expect("first demand should have finding_id")
+        .to_string();
+    let first_attempt = result1
+        .get("attempt_id")
+        .and_then(|v| v.as_str())
+        .expect("first demand should have attempt_id")
+        .to_string();
     assert_eq!(
         result1.get("replayed").and_then(|v| v.as_bool()),
         Some(false),
@@ -1226,6 +1343,16 @@ async fn duplicate_demand_after_accepted_creates_no_second_spike() {
         result2.get("spike_task_id").and_then(|v| v.as_str()),
         Some(first_spike.as_str()),
         "a replay must return the FIRST spike, never a new one: {resp2}"
+    );
+    assert_eq!(
+        result2.get("finding_id").and_then(|v| v.as_str()),
+        Some(first_finding.as_str()),
+        "a replay must return the original typed finding: {resp2}"
+    );
+    assert_eq!(
+        result2.get("attempt_id").and_then(|v| v.as_str()),
+        Some(first_attempt.as_str()),
+        "a replay must return the original typed attempt: {resp2}"
     );
     assert_eq!(
         result2.get("replayed").and_then(|v| v.as_bool()),
@@ -1442,5 +1569,137 @@ async fn atomic_demand_normalized_replay_survives_authority_fence() {
         before_replay,
         atomic_demand_snapshot(&db, &repo, &proposal.id, &project_id).await,
         "replay must not allocate duplicate demand-owned rows"
+    );
+}
+
+/// The accepted categories and authority roles are exercised as data, so a new
+/// category cannot accidentally bypass the same atomic persistence boundary.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn demand_matrix_persists_every_load_bearing_category_for_each_authority_role() {
+    const CATEGORIES: &[&str] = &[
+        "feasibility",
+        "safety",
+        "integrity",
+        "compatibility",
+        "rollout",
+        "core_acceptance_criteria",
+    ];
+
+    for role in ["judge", "adversary"] {
+        for category in CATEGORIES {
+            let (server, db, proposal, user_id, authority_task_id) = setup_demand_test().await;
+            let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+            let project_id = repo.targets(&proposal.id).await.unwrap()[0]
+                .project_id
+                .clone();
+
+            // The fixture materializes Judge authority. Switch every persisted
+            // role column as one correlated tuple for the Adversary case.
+            if role == "adversary" {
+                djinn_db::test_support::switch_to_adversary_authority_for_test(
+                    &db,
+                    &authority_task_id,
+                )
+                .await;
+            }
+
+            let before = atomic_demand_snapshot(&db, &repo, &proposal.id, &project_id).await;
+            let mut params = valid_demand_params(&proposal.id);
+            params["load_bearing_category"] = serde_json::json!(category);
+            params["question"] = serde_json::json!(format!(
+                "Does {category} evidence prove the token-expiry boundary?"
+            ));
+            let response = djinn_core::auth_context::SESSION_USER_ID
+                .scope(Some(user_id), async {
+                    server
+                        .dispatch_tool("proposal_refinement_demand_evidence", params)
+                        .await
+                })
+                .await
+                .unwrap();
+            assert_eq!(
+                response.get("accepted").and_then(|v| v.as_bool()),
+                Some(true),
+                "{role}/{category} must be accepted: {response}"
+            );
+            let spike_task_id = response["result"]["spike_task_id"]
+                .as_str()
+                .expect("accepted matrix response must identify its spike task");
+            let spike = djinn_db::TaskRepository::new(db.clone(), EventBus::noop())
+                .get(spike_task_id)
+                .await
+                .unwrap()
+                .expect("accepted matrix spike task must persist");
+            let labels: Vec<String> = serde_json::from_str(&spike.labels).unwrap();
+            assert_eq!(
+                spike.agent_type.as_deref(),
+                Some("architect"),
+                "{role}/{category}"
+            );
+            assert_eq!(spike.issue_type, "spike", "{role}/{category}");
+            assert!(
+                labels.contains(&"refinement-evidence".to_owned()),
+                "{role}/{category}"
+            );
+            assert!(
+                labels.contains(&"read-only".to_owned()),
+                "{role}/{category}"
+            );
+            assert!(
+                labels.contains(&format!("proposal:{}", proposal.short_id)),
+                "{role}/{category} must retain its proposal label"
+            );
+            let after = atomic_demand_snapshot(&db, &repo, &proposal.id, &project_id).await;
+            assert_eq!(after.0.tasks, before.0.tasks + 1);
+            assert_eq!(after.0.findings, before.0.findings + 1);
+            assert_eq!(after.0.attempts, before.0.attempts + 1);
+            assert_eq!(after.0.debates, before.0.debates + 1);
+            assert_eq!(after.0.lifecycle_events, before.0.lifecycle_events + 1);
+            assert!(
+                after.1.is_some() && after.2.is_some(),
+                "legacy link/claim persist"
+            );
+            let debate = repo.debate_trail(&proposal.id).await.unwrap();
+            assert_eq!(debate.last().unwrap().agent_role, role);
+        }
+    }
+}
+
+/// A database fault at the debate boundary happens after task, typed, and
+/// legacy rows have been staged. The composed transaction must roll all of
+/// them back rather than leaving a partial evidence demand behind.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn atomic_demand_rolls_back_every_owned_relation_after_late_debate_failure() {
+    let (_server, db, proposal, _user_id, judge_task_id) = setup_demand_test().await;
+    let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+    let project_id = repo.targets(&proposal.id).await.unwrap()[0]
+        .project_id
+        .clone();
+    let before = atomic_demand_snapshot(&db, &repo, &proposal.id, &project_id).await;
+    djinn_db::test_support::reject_atomic_demand_debate_inserts_for_test(&db).await;
+
+    let claim = atomic_demand_claim(&judge_task_id);
+    let labels = serde_json::json!(["refinement-evidence", "read-only"]);
+    let error = repo
+        .demand_evidence_atomically(djinn_db::AtomicEvidenceDemandInput {
+            proposal_id: &proposal.id,
+            project_id: &project_id,
+            claim: &claim,
+            title: "Evidence spike: token expiry",
+            description: "Read-only evidence investigation",
+            labels: &labels,
+            load_bearing_category: "feasibility",
+        })
+        .await
+        .expect_err("late debate fault must abort the atomic demand");
+    assert!(
+        error
+            .to_string()
+            .contains("injected atomic demand debate failure")
+    );
+    assert_eq!(
+        before,
+        atomic_demand_snapshot(&db, &repo, &proposal.id, &project_id).await,
+        "late failure must roll back task, typed, legacy, debate, and lifecycle state"
     );
 }
