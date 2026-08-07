@@ -1505,6 +1505,72 @@ fn edit_tool_description_and_schema_surface() {
     );
 }
 
+/// `proposal_refinement_demand_evidence` has two schemas: the Judge-facing one
+/// hand-written in `shared_schemas`, and the one `schemars` derives from
+/// `ProposalRefinementDemandEvidenceParams`, which is what the handler actually
+/// deserializes into. Nothing compared them. So when the param struct gained a
+/// required `load_bearing_category`, the advertised schema went on describing
+/// the old eight-field set: every golden stayed green, and a real Judge omitted
+/// the field and lost the call to a deserialization error no test could see.
+///
+/// Asserting set equality (not containment) is deliberate — advertising a field
+/// the handler will reject is the same class of bug in the other direction.
+#[test]
+fn demand_evidence_advertises_exactly_the_fields_the_handler_deserializes() {
+    let derived = serde_json::to_value(schemars::schema_for!(
+        djinn_control_plane::tools::refinement_helpers::ProposalRefinementDemandEvidenceParams
+    ))
+    .expect("serialize derived demand-evidence param schema");
+
+    let derived_required: BTreeSet<&str> = derived["required"]
+        .as_array()
+        .expect("derived param schema lists required fields")
+        .iter()
+        .map(|v| v.as_str().expect("required entry is a string"))
+        .collect();
+
+    // Guard the guard: schemars omits `required` for an all-optional struct,
+    // and an empty derived set would make the comparison below pass vacuously.
+    assert!(
+        derived_required.contains("load_bearing_category"),
+        "derived param schema should require load_bearing_category, got {derived_required:?}"
+    );
+
+    let advertised =
+        serde_json::to_value(shared_schemas::tool_proposal_refinement_demand_evidence())
+            .expect("serialize advertised demand-evidence schema");
+    let input = &advertised["inputSchema"];
+
+    let advertised_required: BTreeSet<&str> = input["required"]
+        .as_array()
+        .expect("advertised schema lists required fields")
+        .iter()
+        .map(|v| v.as_str().expect("required entry is a string"))
+        .collect();
+
+    assert_eq!(
+        advertised_required, derived_required,
+        "the Judge-facing required set drifted from what the handler deserializes: \
+         advertised {advertised_required:?}, handler {derived_required:?}"
+    );
+
+    // A field can be required and still never described; the Judge needs the
+    // property entry to know what to send.
+    let advertised_props: BTreeSet<&str> = input["properties"]
+        .as_object()
+        .expect("advertised schema has a properties object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert!(
+        derived_required.is_subset(&advertised_props),
+        "every required param must be an advertised property, missing {:?}",
+        derived_required
+            .difference(&advertised_props)
+            .collect::<Vec<_>>()
+    );
+}
+
 #[test]
 fn evidence_spike_preserves_normal_worker_surface() {
     // Verify the normal worker surface is NOT affected.

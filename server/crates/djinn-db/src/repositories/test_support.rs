@@ -1385,6 +1385,192 @@ pub async fn make_project(db: &Database, path: &Path) -> Project {
     .unwrap()
 }
 
+// ---------------------------------------------------------------------------
+// CI-route effect counters and state planting (proposal `nafu`)
+// ---------------------------------------------------------------------------
+//
+// The coordinator's lane-executor fixtures assert their negatives by *counting*
+// real rows either side of a call — no provider mutation, no Tier-2 lease, no
+// board mutation, no worker dispatch — and `djinn-coordinator` may not depend on
+// `sqlx` directly (`boundary_djinn_coordinator_has_no_sqlx_dependency`). These
+// are that crate's read path.
+//
+// **Not for production use.** Every one of them panics on SQL errors.
+
+/// The board status of one task. Half of the "no board mutation" assertion.
+pub async fn task_status_for_test(db: &Database, task_id: &str) -> String {
+    db.ensure_initialized().await.unwrap();
+    sqlx::query_scalar("SELECT status FROM tasks WHERE id = $1")
+        .bind(task_id)
+        .fetch_one(db.pool())
+        .await
+        .unwrap_or_else(|error| panic!("read task status: {error}"))
+}
+
+/// Activity-log rows for one task. The other half: a transition that logged
+/// nothing but moved the row, or logged without moving it, is still a board
+/// mutation.
+pub async fn activity_row_count_for_test(db: &Database, task_id: &str) -> i64 {
+    db.ensure_initialized().await.unwrap();
+    sqlx::query_scalar("SELECT COUNT(*) FROM activity_log WHERE task_id = $1")
+        .bind(task_id)
+        .fetch_one(db.pool())
+        .await
+        .unwrap_or_else(|error| panic!("count activity rows: {error}"))
+}
+
+/// Attempt rows for one task — the durable trace of a worker dispatch.
+pub async fn task_attempt_count_for_test(db: &Database, task_id: &str) -> i64 {
+    db.ensure_initialized().await.unwrap();
+    sqlx::query_scalar("SELECT COUNT(*) FROM task_attempts WHERE task_id = $1")
+        .bind(task_id)
+        .fetch_one(db.pool())
+        .await
+        .unwrap_or_else(|error| panic!("count task attempts: {error}"))
+}
+
+/// Route rows for one subject.
+pub async fn ci_route_row_count_for_test(db: &Database, subject_id: &str) -> i64 {
+    db.ensure_initialized().await.unwrap();
+    sqlx::query_scalar("SELECT COUNT(*) FROM ci_route_attempts WHERE subject_id = $1")
+        .bind(subject_id)
+        .fetch_one(db.pool())
+        .await
+        .unwrap_or_else(|error| panic!("count ci route rows: {error}"))
+}
+
+/// Route rows for one subject that have ever been granted a Tier-2 lease.
+///
+/// Counts `tier2_lease_id IS NOT NULL` rather than open leases, because the
+/// assertion is "no adjudication was opened" and a lease that opened and
+/// resolved within the call would otherwise vanish from the count.
+pub async fn ci_route_lease_count_for_test(db: &Database, subject_id: &str) -> i64 {
+    db.ensure_initialized().await.unwrap();
+    sqlx::query_scalar(
+        "SELECT COUNT(*) FROM ci_route_attempts \
+         WHERE subject_id = $1 AND tier2_lease_id IS NOT NULL",
+    )
+    .bind(subject_id)
+    .fetch_one(db.pool())
+    .await
+    .unwrap_or_else(|error| panic!("count ci route leases: {error}"))
+}
+
+/// Backdate a route's `reserved_at` so the reservation-recovery timeout has
+/// elapsed. Time travel is the only way to test a timeout without sleeping.
+pub async fn ci_route_age_reserved_for_test(
+    db: &Database,
+    subject_id: &str,
+    provider_action_key: &str,
+    seconds: i64,
+) {
+    db.ensure_initialized().await.unwrap();
+    sqlx::query(
+        "UPDATE ci_route_attempts SET reserved_at = now() - make_interval(secs => $3) \
+         WHERE subject_id = $1 AND provider_action_key = $2",
+    )
+    .bind(subject_id)
+    .bind(provider_action_key)
+    .bind(seconds as f64)
+    .execute(db.pool())
+    .await
+    .unwrap_or_else(|error| panic!("age reserved route: {error}"));
+}
+
+/// Backdate a route's `calling_at` so the 300s owner-handoff timeout has
+/// elapsed.
+pub async fn ci_route_age_calling_for_test(
+    db: &Database,
+    subject_id: &str,
+    provider_action_key: &str,
+    seconds: i64,
+) {
+    db.ensure_initialized().await.unwrap();
+    sqlx::query(
+        "UPDATE ci_route_attempts SET calling_at = now() - make_interval(secs => $3) \
+         WHERE subject_id = $1 AND provider_action_key = $2",
+    )
+    .bind(subject_id)
+    .bind(provider_action_key)
+    .bind(seconds as f64)
+    .execute(db.pool())
+    .await
+    .unwrap_or_else(|error| panic!("age calling route: {error}"));
+}
+
+/// Re-open a terminal route as `calling` under a named foreign owner.
+///
+/// Models "the provider accepted but this incarnation has not finalized yet",
+/// which is otherwise unreachable from a single process: the executor finalizes
+/// its own call before returning, so there is no window in which to observe the
+/// live-owner refusal.
+pub async fn ci_route_force_calling_owner_for_test(
+    db: &Database,
+    subject_id: &str,
+    provider_action_key: &str,
+    owner_incarnation_id: &str,
+) {
+    db.ensure_initialized().await.unwrap();
+    sqlx::query(
+        "UPDATE ci_route_attempts SET action_phase = 'calling', terminal_outcome = NULL, \
+         terminalized_at = NULL, owner_incarnation_id = $3, calling_at = COALESCE(calling_at, now()) \
+         WHERE subject_id = $1 AND provider_action_key = $2",
+    )
+    .bind(subject_id)
+    .bind(provider_action_key)
+    .bind(owner_incarnation_id)
+    .execute(db.pool())
+    .await
+    .unwrap_or_else(|error| panic!("force calling owner: {error}"));
+}
+
+/// Plant a `reserved` route row directly, bypassing the budget gate.
+///
+/// `CiRouteAttemptRepository::reserve` refuses a charging action once the
+/// budgets are spent, so a row that was reserved while budget remained and is
+/// exhausted by the time recovery runs — a crash between the two — cannot be
+/// produced through the public API. This is that crash.
+#[allow(clippy::too_many_arguments)]
+pub async fn ci_route_plant_reserved_for_test(
+    db: &Database,
+    subject_id: &str,
+    provider_action_key: &str,
+    lane: &str,
+    pr_number: i64,
+    pr_head_sha: &str,
+    run_id: i64,
+    origin_state: &str,
+    action: &str,
+    transient_fingerprint: &str,
+    retry_budget_key: &str,
+    head_budget_key: &str,
+    reserved_seconds_ago: i64,
+) {
+    db.ensure_initialized().await.unwrap();
+    sqlx::query(
+        "INSERT INTO ci_route_attempts (subject_kind, subject_id, provider_action_key, lane, \
+         pr_number, pr_head_sha, run_id, run_head_sha, dequeue_id, origin_state, class, action, \
+         transient_fingerprint, retry_budget_key, head_budget_key, action_phase, reserved_at) \
+         VALUES ('task', $1, $2, $3, $4, $5, $6, $5, NULL, $7, 'inconclusive', $8, $9, $10, $11, \
+         'reserved', now() - make_interval(secs => $12))",
+    )
+    .bind(subject_id)
+    .bind(provider_action_key)
+    .bind(lane)
+    .bind(pr_number)
+    .bind(pr_head_sha)
+    .bind(run_id)
+    .bind(origin_state)
+    .bind(action)
+    .bind(transient_fingerprint)
+    .bind(retry_budget_key)
+    .bind(head_budget_key)
+    .bind(reserved_seconds_ago as f64)
+    .execute(db.pool())
+    .await
+    .unwrap_or_else(|error| panic!("plant reserved route: {error}"));
+}
+
 // Larger multi-row fixtures live beside this module and are re-exported here,
 // so `crate::repositories::test_support::*` remains the single import path.
 pub use super::test_support_fixtures::*;

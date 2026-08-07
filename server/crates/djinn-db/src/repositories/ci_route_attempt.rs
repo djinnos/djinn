@@ -234,6 +234,22 @@ durable_enum! {
     }
 }
 
+impl CiAction {
+    /// Whether this action can ever consume a retry-budget slot.
+    ///
+    /// Exactly the two provider mutations. `charge_and_begin_calling` is the
+    /// only writer of either counter and only a route carrying a provider
+    /// authorization reaches it, so `ask_lead`, `hold`, and `discard` are
+    /// structurally uncharged — which is why [`Self::reserve`]'s ceiling
+    /// refusal is scoped to this predicate.
+    ///
+    /// [`Self::reserve`]: CiRouteAttemptRepository::reserve
+    #[must_use]
+    pub fn charges_budget(self) -> bool {
+        matches!(self, Self::RerunRun | Self::Reenqueue)
+    }
+}
+
 durable_enum! {
     /// The board state the route was opened from.
     CiOriginState {
@@ -968,6 +984,28 @@ impl CiRouteAttemptRepository {
     /// Committing before the call is the entire point — see the module docs.
     /// Provider mutation is forbidden while the row is `reserved`.
     ///
+    /// # The exhaustion refusal is scoped to actions that can charge
+    ///
+    /// A budget ceiling exists to stop *provider calls*, and only
+    /// [`CiAction::RerunRun`] and [`CiAction::Reenqueue`] can ever reach one:
+    /// `charge_and_begin_calling` is the sole writer of both counters.
+    ///
+    /// Refusing every reservation on an exhausted budget therefore made the
+    /// proposal's own retry-exhaustion escalation unreachable from a fresh
+    /// observation. `apply_budget` in the coordinator's classifier turns a
+    /// Tier-1 route whose ceiling is spent into `CiTier2Reason::RetryExhausted`
+    /// — an `ask_lead` route that charges nothing and calls nothing — and that
+    /// route needs a row, because `open_tier2_lease` operates on one. With a
+    /// blanket refusal there was no row, so no lease, so no adjudication: an
+    /// exhausted PR head simply stopped retrying and escalated to nobody.
+    ///
+    /// So the refusal applies to the two charging actions and nothing else. An
+    /// `ask_lead`, `hold`, or `discard` reservation is admitted regardless of
+    /// the counters and still cannot charge them, because the charge path is a
+    /// different method with its own independent ceiling check
+    /// (`CiChargeOutcome::BudgetExhausted`). The ceiling is enforced where the
+    /// spending happens, not where the bookkeeping starts.
+    ///
     /// # Errors
     ///
     /// Database failures.
@@ -989,7 +1027,7 @@ impl CiRouteAttemptRepository {
             &input.head_budget_key,
         )
         .await?;
-        if counts.is_exhausted() {
+        if counts.is_exhausted() && input.action.charges_budget() {
             tx.commit().await?;
             return Ok(CiReserveOutcome::BudgetExhausted(counts));
         }

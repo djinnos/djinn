@@ -2465,3 +2465,551 @@ fn knowledge_scaffold_stays_under_its_byte_ceiling() {
         "the scaffold must render exactly once"
     );
 }
+
+// ── 3asv: the merge test (achievability) across the tribunal and the planner ──
+//
+// The acceptance-criteria rubric only ever tested *decidability* — can a domain
+// outsider confirm this from its own tool surface. It never tested
+// *achievability* — can the pull request that implements the work actually make
+// the criterion true. A criterion can pass the first and fail the second, which
+// is how a live-pod transcript and a live-data backfill both reached approval,
+// were implemented, and then could not close.
+//
+// Each test renders the prompt and asserts on the rendered string, so every
+// assertion proves the text reaches a real session rather than merely existing
+// in a file.
+
+/// The merge test's first sentence, identical in every surface that carries it.
+const MERGE_TEST_PROPERTY: &str = "An acceptance criterion states a property of the merged tree.";
+
+/// The proof clause: the merged tree, or the pull request's own CI.
+const MERGE_TEST_PROOF: &str =
+    "It must be provable by inspecting that tree, or by a check the pull request's own CI runs.";
+
+/// The exclusion clause.
+const MERGE_TEST_NEGATIVE: &str = "If making it true requires an execution the pull request does not perform, it is not an acceptance criterion";
+
+/// The counterfactual, with its tense.
+const MERGE_TEST_COUNTERFACTUAL: &str =
+    "if this pull request merged right now, would the criterion become true?";
+
+/// The discriminating pair's rule: a gate that exists in code is legal, an
+/// observation interval is not.
+const MERGE_TEST_DISCRIMINATOR: &str =
+    "A gate that exists and is enforced in code passes; an observation interval fails.";
+
+/// Disposal ladder rung 1, in the title-case form used by the surfaces that
+/// render the ladder as a numbered list.
+const LADDER_RUNG_1: &str = "Convert it to a check the pull request's CI runs";
+
+/// Disposal ladder rung 2.
+const LADDER_RUNG_2: &str = "Convert it to a mechanism criterion";
+
+/// Disposal ladder rung 3.
+const LADDER_RUNG_3: &str =
+    "Remove it from the acceptance criteria and name where the intent was rehomed";
+
+/// The rung order is normative, not a menu.
+const LADDER_FIRST_APPLICABLE: &str = "in order and take the first applicable rung";
+
+/// Skipping an applicable earlier rung is invalid.
+const LADDER_NO_SKIP: &str = "Skipping an applicable earlier rung is invalid";
+
+/// Rung 3 without a destination is not a disposal.
+const LADDER_NAMED_DESTINATION: &str =
+    "a criterion dropped without a named destination is not a valid disposal";
+
+/// Assert the three ladder rungs render in rung order in `prompt`.
+///
+/// Presence alone is not enough: the whole point of the ladder is that the
+/// cheapest rung is last, so an author under round pressure cannot reach for
+/// deletion first. Order is the load-bearing property.
+fn assert_ladder_rungs_in_order(prompt: &str, label: &str) {
+    let rung_1 = prompt
+        .find(LADDER_RUNG_1)
+        .unwrap_or_else(|| panic!("{label} prompt must carry ladder rung 1: {LADDER_RUNG_1}"));
+    let rung_2 = prompt
+        .find(LADDER_RUNG_2)
+        .unwrap_or_else(|| panic!("{label} prompt must carry ladder rung 2: {LADDER_RUNG_2}"));
+    let rung_3 = prompt
+        .find(LADDER_RUNG_3)
+        .unwrap_or_else(|| panic!("{label} prompt must carry ladder rung 3: {LADDER_RUNG_3}"));
+
+    assert!(
+        rung_1 < rung_2 && rung_2 < rung_3,
+        "{label} prompt must render the disposal ladder in rung order (CI check, \
+         then mechanism criterion, then rehomed removal); got offsets \
+         {rung_1}, {rung_2}, {rung_3}"
+    );
+}
+
+/// AC1 — the Judge carries the merge test as a NAMED Definition-of-Done
+/// dimension, the operator-only bullet is RELOCATED into it rather than
+/// duplicated beside it, and ordered-ladder / named-destination enforcement
+/// lives on the Judge's side of the loop.
+#[test]
+fn judge_prompt_carries_the_merge_test_definition_of_done_dimension() {
+    let task = make_task();
+    let ctx = make_ctx();
+    let prompt = render_prompt(AgentType::Judge, &task, &ctx);
+
+    // The dimension is NAMED, so a Judge can cite it rather than infer it.
+    assert!(
+        prompt.contains("Achievability — the merge test"),
+        "judge prompt must name the achievability / merge-test DoD dimension"
+    );
+
+    // The rule itself.
+    assert!(
+        prompt.contains(MERGE_TEST_PROPERTY),
+        "judge prompt must state that an AC is a property of the merged tree"
+    );
+    assert!(
+        prompt.contains(MERGE_TEST_PROOF),
+        "judge prompt must state the merged-tree-or-own-CI proof rule"
+    );
+    assert!(
+        prompt.contains(MERGE_TEST_NEGATIVE),
+        "judge prompt must exclude criteria needing an execution the PR does not perform"
+    );
+    assert!(
+        prompt.contains(MERGE_TEST_COUNTERFACTUAL),
+        "judge prompt must carry the merge-test counterfactual"
+    );
+
+    // Decidability and achievability are independent axes and the Judge must
+    // apply both — the criteria that survived review passed the first cleanly.
+    assert!(
+        prompt.contains("a criterion must pass both"),
+        "judge prompt must state that decidability and achievability are both required"
+    );
+
+    // RELOCATED, not duplicated: the phrase must occur exactly once.
+    assert_eq!(
+        prompt.matches("External / operator-only proofs").count(),
+        1,
+        "the operator-only bullet must be relocated into the merge-test dimension, \
+         not duplicated beside it in the confirmability list"
+    );
+
+    // The discriminating pair: a gate enforced in code passes, an observation
+    // interval fails. Both halves must render, so the rule is not applied by
+    // keyword against a legitimate mechanism criterion.
+    assert!(
+        prompt.contains(MERGE_TEST_DISCRIMINATOR),
+        "judge prompt must state that a gate enforced in code passes while an \
+         observation interval fails"
+    );
+    assert!(
+        prompt.contains(
+            "New writers cannot run until all readers use the contract; rollback cannot begin until route work and provider futures are drained"
+        ),
+        "judge prompt must carry the passing half of the discriminating pair (a gate in code)"
+    );
+    assert!(
+        prompt.contains("for two consecutive inventory intervals"),
+        "judge prompt must carry the failing half of the discriminating pair \
+         (an observation interval over a live fleet)"
+    );
+    assert!(
+        prompt.contains("Do not pattern-match on vocabulary"),
+        "judge prompt must forbid rejecting a legitimate mechanism criterion by keyword"
+    );
+
+    // Enforcing the ladder's order is the Judge's job.
+    assert!(
+        prompt.contains("work three rungs in order and take the **first applicable** rung"),
+        "judge prompt must require the disposal ladder be applied in order, first applicable rung"
+    );
+    assert!(
+        prompt.contains("Reject a disposal that skipped an applicable earlier rung"),
+        "judge prompt must reject an out-of-order disposal"
+    );
+    assert!(
+        prompt.contains("reject a rung 3 disposal that does not name where the intent was rehomed"),
+        "judge prompt must reject an unnamed rung-3 disposal"
+    );
+    assert!(
+        prompt.contains(LADDER_NAMED_DESTINATION),
+        "judge prompt must state that a bare drop is not a valid disposal"
+    );
+
+    assert!(
+        !prompt.contains("{{"),
+        "judge prompt should have no unresolved placeholders"
+    );
+}
+
+/// AC2 — the Advocate is the role that disposes of a failing criterion, so it
+/// carries the ladder. Without it, the loop's cheapest resolution is deletion,
+/// which loses the concern that motivated the criterion.
+#[test]
+fn advocate_prompt_carries_the_ordered_disposal_ladder() {
+    let task = make_task();
+    let ctx = make_ctx();
+    let prompt = render_prompt(AgentType::Advocate, &task, &ctx);
+
+    // The rule that triggers the ladder.
+    assert!(
+        prompt.contains(MERGE_TEST_PROPERTY) && prompt.contains(MERGE_TEST_PROOF),
+        "advocate prompt must state the merge test"
+    );
+    assert!(
+        prompt.contains(MERGE_TEST_NEGATIVE),
+        "advocate prompt must exclude criteria needing an execution the PR does not perform"
+    );
+    assert!(
+        prompt.contains(MERGE_TEST_COUNTERFACTUAL),
+        "advocate prompt must carry the merge-test counterfactual"
+    );
+
+    // The ladder, in rung order.
+    assert_ladder_rungs_in_order(&prompt, "advocate");
+
+    // Ordered and first-applicable, not free choice.
+    assert!(
+        prompt.contains(LADDER_FIRST_APPLICABLE),
+        "advocate prompt must instruct taking the first applicable rung, in order"
+    );
+    assert!(
+        prompt.contains("This is a ladder, not a menu"),
+        "advocate prompt must state the ladder is not a menu of equal options"
+    );
+    assert!(
+        prompt.contains(LADDER_NO_SKIP),
+        "advocate prompt must state that skipping an applicable earlier rung is invalid"
+    );
+
+    // Rung 3 must name where the intent went.
+    assert!(
+        prompt.contains(LADDER_NAMED_DESTINATION),
+        "advocate prompt must require a named rehoming destination for rung 3"
+    );
+
+    assert!(
+        !prompt.contains("{{"),
+        "advocate prompt should have no unresolved placeholders"
+    );
+}
+
+/// AC3 — the Adversary gets a merge-test objection category so the defect is
+/// raised in round 1 and resolved by revision, instead of consuming a full
+/// adjudication cycle. It sits ALONGSIDE the human-approval exclusion, which
+/// must keep rendering unchanged.
+#[test]
+fn adversary_prompt_carries_the_merge_test_objection_category() {
+    let task = make_task();
+    let ctx = make_ctx();
+    let prompt = render_prompt(AgentType::Adversary, &task, &ctx);
+
+    // The new category.
+    assert!(
+        prompt.contains(
+            "An acceptance criterion no pull request can satisfy is a blocking objection"
+        ),
+        "adversary prompt must carry the merge-test objection category"
+    );
+    assert!(
+        prompt.contains(MERGE_TEST_PROPERTY) && prompt.contains(MERGE_TEST_PROOF),
+        "adversary prompt must state the merge test"
+    );
+    assert!(
+        prompt.contains(MERGE_TEST_NEGATIVE),
+        "adversary prompt must exclude criteria needing an execution the PR does not perform"
+    );
+    assert!(
+        prompt.contains(MERGE_TEST_COUNTERFACTUAL),
+        "adversary prompt must carry the merge-test counterfactual"
+    );
+    assert!(
+        prompt.contains("This is a **different axis** from decidability"),
+        "adversary prompt must separate achievability from decidability"
+    );
+
+    // The resolution criterion must point at a ladder rung, so the objection is
+    // falsifiable and cannot resolve into a silent deletion.
+    assert!(
+        prompt.contains("convert it to a check the pull request's CI runs")
+            && prompt.contains("convert it to a mechanism criterion")
+            && prompt.contains(
+                "remove it from the acceptance criteria and name where the intent was rehomed"
+            ),
+        "adversary prompt must point the resolution criterion at the disposal ladder"
+    );
+
+    // And it must not license a manufactured objection against a legal gate.
+    assert!(
+        prompt.contains(MERGE_TEST_DISCRIMINATOR),
+        "adversary prompt must state that a gate enforced in code passes while an \
+         observation interval fails"
+    );
+
+    // The existing human-approval exclusion must still render, unchanged.
+    assert!(
+        prompt.contains("### Human approval and organizational structure are out of scope"),
+        "the human-approval exclusion heading must still render"
+    );
+    assert!(
+        prompt.contains("enforced by the forge and its configured owners"),
+        "the human-approval exclusion must keep its forge rule"
+    );
+    assert!(
+        prompt.contains(
+            "Do not file an objection that a proposal lacks authorization, sign-off, separation of duties"
+        ),
+        "the human-approval exclusion must keep its prohibition"
+    );
+    assert!(
+        prompt.contains(
+            "A spec that omits those is complete, not incomplete — demanding them is a category error, not a blocking objection."
+        ),
+        "the human-approval exclusion must keep its category-error sentence"
+    );
+
+    assert!(
+        !prompt.contains("{{"),
+        "adversary prompt should have no unresolved placeholders"
+    );
+}
+
+/// AC4 (proposal mode) — the Planner authors epic criteria that no tribunal
+/// ever reviews, so step D4 must carry the same rule and the same ladder.
+#[test]
+fn planner_proposal_mode_carries_the_merge_test_and_the_ladder() {
+    let mut proposal_task = make_task();
+    proposal_task.issue_type = "epic_breakdown".into();
+    let ctx = make_ctx();
+    let prompt = render_prompt(AgentType::Planner, &proposal_task, &ctx);
+
+    assert!(
+        prompt.contains(MERGE_TEST_PROPERTY) && prompt.contains(MERGE_TEST_PROOF),
+        "planner proposal mode must state the merge test"
+    );
+    assert!(
+        prompt.contains(MERGE_TEST_NEGATIVE),
+        "planner proposal mode must exclude criteria needing an execution the PR does not perform"
+    );
+    assert!(
+        prompt.contains(MERGE_TEST_COUNTERFACTUAL),
+        "planner proposal mode must carry the merge-test counterfactual"
+    );
+
+    assert_ladder_rungs_in_order(&prompt, "planner/proposal");
+
+    assert!(
+        prompt.contains(LADDER_FIRST_APPLICABLE),
+        "planner proposal mode must instruct taking the first applicable rung, in order"
+    );
+    assert!(
+        prompt.contains(LADDER_NO_SKIP),
+        "planner proposal mode must state that skipping an applicable earlier rung is invalid"
+    );
+    assert!(
+        prompt.contains(LADDER_NAMED_DESTINATION),
+        "planner proposal mode must require a named rehoming destination for rung 3"
+    );
+
+    assert!(
+        !prompt.contains("{{"),
+        "planner proposal prompt should have no unresolved placeholders"
+    );
+}
+
+/// AC4 (decomposition mode) — step B4 mints the task criteria that are never
+/// adjudicated at all, so it carries the same rule and the same ladder.
+#[test]
+fn planner_decomposition_mode_carries_the_merge_test_and_the_ladder() {
+    let mut decomposition_task = make_task();
+    decomposition_task.issue_type = "planning".into();
+    let ctx = make_ctx();
+    let prompt = render_prompt(AgentType::Planner, &decomposition_task, &ctx);
+
+    assert!(
+        prompt.contains(MERGE_TEST_PROPERTY) && prompt.contains(MERGE_TEST_PROOF),
+        "planner decomposition mode must state the merge test"
+    );
+    assert!(
+        prompt.contains(MERGE_TEST_NEGATIVE),
+        "planner decomposition mode must exclude criteria needing an execution \
+         the PR does not perform"
+    );
+    assert!(
+        prompt.contains(MERGE_TEST_COUNTERFACTUAL),
+        "planner decomposition mode must carry the merge-test counterfactual"
+    );
+
+    assert_ladder_rungs_in_order(&prompt, "planner/decomposition");
+
+    assert!(
+        prompt.contains(LADDER_FIRST_APPLICABLE),
+        "planner decomposition mode must instruct taking the first applicable rung, in order"
+    );
+    assert!(
+        prompt.contains(LADDER_NO_SKIP),
+        "planner decomposition mode must state that skipping an applicable earlier rung is invalid"
+    );
+    assert!(
+        prompt.contains(LADDER_NAMED_DESTINATION),
+        "planner decomposition mode must require a named rehoming destination for rung 3"
+    );
+
+    assert!(
+        !prompt.contains("{{"),
+        "planner decomposition prompt should have no unresolved placeholders"
+    );
+}
+
+// ── AC5: what actually detects prompt-cap truncation ─────────────────────────
+//
+// `render_prompt_for_role` applies `MAX_SYSTEM_PROMPT_CHARS` **before** it
+// returns, so a post-cap length assertion proves nothing: a truncated prompt is
+// exactly as long as the cap. Only the prompt's *content* can reveal it.
+//
+// WHICH content is the part that is easy to get backwards. `smart_truncate`
+// (`mod.rs`) preserves a HEAD and a TAIL and drops the MIDDLE. With the 48,000
+// cap:
+//
+//     usable      = 48_000 - 80 (separator reserve) = 47_920
+//     head_budget = 47_920 * 60 / 100              = 28_752   (absolute offset)
+//     tail_budget = 47_920 - 28_752                = 19_168   (distance from end)
+//     dropped     = [28_752, len - 19_168)
+//
+// The head bound is an ABSOLUTE offset and the tail bound is a DISTANCE FROM
+// THE END. So a byte survives if it is either within the first 28,752 bytes or
+// within the last 19,168 — and a sentinel taken from the FINAL section is, by
+// construction, in the second set. It can never detect truncation. Measured on
+// the current renders, the final-section sentinels sit 351 bytes (Judge) and
+// 3,119 bytes (Planner decomposition) from the end, both far inside the 19,168
+// always-preserved tail. AC5 names those sentinels literally, so they are
+// asserted below for literal compliance — but they are NOT the guard.
+//
+// The two checks that can actually fire are:
+//
+//   1. The MIDDLE sentinel — a stable literal in the droppable region, i.e. at
+//      a distance GREATER than 19,168 from the end. Only the first
+//      `len - 19_168` bytes of each prompt qualify (7,468 for the Judge, 4,101
+//      for Planner decomposition), which is why the sentinels chosen below are
+//      early-file section headings rather than late ones.
+//   2. `!prompt.contains("bytes omitted")` — `smart_truncate` always injects
+//      that marker when it fires, so this catches truncation unconditionally,
+//      wherever the growth lands.
+//
+// KEEP BOTH. They are the load-bearing assertions in these two tests; the
+// final-section sentinels are the AC-literal ones and are inert at current
+// sizes. Do not delete either as redundant.
+//
+// One honest limit: `render_prompt` here passes `Vec::new` for tool schemas, so
+// these renders (~26.6K Judge, ~23.3K Planner decomposition) carry ~21-24K of
+// slack against the cap. Production renders include the real tool section —
+// `mod.rs` documents the decomposition prompt at ~35K — so the real headroom is
+// closer to ~10K. These tests therefore under-report truncation risk by roughly
+// the size of the tool section, which is inherent to testing the template layer
+// in isolation.
+
+/// AC5 — truncation sentinels for the Planner decomposition prompt.
+///
+/// This is the documented failure mode: the old 31K cap silently truncated the
+/// tail of `planner/decomposition.md`, and the planner never saw guidance it had
+/// explicitly been given.
+#[test]
+fn planner_decomposition_tail_survives_the_prompt_cap() {
+    let mut decomposition_task = make_task();
+    decomposition_task.issue_type = "planning".into();
+    let ctx = make_ctx();
+    let prompt = render_prompt(AgentType::Planner, &decomposition_task, &ctx);
+
+    // LOAD-BEARING (1): a sentinel in the region `smart_truncate` actually
+    // drops. `## Workflow B: Wave Decomposition` heads the mode section and
+    // `### B1.` follows it; B1 sits at offset ~3,302, which is 19,967 bytes from
+    // the end — 799 bytes past the 19,168-byte preserved tail, so it is inside
+    // the droppable middle. Do not replace it with a later heading: everything
+    // after offset 4,101 is in the always-preserved tail and cannot fail.
+    assert!(
+        prompt.contains("### B1. Orient to the Epic (keep brief)"),
+        "the middle of the decomposition prompt must still render — this heading \
+         sits in smart_truncate's dropped region, so losing it means prompt growth \
+         pushed the render past MAX_SYSTEM_PROMPT_CHARS"
+    );
+
+    // LOAD-BEARING (2): `smart_truncate` always injects this marker when it
+    // fires, so this catches truncation wherever the growth landed.
+    assert!(
+        !prompt.contains("bytes omitted"),
+        "the decomposition prompt must not be truncated"
+    );
+
+    // AC-literal, and inert by construction: both of these sit inside the
+    // always-preserved 19,168-byte tail (3,119 and 3,048 bytes from the end).
+    // They are asserted because AC5 names the final stable section, not because
+    // they can detect truncation.
+    assert!(
+        prompt.contains("### B5. Submit Planning"),
+        "the final section of decomposition.md must still render"
+    );
+    assert!(
+        prompt.contains("Wave N: created X tasks"),
+        "the final instruction of decomposition.md must still render"
+    );
+
+    // The SAME render must carry the merge-test guidance, so a future addition
+    // cannot buy its own visibility by evicting other guidance.
+    assert!(
+        prompt.contains(MERGE_TEST_PROOF),
+        "the same decomposition render must carry the merge-test rule"
+    );
+    assert!(
+        prompt.contains(LADDER_FIRST_APPLICABLE),
+        "the same decomposition render must carry the ordered disposal ladder"
+    );
+}
+
+/// AC5 — truncation sentinels for the Judge prompt, same mechanism: the cap is
+/// applied before `render_prompt_for_role` returns, so only content can reveal
+/// truncation, and only content in the dropped middle can reveal it positionally.
+#[test]
+fn judge_prompt_tail_survives_the_prompt_cap() {
+    let task = make_task();
+    let ctx = make_ctx();
+    let prompt = render_prompt(AgentType::Judge, &task, &ctx);
+
+    // LOAD-BEARING (1): a sentinel in the region `smart_truncate` actually
+    // drops. This heading sits at offset ~6,020, which is 20,616 bytes from the
+    // end — 1,448 bytes past the 19,168-byte preserved tail, so it is inside the
+    // droppable middle. Do not replace it with a later heading: everything after
+    // offset 7,468 is in the always-preserved tail and cannot fail.
+    assert!(
+        prompt.contains("### 2. Reject / needs-work (not ready)"),
+        "the middle of the judge prompt must still render — this heading sits in \
+         smart_truncate's dropped region, so losing it means prompt growth pushed \
+         the render past MAX_SYSTEM_PROMPT_CHARS"
+    );
+
+    // LOAD-BEARING (2): the unconditional truncation marker.
+    assert!(
+        !prompt.contains("bytes omitted"),
+        "the judge prompt must not be truncated"
+    );
+
+    // AC-literal, and inert by construction: both of these sit inside the
+    // always-preserved 19,168-byte tail (351 and 216 bytes from the end).
+    assert!(
+        prompt.contains("## Session Completion"),
+        "the final section of judge.md must still render"
+    );
+    assert!(
+        prompt.contains(
+            "end your session by calling `submit_decision` with a short summary of your adjudication"
+        ),
+        "the final instruction of judge.md must still render"
+    );
+
+    // The SAME render must carry the merge-test dimension.
+    assert!(
+        prompt.contains(MERGE_TEST_PROOF),
+        "the same judge render must carry the merge-test rule"
+    );
+    assert!(
+        prompt.contains("Achievability — the merge test"),
+        "the same judge render must carry the named merge-test DoD dimension"
+    );
+}

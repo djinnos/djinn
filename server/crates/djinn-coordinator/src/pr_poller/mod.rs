@@ -52,6 +52,10 @@ const MAX_AGGREGATED_CI_RUNS: usize = 5;
 /// coordinator's internal pr_poller.
 pub use djinn_orchestration_types::coordinator::PR_REVIEW_FEEDBACK_EVENT;
 
+/// How often the coordinator runs the CI-route reservation sweep.
+pub(crate) const CI_ROUTE_SWEEP_INTERVAL: std::time::Duration =
+    ci_routing::executor::RESERVED_SWEEP_INTERVAL;
+
 /// Activity log event type for per-cycle markers (used to count rounds).
 const PR_REVIEW_CYCLE_EVENT: &str = "pr_review_cycle";
 
@@ -133,13 +137,13 @@ pub(crate) fn merge_queue_lane_escalation_section(
 }
 mod ci_failure_analysis;
 mod ci_helpers;
-// Proposal `nafu`, wave 2: the pure CI route classifier and route-decision
-// contract. The two lane executors that consume it are wave 3 and the Lead
-// adjudication path is wave 4, so nothing in the live poll loop references it
-// yet — the feature is disabled by having no call sites at all, which is the
-// strongest form of "disabled" available. The allow is scoped to this module
-// and comes off in wave 3.
-#[allow(dead_code)]
+// Proposal `nafu`: the CI route classifier, its durable executors, and the
+// `ci_evidence_routing` gate. Wave 2 landed the classifier with no call sites
+// and disabled the feature by absence; wave 3b wired both lane executors and
+// replaced that absence with a real default-off gate
+// (`ci_routing::gate::CiRoutingGate`), so the `dead_code` allow is gone.
+mod ci_lane_routing;
+mod ci_provider;
 mod ci_routing;
 mod ci_snapshot;
 mod ci_triage;
@@ -181,6 +185,7 @@ use ci_helpers::{
     advisory_checks_section, blocking_failed_checks, build_ci_failure_sections, is_already_queued,
     is_failing_conclusion, is_merge_method_not_allowed, is_merge_queue_405, parse_actions_run_id,
 };
+use ci_snapshot::evidence::correlate_merge_group_run;
 use conversation_resolution::{
     is_conversation_resolution_block, should_auto_resolve_conversations,
 };
