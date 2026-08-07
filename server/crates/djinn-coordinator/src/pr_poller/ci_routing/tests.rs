@@ -1926,6 +1926,95 @@ fn merge_group_capture_names_the_run_head_not_the_pr_head() {
     assert_eq!(id.dequeue_id.as_deref(), Some("grp@t0"));
 }
 
+/// The merge-group lane fails closed on unusable execution evidence too.
+///
+/// The twin of [`hard_failure_with_non_positive_interval_is_not_tier_one`],
+/// which pins the same guard on the PR-head lane. The merge-group call had no
+/// fixture at all: the `blocking_evidence_completeness` line in
+/// `capture_merge_group_evidence` could be deleted outright with the whole
+/// acceptance list green, because the only other merge-group capture fixture
+/// feeds it a well-formed check and asserts `Runs`.
+///
+/// # Why the lane-level call is not redundant with `prove_complete`
+///
+/// [`CiCapture::prove_complete`] runs the identical predicate again, per run —
+/// deliberate defence in depth — so the *reason* survives the deletion. What
+/// does not survive is the identity the route is keyed on. A lane-level verdict
+/// is a `CiLaneEvidence::Incomplete`, which `ci_lane_routing::drive_lane` keys
+/// on the lane identity and `run_absent_if_required` then collapses to `run_id:
+/// None`. Without the call the lane answers `Runs([run 9])` and the identical
+/// reason is keyed on run 9 instead — a second route row, a second head-scoped
+/// Tier-2 lease and a second Lead session for one PR head, which is exactly
+/// what the `NULLS NOT DISTINCT` collapse exists to prevent. The merge lane is
+/// the one that reaches these reasons *after* a run has been named, so it is
+/// the lane on which the two identities can actually diverge.
+///
+/// NAMED FAILING MUTATION: delete
+/// `if let Some(reason) = super::ci_routing::blocking_evidence_completeness(blocking) { … }`
+/// from `capture_merge_group_evidence`. The capture becomes `Runs(..)`, the
+/// `Incomplete` arm no longer matches, and the first half panics.
+#[test]
+fn a_merge_group_capture_fails_closed_on_a_contradictory_execution_interval() {
+    let run = djinn_provider::github_api::WorkflowRun {
+        id: 9,
+        workflow_id: None,
+        name: None,
+        path: None,
+        head_branch: Some("gh-readonly-queue/main/pr-41-abc".to_owned()),
+        head_sha: "cccccccccccccccccccccccccccccccccccccccc".to_owned(),
+        status: Some("completed".to_owned()),
+        conclusion: Some("failure".to_owned()),
+    };
+
+    // A hard failure whose interval says the lane never ran. Both cannot be
+    // true, and `ci_triage` resolves the pair toward NeverExecuted — which is
+    // what would make this merge-group run look inconclusive and earn an
+    // automatic re-enqueue.
+    let mut contradictory = causal("merge-group / integration", 9);
+    contradictory.started_at = Some(T1.to_owned());
+    contradictory.completed_at = Some(T0.to_owned());
+    let runs = [contradictory];
+    let blocking = refs(&runs);
+    assert!(
+        crate::pr_poller::ci_triage::is_inconclusive(&blocking),
+        "precondition: without the lane guard this run is Tier-1 eligible, \
+         which is the false transient the capture has to refuse",
+    );
+
+    match capture_merge_group_evidence(41, HEAD, &run, "grp@t0", &checks_response(&runs), &blocking)
+    {
+        CiLaneEvidence::Incomplete(CiIncompleteReason::NonPositiveExecutionInterval) => {}
+        other => panic!("expected a fail-closed capture, got {other:?}"),
+    }
+
+    // And the reason really is one that collapses to the run-absent identity —
+    // which is the whole point of answering it at lane level rather than
+    // letting each run answer for itself.
+    assert!(
+        CiIncompleteReason::NonPositiveExecutionInterval.is_run_absent(),
+        "a lane-level fail-closed verdict must name no run, or the collapse the \
+         lane-level call exists to produce does not happen",
+    );
+
+    // Vacuity: the lane is not simply refusing every merge-group capture. The
+    // same correlated run with a usable interval still fans out per run.
+    let usable = [ran_then_cancelled("merge-group / integration", 9)];
+    let usable_blocking = refs(&usable);
+    let captured = capture_merge_group_evidence(
+        41,
+        HEAD,
+        &run,
+        "grp@t0",
+        &checks_response(&usable),
+        &usable_blocking,
+    );
+    let CiLaneEvidence::Runs(routes) = captured else {
+        panic!("a usable merge-group capture must produce per-run evidence, got {captured:?}");
+    };
+    assert_eq!(routes.len(), 1);
+    assert_eq!(routes[0].identity.run_id, Some(9));
+}
+
 // ---------------------------------------------------------------------------
 // Routing the repository layer's outcomes
 // ---------------------------------------------------------------------------

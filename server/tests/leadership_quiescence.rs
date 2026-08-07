@@ -337,3 +337,140 @@ async fn the_no_lock_branch_still_closes_admission_and_joins_before_returning() 
     assert_eq!(counts.in_flight, 0, "{counts:?}");
     assert!(counts.drained, "{counts:?}");
 }
+
+// ---------------------------------------------------------------------------
+// The composition site: one scope, two waiters
+// ---------------------------------------------------------------------------
+
+/// One Rust source with its `//` line comments removed.
+///
+/// The guard below matches on *code*. Without this, a comment that merely names
+/// the token under guard would satisfy the assertion the guard exists to make.
+/// Quote- and escape-aware, so a `//` inside a string literal is left alone
+/// rather than truncating the line it sits on.
+fn strip_line_comments(source: &str) -> String {
+    let mut out = String::with_capacity(source.len());
+    for line in source.lines() {
+        let bytes = line.as_bytes();
+        let mut quoted = false;
+        let mut index = 0usize;
+        let mut end = line.len();
+        while index < bytes.len() {
+            match bytes[index] {
+                b'\\' if quoted => index += 1,
+                b'"' => quoted = !quoted,
+                b'/' if !quoted && bytes.get(index + 1) == Some(&b'/') => {
+                    end = index;
+                    break;
+                }
+                _ => {}
+            }
+            index += 1;
+        }
+        out.push_str(&line[..end]);
+        out.push('\n');
+    }
+    out
+}
+
+/// Leadership and the coordinator are handed the **same** scope object.
+///
+/// Both tests above pass a scope they constructed themselves, so they prove the
+/// ordering contract for *whatever* scope leadership is given. Neither can
+/// prove that the scope leadership waits on is the one the coordinator admits
+/// its provider actions into — and if it is not, every assertion in this file
+/// still passes while the property they exist to protect is gone.
+///
+/// The failure is silent by construction. `CoordinatorDeps::new` seeds a
+/// **private** `ProviderActionScope::new()` (see the field comment: "off-server
+/// and test contexts get a private scope from `Default`"), so deleting
+/// `.with_provider_action_scope(..)` from the builder chain does not fail to
+/// compile and does not log. It gives the coordinator a second, disjoint scope:
+/// `rerun_failed_jobs` futures are admitted into that one, leadership's
+/// `wait_until_drained` watches an empty one, reports a graceful drain
+/// immediately, and releases the advisory lock while a provider future from
+/// this incarnation is still alive. That is the exact ordering
+/// `recover_calling_owner` cannot defend against, because it trusts lock
+/// ownership.
+///
+/// SOURCE-LEVEL, and honestly labelled. A behavioural witness would have to
+/// spawn the whole agent stack (`AppState::initialize_agents`) and then read the
+/// coordinator's scope back — and `CoordinatorHandle` exposes no accessor for
+/// it. Adding one so this test could exist would be inventing the seam the test
+/// claims to witness, and the alternative — rebuilding the deps chain here — is
+/// a fixture performing the composition it is meant to observe. What is
+/// checkable without inventing anything is that both consumers name the same
+/// field, and that is what this asserts.
+///
+/// Comments are stripped before matching, so a comment naming the field
+/// satisfies nothing here.
+///
+/// NAMED FAILING MUTATIONS.
+/// (a) Delete `.with_provider_action_scope(self.inner.provider_action_scope.clone())`
+///     from the `CoordinatorDeps` builder chain in `AppState::initialize_agents`:
+///     the first assertion fails.
+/// (b) Hand the coordinator a fresh scope
+///     (`.with_provider_action_scope(ProviderActionScope::new())`): the same
+///     assertion fails, because the argument is no longer the shared field.
+/// (c) Make `AppState::provider_action_scope()` return a fresh scope rather
+///     than `self.inner.provider_action_scope.clone()`: the accessor assertion
+///     fails — leadership would otherwise wait on a scope with no producer at
+///     all.
+/// (d) Pass `None` for the scope in `main.rs`, or bind `leader_action_scope`
+///     from anything other than `state.provider_action_scope()`: the two
+///     `main.rs` assertions fail, and `quiesce_provider_actions` would
+///     early-return on every shutdown — the pre-`nafu` behaviour, with the lock
+///     released unconditionally.
+#[test]
+fn the_leader_scope_and_the_coordinator_scope_are_one_object() {
+    const FIELD: &str = "self.inner.provider_action_scope.clone()";
+
+    let state = strip_line_comments(include_str!("../src/server/state/mod.rs"));
+
+    assert!(
+        state.contains(&format!(".with_provider_action_scope({FIELD})")),
+        "the coordinator must be built with the SAME scope leadership waits on; \
+         `CoordinatorDeps::new` otherwise seeds a private one and the two \
+         waiters watch disjoint sets of futures",
+    );
+    let accessor = state
+        .find("pub fn provider_action_scope(&self)")
+        .expect("`AppState` must expose the scope leadership is handed");
+    let body_end = accessor
+        + state[accessor..]
+            .find("\n    }")
+            .expect("the accessor must have a body");
+    assert!(
+        state[accessor..body_end].contains(FIELD),
+        "the accessor leadership is handed must return that same field, not a \
+         fresh scope",
+    );
+
+    assert_eq!(
+        state.matches("ProviderActionScope::new()").count(),
+        1,
+        "`AppState` must construct exactly one scope; a second `new()` anywhere \
+         in this file is a second, disjoint set of provider futures",
+    );
+    assert!(
+        state.contains(
+            "provider_action_scope: djinn_orchestration_types::ProviderActionScope::new(),"
+        ),
+        "and the one construction must be the field initialiser, so everything \
+         downstream clones it rather than minting its own",
+    );
+
+    // ── And `main.rs` hands it to leadership rather than `None` ─────────────
+    let main = strip_line_comments(include_str!("../src/main.rs"));
+
+    assert!(
+        main.contains("let leader_action_scope = state.provider_action_scope();"),
+        "the leader scope must come from `AppState`, which is what makes it the \
+         coordinator's",
+    );
+    assert!(
+        main.contains("Some(leader_action_scope),"),
+        "and it must be handed to `run_with_leadership`; `None` makes \
+         `quiesce_provider_actions` a no-op on every shutdown path",
+    );
+}
