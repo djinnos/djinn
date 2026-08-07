@@ -746,3 +746,533 @@ fn ranked_packer_exhaustive_partition_and_non_starvation_property() {
         }
     }
 }
+
+// ── Proposal 5205: single-pass packing of one ranked candidate list ─────────
+
+mod no_backfill {
+    use super::super::{KnowledgePackConfig, NotePackDisposition, pack_ranked_knowledge_notes};
+    use super::{fixture_note, largest_cap_that_still_drops};
+    use djinn_memory::Note;
+
+    /// A note whose fixed per-line overhead alone exceeds any sane line cap,
+    /// so it can never render at any budget.
+    fn oversized_note(index: usize) -> Note {
+        let permalink = format!("pitfalls/{}", "x".repeat(400));
+        fixture_note(
+            "pitfall",
+            &format!("oversized-{index}"),
+            &permalink,
+            Some("an oversized candidate"),
+            None,
+            "body",
+            1.0,
+        )
+    }
+
+    fn ordinary_note(index: usize) -> Note {
+        fixture_note(
+            "pitfall",
+            &format!("ordinary-{index}"),
+            &format!("pitfalls/ordinary-{index}"),
+            Some("a small candidate"),
+            None,
+            "body",
+            1.0,
+        )
+    }
+
+    fn low_confidence_note(index: usize) -> Note {
+        fixture_note(
+            "pitfall",
+            &format!("weak-{index}"),
+            &format!("pitfalls/weak-{index}"),
+            Some("below the floor"),
+            None,
+            "body",
+            0.1,
+        )
+    }
+
+    fn dispositions(
+        notes: &[Note],
+        config: KnowledgePackConfig,
+    ) -> Vec<(String, NotePackDisposition)> {
+        pack_ranked_knowledge_notes(notes, config)
+            .outcomes
+            .into_iter()
+            .map(|outcome| (outcome.permalink, outcome.disposition))
+            .collect()
+    }
+
+    /// AC6's motivating fixture: an oversized note *inside* top-k must not
+    /// promote the relevant note sitting at fused rank `top_k`. That note stays
+    /// `NotTopK`, and the injected count is 2, not 3.
+    #[test]
+    fn oversized_note_in_top_k_does_not_promote_the_next_candidate() {
+        let notes = vec![
+            ordinary_note(0),
+            oversized_note(1),
+            ordinary_note(2),
+            // The relevant, byte-fitting note at zero-based fused rank 3 == top_k.
+            ordinary_note(3),
+        ];
+        let config = KnowledgePackConfig {
+            minimum_confidence: 0.3,
+            top_k: 3,
+            total_byte_budget: 8192,
+            line_byte_cap: 256,
+        };
+        assert!(
+            largest_cap_that_still_drops(&notes[1]) >= config.line_byte_cap,
+            "fixture must actually be oversized at this line cap"
+        );
+
+        let outcomes = dispositions(&notes, config);
+        assert_eq!(
+            outcomes,
+            vec![
+                (
+                    "pitfalls/ordinary-0".to_string(),
+                    NotePackDisposition::Injected
+                ),
+                (
+                    format!("pitfalls/{}", "x".repeat(400)),
+                    NotePackDisposition::OversizedSkipped
+                ),
+                (
+                    "pitfalls/ordinary-2".to_string(),
+                    NotePackDisposition::Injected
+                ),
+                (
+                    "pitfalls/ordinary-3".to_string(),
+                    NotePackDisposition::NotTopK
+                ),
+            ]
+        );
+    }
+
+    /// The confidence floor is evaluated *before* top-k, so a filtered note
+    /// does not consume one of the `top_k` slots.
+    #[test]
+    fn confidence_filtered_notes_do_not_consume_top_k_slots() {
+        let notes = vec![
+            low_confidence_note(0),
+            ordinary_note(1),
+            ordinary_note(2),
+            ordinary_note(3),
+        ];
+        let outcomes = dispositions(
+            &notes,
+            KnowledgePackConfig {
+                minimum_confidence: 0.3,
+                top_k: 2,
+                total_byte_budget: 8192,
+                line_byte_cap: 256,
+            },
+        );
+        assert_eq!(
+            outcomes
+                .iter()
+                .map(|(_, disposition)| disposition.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                NotePackDisposition::ConfidenceFiltered,
+                NotePackDisposition::Injected,
+                NotePackDisposition::Injected,
+                NotePackDisposition::NotTopK,
+            ]
+        );
+    }
+
+    /// Every one of the at-most-50 candidates receives exactly one terminal
+    /// disposition, and the packed bytes never exceed the configured ceiling.
+    #[test]
+    fn every_candidate_in_a_full_window_gets_exactly_one_disposition() {
+        let notes: Vec<Note> = (0..50).map(ordinary_note).collect();
+        let config = KnowledgePackConfig {
+            minimum_confidence: 0.3,
+            top_k: 10,
+            total_byte_budget: 400,
+            line_byte_cap: 256,
+        };
+        let packed = pack_ranked_knowledge_notes(&notes, config);
+
+        assert_eq!(packed.outcomes.len(), notes.len());
+        for (note, outcome) in notes.iter().zip(&packed.outcomes) {
+            assert_eq!(outcome.permalink, note.permalink);
+        }
+        let injected = packed
+            .outcomes
+            .iter()
+            .filter(|outcome| outcome.disposition == NotePackDisposition::Injected)
+            .count();
+        let not_top_k = packed
+            .outcomes
+            .iter()
+            .filter(|outcome| outcome.disposition == NotePackDisposition::NotTopK)
+            .count();
+        assert_eq!(not_top_k, 40, "everything past top-k is NotTopK");
+        assert!(injected > 0 && injected <= config.top_k);
+        assert!(
+            packed.total_injected_chars <= config.total_byte_budget,
+            "packed bytes must respect the ceiling"
+        );
+    }
+
+    /// Repeated runs against the same inputs produce identical ordered IDs,
+    /// dispositions, and byte counts.
+    #[test]
+    fn packing_is_deterministic_across_repeats() {
+        let notes: Vec<Note> = (0..20).map(ordinary_note).collect();
+        let config = KnowledgePackConfig {
+            minimum_confidence: 0.3,
+            top_k: 7,
+            total_byte_budget: 500,
+            line_byte_cap: 256,
+        };
+        let first = pack_ranked_knowledge_notes(&notes, config);
+        let second = pack_ranked_knowledge_notes(&notes, config);
+        assert_eq!(first.rendered, second.rendered);
+        assert_eq!(first.total_injected_chars, second.total_injected_chars);
+        assert_eq!(
+            first
+                .outcomes
+                .iter()
+                .map(|outcome| (outcome.permalink.clone(), outcome.disposition.clone()))
+                .collect::<Vec<_>>(),
+            second
+                .outcomes
+                .iter()
+                .map(|outcome| (outcome.permalink.clone(), outcome.disposition.clone()))
+                .collect::<Vec<_>>(),
+        );
+    }
+}
+
+// ── Proposal 5205: base-tree-validated task scope derivation ────────────────
+
+mod validated_scope {
+    use super::super::{
+        BaseTreeProvider, ListedBaseTree, ScopeFallbackReason, derive_task_scope_path_tokens,
+        derive_task_scope_paths, normalize_scope_token, resolve_scope_token,
+    };
+
+    /// A minimal `Task` built without touching the database, so scope
+    /// derivation is testable in any environment.
+    fn scope_task(description: &str, design: &str) -> djinn_core::models::Task {
+        djinn_core::models::Task {
+            escalation_evidence_at: None,
+            id: "task-5205".to_string(),
+            project_id: "project-5205".to_string(),
+            short_id: "t-5205".to_string(),
+            epic_id: None,
+            title: String::new(),
+            description: description.to_string(),
+            design: design.to_string(),
+            issue_type: "task".to_string(),
+            status: "in_progress".to_string(),
+            priority: 1,
+            owner: "test-owner".to_string(),
+            labels: "[]".to_string(),
+            acceptance_criteria: "[]".to_string(),
+            reopen_count: 0,
+            continuation_count: 0,
+            total_reopen_count: 0,
+            intervention_count: 0,
+            last_intervention_at: None,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+            closed_at: None,
+            close_reason: None,
+            merge_commit_sha: None,
+            pr_url: None,
+            merge_conflict_metadata: None,
+            memory_refs: "[]".to_string(),
+            agent_type: None,
+            execution_context: None,
+            created_by_user_id: "fixture-user".into(),
+            ci_status: "unknown".to_string(),
+            ci_head_sha: None,
+            ci_pr_number: None,
+            ci_blocking_required_check_names: "[]".to_string(),
+            ci_primary_blocking_check: None,
+            ci_failure_annotations: None,
+            ci_failure_fingerprint: None,
+            ci_first_seen_at: None,
+            ci_last_seen_at: None,
+            ci_same_signature_count: 0,
+            ci_last_remediation_base_sha: None,
+            ci_mirror_head_sha: None,
+            ci_github_head_sha: None,
+            ci_heads_diverged: None,
+            ci_head_observation_error: None,
+            ci_mq_state: None,
+            ci_mq_run_id: None,
+            ci_mq_head_sha: None,
+            ci_mq_failed_check_names: None,
+            ci_mq_failure_fingerprint: None,
+            ci_mq_same_signature_count: None,
+            ci_mq_first_seen_at: None,
+            ci_mq_last_seen_at: None,
+            unresolved_blocker_count: 0,
+            refinement_run_id: None,
+            refinement_intent_id: None,
+            refinement_generation: None,
+            refinement_round: None,
+            refinement_phase: None,
+            refinement_role: None,
+        }
+    }
+
+    /// A synthetic base revision. Every path here is invented for this test;
+    /// nothing is read from any deployment's repository or database.
+    fn base_tree() -> ListedBaseTree {
+        ListedBaseTree::from_tracked_files([
+            "server/crates/alpha/src/lib.rs",
+            "server/crates/alpha/src/engine/mod.rs",
+            "server/crates/beta/src/main.rs",
+            "ui/components/button.tsx",
+            "docs/design.md",
+        ])
+    }
+
+    #[test]
+    fn listed_base_tree_derives_directories_from_tracked_files() {
+        let tree = base_tree();
+        assert_eq!(tree.file_count(), 5);
+        assert!(tree.is_file("server/crates/alpha/src/lib.rs"));
+        assert!(tree.is_directory("server/crates/alpha/src"));
+        assert!(tree.is_directory("server"));
+        // A file is not a directory, and an unknown path is neither.
+        assert!(!tree.is_directory("server/crates/alpha/src/lib.rs"));
+        assert!(!tree.is_file("server/crates/alpha/src"));
+        assert!(!tree.is_directory("server/crates/gamma"));
+    }
+
+    // ── normalization ──────────────────────────────────────────────────────
+
+    #[test]
+    fn normalization_folds_separators_and_leading_dot_slash() {
+        assert_eq!(
+            normalize_scope_token("server\\crates\\alpha"),
+            Some("server/crates/alpha".to_string())
+        );
+        assert_eq!(
+            normalize_scope_token("./server/crates/alpha"),
+            Some("server/crates/alpha".to_string())
+        );
+        assert_eq!(
+            normalize_scope_token("server//crates///alpha"),
+            Some("server/crates/alpha".to_string())
+        );
+        assert_eq!(
+            normalize_scope_token("server/crates/alpha/"),
+            Some("server/crates/alpha".to_string())
+        );
+    }
+
+    #[test]
+    fn normalization_preserves_git_path_case() {
+        assert_eq!(
+            normalize_scope_token("UI/Components/Button.tsx"),
+            Some("UI/Components/Button.tsx".to_string())
+        );
+    }
+
+    #[test]
+    fn normalization_rejects_absolute_and_traversal_paths() {
+        assert_eq!(normalize_scope_token("/etc/passwd"), None);
+        assert_eq!(normalize_scope_token("../../etc/passwd"), None);
+        assert_eq!(normalize_scope_token("server/../../etc"), None);
+        assert_eq!(normalize_scope_token("server/./crates"), None);
+        assert_eq!(normalize_scope_token("   "), None);
+    }
+
+    // ── resolution ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn existing_file_resolves_to_itself() {
+        let tree = base_tree();
+        assert_eq!(
+            resolve_scope_token("server/crates/alpha/src/lib.rs", &tree),
+            Some("server/crates/alpha/src/lib.rs".to_string())
+        );
+    }
+
+    #[test]
+    fn existing_directory_resolves_to_itself() {
+        let tree = base_tree();
+        assert_eq!(
+            resolve_scope_token("server/crates/alpha/src", &tree),
+            Some("server/crates/alpha/src".to_string())
+        );
+    }
+
+    #[test]
+    fn new_path_resolves_to_its_longest_existing_ancestor() {
+        let tree = base_tree();
+        // A file that does not exist yet, under a directory that does.
+        assert_eq!(
+            resolve_scope_token("server/crates/alpha/src/engine/planner.rs", &tree),
+            Some("server/crates/alpha/src/engine".to_string())
+        );
+        // Several missing components collapse to the deepest real ancestor.
+        assert_eq!(
+            resolve_scope_token("server/crates/alpha/src/a/b/c/d.rs", &tree),
+            Some("server/crates/alpha/src".to_string())
+        );
+    }
+
+    #[test]
+    fn renamed_or_wholly_new_subtree_degrades_to_a_coarse_real_ancestor() {
+        let tree = base_tree();
+        // `gamma` never existed at the base revision; `server/crates` did.
+        assert_eq!(
+            resolve_scope_token("server/crates/gamma/src/lib.rs", &tree),
+            Some("server/crates".to_string())
+        );
+    }
+
+    #[test]
+    fn deleted_path_still_resolves_because_it_existed_at_the_base_revision() {
+        // The base tree is the immutable revision the attempt branched from, so
+        // a path deleted on the branch is still a valid scope anchor.
+        let tree = base_tree();
+        assert_eq!(
+            resolve_scope_token("docs/design.md", &tree),
+            Some("docs/design.md".to_string())
+        );
+    }
+
+    #[test]
+    fn token_with_no_existing_ancestor_is_discarded() {
+        let tree = base_tree();
+        assert_eq!(resolve_scope_token("accept/reject", &tree), None);
+        assert_eq!(resolve_scope_token("Pod/Job", &tree), None);
+        assert_eq!(resolve_scope_token("and/or", &tree), None);
+    }
+
+    #[test]
+    fn repository_root_is_never_emitted_as_a_scope_path() {
+        // `nonexistent` has no existing ancestor other than the root itself.
+        let tree = base_tree();
+        assert_eq!(resolve_scope_token("nonexistent/child", &tree), None);
+    }
+
+    // ── end-to-end derivation ──────────────────────────────────────────────
+
+    #[test]
+    fn prose_junk_is_rejected_while_real_paths_survive() {
+        let tree = base_tree();
+        let task = scope_task(
+            "We must accept/reject the Pod/Job and/or retry. \
+             Touch `server/crates/alpha/src/lib.rs` and ui/components/button.tsx now.",
+            "Also add server/crates/alpha/src/engine/planner.rs (new file).",
+        );
+
+        let derived = derive_task_scope_paths(&task, None, Some(&tree));
+
+        assert_eq!(derived.fallback_reason, None);
+        assert_eq!(
+            derived.paths,
+            vec![
+                "server/crates/alpha/src/engine".to_string(),
+                "server/crates/alpha/src/lib.rs".to_string(),
+                "ui/components/button.tsx".to_string(),
+            ],
+            "junk pairs must be absent and the new file must resolve to its parent"
+        );
+
+        // The pre-5205 extractor is what this replaces: it happily emits the
+        // junk. Asserting that keeps the regression honest — if validation
+        // silently stopped running, this contrast would collapse.
+        let unvalidated = derive_task_scope_path_tokens(&task, None);
+        assert!(
+            unvalidated.iter().any(|path| path == "accept/reject"),
+            "unvalidated extraction still yields prose junk: {unvalidated:?}"
+        );
+    }
+
+    #[test]
+    fn epic_context_paths_are_validated_too() {
+        let tree = base_tree();
+        let task = scope_task("No paths here.", "");
+        let derived = derive_task_scope_paths(
+            &task,
+            Some("Epic touches server/crates/beta/src/main.rs and nope/nothing."),
+            Some(&tree),
+        );
+        assert_eq!(
+            derived.paths,
+            vec!["server/crates/beta/src/main.rs".to_string()]
+        );
+    }
+
+    #[test]
+    fn provider_unavailability_yields_empty_scope_with_a_typed_reason() {
+        let task = scope_task(
+            "Touch server/crates/alpha/src/lib.rs and accept/reject.",
+            "",
+        );
+        let derived = derive_task_scope_paths(&task, None, None);
+        assert!(
+            derived.paths.is_empty(),
+            "unvalidated regex tokens must never be trusted"
+        );
+        assert_eq!(
+            derived.fallback_reason,
+            Some(ScopeFallbackReason::TreeProviderUnavailable)
+        );
+    }
+
+    #[test]
+    fn an_empty_tree_discards_every_token_without_claiming_a_fallback() {
+        // A reachable-but-empty tree is a legitimate zero-result derivation,
+        // not a provider failure; traces must be able to tell them apart.
+        let tree = ListedBaseTree::from_tracked_files(Vec::<String>::new());
+        let task = scope_task("Touch server/crates/alpha/src/lib.rs.", "");
+        let derived = derive_task_scope_paths(&task, None, Some(&tree));
+        assert!(derived.paths.is_empty());
+        assert_eq!(derived.fallback_reason, None);
+    }
+
+    #[test]
+    fn derived_paths_are_deduplicated_and_deterministically_ordered() {
+        let tree = base_tree();
+        let task = scope_task(
+            "ui/components/button.tsx and again ui/components/button.tsx \
+             plus server/crates/beta/src/main.rs here.",
+            "server/crates/beta/src/main.rs once more.",
+        );
+        let derived = derive_task_scope_paths(&task, None, Some(&tree));
+        assert_eq!(
+            derived.paths,
+            vec![
+                "server/crates/beta/src/main.rs".to_string(),
+                "ui/components/button.tsx".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn traversal_and_absolute_tokens_never_reach_the_tree() {
+        struct PanickingTree;
+        impl BaseTreeProvider for PanickingTree {
+            fn is_file(&self, path: &str) -> bool {
+                assert!(
+                    !path.contains("..") && !path.starts_with('/'),
+                    "unsafe path reached the tree provider: {path}"
+                );
+                false
+            }
+            fn is_directory(&self, path: &str) -> bool {
+                self.is_file(path)
+            }
+        }
+        // The regex happily extracts `docs/../secrets/key.pem`; normalization
+        // must reject it before the tree is ever consulted.
+        let task = scope_task("See docs/../secrets/key.pem for context.", "");
+        let derived = derive_task_scope_paths(&task, None, Some(&PanickingTree));
+        assert!(derived.paths.is_empty());
+    }
+}

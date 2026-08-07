@@ -64,11 +64,13 @@ mod code_context_action_tests;
 mod tests;
 
 pub use code_context::{
-    ACTION_EXCERPT_CAP, ActionExcerptDetail, KnowledgePackConfig, NotePackDisposition,
-    NotePackOutcome, PER_LINE_OVERHEAD_SCAFFOLD, PackedKnowledgeNotes,
-    build_role_code_graph_context, derive_task_scope_paths, format_knowledge_notes,
-    is_role_auto_code_context_enabled, legacy_rendered_line_overhead_bytes, pack_knowledge_notes,
-    pack_ranked_knowledge_notes, rendered_line_overhead_bytes,
+    ACTION_EXCERPT_CAP, ActionExcerptDetail, BaseTreeProvider, DerivedTaskScope,
+    KnowledgePackConfig, ListedBaseTree, NotePackDisposition, NotePackOutcome,
+    PER_LINE_OVERHEAD_SCAFFOLD, PackedKnowledgeNotes, ScopeFallbackReason,
+    build_role_code_graph_context, derive_task_scope_path_tokens, derive_task_scope_paths,
+    format_knowledge_notes, is_role_auto_code_context_enabled, legacy_rendered_line_overhead_bytes,
+    normalize_scope_token, pack_knowledge_notes, pack_ranked_knowledge_notes,
+    rendered_line_overhead_bytes, resolve_scope_token,
 };
 #[cfg(test)]
 pub(crate) use feedback::log_snippet;

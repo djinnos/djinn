@@ -1011,6 +1011,34 @@ pub async fn drop_table_cascade_for_test(db: &Database, table_name: &str) {
 /// observes malformed data.
 ///
 /// **Not for production use.** Panics on SQL errors.
+/// Pin every temporal input to a fixed value across a project's notes, so the
+/// temporal RRF signal scores all of them identically.
+///
+/// Temporal scoring is derived from `created_at`, `updated_at`, and
+/// `access_count`. Notes seeded milliseconds apart therefore get slightly
+/// different temporal scores, and the resulting rank spread is the same
+/// magnitude as the scope signal's — enough to reorder adjacent candidates and
+/// make an end-to-end ranking assertion flaky. Equalizing the inputs collapses
+/// temporal to a constant, so the signal under test decides the order and ties
+/// fall through to the deterministic note-ID tie-break.
+///
+/// **Not for production use.** Panics on SQL errors.
+pub async fn equalize_note_temporal_signals_for_test(db: &Database, project_id: &str) {
+    db.ensure_initialized().await.unwrap();
+    sqlx::query(
+        "UPDATE notes
+         SET created_at = '2026-01-01T00:00:00.000Z',
+             updated_at = '2026-01-01T00:00:00.000Z',
+             last_accessed = '2026-01-01T00:00:00.000Z',
+             access_count = 0
+         WHERE project_id = $1",
+    )
+    .bind(project_id)
+    .execute(db.pool())
+    .await
+    .expect("failed to equalize note temporal signals");
+}
+
 pub async fn nullify_note_confidence_for_test(db: &Database, note_id: &str) {
     db.ensure_initialized().await.unwrap();
     sqlx::query("ALTER TABLE notes ALTER COLUMN confidence DROP NOT NULL")

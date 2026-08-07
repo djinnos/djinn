@@ -1023,6 +1023,37 @@ pub async fn run_git_command_in_with_env(
     })
 }
 
+/// `git ls-tree -r -z --name-only <rev>` against `repo_root`.
+///
+/// Returns every tracked blob path at `rev`, repository-relative and
+/// `/`-separated. `-z` makes git emit raw NUL-separated names rather than
+/// C-quoting paths that contain spaces or non-ASCII bytes, so the caller never
+/// has to unquote.
+///
+/// This is the authoritative snapshot behind base-revision path validation
+/// (proposal `5205`): it reads an immutable revision, not the mutable worker
+/// worktree.
+pub async fn list_tracked_paths(repo_root: &Path, rev: &str) -> Result<Vec<String>, GitError> {
+    let out = run_git_command(
+        repo_root.to_path_buf(),
+        vec![
+            "ls-tree".into(),
+            "-r".into(),
+            "-z".into(),
+            "--name-only".into(),
+            rev.to_string(),
+        ],
+    )
+    .await?;
+    Ok(out
+        .stdout
+        .split('\0')
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(str::to_owned)
+        .collect())
+}
+
 /// `git rev-parse HEAD` against `repo_root`. Returns the trimmed SHA on
 /// stdout. Used by callers that want the HEAD commit SHA without having to
 /// manually parse `CommandOutput`.
