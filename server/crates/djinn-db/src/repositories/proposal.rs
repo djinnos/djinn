@@ -1617,6 +1617,26 @@ impl ProposalRepository {
         &self,
         proposal_id: &str,
     ) -> Result<FeedbackRefinementBoundaryCapture> {
+        self.capture_feedback_refinement_boundary_inner(proposal_id, None)
+            .await
+    }
+
+    /// Capture a feedback boundary and consume every pending handoff represented
+    /// by that capture in the same proposal-serialized transaction.
+    pub(crate) async fn capture_feedback_refinement_boundary_and_complete_handoff(
+        &self,
+        proposal_id: &str,
+        successor_run_id: &str,
+    ) -> Result<FeedbackRefinementBoundaryCapture> {
+        self.capture_feedback_refinement_boundary_inner(proposal_id, Some(successor_run_id))
+            .await
+    }
+
+    async fn capture_feedback_refinement_boundary_inner(
+        &self,
+        proposal_id: &str,
+        successor_run_id: Option<&str>,
+    ) -> Result<FeedbackRefinementBoundaryCapture> {
         self.db.ensure_initialized().await?;
         let mut tx = self.db.pool().begin().await?;
         let revision_seq = sqlx::query_scalar::<_, i32>(
@@ -1637,6 +1657,12 @@ impl ProposalRepository {
         .fetch_one(&mut *tx)
         .await?;
         let Some(cutoff_id) = cutoff_id else {
+            self.complete_captured_pending_feedback_handoffs_in_tx(
+                &mut tx,
+                proposal_id,
+                successor_run_id,
+            )
+            .await?;
             tx.commit().await?;
             return Ok(Default::default());
         };
@@ -1754,6 +1780,12 @@ impl ProposalRepository {
                     reused_round: true,
                 });
             }
+            self.complete_captured_pending_feedback_handoffs_in_tx(
+                &mut tx,
+                proposal_id,
+                successor_run_id,
+            )
+            .await?;
             tx.commit().await?;
             return Ok(FeedbackRefinementBoundaryCapture { captures });
         }
@@ -1857,8 +1889,60 @@ impl ProposalRepository {
                 reused_round: queued_round.is_some(),
             });
         }
+        self.complete_captured_pending_feedback_handoffs_in_tx(
+            &mut tx,
+            proposal_id,
+            successor_run_id,
+        )
+        .await?;
         tx.commit().await?;
         Ok(FeedbackRefinementBoundaryCapture { captures })
+    }
+
+    /// Admit materialized handoffs and keep exactly one owner for work beyond
+    /// this capture's cutoff before releasing the proposal lock.
+    async fn complete_captured_pending_feedback_handoffs_in_tx(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        proposal_id: &str,
+        successor_run_id: Option<&str>,
+    ) -> Result<()> {
+        let Some(successor_run_id) = successor_run_id else {
+            return Ok(());
+        };
+        sqlx::query(
+            r#"UPDATE pending_feedback_refinement_handoffs h
+               SET state='admitted', cohort_owner=false, successor_run_id=$2,
+                   updated_at=to_char(transaction_timestamp() AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+               WHERE h.proposal_id=$1 AND h.state='pending'
+                 AND EXISTS (
+                     SELECT 1 FROM proposal_feedback_refinement_sources s
+                     JOIN proposal_feedback_refinement_injections i ON i.id=s.injection_id
+                     WHERE i.proposal_id=$1 AND s.source_feedback_id=h.boundary_feedback_id
+                 )"#,
+        )
+        .bind(proposal_id)
+        .bind(successor_run_id)
+        .execute(&mut **tx)
+        .await?;
+        sqlx::query(
+            r#"UPDATE pending_feedback_refinement_handoffs
+               SET cohort_owner=true,
+                   updated_at=to_char(transaction_timestamp() AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+               WHERE id=(
+                   SELECT id FROM pending_feedback_refinement_handoffs
+                   WHERE proposal_id=$1 AND state='pending'
+                   ORDER BY created_at,id LIMIT 1
+               )
+               AND NOT EXISTS (
+                   SELECT 1 FROM pending_feedback_refinement_handoffs
+                   WHERE proposal_id=$1 AND state='pending' AND cohort_owner
+               )"#,
+        )
+        .bind(proposal_id)
+        .execute(&mut **tx)
+        .await?;
+        Ok(())
     }
 
     // ── Debate trail (structured objections/rebuttals/verdicts) ──────────────

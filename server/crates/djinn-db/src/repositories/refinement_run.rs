@@ -338,23 +338,18 @@ impl From<sqlx::Error> for RefinementAdmissionError {
 }
 
 impl ProposalRepository {
-    /// Consume a recovery boundary after immediate admission. If a process dies
-    /// before this write, the pending row deliberately remains drainable by the
-    /// owning run's terminal transition.
+    /// Capture and consume a recovery cohort after immediate admission. The
+    /// proposal lock fences concurrent members and preserves one owner for any
+    /// source beyond this capture's cutoff.
     pub async fn complete_pending_feedback_refinement_handoff(
         &self,
         proposal_id: &str,
-        boundary_feedback_id: &str,
         successor_run_id: &str,
     ) -> std::result::Result<(), RefinementAdmissionError> {
-        self.db().ensure_initialized().await?;
-        sqlx::query(
-            "UPDATE pending_feedback_refinement_handoffs SET state='admitted', successor_run_id=$3, updated_at=to_char(transaction_timestamp() AT TIME ZONE 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') WHERE proposal_id=$1 AND boundary_feedback_id=$2 AND state='pending'",
+        self.capture_feedback_refinement_boundary_and_complete_handoff(
+            proposal_id,
+            successor_run_id,
         )
-        .bind(proposal_id)
-        .bind(boundary_feedback_id)
-        .bind(successor_run_id)
-        .execute(self.db().pool())
         .await?;
         Ok(())
     }

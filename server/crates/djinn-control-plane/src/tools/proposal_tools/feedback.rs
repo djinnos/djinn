@@ -249,17 +249,10 @@ impl DjinnMcpServer {
                     .await
                     {
                         Ok(admission) if admission.admitted => {
-                            if let Err(error) = repo
-                                .capture_feedback_refinement_boundary(&proposal.id)
-                                .await
-                            {
-                                return Json(err_feedback(error.to_string()));
-                            }
                             if handoff_persisted
                                 && let Err(error) = repo
                                     .complete_pending_feedback_refinement_handoff(
                                         &proposal.id,
-                                        &f.id,
                                         &admission.run_id,
                                     )
                                     .await
