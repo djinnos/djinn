@@ -2792,6 +2792,7 @@ mod tests {
         let db = Database::ephemeral().await.expect("db");
         seed_model_turn_admission_fixture(&db, "enforce", "supported", 2).await;
         let hooks = Arc::new(ModelTurnAdmissionTestHooks::default());
+        hooks.block_reconcile.store(true, Ordering::Release);
         let coordinator = ModelTurnAdmissionCoordinator::with_test_hooks(
             djinn_db::ModelTurnAdmissionRepository::new(db.clone()),
             hooks.clone(),
@@ -2823,12 +2824,11 @@ mod tests {
         )
         .await
         .expect("launch");
+        let reconcile_reached = hooks.reconcile_reached.notified();
+        tokio::pin!(reconcile_reached);
         let owner = tokio::spawn(async move {
             guard.finish(false).await;
         });
-        tokio::task::yield_now().await;
-        owner.abort();
-        assert!(matches!(owner.await, Err(error) if error.is_cancelled()));
         tx.send(ProviderOutcomeV1 {
             terminal: djinn_provider::ProviderAttemptTerminalV1::Aborted,
             authoritative_usage: None,
@@ -2837,7 +2837,13 @@ mod tests {
             token_emission: Default::default(),
         })
         .expect("outcome");
-        hooks.reconcile_finished.notified().await;
+        reconcile_reached.await;
+        owner.abort();
+        assert!(matches!(owner.await, Err(error) if error.is_cancelled()));
+        let reconcile_finished = hooks.reconcile_finished.notified();
+        tokio::pin!(reconcile_finished);
+        hooks.reconcile_release.notify_waiters();
+        reconcile_finished.await;
         assert!(observed_abort.is_aborted());
         assert_eq!(
             hooks.reconciliations.lock().expect("observer").as_slice(),
