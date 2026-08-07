@@ -1539,6 +1539,83 @@ pub fn build_bounded_clusters(
     (clusters, admission_comparisons)
 }
 
+/// Connected components over a materialized directed score matrix, preserving
+/// the exact grouping semantics the per-seed `dedup_candidates_for_group` loop
+/// produced for the corpus audit.
+///
+/// This is deliberately *not* the complete-link admission used by the canonical
+/// transaction. The audit reports likely-duplicate neighborhoods, not merge
+/// sets, so changing its grouping rule would change its semantic report. Only
+/// the round-trip fan-out changes: the same edges are now derived from one
+/// set-based query per type instead of one query per seed.
+///
+/// Each returned component holds at least two note IDs ordered by
+/// `(permalink, id)`; components are ordered by their ID tuple.
+pub fn connected_components_from_score_matrix(
+    notes: &[ConsolidationNote],
+    scores: &[DirectedScoreRow],
+) -> Vec<Vec<String>> {
+    use std::collections::{BTreeMap, VecDeque};
+
+    let by_id: HashMap<&str, &ConsolidationNote> = notes
+        .iter()
+        .map(|note| (note.id.as_str(), note))
+        .collect();
+
+    let mut adjacency: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for row in scores {
+        if row.seed_id == row.candidate_id
+            || !by_id.contains_key(row.seed_id.as_str())
+            || !by_id.contains_key(row.candidate_id.as_str())
+        {
+            continue;
+        }
+        adjacency
+            .entry(row.seed_id.clone())
+            .or_default()
+            .insert(row.candidate_id.clone());
+        adjacency
+            .entry(row.candidate_id.clone())
+            .or_default()
+            .insert(row.seed_id.clone());
+    }
+
+    let mut visited: HashSet<String> = HashSet::new();
+    let mut components: Vec<Vec<String>> = Vec::new();
+    for start in adjacency.keys() {
+        if !visited.insert(start.clone()) {
+            continue;
+        }
+        let mut queue = VecDeque::from([start.clone()]);
+        let mut component_ids = BTreeSet::from([start.clone()]);
+        while let Some(node) = queue.pop_front() {
+            if let Some(neighbors) = adjacency.get(&node) {
+                for neighbor in neighbors {
+                    if visited.insert(neighbor.clone()) {
+                        queue.push_back(neighbor.clone());
+                    }
+                    component_ids.insert(neighbor.clone());
+                }
+            }
+        }
+        if component_ids.len() < 2 {
+            continue;
+        }
+        let mut ordered = component_ids
+            .iter()
+            .filter_map(|id| by_id.get(id.as_str()).copied())
+            .collect::<Vec<_>>();
+        ordered.sort_by(|left, right| {
+            left.permalink
+                .cmp(&right.permalink)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        components.push(ordered.into_iter().map(|note| note.id.clone()).collect());
+    }
+    components.sort();
+    components
+}
+
 /// Distinct source ids across a set of clusters, used by the run report to
 /// prove that deferred clusters are disjoint from the committed one.
 pub fn cluster_source_id_set(clusters: &[BoundedCluster]) -> BTreeSet<String> {

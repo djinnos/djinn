@@ -74,7 +74,7 @@ pub use consolidation_lifecycle::{
     ConsolidationPartitionKey, ConsolidationWriteBoundary, DirectedScoreRow,
     EligibleSourceSelection, PartitionPressureMetric, ProvenanceBackfillReport,
     build_bounded_clusters, cluster_source_id_set, clusters_are_disjoint,
-    consolidation_attempt_id,
+    connected_components_from_score_matrix, consolidation_attempt_id,
 };
 pub use djinn_memory::{
     BuildContextResponse, ConsolidatedNoteProvenance, ConsolidationCandidateEdge,

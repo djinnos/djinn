@@ -1356,6 +1356,191 @@ async fn partition_pressure_is_passive_and_reports_zero_slot_pressure() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// AC10 — the corpus audit is set-based
+// ═══════════════════════════════════════════════════════════════════════════
+
+const AUDIT_FIXTURE_NOTES_PER_TYPE: i64 = 4_400;
+const AUDIT_FIXTURE_ORPHAN_ORDINALS: i64 = 400;
+
+/// Bulk-build the audit fixture with `generate_series` so the corpus size is a
+/// property of the fixture rather than of how long the test is willing to run.
+///
+/// Everything is derived from ordinals: no project, session, note, or task
+/// identity from any particular database appears here.
+async fn build_audit_fixture(db: &Database, project_id: &str) {
+    for (type_index, note_type) in ["case", "pattern", "pitfall"].into_iter().enumerate() {
+        let folder = folder_for_type(note_type);
+        let base = type_index as i64 * 100_000;
+        sqlx::query(
+            r#"INSERT INTO notes (
+                   id, project_id, permalink, title, file_path, storage, note_type, folder,
+                   status, tags, content, content_hash, scope_paths, confidence
+               )
+               SELECT
+                   '00000000-0000-7000-8000-' || lpad(($1 + g)::text, 12, '0'),
+                   $2,
+                   $3 || '/audit-' || lpad(g::text, 6, '0'),
+                   'Audit Fixture ' || g,
+                   '', 'db', $4, $3, 'active', '[]'::jsonb,
+                   'Retry storms amplify duplicate recovery work during incident recovery; variant '
+                       || g,
+                   lpad(md5(($1 + g)::text), 64, '0'),
+                   '[]'::jsonb,
+                   0.5
+               FROM generate_series(0, $5::bigint - 1) AS g"#,
+        )
+        .bind(base)
+        .bind(project_id)
+        .bind(folder)
+        .bind(note_type)
+        .bind(AUDIT_FIXTURE_NOTES_PER_TYPE)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        // Two inbound links per note, but only onto ordinals at or above
+        // `AUDIT_FIXTURE_ORPHAN_ORDINALS`, so the corpus carries both orphan and
+        // non-orphan rows.
+        let linkable = AUDIT_FIXTURE_NOTES_PER_TYPE - AUDIT_FIXTURE_ORPHAN_ORDINALS;
+        sqlx::query(
+            r#"INSERT INTO note_links (id, source_id, target_id, target_raw)
+               SELECT
+                   '00000000-0000-7000-9000-' || lpad(($1 + g * 2 + slot)::text, 12, '0'),
+                   '00000000-0000-7000-8000-' || lpad(($1 + g)::text, 12, '0'),
+                   '00000000-0000-7000-8000-'
+                       || lpad(($1 + $2 + ((g + slot) % $3))::text, 12, '0'),
+                   'audit-link-' || slot
+               FROM generate_series(0, $4::bigint - 1) AS g
+               CROSS JOIN generate_series(0, 1) AS slot"#,
+        )
+        .bind(base)
+        .bind(AUDIT_FIXTURE_ORPHAN_ORDINALS)
+        .bind(linkable)
+        .bind(AUDIT_FIXTURE_NOTES_PER_TYPE)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        // Revision histories of depth 1 (ordinals 0..99) and depth 5
+        // (ordinals 100..149). Every other note keeps depth 0.
+        for (first, last, depth) in [(0i64, 99i64, 1i64), (100i64, 149i64, 5i64)] {
+            sqlx::query(
+                r#"INSERT INTO note_revision_events (
+                       id, project_id, note_id, note_seq, event_kind, content_before,
+                       content_after, confidence_before, confidence_after, actor_kind,
+                       subsystem, session_id, reason
+                   )
+                   SELECT
+                       '00000000-0000-7000-a000-'
+                           || lpad(($1 + g * 10 + s)::text, 12, '0'),
+                       $2,
+                       '00000000-0000-7000-8000-' || lpad(($1 + g)::text, 12, '0'),
+                       s,
+                       CASE WHEN s = 1 THEN 'created' ELSE 'updated' END,
+                       CASE WHEN s = 1 THEN NULL ELSE 'audit fixture before' END,
+                       'audit fixture after',
+                       CASE WHEN s = 1 THEN NULL ELSE 0.5 END,
+                       0.5,
+                       'system', 'extraction', NULL,
+                       'audit fixture revision'
+                   FROM generate_series($3::bigint, $4::bigint) AS g
+                   CROSS JOIN generate_series(1, $5::bigint) AS s"#,
+            )
+            .bind(base)
+            .bind(project_id)
+            .bind(first)
+            .bind(last)
+            .bind(depth)
+            .execute(db.pool())
+            .await
+            .unwrap();
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn extracted_note_audit_is_set_based_on_a_large_mixed_revision_corpus() {
+    let tmp = crate::database::test_tempdir().unwrap();
+    let db = Database::open_in_memory().unwrap();
+    let (tx, _rx) = broadcast::channel(256);
+    let project = make_project(&db, tmp.path()).await;
+    let repo = NoteRepository::new(db.clone(), event_bus_for(&tx));
+
+    build_audit_fixture(&db, &project.id).await;
+
+    let expected_notes = AUDIT_FIXTURE_NOTES_PER_TYPE * 3;
+    let expected_links = AUDIT_FIXTURE_NOTES_PER_TYPE * 3 * 2;
+    let note_count: i64 =
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM notes WHERE project_id = $1")
+            .bind(&project.id)
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+    assert_eq!(note_count, expected_notes, "fixture must build the full corpus");
+    let link_count: i64 = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM note_links l JOIN notes n ON n.id = l.source_id \
+         WHERE n.project_id = $1",
+    )
+    .bind(&project.id)
+    .fetch_one(db.pool())
+    .await
+    .unwrap();
+    assert_eq!(link_count, expected_links);
+    assert!(expected_notes >= 13_000 && expected_links >= 26_000);
+
+    start_query_capture();
+    let report = repo.extracted_note_audit(&project.id).await.unwrap();
+    let trace = finish_query_capture();
+
+    // Semantics are preserved: the corpus is fully scanned and still produces
+    // likely-duplicate neighborhoods.
+    assert_eq!(report.scanned_note_count, expected_notes);
+    assert!(
+        !report.merge_candidates.is_empty(),
+        "a densely similar corpus must still report merge candidates"
+    );
+    assert!(
+        report
+            .merge_candidates
+            .iter()
+            .any(|finding| finding.attribution.is_some()),
+        "the set-based revision load must still attribute revisioned notes"
+    );
+
+    // Round-trip budget, measured from `sqlx`'s own query records. The lower
+    // bound fails the test if the observer never installed.
+    assert!(
+        trace.round_trips() >= 6,
+        "expected at least the six budgeted round trips, saw:\n{}",
+        trace.rendered()
+    );
+    assert!(
+        trace.round_trips() <= 9,
+        "audit issued {} round trips over {expected_notes} notes:\n{}",
+        trace.round_trips(),
+        trace.rendered()
+    );
+    assert_eq!(
+        trace.matching("scoped c ON c.id <> s.seed_id"),
+        3,
+        "expected exactly one set-based score-matrix query per eligible type:\n{}",
+        trace.rendered()
+    );
+    assert_eq!(
+        trace.matching("DISTINCT ON (note_id)"),
+        1,
+        "expected one set-based latest-revision load:\n{}",
+        trace.rendered()
+    );
+    assert_eq!(
+        trace.matching("DISTINCT target_id FROM note_links"),
+        1,
+        "expected one set-based inbound-link aggregate:\n{}",
+        trace.rendered()
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Partition validation
 // ═══════════════════════════════════════════════════════════════════════════
 
