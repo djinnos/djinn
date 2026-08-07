@@ -2093,8 +2093,7 @@ impl CoordinatorActor {
             return;
         };
 
-        if let Err(e) = poll_stack::boxed(|| self.maybe_record_task_outcome_marker(&task)).await
-        {
+        if let Err(e) = poll_stack::boxed(|| self.maybe_record_task_outcome_marker(&task)).await {
             tracing::warn!(
                 task_id = %task_id,
                 error = %e,

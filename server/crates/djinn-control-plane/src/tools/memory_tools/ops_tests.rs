@@ -468,15 +468,22 @@ mod tests {
         );
         assert!(!response.results.is_empty());
 
+        // Inverted by proposal 9xih. This used to assert `access_count == 1`
+        // under ADR-054, which counted a note appearing in a result set as an
+        // access. That made search display and explicit `memory_read`
+        // indistinguishable in the persisted scalars. ADR-054 is superseded for
+        // PERSISTED note access: display now counts nothing.
         for result in &response.results {
             let access_count =
                 access_count_for(&setup.server, &setup.project, &result.permalink).await;
             assert_eq!(
-                access_count, 1,
-                "returned search results should count as accessed retrievals"
+                access_count, 0,
+                "search-result display must not count as an access (9xih supersedes ADR-054)"
             );
         }
 
+        // Session-level co-access telemetry is explicitly PRESERVED: it never
+        // touched confidence or the persisted access fields, so it stays.
         let recorded = setup.server.recorded_note_ids().await;
         let returned_ids: Vec<String> = response
             .results
@@ -1504,7 +1511,7 @@ mod tests {
         project: &str,
         identifier: &str,
         invocation_id: Option<&str>,
-    ) -> super::MemoryNoteResponse {
+    ) -> crate::tools::memory_tools::MemoryNoteResponse {
         ops::memory_read(
             server,
             ReadParams {
@@ -1574,8 +1581,7 @@ mod tests {
         )
         .await;
         assert!(first.error.is_none(), "{:?}", first.error);
-        let after_first =
-            note_by_permalink(&setup.server, &setup.project, &setup.permalink).await;
+        let after_first = note_by_permalink(&setup.server, &setup.project, &setup.permalink).await;
 
         // Response dropped in transport; the caller retries the same logical
         // invocation.
@@ -1599,8 +1605,7 @@ mod tests {
             "a replay must not append a second ledger row, got {events:?}"
         );
 
-        let after_retry =
-            note_by_permalink(&setup.server, &setup.project, &setup.permalink).await;
+        let after_retry = note_by_permalink(&setup.server, &setup.project, &setup.permalink).await;
         assert_eq!(
             after_retry.access_count,
             before.access_count + 1,
@@ -1652,12 +1657,15 @@ mod tests {
         let setup = setup_server().await;
         let before = note_by_permalink(&setup.server, &setup.project, &setup.permalink).await;
 
-        let over_limit = "x".repeat(
-            super::reads::INVOCATION_ID_MAX_CHARS + 1,
-        );
+        let over_limit = "x".repeat(crate::tools::memory_tools::reads::INVOCATION_ID_MAX_CHARS + 1);
         for invalid in ["", "   ", over_limit.as_str()] {
-            let response =
-                read_note(&setup.server, &setup.project, &setup.permalink, Some(invalid)).await;
+            let response = read_note(
+                &setup.server,
+                &setup.project,
+                &setup.permalink,
+                Some(invalid),
+            )
+            .await;
             assert!(
                 response.error.is_some(),
                 "invocation_id {invalid:?} must be rejected"
@@ -1670,7 +1678,7 @@ mod tests {
 
         // The boundary value itself is accepted, so the test above is a bound
         // check and not a blanket rejection.
-        let at_limit = "y".repeat(super::reads::INVOCATION_ID_MAX_CHARS);
+        let at_limit = "y".repeat(crate::tools::memory_tools::reads::INVOCATION_ID_MAX_CHARS);
         let accepted = read_note(
             &setup.server,
             &setup.project,

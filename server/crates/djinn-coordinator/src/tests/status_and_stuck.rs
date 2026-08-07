@@ -163,7 +163,10 @@ async fn failed_closed_task_records_marker_without_penalising_note_confidence() 
     // `create_task_with_note` parks the note at 0.5. The removed 0.1 signal
     // would have driven that prior to 0.1, so the equality assertion below is a
     // real behavioural difference and not an arithmetic no-op at the ceiling.
-    assert_eq!(before, 0.5, "fixture prior must be movable by the old signal");
+    assert_eq!(
+        before, 0.5,
+        "fixture prior must be movable by the old signal"
+    );
 
     repo.set_status_with_reason(&task.id, "closed", Some("failed"))
         .await

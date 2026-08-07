@@ -48,24 +48,35 @@ UPDATE notes
 
 -- ── 3. Invocation-keyed ledger era ──────────────────────────────────────────
 --
--- `note_access_events` ALREADY EXISTS: migration 189 (proposal u46i AC6)
--- created it, and its rows are the join side of the shipped
--- `P(memory_read | Injected)` report. It is therefore ALTERed here, never
--- dropped and never recreated — deleting those rows would silently break a
--- shipped metric that guards a 30-day retention window.
+-- WHY THIS TABLE IS ALTERED AND NOT RECREATED.
 --
--- The new era is empty all the same, because the new era is *defined* as the
--- rows carrying a non-null `invocation_id`, and this migration adds none.
--- Every pre-9xih row keeps `invocation_id IS NULL` and can never be mistaken
--- for a 9xih-era access event or satisfy a replay probe.
+-- `note_access_events` ALREADY EXISTS: migration 189 (proposal u46i AC6)
+-- created it. Proposal 9xih was written as though it did not, and specifies
+-- "create the empty ledger" — but the table has a LIVE CONSUMER:
+--
+--   server/crates/djinn-db/src/repositories/retrieval_trace/injected_pull_rate.rs
+--
+-- joins these rows against `retrieval_traces` to compute
+-- `P(memory_read | Injected)` for the shipped `memory_injected_pull_rate_report`
+-- MCP tool, over a protected 30-day retention window. Dropping or emptying the
+-- table would silently break a shipped metric on every deployment that has
+-- accumulated rows. So the table is ALTERed in place and NOT ONE ROW IS DELETED.
+--
+-- The new counting era is empty all the same, because the era is *defined* as
+-- the rows carrying a non-null `invocation_id`, and this migration adds none.
+-- Every pre-9xih row keeps `invocation_id IS NULL`, so it can never be mistaken
+-- for a 9xih-era access event nor satisfy a replay probe. That boundary is
+-- asserted in tests/migrations_note_confidence_access_repair.rs.
 ALTER TABLE note_access_events
     ADD COLUMN IF NOT EXISTS invocation_id VARCHAR(64) NULL;
 
 -- `(invocation_id, note_id)` is the replay key: a uniqueness conflict IS a
 -- caller retry of one logical invocation and must NOT increment a counter.
 --
--- Postgres treats NULLs as distinct in a unique index, so the arbitrarily many
--- legacy rows with `invocation_id IS NULL` coexist freely and index creation
--- cannot fail on existing data, however much of it there is.
+-- This index cannot fail on a populated table. Postgres treats NULLs as
+-- DISTINCT in a unique index, so arbitrarily many legacy rows sharing
+-- `invocation_id IS NULL` — including many rows for the SAME `note_id`, which
+-- is the normal shape of the existing data — coexist freely. The migration test
+-- seeds exactly that shape before applying this file.
 CREATE UNIQUE INDEX IF NOT EXISTS uq_note_access_events_invocation_note
     ON note_access_events (invocation_id, note_id);

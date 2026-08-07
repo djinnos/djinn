@@ -312,12 +312,28 @@ async fn migration_195_normalizes_confidence_rebases_access_and_is_idempotent() 
 
         // Pre-9xih ledger rows of BOTH sources. These are the join side of the
         // shipped injected-pull-rate report and must survive the migration.
+        //
+        // CRUCIALLY, the first two share a `note_id`. That is the normal shape
+        // of real data (a note read many times), and it is the shape that makes
+        // the unique index on `(invocation_id, note_id)` non-trivial: all of
+        // these rows will carry `invocation_id IS NULL`, so index creation is
+        // only possible because Postgres treats NULLs as DISTINCT. If that
+        // assumption were wrong, `apply_migration_195` below would fail
+        // outright on a populated deployment.
         let legacy_read_event = seed_legacy_access_event(
             &mut conn,
             &project_id,
             &at_one.id,
             "memory_read",
             "2026-05-05T05:05:05.000Z",
+        )
+        .await;
+        let legacy_duplicate_note_event = seed_legacy_access_event(
+            &mut conn,
+            &project_id,
+            &at_one.id,
+            "memory_read",
+            "2026-05-05T05:05:06.000Z",
         )
         .await;
         let legacy_search_event = seed_legacy_access_event(
@@ -328,6 +344,10 @@ async fn migration_195_normalizes_confidence_rebases_access_and_is_idempotent() 
             "2026-06-06T06:06:06.000Z",
         )
         .await;
+        assert_ne!(
+            legacy_read_event, legacy_duplicate_note_event,
+            "the two same-note legacy rows must be distinct rows"
+        );
 
         apply_migration_195(&mut conn).await;
 
@@ -400,19 +420,68 @@ async fn migration_195_normalizes_confidence_rebases_access_and_is_idempotent() 
                 "SELECT COUNT(*) FROM note_access_events WHERE invocation_id IS NULL"
             )
             .await,
-            2,
+            3,
             "pre-9xih ledger rows must survive with a NULL invocation_id"
         );
-        for event_id in [&legacy_read_event, &legacy_search_event] {
-            let invocation_id: Option<String> = sqlx::query_scalar(
-                "SELECT invocation_id FROM note_access_events WHERE id = $1",
-            )
-            .bind(event_id)
-            .fetch_one(&pool)
-            .await
-            .expect("read legacy event");
+        for event_id in [
+            &legacy_read_event,
+            &legacy_duplicate_note_event,
+            &legacy_search_event,
+        ] {
+            let invocation_id: Option<String> =
+                sqlx::query_scalar("SELECT invocation_id FROM note_access_events WHERE id = $1")
+                    .bind(event_id)
+                    .fetch_one(&pool)
+                    .await
+                    .expect("read legacy event");
             assert_eq!(invocation_id, None);
         }
+
+        // The shipped consumer must still see exactly what it saw before.
+        //
+        // `injected_pull_rate.rs` selects its numerator with
+        // `source = 'memory_read'` over `(project_id, note_id)` and counts
+        // `memory_search` rows separately for contrast. Replaying that exact
+        // predicate shape proves the ALTER did not orphan the report's join
+        // side — the failure mode that deleting or recreating the table would
+        // have caused.
+        assert_eq!(
+            count_scalar(
+                &pool,
+                "SELECT COUNT(*) FROM note_access_events WHERE source = 'memory_read'"
+            )
+            .await,
+            2,
+            "the report's memory_read numerator rows must survive the migration"
+        );
+        assert_eq!(
+            count_scalar(
+                &pool,
+                "SELECT COUNT(*) FROM note_access_events WHERE source = 'memory_search'"
+            )
+            .await,
+            1,
+            "the report's memory_search contrast rows must survive the migration"
+        );
+        // ...and the legacy rows are still reachable through the report's own
+        // correlated-subquery shape (project + note + source + time ordering).
+        assert_eq!(
+            count_scalar(
+                &pool,
+                &format!(
+                    "SELECT COUNT(*) FROM note_access_events e \
+                      WHERE e.project_id = '{project_id}' \
+                        AND e.note_id = '{}' \
+                        AND e.source = 'memory_read' \
+                        AND e.created_at::timestamptz \
+                            > '2026-01-01T00:00:00.000Z'::timestamptz",
+                    at_one.id
+                )
+            )
+            .await,
+            2,
+            "the report's correlated subquery must still match the legacy rows"
+        );
 
         // ── Idempotent re-run ────────────────────────────────────────────
         // First simulate the new era doing real work, so the re-run assertion
@@ -451,8 +520,11 @@ async fn migration_195_normalizes_confidence_rebases_access_and_is_idempotent() 
             "(invocation_id, note_id) must be unique so a replay cannot append a second row"
         );
 
-        // Two legacy rows share a NULL invocation_id; adding a third proves
-        // NULLs stay distinct under the unique index rather than colliding.
+        // Legacy-shaped rows keep working AFTER the index exists: a fourth row
+        // with a NULL invocation_id, for a note that already has two, must
+        // still insert. This is the runtime half of the "NULLs are distinct"
+        // property — the migration proved it at index-creation time, this
+        // proves the index does not block ongoing legacy-shaped writes.
         seed_legacy_access_event(
             &mut conn,
             &project_id,
@@ -494,7 +566,7 @@ async fn migration_195_normalizes_confidence_rebases_access_and_is_idempotent() 
                 "SELECT COUNT(*) FROM note_access_events WHERE invocation_id IS NULL"
             )
             .await,
-            3,
+            4,
             "the re-run must not delete legacy ledger rows"
         );
 
