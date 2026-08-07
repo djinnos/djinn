@@ -199,6 +199,16 @@ async fn close_child(repo: &TaskRepository, child_id: &str) {
 /// deleted the round-3 sources stay `open` and every case fails.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn every_producer_snapshot_status_reaches_the_exhausted_ladder() {
+    // ONE database for all nine cases: each case gets its own source task and
+    // its own escalation children, which is the isolation the assertions
+    // actually need. A `Database` per case meant nine `CREATE DATABASE …
+    // TEMPLATE` clones, and CI re-verifies that template per nextest process —
+    // the single most expensive thing a db test can do here.
+    let db = Database::open_in_memory().unwrap();
+    let repo = TaskRepository::new(db.clone(), silent_bus());
+    let project = make_project(&db).await;
+    let epic_id = make_epic(&db, &project.id).await;
+
     for snapshot_status in [
         "in_lead_intervention",
         "needs_lead_intervention",
@@ -210,11 +220,6 @@ async fn every_producer_snapshot_status_reaches_the_exhausted_ladder() {
         "approved",
         "open",
     ] {
-        let db = Database::open_in_memory().unwrap();
-        let repo = TaskRepository::new(db.clone(), silent_bus());
-        let project = make_project(&db).await;
-        let epic_id = make_epic(&db, &project.id).await;
-
         let (source_id, child_id) = source_with_escalation_rounds_from(
             &db,
             &repo,
