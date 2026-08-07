@@ -8848,6 +8848,8 @@ async fn terminal_fixture(
 #[derive(Clone, Copy)]
 struct KnownSessionExitFixture {
     session_id: &'static str,
+    task_id: &'static str,
+    task_title: &'static str,
     terminal_status: djinn_core::models::SessionStatus,
     task_status: &'static str,
     transition_from_status: &'static str,
@@ -8862,7 +8864,17 @@ async fn known_terminal_fixture(
     use djinn_core::models::TransitionAction;
     use djinn_db::{CreateSessionParams, SessionRepository};
 
-    let (task, _) = create_task_with_note(db, tx, fixture.session_id).await;
+    // The named identities are fixture data, not labels on newly allocated
+    // rows. Install them before producing the durable task transition and the
+    // terminal-event payload which the production actor will read back.
+    let (mut task, _) = create_task_with_note(db, tx, fixture.task_title).await;
+    sqlx::query("UPDATE tasks SET id = $1 WHERE id = $2")
+        .bind(fixture.task_id)
+        .bind(&task.id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+    task.id = fixture.task_id.to_owned();
     let tasks = TaskRepository::new(db.clone(), crate::events::event_bus_for(tx));
     tasks.set_status(&task.id, "in_progress").await.unwrap();
     match fixture.task_status {
@@ -8924,7 +8936,7 @@ async fn known_terminal_fixture(
     // Verify the exact facts the actor's single read-back consumes.
     assert_eq!(session.id, fixture.session_id);
     assert_eq!(session.status, fixture.terminal_status.as_str());
-    assert_eq!(session.task_id.as_deref(), Some(task.id.as_str()));
+    assert_eq!(session.task_id.as_deref(), Some(fixture.task_id));
     let state = djinn_db::LivenessRepository::new(db.clone())
         .load_current_state(&task.id)
         .await
@@ -9119,6 +9131,8 @@ async fn known_session_exit_replay_oracle() {
     let known = [
         KnownSessionExitFixture {
             session_id: "019fcc80",
+            task_id: "019fcc80-task",
+            task_title: "durable completed Required handoff",
             terminal_status: SessionStatus::Completed,
             task_status: "needs_task_review",
             transition_from_status: "in_progress",
@@ -9126,6 +9140,8 @@ async fn known_session_exit_replay_oracle() {
         },
         KnownSessionExitFixture {
             session_id: "019fcc82",
+            task_id: "019fcc82-task",
+            task_title: "durable failed Required handoff",
             terminal_status: SessionStatus::Failed,
             task_status: "needs_task_review",
             transition_from_status: "in_progress",
@@ -9133,6 +9149,8 @@ async fn known_session_exit_replay_oracle() {
         },
         KnownSessionExitFixture {
             session_id: "019fcc84",
+            task_id: "019fcc84-task",
+            task_title: "durable interrupted Required handoff",
             terminal_status: SessionStatus::Interrupted,
             task_status: "needs_task_review",
             transition_from_status: "in_progress",
@@ -9140,6 +9158,8 @@ async fn known_session_exit_replay_oracle() {
         },
         KnownSessionExitFixture {
             session_id: "019fcc30",
+            task_id: "019fcc30-task",
+            task_title: "durable completed terminal task",
             terminal_status: SessionStatus::Completed,
             task_status: "closed",
             transition_from_status: "in_progress",
@@ -9147,6 +9167,8 @@ async fn known_session_exit_replay_oracle() {
         },
         KnownSessionExitFixture {
             session_id: "019fcc22",
+            task_id: "019fcc22-task",
+            task_title: "durable failed terminal task",
             terminal_status: SessionStatus::Failed,
             task_status: "closed",
             transition_from_status: "in_progress",
@@ -9180,6 +9202,8 @@ async fn known_session_exit_replay_oracle() {
     }
     let genuine_fixture = KnownSessionExitFixture {
         session_id: "genuine-failed-handoff-recovery",
+        task_id: "genuine-failed-handoff-recovery-task",
+        task_title: "independently labeled genuine failed handoff recovery",
         terminal_status: SessionStatus::Failed,
         task_status: "in_progress",
         transition_from_status: "open",
@@ -9195,6 +9219,8 @@ async fn known_session_exit_replay_oracle() {
     // classification, immutable observation, or failed attempt from the event.
     let unavailable_fixture = KnownSessionExitFixture {
         session_id: "failed-evidence-acquisition",
+        task_id: "failed-evidence-acquisition-task",
+        task_title: "durable interrupted exit with unavailable evidence",
         terminal_status: SessionStatus::Interrupted,
         task_status: "needs_task_review",
         transition_from_status: "in_progress",

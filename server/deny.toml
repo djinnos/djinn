@@ -145,6 +145,11 @@ deny = [
 		"djinn-core",
 		"djinn-db",
 		"djinn-memory",
+			# Coordinator terminal-exit fixtures install recorded durable task and
+			# session identities, then remove an addressed row to exercise the
+			# actor's fail-closed acquisition path. This is test-only SQL; production
+			# persistence remains owned by djinn-db.
+			"djinn-coordinator",
 			# PostgreSQL-only pool reconciliation fault fixtures use sqlx as a
 			# dev-dependency; production persistence remains owned by djinn-db.
 			"djinn-slot",
