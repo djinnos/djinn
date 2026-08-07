@@ -727,14 +727,20 @@ impl ProposalRepository {
                 intent_id: source.intent_id,
             });
         }
+        let intent_state = row.get::<String, _>("intent_state");
+        // A successful awaiting-review drain resumes this same run while the
+        // source intent remains completed. Replaying that exact transition is
+        // therefore already consumed, not a mismatched live intent, and must
+        // not attempt either pending drain again.
+        if intent_state == "completed" {
+            tx.commit().await?;
+            return Ok(false);
+        }
         if row.get::<String, _>("run_state") != "running" {
             tx.commit().await?;
             return Ok(false);
         }
-        if !matches!(
-            row.get::<String, _>("intent_state").as_str(),
-            "claimed" | "materialized"
-        ) {
+        if !matches!(intent_state.as_str(), "claimed" | "materialized") {
             return Err(RefinementIntentMutationError::SourceIntentMismatch {
                 intent_id: source.intent_id,
             });
