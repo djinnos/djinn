@@ -1736,8 +1736,8 @@ async fn two_concurrent_drivers_issue_exactly_one_patch() {
         .skipped
         .iter()
         .chain(right_pass.skipped.iter())
+        .filter(|&(_, reason)| *reason == SkipReason::ClaimLost)
         .cloned()
-        .filter(|(_, reason)| *reason == SkipReason::ClaimLost)
         .collect();
     assert_eq!(
         claim_lost,

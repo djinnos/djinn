@@ -93,6 +93,10 @@ async fn fetch_artifact_with_timeout(
 /// that holds the same token can therefore fire the deadline's effect on an
 /// in-flight renderer at a point it chooses, instead of betting that a wall
 /// clock lands between two events it does not control.
+// The `#[cfg(test)]` seams push this one over clippy's 7-argument limit in test
+// builds only; splitting a private helper that exists to keep one call path
+// would obscure it for no benefit.
+#[allow(clippy::too_many_arguments)]
 async fn fetch_artifact_with_timeout_inner(
     client: &GitHubApiClient,
     owner: &str,
