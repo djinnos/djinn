@@ -142,6 +142,7 @@ impl ProposalRepository {
             .bind(uuid::Uuid::now_v7().to_string()).bind(&proposal_id).bind(seq)
             .bind(serde_json::json!({"reason_tag":"operator_stop","stop_context":context}))
             .bind(run_id).bind(&context).execute(&mut *tx).await?;
+        drain_pending_feedback_handoff(&mut tx, &proposal_id, generation).await?;
         tx.commit().await?;
         Ok(true)
     }
@@ -330,6 +331,175 @@ impl ProposalRepository {
             role: role(row.get("role")).map_err(snapshot_to_mutation)?,
         })
     }
+}
+
+/// Atomically convert the elected pending cohort into one dispatchable run.
+async fn drain_pending_feedback_handoff(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    proposal_id: &str,
+    previous_generation: i32,
+) -> IntentMutationResult<()> {
+    let row = sqlx::query("SELECT boundary_feedback_id FROM pending_feedback_refinement_handoffs WHERE proposal_id=$1 AND state='pending' AND cohort_owner FOR UPDATE")
+        .bind(proposal_id).fetch_optional(&mut **tx).await?;
+    let Some(row) = row else {
+        return Ok(());
+    };
+    let boundary: String = row.get("boundary_feedback_id");
+    let key = format!("pending-feedback/{boundary}");
+    let seq = sqlx::query_scalar::<_, i32>(
+        "SELECT latest_revision_seq FROM proposals WHERE id=$1 FOR UPDATE",
+    )
+    .bind(proposal_id)
+    .fetch_one(&mut **tx)
+    .await?;
+    let outcome = insert_admission(
+        tx,
+        &AdmitRefinementRunRequest {
+            proposal_id: proposal_id.to_owned(),
+            idempotency_key: key,
+            source: RefinementAdmissionSource::Demand {
+                demand_id: boundary.clone(),
+            },
+            heartbeat_grace_millis: 60_000,
+        },
+        seq,
+        previous_generation + 1,
+    )
+    .await
+    .map_err(|error| match error {
+        RefinementAdmissionError::Database(error) => RefinementIntentMutationError::Database(error),
+        error => RefinementIntentMutationError::InvalidRequest(error.to_string()),
+    })?;
+    let RefinementAdmissionOutcome::Admitted { run_id, .. } = outcome else {
+        return Err(RefinementIntentMutationError::InvalidRequest(
+            "pending successor identity unexpectedly existed".into(),
+        ));
+    };
+    capture_pending_feedback_sources(tx, proposal_id, seq).await?;
+    sqlx::query("UPDATE pending_feedback_refinement_handoffs SET state='admitted', successor_run_id=$2 WHERE proposal_id=$1 AND state='pending'")
+        .bind(proposal_id).bind(&run_id).execute(&mut **tx).await?;
+    Ok(())
+}
+
+/// Consume the elected cohort at the awaiting-review boundary. Unlike a
+/// terminal boundary, this preserves the parked run: normal demand admission
+/// resumes the exact run and appends a single successor intent instead of
+/// inserting a second nonterminal run for the proposal.
+async fn drain_pending_feedback_handoff_from_awaiting_review_park(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    proposal_id: &str,
+    run_id: &str,
+    generation: i32,
+) -> IntentMutationResult<()> {
+    let row = sqlx::query("SELECT boundary_feedback_id FROM pending_feedback_refinement_handoffs WHERE proposal_id=$1 AND state='pending' AND cohort_owner FOR UPDATE")
+        .bind(proposal_id).fetch_optional(&mut **tx).await?;
+    let Some(row) = row else {
+        return Ok(());
+    };
+    let boundary: String = row.get("boundary_feedback_id");
+    let key = format!("pending-feedback/{boundary}");
+    let seq = sqlx::query_scalar::<_, i32>(
+        "SELECT latest_revision_seq FROM proposals WHERE id=$1 FOR UPDATE",
+    )
+    .bind(proposal_id)
+    .fetch_one(&mut **tx)
+    .await?;
+    resume_awaiting_review_park(
+        tx,
+        &AdmitRefinementRunRequest {
+            proposal_id: proposal_id.to_owned(),
+            idempotency_key: key,
+            source: RefinementAdmissionSource::Demand {
+                demand_id: boundary,
+            },
+            heartbeat_grace_millis: 60_000,
+        },
+        run_id,
+        generation,
+    )
+    .await
+    .map_err(|error| match error {
+        RefinementAdmissionError::Database(error) => RefinementIntentMutationError::Database(error),
+        error => RefinementIntentMutationError::InvalidRequest(error.to_string()),
+    })?;
+    capture_pending_feedback_sources(tx, proposal_id, seq).await?;
+    sqlx::query("UPDATE pending_feedback_refinement_handoffs SET state='admitted', successor_run_id=$2 WHERE proposal_id=$1 AND state='pending'")
+        .bind(proposal_id)
+        .bind(run_id)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+/// Materialize every member of the elected cohort before its successor intent
+/// becomes visible.  The source-table existence check makes a retry after a
+/// crash/restart idempotent and prevents a boundary from being captured twice.
+async fn capture_pending_feedback_sources(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    proposal_id: &str,
+    revision_seq: i32,
+) -> IntentMutationResult<()> {
+    let boundaries = sqlx::query_scalar::<_, String>(
+        "SELECT boundary_feedback_id FROM pending_feedback_refinement_handoffs WHERE proposal_id=$1 AND state='pending' ORDER BY created_at,id FOR UPDATE",
+    )
+    .bind(proposal_id)
+    .fetch_all(&mut **tx)
+    .await?;
+    for boundary in boundaries {
+        let captured = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM proposal_feedback_refinement_sources WHERE source_feedback_id=$1)",
+        )
+        .bind(&boundary)
+        .fetch_one(&mut **tx)
+        .await?;
+        if captured {
+            continue;
+        }
+        let feedback = sqlx::query(
+            "SELECT parent_id,author_kind,author_user_id,author_model,body,severity,created_at FROM proposal_feedback WHERE id=$1 AND proposal_id=$2 FOR UPDATE",
+        )
+        .bind(&boundary)
+        .bind(proposal_id)
+        .fetch_optional(&mut **tx)
+        .await?
+        .ok_or_else(|| RefinementIntentMutationError::InvalidRequest("pending feedback boundary is missing".into()))?;
+        let generation = sqlx::query_scalar::<_, Option<i32>>(
+            "SELECT max(generation) FROM proposal_feedback_refinement_injections WHERE root_feedback_id=$1",
+        )
+        .bind(&boundary)
+        .fetch_one(&mut **tx)
+        .await?
+        .unwrap_or(0)
+        + 1;
+        let round = sqlx::query_scalar::<_, Option<i32>>(
+            "SELECT max(round) FROM proposal_debate_trail WHERE proposal_id=$1",
+        )
+        .bind(proposal_id)
+        .fetch_one(&mut **tx)
+        .await?
+        .unwrap_or(0)
+            + 1;
+        let injection_id = uuid::Uuid::now_v7().to_string();
+        let metadata = serde_json::json!({"kind":"feedback_refinement_generation_v1","root_feedback_id":boundary,"injection_id":injection_id,"generation":generation});
+        let debate_id: String = sqlx::query_scalar(
+            "INSERT INTO proposal_debate_trail (id,proposal_id,kind,body,blocking,agent_role,author_kind,against_revision_seq,round,body_metadata) VALUES ($1,$2,'human_feedback',$3,true,'human_feedback','agent',$4,$5,$6) RETURNING id",
+        )
+        .bind(uuid::Uuid::now_v7().to_string())
+        .bind(proposal_id)
+        .bind(feedback.get::<String, _>("body"))
+        .bind(revision_seq)
+        .bind(round)
+        .bind(&metadata)
+        .fetch_one(&mut **tx)
+        .await?;
+        let cutoff_at: String = sqlx::query_scalar("SELECT to_char(transaction_timestamp() AT TIME ZONE 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"')")
+            .fetch_one(&mut **tx).await?;
+        sqlx::query("INSERT INTO proposal_feedback_refinement_injections (id,proposal_id,root_feedback_id,generation,state,cutoff_at,cutoff_feedback_id,round,debate_entry_id) VALUES ($1,$2,$3,$4,'injected',$5,$6,$7,$8)")
+            .bind(&injection_id).bind(proposal_id).bind(&boundary).bind(generation).bind(&cutoff_at).bind(&boundary).bind(round).bind(&debate_id).execute(&mut **tx).await?;
+        sqlx::query("INSERT INTO proposal_feedback_refinement_sources (injection_id,source_feedback_id,source_ordinal,source_parent_id,source_author_kind,source_author_user_id,source_author_model,source_body,source_severity,source_created_at,captured_at) VALUES ($1,$2,1,$3,$4,$5,$6,$7,$8,$9,$10)")
+            .bind(&injection_id).bind(&boundary).bind(feedback.get::<Option<String>, _>("parent_id")).bind(feedback.get::<String, _>("author_kind")).bind(feedback.get::<Option<String>, _>("author_user_id")).bind(feedback.get::<Option<String>, _>("author_model")).bind(feedback.get::<String, _>("body")).bind(feedback.get::<String, _>("severity")).bind(feedback.get::<String, _>("created_at")).bind(&cutoff_at).execute(&mut **tx).await?;
+    }
+    Ok(())
 }
 
 async fn touch_heartbeat(
@@ -521,6 +691,7 @@ impl ProposalRepository {
                 generation: request.generation,
             });
         }
+        drain_pending_feedback_handoff(&mut tx, &proposal_id, request.generation).await?;
         tx.commit().await?;
         Ok(true)
     }
@@ -556,14 +727,20 @@ impl ProposalRepository {
                 intent_id: source.intent_id,
             });
         }
+        let intent_state = row.get::<String, _>("intent_state");
+        // A successful awaiting-review drain resumes this same run while the
+        // source intent remains completed. Replaying that exact transition is
+        // therefore already consumed, not a mismatched live intent, and must
+        // not attempt either pending drain again.
+        if intent_state == "completed" {
+            tx.commit().await?;
+            return Ok(false);
+        }
         if row.get::<String, _>("run_state") != "running" {
             tx.commit().await?;
             return Ok(false);
         }
-        if !matches!(
-            row.get::<String, _>("intent_state").as_str(),
-            "claimed" | "materialized"
-        ) {
+        if !matches!(intent_state.as_str(), "claimed" | "materialized") {
             return Err(RefinementIntentMutationError::SourceIntentMismatch {
                 intent_id: source.intent_id,
             });
@@ -585,6 +762,34 @@ impl ProposalRepository {
                 run_id: source.run_id,
                 generation: source.generation,
             });
+        }
+        // An awaiting-review park is a demand-admissible boundary: no role work
+        // remains in flight, so a feedback cohort committed while this intent
+        // was running must resume through the same transaction and same run.
+        // Awaiting evidence remains deliberately excluded because its evidence
+        // spike owns a separate resume path.
+        if park == Some(RefinementParkKind::AwaitingReview) {
+            let proposal_id = sqlx::query_scalar::<_, String>(
+                "SELECT proposal_id FROM refinement_runs WHERE id=$1",
+            )
+            .bind(&source.run_id)
+            .fetch_one(&mut *tx)
+            .await?;
+            drain_pending_feedback_handoff_from_awaiting_review_park(
+                &mut tx,
+                &proposal_id,
+                &source.run_id,
+                source.generation,
+            )
+            .await?;
+        } else if park.is_none() {
+            let proposal_id = sqlx::query_scalar::<_, String>(
+                "SELECT proposal_id FROM refinement_runs WHERE id=$1",
+            )
+            .bind(&source.run_id)
+            .fetch_one(&mut *tx)
+            .await?;
+            drain_pending_feedback_handoff(&mut tx, &proposal_id, source.generation).await?;
         }
         tx.commit().await?;
         Ok(true)
@@ -681,6 +886,7 @@ impl ProposalRepository {
             .bind(&context)
             .execute(&mut *tx)
             .await?;
+        drain_pending_feedback_handoff(&mut tx, &proposal_id, request.generation).await?;
         tx.commit().await?;
         Ok(true)
     }

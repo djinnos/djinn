@@ -12,6 +12,7 @@ use crate::tools::proposal_ops::ProposalFeedbackResponse;
 use crate::tools::refinement_tools::admit_refinement_run;
 use crate::tools::validation::validate_body;
 use djinn_db::{ProposalRepository, RefinementAdmissionSource};
+use djinn_roles::{AgentType, tool_schemas_for};
 
 use super::proposal_not_found_error;
 
@@ -56,6 +57,126 @@ pub(super) fn err_feedback(error: impl Into<String>) -> ProposalFeedbackResponse
     }
 }
 
+/// The active role-schema registry owns tribunal tool contracts. Missing
+/// registration or any part of either operation's input contract fails closed
+/// before new work can create an obligation the tribunal cannot drain.
+pub(crate) fn human_feedback_disposition_contract_available() -> bool {
+    human_feedback_disposition_contract_available_for_schemas(
+        &tool_schemas_for(AgentType::Advocate),
+        &tool_schemas_for(AgentType::Judge),
+    )
+}
+
+/// Validate the concrete role schemas that tribunal agents receive.
+///
+/// This accepts schema slices rather than looking up roles itself so tests can
+/// prove that each missing tool, property, or enum contract fails closed.
+/// `inputSchema` is the MCP serialization owned by the active schema registry.
+pub(crate) fn human_feedback_disposition_contract_available_for_schemas(
+    advocate_schemas: &[serde_json::Value],
+    judge_schemas: &[serde_json::Value],
+) -> bool {
+    fn tool_input_schema<'a>(
+        schemas: &'a [serde_json::Value],
+        tool_name: &str,
+    ) -> Option<&'a serde_json::Value> {
+        schemas.iter().find_map(|tool| {
+            (tool.get("name").and_then(serde_json::Value::as_str) == Some(tool_name))
+                .then(|| tool.get("inputSchema"))
+                .flatten()
+        })
+    }
+
+    fn string_enum_is(
+        schema: &serde_json::Value,
+        property: &str,
+        expected: &[&str],
+        required: bool,
+    ) -> bool {
+        if schema.get("type").and_then(serde_json::Value::as_str) != Some("object") {
+            return false;
+        }
+        if required
+            && !schema
+                .get("required")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|fields| fields.iter().any(|field| field.as_str() == Some(property)))
+        {
+            return false;
+        }
+        let Some(field_schema) = schema
+            .get("properties")
+            .and_then(|properties| properties.get(property))
+        else {
+            return false;
+        };
+        if field_schema.get("type").and_then(serde_json::Value::as_str) != Some("string") {
+            return false;
+        }
+        let Some(values) = field_schema
+            .get("enum")
+            .and_then(serde_json::Value::as_array)
+        else {
+            return false;
+        };
+        values.len() == expected.len()
+            && expected.iter().all(|expected_value| {
+                values
+                    .iter()
+                    .any(|value| value.as_str() == Some(expected_value))
+            })
+    }
+
+    let Some(advocate) = tool_input_schema(advocate_schemas, "proposal_feedback_disposition")
+    else {
+        return false;
+    };
+    let Some(judge) = tool_input_schema(judge_schemas, "proposal_debate_resolve") else {
+        return false;
+    };
+
+    // Advocate requires its source-specific disposition. Judge's global resolve
+    // tool retains ordinary-objection behavior, so verdict is optional there but
+    // its human-feedback branch must remain a typed accept/reject contract.
+    string_enum_is(
+        advocate,
+        "disposition",
+        &["fixed_by_revision", "wont_fix"],
+        true,
+    ) && string_enum_is(judge, "verdict", &["accept", "reject"], false)
+}
+
+/// Applies only to new feedback work. Readiness and materialized generations
+/// remain drainable after either switch is disabled.
+pub(crate) fn can_activate_feedback_refinement_with_contract(
+    blocking: bool,
+    in_review: bool,
+    auto_resume: bool,
+    capture: bool,
+    contract_available: bool,
+) -> bool {
+    blocking && in_review && auto_resume && capture && contract_available
+}
+
+pub(crate) fn can_activate_feedback_refinement(
+    blocking: bool,
+    in_review: bool,
+    auto_resume: bool,
+    capture: bool,
+) -> bool {
+    can_activate_feedback_refinement_with_contract(
+        blocking,
+        in_review,
+        auto_resume,
+        capture,
+        human_feedback_disposition_contract_available(),
+    )
+}
+
+fn feedback_auto_resume_boundary_id(feedback_id: &str) -> String {
+    format!("feedback:auto-resume:boundary:{feedback_id}")
+}
+
 // ── Tool router ─────────────────────────────────────────────────────────────
 
 #[tool_router(router = proposal_feedback_tool_router, vis = "pub(super)")]
@@ -87,8 +208,15 @@ impl DjinnMcpServer {
                 "invalid severity (expected advisory or blocking)",
             ));
         }
+        let controls = self.state.feedback_refinement_controls();
+        let activation_enabled = can_activate_feedback_refinement(
+            severity == "blocking",
+            proposal.status == "in_review",
+            controls.auto_resume,
+            controls.capture,
+        );
         match repo
-            .add_feedback_with_severity(
+            .add_feedback_with_severity_and_pending_handoff(
                 djinn_db::ProposalFeedbackCreateInput {
                     proposal_id: &proposal.id,
                     parent_id: p.parent_id.as_deref(),
@@ -97,32 +225,50 @@ impl DjinnMcpServer {
                     body: &p.body,
                 },
                 severity,
+                activation_enabled,
             )
             .await
         {
-            Ok(f) => {
-                // Advisory feedback is discussion only. Blocking feedback added
-                // during review uses the durable admission path for a demanded
-                // round; the feedback id makes retries idempotent.
-                if severity == "blocking"
-                    && proposal.status == "in_review"
-                    && admit_refinement_run(
+            Ok((f, handoff_persisted)) => {
+                // Advisory feedback is discussion only. A blocking row is the
+                // durable lifecycle boundary for its auto-demand. Using the row
+                // identity (rather than a permanent proposal identity) means a
+                // row committed after an earlier capture cutoff remains eligible
+                // to admit the subsequent cohort; replaying this exact boundary
+                // still resolves to Existing and cannot duplicate its owner.
+                if activation_enabled {
+                    match admit_refinement_run(
                         self,
                         &repo,
                         &proposal.id,
                         RefinementAdmissionSource::Demand {
-                            demand_id: format!("feedback:{}", f.id),
+                            demand_id: feedback_auto_resume_boundary_id(&f.id),
                         },
                         None,
                     )
                     .await
-                    .is_ok()
-                {
-                    // The explicit start/demand boundaries capture after
-                    // admission. This auto-demand follows that same order.
-                    let _ = repo
-                        .capture_feedback_refinement_boundary(&proposal.id)
-                        .await;
+                    {
+                        Ok(admission) if admission.admitted => {
+                            if handoff_persisted
+                                && let Err(error) = repo
+                                    .complete_pending_feedback_refinement_handoff(
+                                        &proposal.id,
+                                        &admission.run_id,
+                                    )
+                                    .await
+                            {
+                                return Json(err_feedback(error.to_string()));
+                            }
+                        }
+                        Err(rejection)
+                            if rejection.code == "already_active" && handoff_persisted => {}
+                        Err(rejection) if rejection.code == "already_active" => {
+                            return Json(err_feedback(
+                                "refinement ownership changed before durable handoff admission",
+                            ));
+                        }
+                        Ok(_) | Err(_) => {}
+                    }
                 }
                 Json(ProposalFeedbackResponse {
                     feedback: Some((&f).into()),
@@ -184,5 +330,150 @@ impl DjinnMcpServer {
         Json(err_feedback(
             "feedback_resolution_requires_disposition_or_withdrawal",
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        can_activate_feedback_refinement_with_contract, feedback_auto_resume_boundary_id,
+        human_feedback_disposition_contract_available_for_schemas,
+    };
+
+    fn disposition_schema() -> serde_json::Value {
+        serde_json::json!({
+            "name": "proposal_feedback_disposition",
+            "inputSchema": {"type": "object", "required": ["id", "disposition"], "properties": {
+                "disposition": {"type": "string", "enum": ["fixed_by_revision", "wont_fix"]}
+            }}
+        })
+    }
+
+    fn resolve_schema() -> serde_json::Value {
+        serde_json::json!({
+            "name": "proposal_debate_resolve",
+            "inputSchema": {"type": "object", "required": ["id"], "properties": {
+                "verdict": {"type": "string", "enum": ["accept", "reject"]}
+            }}
+        })
+    }
+
+    #[test]
+    fn activation_requires_blocking_review_controls_and_contract() {
+        assert!(can_activate_feedback_refinement_with_contract(
+            true, true, true, true, true
+        ));
+        assert!(!can_activate_feedback_refinement_with_contract(
+            false, true, true, true, true
+        ));
+        assert!(!can_activate_feedback_refinement_with_contract(
+            true, false, true, true, true
+        ));
+        assert!(!can_activate_feedback_refinement_with_contract(
+            true, true, false, true, true
+        ));
+        assert!(!can_activate_feedback_refinement_with_contract(
+            true, true, true, false, true
+        ));
+        assert!(!can_activate_feedback_refinement_with_contract(
+            true, true, true, true, false
+        ));
+    }
+
+    #[test]
+    fn role_schema_contract_requires_each_role_and_semantic_field() {
+        let advocate = vec![disposition_schema()];
+        let judge = vec![resolve_schema()];
+        assert!(human_feedback_disposition_contract_available_for_schemas(
+            &advocate, &judge
+        ));
+        assert!(!human_feedback_disposition_contract_available_for_schemas(
+            &[],
+            &judge
+        ));
+        assert!(!human_feedback_disposition_contract_available_for_schemas(
+            &advocate,
+            &[]
+        ));
+
+        let malformed_disposition = vec![serde_json::json!({
+            "name": "proposal_feedback_disposition",
+            "inputSchema": {"properties": {"id": {"type": "string"}}}
+        })];
+        assert!(!human_feedback_disposition_contract_available_for_schemas(
+            &malformed_disposition,
+            &judge,
+        ));
+
+        let malformed_disposition_variants = vec![serde_json::json!({
+            "name": "proposal_feedback_disposition",
+            "inputSchema": {"properties": {
+                "disposition": {"type": "string", "enum": ["fixed_by_revision"]}
+            }}
+        })];
+        assert!(!human_feedback_disposition_contract_available_for_schemas(
+            &malformed_disposition_variants,
+            &judge,
+        ));
+
+        let disposition_not_required = vec![serde_json::json!({
+            "name": "proposal_feedback_disposition",
+            "inputSchema": {"type": "object", "required": ["id"], "properties": {
+                "disposition": {"type": "string", "enum": ["fixed_by_revision", "wont_fix"]}
+            }}
+        })];
+        assert!(!human_feedback_disposition_contract_available_for_schemas(
+            &disposition_not_required,
+            &judge,
+        ));
+
+        let disposition_not_string = vec![serde_json::json!({
+            "name": "proposal_feedback_disposition",
+            "inputSchema": {"type": "object", "required": ["id", "disposition"], "properties": {
+                "disposition": {"type": "integer", "enum": ["fixed_by_revision", "wont_fix"]}
+            }}
+        })];
+        assert!(!human_feedback_disposition_contract_available_for_schemas(
+            &disposition_not_string,
+            &judge,
+        ));
+
+        let missing_verdict = vec![serde_json::json!({
+            "name": "proposal_debate_resolve",
+            "inputSchema": {"properties": {"id": {"type": "string"}}}
+        })];
+        assert!(!human_feedback_disposition_contract_available_for_schemas(
+            &advocate,
+            &missing_verdict,
+        ));
+
+        let verdict_not_string = vec![serde_json::json!({
+            "name": "proposal_debate_resolve",
+            "inputSchema": {"type": "object", "required": ["id"], "properties": {
+                "verdict": {"type": "integer", "enum": ["accept", "reject"]}
+            }}
+        })];
+        assert!(!human_feedback_disposition_contract_available_for_schemas(
+            &advocate,
+            &verdict_not_string,
+        ));
+
+        let malformed_verdict = vec![serde_json::json!({
+            "name": "proposal_debate_resolve",
+            "inputSchema": {"properties": {
+                "verdict": {"type": "string", "enum": ["accept"]}
+            }}
+        })];
+        assert!(!human_feedback_disposition_contract_available_for_schemas(
+            &advocate,
+            &malformed_verdict,
+        ));
+    }
+
+    #[test]
+    fn auto_resume_identity_is_stable_per_boundary_not_per_proposal() {
+        let first = feedback_auto_resume_boundary_id("feedback-a");
+        assert_eq!(first, feedback_auto_resume_boundary_id("feedback-a"));
+        assert_ne!(first, feedback_auto_resume_boundary_id("feedback-b"));
     }
 }

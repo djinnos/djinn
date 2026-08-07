@@ -15,6 +15,7 @@ djinn-memory = { path = "../djinn-memory" }
 djinn-spec-lint = { path = "../djinn-spec-lint" }
 djinn-git = { path = "../djinn-git" }
 djinn-provider = { path = "../djinn-provider" }
+djinn-roles = { path = "../djinn-roles" }
 djinn-stack = { path = "../djinn-stack" }
 async-trait = "0.1"
 dirs = "6"
