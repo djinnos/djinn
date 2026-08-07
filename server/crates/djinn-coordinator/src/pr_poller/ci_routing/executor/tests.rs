@@ -3970,12 +3970,18 @@ async fn record_ci_snapshot_refuses_an_unproven_enumeration() {
 /// the reachable guarantees are the predicate test (which proves the shared
 /// function is right) and this one (which proves both branches still call it).
 /// Reverting either branch to a bare `checks.check_runs.is_empty()` fails here.
+///
+/// Comments are stripped before matching — this was the one guard in the family
+/// that did not do so, which made it satisfiable by writing prose: a comment
+/// merely *naming* `empty_check_set_is_authoritatively_green` in a branch that
+/// had reverted to `checks.check_runs.is_empty()` kept it green.
 #[test]
 fn both_lane_fast_paths_consult_the_completeness_predicate() {
-    for (label, source) in [
+    for (label, raw) in [
         ("pr_draft", include_str!("../../pr_watcher.rs")),
         ("pr_review", include_str!("../../pr_review_watcher.rs")),
     ] {
+        let source = strip_line_comments(raw);
         assert!(
             source.contains("empty_check_set_is_authoritatively_green"),
             "the {label} no-CI fast path must consult the completeness predicate",
@@ -5965,6 +5971,55 @@ fn strip_line_comments(source: &str) -> String {
     out
 }
 
+/// Comment-stripped source re-joined into **statements** rather than lines.
+///
+/// The AC11 guard asks whether a comparison is applied to a forbidden key
+/// class. Asked per physical line, that question is evaded by a line break:
+///
+/// ```ignore
+/// if cr.name
+///     == "Quality Gate / test"
+/// ```
+///
+/// puts the key on one line and the operator on the next, and neither line
+/// alone trips a per-line rule. So a line is joined to the following one while
+/// it does not end a statement. The terminators are `;`, `{`, `}` and `,` —
+/// exactly what ends a Rust statement, a block, or one argument of a call or
+/// macro — which is what keeps unrelated neighbours apart:
+///
+/// ```ignore
+/// let n = cr.name.clone();   // ends with `;` — its own statement
+/// if a == b {                // never fused with the line above
+/// ```
+///
+/// Verified against all eight routing modules: the rule finds nothing there
+/// that the per-line rule did not, so the tightening adds no false positive.
+///
+/// The `usize` is the 1-based physical line the statement started on, so a
+/// failure can still name a line.
+fn logical_lines(code: &str) -> Vec<(usize, String)> {
+    let mut out: Vec<(usize, String)> = Vec::new();
+    let mut pending: Option<(usize, String)> = None;
+    for (index, line) in code.lines().enumerate() {
+        let number = index + 1;
+        let (start, mut text) = pending.take().unwrap_or_else(|| (number, String::new()));
+        if !text.is_empty() {
+            text.push(' ');
+        }
+        text.push_str(line);
+        let trimmed = text.trim_end();
+        if trimmed.is_empty() || trimmed.ends_with([';', '{', '}', ',']) {
+            out.push((start, text));
+        } else {
+            pending = Some((start, text));
+        }
+    }
+    if let Some(rest) = pending {
+        out.push(rest);
+    }
+    out
+}
+
 /// The PR poller hands both lane routers the LIVE gate.
 ///
 /// Source-level, and honestly labelled as such, for exactly the reason
@@ -6662,7 +6717,9 @@ async fn the_route_sweep_emits_the_routing_report() {
 /// (c) Add `if cr.name.contains("Quality Gate") { … }` — or any comparison on a
 ///     check name, `target.repo`, `target.owner`, or `repository_id` — anywhere
 ///     in a routing module: the forbidden-branch assertion fails, naming the
-///     file and line.
+///     file and line. Including when rustfmt splits it across a line break
+///     (`if cr.name\n    == "Quality Gate"`), which the earlier per-physical-line
+///     form of this check could not see: see [`logical_lines`].
 /// (d) Special-case a migration framework, a build tool, an artifact type, or a
 ///     provider incident label (`"sqlx"`, `"cargo"`, `"incident"`, …): the
 ///     forbidden-vocabulary assertion fails. A branch on one of those classes
@@ -6753,15 +6810,17 @@ fn the_routing_modules_consume_ci_triage_and_branch_on_no_forbidden_key() {
             );
         }
 
-        for (index, line) in code.lines().enumerate() {
-            if !FORBIDDEN_KEYS.iter().any(|key| line.contains(key)) {
+        // Statements, not physical lines: a comparison split across a line
+        // break is the one evasion a per-line rule cannot see, and rustfmt
+        // produces exactly that split as soon as the expression is long.
+        for (number, statement) in logical_lines(&code) {
+            if !FORBIDDEN_KEYS.iter().any(|key| statement.contains(key)) {
                 continue;
             }
-            let number = index + 1;
-            let text = line.trim();
+            let text = statement.trim();
             for comparison in COMPARISONS {
                 assert!(
-                    !line.contains(comparison),
+                    !statement.contains(comparison),
                     "{label}:{number}: `{text}` applies `{comparison}` to a \
                      forbidden key class. AC11 allows a job name, repository, or \
                      owner to be *carried* — hashed into a fingerprint, logged, \
