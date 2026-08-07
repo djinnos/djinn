@@ -818,7 +818,15 @@ pub(super) fn lead_ci_adjudication(
 /// The freshly observed head comes from a **re-read** of the task, not from the
 /// `task` this run started with: a value loaded at dispatch is as old as the
 /// Lead session, and noticing what moved during that session is the entire job.
-async fn apply_lead_ci_result(
+///
+/// `pub(super)` so `ci_routing::guard_tests` can drive **this** function rather
+/// than the layer below it. The re-read on the next few lines is the sole input
+/// to the guard's head comparison, and replacing it with
+/// `ci.guard.identity.pr_head_sha.clone()` makes that comparison a tautology —
+/// a mutation every fixture that calls `apply_under_guard` with a hand-built
+/// `CiObservedNow` survives by construction. See
+/// `the_production_derivation_reads_the_live_head_not_the_stored_one`.
+pub(super) async fn apply_lead_ci_result(
     agent_context: &AgentContext,
     task_id: &str,
     ci: &ci_routing::CiAdjudicationContext,
