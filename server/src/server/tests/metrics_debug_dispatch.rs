@@ -1,6 +1,11 @@
+use std::sync::Arc;
+use std::time::{Duration, SystemTime};
+
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header::CONTENT_TYPE};
+use djinn_core::clock::TestClock;
 use djinn_db::{CreateUserAuthSession, SessionAuthRepository, UserRepository};
+use djinn_provider::catalog::HealthTracker;
 use http_body_util::BodyExt;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
@@ -12,39 +17,69 @@ use crate::test_helpers;
 const WEDGE_SCOPE: &str = "u-wedge";
 const WEDGE_MODEL: &str = "claude-test";
 
+/// The breaker's `INITIAL_COOLDOWN`. Not importable (it is private to
+/// `djinn-provider`), so it is restated here purely to drive the test clock
+/// past it in the half-open leg below.
+const BREAKER_INITIAL_COOLDOWN: Duration = Duration::from_secs(5);
+
 static TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 struct WedgedDispatchState {
     app: axum::Router,
     db: djinn_db::Database,
+    health: HealthTracker,
+    clock: Arc<TestClock>,
     scope: &'static str,
     model: &'static str,
 }
 
+impl WedgedDispatchState {
+    /// Wedge dispatch by exhausting the breaker's three-strike ladder.
+    ///
+    /// This is deliberately `record_failure` at exactly
+    /// `CIRCUIT_BREAKER_THRESHOLD` strikes: the fixture is asserting on the
+    /// ordinary genuine-failure path, and the `consecutive_failures == 3`
+    /// assertion below is only meaningful if the third strike is what tripped
+    /// it. Because the tracker reads `self.clock`, the resulting five-second
+    /// cooldown cannot expire underneath the assertions no matter how long the
+    /// surrounding HTTP/DB work actually takes.
+    fn wedge(&self) {
+        for _ in 0..3 {
+            self.health.record_failure(Some(self.scope), self.model);
+        }
+    }
+}
+
+/// Build the wedge fixture with time frozen.
+///
+/// Nothing is wedged yet: callers seed whatever database state they need
+/// *first* and call [`WedgedDispatchState::wedge`] last, so no unrelated setup
+/// sits inside the trip→assert window. With the injected clock that ordering is
+/// belt-and-braces rather than load-bearing, but it keeps the window minimal.
+#[allow(clippy::disallowed_methods)] // test: real monotonic base for the TestClock
 async fn setup_wedged_dispatch_state() -> WedgedDispatchState {
     let db = test_helpers::create_test_db();
-    let state = AppState::new(db.clone(), CancellationToken::new());
+    // A fixed wall time so the rendered `until` deadline is reproducible, and a
+    // monotonic base that only this test advances.
+    let clock = Arc::new(TestClock::new(
+        SystemTime::UNIX_EPOCH + Duration::from_secs(1_770_000_000),
+        std::time::Instant::now(),
+    ));
+    let cancel = CancellationToken::new();
+    let state = AppState::new_with_health_clock(db.clone(), cancel, clock.clone());
     state.initialize_agent_handles_for_tests().await;
+    let health = state.health_tracker().clone();
 
     // Use the breaker wedge because it is the least flaky end-to-end signal:
-    // three synthetic stalled invocations open the per-user/model breaker
+    // three synthetic provider failures open the per-user/model breaker
     // synchronously, and both `/metrics` and `/debug/dispatch-state` read that
-    // shared tracker without needing a real worker pod or log scraping. A
-    // regular failure opens for only five seconds, which can truthfully become
-    // half-open while this test seeds its database-backed admin session under a
-    // loaded CI runner. A stall is the production failover transition with a
-    // five-minute minimum cooldown; it keeps this intentionally wedged state
-    // open while preserving the observable three-failure count.
-    for _ in 0..3 {
-        state
-            .health_tracker()
-            .record_stall(Some(WEDGE_SCOPE), WEDGE_MODEL, true);
-    }
-
+    // shared tracker without needing a real worker pod or log scraping.
     let app = server::router(state, false);
     WedgedDispatchState {
         app,
         db,
+        health,
+        clock,
         scope: WEDGE_SCOPE,
         model: WEDGE_MODEL,
     }
@@ -54,6 +89,7 @@ async fn setup_wedged_dispatch_state() -> WedgedDispatchState {
 async fn metrics_endpoint_reports_wedged_dispatch_via_metrics_alone() {
     let _guard = TEST_LOCK.lock().await;
     let wedged = setup_wedged_dispatch_state().await;
+    wedged.wedge();
 
     let response = wedged
         .app
@@ -90,8 +126,13 @@ async fn metrics_endpoint_reports_wedged_dispatch_via_metrics_alone() {
 async fn debug_dispatch_state_returns_wedge_to_admin_and_403_to_non_admin() {
     let _guard = TEST_LOCK.lock().await;
     let wedged = setup_wedged_dispatch_state().await;
+    // Seed both database-backed sessions BEFORE tripping the breaker: this is
+    // the slowest work in the test (two user upserts plus two session inserts
+    // over a four-connection pool shared with a starting coordinator) and it
+    // has nothing to do with the wedge.
     let admin_cookie = seed_session(&wedged.db, 101, "admin-wedge", true).await;
     let user_cookie = seed_session(&wedged.db, 102, "user-wedge", false).await;
+    wedged.wedge();
 
     let admin_response = request_debug_dispatch_state(&wedged.app, Some(&admin_cookie)).await;
     assert_eq!(admin_response.status(), StatusCode::OK);
@@ -129,6 +170,30 @@ async fn debug_dispatch_state_returns_wedge_to_admin_and_403_to_non_admin() {
 
     let user_response = request_debug_dispatch_state(&wedged.app, Some(&user_cookie)).await;
     assert_eq!(user_response.status(), StatusCode::FORBIDDEN);
+
+    // The other side of the seam: the `open` reading above is a *time*
+    // predicate, and it is this test — not the runner's load — that decides
+    // when the cooldown lapses. Advancing past `INITIAL_COOLDOWN` must flip the
+    // very same bucket to `half_open`.
+    wedged
+        .clock
+        .advance_mono(BREAKER_INITIAL_COOLDOWN + Duration::from_secs(1));
+    let expired = request_debug_dispatch_state(&wedged.app, Some(&admin_cookie)).await;
+    assert_eq!(expired.status(), StatusCode::OK);
+    let expired_json = response_json(expired).await;
+    let expired_breaker = expired_json["breaker"]
+        .as_array()
+        .expect("breaker must be an array")
+        .iter()
+        .find(|entry| entry["scope"] == wedged.scope && entry["model"] == wedged.model)
+        .expect("the wedged bucket must still be reported after its cooldown lapses")
+        .clone();
+    assert_eq!(
+        expired_breaker["state"], "half_open",
+        "an elapsed cooldown must reclassify as half_open — if this stays `open` \
+         the breaker is no longer reading the injected clock, and the `open` \
+         assertion above proves nothing"
+    );
 }
 
 fn breaker_metric_line<'a>(text: &'a str, scope: &str, model: &str) -> Option<&'a str> {
