@@ -163,8 +163,34 @@ struct TestDbInit {
     test_db: String,
 }
 
+/// Whether an **external** sweeper owns reclamation of `djinn_test_*` clones.
+///
+/// The teardown below is synchronous and `join()`ed, so it sits on the critical
+/// path of every DB-backed test: a fresh admin connection, a
+/// `pg_terminate_backend` scan of `pg_stat_activity`, and a `DROP DATABASE`
+/// that unlinks the ~16 MB of files a template clone copies. Under `cargo
+/// nextest` there is no later moment to do it in — the process exits right
+/// after the test — so simply detaching the thread would not run it at all.
+///
+/// `DJINN_TEST_DB_REAPER=external` says the surrounding harness runs
+/// `scripts/djinn-test-db-reaper.sh` (or equivalent) alongside the suite and
+/// will reclaim the clones out of band. Only CI sets it, and only in the job
+/// that actually starts the reaper. **Unset — every local run, every worker
+/// pod — teardown is unchanged**, so local Postgres never accumulates more
+/// leaked clones than it does today.
+fn external_test_db_reaper() -> bool {
+    static EXTERNAL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *EXTERNAL.get_or_init(|| {
+        std::env::var("DJINN_TEST_DB_REAPER")
+            .is_ok_and(|raw| raw.trim().eq_ignore_ascii_case("external"))
+    })
+}
+
 impl Drop for TestDbInit {
     fn drop(&mut self) {
+        if external_test_db_reaper() {
+            return;
+        }
         let server_prefix = self.server_prefix.clone();
         let test_db = self.test_db.clone();
         // `Drop` is sync and may run on a current-thread test runtime (where
@@ -671,6 +697,12 @@ async fn clone_postgres_test_template(server_prefix: &str, test_db: &str) -> DbR
     let admin_url = format!("{server_prefix}/postgres");
     let opts = sqlx::postgres::PgConnectOptions::from_str(&admin_url).map_err(DbError::from)?;
     let mut conn = opts.connect().await.map_err(DbError::from)?;
+
+    // Raw connection: none of the pool's `after_connect` guards apply here, so
+    // bound the lock wait explicitly. Without this the acquisition below is an
+    // unbounded wait behind a bootstrap that holds the lock across a full sqlx
+    // migrate. See `ADVISORY_LOCK_WAIT_TIMEOUT_MS` in `template_bootstrap`.
+    template_bootstrap::bound_advisory_lock_wait(&mut conn).await?;
 
     // Take the template advisory lock in SHARED mode for the terminate+clone
     // window. `ensure_test_template` holds the same lock EXCLUSIVELY while it

@@ -73,6 +73,46 @@ static TEMPLATE_BOOTSTRAP_SEMAPHORE: std::sync::OnceLock<Arc<Semaphore>> =
 /// for the single first-test bootstrap.
 static TEMPLATE_READY: std::sync::OnceLock<()> = std::sync::OnceLock::new();
 
+/// Environment latch for "this template was already built **and verified** by
+/// the harness that launched me; do not re-verify".
+///
+/// [`TEMPLATE_READY`] above is per-**process**, and `cargo nextest` runs every
+/// test in its own process. So in CI the fast path above never fires: each of
+/// the ~12k test processes re-took the EXCLUSIVE advisory lock, re-ran
+/// `UPDATE pg_database SET datistemplate = TRUE` (a shared-catalog write), and
+/// re-walked all ~190 embedded migrations against the template — while every
+/// peer's `clone_postgres_test_template` queued behind that exclusive lock in
+/// SHARED mode. One serialized maintenance window per test, on a lock every
+/// test also needs to clone through.
+///
+/// Setting `DJINN_TEST_TEMPLATE_PREBUILT=1` (or `true`) asserts that the
+/// template is already present, marked, and fully migrated, so
+/// [`ensure_test_template`] returns immediately and the clone path takes the
+/// shared lock uncontended.
+///
+/// **This is an assertion the setter must prove, not a hint.** It is set by
+/// `.github/workflows/quality-gate.yml` only *after* its "Build Postgres test
+/// template" step has run `tests/setup_test_template.rs`, which now verifies
+/// every embedded migration is applied to the template with a matching
+/// checksum and prints a sentinel the workflow greps for before exporting the
+/// variable. Nothing sets it locally, so local/worker-pod runs keep today's
+/// self-healing bootstrap (create-if-missing, migrate-forward, rebuild on a
+/// diverged history).
+static TEMPLATE_PREBUILT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+/// Whether the environment asserts a pre-built, pre-verified template.
+///
+/// Read once per process: `std::env::var` is not free and this is on the hot
+/// path of every DB-backed test.
+fn template_prebuilt() -> bool {
+    *TEMPLATE_PREBUILT.get_or_init(|| {
+        std::env::var("DJINN_TEST_TEMPLATE_PREBUILT").is_ok_and(|raw| {
+            let raw = raw.trim();
+            raw.eq_ignore_ascii_case("1") || raw.eq_ignore_ascii_case("true")
+        })
+    })
+}
+
 fn bootstrap_semaphore() -> Arc<Semaphore> {
     TEMPLATE_BOOTSTRAP_SEMAPHORE
         .get_or_init(|| Arc::new(Semaphore::new(1)))
@@ -91,6 +131,43 @@ fn bootstrap_semaphore() -> Arc<Semaphore> {
 /// (all shared) never block each other.
 pub(crate) const TEMPLATE_ADVISORY_LOCK_ID: i64 = 0x6a5b4c3d2e1f0a9b;
 
+/// Upper bound on how long either side may WAIT for the template advisory lock.
+///
+/// Both `pg_advisory_lock` (exclusive, below) and `pg_advisory_lock_shared`
+/// (in `clone_postgres_test_template`) run on raw `PgConnection`s, which do
+/// **not** go through the pool's `after_connect` hook — so they inherited none
+/// of the pool's `statement_timeout` / `lock_timeout` guards and the wait was
+/// unbounded. Under `--test-threads 4` against one Postgres server that is an
+/// unbounded wait on a lock held across a full sqlx migrate, and it presents as
+/// an unattributable nextest slow-timeout kill rather than as a lock problem
+/// (e.g. `batch_completion_suppressed_when_active_planner_on_epic`, ~5% of
+/// runs).
+///
+/// `lock_timeout` does apply to advisory locks — verified against PostgreSQL 16:
+/// a contended `SELECT pg_advisory_lock(...)` under `SET lock_timeout = '2s'`
+/// returns `55P03 canceling statement due to lock timeout` at 2.01s, where the
+/// same statement without it blocks indefinitely.
+///
+/// 60s matches the local-semaphore budget in [`acquire_bootstrap_permit`] and
+/// sits under nextest's hard kill (`slow-timeout` `period = 30s`,
+/// `terminate-after = 3` => 90s), so a wedged lock now surfaces as a named
+/// Postgres error inside the test instead of a killed process with no cause.
+const ADVISORY_LOCK_WAIT_TIMEOUT_MS: u32 = 60_000;
+
+/// Bound how long `conn` will wait for a lock before erroring.
+///
+/// Session-scoped, and both callers use a short-lived connection they close
+/// immediately afterwards, so this can never reach pooled query traffic.
+pub(crate) async fn bound_advisory_lock_wait(
+    conn: &mut sqlx::postgres::PgConnection,
+) -> DbResult<()> {
+    sqlx::query(&format!("SET lock_timeout = {ADVISORY_LOCK_WAIT_TIMEOUT_MS}"))
+        .execute(conn)
+        .await
+        .map_err(DbError::from)?;
+    Ok(())
+}
+
 /// Ensure the `djinn_test_template` database exists and is migrated.
 ///
 /// Idempotent: if the template already exists and is marked as a template, this
@@ -100,8 +177,11 @@ pub(crate) const TEMPLATE_ADVISORY_LOCK_ID: i64 = 0x6a5b4c3d2e1f0a9b;
 /// Uses both a local semaphore (per-process) and a Postgres advisory lock
 /// (cross-process) so parallel tests / worker pods don't collide.
 pub(crate) async fn ensure_test_template(server_prefix: &str) -> DbResult<()> {
-    // Fast path: the template was already created/verified in this process.
-    if TEMPLATE_READY.get().is_some() {
+    // Fast path: the template was already created/verified in this process, or
+    // the harness that launched this process proved it before launching us
+    // (see `TEMPLATE_PREBUILT`). The second case is what makes the fast path
+    // reachable at all under `cargo nextest`, which forks a process per test.
+    if TEMPLATE_READY.get().is_some() || template_prebuilt() {
         return Ok(());
     }
 
@@ -116,6 +196,10 @@ pub(crate) async fn ensure_test_template(server_prefix: &str) -> DbResult<()> {
     let admin_url = format!("{server_prefix}/postgres");
     let opts = sqlx::postgres::PgConnectOptions::from_str(&admin_url).map_err(DbError::from)?;
     let mut conn = opts.connect().await.map_err(DbError::from)?;
+
+    // Never wait forever for the lock: this is a raw connection, so it has none
+    // of the pool's guards. See `ADVISORY_LOCK_WAIT_TIMEOUT_MS`.
+    bound_advisory_lock_wait(&mut conn).await?;
 
     // Cross-process serialization: take an EXCLUSIVE advisory lock for the
     // duration of our maintenance work on the template — including the

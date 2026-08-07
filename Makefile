@@ -16,7 +16,7 @@ TEST_DB_MIGRATION_GITHUB_LOGIN ?=
 # Postgres (docker-compose.yml → `postgres-test` service at :5433) plus the
 # test harness targets that depend on it.
 
-.PHONY: help dev test-db-migrate test-db-postgres-template test-vault test-db-reset sqlx-prepare sqlx-check sqlx-verify tool-goldens tool-goldens-check tool-goldens-manifest test test-all validate-taskrun-backstop check-boundaries verify-cache-cleanup verify-incident-observability check-retirement-manifest
+.PHONY: help dev test-db-migrate test-db-postgres-template test-vault test-db-sweep test-db-reset sqlx-prepare sqlx-check sqlx-verify tool-goldens tool-goldens-check tool-goldens-manifest test test-all validate-taskrun-backstop check-boundaries verify-cache-cleanup verify-incident-observability check-retirement-manifest
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*##"}; {printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2}'
@@ -171,6 +171,17 @@ tool-goldens-check: ## Fail if any committed MCP tool-schema golden is stale —
 		exit 1; \
 	fi
 	@echo "MCP tool-schema goldens are up to date."
+
+test-db-sweep: ## Drop leaked djinn_test_<uuid> clone DBs (keeps the template and the schema)
+	@# Each clone is ~16 MB. A hard-killed run (SIGKILL, nextest
+	@# `terminate-after`, a cancelled agent) never runs `TestDbInit::drop`, so
+	@# they strand — 183 of them, 2.9 GB, were sitting on the local :5433 server
+	@# when this target was written. Unlike `test-db-reset` this keeps the
+	@# server, the `djinn` database and `djinn_test_template` intact, so it is
+	@# safe to run at any time, including while a suite is running: the sweeper
+	@# only touches `djinn_test_<32 hex>` databases that are both older than any
+	@# test may run and have no live session. See scripts/djinn-test-db-reaper.sh.
+	@$(CURDIR)/scripts/djinn-test-db-reaper.sh
 
 test-db-reset: ## Wipe and restart the test Postgres — cleans out djinn_test_* DBs
 	docker compose stop postgres-test
