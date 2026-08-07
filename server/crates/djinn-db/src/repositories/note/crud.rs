@@ -953,6 +953,60 @@ impl NoteRepository {
         Ok(())
     }
 
+    /// Record one explicit `memory_read` access, deduplicated by
+    /// `(invocation_id, note_id)`.
+    ///
+    /// This is the 9xih replacement for [`Self::touch_accessed`] on the
+    /// explicit-read path. The differences are the whole point:
+    ///
+    /// * `touch_accessed` increments unconditionally, so a caller retry after a
+    ///   dropped response double-counts. Here the append-only ledger insert is
+    ///   the gate — a `(invocation_id, note_id)` conflict is recognised as a
+    ///   replay and moves neither `access_count` nor `last_accessed`.
+    /// * `touch_accessed` stamps `last_accessed` with `now()` inside the write.
+    ///   Here `event_timestamp` is captured by the caller *before* the
+    ///   transaction, at the moment the handler decided the read succeeded, and
+    ///   is folded in with `GREATEST` so a late commit cannot rewind a newer
+    ///   timestamp.
+    /// * `touch_accessed`'s ledger append is fail-open. Here it is not: if the
+    ///   ledger cannot be written, the counter must not move either, or the
+    ///   counter loses its audit basis.
+    ///
+    /// `source` is not a parameter because there is only one: a counted access
+    /// is exactly one successful external `memory_read` result construction.
+    /// Search-result display no longer counts (ADR-054 is superseded for
+    /// persisted note access), so nothing else may reach this path.
+    pub async fn record_explicit_access(
+        &self,
+        note_id: &str,
+        invocation_id: &str,
+        event_timestamp: &str,
+        attribution: &super::NoteAccessAttribution,
+    ) -> Result<super::ExplicitAccessOutcome> {
+        self.db.ensure_initialized().await?;
+        let note = self
+            .get_summary_state(note_id)
+            .await?
+            .ok_or_else(|| Error::InvalidData(format!("note not found: {note_id}")))?;
+
+        let outcome = super::access_events::record_explicit_access(
+            &self.db,
+            &note.project_id,
+            note_id,
+            invocation_id,
+            event_timestamp,
+            attribution,
+        )
+        .await?;
+
+        if note.abstract_.is_none() || note.overview.is_none() {
+            self.events
+                .send(djinn_memory::events::note_missing_summary(&note));
+        }
+
+        Ok(outcome)
+    }
+
     pub async fn move_note(
         &self,
         id: &str,

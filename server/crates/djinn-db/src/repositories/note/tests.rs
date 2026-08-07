@@ -23,6 +23,7 @@ mod graph_health;
 mod graph_proposals;
 mod graph_scoring;
 mod guidance;
+mod injection_ranking_signals;
 mod lifecycle_archive;
 mod lifecycle_decay;
 mod lifecycle_graph;

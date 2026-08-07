@@ -16,15 +16,32 @@ const MIN_ASSOCIATION_WEIGHT: f64 = 0.05;
 pub const CONFIDENCE_FLOOR: f64 = 0.025;
 pub const CONFIDENCE_CEILING: f64 = 0.975;
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "Used by intra-crate tests in note::mod and scoring::tests"
-    )
-)]
-pub(crate) const TASK_SUCCESS: f64 = 0.65;
-pub const CO_ACCESS_HIGH: f64 = 0.65;
+// ── The epistemic confidence write boundary (proposal 9xih) ──────────────────
+//
+// `notes.confidence` is an epistemic posterior AND an input to injection
+// eligibility, injection ordering, and archival lifecycle. Writing a
+// non-epistemic quantity into it therefore does not merely reweight a ranking;
+// it changes what the system is allowed to inject and what it archives.
+//
+// Only signals whose direct semantics concern a note's TRUTH may be applied
+// here: `USER_CONFIRM`, `CONTRADICTION`, and the stale-citation family.
+//
+// Retrieval inclusion, retrieval frequency, task completion, task failure after
+// injection, review verdict, merge result, cohort assignment, and rollout labels
+// are NOT epistemic signals. They describe how useful a note was, not whether it
+// is correct, and they must never reach `set_confidence` or `update_confidence`.
+//
+// Two constants were deleted rather than left unused, because an available
+// constant is an invitation:
+//
+// * `TASK_SUCCESS` (0.65) — applied by `task_confidence::handle_successful_task_completion`.
+//   A task closing successfully while referencing a note demonstrates USE, not
+//   TRUTH. Completion activity is still recorded; the confidence write is gone.
+// * `CO_ACCESS_HIGH` (0.65) — applied by `DjinnMcpServer::record_memory_read`'s
+//   co-access flush. Reading two notes together raised the confidence of the
+//   lower-confidence one, which then made it more injectable, which made it more
+//   likely to be read together again: an unbounded feedback loop that
+//   manufactured evidence out of retrieval.
 pub const STALE_CITATION: f64 = 0.3;
 pub const USER_CONFIRM: f64 = 0.95;
 pub const CONTRADICTION: f64 = 0.1;
@@ -487,8 +504,30 @@ mod tests {
 
     #[test]
     fn bayesian_update_medium_positive_signal_increases_from_half() {
-        let updated = bayesian_update(0.5, TASK_SUCCESS);
+        // A bare 0.65 literal, not a named production constant: the removed
+        // `TASK_SUCCESS` must not come back through a test's back door.
+        let updated = bayesian_update(0.5, 0.65);
         assert!(updated > 0.5);
+    }
+
+    #[test]
+    fn user_confirm_never_demotes_a_note_at_the_ceiling_default() {
+        // Migration 197 sets the new-note default to CONFIDENCE_CEILING. The
+        // defect it repairs: with the old 1.0 default, confirming a note
+        // *lowered* it to 0.975, sorting it below every untouched peer.
+        let untouched = CONFIDENCE_CEILING;
+        let confirmed = bayesian_update(CONFIDENCE_CEILING, USER_CONFIRM);
+        assert!(
+            confirmed >= untouched,
+            "USER_CONFIRM demoted a default-confidence note: {confirmed} < {untouched}"
+        );
+
+        let legacy_default_confirmed = bayesian_update(1.0, USER_CONFIRM);
+        assert!(
+            legacy_default_confirmed < 1.0,
+            "the pre-197 defect must still be demonstrable: confirming a 1.0 note \
+             clamps to {CONFIDENCE_CEILING}, which is why the default had to move"
+        );
     }
 
     #[test]

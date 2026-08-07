@@ -346,8 +346,17 @@ pub(super) const GRAPH_REFRESH_INTERVAL: Duration = Duration::from_secs(10 * 60)
 /// Minimum cooldown between idle-time memory consolidation sweeps (ADR-048 §3A).
 pub(super) const IDLE_CONSOLIDATION_COOLDOWN: Duration = Duration::from_secs(300);
 
+/// Activity event type for the failed-close / reopen outcome marker.
+///
+/// The name is historical and is deliberately NOT renamed: it is the dedupe key
+/// the coordinator reads back to decide whether an outcome was already handled,
+/// and rows carrying it already exist in every deployed database.
+///
+/// Since 9xih the marker is all that is written. The companion
+/// `TASK_OUTCOME_CONFIDENCE_SIGNAL` (0.1) was deleted along with its only
+/// writer: task failure after injection is a retrieval/task outcome, not
+/// epistemic evidence, and may not reach `notes.confidence`.
 pub(super) const TASK_OUTCOME_CONFIDENCE_ACTIVITY: &str = "task_outcome_confidence";
-pub(super) const TASK_OUTCOME_CONFIDENCE_SIGNAL: f64 = 0.1;
 pub(super) const TASK_OUTCOME_REOPEN_COUNT: &str = "reopen_count";
 pub(super) const TASK_OUTCOME_FAILED_CLOSE: &str = "failed_closed";
 

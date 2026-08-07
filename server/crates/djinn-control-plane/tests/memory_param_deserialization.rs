@@ -48,6 +48,20 @@ fn read_params_deserialize() {
         serde_json::from_value(serde_json::json!({"project":"/tmp/p","identifier":"abc"})).unwrap();
     assert_eq!(p.project, "/tmp/p");
     assert_eq!(p.identifier, "abc");
+    // Backward compatibility: every caller that predates 9xih omits the field
+    // entirely, and that must keep deserializing.
+    assert_eq!(p.invocation_id, None);
+}
+
+#[test]
+fn read_params_deserialize_accepts_caller_supplied_invocation_id() {
+    let p: ReadParams = serde_json::from_value(serde_json::json!({
+        "project": "/tmp/p",
+        "identifier": "abc",
+        "invocation_id": "caller-supplied-read-1"
+    }))
+    .unwrap();
+    assert_eq!(p.invocation_id.as_deref(), Some("caller-supplied-read-1"));
 }
 
 #[test]

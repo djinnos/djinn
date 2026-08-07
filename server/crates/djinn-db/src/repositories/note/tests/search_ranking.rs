@@ -553,10 +553,10 @@ async fn update_confidence_reads_updates_and_persists() {
         .await
         .unwrap();
 
-    let updated = repo
-        .update_confidence(&note.id, scoring::TASK_SUCCESS)
-        .await
-        .unwrap();
+    // A bare medium-positive signal literal. `scoring::TASK_SUCCESS` was
+    // deleted by 9xih along with its only production writer; this test is about
+    // `update_confidence` persisting a posterior, not about task outcomes.
+    let updated = repo.update_confidence(&note.id, 0.65).await.unwrap();
     assert!(updated > 0.5);
 
     let stored = sqlx::query_scalar!("SELECT confidence FROM notes WHERE id = $1", note.id)
@@ -894,4 +894,211 @@ async fn lifecycle_graph_read_does_not_leak_into_unified_lexical_search() {
     assert!(result_ids.contains(active.id.as_str()));
     assert!(!result_ids.contains(archived.id.as_str()));
     assert!(!result_ids.contains(deprecated.id.as_str()));
+}
+
+// ── 9xih: invocation-keyed explicit access accounting ────────────────────────
+
+use crate::repositories::note::{
+    ExplicitAccessOutcome, NoteAccessAttribution, access_event_timestamp,
+    note_access_events_for_note,
+};
+
+/// AC5: replay idempotency at the repository boundary.
+///
+/// The same `(invocation_id, note_id)` is recorded twice. The second call must
+/// report `Replay` AND leave the ledger, the counter, and the timestamp exactly
+/// as the first call left them — all three read back from Postgres.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn record_explicit_access_replay_writes_no_second_event_or_increment() {
+    let tmp = crate::database::test_tempdir().unwrap();
+    let db = Database::open_in_memory().unwrap();
+    let (tx, _rx) = broadcast::channel(256);
+    let project = make_project(&db, tmp.path()).await;
+    let repo = NoteRepository::new(db.clone(), event_bus_for(&tx));
+
+    let note = repo
+        .create(&project.id, "Replay Note", "body", "reference", "[]")
+        .await
+        .unwrap();
+    let before = repo.get(&note.id).await.unwrap().unwrap();
+
+    let first_stamp = access_event_timestamp();
+    let first = repo
+        .record_explicit_access(
+            &note.id,
+            "invocation-alpha",
+            &first_stamp,
+            &NoteAccessAttribution::unattributed(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(first, ExplicitAccessOutcome::Counted);
+
+    let after_first = repo.get(&note.id).await.unwrap().unwrap();
+    assert_eq!(after_first.access_count, before.access_count + 1);
+    assert_eq!(after_first.last_accessed, first_stamp);
+
+    // A retry of the SAME logical invocation, carrying a strictly later
+    // timestamp so a naive implementation that always writes would be caught by
+    // the `last_accessed` assertion below rather than only by the counter.
+    let replay_stamp = "2099-12-31T23:59:59.999Z";
+    let replay = repo
+        .record_explicit_access(
+            &note.id,
+            "invocation-alpha",
+            replay_stamp,
+            &NoteAccessAttribution::unattributed(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(replay, ExplicitAccessOutcome::Replay);
+
+    let after_replay = repo.get(&note.id).await.unwrap().unwrap();
+    assert_eq!(
+        after_replay.access_count, after_first.access_count,
+        "a replay must not increment access_count"
+    );
+    assert_eq!(
+        after_replay.last_accessed, first_stamp,
+        "a replay must not advance last_accessed even with a later timestamp"
+    );
+
+    let events = note_access_events_for_note(&db, &project.id, &note.id)
+        .await
+        .unwrap();
+    assert_eq!(events.len(), 1, "a replay must not append a ledger row");
+    assert_eq!(events[0].invocation_id.as_deref(), Some("invocation-alpha"));
+    assert_eq!(events[0].source, "memory_read");
+    assert_eq!(events[0].created_at, first_stamp);
+}
+
+/// AC5: `last_accessed = max(last_accessed, event_timestamp)`.
+///
+/// A distinct invocation whose event timestamp is OLDER than the stored value
+/// still counts (it is a real, separate access) but must not rewind the
+/// timestamp. This is what distinguishes `GREATEST` from plain assignment; a
+/// `SET last_accessed = $ts` implementation fails here.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn record_explicit_access_never_rewinds_last_accessed() {
+    let tmp = crate::database::test_tempdir().unwrap();
+    let db = Database::open_in_memory().unwrap();
+    let (tx, _rx) = broadcast::channel(256);
+    let project = make_project(&db, tmp.path()).await;
+    let repo = NoteRepository::new(db.clone(), event_bus_for(&tx));
+
+    let note = repo
+        .create(&project.id, "Ordering Note", "body", "reference", "[]")
+        .await
+        .unwrap();
+
+    let newer = "2030-06-06T06:06:06.000Z";
+    let older = "2020-01-01T00:00:00.000Z";
+
+    repo.record_explicit_access(
+        &note.id,
+        "invocation-newer",
+        newer,
+        &NoteAccessAttribution::unattributed(),
+    )
+    .await
+    .unwrap();
+    repo.record_explicit_access(
+        &note.id,
+        "invocation-older",
+        older,
+        &NoteAccessAttribution::unattributed(),
+    )
+    .await
+    .unwrap();
+
+    let stored = repo.get(&note.id).await.unwrap().unwrap();
+    assert_eq!(
+        stored.access_count, 2,
+        "both distinct invocations must count, regardless of timestamp order"
+    );
+    assert_eq!(
+        stored.last_accessed, newer,
+        "a late-committing older event must not rewind last_accessed"
+    );
+
+    let events = note_access_events_for_note(&db, &project.id, &note.id)
+        .await
+        .unwrap();
+    assert_eq!(events.len(), 2);
+}
+
+/// AC5: concurrent distinct invocations lose no increments.
+///
+/// Twelve distinct invocation ids are recorded from twelve concurrently spawned
+/// tasks against one shared pool. The final `access_count` must be exactly 12.
+///
+/// This is the assertion an application-side read-modify-write cannot satisfy:
+/// a `SELECT access_count` / `UPDATE ... SET access_count = n + 1` pair would
+/// interleave and lose updates, landing below 12. The increment is written as
+/// `access_count = access_count + 1` inside Postgres precisely so it cannot.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_distinct_invocations_lose_no_access_increments() {
+    const CONCURRENT_READS: usize = 12;
+
+    let tmp = crate::database::test_tempdir().unwrap();
+    let db = Database::open_in_memory().unwrap();
+    let (tx, _rx) = broadcast::channel(256);
+    let project = make_project(&db, tmp.path()).await;
+    let repo = NoteRepository::new(db.clone(), event_bus_for(&tx));
+
+    let note = repo
+        .create(&project.id, "Concurrent Note", "body", "reference", "[]")
+        .await
+        .unwrap();
+
+    // Deterministic, strictly increasing stamps so the expected maximum is
+    // known without depending on scheduling order.
+    let stamps: Vec<String> = (0..CONCURRENT_READS)
+        .map(|index| format!("2031-01-01T00:00:{index:02}.000Z"))
+        .collect();
+    let latest = stamps.last().cloned().unwrap();
+
+    let mut handles = Vec::new();
+    for (index, stamp) in stamps.into_iter().enumerate() {
+        let task_repo = NoteRepository::new(db.clone(), event_bus_for(&tx));
+        let note_id = note.id.clone();
+        handles.push(tokio::spawn(async move {
+            task_repo
+                .record_explicit_access(
+                    &note_id,
+                    &format!("concurrent-invocation-{index}"),
+                    &stamp,
+                    &NoteAccessAttribution::unattributed(),
+                )
+                .await
+        }));
+    }
+
+    let mut counted = 0usize;
+    for handle in handles {
+        let outcome = handle.await.expect("join").expect("record explicit access");
+        if outcome == ExplicitAccessOutcome::Counted {
+            counted += 1;
+        }
+    }
+    assert_eq!(
+        counted, CONCURRENT_READS,
+        "distinct invocation ids must all be counted, none deduplicated"
+    );
+
+    let stored = repo.get(&note.id).await.unwrap().unwrap();
+    assert_eq!(
+        stored.access_count, CONCURRENT_READS as i64,
+        "the final counter must rise by the number of committed events; \
+         a lower value means an increment was lost to a read-modify-write race"
+    );
+    assert_eq!(
+        stored.last_accessed, latest,
+        "last_accessed must equal the latest committed event timestamp"
+    );
+
+    let events = note_access_events_for_note(&db, &project.id, &note.id)
+        .await
+        .unwrap();
+    assert_eq!(events.len(), CONCURRENT_READS);
 }

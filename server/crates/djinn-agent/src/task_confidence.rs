@@ -13,9 +13,22 @@ fn parse_task_memory_refs(memory_refs: &str) -> Vec<String> {
     })
 }
 
-const TASK_SUCCESS_SIGNAL: f64 = 0.65;
 const COMPLETED_STATUS: &str = "closed";
 const COMPLETED_REASON: &str = "completed";
+
+/// Activity event type recorded on successful task completion.
+///
+/// The name is historical. Since 9xih this listener applies NO confidence
+/// signal: the `TASK_SUCCESS_SIGNAL = 0.65` `update_confidence` call it used to
+/// make was removed. A task closing successfully while referencing a note is
+/// evidence that the note was USED, not that it is TRUE, and `notes.confidence`
+/// also gates injection eligibility and archival lifecycle — so writing a task
+/// outcome into it silently changed what the system may inject and archive.
+///
+/// The event type string is deliberately NOT renamed: it is the dedupe key read
+/// back by `has_already_applied`, and rows carrying it already exist in every
+/// deployed database. Renaming it would make every historically-completed task
+/// look unprocessed.
 const CONFIDENCE_ACTIVITY_TYPE: &str = "confidence_signal_applied";
 
 #[derive(Debug, Deserialize)]
@@ -28,13 +41,25 @@ struct TaskUpdatedPayload {
 #[derive(Debug, Serialize)]
 struct ConfidenceSignalPayload {
     reason: &'static str,
+    /// Note ids the task's `memory_refs` resolved to.
+    ///
+    /// The JSON key stays `updated_notes` because it is already persisted in
+    /// `task_activity` rows across every deployment and is read back by
+    /// operators and the timeline UI; since 9xih no confidence value is
+    /// actually updated, so read it as "notes this completion referenced".
     updated_notes: Vec<String>,
     missing_notes: usize,
     from_sync: bool,
 }
 
 /// Spawn the task-outcome listener. When a task transitions to a successful
-/// terminal state, confidence signals are applied to the notes it references.
+/// terminal state, a completion-activity row is recorded naming the notes it
+/// referenced.
+///
+/// Since 9xih this listener writes NO note confidence. It sits on the forbidden
+/// side of the epistemic write boundary described in
+/// `djinn_db::repositories::note::scoring`: a task outcome is evidence about
+/// usefulness, never about truth.
 ///
 /// `events` is the broadcast sender the listener subscribes to. `db` and
 /// `event_bus` are used to construct the underlying repositories.
@@ -147,7 +172,7 @@ async fn handle_successful_task_completion(
     }
 
     let mut seen = HashSet::new();
-    let mut updated_notes = Vec::new();
+    let mut resolved_notes = Vec::new();
     let mut missing_refs = 0usize;
 
     for permalink in memory_refs {
@@ -159,21 +184,12 @@ async fn handle_successful_task_completion(
             .get_by_permalink(&payload.task.project_id, &permalink)
             .await
         {
+            // Resolution only. This deliberately does NOT call
+            // `update_confidence` (9xih): task completion is a retrieval/task
+            // outcome, not epistemic evidence about the note. The resolved ids
+            // are still recorded so completion remains observable.
             Ok(Some(note)) => {
-                if let Err(error) = note_repo
-                    .update_confidence(&note.id, TASK_SUCCESS_SIGNAL)
-                    .await
-                {
-                    tracing::warn!(
-                        error = %error,
-                        task_id = %payload.task.id,
-                        note_id = %note.id,
-                        permalink,
-                        "failed to apply task success confidence signal"
-                    );
-                    continue;
-                }
-                updated_notes.push(note.id);
+                resolved_notes.push(note.id);
             }
             Ok(None) => {
                 missing_refs += 1;
@@ -194,7 +210,7 @@ async fn handle_successful_task_completion(
     if let Err(error) = record_confidence_signal(
         task_repo,
         &payload.task.id,
-        updated_notes,
+        resolved_notes,
         missing_refs,
         payload.from_sync,
     )
@@ -297,8 +313,20 @@ mod tests {
         project_repo.create(slug, "test", path_name).await
     }
 
+    /// AC1 (9xih), positive + negative in one run against the real listener:
+    ///
+    /// * NEGATIVE — a successful completion carrying a resolvable `memory_refs`
+    ///   entry must leave `notes.confidence` byte-identical. This is the exact
+    ///   scenario that previously applied `TASK_SUCCESS_SIGNAL`, so if the
+    ///   `update_confidence` call ever comes back this assertion fails.
+    /// * POSITIVE — the completion activity row must still be written, with the
+    ///   referenced note id in its payload, so removing the confidence write did
+    ///   not cost observability.
+    ///
+    /// Both assertions read state back out of the database; neither is
+    /// satisfied by the listener merely running.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn applies_task_success_signal_to_referenced_notes() {
+    async fn task_completion_records_activity_without_touching_note_confidence() {
         let harness = make_harness().await;
         spawn_task_outcome_listener(
             harness.db.clone(),
@@ -334,6 +362,12 @@ mod tests {
             .await
             .unwrap();
         let _ = project_path;
+        // Park the note at a mid prior on purpose. At the new default
+        // (CONFIDENCE_CEILING) the removed 0.65 signal would have clamped back
+        // to the ceiling and moved nothing, so "confidence did not change"
+        // would prove nothing. From 0.5 the removed signal WOULD have moved it,
+        // which is what the vacuity guard below asserts.
+        note_repo.set_confidence(&note.id, 0.5).await.unwrap();
         let before = note_repo.get(&note.id).await.unwrap().unwrap().confidence;
 
         let creator = crate::test_helpers::create_test_creator(&harness.db).await;
@@ -378,18 +412,26 @@ mod tests {
 
         wait_for_confidence_signal(&task_repo, &closed.id).await;
 
-        let updated = note_repo.get(&note.id).await.unwrap().unwrap();
-        assert!(
-            updated.confidence < before,
-            "expected confidence to update when task completes"
-        );
-        assert!(
-            (updated.confidence
-                - djinn_db::repositories::note::bayesian_update(before, TASK_SUCCESS_SIGNAL))
-            .abs()
-                < 1e-9
+        // NEGATIVE: the note's stored confidence is re-read from the database
+        // and must be bit-identical to the value before completion.
+        let after = note_repo.get(&note.id).await.unwrap().unwrap().confidence;
+        assert_eq!(
+            after, before,
+            "task completion must not mutate note confidence \
+             (before {before}, after {after}); TASK_SUCCESS_SIGNAL is removed by 9xih"
         );
 
+        // Guard against the assertion above passing vacuously: prove the
+        // removed signal WOULD have moved this exact prior, so an unchanged
+        // value is a real behavioural difference and not an arithmetic no-op.
+        let would_have_been = djinn_db::repositories::note::bayesian_update(before, 0.65);
+        assert!(
+            (would_have_been - before).abs() > 1e-9,
+            "test is vacuous: the removed 0.65 task-success signal would not have \
+             moved a prior of {before} anyway"
+        );
+
+        // POSITIVE: completion activity survives, and still names the note.
         let activity = task_repo
             .query_activity(ActivityQuery {
                 task_id: Some(task.id),
@@ -399,7 +441,51 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(activity.len(), 1);
+        let payload = serde_json::from_str::<serde_json::Value>(&activity[0].payload).unwrap();
+        assert_eq!(payload["reason"], COMPLETED_REASON);
+        assert_eq!(payload["missing_notes"], 0);
+        assert_eq!(
+            payload["updated_notes"]
+                .as_array()
+                .expect("updated_notes array")
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .collect::<Vec<_>>(),
+            vec![note.id.as_str()],
+            "completion activity must still record the referenced note"
+        );
         assert_eq!(closed.status, "closed");
+    }
+
+    /// AC1 (9xih), call-site guard. `handle_successful_task_completion` is the
+    /// production task-outcome writer; this pins that its source text contains
+    /// no confidence-mutation call at all, so a future edit cannot reintroduce
+    /// one without failing here.
+    ///
+    /// A source-text assertion is a weak guard on its own, which is why it is
+    /// paired with the behavioural test above rather than standing in for it.
+    #[test]
+    fn task_outcome_listener_source_contains_no_confidence_writer() {
+        let source = include_str!("task_confidence.rs");
+        // Strip this test's own body so its literals do not match themselves.
+        let production = source
+            .split_once("#[cfg(test)]")
+            .expect("task_confidence.rs has a test module")
+            .0;
+        // Call syntax, not bare identifiers: the doc comments in this file
+        // deliberately NAME the removed writers to explain why they are gone,
+        // and that prose must not trip the guard.
+        for forbidden in [
+            "update_confidence(",
+            "set_confidence(",
+            "const TASK_SUCCESS_SIGNAL",
+        ] {
+            assert!(
+                !production.contains(forbidden),
+                "task-outcome production code must not contain `{forbidden}`: \
+                 task/review/merge outcomes are barred from the confidence write boundary"
+            );
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

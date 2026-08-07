@@ -151,6 +151,7 @@ mod tests {
                 ReadParams {
                     project: setup.project.clone(),
                     identifier: setup.permalink.clone(),
+                    invocation_id: None,
                 },
                 &djinn_db::NoteAccessAttribution::unattributed(),
             )
@@ -199,6 +200,7 @@ mod tests {
                 ReadParams {
                     project: setup.project.clone(),
                     identifier: note.permalink.clone(),
+                    invocation_id: None,
                 },
                 &djinn_db::NoteAccessAttribution::unattributed(),
             )
@@ -232,6 +234,7 @@ mod tests {
             ReadParams {
                 project: setup.project.clone(),
                 identifier: probe.to_string(),
+                invocation_id: None,
             },
             &djinn_db::NoteAccessAttribution::unattributed(),
         )
@@ -293,6 +296,7 @@ mod tests {
             ReadParams {
                 project: setup.project.clone(),
                 identifier: format!("memory://{design_permalink}.md"),
+                invocation_id: None,
             },
             &djinn_db::NoteAccessAttribution::unattributed(),
         )
@@ -464,15 +468,22 @@ mod tests {
         );
         assert!(!response.results.is_empty());
 
+        // Inverted by proposal 9xih. This used to assert `access_count == 1`
+        // under ADR-054, which counted a note appearing in a result set as an
+        // access. That made search display and explicit `memory_read`
+        // indistinguishable in the persisted scalars. ADR-054 is superseded for
+        // PERSISTED note access: display now counts nothing.
         for result in &response.results {
             let access_count =
                 access_count_for(&setup.server, &setup.project, &result.permalink).await;
             assert_eq!(
-                access_count, 1,
-                "returned search results should count as accessed retrievals"
+                access_count, 0,
+                "search-result display must not count as an access (9xih supersedes ADR-054)"
             );
         }
 
+        // Session-level co-access telemetry is explicitly PRESERVED: it never
+        // touched confidence or the persisted access fields, so it stays.
         let recorded = setup.server.recorded_note_ids().await;
         let returned_ids: Vec<String> = response
             .results
@@ -807,6 +818,7 @@ mod tests {
             .memory_read(rmcp::handler::server::wrapper::Parameters(ReadParams {
                 project: setup.project,
                 identifier: setup.permalink,
+                invocation_id: None,
             }))
             .await
             .0;
@@ -1449,6 +1461,413 @@ mod tests {
         assert_eq!(
             error.count, 1,
             "wildcard list failure should record exactly one error observation"
+        );
+    }
+
+    // ── 9xih: the counted-access boundary ────────────────────────────────
+    //
+    // Every test below reads the ACTUAL persisted state back — ledger rows,
+    // `access_count`, `last_accessed`, `confidence` — never a return value or a
+    // log line. A no-op implementation fails all of them.
+
+    async fn project_id_for(server: &DjinnMcpServer, project: &str) -> String {
+        ProjectRepository::new(server.state.db().clone(), server.state.event_bus())
+            .resolve(project)
+            .await
+            .unwrap()
+            .expect("project id")
+    }
+
+    async fn note_by_permalink(
+        server: &DjinnMcpServer,
+        project: &str,
+        permalink: &str,
+    ) -> djinn_memory::Note {
+        let project_id = project_id_for(server, project).await;
+        NoteRepository::new(server.state.db().clone(), server.state.event_bus())
+            .get_by_permalink(&project_id, permalink)
+            .await
+            .unwrap()
+            .expect("note")
+    }
+
+    async fn access_events_for(
+        server: &DjinnMcpServer,
+        project: &str,
+        note_id: &str,
+    ) -> Vec<djinn_db::NoteAccessEvent> {
+        let project_id = project_id_for(server, project).await;
+        djinn_db::repositories::note::note_access_events_for_note(
+            server.state.db(),
+            &project_id,
+            note_id,
+        )
+        .await
+        .expect("read note access ledger")
+    }
+
+    async fn read_note(
+        server: &DjinnMcpServer,
+        project: &str,
+        identifier: &str,
+        invocation_id: Option<&str>,
+    ) -> crate::tools::memory_tools::MemoryNoteResponse {
+        ops::memory_read(
+            server,
+            ReadParams {
+                project: project.to_owned(),
+                identifier: identifier.to_owned(),
+                invocation_id: invocation_id.map(ToOwned::to_owned),
+            },
+            &djinn_db::NoteAccessAttribution::unattributed(),
+        )
+        .await
+    }
+
+    /// AC5: one successful `memory_read` result construction writes exactly one
+    /// ledger row and exactly one increment, and advances `last_accessed`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn memory_read_records_exactly_one_access_event_and_one_increment() {
+        let setup = setup_server().await;
+        let before = note_by_permalink(&setup.server, &setup.project, &setup.permalink).await;
+        assert!(
+            access_events_for(&setup.server, &setup.project, &before.id)
+                .await
+                .is_empty(),
+            "a freshly created note must start with an empty ledger"
+        );
+
+        let response = read_note(
+            &setup.server,
+            &setup.project,
+            &setup.permalink,
+            Some("read-once"),
+        )
+        .await;
+        assert!(response.error.is_none(), "{:?}", response.error);
+
+        let events = access_events_for(&setup.server, &setup.project, &before.id).await;
+        assert_eq!(events.len(), 1, "expected exactly one ledger row");
+        assert_eq!(events[0].source, "memory_read");
+        assert_eq!(events[0].invocation_id.as_deref(), Some("read-once"));
+
+        let after = note_by_permalink(&setup.server, &setup.project, &setup.permalink).await;
+        assert_eq!(after.access_count, before.access_count + 1);
+        // Exactly the `max(last_accessed, event_timestamp)` contract. Stated as
+        // the max rather than as bare equality so the assertion does not depend
+        // on the app clock and the Postgres clock agreeing to the millisecond;
+        // the fixed-timestamp proofs of the ordering rule live in
+        // `djinn-db/.../tests/search_ranking.rs`.
+        assert_eq!(
+            after.last_accessed,
+            std::cmp::max(before.last_accessed.clone(), events[0].created_at.clone()),
+            "last_accessed must be max(previous, event timestamp)"
+        );
+    }
+
+    /// AC5 + AC6: the dropped-response retry. The caller never learns whether
+    /// the first attempt landed, so it retries with the SAME invocation id; the
+    /// access must count exactly once.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn memory_read_retry_with_the_same_invocation_id_is_a_replay() {
+        let setup = setup_server().await;
+        let before = note_by_permalink(&setup.server, &setup.project, &setup.permalink).await;
+
+        let first = read_note(
+            &setup.server,
+            &setup.project,
+            &setup.permalink,
+            Some("dropped-response-1"),
+        )
+        .await;
+        assert!(first.error.is_none(), "{:?}", first.error);
+        let after_first = note_by_permalink(&setup.server, &setup.project, &setup.permalink).await;
+
+        // Response dropped in transport; the caller retries the same logical
+        // invocation.
+        let retry = read_note(
+            &setup.server,
+            &setup.project,
+            &setup.permalink,
+            Some("dropped-response-1"),
+        )
+        .await;
+        assert!(
+            retry.error.is_none(),
+            "a replay must still serve the note: {:?}",
+            retry.error
+        );
+
+        let events = access_events_for(&setup.server, &setup.project, &before.id).await;
+        assert_eq!(
+            events.len(),
+            1,
+            "a replay must not append a second ledger row, got {events:?}"
+        );
+
+        let after_retry = note_by_permalink(&setup.server, &setup.project, &setup.permalink).await;
+        assert_eq!(
+            after_retry.access_count,
+            before.access_count + 1,
+            "a replay must not increment access_count a second time"
+        );
+        assert_eq!(
+            after_retry.last_accessed, after_first.last_accessed,
+            "a replay must not advance last_accessed"
+        );
+    }
+
+    /// AC6: the documented backward-compatible behaviour. A caller that omits
+    /// `invocation_id` gets a fresh id per attempt, so a retry it cannot label
+    /// is counted as a second, distinct access.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn memory_read_without_invocation_id_counts_every_attempt_distinctly() {
+        let setup = setup_server().await;
+        let before = note_by_permalink(&setup.server, &setup.project, &setup.permalink).await;
+
+        for _ in 0..2 {
+            let response = read_note(&setup.server, &setup.project, &setup.permalink, None).await;
+            assert!(response.error.is_none(), "{:?}", response.error);
+        }
+
+        let events = access_events_for(&setup.server, &setup.project, &before.id).await;
+        assert_eq!(
+            events.len(),
+            2,
+            "omitted ids must produce two distinct invocations"
+        );
+        let ids: std::collections::HashSet<_> = events
+            .iter()
+            .map(|event| event.invocation_id.clone())
+            .collect();
+        assert_eq!(ids.len(), 2, "generated invocation ids must differ");
+        assert!(
+            events.iter().all(|event| event.invocation_id.is_some()),
+            "a generated id must still be stored, or replay could never work"
+        );
+
+        let after = note_by_permalink(&setup.server, &setup.project, &setup.permalink).await;
+        assert_eq!(after.access_count, before.access_count + 2);
+    }
+
+    /// AC6: bounds are enforced BEFORE note resolution, so a rejected request
+    /// leaves no ledger row, no counter change, and no timestamp change.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn memory_read_rejects_blank_and_over_limit_invocation_ids_without_touching_state() {
+        let setup = setup_server().await;
+        let before = note_by_permalink(&setup.server, &setup.project, &setup.permalink).await;
+
+        let over_limit = "x".repeat(crate::tools::memory_tools::reads::INVOCATION_ID_MAX_CHARS + 1);
+        for invalid in ["", "   ", over_limit.as_str()] {
+            let response = read_note(
+                &setup.server,
+                &setup.project,
+                &setup.permalink,
+                Some(invalid),
+            )
+            .await;
+            assert!(
+                response.error.is_some(),
+                "invocation_id {invalid:?} must be rejected"
+            );
+            assert!(
+                response.id.is_none(),
+                "a rejected request must not resolve a note"
+            );
+        }
+
+        // The boundary value itself is accepted, so the test above is a bound
+        // check and not a blanket rejection.
+        let at_limit = "y".repeat(crate::tools::memory_tools::reads::INVOCATION_ID_MAX_CHARS);
+        let accepted = read_note(
+            &setup.server,
+            &setup.project,
+            &setup.permalink,
+            Some(at_limit.as_str()),
+        )
+        .await;
+        assert!(accepted.error.is_none(), "{:?}", accepted.error);
+
+        let events = access_events_for(&setup.server, &setup.project, &before.id).await;
+        assert_eq!(
+            events.len(),
+            1,
+            "only the accepted request may appear in the ledger, got {events:?}"
+        );
+        assert_eq!(events[0].invocation_id.as_deref(), Some(at_limit.as_str()));
+
+        let after = note_by_permalink(&setup.server, &setup.project, &setup.permalink).await;
+        assert_eq!(
+            after.access_count,
+            before.access_count + 1,
+            "three rejected requests must have contributed nothing"
+        );
+    }
+
+    /// AC4: search-result display is an EXCLUDED path. ADR-054's persisted
+    /// touch is gone: appearing in a result set writes no ledger row, no
+    /// counter, and no timestamp.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn memory_search_result_display_leaves_the_ledger_and_access_fields_unchanged() {
+        let setup = setup_server().await;
+
+        let search = ops::memory_search(
+            &setup.server,
+            SearchParams {
+                project: setup.project.clone(),
+                query: "architecture".to_string(),
+                folder: None,
+                note_type: None,
+                limit: Some(10),
+                entity_types: None,
+                edge_kinds: None,
+            },
+            None,
+            &djinn_db::NoteAccessAttribution::unattributed(),
+        )
+        .await;
+        assert!(search.error.is_none(), "{:?}", search.error);
+        // Assert against the notes the search ACTUALLY returned. Keying off a
+        // note the ranker was merely expected to return would make this test
+        // pass vacuously the day the ranker changed.
+        assert!(
+            !search.results.is_empty(),
+            "the test is vacuous unless the search returned something"
+        );
+
+        let note_results: Vec<_> = search
+            .results
+            .iter()
+            .filter(|result| result.entity == "note")
+            .collect();
+        assert!(
+            !note_results.is_empty(),
+            "the test is vacuous unless the search returned at least one NOTE; got entities {:?}",
+            search
+                .results
+                .iter()
+                .map(|result| result.entity.as_str())
+                .collect::<Vec<_>>()
+        );
+        for result in note_results {
+            let note = note_by_permalink(&setup.server, &setup.project, &result.permalink).await;
+            assert!(
+                access_events_for(&setup.server, &setup.project, &note.id)
+                    .await
+                    .is_empty(),
+                "search-result display must not append a ledger row for {}",
+                result.permalink
+            );
+            assert_eq!(
+                note.access_count, 0,
+                "search-result display must not increment access_count for {}",
+                result.permalink
+            );
+            assert_eq!(
+                note.last_accessed, note.created_at,
+                "search-result display must not advance last_accessed for {}",
+                result.permalink
+            );
+        }
+    }
+
+    /// AC4: a not-found read is an excluded path too — no ledger row anywhere
+    /// in the project, and no counter or timestamp moves.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn memory_read_not_found_leaves_the_ledger_and_access_fields_unchanged() {
+        let setup = setup_server().await;
+        let before = note_by_permalink(&setup.server, &setup.project, &setup.permalink).await;
+
+        let response = read_note(
+            &setup.server,
+            &setup.project,
+            "xyzzynonexistentidentifier",
+            Some("not-found-read"),
+        )
+        .await;
+        assert!(response.error.is_some());
+
+        assert!(
+            access_events_for(&setup.server, &setup.project, &before.id)
+                .await
+                .is_empty()
+        );
+        let after = note_by_permalink(&setup.server, &setup.project, &setup.permalink).await;
+        assert_eq!(after.access_count, before.access_count);
+        assert_eq!(after.last_accessed, before.last_accessed);
+    }
+
+    /// AC3: the removed `CO_ACCESS_HIGH` mutation.
+    ///
+    /// Two notes are read in one session, one of them above the old
+    /// `HIGH_CONFIDENCE_THRESHOLD` (0.8) and one below it. That is exactly the
+    /// shape the deleted co-access flush acted on: it would have raised the
+    /// low-confidence note. The co-access batch is then flushed explicitly, and
+    /// EVERY involved note's confidence is re-read from the database.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn memory_read_with_a_related_high_confidence_note_changes_no_confidence() {
+        let setup = setup_server().await;
+        let project_id = project_id_for(&setup.server, &setup.project).await;
+        let repo = NoteRepository::new(
+            setup.server.state.db().clone(),
+            setup.server.state.event_bus(),
+        );
+
+        let high = repo
+            .create_db_note(&project_id, "Co Access High", "trusted body", "adr", "[]")
+            .await
+            .unwrap();
+        let low = repo
+            .create_db_note(&project_id, "Co Access Low", "unproven body", "case", "[]")
+            .await
+            .unwrap();
+        repo.set_confidence(&high.id, 0.95).await.unwrap();
+        repo.set_confidence(&low.id, 0.5).await.unwrap();
+        assert!(
+            repo.get_associations_for_note(&high.id)
+                .await
+                .unwrap()
+                .is_empty(),
+            "no association may exist before the flush, or the control below is vacuous"
+        );
+
+        let high_before = repo.get(&high.id).await.unwrap().unwrap().confidence;
+        let low_before = repo.get(&low.id).await.unwrap().unwrap().confidence;
+        assert!(
+            high_before > 0.8 && low_before <= 0.8,
+            "fixture must straddle the old co-access threshold: high={high_before}, low={low_before}"
+        );
+
+        for permalink in [&high.permalink, &low.permalink] {
+            let response = read_note(&setup.server, &setup.project, permalink, None).await;
+            assert!(response.error.is_none(), "{:?}", response.error);
+        }
+
+        // The co-access flush is where the confidence write used to happen.
+        setup.server.flush_co_access_batch().await;
+
+        assert_eq!(
+            repo.get(&high.id).await.unwrap().unwrap().confidence,
+            high_before,
+            "co-access must not change the high-confidence note"
+        );
+        assert_eq!(
+            repo.get(&low.id).await.unwrap().unwrap().confidence,
+            low_before,
+            "co-access must not raise the low-confidence note toward its partner"
+        );
+
+        // Control against a vacuous pass: the flush DID run and DID do its
+        // remaining job. The co-access edge did not exist before (asserted
+        // above) and exists now, so "no confidence changed" means the removed
+        // writer is gone — not that the flush silently no-opped.
+        let associations = repo.get_associations_for_note(&high.id).await.unwrap();
+        assert!(
+            associations
+                .iter()
+                .any(|association| association.note_a_id == low.id
+                    || association.note_b_id == low.id),
+            "the co-access flush must still persist the association edge"
         );
     }
 }
