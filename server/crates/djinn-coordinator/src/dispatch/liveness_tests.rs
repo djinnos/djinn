@@ -257,8 +257,9 @@ fn succeeded_pod_unknown_exit_still_clean_violation() {
 }
 
 #[test]
-fn terminal_session_with_exited_pod_is_not_protocol_violation() {
-    // If the session is already terminal, the pod exit is expected
+fn terminal_session_with_absent_required_handoff_is_protocol_violation() {
+    // Terminal session truth is not an exoneration: a completed exit whose
+    // Required handoff is still absent is positive inconsistency.
     let mut ev = live_evidence();
     ev.pod_phase = Some(PodPhase::Succeeded);
     ev.exit_code = Some(0);
@@ -266,7 +267,7 @@ fn terminal_session_with_exited_pod_is_not_protocol_violation() {
     ev.activity = ActivitySignal::Active;
 
     let result = classify(&ev);
-    assert_ne!(result.verdict, Verdict::ProtocolViolation);
+    assert_eq!(result.verdict, Verdict::ProtocolViolation);
 }
 
 /// Terminal session truth is evidence, not an exoneration. The durable
@@ -327,8 +328,8 @@ fn terminal_session_handoff_and_missing_evidence_fail_closed() {
     assert_ne!(classify(&ev).verdict, Verdict::ProtocolViolation);
 }
 
-/// Terminal persisted status only exonerates the structural-exit rung. It must
-/// not bypass the higher-priority hard runtime cap.
+/// A required handoff failure does not bypass the higher-priority hard runtime
+/// cap.
 #[test]
 fn hard_runtime_precedes_terminal_session_structural_exoneration() {
     let mut ev = live_evidence();
@@ -358,16 +359,16 @@ fn absent_pod_with_no_activity_is_dead() {
 }
 
 #[test]
-fn failed_pod_with_terminal_session_and_no_activity_is_dead() {
+fn failed_pod_with_terminal_session_and_absent_handoff_is_protocol_violation() {
     let mut ev = live_evidence();
     ev.pod_phase = Some(PodPhase::Failed);
     ev.exit_code = Some(1);
     ev.activity = ActivitySignal::Idle;
-    // Session already terminated — pod exit is expected, not a violation
+    // Persisted termination does not excuse an absent Required handoff.
     ev.db_session_status = Some(DbSessionStatus::Failed);
 
     let result = classify(&ev);
-    assert_eq!(result.verdict, Verdict::Dead);
+    assert_eq!(result.verdict, Verdict::ProtocolViolation);
     assert_eq!(result.outcome, Some(LivenessOutcome::Crash));
     assert_eq!(result.reason, Some(LivenessReason::NonzeroExitNonterminal));
 }

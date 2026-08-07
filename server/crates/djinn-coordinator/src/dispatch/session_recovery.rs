@@ -3167,8 +3167,8 @@ impl CoordinatorActor {
         // non-terminal forever and the respawn guard defers every future
         // dispatch of this (task, role) pair — a permanent wedge.
         //
-        // Outcome selection distinguishes an ENVIRONMENTAL interruption from a
-        // genuine failure:
+        // Outcome selection distinguishes an environmental interruption from a
+        // required-handoff failure:
         //
         //  - `interrupted`  → the pod was killed by infrastructure (a coordinator
         //    deploy/rollout, a k8s pod eviction/deletion, or a startup reap of a
@@ -3177,8 +3177,10 @@ impl CoordinatorActor {
         //    nothing wedges, but contribute NO quality strike, NO dispatch-failure
         //    streak, and NO reopen_class penalty (the dispatch reappearance path
         //    treats a latest `Interrupted` attempt as environmental).
-        //  - `failed`       → a genuine application/provider crash. Stays a
-        //    failure (`Crashed`), which the reappearance path still counts.
+        //  - `failed` / a required-handoff failure → a genuine protocol failure.
+        //    Both stay `Crashed`, which the reappearance path still counts. An
+        //    interrupted session is environmental only when the durable evidence
+        //    did not establish that it abandoned its Required handoff.
         //
         // This terminalizer only fires when the attempt is STILL pending/submitted
         // (`advance_latest_to_terminal` no-ops on an already-terminal row). Every
@@ -3208,7 +3210,9 @@ impl CoordinatorActor {
                      mid-flight stream death) while task nonterminal — environmental \
                      non-attempt, retry when the provider recovers",
                     )
-                } else if persisted_session_status == DbSessionStatus::Interrupted {
+                } else if persisted_session_status == DbSessionStatus::Interrupted
+                    && result.verdict != Verdict::ProtocolViolation
+                {
                     (
                         TaskAttemptOutcome::Interrupted,
                         "environmental_interrupt",

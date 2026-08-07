@@ -8405,8 +8405,8 @@ async fn expired_owner_group_reap_redispatches_after_reaping_each_eligible_group
 }
 
 /// Repository-backed counterpart to the pure status matrix: the exit adapter
-/// must read terminal truth from each addressed session row for every task
-/// status, append evidence, and never manufacture a protocol violation.
+/// reads terminal truth from each addressed session row. An absent Required
+/// handoff is one violation; a recorded handoff and settled task states are not.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn terminal_persisted_exit_rows_cover_every_task_status() {
     use djinn_core::models::SessionStatus;
@@ -8424,20 +8424,28 @@ async fn terminal_persisted_exit_rows_cover_every_task_status() {
         (SessionStatus::Failed, "failed"),
         (SessionStatus::Interrupted, "interrupted"),
     ] {
-        for task_status in [
-            "open",
-            "in_progress",
-            "needs_task_review",
-            "in_task_review",
-            "approved",
-            "pr_draft",
-            "pr_review",
-            "needs_lead_intervention",
-            "in_lead_intervention",
-            "closed",
+        for (task_status, confirmed_handoff) in [
+            ("open", false),
+            ("in_progress", false),
+            ("open", true),
+            ("needs_task_review", false),
+            ("in_task_review", false),
+            ("approved", false),
+            ("pr_draft", false),
+            ("pr_review", false),
+            ("needs_lead_intervention", false),
+            ("in_lead_intervention", false),
+            ("closed", false),
         ] {
-            let (task, _) =
-                create_task_with_note(&db, &tx, &format!("persisted-{event}-{task_status}")).await;
+            let (task, _) = create_task_with_note(
+                &db,
+                &tx,
+                &format!("persisted-{event}-{task_status}-{confirmed_handoff}"),
+            )
+            .await;
+            if confirmed_handoff {
+                tasks.set_status(&task.id, "in_progress").await.unwrap();
+            }
             tasks.set_status(&task.id, task_status).await.unwrap();
             let session = sessions
                 .create(CreateSessionParams {
@@ -8498,10 +8506,23 @@ async fn terminal_persisted_exit_rows_cover_every_task_status() {
                 .classify_session_exit_liveness(&session.id, &task.id, None, event, "worker")
                 .await
                 .expect("persisted terminal row must classify");
-            assert_ne!(
-                result.verdict,
-                crate::dispatch::liveness::Verdict::ProtocolViolation,
-                "persisted {event} with task {task_status}"
+            let required_handoff_absent =
+                matches!(task_status, "open" | "in_progress") && !confirmed_handoff;
+            assert_eq!(
+                result.verdict == crate::dispatch::liveness::Verdict::ProtocolViolation,
+                required_handoff_absent,
+                "persisted {event} with task {task_status}, confirmed_handoff={confirmed_handoff}"
+            );
+            assert_eq!(
+                result.evidence.db_session_status,
+                Some(match persisted {
+                    SessionStatus::Completed =>
+                        crate::dispatch::liveness::DbSessionStatus::Completed,
+                    SessionStatus::Failed => crate::dispatch::liveness::DbSessionStatus::Failed,
+                    SessionStatus::Interrupted =>
+                        crate::dispatch::liveness::DbSessionStatus::Interrupted,
+                    _ => unreachable!("matrix contains only terminal statuses"),
+                })
             );
             if task_status == "closed" {
                 assert_eq!(
@@ -8509,11 +8530,11 @@ async fn terminal_persisted_exit_rows_cover_every_task_status() {
                     Some(crate::dispatch::liveness::LivenessOutcome::KillNoop)
                 );
             }
-            let expected_outcome = match (event, task_status == "closed") {
-                ("failed", false) => "crashed",
-                ("interrupted", false) => "interrupted",
-                ("completed", false) if task_status == "needs_task_review" => "crashed",
-                ("completed", false) if task_status == "in_progress" => "submitted",
+            let expected_outcome = match (event, task_status == "closed", required_handoff_absent) {
+                ("failed", false, _) | ("interrupted", false, true) => "crashed",
+                ("interrupted", false, false) => "interrupted",
+                ("completed", false, _) if task_status == "needs_task_review" => "crashed",
+                ("completed", false, _) if task_status == "in_progress" => "submitted",
                 _ => "pending",
             };
             let after = attempts.get(&attempt_id).await.unwrap().unwrap();
@@ -8531,9 +8552,9 @@ async fn terminal_persisted_exit_rows_cover_every_task_status() {
                 .classify_session_exit_liveness(&session.id, &task.id, None, event, "worker")
                 .await
                 .expect("repeated persisted terminal classification must succeed");
-            assert_ne!(
-                repeated.verdict,
-                crate::dispatch::liveness::Verdict::ProtocolViolation
+            assert_eq!(
+                repeated.verdict, result.verdict,
+                "replay returns the immutable classification for this session exit"
             );
             let after_repeat = attempts.get(&attempt_id).await.unwrap().unwrap();
             assert_eq!(after_repeat.outcome, after.outcome);
@@ -8612,7 +8633,7 @@ async fn mismatched_exit_event_uses_persisted_status_and_persists_evidence() {
         .classify_session_exit_liveness(&session.id, &task.id, None, "failed", "worker")
         .await
         .expect("mismatch must classify");
-    assert_ne!(
+    assert_eq!(
         result.verdict,
         crate::dispatch::liveness::Verdict::ProtocolViolation
     );
@@ -8622,9 +8643,9 @@ async fn mismatched_exit_event_uses_persisted_status_and_persists_evidence() {
     );
     assert_eq!(
         result.evidence.pod_phase,
-        Some(crate::dispatch::liveness::PodPhase::Failed)
+        Some(crate::dispatch::liveness::PodPhase::Succeeded)
     );
-    assert_eq!(result.evidence.exit_code, Some(1));
+    assert_eq!(result.evidence.exit_code, Some(0));
     let after = attempts.get(&attempt_id).await.unwrap().unwrap();
     assert_eq!(
         serde_json::to_value(&after).unwrap(),
