@@ -522,7 +522,7 @@ async fn load_knowledge_context_returns_none_when_no_notes() {
         create_project_epic_task(&db, &events, "Knowledge test epic", "Knowledge task").await;
     let app_state = agent_context_from_db(db, CancellationToken::new());
     assert!(
-        load_knowledge_context(&task, None, &app_state)
+        load_knowledge_context(&task, None, &app_state, None)
             .await
             .is_none()
     );
@@ -2177,7 +2177,7 @@ async fn planner_dedupe_ignores_below_threshold_trace_only_note_and_preserves_te
         .create(
             &task.project_id,
             "Trace-only scope title",
-            "below-threshold scope body",
+            &related_content(&task, "below-threshold scope body"),
             "pattern",
             "[]",
         )
@@ -2354,7 +2354,7 @@ async fn planner_production_boundary_scope_budget_runs_planner_without_injection
             .create(
                 &task.project_id,
                 &format!("Scope budget note {index:02}"),
-                &"scope ".repeat(40),
+                &related_content(&task, &"scope ".repeat(40)),
                 "pattern",
                 "[]",
             )
@@ -2453,7 +2453,7 @@ async fn scope_prompt_packing_non_default_budget_differs_from_default_budget() {
             .create(
                 &task.project_id,
                 &format!("Budget discriminating scope note {index:02}"),
-                &format!("scope-note-{index:02} {}", "x".repeat(700)),
+                &related_content(&task, &format!("scope-note-{index:02} {}", "x".repeat(700))),
                 "pattern",
                 "[]",
             )
@@ -2673,7 +2673,7 @@ async fn planner_production_boundary_scope_first_dedup_caps_and_order_are_determ
         .create(
             &task.project_id,
             "Scope first",
-            "scope body",
+            &related_content(&task, "scope body"),
             "pattern",
             "[]",
         )
@@ -2855,7 +2855,7 @@ async fn assembly_rollout_default_enabled_and_cohort_persist_effective_labels() 
         .create(
             &task.project_id,
             "Assembly knowledge",
-            "content",
+            &related_content(&task, "assembly knowledge body"),
             "pattern",
             "[]",
         )

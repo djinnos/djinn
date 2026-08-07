@@ -272,22 +272,33 @@ async fn checked_in_replays_enter_the_production_assemble_prompt_context_boundar
         task.created_by_user_id = "replay-creator".into();
 
         let note_repo = NoteRepository::new(db.clone(), events);
+        // Proposal 5205: injection now ranks by relevance, so the seeded note
+        // must be *about the task* to be retrieved at all. Its body therefore
+        // echoes the task text, while its `abstract` is pinned to the original
+        // "scope baseline" string. `l0_summary` prefers the abstract over the
+        // content, so the rendered line — and therefore every checked-in
+        // `expected_context` in the corpus — is byte-for-byte unchanged.
         let scope = note_repo
             .create(
                 &task.project_id,
                 "Scope Only",
-                "scope baseline",
+                &crate::actors::slot::lifecycle::prompt_context::related_content(
+                    &task,
+                    "scope baseline",
+                ),
                 "pattern",
                 "[]",
             )
             .await
             .expect("seed scope note");
-        if case.full_scope_budget {
-            note_repo
-                .update_summaries(&scope.id, None, Some(&"x".repeat(1_900)))
-                .await
-                .expect("seed near-full scope overview");
-        }
+        note_repo
+            .update_summaries(
+                &scope.id,
+                Some("scope baseline"),
+                case.full_scope_budget.then(|| "x".repeat(1_900)).as_deref(),
+            )
+            .await
+            .expect("pin scope abstract and optional near-full overview");
         note_repo
             .set_confidence(&scope.id, 0.95)
             .await

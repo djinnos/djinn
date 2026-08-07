@@ -36,7 +36,7 @@ async fn set_note_confidence(db: &djinn_db::Database, note_id: &str, confidence:
 /// of a retyped slug literal.
 async fn seed_scoped_note(
     db: &djinn_db::Database,
-    project_id: &str,
+    task: &Task,
     title: &str,
     scope_paths: &str,
     confidence: f64,
@@ -44,9 +44,9 @@ async fn seed_scoped_note(
     let note_repo = NoteRepository::new(db.clone(), EventBus::noop());
     let note = note_repo
         .create_with_scope(
-            project_id,
+            &task.project_id,
             title,
-            "content body",
+            &related_content(task, "content body"),
             "pattern",
             None,
             "[]",
@@ -118,24 +118,25 @@ async fn load_knowledge_context_prompt_output_unchanged_with_tracing() {
     let task = create_project_epic_task(&db, &events, "Trace epic", "Trace task").await;
     let project_id = task.project_id.clone();
 
-    // Seed a matching note with high confidence.
-    seed_scoped_note(&db, &project_id, "High Note", r#"["server/src"]"#, 0.9).await;
-
     let app_state = agent_context_from_db(db.clone(), CancellationToken::new());
 
-    // The task description is "description" which won't derive scope paths.
-    // To get a match we need the note to be global OR the task to have
-    // matching paths. We'll use a global note (empty scope_paths) to ensure
-    // the production query finds it.
+    // Under ranked retrieval a note must be *about the task* to be retrieved,
+    // so this one carries the task's own text. (The retired scope-overlap query
+    // returned every global note regardless of content.)
     let note_repo = NoteRepository::new(db.clone(), EventBus::noop());
     let global = note_repo
-        .create(&project_id, "Global Pattern", "content", "pattern", "[]")
+        .create(
+            &project_id,
+            "Global Pattern",
+            &related_content(&task, "global pattern body"),
+            "pattern",
+            "[]",
+        )
         .await
         .unwrap();
     set_note_confidence(&db, &global.id, 0.9).await;
 
-    // Build a task that has no specific scope paths so global notes match.
-    let result = load_knowledge_context(&task, None, &app_state).await;
+    let result = load_knowledge_context(&task, None, &app_state, None).await;
 
     // Verify the prompt is produced and contains the note.
     assert!(result.is_some(), "knowledge context should be Some");
@@ -156,7 +157,102 @@ async fn load_knowledge_context_prompt_output_unchanged_with_tracing() {
 
     // Verify the trigger shape.
     let trigger = trace.trigger.expect("trigger should be present");
-    assert_eq!(trigger["shape"], "scope_paths");
+    assert_eq!(trigger["shape"], "ranked_injection_v1");
+}
+
+/// AC2: candidates come **only** from the ranked RRF search.
+///
+/// The retired `query_by_scope_overlap` returned every global note above the
+/// confidence floor regardless of whether it had anything to do with the task —
+/// that is precisely the recency lottery proposal `5205` removes. This test
+/// pins the side effect: an unrelated global note is no longer injected, and is
+/// absent from the candidate universe entirely, while a related one is
+/// injected. It is also verified against the retired query directly, so the
+/// test cannot pass by the note simply not existing.
+#[tokio::test]
+async fn unrelated_global_note_is_no_longer_a_candidate() {
+    let mut env = knowledge_context_test_env_guard();
+    env.clear();
+    let db = djinn_db::Database::ephemeral().await.expect("ephemeral db");
+    let events = EventBus::noop();
+    let task = create_project_epic_task(&db, &events, "Relevance epic", "Relevance task").await;
+    let project_id = task.project_id.clone();
+    let note_repo = NoteRepository::new(db.clone(), EventBus::noop());
+
+    let related = note_repo
+        .create(
+            &project_id,
+            "Related Pattern",
+            &related_content(&task, "related body"),
+            "pattern",
+            "[]",
+        )
+        .await
+        .unwrap();
+    set_note_confidence(&db, &related.id, 0.9).await;
+
+    // Shares no term with the task and carries no scope path.
+    let unrelated = note_repo
+        .create(
+            &project_id,
+            "Quokka Ledger Reconciliation",
+            "quokka ledger reconciliation body",
+            "pattern",
+            "[]",
+        )
+        .await
+        .unwrap();
+    set_note_confidence(&db, &unrelated.id, 0.99).await;
+
+    // Control: the retired query *would* have returned the unrelated note — and
+    // ahead of the related one, since it orders by `confidence DESC`. Without
+    // this the negative assertion below could pass vacuously.
+    let legacy = note_repo
+        .query_by_scope_overlap(
+            &project_id,
+            &derive_task_scope_path_tokens(&task, None),
+            KNOWLEDGE_NOTE_TYPES,
+            KNOWLEDGE_MIN_CONFIDENCE,
+            10,
+        )
+        .await
+        .expect("legacy query");
+    assert_eq!(
+        legacy.first().map(|note| note.id.as_str()),
+        Some(unrelated.id.as_str()),
+        "the retired query ranked the unrelated note first, by confidence"
+    );
+
+    let app_state = agent_context_from_db(db.clone(), CancellationToken::new());
+    let rendered = load_knowledge_context(&task, None, &app_state, None)
+        .await
+        .expect("the related note is injected");
+
+    assert!(
+        rendered.contains(&related.permalink),
+        "the task-relevant note must be injected"
+    );
+    assert!(
+        !rendered.contains(&unrelated.permalink),
+        "an unrelated global note must no longer reach the prompt"
+    );
+
+    let trace = latest_trace(&db, &project_id)
+        .await
+        .expect("trace should exist");
+    let candidate_ids: Vec<String> = trace
+        .candidates_typed()
+        .into_iter()
+        .map(|candidate| candidate.note_id)
+        .collect();
+    assert!(
+        candidate_ids.contains(&related.id),
+        "the related note is a candidate"
+    );
+    assert!(
+        !candidate_ids.contains(&unrelated.id),
+        "the unrelated note must not even enter the candidate universe"
+    );
 }
 
 #[tokio::test]
@@ -168,7 +264,7 @@ async fn load_knowledge_context_returns_none_when_no_matching_notes() {
     let task = create_project_epic_task(&db, &events, "Empty epic", "Empty task").await;
 
     let app_state = agent_context_from_db(db.clone(), CancellationToken::new());
-    let result = load_knowledge_context(&task, None, &app_state).await;
+    let result = load_knowledge_context(&task, None, &app_state, None).await;
     assert!(result.is_none(), "should return None when no notes match");
 }
 
@@ -183,16 +279,24 @@ async fn trace_classifies_below_threshold_as_min_confidence() {
     let task = create_project_epic_task(&db, &events, "MinCnf epic", "MinCnf task").await;
     let project_id = task.project_id.clone();
 
-    // Seed a global note below the 0.3 threshold.
+    // A note below the 0.3 threshold. Retrieval has no confidence filter — the
+    // floor is applied by packing — so it still reaches the trace, where it
+    // must be dispositioned `min_confidence`.
     let note_repo = NoteRepository::new(db.clone(), EventBus::noop());
     let below = note_repo
-        .create(&project_id, "Below Threshold", "content", "pattern", "[]")
+        .create(
+            &project_id,
+            "Below Threshold",
+            &related_content(&task, "below threshold body"),
+            "pattern",
+            "[]",
+        )
         .await
         .unwrap();
     set_note_confidence(&db, &below.id, 0.1).await;
 
     let app_state = agent_context_from_db(db.clone(), CancellationToken::new());
-    let _ = load_knowledge_context(&task, None, &app_state).await;
+    let _ = load_knowledge_context(&task, None, &app_state, None).await;
 
     let trace = latest_trace(&db, &project_id)
         .await
@@ -225,18 +329,20 @@ async fn trace_classifies_over_limit_as_not_top_k() {
             .create(
                 &project_id,
                 &format!("Pattern {i}"),
-                "content",
+                &related_content(&task, &format!("pattern body {i}")),
                 "pattern",
                 "[]",
             )
             .await
             .unwrap();
-        // All above 0.3 threshold; slightly different confidence for deterministic ordering.
+        // All above the 0.3 threshold. Which two land outside top-K is now
+        // decided by relevance ranking rather than confidence order, so this
+        // test asserts the counts, not the identities.
         set_note_confidence(&db, &note.id, 0.5 + (11 - i) as f64 * 0.01).await;
     }
 
     let app_state = agent_context_from_db(db.clone(), CancellationToken::new());
-    let _ = load_knowledge_context(&task, None, &app_state).await;
+    let _ = load_knowledge_context(&task, None, &app_state, None).await;
 
     let trace = latest_trace(&db, &project_id)
         .await
@@ -272,7 +378,7 @@ async fn trace_classifies_injected_and_budget_pruned() {
     let note_repo = NoteRepository::new(db.clone(), EventBus::noop());
     let mut note_ids = Vec::new();
     for i in 0..10 {
-        let long_content = "x".repeat(800);
+        let long_content = related_content(&task, &"x".repeat(800));
         let note = note_repo
             .create(
                 &project_id,
@@ -289,7 +395,7 @@ async fn trace_classifies_injected_and_budget_pruned() {
     }
 
     let app_state = agent_context_from_db(db.clone(), CancellationToken::new());
-    let _ = load_knowledge_context(&task, None, &app_state).await;
+    let _ = load_knowledge_context(&task, None, &app_state, None).await;
 
     let trace = latest_trace(&db, &project_id)
         .await
@@ -326,13 +432,19 @@ async fn trace_includes_estimated_injected_tokens_and_cap_metadata() {
 
     let note_repo = NoteRepository::new(db.clone(), EventBus::noop());
     let note = note_repo
-        .create(&project_id, "Token Pattern", "content", "pattern", "[]")
+        .create(
+            &project_id,
+            "Token Pattern",
+            &related_content(&task, "token pattern body"),
+            "pattern",
+            "[]",
+        )
         .await
         .unwrap();
     set_note_confidence(&db, &note.id, 0.9).await;
 
     let app_state = agent_context_from_db(db.clone(), CancellationToken::new());
-    let _ = load_knowledge_context(&task, None, &app_state).await;
+    let _ = load_knowledge_context(&task, None, &app_state, None).await;
 
     let trace = latest_trace(&db, &project_id)
         .await
@@ -383,7 +495,13 @@ async fn trace_persistence_failure_does_not_change_prompt_output() {
 
     let note_repo = NoteRepository::new(db.clone(), EventBus::noop());
     let note = note_repo
-        .create(&project_id, "Fail Pattern", "content", "pattern", "[]")
+        .create(
+            &project_id,
+            "Fail Pattern",
+            &related_content(&task, "fail pattern body"),
+            "pattern",
+            "[]",
+        )
         .await
         .unwrap();
     set_note_confidence(&db, &note.id, 0.9).await;
@@ -395,7 +513,7 @@ async fn trace_persistence_failure_does_not_change_prompt_output() {
     // fails. The same code path produces the same packed string from the same
     // production note set, so a byte-for-byte comparison is the right regression
     // guard against accidental injection of extra trace-related text.
-    let expected = load_knowledge_context(&task, None, &app_state)
+    let expected = load_knowledge_context(&task, None, &app_state, None)
         .await
         .expect("baseline prompt should be produced");
 
@@ -403,7 +521,7 @@ async fn trace_persistence_failure_does_not_change_prompt_output() {
     // The prompt output should still be byte-identical to the baseline.
     djinn_db::test_support::drop_table_for_test(&db, "retrieval_traces").await;
 
-    let result = load_knowledge_context(&task, None, &app_state).await;
+    let result = load_knowledge_context(&task, None, &app_state, None).await;
 
     // Prompt should still be produced correctly despite trace persistence failure.
     assert!(result.is_some(), "prompt should still be produced");
@@ -416,8 +534,11 @@ async fn trace_persistence_failure_does_not_change_prompt_output() {
     assert!(prompt.contains(&note.permalink));
 }
 
+/// AC10: retrieval traces expose the strategy, the ranking profile, the
+/// validated scope (or its typed fallback reason), the per-signal ranks, the
+/// fused rank/score, and exactly one terminal disposition per candidate.
 #[tokio::test]
-async fn trace_trigger_uses_scope_paths_shape() {
+async fn trace_exposes_strategy_profile_scope_and_per_signal_ranks() {
     let mut env = knowledge_context_test_env_guard();
     env.clear();
     let db = djinn_db::Database::ephemeral().await.expect("ephemeral db");
@@ -427,24 +548,103 @@ async fn trace_trigger_uses_scope_paths_shape() {
 
     let note_repo = NoteRepository::new(db.clone(), EventBus::noop());
     let note = note_repo
-        .create(&project_id, "Shape Pattern", "content", "pattern", "[]")
+        .create(
+            &project_id,
+            "Shape Pattern",
+            &related_content(&task, "shape pattern body"),
+            "pattern",
+            "[]",
+        )
         .await
         .unwrap();
     set_note_confidence(&db, &note.id, 0.9).await;
 
     let app_state = agent_context_from_db(db.clone(), CancellationToken::new());
-    let _ = load_knowledge_context(&task, None, &app_state).await;
+    let _ = load_knowledge_context(&task, None, &app_state, None).await;
 
     let trace = latest_trace(&db, &project_id)
         .await
         .expect("trace should exist");
-
-    // Verify entry point string is exactly "load_knowledge_context".
     assert_eq!(trace.entry_point, "load_knowledge_context");
 
-    // Verify trigger shape.
-    let trigger = trace.trigger.expect("trigger present");
-    assert_eq!(trigger["shape"], "scope_paths");
+    let trigger = trace.trigger.clone().expect("trigger present");
+    assert_eq!(trigger["shape"], "ranked_injection_v1");
+    assert_eq!(trigger["strategy"], "ranked_injection_v1");
+    assert_eq!(trigger["ranking_profile"], "knowledge_injection_v1");
+    assert_eq!(trigger["candidate_window"], 50);
+    // top_k defaults to 10, so rrf_k = clamp(20 + 2*10, 30, 60) = 40.
+    assert_eq!(trigger["rrf_k"], 40.0);
+    // No base tree was supplied, so scope derivation reports the typed reason
+    // rather than silently returning unvalidated regex tokens.
+    assert_eq!(
+        trigger["scope_fallback_reason"], "tree_provider_unavailable",
+        "provider unavailability must be distinguishable from an empty match"
+    );
+    assert_eq!(
+        trigger["task_paths"],
+        serde_json::json!([]),
+        "an unavailable provider yields no scope paths at all"
+    );
+    assert!(
+        trigger["search_error"].is_null(),
+        "a successful retrieval records no search_error"
+    );
+
+    // Per-candidate provenance: the fused rank/score and every signal's rank.
+    let candidates = trace.candidates_typed();
+    assert!(!candidates.is_empty(), "the seeded note must be retrieved");
+    let seeded = candidates
+        .iter()
+        .find(|candidate| candidate.note_id == note.id)
+        .expect("seeded note present in trace");
+    assert_eq!(seeded.rank, Some(1), "fused rank is 1-based");
+    let scope = seeded.scope.as_ref().expect("scope payload present");
+    assert_eq!(scope["ranking_profile"], "knowledge_injection_v1");
+    assert_eq!(scope["fused_rank"], 1);
+    assert!(
+        scope["fused_score"]
+            .as_f64()
+            .is_some_and(|score| score > 0.0),
+        "fused score must be recorded, got {scope}"
+    );
+    let signal_ranks = &scope["signal_ranks"];
+    assert!(
+        signal_ranks.is_object(),
+        "per-signal ranks must be recorded, got {scope}"
+    );
+    for signal in [
+        "lexical",
+        "semantic",
+        "temporal",
+        "graph",
+        "task_affinity",
+        "scope",
+    ] {
+        assert!(
+            signal_ranks.get(signal).is_some(),
+            "signal `{signal}` missing from {signal_ranks}"
+        );
+    }
+    assert_eq!(
+        signal_ranks["lexical"], 1,
+        "the note was found by the lexical signal"
+    );
+    assert!(
+        signal_ranks["scope"].is_null(),
+        "no validated scope path, so the note is not in the scope signal"
+    );
+
+    // Exactly one terminal disposition per candidate.
+    let dispositions = trace.confidence_filtered_count.unwrap_or(0)
+        + trace.not_top_k_count.unwrap_or(0)
+        + trace.oversized_skipped_count.unwrap_or(0)
+        + trace.injected_count.unwrap_or(0)
+        + trace.budget_pruned_count.unwrap_or(0);
+    assert_eq!(
+        dispositions,
+        trace.candidate_count.unwrap_or(0),
+        "the disposition histogram must partition the candidate set"
+    );
 }
 
 // ── Pure classification unit tests (no database required) ────────────────────
@@ -773,17 +973,20 @@ fn classify_candidates_for_error_marks_all_search_error() {
     }
 }
 
-// ── Fail-open: trace-candidate search failure ──────────────────────────────
+// ── Ranked-search failure records `search_error` and injects nothing ────────
 //
-// When `query_by_scope_overlap_trace_candidates` fails but the production
-// query succeeds, `load_knowledge_context` must still return the rendered
-// prompt. We simulate the failure by NULLing a note's `confidence` column:
-// the production query filters on `confidence >= 0.3` so NULLs are excluded,
-// but the trace-candidate query selects `confidence` directly into a
-// non-nullable `f64` field, causing `sqlx::FromRow` to fail.
+// Proposal 5205 removed the separate trace-candidate query: one ranked search
+// now produces both the prompt input and the trace universe. There is
+// therefore no longer a "trace query failed but production succeeded" state to
+// test. What replaces it is AC10's contract: a ranked-search failure injects no
+// knowledge, records `search_error`, and does not prevent prompt construction.
+//
+// A NULL `confidence` column is still the cheapest way to break the query —
+// the ranked path hydrates candidates into a non-nullable `f64`, so
+// `sqlx::FromRow` fails.
 
 #[tokio::test]
-async fn trace_candidate_search_failure_does_not_change_prompt_output() {
+async fn ranked_search_failure_records_search_error_and_injects_nothing() {
     let mut env = knowledge_context_test_env_guard();
     env.clear();
     let db = djinn_db::Database::ephemeral().await.expect("ephemeral db");
@@ -792,111 +995,88 @@ async fn trace_candidate_search_failure_does_not_change_prompt_output() {
         create_project_epic_task(&db, &events, "TC search fail epic", "TC search fail task").await;
     let project_id = task.project_id.clone();
 
-    // Seed two notes with high confidence. Both will appear in both queries.
-    let note_a = seed_scoped_note(&db, &project_id, "TC fail A", "[]", 0.85).await;
-    let note_b = seed_scoped_note(&db, &project_id, "TC fail B", "[]", 0.75).await;
-
-    // NULL note A's confidence. The production query (`confidence >= 0.3`)
-    // excludes NULL rows, so it will only return note B. The trace-candidate
-    // query has no confidence filter and includes the NULL row, causing
-    // `query_as` to fail when mapping NULL → f64.
+    let note_a = seed_scoped_note(&db, &task, "TC fail A", "[]", 0.85).await;
+    seed_scoped_note(&db, &task, "TC fail B", "[]", 0.75).await;
     djinn_db::test_support::nullify_note_confidence_for_test(&db, &note_a.id).await;
 
     let app_state = agent_context_from_db(db.clone(), CancellationToken::new());
 
-    // Fail-open: the trace-candidate search failure must not change the
-    // returned knowledge context. The production query still succeeds and
-    // returns note B.
-    let result = load_knowledge_context(&task, None, &app_state).await;
-    assert!(result.is_some(), "prompt should still be produced");
-    let prompt = result.unwrap();
-    // R1: identify each note by its permalink — the title is no longer
-    // rendered. The two permalinks stay distinct (`.../tc-fail-a` vs
-    // `.../tc-fail-b`), so the negative assertion still discriminates.
+    // Nothing is injected — and, critically, no stale unranked fallback is
+    // substituted.
+    let result = load_knowledge_context(&task, None, &app_state, None).await;
     assert!(
-        prompt.contains(&note_b.permalink),
-        "non-NULL-confidence note should appear in rendered prompt"
+        result.is_none(),
+        "a ranked-search failure must inject no knowledge, not fall back"
     );
-    assert!(
-        !prompt.contains(&note_a.permalink),
-        "NULL-confidence note excluded from production results"
-    );
+
     let trace = latest_trace(&db, &project_id).await.expect("error trace");
     assert_exceptional_terminal(&trace, RetrievalTraceOutcome::Error);
     assert!(trace.candidates_typed().is_empty());
+
+    // The trace must say *why*, and must be distinguishable from a legitimate
+    // zero-result retrieval.
+    let trigger = trace.trigger.expect("trigger present");
+    assert!(
+        trigger["search_error"].is_string(),
+        "the trace must record search_error, got {trigger}"
+    );
+    assert_eq!(trigger["strategy"], "ranked_injection_v1");
 }
 
-// ── Fail-open: production search error returns None and persists error trace ──
-//
-// When the production query itself fails, `load_knowledge_context` returns
-// `None` (preserving the original behavior) while still attempting to
-// persist a trace row with `search_error` outcomes from the trace-candidate
-// universe. We simulate the production failure by renaming the `confidence`
-// column after seeding — both production and trace-candidate queries reference
-// that column and will fail, so the function returns None. The key contract:
-// no panic, no error propagation — just None and a debug log.
-
+/// The same failure must not stop the *rest* of the prompt from being built.
+///
+/// `assemble_prompt_context` composes knowledge with several other sections; a
+/// retrieval failure may only blank the knowledge block.
 #[tokio::test]
-async fn production_search_error_returns_none_fail_open() {
+async fn ranked_search_failure_still_allows_prompt_construction() {
     let mut env = knowledge_context_test_env_guard();
     env.clear();
     let db = djinn_db::Database::ephemeral().await.expect("ephemeral db");
     let events = EventBus::noop();
     let task = create_project_epic_task(&db, &events, "Prod fail epic", "Prod fail task").await;
-    let project_id = task.project_id.clone();
 
-    // Seed a note so we have a known-good state before breaking the schema.
-    seed_scoped_note(&db, &project_id, "Prod fail note", "[]", 0.9).await;
-
-    // Rename the confidence column to force production and trace-candidate
-    // queries to fail without dropping the dependency-heavy notes table. Both
-    // queries reference notes.confidence.
-    djinn_db::test_support::rename_note_confidence_column_for_test(&db).await;
+    let note = seed_scoped_note(&db, &task, "Prod fail note", "[]", 0.9).await;
+    djinn_db::test_support::nullify_note_confidence_for_test(&db, &note.id).await;
 
     let app_state = agent_context_from_db(db.clone(), CancellationToken::new());
 
-    // Fail-open: the production search error must not panic or propagate.
-    // The function returns None (the original pre-instrumentation behavior
-    // for search errors), even though the trace-candidate query also fails.
-    let result = load_knowledge_context(&task, None, &app_state).await;
-    assert!(
-        result.is_none(),
-        "production search error must return None (fail-open)"
-    );
-    let trace = latest_trace(&db, &project_id).await.expect("error trace");
-    assert_exceptional_terminal(&trace, RetrievalTraceOutcome::Error);
-    assert!(trace.candidates_typed().is_empty());
+    // The call returns rather than panicking or propagating, and yields None.
+    let knowledge = load_knowledge_context(&task, None, &app_state, None).await;
+    assert!(knowledge.is_none());
+
+    // A second call is equally non-fatal — the failure is not sticky.
+    let again = load_knowledge_context(&task, None, &app_state, None).await;
+    assert!(again.is_none());
 }
 
-// ── Rendered output unchanged by trace instrumentation ─────────────────────
+// ── One ranked list, packed exactly once ───────────────────────────────────
 //
-// The knowledge-context rendered by `load_knowledge_context` (which includes
-// trace instrumentation) must produce byte-identical text to
-// `pack_knowledge_notes` for the same production note set. This pins AC:
-// "Tests or helper assertions prove rendered knowledge context [...] output
-// are unchanged by trace instrumentation."
+// AC6: exactly one at-most-50-item ordered list reaches
+// `pack_ranked_knowledge_notes`, and the confidence floor, top-k, and byte
+// budget are applied once over it. This test reproduces the production
+// composition independently — the same ranked search, then the same packer —
+// and requires byte-identical output. It replaces the pre-5205 version, which
+// compared against `query_by_scope_overlap` + `pack_knowledge_notes`; that
+// comparison is no longer meaningful because injection no longer uses that
+// query.
 
 #[tokio::test]
-async fn load_knowledge_context_rendered_matches_pack_knowledge_notes() {
+async fn load_knowledge_context_rendered_matches_the_ranked_pack() {
     let mut env = knowledge_context_test_env_guard();
     env.clear();
-    use crate::actors::slot::helpers::pack_knowledge_notes;
 
     let db = djinn_db::Database::ephemeral().await.expect("ephemeral db");
     let events = EventBus::noop();
     let task = create_project_epic_task(&db, &events, "Match epic", "Match task").await;
     let project_id = task.project_id.clone();
 
-    // Seed two global notes with different confidence levels so the rendered
-    // text uses different summary paths (L1 overview for high confidence,
-    // L0 abstract for lower confidence).
     let note_repo = NoteRepository::new(db.clone(), EventBus::noop());
 
     let high_note = note_repo
         .create(
             &project_id,
             "High Confidence Note",
-            "high body",
+            &related_content(&task, "high body"),
             "pattern",
             "[]",
         )
@@ -908,7 +1088,7 @@ async fn load_knowledge_context_rendered_matches_pack_knowledge_notes() {
         .create(
             &project_id,
             "Low Confidence Note",
-            "low body",
+            &related_content(&task, "low body"),
             "pitfall",
             "[]",
         )
@@ -917,37 +1097,59 @@ async fn load_knowledge_context_rendered_matches_pack_knowledge_notes() {
     set_note_confidence(&db, &low_note.id, 0.5).await;
 
     let app_state = agent_context_from_db(db.clone(), CancellationToken::new());
-    let rendered = load_knowledge_context(&task, None, &app_state)
+    let rendered = load_knowledge_context(&task, None, &app_state, None)
         .await
         .expect("knowledge context should be Some");
 
-    // Fetch the same notes via the production query to compare.
-    let notes = note_repo
-        .query_by_scope_overlap(
-            &project_id,
-            &derive_task_scope_path_tokens(&task, None),
-            KNOWLEDGE_NOTE_TYPES,
-            KNOWLEDGE_MIN_CONFIDENCE,
-            app_state.knowledge_injection.knowledge_injection_limit as usize,
+    // Reproduce the production composition: the ranked search, then the packer.
+    let top_k = app_state.knowledge_injection.knowledge_injection_limit as usize;
+    let search = note_repo
+        .search_knowledge_injection_candidates(
+            djinn_db::repositories::note::KnowledgeInjectionSearchParams {
+                project_id: &project_id,
+                query: &crate::actors::slot::lifecycle::prompt_context::knowledge_injection_query(
+                    &task, None,
+                ),
+                task_id: Some(&task.id),
+                note_types: KNOWLEDGE_NOTE_TYPES,
+                task_paths: &[],
+                top_k,
+                semantic_scores: None,
+            },
         )
         .await
-        .expect("production query");
+        .expect("ranked search");
+    assert!(
+        search.candidates.len() <= search.candidate_window,
+        "at most one window of candidates may reach packing"
+    );
 
-    let expected = pack_knowledge_notes(
+    let notes: Vec<djinn_memory::Note> = search
+        .candidates
+        .iter()
+        .map(|candidate| candidate.note.clone())
+        .collect();
+    let expected = crate::actors::slot::helpers::pack_ranked_knowledge_notes(
         &notes,
-        app_state
-            .knowledge_injection
-            .knowledge_injection_budget_bytes as usize,
+        crate::actors::slot::helpers::KnowledgePackConfig {
+            minimum_confidence: KNOWLEDGE_MIN_CONFIDENCE,
+            top_k,
+            total_byte_budget: app_state
+                .knowledge_injection
+                .knowledge_injection_budget_bytes as usize,
+            line_byte_cap: app_state
+                .knowledge_injection
+                .knowledge_injection_line_cap_bytes as usize,
+        },
     )
     .rendered;
 
     assert_eq!(
         rendered, expected,
-        "load_knowledge_context rendered output must match pack_knowledge_notes byte-for-byte"
+        "the rendered prompt must be exactly one ranked list packed exactly once"
     );
 
-    // Both notes must appear in the rendered text. R1: a line is labelled by
-    // the note's permalink, not its title, so the permalinks are the handles.
+    // R1: a line is labelled by the note's permalink, not its title.
     assert!(rendered.contains(&high_note.permalink));
     assert!(rendered.contains(&low_note.permalink));
 }
@@ -962,125 +1164,142 @@ async fn successful_trace_replays_oversized_rank_one_with_taxonomy_v1_histogram(
         create_project_epic_task(&db, &events, "Oversized replay epic", "Oversized replay").await;
     let project_id = task.project_id.clone();
     let repo = NoteRepository::new(db.clone(), EventBus::noop());
+
+    // Rank order is now decided by relevance fusion, not by `confidence DESC`,
+    // so this test no longer pins *which* note lands where. Every assertion
+    // below is instead order-independent by construction:
+    //
+    // * `oversized` can never render at any budget (its permalink alone
+    //   overruns the 128-byte line cap), so its disposition does not depend on
+    //   its rank — provided it is inside top-k, which `top_k = 5` guarantees.
+    // * `low` is below the 0.3 floor, and the floor is applied before rank.
+    // * each fitting note renders a full 128-byte line, so with a 256-byte
+    //   budget exactly one fits (128 + 1 separator + 128 = 257 > 256)
+    //   regardless of which one is first.
     let oversized = repo
         .create(
             &project_id,
             &"O".repeat(100),
-            "metadata overflow",
+            &related_content(&task, "metadata overflow"),
             "pattern",
             "[]",
         )
         .await
         .unwrap();
-    let injected = repo
-        .create(
-            &project_id,
-            "Rank two fitting",
-            &"a".repeat(400),
-            "pattern",
-            "[]",
-        )
-        .await
-        .unwrap();
-    let pruned = repo
-        .create(
-            &project_id,
-            "Rank three budget miss",
-            &"b".repeat(400),
-            "pattern",
-            "[]",
-        )
-        .await
-        .unwrap();
-    let not_top_k = repo
-        .create(
-            &project_id,
-            "Rank four not top k",
-            "eligible",
-            "pattern",
-            "[]",
-        )
-        .await
-        .unwrap();
+    let fitting: Vec<djinn_memory::Note> = {
+        let mut notes = Vec::new();
+        for index in 0..3 {
+            notes.push(
+                repo.create(
+                    &project_id,
+                    &format!("Fitting candidate {index}"),
+                    &related_content(&task, &"a".repeat(400)),
+                    "pattern",
+                    "[]",
+                )
+                .await
+                .unwrap(),
+            );
+        }
+        notes
+    };
     let low = repo
         .create(
             &project_id,
             "Below confidence threshold",
-            "low",
+            &related_content(&task, "low"),
             "pattern",
             "[]",
         )
         .await
         .unwrap();
-    for (note, confidence) in [
-        (&oversized, 0.975),
-        (&injected, 0.97),
-        (&pruned, 0.96),
-        (&not_top_k, 0.95),
-        (&low, 0.1),
-    ] {
-        set_note_confidence(&db, &note.id, confidence).await;
+    set_note_confidence(&db, &oversized.id, 0.975).await;
+    for note in &fitting {
+        set_note_confidence(&db, &note.id, 0.97).await;
     }
+    set_note_confidence(&db, &low.id, 0.1).await;
+
     let mut app_state = agent_context_from_db(db.clone(), CancellationToken::new());
     app_state.knowledge_injection = djinn_core::models::KnowledgeInjectionConfig {
         knowledge_injection_budget_bytes: 256,
         knowledge_injection_line_cap_bytes: 128,
-        knowledge_injection_limit: 3,
+        // Every confidence-eligible candidate is inside top-k, so no candidate
+        // is `not_top_k` and the remaining dispositions are rank-independent.
+        knowledge_injection_limit: 5,
         ..Default::default()
     };
-    let rendered = load_knowledge_context(&task, None, &app_state)
+    let rendered = load_knowledge_context(&task, None, &app_state, None)
         .await
         .expect("fitting candidate survives");
-    assert_eq!(rendered.len(), 128);
-    // R1: the rank-two note is identified by its permalink label. The scenario
-    // still bites: rank one's permalink alone (9 + 100 bytes) plus the fixed
-    // scaffold exceeds the 128-byte line cap, so it is still dropped whole
-    // (`oversized_skipped`), and rank three still misses the 256-byte budget.
-    assert!(rendered.contains(&injected.permalink));
+    assert_eq!(rendered.len(), 128, "exactly one full line fits the budget");
+
     let trace = latest_trace(&db, &project_id)
         .await
         .expect("terminal trace");
     assert_eq!(trace.knowledge_trace_taxonomy_version, Some(1));
     assert_eq!(trace.terminal_state.as_deref(), Some("success"));
     assert_eq!(trace.candidate_count, Some(5));
-    assert_eq!(trace.injected_count, Some(1));
+    // The u46i contract this test exists for: an oversized note is reported
+    // distinctly from a budget-pruned one, and every candidate is accounted
+    // for exactly once.
     assert_eq!(
         (
             trace.confidence_filtered_count,
             trace.not_top_k_count,
             trace.oversized_skipped_count,
+            trace.injected_count,
             trace.budget_pruned_count
         ),
-        (Some(1), Some(1), Some(1), Some(1))
+        (Some(1), Some(0), Some(1), Some(1), Some(2))
     );
+
     let candidates = trace.candidates_typed();
-    assert_eq!(
-        candidates
-            .iter()
-            .map(|candidate| candidate.note_id.as_str())
-            .collect::<Vec<_>>(),
-        vec![
-            oversized.id.as_str(),
-            injected.id.as_str(),
-            pruned.id.as_str(),
-            not_top_k.id.as_str(),
-            low.id.as_str()
-        ]
-    );
+    assert_eq!(candidates.len(), 5);
+    // Fused ranks are 1-based and contiguous, whatever the order turned out
+    // to be.
     assert_eq!(
         candidates
             .iter()
             .map(|candidate| candidate.rank)
             .collect::<Vec<_>>(),
-        vec![Some(1), Some(2), Some(3), Some(4), Some(5)]
+        (1..=5).map(Some).collect::<Vec<_>>()
     );
-    assert_eq!(
+    // Dispositions pinned by identity — each of these holds at any rank.
+    let disposition_of = |note_id: &str| {
         candidates
             .iter()
-            .filter(|candidate| candidate.outcome == CandidateOutcome::Injected)
-            .count(),
-        1
+            .find(|candidate| candidate.note_id == note_id)
+            .map(|candidate| (candidate.outcome, candidate.skipped_reason))
+            .expect("candidate present")
+    };
+    assert_eq!(
+        disposition_of(&oversized.id),
+        (
+            CandidateOutcome::Skipped,
+            Some(SkippedReason::OversizedSkipped)
+        ),
+        "a note that can never render is oversized_skipped, never budget_pruned"
     );
+    assert_eq!(
+        disposition_of(&low.id),
+        (
+            CandidateOutcome::Skipped,
+            Some(SkippedReason::MinConfidence)
+        ),
+        "the confidence floor is applied before rank"
+    );
+    // The single injected note is one of the fitting ones, and it is the note
+    // the prompt actually renders.
+    let injected_id = candidates
+        .iter()
+        .find(|candidate| candidate.outcome == CandidateOutcome::Injected)
+        .map(|candidate| candidate.note_id.clone())
+        .expect("exactly one injected candidate");
+    let injected_note = fitting
+        .iter()
+        .find(|note| note.id == injected_id)
+        .expect("the injected note must be one of the fitting candidates");
+    assert!(rendered.contains(&injected_note.permalink));
 }
 
 #[tokio::test]
@@ -1097,7 +1316,7 @@ async fn successful_trace_charges_newline_and_persists_exact_budget_equality() {
         .create(
             &project_id,
             "First exact line",
-            &"x".repeat(400),
+            &related_content(&task, &"x".repeat(400)),
             "pattern",
             "[]",
         )
@@ -1107,7 +1326,7 @@ async fn successful_trace_charges_newline_and_persists_exact_budget_equality() {
         .create(
             &project_id,
             "Second exact line",
-            &"y".repeat(400),
+            &related_content(&task, &"y".repeat(400)),
             "pattern",
             "[]",
         )
@@ -1122,7 +1341,7 @@ async fn successful_trace_charges_newline_and_persists_exact_budget_equality() {
         knowledge_injection_limit: 2,
         ..Default::default()
     };
-    let rendered = load_knowledge_context(&task, None, &app_state)
+    let rendered = load_knowledge_context(&task, None, &app_state, None)
         .await
         .expect("two exact-budget lines");
     assert_eq!(rendered.len(), 257, "budget includes the separator byte");
@@ -1174,9 +1393,16 @@ async fn cancelled_knowledge_load_persists_cancelled_terminal_without_prompt_tex
     cancellation.cancel();
     let rollout = knowledge_context_rollout_from_env();
 
-    let rendered =
-        load_knowledge_context_with_planner(&task, None, &app_state, None, &rollout, &cancellation)
-            .await;
+    let rendered = load_knowledge_context_with_planner(
+        &task,
+        None,
+        &app_state,
+        None,
+        &rollout,
+        &cancellation,
+        None,
+    )
+    .await;
 
     assert!(
         rendered.is_none(),

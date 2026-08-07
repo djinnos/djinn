@@ -9,8 +9,9 @@ use djinn_core::models::Task;
 
 use crate::actors::slot::MergeConflictMetadata;
 use crate::actors::slot::helpers::{
-    COMBINED_BRIEF_TOTAL_CHARS, KnowledgePackConfig, NotePackDisposition,
-    build_reviewer_diff_context, build_role_code_graph_context, derive_task_scope_path_tokens,
+    BaseTreeProvider, COMBINED_BRIEF_TOTAL_CHARS, KnowledgePackConfig, ListedBaseTree,
+    NotePackDisposition, ScopeFallbackReason, build_reviewer_diff_context,
+    build_role_code_graph_context, derive_task_scope_path_tokens, derive_task_scope_paths,
     extract_worker_context, format_attempt_history, pack_ranked_knowledge_notes, recent_feedback,
 };
 use crate::actors::slot::lifecycle::attempt_context;
@@ -433,29 +434,31 @@ fn disabled_knowledge_outcome(
     }
 }
 
-/// Load knowledge context from scope-matched notes. Returns None on error/empty.
+/// Load knowledge context through the ranked RRF retrieval path.
 ///
-/// Instruments retrieval with a fail-open `LoadKnowledgeContext` trace row. The
-/// production query is authoritative for prompt output; the trace-candidate query
-/// provides the full universe for classification.
+/// Instruments retrieval with a fail-open `LoadKnowledgeContext` trace row.
 ///
-/// ## Trace contract (epic 3paf; consumed by sibling `liso` MCP tooling)
+/// ## Trace contract (epic 3paf; extended by proposal `5205`)
 ///
 /// - **Entry point:** `LoadKnowledgeContext` → `"load_knowledge_context"`.
-/// - **Trigger:** `{ "shape": "scope_paths", "task_paths": [...] }`.
+/// - **Trigger:** `{ "shape": "ranked_injection_v1", "strategy",
+///   "ranking_profile", "task_paths", "scope_fallback_reason",
+///   "candidate_window", "rrf_k", "search_error" }`.
 /// - **Outcomes** (`TraceCandidate`): `injected` (top-K, survived budget — no
 ///   reason), `min_confidence` (<0.3), `not_top_k`, `budget_pruned`,
-///   `oversized_skipped`, `dedupe`, `search_error`.
+///   `oversized_skipped`. Each candidate's `scope` additionally carries its
+///   per-signal ranks and its fused rank/score.
 /// - **Durations:** `candidate_fetch_ms`, `classify_ms`, `prompt_pack_ms`, `persist_ms`.
-/// - **Tokens:** `ceil(injected_chars/4)`. **Cap:** `DEFAULT_CANDIDATE_CAP`;
-///   `exceeded`=`len>=cap`.
-/// - **Fail-open:** trace errors are logged and swallowed; the rendered context
-///   is produced from the production query alone.
+/// - **Tokens:** `ceil(injected_chars/4)`.
+/// - **Fail-open:** trace errors are logged and swallowed. A *retrieval* error
+///   injects no knowledge, records `search_error`, and still lets the rest of
+///   the prompt render.
 #[allow(dead_code)] // Scope-only entry point remains available to focused lifecycle tests.
 pub(crate) async fn load_knowledge_context(
     task: &Task,
     epic_context: Option<&str>,
     app_state: &AgentContext,
+    base_tree: Option<&ListedBaseTree>,
 ) -> Option<String> {
     let rollout = knowledge_context_rollout_from_env();
     let cancellation = CancellationToken::new();
@@ -466,10 +469,59 @@ pub(crate) async fn load_knowledge_context(
         None,
         &rollout,
         &cancellation,
+        base_tree,
     )
     .await
 }
 
+/// The project's configured target branch, defaulting to `main`.
+pub(crate) async fn project_target_branch(task: &Task, app_state: &AgentContext) -> String {
+    let repo = djinn_db::ProjectRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+    match repo.get_config(&task.project_id).await {
+        Ok(Some(config)) => config.target_branch,
+        _ => "main".to_owned(),
+    }
+}
+
+/// Build the base-revision tree provider for `task`'s attempt.
+///
+/// Resolution order is `origin/<target>`, then `<target>`, then `HEAD`. Every
+/// failure mode returns `None`, which [`derive_task_scope_paths`] turns into an
+/// explicit empty scope with a typed fallback reason: provider unavailability is
+/// a specified degradation, never a hard error and never a licence to trust
+/// unvalidated prose tokens.
+pub(crate) async fn load_base_tree(
+    project_path: &str,
+    target_branch: &str,
+) -> Option<ListedBaseTree> {
+    let repo_root = std::path::Path::new(project_path);
+    if !repo_root.exists() {
+        return None;
+    }
+    let candidates = [
+        format!("origin/{target_branch}"),
+        target_branch.to_owned(),
+        "HEAD".to_owned(),
+    ];
+    for revision in candidates {
+        match djinn_git::list_tracked_paths(repo_root, &revision).await {
+            Ok(paths) if !paths.is_empty() => {
+                return Some(ListedBaseTree::from_tracked_files(paths));
+            }
+            Ok(_) => continue,
+            Err(error) => {
+                tracing::debug!(
+                    revision = %revision,
+                    error = %error,
+                    "load_base_tree: revision unavailable; trying the next candidate"
+                );
+            }
+        }
+    }
+    None
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn load_knowledge_context_with_planner(
     task: &Task,
     epic_context: Option<&str>,
@@ -477,14 +529,18 @@ async fn load_knowledge_context_with_planner(
     planner: Option<&MemoryIntentPlannerInvocation<'_>>,
     rollout: &RolloutMode,
     cancellation: &CancellationToken,
+    base_tree: Option<&ListedBaseTree>,
 ) -> Option<String> {
-    // NOTE (proposal 5205): this entry point still uses the *unvalidated*
-    // extractor. The validated, base-tree-checked
-    // `djinn_slot::helpers::derive_task_scope_paths` and the ranked
-    // `NoteRepository::search_knowledge_injection_candidates` path both exist,
-    // but the production cutover is deliberately not flipped here — see the
-    // proposal's delivery order, step 4.
-    let task_paths = derive_task_scope_path_tokens(task, epic_context);
+    // Proposal 5205: prose tokens are validated against the task attempt's
+    // base-revision Git tree. With no provider this is an explicit *empty*
+    // scope plus a typed reason — never the old unvalidated regex output.
+    let derived_scope = derive_task_scope_paths(
+        task,
+        epic_context,
+        base_tree.map(|tree| tree as &dyn BaseTreeProvider),
+    );
+    let task_paths = derived_scope.paths.clone();
+    let scope_fallback_reason = derived_scope.fallback_reason;
     if cancellation.is_cancelled() {
         persist_cancelled_knowledge_trace(task, &task_paths, app_state, planner, rollout).await;
         return None;
@@ -503,71 +559,69 @@ async fn load_knowledge_context_with_planner(
             disabled_knowledge_outcome(rollout),
             false,
             None,
+            &KnowledgeTraceStrategy {
+                scope_fallback_reason: scope_fallback_reason.map(ScopeFallbackReason::as_str),
+                ..KnowledgeTraceStrategy::default()
+            },
         )
         .await;
         return None;
     }
     let note_repo = NoteRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+    let top_k = app_state.knowledge_injection.knowledge_injection_limit as usize;
+    let query = knowledge_injection_query(task, epic_context);
+    let mut strategy = KnowledgeTraceStrategy {
+        scope_fallback_reason: scope_fallback_reason.map(ScopeFallbackReason::as_str),
+        ..KnowledgeTraceStrategy::default()
+    };
 
     let fetch_start = tokio::time::Instant::now();
 
-    // Fetch the production result set (unchanged semantics) and the capped trace
-    // candidate universe concurrently. The production query is authoritative for
-    // prompt output; the trace candidate query provides the full universe for
-    // classification.
+    // Proposal 5205: candidates come *only* from the RRF search path under
+    // `KnowledgeInjectionV1`. The recency-ordered `query_by_scope_overlap`
+    // query is retired for this entry point; the JIT pitfalls call site keeps
+    // using it. There is no separate trace-candidate universe any more — the
+    // single fused list is both the prompt input and the trace universe.
     let retrieval = tokio::select! {
         _ = cancellation.cancelled() => {
             persist_cancelled_knowledge_trace(task, &task_paths, app_state, planner, rollout).await;
             return None;
         }
-        result = async {
-            tokio::join!(
-                note_repo.query_by_scope_overlap(
-                    &task.project_id, &task_paths, KNOWLEDGE_NOTE_TYPES,
-                    KNOWLEDGE_MIN_CONFIDENCE,
-                    app_state.knowledge_injection.knowledge_injection_limit as usize,
-                ),
-                note_repo.query_by_scope_overlap_trace_notes(
-                    &task.project_id, &task_paths, KNOWLEDGE_NOTE_TYPES,
-                    djinn_db::repositories::retrieval_trace::DEFAULT_CANDIDATE_CAP as usize,
-                ),
-            )
-        } => result,
+        result = note_repo.search_knowledge_injection_candidates(
+            djinn_db::repositories::note::KnowledgeInjectionSearchParams {
+                project_id: &task.project_id,
+                query: &query,
+                task_id: Some(&task.id),
+                note_types: KNOWLEDGE_NOTE_TYPES,
+                task_paths: &task_paths,
+                top_k,
+                semantic_scores: None,
+            },
+        ) => result,
     };
-    let (production_result, trace_candidates_result) = retrieval;
     let candidate_fetch_ms = fetch_start.elapsed().as_millis() as i64;
     if cancellation.is_cancelled() {
         persist_cancelled_knowledge_trace(task, &task_paths, app_state, planner, rollout).await;
         return None;
     }
 
-    let notes = match production_result {
-        Ok(notes) => notes,
+    let search = match retrieval {
+        Ok(search) => search,
         Err(e) => {
+            // Ranked-search failure is non-fatal to prompt construction: no
+            // knowledge is injected, the trace records `search_error`, and the
+            // caller still renders the rest of the prompt. Stale unranked notes
+            // are never injected as an error fallback.
             tracing::warn!(
                 task_id = %task.short_id,
                 error = %e,
-                "Lifecycle: failed to query knowledge context"
+                "Lifecycle: ranked knowledge retrieval failed; injecting no knowledge"
             );
-            // Even when either query failed, attempt an explicit error trace.
-            // Trace candidates are useful diagnostic evidence when available;
-            // otherwise the empty array records that the candidate universe was
-            // unavailable without changing the production fail-open behavior.
-            let (error_candidates, cap_exceeded) = match trace_candidates_result {
-                Ok(candidates) => (
-                    Vec::new(),
-                    candidates.len()
-                        >= djinn_db::repositories::retrieval_trace::DEFAULT_CANDIDATE_CAP as usize,
-                ),
-                Err(trace_error) => {
-                    tracing::warn!(task_id = %task.short_id, error = %trace_error, "Lifecycle: failed to query knowledge trace candidates");
-                    (Vec::new(), false)
-                }
-            };
+            strategy.search_error = Some(e.to_string());
             persist_knowledge_trace(
                 task,
                 &task_paths,
-                &error_candidates,
+                &[],
                 0,
                 KnowledgeTraceDurations {
                     candidate_fetch_ms,
@@ -575,102 +629,43 @@ async fn load_knowledge_context_with_planner(
                     prompt_pack_ms: 0,
                     persist_ms: 0,
                 },
-                cap_exceeded,
+                false,
                 &app_state.db,
                 planner.map(|p| (p.session_id, p.task_run_id)),
                 rollout,
                 djinn_db::repositories::retrieval_trace::RetrievalTraceOutcome::Error,
                 false,
                 None,
+                &strategy,
             )
             .await;
             return None;
         }
     };
 
-    // Trace candidate query failures are trace failures, even if the production
-    // prompt query succeeded. Persist an Error attempt with no candidates while
-    // returning the production-rendered prompt unchanged.
-    if let Err(trace_error) = trace_candidates_result {
-        tracing::warn!(
-            task_id = %task.short_id,
-            error = %trace_error,
-            "Lifecycle: failed to query knowledge trace candidates"
-        );
-        let pack_start = tokio::time::Instant::now();
-        let packed = pack_ranked_knowledge_notes(
-            &notes,
-            KnowledgePackConfig {
-                minimum_confidence: f64::NEG_INFINITY,
-                top_k: app_state.knowledge_injection.knowledge_injection_limit as usize,
-                total_byte_budget: app_state
-                    .knowledge_injection
-                    .knowledge_injection_budget_bytes as usize,
-                line_byte_cap: app_state
-                    .knowledge_injection
-                    .knowledge_injection_line_cap_bytes as usize,
-            },
-        );
-        let pack_ms = pack_start.elapsed().as_millis() as i64;
-        if cancellation.is_cancelled() {
-            persist_cancelled_knowledge_trace(task, &task_paths, app_state, planner, rollout).await;
-            return None;
-        }
-        let rendered = if notes.is_empty() {
-            None
-        } else {
-            Some(packed.rendered)
-        };
-        let rendered = merge_planned_knowledge(
-            rendered,
-            &notes,
-            &note_repo,
-            task,
-            planner,
-            app_state.knowledge_injection,
-        )
-        .await;
-        if cancellation.is_cancelled() {
-            persist_cancelled_knowledge_trace(task, &task_paths, app_state, planner, rollout).await;
-            return None;
-        }
-        persist_knowledge_trace(
-            task,
-            &task_paths,
-            &[],
-            0,
-            KnowledgeTraceDurations {
-                candidate_fetch_ms,
-                classify_ms: 0,
-                prompt_pack_ms: pack_ms,
-                persist_ms: 0,
-            },
-            false,
-            &app_state.db,
-            planner.map(|p| (p.session_id, p.task_run_id)),
-            rollout,
-            djinn_db::repositories::retrieval_trace::RetrievalTraceOutcome::Error,
-            false,
-            None,
-        )
-        .await;
-        return rendered;
-    }
+    strategy.ranking_profile = search.profile.as_str();
+    strategy.candidate_window = search.candidate_window;
+    strategy.rrf_k = Some(search.rrf_k);
 
     let classification_start = tokio::time::Instant::now();
-    let trace_notes = trace_candidates_result.expect("trace candidate result checked above");
-    let candidate_cap_exceeded = trace_notes.len()
-        >= djinn_db::repositories::retrieval_trace::DEFAULT_CANDIDATE_CAP as usize;
+    let notes: Vec<djinn_memory::Note> = search
+        .candidates
+        .iter()
+        .map(|candidate| candidate.note.clone())
+        .collect();
+    // `search_knowledge_injection_candidates` already truncates to the fixed
+    // 50-note window, so packing sees at most that many candidates.
+    let candidate_cap_exceeded = notes.len() >= search.candidate_window;
 
-    // Pack the full ranked trace-candidate universe exactly once. The concurrent
-    // production query above remains authoritative for its legacy error semantics,
-    // but successful prompt text and terminal counts share these outcomes.
+    // Exactly one ordered list is packed exactly once. Confidence floor, top-k,
+    // and byte budget are applied here and nowhere else; no unranked scope
+    // block is prepended and no note-type quota exists.
     let pack_start = tokio::time::Instant::now();
     let packed = pack_ranked_knowledge_notes(
-        &trace_notes,
+        &notes,
         KnowledgePackConfig {
             minimum_confidence: KNOWLEDGE_MIN_CONFIDENCE,
-            top_k: app_state.knowledge_injection.knowledge_injection_limit as usize,
+            top_k,
             total_byte_budget: app_state
                 .knowledge_injection
                 .knowledge_injection_budget_bytes as usize,
@@ -684,18 +679,28 @@ async fn load_knowledge_context_with_planner(
         persist_cancelled_knowledge_trace(task, &task_paths, app_state, planner, rollout).await;
         return None;
     }
-    let trace_candidates_final = trace_candidates_from_pack(&trace_notes, &packed);
+    let trace_candidates_final =
+        injection_trace_candidates(&search.candidates, &packed, search.profile.as_str());
     let terminal_dispositions = pack_disposition_counts(&packed);
     let classification_ms = classification_start.elapsed().as_millis() as i64;
     let estimated_injected_tokens = packed.total_injected_tokens as i32;
 
+    // Planner duplicate suppression must see only the notes that actually
+    // reached the prompt. A candidate dropped by the confidence floor, top-k,
+    // or the byte budget is *not* in the prompt, so it must not suppress a
+    // matching planned-search result — passing the whole ranked list here would
+    // silently hide planner enrichment behind notes the agent never sees.
+    let injected_notes: Vec<djinn_memory::Note> = notes
+        .iter()
+        .zip(&packed.outcomes)
+        .filter(|(_, outcome)| outcome.disposition == NotePackDisposition::Injected)
+        .map(|(note, _)| note.clone())
+        .collect();
+
     let rendered = (!packed.rendered.is_empty()).then_some(packed.rendered.clone());
     let rendered = merge_planned_knowledge(
         rendered,
-        // Planner duplicate suppression retains the production-query contract:
-        // below-threshold and outside-top-K trace-only notes must not hide a
-        // matching planned-search result from prompt enrichment.
-        &notes,
+        &injected_notes,
         &note_repo,
         task,
         planner,
@@ -735,6 +740,7 @@ async fn load_knowledge_context_with_planner(
         },
         false,
         Some(terminal_dispositions),
+        &strategy,
     )
     .await;
 
@@ -763,8 +769,140 @@ async fn persist_cancelled_knowledge_trace(
         djinn_db::repositories::retrieval_trace::RetrievalTraceOutcome::Error,
         true,
         None,
+        &KnowledgeTraceStrategy::default(),
     )
     .await;
+}
+
+/// The lexical query knowledge injection retrieves with: the task's own title
+/// and description.
+///
+/// This is what makes ranking task-relative at all — the retired path had no
+/// task-to-note relevance input beyond boolean scope eligibility.
+///
+/// # Why not the design body or the epic context
+///
+/// `sanitize_postgres_tsquery` **AND**-joins terms and keeps only the first
+/// **12**. Every additional word therefore makes the query strictly harder to
+/// satisfy, and past the twelfth it silently displaces a more topical earlier
+/// term. Concatenating the design body or the epic blob does not broaden
+/// recall — it reliably drives the lexical signal to zero matches, because no
+/// single note contains all twelve leading terms of a task *and* its epic.
+///
+/// The title plus description is the shortest text that still identifies the
+/// task. The remaining five signals (embedding, temporal, graph, task-affinity,
+/// validated scope) carry the context this deliberately omits; the epic in
+/// particular already reaches fusion through task affinity, which scores notes
+/// from the epic's own `memory_refs`.
+///
+/// `epic_context` is accepted so the call site stays honest about what it has
+/// and this decision stays visible at the boundary rather than at the caller.
+pub(crate) fn knowledge_injection_query(task: &Task, _epic_context: Option<&str>) -> String {
+    let mut parts: Vec<&str> = vec![task.title.as_str()];
+    if !task.description.trim().is_empty() {
+        parts.push(task.description.as_str());
+    }
+    parts.join("\n")
+}
+
+/// Test-only: a note body the task's own text will retrieve.
+///
+/// Proposal `5205` replaced boolean scope-overlap eligibility with relevance
+/// ranking, so a note now has to be *about the task* to be retrieved at all.
+/// The retired query returned every global note above the confidence floor
+/// regardless of content; tests that need a note injected must therefore give
+/// it a genuine lexical relationship to the task instead of relying on that.
+///
+/// [`knowledge_injection_query`] builds the query from the task's title,
+/// description, and design, so echoing those is what makes the note reachable.
+#[cfg(test)]
+pub(crate) fn related_content(task: &Task, extra: &str) -> String {
+    format!(
+        "{} {} {} {extra}",
+        task.title, task.description, task.design
+    )
+}
+
+/// Ranking identity and fallback reasons recorded on the retrieval trace.
+#[derive(Debug, Clone, Default)]
+struct KnowledgeTraceStrategy {
+    ranking_profile: &'static str,
+    scope_fallback_reason: Option<&'static str>,
+    candidate_window: usize,
+    rrf_k: Option<f64>,
+    search_error: Option<String>,
+}
+
+impl KnowledgeTraceStrategy {
+    /// Stable strategy version so a trace can be attributed to this ranker.
+    const STRATEGY: &'static str = "ranked_injection_v1";
+}
+
+/// Build one candidate's trace `scope` payload.
+///
+/// Records the ranking identity, the per-signal ranks, and the fused
+/// rank/score so a reviewer can reconstruct *why* a note reached (or missed)
+/// the prompt without re-running retrieval.
+fn injection_candidate_scope(
+    candidate: &djinn_db::repositories::note::KnowledgeInjectionCandidate,
+    profile: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "folder": candidate.note.folder,
+        "note_type": candidate.note.note_type,
+        "scope_paths": candidate.note.scope_paths,
+        "ranking_profile": profile,
+        "fused_rank": candidate.fused_rank,
+        "fused_score": candidate.fused_score,
+        "signal_ranks": candidate.signal_ranks,
+    })
+}
+
+/// Map the single fused candidate list plus its packing outcomes onto trace
+/// candidates, preserving per-signal ranks, fused rank/score, and exactly one
+/// terminal disposition per candidate.
+fn injection_trace_candidates(
+    candidates: &[djinn_db::repositories::note::KnowledgeInjectionCandidate],
+    packed: &crate::actors::slot::helpers::PackedKnowledgeNotes,
+    profile: &str,
+) -> Vec<djinn_db::repositories::retrieval_trace::TraceCandidate> {
+    use djinn_db::repositories::retrieval_trace::{
+        CandidateOutcome, SkippedReason, TraceCandidate,
+    };
+    candidates
+        .iter()
+        .zip(&packed.outcomes)
+        .map(|(candidate, outcome)| {
+            let (outcome_kind, skipped_reason) = match outcome.disposition {
+                NotePackDisposition::Injected => (CandidateOutcome::Injected, None),
+                NotePackDisposition::ConfidenceFiltered => (
+                    CandidateOutcome::Skipped,
+                    Some(SkippedReason::MinConfidence),
+                ),
+                NotePackDisposition::NotTopK => {
+                    (CandidateOutcome::Skipped, Some(SkippedReason::NotTopK))
+                }
+                NotePackDisposition::OversizedSkipped => (
+                    CandidateOutcome::Skipped,
+                    Some(SkippedReason::OversizedSkipped),
+                ),
+                NotePackDisposition::BudgetPruned => {
+                    (CandidateOutcome::Skipped, Some(SkippedReason::BudgetPruned))
+                }
+            };
+            TraceCandidate {
+                note_id: candidate.note.id.clone(),
+                permalink: Some(candidate.note.permalink.clone()),
+                title: Some(candidate.note.title.clone()),
+                outcome: outcome_kind,
+                rank: Some(candidate.fused_rank as i32),
+                confidence: Some(candidate.note.confidence),
+                skipped_reason,
+                source: Some(KnowledgeTraceStrategy::STRATEGY.to_owned()),
+                scope: Some(injection_candidate_scope(candidate, profile)),
+            }
+        })
+        .collect()
 }
 
 /// Classify trace candidates into `TraceCandidate` DTOs with deterministic outcomes.
@@ -920,6 +1058,7 @@ fn apply_budget_outcomes(
 }
 
 /// Convert exact pack outcomes into detailed candidate records.
+#[cfg(test)]
 fn trace_candidates_from_pack(
     notes: &[djinn_memory::Note],
     packed: &crate::actors::slot::helpers::PackedKnowledgeNotes,
@@ -999,6 +1138,7 @@ async fn persist_knowledge_trace(
     terminal_dispositions: Option<
         djinn_db::repositories::retrieval_trace::KnowledgeTraceDispositionCounts,
     >,
+    strategy: &KnowledgeTraceStrategy,
 ) {
     use djinn_db::repositories::retrieval_trace::{
         CreateRetrievalTraceParams, CreateRetrievalTraceTerminalParams,
@@ -1029,8 +1169,18 @@ async fn persist_knowledge_trace(
     };
 
     let trigger = serde_json::json!({
-        "shape": "scope_paths",
+        // Proposal 5205: the trigger carries the retrieval strategy version,
+        // the ranking profile, the validated scope (or the typed reason it is
+        // empty), the fixed candidate window, and the `rrf_k` actually used.
+        // `search_error` is present only when ranked retrieval itself failed.
+        "shape": "ranked_injection_v1",
+        "strategy": KnowledgeTraceStrategy::STRATEGY,
+        "ranking_profile": strategy.ranking_profile,
         "task_paths": task_paths,
+        "scope_fallback_reason": strategy.scope_fallback_reason,
+        "candidate_window": strategy.candidate_window,
+        "rrf_k": strategy.rrf_k,
+        "search_error": strategy.search_error,
     });
     let durations_ms = serde_json::json!({
         "candidate_fetch_ms": durations.candidate_fetch_ms,
@@ -1138,12 +1288,18 @@ pub(crate) async fn assemble_prompt_context(inputs: PromptContextInputs<'_>) -> 
     let role_name = runtime_role.config().name;
     let knowledge_rollout = knowledge_context_rollout_from_env();
 
-    // ── Phase 1: activity + epic context concurrently ──
+    // ── Phase 1: activity + epic context + base tree concurrently ──
     // Each child measures its own wall-clock time so the child-span
     // metric reports per-child duration, not the phase aggregate.
+    //
+    // The base-revision tree shells out to `git ls-tree` and depends only on
+    // the project path and the configured target branch, so it belongs here
+    // rather than serially in front of phase 2 where it would add its whole
+    // latency to every prompt assembly.
     let (
         ((activity_text, worker_summary, worker_concerns), _activity_elapsed),
         (epic_context, _epic_elapsed),
+        base_tree,
     ) = tokio::join!(
         {
             let span = tracing::info_span!(
@@ -1175,6 +1331,16 @@ pub(crate) async fn assemble_prompt_context(inputs: PromptContextInputs<'_>) -> 
                 (result, child_start.elapsed())
             }
             .instrument(span)
+        },
+        {
+            let span = tracing::info_span!(
+                "prompt_ctx::base_tree",
+                task_id = %task.short_id,
+            );
+            async move {
+                load_base_tree(project_path, &project_target_branch(task, app_state).await).await
+            }
+            .instrument(span)
         }
     );
     djinn_telemetry::prompt_context_metrics::record_child_span(
@@ -1194,6 +1360,8 @@ pub(crate) async fn assemble_prompt_context(inputs: PromptContextInputs<'_>) -> 
     // Each child measures its own wall-clock time so the child-span
     // metric reports per-child duration, not the phase aggregate.
     let epic_context_ref = epic_context.as_deref();
+    // The code-graph block filters symbol file paths by directory prefix and is
+    // outside proposal 5205's scope; it keeps the unvalidated token extractor.
     let task_paths_for_code_graph = derive_task_scope_path_tokens(task, epic_context_ref);
     let (
         (knowledge_context, _knowledge_elapsed),
@@ -1216,6 +1384,7 @@ pub(crate) async fn assemble_prompt_context(inputs: PromptContextInputs<'_>) -> 
                     memory_intent_planner.as_ref(),
                     &knowledge_rollout,
                     cancellation,
+                    base_tree.as_ref(),
                 )
                 .await;
                 (result, child_start.elapsed())
