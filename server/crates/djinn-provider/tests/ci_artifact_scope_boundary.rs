@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use djinn_provider::github_api::{GitHubApiClient, GitHubErrorSource};
 use wiremock::matchers::{method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -214,17 +216,23 @@ async fn artifact_download_over_compressed_budget_is_rejected_with_run_context()
     assert!(error.body.contains("32 MiB"));
 }
 
+/// Drives a real elapsed request timeout, not a synthesized error: the client
+/// is built with a short timeout and the mock stalls past it, so the assertion
+/// still covers the transport timeout path and its error formatting.
 #[tokio::test]
 async fn artifact_timeout_includes_operation_and_run_context() {
+    const TIMEOUT: Duration = Duration::from_millis(50);
+
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path(
             "/repos/task-owner/task-repository/actions/artifacts/7/zip",
         ))
-        .respond_with(ResponseTemplate::new(200).set_delay(std::time::Duration::from_secs(31)))
+        .respond_with(ResponseTemplate::new(200).set_delay(TIMEOUT * 20))
         .mount(&server)
         .await;
     let error = client(&server)
+        .with_request_timeout(TIMEOUT)
         .download_artifact(OWNER, REPO, RUN_ID, ARTIFACT_ID)
         .await
         .unwrap_err();
