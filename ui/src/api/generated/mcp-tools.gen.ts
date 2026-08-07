@@ -9299,6 +9299,11 @@ export namespace ProposalRefinementDemandEvidenceInputSchema {
    */
   insufficient_in_session_research: string
   /**
+   * Caller-declared load-bearing threshold. The server must not infer this
+   * authority from legacy question prose.
+   */
+  load_bearing_category: string
+  /**
    * Proposal UUID or short_id.
    */
   proposal_id: string
@@ -9331,6 +9336,10 @@ export namespace ProposalRefinementDemandEvidenceOutputSchema {
    */
   accepted: boolean
   /**
+   * Stable machine-readable rejection/conflict code.
+   */
+  conflict_code?: string
+  /**
    * Error message for a rejected demand.
    */
   error?: string
@@ -9356,9 +9365,25 @@ export namespace ProposalRefinementDemandEvidenceOutputSchema {
    */
   against_revision_seq: number
   /**
+   * Typed active attempt identity for the allocated spike.
+   */
+  attempt_id?: string
+  /**
    * The recorded needs-evidence claim question.
    */
   claim: string
+  /**
+   * Typed finding identity owned by `TypedEvidenceRepository`.
+   */
+  finding_id?: string
+  /**
+   * Typed lifecycle after atomic allocation.
+   */
+  lifecycle?: string
+  /**
+   * True when normalized delivery returned the existing allocation.
+   */
+  replayed?: boolean
   /**
    * The debate round when the demand was issued.
    */

@@ -12,8 +12,9 @@ use crate::database::Database;
 use crate::repositories::epic::EpicRepository;
 use crate::repositories::note::NoteRepository;
 use crate::repositories::note::{LexicalSearchBackend, sanitize_postgres_tsquery};
+use crate::repositories::task::{EffectiveCreatorProvenance, resolve_effective_creator};
 use crate::repositories::typed_evidence::{
-    DemandTypedEvidenceInput, TypedEvidenceRepository, legacy_demand_hash,
+    DemandTypedEvidenceInput, TypedEvidenceRepository, legacy_demand_hash, normalized_demand_hash,
 };
 use crate::{Error, Result};
 
@@ -286,6 +287,32 @@ pub struct ProposalDebateTrailCreateInput<'a> {
     /// ignored for `objection`/`rebuttal`/`verdict`, which only need the
     /// `body` text.
     pub body_metadata: Option<&'a serde_json::Value>,
+}
+
+/// Facts for the one repository-owned atomic demand boundary.
+pub struct AtomicEvidenceDemandInput<'a> {
+    pub proposal_id: &'a str,
+    pub project_id: &'a str,
+    pub claim: &'a NeedsEvidenceClaim,
+    pub title: &'a str,
+    pub description: &'a str,
+    pub labels: &'a serde_json::Value,
+    pub load_bearing_category: &'a str,
+}
+
+#[derive(Clone, Debug)]
+pub struct AtomicEvidenceDemandResult {
+    pub finding_id: String,
+    pub attempt_id: String,
+    pub spike_task_id: String,
+    pub replayed: bool,
+}
+
+/// The exact persisted authority identity used to admit an evidence demand.
+#[derive(Clone, Debug, PartialEq, Eq, sqlx::FromRow)]
+pub struct ActiveEvidenceAuthorityTask {
+    pub task_id: String,
+    pub created_by_user_id: String,
 }
 
 /// A Planner-authored acceptance-criteria spec amendment. Unlike
@@ -744,6 +771,34 @@ impl ProposalRepository {
     /// Access the underlying event bus for constructing sibling repositories.
     pub fn events(&self) -> &EventBus {
         &self.events
+    }
+
+    /// Find an open authority task using its full persisted refinement tuple.
+    pub async fn active_evidence_authority_task(
+        &self,
+        proposal_id: &str,
+        against_revision_seq: i32,
+        round: i32,
+    ) -> Result<Option<ActiveEvidenceAuthorityTask>> {
+        self.db.ensure_initialized().await?;
+        let row = sqlx::query_as(
+            "SELECT t.id AS task_id, t.created_by_user_id FROM tasks t \
+             JOIN refinement_dispatch_intents i ON i.id = t.refinement_intent_id \
+             JOIN refinement_runs r ON r.id = i.run_id JOIN proposals p ON p.id = r.proposal_id \
+             WHERE r.proposal_id = $1 AND r.state = 'running' AND p.latest_revision_seq = $2 \
+               AND i.round = $3 AND i.state = 'materialized' AND i.task_id = t.id \
+               AND t.issue_type = 'refinement' AND t.status IN ('open', 'in_progress') \
+               AND t.agent_type IN ('judge', 'adversary') AND t.refinement_run_id = r.id \
+               AND t.refinement_generation = r.generation AND t.refinement_round = i.round \
+               AND t.refinement_phase = i.phase AND t.refinement_role = i.role AND t.agent_type = t.refinement_role \
+               AND t.refinement_role IN ('judge', 'adversary') ORDER BY t.updated_at DESC, t.id DESC LIMIT 1",
+        )
+        .bind(proposal_id)
+        .bind(against_revision_seq)
+        .bind(round)
+        .fetch_optional(self.db.pool())
+        .await?;
+        Ok(row)
     }
 
     pub async fn get(&self, id: &str) -> Result<Option<Proposal>> {
@@ -3493,6 +3548,179 @@ impl ProposalRepository {
         self.events
             .send(DjinnEventEnvelope::proposal_updated(&proposal));
         Ok(proposal)
+    }
+
+    /// Atomically allocate the task, typed authority, legacy projection, debate
+    /// link, and lifecycle fact.  The proposal lock is the normalized delivery
+    /// replay/conflict fence, so no loser task can be created.
+    pub async fn demand_evidence_atomically(
+        &self,
+        input: AtomicEvidenceDemandInput<'_>,
+    ) -> Result<AtomicEvidenceDemandResult> {
+        self.db.ensure_initialized().await?;
+        let mut claim =
+            serde_json::to_value(input.claim).map_err(|e| Error::InvalidData(e.to_string()))?;
+        claim["load_bearing_category"] =
+            serde_json::Value::String(input.load_bearing_category.trim().to_owned());
+        let demand_hash = normalized_demand_hash(&claim);
+        let mut tx = self.db.pool().begin().await?;
+        let (active_revision, linked_spike_task_id): (i32, Option<String>) = sqlx::query_as(
+            "SELECT latest_revision_seq, linked_spike_task_id FROM proposals WHERE id=$1 FOR UPDATE",
+        )
+        .bind(input.proposal_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| Error::InvalidData("proposal not found".into()))?;
+        if active_revision != input.claim.against_revision_seq {
+            return Err(Error::InvalidTransition(
+                "stale_evidence_demand_revision".into(),
+            ));
+        }
+        // Preflight authorization can race a role handoff. Recheck the exact
+        // materialized task/intent/run correlation while this proposal is
+        // locked, before typed allocation or any demand-owned insertion.
+        let authority = sqlx::query(
+            "SELECT t.id FROM tasks t JOIN refinement_dispatch_intents i ON i.id = t.refinement_intent_id \
+             JOIN refinement_runs r ON r.id = i.run_id WHERE t.id = $1 AND r.proposal_id = $2 \
+               AND r.state = 'running' AND i.round = $3 AND i.state = 'materialized' \
+               AND i.task_id = t.id AND t.issue_type = 'refinement' \
+               AND t.status IN ('open', 'in_progress') AND t.agent_type IN ('judge', 'adversary') \
+               AND t.refinement_run_id = r.id AND t.refinement_generation = r.generation \
+               AND t.refinement_round = i.round AND t.refinement_phase = i.phase AND t.agent_type = t.refinement_role \
+               AND t.refinement_role = i.role AND t.refinement_role IN ('judge', 'adversary') \
+             FOR UPDATE OF t, i, r",
+        )
+        .bind(&input.claim.created_by_task_id)
+        .bind(input.proposal_id)
+        .bind(input.claim.round)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if authority.is_none() {
+            return Err(Error::InvalidTransition(
+                "stale_evidence_demand_authority".into(),
+            ));
+        }
+        // The typed primitive decides replay versus unresolved conflict before
+        // a task row is allocated.
+        let typed_demand = DemandTypedEvidenceInput {
+            finding_id: uuid::Uuid::now_v7().to_string(),
+            proposal_id: input.proposal_id.into(),
+            demand_hash: demand_hash.clone(),
+            claim: claim.clone(),
+            demanded_revision_seq: input.claim.against_revision_seq,
+            judge_task_id: input.claim.created_by_task_id.clone(),
+        };
+        let projection =
+            TypedEvidenceRepository::demand_in_transaction(&mut tx, typed_demand).await?;
+        if let Some(attempt_id) = projection.active_attempt_id {
+            let spike_task_id: String =
+                sqlx::query_scalar("SELECT spike_task_id FROM typed_evidence_attempts WHERE id=$1")
+                    .bind(&attempt_id)
+                    .fetch_one(&mut *tx)
+                    .await?;
+            tx.commit().await?;
+            return Ok(AtomicEvidenceDemandResult {
+                finding_id: projection.finding.id,
+                attempt_id,
+                spike_task_id,
+                replayed: true,
+            });
+        }
+        // A mixed-version writer may have installed a legacy link without a
+        // typed finding. It remains active authority and must not be replaced.
+        // The tentative finding inserted above is rolled back on this return;
+        // exact typed deliveries took the replay branch and remain idempotent.
+        if linked_spike_task_id.is_some() {
+            return Err(Error::InvalidTransition("active_evidence_conflict".into()));
+        }
+        let task_id = uuid::Uuid::now_v7().to_string();
+        // Attribute the spike through the shared provenance boundary while this
+        // transaction is open, exactly like every other task producer. The
+        // authority task is the source of record; the proposal owner is the
+        // declared fallback. A creatorless outcome fails closed there rather
+        // than reaching a NULL-capable insert here.
+        let created_by_user_id = resolve_effective_creator(
+            &mut tx,
+            EffectiveCreatorProvenance {
+                explicit_user_id: None,
+                source_task_id: Some(&input.claim.created_by_task_id),
+                proposal_id: Some(input.proposal_id),
+            },
+            None,
+        )
+        .await?;
+        let authority_role: String = sqlx::query_scalar("SELECT agent_type FROM tasks WHERE id=$1")
+            .bind(&input.claim.created_by_task_id)
+            .fetch_one(&mut *tx)
+            .await?;
+        if !matches!(authority_role.as_str(), "judge" | "adversary") {
+            return Err(Error::InvalidTransition(
+                "evidence_authority_role_invalid".into(),
+            ));
+        }
+        sqlx::query("INSERT INTO tasks (id,project_id,short_id,title,description,design,issue_type,priority,owner,status,labels,acceptance_criteria,created_by_user_id,agent_type) VALUES ($1,$2,$3,$4,$5,'','spike',0,'','open',$6,'[]'::jsonb,$7,'architect')")
+            .bind(&task_id).bind(input.project_id).bind(format!("e{}", &task_id[..7])).bind(input.title).bind(input.description).bind(input.labels).bind(&created_by_user_id).execute(&mut *tx).await?;
+        let demand = DemandTypedEvidenceInput {
+            finding_id: uuid::Uuid::now_v7().to_string(),
+            proposal_id: input.proposal_id.into(),
+            demand_hash,
+            claim,
+            demanded_revision_seq: input.claim.against_revision_seq,
+            judge_task_id: input.claim.created_by_task_id.clone(),
+        };
+        let typed = TypedEvidenceRepository::demand_activate_and_set_legacy_in_transaction(
+            &mut tx, demand, &task_id,
+        )
+        .await?;
+        let attempt_id: String = sqlx::query_scalar(
+            "SELECT id FROM typed_evidence_attempts WHERE finding_id=$1 AND spike_task_id=$2",
+        )
+        .bind(&typed.finding.id)
+        .bind(&task_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        let link =
+            NeedsEvidenceClaimLink::from_claim(input.proposal_id, &task_id, input.claim).to_value();
+        self.add_debate_trail_entry_in_tx(
+            &mut tx,
+            ProposalDebateTrailCreateInput {
+                proposal_id: input.proposal_id,
+                kind: "needs_evidence",
+                body: &input.claim.question,
+                blocking: true,
+                agent_role: &authority_role,
+                author_kind: "agent",
+                author_model: None,
+                source_task_id: Some(&input.claim.created_by_task_id),
+                against_revision_seq: input.claim.against_revision_seq,
+                round: input.claim.round,
+                body_metadata: Some(&link),
+            },
+        )
+        .await?;
+        let meta = EvidenceLifecycleMetadata::awaiting_started(
+            input.proposal_id,
+            &task_id,
+            &input.claim.created_by_task_id,
+            input.claim.round,
+            input.claim.against_revision_seq,
+        )
+        .to_event_metadata();
+        self.insert_lightweight_lifecycle_event_in_tx(
+            &mut tx,
+            input.proposal_id,
+            input.claim.against_revision_seq,
+            evidence_lifecycle_kind::AWAITING_EVIDENCE_STARTED,
+            Some(&meta),
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(AtomicEvidenceDemandResult {
+            finding_id: typed.finding.id,
+            attempt_id,
+            spike_task_id: task_id,
+            replayed: false,
+        })
     }
 
     /// Structured counterpart of [`Self::set_needs_evidence_spike`]: persists

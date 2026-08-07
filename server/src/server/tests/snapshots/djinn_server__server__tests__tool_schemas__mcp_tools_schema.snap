@@ -19996,6 +19996,10 @@ expression: signatures
           "description": "Why in-session research was insufficient to resolve the claim.",
           "type": "string"
         },
+        "load_bearing_category": {
+          "description": "Caller-declared load-bearing threshold. The server must not infer this\nauthority from legacy question prose.",
+          "type": "string"
+        },
         "proposal_id": {
           "description": "Proposal UUID or short_id.",
           "type": "string"
@@ -20026,7 +20030,8 @@ expression: signatures
         "target_subsystem",
         "spec_unknown_anchor",
         "insufficient_in_session_research",
-        "expected_findings"
+        "expected_findings",
+        "load_bearing_category"
       ],
       "type": "object"
     },
@@ -20040,9 +20045,37 @@ expression: signatures
               "format": "int32",
               "type": "integer"
             },
+            "attempt_id": {
+              "description": "Typed active attempt identity for the allocated spike.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "claim": {
               "description": "The recorded needs-evidence claim question.",
               "type": "string"
+            },
+            "finding_id": {
+              "description": "Typed finding identity owned by `TypedEvidenceRepository`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "lifecycle": {
+              "description": "Typed lifecycle after atomic allocation.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "replayed": {
+              "description": "True when normalized delivery returned the existing allocation.",
+              "type": [
+                "boolean",
+                "null"
+              ]
             },
             "round": {
               "description": "The debate round when the demand was issued.",
@@ -20070,6 +20103,13 @@ expression: signatures
         "accepted": {
           "description": "True when the demand was accepted and recorded.",
           "type": "boolean"
+        },
+        "conflict_code": {
+          "description": "Stable machine-readable rejection/conflict code.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "error": {
           "description": "Error message for a rejected demand.",

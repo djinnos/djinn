@@ -20111,7 +20111,8 @@
         "target_subsystem",
         "spec_unknown_anchor",
         "insufficient_in_session_research",
-        "expected_findings"
+        "expected_findings",
+        "load_bearing_category"
       ],
       "type": "object",
       "properties": {
@@ -20148,6 +20149,10 @@
         "expected_findings": {
           "description": "What the evidence spike should produce to resolve the claim.",
           "type": "string"
+        },
+        "load_bearing_category": {
+          "description": "Caller-declared load-bearing threshold. The server must not infer this\nauthority from legacy question prose.",
+          "type": "string"
         }
       }
     },
@@ -20178,6 +20183,34 @@
               "description": "The debate round when the demand was issued.",
               "type": "integer",
               "format": "int32"
+            },
+            "finding_id": {
+              "description": "Typed finding identity owned by `TypedEvidenceRepository`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "attempt_id": {
+              "description": "Typed active attempt identity for the allocated spike.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "lifecycle": {
+              "description": "Typed lifecycle after atomic allocation.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "replayed": {
+              "description": "True when normalized delivery returned the existing allocation.",
+              "type": [
+                "boolean",
+                "null"
+              ]
             }
           },
           "required": [
@@ -20215,6 +20248,13 @@
         },
         "error": {
           "description": "Error message for a rejected demand.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "conflict_code": {
+          "description": "Stable machine-readable rejection/conflict code.",
           "type": [
             "string",
             "null"

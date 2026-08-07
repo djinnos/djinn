@@ -1220,6 +1220,18 @@ pub struct NeedsEvidenceDemandResult {
     pub against_revision_seq: i32,
     /// The debate round when the demand was issued.
     pub round: i32,
+    /// Typed finding identity owned by `TypedEvidenceRepository`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finding_id: Option<String>,
+    /// Typed active attempt identity for the allocated spike.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attempt_id: Option<String>,
+    /// Typed lifecycle after atomic allocation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lifecycle: Option<String>,
+    /// True when normalized delivery returned the existing allocation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replayed: Option<bool>,
 }
 
 /// Response for `proposal_refinement_demand_evidence`.
@@ -1239,6 +1251,9 @@ pub struct NeedsEvidenceDemandResponse {
     /// Error message for a rejected demand.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Stable machine-readable rejection/conflict code.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conflict_code: Option<String>,
 }
 
 #[cfg(test)]

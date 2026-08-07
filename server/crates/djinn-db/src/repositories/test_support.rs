@@ -10,6 +10,107 @@ mod refinement_read_only;
 
 pub use refinement_read_only::*;
 
+/// Counts every demand-owned relation for one proposal and its target project.
+///
+/// **Not for production use.** Panics on SQL errors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AtomicEvidenceDemandCountsForTest {
+    pub tasks: i64,
+    pub findings: i64,
+    pub attempts: i64,
+    pub debates: i64,
+    pub lifecycle_events: i64,
+}
+
+/// Count relations that must remain unchanged when atomic demand rejects.
+///
+/// **Not for production use.** Panics on SQL errors.
+pub async fn atomic_evidence_demand_counts_for_test(
+    db: &Database,
+    proposal_id: &str,
+    project_id: &str,
+) -> AtomicEvidenceDemandCountsForTest {
+    db.ensure_initialized().await.unwrap();
+    let tasks = sqlx::query_scalar("SELECT COUNT(*) FROM tasks WHERE project_id = $1")
+        .bind(project_id)
+        .fetch_one(db.pool())
+        .await
+        .expect("failed to count demand tasks");
+    let findings =
+        sqlx::query_scalar("SELECT COUNT(*) FROM typed_evidence_findings WHERE proposal_id = $1")
+            .bind(proposal_id)
+            .fetch_one(db.pool())
+            .await
+            .expect("failed to count demand findings");
+    let attempts = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM typed_evidence_attempts WHERE finding_id IN \
+         (SELECT id FROM typed_evidence_findings WHERE proposal_id = $1)",
+    )
+    .bind(proposal_id)
+    .fetch_one(db.pool())
+    .await
+    .expect("failed to count demand attempts");
+    let debates =
+        sqlx::query_scalar("SELECT COUNT(*) FROM proposal_debate_trail WHERE proposal_id = $1")
+            .bind(proposal_id)
+            .fetch_one(db.pool())
+            .await
+            .expect("failed to count demand debates");
+    let lifecycle_events = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM proposal_revisions WHERE proposal_id = $1 \
+         AND event_kind = 'refinement_awaiting_evidence_started'",
+    )
+    .bind(proposal_id)
+    .fetch_one(db.pool())
+    .await
+    .expect("failed to count demand lifecycle events");
+    AtomicEvidenceDemandCountsForTest {
+        tasks,
+        findings,
+        attempts,
+        debates,
+        lifecycle_events,
+    }
+}
+
+/// Materialize an exact Judge authority tuple for a focused cross-crate test.
+///
+/// **Not for production use.** Panics on SQL errors.
+pub async fn materialize_judge_authority_for_test(
+    db: &Database,
+    task_id: &str,
+    run_id: &str,
+    generation: i64,
+) {
+    db.ensure_initialized().await.unwrap();
+    let intent_id = uuid::Uuid::now_v7().to_string();
+    let mut tx = db.pool().begin().await.unwrap();
+    sqlx::query(
+        "INSERT INTO refinement_dispatch_intents (id, run_id, round, phase, role, state, idempotency_key, task_id) \
+         VALUES ($1, $2, 1, 'judge_adjudication', 'judge', 'materialized', $3, $4)",
+    )
+    .bind(&intent_id)
+    .bind(run_id)
+    .bind(format!("demand-validation/judge/{task_id}"))
+    .bind(task_id)
+    .execute(&mut *tx)
+    .await
+    .expect("failed to materialize Judge authority intent");
+    sqlx::query(
+        "UPDATE tasks SET refinement_run_id = $1, refinement_intent_id = $2, \
+         refinement_generation = $3, refinement_round = 1, \
+         refinement_phase = 'judge_adjudication', refinement_role = 'judge' WHERE id = $4",
+    )
+    .bind(run_id)
+    .bind(&intent_id)
+    .bind(generation)
+    .bind(task_id)
+    .execute(&mut *tx)
+    .await
+    .expect("failed to correlate Judge authority task");
+    tx.commit().await.unwrap();
+}
+
 /// Override a task short id for identifier-resolution regressions.
 ///
 /// **Not for production use.** Panics on SQL errors.

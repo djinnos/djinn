@@ -380,7 +380,9 @@ impl TypedEvidenceRepository {
             return Ok(None);
         }
         let finding = finding(&rows[0])?;
-        if finding.demand_hash != legacy_demand_hash(&claim, link.as_deref()) {
+        if finding.demand_hash != legacy_demand_hash(&claim, link.as_deref())
+            && finding.demand_hash != normalized_demand_hash(&claim)
+        {
             return Ok(None);
         }
         let attempts = sqlx::query("SELECT id,spike_task_id FROM typed_evidence_attempts WHERE finding_id=$1 ORDER BY sequence DESC").bind(&finding.id).fetch_all(&mut **tx).await?;
@@ -425,7 +427,9 @@ impl TypedEvidenceRepository {
         linked_spike_task_id: Option<&str>,
     ) -> Result<TypedEvidenceFindingProjection> {
         let proposal_id = input.proposal_id.clone();
-        if input.demand_hash != legacy_demand_hash(&input.claim, linked_spike_task_id) {
+        if input.demand_hash != legacy_demand_hash(&input.claim, linked_spike_task_id)
+            && input.demand_hash != normalized_demand_hash(&input.claim)
+        {
             return Err(Error::InvalidData(
                 "legacy dual-write demand hash mismatch".into(),
             ));
@@ -1744,6 +1748,32 @@ pub fn legacy_demand_hash(claim: &serde_json::Value, spike_task_id: Option<&str>
     hasher.update(b"\0");
     hasher.update(spike_task_id.unwrap_or_default().as_bytes());
     format!("legacy:{:x}", hasher.finalize())
+}
+
+/// Stable caller-delivery identity; task allocation is intentionally excluded.
+pub fn normalized_demand_hash(claim: &serde_json::Value) -> String {
+    fn normalize(value: &serde_json::Value) -> serde_json::Value {
+        match value {
+            serde_json::Value::String(s) => serde_json::Value::String(s.trim().to_owned()),
+            serde_json::Value::Array(xs) => {
+                serde_json::Value::Array(xs.iter().map(normalize).collect())
+            }
+            serde_json::Value::Object(map) => {
+                let mut out = serde_json::Map::new();
+                let mut keys: Vec<_> = map.keys().collect();
+                keys.sort_unstable();
+                for key in keys {
+                    out.insert(key.clone(), normalize(&map[key]));
+                }
+                serde_json::Value::Object(out)
+            }
+            _ => value.clone(),
+        }
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(b"typed_evidence_normalized_demand_v1\0");
+    hasher.update(serde_json::to_vec(&normalize(claim)).expect("JSON serialization cannot fail"));
+    format!("demand:{:x}", hasher.finalize())
 }
 fn nonempty(values: &[&str]) -> Result<()> {
     if values.iter().any(|v| v.trim().is_empty()) {
