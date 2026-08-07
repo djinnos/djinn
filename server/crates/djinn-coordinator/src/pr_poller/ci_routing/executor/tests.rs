@@ -908,6 +908,14 @@ async fn live_calling_owner_after_acceptance_is_not_recovered() {
 /// After a quiescent handoff the row is recovered exactly once, keeps its
 /// charge, and opens at most one Tier-2 lease — with no provider query and no
 /// replay.
+///
+/// The injected `ProcessTerminated` is the repository's contract, not a claim
+/// about what production can observe. No production witness emits it:
+/// `CiIncarnationLiveness` reads exactly one fact, the former owner's
+/// `provider_actions_drained_at` stamp, because every available death signal is
+/// a clock in disguise. See `a_lapsed_owner_lease_is_not_a_quiescence_proof`
+/// below for why, and `only_the_former_owners_drain_stamp_recovers_a_calling_row`
+/// for the same recovery driven by the real witness.
 #[tokio::test]
 async fn terminated_owner_handoff_recovers_calling_once() {
     let f = fixture().await;
@@ -1069,6 +1077,357 @@ async fn provider_finalizer_wins_owner_handoff_race() {
         .await
         .expect("late finalize");
     assert!(!late, "terminalization is write-once");
+}
+
+// ---------------------------------------------------------------------------
+// The PRODUCTION liveness witness
+// ---------------------------------------------------------------------------
+//
+// Every handoff fixture above injects `FixedLiveness`, so until these three
+// existed the one production implementation of `CiOwnerLiveness` —
+// `CiIncarnationLiveness` — had no coverage at all: inverting it outright left
+// the whole coordinator suite green. These drive the real type against the real
+// `coordinator_incarnations` ledger on the same ephemeral Postgres.
+
+/// Plant a charged `calling` row owned by `owner`, aged past the 300s floor.
+///
+/// The route goes in through `reserve` + `charge_and_begin_calling` rather than
+/// a planted UPDATE, so the budgets are really charged and the phase is really
+/// the one the executor leaves behind at the provider boundary.
+async fn calling_row_owned_by(
+    f: &Fixture,
+    identity: &CiEvidenceIdentity,
+    blocking: &[&CheckRun],
+    owner: &str,
+) -> (String, String) {
+    let key = provider_action_key(&f.subject, identity, CiAction::RerunRun);
+    let fingerprint = transient_fingerprint(CiLane::PrHead, blocking);
+    f.routes
+        .reserve(&CiRouteReservation {
+            subject: f.subject.clone(),
+            provider_action_key: key.clone(),
+            identity: identity.clone(),
+            origin_state: CiOriginState::PrDraft,
+            class: djinn_db::CiClass::Inconclusive,
+            action: CiAction::RerunRun,
+            transient_fingerprint: fingerprint.clone(),
+            retry_budget_key: retry_budget_key(&f.subject, identity, &fingerprint),
+            head_budget_key: head_budget_key(&f.subject, identity.pr_number, &identity.pr_head_sha),
+        })
+        .await
+        .expect("reserve");
+    f.routes
+        .charge_and_begin_calling(&f.subject, &key, owner, identity)
+        .await
+        .expect("charge");
+    age_calling(f, &key, 400).await;
+    (key, fingerprint)
+}
+
+/// One startup handoff pass driven by the PRODUCTION witness.
+async fn handoff_with(f: &Fixture, liveness: &CiIncarnationLiveness) -> CiHandoffReport {
+    recover_calling_owners_at_startup(
+        &f.routes,
+        &FixedHead(Some(HEAD.to_owned())),
+        liveness,
+        &f.incarnation,
+        true,
+        CiRoutingGate::Enabled,
+    )
+    .await
+}
+
+async fn recovery_reasons(f: &Fixture, key: &str) -> Vec<CiCallingRecoveryReason> {
+    f.routes
+        .calling_recovery_audit(&f.subject, key)
+        .await
+        .expect("calling-recovery audit")
+        .iter()
+        .map(|record| record.recovery_reason)
+        .collect()
+}
+
+/// A former owner whose renewal lease has lapsed is NOT quiescent.
+///
+/// The lapsed lease is the trap this fixture exists for. Renewal is scoped to
+/// the coordinator's cancellation token, so it stops when leadership is
+/// cancelled and not when the process exits: a leader still joining its
+/// provider futures past its drain budget reads exactly like a dead one once
+/// the expiry window passes. Deriving `ProcessTerminated` from that expiry
+/// authorises a second `rerun_failed_jobs` against evidence whose first call
+/// may still be in flight, discards the old owner's fenced `finalize_calling`,
+/// and spends a Lead session adjudicating an episode that in fact succeeded —
+/// which AC5 forbids in terms: "elapsed time, owner-lease expiry, cancellation,
+/// or advisory-lock release without provider-action drain never authorizes
+/// `calling` recovery".
+///
+/// NAMED FAILING MUTATION: restore the deleted arm in
+/// `CiIncarnationLiveness::quiescence_proof` —
+/// `Ok(Some(_)) => match is_live(..) { Ok(Some(false)) => ProcessTerminated, .. }`.
+/// The backdated lease reads expired, so `quiescence_proof` answers
+/// `ProcessTerminated`, the first assertion fails, and the handoff below takes
+/// the row instead of deferring: `deferred` drops to 0, `outcome_unknown` rises
+/// to 1, the phase leaves `calling`, and the audit reason stops being
+/// `LiveOwnerDeferred`.
+#[tokio::test]
+async fn a_lapsed_owner_lease_is_not_a_quiescence_proof() {
+    let f = fixture().await;
+    let incarnations = djinn_db::CoordinatorIncarnationRepository::new(f.db.clone());
+
+    // Two real ledger rows: one renewed just now, one an hour stale.
+    let lapsed = uuid::Uuid::now_v7().to_string();
+    let fresh = uuid::Uuid::now_v7().to_string();
+    incarnations
+        .register(&lapsed)
+        .await
+        .expect("register the former owner");
+    incarnations
+        .register(&fresh)
+        .await
+        .expect("register the control incarnation");
+    djinn_db::test_support::backdate_coordinator_incarnation_lease(&f.db, &lapsed, "1 hour").await;
+
+    // The precondition, proven rather than assumed. Without it this fixture
+    // would pass against a heartbeat-reading witness for the wrong reason —
+    // because the row was seconds old, not because the witness ignores age.
+    // `fresh`'s own `last_renewed_at` is "now" in the column's exact stored
+    // spelling, so it is the one threshold that needs no clock arithmetic here.
+    let now_iso = incarnations
+        .get(&fresh)
+        .await
+        .expect("ledger read")
+        .expect("the control incarnation is registered")
+        .last_renewed_at;
+    assert_eq!(
+        incarnations
+            .is_live(&lapsed, &now_iso)
+            .await
+            .expect("liveness read"),
+        Some(false),
+        "the backdated lease must read expired, or the assertion below is vacuous"
+    );
+    assert_eq!(
+        incarnations
+            .is_live(&fresh, &now_iso)
+            .await
+            .expect("liveness read"),
+        Some(true),
+        "and the control must read live, or the threshold itself is wrong"
+    );
+
+    let liveness = CiIncarnationLiveness { incarnations };
+    assert_eq!(
+        liveness.quiescence_proof(&lapsed).await,
+        CiQuiescenceProof::None,
+        "an expired heartbeat says nothing about where the former owner's \
+         provider future went; only its own drain stamp does"
+    );
+
+    // End to end: a charged `calling` row owned by that lapsed incarnation must
+    // be left exactly where it is.
+    let checks = [inconclusive_check("Quality Gate / test", 920)];
+    let blocking = refs(&checks);
+    let id = pr_head_identity(920);
+    let (key, _) = calling_row_owned_by(&f, &id, &blocking, &lapsed).await;
+
+    let before = f.effects().await;
+    let report = handoff_with(&f, &liveness).await;
+    let after = f.effects().await;
+
+    assert_eq!(report.examined, 1, "the row is a handoff candidate");
+    assert_eq!(
+        report.deferred, 1,
+        "a lapsed lease is not a quiescence proof, so the row is deferred"
+    );
+    assert_eq!(
+        report.outcome_unknown, 0,
+        "and nothing is recovered: a second provider call is the cost of \
+         getting this wrong"
+    );
+    assert_eq!(report.superseded_after_call, 0);
+    assert_no_effects_beyond_routes(&before, &after);
+
+    let attempt = f.attempt(&id, CiAction::RerunRun).await;
+    assert_eq!(
+        attempt.action_phase,
+        CiActionPhase::Calling,
+        "the row stays where the former owner left it"
+    );
+    assert_eq!(
+        attempt.owner_incarnation_id.as_deref(),
+        Some(lapsed.as_str()),
+        "and the owner is not rewritten, so the former owner's fenced \
+         finalizer can still land"
+    );
+
+    let reasons = recovery_reasons(&f, &key).await;
+    assert!(
+        reasons.contains(&CiCallingRecoveryReason::LiveOwnerDeferred),
+        "the refusal must be the missing quiescence proof; got {reasons:?}"
+    );
+    assert!(
+        !reasons.contains(&CiCallingRecoveryReason::TimeoutNotElapsed),
+        "the 300s window has already elapsed, or the quiescence predicate is \
+         never reached; got {reasons:?}"
+    );
+}
+
+/// The former owner's drain stamp — and nothing weaker — recovers a `calling`
+/// row.
+///
+/// A differential: one incarnation, one route row, one startup handoff, run
+/// three times. The only thing that changes between passes is how far the
+/// former owner got through its own shutdown contract — unregistered, admission
+/// closed, futures joined and stamped.
+///
+/// NAMED FAILING MUTATIONS. (a) Stub `quiescence_proof` to a constant
+/// `CiQuiescenceProof::None`: the third pass recovers nothing, so
+/// `outcome_unknown` stays 0 and the phase never leaves `calling`. (b) Stub it
+/// to a constant `GracefulDrain`, or read `draining_at` in place of
+/// `provider_actions_drained_at`: the second pass takes a row whose owner has
+/// closed admission but has NOT yet joined its futures, so the `deferred` and
+/// `Calling` assertions there fail. Note that (b) is not caught by the
+/// repository's own check — `recover_calling_owner` re-reads
+/// `provider_actions_drained_at` only for a `GracefulDrain` claim, so a witness
+/// that manufactures that claim from `draining_at` would be believed on its
+/// second predicate and refused on the first. This asserts the witness.
+#[tokio::test]
+async fn only_the_former_owners_drain_stamp_recovers_a_calling_row() {
+    let f = fixture().await;
+    let incarnations = djinn_db::CoordinatorIncarnationRepository::new(f.db.clone());
+    let former = uuid::Uuid::now_v7().to_string();
+    incarnations
+        .register(&former)
+        .await
+        .expect("register the former owner");
+
+    let checks = [inconclusive_check("Quality Gate / test", 921)];
+    let blocking = refs(&checks);
+    let id = pr_head_identity(921);
+    let (key, fingerprint) = calling_row_owned_by(&f, &id, &blocking, &former).await;
+    assert_eq!(
+        f.budgets(&id, &fingerprint).await,
+        (1, 1),
+        "the call was charged before the owner went away"
+    );
+
+    let liveness = CiIncarnationLiveness {
+        incarnations: djinn_db::CoordinatorIncarnationRepository::new(f.db.clone()),
+    };
+
+    // ── Pass 1: registered, renewing or not, nothing drained. ──
+    assert_eq!(
+        liveness.quiescence_proof(&former).await,
+        CiQuiescenceProof::None
+    );
+    assert_eq!(handoff_with(&f, &liveness).await.deferred, 1);
+
+    // ── Pass 2: admission is closed but the futures are not yet joined. ──
+    // This is the interesting half-state: the owner is on its way out and its
+    // `rerun_failed_jobs` future is still running.
+    assert!(
+        incarnations
+            .mark_draining(&former)
+            .await
+            .expect("mark draining"),
+        "the drain must actually start, or pass 2 tests nothing"
+    );
+    assert_eq!(
+        liveness.quiescence_proof(&former).await,
+        CiQuiescenceProof::None,
+        "a started drain is an intention, not a join"
+    );
+    let report = handoff_with(&f, &liveness).await;
+    assert_eq!(report.deferred, 1);
+    assert_eq!(report.outcome_unknown, 0);
+    assert_eq!(
+        f.attempt(&id, CiAction::RerunRun).await.action_phase,
+        CiActionPhase::Calling,
+        "a draining owner still owns its row"
+    );
+
+    // ── Pass 3: the scope emptied and the owner stamped its own row. ──
+    assert!(
+        incarnations
+            .mark_provider_actions_drained(&former)
+            .await
+            .expect("stamp the drain"),
+        "the stamp must land, or pass 3 tests nothing"
+    );
+    assert_eq!(
+        liveness.quiescence_proof(&former).await,
+        CiQuiescenceProof::GracefulDrain
+    );
+
+    let before = f.effects().await;
+    let report = handoff_with(&f, &liveness).await;
+    let after = f.effects().await;
+
+    assert_eq!(
+        report.outcome_unknown, 1,
+        "a stamped drain is the proof, and the still-current row becomes \
+         outcome_unknown"
+    );
+    assert_eq!(report.deferred, 0);
+    assert_eq!(report.superseded_after_call, 0);
+
+    let attempt = f.attempt(&id, CiAction::RerunRun).await;
+    assert_eq!(attempt.action_phase, CiActionPhase::Terminal);
+    assert_eq!(
+        attempt.terminal_outcome,
+        Some(CiRouteOutcome::OutcomeUnknown)
+    );
+    assert_eq!(
+        attempt.owner_incarnation_id.as_deref(),
+        Some(f.incarnation.as_str()),
+        "the handoff rewrites the owner to the recovering incarnation"
+    );
+    assert_eq!(
+        f.budgets(&id, &fingerprint).await,
+        (1, 1),
+        "the charge is retained across the handoff"
+    );
+    assert_eq!(
+        after.provider_mutations, before.provider_mutations,
+        "a handoff performs no provider query and no replay"
+    );
+    assert_eq!(after.worker_attempts, before.worker_attempts);
+    assert_eq!(after.task_status, before.task_status);
+    assert!(after.tier2_leases <= 1);
+}
+
+/// An owner the ledger never recorded is not a proof either.
+///
+/// NAMED FAILING MUTATION: fold the missing row into the drained arm — e.g.
+/// `Ok(row) if row.is_none_or(|r| r.provider_actions_drained_at.is_some())`.
+/// A vanished incarnation is precisely the case where nothing can attest that
+/// its futures are gone, so "no row" must read as "no proof".
+#[tokio::test]
+async fn an_unrecorded_owner_has_no_quiescence_proof() {
+    let f = fixture().await;
+    let liveness = CiIncarnationLiveness {
+        incarnations: djinn_db::CoordinatorIncarnationRepository::new(f.db.clone()),
+    };
+    let never_registered = uuid::Uuid::now_v7().to_string();
+
+    assert_eq!(
+        liveness.quiescence_proof(&never_registered).await,
+        CiQuiescenceProof::None
+    );
+
+    let checks = [inconclusive_check("Quality Gate / test", 922)];
+    let blocking = refs(&checks);
+    let id = pr_head_identity(922);
+    let (key, _) = calling_row_owned_by(&f, &id, &blocking, &never_registered).await;
+
+    let report = handoff_with(&f, &liveness).await;
+    assert_eq!(report.deferred, 1);
+    assert_eq!(report.outcome_unknown, 0);
+    assert!(
+        recovery_reasons(&f, &key)
+            .await
+            .contains(&CiCallingRecoveryReason::LiveOwnerDeferred)
+    );
 }
 
 /// A PR head that moved before the Tier-2 lease could open discards the

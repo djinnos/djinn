@@ -1091,20 +1091,35 @@ pub(crate) async fn recover_calling_owners_at_startup(
 
 /// The coordinator-incarnation-backed liveness witness.
 ///
-/// Two proofs, and the order matters. `provider_actions_drained_at` is the
-/// graceful one: the former incarnation closed action admission, joined every
-/// provider future, and stamped its own row — the only handshake that proves a
-/// future is gone while the process may still exist. Absent that, an expired
-/// renewal lease is accepted as `ProcessTerminated`, because process death
-/// destroys the futures before the advisory-lock connection closes.
+/// One proof, and only one: `provider_actions_drained_at`. The former
+/// incarnation closed action admission, joined every provider future and
+/// finalizer, and only then stamped its own row. That stamp is the sole entry
+/// in the ledger that is a *fact* about where those futures went, rather than
+/// an inference from a clock.
 ///
-/// A live, undrained former owner yields `None`, and the repository refuses the
-/// handoff on it. Lease age alone is never treated as death proof for a
-/// *drained* claim.
+/// # Why an expired renewal lease is not `ProcessTerminated`
+///
+/// It reads like process-death evidence and is not. Renewal is scoped to the
+/// coordinator's cancellation token, so it stops the instant leadership is
+/// cancelled — long before the process is gone. A leader whose drain overran
+/// its budget therefore looks *identical* to a dead one once any expiry window
+/// passes, while a `rerun_failed_jobs` future of its own is still in flight.
+/// Reading that as termination hands a charged `calling` row to a new
+/// incarnation, so the same provider action runs twice, the old owner's fenced
+/// `finalize_calling` is discarded, and a real episode is adjudicated
+/// `outcome_unknown`. Elapsed time is never by itself evidence that a `calling`
+/// owner is dead.
+///
+/// # What "no proof" costs
+///
+/// The row stays `calling` and the repository defers — writing a
+/// `LiveOwnerDeferred` audit row on every pass, so a stuck row is observable
+/// rather than silent. In the ordinary case the former owner's own fenced
+/// finalizer resolves it; in the crash case it waits for an incarnation that
+/// can show a drain stamp. A row that waits is strictly cheaper than a second
+/// provider call against evidence that is already charged.
 pub(crate) struct CiIncarnationLiveness {
     pub incarnations: djinn_db::CoordinatorIncarnationRepository,
-    /// ISO timestamp before which a renewal is considered expired.
-    pub orphan_threshold_iso: String,
 }
 
 #[async_trait::async_trait]
@@ -1114,17 +1129,10 @@ impl CiOwnerLiveness for CiIncarnationLiveness {
             Ok(Some(row)) if row.provider_actions_drained_at.is_some() => {
                 djinn_db::CiQuiescenceProof::GracefulDrain
             }
-            Ok(Some(_)) => match self
-                .incarnations
-                .is_live(incarnation_id, &self.orphan_threshold_iso)
-                .await
-            {
-                Ok(Some(false)) => djinn_db::CiQuiescenceProof::ProcessTerminated,
-                _ => djinn_db::CiQuiescenceProof::None,
-            },
-            // No row at all: the incarnation ledger has no record of the owner,
-            // so nothing can attest that its futures are gone.
-            Ok(None) | Err(_) => djinn_db::CiQuiescenceProof::None,
+            // A live owner, an owner whose renewal lease lapsed, an incarnation
+            // the ledger never recorded, and a failed read are one answer:
+            // none of them says where the former owner's provider future went.
+            _ => djinn_db::CiQuiescenceProof::None,
         }
     }
 }

@@ -960,9 +960,10 @@ impl CoordinatorActor {
     ///
     /// Runs once, from `CoordinatorActor` startup, after this incarnation has
     /// registered its lease. It is startup-only because elapsed time is never
-    /// evidence that a `calling` owner is dead — only a graceful drain stamp or
-    /// process death is — and both of those are facts about a *former* process,
-    /// not about how long a row has sat.
+    /// evidence that a `calling` owner is dead. The one proof this witness can
+    /// read is the former owner's own `provider_actions_drained_at` stamp — a
+    /// fact about where that process's provider futures went, not about how
+    /// long a row has sat. Without it the row is deferred, not taken.
     pub(crate) async fn recover_ci_calling_owners_at_startup(&self) {
         let gate = self.ci_routing_gate();
         if !gate.owns_routes() {
@@ -970,7 +971,6 @@ impl CoordinatorActor {
         }
         let liveness = CiIncarnationLiveness {
             incarnations: djinn_db::CoordinatorIncarnationRepository::new(self.db.clone()),
-            orphan_threshold_iso: crate::health::orphan_threshold_iso(),
         };
         let report = recover_calling_owners_at_startup(
             &self.ci_routes(),

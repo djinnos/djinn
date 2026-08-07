@@ -92,7 +92,7 @@ fn postgres_migration_167_is_immutable() {
 ///
 /// A content hash does not care about the merge base, so it holds where the
 /// diff-based guard cannot. Corrective DDL goes in a NEW migration --
-/// `194_ci_route_lead_rejection_and_rollback_reports.sql` is where the wave-5
+/// `195_ci_route_lead_rejection_and_rollback_reports.sql` is where the wave-5
 /// delta actually lives.
 #[test]
 fn postgres_migration_193_is_immutable() {

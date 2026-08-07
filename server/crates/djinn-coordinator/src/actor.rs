@@ -1107,9 +1107,11 @@ impl CoordinatorActor {
     /// Nothing is stamped, so a later recovering incarnation finds
     /// `provider_actions_drained_at` NULL and
     /// `CiQuiescenceProof::GracefulDrain` unsatisfied. It then defers instead
-    /// of racing. Degraded recovery latency, never lost exclusion — which is
-    /// why every step here is best-effort and none of them can panic the
-    /// shutdown path.
+    /// of racing — indefinitely, because the stamp is the only quiescence fact
+    /// `CiIncarnationLiveness` can read and no clock substitutes for it. The
+    /// charged row waits for this incarnation's own fenced finalizer. Degraded
+    /// recovery latency, never lost exclusion — which is why every step here is
+    /// best-effort and none of them can panic the shutdown path.
     async fn quiesce_provider_actions(&self) {
         // 1. No new route may enter `calling`.
         self.provider_action_scope.close_admission();

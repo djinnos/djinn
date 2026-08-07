@@ -99,9 +99,12 @@ const POLL_INTERVAL: Duration = Duration::from_secs(2);
 /// Strictly longer than the coordinator's own drain budget so the ordinary
 /// outcome is "the coordinator finished and stamped", never "leadership gave up
 /// while the coordinator was still joining". Exceeding it is reported and the
-/// lock is released without a graceful proof — a degraded but safe outcome,
-/// because `recover_calling_owner` requires the stamp and will defer without
-/// it.
+/// lock is released without a graceful proof — degraded but safe, and the
+/// safety is entirely on the *proof* side rather than the lock side:
+/// `recover_calling_owner` takes a row only against the former owner's own
+/// `provider_actions_drained_at` stamp, and `CiIncarnationLiveness` reads no
+/// other fact. A new lock owner that finds no stamp defers indefinitely, so an
+/// early release costs recovery latency and can never cost exclusion.
 const PROVIDER_ACTION_DRAIN_WAIT: std::time::Duration = std::time::Duration::from_secs(45);
 
 /// Close the CI-route provider-action gate and wait for the coordinator's drain
@@ -142,7 +145,9 @@ async fn quiesce_provider_actions(scope: Option<&ProviderActionScope>) {
             in_flight = scope.in_flight(),
             "leadership: provider-action scope did not report a graceful drain within \
              {PROVIDER_ACTION_DRAIN_WAIT:?}; releasing the advisory lock WITHOUT a drain proof. \
-             `calling` rows owned by this incarnation stay unrecoverable until process death.",
+             `calling` rows owned by this incarnation are recoverable by nobody: the next \
+             leader will defer on them indefinitely, and only this incarnation's own fenced \
+             finalizer can still terminalize them.",
         );
     }
 }
