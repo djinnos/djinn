@@ -92,22 +92,47 @@ impl Artifact {
     }
 }
 
-/// Seed a project selecting one artifact, and hand back a resolver bound to
-/// `mode` + `inventory`.
-async fn resolve(
-    artifact: &Artifact,
-    mode: LauncherAuthorityProtocol,
-    inventory: LegacyDigestInventory,
-) -> djinn_db::Result<Option<djinn_db::DispatchImage>> {
+/// The one project and the one catalog image every case in a test resolves
+/// through.
+///
+/// A `Database::open_in_memory()` is a `CREATE DATABASE … TEMPLATE` clone, so
+/// paying for one per matrix cell dominated this file's wall time. The clone is
+/// hoisted to one per test instead, and [`resolve`] restores the pristine state
+/// itself — see the note there for why that is exact rather than approximate.
+async fn fixture_db() -> Database {
     let db = Database::open_in_memory().unwrap();
     db.ensure_initialized().await.unwrap();
-    djinn_db::test_support::seed_legacy_launcher_authority_for_test(&db).await;
     ProjectRepository::new(db.clone(), djinn_core::events::EventBus::noop())
         .create_with_id("p1", "p-1", "test", "p1")
         .await
         .unwrap();
     let images = ImageRepository::new(db.clone());
     images.create("i1", "Fixture", None, "{}").await.unwrap();
+    images.set_project_image("p1", Some("i1")).await.unwrap();
+    db
+}
+
+/// Point the fixture project's artifact at `artifact`, and hand back a resolver
+/// bound to `mode` + `inventory`.
+///
+/// **Why sharing `db` across cases is exact, not merely convenient.** The
+/// resolution reads exactly two rows: the single `images` row the project
+/// selects, and the `launcher_authority_mode` singleton. Both are OVERWRITTEN
+/// in full here before every case — `mark_ready` assigns `status`, `tag`,
+/// `registry_digest` and `launcher_authority_protocol` unconditionally, and
+/// `seed_legacy_launcher_authority_for_test` resets the singleton to exactly
+/// migration 167's seed (`leaf-v1` at epoch 0). Nothing is appended to and
+/// nothing accumulates, so the rows a case resolves against are the rows a
+/// freshly cloned database would have held. `resolve_dispatch_image` is a pure
+/// read, so a case cannot leave a trace for the next one either way.
+async fn resolve(
+    db: &Database,
+    artifact: &Artifact,
+    mode: LauncherAuthorityProtocol,
+    inventory: LegacyDigestInventory,
+) -> djinn_db::Result<Option<djinn_db::DispatchImage>> {
+    djinn_db::test_support::seed_legacy_launcher_authority_for_test(db).await;
+    let images = ImageRepository::new(db.clone());
     images
         .mark_ready(
             "i1",
@@ -117,12 +142,12 @@ async fn resolve(
         )
         .await
         .expect("the fixture must be writable through the real repository");
-    images.set_project_image("p1", Some("i1")).await.unwrap();
 
     // The authority mode is the DURABLE singleton migration 167 seeds, flipped
     // through z3gi's own drain fence — not a value this test hands the
-    // resolver. A fresh database has no live permits, so the fence lets the
-    // flip through and the resolution reads a mode that is really stored.
+    // resolver. Nothing here ever admits a build pod permit, so the drain
+    // census stays empty for every case and the fence lets each flip through
+    // exactly as it does on a fresh database.
     let modes = LauncherAuthorityModeRepository::new(db.clone());
     let epoch = modes
         .read()
@@ -155,6 +180,7 @@ async fn resolve(
 /// `admitted == mode` fails naming both protocols.
 #[tokio::test]
 async fn every_admitted_combination_has_exactly_one_effective_authority() {
+    let db = fixture_db().await;
     let mut admitted_cells = 0;
     for mode in LauncherAuthorityProtocol::ALL {
         for artifact in [
@@ -166,7 +192,7 @@ async fn every_admitted_combination_has_exactly_one_effective_authority() {
             // The inventory vouches for the legacy artifact, so the only thing
             // that can reject it in this sweep is the mode.
             let inventory = inventoried("1eeac9de");
-            let resolved = resolve(&artifact, mode, inventory).await;
+            let resolved = resolve(&db, &artifact, mode, inventory).await;
 
             let Ok(Some(image)) = resolved else {
                 continue; // rejected; the rejection sweeps below cover why
@@ -212,9 +238,11 @@ async fn every_admitted_combination_has_exactly_one_effective_authority() {
 /// "uninventoried" assertion below then resolves instead of erroring.
 #[tokio::test]
 async fn a_missing_protocol_is_admitted_only_for_an_exact_inventoried_digest() {
+    let db = fixture_db().await;
     let artifact = Artifact::legacy_no_handshake();
 
     let admitted = resolve(
+        &db,
         &artifact,
         LauncherAuthorityProtocol::LeafV1,
         inventoried("1eeac9de"),
@@ -230,6 +258,7 @@ async fn a_missing_protocol_is_admitted_only_for_an_exact_inventoried_digest() {
 
     // A different digest, correctly formed, that the inventory does not list.
     let rejected = resolve(
+        &db,
         &artifact,
         LauncherAuthorityProtocol::LeafV1,
         inventoried("d1ffe2ed"),
@@ -254,11 +283,13 @@ async fn a_missing_protocol_is_admitted_only_for_an_exact_inventoried_digest() {
 /// `decide_admission`. Both `expect_err`s below then return `Ok`.
 #[tokio::test]
 async fn no_missing_protocol_artifact_survives_resize_v2() {
+    let db = fixture_db().await;
     for inventory in [
         inventoried("1eeac9de"), // even vouched for
         LegacyDigestInventory::Unconfigured,
     ] {
         let error = resolve(
+            &db,
             &Artifact::legacy_no_handshake(),
             LauncherAuthorityProtocol::ResizeV2,
             inventory,
@@ -290,6 +321,7 @@ async fn no_missing_protocol_artifact_survives_resize_v2() {
 /// malformed sweep then resolves.
 #[tokio::test]
 async fn a_mutable_tag_without_a_verified_digest_never_dispatches() {
+    let db = fixture_db().await;
     // Not canonical: short, uppercase, wrong algorithm, and a bare tag.
     for bad in [
         "sha256:abc",
@@ -303,6 +335,7 @@ async fn a_mutable_tag_without_a_verified_digest_never_dispatches() {
             digest: Some(bad.to_owned()),
         };
         let error = resolve(
+            &db,
             &artifact,
             LauncherAuthorityProtocol::LeafV1,
             LegacyDigestInventory::Unconfigured,
@@ -319,6 +352,7 @@ async fn a_mutable_tag_without_a_verified_digest_never_dispatches() {
 
     // The digestless legacy row: resolvable, but carrying no authority.
     let undigested = resolve(
+        &db,
         &Artifact::legacy_no_handshake_undigested(),
         LauncherAuthorityProtocol::LeafV1,
         LegacyDigestInventory::Unconfigured,
@@ -344,12 +378,14 @@ async fn a_mutable_tag_without_a_verified_digest_never_dispatches() {
 /// `decide_admission` with `true`. Both directions then resolve.
 #[tokio::test]
 async fn an_explicit_protocol_mismatch_is_refused_in_both_directions() {
+    let db = fixture_db().await;
     for mode in LauncherAuthorityProtocol::ALL {
         for declared in LauncherAuthorityProtocol::ALL {
             if declared == mode {
                 continue;
             }
             let error = resolve(
+                &db,
                 &Artifact::declaring(declared),
                 mode,
                 LegacyDigestInventory::Unconfigured,
@@ -373,7 +409,9 @@ async fn an_explicit_protocol_mismatch_is_refused_in_both_directions() {
 /// absent one). The first assertion then resolves.
 #[tokio::test]
 async fn an_unusable_inventory_rejects_rather_than_falling_back() {
+    let db = fixture_db().await;
     let error = resolve(
+        &db,
         &Artifact::legacy_no_handshake(),
         LauncherAuthorityProtocol::LeafV1,
         LegacyDigestInventory::Unusable(InventoryFault::SignatureInvalid),
@@ -388,6 +426,7 @@ async fn an_unusable_inventory_rejects_rather_than_falling_back() {
     // A DECLARING artifact does not consult the inventory at all, so a broken
     // inventory must not take the whole catalog down with it.
     let declaring = resolve(
+        &db,
         &Artifact::declaring(LauncherAuthorityProtocol::LeafV1),
         LauncherAuthorityProtocol::LeafV1,
         LegacyDigestInventory::Unusable(InventoryFault::SignatureInvalid),
@@ -411,9 +450,11 @@ async fn an_unusable_inventory_rejects_rather_than_falling_back() {
 /// dispatching across the upgrade. Configuring an inventory arms it.
 #[tokio::test]
 async fn arming_the_inventory_is_what_narrows_an_undeclared_artifact() {
+    let db = fixture_db().await;
     let artifact = Artifact::legacy_no_handshake();
 
     let unarmed = resolve(
+        &db,
         &artifact,
         LauncherAuthorityProtocol::LeafV1,
         LegacyDigestInventory::Unconfigured,
@@ -429,6 +470,7 @@ async fn arming_the_inventory_is_what_narrows_an_undeclared_artifact() {
     // The same artifact, once an inventory exists that does not list it.
     assert!(
         resolve(
+            &db,
             &artifact,
             LauncherAuthorityProtocol::LeafV1,
             inventoried("d1ffe2ed"),
@@ -447,6 +489,7 @@ async fn arming_the_inventory_is_what_narrows_an_undeclared_artifact() {
 /// [`decide_admission`] returns for the same inputs.
 #[tokio::test]
 async fn the_repository_seam_reports_exactly_what_the_decision_returns() {
+    let db = fixture_db().await;
     for mode in LauncherAuthorityProtocol::ALL {
         for inventory in [
             LegacyDigestInventory::Unconfigured,
@@ -466,7 +509,7 @@ async fn the_repository_seam_reports_exactly_what_the_decision_returns() {
                     artifact.digest.as_deref(),
                     &inventory,
                 );
-                let observed = resolve(&artifact, mode, inventory.clone()).await;
+                let observed = resolve(&db, &artifact, mode, inventory.clone()).await;
                 match (expected, observed) {
                     (Ok(AdmissionDecision::Admitted(protocol)), Ok(Some(image))) => {
                         assert_eq!(
