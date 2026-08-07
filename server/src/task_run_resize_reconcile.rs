@@ -362,6 +362,30 @@ pub struct ResizeReconcilePass {
     pub pre_birth_scan_failed: bool,
 }
 
+/// What one sweep OBSERVED, before it drove anything.
+///
+/// Carries the partially-filled [`ResizeReconcilePass`] — mode, `scanned`,
+/// `scan_failed` — so that [`TaskRunResizeReconciler::drive`] finishes the same
+/// record [`TaskRunResizeReconciler::run_pass`] would have produced. The rows
+/// are deliberately opaque: nothing outside this module may act on them, and
+/// the only reason the seam is public is that a driver race is not a statement
+/// about the durable compare-and-swap unless both drivers are known to have
+/// read the same row.
+#[derive(Debug)]
+pub struct ResizeReconcileScan {
+    mode: ResizeReconcileMode,
+    pass: ResizeReconcilePass,
+    rows: Vec<BuildPodPermitRow>,
+}
+
+impl ResizeReconcileScan {
+    /// Rows the durable nonterminal scan returned.
+    #[must_use]
+    pub const fn scanned(&self) -> usize {
+        self.pass.scanned
+    }
+}
+
 /// Emit completed-pass summaries separately for each durable ledger.
 ///
 /// A pass advances the `build_pod_permits` lifecycle before it may release a
@@ -482,7 +506,27 @@ impl TaskRunResizeReconciler {
     }
 
     /// One sweep over every nonterminal resize row.
+    ///
+    /// Exactly [`Self::scan`] followed by [`Self::drive`], and the only shape
+    /// production ever uses.
     pub async fn run_pass(&self) -> ResizeReconcilePass {
+        let scan = self.scan().await;
+        self.drive(scan).await
+    }
+
+    /// The OBSERVING half of one sweep: read the durable rows, decide nothing.
+    ///
+    /// Separated from [`Self::drive`] because "two drivers raced over one row"
+    /// is only a statement about the compare-and-swap when both drivers
+    /// actually OBSERVED the same row. A test that starts two whole passes
+    /// together is instead betting that the second driver's SELECT lands before
+    /// the first driver's CAS commits; when it does not, the second driver
+    /// either reads a row already moved to `drop_required` (which `claim`
+    /// waves through without a CAS, producing a second PATCH) or reads nothing
+    /// at all. Joining the scans first and the drives second removes that bet
+    /// without removing the race: the CAS is still what serialises them, and
+    /// deleting it still doubles the PATCH count.
+    pub async fn scan(&self) -> ResizeReconcileScan {
         self.passes.fetch_add(1, Ordering::SeqCst);
         let mode = self.gate.mode();
         let mut pass = ResizeReconcilePass {
@@ -490,7 +534,11 @@ impl TaskRunResizeReconciler {
             ..ResizeReconcilePass::default()
         };
         if mode == ResizeReconcileMode::Off {
-            return pass;
+            return ResizeReconcileScan {
+                mode,
+                pass,
+                rows: Vec::new(),
+            };
         }
 
         // THE DURABLE READ. Not a cache, not an in-process registry of live
@@ -505,10 +553,27 @@ impl TaskRunResizeReconciler {
                      stranded rows keep their lease until the next tick"
                 );
                 pass.scan_failed = true;
-                return pass;
+                return ResizeReconcileScan {
+                    mode,
+                    pass,
+                    rows: Vec::new(),
+                };
             }
         };
         pass.scanned = rows.len();
+        ResizeReconcileScan { mode, pass, rows }
+    }
+
+    /// The ACTING half of one sweep, over the rows [`Self::scan`] observed.
+    pub async fn drive(&self, scan: ResizeReconcileScan) -> ResizeReconcilePass {
+        let ResizeReconcileScan {
+            mode,
+            mut pass,
+            rows,
+        } = scan;
+        if mode == ResizeReconcileMode::Off || pass.scan_failed {
+            return pass;
+        }
 
         for row in rows {
             let task_run_id = row.task_run_id.clone();

@@ -223,6 +223,7 @@ pub(crate) fn task_with_ci(
     ci_last_remediation_base_sha: Option<&str>,
 ) -> Task {
     Task {
+        escalation_evidence_at: None,
         id: "task-ci-test".into(),
         project_id: "project-1".into(),
         short_id: "t-ci".into(),

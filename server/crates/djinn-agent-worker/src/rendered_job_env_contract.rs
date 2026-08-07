@@ -169,6 +169,7 @@ fn the_warm_pod_argv_parses_with_the_real_parser() {
         "deadbeef",
         "registry.example/djinn-project:opsu",
         None,
+        &[],
     );
     let pod = job
         .spec
@@ -224,6 +225,7 @@ fn the_scip_index_pod_argv_parses_with_the_real_parser() {
         "registry.example/djinn-project:scip",
         "0123456789abcdef0123456789abcdef01234567",
         None,
+        &[],
     );
     let pod = job
         .spec
@@ -333,6 +335,7 @@ fn the_leased_warm_job_renders_the_build_lease_identity_the_worker_releases_with
         "registry.example/djinn-project:lease",
         None,
         &identity,
+        &[],
     );
     let pod = job
         .spec
@@ -388,6 +391,7 @@ fn the_unleased_warm_job_renders_no_build_lease_identity() {
         "deadbeef",
         "registry.example/djinn-project:unleased",
         None,
+        &[],
     );
     let pod = job
         .spec
@@ -429,6 +433,7 @@ fn every_required_warm_graph_environment_key_is_rendered_into_the_job() {
         "deadbeef",
         "registry.example/djinn-project:opsu",
         None,
+        &[],
     );
     stamp_warm_attempt(
         &mut job,

@@ -1,0 +1,16 @@
+[32;1m Nextest run[0m ID [1mb4689864-1a40-4b1b-9312-5497a9c5f809[0m with nextest profile: [1mpull-request[0m
+[32;1m    Starting[0m [1m9[0m tests across [1m4[0m binaries
+[32;1m        PASS[0m [   0.007s] (1/9) [35;1mdjinn-runtime[0m [36mspec::tests[0m[36m::[0m[34;1mtask_run_report_bincode_roundtrip[0m
+[32;1m        PASS[0m [   0.011s] (2/9) [35;1mdjinn-runtime[0m [36mspec::tests[0m[36m::[0m[34;1mfailed_outcome_throttle_bincode_roundtrip[0m
+[35;1m  TRY 1 FAIL[0m [   0.526s] (─────────) [35;1mdjinn-server[0m [36mserver::chat::tests::handler[0m[36m::[0m[34;1mcompletions_rejects_non_uuid_session[0m
+[33;1m   DELAY 2/3[0m by   0.625s (─────────) [35;1mdjinn-server[0m [36mserver::chat::tests::handler[0m[36m::[0m[34;1mcompletions_rejects_non_uuid_session[0m
+[33;1m  TRY 2 PASS[0m [   0.501s] (3/9) [35;1mdjinn-server[0m [36mserver::chat::tests::handler[0m[36m::[0m[34;1mcompletions_rejects_non_uuid_session[0m
+[32;1m        PASS[0m [   0.740s] (4/9) [35;1mdjinn-server[0m [36mserver::chat::tests::compaction[0m[36m::[0m[34;1mnewer_boundary_with_stale_tail_hash_falls_back[0m
+[31;1m        FAIL[0m [   0.483s] (5/9) [35;1mdjinn-provider::stream_event_consumer_audit[0m [34;1mchecked_in_classification_covers_every_production_stream_event_match[0m
+[33;1m        SLOW[0m [>  60.000s] (─────────) [35;1mdjinn-server::coordinator_dispatch[0m [34;1mdispatch_settles_under_sustained_load[0m
+[32;1m        PASS[0m [  62.481s] (6/9) [35;1mdjinn-server::coordinator_dispatch[0m [34;1mdispatch_settles_under_sustained_load[0m
+[33;1m        LEAK[0m [   3.204s] (7/9) [35;1mdjinn-server::coordinator_dispatch[0m [34;1mpool_teardown_leaks_a_child[0m
+[31;1m     TIMEOUT[0m [ 120.000s] (8/9) [35;1mdjinn-server::coordinator_dispatch[0m [34;1mwedged_admission_probe[0m
+────────────
+[31;1m     Summary[0m [ 196.905s] [1m8[0m/[1m9[0m tests run: [1m6[0m [32;1mpassed[0m ([1m1[0m [33;1mleaky[0m), [1m2[0m [31;1mfailed[0m
+[31;1m        FAIL[0m [   0.483s] (5/9) [35;1mdjinn-provider::stream_event_consumer_audit[0m [34;1mchecked_in_classification_covers_every_production_stream_event_match[0m

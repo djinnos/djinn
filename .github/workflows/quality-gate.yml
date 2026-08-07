@@ -229,6 +229,17 @@ jobs:
         run: node --test scripts/ci-release-image-validation.test.mjs
       - name: Verify shard failure summary contract
         run: node --test scripts/ci-shard-failure-summary.test.mjs
+      # Guards the per-test timing artifact. Its predecessor failed silently in
+      # the worst way available — a valid, accepted, entirely uniform document —
+      # so these assertions are about the VALUES and the KEY FORMAT, not about
+      # the file being produced.
+      - name: Verify nextest per-test timing contract
+        run: node --test scripts/ci-nextest-timing.test.mjs
+      # Retry telemetry shares the shard-failure parser. It is proven here for
+      # the same reason: the only alternative is an inline grep nobody can test,
+      # and this one runs on GREEN lanes where a wrong answer is invisible.
+      - name: Verify retry-absorbed flake telemetry contract
+        run: node --test scripts/ci-retry-flake-summary.test.mjs
       - name: Verify MCP tool-schema golden manifest contract
         run: node --test scripts/tool-goldens.test.mjs
       # Cheap (filesystem walk, no build): fails if a NEW derived tool-schema
@@ -1764,7 +1775,15 @@ jobs:
           nohup bash -c '
             for _ in $(seq 1 240); do
               sleep 15
-              failed=$(gh api "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?per_page=100" \
+              # Attempt-scoped on purpose (no apostrophes below: this whole
+              # block is inside a single-quoted `bash -c`). The unscoped
+              # /runs/{id}/jobs endpoint reports the latest record per job
+              # NAME, so at the start of a re-run it still returns the
+              # PREVIOUS attempt results. A run whose gate concluded failure
+              # once could therefore never be re-run: the watcher on the new
+              # attempt saw that stale failure on its first poll and cancelled
+              # the re-run within ~15s, every time.
+              failed=$(gh api "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}/jobs?per_page=100" \
                 --jq "[.jobs[] | select(.conclusion == \"failure\") | .name] | first // empty" 2>/dev/null || true)
               if [ -n "$failed" ]; then
                 echo "Lane $failed failed — cancelling run ${{ github.run_id }} to save the remaining shard minutes (attribution is on the failed lane'"'"'s run-level annotation)."
@@ -2020,15 +2039,49 @@ jobs:
           set -e
           elapsed_seconds=$(( $(date +%s) - started_seconds ))
           mkdir -p nextest-timing
-          jq -s --arg generated_at "$started_at" --argjson elapsed "$elapsed_seconds" '
-            (.[0]) as $ids |
-            ($ids | length) as $count |
-            {
-              version: "ci-nextest-timing/v1",
-              generated_at: $generated_at,
-              tests: (reduce $ids[] as $id ({}; .[$id] = (if $count > 0 then ($elapsed / $count) else 0 end)))
-            }
-          ' nextest-plan/shard-test-ids.json > "nextest-timing/timing-${{ matrix.shardIndex }}.json"
+          timing_file="nextest-timing/timing-${{ matrix.shardIndex }}.json"
+          # Real per-test durations, parsed out of the log teed above.
+          #
+          # This used to be an inline jq that wrote `elapsed / test_count` into
+          # every entry — the shard's whole wall clock spread uniformly. The
+          # document was schema-valid and was accepted and used by the planner,
+          # so nothing ever failed; it simply carried no per-test signal. All
+          # 12,462 entries of the last artifact published that way lay between
+          # 0.4599s and 0.56s, which makes duration balancing arithmetically
+          # identical to test-count balancing. Shards in one run landed at 534s
+          # and 866s, a 62% spread, for exactly that reason.
+          #
+          # The durations were already on disk: every settled nextest attempt
+          # prints `PASS [   0.011s] (n/m) <binary-id> <test-name>`. The parser
+          # and, critically, the reconciliation between that `<binary-id>
+          # <test-name>` and the planner's `package|binary|test` key live in
+          # scripts/ci-nextest-timing.mjs (which derives the mapping from the
+          # planner's own parseDiscovery, so the two cannot disagree).
+          #
+          # `nextest-timing-publish` requires this file's key set to equal this
+          # shard's matrix row exactly, so a hard failure here would red the
+          # gate rather than degrade balancing. The generator therefore handles
+          # a missing/unparseable log internally, and this final `||` keeps the
+          # old uniform document as a last resort for anything it cannot: a
+          # coarse artifact is the status quo ante, an absent one is an outage.
+          if ! node "$GITHUB_WORKSPACE/scripts/ci-nextest-timing.mjs" \
+            --discovery nextest-plan/discovery.json \
+            --test-ids nextest-plan/shard-test-ids.json \
+            --log "$RUNNER_TEMP/nextest-run.log" \
+            --elapsed "$elapsed_seconds" \
+            --generated-at "$started_at" \
+            --output "$timing_file" || [ ! -s "$timing_file" ]; then
+            echo "::warning::Per-test timing extraction failed; falling back to a uniform timing document for this shard."
+            jq -s --arg generated_at "$started_at" --argjson elapsed "$elapsed_seconds" '
+              (.[0]) as $ids |
+              ($ids | length) as $count |
+              {
+                version: "ci-nextest-timing/v1",
+                generated_at: $generated_at,
+                tests: (reduce $ids[] as $id ({}; .[$id] = (if $count > 0 then ($elapsed / $count) else 0 end)))
+              }
+            ' nextest-plan/shard-test-ids.json > "$timing_file"
+          fi
           exit "$status"
       - name: Surface shard failure at run level
         # Runs on ANY failure in this shard (test failure, or an earlier
@@ -2079,6 +2132,43 @@ jobs:
             echo "::error title=Server shard failed before checkout::$message"
             printf '### Server shard failure\n\n%s\n' "$message" >> "$GITHUB_STEP_SUMMARY"
           fi
+      - name: Surface retry-absorbed flakes
+        # Deliberately `always()`, NOT `failure()`. Every profile used here
+        # inherits [profile.ci]'s `retries = { count = 2 }`, so a test that
+        # fails once and passes on a re-run leaves this lane GREEN and leaves
+        # no signal anywhere. Measured over 619 shard logs from 80 SUCCESSFUL
+        # merge_group runs: 33 of the 80 (41.2%) absorbed at least one flake,
+        # 34 instances total, against a 2.1% visible failure rate — roughly
+        # 20x under-reporting.
+        #
+        # This step is PURE TELEMETRY and must stay that way. The script always
+        # exits 0 (a parse problem degrades to a `::notice::`), and the `|| true`
+        # below covers node itself failing to start: a bug in reporting must
+        # never turn a lane whose tests passed into a red one. It also does not
+        # touch `retries` — whether to keep three attempts is a separate call,
+        # and it cannot be made honestly until the cost is on the page.
+        if: always() && steps.shard.outputs.active == 'true'
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -uo pipefail
+          flake_script="$GITHUB_WORKSPACE/scripts/ci-retry-flake-summary.mjs"
+          if [[ -f "$flake_script" ]]; then
+            node "$flake_script" \
+              --shard "${{ matrix.shard }}" \
+              --log "$RUNNER_TEMP/nextest-run.log" \
+              --summary "$GITHUB_STEP_SUMMARY" \
+              --json "$GITHUB_WORKSPACE/server/nextest-flake/flake-${{ matrix.shardIndex }}.json" || true
+          fi
+          exit 0
+      - name: Upload shard retry-flake report
+        if: always() && steps.shard.outputs.active == 'true'
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: nextest-flake-${{ github.run_id }}-${{ matrix.shard }}
+          path: server/nextest-flake/flake-${{ matrix.shardIndex }}.json
+          if-no-files-found: ignore
+          retention-days: 30
       - name: Upload retained shard timing data
         if: always() && steps.shard.outputs.active == 'true'
         uses: actions/upload-artifact@v4
@@ -2087,6 +2177,18 @@ jobs:
           path: server/nextest-timing/timing-${{ matrix.shardIndex }}.json
           if-no-files-found: warn
           retention-days: 30
+  # ADVISORY LANE. The quality gate routes this job's result through
+  # `advisory`, not `check` — a failure here is annotated and does not block.
+  # The full justification, and the 2026-08-06 incident that forced it, is on
+  # `SERVER_TEST_TIMING` in the `quality-gate` job.
+  #
+  # Do not try to make this job zero-`uses:` to dodge `Set up job` action
+  # resolution: the upload cannot be expressed as `gh api`. The REST API has no
+  # artifact-create endpoint, and the internal upload service requires
+  # ACTIONS_RUNTIME_TOKEN, which the runner injects for JavaScript/container
+  # action steps only and NOT for `run:` steps. Dropping the two
+  # download-artifact steps alone buys nothing: resolution is ONE batched call
+  # per job, so any single remaining `uses:` keeps the job exposed.
   nextest-timing-publish:
     name: Publish Nextest Timing
     needs:
@@ -2533,6 +2635,39 @@ jobs:
         run: pnpm test
       - name: Production build
         run: pnpm build
+  nextest-flake-report:
+    name: Retry-Absorbed Flakes
+    # Run-level rollup of the per-shard retry telemetry. A single shard saying
+    # "1 absorbed flake" reads as noise; "this run absorbed 3" is the statistic
+    # that showed 41.2% of green merge_group runs were quietly flaky.
+    #
+    # This job is deliberately ABSENT from `quality-gate`'s `needs` list, and
+    # must stay absent: it reports on runs whose tests already passed, so
+    # letting it block a merge would convert a measurement into an outage. It
+    # is `always()` so a red sibling shard still gets its retry ledger printed,
+    # and every step swallows its own errors.
+    needs:
+      - preflight
+      - server-test
+    if: always() && needs.preflight.outputs.serverTest == 'true' && github.event_name != 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download shard retry-flake reports
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          pattern: nextest-flake-${{ github.run_id }}-*
+          path: nextest-flake-shards
+          merge-multiple: true
+      - name: Report run-level retry-absorbed flake count
+        run: |
+          set -uo pipefail
+          node scripts/ci-retry-flake-summary.mjs \
+            --aggregate nextest-flake-shards \
+            --summary "$GITHUB_STEP_SUMMARY" || true
+          exit 0
   quality-gate:
     name: Quality Gate
     runs-on: ubuntu-latest
@@ -2576,6 +2711,38 @@ jobs:
           AARCH64: ${{ needs.preflight.outputs.aarch64 }}:${{ needs.server-aarch64-check.result }}
           SERVER_TEST_PLAN: ${{ needs.preflight.outputs.serverTest }}:${{ needs.nextest-plan.result }}
           SERVER_TEST_SHARDS: ${{ needs.preflight.outputs.serverTest }}:${{ needs.server-test.result }}
+          # ADVISORY (routed through `advisory`, not `check`, below). This is
+          # the only lane in this gate that does not block, and it is the only
+          # one that may be: it publishes the shard TIMING artifact, which the
+          # planner consumes to balance shards by duration. The planner's own
+          # contract, stated at its restore loop, is that timing "influence[s]
+          # balancing only, never selection" — every failure mode there already
+          # falls through to "using cold-start balancing" and the run proceeds.
+          # So a missing timing artifact is, by construction, not a correctness
+          # signal; the next run just cold-starts (or picks an older candidate
+          # from the five pages it pages through).
+          #
+          # Why it had to change: on 2026-08-06 GitHub Actions could not resolve
+          # action download info ("Service Unavailable" / "Internal Server
+          # Error") for actions/{up,down}load-artifact@v4. Action resolution is
+          # one batched API call per JOB, made during `Set up job` before any
+          # step runs, so a job dies whole. On run 31113025510, 22 of 27 jobs
+          # were green INCLUDING all eight test shards; `Publish Nextest Timing`
+          # died at setup, and this gate fail-closed on it and discarded 212
+          # job-minutes of green test signal.
+          #
+          # This lane cannot be made structurally immune the way the
+          # `quality-gate` job itself is (zero `uses:`, so it never makes the
+          # resolution call): publishing an artifact REQUIRES
+          # actions/upload-artifact. There is no REST endpoint to create an
+          # artifact, and the internal upload API needs ACTIONS_RUNTIME_TOKEN,
+          # which the runner injects only for JavaScript/container action steps
+          # and NOT for `run:` steps. Downgrading the lane is therefore the fix,
+          # and it is a strictly better one: it also covers runner-allocation
+          # failures, artifact-API 5xx at runtime, and the 10-minute timeout.
+          #
+          # NOT a general "tolerate infra death" policy. Only telemetry lanes
+          # qualify. A test shard that dies at `Set up job` ran zero tests.
           SERVER_TEST_TIMING: ${{ needs.preflight.outputs.serverTest }}:${{ needs.nextest-timing-publish.result }}
           SQLX: ${{ needs.preflight.outputs.sqlxFreshness }}:${{ needs.server-sqlx-freshness.result }}
           MEMORY: ${{ needs.preflight.outputs.memoryEval }}:${{ needs.memory-eval.result }}
@@ -2592,9 +2759,25 @@ jobs:
             if [ "$selected" = false ] && [ "$result" = skipped ]; then return; fi
             echo "lane $lane selected=$selected result=$result"; return 1
           }
+          # Advisory lanes are annotated loudly and never block.
+          #
+          # ONLY legitimate for a lane that produces TELEMETRY: one whose output
+          # cannot change which tests run, whether they passed, or what ships.
+          # A lane that executes or verifies anything must stay on `check`.
+          # In particular this must never be extended to a test shard: a shard
+          # that dies at `Set up job` ran zero tests, and passing it would be a
+          # green-with-zero-executions trap.
+          advisory() {
+            local lane=$1 pair=$2 selected=${2%%:*} result=${2#*:}
+            if check "$@"; then return 0; fi
+            echo "::warning title=Advisory lane $lane did not succeed::lane $lane selected=$selected result=$result. This lane is telemetry-only and does NOT block the merge, but it did not do its job — investigate before the next planner run."
+            return 0
+          }
           check server-guards "$GUARDS"; check clippy "$CLIPPY"
           check deploy-render-gate "$RENDER_GATE"; check cutover-preflight "$CUTOVER_PREFLIGHT"
           check aarch64 "$AARCH64"
-          check server-test-plan "$SERVER_TEST_PLAN"; check server-test-shards "$SERVER_TEST_SHARDS"; check server-test-timing "$SERVER_TEST_TIMING"
+          check server-test-plan "$SERVER_TEST_PLAN"; check server-test-shards "$SERVER_TEST_SHARDS"
+          # Timing is the ONE advisory lane. See the SERVER_TEST_TIMING comment above.
+          advisory server-test-timing "$SERVER_TEST_TIMING"
           check sqlx-freshness "$SQLX"; check memory-eval "$MEMORY"
           check local-dev-contracts "$TILT_CONTRACTS"; check qa-smoke "$QA_SMOKE"; check ui "$UI"

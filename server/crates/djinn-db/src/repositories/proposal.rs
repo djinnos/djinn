@@ -1124,20 +1124,36 @@ impl ProposalRepository {
         &self,
         input: ProposalFeedbackCreateInput<'_>,
     ) -> Result<ProposalFeedback> {
+        self.add_feedback_with_severity(input, "blocking").await
+    }
+
+    /// Add feedback with an explicit readiness severity. The legacy path stays
+    /// blocking so existing callers retain their previous behavior.
+    pub async fn add_feedback_with_severity(
+        &self,
+        input: ProposalFeedbackCreateInput<'_>,
+        severity: &str,
+    ) -> Result<ProposalFeedback> {
         self.db.ensure_initialized().await?;
+        if !matches!(severity, "advisory" | "blocking") {
+            return Err(Error::InvalidData(format!(
+                "invalid feedback severity: {severity}"
+            )));
+        }
         let id = uuid::Uuid::now_v7().to_string();
         let author_user_id = djinn_core::auth_context::current_user_id();
         sqlx::query!(
             "INSERT INTO proposal_feedback
-                (id, proposal_id, parent_id, author_kind, author_user_id, author_model, body)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                (id, proposal_id, parent_id, author_kind, author_user_id, author_model, body, severity)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
             id,
             input.proposal_id,
             input.parent_id,
             input.author_kind,
             author_user_id,
             input.author_model,
-            input.body
+            input.body,
+            severity
         )
         .execute(self.db.pool())
         .await?;
@@ -1239,6 +1255,33 @@ impl ProposalRepository {
         }
         tx.commit().await?;
         Ok((feedback, results))
+    }
+
+    /// Read the typed withdrawal state for one materialized feedback generation.
+    pub async fn get_feedback_refinement_withdrawal_result(
+        &self,
+        injection_id: &str,
+    ) -> Result<Option<FeedbackRefinementWithdrawalResult>> {
+        self.db.ensure_initialized().await?;
+        let Some(injection) = sqlx::query_as::<_, ProposalFeedbackRefinementInjection>(
+            "SELECT id,proposal_id,root_feedback_id,generation,state,cutoff_at,cutoff_feedback_id,round,debate_entry_id,accepted_disposition,accepted_revision_seq,accepted_reason,accepted_at,accepted_by_user_id,created_at,updated_at FROM proposal_feedback_refinement_injections WHERE id=$1",
+        )
+        .bind(injection_id)
+        .fetch_optional(self.db.pool())
+        .await?
+        else {
+            return Ok(None);
+        };
+        let debate_id = injection.debate_entry_id.as_deref().ok_or_else(|| {
+            Error::InvalidData("materialized injection has no debate link".into())
+        })?;
+        let debate_entry = self.get_debate_trail_entry_required(debate_id).await?;
+        let withdrawn = injection.state == "withdrawn_by_author";
+        Ok(Some(FeedbackRefinementWithdrawalResult {
+            injection,
+            debate_entry,
+            withdrawn,
+        }))
     }
 
     /// Dispose a generation atomically and write back exactly its captured rows.

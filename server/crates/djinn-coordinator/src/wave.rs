@@ -288,6 +288,35 @@ mod tests {
             .await
     }
 
+    /// The exact `epic.created` envelope `EpicRepository` broadcasts, so a test
+    /// that hands it to `handle_event` drives the production routing path.
+    fn epic_created_event(epic: &djinn_core::models::Epic) -> DjinnEventEnvelope {
+        DjinnEventEnvelope::epic_created(&djinn_core::models::EpicEventPayload::bare(epic))
+    }
+
+    /// The `epic.updated` counterpart of [`epic_created_event`].
+    fn epic_updated_event(epic: &djinn_core::models::Epic) -> DjinnEventEnvelope {
+        DjinnEventEnvelope::epic_updated(&djinn_core::models::EpicEventPayload::bare(epic))
+    }
+
+    /// Count the epic's open/in-progress planning tasks *right now*.
+    ///
+    /// Unlike [`wait_for_decomp_tasks`] this does not wait: it is for tests
+    /// that drive a coordinator pass to completion themselves and therefore
+    /// already hold a happens-before edge over the write they are counting.
+    async fn open_planning_count(task_repo: &TaskRepository, epic_id: &str) -> usize {
+        task_repo
+            .list_by_epic(epic_id)
+            .await
+            .unwrap()
+            .iter()
+            .filter(|t| {
+                matches!(t.issue_type.as_str(), "planning" | "decomposition")
+                    && matches!(t.status.as_str(), "open" | "in_progress")
+            })
+            .count()
+    }
+
     async fn wait_for_decomp_tasks(
         db: &Database,
         tx: &broadcast::Sender<DjinnEventEnvelope>,
@@ -488,8 +517,24 @@ mod tests {
 
         let project = test_helpers::create_test_project(&db).await;
         let epic_repo = EpicRepository::new(db.clone(), crate::events::event_bus_for(&tx));
-        let _handle = spawn_coordinator_with_planner(&db, &tx);
-        tokio::task::yield_now().await;
+        let task_repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+
+        // Deliver the two `epic.updated` events to an unspawned actor instead
+        // of broadcasting them at a spawned coordinator and waiting.
+        //
+        // The dedupe this test exercises is entirely inside
+        // `maybe_create_planning_task`, and the coordinator processes events
+        // one at a time — so a *duplicate* was never actually reachable here.
+        // What was reachable was the intermediate `wait_for_decomp_tasks`
+        // returning empty at its 2s deadline: the spawned coordinator has to
+        // finish its whole startup path and its immediate first tick before it
+        // can drain the first event, all while sharing four pooled connections
+        // with this test body. `assert_eq!(decomp_tasks.len(), 1)` then failed
+        // with 0 — not a duplicate, just an unfinished pass.
+        //
+        // Awaiting `handle_event` removes the deadline entirely: the pass is
+        // finished when the call returns.
+        let (mut actor, cancel) = test_helpers::make_coordinator_actor_cancellable(&db, &tx);
 
         let epic = create_owned_epic(
             &db,
@@ -510,31 +555,33 @@ mod tests {
         )
         .await
         .unwrap();
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
         let promoted = epic_repo.set_status_raw(&epic.id, "open").await.unwrap();
-        let _ = tx.send(DjinnEventEnvelope::epic_updated(
-            &djinn_core::models::EpicEventPayload::bare(&promoted),
-        ));
+        let promotion = epic_updated_event(&promoted);
 
-        let decomp_tasks = wait_for_decomp_tasks(&db, &tx, &epic.id, 1).await;
-        assert_eq!(decomp_tasks.len(), 1);
+        // Promotion to `open` creates the wave-1 planning task.
+        actor.handle_event(promotion.clone()).await;
+        assert_eq!(
+            open_planning_count(&task_repo, &epic.id).await,
+            1,
+            "closed→open promotion must create exactly one planning task"
+        );
 
-        let _ = tx.send(DjinnEventEnvelope::epic_updated(
-            &djinn_core::models::EpicEventPayload::bare(&promoted),
-        ));
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        // The planner re-touching the epic re-emits an identical `epic.updated`.
+        // The `has_open_planning` dedupe must swallow it. This is the real
+        // assertion of the test, and it is non-vacuous in the strong sense:
+        // the pass above already proved this exact call *does* create a
+        // planning task when none is open, so a second identical call that
+        // leaves the count at 1 can only be the dedupe doing its job.
+        actor.handle_event(promotion).await;
+        assert_eq!(
+            open_planning_count(&task_repo, &epic.id).await,
+            1,
+            "a re-emitted epic.updated must not duplicate the open planning task"
+        );
 
-        let task_repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
-        let tasks = task_repo.list_by_epic(&epic.id).await.unwrap();
-        let open_planning_count = tasks
-            .iter()
-            .filter(|t| {
-                matches!(t.issue_type.as_str(), "planning" | "decomposition")
-                    && matches!(t.status.as_str(), "open" | "in_progress")
-            })
-            .count();
-        assert_eq!(open_planning_count, 1);
+        cancel.cancel();
+        db.pool().close().await;
     }
 
     /// Regression (epic `lywz`, 2026-06-02): the Planner re-links the epic
@@ -713,6 +760,23 @@ mod tests {
     /// Simulates the proposal decomposition flow: epic A (foundation) and
     /// epic B (dependent) are created, then B.blocked_by=A is wired.
     /// B must NOT receive a planning task until A closes.
+    ///
+    /// Note on shape: this test used to spawn a coordinator and race it. Epic B
+    /// is deliberately created *unblocked* and the blocker edge is wired one
+    /// statement later, so a spawned coordinator that drained B's `epic.created`
+    /// before `add_blocker` committed would legitimately create a planning task
+    /// for B — the assertion below would fail without anything being wrong with
+    /// the blocker gate. The test's own comment conceded it ("its planning task
+    /// may or may not have fired by now"), and the 300ms sleep did not close the
+    /// window: the sleep sits *after* `add_blocker`, so it changes when the race
+    /// is observed, not whether it happens. The coordinator usually lost that
+    /// race only because `maybe_create_planning_task` does a `list_by_epic`
+    /// round-trip before it ever reaches the blocker gate.
+    ///
+    /// Driving `handle_event` explicitly keeps the thing under test — the edge
+    /// is still wired *after* B exists, and the gate must still read it from the
+    /// database rather than from B's stale in-memory payload — while making the
+    /// ordering a fact of the test rather than a coin flip.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn blocked_epic_does_not_get_planning_task_while_blocker_open() {
         let db = test_helpers::create_test_db();
@@ -720,8 +784,8 @@ mod tests {
 
         let project = test_helpers::create_test_project(&db).await;
         let epic_repo = EpicRepository::new(db.clone(), crate::events::event_bus_for(&tx));
-        let _handle = spawn_coordinator_with_planner(&db, &tx);
-        tokio::task::yield_now().await;
+        let task_repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+        let (mut actor, cancel) = test_helpers::make_coordinator_actor_cancellable(&db, &tx);
 
         // Create epic A (foundation, no blockers).
         let epic_a = create_owned_epic(
@@ -744,10 +808,13 @@ mod tests {
         .await
         .unwrap();
 
-        // Epic A gets its planning task immediately (no blockers).
-        let a_tasks = wait_for_decomp_tasks(&db, &tx, &epic_a.id, 1).await;
+        // Epic A has no blockers, so its wave-1 pass creates a planning task.
+        // This is also the control for the assertion at the end: it proves this
+        // exact `epic.created` pass DOES create planning tasks, so B's zero
+        // below is suppression rather than an inert pass.
+        actor.handle_event(epic_created_event(&epic_a)).await;
         assert_eq!(
-            a_tasks.len(),
+            open_planning_count(&task_repo, &epic_a.id).await,
             1,
             "foundation epic A should get a planning task"
         );
@@ -773,30 +840,24 @@ mod tests {
         .await
         .unwrap();
 
-        // B initially has no blockers — its planning task may or may not
-        // have fired by now. Wire the blocker immediately (simulates the
-        // proposal planner wiring edges after creation).
+        // B was created unblocked; the proposal planner wires the edge a beat
+        // later. `epic_b` in hand still carries the pre-blocker payload, which
+        // is the point: the gate must read blockers from the database, not from
+        // the event payload.
         epic_repo.add_blocker(&epic_b.id, &epic_a.id).await.unwrap();
 
-        // Wait a bit for any pending dispatches to settle.
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        // Now run B's wave-1 pass. It must be suppressed while A is open.
+        actor.handle_event(epic_created_event(&epic_b)).await;
 
-        // B must NOT have an open planning task while A is still open.
-        let task_repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
-        let b_tasks = task_repo.list_by_epic(&epic_b.id).await.unwrap();
-        let b_open_planning: Vec<_> = b_tasks
-            .iter()
-            .filter(|t| {
-                matches!(t.issue_type.as_str(), "planning" | "decomposition")
-                    && matches!(t.status.as_str(), "open" | "in_progress")
-            })
-            .collect();
-        assert!(
-            b_open_planning.is_empty(),
+        let b_open_planning = open_planning_count(&task_repo, &epic_b.id).await;
+        assert_eq!(
+            b_open_planning, 0,
             "epic B must NOT have an open planning task while blocker A is open, \
-             but found {} open planning tasks",
-            b_open_planning.len()
+             but found {b_open_planning} open planning tasks"
         );
+
+        cancel.cancel();
+        db.pool().close().await;
     }
 
     /// Regression test (two-phased): closing blocker triggers decomposition

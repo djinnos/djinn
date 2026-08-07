@@ -1,0 +1,28 @@
+-- 4etb: canonical escalation evidence epoch.
+--
+-- Rung-1 planner remediation is retired: every in-scope stuck-task trigger
+-- (A/B/D, CI-loop, tripwire) now routes straight to the forensic arbiter on its
+-- FIRST escalation. At that point `last_intervention_at` and
+-- `human_review_resolved_at` are both NULL, so the park guards' evidence floor
+-- (`post_intervention_history`) was empty and every guard read "no attempts
+-- yet" forever — the uv3p attempted-remediation guard declined park, model
+-- rotation stayed disabled behind `intervention_count >= 1`, and the same tick
+-- reproduced the same decision indefinitely.
+--
+-- `escalation_evidence_at` is the third and mandatory member of the canonical
+-- floor
+--
+--     evidence_floor = max(escalation_evidence_at,
+--                          last_intervention_at,
+--                          human_review_resolved_at)
+--
+-- and is stamped exactly once per escalation, in the same transaction that
+-- inserts the arbitration row. Repeated coordinator ticks while the same
+-- escalation is pending must not rewrite it (the write is conditional on the
+-- column being NULL); the epoch is cleared when an adjudication clears, so a
+-- NEW trigger stamps a NEW epoch.
+--
+-- Same ISO-8601 text format as `last_intervention_at` /
+-- `human_review_resolved_at` so lexical comparison across all three is correct.
+ALTER TABLE tasks
+    ADD COLUMN IF NOT EXISTS escalation_evidence_at VARCHAR(64);

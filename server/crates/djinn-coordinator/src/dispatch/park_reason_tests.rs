@@ -3,9 +3,22 @@
 //! These tests directly exercise `park_reason_detail` / `compute_park_reason` so
 //! the 3t22 misattribution (merge-queue failure folded into the generic AC
 //! phrasing) stays fixed without needing a full DB-backed coordinator harness.
+//!
+//! 4etb extends the module with the guard-decline reason contract
+//! ([`guard_decline_reason_uses_epoch_and_rotation_contract`]). This module is
+//! deliberately DB-free: every test here is a synchronous `#[test]` over pure
+//! functions. Anything that needs a live coordinator + Postgres (marker
+//! emission, once-only arbitration-row consumption, the actual rotated
+//! redispatch) is proven by the DB-backed siblings in `crate::tests::*` and is
+//! named explicitly where it applies.
 use crate::CoordinatorActor;
 use crate::dispatch::retry::PostInterventionHistory;
 use djinn_core::models::ReopenClass;
+
+/// 4etb: the canonical evidence floor these fixtures are computed against.
+/// Matches `last_intervention_at` on [`test_task`], which is one of the three
+/// instants `canonical_evidence_floor` maximizes over.
+const FIXTURE_EVIDENCE_FLOOR: &str = "2026-07-04T21:45:00Z";
 
 /// Build a minimal `Task` with the CI fields used by the park reason builder.
 fn test_task(
@@ -14,6 +27,7 @@ fn test_task(
     ci_failure_fingerprint: Option<&str>,
 ) -> djinn_core::models::Task {
     djinn_core::models::Task {
+        escalation_evidence_at: None,
         id: "task-3t22".to_string(),
         project_id: "proj-3t22".to_string(),
         short_id: "3t22".to_string(),
@@ -76,6 +90,9 @@ fn test_task(
     }
 }
 
+/// 4etb: the two new `PostInterventionHistory` fields are populated here as the
+/// attempt-backed builder would populate them — one qualifying submission at or
+/// after the canonical evidence floor.
 fn post_intervention_history_with_submission(reopen_class: ReopenClass) -> PostInterventionHistory {
     PostInterventionHistory {
         any_submitted: true,
@@ -85,6 +102,8 @@ fn post_intervention_history_with_submission(reopen_class: ReopenClass) -> PostI
         submission_pending_review: false,
         latest_submission_at: Some("2026-07-04T21:48:44Z".to_string()),
         most_recent_reopen_class: reopen_class,
+        evidence_floor: Some(FIXTURE_EVIDENCE_FLOOR.to_string()),
+        qualifying_submission_count: 1,
     }
 }
 
@@ -204,6 +223,8 @@ fn non_attempt_history_uses_rotation_phrasing() {
         submission_pending_review: false,
         latest_submission_at: None,
         most_recent_reopen_class: ReopenClass::ReviewRejected,
+        evidence_floor: Some(FIXTURE_EVIDENCE_FLOOR.to_string()),
+        qualifying_submission_count: 0,
     };
 
     let reason = CoordinatorActor::compute_park_reason(&task, &history);
@@ -236,6 +257,8 @@ fn in_flight_submitted_attempt_does_not_park() {
         submission_pending_review: true,
         latest_submission_at: Some("2026-07-04T21:48:44Z".to_string()),
         most_recent_reopen_class: ReopenClass::Other,
+        evidence_floor: Some(FIXTURE_EVIDENCE_FLOOR.to_string()),
+        qualifying_submission_count: 1,
     };
 
     // submission_pending_review=true means the round is still in flight;
@@ -261,6 +284,24 @@ fn in_flight_submitted_attempt_does_not_park() {
     assert!(
         reason.contains("Auto-parked to autonomous arbitration"),
         "park reason template should render; got: {reason}"
+    );
+    // 4etb: rung 1 (planner remediation) is retired, so the header no longer
+    // counts planner interventions. It names the evidence EPOCH the guards
+    // measured against instead — the only frame that is still true once no
+    // planner runs on this path. Asserting the floor verbatim keeps the
+    // template honest: a reason that cannot name its epoch fails here.
+    assert!(
+        reason.contains(&format!("Evidence epoch: {FIXTURE_EVIDENCE_FLOOR}")),
+        "park reason must name the canonical evidence floor it measured from; got: {reason}"
+    );
+    assert!(
+        reason.contains("total_reopen_count=4"),
+        "park reason must report the durable reopen count; got: {reason}"
+    );
+    assert!(
+        !reason.contains("planner intervention") && !reason.contains("intervention_count"),
+        "4etb: park reason must NOT claim a count of planner interventions preceded the park; \
+         got: {reason}"
     );
     // The park rung has had no human in it since the arbiter replaced the
     // human hold; the narration must not claim otherwise (gy53 audit — three
@@ -289,6 +330,8 @@ fn pre_submission_terminal_non_attempt_produces_non_attempt_evidence() {
         submission_pending_review: false,
         latest_submission_at: None,
         most_recent_reopen_class: ReopenClass::Other,
+        evidence_floor: Some(FIXTURE_EVIDENCE_FLOOR.to_string()),
+        qualifying_submission_count: 0,
     };
 
     let reason = CoordinatorActor::compute_park_reason(&task, &history);
@@ -320,6 +363,8 @@ fn submitted_terminal_failure_parks_with_reopen_class() {
         submission_pending_review: false,
         latest_submission_at: Some("2026-07-04T21:48:44Z".to_string()),
         most_recent_reopen_class: ReopenClass::ReviewRejected,
+        evidence_floor: Some(FIXTURE_EVIDENCE_FLOOR.to_string()),
+        qualifying_submission_count: 1,
     };
 
     let reason = CoordinatorActor::compute_park_reason(&task, &history);
@@ -364,6 +409,8 @@ fn rotation_excluded_models_from_two_distinct_post_floor_models() {
         submission_pending_review: false,
         latest_submission_at: None,
         most_recent_reopen_class: ReopenClass::Other,
+        evidence_floor: Some(FIXTURE_EVIDENCE_FLOOR.to_string()),
+        qualifying_submission_count: 0,
     };
 
     let excluded = history.rotation_excluded_models();
@@ -397,6 +444,8 @@ fn rotation_excluded_models_excludes_in_flight_submitted_attempt() {
         submission_pending_review: true,
         latest_submission_at: Some("2026-07-04T21:48:44Z".to_string()),
         most_recent_reopen_class: ReopenClass::Other,
+        evidence_floor: Some(FIXTURE_EVIDENCE_FLOOR.to_string()),
+        qualifying_submission_count: 1,
     };
 
     let excluded = history.rotation_excluded_models();
@@ -423,6 +472,8 @@ fn rotation_excluded_models_skips_outcome_string_fallbacks() {
         submission_pending_review: false,
         latest_submission_at: None,
         most_recent_reopen_class: ReopenClass::Other,
+        evidence_floor: Some(FIXTURE_EVIDENCE_FLOOR.to_string()),
+        qualifying_submission_count: 0,
     };
 
     let excluded = history.rotation_excluded_models();
@@ -448,6 +499,8 @@ fn rotation_excluded_models_separates_model_ids_from_outcome_fallbacks() {
         submission_pending_review: false,
         latest_submission_at: None,
         most_recent_reopen_class: ReopenClass::Other,
+        evidence_floor: Some(FIXTURE_EVIDENCE_FLOOR.to_string()),
+        qualifying_submission_count: 0,
     };
 
     let excluded = history.rotation_excluded_models();
@@ -481,6 +534,8 @@ fn submitted_terminal_failure_uses_quality_strike_api_not_inline_rotation() {
         submission_pending_review: false,
         latest_submission_at: Some("2026-07-04T21:48:44Z".to_string()),
         most_recent_reopen_class: ReopenClass::ReviewRejected,
+        evidence_floor: Some(FIXTURE_EVIDENCE_FLOOR.to_string()),
+        qualifying_submission_count: 1,
     };
 
     let excluded = history.rotation_excluded_models();
@@ -517,6 +572,8 @@ fn infra_only_pre_submission_history_excludes_from_park_threshold() {
         submission_pending_review: false,
         latest_submission_at: None,
         most_recent_reopen_class: ReopenClass::Infra,
+        evidence_floor: Some(FIXTURE_EVIDENCE_FLOOR.to_string()),
+        qualifying_submission_count: 0,
     };
 
     // Infra outcomes must NOT count toward the park escalation threshold.
@@ -555,6 +612,8 @@ fn infra_only_park_reason_names_infrastructure_not_ac_phrasing() {
         submission_pending_review: false,
         latest_submission_at: None,
         most_recent_reopen_class: ReopenClass::Infra,
+        evidence_floor: Some(FIXTURE_EVIDENCE_FLOOR.to_string()),
+        qualifying_submission_count: 0,
     };
 
     let reason = CoordinatorActor::compute_park_reason(&task, &history);
@@ -614,6 +673,8 @@ fn mixed_infra_and_quality_park_reason_appends_infra_diagnostics() {
         submission_pending_review: false,
         latest_submission_at: None,
         most_recent_reopen_class: ReopenClass::Other,
+        evidence_floor: Some(FIXTURE_EVIDENCE_FLOOR.to_string()),
+        qualifying_submission_count: 0,
     };
 
     let reason = CoordinatorActor::compute_park_reason(&task, &history);
@@ -646,4 +707,177 @@ fn infra_reopen_class_is_not_a_quality_strike() {
     assert!(ReopenClass::ReviewRejected.is_quality_strike());
     assert!(ReopenClass::MergeQueueFailed.is_quality_strike());
     assert!(ReopenClass::Other.is_quality_strike());
+}
+
+// ── 4etb: guard-declined park reason contract ──────────────────────────────
+// A guard decline is now a first-class, named outcome with a stable reason
+// code, a fixed operator sentence, and a marker payload an operator (or a
+// later audit) can join on. These tests pin that contract.
+
+/// The production source of the guard-decline path, read at compile time.
+///
+/// `CoordinatorActor::record_guard_declined_park` is a private `async fn` on a
+/// sibling module (`dispatch::retry`) that needs a live `Database` and a
+/// coordinator actor, so this DB-free module cannot call it. Reading its source
+/// lets the field-set assertion below bite on the REAL payload literal instead
+/// of on a fixture copy of it — if a required key is dropped or renamed in
+/// `retry.rs`, this test fails. It is a schema/lint-grade check: it proves the
+/// payload is CONSTRUCTED with those fields, not that a row was written. The
+/// write, and the VALUES it carries, are proven by
+/// `crate::tests::intervention::park_guard_declines_with_the_epoch_keyed_reason_contract`.
+const RETRY_SRC: &str = include_str!("retry.rs");
+
+/// Slice `RETRY_SRC` down to the body of `record_guard_declined_park` so the
+/// field assertions cannot be satisfied by an unrelated payload elsewhere in
+/// the file.
+fn record_guard_declined_park_source() -> &'static str {
+    let start = RETRY_SRC
+        .find("async fn record_guard_declined_park")
+        .expect("dispatch/retry.rs must still define record_guard_declined_park");
+    let body = &RETRY_SRC[start..];
+    // The next item declared at `impl`-member indentation ends the body.
+    let end = ["\n    fn ", "\n    async fn ", "\n    pub(crate) fn "]
+        .iter()
+        .filter_map(|marker| body.find(marker))
+        .min()
+        .unwrap_or(body.len());
+    &body[..end]
+}
+
+/// 4etb stable-reason-contract test (required by the proposal at this exact
+/// path/name).
+///
+/// What this test PROVES at runtime, by calling the shipped functions:
+/// - the reason code is the `park_guard_insufficient_epoch_evidence` string;
+/// - `guard_declined_park_reason` renders EXACTLY the contracted sentence for
+///   the fixture's evidence floor and hold cycle;
+/// - that sentence carries no `Planner`/`planner`/`intervention_count`
+///   wording — rung 1 is retired and this decision never reads that counter;
+/// - the `excluded_models` value the marker carries is
+///   `history.rotation_excluded_models()`, which drops outcome-string
+///   fallbacks and keeps only real `provider/model` IDs.
+///
+/// What it proves at SOURCE level only (this module is DB-free; the payload is
+/// built inside a private `async fn` that needs a live coordinator): that the
+/// guard-decline marker payload is constructed with every required field —
+/// `hold_cycle`, `evidence_floor`, `qualifying_submission_count`,
+/// `qualifying_non_attempt_models`, `excluded_models`, `disposition =
+/// "redispatch_rotated"` — wired to the guard's own inputs, and that the
+/// decline leaves the arbitration ledger alone.
+///
+/// What it does NOT prove, and exactly where that lives instead (DB-backed,
+/// needs Postgres; `record_guard_declined_park` is private to `dispatch::retry`
+/// and needs a live actor, so none of it is reachable from here):
+/// - that a real `park_redispatch` ROW is written carrying those field VALUES
+///   — `crate::tests::intervention::park_guard_declines_with_the_epoch_keyed_reason_contract`,
+///   which reads the persisted activity payload and asserts `reason_code`,
+///   `evidence_floor`, `hold_cycle`, `qualifying_submission_count`,
+///   `qualifying_non_attempt_models`, `excluded_models`, `disposition` and
+///   `reason` against the shipped values, and that exactly one marker exists;
+/// - that the redispatch actually rotates away from the attempted models — the
+///   dispatch-time exclusion path in `dispatch/task_dispatch.rs`, covered by
+///   `crate::tests::i3mv_regression_tests`.
+#[test]
+fn guard_decline_reason_uses_epoch_and_rotation_contract() {
+    let hold_cycle: i32 = 3;
+    // A mixed history: one session-resolved model ID and one outcome-string
+    // fallback, so the exclusion assertion below has teeth.
+    let history = PostInterventionHistory {
+        any_submitted: false,
+        non_attempt_models: vec!["provider-a/model-x".to_string(), "crashed".to_string()],
+        non_attempt_session_labels: vec!["attempt a1b2c3d4 (provider-a/model-x)".to_string()],
+        infra_session_labels: vec!["attempt e5f6g7h8 (crashed)".to_string()],
+        submission_pending_review: false,
+        latest_submission_at: None,
+        most_recent_reopen_class: ReopenClass::Other,
+        evidence_floor: Some(FIXTURE_EVIDENCE_FLOOR.to_string()),
+        qualifying_submission_count: 0,
+    };
+
+    // ── 1. Stable reason code ───────────────────────────────────────────────
+    assert_eq!(
+        CoordinatorActor::PARK_GUARD_INSUFFICIENT_EPOCH_EVIDENCE,
+        "park_guard_insufficient_epoch_evidence",
+        "the guard-decline reason code is a stable contract operators join on"
+    );
+
+    // ── 2. Exact operator text, with fixture substitution ───────────────────
+    let text = CoordinatorActor::guard_declined_park_reason(FIXTURE_EVIDENCE_FLOOR, hold_cycle);
+    assert_eq!(
+        text,
+        format!(
+            "Park declined: insufficient worker evidence at or after {FIXTURE_EVIDENCE_FLOOR} in \
+             hold cycle {hold_cycle}; redispatching with model rotation."
+        ),
+        "the guard-decline sentence is a fixed contract; got: {text}"
+    );
+
+    // ── 3. No retired rung-1 wording ────────────────────────────────────────
+    for banned in ["Planner", "planner", "intervention_count"] {
+        assert!(
+            !text.contains(banned),
+            "4etb: the guard-decline reason must not mention {banned:?} — rung 1 is retired and \
+             this decision does not read the intervention counter; got: {text}"
+        );
+    }
+
+    // ── 4. Rotation exclusions the marker carries ───────────────────────────
+    let excluded = history.rotation_excluded_models();
+    assert_eq!(
+        excluded,
+        vec!["provider-a/model-x".to_string()],
+        "excluded_models must carry real model IDs only, never outcome-string fallbacks; \
+         got: {excluded:?}"
+    );
+
+    // ── 5. Required marker payload fields (source-level; see doc comment) ───
+    let src = record_guard_declined_park_source();
+    for field in [
+        "hold_cycle",
+        "evidence_floor",
+        "qualifying_submission_count",
+        "qualifying_non_attempt_models",
+        "excluded_models",
+        "disposition",
+        "reason_code",
+        "reason",
+    ] {
+        assert!(
+            src.contains(&format!("\"{field}\":")),
+            "the guard-decline marker payload must carry the {field:?} field"
+        );
+    }
+    assert!(
+        src.contains("\"disposition\": \"redispatch_rotated\""),
+        "the decline's disposition must be recorded as redispatch_rotated"
+    );
+    assert!(
+        src.contains("\"reason_code\": Self::PARK_GUARD_INSUFFICIENT_EPOCH_EVIDENCE"),
+        "the payload's reason_code must be the shared constant, not a re-typed literal"
+    );
+    assert!(
+        src.contains("\"reason\": operator_text"),
+        "the payload's reason must be the SAME rendered sentence asserted above, so the text an \
+         operator reads and the structured fields can never disagree"
+    );
+    // The values must come from the guard's own inputs, not from constants.
+    assert!(
+        src.contains("history.qualifying_submission_count")
+            && src.contains("\"qualifying_non_attempt_models\": history.non_attempt_models")
+            && src.contains("history.rotation_excluded_models()"),
+        "the marker fields must be wired to the evaluated history, not hard-coded"
+    );
+    assert!(
+        src.contains("PARK_REDISPATCH_MARKER"),
+        "the decline must be recorded on the park_redispatch marker stream"
+    );
+    // A decline must NOT touch the arbitration ledger. It is only reachable
+    // when no unconsumed row exists (`guards_apply`), and consuming a row while
+    // an arbiter — or a monitored reopen — is in flight is exactly the v1ej
+    // contract violation the in-flight branch exists to prevent.
+    assert!(
+        !src.contains("mark_consumed") && !src.contains("update_dispatch_ledger"),
+        "a guard decline must never consume or rewrite an arbitration row: it only runs when \
+         none is open, and doing so with one open would destroy the monitored-reopen contract"
+    );
 }

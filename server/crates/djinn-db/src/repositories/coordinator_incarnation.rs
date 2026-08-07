@@ -26,6 +26,16 @@ pub struct CoordinatorIncarnation {
     pub id: String,
     pub registered_at: String,
     pub last_renewed_at: String,
+    /// Set when leadership cancellation closed provider-action admission
+    /// (migration 193). Present without `provider_actions_drained_at` means
+    /// the drain started and has not finished.
+    pub draining_at: Option<String>,
+    /// Set only after the registered provider-action scope is empty
+    /// (migration 193). This is the timestamp that turns advisory-lock
+    /// release into an *exclusion proof* for CI route `calling` rows: until
+    /// it exists, a former owner's provider future may still be live and
+    /// `ci_route_attempt::recover_calling_owner` refuses the handoff.
+    pub provider_actions_drained_at: Option<String>,
 }
 
 pub struct CoordinatorIncarnationRepository {
@@ -100,13 +110,65 @@ impl CoordinatorIncarnationRepository {
         Uuid::parse_str(incarnation_id)
             .map_err(|_| DbError::InvalidData("incarnation_id must be a UUID".to_owned()))?;
         Ok(sqlx::query_as::<_, CoordinatorIncarnation>(
-            r#"SELECT id, registered_at, last_renewed_at
+            r#"SELECT id, registered_at, last_renewed_at, draining_at, provider_actions_drained_at
                FROM coordinator_incarnations
                WHERE id = $1"#,
         )
         .bind(incarnation_id)
         .fetch_optional(self.db.pool())
         .await?)
+    }
+
+    /// Mark this incarnation as draining: leadership cancellation has closed
+    /// provider-action admission, so no new route may enter `calling`.
+    ///
+    /// Write-once and fenced to the exact incarnation. Draining is a one-way
+    /// door — an incarnation that started draining never resumes admitting.
+    ///
+    /// # Errors
+    ///
+    /// Database failures, or a non-UUID incarnation id.
+    pub async fn mark_draining(&self, incarnation_id: &str) -> Result<bool> {
+        self.db.ensure_initialized().await?;
+        Uuid::parse_str(incarnation_id)
+            .map_err(|_| DbError::InvalidData("incarnation_id must be a UUID".to_owned()))?;
+        let result = sqlx::query(
+            r#"UPDATE coordinator_incarnations
+               SET draining_at = to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+               WHERE id = $1 AND draining_at IS NULL"#,
+        )
+        .bind(incarnation_id)
+        .execute(self.db.pool())
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Record that every leader-owned provider-action future and finalizer has
+    /// exited and the registered action scope is empty.
+    ///
+    /// **This must be written before the advisory-lock session is released**,
+    /// and only after admission is closed — which is why it refuses a row that
+    /// never entered `draining`. A caller that could stamp this without
+    /// draining would hand the next incarnation a proof it did not earn, and
+    /// the next incarnation would use it to take a `calling` row whose
+    /// provider future is still alive.
+    ///
+    /// # Errors
+    ///
+    /// Database failures, or a non-UUID incarnation id.
+    pub async fn mark_provider_actions_drained(&self, incarnation_id: &str) -> Result<bool> {
+        self.db.ensure_initialized().await?;
+        Uuid::parse_str(incarnation_id)
+            .map_err(|_| DbError::InvalidData("incarnation_id must be a UUID".to_owned()))?;
+        let result = sqlx::query(
+            r#"UPDATE coordinator_incarnations
+               SET provider_actions_drained_at = to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+               WHERE id = $1 AND draining_at IS NOT NULL AND provider_actions_drained_at IS NULL"#,
+        )
+        .bind(incarnation_id)
+        .execute(self.db.pool())
+        .await?;
+        Ok(result.rows_affected() > 0)
     }
 
     /// Report whether the incarnation is **live** (its lease has been renewed

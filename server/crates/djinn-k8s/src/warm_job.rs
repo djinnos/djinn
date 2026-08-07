@@ -143,12 +143,16 @@ pub fn warm_job_name(project_id: &str, warm_generation: &str) -> String {
 /// The ServiceAccount (`config.service_account`) is reused from task-run
 /// dispatch — the warm Pod needs the mirror PVC + the DB env, both of
 /// which already work with the task-run SA.
+/// `js_workspace_roots` are the project's declared JavaScript workspace roots
+/// (see [`crate::js_install::js_workspace_roots`]). Empty preserves the previous
+/// root-only install behaviour for projects with no declared JS workspace.
 pub fn build_warm_job(
     config: &KubernetesConfig,
     project_id: &str,
     warm_generation: &str,
     project_image_tag: &str,
     policy: Option<&djinn_stack::environment::CargoCachePolicy>,
+    js_workspace_roots: &[String],
 ) -> Job {
     let sanitized_project = sanitize_id(project_id);
     let job_name = warm_job_name(project_id, warm_generation);
@@ -201,19 +205,9 @@ git clone --depth 1000 --single-branch "$UPSTREAM_URL" "{project_root}"
 # tsconfig `extends` that point at workspace packages (e.g. a shared
 # `tsconfig` package in a pnpm/turbo monorepo) — those live under
 # node_modules, so without an install every `tsconfig.json` fails to load
-# and the TS indexer reports "missing tsconfig.json". Gated on a lockfile
-# so non-JS repos are untouched; `|| true` keeps a JS-install failure from
-# aborting a warm whose Rust/Python/Go indexers would still succeed.
-cd "{project_root}"
-if [ -f pnpm-lock.yaml ]; then
-  ( corepack enable >/dev/null 2>&1 || true; \
-    corepack pnpm install --frozen-lockfile || pnpm install --frozen-lockfile || pnpm install ) || true
-elif [ -f yarn.lock ]; then
-  ( corepack enable >/dev/null 2>&1 || true; \
-    corepack yarn install --frozen-lockfile || yarn install ) || true
-elif [ -f package-lock.json ]; then
-  ( npm ci || npm install ) || true
-fi
+# and the TS indexer reports "missing tsconfig.json". A JS-install failure
+# must not abort a warm whose Rust/Python/Go indexers would still succeed.
+cd "{project_root}"{js_install}
 # The cargo target base is warmed by `warm-graph` itself (in the worker), NOT
 # here: the worker normalizes tracked-file mtimes to commit times — the SAME
 # normalization task-run applies before it compiles — then compiles the
@@ -228,6 +222,7 @@ exec {bin} warm-graph "{project_id}"
         project_root = project_root,
         bin = WARM_COMMAND_BIN,
         project_id = project_id,
+        js_install = crate::js_install::js_install_preamble(&project_root, js_workspace_roots),
     );
 
     let mut env = vec![
@@ -462,6 +457,7 @@ pub fn build_leased_warm_job(
     project_image_tag: &str,
     policy: Option<&djinn_stack::environment::CargoCachePolicy>,
     identity: &LeasedWarmJobIdentity,
+    js_workspace_roots: &[String],
 ) -> Job {
     let mut job = build_warm_job(
         config,
@@ -469,6 +465,7 @@ pub fn build_leased_warm_job(
         &identity.graph_revision,
         project_image_tag,
         policy,
+        js_workspace_roots,
     );
     job.metadata.name = Some(identity.object_name.clone());
     let annotations = BTreeMap::from([

@@ -111,6 +111,16 @@ pub use repositories::{
     chat_interruption_notice::{
         ChatInterruptionNotice, ChatInterruptionNoticeRepository, CreateChatInterruptionNotice,
     },
+    ci_route_attempt::{
+        CI_CALLING_RECOVERY_TIMEOUT_SECS, CI_HEAD_BUDGET_LIMIT,
+        CI_RESERVATION_RECOVERY_TIMEOUT_SECS, CI_SIGNATURE_BUDGET_LIMIT, CiAction, CiActionPhase,
+        CiBudgetCounts, CiCallingRecovery, CiCallingRecoveryAuthority, CiCallingRecoveryReason,
+        CiCallingRecoveryRecord, CiChargeOutcome, CiClass, CiDiagnosticReason, CiEvidenceIdentity,
+        CiLane, CiOriginState, CiQuiescenceProof, CiReopenMode, CiReserveOutcome,
+        CiReservedRecovery, CiRouteAttempt, CiRouteAttemptRepository, CiRouteOutcome,
+        CiRouteQuiescence, CiRouteReservation, CiRouteSubject, CiSubjectKind, CiTier2LeaseOutcome,
+        CiTier2LeaseState, CiTier2Reason, CiTier2Resolution,
+    },
     code_chunk::{
         ChunkAndEmbedReport, CodeChunk, CodeChunkEmbeddingProvider, CodeChunkRepairEmbeddingRow,
         CodeChunkRepository, CodeChunkSearchHit, CodeChunkVectorBackend, CodeChunkVectorMatch,

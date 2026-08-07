@@ -41,6 +41,7 @@ mod types;
 mod write_errors;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use reqwest::Client;
 use tokio::sync::RwLock;
@@ -64,6 +65,11 @@ pub use write_errors::{
 
 /// GitHub REST API v3 base URL.
 pub const GITHUB_API_BASE: &str = "https://api.github.com";
+
+/// Default per-request timeout applied to every outbound GitHub API call.
+///
+/// Override with [`GitHubApiClient::with_request_timeout`].
+pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// GitHub REST API v3 client.
 ///
@@ -198,9 +204,24 @@ impl GitHubApiClient {
         )
     }
 
+    /// Return a client identical to `self` but with a different per-request
+    /// timeout, replacing the [`DEFAULT_REQUEST_TIMEOUT`] the constructors
+    /// apply.
+    ///
+    /// Production paths should keep the default; this exists so tests can
+    /// exercise the real timeout path against a mock server without waiting
+    /// 30 seconds of wall clock for it to elapse.
+    pub fn with_request_timeout(self, timeout: Duration) -> Self {
+        Self::build_with_timeout(self.auth, self.base_url, timeout)
+    }
+
     fn build(auth: AuthMode, base_url: String) -> Self {
+        Self::build_with_timeout(auth, base_url, DEFAULT_REQUEST_TIMEOUT)
+    }
+
+    fn build_with_timeout(auth: AuthMode, base_url: String, timeout: Duration) -> Self {
         let http = Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
+            .timeout(timeout)
             .user_agent("djinn-server/0.1 (+https://github.com/djinnos/server)")
             .build()
             .expect("failed to build reqwest client");

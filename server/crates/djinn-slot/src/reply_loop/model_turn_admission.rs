@@ -73,6 +73,8 @@ struct PreparationOwnership {
     cleanups: Arc<CleanupTracker>,
     #[cfg(test)]
     post_active_hook: Option<Arc<ActiveHandoffHook>>,
+    #[cfg(test)]
+    test_hooks: Option<Arc<ModelTurnAdmissionTestHooks>>,
 }
 
 impl PreparationOwnership {
@@ -81,6 +83,7 @@ impl PreparationOwnership {
         identity: ModelTurnLeaseIdentity,
         cleanups: Arc<CleanupTracker>,
         #[cfg(test)] post_active_hook: Option<Arc<ActiveHandoffHook>>,
+        #[cfg(test)] test_hooks: Option<Arc<ModelTurnAdmissionTestHooks>>,
     ) -> Self {
         Self {
             repository,
@@ -88,6 +91,8 @@ impl PreparationOwnership {
             cleanups,
             #[cfg(test)]
             post_active_hook,
+            #[cfg(test)]
+            test_hooks,
         }
     }
 
@@ -96,7 +101,27 @@ impl PreparationOwnership {
         let Some(identity) = state.as_ref() else {
             return Ok(ModelTurnLeaseMutationOutcome::Fenced);
         };
-        let outcome = self.repository.mark_active(identity).await?;
+        #[cfg(test)]
+        if self
+            .test_hooks
+            .as_ref()
+            .is_some_and(|hooks| hooks.fail_mark_active.load(Ordering::Acquire))
+        {
+            *state = None;
+            return Err(djinn_db::Error::Internal(
+                "injected mark_active database failure".into(),
+            ));
+        }
+        let outcome = match self.repository.mark_active(identity).await {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                // B1 has already accepted the launch when this is called.
+                // Do not let a preparation drop refund a possibly-sent lease:
+                // the terminal guard owns this identity from that point.
+                *state = None;
+                return Err(error);
+            }
+        };
         if matches!(
             outcome,
             ModelTurnLeaseMutationOutcome::Applied | ModelTurnLeaseMutationOutcome::Idempotent
@@ -159,6 +184,32 @@ pub struct ModelTurnAdmissionCoordinator {
     post_dispatching_hook: Option<Arc<PrepareCancellationHook>>,
     #[cfg(test)]
     post_active_hook: Option<Arc<ActiveHandoffHook>>,
+    #[cfg(test)]
+    test_hooks: Option<Arc<ModelTurnAdmissionTestHooks>>,
+}
+
+#[cfg(test)]
+pub(super) struct ModelTurnAdmissionTestHooks {
+    pub fail_mark_active: std::sync::atomic::AtomicBool,
+    pub reconciliations: std::sync::Mutex<Vec<ModelTurnLeaseIdentity>>,
+    pub reconcile_reached: TestNotify,
+    pub reconcile_release: TestNotify,
+    pub reconcile_finished: TestNotify,
+    pub block_reconcile: std::sync::atomic::AtomicBool,
+}
+
+#[cfg(test)]
+impl Default for ModelTurnAdmissionTestHooks {
+    fn default() -> Self {
+        Self {
+            fail_mark_active: std::sync::atomic::AtomicBool::new(false),
+            reconciliations: std::sync::Mutex::new(Vec::new()),
+            reconcile_reached: TestNotify::new(),
+            reconcile_release: TestNotify::new(),
+            reconcile_finished: TestNotify::new(),
+            block_reconcile: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -183,6 +234,21 @@ impl ModelTurnAdmissionCoordinator {
             post_dispatching_hook: None,
             #[cfg(test)]
             post_active_hook: None,
+            #[cfg(test)]
+            test_hooks: None,
+        }
+    }
+    #[cfg(test)]
+    pub(super) fn with_test_hooks(
+        repository: ModelTurnAdmissionRepository,
+        hooks: Arc<ModelTurnAdmissionTestHooks>,
+    ) -> Self {
+        Self {
+            repository,
+            cleanups: Arc::new(CleanupTracker::default()),
+            post_dispatching_hook: None,
+            post_active_hook: None,
+            test_hooks: Some(hooks),
         }
     }
     #[cfg(test)]
@@ -195,6 +261,7 @@ impl ModelTurnAdmissionCoordinator {
             cleanups: Arc::new(CleanupTracker::default()),
             post_dispatching_hook: Some(hook),
             post_active_hook: None,
+            test_hooks: None,
         }
     }
     #[cfg(test)]
@@ -207,6 +274,7 @@ impl ModelTurnAdmissionCoordinator {
             cleanups: Arc::new(CleanupTracker::default()),
             post_dispatching_hook: None,
             post_active_hook: Some(hook),
+            test_hooks: None,
         }
     }
     /// Join cancellation cleanup in deterministic tests.
@@ -287,6 +355,8 @@ impl ModelTurnAdmissionCoordinator {
                         self.cleanups.clone(),
                         #[cfg(test)]
                         self.post_active_hook.clone(),
+                        #[cfg(test)]
+                        self.test_hooks.clone(),
                     );
                     let outcome = self.repository.mark_dispatching(&identity).await?;
                     #[cfg(test)]
@@ -315,19 +385,37 @@ impl ModelTurnAdmissionCoordinator {
         identity: ModelTurnLeaseIdentity,
         outcome: &ProviderOutcomeV1,
     ) -> djinn_db::Result<ModelTurnLeaseMutationOutcome> {
+        #[cfg(test)]
+        if let Some(hooks) = &self.test_hooks {
+            hooks
+                .reconciliations
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(identity.clone());
+            hooks.reconcile_reached.notify_waiters();
+            if hooks.block_reconcile.load(Ordering::Acquire) {
+                hooks.reconcile_release.notified().await;
+            }
+        }
         let terminal = match outcome.terminal {
             ProviderAttemptTerminalV1::Completed => ModelTurnLeaseTerminalOutcome::Completed,
             ProviderAttemptTerminalV1::Aborted => ModelTurnLeaseTerminalOutcome::Cancelled,
             ProviderAttemptTerminalV1::Failed(_) => ModelTurnLeaseTerminalOutcome::Failed,
         };
-        self.repository
+        let result = self
+            .repository
             .reconcile_lease(ModelTurnLeaseReconciliationInput {
                 identity,
                 outcome: terminal,
                 authoritative_usage: outcome.authoritative_usage.clone(),
                 detail: None,
             })
-            .await
+            .await;
+        #[cfg(test)]
+        if let Some(hooks) = &self.test_hooks {
+            hooks.reconcile_finished.notify_waiters();
+        }
+        result
     }
 }
 

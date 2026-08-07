@@ -1,9 +1,5 @@
 // djinn:allow-oversize — park telemetry + quality-strike guard logic pushed file past the byte threshold; split when touched substantively.
 use super::super::*;
-use super::DispatchOutcome;
-use super::admission::lane_under_user_cap;
-use super::model_under_user_cap;
-use djinn_core::clock::{Clock, SystemClock};
 use djinn_core::models::task_attempt::{TaskAttemptLedgerRow, TaskAttemptOutcome};
 use djinn_core::models::{ReopenClass, SessionFailureCause, TransitionAction};
 #[cfg(not(test))]
@@ -173,6 +169,16 @@ pub(crate) struct PostInterventionHistory {
     /// truthful park-reason attribution (merge_queue_failed vs review_rejected
     /// vs infra).
     pub most_recent_reopen_class: ReopenClass,
+    /// 4etb: the canonical evidence floor this history was computed against —
+    /// `max(escalation_evidence_at, last_intervention_at, human_review_resolved_at)`.
+    /// `None` only when the task has never been escalated at all. Rendered
+    /// verbatim into the guard-decline reason contract so an operator can see
+    /// WHICH instant the guard measured evidence from.
+    pub evidence_floor: Option<String>,
+    /// 4etb: number of submissions at or after [`evidence_floor`](Self::evidence_floor).
+    /// Reported in the guard-decline marker; distinct from `any_submitted`,
+    /// which is the boolean the uv3p gate reads.
+    pub qualifying_submission_count: usize,
 }
 
 impl PostInterventionHistory {
@@ -198,34 +204,22 @@ impl PostInterventionHistory {
     }
 }
 
-/// Which kind of remediation task to create for a stuck source task.
+/// Which kind of held remediation task to create for a stuck source task.
 ///
-/// All three kinds create a `review` task and block the source on it. They
-/// differ in WHICH RUNG of the escalation ladder produced them and in WHO is
-/// expected to resolve it — and, because those are very different board
-/// states, each gets its OWN title prefix so a human or an agent can tell them
-/// apart from the title alone (see [`crate::roles`]):
+/// 4etb retired the first-response `Planner` rung: every in-scope stuck-task
+/// trigger now routes straight to the forensic arbiter, so no remediation kind
+/// dispatches an agent inline any more. Both surviving kinds create a `review`
+/// task, block the source on it, and differ only in WHO resolves it — and,
+/// because those are different board states, each gets its OWN title prefix so
+/// a human or an agent can tell them apart from the title alone (see
+/// [`crate::roles`]):
 ///
 /// | Kind | Title prefix | Label | Rung |
 /// |---|---|---|---|
-/// | [`Self::Planner`] | `Planner remediation` | `planner-remediation` | first response |
 /// | [`Self::PlannerEscalation`] | `Planner terminal escalation` | `planner-park-escalation` | terminal, post-arbiter |
 /// | [`Self::HumanReview`] | `Human review required` | `human-review-hold` | terminal, human-only |
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RemediationKind {
-    /// **First-response** remediation. A Planner is dispatched to auto-remediate
-    /// (reshape / dedupe / spike). When it closes, `emit_unblocked_tasks`
-    /// revives the source automatically.
-    ///
-    /// Reached from the coordinator's own loop detectors
-    /// (`maybe_intervene_on_stuck_task`, `maybe_intervene_on_cycling_task`,
-    /// `maybe_escalate_provider_failure_streak`, the PR/CI-loop paths) and from
-    /// an agent calling `request_planner`. **No arbiter/Lead session has run on
-    /// the source when this fires** — the arbiter rung only starts once
-    /// `intervention_count >= MAX_PLANNER_INTERVENTIONS`, strictly later than
-    /// this variant. The description must therefore never claim a Lead tried
-    /// and failed.
-    Planner,
     /// Repeated automated remediation already failed — this requires a HUMAN.
     /// No Planner (or any agent) is dispatched, so the remediation never
     /// auto-resolves; the source stays held (open + blocked) until a human
@@ -507,7 +501,7 @@ impl CoordinatorActor {
     ///
     /// Gates on DB-backed `quality_reopen_count` (excludes `merge_conflict` /
     /// `superseded`) reaching `REOPEN_INTERVENTION_THRESHOLD`. The Planner
-    /// decomposes, rescopes, or closes via `dispatch_planner_escalation`.
+    /// decomposes, rescopes, or closes via `dispatch_arbiter_adjudication`.
     ///
     /// Returns `true` when routed (caller skips the worker dispatch).
     ///
@@ -551,7 +545,7 @@ impl CoordinatorActor {
         );
         tracing::Span::current().record("attempt", quality_strikes);
         poll_stack::boxed(|| {
-            self.route_planner_intervention(task, "worker", &reason, None, quality_strikes)
+            self.route_arbiter_adjudication(task, "worker", &reason, None, quality_strikes)
         })
         .await
     }
@@ -584,7 +578,7 @@ impl CoordinatorActor {
     /// Shares all of trigger A's machinery — second-strike terminal park,
     /// reopen-count-keyed idempotency marker (stable across a review-cycle
     /// loop, so one intervention per loop), backoff-state clearing — via
-    /// [`Self::route_planner_intervention`].
+    /// [`Self::route_arbiter_adjudication`].
     #[tracing::instrument(
         name = "djinn.dispatch.intervention.trigger",
         skip(self, task),
@@ -625,7 +619,7 @@ impl CoordinatorActor {
             task.status, task.reopen_count
         );
         poll_stack::boxed(|| {
-            self.route_planner_intervention(task, role, &reason, None, task.reopen_count)
+            self.route_arbiter_adjudication(task, role, &reason, None, task.reopen_count)
         })
         .await
     }
@@ -797,7 +791,7 @@ impl CoordinatorActor {
         .await;
 
         poll_stack::boxed(|| {
-            self.route_loop_guard_planner_intervention(&task.id, role, &intervention_reason)
+            self.route_loop_guard_arbiter_adjudication(&task.id, role, &intervention_reason)
         })
         .await
     }
@@ -811,7 +805,7 @@ impl CoordinatorActor {
         skip(self, reason),
         fields(task_id = %task_id, role = %role, pass_kind = "loop_guard")
     )]
-    pub(crate) async fn route_loop_guard_planner_intervention(
+    pub(crate) async fn route_loop_guard_arbiter_adjudication(
         &mut self,
         task_id: &str,
         role: &'static str,
@@ -837,9 +831,66 @@ impl CoordinatorActor {
         };
 
         poll_stack::boxed(|| {
-            self.route_planner_intervention(&task, role, reason, None, task.reopen_count)
+            self.route_arbiter_adjudication(&task, role, reason, None, task.reopen_count)
         })
         .await
+    }
+
+    /// 4etb: the canonical evidence floor for every park guard on this task.
+    ///
+    /// `max(escalation_evidence_at, last_intervention_at, human_review_resolved_at)`
+    /// — the three durable instants after which worker evidence can be said to
+    /// belong to the CURRENT adjudication. Missing optional values are ignored;
+    /// `escalation_evidence_at` is mandatory for every escalation this build
+    /// creates, so a `None` result means the task has never been escalated.
+    ///
+    /// Legacy rows that were ALREADY mid-adjudication when this shipped have no
+    /// epoch and no transition left that would stamp one. They get the bounded
+    /// one-time fallback `max(last_intervention_at, human_review_resolved_at,
+    /// updated_at)`, PERSISTED by the repository so it is read like any other
+    /// epoch on every later tick. There is deliberately no unbounded-history
+    /// fallback: that is the pre-4etb behavior this replaces.
+    pub(crate) async fn canonical_evidence_floor(
+        &self,
+        task: &djinn_core::models::Task,
+    ) -> Option<String> {
+        let repo = self.task_repo();
+        let mut epoch = task.escalation_evidence_at.clone();
+        if epoch.is_none() {
+            // Re-read: the task snapshot in hand may predate a stamp written by
+            // an earlier step of this very tick.
+            epoch = repo.escalation_evidence_at(&task.id).await.ok().flatten();
+        }
+        if epoch.is_none() {
+            match repo
+                .backfill_legacy_escalation_evidence_epoch(&task.id)
+                .await
+            {
+                Ok(persisted @ Some(_)) => {
+                    tracing::info!(
+                        task_id = %task.short_id,
+                        evidence_floor = ?persisted,
+                        "4etb: persisted the one-time legacy escalation evidence epoch for a task \
+                         that was already awaiting adjudication"
+                    );
+                    epoch = persisted;
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::warn!(
+                        task_id = %task.short_id,
+                        error = %e,
+                        "4etb: legacy escalation-evidence backfill failed; falling back to the \
+                         intervention/human-review floor for this evaluation only"
+                    );
+                }
+            }
+        }
+        let resolved_at = repo.human_review_resolved_at(&task.id).await.ok().flatten();
+        [epoch, task.last_intervention_at.clone(), resolved_at]
+            .into_iter()
+            .flatten()
+            .max()
     }
 
     /// uv3p Part B: what the fleet actually did since the current intervention
@@ -854,26 +905,23 @@ impl CoordinatorActor {
         &self,
         task: &djinn_core::models::Task,
     ) -> PostInterventionHistory {
-        // Evidence floor: the later of the last intervention and the last
-        // human-review hold resolution. Sessions/strikes before this floor are
-        // pre-intervention (or already-adjudicated pre-release) noise, not
-        // evidence the CURRENT remediation was attempted.
+        // 4etb canonical evidence floor:
         //
-        // `task_attempts` rows created_at is the dispatch time; `submitted_at`
-        // is the worker submit signal time. Both are compared against the floor
-        // to classify post-intervention evidence.
-        let resolved_at = self
-            .task_repo()
-            .human_review_resolved_at(&task.id)
-            .await
-            .ok()
-            .flatten();
-        let floor = [task.last_intervention_at.clone(), resolved_at]
-            .into_iter()
-            .flatten()
-            .max();
-        let Some(floor) = floor else {
-            // No intervention has landed yet — nothing counts as post-intervention.
+        //   evidence_floor = max(escalation_evidence_at,
+        //                        last_intervention_at,
+        //                        human_review_resolved_at)
+        //
+        // Only attempts and submissions at or after the floor qualify. Before
+        // rung 1 was retired the floor was `max(last_intervention_at,
+        // human_review_resolved_at)` and was EMPTY on a first escalation, so
+        // this function returned `default()` — no evidence, no rotation, and a
+        // uv3p decline the coordinator reproduced on every tick forever.
+        //
+        // A completed human review or arbiter intervention AFTER the trigger
+        // intentionally raises the floor: evidence predating that reset cannot
+        // justify a later park.
+        let Some(floor) = poll_stack::boxed(|| self.canonical_evidence_floor(task)).await else {
+            // The task has never been escalated — nothing to measure yet.
             return PostInterventionHistory::default();
         };
 
@@ -898,6 +946,7 @@ impl CoordinatorActor {
                 return PostInterventionHistory {
                     any_submitted: true,
                     most_recent_reopen_class,
+                    evidence_floor: Some(floor),
                     ..Default::default()
                 };
             }
@@ -905,17 +954,22 @@ impl CoordinatorActor {
 
         // Filter to post-floor worker attempts. Guard-only rows (deferred,
         // adopted_pr) are excluded from remediation evidence.
+        // Inclusive (`>=`): an attempt written in the SAME transaction timestamp
+        // as the epoch must not be lost. The 4etb truth table specifies
+        // `created_at >= evidence_floor`.
         let post_floor: Vec<_> = all_attempts
             .iter()
-            .filter(|a| a.role == "worker" && a.created_at.as_str() > floor.as_str())
+            .filter(|a| a.role == "worker" && a.created_at.as_str() >= floor.as_str())
             .collect();
 
         // Track submitted attempts (rows that reached the `submitted` outcome
         // or have a non-null submitted_at). The newest post-floor `submitted`
         // row is in-flight and must not count as failed/non-attempt evidence.
-        let any_submitted = post_floor
+        let qualifying_submission_count = post_floor
             .iter()
-            .any(|a| a.outcome == "submitted" || a.submitted_at.is_some());
+            .filter(|a| a.outcome == "submitted" || a.submitted_at.is_some())
+            .count();
+        let any_submitted = qualifying_submission_count > 0;
         let latest_submission_at = post_floor
             .iter()
             .filter_map(|a| a.submitted_at.as_deref())
@@ -962,6 +1016,8 @@ impl CoordinatorActor {
                 submission_pending_review,
                 latest_submission_at,
                 most_recent_reopen_class,
+                evidence_floor: Some(floor),
+                qualifying_submission_count,
                 ..Default::default()
             };
         }
@@ -1068,6 +1124,8 @@ impl CoordinatorActor {
             submission_pending_review: false,
             latest_submission_at: None,
             most_recent_reopen_class,
+            evidence_floor: Some(floor),
+            qualifying_submission_count: 0,
         }
     }
 
@@ -1142,8 +1200,8 @@ impl CoordinatorActor {
                 _ => {
                     // review_rejected / other quality strikes keep the existing AC phrasing.
                     format!(
-                        "The post-intervention remediation WAS attempted — at least one session \
-                         submitted work after the planner reshaped the scope — but the acceptance \
+                        "The remediation WAS attempted — at least one session submitted work at \
+                         or after the current escalation evidence epoch — but the acceptance \
                          criteria still did not pass, so re-dispatching would only loop again.{skip_note}"
                     )
                 }
@@ -1179,7 +1237,7 @@ impl CoordinatorActor {
                 )
             };
             format!(
-                "{} post-intervention session(s) terminated pre-submission across models {} — \
+                "{} session(s) since the escalation evidence epoch terminated pre-submission across models {} — \
                  the remediation never converged despite forced model rotation, so re-dispatching \
                  would only loop again.{infra_note}",
                 history.non_attempt_session_labels.len(),
@@ -1196,16 +1254,19 @@ impl CoordinatorActor {
         history: &PostInterventionHistory,
     ) -> String {
         let detail = Self::park_reason_detail(task, history);
+        // 4etb: rung 1 is retired, so the reason must NOT claim a count of
+        // planner interventions preceded this park. The truthful frame is the
+        // evidence epoch the guards measured against.
         format!(
-            "Auto-parked to autonomous arbitration after {} planner intervention(s) \
-             (intervention_count={}, total_reopen_count={}). {detail} The task is held (open + \
-             blocked on an autonomous planner-park escalation) so it frees the dispatch slot for \
-             other ready tasks while its branch and prior work are preserved. NO human hold is \
-             produced and no human is required to release it: the Lead arbiter adjudicates the \
-             hold cycle, and the Planner owns terminal resolution of the escalation (decompose + \
-             supersede, close as won't-fix, or re-scope + reopen). Closing the escalation releases \
-             this source.",
-            MAX_PLANNER_INTERVENTIONS, task.intervention_count, task.total_reopen_count,
+            "Auto-parked to autonomous arbitration. Evidence epoch: {} \
+             (total_reopen_count={}). {detail} The task is held (open + blocked on an autonomous \
+             planner-park escalation) so it frees the dispatch slot for other ready tasks while \
+             its branch and prior work are preserved. NO human hold is produced and no human is \
+             required to release it: the Lead arbiter adjudicates the hold cycle, and the Planner \
+             owns terminal resolution of the escalation (decompose + supersede, close as \
+             won't-fix, or re-scope + reopen). Closing the escalation releases this source.",
+            history.evidence_floor.as_deref().unwrap_or("(none)"),
+            task.total_reopen_count,
         )
     }
 
@@ -1250,12 +1311,17 @@ impl CoordinatorActor {
         kind: &str,
         fingerprint: Option<&str>,
         non_attempt_count: usize,
+        evidence_floor: Option<&str>,
     ) {
+        // 4etb: the decline budget is keyed on the canonical evidence epoch,
+        // NOT on `intervention_count`. With rung 1 retired nothing advances
+        // that counter on this path, so an epoch-keyed budget is the only one
+        // that re-arms when a genuine adjudication resets the floor.
         let payload = serde_json::json!({
             "kind": kind,
             "fingerprint": fingerprint,
             "non_attempt_count": non_attempt_count,
-            "intervention_count": task.intervention_count,
+            "evidence_floor": evidence_floor,
         })
         .to_string();
         if let Err(e) = self
@@ -1273,6 +1339,100 @@ impl CoordinatorActor {
                 task_id = %task.short_id,
                 error = %e,
                 "uv3p: failed to record park-redispatch marker"
+            );
+        }
+    }
+
+    /// 4etb: the stable reason code every uv3p guard decline caused by
+    /// insufficient CURRENT-EPOCH worker evidence carries.
+    pub(crate) const PARK_GUARD_INSUFFICIENT_EPOCH_EVIDENCE: &'static str =
+        "park_guard_insufficient_epoch_evidence";
+
+    /// 4etb: the exact operator-facing sentence for a guard-declined park.
+    ///
+    /// Brace-delimited values are populated from the SAME guard evaluation and
+    /// marker transaction that produced the decline, so the text an operator
+    /// reads and the structured fields never disagree. Deliberately carries no
+    /// Planner or intervention-count wording: rung 1 no longer exists and this
+    /// decision does not read `intervention_count`.
+    pub(crate) fn guard_declined_park_reason(evidence_floor: &str, hold_cycle: i32) -> String {
+        format!(
+            "Park declined: insufficient worker evidence at or after {evidence_floor} in hold cycle {hold_cycle}; redispatching with model rotation."
+        )
+    }
+
+    /// 4etb: apply one guarded park decline.
+    ///
+    /// Writes the `park_redispatch` marker carrying the full reason contract,
+    /// exactly once per epoch (the decline budget in
+    /// [`crate::dispatch::park_redispatch_bound`] is keyed on `evidence_floor`,
+    /// so a repeated tick within the same epoch is bounded rather than
+    /// unbounded).
+    ///
+    /// **On not consuming an arbitration row.** The proposal's promotion table
+    /// describes a guarded park decline as consuming row N and storing model
+    /// exclusions on it. That cannot happen here, and must not: this function
+    /// is only reachable when `guards_apply` is true, which is *defined* as
+    /// "no unconsumed row exists" (`Ok((cycle, None)) if cycle > 0`). When a
+    /// row IS unconsumed an arbiter — or a monitored reopen — is genuinely in
+    /// flight, and the in-flight branch owns that tick; consuming the row there
+    /// would silently destroy the v1ej monitored-reopen contract. So at the
+    /// moment a decline happens there is no open row to consume, and the
+    /// rotation it asks for is applied where it actually takes effect: at
+    /// dispatch time, from the durable attempt ledger
+    /// (`dispatch/task_dispatch.rs`, `rotation_excluded_models`). The decline
+    /// records the PROSPECTIVE cycle it declined to open.
+    async fn record_guard_declined_park(
+        &mut self,
+        task: &djinn_core::models::Task,
+        history: &PostInterventionHistory,
+        evidence_floor: &str,
+    ) {
+        let hold_cycle = match TaskArbitrationRepository::new(self.db.clone())
+            .resolve_current_hold_cycle(&task.id)
+            .await
+        {
+            Ok((cycle, _)) => cycle,
+            Err(e) => {
+                tracing::warn!(
+                    task_id = %task.short_id,
+                    error = %e,
+                    "4etb: guard-declined park could not resolve the prospective hold cycle"
+                );
+                0
+            }
+        };
+        let excluded_models = history.rotation_excluded_models();
+        let operator_text = Self::guard_declined_park_reason(evidence_floor, hold_cycle);
+        let payload = serde_json::json!({
+            "kind": NO_ATTEMPTED_REMEDIATION_KIND,
+            "fingerprint": serde_json::Value::Null,
+            "non_attempt_count": history.non_attempt_models.len(),
+            "reason_code": Self::PARK_GUARD_INSUFFICIENT_EPOCH_EVIDENCE,
+            "hold_cycle": hold_cycle,
+            "evidence_floor": evidence_floor,
+            "qualifying_submission_count": history.qualifying_submission_count,
+            "qualifying_non_attempt_models": history.non_attempt_models,
+            "excluded_models": excluded_models,
+            "disposition": "redispatch_rotated",
+            "reason": operator_text,
+        })
+        .to_string();
+        if let Err(e) = self
+            .task_repo()
+            .log_activity(
+                Some(&task.id),
+                "coordinator",
+                "system",
+                PARK_REDISPATCH_MARKER,
+                &payload,
+            )
+            .await
+        {
+            tracing::warn!(
+                task_id = %task.short_id,
+                error = %e,
+                "4etb: failed to record the guard-declined park marker"
             );
         }
     }
@@ -1416,9 +1576,9 @@ impl CoordinatorActor {
     #[tracing::instrument(
         name = "djinn.dispatch.intervention",
         skip(self, task, reason),
-        fields(task_id = %task.short_id, role = %role, pass_kind = "planner_intervention")
+        fields(task_id = %task.short_id, role = %role, pass_kind = "arbiter_adjudication")
     )]
-    pub(crate) async fn route_planner_intervention(
+    pub(crate) async fn route_arbiter_adjudication(
         &mut self,
         task: &djinn_core::models::Task,
         role: &'static str,
@@ -1427,10 +1587,14 @@ impl CoordinatorActor {
         quality_strikes: i64,
     ) -> bool {
         tracing::Span::current().record("attempt", quality_strikes);
-        // Second strike: hand the task to the autonomous arbiter ladder instead
-        // of re-escalating the Planner (which just resets the counters and
-        // loops). Parked to `open` so the dispatch slot is freed.
-        if task.intervention_count >= MAX_PLANNER_INTERVENTIONS {
+        // 4etb: rung 1 is gone. EVERY in-scope trigger reaches the forensic
+        // arbiter on its FIRST escalation — there is no `intervention_count`
+        // threshold to cross and no `RemediationKind::Planner` child to create.
+        // The bounds below are all coordinator-owned and derived from durable
+        // ledgers (`task_arbitrations.hold_cycle`, held-remediation blockers),
+        // never from a counter an agent has to advance by calling
+        // `task_reset_counters`.
+        {
             // ── Cumulative cross-cycle bound (gy53) ─────────────────────────
             //
             // FIRST, before any per-cycle or per-fingerprint sub-guard below.
@@ -1447,6 +1611,38 @@ impl CoordinatorActor {
             // unconsumed row). A genuinely in-flight arbiter is left to finish
             // — it may still approve or supersede — and is separately bounded
             // by the 24h arbitration deadline and the decision-failure cap.
+            // 4etb: stamp the evidence epoch before anything below reads it.
+            //
+            // What this buys TODAY, precisely: the arbiter's dossier attempt
+            // ledger (`attempt_ledger_for_task`) and the park-reason text are
+            // sliced by the canonical floor, and on a first escalation the
+            // floor only exists because of this call — the authoritative stamp
+            // lives in `try_create_with_evidence_epoch` at the bottom of the
+            // rung, which is too late for them. Without it a first escalation
+            // hands the arbiter unbounded history, contradicting the guards
+            // whose decision it is meant to explain.
+            //
+            // It is NOT what keeps a first escalation off the uv3p guard any
+            // more — `guards_apply` does that, by skipping the park guards
+            // entirely at prospective cycle 0. Both are deliberate: this is the
+            // evidence contract, that is the routing contract.
+            //
+            // Conditional on the column being NULL, so a repeated tick while
+            // this escalation is pending is a no-op and the row insert below
+            // re-reads the same value inside its own transaction.
+            if let Err(e) = self
+                .task_repo()
+                .stamp_escalation_evidence_epoch(&task.id)
+                .await
+            {
+                tracing::warn!(
+                    task_id = %task.short_id,
+                    error = %e,
+                    "4etb: failed to stamp the escalation evidence epoch; guards will fall back \
+                     to the intervention/human-review floor for this tick"
+                );
+            }
+
             let final_disposition =
                 poll_stack::boxed(|| self.arbiter_hold_cycle_ceiling_reached(task)).await;
             if final_disposition
@@ -1470,6 +1666,41 @@ impl CoordinatorActor {
                     )
                     .await;
             }
+
+            // 4etb: do the park guards apply on THIS tick?
+            //
+            // They gate a PARK, not arbiter ENTRY, so exactly two states skip
+            // them — both straight out of the promotion truth table:
+            //
+            // - **prospective cycle 0, no row.** "no row, prospective cycle 0 →
+            //   stamp the epoch, insert arbitration row 0, dispatch one
+            //   ordinary arbiter child" is unconditional. No arbiter has run,
+            //   so there is no prior remediation whose attempt a guard could
+            //   measure, and declining here reinstates exactly the
+            //   first-escalation livelock this proposal closes.
+            //
+            // - **an unconsumed row exists.** "unconsumed row N → repeated tick
+            //   makes no write → retain the row, epoch, and child." An arbiter
+            //   (or a monitored reopen) is genuinely in flight. A guard decline
+            //   here would `mark_consumed` that live row and, on the v1ej
+            //   monitored-reopen path, silently destroy the contract the branch
+            //   further down exists to protect — while burning the epoch's
+            //   decline budget on every tick of a task the coordinator is
+            //   holding in `needs_lead_intervention`. The in-flight branch
+            //   below owns this state: it handles the stale decision, the
+            //   expired deadline, the decision-failure cap and the monitored
+            //   reopen.
+            //
+            // A ledger read error yields `false` — fail OPEN toward dispatching
+            // the arbiter, matching how the gy53 ceiling check fails open. The
+            // alternative turns a transient DB blip during a first escalation
+            // into a decline.
+            let guards_apply = matches!(
+                TaskArbitrationRepository::new(self.db.clone())
+                    .resolve_current_hold_cycle(&task.id)
+                    .await,
+                Ok((cycle, None)) if cycle > 0
+            );
 
             // uv3p Part B: attempted-remediation requirement on the park rung.
             // A park declares the current intervention's remediation a failure —
@@ -1504,6 +1735,7 @@ impl CoordinatorActor {
             // Skip the fingerprint check when CI evidence is stale (from a prior
             // head SHA) — it cannot serve as a park-triggering strike.
             if !final_disposition
+                && guards_apply
                 && !ci_stale
                 && let Some(fingerprint) = task
                     .ci_failure_fingerprint
@@ -1518,6 +1750,7 @@ impl CoordinatorActor {
                                 "first_occurrence_fingerprint",
                                 Some(fingerprint),
                                 history.non_attempt_models.len(),
+                                history.evidence_floor.as_deref(),
                             )
                         })
                         .await;
@@ -1559,10 +1792,17 @@ impl CoordinatorActor {
             // arbitration row never advances. Bound the decline on the durable
             // markers this rung itself writes, scoped to the current intervention
             // epoch so a genuine Planner intervention re-arms the budget.
+            // 4etb: the decline budget is scoped to the CANONICAL EVIDENCE
+            // EPOCH, not to `intervention_count`. Rung 1 is gone, so nothing
+            // advances that counter here; an epoch-keyed budget re-arms exactly
+            // when an adjudication resets the floor, which is the property the
+            // old counter was standing in for.
+            let evidence_floor = history.evidence_floor.clone().unwrap_or_default();
             let prior_declines = self
-                .no_attempted_remediation_decline_count(&task.id, task.intervention_count)
+                .no_attempted_remediation_decline_count(&task.id, &evidence_floor)
                 .await;
             if !final_disposition
+                && guards_apply
                 && should_decline_no_attempted_remediation_park(
                     history.any_submitted,
                     history.non_attempt_models.len(),
@@ -1570,21 +1810,19 @@ impl CoordinatorActor {
                 )
             {
                 poll_stack::boxed(|| {
-                    self.record_park_redispatch_marker(
-                        task,
-                        NO_ATTEMPTED_REMEDIATION_KIND,
-                        None,
-                        history.non_attempt_models.len(),
-                    )
+                    self.record_guard_declined_park(task, &history, &evidence_floor)
                 })
                 .await;
                 tracing::warn!(
                     task_id = %task.short_id,
-                    intervention_count = task.intervention_count,
+                    evidence_floor = %evidence_floor,
+                    qualifying_submission_count = history.qualifying_submission_count,
                     non_attempt_models = ?history.non_attempt_models,
                     prior_declines,
                     decline_bound = MAX_PARK_REDISPATCH_DECLINES,
-                    "uv3p: human-park rung declined to park — no post-intervention session reached submit_work yet; redispatching with forced model rotation instead of parking"
+                    reason_code = Self::PARK_GUARD_INSUFFICIENT_EPOCH_EVIDENCE,
+                    "4etb: park declined — insufficient worker evidence in the current escalation \
+                     epoch; redispatching with forced model rotation"
                 );
                 return false;
             }
@@ -1595,9 +1833,19 @@ impl CoordinatorActor {
             // (mirror-vs-GitHub staleness) must not serve as the park-triggering
             // strike. If the task is in needs_task_review/in_task_review with no
             // rejection newer than the submission, do not park.
-            if !final_disposition && history.any_submitted && history.submission_pending_review {
+            if !final_disposition
+                && guards_apply
+                && history.any_submitted
+                && history.submission_pending_review
+            {
                 poll_stack::boxed(|| {
-                    self.record_park_redispatch_marker(task, "submission_pending_review", None, 0)
+                    self.record_park_redispatch_marker(
+                        task,
+                        "submission_pending_review",
+                        None,
+                        0,
+                        history.evidence_floor.as_deref(),
+                    )
                 })
                 .await;
                 tracing::warn!(
@@ -1609,6 +1857,26 @@ impl CoordinatorActor {
                 );
                 return false;
             }
+
+            // 4etb / AC9: trigger evidence passthrough. The caller's reason,
+            // its `ci_failure_sections`, and the merge-queue lane facts are
+            // carried to the arbiter VERBATIM. Classification of CI and
+            // merge-queue failures is owned by proposal `nafu` and PRs
+            // #2714/#2715 — this rung changes WHICH rung the payload reaches,
+            // never what it says.
+            let mq_section = crate::pr_poller::merge_queue_lane_escalation_section(task);
+            let combined_sections = match (ci_failure_sections, mq_section.as_deref()) {
+                (Some(sections), Some(mq)) if !sections.is_empty() => {
+                    Some(format!("{sections}\n{mq}"))
+                }
+                (Some(sections), _) if !sections.is_empty() => Some(sections.to_string()),
+                (_, Some(mq)) => Some(mq.to_string()),
+                _ => None,
+            };
+            let trigger_reason = match combined_sections.as_deref() {
+                Some(sections) => format!("{reason}\n\n**CI Failure Details:**\n{sections}"),
+                None => reason.to_string(),
+            };
 
             // Truthful park reason computed from actual post-intervention
             // history — never the templated "same acceptance criteria kept
@@ -1898,6 +2166,11 @@ impl CoordinatorActor {
                 Self::summarize_prior_arbitrations(&arbiter_repo, &task.id, hold_cycle).await;
             let dossier = serde_json::json!({
                 "reason": reason,
+                // Verbatim trigger evidence — the arbiter reads the SAME text
+                // rung 1 used to receive, with its CI/merge-queue sections and
+                // reason codes untouched.
+                "trigger_reason": trigger_reason,
+                "ci_failure_sections": combined_sections,
                 "role": role,
                 "hold_cycle": hold_cycle,
                 "hold_cycle_ceiling": MAX_ARBITER_HOLD_CYCLES,
@@ -1956,8 +2229,14 @@ impl CoordinatorActor {
                 }
             };
 
+            // 4etb: ONE transaction stamps the canonical evidence epoch and
+            // inserts the arbitration row. The epoch is what every park guard
+            // measures evidence from, so an arbitration row that exists without
+            // one would reproduce the pre-4etb first-escalation livelock.
+            // Both writes are idempotent, so a repeated tick while the same
+            // escalation is pending retains one epoch, one row and one child.
             let create_result = match arbiter_repo
-                .try_create(CreateArbitrationParams {
+                .try_create_with_evidence_epoch(CreateArbitrationParams {
                     task_id: &task.id,
                     hold_cycle,
                     deadline_at: deadline.as_deref(),
@@ -1972,7 +2251,15 @@ impl CoordinatorActor {
                 })
                 .await
             {
-                Ok(r) => r,
+                Ok((r, epoch)) => {
+                    tracing::debug!(
+                        task_id = %task.short_id,
+                        hold_cycle,
+                        escalation_evidence_at = ?epoch,
+                        "4etb: escalation evidence epoch and arbitration row committed together"
+                    );
+                    r
+                }
                 Err(e) => {
                     tracing::warn!(
                         task_id = %task.short_id,
@@ -2045,7 +2332,7 @@ impl CoordinatorActor {
                             Some(&task.id),
                             "system",
                             "coordinator",
-                            "arbiter_dispatched",
+                            ARBITER_DISPATCHED_MARKER,
                             &payload.to_string(),
                         )
                         .await
@@ -2078,7 +2365,7 @@ impl CoordinatorActor {
                         .task_repo()
                         .query_activity(ActivityQuery {
                             task_id: Some(task.id.clone()),
-                            event_type: Some("arbiter_dispatched".to_string()),
+                            event_type: Some(ARBITER_DISPATCHED_MARKER.to_string()),
                             ..ActivityQuery::default()
                         })
                         .await
@@ -2100,7 +2387,7 @@ impl CoordinatorActor {
                                 Some(&task.id),
                                 "system",
                                 "coordinator",
-                                "arbiter_dispatched",
+                                ARBITER_DISPATCHED_MARKER,
                                 &payload.to_string(),
                             )
                             .await
@@ -2147,144 +2434,6 @@ impl CoordinatorActor {
                 }
             }
         }
-
-        // Idempotency: keyed by raw reopen_count for re-arm after reset.
-        match self
-            .planner_intervention_marker_exists(task, task.reopen_count)
-            .await
-        {
-            Ok(true) => return false,
-            Ok(false) => {}
-            Err(e) => {
-                // Fail safe: skip intervention on DB errors.
-                tracing::warn!(
-                    task_id = %task.short_id,
-                    error = %e,
-                    "CoordinatorActor: planner-intervention marker check failed; skipping intervention this pass"
-                );
-                return false;
-            }
-        }
-
-        // Record the marker BEFORE dispatching to prevent double-fire.
-        if let Err(e) = self
-            .record_planner_intervention_marker(task, task.reopen_count, quality_strikes)
-            .await
-        {
-            tracing::warn!(
-                task_id = %task.short_id,
-                error = %e,
-                "CoordinatorActor: failed to record planner-intervention marker; skipping intervention this pass"
-            );
-            return false;
-        }
-
-        tracing::warn!(
-            task_id = %task.short_id,
-            role,
-            quality_strikes,
-            reopen_count = task.reopen_count,
-            "CoordinatorActor: stuck task — routing to Planner intervention"
-        );
-
-        // Clear the escalating-cooldown backoff state so the Planner-created
-        // review task (and any follow-up the Planner makes) isn't shadowed by a
-        // stale failure streak attributed to the original task.
-        self.dispatch_failure_streak.remove(&task.id);
-        self.dispatch_cooldowns.remove(&task.id);
-        self.last_dispatched.remove(&task.id);
-        self.inflight_dispatches.remove(&task.id);
-        poll_stack::boxed(|| {
-            self.clear_durable_dispatch_backoff_state(
-                &task.id,
-                Some(&task.short_id),
-                "planner_intervention_handoff_clear",
-            )
-        })
-        .await;
-
-        // Append the merge-queue lane facts (run id, failing checks,
-        // same-signature count) when the task's CI snapshot carries a
-        // merge-queue rejection, so the Planner dossier explains why a PR with a
-        // green head keeps getting dequeued.
-        let mq_section = crate::pr_poller::merge_queue_lane_escalation_section(task);
-        let combined_sections = match (ci_failure_sections, mq_section.as_deref()) {
-            (Some(sections), Some(mq)) if !sections.is_empty() => Some(format!("{sections}\n{mq}")),
-            (Some(sections), _) if !sections.is_empty() => Some(sections.to_string()),
-            (_, Some(mq)) => Some(mq.to_string()),
-            _ => None,
-        };
-        let enriched_reason = match combined_sections {
-            Some(sections) => format!("{reason}\n\n**CI Failure Details:**\n{sections}"),
-            None => reason.to_string(),
-        };
-        poll_stack::boxed(|| {
-            self.dispatch_planner_escalation(&task.id, &enriched_reason, &task.project_id)
-        })
-        .await;
-        true
-    }
-
-    /// Returns `true` if a `planner_intervention` marker already exists for
-    /// `task` at the given raw `reopen_count`.
-    async fn planner_intervention_marker_exists(
-        &self,
-        task: &djinn_core::models::Task,
-        reopen_count: i64,
-    ) -> djinn_db::Result<bool> {
-        let task_repo = self.task_repo();
-        let entries = task_repo
-            .query_activity(ActivityQuery {
-                task_id: Some(task.id.clone()),
-                event_type: Some(PLANNER_INTERVENTION_MARKER.to_string()),
-                actor_role: Some("system".to_string()),
-                project_id: None,
-                from_time: None,
-                to_time: None,
-                limit: 100,
-                offset: 0,
-            })
-            .await?;
-
-        Ok(entries.iter().any(|entry| {
-            serde_json::from_str::<serde_json::Value>(&entry.payload)
-                .ok()
-                .and_then(|payload| {
-                    payload
-                        .get("reopen_count")
-                        .and_then(serde_json::Value::as_i64)
-                        .filter(|value| *value == reopen_count)
-                        .map(|_| ())
-                })
-                .is_some()
-        }))
-    }
-
-    /// Record a `planner_intervention` marker keyed by raw `reopen_count`.
-    /// `quality_strikes` stored in audit.
-    async fn record_planner_intervention_marker(
-        &self,
-        task: &djinn_core::models::Task,
-        reopen_count: i64,
-        quality_strikes: i64,
-    ) -> djinn_db::Result<()> {
-        let payload = serde_json::json!({
-            "reopen_count": reopen_count,
-            "quality_strikes": quality_strikes,
-        })
-        .to_string();
-
-        self.task_repo()
-            .log_activity(
-                Some(&task.id),
-                "coordinator",
-                "system",
-                PLANNER_INTERVENTION_MARKER,
-                &payload,
-            )
-            .await?;
-
-        Ok(())
     }
 
     /// Emit the parked-task telemetry metric with strike-class breakdown labels.
@@ -2364,11 +2513,17 @@ impl CoordinatorActor {
         task: &djinn_core::models::Task,
     ) -> Vec<TaskAttemptLedgerRow> {
         let attempt_repo = TaskAttemptRepository::new(self.db.clone());
+        // 4etb: the ledger the arbiter reads must be sliced by the SAME
+        // canonical evidence floor the guards use. Slicing on
+        // `last_intervention_at` alone meant a first escalation (where that
+        // column is NULL) handed the arbiter unbounded history, contradicting
+        // the very guards whose decision it is meant to explain.
+        let floor = poll_stack::boxed(|| self.canonical_evidence_floor(task)).await;
         match attempt_repo
             .ledger_for_task_since(
                 &task.id,
                 None, // all roles — worker, guard, etc.
-                task.last_intervention_at.as_deref(),
+                floor.as_deref(),
                 100,
             )
             .await
@@ -2686,20 +2841,19 @@ impl CoordinatorActor {
     ) -> bool {
         let prior = poll_stack::boxed(|| self.planner_escalation_count(&task.id)).await;
         if prior >= MAX_AUTONOMOUS_ESCALATIONS {
-            let terminal_reason = format!(
-                "Autonomous remediation ladder exhausted: {prior} planner-park escalations already \
-                 spent (ceiling {MAX_AUTONOMOUS_ESCALATIONS}) without convergence. Terminally \
-                 failing this task rather than parking it for a human — a planner may resurrect it \
-                 from the epic. Last reason: {reason}"
-            );
+            // 4etb: rounds 1, 2 and 3 are the whole terminal rung. A FOURTH
+            // `PlannerEscalation` is forbidden, and the exhausted source must
+            // never be left in a status no poller scans (tasks `z8i8`/`zkas`
+            // sat `open` and unscanned until a human moved them). Apply the
+            // exhausted-ladder ownership contract instead.
             tracing::warn!(
                 task_id = %task.short_id,
                 prior_escalations = prior,
                 ceiling = MAX_AUTONOMOUS_ESCALATIONS,
-                "CoordinatorActor: autonomous-escalation ceiling reached — terminally failing task (no human park)"
+                "4etb: terminal-rung ceiling reached — applying exhausted-ladder ownership instead \
+                 of creating another escalation"
             );
-            poll_stack::boxed(|| self.terminally_fail_task(task, "coordinator", &terminal_reason))
-                .await;
+            poll_stack::boxed(|| self.apply_exhausted_ladder_ownership(task, reason)).await;
             return false;
         }
         // Ensure a planner-park escalation task blocks the source (creating one
@@ -2717,6 +2871,121 @@ impl CoordinatorActor {
         .await;
         poll_stack::boxed(|| self.park_source_open(&task.id, reason)).await;
         true
+    }
+
+    /// 4etb: the exhausted-ladder ownership contract.
+    ///
+    /// Reached when the terminal `PlannerEscalation` rung is spent
+    /// ([`MAX_AUTONOMOUS_ESCALATIONS`] blocker-derived rounds) and the source
+    /// still has no disposition. EXACTLY one branch is taken, and each leaves
+    /// the source with a NAMED owner:
+    ///
+    /// | Source precondition | Destination | Consumer |
+    /// |---|---|---|
+    /// | open, unmerged PR (including an adopted one) | `pr_review` | `poll_pr_review_tasks` |
+    /// | no open PR | terminal `closed` with the contractual reason | none — terminal by contract |
+    /// | already terminal or already `pr_review` | preserved | existing owner |
+    ///
+    /// Repeated ticks and duplicate deliveries are no-ops: the already-owned
+    /// branch preserves the current state and rewrites no disposition. A merged
+    /// PR (`merge_commit_sha` present) does NOT satisfy the first branch — a
+    /// landed PR gives the poller nothing to do.
+    ///
+    /// The same contract runs inside the child-close transaction
+    /// (`djinn_db::repositories::task::apply_adjudication_child_close_tx`) so
+    /// an intermediate merely-`open` source is never externally observable.
+    /// This copy covers the paths that reach the ceiling from the coordinator's
+    /// own rung rather than from a child close.
+    pub(crate) async fn apply_exhausted_ladder_ownership(
+        &mut self,
+        task: &djinn_core::models::Task,
+        reason: &str,
+    ) -> bool {
+        let repo = self.task_repo();
+        let latest = match repo.get(&task.id).await {
+            Ok(Some(latest)) => latest,
+            _ => return false,
+        };
+        // Already-owned states are preserved verbatim.
+        if matches!(
+            latest.status.as_str(),
+            "closed" | "superseded" | "pr_review"
+        ) {
+            tracing::info!(
+                task_id = %latest.short_id,
+                status = %latest.status,
+                "4etb: exhausted-ladder ownership is a no-op — the source already has an owner"
+            );
+            return true;
+        }
+
+        let merged = latest
+            .merge_commit_sha
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|sha| !sha.is_empty());
+        let open_pr = latest
+            .pr_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|url| !url.is_empty())
+            .filter(|_| !merged);
+
+        if let Some(pr_url) = open_pr {
+            const HANDOFF_REASON: &str = djinn_db::repositories::task::PR_HANDOFF_REASON;
+            let head_sha = latest
+                .ci_github_head_sha
+                .as_deref()
+                .or(latest.ci_head_sha.as_deref());
+            match super::respawn_guard::handoff_pr_to_poller(
+                &repo,
+                &latest.id,
+                &latest.status,
+                pr_url,
+                HANDOFF_REASON,
+                head_sha,
+            )
+            .await
+            {
+                Ok(_) => {
+                    tracing::warn!(
+                        task_id = %latest.short_id,
+                        pr_url,
+                        "4etb: adjudication ladder exhausted with an open unmerged PR — handed to \
+                         the PR poller (pr_review)"
+                    );
+                    self.dispatch_failure_streak.remove(&latest.id);
+                    self.provider_failure_streak.remove(&latest.id);
+                    self.dispatch_cooldowns.remove(&latest.id);
+                    self.last_dispatched.remove(&latest.id);
+                    self.inflight_dispatches.remove(&latest.id);
+                    return true;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        task_id = %latest.short_id,
+                        error = %e,
+                        "4etb: exhausted-ladder PR handoff failed; leaving the source for the next tick"
+                    );
+                    return false;
+                }
+            }
+        }
+
+        // No PR: terminal by contract, with the EXACT reason the ownership
+        // contract specifies. `reason` is appended as context, never as a
+        // replacement — matching on the contractual prefix must stay possible.
+        //
+        // Routed through `terminally_fail_task`, the single terminal gate:
+        // `dispatch/retry.rs` must never own a second `ForceClose` gateway
+        // (`tests::terminal_gate_boundary`). The gate's own PR-handoff branch is
+        // a no-op here because the open-PR case already returned above.
+        let terminal_reason = format!(
+            "{}. Last adjudication reason: {reason}",
+            djinn_db::repositories::task::LADDER_EXHAUSTED_CLOSE_REASON
+        );
+        poll_stack::boxed(|| self.terminally_fail_task(&latest, "coordinator", &terminal_reason))
+            .await
     }
 
     /// Summarize every arbitration cycle already closed on this task, newest
@@ -2918,7 +3187,7 @@ impl CoordinatorActor {
     async fn no_attempted_remediation_decline_count(
         &self,
         task_id: &str,
-        intervention_count: i64,
+        evidence_floor: &str,
     ) -> usize {
         self.task_repo()
             .query_activity(ActivityQuery {
@@ -2928,7 +3197,7 @@ impl CoordinatorActor {
                 ..ActivityQuery::default()
             })
             .await
-            .map(|entries| no_attempted_remediation_declines(&entries, intervention_count))
+            .map(|entries| no_attempted_remediation_declines(&entries, evidence_floor))
             .unwrap_or(0)
     }
 
@@ -3019,45 +3288,35 @@ impl CoordinatorActor {
         serde_json::json!(ids)
     }
 
-    /// Dispatch a Planner escalation: create a review task, add a comment linking it
-    /// to the source task, then dispatch the Planner to it.
+    /// 4etb: route a stuck source straight to the forensic arbiter.
     ///
-    /// Called when Lead calls `request_planner` or when auto-escalation fires on the
-    /// 2nd planner escalation for the same task.  Per ADR-051 §8 the Planner is now the
-    /// escalation ceiling above Lead — it owns the board and decides whether to
-    /// reshape, dedupe, or (if the issue requires deeper code-structural reasoning)
-    /// dispatch an Architect spike.
-    pub(crate) async fn dispatch_planner_escalation(
+    /// This used to create a first-response `RemediationKind::Planner` child.
+    /// That rung offered the arbiter's high-level dispositions without the
+    /// arbiter's mandatory evidence, structured reopen directives,
+    /// transactional supersession or bounded park guards — and had no
+    /// coordinator-owned promotion at all: it only advanced when an agent
+    /// voluntarily called `task_reset_counters`. It is gone. Every caller
+    /// (`request_planner`, the wave/PR-review handlers, the dispatch fallbacks)
+    /// now reaches the best-instrumented adjudicator on the FIRST escalation.
+    pub(crate) async fn dispatch_arbiter_adjudication(
         &mut self,
         source_task_id: &str,
         reason: &str,
-        project_id: &str,
+        _project_id: &str,
     ) {
         poll_stack::boxed(|| {
-            self.create_remediation_task(
-                source_task_id,
-                reason,
-                project_id,
-                RemediationKind::Planner,
-            )
+            self.route_loop_guard_arbiter_adjudication(source_task_id, "worker", reason)
         })
         .await;
     }
 
-    /// Create a remediation review task that blocks the stuck `source_task_id`,
-    /// add a linking comment, and (for [`RemediationKind::Planner`]) dispatch the
-    /// Planner to it.
+    /// Create a held remediation review task that blocks the stuck
+    /// `source_task_id` and add a linking comment.
     ///
-    /// Called when Lead calls `request_planner`, when auto-escalation fires on the
-    /// 2nd planner escalation for the same task, and on the CI-loop / second-strike
-    /// park paths. Per ADR-051 §8 the Planner is the escalation ceiling above Lead
-    /// — it owns the board and decides whether to reshape, dedupe, or (if the issue
-    /// requires deeper code-structural reasoning) dispatch an Architect spike.
-    ///
-    /// Neither held-remediation kind dispatches an agent inline, and creation is
-    /// skipped when the source is already held by an unresolved blocker. Note
-    /// that the autonomous rungs never construct
-    /// [`RemediationKind::HumanReview`] — every loop-breaker path routes to
+    /// 4etb: NEITHER surviving kind dispatches an agent inline, and creation is
+    /// skipped when the source is already held by an unresolved blocker. The
+    /// autonomous rungs never construct [`RemediationKind::HumanReview`] —
+    /// every loop-breaker path routes to
     /// [`RemediationKind::PlannerEscalation`], which the coordinator's normal
     /// dispatch pass claims for the Planner. `HumanReview` is reachable ONLY
     /// through the tripwire org-policy escape hatch (a rule an operator
@@ -3105,92 +3364,10 @@ impl CoordinatorActor {
             }
         }
 
-        // Models + project path are only needed to DISPATCH the Planner. A
-        // human-review remediation is never dispatched, so it needs neither —
-        // and must not bail out when no planner model is configured.
-        let (model_ids, project_path): (Vec<String>, Option<String>) = match kind {
-            RemediationKind::Planner => {
-                let model_ids = self
-                    .resolve_dispatch_models_for_role("planner", source_creator.as_deref())
-                    .await;
-                if model_ids.is_empty() {
-                    tracing::warn!(
-                        source_task_id = %source_task_id,
-                        "CoordinatorActor: planner escalation — no model configured for planner role"
-                    );
-                    return;
-                }
-
-                // Per-user, per-model concurrency cap: the planner escalation must
-                // consume the SAME shared per-(creator, model) budget as every other
-                // dispatch path (worker, reviewer, lead, architect). Without this a
-                // planner dispatch admitted in the same tick as worker dispatches can
-                // overshoot max_sessions (observed: 2 worker + 1 reviewer = 3 > cap 2).
-                // Filter to only models where the creator is under their cap, using a
-                // fresh DB + inflight-ledger snapshot so a just-recorded admission in
-                // this same tick is visible.
-                let model_ids: Vec<String> = if let Some(creator) = source_creator.as_deref() {
-                    let (running_by_model, running_by_lane) =
-                        poll_stack::boxed(|| self.effective_running_counts()).await;
-                    let settings = djinn_db::UserSettingsRepository::new(self.db.clone())
-                        .get(creator)
-                        .await
-                        .ok()
-                        .flatten();
-                    let caps = settings
-                        .as_ref()
-                        .and_then(|s| s.max_sessions.clone())
-                        .unwrap_or_default();
-                    let lane = djinn_core::models::ModelLane::Plan;
-                    let lane_cap = settings
-                        .and_then(|s| s.lane_max_sessions)
-                        .map(|limits| limits.lane(lane));
-                    if !lane_under_user_cap(&running_by_lane, creator, lane, lane_cap) {
-                        tracing::debug!(
-                            source_task_id = %source_task_id,
-                            creator,
-                            lane_cap,
-                            "CoordinatorActor: planner escalation deferred — creator at plan-lane concurrency cap"
-                        );
-                        return;
-                    }
-                    let mut filtered: Vec<String> = Vec::new();
-                    for m in &model_ids {
-                        let cap = caps.get(m).copied().unwrap_or(1);
-                        if model_under_user_cap(&running_by_model, creator, m, cap) {
-                            filtered.push(m.clone());
-                        }
-                    }
-                    if filtered.is_empty() {
-                        tracing::debug!(
-                            source_task_id = %source_task_id,
-                            creator,
-                            "CoordinatorActor: planner escalation deferred — creator at per-model concurrency cap"
-                        );
-                        return;
-                    }
-                    filtered
-                } else {
-                    model_ids
-                };
-
-                let Some(project_path) =
-                    poll_stack::boxed(|| self.project_path_for_id(project_id)).await
-                else {
-                    tracing::warn!(
-                        project_id = %project_id,
-                        source_task_id = %source_task_id,
-                        "CoordinatorActor: planner escalation — project path not found"
-                    );
-                    return;
-                };
-                (model_ids, Some(project_path))
-            }
-            // Neither held-remediation kind is dispatched inline: HumanReview
-            // waits for a human, and a PlannerEscalation is a normal review task
-            // the coordinator dispatch pass routes to the Planner.
-            RemediationKind::HumanReview | RemediationKind::PlannerEscalation => (Vec::new(), None),
-        };
+        // 4etb: no remediation kind is dispatched inline any more, so neither
+        // a planner model nor a project path is needed here. `HumanReview`
+        // waits for a human; a `PlannerEscalation` is a normal review task the
+        // coordinator dispatch pass routes to the Planner.
 
         // Name the review task after the work it is solving, not just a
         // truncated reason. "[<short_id>] <title>" gives the board immediate
@@ -3206,7 +3383,6 @@ impl CoordinatorActor {
         // source yet), `PlannerEscalation` is the TERMINAL rung reached after
         // the arbiter ladder spent its hold cycles.
         let title_prefix = match kind {
-            RemediationKind::Planner => crate::roles::PLANNER_REMEDIATION_TITLE_PREFIX,
             RemediationKind::PlannerEscalation => {
                 crate::roles::PLANNER_TERMINAL_ESCALATION_TITLE_PREFIX
             }
@@ -3225,28 +3401,6 @@ impl CoordinatorActor {
             .map(|t| format!("{} ({})", t.title, t.short_id))
             .unwrap_or_else(|| source_task_id.to_string());
         let (description, instructions) = match kind {
-            // FIRST-RESPONSE rung. Do NOT claim a Lead ran here: this variant
-            // fires from the coordinator's own loop detectors (and from
-            // `request_planner`) with no arbiter session anywhere in the source
-            // task's history — the arbiter/Lead rung only starts once
-            // `intervention_count >= MAX_PLANNER_INTERVENTIONS`. The Planner
-            // prompt (`prompts/planner/intervention.md`) reads "Lead escalation"
-            // as a distinct case meaning a Lead genuinely tried and failed, so
-            // asserting it here actively misinforms the agent.
-            RemediationKind::Planner => (
-                format!(
-                    "First-response remediation for task {source_label}. The COORDINATOR detected \
-                     that the source is not progressing on its own and dispatched you (the \
-                     Planner) — no Lead, arbiter, or human has adjudicated it yet.\n\nThis is the \
-                     FIRST rung of the escalation ladder, not a terminal escalation: nothing has \
-                     been ruled out, and if the source keeps looping after this the board \
-                     escalates further (arbiter adjudication, then a terminal planner-park \
-                     escalation).\n\nReason: {reason}"
-                ),
-                "The coordinator detected the loop — no Lead or arbiter has reviewed this task \
-                 yet, so treat nothing as already ruled out. Review the escalated task and either \
-                 resolve it, reshape the work, or leave a 'Requires human review' comment.",
-            ),
             RemediationKind::HumanReview => (
                 format!(
                     "Escalated from task {source_label}. Repeated automated remediation FAILED — this requires HUMAN review.\n\nDo NOT auto-resolve: a human must close THIS task to release the blocked source task.\n\nReason: {reason}"
@@ -3309,15 +3463,38 @@ impl CoordinatorActor {
         // source uuid (source_task.id) — add_blocker keys on tasks.id, and the
         // caller-supplied source_task_id may be a short_id. Non-fatal: a failed
         // link still leaves the escalation dispatched.
-        if let Some(src) = source_task.as_ref()
-            && let Err(e) = task_repo.add_blocker(&src.id, &review_task.id).await
-        {
-            tracing::warn!(
-                error = %e,
-                source_task_id = %src.short_id,
-                review_task_id = %review_task.short_id,
-                "CoordinatorActor: planner escalation — failed to block source task on review task"
-            );
+        if let Some(src) = source_task.as_ref() {
+            if let Err(e) = task_repo.add_blocker(&src.id, &review_task.id).await {
+                tracing::warn!(
+                    error = %e,
+                    source_task_id = %src.short_id,
+                    review_task_id = %review_task.short_id,
+                    "CoordinatorActor: planner escalation — failed to block source task on review task"
+                );
+            }
+            // 4etb: capture the source's business disposition as it stands NOW,
+            // before this adjudication runs. The planner's own edits (rescope,
+            // applied directive, supersede) land through separate MCP calls
+            // before it closes this child, so a `before` read at close time
+            // would see them already applied — reporting every real decision as
+            // `source_unchanged` and, at the terminal round, letting the
+            // exhausted-ladder branch dispose of a source the planner had just
+            // legitimately reshaped.
+            if let Err(e) = djinn_db::repositories::task::record_adjudication_source_snapshot(
+                self.db.pool(),
+                &src.id,
+                &review_task.id,
+            )
+            .await
+            {
+                tracing::error!(
+                    error = %e,
+                    source_task_id = %src.short_id,
+                    review_task_id = %review_task.short_id,
+                    "4etb: failed to record the adjudication source snapshot; this child's close \
+                     will report no outcome rather than an unreliable one"
+                );
+            }
         }
 
         // Label the remediation task with its RUNG. Write only the labels column:
@@ -3336,18 +3513,9 @@ impl CoordinatorActor {
         //   status + any active tripwire `gate.held`) is the real gate. The
         //   label only drives the close-time source-release semantics
         //   (`releases_source_on_close`).
-        // - `Planner` → `planner-remediation`: a purely DESCRIPTIVE sibling that
-        //   makes the first-response rung queryable instead of only readable. It
-        //   is inert against every behavioural predicate — it is not a human
-        //   hold (`is_human_review_hold`), does not release the source on close
-        //   (`releases_source_on_close` — a first-response remediation revives
-        //   its source through the ordinary blocker path), and does not affect
-        //   planner claiming (`planner_review_claims` only excludes
-        //   `human-review-hold`).
         let kind_label = match kind {
             RemediationKind::HumanReview => crate::roles::HUMAN_REVIEW_HOLD_LABEL,
             RemediationKind::PlannerEscalation => crate::roles::PLANNER_PARK_ESCALATION_LABEL,
-            RemediationKind::Planner => crate::roles::PLANNER_REMEDIATION_LABEL,
         };
         let labels_json = serde_json::json!([kind_label]).to_string();
         if let Err(e) = task_repo.update_labels(&review_task.id, &labels_json).await {
@@ -3360,10 +3528,6 @@ impl CoordinatorActor {
 
         // Log a comment on the source task linking to the remediation review task.
         let comment_body = match kind {
-            RemediationKind::Planner => format!(
-                "[PLANNER_ESCALATION] Escalated to Planner review task {}. Reason: {}",
-                review_task.short_id, reason
-            ),
             RemediationKind::HumanReview => format!(
                 "[HUMAN_REVIEW_HOLD] Held on human-review remediation task {} after repeated \
                  automated remediation failed. This task stays open + blocked until a human \
@@ -3388,110 +3552,17 @@ impl CoordinatorActor {
             )
             .await;
 
-        // Neither held-remediation kind is dispatched inline here. HumanReview
-        // waits for a human. A PlannerEscalation is a normal open review task —
-        // the coordinator's dispatch pass claims it for the Planner role on a
-        // later tick (see `crate::roles::planner_review_claims`), so we must not
-        // dispatch it here (and must not fall through to the Planner-dispatch
-        // path below, which would double-dispatch).
-        if matches!(
-            kind,
-            RemediationKind::HumanReview | RemediationKind::PlannerEscalation
-        ) {
-            tracing::info!(
-                review_task_id = %review_task.short_id,
-                source_task_id = %source_task_id,
-                project_id = %project_id,
-                kind = ?kind,
-                "CoordinatorActor: held remediation created; source held until the remediation task closes"
-            );
-            return;
-        }
-
-        let Some(project_path) = project_path else {
-            tracing::error!(
-                source_task_id = %source_task_id,
-                "planner remediation: project_path unexpectedly None after early-return guard"
-            );
-            return;
-        };
-        let task_id = review_task.id.clone();
-        let project_path_owned = project_path.clone();
-        let outcome = self
-            .try_dispatch_to_pool(
-                &review_task.short_id,
-                "planner",
-                review_task.reopen_count.max(0) as u32,
-                Some(review_task.created_by_user_id.as_str()),
-                &model_ids,
-                |pool, model_id| {
-                    let pool = pool.clone();
-                    let tid = task_id.clone();
-                    let pp = project_path_owned.clone();
-                    let mid = model_id.to_owned();
-                    async move { pool.dispatch(&tid, &pp, &mid).await }
-                },
-            )
-            .await;
-        match outcome {
-            DispatchOutcome::Dispatched => {
-                tracing::info!(outcome = "ok", task_id = %review_task.short_id, role = "planner");
-                tracing::info!(
-                    review_task_id = %review_task.short_id,
-                    review_task_uuid = %review_task.id,
-                    source_task_id = %source_task_id,
-                    project_id = %project_id,
-                    "CoordinatorActor: Planner escalation dispatched"
-                );
-                self.last_dispatched.insert(
-                    review_task.id.clone(),
-                    DispatchMarker {
-                        instant: SystemClock::new().now_instant(),
-                        role: "planner".to_owned(),
-                    },
-                );
-                self.dispatched += 1;
-                // Record the planner admission in the shared in-flight ledger
-                // so a same-tick dispatch of ANY role sees reduced capacity.
-                // The dispatched model is the first health-available candidate
-                // (the one try_dispatch_to_pool accepted).
-                let dispatched_model = model_ids
-                    .iter()
-                    .find(|m| {
-                        self.health
-                            .is_available(Some(review_task.created_by_user_id.as_str()), m)
-                    })
-                    .cloned();
-                if let Some(model) = dispatched_model {
-                    poll_stack::boxed(|| {
-                        self.record_inflight_dispatch(
-                            &review_task.id,
-                            Some(&review_task.short_id),
-                            Some(review_task.created_by_user_id.as_str()),
-                            &model,
-                            "planner",
-                        )
-                    })
-                    .await;
-                }
-                self.publish_status();
-            }
-            DispatchOutcome::AtCapacity => {
-                tracing::debug!(outcome = "cap", task_id = %review_task.short_id, role = "planner");
-                tracing::debug!(
-                    "CoordinatorActor: planner escalation — Planner model at capacity, will retry next cycle"
-                );
-            }
-            DispatchOutcome::PoolDead => {
-                tracing::error!("CoordinatorActor: planner escalation — slot pool actor dead");
-            }
-            DispatchOutcome::Failed { .. } => {
-                tracing::debug!(outcome = "error", task_id = %review_task.short_id, role = "planner");
-                tracing::debug!(
-                    "CoordinatorActor: planner escalation — no model could accept Planner dispatch"
-                );
-            }
-        }
+        // 4etb: neither surviving remediation kind is dispatched inline.
+        // `HumanReview` waits for a human; a `PlannerEscalation` is a normal
+        // open review task the coordinator's dispatch pass claims for the
+        // Planner role on a later tick (see `crate::roles::planner_review_claims`).
+        tracing::info!(
+            review_task_id = %review_task.short_id,
+            source_task_id = %source_task_id,
+            project_id = %project_id,
+            kind = ?kind,
+            "CoordinatorActor: held remediation created; source held until the remediation task closes"
+        );
     }
 }
 

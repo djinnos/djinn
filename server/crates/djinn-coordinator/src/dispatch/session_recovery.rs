@@ -646,7 +646,7 @@ impl CoordinatorActor {
                     reason
                 );
                 poll_stack::boxed(|| {
-                    self.route_loop_guard_planner_intervention(
+                    self.route_loop_guard_arbiter_adjudication(
                         task_id,
                         "coordinator",
                         &intervention_reason,
@@ -1284,7 +1284,7 @@ impl CoordinatorActor {
                 // re-armed intervention is not double-counted).
                 self.stall_cancel_streak.remove(task_id);
                 poll_stack::boxed(|| {
-                    self.route_loop_guard_planner_intervention(
+                    self.route_loop_guard_arbiter_adjudication(
                         task_id,
                         "coordinator",
                         &intervention_reason,

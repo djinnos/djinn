@@ -97,19 +97,22 @@ async fn hold_cycle_ceiling_markers(
     .collect()
 }
 
-/// Build a task sitting exactly on the second-strike rung
-/// (`intervention_count == MAX_PLANNER_INTERVENTIONS`).
+/// Build a task sitting on the arbiter rung.
+///
+/// 4etb: the rung is now UNCONDITIONAL — rung 1 is retired, so there is no
+/// `intervention_count >= MAX_PLANNER_INTERVENTIONS` threshold to reach and no
+/// counter to assert. A task that has crossed the quality-strike threshold IS
+/// on the rung. The fixture deliberately asserts `intervention_count == 0` so
+/// that a regression reinstating a counter gate would fail here rather than
+/// silently skip the whole gy53 ceiling suite.
 async fn task_on_the_park_rung(
     db: &Database,
     tx: &broadcast::Sender<DjinnEventEnvelope>,
 ) -> djinn_core::models::Task {
-    let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(tx));
     let task = make_task_with_reopen_count(db, tx, REOPEN_INTERVENTION_THRESHOLD).await;
-    repo.reset_intervention_counters(&task.id).await.unwrap();
-    let task = repo.get(&task.id).await.unwrap().unwrap();
     assert_eq!(
-        task.intervention_count, MAX_PLANNER_INTERVENTIONS,
-        "fixture must sit exactly on the second-strike rung"
+        task.intervention_count, 0,
+        "4etb: the arbiter rung must be reachable with a ZERO intervention_count"
     );
     task
 }
@@ -121,6 +124,15 @@ async fn task_on_the_park_rung(
 /// `hold_cycle` 9. The task must still stop worker redispatch at the cumulative
 /// bound and enter the one-shot final arbiter rather than the guard that would
 /// otherwise grant another free remediation.
+///
+/// 4etb: cycle 0 is seeded CONSUMED rather than driven through the rung. The
+/// first escalation of any in-scope trigger now reaches the arbiter
+/// unconditionally — `first_cycle` skips every park guard, because those guards
+/// gate a PARK and on cycle 0 there is no prior remediation whose attempt they
+/// could measure. Seeding the consumed row reproduces the state production is
+/// in after that first arbiter decided and reopened, which is the first moment
+/// the rotating-guard shape under test can exist at all. The declines then run
+/// at cycles 1 and 2 and the ceiling is presented at cycle 3.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn hold_cycle_ceiling_terminates_when_a_different_guard_declines_each_cycle() {
     let db = test_helpers::create_test_db();
@@ -130,48 +142,41 @@ async fn hold_cycle_ceiling_terminates_when_a_different_guard_declines_each_cycl
 
     let base = task_on_the_park_rung(&db, &tx).await;
 
-    // ── Cycle 0: declines via `first_occurrence_fingerprint` ─────────────────
+    // ── Cycle 0: the unconditional first arbiter, already decided ────────────
+    spend_hold_cycle(&db, &base.id, 0).await;
+
+    // ── Cycle 1: declines via `first_occurrence_fingerprint` ─────────────────
     let mut round = base.clone();
-    round.ci_failure_fingerprint = Some("fp-round-0".to_string());
+    round.ci_failure_fingerprint = Some("fp-round-1".to_string());
     assert!(
         !actor
-            .route_planner_intervention(&round, "worker", "strike", None, 5)
+            .route_arbiter_adjudication(&round, "worker", "strike", None, 5)
             .await,
         "a novel CI fingerprint must buy one remediation while under the ceiling"
     );
-    spend_hold_cycle(&db, &base.id, 0).await;
+    spend_hold_cycle(&db, &base.id, 1).await;
 
-    // ── Cycle 1: declines via `no_attempted_remediation` ─────────────────────
+    // ── Cycle 2: declines via `no_attempted_remediation` ─────────────────────
     // No fingerprint at all, and no post-intervention session ever submitted —
-    // a different guard, on a different counter, from cycle 0's.
+    // a different guard, on a different counter, from cycle 1's.
     let mut round = base.clone();
     round.ci_failure_fingerprint = None;
     assert!(
         !actor
-            .route_planner_intervention(&round, "worker", "strike", None, 5)
+            .route_arbiter_adjudication(&round, "worker", "strike", None, 5)
             .await,
         "an unattempted remediation must redispatch while under the ceiling"
     );
-    spend_hold_cycle(&db, &base.id, 1).await;
-
-    // ── Cycle 2: back to `first_occurrence_fingerprint`, new signature ───────
-    let mut round = base.clone();
-    round.ci_failure_fingerprint = Some("fp-round-2".to_string());
-    assert!(
-        !actor
-            .route_planner_intervention(&round, "worker", "strike", None, 5)
-            .await,
-        "a second novel fingerprint must also buy a remediation while under the ceiling"
-    );
     spend_hold_cycle(&db, &base.id, 2).await;
 
-    // Three cycles are spent. Every sub-guard's own counter is still low: two
-    // distinct fingerprints each seen once, zero submitted remediations.
+    // Three cycles are spent. Every sub-guard's own counter is still low: one
+    // fingerprint seen once, one no-attempt decline, zero submitted
+    // remediations — nothing here is near any per-guard bound.
     let markers_before = park_redispatch_markers(&repo, &base.id).await;
     assert_eq!(
         markers_before.len(),
-        3,
-        "each of the three declines recorded its own park-redispatch marker: {markers_before:?}"
+        2,
+        "each of the two declines recorded its own park-redispatch marker: {markers_before:?}"
     );
     let kinds: Vec<&str> = markers_before
         .iter()
@@ -187,9 +192,9 @@ async fn hold_cycle_ceiling_terminates_when_a_different_guard_declines_each_cycl
     // A brand-new fingerprint again. Pre-fix this returned false and the worker
     // redispatched; the cumulative ceiling must win instead.
     let mut final_round = base.clone();
-    final_round.ci_failure_fingerprint = Some("fp-round-3".to_string());
+    final_round.ci_failure_fingerprint = Some("fp-round-ceiling".to_string());
     let handled = actor
-        .route_planner_intervention(&final_round, "worker", "strike", None, 5)
+        .route_arbiter_adjudication(&final_round, "worker", "strike", None, 5)
         .await;
     assert!(
         handled,
@@ -221,7 +226,7 @@ async fn hold_cycle_ceiling_terminates_when_a_different_guard_declines_each_cycl
     );
     assert_eq!(ceiling_markers[0]["ceiling"], MAX_ARBITER_HOLD_CYCLES);
     assert_eq!(
-        ceiling_markers[0]["ci_failure_fingerprint"], "fp-round-3",
+        ceiling_markers[0]["ci_failure_fingerprint"], "fp-round-ceiling",
         "the audit entry names the fingerprint that would otherwise have won another free round"
     );
 
@@ -262,7 +267,7 @@ async fn hold_cycle_ceiling_does_not_fire_below_the_bound() {
     round.ci_failure_fingerprint = Some("fp-below-bound".to_string());
     assert!(
         !actor
-            .route_planner_intervention(&round, "worker", "strike", None, 5)
+            .route_arbiter_adjudication(&round, "worker", "strike", None, 5)
             .await,
         "with {} of {MAX_ARBITER_HOLD_CYCLES} cycles spent the rung must still decline to a \
          redispatch",
@@ -283,6 +288,19 @@ async fn hold_cycle_ceiling_does_not_fire_below_the_bound() {
 /// may still approve or supersede, and it is independently bounded by the 24h
 /// arbitration deadline and the decision-failure cap. The ceiling only refuses
 /// to open a FRESH cycle.
+///
+/// 4etb changed what "left alone" means on the return value. This used to
+/// assert `!routed`, which held only because the first-occurrence fingerprint
+/// guard declined ahead of the in-flight branch — and a `false` return tells
+/// the caller to go ahead and dispatch the WORKER while an arbiter is live.
+/// The promotion truth table is explicit that an unconsumed row means "repeated
+/// tick makes no write; retain the row, epoch, and child", so the guards are
+/// skipped, the in-flight branch owns the tick, and it reports handled. The
+/// load-bearing assertions — no ceiling marker, no terminal failure, no new
+/// row — are unchanged, and two are ADDED: the live row must still be
+/// unconsumed and no decline marker may be written. A guard decline here would
+/// `mark_consumed` the row an arbiter is still working, which on the v1ej
+/// monitored-reopen path silently destroys the contract.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn hold_cycle_ceiling_yields_to_an_in_flight_arbiter() {
     let db = test_helpers::create_test_db();
@@ -299,10 +317,11 @@ async fn hold_cycle_ceiling_yields_to_an_in_flight_arbiter() {
     let mut round = base.clone();
     round.ci_failure_fingerprint = Some("fp-in-flight".to_string());
     assert!(
-        !actor
-            .route_planner_intervention(&round, "worker", "strike", None, 5)
+        actor
+            .route_arbiter_adjudication(&round, "worker", "strike", None, 5)
             .await,
-        "an unconsumed arbitration row means an arbiter is live; the ceiling must not pre-empt it"
+        "an unconsumed arbitration row means an arbiter is live: the rung must report the tick \
+         handled so the caller does NOT redispatch the worker underneath it"
     );
     let task = repo.get(&base.id).await.unwrap().unwrap();
     assert_eq!(
@@ -312,6 +331,25 @@ async fn hold_cycle_ceiling_yields_to_an_in_flight_arbiter() {
     assert!(
         hold_cycle_ceiling_markers(&repo, &base.id).await.is_empty(),
         "no ceiling audit entry may be written while an arbiter is in flight"
+    );
+    assert!(
+        park_redispatch_markers(&repo, &base.id).await.is_empty(),
+        "no guard may decline — and therefore consume — a cycle an arbiter is still working"
+    );
+    let arb = TaskArbitrationRepository::new(db.clone());
+    let live = arb
+        .get_by_task_and_cycle(&base.id, MAX_ARBITER_HOLD_CYCLES)
+        .await
+        .unwrap()
+        .expect("the in-flight row must survive the tick");
+    assert_eq!(
+        live.state, "unconsumed",
+        "the live arbiter's row must still be unconsumed after a repeated tick"
+    );
+    assert_eq!(
+        arb.list_for_task(&base.id).await.unwrap().len(),
+        (MAX_ARBITER_HOLD_CYCLES as usize) + 1,
+        "a repeated tick must not open another arbitration row"
     );
 }
 
@@ -338,7 +376,7 @@ async fn hold_cycle_ceiling_dispatches_one_final_arbiter_for_pr_task() {
     round.ci_failure_fingerprint = Some("fp-pr-bearing".to_string());
     assert!(
         actor
-            .route_planner_intervention(&round, "worker", "strike", None, 5)
+            .route_arbiter_adjudication(&round, "worker", "strike", None, 5)
             .await,
         "a PR-bearing task at the ceiling must still be handled, never redispatched"
     );
@@ -384,9 +422,12 @@ async fn arbiter_dossier_carries_hold_cycle_and_prior_decisions() {
     let mut actor = coordinator_actor_for_tests(&db, &tx);
 
     let base = task_on_the_park_rung(&db, &tx).await;
-    // One prior cycle, consumed with a `reopen` decision (what `spend_hold_cycle`
-    // records) — the history a fresh arbiter must be handed.
-    spend_hold_cycle(&db, &base.id, 0).await;
+    // One prior cycle, consumed with a `reopen` decision — the history a fresh
+    // arbiter must be handed — plus the stamped evidence epoch that cycle left
+    // behind. 4etb: the guards read worker evidence at or after that epoch, so
+    // the sessions seeded below must be created AFTER it or they are invisible
+    // and the attempted-remediation gate would decline instead of dispatching.
+    arm_park_guards_after_one_arbiter_cycle(&db, &base.id).await;
 
     // Clear the fingerprint guard and the attempted-remediation gate so the
     // rung actually reaches the arbiter-dispatch path and builds a dossier.
@@ -396,7 +437,7 @@ async fn arbiter_dossier_carries_hold_cycle_and_prior_decisions() {
 
     assert!(
         actor
-            .route_planner_intervention(&round, "worker", "strike", None, 5)
+            .route_arbiter_adjudication(&round, "worker", "strike", None, 5)
             .await,
         "with the sub-guards cleared and budget remaining, the rung dispatches the Lead arbiter"
     );

@@ -37,9 +37,10 @@ pub use session_runtime::{
     TerminalRuntimeObservation,
 };
 pub use spec::{
-    BuildSlotWeight, LoopGuardKind, LoopGuardTrip, ProviderFailureClass, ResumeLifecycleMetadata,
-    ResumeSelectionReason, ResumeSourceKind, RoleKind, RoleResourceClass, SupervisorFlow,
-    TaskRunOutcome, TaskRunReport, TaskRunSpec, role_sequence,
+    BuildSlotWeight, LoopGuardKind, LoopGuardTrip, ModelTurnAdmissionTerminalOutcome,
+    ProviderFailureClass, ResumeLifecycleMetadata, ResumeSelectionReason, ResumeSourceKind,
+    RoleKind, RoleResourceClass, SupervisorFlow, TaskRunOutcome, TaskRunReport, TaskRunSpec,
+    role_sequence,
 };
 pub use stream::{BiStream, STAGE_STEP_FIRST_TURN, StreamEvent, StreamFrame, stage_step};
 pub use warmer::{GraphWarmerService, TaskrunJobRef, WarmerError};

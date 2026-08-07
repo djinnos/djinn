@@ -131,7 +131,7 @@ async fn stalled_model_is_skipped_and_dispatch_fails_over_to_next() {
         )
         .await;
 
-    assert!(matches!(outcome, DispatchOutcome::Dispatched));
+    assert!(matches!(outcome, DispatchOutcome::Dispatched { .. }));
     let attempted = attempted.lock().unwrap().clone();
     assert_eq!(
         attempted,
@@ -168,7 +168,7 @@ async fn stalled_model_recovers_after_cooldown_expires() {
             |_pool, _model_id| async move { Ok::<(), PoolError>(()) },
         )
         .await;
-    assert!(matches!(outcome, DispatchOutcome::Dispatched));
+    assert!(matches!(outcome, DispatchOutcome::Dispatched { .. }));
 }
 
 // ── Zombie-session DB-truth backstop ─────────────────────────────────────
@@ -1909,7 +1909,7 @@ async fn budget_ceiling_kill_routes_loop_guard_without_tripping_breaker() {
     // The task must be routed through loop-guard planner intervention. We
     // check for the planner_intervention activity marker.
     let task_repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
-    let markers = planner_intervention_markers(&task_repo, &task.id).await;
+    let markers = arbiter_dispatch_markers(&task_repo, &task.id).await;
     assert_eq!(
         markers.len(),
         1,
@@ -2869,7 +2869,7 @@ async fn first_stall_cancel_does_not_escalate_to_planner() {
         .get(&task.id)
         .expect("first strike records a streak");
     assert_eq!(streak.count, 1, "first strike is count 1");
-    let markers = planner_intervention_markers(&actor.task_repo(), &task.id).await;
+    let markers = arbiter_dispatch_markers(&actor.task_repo(), &task.id).await;
     assert!(
         markers.is_empty(),
         "a single stall cancel must not escalate to the Planner"
@@ -2918,7 +2918,7 @@ async fn second_consecutive_stall_cancel_escalates_to_planner() {
         actor.stall_killed.contains(&session.id),
         "the second stalled session is killed"
     );
-    let markers = planner_intervention_markers(&actor.task_repo(), &task.id).await;
+    let markers = arbiter_dispatch_markers(&actor.task_repo(), &task.id).await;
     assert!(
         !markers.is_empty(),
         "the second consecutive stall cancel without status progress must route to a Planner intervention"
@@ -7829,6 +7829,24 @@ async fn evidence_reap_is_live_lookup_error_counts_as_crashed_unproven() {
     let sj: serde_json::Value = serde_json::from_str(row.summary_json.as_deref().unwrap()).unwrap();
     assert_eq!(sj["failure_class"], "orphaned_pending_attempt_unproven");
     assert_eq!(sj["owner_classification"], "lookup_error");
+
+    // `lookup_error` alone does NOT identify which of the two reads failed:
+    // `classify_orphan_owner` emits it for a failed `get()` and for a failed
+    // `is_live()`. The two are distinguishable only by their evidence — the
+    // `get()` branch builds `OwnerLeaseEvidence { ..Default::default() }` and
+    // therefore carries no lease timestamps, while the `is_live()` branch
+    // copies them off the resolved row.
+    //
+    // Asserting the timestamps is what makes this test discriminate. Without
+    // it, anything that breaks the FIRST read — a column added to
+    // `coordinator_incarnations` and forgotten in the fixture view, say — keeps
+    // this assertion green while the branch under test goes unexecuted.
+    assert_eq!(
+        sj["owner_lease_registered_at"], inc.registered_at,
+        "the get() read must have SUCCEEDED; a lookup_error without lease \
+         timestamps means the first read failed and this test proved nothing"
+    );
+    assert_eq!(sj["owner_lease_last_renewed_at"], inc.last_renewed_at);
 }
 
 /// A non-NULL dispatch group is terminalized through the exact-group repository

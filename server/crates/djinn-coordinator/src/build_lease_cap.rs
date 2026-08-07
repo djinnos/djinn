@@ -212,6 +212,8 @@ impl BuildLeaseService {
 #[cfg(test)]
 mod capacity_tests {
     use super::*;
+    use std::time::Duration;
+
     #[test]
     fn compile_bound_precondition_exhausts_launcher_and_authority_modes() {
         for launcher in [
@@ -240,9 +242,32 @@ mod capacity_tests {
         }
     }
 
+    /// Wall-clock bound on the compile-fail visibility probe below.
+    ///
+    /// The probe shells out to `rustc`. It used to do so with no bound at all,
+    /// which is how it turned into a HARD CI failure rather than a flake: in
+    /// run 30727348884 nextest's `slow-timeout = { period = "30s",
+    /// terminate-after = 3 }` (`.config/nextest.toml`) terminated it on all
+    /// three attempts, 90s apiece, and reported a bare TMT with no stderr, no
+    /// exit status, and nothing to distinguish "the visibility property
+    /// regressed" from "the toolchain was starved for disk". Retries cannot
+    /// help — every attempt re-runs the same cold-I/O work under the same
+    /// load — so the useful thing a retry budget can buy is not another
+    /// attempt but an ATTRIBUTABLE failure, which is what this bound produces.
+    ///
+    /// 60s sits below nextest's 90s termination point on purpose, so this
+    /// assertion is what fires first and the panic message is what the lane
+    /// reports.
+    const VISIBILITY_PROBE_TIMEOUT: Duration = Duration::from_secs(60);
+
     #[test]
     fn build_lease_cap_api_visibility() {
-        use std::{fs, process::Command, time::SystemTime};
+        use std::{
+            fs::{self, File},
+            process::{Command, Stdio},
+            thread::sleep,
+            time::{Instant, SystemTime},
+        };
 
         let deps = std::env::current_exe()
             .expect("current test executable")
@@ -272,8 +297,34 @@ mod capacity_tests {
             "/tests/ui/build_lease_cap_private.rs"
         );
         let output_dir = tempfile::tempdir().expect("compile-fail output directory");
-        let output = Command::new("rustc")
-            .args(["--edition=2021", "--crate-type=bin"])
+        let stderr_path = output_dir.path().join("probe.stderr");
+        let stderr_sink = File::create(&stderr_path).expect("compile-fail stderr sink");
+
+        // `--emit=metadata` is the cost fix, and it is safe precisely BECAUSE
+        // of what this probe asserts. Every diagnostic below is a name
+        // resolution / field privacy error, all of which are produced during
+        // type checking; nothing downstream of typeck is needed to observe
+        // them, and the probe never links because it never compiles.
+        //
+        // What the flag buys is the crate loader's behaviour. With no object
+        // code requested, `-L dependency` lookups for `djinn-coordinator`'s
+        // transitive crates are satisfied from their `.rmeta` instead of being
+        // decoded out of their `.rlib`. That directory is the whole workspace's
+        // `target/debug/deps`: thousands of entries, several stale ~113MB
+        // `libdjinn_coordinator-*.rlib` candidates among them, cold-restored by
+        // `rust-cache` on CI while the sibling test processes in the same shard
+        // compete for the same disk. Reading metadata sidecars instead of
+        // fully-linked archives is the difference between the probe being
+        // cheap and the probe being the reason a shard goes red.
+        //
+        // Diagnostics are unchanged: a rustc that rejected the flag, or a probe
+        // that stopped emitting these errors, fails the assertions below with
+        // the captured stderr attached rather than passing vacuously.
+        //
+        // Stderr goes to a file rather than a pipe so this cannot deadlock on a
+        // full pipe buffer while the test is polling for exit.
+        let mut probe = Command::new("rustc")
+            .args(["--edition=2021", "--crate-type=bin", "--emit=metadata"])
             .arg(source)
             .arg("--extern")
             .arg(format!("djinn_coordinator={}", coordinator_rlib.display()))
@@ -281,18 +332,59 @@ mod capacity_tests {
             .arg(format!("dependency={}", deps.display()))
             .arg("--out-dir")
             .arg(output_dir.path())
-            .output()
-            .expect("run rustc visibility probe");
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(stderr_sink))
+            .spawn()
+            .expect("spawn rustc visibility probe");
 
+        let started = Instant::now();
+        let timed_out = loop {
+            if probe
+                .try_wait()
+                .expect("poll rustc visibility probe")
+                .is_some()
+            {
+                break false;
+            }
+            if started.elapsed() >= VISIBILITY_PROBE_TIMEOUT {
+                let _ = probe.kill();
+                break true;
+            }
+            sleep(Duration::from_millis(25));
+        };
+        // Unconditional, on both paths: `Child::wait` returns the status
+        // `try_wait` already cached, so this reaps the killed probe without
+        // changing what the successful path observes.
+        let status = probe.wait().expect("reap rustc visibility probe");
+        let budget = VISIBILITY_PROBE_TIMEOUT;
+        let elapsed = started.elapsed();
+        let search_path = deps.display();
         assert!(
-            !output.status.success(),
-            "visibility probe unexpectedly compiled"
+            !timed_out,
+            "rustc visibility probe did not finish within {budget:?} (elapsed {elapsed:?}) and \
+             was killed. The API-visibility property was NOT evaluated: this is a toolchain or \
+             disk-contention stall reading {search_path}, not a visibility regression, and \
+             re-running will reproduce it."
         );
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(stderr.contains("field `cap` of struct `BuildLeaseService` is private"));
+
+        let stderr = fs::read_to_string(&stderr_path).expect("read visibility probe stderr");
         assert!(
-            stderr.contains("field `derived_fallback` of struct `BuildLeaseService` is private")
+            !status.success(),
+            "visibility probe unexpectedly compiled: BuildLeaseService's private cap state is \
+             reachable from outside the crate"
         );
-        assert!(stderr.contains("no method named `set_cap_directly`"));
+        assert!(
+            stderr.contains("field `cap` of struct `BuildLeaseService` is private"),
+            "visibility probe stderr did not report `cap` as private:\n{stderr}"
+        );
+        assert!(
+            stderr.contains("field `derived_fallback` of struct `BuildLeaseService` is private"),
+            "visibility probe stderr did not report `derived_fallback` as private:\n{stderr}"
+        );
+        assert!(
+            stderr.contains("no method named `set_cap_directly`"),
+            "visibility probe stderr did not reject `set_cap_directly`:\n{stderr}"
+        );
     }
 }

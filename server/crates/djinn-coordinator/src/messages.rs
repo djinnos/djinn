@@ -35,14 +35,14 @@ pub(super) enum CoordinatorMessage {
     /// Lead requests Planner escalation for a task.
     /// Creates a review task and dispatches Planner to it.
     /// Per ADR-051 §8 the Planner is the escalation ceiling above Lead.
-    DispatchPlannerEscalation {
+    DispatchArbiterAdjudication {
         source_task_id: String,
         reason: String,
         project_id: String,
     },
     /// Route a completed loop-guard trip through the shared Planner-intervention
     /// machinery instead of the dispatch-failure streak/ladder.
-    RouteLoopGuardPlannerIntervention {
+    RouteLoopGuardArbiterAdjudication {
         source_task_id: String,
         role: &'static str,
         reason: String,

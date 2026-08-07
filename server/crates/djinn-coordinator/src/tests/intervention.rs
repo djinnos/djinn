@@ -1,4 +1,42 @@
 // djinn:allow-oversize
+//! Coordinator intervention / escalation rung tests.
+//!
+//! **Proposal 4etb reframed this whole file.** Before it, the escalation ladder
+//! had TWO autonomous rungs: a first-response `RemediationKind::Planner`
+//! remediation (a review child, source left `open`, guarded by a
+//! `planner_intervention` activity marker keyed on `reopen_count`), and — only
+//! once `intervention_count >= MAX_PLANNER_INTERVENTIONS` — the forensic
+//! arbiter. Rung 1, its label, its title prefix, its marker and the
+//! `MAX_PLANNER_INTERVENTIONS` constant are all deleted. Every in-scope trigger
+//! (A: quality strikes, B: same-role cycling, C: reply-loop guard, D: provider
+//! failure streak) now reaches the arbiter on its FIRST escalation.
+//!
+//! Consequences for the tests here, applied throughout:
+//!
+//! * "the first crossing creates a Planner remediation child and stays `open`"
+//!   became "the first crossing opens arbitration row 0, stamps
+//!   `escalation_evidence_at`, emits one `arbiter_dispatched` event and holds
+//!   the source in `needs_lead_intervention`".
+//! * Idempotency is no longer keyed on `reopen_count` via an activity marker;
+//!   the stamped epoch plus the unconsumed arbitration row ARE the boundary.
+//!   The router's return value on a repeat tick is therefore not a contract
+//!   (the source is already held, so dispatch cannot act on it either way) —
+//!   these tests assert the durable ledger instead.
+//! * `reset_intervention_counters` survives in fixtures only for its
+//!   `last_intervention_at` stamp, which RAISES the canonical evidence floor
+//!   `max(escalation_evidence_at, last_intervention_at,
+//!   human_review_resolved_at)` that every park guard measures from
+//!   (inclusive `>=`). The `intervention_count` it also bumps is inert.
+//! * The uv3p / 8y3q / 2vxr / 6tlg / gy53 / lre2 / v1ej / zkk9 guards are
+//!   unchanged in intent; only their EPOCH KEYING changed, so their tests keep
+//!   their incident references and gain assertions on the new decline contract
+//!   (`park_guard_insufficient_epoch_evidence`, `evidence_floor`, `hold_cycle`,
+//!   `qualifying_submission_count`, `disposition`).
+//!
+//! The proposal's own acceptance matrix lives in
+//! `crate::tests::direct_arbiter_routing`; the tests here are the pre-existing
+//! rung coverage carried forward onto the new contract.
+
 use super::*;
 use crate::supervisor_impl::disposition::{NUDGE_CAP, RunDisposition, decide_run_disposition};
 use djinn_core::models::{ReopenClass, TaskStatus, TransitionAction};
@@ -280,7 +318,16 @@ impl InterventionChaosHarness {
         last
     }
 
-    async fn complete_planner_intervention_and_reset_ladder(&self) -> djinn_core::models::Task {
+    /// Simulate an adjudication concluding: `reset_intervention_counters`
+    /// zeroes `reopen_count` and stamps `last_intervention_at`.
+    ///
+    /// 4etb: the `intervention_count` this also bumps is no longer read by any
+    /// rung — rung 1 is retired and the arbiter rung is unconditional. What
+    /// still matters is the `last_intervention_at` stamp, because it RAISES the
+    /// canonical evidence floor (`max(escalation_evidence_at,
+    /// last_intervention_at, human_review_resolved_at)`), so evidence predating
+    /// the adjudication can no longer justify a later park.
+    async fn conclude_adjudication_and_raise_evidence_floor(&self) -> djinn_core::models::Task {
         self.repo
             .reset_intervention_counters(&self.task_id)
             .await
@@ -377,8 +424,8 @@ impl InterventionChaosHarness {
             .await
     }
 
-    async fn planner_intervention_markers(&self) -> Vec<serde_json::Value> {
-        planner_intervention_markers(&self.repo, &self.task_id).await
+    async fn arbiter_dispatch_markers(&self) -> Vec<serde_json::Value> {
+        arbiter_dispatch_markers(&self.repo, &self.task_id).await
     }
 
     async fn durable_dispatch_state(&self) -> Option<djinn_db::DispatchStateRecord> {
@@ -507,7 +554,15 @@ impl InterventionChaosHarness {
         }
     }
 
-    async fn open_planner_intervention_reviews(&self) -> Vec<djinn_core::models::Task> {
+    /// Open `review` children in the source's project.
+    ///
+    /// 4etb: before rung 1 was retired, the FIRST escalation minted one of these
+    /// (a `planner-remediation` child) and the source stayed `open`. It does not
+    /// any more — the only remediation children a 4etb build can create are the
+    /// TERMINAL holds (`planner-park-escalation` / `human-review-hold`). So a
+    /// non-zero count here now means a terminal hold exists, and the escalation
+    /// paths that used to expect `1` here must expect `0`.
+    async fn open_held_remediation_reviews(&self) -> Vec<djinn_core::models::Task> {
         let task = self.task().await;
         self.repo
             .list_by_status("open")
@@ -520,12 +575,30 @@ impl InterventionChaosHarness {
             .collect()
     }
 
-    async fn assert_open_planner_review_count(&self, expected: usize) {
+    async fn assert_open_held_remediation_count(&self, expected: usize) {
         assert_eq!(
-            self.open_planner_intervention_reviews().await.len(),
+            self.open_held_remediation_reviews().await.len(),
             expected,
-            "open Planner intervention review count"
+            "open held-remediation review count"
         );
+    }
+
+    /// 4etb: no path may create a first-response `planner-remediation` child.
+    /// The retired rung's LABEL is the durable proof — it is inert against every
+    /// behavioural predicate, so only its presence can betray a regression that
+    /// reinstated the rung.
+    async fn assert_no_retired_rung_one_child(&self) {
+        for blocker in self.repo.list_blockers(&self.task_id).await.unwrap() {
+            let child = self.repo.get(&blocker.task_id).await.unwrap();
+            if let Some(child) = child {
+                assert!(
+                    !child.labels.contains("planner-remediation"),
+                    "rung 1 is retired: no path may create a first-response planner \
+                     remediation child (found labels {})",
+                    child.labels
+                );
+            }
+        }
     }
 
     async fn assert_latest_status_change_reason_contains(&self, needle: &str) {
@@ -550,29 +623,68 @@ impl InterventionChaosHarness {
         );
     }
 
-    async fn assert_marker_reopen_counts(&self, expected: &[i64]) {
-        let actual: Vec<i64> = self
-            .planner_intervention_markers()
+    /// 4etb: the retired `planner_intervention` marker was keyed by
+    /// `reopen_count` (it was the rung-1 double-fire guard). The surviving
+    /// `arbiter_dispatched` marker carries no such field — its identity is the
+    /// HOLD CYCLE, which is what the arbitration ledger derives promotion from.
+    /// Asserting the cycle sequence is the same property, read off the ledger
+    /// key the current design actually owns.
+    ///
+    /// Sorted ascending: `query_activity` returns newest-first and its
+    /// `created_at` is millisecond-resolution, so two dispatches in the same
+    /// millisecond would otherwise tie non-deterministically. The property under
+    /// test is WHICH cycles were dispatched, not the row order.
+    async fn assert_arbiter_marker_hold_cycles(&self, expected: &[i64]) {
+        let mut actual: Vec<i64> = self
+            .arbiter_dispatch_markers()
             .await
             .iter()
             .map(|marker| {
-                marker["reopen_count"]
+                marker["hold_cycle"]
                     .as_i64()
-                    .expect("marker reopen_count")
+                    .expect("arbiter_dispatched marker must carry its hold_cycle")
             })
             .collect();
+        actual.sort_unstable();
+        assert_eq!(actual, expected, "arbiter_dispatched marker hold cycles");
+    }
+
+    async fn assert_arbiter_marker_count(&self, expected: usize) {
         assert_eq!(
-            actual, expected,
-            "planner_intervention marker reopen counts"
+            self.arbiter_dispatch_markers().await.len(),
+            expected,
+            "arbiter_dispatched marker count"
         );
     }
 
-    async fn assert_planner_marker_count(&self, expected: usize) {
-        assert_eq!(
-            self.planner_intervention_markers().await.len(),
-            expected,
-            "planner_intervention marker count"
-        );
+    /// The dossier of the currently-open arbitration row.
+    ///
+    /// 4etb: the escalation reason and its CI/merge-queue sections used to land
+    /// in the rung-1 remediation child's `description`. They now reach the
+    /// forensic arbiter through this dossier (`reason` / `trigger_reason` /
+    /// `ci_failure_sections`), so this is where the "the escalation must
+    /// describe the evidence truthfully" assertions read from.
+    async fn current_arbitration_dossier(&self) -> serde_json::Value {
+        let (_cycle, existing) = TaskArbitrationRepository::new(self.db.clone())
+            .resolve_current_hold_cycle(&self.task_id)
+            .await
+            .unwrap();
+        existing
+            .expect("an escalation must leave an unconsumed arbitration row")
+            .dossier
+            .expect("the arbiter must receive a dossier")
+    }
+
+    async fn arbitration_hold_cycles(&self) -> Vec<i32> {
+        let mut cycles: Vec<i32> = TaskArbitrationRepository::new(self.db.clone())
+            .list_for_task(&self.task_id)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|record| record.hold_cycle)
+            .collect();
+        cycles.sort_unstable();
+        cycles
     }
 
     async fn assert_same_role_backoff_seeded(&self, role: &str, expected_streak: u32) {
@@ -735,14 +847,27 @@ impl InterventionChaosHarness {
     }
 }
 
+/// 4etb rewrite. This used to prove the two-rung ladder: the first threshold
+/// crossing minted a rung-1 `Planner remediation` child and left the source
+/// `open`, and only a SECOND crossing (after `intervention_count` had reached
+/// `MAX_PLANNER_INTERVENTIONS`, a constant 4etb deleted) reached the arbiter.
+///
+/// Rung 1 is retired, so the equivalent guarantee is now:
+///  * the FIRST threshold crossing reaches the forensic arbiter directly —
+///    arbitration row 0, one `arbiter_dispatched` marker, source in
+///    `needs_lead_intervention`, and NO first-response remediation child;
+///  * a repeated crossing at the same cycle is absorbed by the unconsumed row
+///    (one row, one marker) rather than storming the ladder;
+///  * an adjudication that consumes the row and raises the evidence floor lets
+///    the next crossing open cycle 1 — and only cycle 1.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn reopen_loop_guard_second_strike_chaos_parks_without_rearming() {
+async fn reopen_loop_chaos_reaches_the_arbiter_on_the_first_crossing_without_rearming() {
     let mut harness = InterventionChaosHarness::new(0).await;
 
     // Trigger A is keyed to the configured reopen threshold. The first climb
-    // asserts escalation at the production threshold; the post-Planner climb
-    // intentionally runs one cycle beyond it so the same task experiences 4+
-    // consecutive review/CI-style failures before the terminal second strike.
+    // asserts escalation at the production threshold; the post-adjudication
+    // climb intentionally runs one cycle beyond it so the same task experiences
+    // 4+ consecutive review/CI-style failures across the two cycles.
     const {
         assert!(
             REOPEN_INTERVENTION_THRESHOLD + 1 >= 4,
@@ -752,37 +877,74 @@ async fn reopen_loop_guard_second_strike_chaos_parks_without_rearming() {
 
     let first_threshold = harness.drive_review_failures_through_threshold().await;
     assert_eq!(first_threshold.reopen_count, REOPEN_INTERVENTION_THRESHOLD);
-    assert_eq!(first_threshold.intervention_count, 0);
-
-    let (handled, first_routed) = harness.route_reopen_intervention().await;
-    assert!(handled, "first threshold crossing routes to Planner");
-    assert_eq!(first_routed.status, "open", "source task stays open");
-    harness
-        .assert_marker_reopen_counts(&[REOPEN_INTERVENTION_THRESHOLD])
-        .await;
-    harness.assert_open_planner_review_count(1).await;
-
-    let (handled_again, unchanged_after_repeat) = harness.route_reopen_intervention().await;
+    assert_eq!(
+        first_threshold.intervention_count, 0,
+        "the 4etb ladder must reach the arbiter from a ZERO intervention_count — \
+         a fixture that pre-seeded it would hide a reinstated counter gate"
+    );
     assert!(
-        !handled_again,
-        "same reopen-count check is suppressed by the intervention marker"
+        first_threshold.escalation_evidence_at.is_none(),
+        "a task that has never been escalated carries no evidence epoch"
     );
-    assert_eq!(
-        unchanged_after_repeat.reopen_count,
-        REOPEN_INTERVENTION_THRESHOLD
-    );
-    harness
-        .assert_marker_reopen_counts(&[REOPEN_INTERVENTION_THRESHOLD])
-        .await;
-    harness.assert_open_planner_review_count(1).await;
 
-    let reset = harness
-        .complete_planner_intervention_and_reset_ladder()
-        .await;
-    assert_eq!(reset.reopen_count, 0, "Planner completion resets ladder");
+    // Deliberately NO seeded post-intervention evidence here. The uv3p
+    // attempted-remediation guard exists to stop a park landing on evidence the
+    // fleet never produced SINCE THE LAST ADJUDICATION; on a first escalation
+    // there is no prior adjudication and no floor, so it has nothing to measure
+    // and must not stand in the way of reaching the arbiter (AC1).
+    let (handled, first_routed) = harness.route_reopen_intervention().await;
+    assert!(
+        handled,
+        "the FIRST threshold crossing must reach the arbiter — there is no rung-1 \
+         planner remediation left to absorb it"
+    );
     assert_eq!(
-        reset.intervention_count, MAX_PLANNER_INTERVENTIONS,
-        "Planner completion records the first strike"
+        first_routed.status, "needs_lead_intervention",
+        "the arbiter entry contract puts the source in needs_lead_intervention"
+    );
+    assert!(
+        first_routed.escalation_evidence_at.is_some(),
+        "the escalation must stamp the canonical evidence epoch in the same \
+         transaction that opened the arbitration row"
+    );
+    assert_eq!(harness.arbitration_hold_cycles().await, vec![0]);
+    harness.assert_arbiter_marker_hold_cycles(&[0]).await;
+    harness.assert_open_held_remediation_count(0).await;
+    harness.assert_no_retired_rung_one_child().await;
+
+    // A repeat tick while the SAME escalation is pending. The router's return
+    // value is deliberately NOT asserted here: with the arbiter in flight the
+    // source is held in `needs_lead_intervention`, so whether this tick reports
+    // "handled" or falls through to a guard decline is invisible to dispatch.
+    // What must hold either way are the durable invariants — one epoch, one
+    // row, one child — which are the actual idempotency boundary now that the
+    // reopen-count-keyed marker guard is retired.
+    let first_epoch = first_routed.escalation_evidence_at.clone().unwrap();
+    let (_repeat_handled, unchanged_after_repeat) = harness.route_reopen_intervention().await;
+    assert_eq!(
+        unchanged_after_repeat.escalation_evidence_at.as_deref(),
+        Some(first_epoch.as_str()),
+        "a pending escalation must never restamp its epoch"
+    );
+    assert_eq!(
+        harness.arbitration_hold_cycles().await,
+        vec![0],
+        "the unconsumed row IS the idempotency boundary — no second row"
+    );
+    harness.assert_arbiter_marker_hold_cycles(&[0]).await;
+    harness.assert_open_held_remediation_count(0).await;
+
+    // ── An adjudication concludes: consume cycle 0 and raise the floor ────────
+    TaskArbitrationRepository::new(harness.db.clone())
+        .mark_consumed(&harness.task_id, 0)
+        .await
+        .unwrap();
+    let reset = harness
+        .conclude_adjudication_and_raise_evidence_floor()
+        .await;
+    assert_eq!(
+        reset.reopen_count, 0,
+        "adjudication resets the reopen ladder"
     );
 
     harness.drive_review_failures_beyond_threshold(1).await;
@@ -791,79 +953,73 @@ async fn reopen_loop_guard_second_strike_chaos_parks_without_rearming() {
         second_threshold.reopen_count,
         REOPEN_INTERVENTION_THRESHOLD + 1
     );
-    assert_eq!(
-        second_threshold.intervention_count,
-        MAX_PLANNER_INTERVENTIONS
-    );
 
     harness.seed_same_role_redispatch_state("worker", 2).await;
     harness.assert_same_role_backoff_seeded("worker", 2).await;
     harness.seed_running_capacity_occupancy().await;
-    // uv3p Part B: the park rung now requires an attempted remediation. Seed two
-    // post-intervention sessions that terminated pre-submission across distinct
-    // models so the non-attempt bound is reached and the second strike parks
-    // (rather than redispatching with forced rotation).
+    // The floor was just raised, so the pre-adjudication evidence no longer
+    // qualifies: seed fresh post-floor non-attempts for the second crossing.
     seed_terminated_post_intervention_sessions(
         &harness.db,
         &harness.tx,
         &harness.task_id,
-        &["chaos-model-a", "chaos-model-b"],
+        &["chaos-model-c", "chaos-model-d"],
     )
     .await;
 
     let (second_handled, parked) = harness.route_reopen_intervention().await;
     assert!(
         second_handled,
-        "second strike is handled terminally instead of redispatching"
+        "the second crossing opens the next hold cycle instead of redispatching"
     );
     assert_eq!(parked.reopen_count, REOPEN_INTERVENTION_THRESHOLD + 1);
-    // Second strike dispatches the Lead arbiter: the task transitions to
-    // needs_lead_intervention instead of staying open with a human-review
-    // blocker.  The first-strike planner review blocker is still in place.
     harness
         .assert_task_status("needs_lead_intervention", None)
         .await;
-    assert!(
-        !harness
-            .repo
-            .list_blockers(&harness.task_id)
-            .await
-            .unwrap()
-            .is_empty(),
-        "parked source must remain held by an unresolved remediation blocker"
-    );
     harness.assert_dispatch_backoff_cleared().await;
     harness.assert_capacity_released().await;
-    harness
-        .assert_marker_reopen_counts(&[REOPEN_INTERVENTION_THRESHOLD])
-        .await;
-    harness.assert_open_planner_review_count(1).await;
-
-    let marker_count_after_park = harness.planner_intervention_markers().await.len();
-    let review_count_after_park = harness.open_planner_intervention_reviews().await.len();
-
-    let (terminal_recheck_handled, terminal_recheck) = harness.route_reopen_intervention().await;
-    assert!(
-        terminal_recheck_handled,
-        "terminal second-strike recheck is consumed rather than redispatched"
+    assert_eq!(
+        harness.arbitration_hold_cycles().await,
+        vec![0, 1],
+        "a consumed cycle promotes to exactly one successor"
     );
+    harness.assert_arbiter_marker_hold_cycles(&[0, 1]).await;
+    harness.assert_open_held_remediation_count(0).await;
+    harness.assert_no_retired_rung_one_child().await;
+
+    let marker_count_after_dispatch = harness.arbiter_dispatch_markers().await.len();
+
+    // Again: the recheck's return value is not the contract — the durable
+    // ledger is. The source must stay on its live arbiter and the ladder must
+    // not advance.
+    let (_terminal_recheck_handled, terminal_recheck) = harness.route_reopen_intervention().await;
     assert_eq!(terminal_recheck.status, "needs_lead_intervention");
     assert_eq!(
-        harness.planner_intervention_markers().await.len(),
-        marker_count_after_park,
-        "terminal recheck must not write another Planner marker"
+        harness.arbiter_dispatch_markers().await.len(),
+        marker_count_after_dispatch,
+        "the recheck must not emit a second arbiter_dispatched event"
     );
     assert_eq!(
-        harness.open_planner_intervention_reviews().await.len(),
-        review_count_after_park,
-        "terminal recheck must not create another Planner review"
+        harness.arbitration_hold_cycles().await,
+        vec![0, 1],
+        "the recheck must not open a third hold cycle"
     );
     harness.assert_dispatch_backoff_cleared().await;
     harness.assert_capacity_released().await;
 }
 
+/// 4etb rewrite. Trigger B's chaos coverage used to run: threshold crossing
+/// mints a rung-1 Planner remediation → every later cycle is SUPPRESSED by the
+/// reopen-count marker (router returns `false`) → the streak climbs to
+/// `MAX_DISPATCH_FAILURES` → terminal force-close.
+///
+/// With the arbiter rung unconditional, the crossing opens an arbitration row
+/// and every later cycle is ABSORBED by it (the router returns `true`, because
+/// the source is held on a live arbiter and must not be redispatched). The
+/// hard-cap force-close is therefore no longer reachable on a role that arms
+/// trigger B, and is covered on its own below by a role that never does.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn same_role_cycling_trigger_b_chaos_intervenes_then_terminally_closes() {
+async fn same_role_cycling_trigger_b_chaos_reaches_the_arbiter_and_is_absorbed_by_it() {
     let mut harness = InterventionChaosHarness::new(0).await;
     let role = "worker";
 
@@ -901,43 +1057,94 @@ async fn same_role_cycling_trigger_b_chaos_intervenes_then_terminally_closes() {
     harness
         .assert_same_role_backoff_after_reappearance(STREAK_INTERVENTION_THRESHOLD - 1)
         .await;
-    harness.assert_planner_marker_count(0).await;
-    harness.assert_open_planner_review_count(0).await;
+    harness.assert_arbiter_marker_count(0).await;
+    harness.assert_open_held_remediation_count(0).await;
 
     let (threshold_handled, first_routed) = harness
         .dispatch_same_role_reappearance_like_dispatch(role, false)
         .await;
     assert!(
         threshold_handled,
-        "threshold crossing routes to the cycling Planner intervention"
+        "the threshold crossing routes straight to the forensic arbiter"
     );
-    assert_eq!(first_routed.status, "open", "source task stays open");
+    assert_eq!(
+        first_routed.status, "needs_lead_intervention",
+        "4etb: trigger B reaches the arbiter, which owns the source's status — \
+         it no longer leaves the source `open` behind a rung-1 remediation"
+    );
     assert_eq!(
         first_routed.reopen_count, 0,
         "Trigger B does not need reopen_count"
     );
-    harness.assert_planner_marker_count(1).await;
-    harness.assert_marker_reopen_counts(&[0]).await;
-    harness.assert_open_planner_review_count(1).await;
+    harness.assert_arbiter_marker_count(1).await;
+    harness.assert_arbiter_marker_hold_cycles(&[0]).await;
+    harness.assert_open_held_remediation_count(0).await;
+    harness.assert_no_retired_rung_one_child().await;
     harness.assert_dispatch_backoff_cleared().await;
 
-    let (suppressed_handled, suppressed) = harness
+    // Further cycles are ABSORBED by the in-flight arbiter. The router's return
+    // value is not the contract (the source is already held in
+    // `needs_lead_intervention`, so dispatch cannot act on it either way) — the
+    // durable invariants are: no second row, no second dispatch event, and the
+    // source never leaves the arbiter.
+    let (_absorbed_handled, absorbed) = harness
         .dispatch_same_role_reappearances_like_dispatch(role, STREAK_INTERVENTION_THRESHOLD)
         .await;
-    assert!(
-        !suppressed_handled,
-        "same reopen-count loop is idempotently suppressed after the first Planner handoff"
+    assert_eq!(
+        absorbed.status, "needs_lead_intervention",
+        "the absorbed cycles must not move the source off the arbiter"
     );
-    assert_eq!(suppressed.status, "open");
-    harness.assert_planner_marker_count(1).await;
-    harness.assert_open_planner_review_count(1).await;
-    harness
+    harness.assert_arbiter_marker_count(1).await;
+    assert_eq!(
+        harness.arbitration_hold_cycles().await,
+        vec![0],
+        "absorbed cycles must not open a second arbitration row"
+    );
+    harness.assert_open_held_remediation_count(0).await;
+
+    let mut provider_guard = InterventionChaosHarness::new(0).await;
+    let (provider_handled, provider_task) = provider_guard
+        .dispatch_same_role_reappearances_like_dispatch(role, STREAK_INTERVENTION_THRESHOLD - 1)
+        .await;
+    assert!(!provider_handled);
+    assert_eq!(provider_task.status, "open");
+    let (provider_threshold_handled, provider_threshold_task) = provider_guard
+        .dispatch_same_role_reappearance_like_dispatch(role, true)
+        .await;
+    assert!(
+        !provider_threshold_handled,
+        "typed provider failure at threshold must stay on backoff path, not Planner intervention"
+    );
+    assert_eq!(provider_threshold_task.status, "open");
+    provider_guard.assert_arbiter_marker_count(0).await;
+    provider_guard.assert_open_held_remediation_count(0).await;
+    provider_guard
         .assert_same_role_backoff_after_reappearance(STREAK_INTERVENTION_THRESHOLD)
         .await;
+}
 
-    let remaining_before_hard_cap = MAX_DISPATCH_FAILURES - STREAK_INTERVENTION_THRESHOLD - 1;
+/// The other half of the split above: the terminal force-close at
+/// [`MAX_DISPATCH_FAILURES`] is preserved on a role that never arms trigger B
+/// (`planner` — see `should_route_cycling_intervention`), so no arbiter is ever
+/// in flight to absorb the cycles. Before 4etb this tail lived inside the
+/// `worker` chaos test, where the rung-1 marker suppressed re-routing and let
+/// the streak climb; the unconditional arbiter rung now holds such a source
+/// instead, so the hard cap has to be exercised on its own.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn same_role_hard_cap_force_closes_when_no_arbiter_is_in_flight() {
+    let mut harness = InterventionChaosHarness::new(0).await;
+    // `planner` is excluded from trigger B by role, so the reappearances only
+    // seed backoff and the hard cap is the sole terminal.
+    let role = "planner";
+    assert!(!should_route_cycling_intervention(
+        role,
+        STREAK_INTERVENTION_THRESHOLD,
+        false,
+        PriorSessionDisposition::Concluded
+    ));
+
     let (pre_terminal_handled, pre_terminal) = harness
-        .dispatch_same_role_reappearances_like_dispatch(role, remaining_before_hard_cap)
+        .dispatch_same_role_reappearances_like_dispatch(role, MAX_DISPATCH_FAILURES - 1)
         .await;
     assert!(
         !pre_terminal_handled,
@@ -968,28 +1175,8 @@ async fn same_role_cycling_trigger_b_chaos_intervenes_then_terminally_closes() {
     harness.assert_dispatch_backoff_cleared().await;
     harness.assert_capacity_released().await;
     harness.assert_source_task_not_ready_open().await;
-    harness.assert_planner_marker_count(1).await;
-    harness.assert_open_planner_review_count(1).await;
-
-    let mut provider_guard = InterventionChaosHarness::new(0).await;
-    let (provider_handled, provider_task) = provider_guard
-        .dispatch_same_role_reappearances_like_dispatch(role, STREAK_INTERVENTION_THRESHOLD - 1)
-        .await;
-    assert!(!provider_handled);
-    assert_eq!(provider_task.status, "open");
-    let (provider_threshold_handled, provider_threshold_task) = provider_guard
-        .dispatch_same_role_reappearance_like_dispatch(role, true)
-        .await;
-    assert!(
-        !provider_threshold_handled,
-        "typed provider failure at threshold must stay on backoff path, not Planner intervention"
-    );
-    assert_eq!(provider_threshold_task.status, "open");
-    provider_guard.assert_planner_marker_count(0).await;
-    provider_guard.assert_open_planner_review_count(0).await;
-    provider_guard
-        .assert_same_role_backoff_after_reappearance(STREAK_INTERVENTION_THRESHOLD)
-        .await;
+    harness.assert_arbiter_marker_count(0).await;
+    harness.assert_open_held_remediation_count(0).await;
 }
 
 /// Regression for task 7mq0 (2026-07-28): four consecutive `worker` sessions
@@ -1033,8 +1220,8 @@ async fn cancelled_sessions_do_not_route_the_cycling_planner_intervention() {
         task.status, "open",
         "the source task must stay dispatchable, not be handed to a Planner"
     );
-    harness.assert_planner_marker_count(0).await;
-    harness.assert_open_planner_review_count(0).await;
+    harness.assert_arbiter_marker_count(0).await;
+    harness.assert_open_held_remediation_count(0).await;
     harness
         .assert_same_role_backoff_after_reappearance(STREAK_INTERVENTION_THRESHOLD)
         .await;
@@ -1053,16 +1240,21 @@ async fn cancelled_sessions_do_not_route_the_cycling_planner_intervention() {
         "the cancellation exclusion must not decay as the streak grows"
     );
     assert_eq!(still_open.status, "open");
-    harness.assert_planner_marker_count(0).await;
-    harness.assert_open_planner_review_count(0).await;
+    harness.assert_arbiter_marker_count(0).await;
+    harness.assert_open_held_remediation_count(0).await;
 }
 
 /// The other half of the contract: trigger B must keep firing at 4 on the
 /// review-cycle livelock it exists to catch (the t9wi/32bk wedge), whose runs
 /// DO conclude — and the reason it emits must name the session outcomes it
 /// actually observed rather than asserting completion it never checked.
+///
+/// 4etb: that reason now reaches the ARBITER's dossier (`trigger_reason`)
+/// verbatim instead of a rung-1 remediation child's description. The property
+/// under test is unchanged — the escalation must not assert completion nobody
+/// checked — only the payload it is read from moved.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn completed_same_role_redispatches_still_route_the_cycling_planner_intervention() {
+async fn completed_same_role_redispatches_still_route_the_cycling_arbiter_adjudication() {
     let mut harness = InterventionChaosHarness::new(0).await;
     let role = "worker";
 
@@ -1075,7 +1267,7 @@ async fn completed_same_role_redispatches_still_route_the_cycling_planner_interv
         .await;
     assert!(!below_handled, "below threshold only seeds backoff");
     assert_eq!(below.status, "open");
-    harness.assert_planner_marker_count(0).await;
+    harness.assert_arbiter_marker_count(0).await;
 
     let (handled, routed) = harness
         .dispatch_same_role_reappearances_after_sessions(
@@ -1086,29 +1278,33 @@ async fn completed_same_role_redispatches_still_route_the_cycling_planner_interv
         .await;
     assert!(
         handled,
-        "four concluded same-role redispatches must still route the Planner \
-         intervention — the fix must not weaken trigger B for genuine livelocks"
+        "four concluded same-role redispatches must still route the adjudication \
+         — the fix must not weaken trigger B for genuine livelocks"
     );
-    assert_eq!(routed.status, "open", "the source task stays open");
-    harness.assert_planner_marker_count(1).await;
-    harness.assert_open_planner_review_count(1).await;
+    assert_eq!(
+        routed.status, "needs_lead_intervention",
+        "4etb: the escalation goes to the arbiter, which owns the source's status"
+    );
+    harness.assert_arbiter_marker_count(1).await;
+    harness.assert_open_held_remediation_count(0).await;
+    harness.assert_no_retired_rung_one_child().await;
 
-    // The escalation the Planner reads must describe the evidence truthfully.
-    let reviews = harness.open_planner_intervention_reviews().await;
-    let description = reviews
-        .first()
-        .map(|review| review.description.clone())
-        .expect("trigger B must create a Planner remediation review task");
+    // The escalation the adjudicator reads must describe the evidence truthfully.
+    let dossier = harness.current_arbitration_dossier().await;
+    let trigger_reason = dossier["trigger_reason"]
+        .as_str()
+        .expect("the dossier must carry the trigger reason verbatim")
+        .to_owned();
     assert!(
-        description.contains(
+        trigger_reason.contains(
             "Observed session outcomes for `worker`, newest first: \
              completed, completed, completed, completed"
         ),
-        "the reason must report the session outcomes it counted, got: {description}"
+        "the reason must report the session outcomes it counted, got: {trigger_reason}"
     );
     assert!(
-        !description.contains("Each run finishes"),
-        "the reason must not assert completion it never verified, got: {description}"
+        !trigger_reason.contains("Each run finishes"),
+        "the reason must not assert completion it never verified, got: {trigger_reason}"
     );
 }
 
@@ -1153,9 +1349,9 @@ async fn spawn_failed_sessions_do_not_route_the_cycling_planner_intervention() {
         task.status, "open",
         "the source task must stay dispatchable, not be handed to a Planner"
     );
-    harness.assert_planner_marker_count(0).await;
+    harness.assert_arbiter_marker_count(0).await;
     // The load-bearing side effect: no remediation review task row exists.
-    harness.assert_open_planner_review_count(0).await;
+    harness.assert_open_held_remediation_count(0).await;
 
     // The 60s-and-up dispatch backoff is deliberately UNCHANGED: a genuinely
     // unlaunchable task should still be throttled, it just must not manufacture
@@ -1178,16 +1374,19 @@ async fn spawn_failed_sessions_do_not_route_the_cycling_planner_intervention() {
         "the spawn-failure exclusion must not decay as the streak grows"
     );
     assert_eq!(still_open.status, "open");
-    harness.assert_planner_marker_count(0).await;
-    harness.assert_open_planner_review_count(0).await;
+    harness.assert_arbiter_marker_count(0).await;
+    harness.assert_open_held_remediation_count(0).await;
 }
 
 /// The other half of the spawn_failed contract: a streak of genuine reviewer
 /// rejections (`reopened` — the run concluded and a reviewer sent it back) MUST
-/// still mint the remediation. Proves the fix narrows the gate rather than
-/// disabling trigger B.
+/// still escalate. Proves the fix narrows the gate rather than disabling
+/// trigger B.
+///
+/// 4etb: the escalation is the arbiter adjudication, and its reason is read off
+/// the arbitration dossier rather than a retired rung-1 child.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn rejected_same_role_redispatches_still_route_the_cycling_planner_intervention() {
+async fn rejected_same_role_redispatches_still_route_the_cycling_arbiter_adjudication() {
     let mut harness = InterventionChaosHarness::new(0).await;
     let role = "worker";
 
@@ -1200,7 +1399,7 @@ async fn rejected_same_role_redispatches_still_route_the_cycling_planner_interve
         .await;
     assert!(!below_handled, "below threshold only seeds backoff");
     assert_eq!(below.status, "open");
-    harness.assert_open_planner_review_count(0).await;
+    harness.assert_open_held_remediation_count(0).await;
 
     let (handled, routed) = harness
         .dispatch_same_role_reappearances_after_sessions(
@@ -1211,33 +1410,36 @@ async fn rejected_same_role_redispatches_still_route_the_cycling_planner_interve
         .await;
     assert!(
         handled,
-        "four rejected same-role redispatches must still route the Planner \
-         intervention — excluding spawn_failed must not disable the escalation"
+        "four rejected same-role redispatches must still route the adjudication \
+         — excluding spawn_failed must not disable the escalation"
     );
-    assert_eq!(routed.status, "open", "the source task stays open");
-    harness.assert_planner_marker_count(1).await;
-    harness.assert_open_planner_review_count(1).await;
+    assert_eq!(
+        routed.status, "needs_lead_intervention",
+        "4etb: the escalation goes to the arbiter, which owns the source's status"
+    );
+    harness.assert_arbiter_marker_count(1).await;
+    harness.assert_open_held_remediation_count(0).await;
+    harness.assert_no_retired_rung_one_child().await;
 
-    let description = harness
-        .open_planner_intervention_reviews()
-        .await
-        .first()
-        .map(|review| review.description.clone())
-        .expect("trigger B must create a Planner remediation review task");
+    let dossier = harness.current_arbitration_dossier().await;
+    let trigger_reason = dossier["trigger_reason"]
+        .as_str()
+        .expect("the dossier must carry the trigger reason verbatim")
+        .to_owned();
     assert!(
-        description.contains(
+        trigger_reason.contains(
             "Observed session outcomes for `worker`, newest first: \
              reopened, reopened, reopened, reopened"
         ),
-        "the reason must report the session outcomes it counted, got: {description}"
+        "the reason must report the session outcomes it counted, got: {trigger_reason}"
     );
     // The narration must not lie in the other direction either: now that
     // `spawn_failed` cannot arm this escalation, the enumerated exclusion set
     // has to name it.
     assert!(
-        description.contains("`cancelled` / `timed_out` / `interrupted` / `spawn_failed`"),
+        trigger_reason.contains("`cancelled` / `timed_out` / `interrupted` / `spawn_failed`"),
         "the reason must enumerate spawn_failed among the outcomes that cannot arm \
-         this escalation, got: {description}"
+         this escalation, got: {trigger_reason}"
     );
 }
 
@@ -1275,26 +1477,29 @@ async fn mixed_streak_arms_only_when_the_newest_attempt_concluded() {
     assert!(
         handled,
         "a mixed streak whose newest attempt concluded must still route the \
-         Planner intervention"
+         arbiter adjudication"
     );
-    assert_eq!(task.status, "open");
-    newest_concluded.assert_open_planner_review_count(1).await;
-    let description = newest_concluded
-        .open_planner_intervention_reviews()
-        .await
-        .first()
-        .map(|review| review.description.clone())
-        .expect("trigger B must create a Planner remediation review task");
+    assert_eq!(
+        task.status, "needs_lead_intervention",
+        "4etb: the escalation goes to the arbiter, which owns the source's status"
+    );
+    newest_concluded.assert_open_held_remediation_count(0).await;
+    newest_concluded.assert_no_retired_rung_one_child().await;
+    let dossier = newest_concluded.current_arbitration_dossier().await;
+    let trigger_reason = dossier["trigger_reason"]
+        .as_str()
+        .expect("the dossier must carry the trigger reason verbatim")
+        .to_owned();
     assert!(
-        description.contains(
+        trigger_reason.contains(
             "Observed session outcomes for `worker`, newest first: \
              reopened, reopened, spawn_failed, spawn_failed"
         ),
-        "the reason must show the mixed evidence verbatim, got: {description}"
+        "the reason must show the mixed evidence verbatim, got: {trigger_reason}"
     );
     assert!(
-        description.contains("arms only when the MOST RECENT run reached its own terminal"),
-        "the reason must state the newest-attempt rule it actually applied, got: {description}"
+        trigger_reason.contains("arms only when the MOST RECENT run reached its own terminal"),
+        "the reason must state the newest-attempt rule it actually applied, got: {trigger_reason}"
     );
 
     // Direction 2 — same mix, opposite order: 2 reopened then 2 spawn_failed.
@@ -1322,9 +1527,9 @@ async fn mixed_streak_arms_only_when_the_newest_attempt_concluded() {
          route a Planner intervention"
     );
     assert_eq!(mixed_task.status, "open");
-    newest_spawn_failed.assert_planner_marker_count(0).await;
+    newest_spawn_failed.assert_arbiter_marker_count(0).await;
     newest_spawn_failed
-        .assert_open_planner_review_count(0)
+        .assert_open_held_remediation_count(0)
         .await;
     newest_spawn_failed
         .assert_same_role_backoff_after_reappearance(STREAK_INTERVENTION_THRESHOLD)
@@ -1343,15 +1548,28 @@ async fn below_threshold_does_not_intervene() {
 
     let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
     assert!(
-        planner_intervention_markers(&repo, &task.id)
+        arbiter_dispatch_markers(&repo, &task.id).await.is_empty(),
+        "no arbiter dispatch may be recorded below threshold"
+    );
+    assert!(
+        repo.get(&task.id)
             .await
-            .is_empty(),
-        "no intervention marker should be written below threshold"
+            .unwrap()
+            .unwrap()
+            .escalation_evidence_at
+            .is_none(),
+        "a below-threshold pass must not stamp an escalation evidence epoch"
     );
 }
 
+/// 4etb: trigger C (the reply-loop guard) reaches the ARBITER on its first trip
+/// — it used to mint a rung-1 `Planner remediation` review child and leave the
+/// source `open`. The equivalent new guarantee: one arbitration row at hold
+/// cycle 0, one `arbiter_dispatched` event, the source held in
+/// `needs_lead_intervention`, the stale backoff cleared, and NO first-response
+/// remediation child anywhere.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn loop_guard_routes_to_planner_without_dispatch_failure_streak() {
+async fn loop_guard_routes_to_the_arbiter_without_dispatch_failure_streak() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
     let mut actor = coordinator_actor_for_tests(&db, &tx);
@@ -1367,8 +1585,11 @@ async fn loop_guard_routes_to_planner_without_dispatch_failure_streak() {
         },
     );
 
+    // No seeded evidence: this is a FIRST escalation, so there is no canonical
+    // evidence floor and the uv3p attempted-remediation guard has nothing to
+    // measure — it must not stand between the trigger and the arbiter (AC1).
     let handled = actor
-        .route_loop_guard_planner_intervention(
+        .route_loop_guard_arbiter_adjudication(
             &task.id,
             "worker",
             "Reply-loop guard `identical_tool_failure` tripped: offending_signature=`shell:cargo-test`, threshold=3, observed=4, turn_span=7..=12",
@@ -1376,33 +1597,55 @@ async fn loop_guard_routes_to_planner_without_dispatch_failure_streak() {
         .await;
     assert!(
         handled,
-        "loop guard trip must be routed through Planner intervention"
+        "a loop-guard trip must be routed to the forensic arbiter"
     );
 
     assert!(
         !actor.dispatch_failure_streak.contains_key(&task.id),
-        "route_planner_intervention clears stale streak state instead of incrementing it"
+        "route_arbiter_adjudication clears stale streak state instead of incrementing it"
     );
     assert!(
         !actor.last_dispatched.contains_key(&task.id),
         "loop guard path must gate identical worker re-dispatch"
     );
 
-    let markers = planner_intervention_markers(&repo, &task.id).await;
+    let markers = arbiter_dispatch_markers(&repo, &task.id).await;
     assert_eq!(
         markers.len(),
         1,
-        "loop guard writes planner_intervention marker"
+        "the loop-guard trip dispatches exactly one arbiter"
     );
-    assert_eq!(markers[0]["reopen_count"], 0);
+    assert_eq!(
+        markers[0]["hold_cycle"], 0,
+        "the first escalation opens hold cycle 0"
+    );
 
-    let reviews = repo.list_by_status("open").await.unwrap();
-    assert!(
-        reviews
-            .iter()
-            .any(|t| t.issue_type == "review" && t.project_id == task.project_id),
-        "loop guard trip must create a Planner intervention review task, not redispatch the worker"
+    let after = repo.get(&task.id).await.unwrap().unwrap();
+    assert_eq!(
+        after.status, "needs_lead_intervention",
+        "the arbiter entry contract holds the source in needs_lead_intervention"
     );
+    assert!(
+        after.escalation_evidence_at.is_some(),
+        "the escalation stamps the canonical evidence epoch"
+    );
+    assert!(
+        TaskArbitrationRepository::new(db.clone())
+            .get_by_task_and_cycle(&task.id, 0)
+            .await
+            .unwrap()
+            .is_some(),
+        "the loop-guard trip must open arbitration row 0"
+    );
+    for blocker in repo.list_blockers(&task.id).await.unwrap() {
+        let child = repo.get(&blocker.task_id).await.unwrap().unwrap();
+        assert!(
+            !child.labels.contains("planner-remediation"),
+            "rung 1 is retired: the loop guard must not mint a first-response \
+             planner remediation child (labels {})",
+            child.labels
+        );
+    }
 }
 
 /// Drain the already-buffered broadcast events (the transition + any
@@ -1441,9 +1684,17 @@ async fn loop_guard_second_strike_parks_task() {
     let mut actor = coordinator_actor_for_tests(&db, &tx);
     let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
     let task = make_task_with_reopen_count(&db, &tx, 0).await;
+    // 4etb: `reset_intervention_counters` is kept here for its OTHER effect —
+    // it stamps `last_intervention_at`, which raises the canonical evidence
+    // floor the park guards measure from. The `intervention_count` it also
+    // bumps is no longer read by any rung, so this setup no longer "reaches"
+    // anything: the arbiter rung is unconditional.
     repo.reset_intervention_counters(&task.id).await.unwrap();
     let task = repo.get(&task.id).await.unwrap().unwrap();
-    assert_eq!(task.intervention_count, MAX_PLANNER_INTERVENTIONS);
+    assert!(
+        task.last_intervention_at.is_some(),
+        "the fixture needs an evidence floor for the seeded attempts to qualify"
+    );
 
     // uv3p Part B: seed two distinct-model pre-submission terminations so the
     // attempted-remediation park gate reaches its non-attempt bound and parks.
@@ -1502,7 +1753,7 @@ async fn loop_guard_second_strike_parks_task() {
         .unwrap();
 
     let handled = actor
-        .route_loop_guard_planner_intervention(
+        .route_loop_guard_arbiter_adjudication(
             &task.id,
             "worker",
             "Reply-loop guard `identical_tool_failure` tripped: offending_signature=`shell:cargo-test`, threshold=3, observed=4, turn_span=7..=12",
@@ -1563,12 +1814,17 @@ async fn loop_guard_second_strike_parks_task() {
         "arbiter dispatch path must not create human-review blockers"
     );
 
-    assert!(
-        planner_intervention_markers(&repo, &task.id)
-            .await
-            .is_empty(),
-        "second strike parks without writing a fresh marker"
+    // 4etb: the arbiter dispatch IS the escalation's durable marker. The retired
+    // `planner_intervention` marker (which this used to assert stayed absent)
+    // no longer exists, so the honest assertion is that exactly ONE
+    // `arbiter_dispatched` event was written, for this hold cycle.
+    let markers = arbiter_dispatch_markers(&repo, &task.id).await;
+    assert_eq!(
+        markers.len(),
+        1,
+        "the escalation writes exactly one arbiter_dispatched event"
     );
+    assert_eq!(markers[0]["hold_cycle"], arb.hold_cycle as i64);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1868,105 +2124,178 @@ fn budget_park_source_paths_do_not_enter_dispatch_fault_routing() {
     );
 }
 
+/// 4etb: at the quality-strike threshold trigger A reaches the ARBITER on the
+/// first pass. It used to mint a `Planner remediation` review child and log a
+/// `PLANNER_ESCALATION` comment on the source; neither exists on this path any
+/// more. The equivalent guarantees are the durable ones the arbiter rung owns:
+/// the evidence epoch, arbitration row 0, one `arbiter_dispatched` event, and
+/// the dossier carrying the strike counts the retired marker used to hold.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn at_threshold_routes_to_planner_intervention() {
+async fn at_threshold_routes_directly_to_the_arbiter() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
     let mut actor = coordinator_actor_for_tests(&db, &tx);
+    let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
     let task = make_task_with_reopen_count(&db, &tx, REOPEN_INTERVENTION_THRESHOLD).await;
+    assert_eq!(
+        task.intervention_count, 0,
+        "the arbiter rung is unconditional — this fixture must reach it from a \
+         ZERO intervention_count or a reinstated counter gate would pass silently"
+    );
 
     let intervened = actor.maybe_intervene_on_stuck_task(&task).await;
+    assert!(intervened, "at threshold must route to the arbiter");
+
+    // Exactly one arbiter dispatch, on hold cycle 0.
+    let markers = arbiter_dispatch_markers(&repo, &task.id).await;
+    assert_eq!(markers.len(), 1, "exactly one arbiter_dispatched event");
+    assert_eq!(markers[0]["hold_cycle"], 0);
+    assert_eq!(markers[0]["role"], "worker");
+
+    let after = repo.get(&task.id).await.unwrap().unwrap();
+    assert_eq!(after.status, "needs_lead_intervention");
     assert!(
-        intervened,
-        "at threshold must route to planner intervention"
+        after.escalation_evidence_at.is_some(),
+        "the escalation stamps the canonical evidence epoch"
     );
 
-    let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
-
-    // Exactly one intervention marker, keyed to the current reopen count.
-    let markers = planner_intervention_markers(&repo, &task.id).await;
-    assert_eq!(markers.len(), 1, "exactly one intervention marker");
-    assert_eq!(markers[0]["reopen_count"], REOPEN_INTERVENTION_THRESHOLD);
-
-    // A Planner review task was created in the same project.
-    let reviews = repo.list_by_status("open").await.unwrap();
-    assert!(
-        reviews
-            .iter()
-            .any(|t| t.issue_type == "review" && t.project_id == task.project_id),
-        "a review (planner intervention) task must be created"
+    // The strike counts the retired `planner_intervention` marker carried now
+    // live in the arbiter's dossier, which is what actually reads them.
+    let record = TaskArbitrationRepository::new(db.clone())
+        .get_by_task_and_cycle(&after.id, 0)
+        .await
+        .unwrap()
+        .expect("arbitration row 0 must exist");
+    let dossier = record.dossier.expect("the arbiter must receive a dossier");
+    assert_eq!(
+        dossier["reopen_count"].as_i64(),
+        Some(REOPEN_INTERVENTION_THRESHOLD),
+        "the dossier records the raw reopen count"
+    );
+    assert_eq!(
+        dossier["quality_strikes"].as_i64(),
+        Some(REOPEN_INTERVENTION_THRESHOLD),
+        "the dossier records the quality-strike count that armed the trigger"
     );
 
-    // The source task carries a PLANNER_ESCALATION comment linking it.
+    // No first-response remediation child, and no `PLANNER_ESCALATION` comment:
+    // both were rung-1 artefacts.
+    assert!(
+        repo.list_blockers(&after.id).await.unwrap().is_empty(),
+        "the arbiter rung holds the source by STATUS, not by a remediation blocker"
+    );
     let comments = repo
         .query_activity(ActivityQuery {
-            task_id: Some(task.id.clone()),
+            task_id: Some(after.id.clone()),
             event_type: Some("comment".to_string()),
-            actor_role: None,
-            project_id: None,
-            from_time: None,
-            to_time: None,
             limit: 100,
-            offset: 0,
+            ..ActivityQuery::default()
         })
         .await
         .unwrap();
     assert!(
-        comments
+        !comments
             .iter()
             .any(|c| c.payload.contains("PLANNER_ESCALATION")),
-        "source task must record a PLANNER_ESCALATION comment"
+        "a PLANNER_ESCALATION comment means a remediation child was minted — \
+         rung 1 is retired and this path must not create one"
     );
 }
 
+/// 4etb: idempotency moved off the `reopen_count`-keyed activity marker (the
+/// rung-1 double-fire guard, retired with the rung) and onto the arbitration
+/// ledger. The epoch + the unconsumed row ARE the boundary now:
+///   * repeated passes while the arbiter is in flight are still HANDLED (the
+///     source is held and must not be redispatched) but add no row, no marker
+///     and no restamped epoch;
+///   * a higher reopen count is NOT a re-arm — only CONSUMING the row is, which
+///     is the property the counter was standing in for.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn intervention_is_idempotent_per_reopen_count() {
+async fn escalation_is_idempotent_per_hold_cycle_not_per_reopen_count() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
     let mut actor = coordinator_actor_for_tests(&db, &tx);
     let task = make_task_with_reopen_count(&db, &tx, REOPEN_INTERVENTION_THRESHOLD).await;
     let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+    let arb_repo = TaskArbitrationRepository::new(db.clone());
 
-    // First pass intervenes; subsequent passes at the SAME reopen count are
-    // suppressed by the marker — no Planner storm while one is in flight.
     assert!(actor.maybe_intervene_on_stuck_task(&task).await);
-    assert!(!actor.maybe_intervene_on_stuck_task(&task).await);
-    assert!(!actor.maybe_intervene_on_stuck_task(&task).await);
+    let first_epoch = repo
+        .get(&task.id)
+        .await
+        .unwrap()
+        .unwrap()
+        .escalation_evidence_at
+        .expect("the first escalation stamps the epoch");
 
+    // Repeat passes while the arbiter is in flight. Their return value is not
+    // pinned (the source is held in `needs_lead_intervention`, so dispatch
+    // cannot act on it either way); the durable invariants below are.
+    for _ in 0..2 {
+        let refreshed = repo.get(&task.id).await.unwrap().unwrap();
+        let _ = actor.maybe_intervene_on_stuck_task(&refreshed).await;
+    }
     assert_eq!(
-        planner_intervention_markers(&repo, &task.id).await.len(),
+        arbiter_dispatch_markers(&repo, &task.id).await.len(),
         1,
-        "idempotent: a single marker for one reopen-count value"
+        "idempotent: one arbiter_dispatched event per hold cycle"
+    );
+    assert_eq!(arb_repo.list_for_task(&task.id).await.unwrap().len(), 1);
+    assert_eq!(
+        repo.get(&task.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .escalation_evidence_at
+            .as_deref(),
+        Some(first_epoch.as_str()),
+        "a pending escalation must never restamp its epoch"
     );
 
-    // A genuine new reopen (count bumps past threshold again) re-arms one
-    // fresh intervention.
+    // A higher reopen count alone does NOT re-arm: the row is still unconsumed.
     repo.set_status(&task.id, "closed").await.unwrap();
     let bumped = repo.set_status(&task.id, "open").await.unwrap();
     assert_eq!(bumped.reopen_count, REOPEN_INTERVENTION_THRESHOLD + 1);
-
-    assert!(
-        actor.maybe_intervene_on_stuck_task(&bumped).await,
-        "a higher reopen count must re-arm intervention"
+    let _ = actor.maybe_intervene_on_stuck_task(&bumped).await;
+    assert_eq!(
+        arbiter_dispatch_markers(&repo, &task.id).await.len(),
+        1,
+        "a bumped reopen count must NOT open a second cycle while the arbiter is \
+         still in flight — the ledger, not the counter, gates promotion"
     );
     assert_eq!(
-        planner_intervention_markers(&repo, &task.id).await.len(),
+        arb_repo.list_for_task(&task.id).await.unwrap().len(),
+        1,
+        "a bumped reopen count must not open a second arbitration row either"
+    );
+
+    // Consuming the row is what re-arms the ladder. The floor is now the
+    // cycle-0 epoch, so the next cycle needs its OWN post-floor evidence for
+    // the uv3p guard to let it through.
+    arb_repo.mark_consumed(&task.id, 0).await.unwrap();
+    seed_terminated_post_intervention_sessions(&db, &tx, &task.id, &["m-a", "m-b"]).await;
+    let refreshed = repo.get(&task.id).await.unwrap().unwrap();
+    assert!(actor.maybe_intervene_on_stuck_task(&refreshed).await);
+    assert_eq!(
+        arbiter_dispatch_markers(&repo, &task.id).await.len(),
         2,
-        "one marker per distinct reopen-count value"
+        "one arbiter dispatch per hold cycle, and a consumed cycle promotes once"
     );
 }
 
-/// Second strike: once the Planner has already intervened
-/// (`intervention_count >= MAX_PLANNER_INTERVENTIONS`) and the task has
-/// STILL climbed back to the reopen threshold, the coordinator dispatches
-/// the Lead arbiter via the atomic arbiter dispatch path — the task enters
-/// `needs_lead_intervention` with a durable arbitration row instead of
-/// creating a human-review remediation blocker. Writes no new intervention
-/// marker. This is the loop breaker for the txr4 case (rescope didn't help
-/// → stop hogging the slot), now revivable when the Lead arbiter returns a
-/// decision.
+/// A task that has ALREADY been adjudicated once and has STILL climbed back to
+/// the reopen threshold reaches the arbiter again: it enters
+/// `needs_lead_intervention` with a durable arbitration row instead of a
+/// human-review remediation blocker. This is the loop breaker for the txr4 case
+/// (rescope didn't help → stop hogging the slot), revivable when the Lead
+/// arbiter returns a decision.
+///
+/// 4etb: `intervention_count == 1` here is now only a SIDE EFFECT of the
+/// fixture's `reset_intervention_counters` call — nothing reads it. What the
+/// fixture actually needs from that call is `last_intervention_at`, the
+/// evidence floor the seeded post-adjudication attempts are measured against.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn second_strike_parks_task_after_prior_intervention() {
+async fn post_adjudication_climb_reaches_the_arbiter_again() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
     let mut actor = coordinator_actor_for_tests(&db, &tx);
@@ -1982,17 +2311,20 @@ async fn second_strike_parks_task_after_prior_intervention() {
         repo.set_status(&task.id, "open").await.unwrap();
     }
     let task = repo.get(&task.id).await.unwrap().unwrap();
-    assert_eq!(task.intervention_count, 1, "one prior planner intervention");
+    assert!(
+        task.last_intervention_at.is_some(),
+        "the prior adjudication must have raised the evidence floor"
+    );
     assert_eq!(task.reopen_count, REOPEN_INTERVENTION_THRESHOLD);
 
-    // uv3p Part B: the second strike parks only once the remediation was
-    // actually attempted; seed two distinct-model pre-submission terminations.
+    // uv3p Part B: the rung adjudicates only once the remediation was actually
+    // attempted; seed two distinct-model post-floor pre-submission terminations.
     seed_terminated_post_intervention_sessions(&db, &tx, &task.id, &["m-a", "m-b"]).await;
 
     let handled = actor.maybe_intervene_on_stuck_task(&task).await;
     assert!(
         handled,
-        "second strike must handle the task (caller skips worker dispatch)"
+        "the post-adjudication climb must handle the task (caller skips worker dispatch)"
     );
 
     // Arbiter dispatch: task transitions to needs_lead_intervention instead
@@ -2011,16 +2343,18 @@ async fn second_strike_parks_task_after_prior_intervention() {
         "arbiter dispatch must create an unconsumed arbitration row"
     );
 
-    // No planner intervention marker for this reopen count — the rework loop is
-    // broken (not re-escalated to the planner). The arbiter dispatch path does
-    // not create human-review blockers; the task is held via status.
-    assert!(
-        !planner_intervention_markers(&repo, &task.id)
-            .await
-            .iter()
-            .any(|m| m["reopen_count"] == REOPEN_INTERVENTION_THRESHOLD),
-        "second strike must not write a new planner intervention marker"
+    // 4etb: the retired `planner_intervention` marker was keyed by
+    // `reopen_count`; the surviving `arbiter_dispatched` event is keyed by hold
+    // cycle. The equivalent assertion is that this pass produced exactly ONE
+    // arbiter dispatch on the current cycle — not a re-escalation to a rung-1
+    // planner. The arbiter path holds the task via status, never a blocker.
+    let markers = arbiter_dispatch_markers(&repo, &task.id).await;
+    assert_eq!(
+        markers.len(),
+        1,
+        "exactly one arbiter dispatch for this hold cycle"
     );
+    assert_eq!(markers[0]["hold_cycle"], 0);
     let blockers = repo.list_blockers(&task.id).await.unwrap();
     assert!(
         blockers.is_empty(),
@@ -2028,11 +2362,78 @@ async fn second_strike_parks_task_after_prior_intervention() {
     );
 }
 
-/// Drive a task to the exact second-strike park condition — `intervention_count
-/// == 1`, quality strikes back at threshold, and enough terminated
-/// post-intervention sessions to satisfy the uv3p attempted-remediation gate —
-/// so that trigger A WOULD park it on the next worker dispatch. Returns the task
-/// after the setup completes.
+/// 4etb: stamp the canonical escalation evidence epoch BEFORE the fixture seeds
+/// worker evidence, and return the epoch that was written.
+///
+/// `route_arbiter_adjudication` stamps `escalation_evidence_at` at the TOP of
+/// the rung, and every park guard measures evidence from
+/// `max(escalation_evidence_at, last_intervention_at, human_review_resolved_at)`.
+/// A fixture that seeds attempts and only THEN calls the router hands the guards
+/// an epoch NEWER than all of its own evidence: they see zero qualifying
+/// attempts and decline, which is not the state under test.
+///
+/// The production state this reproduces is the guard-declined redispatch: the
+/// epoch is stamped, no arbitration row is opened, the rotated worker attempts
+/// accrue AFTER it, and the next trigger measures exactly those. The stamp is
+/// conditional on the column being NULL, so the router's own stamp is then a
+/// no-op and the floor stays where the fixture put it.
+async fn stamp_evidence_epoch_before_seeding(repo: &TaskRepository, task_id: &str) -> String {
+    repo.stamp_escalation_evidence_epoch(task_id)
+        .await
+        .expect("stamping the escalation evidence epoch must succeed")
+        .expect("the conditional stamp must return the epoch it wrote")
+}
+
+/// 4etb: spend arbitration hold cycle `cycle` exactly as the production ladder
+/// does — open the row and stamp the canonical evidence epoch in ONE
+/// transaction (`try_create_with_evidence_epoch`, the live dispatch path),
+/// record the arbiter's `reopen` decision on it, then consume it.
+/// `resolve_current_hold_cycle` then reports `cycle + 1` as the next cycle a
+/// fresh escalation would open. Returns the stamped epoch.
+///
+/// This is what puts a fixture PAST the unconditional cycle-0 promotion. Under
+/// 4etb a task with NO arbitration row is at prospective cycle 0, where the
+/// promotion truth table dispatches one ordinary arbiter unconditionally and the
+/// 8y3q / uv3p / 2vxr park guards are all skipped — the guards gate a PARK, not
+/// arbiter ENTRY. A guard can therefore only be exercised from cycle 1 on.
+/// Mirrors `tests::hold_cycle_ceiling::spend_hold_cycle`.
+async fn spend_hold_cycle(db: &Database, task_id: &str, cycle: i32) -> String {
+    let arb = TaskArbitrationRepository::new(db.clone());
+    let empty = serde_json::json!([]);
+    let (_result, epoch) = arb
+        .try_create_with_evidence_epoch(CreateArbitrationParams {
+            task_id,
+            hold_cycle: cycle,
+            deadline_at: None,
+            mirror_head_sha: None,
+            github_head_sha: None,
+            pr_url: None,
+            failing_ci_job_ids: &empty,
+            dossier: None,
+            directive: Some(&serde_json::json!({ "decision": "reopen" })),
+            verification_command: None,
+            excluded_models: &empty,
+        })
+        .await
+        .expect("seed arbitration row");
+    assert!(
+        arb.mark_consumed(task_id, cycle)
+            .await
+            .expect("consume arbitration row"),
+        "seeded arbitration row at cycle {cycle} must transition to consumed"
+    );
+    epoch.expect("opening a hold cycle must stamp the escalation evidence epoch")
+}
+
+/// Drive a task to the exact post-adjudication park condition — a raised
+/// evidence floor (`last_intervention_at`), quality strikes back at threshold,
+/// and enough terminated post-floor sessions to satisfy the uv3p
+/// attempted-remediation gate — so that trigger A WOULD adjudicate it on the
+/// next worker dispatch. Returns the task after the setup completes.
+///
+/// 4etb: the `intervention_count == 1` this fixture also produces is inert.
+/// Nothing reads it any more; it is asserted below only to pin the fixture's
+/// shape, not because any rung gates on it.
 async fn seed_task_at_second_strike_park_condition(
     db: &Database,
     tx: &broadcast::Sender<DjinnEventEnvelope>,
@@ -2051,20 +2452,23 @@ async fn seed_task_at_second_strike_park_condition(
     // would fire rather than redispatch for more evidence.
     seed_terminated_post_intervention_sessions(db, tx, &task.id, &["m-a", "m-b"]).await;
     let task = repo.get(&task.id).await.unwrap().unwrap();
-    assert_eq!(task.intervention_count, 1, "one prior planner intervention");
+    assert!(
+        task.last_intervention_at.is_some(),
+        "the fixture's load-bearing product is the raised evidence floor"
+    );
     assert_eq!(task.reopen_count, REOPEN_INTERVENTION_THRESHOLD);
     task
 }
 
-/// Regression (incident k6hm, 2026-07-21): a task that has exhausted its
-/// intervention budget on EARLIER review rejections then hits a trivial merge
+/// Regression (incident k6hm, 2026-07-21): a task already carrying a raised
+/// evidence floor from EARLIER review rejections then hits a trivial merge
 /// conflict against main. A conflict means main moved under an otherwise-healthy
 /// PR — it is not evidence the worker cannot converge on the acceptance
 /// criteria — so the dispatch tick must route it to the normal ConflictRetry
 /// rework worker, NOT consume the second strike and park it into
 /// `needs_lead_intervention` / the arbitration lane.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn merge_conflict_reopen_at_intervention_cap_does_not_park() {
+async fn merge_conflict_reopen_at_the_escalation_condition_does_not_park() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
     let mut actor = coordinator_actor_for_tests(&db, &tx);
@@ -2099,7 +2503,7 @@ async fn merge_conflict_reopen_at_intervention_cap_does_not_park() {
     assert_ne!(
         after.status, "needs_lead_intervention",
         "a merge-conflict reopen must never park to needs_lead_intervention, even at \
-         the intervention cap — it routes to the ConflictRetry rework worker"
+         the escalation condition — it routes to the ConflictRetry rework worker"
     );
 
     let arb_repo = TaskArbitrationRepository::new(db.clone());
@@ -2115,14 +2519,14 @@ async fn merge_conflict_reopen_at_intervention_cap_does_not_park() {
     );
 }
 
-/// Control for `merge_conflict_reopen_at_intervention_cap_does_not_park`:
-/// through the SAME dispatch tick, an identical second-strike task WITHOUT a
+/// Control for `merge_conflict_reopen_at_the_escalation_condition_does_not_park`:
+/// through the SAME dispatch tick, an identical task WITHOUT a
 /// merge-conflict signal (a genuine quality strike) still parks to
 /// `needs_lead_intervention` with a durable arbitration row. Proves the exempt
 /// path above is scoped to merge conflicts and does not weaken genuine
 /// quality-strike parking.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn genuine_quality_strike_at_intervention_cap_still_parks_through_dispatch() {
+async fn genuine_quality_strike_at_the_escalation_condition_still_parks_through_dispatch() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
     let mut actor = coordinator_actor_for_tests(&db, &tx);
@@ -2140,7 +2544,7 @@ async fn genuine_quality_strike_at_intervention_cap_still_parks_through_dispatch
     let after = repo.get(&task.id).await.unwrap().unwrap();
     assert_eq!(
         after.status, "needs_lead_intervention",
-        "a genuine quality strike at the intervention cap must still park"
+        "a genuine quality strike at the escalation condition must still park"
     );
     let arb_repo = TaskArbitrationRepository::new(db.clone());
     let (_cycle, existing) = arb_repo.resolve_current_hold_cycle(&task.id).await.unwrap();
@@ -2150,20 +2554,31 @@ async fn genuine_quality_strike_at_intervention_cap_still_parks_through_dispatch
     );
 }
 
-/// uv3p Part B (AC #2 / cgcl-7fj3-nlus shape): a task at the second-strike
-/// condition (`intervention_count == 1`, quality strikes at threshold) with
-/// ZERO sessions dispatched since the intervention must NOT park — the
-/// remediation was never attempted. The audits showed parks landing 272ms–36s
-/// after a rescope with zero dispatches; the guard now redispatches instead.
+/// uv3p Part B (AC #2 / cgcl-7fj3-nlus shape): a task whose evidence floor was
+/// raised by a prior adjudication, with ZERO sessions dispatched since, must NOT
+/// park — the remediation was never attempted. The audits showed parks landing
+/// 272ms–36s after a rescope with zero dispatches; the guard redispatches
+/// instead.
+///
+/// 4etb strengthens the decline's reason contract: the marker is keyed on the
+/// CANONICAL EVIDENCE EPOCH (a string) rather than `intervention_count`, carries
+/// the stable `park_guard_insufficient_epoch_evidence` reason code plus the
+/// hold cycle, qualifying counts and rotation exclusions, and its operator text
+/// must never mention a planner rung or an intervention count — nothing on this
+/// path reads either any more.
+///
+/// 4etb also RE-BASED the fixture to cycle 1: the guards gate a park, not
+/// arbiter entry, so at prospective cycle 0 this guard is skipped entirely and
+/// the fixture would have proven nothing about it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn park_rung_redispatches_when_no_post_intervention_submission() {
+async fn park_guard_declines_with_the_epoch_keyed_reason_contract() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
     let mut actor = coordinator_actor_for_tests(&db, &tx);
     let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
 
-    // One prior intervention (bumps intervention_count, sets last_intervention_at),
-    // then climb back to the reopen threshold — the second-strike condition.
+    // A prior adjudication raised the evidence floor (`last_intervention_at`),
+    // then the task climbed back to the reopen threshold.
     let task = make_task_with_reopen_count(&db, &tx, REOPEN_INTERVENTION_THRESHOLD).await;
     repo.reset_intervention_counters(&task.id).await.unwrap();
     for _ in 0..REOPEN_INTERVENTION_THRESHOLD {
@@ -2171,20 +2586,39 @@ async fn park_rung_redispatches_when_no_post_intervention_submission() {
         repo.set_status(&task.id, "open").await.unwrap();
     }
     let task = repo.get(&task.id).await.unwrap().unwrap();
-    assert_eq!(task.intervention_count, 1);
+    let raised_floor = task
+        .last_intervention_at
+        .clone()
+        .expect("the fixture's adjudication must have raised the floor");
     assert_eq!(task.reopen_count, REOPEN_INTERVENTION_THRESHOLD);
-    // No sessions were dispatched after the intervention — the cgcl/7fj3/nlus
+
+    // 4etb: re-based past cycle 0. The guards gate a PARK, not arbiter ENTRY —
+    // at prospective cycle 0 the promotion truth table dispatches the arbiter
+    // unconditionally and this guard is skipped, so the uv3p decline can only be
+    // observed once a cycle has been spent (cycle 0 opened, the arbiter
+    // reopened, the row consumed). Opening that cycle is also what stamps the
+    // canonical evidence epoch, which then becomes the floor the decline is
+    // keyed on.
+    let floor = spend_hold_cycle(&db, &task.id, 0).await;
+    assert!(
+        floor >= raised_floor,
+        "the canonical floor is max(escalation_evidence_at, last_intervention_at, \
+         human_review_resolved_at) — the epoch stamped when cycle 0 opened must not \
+         go backwards (epoch {floor}, last_intervention_at {raised_floor})"
+    );
+    let task = repo.get(&task.id).await.unwrap().unwrap();
+    // No sessions were dispatched after the adjudication — the cgcl/7fj3/nlus
     // shape (park within seconds of a rescope, zero dispatches).
 
     let handled = actor.maybe_intervene_on_stuck_task(&task).await;
     assert!(
         !handled,
-        "park rung must NOT handle (park) the task when no post-intervention session was ever dispatched — it must fall through to the redispatch path"
+        "the guard must NOT adjudicate when no post-floor session was ever \
+         dispatched — it must fall through to the redispatch path"
     );
 
-    // The observable of the redispatch decision: no human-review hold was
-    // created, so the task stays dispatchable, and a park-redispatch marker
-    // documents the decision.
+    // The observable of the redispatch decision: no hold was created, so the
+    // task stays dispatchable, and a park-redispatch marker documents it.
     let blockers = repo.list_blockers(&task.id).await.unwrap();
     assert!(
         blockers.is_empty(),
@@ -2198,7 +2632,61 @@ async fn park_rung_redispatches_when_no_post_intervention_submission() {
         1,
         "the redispatch decision records exactly one park-redispatch marker"
     );
-    assert_eq!(markers[0]["kind"], "no_attempted_remediation");
+    let marker = &markers[0];
+    assert_eq!(marker["kind"], "no_attempted_remediation");
+    assert_eq!(
+        marker["reason_code"],
+        CoordinatorActor::PARK_GUARD_INSUFFICIENT_EPOCH_EVIDENCE,
+        "the decline must carry the stable 4etb reason code"
+    );
+    assert_eq!(
+        marker["evidence_floor"].as_str(),
+        Some(floor.as_str()),
+        "the decline is keyed on the canonical evidence epoch, not intervention_count"
+    );
+    assert_eq!(
+        marker["qualifying_submission_count"].as_u64(),
+        Some(0),
+        "zero submissions qualified at or after the floor"
+    );
+    assert_eq!(
+        marker["qualifying_non_attempt_models"],
+        serde_json::json!([])
+    );
+    assert_eq!(marker["excluded_models"], serde_json::json!([]));
+    assert_eq!(marker["disposition"], "redispatch_rotated");
+    assert_eq!(
+        marker["hold_cycle"].as_i64(),
+        Some(1),
+        "the decline is a DISPOSITION of the hold cycle it declined: cycle 0 was \
+         spent by the fixture, so the prospective cycle is 1; got {marker}"
+    );
+    let operator_text = marker["reason"]
+        .as_str()
+        .expect("the decline must carry operator-facing text");
+    assert_eq!(
+        operator_text,
+        CoordinatorActor::guard_declined_park_reason(
+            &floor,
+            marker["hold_cycle"].as_i64().unwrap() as i32
+        ),
+        "the operator text and the structured fields come from the SAME evaluation"
+    );
+    let lowered = operator_text.to_lowercase();
+    assert!(
+        !lowered.contains("planner") && !lowered.contains("intervention_count"),
+        "the 4etb decline names the evidence epoch, never a retired planner rung \
+         or a counter nothing reads; got {operator_text}"
+    );
+    assert_eq!(
+        marker["non_attempt_count"].as_u64(),
+        Some(0),
+        "the legacy audit field stays truthful alongside the new contract"
+    );
+    assert!(
+        arbiter_dispatch_markers(&repo, &task.id).await.is_empty(),
+        "a declined guard must not dispatch an arbiter"
+    );
 }
 
 /// uv3p Part B (AC #2 / 8y3q shape): a park-triggering strike whose CI
@@ -2206,6 +2694,12 @@ async fn park_rung_redispatches_when_no_post_intervention_submission() {
 /// remediation session before any park. 8y3q parked on a brand-new merge-queue
 /// failure whose fix was one token. A subsequent strike on the SAME (now-seen)
 /// fingerprint no longer earns a free shot.
+///
+/// 4etb re-based the fixture to cycle 1. The first-occurrence guard gates a
+/// PARK, not arbiter entry: at prospective cycle 0 the promotion truth table
+/// dispatches the arbiter unconditionally and this guard never runs, so the
+/// fixture spends cycle 0 first (open + `reopen` decision + consume) and the
+/// novel fingerprint is then presented on the cycle the guard actually governs.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn park_rung_dispatches_one_remediation_on_first_occurrence_fingerprint() {
     let db = test_helpers::create_test_db();
@@ -2215,8 +2709,14 @@ async fn park_rung_dispatches_one_remediation_on_first_occurrence_fingerprint() 
 
     let task = make_task_with_reopen_count(&db, &tx, REOPEN_INTERVENTION_THRESHOLD).await;
     repo.reset_intervention_counters(&task.id).await.unwrap();
+    // Spend cycle 0 so the park guards are live on this pass; this also stamps
+    // the canonical evidence epoch that the sessions seeded below sort after.
+    spend_hold_cycle(&db, &task.id, 0).await;
     let mut task = repo.get(&task.id).await.unwrap().unwrap();
-    assert_eq!(task.intervention_count, 1);
+    assert!(
+        task.last_intervention_at.is_some(),
+        "the fixture must have raised the evidence floor"
+    );
     // Attach a brand-new CI failure fingerprint (the merge-queue signature 8y3q
     // parked on). The Task field is read directly by the park rung.
     task.ci_failure_fingerprint = Some("abc123:Merge Queue".to_string());
@@ -2227,7 +2727,7 @@ async fn park_rung_dispatches_one_remediation_on_first_occurrence_fingerprint() 
     seed_terminated_post_intervention_sessions(&db, &tx, &task.id, &["m-a", "m-b"]).await;
 
     let handled = actor
-        .route_planner_intervention(&task, "worker", "second strike", None, 5)
+        .route_arbiter_adjudication(&task, "worker", "second strike", None, 5)
         .await;
     assert!(
         !handled,
@@ -2247,7 +2747,7 @@ async fn park_rung_dispatches_one_remediation_on_first_occurrence_fingerprint() 
     // attempted-remediation gate, which — with two non-attempt models on record
     // — parks.
     let handled_again = actor
-        .route_planner_intervention(&task, "worker", "second strike", None, 5)
+        .route_arbiter_adjudication(&task, "worker", "second strike", None, 5)
         .await;
     assert!(
         handled_again,
@@ -2267,6 +2767,14 @@ async fn park_rung_dispatches_one_remediation_on_first_occurrence_fingerprint() 
 /// DIFFERENT models the task parks, and the reason names the terminated
 /// sessions/models — never the templated "same acceptance criteria kept
 /// failing" text that five of five 2026-07-04 parks asserted falsely.
+///
+/// 4etb re-based the fixture to cycle 1. The non-attempt bound is a park guard,
+/// and the truthful reason is computed from the evidence measured since the
+/// canonical epoch — at prospective cycle 0 the epoch is stamped by this very
+/// pass, so NO evidence could belong to it and the reason would truthfully name
+/// zero sessions. Spending cycle 0 first stamps the epoch that the two
+/// terminations then sort after, which is the production ordering (escalate →
+/// arbiter reopens → workers terminate → escalate again).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn park_rung_parks_after_two_non_attempts_with_truthful_reason() {
     let db = test_helpers::create_test_db();
@@ -2280,6 +2788,7 @@ async fn park_rung_parks_after_two_non_attempts_with_truthful_reason() {
         repo.set_status(&task.id, "closed").await.unwrap();
         repo.set_status(&task.id, "open").await.unwrap();
     }
+    spend_hold_cycle(&db, &task.id, 0).await;
     let task = repo.get(&task.id).await.unwrap().unwrap();
 
     // Two post-intervention sessions terminated pre-submission across DIFFERENT
@@ -2348,6 +2857,11 @@ async fn consumed_arbitration_prevents_duplicate_dispatch() {
         repo.set_status(&task.id, "closed").await.unwrap();
         repo.set_status(&task.id, "open").await.unwrap();
     }
+    // 4etb: the epoch is stamped BEFORE the evidence so the sessions below
+    // belong to this escalation — otherwise the re-entry pass below measures
+    // them against an epoch newer than all of them and declines instead of
+    // exercising the consumed-cycle path this test is about.
+    stamp_evidence_epoch_before_seeding(&repo, &task.id).await;
     let task = repo.get(&task.id).await.unwrap().unwrap();
     seed_terminated_post_intervention_sessions(&db, &tx, &task.id, &["m-a", "m-b"]).await;
     assert!(
@@ -2642,10 +3156,50 @@ async fn escalate_ci_failure_includes_merge_queue_lane_facts() {
     );
 }
 
-/// `route_planner_intervention` appends the merge-queue lane facts even when the
+/// Read the `trigger_reason` the arbiter received for hold cycle 0.
+///
+/// 4etb: the enriched escalation reason used to land in the rung-1 remediation
+/// child's `PLANNER_ESCALATION` comment. It now reaches the forensic arbiter
+/// through the arbitration dossier VERBATIM — this proposal changes WHICH rung
+/// the payload reaches, never what it says (AC9). These tests therefore read
+/// the dossier, and additionally assert the retired comment is NOT written,
+/// which is what would betray a resurrected rung-1 child.
+async fn arbiter_trigger_reason(db: &Database, task_id: &str) -> String {
+    TaskArbitrationRepository::new(db.clone())
+        .get_by_task_and_cycle(task_id, 0)
+        .await
+        .unwrap()
+        .expect("arbitration row 0 must exist")
+        .dossier
+        .expect("the arbiter must receive a dossier")["trigger_reason"]
+        .as_str()
+        .expect("the dossier must carry the trigger reason")
+        .to_owned()
+}
+
+async fn assert_no_planner_escalation_comment(repo: &TaskRepository, task_id: &str) {
+    let comments = repo
+        .query_activity(ActivityQuery {
+            task_id: Some(task_id.to_owned()),
+            event_type: Some("comment".to_string()),
+            limit: 100,
+            ..ActivityQuery::default()
+        })
+        .await
+        .unwrap();
+    assert!(
+        !comments
+            .iter()
+            .any(|c| c.payload.contains("PLANNER_ESCALATION")),
+        "the arbiter rung must not mint a remediation child (whose creation is \
+         what logs the PLANNER_ESCALATION comment) — rung 1 is retired"
+    );
+}
+
+/// `route_arbiter_adjudication` appends the merge-queue lane facts even when the
 /// caller passes `ci_failure_sections = None`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn route_planner_intervention_appends_merge_queue_lane_facts() {
+async fn route_arbiter_adjudication_appends_merge_queue_lane_facts() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
     let mut actor = coordinator_actor_for_tests(&db, &tx);
@@ -2658,28 +3212,11 @@ async fn route_planner_intervention_appends_merge_queue_lane_facts() {
 
     let reason = "Merge queue repeatedly rejected PR.";
     let handled = actor
-        .route_planner_intervention(&task, "worker", reason, None, task.reopen_count)
+        .route_arbiter_adjudication(&task, "worker", reason, None, task.reopen_count)
         .await;
-    assert!(handled, "route_planner_intervention must handle the task");
+    assert!(handled, "route_arbiter_adjudication must handle the task");
 
-    let comments = repo
-        .query_activity(ActivityQuery {
-            task_id: Some(task.id.clone()),
-            event_type: Some("comment".to_string()),
-            actor_role: None,
-            project_id: None,
-            from_time: None,
-            to_time: None,
-            limit: 100,
-            offset: 0,
-        })
-        .await
-        .unwrap();
-
-    let planner_comment = comments
-        .iter()
-        .find(|c| c.payload.contains("PLANNER_ESCALATION"))
-        .expect("PLANNER_ESCALATION comment must be logged");
+    let trigger_reason = arbiter_trigger_reason(&db, &task.id).await;
     for needle in [
         "**CI Failure Details:**",
         "Merge-queue rejection",
@@ -2687,17 +3224,18 @@ async fn route_planner_intervention_appends_merge_queue_lane_facts() {
         "Server Tests",
     ] {
         assert!(
-            planner_comment.payload.contains(needle),
-            "planner escalation reason must include merge-queue fact {needle:?}; got: {}",
-            planner_comment.payload
+            trigger_reason.contains(needle),
+            "the arbiter's trigger reason must include merge-queue fact {needle:?}; \
+             got: {trigger_reason}"
         );
     }
+    assert_no_planner_escalation_comment(&repo, &task.id).await;
 }
 
-/// `route_planner_intervention` appends CI failure sections to the escalation
+/// `route_arbiter_adjudication` appends CI failure sections to the escalation
 /// reason when `ci_failure_sections` is `Some(...)`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn route_planner_intervention_appends_ci_failure_sections() {
+async fn route_arbiter_adjudication_appends_ci_failure_sections() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
     let mut actor = coordinator_actor_for_tests(&db, &tx);
@@ -2708,58 +3246,42 @@ async fn route_planner_intervention_appends_ci_failure_sections() {
     let sections = "**Workflow:** CI\n**Failed job:** test (failure)";
 
     let handled = actor
-        .route_planner_intervention(&task, "worker", reason, Some(sections), task.reopen_count)
+        .route_arbiter_adjudication(&task, "worker", reason, Some(sections), task.reopen_count)
         .await;
-    assert!(handled, "route_planner_intervention must handle the task");
+    assert!(handled, "route_arbiter_adjudication must handle the task");
 
-    // The PLANNER_ESCALATION comment logged by dispatch_planner_escalation
-    // should contain the CI failure sections in the reason.
-    let comments = repo
-        .query_activity(ActivityQuery {
-            task_id: Some(task.id.clone()),
-            event_type: Some("comment".to_string()),
-            actor_role: None,
-            project_id: None,
-            from_time: None,
-            to_time: None,
-            limit: 100,
-            offset: 0,
-        })
+    let trigger_reason = arbiter_trigger_reason(&db, &task.id).await;
+    for needle in [
+        "**CI Failure Details:**",
+        "**Workflow:** CI",
+        "**Failed job:** test (failure)",
+    ] {
+        assert!(
+            trigger_reason.contains(needle),
+            "the arbiter's trigger reason must carry {needle:?} verbatim; got: {trigger_reason}"
+        );
+    }
+    // The sections are also preserved as their own dossier field, not folded
+    // away into prose.
+    let dossier = TaskArbitrationRepository::new(db.clone())
+        .get_by_task_and_cycle(&task.id, 0)
         .await
+        .unwrap()
+        .unwrap()
+        .dossier
         .unwrap();
-
-    let planner_comments: Vec<_> = comments
-        .iter()
-        .filter(|c| c.payload.contains("PLANNER_ESCALATION"))
-        .collect();
-    assert!(
-        !planner_comments.is_empty(),
-        "PLANNER_ESCALATION comment must be logged"
+    assert_eq!(
+        dossier["ci_failure_sections"].as_str(),
+        Some(sections),
+        "ci_failure_sections must survive as its own field"
     );
-    let planner_comment = &planner_comments[0];
-    assert!(
-        planner_comment.payload.contains("**CI Failure Details:**"),
-        "escalation reason must include CI Failure Details header when sections provided; got: {}",
-        planner_comment.payload
-    );
-    assert!(
-        planner_comment.payload.contains("**Workflow:** CI"),
-        "escalation reason must include workflow section; got: {}",
-        planner_comment.payload
-    );
-    assert!(
-        planner_comment
-            .payload
-            .contains("**Failed job:** test (failure)"),
-        "escalation reason must include failed-job section; got: {}",
-        planner_comment.payload
-    );
+    assert_no_planner_escalation_comment(&repo, &task.id).await;
 }
 
-/// `route_planner_intervention` passes the original reason unchanged when
+/// `route_arbiter_adjudication` passes the original reason unchanged when
 /// `ci_failure_sections` is `None`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn route_planner_intervention_with_none_sections_preserves_reason() {
+async fn route_arbiter_adjudication_with_none_sections_preserves_reason() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
     let mut actor = coordinator_actor_for_tests(&db, &tx);
@@ -2769,45 +3291,21 @@ async fn route_planner_intervention_with_none_sections_preserves_reason() {
     let reason = "Internal review loop exceeded threshold.";
 
     let handled = actor
-        .route_planner_intervention(&task, "worker", reason, None, task.reopen_count)
+        .route_arbiter_adjudication(&task, "worker", reason, None, task.reopen_count)
         .await;
-    assert!(handled, "route_planner_intervention must handle the task");
+    assert!(handled, "route_arbiter_adjudication must handle the task");
 
-    let comments = repo
-        .query_activity(ActivityQuery {
-            task_id: Some(task.id.clone()),
-            event_type: Some("comment".to_string()),
-            actor_role: None,
-            project_id: None,
-            from_time: None,
-            to_time: None,
-            limit: 100,
-            offset: 0,
-        })
-        .await
-        .unwrap();
-
-    let planner_comments: Vec<_> = comments
-        .iter()
-        .filter(|c| c.payload.contains("PLANNER_ESCALATION"))
-        .collect();
+    let trigger_reason = arbiter_trigger_reason(&db, &task.id).await;
     assert!(
-        !planner_comments.is_empty(),
-        "PLANNER_ESCALATION comment must be logged"
+        !trigger_reason.contains("**CI Failure Details:**"),
+        "the trigger reason must NOT include CI Failure Details when sections are \
+         None; got: {trigger_reason}"
     );
     assert!(
-        !planner_comments[0]
-            .payload
-            .contains("**CI Failure Details:**"),
-        "escalation reason must NOT include CI Failure Details when sections are None; got: {}",
-        planner_comments[0].payload
+        trigger_reason.contains(reason),
+        "the original reason must reach the arbiter verbatim; got: {trigger_reason}"
     );
-    // The original reason should appear verbatim in the escalation.
-    assert!(
-        planner_comments[0].payload.contains(reason),
-        "escalation reason must contain the original reason text; got: {}",
-        planner_comments[0].payload
-    );
+    assert_no_planner_escalation_comment(&repo, &task.id).await;
 }
 
 /// End-to-end regression (pdn6 release-side): the full lifecycle through the
@@ -2816,7 +3314,7 @@ async fn route_planner_intervention_with_none_sections_preserves_reason() {
 /// intervention returns it to `open` / `list_ready` — and that a normal
 /// (non-review) blocker has identical semantics.
 ///
-/// This test exercises the real coordinator path (`route_loop_guard_planner_intervention`)
+/// This test exercises the real coordinator path (`route_loop_guard_arbiter_adjudication`)
 /// and then queries `list_ready` — the same dispatch readiness query the
 /// coordinator's dispatch tick uses — to prove:
 /// 1. Source is NOT ready while in needs_lead_intervention.
@@ -2835,7 +3333,15 @@ async fn review_hold_release_lifecycle_proves_dispatch_readiness_recovery() {
     repo.reset_intervention_counters(&task.id).await.unwrap();
     // Drive reopen count to the threshold so intervention fires.
     let task = repo.get(&task.id).await.unwrap().unwrap();
-    assert_eq!(task.intervention_count, MAX_PLANNER_INTERVENTIONS);
+    // 4etb: `reset_intervention_counters` is retained for its load-bearing side
+    // effect — the `last_intervention_at` stamp that RAISES the canonical evidence
+    // floor the park guards measure from. The `intervention_count` it also bumps is
+    // inert: rung 1 is retired and no rung reads that counter, so asserting it would
+    // assert a label rather than the state this fixture depends on.
+    assert!(
+        task.last_intervention_at.is_some(),
+        "the fixture must have raised the evidence floor"
+    );
 
     // uv3p Part B: seed two distinct-model pre-submission terminations so the
     // attempted-remediation gate reaches its bound and the loop-guard second
@@ -2844,7 +3350,7 @@ async fn review_hold_release_lifecycle_proves_dispatch_readiness_recovery() {
 
     // Route to the loop guard second-strike path (the actual pdn6 hold mechanism).
     let handled = actor
-        .route_loop_guard_planner_intervention(
+        .route_loop_guard_arbiter_adjudication(
             &task.id,
             "worker",
             "Reply-loop guard `identical_tool_failure` tripped: offending_signature=`shell:cargo-test`, threshold=3, observed=4, turn_span=7..=12",
@@ -3136,12 +3642,12 @@ fn failure_and_stall_escalation_thresholds_are_distinct() {
 }
 
 /// Three consecutive provider-error FAILED sessions without durable status
-/// progress route the task to a Planner intervention (the second-strike PARK
-/// path here, since the task is already at MAX_PLANNER_INTERVENTIONS) instead
+/// progress route the task to the arbiter adjudication (the PARK
+/// path here — 4etb made that rung unconditional) instead
 /// of another backoff+redispatch cycle. The first two strikes only advance the
 /// streak; the third escalates and clears the task's backoff state.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn third_provider_failure_without_progress_routes_to_planner() {
+async fn third_provider_failure_without_progress_routes_to_the_arbiter() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
     let mut actor = coordinator_actor_for_tests(&db, &tx);
@@ -3149,7 +3655,15 @@ async fn third_provider_failure_without_progress_routes_to_planner() {
     let task = make_task_with_reopen_count(&db, &tx, 0).await;
     repo.reset_intervention_counters(&task.id).await.unwrap();
     let task = repo.get(&task.id).await.unwrap().unwrap();
-    assert_eq!(task.intervention_count, MAX_PLANNER_INTERVENTIONS);
+    // 4etb: `reset_intervention_counters` is retained for its load-bearing side
+    // effect — the `last_intervention_at` stamp that RAISES the canonical evidence
+    // floor the park guards measure from. The `intervention_count` it also bumps is
+    // inert: rung 1 is retired and no rung reads that counter, so asserting it would
+    // assert a label rather than the state this fixture depends on.
+    assert!(
+        task.last_intervention_at.is_some(),
+        "the fixture must have raised the evidence floor"
+    );
 
     // uv3p Part B: the three provider-error failures are pre-submission
     // terminations; seed two of them as distinct-model sessions so the park
@@ -3187,7 +3701,7 @@ async fn third_provider_failure_without_progress_routes_to_planner() {
         .await;
     assert!(
         routed,
-        "the third consecutive provider-error failure routes to a Planner intervention"
+        "the third consecutive provider-error failure routes to the arbiter"
     );
 
     // The task is dispatched to the Lead arbiter (needs_lead_intervention),
@@ -3366,15 +3880,17 @@ async fn quality_strikes_below_threshold_does_not_intervene() {
         "quality_strikes below threshold must not trigger intervention"
     );
     assert!(
-        planner_intervention_markers(&repo, &task.id)
-            .await
-            .is_empty(),
+        arbiter_dispatch_markers(&repo, &task.id).await.is_empty(),
         "no marker should be written below threshold"
     );
 }
 
-/// At-threshold quality reopens MUST trigger intervention.
-/// Marker stores both `quality_strikes` and raw `reopen_count`.
+/// At-threshold quality reopens MUST trigger the escalation.
+///
+/// 4etb: the retired `planner_intervention` marker carried `quality_strikes`
+/// and raw `reopen_count`. Those facts now travel in the arbiter's DOSSIER —
+/// the payload the adjudicator actually reads — so that is where they are
+/// asserted; the surviving `arbiter_dispatched` event is keyed by hold cycle.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn quality_strikes_at_threshold_triggers_intervention() {
     let db = test_helpers::create_test_db();
@@ -3406,16 +3922,26 @@ async fn quality_strikes_at_threshold_triggers_intervention() {
         "quality_strikes at threshold must trigger intervention"
     );
 
-    // Marker stores both quality_strikes and reopen_count.
-    let markers = planner_intervention_markers(&repo, &task.id).await;
-    assert_eq!(markers.len(), 1, "exactly one intervention marker");
+    let markers = arbiter_dispatch_markers(&repo, &task.id).await;
+    assert_eq!(markers.len(), 1, "exactly one arbiter dispatch");
+    assert_eq!(markers[0]["hold_cycle"], 0);
+
+    let dossier = TaskArbitrationRepository::new(db.clone())
+        .get_by_task_and_cycle(&task.id, 0)
+        .await
+        .unwrap()
+        .expect("arbitration row 0 must exist")
+        .dossier
+        .expect("the arbiter must receive a dossier");
     assert_eq!(
-        markers[0]["reopen_count"], REOPEN_INTERVENTION_THRESHOLD,
-        "marker reopen_count = raw reopen_count"
+        dossier["reopen_count"].as_i64(),
+        Some(REOPEN_INTERVENTION_THRESHOLD),
+        "dossier reopen_count = raw reopen_count"
     );
     assert_eq!(
-        markers[0]["quality_strikes"], REOPEN_INTERVENTION_THRESHOLD,
-        "marker quality_strikes = quality reopen count"
+        dossier["quality_strikes"].as_i64(),
+        Some(REOPEN_INTERVENTION_THRESHOLD),
+        "dossier quality_strikes = quality reopen count"
     );
 }
 
@@ -3507,15 +4033,27 @@ async fn excluded_class_reopens_do_not_arm_intervention() {
         "quality_strikes at threshold must trigger intervention despite prior merge_conflicts"
     );
 
-    let markers = planner_intervention_markers(&repo, &task.id).await;
+    let markers = arbiter_dispatch_markers(&repo, &task.id).await;
     assert_eq!(markers.len(), 1);
+    assert_eq!(markers[0]["hold_cycle"], 0);
+    // 4etb: the strike counts moved from the retired `planner_intervention`
+    // marker into the arbiter's dossier.
+    let dossier = TaskArbitrationRepository::new(db.clone())
+        .get_by_task_and_cycle(&task.id, 0)
+        .await
+        .unwrap()
+        .expect("arbitration row 0 must exist")
+        .dossier
+        .expect("the arbiter must receive a dossier");
     assert_eq!(
-        markers[0]["quality_strikes"], REOPEN_INTERVENTION_THRESHOLD,
-        "marker records quality strike count"
+        dossier["quality_strikes"].as_i64(),
+        Some(REOPEN_INTERVENTION_THRESHOLD),
+        "the dossier records the quality strike count"
     );
     assert_eq!(
-        markers[0]["reopen_count"], REOPEN_INTERVENTION_THRESHOLD,
-        "marker records raw reopen count"
+        dossier["reopen_count"].as_i64(),
+        Some(REOPEN_INTERVENTION_THRESHOLD),
+        "the dossier records the raw reopen count"
     );
 }
 
@@ -3585,17 +4123,29 @@ async fn intervention_uses_db_quality_count_not_raw_reopen_count() {
         "quality=3 at threshold triggers intervention (even with merge_conflict reopens)"
     );
 
-    // Calling again at the same quality/raw count must not re-intervene because
-    // the marker for this reopen-count value already exists.
+    // 4etb: the reopen-count-keyed marker that used to suppress the second pass
+    // is retired along with rung 1. The unconsumed arbitration row is the
+    // boundary now — a repeat pass is still HANDLED (the source is held on a
+    // live arbiter and must not be redispatched) but must add no second cycle
+    // and no second dispatch event.
     let t = repo.get(&task.id).await.unwrap().unwrap();
-    assert_eq!(t.reopen_count, 3, "raw count = 3");
     let quality = repo.quality_reopen_count(&task.id).await.unwrap();
     assert_eq!(quality, 3, "quality count stays at threshold");
 
-    let intervened = actor.maybe_intervene_on_stuck_task(&t).await;
-    assert!(
-        !intervened,
-        "no re-intervention when quality count hasn't changed and marker exists"
+    let _ = actor.maybe_intervene_on_stuck_task(&t).await;
+    assert_eq!(
+        arbiter_dispatch_markers(&repo, &task.id).await.len(),
+        1,
+        "a repeat pass must not emit a second arbiter_dispatched event"
+    );
+    assert_eq!(
+        TaskArbitrationRepository::new(db.clone())
+            .list_for_task(&task.id)
+            .await
+            .unwrap()
+            .len(),
+        1,
+        "a repeat pass must not open a second arbitration row"
     );
 }
 
@@ -3902,11 +4452,16 @@ async fn mixed_reopen_ledger_park_uses_quality_count_and_emits_telemetry_breakdo
         existing.is_some(),
         "second-strike park must create an unconsumed arbitration row"
     );
-    assert!(
-        planner_intervention_markers(&repo, &task.id)
-            .await
-            .is_empty(),
-        "second-strike park must not write a fresh planner intervention marker"
+    // 4etb: the retired `planner_intervention` marker (which this used to assert
+    // stayed absent) no longer exists; the arbiter dispatch writes its OWN
+    // `arbiter_dispatched` event, exactly once, and that is the honest
+    // assertion. The "no re-escalation to a planner rung" property is now
+    // structural — there is no such rung.
+    let markers = arbiter_dispatch_markers(&repo, &task.id).await;
+    assert_eq!(
+        markers.len(),
+        1,
+        "the escalation writes exactly one arbiter_dispatched event"
     );
 
     // Per proposal cxvq (Section A/F), the arbiter-dispatch rung does NOT park:
@@ -4044,19 +4599,26 @@ async fn gs37_park_guard_not_triggered_below_quality_threshold_despite_raw_reope
          despite the raw reopen counter having advanced"
     );
     assert!(
-        planner_intervention_markers(&repo, &task.id)
+        arbiter_dispatch_markers(&repo, &task.id).await.is_empty(),
+        "no arbiter may be dispatched below the quality threshold"
+    );
+    assert!(
+        repo.get(&t.id)
             .await
-            .is_empty(),
-        "no planner-intervention marker may be written below the quality threshold"
+            .unwrap()
+            .unwrap()
+            .escalation_evidence_at
+            .is_none(),
+        "a below-threshold pass must not stamp an escalation evidence epoch"
     );
 
-    // And no Planner intervention (review) task was spawned.
+    // And no remediation (review) task was spawned either.
     let reviews = repo.list_by_status("open").await.unwrap();
     assert!(
         !reviews
             .iter()
             .any(|r| r.issue_type == "review" && r.project_id == t.project_id),
-        "no Planner intervention (review) task may be created below the park threshold"
+        "no remediation (review) task may be created below the park threshold"
     );
 }
 
@@ -4070,6 +4632,13 @@ async fn gs37_park_guard_not_triggered_below_quality_threshold_despite_raw_reope
 /// work_submitted, status needs_task_review, stale failing CI from a prior
 /// head; run the park evaluation; assert no hold is created. Then apply a
 /// review rejection and assert the park fires (attempt concluded).
+///
+/// 4etb re-based the fixture to cycle 1: the 2vxr guard gates a PARK, not
+/// arbiter entry, so at prospective cycle 0 it is skipped and the submission
+/// would be adjudicated mid-flight regardless of its review state. Spending
+/// cycle 0 (open + `reopen` decision + consume) also stamps the canonical
+/// evidence epoch, so the CI snapshot and the submission below both belong to
+/// the escalation the guard is measuring.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn park_rung_does_not_park_while_submission_pending_review() {
     let db = test_helpers::create_test_db();
@@ -4080,13 +4649,21 @@ async fn park_rung_does_not_park_while_submission_pending_review() {
     // Create a task with reopen_count at the intervention threshold so
     // quality_strikes >= REOPEN_INTERVENTION_THRESHOLD.
     let task = make_task_with_reopen_count(&db, &tx, REOPEN_INTERVENTION_THRESHOLD).await;
-    // Reset intervention counters: bumps intervention_count to 1 (>=
-    // MAX_PLANNER_INTERVENTIONS) and zeroes reopen_count.  The quality
+    // Reset intervention counters: stamps `last_intervention_at` (a component of
+    // the canonical evidence floor) and zeroes `reopen_count`. The quality
     // reopen count is computed from the activity log and stays at
-    // REOPEN_INTERVENTION_THRESHOLD.
+    // REOPEN_INTERVENTION_THRESHOLD. 4etb: the `intervention_count` bump is
+    // inert — no rung reads it.
     repo.reset_intervention_counters(&task.id).await.unwrap();
+    // 4etb: put the task past the unconditional cycle-0 promotion so the 2vxr
+    // guard is live, and stamp the evidence epoch the CI/submission evidence
+    // below sorts after.
+    spend_hold_cycle(&db, &task.id, 0).await;
     let task = repo.get(&task.id).await.unwrap().unwrap();
-    assert_eq!(task.intervention_count, 1);
+    assert!(
+        task.last_intervention_at.is_some(),
+        "the fixture must have raised the evidence floor"
+    );
 
     // Insert a stale CI snapshot (failing, from a prior head SHA). The
     // first_seen_at is set to now by the DB.
@@ -4252,13 +4829,13 @@ async fn park_rung_does_not_park_while_submission_pending_review() {
 // When a consumed/failed arbitration exists for the latest hold cycle,
 // `resolve_current_hold_cycle` advances to the next cycle and a new arbiter
 // is dispatched (the normal flow).  The `AlreadyExistsConsumed` /
-// `AlreadyExistsFailed` match arms in `route_planner_intervention` are
+// `AlreadyExistsFailed` match arms in `route_arbiter_adjudication` are
 // race-condition safety nets: they fire when `try_create` hits a uniqueness
 // conflict on the SAME hold cycle — e.g. the unconsumed row was consumed
 // between `resolve_current_hold_cycle` and `try_create`.
 
 /// When the latest arbitration is consumed, `resolve_current_hold_cycle`
-/// advances to the next cycle and `route_planner_intervention` dispatches a
+/// advances to the next cycle and `route_arbiter_adjudication` dispatches a
 /// new arbiter.  The task transitions to `needs_lead_intervention`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn consumed_arbitration_advances_to_next_cycle_and_dispatches() {
@@ -4274,13 +4851,24 @@ async fn consumed_arbitration_advances_to_next_cycle_and_dispatches() {
         repo.set_status(&task.id, "open").await.unwrap();
     }
     let task = repo.get(&task.id).await.unwrap().unwrap();
-    assert_eq!(task.intervention_count, MAX_PLANNER_INTERVENTIONS);
+    // 4etb: `reset_intervention_counters` is retained for its load-bearing side
+    // effect — the `last_intervention_at` stamp that RAISES the canonical evidence
+    // floor the park guards measure from. The `intervention_count` it also bumps is
+    // inert: rung 1 is retired and no rung reads that counter, so asserting it would
+    // assert a label rather than the state this fixture depends on.
+    assert!(
+        task.last_intervention_at.is_some(),
+        "the fixture must have raised the evidence floor"
+    );
 
     // Seed a consumed arbitration at hold_cycle 0 to simulate a completed
-    // arbiter.
+    // arbiter. 4etb: opened through `try_create_with_evidence_epoch`, the
+    // production entry point — the row and the canonical escalation evidence
+    // epoch commit together, so the post-intervention sessions seeded below sort
+    // AFTER the epoch and qualify as evidence for the cycle-1 pass.
     let arb_repo = TaskArbitrationRepository::new(db.clone());
     arb_repo
-        .try_create(CreateArbitrationParams {
+        .try_create_with_evidence_epoch(CreateArbitrationParams {
             task_id: &task.id,
             hold_cycle: 0,
             deadline_at: None,
@@ -4305,7 +4893,7 @@ async fn consumed_arbitration_advances_to_next_cycle_and_dispatches() {
     // arbitration at cycle 0 is detected, `resolve_current_hold_cycle`
     // advances to cycle 1 and `try_create(1)` inserts a new row → dispatch.
     let handled = actor
-        .route_planner_intervention(&task, "worker", "consumed cycle reentry", None, 5)
+        .route_arbiter_adjudication(&task, "worker", "consumed cycle reentry", None, 5)
         .await;
     assert!(handled, "consumed-cycle re-entry must be handled");
 
@@ -4372,12 +4960,23 @@ async fn failed_arbitration_advances_to_next_cycle_and_dispatches() {
         repo.set_status(&task.id, "open").await.unwrap();
     }
     let task = repo.get(&task.id).await.unwrap().unwrap();
-    assert_eq!(task.intervention_count, MAX_PLANNER_INTERVENTIONS);
+    // 4etb: `reset_intervention_counters` is retained for its load-bearing side
+    // effect — the `last_intervention_at` stamp that RAISES the canonical evidence
+    // floor the park guards measure from. The `intervention_count` it also bumps is
+    // inert: rung 1 is retired and no rung reads that counter, so asserting it would
+    // assert a label rather than the state this fixture depends on.
+    assert!(
+        task.last_intervention_at.is_some(),
+        "the fixture must have raised the evidence floor"
+    );
 
-    // Seed a failed arbitration at hold_cycle 0.
+    // Seed a failed arbitration at hold_cycle 0. 4etb: opened through
+    // `try_create_with_evidence_epoch` (the production entry point) so the row
+    // and the canonical escalation evidence epoch commit together and the
+    // sessions seeded below qualify as evidence for the cycle-1 pass.
     let arb_repo = TaskArbitrationRepository::new(db.clone());
     arb_repo
-        .try_create(CreateArbitrationParams {
+        .try_create_with_evidence_epoch(CreateArbitrationParams {
             task_id: &task.id,
             hold_cycle: 0,
             deadline_at: None,
@@ -4397,7 +4996,7 @@ async fn failed_arbitration_advances_to_next_cycle_and_dispatches() {
     seed_terminated_post_intervention_sessions(&db, &tx, &task.id, &["m-a", "m-b"]).await;
 
     let handled = actor
-        .route_planner_intervention(&task, "worker", "failed cycle reentry", None, 5)
+        .route_arbiter_adjudication(&task, "worker", "failed cycle reentry", None, 5)
         .await;
     assert!(handled, "failed-cycle re-entry must be handled");
 
@@ -4449,14 +5048,27 @@ async fn reentry_with_unconsumed_arbiter_does_not_create_second_arbiter() {
         repo.set_status(&task.id, "open").await.unwrap();
     }
     let task = repo.get(&task.id).await.unwrap().unwrap();
-    assert_eq!(task.intervention_count, MAX_PLANNER_INTERVENTIONS);
+    // 4etb: `reset_intervention_counters` is retained for its load-bearing side
+    // effect — the `last_intervention_at` stamp that RAISES the canonical evidence
+    // floor the park guards measure from. The `intervention_count` it also bumps is
+    // inert: rung 1 is retired and no rung reads that counter, so asserting it would
+    // assert a label rather than the state this fixture depends on.
+    assert!(
+        task.last_intervention_at.is_some(),
+        "the fixture must have raised the evidence floor"
+    );
 
+    // 4etb: stamp the evidence epoch BEFORE the sessions. The first dispatch
+    // below is the unconditional cycle-0 promotion (guards skipped), but the
+    // RE-ENTRY runs with the guards live — and they must measure the sessions
+    // this fixture seeded, not an epoch stamped after them.
+    stamp_evidence_epoch_before_seeding(&repo, &task.id).await;
     seed_terminated_post_intervention_sessions(&db, &tx, &task.id, &["m-a", "m-b"]).await;
 
     // First dispatch: creates the arbitration row and transitions to
     // needs_lead_intervention.
     let first_handled = actor
-        .route_planner_intervention(&task, "worker", "second strike first dispatch", None, 5)
+        .route_arbiter_adjudication(&task, "worker", "second strike first dispatch", None, 5)
         .await;
     assert!(first_handled, "first dispatch must handle the task");
 
@@ -4470,12 +5082,12 @@ async fn reentry_with_unconsumed_arbiter_does_not_create_second_arbiter() {
     let first_arb_id = all_arbs[0].id.clone();
 
     // Re-entry: refresh the task (now in needs_lead_intervention) and call
-    // route_planner_intervention again. The unconsumed arbitration for the
+    // route_arbiter_adjudication again. The unconsumed arbitration for the
     // current hold cycle means the arbiter is already in flight.
     let refreshed = repo.get(&task.id).await.unwrap().unwrap();
     assert_eq!(refreshed.status, "needs_lead_intervention");
     let reentry_handled = actor
-        .route_planner_intervention(&refreshed, "worker", "second strike reentry", None, 5)
+        .route_arbiter_adjudication(&refreshed, "worker", "second strike reentry", None, 5)
         .await;
     assert!(
         reentry_handled,
@@ -4512,7 +5124,7 @@ async fn reentry_with_unconsumed_arbiter_does_not_create_second_arbiter() {
 /// Monitored-reopen starvation regression (incident v1ej, 2026-07-17): when
 /// the current hold cycle's unconsumed arbitration row carries a `reopen`
 /// decision, the arbiter has ALREADY decided and the one monitored worker
-/// attempt is what must run next.  `route_planner_intervention` must yield
+/// attempt is what must run next.  `route_arbiter_adjudication` must yield
 /// (return `false`) so the normal dispatch pass can run that worker — instead
 /// of treating the row as "arbiter in flight" on every tick, which starves the
 /// monitored attempt until the 24h arbitration deadline.
@@ -4532,13 +5144,27 @@ async fn pending_monitored_reopen_yields_to_normal_dispatch() {
         repo.set_status(&task.id, "open").await.unwrap();
     }
     let task = repo.get(&task.id).await.unwrap().unwrap();
-    assert_eq!(task.intervention_count, MAX_PLANNER_INTERVENTIONS);
+    // 4etb: `reset_intervention_counters` is retained for its load-bearing side
+    // effect — the `last_intervention_at` stamp that RAISES the canonical evidence
+    // floor the park guards measure from. The `intervention_count` it also bumps is
+    // inert: rung 1 is retired and no rung reads that counter, so asserting it would
+    // assert a label rather than the state this fixture depends on.
+    assert!(
+        task.last_intervention_at.is_some(),
+        "the fixture must have raised the evidence floor"
+    );
 
+    // 4etb: stamp the evidence epoch BEFORE the sessions. The re-entry pass
+    // below runs with the park guards live (a row exists, so it is no longer the
+    // unconditional cycle-0 promotion); without this the guards would measure
+    // zero evidence, decline, and CONSUME the monitored-reopen row on the way
+    // out — masking the v1ej yield this test exists to prove.
+    stamp_evidence_epoch_before_seeding(&repo, &task.id).await;
     seed_terminated_post_intervention_sessions(&db, &tx, &task.id, &["m-a", "m-b"]).await;
 
     // First dispatch creates the arbitration row (arbiter routed).
     let first_handled = actor
-        .route_planner_intervention(&task, "worker", "second strike first dispatch", None, 5)
+        .route_arbiter_adjudication(&task, "worker", "second strike first dispatch", None, 5)
         .await;
     assert!(first_handled, "first dispatch must handle the task");
 
@@ -4583,7 +5209,7 @@ async fn pending_monitored_reopen_yields_to_normal_dispatch() {
     // dispatch — not spin "arbiter already in flight".
     let refreshed = repo.get(&task.id).await.unwrap().unwrap();
     let handled = actor
-        .route_planner_intervention(&refreshed, "worker", "second strike reentry", None, 5)
+        .route_arbiter_adjudication(&refreshed, "worker", "second strike reentry", None, 5)
         .await;
     assert!(
         !handled,
@@ -4613,7 +5239,7 @@ async fn pending_monitored_reopen_yields_to_normal_dispatch() {
 /// AND the durable `task_arbitrations` row is written (the arbitration ledger,
 /// keyed by `(task_id, hold_cycle)`), then (2) a best-effort `arbiter_dispatched`
 /// activity/outbox record is logged — a write whose failure is only a
-/// `tracing::warn!` (see `route_planner_intervention`, "Log the arbiter_dispatched
+/// `tracing::warn!` (see `route_arbiter_adjudication`, "Log the arbiter_dispatched
 /// outbox payload"). A crash/error in the window AFTER step 1 commits but BEFORE
 /// step 2 becomes durable leaves the task held on a committed arbitration with NO
 /// visible `arbiter_dispatched` record.
@@ -4647,7 +5273,15 @@ async fn arbiter_dispatch_transition_before_activity_failure_recovers_to_single_
         repo.set_status(&task.id, "open").await.unwrap();
     }
     let task = repo.get(&task.id).await.unwrap().unwrap();
-    assert_eq!(task.intervention_count, MAX_PLANNER_INTERVENTIONS);
+    // 4etb: `reset_intervention_counters` is retained for its load-bearing side
+    // effect — the `last_intervention_at` stamp that RAISES the canonical evidence
+    // floor the park guards measure from. The `intervention_count` it also bumps is
+    // inert: rung 1 is retired and no rung reads that counter, so asserting it would
+    // assert a label rather than the state this fixture depends on.
+    assert!(
+        task.last_intervention_at.is_some(),
+        "the fixture must have raised the evidence floor"
+    );
 
     // Durable CI ledger the arbiter dispatch must preserve. The GitHub head SHA
     // and PR URL flow from live task state (CI snapshot + pr_url); the failing CI
@@ -4673,6 +5307,11 @@ async fn arbiter_dispatch_transition_before_activity_failure_recovers_to_single_
 
     // Two distinct-model pre-submission terminations so the attempted-remediation
     // park gate reaches its non-attempt bound and routes to the arbiter.
+    // 4etb: the evidence epoch is stamped first so those terminations belong to
+    // THIS escalation. The initial dispatch is the unconditional cycle-0
+    // promotion, but the recovery replay below re-enters with the guards live
+    // and must see the same evidence rather than an epoch newer than all of it.
+    stamp_evidence_epoch_before_seeding(&repo, &task.id).await;
     seed_terminated_post_intervention_sessions(&db, &tx, &task.id, &["m-a", "m-b"]).await;
 
     // A terminated (crashed) attempt carrying the mirror head SHA — the arbiter
@@ -4718,7 +5357,7 @@ async fn arbiter_dispatch_transition_before_activity_failure_recovers_to_single_
     // ── Initial dispatch: real code commits the transition + durable arbitration
     // row and logs the arbiter_dispatched activity. ─────────────────────────────
     let first_handled = actor
-        .route_planner_intervention(
+        .route_arbiter_adjudication(
             &task,
             "worker",
             "second strike initial dispatch",
@@ -4798,7 +5437,7 @@ async fn arbiter_dispatch_transition_before_activity_failure_recovers_to_single_
     let refreshed = repo.get(&task.id).await.unwrap().unwrap();
     assert_eq!(refreshed.status, "needs_lead_intervention");
     let recovered = actor
-        .route_planner_intervention(
+        .route_arbiter_adjudication(
             &refreshed,
             "worker",
             "second strike recovery replay",
@@ -4890,12 +5529,23 @@ async fn repeated_consumed_cycles_do_not_create_duplicate_arbitration_rows() {
         repo.set_status(&task.id, "open").await.unwrap();
     }
     let task = repo.get(&task.id).await.unwrap().unwrap();
-    assert_eq!(task.intervention_count, MAX_PLANNER_INTERVENTIONS);
+    // 4etb: `reset_intervention_counters` is retained for its load-bearing side
+    // effect — the `last_intervention_at` stamp that RAISES the canonical evidence
+    // floor the park guards measure from. The `intervention_count` it also bumps is
+    // inert: rung 1 is retired and no rung reads that counter, so asserting it would
+    // assert a label rather than the state this fixture depends on.
+    assert!(
+        task.last_intervention_at.is_some(),
+        "the fixture must have raised the evidence floor"
+    );
 
-    // Seed consumed arbitration at cycle 0.
+    // Seed consumed arbitration at cycle 0. 4etb: opened through
+    // `try_create_with_evidence_epoch` (the production entry point) so the
+    // canonical evidence epoch commits with the row and the sessions seeded
+    // below qualify as evidence on every later cycle.
     let arb_repo = TaskArbitrationRepository::new(db.clone());
     arb_repo
-        .try_create(CreateArbitrationParams {
+        .try_create_with_evidence_epoch(CreateArbitrationParams {
             task_id: &task.id,
             hold_cycle: 0,
             deadline_at: None,
@@ -4916,7 +5566,7 @@ async fn repeated_consumed_cycles_do_not_create_duplicate_arbitration_rows() {
 
     // First intervention: advances from consumed cycle 0 to cycle 1.
     let handled1 = actor
-        .route_planner_intervention(&task, "worker", "first consumed reentry", None, 5)
+        .route_arbiter_adjudication(&task, "worker", "first consumed reentry", None, 5)
         .await;
     assert!(handled1, "first consumed re-entry must be handled");
 
@@ -4940,7 +5590,7 @@ async fn repeated_consumed_cycles_do_not_create_duplicate_arbitration_rows() {
     // Task is in needs_lead_intervention from first dispatch; refresh.
     let refreshed = repo.get(&task.id).await.unwrap().unwrap();
     let handled2 = actor
-        .route_planner_intervention(&refreshed, "worker", "second consumed reentry", None, 5)
+        .route_arbiter_adjudication(&refreshed, "worker", "second consumed reentry", None, 5)
         .await;
     assert!(handled2, "second consumed re-entry must be handled");
 
@@ -4969,7 +5619,7 @@ async fn repeated_consumed_cycles_do_not_create_duplicate_arbitration_rows() {
 
 /// `try_create` must return `AlreadyExistsConsumed` when a consumed row
 /// already exists at the same `(task_id, hold_cycle)`.  This is the
-/// race-condition safety net that `route_planner_intervention` uses to park
+/// race-condition safety net that `route_arbiter_adjudication` uses to park
 /// rather than double-dispatch.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn try_create_returns_already_exists_consumed_for_consumed_row() {
@@ -5101,28 +5751,48 @@ async fn try_create_returns_already_exists_failed_for_failed_row() {
 /// The park reason (`compute_park_reason`) must never emit the old static
 /// "same acceptance criteria kept failing" template when post-intervention
 /// history is available.
+///
+/// 4etb additionally forbids the reason from framing the park as the Nth
+/// PLANNER INTERVENTION: rung 1 is retired and nothing on this path reads
+/// `intervention_count`, so the truthful frame is the evidence epoch the guards
+/// actually measured from. This asserts the frame, not just the absence of the
+/// old template — a reason that silently kept counting interventions would be
+/// exactly the "changed the consequence, not the trigger" failure.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn park_reason_never_uses_old_static_template() {
+async fn park_reason_names_the_evidence_epoch_not_an_intervention_count() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
+    let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
 
-    // Create a task with enough reopens that `compute_park_reason` is
-    // exercised.  We use the `make_task_with_reopen_count` helper and seed
-    // terminated post-intervention sessions to exercise the history-based
-    // reason path.
     let task = make_task_with_reopen_count(&db, &tx, REOPEN_INTERVENTION_THRESHOLD).await;
+    // Raise the evidence floor, THEN seed the post-floor non-attempts, so the
+    // history the reason is built from is a real, qualifying one.
+    repo.reset_intervention_counters(&task.id).await.unwrap();
+    let task = repo.get(&task.id).await.unwrap().unwrap();
+    let floor = task.last_intervention_at.clone().unwrap();
     seed_terminated_post_intervention_sessions(&db, &tx, &task.id, &["m-a", "m-b"]).await;
 
-    // Build the post-intervention history and compute the park reason.
     let actor = coordinator_actor_for_tests(&db, &tx);
     let history = actor.post_intervention_history(&task).await;
+    assert_eq!(
+        history.evidence_floor.as_deref(),
+        Some(floor.as_str()),
+        "the history must be computed against the canonical floor"
+    );
     let reason = CoordinatorActor::compute_park_reason(&task, &history);
 
     assert!(
         !reason.contains("same acceptance criteria kept failing"),
         "park reason must NEVER contain the old static template; got: {reason}"
     );
-    assert!(!reason.is_empty(), "park reason must not be empty");
+    assert!(
+        reason.contains("Evidence epoch:") && reason.contains(&floor),
+        "the reason must name the evidence epoch it measured from; got: {reason}"
+    );
+    assert!(
+        !reason.contains("intervention_count") && !reason.contains("planner interventions"),
+        "the reason must not narrate a retired rung-1 counter; got: {reason}"
+    );
 }
 
 // ── Force-close attempt terminalization tests ─────────────────────────────────
@@ -5199,17 +5869,31 @@ async fn arbiter_dossier_includes_attempt_ledger() {
     let mut actor = coordinator_actor_for_tests(&db, &tx);
     let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
 
-    // Create a task and drive intervention_count to MAX_PLANNER_INTERVENTIONS
-    // so the second-strike arbiter path triggers. reset_intervention_counters
-    // sets last_intervention_at = now().
+    // 4etb: what the arbiter path needs from `reset_intervention_counters` is the
+    // `last_intervention_at` stamp (the evidence floor), not the inert
+    // `intervention_count` bump — the arbiter rung is unconditional.
     let task = make_task_with_reopen_count(&db, &tx, 0).await;
     repo.reset_intervention_counters(&task.id).await.unwrap();
     let task = repo.get(&task.id).await.unwrap().unwrap();
-    assert_eq!(task.intervention_count, MAX_PLANNER_INTERVENTIONS);
+    // 4etb: `reset_intervention_counters` is retained for its load-bearing side
+    // effect — the `last_intervention_at` stamp that RAISES the canonical evidence
+    // floor the park guards measure from. The `intervention_count` it also bumps is
+    // inert: rung 1 is retired and no rung reads that counter, so asserting it would
+    // assert a label rather than the state this fixture depends on.
+    assert!(
+        task.last_intervention_at.is_some(),
+        "the fixture must have raised the evidence floor"
+    );
     assert!(
         task.last_intervention_at.is_some(),
         "reset_intervention_counters must set last_intervention_at"
     );
+
+    // 4etb: the attempt ledger in the dossier is scoped to the canonical
+    // evidence epoch, so the epoch has to be stamped BEFORE the rows below —
+    // otherwise every seeded attempt predates the floor and the ledger the
+    // assertions inspect is legitimately empty.
+    stamp_evidence_epoch_before_seeding(&repo, &task.id).await;
 
     // Seed terminated post-intervention sessions so the park gate sees
     // remediation was attempted (avoids the "no evidence" early return).
@@ -5325,7 +6009,7 @@ async fn arbiter_dossier_includes_attempt_ledger() {
 
     // Trigger the second-strike arbiter path.
     let handled = actor
-        .route_loop_guard_planner_intervention(&task.id, "worker", "test-reason for ledger dossier")
+        .route_loop_guard_arbiter_adjudication(&task.id, "worker", "test-reason for ledger dossier")
         .await;
     assert!(handled, "second-strike must be handled");
 
@@ -5461,10 +6145,17 @@ async fn cross_cycle_dossier_includes_guard_deferred_ledger() {
     let mut actor = coordinator_actor_for_tests(&db, &tx);
     let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
 
-    // Set up task with intervention_count >= MAX_PLANNER_INTERVENTIONS.
+    // 4etb: set up the evidence floor (`last_intervention_at`); the arbiter rung
+    // itself is unconditional and reads no intervention counter.
     let task = make_task_with_reopen_count(&db, &tx, 0).await;
     repo.reset_intervention_counters(&task.id).await.unwrap();
     let task = repo.get(&task.id).await.unwrap().unwrap();
+
+    // 4etb: stamp the evidence epoch first. The re-entry dispatch below runs
+    // with the park guards live (cycle 0 has been consumed by then), so the
+    // terminated sessions must sort AFTER the epoch to count as its evidence —
+    // and the cross-cycle ledger asserted below is scoped to the same floor.
+    stamp_evidence_epoch_before_seeding(&repo, &task.id).await;
 
     // Seed terminated sessions so the park gate works.
     seed_terminated_post_intervention_sessions(&db, &tx, &task.id, &["m-a", "m-b"]).await;
@@ -5472,7 +6163,7 @@ async fn cross_cycle_dossier_includes_guard_deferred_ledger() {
     // First arbiter dispatch: creates the arbitration row.
     assert!(
         actor
-            .route_loop_guard_planner_intervention(&task.id, "worker", "initial reason",)
+            .route_loop_guard_arbiter_adjudication(&task.id, "worker", "initial reason",)
             .await,
         "first dispatch creates the arbitration"
     );
@@ -5519,7 +6210,7 @@ async fn cross_cycle_dossier_includes_guard_deferred_ledger() {
     // arbitration was consumed, a NEW cycle is created.
     let task = repo.get(&task.id).await.unwrap().unwrap();
     let handled = actor
-        .route_loop_guard_planner_intervention(&task.id, "worker", "re-entry reason")
+        .route_loop_guard_arbiter_adjudication(&task.id, "worker", "re-entry reason")
         .await;
     assert!(handled, "re-entry dispatch creates a new arbitration cycle");
 
@@ -6359,12 +7050,24 @@ async fn second_strike_arbiter_dispatch_atomic_marker_status_and_outbox() {
         repo.set_status(&task.id, "open").await.unwrap();
     }
     let task = repo.get(&task.id).await.unwrap().unwrap();
-    assert_eq!(task.intervention_count, MAX_PLANNER_INTERVENTIONS);
+    // 4etb: `reset_intervention_counters` is retained for its load-bearing side
+    // effect — the `last_intervention_at` stamp that RAISES the canonical evidence
+    // floor the park guards measure from. The `intervention_count` it also bumps is
+    // inert: rung 1 is retired and no rung reads that counter, so asserting it would
+    // assert a label rather than the state this fixture depends on.
+    assert!(
+        task.last_intervention_at.is_some(),
+        "the fixture must have raised the evidence floor"
+    );
+    // 4etb: the epoch precedes the evidence, so the outbox-replay re-run below
+    // (which no longer takes the unconditional cycle-0 path, because the row now
+    // exists) measures these sessions instead of an empty epoch.
+    stamp_evidence_epoch_before_seeding(&repo, &task.id).await;
     seed_terminated_post_intervention_sessions(&db, &tx, &task.id, &["m-a", "m-b"]).await;
 
     // Act: route the park rung — should dispatch an arbiter.
     let handled = actor
-        .route_planner_intervention(&task, "worker", "test second strike", None, 5)
+        .route_arbiter_adjudication(&task, "worker", "test second strike", None, 5)
         .await;
     assert!(handled, "second-strike must be handled");
 
@@ -6453,7 +7156,7 @@ async fn second_strike_arbiter_dispatch_atomic_marker_status_and_outbox() {
     //    unchanged, arbitration still unconsumed) — must NOT create a second
     //    dispatch or a duplicate activity entry.
     let re_handled = actor
-        .route_planner_intervention(&task, "worker", "test second strike", None, 5)
+        .route_arbiter_adjudication(&task, "worker", "test second strike", None, 5)
         .await;
     assert!(
         re_handled,
@@ -6510,7 +7213,19 @@ async fn corrupted_arbitration_state_advances_to_next_cycle() {
         repo.set_status(&task.id, "open").await.unwrap();
     }
     let task = repo.get(&task.id).await.unwrap().unwrap();
-    assert_eq!(task.intervention_count, MAX_PLANNER_INTERVENTIONS);
+    // 4etb: `reset_intervention_counters` is retained for its load-bearing side
+    // effect — the `last_intervention_at` stamp that RAISES the canonical evidence
+    // floor the park guards measure from. The `intervention_count` it also bumps is
+    // inert: rung 1 is retired and no rung reads that counter, so asserting it would
+    // assert a label rather than the state this fixture depends on.
+    assert!(
+        task.last_intervention_at.is_some(),
+        "the fixture must have raised the evidence floor"
+    );
+    // 4etb: the corrupted cycle-0 row means this pass is NOT the unconditional
+    // cycle-0 promotion — the park guards are live — so the epoch must precede
+    // the evidence they measure.
+    stamp_evidence_epoch_before_seeding(&repo, &task.id).await;
     seed_terminated_post_intervention_sessions(&db, &tx, &task.id, &["m-a", "m-b"]).await;
 
     // Seed an arbitration at cycle 0 and corrupt its state to an invalid value.
@@ -6560,7 +7275,7 @@ async fn corrupted_arbitration_state_advances_to_next_cycle() {
 
     // Act: the park rung must create a fresh arbitration at cycle 1 and dispatch.
     let handled = actor
-        .route_planner_intervention(&task, "worker", "corruption recovery test", None, 5)
+        .route_arbiter_adjudication(&task, "worker", "corruption recovery test", None, 5)
         .await;
     assert!(handled, "park rung must handle corruption recovery");
 
@@ -6614,7 +7329,22 @@ async fn arbiter_failure_dossier_on_db_error_parks_with_evidence_fields() {
         repo.set_status(&task.id, "open").await.unwrap();
     }
     let task = repo.get(&task.id).await.unwrap().unwrap();
-    assert_eq!(task.intervention_count, MAX_PLANNER_INTERVENTIONS);
+    // 4etb: `reset_intervention_counters` is retained for its load-bearing side
+    // effect — the `last_intervention_at` stamp that RAISES the canonical evidence
+    // floor the park guards measure from. The `intervention_count` it also bumps is
+    // inert: rung 1 is retired and no rung reads that counter, so asserting it would
+    // assert a label rather than the state this fixture depends on.
+    assert!(
+        task.last_intervention_at.is_some(),
+        "the fixture must have raised the evidence floor"
+    );
+    // 4etb: with the ledger unreadable (below), `resolve_current_hold_cycle`
+    // errors, so the cycle-0 first-escalation shortcut cannot apply and the park
+    // guards run. The epoch is therefore stamped before the evidence — the
+    // guard-declined-redispatch shape, where an escalation stamped its epoch and
+    // rotated workers accrued under it — so the guards pass and the pass reaches
+    // the fail-closed branch this test is about.
+    stamp_evidence_epoch_before_seeding(&repo, &task.id).await;
     seed_terminated_post_intervention_sessions(&db, &tx, &task.id, &["m-a", "m-b"]).await;
 
     // Drop the arbitration table so resolve_current_hold_cycle fails with
@@ -6623,7 +7353,7 @@ async fn arbiter_failure_dossier_on_db_error_parks_with_evidence_fields() {
 
     // Act: route the park rung — must fail closed to human review.
     let handled = actor
-        .route_planner_intervention(&task, "worker", "db error test", None, 5)
+        .route_arbiter_adjudication(&task, "worker", "db error test", None, 5)
         .await;
     assert!(handled, "db error must park (fail-closed)");
 
@@ -6697,7 +7427,7 @@ async fn arbiter_failure_dossier_on_db_error_parks_with_evidence_fields() {
 /// This test seeds a valid consumed arbitration first, then installs a
 /// `djinn-db` test-support constraint that leaves reads intact while rejecting
 /// subsequent `task_arbitrations` INSERTs.  That means the
-/// `route_planner_intervention` call below successfully re-runs
+/// `route_arbiter_adjudication` call below successfully re-runs
 /// `resolve_current_hold_cycle` as `(1, None)` and only fails when the real
 /// `TaskArbitrationRepository::try_create` call attempts to create cycle 1.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -6715,7 +7445,20 @@ async fn try_create_db_error_parks_with_failure_dossier() {
         repo.set_status(&task.id, "open").await.unwrap();
     }
     let task = repo.get(&task.id).await.unwrap().unwrap();
-    assert_eq!(task.intervention_count, MAX_PLANNER_INTERVENTIONS);
+    // 4etb: `reset_intervention_counters` is retained for its load-bearing side
+    // effect — the `last_intervention_at` stamp that RAISES the canonical evidence
+    // floor the park guards measure from. The `intervention_count` it also bumps is
+    // inert: rung 1 is retired and no rung reads that counter, so asserting it would
+    // assert a label rather than the state this fixture depends on.
+    assert!(
+        task.last_intervention_at.is_some(),
+        "the fixture must have raised the evidence floor"
+    );
+    // 4etb: the consumed cycle-0 row seeded below puts this pass at prospective
+    // cycle 1, where the park guards are live — so the epoch is stamped before
+    // the evidence they measure, otherwise the pass declines instead of reaching
+    // the `try_create` failure arm under test.
+    stamp_evidence_epoch_before_seeding(&repo, &task.id).await;
     seed_terminated_post_intervention_sessions(&db, &tx, &task.id, &["m-a", "m-b"]).await;
 
     // Seed typed evidence that only the `try_create` error arm can preserve in
@@ -6819,7 +7562,7 @@ async fn try_create_db_error_parks_with_failure_dossier() {
     let ci_sections = "Required CI failed: Server Clippy (job_id=86091807456), \
                        Server sqlx Cache (job_id=86091807443)";
     let handled = actor
-        .route_planner_intervention(
+        .route_arbiter_adjudication(
             &task,
             "worker",
             "try_create error test",
@@ -7000,12 +7743,16 @@ async fn decision_failure_cap_parks_and_infra_only_increments_infra_count() {
         repo.set_status(&task.id, "closed").await.unwrap();
         repo.set_status(&task.id, "open").await.unwrap();
     }
+    // 4etb: the unconsumed cycle-1 row means the park guards are live on this
+    // pass, so the epoch must precede the evidence they measure — otherwise the
+    // guards decline before the decision-failure cap is ever consulted.
+    stamp_evidence_epoch_before_seeding(&repo, &task.id).await;
     let task = repo.get(&task.id).await.unwrap().unwrap();
     seed_terminated_post_intervention_sessions(&db, &tx, &task.id, &["m-a", "m-b"]).await;
 
     // Act: route the park rung — decision-failure cap must park, not dispatch.
     let handled = actor
-        .route_planner_intervention(&task, "worker", "decision cap test", None, 5)
+        .route_arbiter_adjudication(&task, "worker", "decision cap test", None, 5)
         .await;
     assert!(handled, "decision-failure cap must be handled (park path)");
     let after = repo.get(&task.id).await.unwrap().unwrap();
@@ -7199,12 +7946,20 @@ async fn hold_release_yields_fresh_arbitration_on_next_strike() {
         repo.set_status(&task.id, "open").await.unwrap();
     }
     let task = repo.get(&task.id).await.unwrap().unwrap();
-    assert_eq!(task.intervention_count, MAX_PLANNER_INTERVENTIONS);
+    // 4etb: `reset_intervention_counters` is retained for its load-bearing side
+    // effect — the `last_intervention_at` stamp that RAISES the canonical evidence
+    // floor the park guards measure from. The `intervention_count` it also bumps is
+    // inert: rung 1 is retired and no rung reads that counter, so asserting it would
+    // assert a label rather than the state this fixture depends on.
+    assert!(
+        task.last_intervention_at.is_some(),
+        "the fixture must have raised the evidence floor"
+    );
     seed_terminated_post_intervention_sessions(&db, &tx, &task.id, &["m-a", "m-b"]).await;
 
     // First strike: dispatch arbiter at cycle 0.
     let handled = actor
-        .route_planner_intervention(&task, "worker", "first park", None, 5)
+        .route_arbiter_adjudication(&task, "worker", "first park", None, 5)
         .await;
     assert!(handled, "first park must be handled");
     let after_first = repo.get(&task.id).await.unwrap().unwrap();
@@ -7345,7 +8100,7 @@ async fn hold_release_yields_fresh_arbitration_on_next_strike() {
     let task = repo.get(&task.id).await.unwrap().unwrap();
 
     let handled2 = actor
-        .route_planner_intervention(&task, "worker", "second park after hold release", None, 5)
+        .route_arbiter_adjudication(&task, "worker", "second park after hold release", None, 5)
         .await;
     assert!(handled2, "second park after hold release must be handled");
 
@@ -7519,7 +8274,7 @@ async fn coordinator_park_rung_creates_needs_lead_intervention_while_park_for_re
     let task_a = repo.get(&task_a.id).await.unwrap().unwrap();
     seed_terminated_post_intervention_sessions(&db, &tx, &task_a.id, &["m-a", "m-b"]).await;
     let handled = actor
-        .route_planner_intervention(&task_a, "worker", "coordinator park", None, 5)
+        .route_arbiter_adjudication(&task_a, "worker", "coordinator park", None, 5)
         .await;
     assert!(handled);
     let after_a = repo.get(&task_a.id).await.unwrap().unwrap();
@@ -7570,6 +8325,11 @@ async fn dispatch_pass_parks_when_decision_failure_cap_reached_at_dispatch_time(
         repo.set_status(&task.id, "closed").await.unwrap();
         repo.set_status(&task.id, "open").await.unwrap();
     }
+    // 4etb: the pre-seeded unconsumed row below keeps this pass off the
+    // unconditional cycle-0 path, so the park guards run first — stamp the epoch
+    // before the evidence they measure, or they decline before the
+    // decision-failure cap is reached.
+    stamp_evidence_epoch_before_seeding(&repo, &task.id).await;
     let task = repo.get(&task.id).await.unwrap().unwrap();
     seed_terminated_post_intervention_sessions(&db, &tx, &task.id, &["m-a", "m-b"]).await;
 
@@ -7616,7 +8376,7 @@ async fn dispatch_pass_parks_when_decision_failure_cap_reached_at_dispatch_time(
 
     // Act: the park rung must detect the decision-failure cap and park.
     let handled = actor
-        .route_planner_intervention(&task, "worker", "decision cap dispatch test", None, 5)
+        .route_arbiter_adjudication(&task, "worker", "decision cap dispatch test", None, 5)
         .await;
     assert!(handled, "decision-failure cap must be handled");
 
@@ -7671,7 +8431,15 @@ async fn reentry_with_stale_decided_arbitration_self_consumes_and_dispatches_fre
         repo.set_status(&task.id, "open").await.unwrap();
     }
     let task = repo.get(&task.id).await.unwrap().unwrap();
-    assert_eq!(task.intervention_count, MAX_PLANNER_INTERVENTIONS);
+    // 4etb: `reset_intervention_counters` is retained for its load-bearing side
+    // effect — the `last_intervention_at` stamp that RAISES the canonical evidence
+    // floor the park guards measure from. The `intervention_count` it also bumps is
+    // inert: rung 1 is retired and no rung reads that counter, so asserting it would
+    // assert a label rather than the state this fixture depends on.
+    assert!(
+        task.last_intervention_at.is_some(),
+        "the fixture must have raised the evidence floor"
+    );
 
     // Seed an UNCONSUMED arbitration at hold_cycle 0 whose directive already
     // carries a terminal decision — the shape left behind by an approve that
@@ -7681,8 +8449,12 @@ async fn reentry_with_stale_decided_arbitration_self_consumes_and_dispatches_fre
         "decision": "approve",
         "evidence_summary": "full diff review confirmed the remediation",
     });
+    // 4etb: opened through the production entry point so the row and the
+    // canonical evidence epoch commit together — the sessions seeded below then
+    // sort after the epoch and the park guards (live, because a row exists) see
+    // them instead of declining before the self-consume path under test.
     arb_repo
-        .try_create(CreateArbitrationParams {
+        .try_create_with_evidence_epoch(CreateArbitrationParams {
             task_id: &task.id,
             hold_cycle: 0,
             deadline_at: None,
@@ -7701,7 +8473,7 @@ async fn reentry_with_stale_decided_arbitration_self_consumes_and_dispatches_fre
     seed_terminated_post_intervention_sessions(&db, &tx, &task.id, &["m-a", "m-b"]).await;
 
     let handled = actor
-        .route_planner_intervention(&task, "worker", "merge-conflict reopen reentry", None, 5)
+        .route_arbiter_adjudication(&task, "worker", "merge-conflict reopen reentry", None, 5)
         .await;
     assert!(handled, "stale-decided re-entry must be handled");
 
@@ -7760,8 +8532,13 @@ async fn reentry_with_monitored_reopen_directive_does_not_self_consume() {
         "decision": "reopen",
         "directive": "fix the flaky assertion and re-run the suite",
     });
+    // 4etb: opened through the production entry point so the row and the
+    // canonical evidence epoch commit together. Without the epoch preceding the
+    // sessions below, the (now live) park guards measure zero evidence, decline,
+    // and CONSUME this row on the way out — which would silently invert the
+    // property under test.
     arb_repo
-        .try_create(CreateArbitrationParams {
+        .try_create_with_evidence_epoch(CreateArbitrationParams {
             task_id: &task.id,
             hold_cycle: 0,
             deadline_at: None,
@@ -7780,7 +8557,7 @@ async fn reentry_with_monitored_reopen_directive_does_not_self_consume() {
     seed_terminated_post_intervention_sessions(&db, &tx, &task.id, &["m-a", "m-b"]).await;
 
     let handled = actor
-        .route_planner_intervention(&task, "worker", "monitored reopen reentry", None, 5)
+        .route_arbiter_adjudication(&task, "worker", "monitored reopen reentry", None, 5)
         .await;
     assert!(
         !handled,
@@ -7803,14 +8580,18 @@ async fn reentry_with_monitored_reopen_directive_does_not_self_consume() {
 
 // ── Remediation rung labelling (title / description honesty) ─────────────
 //
-// `create_remediation_task` builds the board-visible remediation task for all
-// three `RemediationKind` variants. Every variant used to be titled
+// `create_remediation_task` builds the board-visible remediation task for every
+// surviving `RemediationKind`. Historically all THREE variants were titled
 // `Planner remediation [<short_id>]: <title>`, so a first-response remediation
 // and a TERMINAL post-arbiter escalation were indistinguishable on the board
-// without reading the description prose — and the `Planner` variant's
-// description asserted "Lead could not resolve", which is false: that variant
-// fires from the coordinator's own loop detectors with no arbiter/Lead session
-// anywhere in the source task's history.
+// without reading the description prose.
+//
+// 4etb retired the first-response `Planner` variant outright, which removes that
+// collision at the root: only the two TERMINAL rungs remain, and each already
+// owns its own prefix and label. The tests below therefore enumerate the
+// surviving kinds exhaustively — a future change that re-adds a first-response
+// rung has to touch them deliberately — and assert that neither of them can
+// produce the retired rung's title prefix or `planner-remediation` label.
 
 /// Create a remediation of `kind` for a fresh source task and return the
 /// remediation task the source ends up blocked on.
@@ -7835,26 +8616,26 @@ async fn remediation_task_for_kind(
     repo.get(&blockers[0].task_id).await.unwrap().unwrap()
 }
 
-/// The three rungs must be tellable apart from the TITLE alone: a human (or an
-/// agent) scanning the board must see whether a remediation is the
-/// first-response rung or the terminal post-arbiter escalation without opening
-/// the description.
+/// The surviving rungs must be tellable apart from the TITLE alone: a human (or
+/// an agent) scanning the board must see WHO resolves a remediation without
+/// opening the description.
+///
+/// 4etb rewrite. This used to enumerate three kinds, including the
+/// first-response `RemediationKind::Planner`. That variant is deleted, so the
+/// test now enumerates the two survivors exhaustively and asserts the stronger
+/// property the deletion bought: NEITHER surviving kind can wear the retired
+/// rung's `Planner remediation [` prefix or its `planner-remediation` label.
+/// The `Planner`-only assertions (its own prefix, its descriptive-but-inert
+/// label, and that the label is not a source-releasing or human hold) are
+/// deleted with the rung they described — there is no code path left that can
+/// produce a first-response remediation for them to constrain.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn remediation_kinds_are_distinguishable_by_title_alone() {
+async fn surviving_remediation_kinds_are_distinguishable_by_title_alone() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
     let mut actor = coordinator_actor_for_tests(&db, &tx);
     let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
 
-    let first_response = remediation_task_for_kind(
-        &db,
-        &tx,
-        &mut actor,
-        &repo,
-        crate::dispatch::RemediationKind::Planner,
-        "coordinator detected a reopen loop",
-    )
-    .await;
     let terminal = remediation_task_for_kind(
         &db,
         &tx,
@@ -7874,14 +8655,7 @@ async fn remediation_kinds_are_distinguishable_by_title_alone() {
     )
     .await;
 
-    // Each rung owns a DISTINCT title prefix.
-    assert!(
-        first_response
-            .title
-            .starts_with(crate::roles::PLANNER_REMEDIATION_TITLE_PREFIX),
-        "first-response remediation must be titled `Planner remediation [...]`; got {:?}",
-        first_response.title
-    );
+    // Each surviving rung owns a DISTINCT title prefix.
     assert!(
         terminal
             .title
@@ -7897,19 +8671,24 @@ async fn remediation_kinds_are_distinguishable_by_title_alone() {
         human.title
     );
 
-    // The terminal rung must NOT read as a first-response remediation. This is
-    // the exact collision that made 198 board tasks indistinguishable: both
-    // rungs shared the `Planner remediation [` prefix.
-    assert!(
-        !terminal
-            .title
-            .starts_with(crate::roles::PLANNER_REMEDIATION_TITLE_PREFIX),
-        "a terminal escalation must not wear the first-response prefix; got {:?}",
-        terminal.title
-    );
+    // Neither may read as the retired first-response rung. This was the exact
+    // collision that made 198 board tasks indistinguishable; 4etb removes the
+    // producer, and this pins that the survivors did not inherit its identity.
+    for t in [&terminal, &human] {
+        assert!(
+            !t.title.starts_with("Planner remediation ["),
+            "no surviving rung may wear the retired first-response prefix; got {:?}",
+            t.title
+        );
+        assert!(
+            !t.labels.contains("planner-remediation"),
+            "no surviving rung may carry the retired first-response label; labels={}",
+            t.labels
+        );
+    }
 
-    // All three titles differ pairwise on their prefix, and stay bounded.
-    let prefixes: Vec<&str> = [&first_response, &terminal, &human]
+    // The two titles differ on their prefix, and stay bounded.
+    let prefixes: Vec<&str> = [&terminal, &human]
         .iter()
         .map(|t| t.title.split(" [").next().unwrap())
         .collect();
@@ -7918,10 +8697,10 @@ async fn remediation_kinds_are_distinguishable_by_title_alone() {
             .iter()
             .collect::<std::collections::HashSet<_>>()
             .len(),
-        3,
-        "the three rungs must carry three distinct title prefixes; got {prefixes:?}"
+        2,
+        "the two rungs must carry two distinct title prefixes; got {prefixes:?}"
     );
-    for t in [&first_response, &terminal, &human] {
+    for t in [&terminal, &human] {
         assert!(
             t.title.chars().count() <= 160,
             "remediation titles stay bounded; got {} chars: {:?}",
@@ -7930,30 +8709,23 @@ async fn remediation_kinds_are_distinguishable_by_title_alone() {
         );
     }
 
-    // The rung is queryable, not just readable.
-    assert!(
-        first_response
-            .labels
-            .contains(crate::roles::PLANNER_REMEDIATION_LABEL),
-        "first-response remediation must carry the `planner-remediation` label; labels={}",
-        first_response.labels
-    );
-    assert!(
-        !crate::roles::releases_source_on_close(&first_response),
-        "the descriptive first-response label must NOT turn the remediation into a \
-         source-releasing hold; labels={}",
-        first_response.labels
-    );
-    assert!(
-        !crate::roles::is_human_review_hold(&first_response),
-        "the first-response label must NOT read as a human hold; labels={}",
-        first_response.labels
-    );
+    // The rung is queryable, not just readable, and each drives its own
+    // close-time semantics.
     assert!(
         terminal
             .labels
             .contains(crate::roles::PLANNER_PARK_ESCALATION_LABEL),
         "terminal escalation keeps the `planner-park-escalation` label; labels={}",
+        terminal.labels
+    );
+    assert!(
+        crate::roles::releases_source_on_close(&terminal),
+        "closing the terminal escalation must release its blocked source; labels={}",
+        terminal.labels
+    );
+    assert!(
+        !crate::roles::is_human_review_hold(&terminal),
+        "the autonomous terminal rung must NOT read as a human hold; labels={}",
         terminal.labels
     );
     assert!(
@@ -7963,61 +8735,52 @@ async fn remediation_kinds_are_distinguishable_by_title_alone() {
     );
 }
 
-/// The first-response rung must describe what ACTUALLY happened — the
-/// coordinator detected the loop — and must never assert that a Lead tried and
-/// failed. `prompts/planner/intervention.md` teaches the Planner to read "Lead
-/// escalation" as a distinct case meaning a Lead genuinely ran, so the old
-/// "Lead could not resolve" sentence actively misinformed the agent on a task
-/// with `intervention_count = 0` and no `lead` session.
+/// Neither surviving rung may narrate a Lead that did not run.
+///
+/// 4etb rewrite of `planner_remediation_does_not_claim_a_lead_ran`. The original
+/// covered the first-response `Planner` rung, whose description asserted "Lead
+/// could not resolve" on tasks with no `lead` session at all —
+/// `prompts/planner/intervention.md` teaches the Planner to read "Lead
+/// escalation" as meaning a Lead genuinely ran, so that sentence actively
+/// misinformed the agent. The rung is gone, but the honesty requirement carries
+/// over to the rungs that replaced it, and it is now testable in the STRONG
+/// direction: the terminal escalation may only claim what actually happened
+/// (automated remediation could not converge), and the escalation reason must
+/// survive into the description either way.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn planner_remediation_does_not_claim_a_lead_ran() {
+async fn surviving_remediation_rungs_do_not_claim_an_unrun_lead() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
     let mut actor = coordinator_actor_for_tests(&db, &tx);
     let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
 
-    let precondition = make_task_with_reopen_count(&db, &tx, 0).await;
-    assert_eq!(
-        precondition.intervention_count, 0,
-        "fixture precondition: no arbiter/Lead rung has run on the source"
-    );
-
-    let remediation = remediation_task_for_kind(
-        &db,
-        &tx,
-        &mut actor,
-        &repo,
-        crate::dispatch::RemediationKind::Planner,
-        "worker cycled 3 times on the same failure",
-    )
-    .await;
-
-    let lowered = remediation.description.to_lowercase();
-    assert!(
-        !lowered.contains("lead could not resolve"),
-        "the first-response rung must not claim a Lead tried and failed; description={:?}",
-        remediation.description
-    );
-    assert!(
-        !lowered.contains("lead "),
-        "no Lead ran before this rung, so the description must not narrate one; \
-         description={:?}",
-        remediation.description
-    );
-    assert!(
-        remediation.description.contains("COORDINATOR"),
-        "the description must name the coordinator as the actual detector; description={:?}",
-        remediation.description
-    );
-    // The escalation reason survives the rewrite — it is the payload the
-    // Planner acts on.
-    assert!(
-        remediation
-            .description
-            .contains("worker cycled 3 times on the same failure"),
-        "the escalation reason must stay in the description; description={:?}",
-        remediation.description
-    );
+    for (kind, reason) in [
+        (
+            crate::dispatch::RemediationKind::PlannerEscalation,
+            "worker cycled 3 times on the same failure",
+        ),
+        (
+            crate::dispatch::RemediationKind::HumanReview,
+            "operator policy demands human adjudication",
+        ),
+    ] {
+        let remediation =
+            remediation_task_for_kind(&db, &tx, &mut actor, &repo, kind, reason).await;
+        let lowered = remediation.description.to_lowercase();
+        assert!(
+            !lowered.contains("lead could not resolve"),
+            "{kind:?} must not claim a Lead tried and failed; description={:?}",
+            remediation.description
+        );
+        // The escalation reason is the payload the resolver acts on and must
+        // survive verbatim.
+        assert!(
+            remediation.description.contains(reason),
+            "{kind:?} must keep the escalation reason in its description; \
+             description={:?}",
+            remediation.description
+        );
+    }
 }
 
 /// The terminal and human rungs are CORRECT today — their instructions must

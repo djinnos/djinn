@@ -415,9 +415,9 @@ pub async fn record_adopted_pr_attempt(
 /// Actor id recorded on the adoption-handoff transition. The handoff is a
 /// system bookkeeping move (no user), mirroring the PR poller's own
 /// `("system", "pr_poller")` board transitions.
-const HANDOFF_ACTOR_ID: &str = "system";
+pub(crate) const HANDOFF_ACTOR_ID: &str = "system";
 /// Actor role recorded on the adoption-handoff transition.
-const HANDOFF_ACTOR_ROLE: &str = "respawn_guard";
+pub(crate) const HANDOFF_ACTOR_ROLE: &str = "respawn_guard";
 
 /// Hand an adopted open PR off to the PR poller by transitioning the task from
 /// the dispatchable `open` column into the poller-owned `pr_review` column.

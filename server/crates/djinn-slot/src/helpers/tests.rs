@@ -324,6 +324,7 @@ static AUTO_CODE_CONTEXT_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(
 
 fn worker_task(project_id: &str) -> Task {
     Task {
+        escalation_evidence_at: None,
         id: uuid::Uuid::now_v7().to_string(),
         project_id: project_id.to_string(),
         short_id: "wtst".to_string(),

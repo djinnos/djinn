@@ -632,10 +632,23 @@ fn the_privileged_git_proofs_are_wired_and_cannot_silently_skip() {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../.github/workflows/quality-gate.yml");
     let workflow = std::fs::read_to_string(&workflow)
         .unwrap_or_else(|error| panic!("read {}: {error}", workflow.display()));
-    let lane = workflow
+    // Bound the slice to THIS job. Splitting on the header alone runs to EOF,
+    // which makes the `continue-on-error` assertion below fire on any later job
+    // in the file — a false positive that says nothing about this lane. Job
+    // headers are the only two-space-indented, non-comment keys at this level.
+    let after_header = workflow
         .split(&format!("\n  {PRIVILEGED_LANE_JOB}:"))
         .nth(1)
         .unwrap_or_else(|| panic!("the {PRIVILEGED_LANE_JOB} lane must exist"));
+    let end = after_header
+        .match_indices("\n  ")
+        .find(|(index, _)| {
+            let first_line = after_header[index + 3..].lines().next().unwrap_or("");
+            !first_line.starts_with(' ') && !first_line.starts_with('#') && first_line.contains(':')
+        })
+        .map(|(index, _)| index)
+        .unwrap_or(after_header.len());
+    let lane = &after_header[..end];
 
     assert!(
         lane.contains("--test brokered_git_trust"),

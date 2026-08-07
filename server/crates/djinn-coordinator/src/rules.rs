@@ -1090,52 +1090,18 @@ mod tests {
 
     /// Build a `CoordinatorActor` directly (not spawned) so a test can drive an
     /// individual method like `sweep_proposals_needing_review` deterministically.
+    ///
+    /// Thin wrapper over [`test_helpers::make_coordinator_actor_cancellable`],
+    /// which wave-module tests share. This form drops the slot pool's
+    /// cancellation token, so the pool task outlives the test body; a test that
+    /// cares (because it also wants the database pool closed before
+    /// `TestDbInit::drop` runs `DROP DATABASE`) should call the `_cancellable`
+    /// helper directly.
     fn make_coordinator_actor(
         db: &Database,
         tx: &broadcast::Sender<DjinnEventEnvelope>,
     ) -> CoordinatorActor {
-        use crate::roles::RoleRegistry;
-        use djinn_provider::catalog::health::HealthTracker;
-        use djinn_slot::{ModelSlotConfig, SlotPoolConfig, SlotPoolHandle};
-
-        let cancel = CancellationToken::new();
-        let ctx = test_helpers::agent_context_from_db(db.clone(), cancel.clone());
-        let pool = SlotPoolHandle::spawn(
-            ctx,
-            cancel.clone(),
-            SlotPoolConfig {
-                models: vec![ModelSlotConfig {
-                    model_id: DEFAULT_MODEL_ID.to_owned(),
-                    max_slots: 1,
-                    roles: ["worker"].into_iter().map(ToOwned::to_owned).collect(),
-                }],
-                role_priorities: HashMap::new(),
-            },
-        );
-        let (status_tx, _) = tokio::sync::watch::channel(SharedCoordinatorState {
-            dispatched: 0,
-            recovered: 0,
-            epic_throughput: HashMap::new(),
-            pr_errors: HashMap::new(),
-            rate_limited_until: None,
-        });
-        let (sender, receiver) = tokio::sync::mpsc::channel(8);
-        CoordinatorActor::new(
-            CoordinatorDeps::new(
-                tx.clone(),
-                cancel,
-                db.clone(),
-                pool,
-                djinn_provider::catalog::CatalogService::new(),
-                HealthTracker::new(),
-                Arc::new(RoleRegistry::new()),
-                BackgroundWorkTracker::default(),
-                djinn_lsp::LspManager::new(),
-            ),
-            receiver,
-            sender,
-            status_tx,
-        )
+        test_helpers::make_coordinator_actor_cancellable(db, tx).0
     }
 
     async fn make_fixture_user(db: &Database, purpose: &str) -> djinn_db::User {
@@ -1776,7 +1742,7 @@ mod tests {
 
         // Insert a running planner session on `planner_host`.
         let session_repo = SessionRepository::new(db.clone(), crate::events::event_bus_for(&tx));
-        session_repo
+        let planner_session = session_repo
             .create(CreateSessionParams {
                 project_id: &project.id,
                 task_id: Some(&planner_host.id),
@@ -1790,12 +1756,42 @@ mod tests {
             .await
             .unwrap();
 
-        let _handle = spawn_coordinator(&db, &tx);
+        // Drive the batch-completion pass explicitly rather than spawning a
+        // coordinator and sleeping.
+        //
+        // The old shape was `spawn_coordinator(...)` + `sleep(200ms)` + assert
+        // the planning count is 0. That assertion cannot distinguish "the
+        // reentrance guard suppressed the dispatch" from "the coordinator had
+        // not gotten around to the close event yet" — a coordinator that
+        // ignored the event entirely would have produced exactly the same 0.
+        // The sleep was standing in for a happens-before edge it could not
+        // provide, and on a loaded box (four pooled connections shared with the
+        // coordinator's startup path and its immediate first tick) the wait was
+        // long enough to blow the 90s nextest budget.
+        //
+        // Awaiting `on_task_closed` is that edge: when it returns, the pass has
+        // run to completion, so the count below is what the pass *produced*.
+        let (mut actor, cancel) = test_helpers::make_coordinator_actor_cancellable(&db, &tx);
 
-        // Closing the worker task should normally trigger batch-completion
-        // auto-dispatch — but the active planner guard must suppress it.
-        close_task(&db, &t1.id, &tx).await;
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        // Closing the worker task drains the epic, so batch completion would
+        // normally fire — the active planner guard must suppress it.
+        let closed = task_repo
+            .transition(
+                &t1.id,
+                djinn_core::models::TransitionAction::Close,
+                "test",
+                "system",
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            closed.status, "closed",
+            "precondition: the only worker task must be closed, so the epic is drained"
+        );
+
+        actor.on_task_closed(&closed).await;
 
         let tasks = task_repo.list_by_epic(&epic.id).await.unwrap();
         assert_eq!(
@@ -1803,6 +1799,37 @@ mod tests {
             0,
             "reentrance guard must suppress new planning task while planner is active"
         );
+
+        // Non-vacuity witness, in-test: end the planner session and replay the
+        // very same pass on the very same fixture. Every other gate in
+        // `should_auto_dispatch_planner` is unchanged, so the only difference is
+        // the active-planner check — and now a planning task MUST appear.
+        //
+        // Together the two assertions pin the mechanism from both sides: delete
+        // the active-session guard and the first assertion fails (a planning
+        // task is created while the planner is running); make the pass a no-op
+        // and the second fails (no planning task is ever created). Neither can
+        // be satisfied by a coordinator that simply never ran.
+        let settled = session_repo
+            .settle_non_terminal_by_id(&planner_session.id)
+            .await
+            .unwrap();
+        assert!(settled, "fixture: planner session must have been running");
+
+        actor.on_task_closed(&closed).await;
+
+        let tasks = task_repo.list_by_epic(&epic.id).await.unwrap();
+        assert_eq!(
+            planning_count(&tasks),
+            1,
+            "with no active planner the identical pass must create the planning task \
+             it was suppressing — otherwise the assertion above proves nothing"
+        );
+
+        // Stop the slot-pool task and hand back every pooled connection before
+        // `TestDbInit::drop` blocks on `DROP DATABASE`.
+        cancel.cancel();
+        db.pool().close().await;
     }
 
     // ── Proposal review: incremental on epic close + backfill sweep ───────────

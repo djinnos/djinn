@@ -16,6 +16,7 @@ test-runtime = []
 
 [dependencies]
 djinn-core = { path = "../djinn-core" }
+djinn-db = { path = "../djinn-db" }
 djinn-launcher-protocol = { path = "../djinn-launcher-protocol" }
 anyhow = "1"
 async-trait = "0.1"

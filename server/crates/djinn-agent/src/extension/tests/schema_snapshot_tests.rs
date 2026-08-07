@@ -548,7 +548,7 @@ fn production_handler_dispatch_does_not_transition_to_needs_lead_intervention() 
 
 /// The deprecated `call_request_lead` handler (`task_epic.rs`) must NOT
 /// contain any code that transitions a task to `needs_lead_intervention`.
-/// It routes to `dispatch_planner_escalation` instead.
+/// It routes to `dispatch_arbiter_adjudication` instead.
 #[test]
 fn deprecated_request_lead_handler_does_not_transition_to_needs_lead_intervention() {
     let src = include_str!("../handlers/task_epic.rs");
@@ -574,10 +574,10 @@ fn deprecated_request_lead_handler_does_not_transition_to_needs_lead_interventio
     assert!(
         !code_only.contains("needs_lead_intervention"),
         "call_request_lead must NOT transition task to needs_lead_intervention; \
-         it should route to dispatch_planner_escalation only"
+         it should route to dispatch_arbiter_adjudication only"
     );
     assert!(
-        code_only.contains("dispatch_planner_escalation"),
-        "call_request_lead must route through dispatch_planner_escalation"
+        code_only.contains("dispatch_arbiter_adjudication"),
+        "call_request_lead must route through dispatch_arbiter_adjudication"
     );
 }

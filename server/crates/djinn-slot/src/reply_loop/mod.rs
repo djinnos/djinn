@@ -40,7 +40,7 @@ pub use error_handling::{
     ReplyLoopCancelled, ReplyLoopCompactionFailure, StepCapWindDownIgnored,
 };
 pub use phase::{SessionPhase, SessionPhaseRole, SessionPhaseTracker};
-pub use turn::{ReplyLoopContext, run_reply_loop};
+pub use turn::{ModelTurnAdmissionOutcome, ReplyLoopContext, run_reply_loop};
 
 #[cfg(test)]
 mod tests;
