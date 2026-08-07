@@ -15,6 +15,88 @@ use djinn_provider::catalog::{CatalogService, HealthTracker};
 use djinn_slot::host::SlotContext;
 use djinn_slot::reply_loop::CompactionCriticalSection;
 
+/// Build a `CoordinatorActor` directly — never spawned — together with the
+/// `CancellationToken` its slot pool was built with.
+///
+/// A test that wants a *deterministic* coordinator pass must not spawn one.
+/// `CoordinatorHandle::spawn` detaches `CoordinatorActor::run` onto
+/// the test runtime, and that task first walks the whole startup path
+/// (incarnation registration, three startup reapers, durable-dispatch
+/// rehydration, refinement recovery) and then immediately takes its first
+/// 30s tick — `tokio::time::interval` fires once straight away — which runs
+/// the full `run_tick` sweep. All of that contends for the test database's
+/// **four** pooled connections with the test body itself, so a test that
+/// spawns a coordinator and then sleeps a fixed number of milliseconds is
+/// really asserting against whatever that race happened to produce.
+///
+/// Driving `handle_event` / `on_task_closed` on an unspawned actor replaces
+/// that race with a happens-before edge: the pass is complete when the
+/// `.await` returns, so the assertion that follows observes a finished pass
+/// rather than an unstarted one.
+///
+/// The returned token is the one held by the `SlotPoolHandle` spawned
+/// here. Nothing else in the process will ever fire it, so a caller
+/// that drops it on the floor leaks that pool task for the lifetime of the
+/// test binary; cancel it (and close the pool) at the end of the test body:
+///
+/// ```ignore
+/// let (mut actor, cancel) = test_helpers::make_coordinator_actor_cancellable(&db, &tx);
+/// // ... drive passes, assert ...
+/// cancel.cancel();
+/// db.pool().close().await;
+/// ```
+pub fn make_coordinator_actor_cancellable(
+    db: &Database,
+    tx: &tokio::sync::broadcast::Sender<djinn_core::events::DjinnEventEnvelope>,
+) -> (crate::actor::CoordinatorActor, CancellationToken) {
+    use crate::roles::RoleRegistry;
+    use crate::types::{
+        BackgroundWorkTracker, CoordinatorDeps, DEFAULT_MODEL_ID, SharedCoordinatorState,
+    };
+    use djinn_slot::{ModelSlotConfig, SlotPoolConfig, SlotPoolHandle};
+    use std::collections::HashMap;
+
+    let cancel = CancellationToken::new();
+    let ctx = agent_context_from_db(db.clone(), cancel.clone());
+    let pool = SlotPoolHandle::spawn(
+        ctx,
+        cancel.clone(),
+        SlotPoolConfig {
+            models: vec![ModelSlotConfig {
+                model_id: DEFAULT_MODEL_ID.to_owned(),
+                max_slots: 1,
+                roles: ["worker"].into_iter().map(ToOwned::to_owned).collect(),
+            }],
+            role_priorities: HashMap::new(),
+        },
+    );
+    let (status_tx, _) = tokio::sync::watch::channel(SharedCoordinatorState {
+        dispatched: 0,
+        recovered: 0,
+        epic_throughput: HashMap::new(),
+        pr_errors: HashMap::new(),
+        rate_limited_until: None,
+    });
+    let (sender, receiver) = tokio::sync::mpsc::channel(8);
+    let actor = crate::actor::CoordinatorActor::new(
+        CoordinatorDeps::new(
+            tx.clone(),
+            cancel.clone(),
+            db.clone(),
+            pool,
+            CatalogService::new(),
+            djinn_provider::catalog::health::HealthTracker::new(),
+            Arc::new(RoleRegistry::new()),
+            BackgroundWorkTracker::default(),
+            djinn_lsp::LspManager::new(),
+        ),
+        receiver,
+        sender,
+        status_tx,
+    );
+    (actor, cancel)
+}
+
 pub fn test_tempdir(prefix: &str) -> tempfile::TempDir {
     tempfile::Builder::new()
         .prefix(prefix)
