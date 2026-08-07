@@ -2565,7 +2565,7 @@ mod tests {
         );
         assert_eq!(
             hooks.reconciliations.lock().expect("observer").as_slice(),
-            [lease.clone()],
+            std::slice::from_ref(&lease),
             "{name}: exactly one exact-identity reconciliation"
         );
         assert_eq!(
@@ -2775,7 +2775,7 @@ mod tests {
         assert!(observed_abort.is_aborted());
         assert_eq!(
             hooks.reconciliations.lock().expect("observer").as_slice(),
-            [lease.clone()]
+            std::slice::from_ref(&lease)
         );
         assert_eq!(
             model_turn_terminal_fixture(&db, &lease.lease_id, lease.generation, &lease.request_id)
@@ -2846,7 +2846,7 @@ mod tests {
         assert!(observed_abort.is_aborted());
         assert_eq!(
             hooks.reconciliations.lock().expect("observer").as_slice(),
-            [lease.clone()]
+            std::slice::from_ref(&lease)
         );
         assert_eq!(
             model_turn_terminal_fixture(&db, &lease.lease_id, lease.generation, &lease.request_id)
@@ -2916,7 +2916,7 @@ mod tests {
         hooks.reconcile_reached.notified().await;
         assert_eq!(
             hooks.reconciliations.lock().expect("observer").as_slice(),
-            [lease.clone()]
+            std::slice::from_ref(&lease)
         );
         assert_eq!(
             model_turn_terminal_fixture(&db, &lease.lease_id, lease.generation, &lease.request_id)
