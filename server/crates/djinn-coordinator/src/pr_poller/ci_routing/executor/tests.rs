@@ -5016,3 +5016,502 @@ async fn irrecoverable_reasons_share_one_run_absent_route_row() {
         "an irrecoverable reason is not a hold, so it accumulates no streak",
     );
 }
+
+// ===========================================================================
+// The production wiring: the call sites, not the callees (AC12)
+// ===========================================================================
+//
+// Everything above drives `recover_calling_owners_at_startup`,
+// `sweep_reserved_routes` and the two lane routers directly, which proves the
+// machinery works and proves nothing about whether production reaches it. Each
+// of the three fixtures below exists because deleting one production call site
+// left this entire file — and the whole `djinn-coordinator` lib suite — green,
+// with byte-identical counts.
+
+/// Plant a task, its project, and one ephemeral database, for the fixtures that
+/// need a real `CoordinatorActor` beside them.
+///
+/// Deliberately not [`fixture`]: that one owns a `FakeProvider` and a
+/// `ProviderActionScope` the actor would not be using, and an actor built over
+/// a *different* database than the assertions read is the exact shape of a
+/// fixture that witnesses nothing.
+async fn wiring_subject(label: &str) -> (Database, String, CiRouteSubject) {
+    let db = Database::open_in_memory().expect("ephemeral test database");
+    let project = djinn_db::test_support::make_project(&db, std::path::Path::new(label)).await;
+    let task_id = djinn_db::test_support::seed_task_row(
+        &db,
+        djinn_db::test_support::UsageTestTaskSeed {
+            project_id: &project.id,
+            // `pr_draft` with no `pr_url` — the PR poller's own filter drops it
+            // before `resolve_installation_client`, so driving a real tick over
+            // this row never reaches `api.github.com`.
+            status: "pr_draft",
+            close_reason: None,
+            total_reopen_count: 0,
+        },
+    )
+    .await;
+    let subject = CiRouteSubject::task(task_id.clone());
+    (db, task_id, subject)
+}
+
+/// A Tier-1 reservation for one evidence identity, owned by nobody yet.
+async fn plant_reservation(
+    routes: &CiRouteAttemptRepository,
+    subject: &CiRouteSubject,
+    identity: &CiEvidenceIdentity,
+    fingerprint: &str,
+) -> String {
+    let key = provider_action_key(subject, identity, CiAction::RerunRun);
+    routes
+        .reserve(&CiRouteReservation {
+            subject: subject.clone(),
+            provider_action_key: key.clone(),
+            identity: identity.clone(),
+            origin_state: CiOriginState::PrDraft,
+            class: djinn_db::CiClass::Inconclusive,
+            action: CiAction::RerunRun,
+            transient_fingerprint: fingerprint.to_owned(),
+            retry_budget_key: retry_budget_key(subject, identity, fingerprint),
+            head_budget_key: head_budget_key(subject, identity.pr_number, &identity.pr_head_sha),
+        })
+        .await
+        .expect("reserve");
+    key
+}
+
+async fn route_row(
+    routes: &CiRouteAttemptRepository,
+    subject: &CiRouteSubject,
+    key: &str,
+) -> CiRouteAttempt {
+    routes
+        .get(subject, key)
+        .await
+        .expect("route read")
+        .expect("route row exists")
+}
+
+/// The PRODUCTION startup path is what hands off a stranded `calling` row.
+///
+/// `recover_ci_calling_owners_at_startup` has exactly one caller in the tree —
+/// one `poll_stack::boxed(..).await` in `CoordinatorActor::run`, placed after
+/// `register_coordinator_incarnation` because the handoff compare-and-sets the
+/// row from the former owner to *this* incarnation and so needs this
+/// incarnation's lease to exist first. Nothing in this crate ran `run`, so that
+/// line could be deleted with every fixture above still green: a charged
+/// `calling` row left behind by a leadership handover would then stay `calling`
+/// forever, its head-scoped Tier-2 lease would never open, and the evidence
+/// would be adjudicated by nobody.
+///
+/// So this drives the real `run()` — through
+/// `CoordinatorActor::new(CoordinatorDeps::new(..))`, the production
+/// constructor — with the cancellation token already fired. The `biased`
+/// ordering in `run_dispatch_loop` makes the cancellation arm the one that
+/// wins, so the loop breaks on its first poll and `run()` returns: the whole
+/// finite startup phase executes and nothing infinite does. The `.await`
+/// returning is the happens-before edge the assertions read.
+///
+/// The former owner is *really* drained here — registered, marked draining,
+/// then stamped — because `recover_calling_owner` re-reads
+/// `provider_actions_drained_at` for itself and refuses a claim it cannot
+/// confirm. There is no injected liveness double in this fixture at all:
+/// `run()` builds the production `CiIncarnationLiveness` and passes the
+/// production `TaskRepository` head witness.
+///
+/// NAMED FAILING MUTATIONS.
+/// (a) Delete `poll_stack::boxed(|| self.recover_ci_calling_owners_at_startup()).await;`
+///     from `run()`: nothing else in `run()` touches a route row — the tick
+///     never fires, because the token is already cancelled — so the row stays
+///     `Calling` with `terminal_outcome: None` and the first post-run assertion
+///     fails.
+/// (b) Move it ABOVE `register_coordinator_incarnation`: the recovering
+///     incarnation has no ledger row yet, and the audit assertion below stops
+///     reading a single `StartupOwnerHandoff`. This mutation is why the
+///     ordering comment at the call site exists.
+/// (c) Guard it on anything beyond `gate.owns_routes()`: the gate here is
+///     `Enabled` and the row is eligible on every other axis, so any added
+///     refusal turns the recovery into a deferral and the outcome assertion
+///     fails.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_startup_path_hands_off_a_calling_row_left_by_a_former_incarnation() {
+    let (db, task_id, subject) = wiring_subject("ci-startup-wiring").await;
+    let routes = CiRouteAttemptRepository::new(db.clone());
+
+    let mut actor = crate::actor::actor_with_test_db(db.clone());
+    actor.test_ci_routing_gate = Some(CiRoutingGate::Enabled);
+    let recovering = actor.coordinator_incarnation_id.clone();
+    let cancel = actor.cancel.clone();
+
+    // The head witness `run()` passes is the poller's own durable snapshot. A
+    // row whose current head cannot be witnessed is counted `unverifiable` and
+    // left alone, so without this the fixture would be asserting a skip.
+    actor
+        .persist_ci_snapshot(
+            &task_id,
+            PR as u64,
+            HEAD,
+            djinn_core::models::CiStatus::Pending,
+            Vec::new(),
+            None,
+            0,
+            None,
+        )
+        .await;
+
+    // A former incarnation that reached the END of its own shutdown contract.
+    let former = uuid::Uuid::now_v7().to_string();
+    assert_ne!(
+        former, recovering,
+        "precondition: the handoff refuses a row it already owns"
+    );
+    let incarnations = djinn_db::CoordinatorIncarnationRepository::new(db.clone());
+    incarnations
+        .register(&former)
+        .await
+        .expect("register the former owner");
+    assert!(
+        incarnations
+            .mark_draining(&former)
+            .await
+            .expect("mark draining")
+    );
+    assert!(
+        incarnations
+            .mark_provider_actions_drained(&former)
+            .await
+            .expect("stamp the drain"),
+        "the former owner must really have drained, or the repository refuses \
+         the claim and this fixture asserts a deferral instead of a handoff"
+    );
+
+    // The charged `calling` row a leadership handover left behind.
+    let checks = [inconclusive_check("Quality Gate / test", 990)];
+    let blocking = refs(&checks);
+    let id = pr_head_identity(990);
+    let fingerprint = transient_fingerprint(CiLane::PrHead, &blocking);
+    let key = plant_reservation(&routes, &subject, &id, &fingerprint).await;
+    routes
+        .charge_and_begin_calling(&subject, &key, &former, &id)
+        .await
+        .expect("charge");
+    djinn_db::test_support::ci_route_age_calling_for_test(&db, &subject.id, &key, 400).await;
+
+    let before = route_row(&routes, &subject, &key).await;
+    assert_eq!(
+        before.action_phase,
+        CiActionPhase::Calling,
+        "precondition: the row is the one only a startup handoff can move"
+    );
+    assert_eq!(
+        before.owner_incarnation_id.as_deref(),
+        Some(former.as_str())
+    );
+    assert_eq!(before.terminal_outcome, None);
+    assert!(
+        routes
+            .calling_recovery_audit(&subject, &key)
+            .await
+            .expect("calling-recovery audit")
+            .is_empty(),
+        "precondition: nothing has attempted a handoff yet"
+    );
+
+    // ── The production startup path, start to finish ────────────────────────
+    //
+    // `tokio::spawn(actor.run())` is exactly what `CoordinatorHandle::spawn`
+    // does, so this is the production entry point on the production stack.
+    cancel.cancel();
+    tokio::time::timeout(PATIENCE, tokio::spawn(actor.run()))
+        .await
+        .expect("the startup phase must complete and the cancelled loop exit")
+        .expect("the coordinator startup path must not panic");
+
+    let after = route_row(&routes, &subject, &key).await;
+    assert_eq!(
+        after.action_phase,
+        CiActionPhase::Terminal,
+        "startup must ACT on the stranded row, not merely enumerate it"
+    );
+    assert_eq!(
+        after.terminal_outcome,
+        Some(CiRouteOutcome::OutcomeUnknown),
+        "the row is still current, so the unknowable outcome is recorded rather \
+         than guessed"
+    );
+    assert_eq!(
+        after.owner_incarnation_id.as_deref(),
+        Some(recovering.as_str()),
+        "the handoff compare-and-sets ownership to the incarnation `run()` \
+         registered, which is what proves the call ran inside THIS startup"
+    );
+    assert_eq!(
+        routes
+            .calling_recovery_audit(&subject, &key)
+            .await
+            .expect("calling-recovery audit")
+            .into_iter()
+            .map(|record| record.recovery_reason)
+            .collect::<Vec<_>>(),
+        vec![CiCallingRecoveryReason::StartupOwnerHandoff],
+        "exactly one handoff, and it is the startup one"
+    );
+
+    let counts = routes
+        .budget_counts(&subject, &after.retry_budget_key, &after.head_budget_key)
+        .await
+        .expect("budget read");
+    assert_eq!(
+        (counts.signature, counts.head),
+        (1, 1),
+        "the charge is retained across the handoff — neither replayed nor refunded"
+    );
+    assert_eq!(
+        djinn_db::test_support::task_attempt_count_for_test(&db, &task_id).await,
+        0,
+        "a startup handoff dispatches no worker"
+    );
+}
+
+/// An `Instant` far enough in the past that a sweep interval has elapsed.
+fn a_sweep_interval_ago() -> std::time::Instant {
+    std::time::Instant::now()
+        .checked_sub(2 * crate::pr_poller::CI_ROUTE_SWEEP_INTERVAL)
+        .expect("the monotonic clock must be older than two sweep intervals")
+}
+
+/// The PRODUCTION tick is what runs the reserved sweep and takes the rollback
+/// report.
+///
+/// `sweep_ci_routes` has exactly one caller: the `CI_ROUTE_SWEEP_INTERVAL`
+/// block in `CoordinatorActor::run_tick`. It is in turn the only caller of
+/// `emit_ci_route_report` and of `record_ci_rollback_quiescence_report`.
+/// Nothing in this crate ran `run_tick`, so that four-line block could be
+/// deleted outright with every sweep fixture above still green — and the
+/// consequence is not cosmetic. A `reserved` row whose head has moved is
+/// exactly the row no poller will ever revisit (nothing polls a head that is
+/// gone), so without the sweep it sits `reserved` until the process restarts;
+/// and the rollback quiescence report — the single repository-checkable row the
+/// proposal puts in front of a binary rollback — would exist only if an
+/// operator thought to ask for it by hand, which is the difference between a
+/// report and a query.
+///
+/// The tick is driven ONCE rather than through the loop, so the `.await`
+/// returning is a happens-before edge and the assertions read a finished pass.
+///
+/// NAMED FAILING MUTATIONS.
+/// (a) Delete the whole `if self.last_ci_route_sweep.elapsed() >=
+///     CI_ROUTE_SWEEP_INTERVAL { … }` block from `run_tick`: no other pass in
+///     the tick touches a route row, so the planted reservation stays
+///     `Reserved` with `terminal_outcome: None` and the first post-tick
+///     assertion fails; the second half then finds no rollback report either.
+/// (b) Delete only `self.record_ci_rollback_quiescence_report()` from
+///     `sweep_ci_routes`, or narrow its `gate == Quiescing` guard: the sweep
+///     half still passes and the report half fails on `None`.
+/// (c) Drop the interval guard and sweep on every tick: the vacuity guard
+///     between the two halves — a tick taken WITHOUT backdating, which must
+///     record nothing — fails.
+/// (d) Reset `last_ci_route_sweep` before the sweep rather than after, or reset
+///     it outside the block: the second half's backdate is overwritten by an
+///     earlier tick and the report is never taken.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_ticks_sweep_block_closes_a_stranded_reservation_and_takes_the_rollback_report() {
+    let (db, task_id, subject) = wiring_subject("ci-sweep-wiring").await;
+    let routes = CiRouteAttemptRepository::new(db.clone());
+
+    let mut actor = crate::actor::actor_with_test_db(db.clone());
+    actor.test_ci_routing_gate = Some(CiRoutingGate::Enabled);
+    let incarnation = actor.coordinator_incarnation_id.clone();
+
+    // The witness reports a head that has MOVED past the reservation's, which
+    // is what makes this the row no poller will revisit.
+    actor
+        .persist_ci_snapshot(
+            &task_id,
+            PR as u64,
+            MOVED_HEAD,
+            djinn_core::models::CiStatus::Pending,
+            Vec::new(),
+            None,
+            0,
+            None,
+        )
+        .await;
+
+    let checks = [inconclusive_check("Quality Gate / test", 991)];
+    let blocking = refs(&checks);
+    let id = pr_head_identity(991);
+    let fingerprint = transient_fingerprint(CiLane::PrHead, &blocking);
+    let key = plant_reservation(&routes, &subject, &id, &fingerprint).await;
+    djinn_db::test_support::ci_route_age_reserved_for_test(&db, &subject.id, &key, 600).await;
+
+    let before = route_row(&routes, &subject, &key).await;
+    assert_eq!(
+        before.action_phase,
+        CiActionPhase::Reserved,
+        "precondition: a stranded reservation, which only the sweep resolves"
+    );
+    assert_eq!(before.terminal_outcome, None);
+    assert!(
+        routes
+            .latest_rollback_quiescence_report()
+            .await
+            .expect("report read")
+            .is_none(),
+        "precondition: no rollback report has ever been taken"
+    );
+
+    // ── One production tick, with the interval genuinely elapsed ────────────
+    actor.last_ci_route_sweep = a_sweep_interval_ago();
+    actor.drive_tick_for_test().await;
+
+    let swept = route_row(&routes, &subject, &key).await;
+    assert_eq!(
+        swept.action_phase,
+        CiActionPhase::Terminal,
+        "the tick must SWEEP the stranded row, not merely count it"
+    );
+    assert_eq!(
+        swept.terminal_outcome,
+        Some(CiRouteOutcome::SupersededPreCall),
+        "an obsolete reservation is closed pre-call"
+    );
+    let counts = routes
+        .budget_counts(&subject, &swept.retry_budget_key, &swept.head_budget_key)
+        .await
+        .expect("budget read");
+    assert_eq!(
+        (counts.signature, counts.head),
+        (0, 0),
+        "and closed uncharged: the sweep holds no provider client"
+    );
+
+    // ── Vacuity: the interval is a real gate, not a formality ───────────────
+    //
+    // The block reset `last_ci_route_sweep` to now, so this tick must not
+    // re-enter it. Without this, a sweep that ran unconditionally on every tick
+    // would satisfy everything above and the half below would prove nothing
+    // about the interval.
+    actor.test_ci_routing_gate = Some(CiRoutingGate::Quiescing);
+    actor.drive_tick_for_test().await;
+    assert!(
+        routes
+            .latest_rollback_quiescence_report()
+            .await
+            .expect("report read")
+            .is_none(),
+        "a tick inside the sweep interval must not run the sweep"
+    );
+
+    // ── The drain posture takes the rollback report on every pass ───────────
+    actor.last_ci_route_sweep = a_sweep_interval_ago();
+    actor.drive_tick_for_test().await;
+
+    let report = routes
+        .latest_rollback_quiescence_report()
+        .await
+        .expect("report read")
+        .expect("a quiescing sweep must record the rollback report without being asked");
+    assert_eq!(report.gate_state, "quiescing");
+    assert_eq!(
+        report.recorded_by_incarnation, incarnation,
+        "the report names the incarnation whose tick took it, which is what ties \
+         it to THIS actor rather than to any writer of that table"
+    );
+    assert_eq!(
+        report.reserved_rows, 0,
+        "the sweep above closed the only one"
+    );
+    assert_eq!(report.calling_rows, 0);
+    assert_eq!(
+        report.permits_rollback,
+        report.recomputed_verdict(),
+        "the stored verdict must agree with the function it is checked against"
+    );
+}
+
+/// The PR poller hands both lane routers the LIVE gate.
+///
+/// Source-level, and honestly labelled as such, for exactly the reason
+/// `both_lane_fast_paths_consult_the_completeness_predicate` above is:
+/// `resolve_installation_client` builds `GitHubApiClient::for_installation`,
+/// which hard-codes `api.github.com`, so `poll_pr_draft_tasks` and
+/// `handle_queue_failure` cannot be driven end to end from this crate. Every
+/// behavioural fixture in this file therefore enters at
+/// `route_pr_head_ci_evidence` / `route_merge_group_ci_evidence` with a gate
+/// value of its own choosing — which is precisely the seam this test guards,
+/// because passing `CiRoutingGate::DisabledClean` at the three real call sites
+/// makes the whole feature permanently unreachable from the running poller with
+/// the entire suite green.
+///
+/// NAMED FAILING MUTATIONS, at any of the three sites.
+/// (a) `self.ci_routing_gate()` → `CiRoutingGate::DisabledClean` inline in the
+///     call: the final-argument check fails (the argument is no longer `gate`)
+///     AND the `CiRoutingGate::` ban fails.
+/// (b) `let gate = CiRoutingGate::DisabledClean;`: the count of live reads drops
+///     below the call count, and the `CiRoutingGate::` ban fails.
+/// (c) A second `let gate = …` shadowing the live one between the read and the
+///     call: `let gate ` occurs more often than `let gate = self.ci_routing_gate();`.
+/// (d) Deleting a router call site outright: the call count no longer matches.
+#[test]
+fn the_pr_poller_hands_the_live_gate_to_both_lane_routers() {
+    // The final argument of the call whose open paren `args` starts just after.
+    fn final_argument(args: &str) -> &str {
+        let mut depth = 1usize;
+        let mut end = args.len();
+        for (index, character) in args.char_indices() {
+            match character {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = index;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        args[..end]
+            .trim()
+            .trim_end_matches(',')
+            .rsplit(',')
+            .next()
+            .unwrap_or_default()
+            .trim()
+    }
+
+    for (label, source, expected_calls) in [
+        ("pr_watcher", include_str!("../../pr_watcher.rs"), 2usize),
+        ("pr_commands", include_str!("../../pr_commands.rs"), 1usize),
+    ] {
+        let calls: Vec<&str> = source.split("_ci_evidence(").skip(1).collect();
+        assert_eq!(
+            calls.len(),
+            expected_calls,
+            "{label}: the poller's lane-router call sites are the thing under \
+             guard here; a changed count needs this test updated, not ignored",
+        );
+        assert_eq!(
+            source.matches("let gate = self.ci_routing_gate();").count(),
+            expected_calls,
+            "{label}: every router call must be preceded by a LIVE gate read",
+        );
+        assert_eq!(
+            source.matches("let gate ").count(),
+            expected_calls,
+            "{label}: no other `gate` binding may shadow the live read",
+        );
+        for (index, args) in calls.into_iter().enumerate() {
+            assert_eq!(
+                final_argument(args),
+                "gate",
+                "{label}: router call {index} must be handed the live gate binding",
+            );
+        }
+        assert!(
+            !source.contains("CiRoutingGate::"),
+            "{label}: the poller must never name a gate posture; it reads one",
+        );
+    }
+}
