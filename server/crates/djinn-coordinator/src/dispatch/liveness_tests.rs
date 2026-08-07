@@ -530,32 +530,35 @@ fn no_task_status_with_exited_pod_is_not_a_protocol_violation() {
     assert_ne!(result.verdict, Verdict::ProtocolViolation);
 }
 
-/// A session that exits with its task parked at a recorded handoff did its
-/// job. Every `is_settled` status must be exonerated, on both a clean and a
-/// crashing exit.
+/// Queue and post-session destinations exonerate an exited session without
+/// separate handoff evidence. Session-held reviewer/lead claim states are
+/// intentionally excluded: after the 7luh barrier they require a confirmed
+/// Required transition, as covered by `terminal_reviewer_and_lead_claims_require_confirmed_handoff`.
 #[test]
-fn exit_at_a_recorded_handoff_is_not_a_protocol_violation() {
+fn exit_at_a_queue_or_post_session_destination_is_not_a_protocol_violation() {
     for status in [
         DbTaskStatus::NeedsTaskReview,
-        DbTaskStatus::InTaskReview,
         DbTaskStatus::Approved,
         DbTaskStatus::PrDraft,
         DbTaskStatus::PrReview,
         DbTaskStatus::NeedsLeadIntervention,
-        DbTaskStatus::InLeadIntervention,
     ] {
-        for (phase, code) in [(PodPhase::Succeeded, 0), (PodPhase::Failed, 1)] {
+        for (session_status, phase, code) in [
+            (DbSessionStatus::Completed, PodPhase::Succeeded, 0),
+            (DbSessionStatus::Failed, PodPhase::Failed, 1),
+            (DbSessionStatus::Interrupted, PodPhase::Failed, 1),
+        ] {
             let mut ev = live_evidence();
             ev.pod_phase = Some(phase);
             ev.exit_code = Some(code);
-            ev.db_session_status = Some(DbSessionStatus::Running);
+            ev.db_session_status = Some(session_status);
             ev.db_task_status = Some(status);
 
             let result = classify(&ev);
             assert_ne!(
                 result.verdict,
                 Verdict::ProtocolViolation,
-                "{status:?} is a recorded handoff, not a structural inconsistency"
+                "{status:?} is a queue or post-session destination"
             );
         }
     }
@@ -686,9 +689,9 @@ fn is_settled_overlaps_session_held_on_exactly_the_two_claim_statuses() {
     assert_eq!(
         overlap,
         vec!["in_task_review", "in_lead_intervention"],
-        "these two session-held review/intervention boundaries are settled \
-         handoff destinations after the supervisor's durable read-back (see \
-         DbTaskStatus::is_settled)"
+        "these two claim states retain broad settled semantics but remain \
+         session-owned until the supervisor's durable read-back confirms a \
+         Required handoff (see DbTaskStatus::is_settled)"
     );
 
     // The dispatch-held status remains unsettled: without a recorded transition
