@@ -184,7 +184,14 @@ async fn launch_prepared_covered_attempt_with_lease(
             // Keep this in scope across `mark_active`; its Drop owns every
             // post-dispatch early return, including a database partition here.
             let guard = CoveredAttemptTerminalGuard::new(attempt, parser, coordinator, lease);
-            permit.mark_active().await.map_err(anyhow::Error::from)?;
+            let active = permit.mark_active().await.map_err(anyhow::Error::from)?;
+            if matches!(
+                active,
+                djinn_db::ModelTurnLeaseMutationOutcome::Applied
+                    | djinn_db::ModelTurnLeaseMutationOutcome::Idempotent
+            ) {
+                guard.start_watchdog();
+            }
             Ok(guard)
         }
         ModelTurnPreparation::Wait(wait) => {
@@ -1364,11 +1371,12 @@ pub async fn run_reply_loop(
                 streaming_dispatched,
                 early_stream_end,
                 provider_done: _,
+                watchdog_aborted,
                 turn_flushed: _,
             } = stream_state;
             saw_any_event |= saw_round_event;
             if let Some(llm) = otel_llm {
-                if interrupted.is_some() || early_stream_end {
+                if interrupted.is_some() || early_stream_end || watchdog_aborted {
                     llm.end_error(if interrupted.is_some() { "interrupted" } else { "truncated" });
                 } else {
                     llm.record_usage(turn_tokens_in, turn_tokens_out);
@@ -1399,6 +1407,9 @@ pub async fn run_reply_loop(
             }
             if let Some(cancelled) = interrupted {
                 return Err(anyhow::Error::new(cancelled));
+            }
+            if watchdog_aborted {
+                return Err(anyhow::anyhow!("lease heartbeat watchdog aborted provider attempt"));
             }
             // AC3: When the provider stream ended early (without StreamEvent::Done)
             // and partial content was produced, the truncated turn must not be

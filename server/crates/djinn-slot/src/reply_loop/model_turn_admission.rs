@@ -417,6 +417,15 @@ impl ModelTurnAdmissionCoordinator {
         }
         result
     }
+
+    /// Refresh exactly this in-flight lease. A fenced result cannot affect a
+    /// replacement generation and is deliberately left to the caller.
+    pub async fn heartbeat(
+        &self,
+        identity: &ModelTurnLeaseIdentity,
+    ) -> djinn_db::Result<ModelTurnLeaseMutationOutcome> {
+        self.repository.heartbeat(identity).await
+    }
 }
 
 fn request_fingerprint(request_id: &str) -> String {

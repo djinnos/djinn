@@ -8,6 +8,7 @@ use std::collections::{HashSet, VecDeque};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
@@ -142,6 +143,9 @@ pub struct StreamTurnState {
     /// Set only by an explicit provider terminal event. Raw EOF is not a
     /// successful completion and must reconcile the admission lease as loss.
     pub provider_done: bool,
+    /// The independent lease watchdog aborted this attempt; it is never a
+    /// provider retry signal.
+    pub watchdog_aborted: bool,
     /// Idempotency guard: `true` once this turn's observed assistant/tool
     /// rows have been persisted (either through the normal finalize path or
     /// via [`persistence::flush_in_flight_turn`]).  Repeated flush calls
@@ -176,6 +180,7 @@ impl StreamTurnState {
             streaming_dispatched: HashSet::new(),
             early_stream_end: false,
             provider_done: false,
+            watchdog_aborted: false,
             turn_flushed: false,
         }
     }
@@ -196,6 +201,9 @@ pub(super) struct CoveredAttemptTerminalGuard {
     coordinator: ModelTurnAdmissionCoordinator,
     identity: Option<ModelTurnLeaseIdentity>,
     settlement: Arc<CoveredAttemptSettlement>,
+    watchdog_stop: tokio_util::sync::CancellationToken,
+    watchdog_aborted: tokio_util::sync::CancellationToken,
+    watchdog: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 /// Independently-owned terminal state. Once scheduled, the runtime task—not
@@ -226,6 +234,63 @@ impl CoveredAttemptTerminalGuard {
                 complete: AtomicBool::new(false),
                 notify: tokio::sync::Notify::new(),
             }),
+            watchdog_stop: tokio_util::sync::CancellationToken::new(),
+            watchdog_aborted: tokio_util::sync::CancellationToken::new(),
+            watchdog: Mutex::new(None),
+        }
+    }
+
+    /// Starts after the active hand-off, independently of provider frames and
+    /// all reply-loop activity work.
+    pub(super) fn start_watchdog(&self) {
+        if self.identity.is_none() {
+            return;
+        }
+        let mut watchdog = self.watchdog.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if watchdog.is_some() {
+            return;
+        }
+        let coordinator = self.coordinator.clone();
+        let identity = self.identity.clone();
+        let abort = self.abort.clone();
+        let stop = self.watchdog_stop.clone();
+        let fired = self.watchdog_aborted.clone();
+        *watchdog = Some(tokio::spawn(async move {
+            let Some(identity) = identity else { return; };
+            let mut ticks = tokio::time::interval(Duration::from_secs(20));
+            ticks.tick().await;
+            let mut last_success = tokio::time::Instant::now();
+            loop {
+                tokio::select! {
+                    _ = stop.cancelled() => return,
+                    _ = ticks.tick() => {
+                        let deadline = last_success + Duration::from_secs(40);
+                        tokio::select! {
+                            biased;
+                            _ = stop.cancelled() => return,
+                            _ = tokio::time::sleep_until(deadline) => {
+                                abort.abort();
+                                fired.cancel();
+                                return;
+                            }
+                            result = coordinator.heartbeat(&identity) => {
+                                if matches!(result, Ok(djinn_db::ModelTurnLeaseMutationOutcome::Applied | djinn_db::ModelTurnLeaseMutationOutcome::Idempotent)) {
+                                    last_success = tokio::time::Instant::now();
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }));
+    }
+
+    async fn stop_watchdog(&self) {
+        self.watchdog_stop.cancel();
+        let handle = self.watchdog.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
+        if let Some(handle) = handle {
+            handle.abort();
+            let _ = handle.await;
         }
     }
 
@@ -246,13 +311,10 @@ impl CoveredAttemptTerminalGuard {
     }
 
     /// Observe B1's singular terminal outcome and reconcile precisely this lease.
-    pub(super) fn finish(
-        &self,
-        completed: bool,
-    ) -> impl std::future::Future<Output = ()> + Send + 'static {
+    pub(super) async fn finish(&self, completed: bool) {
+        self.stop_watchdog().await;
         self.schedule_settlement(!completed);
-        let settlement = self.settlement.clone();
-        async move { wait_for_settlement(settlement).await }
+        wait_for_settlement(self.settlement.clone()).await;
     }
 
     fn schedule_settlement(&self, abort: bool) {
@@ -312,6 +374,10 @@ impl Drop for CoveredAttemptTerminalGuard {
     fn drop(&mut self) {
         // Scheduling precedes every awaited operation, so cancellation of
         // `finish` cannot suppress cleanup.
+        self.watchdog_stop.cancel();
+        if let Some(handle) = self.watchdog.get_mut().unwrap_or_else(std::sync::PoisonError::into_inner).take() {
+            handle.abort();
+        }
         self.schedule_settlement(true);
     }
 }
@@ -413,6 +479,10 @@ pub(super) async fn consume_provider_stream(
 ) -> anyhow::Result<StreamTurnState> {
     let mut state = StreamTurnState::new();
     let mut streaming_inflight: FuturesUnordered<StreamingFut<'_>> = FuturesUnordered::new();
+    let watchdog_aborted = ctx
+        .covered_attempt
+        .as_deref()
+        .map(|attempt| attempt.watchdog_aborted.clone());
     loop {
         // A concurrent-safe side tool may have temporarily taken phase
         // ownership. Every select iteration waits for the provider again, so
@@ -431,6 +501,16 @@ pub(super) async fn consume_provider_stream(
             }
             _ = ctx.global_cancel.cancelled() => {
                 state.interrupted = Some(ReplyLoopCancelled::supervisor_shutdown());
+                break;
+            }
+            _ = async {
+                if let Some(watchdog_aborted) = &watchdog_aborted {
+                    watchdog_aborted.cancelled().await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            } => {
+                state.watchdog_aborted = true;
                 break;
             }
             Some(result) = streaming_inflight.next() => {
