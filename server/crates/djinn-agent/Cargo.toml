@@ -79,6 +79,11 @@ djinn-slot = { path = "../djinn-slot", features = ["test-support"] }
 # cfg-gated `djinn_agent::test_helpers` module.
 djinn-agent = { path = ".", features = ["test-support"] }
 djinn-db = { path = "../djinn-db", features = ["test-support"] }
+# The worker/launcher `StageOutcome` envelope is positional bincode, so
+# `lead_ci_routing::lead_route_superseded_is_the_last_wire_variant` has to
+# encode and decode real frames to prove the variant is appended last.
+# Same version djinn-supervisor sends them with.
+bincode = "1.3"
 
 [lints]
 workspace = true

@@ -211,12 +211,11 @@ impl CoordinatorActor {
                     // do. The legacy helper stays the whole behaviour whenever
                     // the route layer declines, which is every deployment until
                     // the gate is enabled.
-                    let failing: Vec<&CheckRun> = checks
-                        .check_runs
-                        .iter()
-                        .filter(|cr| is_failing_conclusion(cr.conclusion.as_deref()))
-                        .collect();
                     let gate = self.ci_routing_gate();
+                    // The route layer takes its own enumeration under its own
+                    // reserved poll sequence, so it receives the *predicate*
+                    // rather than the slice above — which was filtered from a
+                    // response fetched before this lane knew its head SHA.
                     let routed = poll_stack::boxed(|| {
                         self.route_pr_head_ci_evidence(
                             gh_client,
@@ -226,8 +225,7 @@ impl CoordinatorActor {
                             &repo,
                             pull_number,
                             &pr.head.sha,
-                            &checks,
-                            &failing,
+                            |cr| is_failing_conclusion(cr.conclusion.as_deref()),
                             gate,
                         )
                     })
@@ -317,8 +315,12 @@ impl CoordinatorActor {
                             &repo,
                             pull_number,
                             &pr.head.sha,
-                            &checks,
-                            &failed_checks,
+                            |cr| {
+                                matches!(
+                                    cr.conclusion.as_deref(),
+                                    Some("failure") | Some("timed_out") | Some("cancelled")
+                                )
+                            },
                             gate,
                         )
                     })

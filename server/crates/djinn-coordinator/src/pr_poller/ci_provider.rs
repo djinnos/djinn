@@ -33,11 +33,29 @@
 //! contract's `LogApiError` input, which has no producer anywhere else in the
 //! tree. Leaving it off the seam would leave that input unreachable from a
 //! fixture, which is the blocker this module exists to remove.
+//!
+//! # The fifth method (wave 5)
+//!
+//! `required_check_reproduction_context` supplies the **repository-command
+//! corpus** a repair reopen's `verification_command` must be drawn from.
+//!
+//! The proposal allows exactly two sources: a command "copied from
+//! repository/task context" or one "directly exposed as a command by CI
+//! evidence". This is the second, literally — the command string is parsed out
+//! of the Actions job log by `parse_actions_run_commands`, so it is the command
+//! GitHub *actually ran*, not a guess derived from a job name. Without it every
+//! repair degrades to a diagnosis, because a corpus that is always empty makes
+//! `command_is_repository_valid` always false.
+//!
+//! It is a read. It performs no provider mutation, adds no reconciliation
+//! subsystem, and is consumed only when a route is already escalating to Lead,
+//! so a deployment that never reaches Tier 2 never pays for it.
 
 use async_trait::async_trait;
 
 use djinn_provider::github_api::{
     CheckAnnotation, CheckRunsResponse, GitHubApiClient, GitHubApiError, MergeMethod,
+    RequiredCheckReproduction,
 };
 
 /// The exact provider surface the CI-route lane executors touch.
@@ -83,6 +101,16 @@ pub(crate) trait CiRouteProvider: Send + Sync {
         repo: &str,
         check_run_id: u64,
     ) -> Result<Vec<CheckAnnotation>, GitHubApiError>;
+
+    /// The commands the failing check actually executed, for the repair
+    /// validator's corpus. A read; never a mutation.
+    async fn required_check_reproduction_context(
+        &self,
+        owner: &str,
+        repo: &str,
+        observed_head_sha: &str,
+        required_check_name: &str,
+    ) -> Result<RequiredCheckReproduction, GitHubApiError>;
 }
 
 #[async_trait]
@@ -133,5 +161,22 @@ impl CiRouteProvider for GitHubApiClient {
         check_run_id: u64,
     ) -> Result<Vec<CheckAnnotation>, GitHubApiError> {
         GitHubApiClient::get_check_run_annotations(self, owner, repo, check_run_id).await
+    }
+
+    async fn required_check_reproduction_context(
+        &self,
+        owner: &str,
+        repo: &str,
+        observed_head_sha: &str,
+        required_check_name: &str,
+    ) -> Result<RequiredCheckReproduction, GitHubApiError> {
+        GitHubApiClient::required_check_reproduction_context(
+            self,
+            owner,
+            repo,
+            observed_head_sha,
+            required_check_name,
+        )
+        .await
     }
 }

@@ -2060,10 +2060,26 @@ impl SupervisorServices for DirectServices {
             .map_err(|e| format!("start_monitored_reopen: failed to resolve hold cycle: {e}"))?;
 
         // Build the structured payloads for the dispatch ledger update.
-        let directive_json = serde_json::json!({
-            "decision": "reopen",
-            "directive": directive,
-        });
+        //
+        // ── `nafu` wave 5: merge, do not clobber ──────────────────────────
+        //
+        // This used to be a bare `json!({"decision": "reopen", "directive":
+        // ...})` written over the arbitration row's `directive` column — the
+        // same column the coordinator writes the `ci_route` block into. So
+        // applying a Lead reopen destroyed the route block for that hold cycle,
+        // and any later read (a redispatched Lead, a recovery sweep, or the
+        // reporting join) saw a row that had never been a CI route at all.
+        //
+        // Both facts belong on this column, so both are kept: the reopen
+        // payload is merged into whatever the row already carries, and
+        // `ci_route` — along with `terminal_disposition_required`, which had
+        // the identical problem and simply had not been noticed — survives.
+        let directive_json = merge_reopen_into_directive(
+            unconsumed_record
+                .as_ref()
+                .and_then(|record| record.directive.as_ref()),
+            &directive,
+        );
         let excluded_json = serde_json::Value::Array(
             exclude_models
                 .iter()
@@ -2866,6 +2882,45 @@ fn intern_envelope(wire: SerializableDjinnEvent) -> Result<DjinnEventEnvelope, (
 /// pollutes the usage dashboard's cost stack. Missing pricing (`None`) and
 /// all-zero pricing both resolve to `"unpriced"`.
 ///
+/// Merge a reopen payload into whatever the arbitration row's `directive`
+/// column already carries (proposal `nafu`, wave 5).
+///
+/// # The bug this replaces
+///
+/// `start_monitored_reopen` used to build `{"decision": "reopen", "directive":
+/// ...}` from scratch and write it over the column — the **same column** the
+/// coordinator writes the `ci_route` block into when it dispatches Lead under a
+/// Tier-2 lease. So applying a Lead reopen destroyed the route block for that
+/// hold cycle: a redispatched Lead, a recovery sweep, or the reporting join
+/// would then read a row that had never been a CI route at all, and the
+/// supervisor's `read_arbiter_directive` would answer `NoRoute` for a task that
+/// was mid-adjudication.
+///
+/// `terminal_disposition_required` had the identical problem and had simply not
+/// been noticed: a reopen wiped the cumulative-budget flag too.
+///
+/// Both facts belong on this column, so both are kept. Only the two keys this
+/// function owns are overwritten.
+///
+/// Extracted as a pure function so the merge is testable without a database —
+/// the failure mode is a *lost key*, which no assertion on the return value of
+/// `start_monitored_reopen` would ever have caught.
+pub(crate) fn merge_reopen_into_directive(
+    existing: Option<&serde_json::Value>,
+    directive: &str,
+) -> serde_json::Value {
+    let mut merged = existing
+        .filter(|value| value.is_object())
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+    let object = merged
+        .as_object_mut()
+        .expect("filtered to objects immediately above");
+    object.insert("decision".to_owned(), serde_json::json!("reopen"));
+    object.insert("directive".to_owned(), serde_json::json!(directive));
+    merged
+}
+
 /// This is extracted as a pure function so the decision logic can be tested
 /// without instantiating a `DirectServices` / database.
 pub(crate) fn determine_cost_basis(
