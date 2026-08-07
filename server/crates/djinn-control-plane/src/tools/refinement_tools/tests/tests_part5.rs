@@ -185,7 +185,9 @@ pub(super) async fn setup_demand_test() -> (
     let p = repo
         .create(ProposalCreateInput {
             title: "Demand Validation Test",
-            body: "This spec contains anchor-text for validation.",
+            // These are deliberately only prose/UI question inventory. The
+            // demand path must never synthesize typed evidence from them.
+            body: "This spec contains anchor-text for validation.\n\n## Open questions\nIs token expiry safe?\n\n<QuestionForm id=\"questions\">\nDoes the repository need refresh tokens?\n</QuestionForm>",
             acceptance_criteria: Some("[]"),
             status: None,
             body_format: None,
@@ -1196,6 +1198,16 @@ async fn duplicate_demand_after_accepted_creates_no_second_spike() {
         .and_then(|v| v.as_str())
         .expect("first demand should have spike_task_id")
         .to_string();
+    let first_finding = result1
+        .get("finding_id")
+        .and_then(|v| v.as_str())
+        .expect("first demand should have finding_id")
+        .to_string();
+    let first_attempt = result1
+        .get("attempt_id")
+        .and_then(|v| v.as_str())
+        .expect("first demand should have attempt_id")
+        .to_string();
     assert_eq!(
         result1.get("replayed").and_then(|v| v.as_bool()),
         Some(false),
@@ -1226,6 +1238,16 @@ async fn duplicate_demand_after_accepted_creates_no_second_spike() {
         result2.get("spike_task_id").and_then(|v| v.as_str()),
         Some(first_spike.as_str()),
         "a replay must return the FIRST spike, never a new one: {resp2}"
+    );
+    assert_eq!(
+        result2.get("finding_id").and_then(|v| v.as_str()),
+        Some(first_finding.as_str()),
+        "a replay must return the original typed finding: {resp2}"
+    );
+    assert_eq!(
+        result2.get("attempt_id").and_then(|v| v.as_str()),
+        Some(first_attempt.as_str()),
+        "a replay must return the original typed attempt: {resp2}"
     );
     assert_eq!(
         result2.get("replayed").and_then(|v| v.as_bool()),
@@ -1443,4 +1465,79 @@ async fn atomic_demand_normalized_replay_survives_authority_fence() {
         atomic_demand_snapshot(&db, &repo, &proposal.id, &project_id).await,
         "replay must not allocate duplicate demand-owned rows"
     );
+}
+
+/// The accepted categories and authority roles are exercised as data, so a new
+/// category cannot accidentally bypass the same atomic persistence boundary.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn demand_matrix_persists_every_load_bearing_category_for_each_authority_role() {
+    const CATEGORIES: &[&str] = &[
+        "feasibility",
+        "safety",
+        "integrity",
+        "compatibility",
+        "rollout",
+        "core_acceptance_criteria",
+    ];
+
+    for role in ["judge", "adversary"] {
+        for category in CATEGORIES {
+            let (server, db, proposal, user_id, authority_task_id) = setup_demand_test().await;
+            let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+            let project_id = repo.targets(&proposal.id).await.unwrap()[0]
+                .project_id
+                .clone();
+
+            // The fixture materializes Judge authority. Switch every persisted
+            // role column as one correlated tuple for the Adversary case.
+            if role == "adversary" {
+                sqlx::query(
+                    "UPDATE refinement_dispatch_intents SET role = 'adversary' WHERE task_id = $1",
+                )
+                .bind(&authority_task_id)
+                .execute(db.pool())
+                .await
+                .unwrap();
+                sqlx::query(
+                    "UPDATE tasks SET agent_type = 'adversary', refinement_role = 'adversary' WHERE id = $1",
+                )
+                .bind(&authority_task_id)
+                .execute(db.pool())
+                .await
+                .unwrap();
+            }
+
+            let before = atomic_demand_snapshot(&db, &repo, &proposal.id, &project_id).await;
+            let mut params = valid_demand_params(&proposal.id);
+            params["load_bearing_category"] = serde_json::json!(category);
+            params["question"] = serde_json::json!(format!(
+                "Does {category} evidence prove the token-expiry boundary?"
+            ));
+            let response = djinn_core::auth_context::SESSION_USER_ID
+                .scope(Some(user_id), async {
+                    server
+                        .dispatch_tool("proposal_refinement_demand_evidence", params)
+                        .await
+                })
+                .await
+                .unwrap();
+            assert_eq!(
+                response.get("accepted").and_then(|v| v.as_bool()),
+                Some(true),
+                "{role}/{category} must be accepted: {response}"
+            );
+            let after = atomic_demand_snapshot(&db, &repo, &proposal.id, &project_id).await;
+            assert_eq!(after.0.tasks, before.0.tasks + 1);
+            assert_eq!(after.0.findings, before.0.findings + 1);
+            assert_eq!(after.0.attempts, before.0.attempts + 1);
+            assert_eq!(after.0.debates, before.0.debates + 1);
+            assert_eq!(after.0.lifecycle_events, before.0.lifecycle_events + 1);
+            assert!(
+                after.1.is_some() && after.2.is_some(),
+                "legacy link/claim persist"
+            );
+            let debate = repo.debate_trail(&proposal.id).await.unwrap();
+            assert_eq!(debate.last().unwrap().agent_role, role);
+        }
+    }
 }
