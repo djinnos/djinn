@@ -26,7 +26,7 @@
 //! left for this side to do, and doing anything would be the bug.
 //!
 //! Keeping them apart is what makes "exactly one worker for a valid current
-//! reopen" and "zero of everything for a stale one" countable rather than
+//! reopen" and "zero transitions for a stale one" countable rather than
 //! asserted by name — see [`CiEffectCounts`].
 //!
 //! # What is deliberately absent
@@ -37,6 +37,12 @@
 //! existence of a [`CiAdjudicationContext`] means the CI evidence was not
 //! passing, and approve is legal only on the passing path where no context
 //! exists. That is stronger than a boolean flag Lead could argue with.
+//!
+//! Because they are absent from the *types*, they are not things
+//! [`CiEffectCounts`] can count — a counter that no variant can raise above
+//! zero proves nothing about the parser or the validator that actually keeps it
+//! at zero. See the note on [`CiEffectCounts`] for where each of those
+//! invariants is enforced and which fixture witnesses it.
 
 use djinn_db::{
     CiDiagnosticReason, CiEvidenceIdentity, CiLane, CiOriginState, CiReopenMode, CiRouteOutcome,
@@ -831,19 +837,45 @@ pub(crate) enum CiBoardEffect {
 
 /// Countable side effects, so "exactly one worker" and "a no-op" are
 /// assertions about behaviour rather than about a variant's name.
+///
+/// # Why there are exactly two counters
+///
+/// There used to be six. The other four — `current_route_mutations`,
+/// `lead_sessions`, `dependency_edges`, `provider_actions` — were filled from
+/// `Default` for every variant, so `counts().dependency_edges` was the literal
+/// `0` and the tests asserting it was zero were asserting `0 == 0`. They would
+/// have stayed green if [`adjudicate`] had *started* honouring `blocked_by_add`
+/// tomorrow, which is the exact regression they claimed to catch.
+///
+/// A counter is only worth having if some variant can make it non-zero.
+/// [`CiBoardEffect`] has four variants and not one field of one of them names
+/// another route, a Lead session, a dependency edge, or a provider action —
+/// there is nothing here to derive those from, and widening the effect type
+/// purely so a test could count a constant would be inventing the mechanism to
+/// justify the assertion. The invariants are real; they are enforced elsewhere
+/// and are now asserted where they are enforced:
+///
+/// - **No dependency edge.** [`adjudicate`] never reads `blocked_by_add`, and
+///   [`CiLeadPlan`] has no blocker field. Witnessed by
+///   `blockers_in_a_payload_are_not_read`, which builds a plan from a payload
+///   carrying blockers and requires it to equal the plan built without them —
+///   that fails the moment the parser starts honouring the key.
+/// - **No provider action.** Enforced by rejection: `retrigger`, `requeue`,
+///   `rerun_failed_jobs` and `enable_auto_merge` are
+///   `CiResultRejection::UnknownDecision`, witnessed by
+///   `lead_cannot_request_a_provider_retry`.
+/// - **No further Lead session.** Enforced by [`CiAdjudication::fallback`],
+///   which turns every rejected result into a diagnostic reopen rather than a
+///   re-dispatch, witnessed by
+///   `invalid_unsupported_and_timed_out_results_convert_to_one_diagnosis`.
+/// - **No mutation of the current route.** Enforced by the repository: the
+///   guard's transaction touches only this row. Witnessed durably by
+///   `a_moved_head_applies_nothing` and `a_repository_error_applies_nothing`,
+///   which read the row back.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct CiEffectCounts {
     pub board_transitions: usize,
     pub worker_dispatches: usize,
-    /// Mutations of the *current* route — the one that superseded this
-    /// obsolete attempt. Always zero: an obsolete route may never touch it.
-    pub current_route_mutations: usize,
-    /// Further Lead sessions for the same evidence. Always zero.
-    pub lead_sessions: usize,
-    /// Dependency-graph edges. Always zero — CI routing adds none.
-    pub dependency_edges: usize,
-    /// Provider calls. Always zero — there is no Lead-to-provider edge.
-    pub provider_actions: usize,
 }
 
 impl CiBoardEffect {
@@ -859,7 +891,6 @@ impl CiBoardEffect {
         CiEffectCounts {
             board_transitions,
             worker_dispatches,
-            ..CiEffectCounts::default()
         }
     }
 

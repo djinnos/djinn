@@ -411,6 +411,53 @@ impl CiIncompleteReason {
     pub(crate) fn is_enumeration_failure(self) -> bool {
         matches!(self, Self::EnumerationPageFailed | Self::PartialPagination)
     }
+
+    /// Whether the reason means **no run was ever named** — as distinct from
+    /// an enumeration that failed, and from several runs being named at once.
+    ///
+    /// This is the second hold predicate, and it is deliberately *not* folded
+    /// into [`Self::is_enumeration_failure`]: neither of these is an
+    /// enumeration failure (the enumeration finished perfectly), so putting
+    /// them there would make that predicate's name a lie and would corrupt the
+    /// report, which distinguishes "the provider did not finish telling us"
+    /// from "the provider told us and there was nothing to point at".
+    ///
+    /// # Why they must hold rather than take the guarded Tier-2 route
+    ///
+    /// AC5 admits to Tier 2 "the closed complete-but-unusable cases **with a
+    /// constructible immutable run/lane identity**". These two have neither:
+    ///
+    /// * `MergeGroupCorrelationUnavailable` — zero terminal merge-group runs
+    ///   correlate to this PR. Nothing was named, so there is no run identity,
+    ///   and a later poll can produce one for free once the queue run appears.
+    /// * `RunAttributionUnavailable` — a blocking check belongs to no Actions
+    ///   run we can name, so there is no run identity *and* `rerun_failed_jobs`
+    ///   has nothing to act on.
+    ///
+    /// Routing them to Tier 2 anyway is what forced the lane executor to
+    /// fabricate `run_id: 0` / `dequeue_id: None` for the route row's
+    /// provider-action key — collapsing two distinct observations of the same
+    /// PR head onto one key, so the second resolved `AlreadyPresent` and never
+    /// got a route at all. AC9 and AC14 forbid that synthetic identity by name,
+    /// and the fix is to stop creating the row, not to invent the fields.
+    ///
+    /// # Why `AmbiguousMergeGroupCorrelation` is deliberately NOT here
+    ///
+    /// The proposal body puts it on the Tier-2 side explicitly — "missing or
+    /// malformed execution timestamps, check/log API error after immutable run
+    /// identification, or ambiguous merge-group correlation follows the guarded
+    /// Tier-2 route". Ambiguity is *several* runs named, not none, and its
+    /// lane identity (lane, PR number, PR head SHA, **and the real dequeue id**)
+    /// is constructible without fabricating anything that distinguishes one
+    /// dequeue from another. Its `run_id` stays `0` because no single run
+    /// exists to name — that residual is enumerated explicitly in
+    /// `ci_routing::tests`, not hidden.
+    pub(crate) fn no_run_was_named(self) -> bool {
+        matches!(
+            self,
+            Self::MergeGroupCorrelationUnavailable | Self::RunAttributionUnavailable
+        )
+    }
 }
 
 /// What the poller managed to capture for one evidence identity.
@@ -546,8 +593,23 @@ impl<'a> CiCapture<'a> {
 /// one `PartialPagination`, because they answer different operational
 /// questions: a failed page is a provider incident, a truncated walk is a PR
 /// that outgrew the ceiling, and a short read is the provider disagreeing with
-/// itself. All three route identically — hold — so nothing branches on the
-/// difference; only the report does.
+/// itself.
+///
+/// They do **not** route identically, and the split is two-way:
+///
+/// * `PageFetchFailed` → `EnumerationPageFailed` and `ShortRead` →
+///   `PartialPagination` are enumeration failures
+///   ([`CiIncompleteReason::is_enumeration_failure`]), so they **hold** and
+///   write no route row. A later poll can turn either into a real evidence
+///   bundle for free.
+/// * `MaxPagesTruncated` → `CheckEnumerationUnavailable` is deliberately *not*
+///   an enumeration failure, so it does **not** hold: truncation is a property
+///   of the PR rather than of the moment, so every subsequent enumeration
+///   returns the identical verdict and a hold is a permanent wedge with nothing
+///   on the board to explain it. See the rationale on
+///   [`CiIncompleteReason::is_enumeration_failure`] — and note it is the one
+///   route row still keyed on a placeholder `run_id`, which is a known
+///   deviation from the proposal's table under separate review.
 fn enumeration_incomplete_reason(reason: CheckSetIncompleteReason) -> CiIncompleteReason {
     match reason {
         CheckSetIncompleteReason::PageFetchFailed => CiIncompleteReason::EnumerationPageFailed,
@@ -769,12 +831,21 @@ pub(crate) enum CiRouteRationale {
     IncompleteEvidence(CiIncompleteReason),
     /// Tier 1 was the classification, but a budget ceiling is spent.
     BudgetExhausted,
-    /// The provider call returned an explicit error.
-    ProviderActionFailed,
-    /// A `calling` row was legally handed off and its result is unknowable.
-    /// Produced by [`unknown_outcome_route`]; see its note.
-    #[allow(dead_code)]
-    ProviderOutcomeUnknown,
+    // There is deliberately no `ProviderActionFailed` rationale either. A failed
+    // provider call is a durable fact — `finalize_calling` writes
+    // `CiRouteOutcome::ActionFailed` and the executor then opens the Tier-2
+    // lease with `CiTier2Reason::ProviderActionFailed` — and nothing classifies
+    // it. Its decision-shaped mirror was constructible only by
+    // `provider_failure_route`, whose result was discarded; see the note where
+    // that function used to live.
+    // There is deliberately no `ProviderOutcomeUnknown` rationale. A `calling`
+    // row that was legally handed off *is* a real route state, but it is a
+    // durable one: `recover_calling_owner` writes
+    // `CiRouteOutcome::OutcomeUnknown` and opens the lease in one transaction,
+    // and nothing classifies it. A decision-shaped mirror of that fact existed
+    // here, was constructible only by a function nothing called, and carried a
+    // comment claiming "wave 4 consumes it" that was never true — so it is
+    // deleted rather than kept as an unenforced second source of truth.
     /// A newer passing observation closes the route.
     NewerPass,
     /// A merged PR closes the route.
@@ -1030,7 +1101,9 @@ impl CiRouteDecision {
 /// | every blocking check cancelled/never executed (`is_inconclusive`) | Tier 1, subject to budget |
 /// | empty blocking set on a completed run | Tier 2 after the guard |
 /// | run or any required check non-terminal | Hold |
-/// | missing/malformed timestamps, unavailable/partial enumeration, check or log API error, ambiguous merge-group correlation | Tier 2 after the guard |
+/// | failed enumeration page, or collected count below `total_count` | Hold, no route row |
+/// | no merge-group run correlated, or a blocking check attributable to no run | Hold, no route row |
+/// | missing/malformed timestamps, check or log API error, ambiguous merge-group correlation, `MAX_PAGES` truncation | Tier 2 after the guard |
 /// | stale run head, PR head, merge-group, or dequeue identity | Discard |
 /// | passing complete set | existing passing path |
 /// | merged task/PR | existing merged path |
@@ -1087,9 +1160,19 @@ pub(crate) fn classify(observation: &CiObservation<'_>) -> CiRouteDecision {
     match (observation.capture.0, complete) {
         (Capture::NonTerminal(reason), _) => CiRouteDecision::hold(class, reason),
         (Capture::CompleteEmpty, _) => CiRouteDecision::complete_empty(observation.evidence.lane),
-        // The enumeration failed. This is not an evidence bundle, so it holds
-        // and re-polls; it may not open a route row, a lease, or a session.
-        (Capture::Incomplete(reason), _) if reason.is_enumeration_failure() => {
+        // Two independent reasons to hold, kept as two predicates because they
+        // are two different facts and the report separates them:
+        //
+        // * the enumeration failed — this is not an evidence bundle yet, and a
+        //   later poll can turn it into one for free;
+        // * no run was ever named — there is no run/lane identity to key a
+        //   route row on, and creating one would mean fabricating the fields
+        //   that distinguish one observation from the next.
+        //
+        // Either way: no route row, no lease, no session, and re-poll.
+        (Capture::Incomplete(reason), _)
+            if reason.is_enumeration_failure() || reason.no_run_was_named() =>
+        {
             CiRouteDecision::hold_incomplete(reason)
         }
         (_, Some(CiRouteRationale::Inconclusive)) => {
@@ -1136,36 +1219,22 @@ pub(crate) fn apply_budget(decision: CiRouteDecision, counts: CiBudgetCounts) ->
     )
 }
 
-/// The Tier-2 route for a provider call that returned an explicit error.
-///
-/// Charged and terminal for its evidence; it may route to Lead once, and only
-/// while the identity is still current — which the lease compare-and-set in
-/// `open_tier2_lease` enforces, not this function.
-pub(crate) fn provider_failure_route(class: CiClass) -> CiRouteDecision {
-    CiRouteDecision::tier2(
-        class,
-        CiRouteRationale::ProviderActionFailed,
-        CiTier2Reason::ProviderActionFailed,
-    )
-}
-
-/// The Tier-2 route for a `calling` row whose external result became unknowable
-/// after a quiescent exclusive startup handoff.
-// The classifier's name for a legally handed-off `calling` row whose external
-// result is unknowable. The *durable* transition is owned by
-// `recover_calling_owner`, which writes `outcome_unknown` and opens the lease in
-// one transaction; this is the decision-shaped view of the same fact, and wave 4
-// consumes it when it builds the Lead evidence bundle for such a route. Kept
-// beside its two siblings rather than deleted so the four Tier-2 entry reasons
-// stay one enumerable set.
-#[allow(dead_code)]
-pub(crate) fn unknown_outcome_route(class: CiClass) -> CiRouteDecision {
-    CiRouteDecision::tier2(
-        class,
-        CiRouteRationale::ProviderOutcomeUnknown,
-        CiTier2Reason::OutcomeUnknown,
-    )
-}
+// There is deliberately no `provider_failure_route` constructor, and no
+// `CiRouteRationale::ProviderActionFailed` for it to carry.
+//
+// It existed, it was never called for its value — the executor's only call site
+// was `let _ = provider_failure_route(decision.class());` on the line above a
+// hard-coded `CiTier2Reason::ProviderActionFailed` — and no test exercised it.
+// So it was a second source of truth that nothing could hold to the first.
+//
+// Consuming it instead of deleting it was tried and is not available: the reason
+// lives behind `CiRouteDecision::tier2_reason() -> Option<_>`, whose `None` is
+// unreachable for a Tier-2 constructor, and this workspace denies
+// `clippy::expect_used`. The honest choices were a panic site, a dead fallback
+// branch that would swallow exactly the drift the threading was meant to catch,
+// or deletion. `open_tier2` now names `CiTier2Reason::ProviderActionFailed`
+// directly, which is how its sibling call site already names
+// `CiTier2Reason::RetryExhausted` — one convention, one literal, no shadow copy.
 
 // ---------------------------------------------------------------------------
 // Route stages and supersession

@@ -307,7 +307,14 @@ impl CoordinatorActor {
     ///   [`CiIncompleteReason::LogApiError`].
     ///
     /// Neither is an enumeration failure — the run identity survives both — so
-    /// both take the guarded Tier-2 route rather than holding.
+    /// both take the guarded Tier-2 route rather than holding, keyed on that
+    /// run identity.
+    ///
+    /// `CheckApiError` is now reached only by a genuine transport or
+    /// JSON-decode failure. A non-success *page status* — including page 1 —
+    /// is an enumeration verdict rather than an error, so it arrives as
+    /// `Ok(Incomplete(PageFetchFailed))` and holds, exactly as it does on the
+    /// PR-head lane. That symmetry is the point: one fact, one route.
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn route_merge_group_ci_evidence(
         &self,
@@ -365,14 +372,49 @@ impl CoordinatorActor {
         let run = match correlate_merge_group_run(pull_number, runs) {
             Ok(run) => run.clone(),
             Err(err) => {
-                // No run was named, so there is no immutable identity to key on
-                // — which is precisely why the correlation errors route through
-                // the synthetic-identity path. `NotTerminal` holds and writes
-                // nothing; `Unusable` is an ambiguity about *which* run, so a
-                // per-PR-head key is the only honest one available.
+                // No *single* run was named — but the lane identity is real,
+                // and that is what the route row is keyed on. Lane, PR number,
+                // PR head SHA and the dequeue id were all resolved above from
+                // what the provider actually said; only the run fields are
+                // absent, because naming one is precisely what failed.
+                //
+                // Passing this instead of `None` is what fixes the collision
+                // the audit named: with a fabricated `dequeue_id: None` the
+                // provider-action key collapsed to subject + lane + PR + PR
+                // head, so two merge-group dequeues of the same head that both
+                // failed correlation shared one key — the second resolved
+                // `AlreadyPresent` and never got a route at all, and
+                // `stale_field` could never supersede on a newer dequeue.
+                //
+                // Of the two error arms only `AmbiguousMergeGroupCorrelation`
+                // still reaches a route row (the proposal puts it on the
+                // guarded Tier-2 side explicitly); `NotTerminal` and
+                // `MergeGroupCorrelationUnavailable` hold and write nothing, so
+                // for them this identity is never persisted.
+                let lane_identity = CiEvidenceIdentity {
+                    lane: CiLane::MergeGroup,
+                    pr_number,
+                    pr_head_sha: pr_head_sha.to_owned(),
+                    // No run was named. `run_id: 0` is the residual placeholder
+                    // — `CiEvidenceIdentity` has no absent encoding, and
+                    // widening it is a schema decision, not a bug fix. It is
+                    // enumerated as a known placeholder in `ci_routing::tests`
+                    // rather than hidden, and it no longer collapses keys now
+                    // that the dequeue id is real.
+                    run_id: 0,
+                    run_head_sha: pr_head_sha.to_owned(),
+                    dequeue_id: Some(dequeue_id.clone()),
+                };
                 let evidence: CiLaneEvidence<'_> = err.into();
                 let outcomes = self
-                    .drive_lane(&target, &evidence, pr_number, pr_head_sha, provider, None)
+                    .drive_lane(
+                        &target,
+                        &evidence,
+                        pr_number,
+                        pr_head_sha,
+                        provider,
+                        Some(lane_identity),
+                    )
                     .await;
                 return self
                     .settle(&outcomes, task_id, pull_number, pr_head_sha)
@@ -469,8 +511,27 @@ impl CoordinatorActor {
             &checks,
             &failed,
         );
+        // `known` is the identity of the run this capture was taken from, and
+        // it is passed rather than dropped. `capture_merge_group_evidence` can
+        // return a *lane-level* verdict — an enumeration reason, a
+        // non-terminal blocking check, complete-empty, or an unusable-timestamp
+        // reason — and every one of those used to be keyed on a fabricated
+        // `run_id: 0` / `dequeue_id: None` even though the correlated run was
+        // right here in scope. The `Runs` case ignores this argument: each run
+        // carries its own identity.
+        //
+        // `known` is moved by the `CheckApiError` and `LogApiError` branches
+        // above, but both of those `return`, so this use is on a path where it
+        // was never moved.
         let outcomes = self
-            .drive_lane(&target, &evidence, pr_number, pr_head_sha, provider, None)
+            .drive_lane(
+                &target,
+                &evidence,
+                pr_number,
+                pr_head_sha,
+                provider,
+                Some(known),
+            )
             .await;
         let disposition = self
             .settle(&outcomes, task_id, pull_number, pr_head_sha)
@@ -498,29 +559,45 @@ impl CoordinatorActor {
         pr_number: i64,
         observed_head_sha: &str,
         provider: &dyn CiRouteProvider,
-        // The immutable identity to key a lane-level capture on, when the
-        // caller already knows it. It matters for exactly the two reasons
-        // scoped to "after an immutable run is known" — `CheckApiError` and
-        // `LogApiError`. Those are Tier-2 routes, so they *do* write a route
-        // row, and keying that row on a synthetic run id would give two
-        // different failures of the same run one shared key. Every other
-        // lane-level capture (hold, complete-empty) writes nothing, so the
-        // synthetic identity below is unobservable.
+        // The identity to key a lane-level capture on. The merge-group lane
+        // always supplies one — the correlated run when there is one, the real
+        // lane identity (with the real dequeue id) when correlation failed —
+        // and the PR-head lane supplies `None`, because it has nothing more
+        // specific than the lane and the head until it fans out per run.
         known: Option<CiEvidenceIdentity>,
     ) -> Vec<CiLaneOutcome> {
         let routes = self.ci_routes();
         let scope = self.provider_action_scope.clone();
 
         if let Some(capture) = evidence.lane_capture() {
-            // No per-run evidence: hold, incomplete, or complete-empty. The
-            // identity is synthetic only in the fields no route row will ever
-            // read, because none of these branches creates one — except the
-            // incomplete-but-usable ones, which are keyed on the lane and head
-            // this poll observed.
+            // No per-run evidence: hold, incomplete, or complete-empty.
+            //
+            // This comment used to assert that "none of these branches creates
+            // a route row", and that was simply false: four incompleteness
+            // reasons are not enumeration failures, so they classify to Tier 2
+            // and DO write a row — keyed on whatever identity arrives here.
+            // Fabricating that identity is what let two distinct observations
+            // of one PR head collapse onto a single provider-action key.
+            //
+            // What is true now: `MergeGroupCorrelationUnavailable` and
+            // `RunAttributionUnavailable` hold (see
+            // `CiIncompleteReason::no_run_was_named`), the merge-group lane
+            // always passes a real `known`, and the fallback below is reached
+            // only by the PR-head lane.
             let identity = known.unwrap_or(CiEvidenceIdentity {
                 lane: lane_of(target.origin_state),
                 pr_number,
                 pr_head_sha: observed_head_sha.to_owned(),
+                // `run_id: 0` is a placeholder: this is a lane-level verdict
+                // and no run has been named yet. On the PR-head lane
+                // `run_head_sha` *is* the PR head, so that field is real —
+                // `capture_pr_head_evidence` sets it identically for genuine
+                // runs.
+                //
+                // Reasons that still reach a route row through this fallback,
+                // and are therefore keyed on the placeholder `run_id`, are
+                // enumerated explicitly in `ci_routing::tests` — see
+                // `every_incomplete_reason_either_holds_or_names_a_real_identity`.
                 run_id: 0,
                 run_head_sha: observed_head_sha.to_owned(),
                 dequeue_id: None,

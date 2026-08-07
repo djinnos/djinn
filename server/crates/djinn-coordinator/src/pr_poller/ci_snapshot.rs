@@ -674,8 +674,18 @@ pub(crate) mod evidence {
     ///   reason and therefore a guarded Tier 2 — a Lead session and a route row
     ///   spent on a run that is simply still going, and which the next poll
     ///   would have classified for free.
-    /// * **`Unusable` fails closed to Tier 2**, because a merge group we cannot
-    ///   name is complete-but-unusable current evidence, not a wait.
+    /// * **`Unusable` fails closed**, because a merge group we cannot name is
+    ///   not a wait. Its two reasons then part company at the classifier, and
+    ///   the difference is which identity exists:
+    ///   * `AmbiguousMergeGroupCorrelation` — two or more terminal runs were
+    ///     named and we cannot say which this dequeue refers to. The proposal
+    ///     puts it on the guarded Tier-2 route explicitly, and its lane
+    ///     identity (lane, PR, PR head, **and the real dequeue id**) is
+    ///     constructible, so it takes a route row.
+    ///   * `MergeGroupCorrelationUnavailable` — *no* run was named at all.
+    ///     There is no run identity to key on and nothing for an adjudication
+    ///     to read, so it **holds** with no route row; see
+    ///     [`CiIncompleteReason::no_run_was_named`].
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub(crate) enum CiMergeGroupCorrelationError {
         NotTerminal(CiPendingReason),

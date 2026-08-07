@@ -1115,6 +1115,42 @@ pub async fn reject_refinement_terminal_audit_for_test(db: &Database) {
     .expect("failed to create terminal audit rejection trigger");
 }
 
+/// Install a test-only trigger that makes every write to `ci_route_attempts`
+/// fail, leaving reads intact.
+///
+/// This is the honest injection for the supervisor's fail-closed apply path.
+/// `resolve_tier2_lease` calls `ensure_initialized`, validates the resolution,
+/// and reads the row under `SELECT ... FOR UPDATE` before it writes anything,
+/// so dropping or renaming the table would fail *earlier and elsewhere* — a
+/// setup failure dressed as a guard failure — and would also destroy the row
+/// the fixture must read back to prove nothing happened. A `BEFORE UPDATE`
+/// trigger lets `reserve` and `open_tier2_lease` run normally when it is
+/// installed afterwards, and puts the error inside the guard's own
+/// transaction, which then rolls back whole.
+///
+/// **Not for production use.**  Panics on SQL errors.
+pub async fn reject_ci_route_attempt_updates_for_test(db: &Database) {
+    db.ensure_initialized().await.unwrap();
+    sqlx::query(
+        "CREATE FUNCTION reject_ci_route_attempt_updates_for_test() RETURNS trigger AS $$ \
+         BEGIN \
+           RAISE EXCEPTION 'injected ci_route_attempts write failure'; \
+         END; \
+         $$ LANGUAGE plpgsql",
+    )
+    .execute(db.pool())
+    .await
+    .expect("failed to create ci_route_attempts rejection function");
+    sqlx::query(
+        "CREATE TRIGGER reject_ci_route_attempt_updates_for_test \
+         BEFORE UPDATE ON ci_route_attempts \
+         FOR EACH ROW EXECUTE FUNCTION reject_ci_route_attempt_updates_for_test()",
+    )
+    .execute(db.pool())
+    .await
+    .expect("failed to create ci_route_attempts rejection trigger");
+}
+
 /// Backdate a task's `updated_at` by a PostgreSQL `interval` string
 /// (e.g. `'20 minutes'`).
 ///

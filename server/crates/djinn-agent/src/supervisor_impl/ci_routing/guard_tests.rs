@@ -24,6 +24,13 @@
 //! [`a_resolved_lease_cannot_be_resolved_twice`] must all fail. They assert on
 //! the **durable row and the counted effects**, not on the name of the returned
 //! variant, so a mutation that merely renames the outcome does not slip past.
+//!
+//! The other half of the same contract is the guard that could not be
+//! *evaluated*. `apply_under_guard` maps a repository `Err` to "applied
+//! nothing", and until [`a_repository_error_applies_nothing`] existed, flipping
+//! that arm to "applied" left the whole crate green: the three fixtures above
+//! all reach a repository that answers, so none of them exercises the branch
+//! where it cannot.
 
 use djinn_db::{
     CiAction, CiActionPhase, CiClass, CiEvidenceIdentity, CiLane, CiOriginState, CiReserveOutcome,
@@ -193,10 +200,6 @@ async fn a_current_route_applies_exactly_one_reopen() {
     let counts = effect.counts();
     assert_eq!(counts.board_transitions, 1);
     assert_eq!(counts.worker_dispatches, 1, "exactly one worker, not two");
-    assert_eq!(counts.current_route_mutations, 0);
-    assert_eq!(counts.lead_sessions, 0);
-    assert_eq!(counts.dependency_edges, 0);
-    assert_eq!(counts.provider_actions, 0);
 
     let row = g.row().await;
     assert_eq!(
@@ -348,6 +351,111 @@ async fn a_resolved_lease_cannot_be_resolved_twice() {
         1,
         "two deliveries of one adjudication dispatch exactly one worker in total"
     );
+}
+
+/// The guard could not be **evaluated**. Nothing may happen either — and the
+/// durable witness is the opposite of the moved-head one.
+///
+/// A lost guard leaves `superseded_before_apply` behind, because the repository
+/// ran and wrote it. A repository *error* leaves nothing at all: the
+/// transaction rolled back, the row is still un-adjudicated, and the lease is
+/// still open. That is what makes this fixture necessary rather than a
+/// re-statement of [`a_moved_head_applies_nothing`] — the two cases are
+/// indistinguishable from the returned effect and distinguishable only from the
+/// row.
+///
+/// **Mutation target.** `apply_under_guard` maps the `Err` arm to `false`. Flip
+/// that to `true` — "apply the Lead result when the guard could not be
+/// evaluated" — and this fails on the counted effects, on the returned stage
+/// outcome, and on nothing else in the suite.
+#[tokio::test]
+async fn a_repository_error_applies_nothing() {
+    let g = guarded().await;
+    let ctx = g.context();
+    let adjudication = repair(&ctx);
+    let status_before = g.task_status().await;
+    let attempts_before = g.worker_attempts().await;
+    let activity_before =
+        djinn_db::test_support::activity_row_count_for_test(&g.db, &g.subject.id).await;
+    let routes_before =
+        djinn_db::test_support::ci_route_row_count_for_test(&g.db, &g.subject.id).await;
+    let leases_before =
+        djinn_db::test_support::ci_route_lease_count_for_test(&g.db, &g.subject.id).await;
+
+    // Installed *after* the fixture reserved the route and opened the lease, so
+    // the only statement it defeats is the guard's own resolving write.
+    djinn_db::test_support::reject_ci_route_attempt_updates_for_test(&g.db).await;
+
+    let effect = apply_under_guard(
+        &g.routes,
+        &ctx,
+        &adjudication,
+        // The head has NOT moved and the lease is open: on a reachable database
+        // this exact call is `a_current_route_applies_exactly_one_reopen`, which
+        // is what makes the error the only difference between the two.
+        &CiObservedNow {
+            pr_head_sha: HEAD.to_owned(),
+        },
+    )
+    .await;
+
+    assert!(
+        effect.is_noop(),
+        "an unevaluated guard cannot authorize anything, got {effect:?}"
+    );
+    assert_eq!(
+        effect.counts(),
+        CiEffectCounts::default(),
+        "fail-closed means no board transition and no worker dispatch"
+    );
+
+    let row = g.row().await;
+    assert_eq!(
+        row.adjudicated_outcome(),
+        None,
+        "the resolving transaction rolled back, so the route is still \
+         un-adjudicated -- NOT superseded_before_apply, which only a repository \
+         that actually ran can write"
+    );
+    assert!(
+        row.holds_open_tier2_lease(),
+        "an un-resolved lease is what keeps the row visible to the quiescence \
+         report instead of silently dropping the Lead result"
+    );
+    assert_eq!(row.action_phase, CiActionPhase::Reserved);
+    assert_eq!(row.reopen_mode, None);
+    assert_eq!(row.superseded_by_evidence, None);
+
+    assert_eq!(
+        g.task_status().await,
+        status_before,
+        "no board mutation: the task status must be untouched"
+    );
+    assert_eq!(
+        g.worker_attempts().await,
+        attempts_before,
+        "no worker dispatch: no task attempt may be created"
+    );
+    assert_eq!(
+        djinn_db::test_support::activity_row_count_for_test(&g.db, &g.subject.id).await,
+        activity_before,
+        "no board mutation: nothing may be logged either"
+    );
+    assert_eq!(
+        djinn_db::test_support::ci_route_row_count_for_test(&g.db, &g.subject.id).await,
+        routes_before,
+        "no route row invented"
+    );
+    assert_eq!(
+        djinn_db::test_support::ci_route_lease_count_for_test(&g.db, &g.subject.id).await,
+        leases_before,
+        "no second Tier-2 lease"
+    );
+
+    assert!(matches!(
+        stage_outcome_after_guard(&adjudication.plan, &effect, "db error"),
+        StageOutcome::LeadRouteSuperseded { .. }
+    ));
 }
 
 // ---------------------------------------------------------------------------

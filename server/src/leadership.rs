@@ -59,10 +59,17 @@ use tokio_util::sync::CancellationToken;
 
 /// Advisory-lock classid: ASCII "djin" (0x646A696E). Arbitrary-but-fixed
 /// namespace for djinn's own process-level locks.
-const LOCK_CLASSID: i32 = 0x646A_696E;
+///
+/// Public so an integration test can probe *this* lock from its own connection
+/// instead of hardcoding the literal. The only observable fact about the
+/// release ordering is lock availability from a second session, and a test that
+/// silently probed a different key would pass vacuously forever.
+pub const LOCK_CLASSID: i32 = 0x646A_696E;
 /// Advisory-lock objid for the singleton coordinator. Bump only if you ever
 /// need a *second* independent singleton role.
-const LOCK_OBJID: i32 = 1;
+///
+/// Public for the same reason as [`LOCK_CLASSID`].
+pub const LOCK_OBJID: i32 = 1;
 
 /// How often a standby retries the lock, and how often the leader pings its
 /// held connection to detect loss. Kept short so promotion after the old pod

@@ -60,8 +60,7 @@ use super::{
     CiAction, CiCompleteEmptyRoute, CiEvidenceIdentity, CiObservation, CiProviderActionKind,
     CiReservedRecoveryRoute, CiRouteOutcome, CiRouteRationale, CiRouteSubject, CiStaleField,
     CiTier2Reason, apply_budget, classify, head_budget_key, may_open_tier2, provider_action_key,
-    provider_failure_route, retry_budget_key, route_reserved_recovery, tier2_lease_key,
-    transient_fingerprint,
+    retry_budget_key, route_reserved_recovery, tier2_lease_key, transient_fingerprint,
 };
 
 // ---------------------------------------------------------------------------
@@ -490,7 +489,13 @@ pub(crate) async fn execute_route(
     // An explicit provider error is charged, terminal, and may route to Lead
     // once — only while the identity is still current, which `open_tier2_lease`
     // enforces with its own compare-and-set.
-    let _ = provider_failure_route(decision.class());
+    //
+    // The reason is named here, exactly as `CiTier2Reason::RetryExhausted` is
+    // named at the budget-exhaustion `open_tier2` call above. There used to be a
+    // `let _ = provider_failure_route(decision.class());` on the line before
+    // this one: a second, discarded copy of the same verdict that nothing read
+    // and no test exercised. It has been deleted rather than threaded through —
+    // see the note where it used to live in `super`.
     let escalated = open_tier2(
         routes,
         provider,
@@ -985,8 +990,9 @@ pub(crate) trait CiOwnerLiveness: Send + Sync {
 ///
 /// After a legal handoff the external outcome is genuinely unknowable, and the
 /// repository resolves that rather than guessing: a still-current row becomes
-/// `outcome_unknown` and retains its charge — [`super::unknown_outcome_route`]
-/// is the classifier's name for the same fact — while an obsolete one becomes
+/// [`djinn_db::CiRouteOutcome::OutcomeUnknown`] and retains its charge — that
+/// transition is durable and owned entirely by `recover_calling_owner`, with no
+/// classifier mirror — while an obsolete one becomes
 /// `superseded_after_call`, which is [`super::supersession_outcome`] of
 /// [`super::CiRouteStage::AfterCall`]. Nothing here queries the provider,
 /// replays the call, or touches the board.

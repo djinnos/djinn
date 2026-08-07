@@ -558,7 +558,7 @@ fn a_non_terminal_run_or_check_holds_and_spends_nothing() {
 /// [`CiIncompleteReason`] fails to compile here until it is placed on one side
 /// of the partition, which is the only thing that stops a new reason from
 /// silently inheriting whichever default the classifier happens to have.
-const EVERY_INCOMPLETE_REASON: [CiIncompleteReason; 11] = [
+const EVERY_INCOMPLETE_REASON: [CiIncompleteReason; 12] = [
     CiIncompleteReason::MissingStartTimestamp,
     CiIncompleteReason::MissingCompletionTimestamp,
     CiIncompleteReason::MalformedExecutionInterval,
@@ -570,18 +570,70 @@ const EVERY_INCOMPLETE_REASON: [CiIncompleteReason; 11] = [
     CiIncompleteReason::LogApiError,
     CiIncompleteReason::AmbiguousMergeGroupCorrelation,
     CiIncompleteReason::MergeGroupCorrelationUnavailable,
+    CiIncompleteReason::RunAttributionUnavailable,
 ];
 
+/// What a reason is allowed to do, and — when it writes a route row — what the
+/// row is allowed to be keyed on.
+///
+/// This is the regression guard that replaces a database `CHECK (run_id > 0)`.
+/// That constraint cannot be added while any producer of a placeholder `run_id`
+/// survives: it would turn today's silent key collision into a hard `INSERT`
+/// failure for real PRs. So the invariant is pinned here instead, and the
+/// `match` below is exhaustive with **no wildcard arm** — a new
+/// `CiIncompleteReason` does not compile until somebody classifies it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum IdentityDiscipline {
+    /// Holds: no route row, so no identity is persisted at all.
+    Holds,
+    /// Writes a route row, and every field of the identity it is keyed on is a
+    /// fact the provider reported.
+    RowOnRealIdentity,
+    /// Writes a route row keyed on an identity whose `run_id` is the placeholder
+    /// `0`, because no single Actions run exists to name at that point.
+    ///
+    /// **This list must stay at two entries.** Every member is a known,
+    /// documented deviation with an owner; anything new arriving here is the
+    /// synthetic identity AC9 and AC14 forbid, sneaking back in.
+    RowOnPlaceholderRunId,
+}
+
 /// Which side of the proposal's partition a reason belongs to, spelled out
-/// independently of the implementation's `is_enumeration_failure` so the test
-/// is a second opinion rather than a restatement.
-fn expected_to_hold(reason: CiIncompleteReason) -> bool {
+/// independently of the implementation's `is_enumeration_failure` /
+/// `no_run_was_named` predicates so the test is a second opinion rather than a
+/// restatement.
+///
+/// The judgement is per *reason*, taken over every path that can produce it: a
+/// reason is `RowOnPlaceholderRunId` if **any** producer can reach a route row
+/// without a run id, even when another producer supplies one.
+fn identity_discipline(reason: CiIncompleteReason) -> IdentityDiscipline {
     match reason {
         // "Any failed page ... or collected count below reported
         // `total_count` → Hold without a route row." Both are transient
         // provider facts that a later poll can resolve for free.
-        CiIncompleteReason::EnumerationPageFailed | CiIncompleteReason::PartialPagination => true,
-        // `MAX_PAGES` truncation is deliberately NOT on the hold side, and the
+        CiIncompleteReason::EnumerationPageFailed | CiIncompleteReason::PartialPagination => {
+            IdentityDiscipline::Holds
+        }
+
+        // No run was ever named, so there is no run/lane identity to key on —
+        // and AC5 admits to Tier 2 only "the closed complete-but-unusable cases
+        // **with a constructible immutable run/lane identity**". Creating the
+        // row anyway is what forced the fabricated `run_id: 0` /
+        // `dequeue_id: None`, which collapsed two observations of one PR head
+        // onto a single provider-action key.
+        CiIncompleteReason::MergeGroupCorrelationUnavailable
+        | CiIncompleteReason::RunAttributionUnavailable => IdentityDiscipline::Holds,
+
+        // Complete-but-unusable, and produced only *after* an immutable run is
+        // known — `route_merge_group_ci_evidence` reaches them strictly after
+        // `correlate_merge_group_run` succeeded, so the identity is that run's.
+        CiIncompleteReason::CheckApiError | CiIncompleteReason::LogApiError => {
+            IdentityDiscipline::RowOnRealIdentity
+        }
+
+        // ── The two placeholder-`run_id` rows, and why each is allowed ───────
+        //
+        // `MAX_PAGES` truncation is deliberately not on the hold side, and the
         // divergence from the proposal's sentence is the point.
         //
         // A hold's premise is "a later poll turns this into an evidence bundle
@@ -592,23 +644,114 @@ fn expected_to_hold(reason: CiIncompleteReason) -> bool {
         // verdict. Held, such a PR's CI gate never resolves — no route row, no
         // adjudication, no board signal, forever.
         //
-        // It is complete-but-unusable current evidence instead: a real
-        // enumeration whose contents no automatic action can read. That is the
-        // guarded Tier-2 row, and the head-scoped lease bounds it to one Lead
-        // adjudication per PR head rather than one per poll.
-        CiIncompleteReason::CheckEnumerationUnavailable => false,
-        // "Complete snapshot with missing or malformed timestamps, check/log
-        // API error after an immutable run is known, or ambiguous merge-group
-        // correlation → Tier 2 after the current-identity guard."
+        // The residual: on the merge-group lane it is keyed on the correlated
+        // run, but on the PR-head lane `capture_pr_head_evidence` tests the
+        // enumeration verdict *before* run attribution, so no run identity
+        // exists yet and the row is keyed on `run_id: 0`. That is the
+        // truncation-to-Tier-2 deviation from the proposal's table
+        // (AC5/AC12/AC14), and it is **pending a separate tribunal** — it is
+        // recorded here, not fixed here.
+        CiIncompleteReason::CheckEnumerationUnavailable => {
+            IdentityDiscipline::RowOnPlaceholderRunId
+        }
+        // Two or more terminal merge-group runs correlate to this PR. The
+        // proposal puts it on the guarded Tier-2 route explicitly ("...or
+        // ambiguous merge-group correlation follows the guarded Tier-2 route"),
+        // and its lane identity — lane, PR number, PR head SHA, and the *real*
+        // dequeue id — is constructible. `run_id` stays `0` because "ambiguous"
+        // means no single run exists to name; `CiEvidenceIdentity` has no absent
+        // encoding, and widening it is a schema decision rather than a bug fix.
+        // The real dequeue id is what makes two dequeues of one head distinct
+        // keys, which is the collision the audit actually named.
+        CiIncompleteReason::AmbiguousMergeGroupCorrelation => {
+            IdentityDiscipline::RowOnPlaceholderRunId
+        }
+
+        // ── Known gap, deliberately recorded rather than papered over ────────
+        //
+        // "Complete snapshot with missing or malformed timestamps ... → Tier 2
+        // after the current-identity guard." On the *merge-group* lane these
+        // are keyed on the correlated run, which is real. On the *PR-head* lane
+        // they are not: `capture_pr_head_evidence` runs
+        // `blocking_evidence_completeness` BEFORE run attribution, so the lane
+        // fails closed with no run named and the row is keyed on `run_id: 0` —
+        // the same collision shape as everything above.
+        //
+        // Fixing it means changing how many route rows a lane may emit (the
+        // lane-level fail-closed would have to fan out per attributed run so
+        // that no run takes Tier 1 while every row names a real run). That is a
+        // spec-level behaviour change, not a bug fix, so it is reported rather
+        // than made here — and it is classified honestly so the fix, when it
+        // lands, shows up as this arm moving to `RowOnRealIdentity`.
         CiIncompleteReason::MissingStartTimestamp
         | CiIncompleteReason::MissingCompletionTimestamp
         | CiIncompleteReason::MalformedExecutionInterval
-        | CiIncompleteReason::NonPositiveExecutionInterval
-        | CiIncompleteReason::CheckApiError
-        | CiIncompleteReason::LogApiError
-        | CiIncompleteReason::AmbiguousMergeGroupCorrelation
-        | CiIncompleteReason::MergeGroupCorrelationUnavailable
-        | CiIncompleteReason::RunAttributionUnavailable => false,
+        | CiIncompleteReason::NonPositiveExecutionInterval => {
+            IdentityDiscipline::RowOnPlaceholderRunId
+        }
+    }
+}
+
+fn expected_to_hold(reason: CiIncompleteReason) -> bool {
+    identity_discipline(reason) == IdentityDiscipline::Holds
+}
+
+/// Every reason either holds and writes nothing, or writes a row it can name.
+///
+/// The `match` in [`identity_discipline`] has no wildcard arm, so adding a
+/// `CiIncompleteReason` without classifying it fails the build. This test is the
+/// other half: it pins the *size and membership* of the placeholder-`run_id`
+/// set, so a new reason cannot be quietly filed beside the two documented
+/// deviations, and it re-derives the hold/row split from the classifier itself
+/// rather than from the predicates the classifier uses.
+#[test]
+fn every_incomplete_reason_either_holds_or_names_a_real_identity() {
+    let id = pr_head_identity(900);
+
+    let placeholder: Vec<CiIncompleteReason> = EVERY_INCOMPLETE_REASON
+        .into_iter()
+        .filter(|reason| identity_discipline(*reason) == IdentityDiscipline::RowOnPlaceholderRunId)
+        .collect();
+    assert_eq!(
+        placeholder,
+        vec![
+            // Known gap on the PR-head lane only — see `identity_discipline`.
+            CiIncompleteReason::MissingStartTimestamp,
+            CiIncompleteReason::MissingCompletionTimestamp,
+            CiIncompleteReason::MalformedExecutionInterval,
+            CiIncompleteReason::NonPositiveExecutionInterval,
+            // Tribunal-pending: `MAX_PAGES` truncation classifies to Tier 2
+            // instead of holding, and on the PR-head lane it is reached before
+            // any run is attributed.
+            CiIncompleteReason::CheckEnumerationUnavailable,
+            // Spec-mandated Tier 2, and "ambiguous" means no single run exists.
+            // Its dequeue id is real, which is what keeps its keys distinct.
+            CiIncompleteReason::AmbiguousMergeGroupCorrelation,
+        ],
+        "a NEW reason reached a route row without a real run identity — that is \
+         the synthetic identity AC9 and AC14 forbid. Give it a real identity, or \
+         make it hold; do not add it to this list.",
+    );
+
+    for reason in EVERY_INCOMPLETE_REASON {
+        let decision = classify(&observe(&id, &id, CiCapture::incomplete(reason)));
+        match identity_discipline(reason) {
+            IdentityDiscipline::Holds => {
+                assert_eq!(decision.action(), CiAction::Hold, "{reason:?}");
+                assert!(
+                    !decision.creates_route_row(),
+                    "{reason:?} holds, so it may not create a route row: {decision:?}",
+                );
+                assert_no_effects(&decision);
+            }
+            IdentityDiscipline::RowOnRealIdentity | IdentityDiscipline::RowOnPlaceholderRunId => {
+                assert!(
+                    decision.creates_route_row(),
+                    "{reason:?} is classified as writing a route row: {decision:?}",
+                );
+                assert_lead_only(&decision, CiTier2Reason::EvidenceUnknown);
+            }
+        }
     }
 }
 
@@ -621,10 +764,7 @@ fn expected_to_hold(reason: CiIncompleteReason) -> bool {
 #[test]
 fn every_incomplete_evidence_case_fails_closed_without_provider_mutation() {
     let id = pr_head_identity(900);
-    for reason in EVERY_INCOMPLETE_REASON
-        .into_iter()
-        .chain([CiIncompleteReason::RunAttributionUnavailable])
-    {
+    for reason in EVERY_INCOMPLETE_REASON {
         let decision = classify(&observe(&id, &id, CiCapture::incomplete(reason)));
         assert_eq!(decision.class(), CiClass::Unknown, "{reason:?}");
         assert_eq!(
@@ -1347,7 +1487,7 @@ fn timestamp_completeness_is_checked_in_a_fixed_order() {
 }
 
 #[test]
-fn a_hard_failure_that_claims_it_never_ran_is_contradictory_not_transient() {
+fn hard_failure_with_non_positive_interval_is_not_tier_one() {
     // `failure` is a verdict about the lane's own work; a non-positive
     // interval says the lane never dispatched work. Both cannot be true, and
     // `ci_triage` resolves the pair toward NeverExecuted — which would make

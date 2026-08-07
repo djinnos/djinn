@@ -11,8 +11,12 @@
 //! 1. Effects are **counted**, never named. Every application assertion goes
 //!    through [`CiBoardEffect::counts`], so a variant renamed or a plan that
 //!    quietly dispatched two workers fails. `expect_noop` additionally
-//!    asserts all six counters are zero, which is what "no reopen, no worker
-//!    dispatch, no mutation of the current route" means operationally.
+//!    requires the whole counter struct to equal its zero value, which is what
+//!    "no reopen and no worker dispatch" means operationally. It counts the
+//!    two things a [`CiBoardEffect`] can actually cause and nothing else: the
+//!    earlier version also asserted four counters that were `Default`-filled
+//!    constants, so they held by construction and would have gone on holding
+//!    through the regressions they named.
 //! 2. Every plan is exercised against **both** guard outcomes. A test that
 //!    only ever saw a passing guard would prove nothing about suppression,
 //!    and a suppression test that never saw the plan succeed would not prove
@@ -123,8 +127,7 @@ fn expect_noop(effect: &CiBoardEffect) {
     assert_eq!(
         effect.counts(),
         CiEffectCounts::default(),
-        "a suppressed result must perform no transition, no worker dispatch, no mutation of the \
-         current route, no further Lead session, no dependency edge, and no provider action"
+        "a suppressed result must perform no board transition and no worker dispatch"
     );
 }
 
@@ -137,10 +140,6 @@ fn expect_single_worker_reopen(effect: &CiBoardEffect) {
         counts.worker_dispatches, 1,
         "a valid current reopen dispatches EXACTLY one worker"
     );
-    assert_eq!(counts.current_route_mutations, 0);
-    assert_eq!(counts.lead_sessions, 0);
-    assert_eq!(counts.dependency_edges, 0);
-    assert_eq!(counts.provider_actions, 0);
 }
 
 // ── Valid repair reopen ────────────────────────────────────────────────────
@@ -644,16 +643,27 @@ fn invalid_unsupported_and_timed_out_results_convert_to_one_diagnosis() {
 
         let effect = board_effect(&ctx, &adjudication.plan, CiGuardOutcome::Current);
         expect_single_worker_reopen(&effect);
-        assert_eq!(
-            effect.counts().lead_sessions,
-            0,
-            "a fallback must not request another Lead session"
-        );
+
+        // "Never a second Lead session for the same evidence" is the fallback
+        // itself, not a counter: `CiAdjudication::fallback` returns a
+        // diagnostic reopen, and a diagnostic reopen dispatches a worker. The
+        // assertions above -- plan shape plus exactly one dispatch -- are the
+        // whole of it. A `lead_sessions` counter would only ever have read the
+        // constant `0`, including on the day a fallback started re-dispatching
+        // Lead.
     }
 }
 
 /// `retrigger` and `requeue` have no representation: they are unknown
 /// decisions, and they do not reach the provider.
+///
+/// The load-bearing assertion is the **rejection**. "No provider action" is a
+/// property of the type system here — no [`CiLeadPlan`] and no
+/// [`CiBoardEffect`] variant carries one — so the only way a retry could reach
+/// a provider is for `adjudicate` to grow a decision for it, and that is what
+/// this test forbids. (The earlier `counts().provider_actions == 0` line
+/// asserted a `Default`-filled constant and would have survived exactly that
+/// change.)
 #[test]
 fn lead_cannot_request_a_provider_retry() {
     let ctx = causal_context();
@@ -670,40 +680,57 @@ fn lead_cannot_request_a_provider_retry() {
             Some(CiResultRejection::UnknownDecision),
             "`{retry}` must not be a decision"
         );
-        assert_eq!(
-            board_effect(&ctx, &adjudication.plan, CiGuardOutcome::Current)
-                .counts()
-                .provider_actions,
-            0,
-            "no Lead result may produce a provider action"
+        assert!(
+            matches!(adjudication.plan, CiLeadPlan::DiagnosticReopen { .. }),
+            "`{retry}` must degrade to the single fallback, not to a plan of its own"
         );
     }
 }
 
-/// No plan, valid or fallback, ever adds a dependency edge.
+/// A `blocked_by_add` key in a Lead payload is not read.
+///
+/// This replaces an assertion that `counts().dependency_edges == 0`. That
+/// counter was a `Default`-filled constant, so it held whatever the parser did;
+/// this holds only while the parser genuinely ignores the key. The witness is
+/// **equality of the produced plans**: a payload carrying blockers must
+/// adjudicate byte-identically to the same payload without them. The day
+/// `adjudicate` starts honouring `blocked_by_add`, the two plans diverge and
+/// this goes red.
 #[test]
-fn no_plan_mutates_the_dependency_graph() {
+fn blockers_in_a_payload_are_not_read() {
     let ctx = causal_context();
-    let mut with_blockers = repair_payload();
-    with_blockers["blocked_by_add"] = json!(["e5f6"]);
 
-    for plan in [
-        adjudicate(&ctx, LeadResponse::Submitted(&with_blockers)).plan,
-        adjudicate(
-            &ctx,
-            LeadResponse::Submitted(&diagnose_payload("no_grounded_remedy")),
-        )
-        .plan,
-        adjudicate(&ctx, LeadResponse::Submitted(&park_payload())).plan,
-        adjudicate(&ctx, LeadResponse::Submitted(&supersede_payload())).plan,
-        adjudicate(&ctx, LeadResponse::TimedOut).plan,
-    ] {
+    let payloads = [
+        ("repair", repair_payload()),
+        ("diagnose", diagnose_payload("no_grounded_remedy")),
+        ("park", park_payload()),
+        ("supersede", supersede_payload()),
+    ];
+
+    for (label, clean) in payloads {
+        let mut with_blockers = clean.clone();
+        with_blockers["blocked_by_add"] = json!(["e5f6"]);
+        with_blockers["blocked_by_remove"] = json!(["a1b2"]);
+
+        let baseline = adjudicate(&ctx, LeadResponse::Submitted(&clean));
+        let carried = adjudicate(&ctx, LeadResponse::Submitted(&with_blockers));
+
         assert_eq!(
-            board_effect(&ctx, &plan, CiGuardOutcome::Current)
-                .counts()
-                .dependency_edges,
-            0,
-            "{plan:?} must add no dependency edge"
+            carried.plan, baseline.plan,
+            "{label}: blocker keys must make no difference to the plan"
+        );
+        assert_eq!(
+            carried.rejection, baseline.rejection,
+            "{label}: blocker keys must not change acceptance either -- ignoring \
+             a key is not the same as rejecting the payload that carries it"
+        );
+
+        // And the effect the supervisor is permitted to perform is likewise
+        // unchanged, so nothing downstream can read the key back out.
+        assert_eq!(
+            board_effect(&ctx, &carried.plan, CiGuardOutcome::Current),
+            board_effect(&ctx, &baseline.plan, CiGuardOutcome::Current),
+            "{label}: no blocker may reach the board effect"
         );
     }
 }

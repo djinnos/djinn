@@ -31,9 +31,10 @@ use djinn_db::{
     CiQuiescenceProof, CiRouteOutcome, CiRouteSubject, CiSubjectKind, Database,
 };
 use djinn_provider::github_api::{
-    CheckAnnotation, CheckRun, CheckRunsResponse, GitHubApiError, MergeMethod, ReproductionJob,
-    ReproductionStep, RequiredCheckReproduction, RequiredCheckReproductionContext,
-    RequiredCheckUnreproducible, RequiredCheckUnreproducibleReason,
+    CheckAnnotation, CheckRun, CheckRunsResponse, CheckSetIncompleteReason, GitHubApiError,
+    MergeMethod, ReproductionJob, ReproductionStep, RequiredCheckReproduction,
+    RequiredCheckReproductionContext, RequiredCheckUnreproducible,
+    RequiredCheckUnreproducibleReason,
 };
 
 use super::*;
@@ -75,6 +76,11 @@ struct FakeState {
     fail_annotations: bool,
     /// What `list_check_runs_for_ref` returns when it does not fail.
     check_runs: Vec<CheckRun>,
+    /// The completeness verdict `list_check_runs_for_ref` reports. Defaults to
+    /// `Complete`; a fixture sets it to drive the merge-group lane's
+    /// *lane-level* incomplete captures, which are the ones that used to be
+    /// keyed on a fabricated identity.
+    check_runs_completeness: Option<CheckSetIncompleteReason>,
     /// The command `required_check_reproduction_context` reports as the one CI
     /// actually ran. `None` makes the check unreproducible, which is the case
     /// that leaves a route with an empty repair corpus.
@@ -124,6 +130,15 @@ impl FakeProvider {
 
     fn set_check_runs(&self, runs: Vec<CheckRun>) {
         self.state.lock().expect("fake provider mutex").check_runs = runs;
+    }
+
+    /// Make `list_check_runs_for_ref` report an incomplete enumeration rather
+    /// than failing outright — the shape a truncated or short read has.
+    fn set_check_runs_incomplete(&self, reason: CheckSetIncompleteReason) {
+        self.state
+            .lock()
+            .expect("fake provider mutex")
+            .check_runs_completeness = Some(reason);
     }
 
     /// The command `required_check_reproduction_context` reports. `None` makes
@@ -193,7 +208,15 @@ impl CiRouteProvider for FakeProvider {
         if state.fail_check_runs {
             return Err(api_error("list_check_runs_for_ref"));
         }
-        Ok(CheckRunsResponse::complete(state.check_runs.clone()))
+        let runs = state.check_runs.clone();
+        Ok(match state.check_runs_completeness {
+            Some(reason) => CheckRunsResponse::incomplete(
+                u32::try_from(runs.len()).unwrap_or(u32::MAX) + 1,
+                runs,
+                reason,
+            ),
+            None => CheckRunsResponse::complete(runs),
+        })
     }
 
     async fn get_check_run_annotations(
@@ -1167,13 +1190,32 @@ async fn newer_success_before_supervisor_apply_is_noop() {
     );
 }
 
-/// Graceful shutdown closes action admission, joins every in-flight provider
-/// future, and only then reports drained — in that order.
+/// A closed scope refuses new routes, and the drain stamp cannot be taken while
+/// an in-flight provider future is still live.
 ///
-/// The ordering is the whole point: leadership releases the advisory lock on
-/// this signal, and the lock is the exclusion authority for `calling` rows. A
+/// The ordering matters because leadership releases the advisory lock on the
+/// drain stamp, and the lock is the exclusion authority for `calling` rows. A
 /// scope that reported drained while a future was live would make exclusion a
 /// claim rather than a fact.
+///
+/// # What this test does NOT prove
+///
+/// It drives the scope by hand — this body calls `close_admission`,
+/// `wait_until_empty`, and `mark_drained` itself. So it pins the
+/// `ProviderActionScope` CONTRACT: that the primitive refuses admission when
+/// closed and withholds the drain stamp until in-flight reaches zero.
+///
+/// It does not prove that anything in production drives the scope that way,
+/// because it never calls `run_with_leadership`, never cancels a token, and
+/// never touches the advisory lock. A test cannot witness an ordering it is
+/// itself performing. Deleting the `quiesce_provider_actions(...)` call from
+/// `server/src/leadership.rs` leaves this test green.
+///
+/// The production ordering — cancellation, drain, lock release, then a NEW
+/// acquisition by a second connection — is pinned in
+/// `server/tests/leadership_quiescence.rs`, which passes a real scope and
+/// observes lock availability from its own Postgres session. Both halves are
+/// required: this one for the primitive, that one for the caller.
 #[tokio::test]
 async fn graceful_shutdown_quiesces_calling_before_lock_release() {
     let f = fixture().await;
@@ -2232,6 +2274,260 @@ async fn an_unidentifiable_dequeue_leaves_the_lane_to_the_legacy_path() {
     assert_eq!(disposition, CiLaneDisposition::Legacy);
     assert!(!disposition.is_routed());
     assert_eq!(provider.calls().mutations(), 0);
+}
+
+// ===========================================================================
+// Lane-level captures are keyed on a real identity, or they are not keyed at all
+// ===========================================================================
+
+/// The fabricated identity `drive_lane` used to hand every lane-level capture.
+///
+/// Nothing may be findable at this key. It is the shape the audit named:
+/// `run_id: 0` with `dequeue_id: None`, which collapses two merge-group dequeues
+/// of one PR head onto a single `provider_action_key` — the second resolves
+/// `AlreadyPresent` and never gets a route, and `stale_field` can never
+/// supersede on a newer run or dequeue because both fields are constants.
+fn fabricated_merge_group_identity() -> CiEvidenceIdentity {
+    CiEvidenceIdentity {
+        lane: CiLane::MergeGroup,
+        pr_number: PR,
+        pr_head_sha: HEAD.to_owned(),
+        run_id: 0,
+        run_head_sha: HEAD.to_owned(),
+        dequeue_id: None,
+    }
+}
+
+/// Whether a route row exists at the key `identity` derives.
+async fn route_exists(h: &LaneHarness, identity: &CiEvidenceIdentity, action: CiAction) -> bool {
+    let subject = CiRouteSubject::task(h.task_id.clone());
+    CiRouteAttemptRepository::new(h.db.clone())
+        .get(&subject, &provider_action_key(&subject, identity, action))
+        .await
+        .expect("route read")
+        .is_some()
+}
+
+/// The merge-group lane's *lane-level* incomplete capture keys on the run the
+/// correlation named — because that run is right there in scope.
+///
+/// `capture_merge_group_evidence` runs strictly after
+/// `correlate_merge_group_run` has named exactly one terminal run, so every
+/// verdict it can return has a real immutable identity available. The call site
+/// nevertheless passed `None`, so a truncated merge-group enumeration took a
+/// Tier-2 route row keyed on `run_id: 0` / `dequeue_id: None` while the real run
+/// id, the real run head SHA, and the real dequeue id were all in scope.
+#[tokio::test]
+async fn a_lane_level_merge_group_capture_keys_on_the_correlated_run() {
+    let h = lane_harness().await;
+    let provider = FakeProvider::default();
+    // A truncated enumeration: not an enumeration *failure*, so it classifies
+    // to Tier 2 and really does write a route row.
+    provider.set_check_runs(vec![causal_check("merge-group / integration", 975)]);
+    provider.set_check_runs_incomplete(CheckSetIncompleteReason::MaxPagesTruncated);
+
+    let disposition = h
+        .actor
+        .route_merge_group_ci_evidence(
+            &provider,
+            &h.task_id,
+            "task-short",
+            "acme",
+            "widgets",
+            PR as u64,
+            HEAD,
+            "PR_node",
+            MergeMethod::Squash,
+            &[merge_group_run(975)],
+            Some(&dequeue_event()),
+            CiRoutingGate::Enabled,
+        )
+        .await;
+
+    assert!(disposition.is_routed());
+    assert_eq!(provider.calls().mutations(), 0, "no provider mutation");
+    assert_eq!(
+        djinn_db::test_support::ci_route_row_count_for_test(&h.db, &h.task_id).await,
+        1,
+        "precondition: this reason really does create a route row",
+    );
+
+    assert!(
+        route_exists(&h, &merge_group_identity(975), CiAction::AskLead).await,
+        "the lane-level capture must be keyed on the correlated run — run id, \
+         run head SHA, and dequeue id were all already known",
+    );
+    assert!(
+        !route_exists(&h, &fabricated_merge_group_identity(), CiAction::AskLead).await,
+        "no route row may be keyed on the synthetic identity",
+    );
+}
+
+/// Ambiguous correlation keeps its Tier-2 route (the proposal puts it there
+/// explicitly) — and keys it on the **real dequeue id**, which is what stops two
+/// dequeues of one head sharing a single provider-action key.
+///
+/// The dequeue id is resolved *before* correlation is attempted, so it was never
+/// unknown at this branch; it was simply dropped.
+#[tokio::test]
+async fn an_ambiguous_correlation_keys_its_route_on_the_real_dequeue() {
+    let h = lane_harness().await;
+    let provider = FakeProvider::default();
+
+    // Two terminal merge-group runs for one PR: the queue ran it twice and
+    // nothing can say which this dequeue refers to.
+    let disposition = h
+        .actor
+        .route_merge_group_ci_evidence(
+            &provider,
+            &h.task_id,
+            "task-short",
+            "acme",
+            "widgets",
+            PR as u64,
+            HEAD,
+            "PR_node",
+            MergeMethod::Squash,
+            &[merge_group_run(976), merge_group_run(977)],
+            Some(&dequeue_event()),
+            CiRoutingGate::Enabled,
+        )
+        .await;
+
+    assert!(disposition.is_routed());
+    assert_eq!(provider.calls().mutations(), 0);
+    assert_eq!(
+        djinn_db::test_support::ci_route_row_count_for_test(&h.db, &h.task_id).await,
+        1,
+    );
+
+    // The lane identity: everything real except `run_id`, which stays 0 because
+    // "ambiguous" means no single run exists to name. That residual is the one
+    // this fixture pins — it must not silently grow a second field.
+    let lane_identity = CiEvidenceIdentity {
+        lane: CiLane::MergeGroup,
+        pr_number: PR,
+        pr_head_sha: HEAD.to_owned(),
+        run_id: 0,
+        run_head_sha: HEAD.to_owned(),
+        dequeue_id: Some(DEQUEUE_ID.to_owned()),
+    };
+    assert!(
+        route_exists(&h, &lane_identity, CiAction::AskLead).await,
+        "the route must be keyed on the dequeue the poll actually named",
+    );
+    assert!(
+        !route_exists(&h, &fabricated_merge_group_identity(), CiAction::AskLead).await,
+        "dropping the dequeue id is what collapsed two dequeues onto one key",
+    );
+}
+
+/// No correlated merge-group run at all **holds**, and holding writes nothing.
+///
+/// This is `MergeGroupCorrelationUnavailable`. Nothing was named, so there is no
+/// run/lane identity a route row could honestly be keyed on — and AC5 admits to
+/// Tier 2 only "the closed complete-but-unusable cases with a constructible
+/// immutable run/lane identity". It used to take a Tier-2 row on the fabricated
+/// identity; now it waits for the queue run to appear, which a later poll gets
+/// for free.
+///
+/// It still suppresses the legacy remediation path: holding *is* the answer, and
+/// falling through would reopen the task for rework on the strength of evidence
+/// nobody has seen.
+#[tokio::test]
+async fn no_correlated_merge_group_run_holds_without_a_route_row() {
+    let h = lane_harness().await;
+    let provider = FakeProvider::default();
+
+    // A run for a *different* PR: the `pr-4242-` marker does not match, so the
+    // candidate set is empty.
+    let other_pr = djinn_provider::github_api::WorkflowRun {
+        head_branch: Some("gh-readonly-queue/main/pr-9999-abc".to_owned()),
+        ..merge_group_run(978)
+    };
+    let disposition = h
+        .actor
+        .route_merge_group_ci_evidence(
+            &provider,
+            &h.task_id,
+            "task-short",
+            "acme",
+            "widgets",
+            PR as u64,
+            HEAD,
+            "PR_node",
+            MergeMethod::Squash,
+            &[other_pr],
+            Some(&dequeue_event()),
+            CiRoutingGate::Enabled,
+        )
+        .await;
+
+    assert!(
+        disposition.is_routed(),
+        "a hold must not fall through to the legacy reopen",
+    );
+    assert_eq!(provider.calls().mutations(), 0);
+    assert_eq!(
+        djinn_db::test_support::ci_route_row_count_for_test(&h.db, &h.task_id).await,
+        0,
+        "an unnameable merge group may not create a route row",
+    );
+    assert_eq!(
+        djinn_db::test_support::ci_route_lease_count_for_test(&h.db, &h.task_id).await,
+        0,
+        "and may not spend a Lead adjudication",
+    );
+    assert_eq!(
+        djinn_db::test_support::task_attempt_count_for_test(&h.db, &h.task_id).await,
+        0,
+    );
+}
+
+/// A blocking check attributable to no Actions run **holds** on the PR-head lane.
+///
+/// `RunAttributionUnavailable`: there is no run identity to key on, and
+/// `rerun_failed_jobs` has no run to act on either. It used to take a Tier-2 row
+/// on the fabricated `run_id: 0` identity.
+#[tokio::test]
+async fn an_unattributable_blocking_check_holds_without_a_route_row() {
+    let h = lane_harness().await;
+    let provider = FakeProvider::default();
+
+    // No `run_id`, and an `html_url` that `parse_actions_run_id` cannot read.
+    let mut orphan = causal_check("External / policy", 979);
+    orphan.run_id = None;
+    orphan.html_url = "https://example.test/checks/1".to_owned();
+    let runs = vec![orphan];
+    let blocking = refs(&runs);
+
+    let disposition = h
+        .actor
+        .route_pr_head_ci_evidence(
+            &provider,
+            &h.task_id,
+            "task-short",
+            "acme",
+            "widgets",
+            PR as u64,
+            HEAD,
+            &CheckRunsResponse::complete(runs.clone()),
+            &blocking,
+            CiRoutingGate::Enabled,
+        )
+        .await;
+
+    assert!(disposition.is_routed(), "holding is the answer");
+    assert_eq!(provider.calls().mutations(), 0);
+    assert_eq!(
+        djinn_db::test_support::ci_route_row_count_for_test(&h.db, &h.task_id).await,
+        0,
+        "no run was named, so nothing may be keyed on a fabricated one",
+    );
+    assert_eq!(
+        djinn_db::test_support::ci_route_lease_count_for_test(&h.db, &h.task_id).await,
+        0,
+    );
 }
 
 /// Both lane wrappers decline with the gate off, without touching the database.

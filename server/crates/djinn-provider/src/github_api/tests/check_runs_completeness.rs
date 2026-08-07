@@ -427,12 +427,16 @@ async fn ref_enumeration_pages_and_reports_its_own_completeness() {
         CheckSetCompleteness::Incomplete(CheckSetIncompleteReason::PageFetchFailed),
     );
 
-    // --- a page-1 failure still surfaces as an error ----------------------
+    // --- a page-1 failure is INCOMPLETE, exactly as on the PR-head walk ----
     //
-    // There is no partial result to report, and the merge-group route treats an
-    // outright failure as `CheckApiError` — a complete-but-unusable input whose
-    // run identity is already known — rather than as a re-pollable enumeration
-    // failure.
+    // This lane used to return `Err` here, which made the two walks disagree
+    // about one identical fact. A page-1 failure has no partial result, so the
+    // collected count and `total_count` both sit at zero and compare *equal* —
+    // byte-identical to "this ref has no CI", which is a lane's fast path to
+    // green. Only the carried failed-page fact separates them, and the routing
+    // contract then holds and re-polls rather than keying a route row on
+    // evidence that does not exist yet. Mirrors
+    // `failed_first_page_is_incomplete_not_empty` above.
     let server = MockServer::start().await;
     let install_id = seed_installation_token();
     Mock::given(method("GET"))
@@ -443,11 +447,24 @@ async fn ref_enumeration_pages_and_reports_its_own_completeness() {
         .await;
 
     let client = GitHubApiClient::for_installation_with_base_url(install_id, server.uri());
+    let checks = client
+        .list_check_runs_for_ref("djinnos", "server", "queuesha")
+        .await
+        .expect("a page-1 failure is an incomplete enumeration, not a transport error");
     assert!(
-        client
-            .list_check_runs_for_ref("djinnos", "server", "queuesha")
-            .await
-            .is_err(),
+        checks.check_runs.is_empty(),
+        "there is no partial result to report",
+    );
+    assert_eq!(checks.total_count, 0);
+    assert_eq!(
+        checks.check_runs.len(),
+        checks.total_count as usize,
+        "precondition: the count comparison agrees, which is exactly why it \
+         cannot be the completeness proof",
+    );
+    assert_eq!(
+        checks.completeness,
+        CheckSetCompleteness::Incomplete(CheckSetIncompleteReason::PageFetchFailed),
         "a page-1 failure has no partial result and must not read as an empty set",
     );
 }
