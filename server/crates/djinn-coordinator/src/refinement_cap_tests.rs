@@ -759,8 +759,9 @@ fn resident_admission_keeps_default_model_cap_and_role_mapped_lane_conjunction()
 
     let user = "resident-user";
     let model = "provider/model";
-    let empty_models = HashMap::new();
-    let empty_lanes = HashMap::new();
+    let empty_running_by_model: HashMap<(String, String), u32> = HashMap::new();
+    let empty_running_by_lane: HashMap<(String, ModelLane), u32> = HashMap::new();
+    let empty_max_sessions: HashMap<String, u32> = HashMap::new();
     let limits = LaneMaxSessions {
         plan: 3,
         implement: 1,
@@ -770,12 +771,12 @@ fn resident_admission_keeps_default_model_cap_and_role_mapped_lane_conjunction()
     // This calls the actual outer admission composition used by normal dispatch,
     // including settings resolution's missing-model default of one.
     assert!(CoordinatorActor::resident_admission_allows(
-        &empty_models,
-        &empty_lanes,
+        &empty_running_by_model,
+        &empty_running_by_lane,
         user,
         model,
         "worker",
-        &empty_models,
+        &empty_max_sessions,
         Some(&limits),
     ));
 
@@ -783,20 +784,21 @@ fn resident_admission_keeps_default_model_cap_and_role_mapped_lane_conjunction()
     let model_full = HashMap::from([((user.to_owned(), model.to_owned()), 1)]);
     assert!(!CoordinatorActor::resident_admission_allows(
         &model_full,
-        &empty_lanes,
+        &empty_running_by_lane,
         user,
         model,
         "worker",
-        &empty_models,
+        &empty_max_sessions,
         Some(&limits),
     ));
 
     // An explicit model cap leaves room, but the worker's mapped implement lane
-    // independently blocks. Review maps to its separate configured lane.
+    // independently blocks. A full review lane proves reviewer is not mapped to
+    // either implement or plan.
     let model_caps = HashMap::from([(model.to_owned(), 2)]);
     let worker_lane_full = HashMap::from([((user.to_owned(), ModelLane::Implement), 1)]);
     assert!(!CoordinatorActor::resident_admission_allows(
-        &empty_models,
+        &empty_running_by_model,
         &worker_lane_full,
         user,
         model,
@@ -804,9 +806,10 @@ fn resident_admission_keeps_default_model_cap_and_role_mapped_lane_conjunction()
         &model_caps,
         Some(&limits),
     ));
-    assert!(CoordinatorActor::resident_admission_allows(
-        &empty_models,
-        &worker_lane_full,
+    let reviewer_lane_full = HashMap::from([((user.to_owned(), ModelLane::Review), 2)]);
+    assert!(!CoordinatorActor::resident_admission_allows(
+        &empty_running_by_model,
+        &reviewer_lane_full,
         user,
         model,
         "reviewer",
