@@ -421,6 +421,13 @@ fn strip_line_comments(source: &str) -> String {
 ///     `main.rs` assertions fail, and `quiesce_provider_actions` would
 ///     early-return on every shutdown — the pre-`nafu` behaviour, with the lock
 ///     released unconditionally.
+/// (e) Replace the body of the djinn-agent facade's
+///     `CoordinatorDeps::with_provider_action_scope` with `let _ = scope; self`,
+///     or change `spawn_coordinator` to build a fresh inner deps: the last two
+///     assertions fail. Every assertion before them reads `server/src/…` only,
+///     so the scope reaching `AppState`'s builder call proves nothing about the
+///     scope reaching the actor — the adapter is one crate further in, and its
+///     private `inner` is why deleting the forward is silent.
 #[test]
 fn the_leader_scope_and_the_coordinator_scope_are_one_object() {
     const FIELD: &str = "self.inner.provider_action_scope.clone()";
@@ -472,5 +479,46 @@ fn the_leader_scope_and_the_coordinator_scope_are_one_object() {
         main.contains("Some(leader_action_scope),"),
         "and it must be handed to `run_with_leadership`; `None` makes \
          `quiesce_provider_actions` a no-op on every shutdown path",
+    );
+
+    // ── And the djinn-agent facade actually FORWARDS it ────────────────────
+    //
+    // `AppState` builds `djinn_agent::actors::coordinator::CoordinatorDeps`,
+    // not `djinn_coordinator`'s. Everything above proves the scope reaches that
+    // adapter; nothing above proves the adapter passes it on. The adapter's
+    // `with_provider_action_scope` is a one-line forwarder whose body can be
+    // replaced with `let _ = scope; self` with every assertion in this file —
+    // and every other `nafu` acceptance command — still green, because
+    // `djinn_coordinator::CoordinatorDeps::new` seeds a private
+    // `ProviderActionScope::new()` the coordinator then keeps.
+    //
+    // The behavioural witness for that hop lives where it can observe the
+    // object: `djinn_agent::actors::coordinator::ci_routing_scope_handoff_tests`
+    // admits an action through the caller's handle and reads `in_flight()` off
+    // the forwarded one. This is the cheap cross-check that the chain from
+    // `AppState` to the spawned actor has no other gap.
+    let agent = strip_line_comments(include_str!(
+        "../crates/djinn-agent/src/actors/coordinator/mod.rs"
+    ));
+
+    let forwarder = agent
+        .find("pub fn with_provider_action_scope(")
+        .expect("the djinn-agent coordinator facade must expose the forwarder");
+    let forwarder_end = forwarder
+        + agent[forwarder..]
+            .find("\n    }")
+            .expect("the forwarder must have a body");
+    assert!(
+        agent[forwarder..forwarder_end]
+            .contains("self.inner = self.inner.with_provider_action_scope(scope);"),
+        "the djinn-agent facade must FORWARD the scope to the inner deps; \
+         dropping the argument leaves the coordinator on the private scope \
+         `CoordinatorDeps::new` seeded, and leadership then waits on a scope no \
+         provider action ever enters",
+    );
+    assert!(
+        agent.contains("djinn_coordinator::CoordinatorHandle::spawn(deps.inner)"),
+        "and the spawn helper must hand over that same `inner`, or the forwarded \
+         scope never reaches the actor at all",
     );
 }
