@@ -133,6 +133,14 @@ pub(crate) fn merge_queue_lane_escalation_section(
 }
 mod ci_failure_analysis;
 mod ci_helpers;
+// Proposal `nafu`, wave 2: the pure CI route classifier and route-decision
+// contract. The two lane executors that consume it are wave 3 and the Lead
+// adjudication path is wave 4, so nothing in the live poll loop references it
+// yet — the feature is disabled by having no call sites at all, which is the
+// strongest form of "disabled" available. The allow is scoped to this module
+// and comes off in wave 3.
+#[allow(dead_code)]
+mod ci_routing;
 mod ci_snapshot;
 mod ci_triage;
 mod conversation_resolution;

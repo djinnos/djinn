@@ -598,4 +598,6 @@ mod truncate {
 }
 
 #[cfg(test)]
+mod lead_ci_routing;
+#[cfg(test)]
 mod tests;
