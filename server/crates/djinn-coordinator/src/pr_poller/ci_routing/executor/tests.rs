@@ -3305,6 +3305,22 @@ async fn an_annotation_failure_after_correlation_routes_to_guarded_tier_two() {
 /// binding is also what makes `unapplied_lead_results` in the rollback
 /// quiescence report mean "a Lead was dispatched" rather than "a lease exists".
 ///
+/// # What this fixture found on its first run
+///
+/// A real one, and not the call site it was written to guard. The dispatch
+/// bound the route under `format!("arbitration:{task_id}:{hold_cycle}")` — a
+/// ~50 character string — and `ci_route_attempts.lead_session_id` is
+/// `VARCHAR(36)`. Postgres refuses an over-long value rather than truncating
+/// it, the dispatch logged the resulting error at `warn` and escalated the
+/// board anyway, so every other observable effect of a Tier-2 dispatch landed
+/// while the binding never did on any lane. The two counters that read this
+/// column — `unapplied_lead_results` and the route report's `lead_invocations`
+/// — were therefore pinned at zero by construction. Nothing else could have
+/// caught it: the `tier2_dispatch` fixtures hand the dispatch a handoff whose
+/// route row does not exist, so their attach misses the fence and returns
+/// `NotFound` before the column is ever written. The dispatch now binds the
+/// arbitration row's own id.
+///
 /// NAMED FAILING MUTATIONS.
 /// (a) Delete `self.dispatch_opened_tier2_leases(outcomes, task_id).await;`
 ///     from `settle`: no arbitration row, the task stays `pr_review`, and the
@@ -3318,6 +3334,11 @@ async fn an_annotation_failure_after_correlation_routes_to_guarded_tier_two() {
 /// (d) Drop the `attach_lead_session` call from `dispatch_ci_tier2_lead`: the
 ///     arbitration and the board transition still land, and the two
 ///     `lead_session_*` assertions fail alone.
+/// (e) Bind any handle that is not a row id — the old
+///     `arbitration:{task_id}:{hold_cycle}`, or anything else over 36
+///     characters: the `UPDATE` is refused by the column type, the dispatch
+///     swallows the error, and (d)'s two assertions fail in exactly the same
+///     way. That is the mutation this fixture actually caught.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_lane_opened_tier2_lease_becomes_a_lead_session_bound_to_its_route() {
     let h = lane_harness().await;
@@ -3393,21 +3414,22 @@ async fn a_lane_opened_tier2_lease_becomes_a_lead_session_bound_to_its_route() {
         row.lead_session_count, 1,
         "exactly one Lead session is attached to the route it adjudicates",
     );
-    assert!(
-        row.lead_session_id
-            .as_deref()
-            .is_some_and(|id| id.starts_with(&format!("arbitration:{}:", h.task_id))),
-        "the route must name the arbitration adjudicating it, got {:?}",
-        row.lead_session_id,
-    );
-
-    let directive =
+    let arbitration =
         djinn_db::repositories::task_arbitration::TaskArbitrationRepository::new(h.db.clone())
             .get_latest_for_task(&h.task_id)
             .await
             .expect("arbitration read")
-            .and_then(|record| record.directive)
-            .expect("the dispatch writes the directive the Lead session reads");
+            .expect("the dispatch writes the arbitration this route is adjudicated under");
+    assert_eq!(
+        row.lead_session_id.as_deref(),
+        Some(arbitration.id.as_str()),
+        "the route must name the arbitration row adjudicating it, not merely have \
+         some session id",
+    );
+
+    let directive = arbitration
+        .directive
+        .expect("the dispatch writes the directive the Lead session reads");
     assert_eq!(
         directive["ci_route"]["provider_action_key"].as_str(),
         Some(key.as_str()),
