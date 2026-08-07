@@ -169,6 +169,11 @@ mod worker_lifecycle;
 
 // ─── Public re-exports (matching djinn-agent facade paths) ───────────────
 
+pub use consolidation::{
+    CONSOLIDATION_NOTE_TYPE_ENV, CONSOLIDATION_PROJECT_ENV, CONSOLIDATION_SESSION_ENV,
+    CONSOLIDATION_THRESHOLD_ENV, CONSOLIDATION_WRITES_ENV, ConsolidationEnablement,
+    ConsolidationRunReport, ConsolidationWriteResult, run_bounded_consolidation,
+};
 pub use handle::CoordinatorHandle;
 /// How long leadership waits for the coordinator's provider-action drain stamp
 /// before releasing the advisory lock (proposal `nafu`).

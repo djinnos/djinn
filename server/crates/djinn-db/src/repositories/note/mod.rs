@@ -16,6 +16,7 @@ mod abstract_regeneration;
 mod access_events;
 mod association;
 pub(crate) mod consolidation;
+pub(crate) mod consolidation_lifecycle;
 mod context;
 mod crud;
 mod embedding_associations;
@@ -38,6 +39,7 @@ pub mod rrf;
 pub mod scope_rank;
 mod scoring;
 mod search;
+pub(crate) mod working_spec;
 
 // Note: as of the db-only knowledge-base cut-over, `indexing` exposes only
 // the wikilink graph helpers (used by `crud.rs`). The on-disk reindex
@@ -62,6 +64,21 @@ pub use association::{
 pub use consolidation::{
     CreateCanonicalConsolidatedNote, CreateConsolidationRunMetric,
     CreatedCanonicalConsolidatedNote, NoteConsolidationRepository,
+    is_consolidation_eligible_note_type,
+};
+pub use consolidation_lifecycle::{
+    BoundedCluster, BoundedClusteringOutcome, CONSOLIDATION_ATTEMPT_VERSION,
+    CONSOLIDATION_BACKFILL_BATCH_ROWS, CONSOLIDATION_CANONICAL_TAG,
+    CONSOLIDATION_DEFAULT_SCORE_THRESHOLD, CONSOLIDATION_ELIGIBLE_NOTE_TYPES,
+    CONSOLIDATION_MAX_ADMISSION_COMPARISONS, CONSOLIDATION_MAX_CLUSTER_SOURCES,
+    CONSOLIDATION_MAX_PARTITION_INPUTS, CONSOLIDATION_MIN_CLUSTER_SOURCES,
+    CommitConsolidationCanonical, CommittedConsolidationCanonical, ConsolidationAttemptWitness,
+    ConsolidationCommitOutcome, ConsolidationConflict, ConsolidationConflictReason,
+    ConsolidationPartitionKey, ConsolidationWriteBoundary, DirectedScoreRow,
+    EligibleSourceSelection, PartitionPressureMetric, ProvenanceBackfillReport,
+    build_bounded_clusters, cluster_source_id_set, clusters_are_disjoint,
+    connected_components_from_score_matrix, consolidation_attempt_id,
+    minimum_valid_score_threshold,
 };
 pub use djinn_memory::{
     BuildContextResponse, ConsolidatedNoteProvenance, ConsolidationCandidateEdge,
@@ -134,6 +151,11 @@ pub use lifecycle::NoteStatus;
 pub use mutation::{
     NoteRevisionCreateState, NoteRevisionDesiredState, NoteRevisionEvent, NoteRevisionMutation,
     NoteRevisionMutationResult, NoteRevisionUpdateState, NoteSupersedesAssociation,
+};
+pub use working_spec::{
+    PersistWorkingSpecRequest, PersistedWorkingSpec, PromoteWorkingSpecSection,
+    PromotedWorkingSpecNote, WORKING_SPEC_CONSTRAINT_SENTENCE, WORKING_SPEC_TAG,
+    working_spec_permalink, working_spec_title,
 };
 
 /// Compact scope-overlap candidate row returned by
@@ -270,6 +292,9 @@ pub struct NoteRepository {
     vector_store: Arc<dyn NoteVectorStore>,
     revision_event_failure: std::sync::Arc<std::sync::atomic::AtomicBool>,
     association_failure: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Test-only seam proving that a failed `(note_id, session_id)` provenance
+    /// insert rolls back the extraction note mutation *and* its revision.
+    extraction_provenance_failure: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl NoteRepository {
@@ -282,6 +307,7 @@ impl NoteRepository {
             vector_store: Arc::new(NoopNoteVectorStore) as Arc<dyn NoteVectorStore>,
             revision_event_failure: mutation::revision_failure_flag(),
             association_failure: mutation::revision_failure_flag(),
+            extraction_provenance_failure: mutation::revision_failure_flag(),
         }
     }
 

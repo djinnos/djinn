@@ -8,6 +8,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use super::consolidation::is_consolidation_eligible_note_type;
 use super::{
     NoteAssociationKind, NoteHistoryRequest, NoteRepository, NoteRevisionEventKind,
     NoteRevisionEventRow, NoteRevisionReason, NoteRevisionSnapshot, NoteRevisionSubsystem,
@@ -281,6 +282,8 @@ impl NoteRepository {
                 Some(note.confidence),
             )
             .await?;
+        self.seed_extraction_session_provenance(tx, command, &note)
+            .await?;
         Ok(NoteRevisionMutationResult {
             changed: true,
             note: Some(note),
@@ -388,6 +391,8 @@ impl NoteRepository {
                 Some(before.confidence),
                 Some(note.confidence),
             )
+            .await?;
+        self.seed_extraction_session_provenance(tx, command, &note)
             .await?;
         Ok(NoteRevisionMutationResult {
             changed: true,
@@ -561,11 +566,86 @@ impl NoteRepository {
         Ok(id)
     }
 
+    /// Seed `consolidated_note_provenance(note_id, session_id)` for a durable
+    /// extracted source note inside the *same* transaction that wrote the note
+    /// and its immutable revision (proposal `t5rn`, T1).
+    ///
+    /// Before this existed the only production writer of that table was
+    /// canonical consolidation itself, so `list_sessions_with_provenance()` had
+    /// no entry point and the hourly runner never observed a session. The write
+    /// now happens at the source writer.
+    ///
+    /// Scope, deliberately narrow:
+    ///
+    /// * only `system`/`extraction` attribution — canonical consolidation writes
+    ///   its own provenance rows inside its own atomic transaction;
+    /// * only trusted `session_id` provenance — never inferred from timestamps,
+    ///   titles, or content;
+    /// * only durable DB-backed `case`/`pattern`/`pitfall` notes, so pipeline
+    ///   `design` working specs never become consolidation sources.
+    ///
+    /// The insert is an `INSERT … SELECT … FROM sessions` guarded on
+    /// `sessions.project_id = notes.project_id`, which is the same-project rule
+    /// the backfill enforces. A session that does not exist in this project
+    /// therefore seeds nothing instead of violating the foreign key and
+    /// destroying an otherwise valid extraction write.
+    ///
+    /// It is idempotent on the `(note_id, session_id)` primary key, so a later
+    /// extraction session updating the same note adds a second membership row
+    /// rather than duplicating an existing one.
+    ///
+    /// Any error here propagates and rolls back the note mutation, its links,
+    /// and its revision: no unpaired note mutation and no orphan provenance row
+    /// can survive.
+    async fn seed_extraction_session_provenance(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        command: &NoteRevisionMutation,
+        note: &Note,
+    ) -> Result<()> {
+        if command.attribution.subsystem() != Some(NoteRevisionSubsystem::Extraction.as_str()) {
+            return Ok(());
+        }
+        let Some(session_id) = command.provenance.session_id() else {
+            return Ok(());
+        };
+        if note.storage != "db" || !is_consolidation_eligible_note_type(&note.note_type) {
+            return Ok(());
+        }
+        if self.extraction_provenance_failure.load(Ordering::SeqCst) {
+            return Err(Error::Internal(
+                "forced extracted-note session provenance insertion failure".to_owned(),
+            ));
+        }
+        sqlx::query(
+            r#"INSERT INTO consolidated_note_provenance (note_id, session_id, created_at)
+               SELECT $1, s.id, to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+               FROM sessions s
+               WHERE s.id = $2 AND s.project_id = $3
+               ON CONFLICT (note_id, session_id) DO NOTHING"#,
+        )
+        .bind(&note.id)
+        .bind(session_id)
+        .bind(&command.project_id)
+        .execute(&mut **tx)
+        .await?;
+        Ok(())
+    }
+
     /// Test-only deterministic seam for proving transaction rollback. It is not
     /// compiled into normal production consumers.
     #[cfg(any(test, feature = "test-support"))]
     pub fn set_revision_event_insertion_failure_for_test(&self, enabled: bool) {
         self.revision_event_failure.store(enabled, Ordering::SeqCst);
+    }
+
+    /// Test-only deterministic seam for proving that a failed
+    /// `(note_id, session_id)` provenance insert rolls back the extraction note
+    /// mutation and its revision together.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_extraction_provenance_failure_for_test(&self, enabled: bool) {
+        self.extraction_provenance_failure
+            .store(enabled, Ordering::SeqCst);
     }
 
     #[cfg(any(test, feature = "test-support"))]
