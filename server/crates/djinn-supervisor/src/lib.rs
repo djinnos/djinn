@@ -292,6 +292,37 @@ pub enum StageOutcome {
         /// empty `created_tasks` and directs the arbiter to `park` instead).
         replacement_task_ids: Vec<String>,
     },
+    /// A Lead result on a CI evidence route that the atomic current-identity
+    /// guard refused (proposal `nafu`, wave 5).
+    ///
+    /// # Why this needed its own variant
+    ///
+    /// The proposal requires that a stale result perform "no reopen, worker
+    /// dispatch, or mutation of the current route". Every existing outcome
+    /// does at least one of those:
+    ///
+    /// * `LeadEscalate` fires `lead_intervention_complete` → `open`, which is a
+    ///   board mutation and hands the task to the next worker dispatch;
+    /// * `Failed` on a Lead role calls `record_arbiter_session_termination`,
+    ///   which increments the decision-failure counter and **parks the task
+    ///   with a generated dossier at the cap** — so two supersessions would
+    ///   park a task whose only sin was that its PR head moved twice;
+    /// * `LeadClose` closes the task outright.
+    ///
+    /// This variant does none of them. It requires no exit-barrier board write,
+    /// fires no transition, and produces `TaskRunOutcome::Interrupted`, so the
+    /// task stays `in_lead_intervention` with its arbitration row unconsumed —
+    /// the same posture as a cancelled Lead run, which the coordinator already
+    /// redispatches. The repository wrote `superseded_before_apply` inside the
+    /// guard's own transaction, so the durable record is already complete;
+    /// anything this side did would be the bug.
+    ///
+    /// Also produced when the `ci_route` block is present but unparseable: a
+    /// route that cannot be guarded must not be applied.
+    LeadRouteSuperseded {
+        /// Why the guard refused, for the log and the run outcome.
+        reason: String,
+    },
 }
 
 /// Session data captured by the stage and settled only after the supervisor's
@@ -407,6 +438,7 @@ fn emit_stage_outcome_event(
         StageOutcome::LeadEscalate { .. } => "lead_escalate",
         StageOutcome::LeadParked { .. } => "lead_parked",
         StageOutcome::LeadSuperseded { .. } => "lead_superseded",
+        StageOutcome::LeadRouteSuperseded { .. } => "lead_route_superseded",
         StageOutcome::Failed { .. } => "failed",
         StageOutcome::LoopGuardTripped { .. } => "loop_guard_tripped",
         StageOutcome::Parked { .. } => "parked",
@@ -592,6 +624,11 @@ fn session_exit_barrier_plan(
             SessionExitBarrierPlan::InterruptedOrFailed
         }
         StageOutcome::ModelTurnAdmission(..) => SessionExitBarrierPlan::InterruptedOrFailed,
+        // No board handoff exists to guarantee: the guard's whole contract is
+        // that nothing reaches the board. A `Required` plan here would make the
+        // supervisor wait for — and then warn about — a transition it must not
+        // perform.
+        StageOutcome::LeadRouteSuperseded { .. } => SessionExitBarrierPlan::InterruptedOrFailed,
     }
 }
 
@@ -3165,6 +3202,38 @@ impl TaskRunSupervisor {
                         result = Some(TaskRunOutcome::Closed {
                             reason: reason.clone(),
                         });
+                        break;
+                    }
+                    StageOutcome::LeadRouteSuperseded { reason } => {
+                        // `nafu` wave 5. The atomic current-identity guard lost:
+                        // the PR head moved, the lane or dequeue changed, a
+                        // newer passing observation landed, or the PR merged
+                        // while Lead was adjudicating.
+                        //
+                        // Everything this arm does NOT do is the contract.
+                        // There is no `start_monitored_reopen` (so no directive
+                        // is injected and no worker is dispatched), no
+                        // `transition_task` (so the board is untouched), no
+                        // park, no supersede, and no write against the route
+                        // that superseded this one. The repository already
+                        // closed this attempt `superseded_before_apply` inside
+                        // the guard's own transaction.
+                        //
+                        // `Interrupted` — not `Failed` — because `Failed` on a
+                        // Lead role feeds the arbiter decision-failure counter,
+                        // and a task whose head moved twice would be parked with
+                        // a generated dossier for it. Interrupted leaves the
+                        // task `in_lead_intervention` with its arbitration row
+                        // unconsumed, which is the posture the coordinator
+                        // already redispatches from.
+                        tracing::info!(
+                            task_run_id = %run_id,
+                            task_id = %spec.task_id,
+                            %reason,
+                            "supervisor: CI route guard refused the Lead result — \
+                             nothing applied"
+                        );
+                        result = Some(TaskRunOutcome::Interrupted);
                         break;
                     }
                     StageOutcome::LeadClose { reason } => {

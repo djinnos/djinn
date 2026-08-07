@@ -36,17 +36,21 @@
 //!
 //! # What the executor deliberately does not do
 //!
-//! It does not dispatch Lead. Opening the Tier-2 lease is the end of the
-//! coordinator's half of the contract; the adjudication and the guarded
-//! application of its result are the supervisor's, and that wiring cannot be
-//! written from a tree where only one half is visible. It also never writes a
-//! `ci_route` directive, for the same reason.
+//! It does not dispatch Lead and it does not write a `ci_route` directive.
+//! Opening the Tier-2 lease is the end of *this* module's half of the
+//! contract; it returns the lease id and the route keys in a
+//! [`CiTier2Handoff`], and `ci_lane_routing` is what turns that into an
+//! arbitration row and a board transition. Keeping the split means the
+//! executor still holds no board handle, so "no board mutation on any branch"
+//! stays a property of the type signature rather than of the branch coverage.
 
 use djinn_db::{
     CiChargeOutcome, CiOriginState, CiReserveOutcome, CiReservedRecovery, CiRouteAttemptRepository,
     CiRouteReservation, CiTier2LeaseOutcome,
 };
-use djinn_provider::github_api::{CheckRun, GitHubApiError, MergeMethod};
+use djinn_provider::github_api::{
+    CheckRun, GitHubApiError, MergeMethod, RequiredCheckReproduction,
+};
 
 use crate::pr_poller::ci_provider::CiRouteProvider;
 use crate::types::ProviderActionScope;
@@ -56,8 +60,7 @@ use super::{
     CiAction, CiCompleteEmptyRoute, CiEvidenceIdentity, CiObservation, CiProviderActionKind,
     CiReservedRecoveryRoute, CiRouteOutcome, CiRouteRationale, CiRouteSubject, CiStaleField,
     CiTier2Reason, apply_budget, classify, head_budget_key, may_open_tier2, provider_action_key,
-    provider_failure_route, retry_budget_key, route_reserved_recovery, tier2_lease_key,
-    transient_fingerprint,
+    retry_budget_key, route_reserved_recovery, tier2_lease_key, transient_fingerprint,
 };
 
 // ---------------------------------------------------------------------------
@@ -137,9 +140,36 @@ pub(crate) enum CiLaneOutcome {
     Tier2 {
         reason: CiTier2Reason,
         lease_opened: bool,
+        /// Everything the Lead dispatch needs to name this route row, present
+        /// exactly when `lease_opened` is true (proposal `nafu`, wave 5).
+        ///
+        /// Wave 3b opened the lease and returned a bare bool, so nothing
+        /// downstream could say *which row* the Lead session it never
+        /// dispatched would have adjudicated. These are the keys the
+        /// supervisor's guard call needs, and they exist only here.
+        handoff: Option<Box<CiTier2Handoff>>,
     },
     /// Nothing happened, and the reason is not an answer about the evidence.
     Deferred(CiDeferral),
+}
+
+/// The durable handles that let a Lead session be bound to one route row.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CiTier2Handoff {
+    pub subject: CiRouteSubject,
+    pub provider_action_key: String,
+    pub tier2_lease_id: String,
+    pub identity: CiEvidenceIdentity,
+    pub origin_state: CiOriginState,
+    pub reason: CiTier2Reason,
+    /// Handles from the evidence bundle a Lead directive must cite. Non-empty
+    /// by construction — the supervisor's `is_grounded` fails closed on an
+    /// empty list, and `read_arbiter_directive` refuses a block without them.
+    pub evidence_references: Vec<String>,
+    /// The only corpus a repair's `verification_command` may be drawn from.
+    /// May legitimately be empty — an unreproducible check yields no command —
+    /// in which case every repair on this route degrades to a diagnosis.
+    pub repository_commands: Vec<String>,
 }
 
 impl CiLaneOutcome {
@@ -295,6 +325,7 @@ pub(crate) async fn execute_route(
             return CiLaneOutcome::Tier2 {
                 reason: CiTier2Reason::RetryExhausted,
                 lease_opened: false,
+                handoff: None,
             };
         }
         CiReserveOutcome::AlreadyPresent(attempt) => {
@@ -312,7 +343,17 @@ pub(crate) async fn execute_route(
         let reason = decision
             .tier2_reason()
             .unwrap_or(CiTier2Reason::EvidenceUnknown);
-        return open_tier2(routes, target, observation.observed_current, &keys, reason).await;
+        return open_tier2(
+            routes,
+            provider,
+            target,
+            observation.evidence,
+            observation.observed_current,
+            &keys,
+            reason,
+            blocking,
+        )
+        .await;
     };
 
     // Phase 2. Admission before the charge — see the module docs. It is also
@@ -355,10 +396,13 @@ pub(crate) async fn execute_route(
             drop(admitted);
             return open_tier2(
                 routes,
+                provider,
                 target,
+                observation.evidence,
                 observation.observed_current,
                 &keys,
                 CiTier2Reason::RetryExhausted,
+                blocking,
             )
             .await;
         }
@@ -445,13 +489,22 @@ pub(crate) async fn execute_route(
     // An explicit provider error is charged, terminal, and may route to Lead
     // once — only while the identity is still current, which `open_tier2_lease`
     // enforces with its own compare-and-set.
-    let _ = provider_failure_route(decision.class());
+    //
+    // The reason is named here, exactly as `CiTier2Reason::RetryExhausted` is
+    // named at the budget-exhaustion `open_tier2` call above. There used to be a
+    // `let _ = provider_failure_route(decision.class());` on the line before
+    // this one: a second, discarded copy of the same verdict that nothing read
+    // and no test exercised. It has been deleted rather than threaded through —
+    // see the note where it used to live in `super`.
     let escalated = open_tier2(
         routes,
+        provider,
         target,
+        observation.evidence,
         observation.observed_current,
         &keys,
         CiTier2Reason::ProviderActionFailed,
+        blocking,
     )
     .await;
     CiLaneOutcome::ProviderFailed {
@@ -466,12 +519,16 @@ pub(crate) async fn execute_route(
 }
 
 /// Open the head's Tier-2 lease under the current-identity compare-and-set.
+#[allow(clippy::too_many_arguments)]
 async fn open_tier2(
     routes: &CiRouteAttemptRepository,
+    provider: &dyn CiRouteProvider,
     target: &CiLaneTarget<'_>,
+    evidence: &CiEvidenceIdentity,
     observed_current: &CiEvidenceIdentity,
     keys: &RouteKeys,
     reason: CiTier2Reason,
+    blocking: &[&CheckRun],
 ) -> CiLaneOutcome {
     // The caller-side guard `tier2_admission` documents: the repository's
     // supersession branch would happily terminalize a live `calling` row, and
@@ -484,6 +541,7 @@ async fn open_tier2(
                 CiLaneOutcome::Tier2 {
                     reason,
                     lease_opened: false,
+                    handoff: None,
                 }
             };
         }
@@ -493,6 +551,15 @@ async fn open_tier2(
             return CiLaneOutcome::Deferred(CiDeferral::RepositoryError);
         }
     }
+
+    // The repair validator's corpus, read once for this route.
+    //
+    // A repair is invalid without a repository-valid command, so an empty
+    // corpus makes every repair degrade to a diagnosis. That degradation is
+    // safe but it is not free — a diagnosis costs the same worker session and
+    // asks it to re-derive what CI already printed — so the corpus is fetched
+    // here rather than left empty.
+    let commands = reproduction_commands(provider, target, evidence, blocking).await;
 
     match routes
         .open_tier2_lease(
@@ -504,9 +571,22 @@ async fn open_tier2(
         )
         .await
     {
-        Ok(CiTier2LeaseOutcome::Opened { .. }) => CiLaneOutcome::Tier2 {
+        Ok(CiTier2LeaseOutcome::Opened { lease_id, .. }) => CiLaneOutcome::Tier2 {
             reason,
             lease_opened: true,
+            // The one place these keys exist together. Everything downstream —
+            // the `ci_route` directive block, the supervisor's guard call —
+            // reads them from here.
+            handoff: Some(Box::new(CiTier2Handoff {
+                subject: target.subject.clone(),
+                provider_action_key: keys.action.clone(),
+                tier2_lease_id: lease_id,
+                repository_commands: commands,
+                identity: evidence.clone(),
+                origin_state: target.origin_state,
+                reason,
+                evidence_references: evidence_references(evidence, blocking),
+            })),
         },
         Ok(CiTier2LeaseOutcome::SupersededBeforeLead(attempt)) => CiLaneOutcome::Discarded(
             super::stale_field(&attempt.identity, observed_current).unwrap_or(CiStaleField::RunId),
@@ -521,6 +601,7 @@ async fn open_tier2(
         ) => CiLaneOutcome::Tier2 {
             reason,
             lease_opened: false,
+            handoff: None,
         },
         Err(error) => {
             tracing::warn!(%error, "ci route: failed to open the Tier-2 lease");
@@ -532,6 +613,89 @@ async fn open_tier2(
 // ---------------------------------------------------------------------------
 // Keys
 // ---------------------------------------------------------------------------
+
+/// The commands the failing checks actually executed, for the repair
+/// validator's corpus (proposal `nafu`, wave 5).
+///
+/// # Why this is not "inventing a command from a job name"
+///
+/// The proposal forbids exactly that, and permits a command "directly exposed
+/// as a command by CI evidence". This is the latter, literally: the strings
+/// come from `parse_actions_run_commands` over the Actions **job log**, so each
+/// one is a line the runner ran. Nothing here derives a command from a check
+/// name, a workflow name, or a build tool.
+///
+/// Bounded on purpose. Only the first [`MAX_REPRODUCTION_CHECKS`] blocking
+/// checks are queried: each call is two GitHub reads, this runs only on a route
+/// that is already escalating to Lead, and a run with thirty failing checks has
+/// long since stopped being one diagnosable failure.
+///
+/// Failures are silent and non-fatal. An unreproducible check, a rate limit, or
+/// a log that no longer exists yields fewer commands — which costs a repair its
+/// command and produces a diagnosis, never a wrong one.
+async fn reproduction_commands(
+    provider: &dyn CiRouteProvider,
+    target: &CiLaneTarget<'_>,
+    evidence: &CiEvidenceIdentity,
+    blocking: &[&CheckRun],
+) -> Vec<String> {
+    let mut commands: Vec<String> = Vec::new();
+    for check in blocking.iter().take(MAX_REPRODUCTION_CHECKS) {
+        let context = provider
+            .required_check_reproduction_context(
+                target.owner,
+                target.repo,
+                &evidence.run_head_sha,
+                &check.name,
+            )
+            .await;
+        let Ok(RequiredCheckReproduction::Reproducible(context)) = context else {
+            continue;
+        };
+        // The failing command, plus the setup commands that ran before it. A
+        // repair whose remedy is "run the setup step the workflow runs" is as
+        // legitimate as one naming the failing command itself.
+        commands.push(context.command);
+        commands.extend(context.setup_steps.into_iter().map(|step| step.command));
+    }
+    commands.retain(|command| !command.trim().is_empty());
+    commands.sort();
+    commands.dedup();
+    commands
+}
+
+/// How many blocking checks a Tier-2 route will query for reproduction context.
+const MAX_REPRODUCTION_CHECKS: usize = 3;
+
+/// The handles a Lead directive must cite to count as evidence-grounded.
+///
+/// Deliberately narrow: run id, both head SHAs, the dequeue id when there is
+/// one, and the blocking check names. Every one of them is a string that
+/// appears verbatim in the evidence bundle Lead is shown, so "cite one of
+/// these" is a check Lead can actually satisfy by quoting what it read — as
+/// opposed to a similarity score over prose, which is the fabrication the
+/// grounding rule exists to stop.
+///
+/// The list is never empty: the two SHAs are always present, so a route can
+/// never produce a block that the supervisor's fail-closed `is_grounded` would
+/// reject wholesale — including on a **run-absent** route, where there is no run
+/// id to cite. Emitting a placeholder there would hand Lead a reference it could
+/// quote to look grounded while citing nothing, which is the opposite of what
+/// this list is for.
+fn evidence_references(identity: &CiEvidenceIdentity, blocking: &[&CheckRun]) -> Vec<String> {
+    let mut out = vec![identity.pr_head_sha.clone(), identity.run_head_sha.clone()];
+    if let Some(run_id) = identity.run_id {
+        out.push(run_id.to_string());
+    }
+    if let Some(dequeue) = &identity.dequeue_id {
+        out.push(dequeue.clone());
+    }
+    out.extend(blocking.iter().map(|check| check.name.clone()));
+    out.retain(|reference| !reference.trim().is_empty());
+    out.sort();
+    out.dedup();
+    out
+}
 
 /// The four derived keys for one route, computed once.
 #[derive(Clone, Debug)]
@@ -828,8 +992,9 @@ pub(crate) trait CiOwnerLiveness: Send + Sync {
 ///
 /// After a legal handoff the external outcome is genuinely unknowable, and the
 /// repository resolves that rather than guessing: a still-current row becomes
-/// `outcome_unknown` and retains its charge — [`super::unknown_outcome_route`]
-/// is the classifier's name for the same fact — while an obsolete one becomes
+/// [`djinn_db::CiRouteOutcome::OutcomeUnknown`] and retains its charge — that
+/// transition is durable and owned entirely by `recover_calling_owner`, with no
+/// classifier mirror — while an obsolete one becomes
 /// `superseded_after_call`, which is [`super::supersession_outcome`] of
 /// [`super::CiRouteStage::AfterCall`]. Nothing here queries the provider,
 /// replays the call, or touches the board.
@@ -926,20 +1091,35 @@ pub(crate) async fn recover_calling_owners_at_startup(
 
 /// The coordinator-incarnation-backed liveness witness.
 ///
-/// Two proofs, and the order matters. `provider_actions_drained_at` is the
-/// graceful one: the former incarnation closed action admission, joined every
-/// provider future, and stamped its own row — the only handshake that proves a
-/// future is gone while the process may still exist. Absent that, an expired
-/// renewal lease is accepted as `ProcessTerminated`, because process death
-/// destroys the futures before the advisory-lock connection closes.
+/// One proof, and only one: `provider_actions_drained_at`. The former
+/// incarnation closed action admission, joined every provider future and
+/// finalizer, and only then stamped its own row. That stamp is the sole entry
+/// in the ledger that is a *fact* about where those futures went, rather than
+/// an inference from a clock.
 ///
-/// A live, undrained former owner yields `None`, and the repository refuses the
-/// handoff on it. Lease age alone is never treated as death proof for a
-/// *drained* claim.
+/// # Why an expired renewal lease is not `ProcessTerminated`
+///
+/// It reads like process-death evidence and is not. Renewal is scoped to the
+/// coordinator's cancellation token, so it stops the instant leadership is
+/// cancelled — long before the process is gone. A leader whose drain overran
+/// its budget therefore looks *identical* to a dead one once any expiry window
+/// passes, while a `rerun_failed_jobs` future of its own is still in flight.
+/// Reading that as termination hands a charged `calling` row to a new
+/// incarnation, so the same provider action runs twice, the old owner's fenced
+/// `finalize_calling` is discarded, and a real episode is adjudicated
+/// `outcome_unknown`. Elapsed time is never by itself evidence that a `calling`
+/// owner is dead.
+///
+/// # What "no proof" costs
+///
+/// The row stays `calling` and the repository defers — writing a
+/// `LiveOwnerDeferred` audit row on every pass, so a stuck row is observable
+/// rather than silent. In the ordinary case the former owner's own fenced
+/// finalizer resolves it; in the crash case it waits for an incarnation that
+/// can show a drain stamp. A row that waits is strictly cheaper than a second
+/// provider call against evidence that is already charged.
 pub(crate) struct CiIncarnationLiveness {
     pub incarnations: djinn_db::CoordinatorIncarnationRepository,
-    /// ISO timestamp before which a renewal is considered expired.
-    pub orphan_threshold_iso: String,
 }
 
 #[async_trait::async_trait]
@@ -949,17 +1129,10 @@ impl CiOwnerLiveness for CiIncarnationLiveness {
             Ok(Some(row)) if row.provider_actions_drained_at.is_some() => {
                 djinn_db::CiQuiescenceProof::GracefulDrain
             }
-            Ok(Some(_)) => match self
-                .incarnations
-                .is_live(incarnation_id, &self.orphan_threshold_iso)
-                .await
-            {
-                Ok(Some(false)) => djinn_db::CiQuiescenceProof::ProcessTerminated,
-                _ => djinn_db::CiQuiescenceProof::None,
-            },
-            // No row at all: the incarnation ledger has no record of the owner,
-            // so nothing can attest that its futures are gone.
-            Ok(None) | Err(_) => djinn_db::CiQuiescenceProof::None,
+            // A live owner, an owner whose renewal lease lapsed, an incarnation
+            // the ledger never recorded, and a failed read are one answer:
+            // none of them says where the former owner's provider future went.
+            _ => djinn_db::CiQuiescenceProof::None,
         }
     }
 }
