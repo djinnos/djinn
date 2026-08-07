@@ -267,6 +267,12 @@ jobs:
         run: node --test scripts/ci-cache-policy.test.mjs
       - name: Verify qa-smoke workflow contract
         run: node --test scripts/ci-qa-smoke-workflow.test.mjs
+      # Sweeps EVERY workflow, not just this one: an artifact upload that is
+      # reachable on a cancelled run while `if-no-files-found: error` is set
+      # turns a cancellation into a manufactured step failure. That is how run
+      # 31137003502 reddened the Quality Gate with all lanes green.
+      - name: Verify artifact uploads cannot manufacture a cancellation failure
+        run: node --test scripts/ci-artifact-upload-guards.test.mjs
       - name: Verify host PostgreSQL workflow contract
         run: node --test scripts/ci-host-postgres-workflow.test.mjs
       - name: Verify release image validation contract
@@ -2574,6 +2580,7 @@ jobs:
       - name: Validate fixtures
         run: cargo run -p djinn-memory-eval -- validate-fixtures
       - name: Run Phase 1 benchmark
+        id: phase1_run
         env:
           DJINN_TEST_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5433/postgres
         run: cargo run -p djinn-memory-eval -- run
@@ -2581,8 +2588,19 @@ jobs:
         env:
           DJINN_TEST_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5433/postgres
         run: cargo run -p djinn-memory-eval -- compare
+      # Same hazard as the qa-smoke evidence upload below; see the long comment
+      # there for the run-31137003502 chain. memory-eval is likewise a
+      # Quality-Gate-checked lane, so `always()` here would let a cancellation
+      # manufacture a `failure` on a required check. `phase1_run` is the step
+      # that writes phase1-report.json — if it never ran, neither report exists
+      # and there is nothing this upload could legitimately find.
+      #
+      # `if-no-files-found: error` stays for the same reason: past these guards
+      # the benchmark executed, and an executed benchmark that emits no report
+      # is a real defect. (Only the "no path matched anything" case errors, so
+      # a run that produced the report but not the summary still uploads.)
       - name: Upload Phase 1 report artifacts
-        if: always()
+        if: ${{ !cancelled() && steps.phase1_run.outcome != 'skipped' }}
         uses: actions/upload-artifact@v4
         with:
           name: memory-eval-phase1-report
@@ -2651,6 +2669,7 @@ jobs:
           cargo test -p djinn-slot --no-run
           cargo test -p djinn-db --no-run
       - name: Run deterministic qa smoke and coverage gate
+        id: qa_smoke_run
         run: |
           set +e
           target/debug/djinn-qa run --qa-profile smoke-ci --concurrency 8 --repo-root .. --evidence-dir qa/evidence/smoke-ci
@@ -2664,8 +2683,37 @@ jobs:
           if [ "$runner_status" -ne 0 ] || [ "$coverage_status" -ne 0 ]; then
             exit 1
           fi
+      # This guard is NOT `always()`, and the difference is a merge-blocker.
+      #
+      # `always()` also fires when the RUN was cancelled. Run 31137003502 on
+      # PR #3064 was cancelled externally at 01:14:02; every lane had already
+      # SUCCEEDED at 01:12:26 and no job failed. But cancellation ended
+      # "Precompile selected smoke test binaries" as `cancelled`, which left
+      # "Run deterministic qa smoke and coverage gate" `skipped`, so
+      # qa/evidence/smoke-ci was never created. This upload ran anyway on
+      # `always()`, `if-no-files-found: error` fired on the empty path, and the
+      # STEP failed — flipping qa-smoke's result from `cancelled` to `failure`
+      # and reddening the sole required check. A cancellation was laundered
+      # into a test-shaped failure, and the log blamed qa-smoke for a defect
+      # that did not exist.
+      #
+      # `!cancelled()` keeps the real intent — evidence from a smoke run that
+      # RAN and FAILED is exactly what an investigator needs, so `failure()` is
+      # still covered — while refusing to invent an artifact error out of a
+      # producer the runner never allowed to start. The `outcome != 'skipped'`
+      # clause closes the same hazard's other door: when an earlier step (the
+      # template build, the runner build, the precompile) fails on its own, the
+      # smoke step is skipped rather than cancelled, and uploading then would
+      # bury that genuine root cause under a spurious artifact error.
+      #
+      # `if-no-files-found: error` deliberately STAYS. Past those two guards
+      # the smoke step actually executed, and a smoke step that executes and
+      # leaves no evidence behind is an evidence-integrity hole, not a
+      # non-event: the coverage gate would have nothing to have been computed
+      # from. That must stay loud, or qa-smoke can go green having proven
+      # nothing.
       - name: Upload qa smoke evidence
-        if: always()
+        if: ${{ !cancelled() && steps.qa_smoke_run.outcome != 'skipped' }}
         uses: actions/upload-artifact@v4
         with:
           name: qa-smoke-evidence
