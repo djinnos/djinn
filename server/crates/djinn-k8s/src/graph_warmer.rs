@@ -777,9 +777,15 @@ impl WarmDispatch {
             return;
         }
 
-        let (cargo_cache_policy, warm_build_resources): (
+        // One read of the project's EnvironmentConfig feeds three things: the
+        // cargo cache policy, the warm Pod's resource overrides, and the JS
+        // workspace roots the Pod must install. The JS roots used to be absent
+        // here, so the Pod fell back to a root-only lockfile probe and silently
+        // skipped every monorepo whose JS lives in a subdirectory.
+        let (cargo_cache_policy, warm_build_resources, js_workspace_roots): (
             Option<djinn_stack::environment::CargoCachePolicy>,
             Option<djinn_stack::resources::BuildResourceOverrides>,
+            Vec<String>,
         ) = {
             let repo =
                 ProjectRepository::new(self.db.clone(), djinn_core::events::EventBus::noop());
@@ -787,14 +793,18 @@ impl WarmDispatch {
                 Ok(Some(raw)) => {
                     match serde_json::from_str::<djinn_stack::environment::EnvironmentConfig>(&raw)
                     {
-                        Ok(cfg) => (
-                            cfg.cargo_cache_policy,
-                            cfg.build_resources.and_then(|b| b.warm),
-                        ),
-                        Err(_) => (None, None),
+                        Ok(cfg) => {
+                            let js = crate::js_install::js_workspace_roots(Some(&cfg));
+                            (
+                                cfg.cargo_cache_policy,
+                                cfg.build_resources.and_then(|b| b.warm),
+                                js,
+                            )
+                        }
+                        Err(_) => (None, None, Vec::new()),
                     }
                 }
-                _ => (None, None),
+                _ => (None, None, Vec::new()),
             }
         };
 
@@ -894,6 +904,7 @@ impl WarmDispatch {
                 &image_tag,
                 cargo_cache_policy.as_ref(),
                 leased_identity.as_ref().expect("leased grant has identity"),
+                &js_workspace_roots,
             ),
             None => build_warm_job(
                 &self.config,
@@ -901,6 +912,7 @@ impl WarmDispatch {
                 &warm_generation,
                 &image_tag,
                 cargo_cache_policy.as_ref(),
+                &js_workspace_roots,
             ),
         };
         crate::build_resources::apply_resolved_resources(&mut job, resolved_warm_resources);

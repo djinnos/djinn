@@ -18,6 +18,7 @@ fn builds_warm_job_manifest_with_expected_shape() {
         "deadbeef",
         "reg.example:5000/djinn-project-p:abc123",
         None,
+        &[],
     );
 
     let meta = &job.metadata;
@@ -171,14 +172,35 @@ fn builds_warm_job_manifest_with_expected_shape() {
     );
     assert!(cmd[2].contains(WARM_COMMAND_BIN));
     assert!(cmd[2].contains("warm-graph \"proj-xyz\""));
-    // JS deps are installed (lockfile-gated) before warming so the TS
-    // indexer can resolve workspace-package tsconfig `extends`.
+    // JS deps are installed before warming so the TS indexer can resolve
+    // workspace-package tsconfig `extends`.
+    //
+    // These used to be bare `contains("pnpm-lock.yaml")` / `contains("pnpm
+    // install")` string checks. They passed for three weeks while the rendered
+    // script did not install this repo's JS workspace at all: the strings live
+    // in a branch that never executed, because the chain probed only the repo
+    // root and the root's `package-lock.json` selected the npm branch first.
+    // A test that asserts a substring of a script it never runs cannot see
+    // that. Assert the reachable structure instead.
     assert!(
-        cmd[2].contains("pnpm-lock.yaml"),
-        "bash -c script: {}",
+        cmd[2].contains("djinn_js_install_one"),
+        "warm script must render the JS install helper: {}",
         cmd[2]
     );
-    assert!(cmd[2].contains("pnpm install"));
+    // With no declared JS workspace the helper must still be invoked for the
+    // project root -- the pre-existing behaviour for unconfigured projects.
+    assert!(
+        cmd[2].contains(r#"djinn_js_install_one ".""#),
+        "no declared workspaces must fall back to a root install: {}",
+        cmd[2]
+    );
+    // The bound is the point: an unbounded install turned a corrupt shared
+    // package-manager store into a silent Pod-deadline kill.
+    assert!(
+        cmd[2].contains("timeout"),
+        "every JS install must be time-bounded: {}",
+        cmd[2]
+    );
     // The cargo target base is warmed inside `warm-graph` (the worker), where
     // mtimes are normalized to match task-run — NOT in this shell wrapper.
     // The old in-shell `cargo` step gated on a root `Cargo.toml` djinn's
@@ -383,13 +405,14 @@ fn builds_warm_job_manifest_with_expected_shape() {
 #[test]
 fn durable_attempt_stamp_reaches_leased_and_unleased_pods_without_renaming_them() {
     let cfg = KubernetesConfig::for_testing();
-    let mut plain = build_warm_job(&cfg, "proj-xyz", "deadbeef", "example/warm:latest", None);
+    let mut plain = build_warm_job(&cfg, "proj-xyz", "deadbeef", "example/warm:latest", None, &[]);
     let mut leased = build_leased_warm_job(
         &cfg,
         "proj-xyz",
         "example/warm:latest",
         None,
         &LeasedWarmJobIdentity::new("proj-xyz", "req-1", "rev-1", 7),
+        &[],
     );
 
     for job in [&mut plain, &mut leased] {
@@ -426,13 +449,14 @@ fn durable_attempt_stamp_reaches_leased_and_unleased_pods_without_renaming_them(
 #[test]
 fn warm_pod_never_renders_a_launcher_sidecar() {
     let cfg = KubernetesConfig::for_testing();
-    let plain = build_warm_job(&cfg, "proj-xyz", "deadbeef", "example/warm:latest", None);
+    let plain = build_warm_job(&cfg, "proj-xyz", "deadbeef", "example/warm:latest", None, &[]);
     let leased = build_leased_warm_job(
         &cfg,
         "proj-xyz",
         "example/warm:latest",
         None,
         &LeasedWarmJobIdentity::new("proj-xyz", "req-1", "rev-1", 7),
+        &[],
     );
 
     for (label, job) in [("plain", &plain), ("leased", &leased)] {
@@ -483,6 +507,7 @@ fn warm_manifest_preserves_shared_cache_lock_prerequisites() {
         "deadbeef",
         "example/warm:latest",
         None,
+        &[],
     );
 
     let spec = job.spec.as_ref().expect("job spec");
@@ -593,7 +618,7 @@ fn warm_manifest_preserves_shared_cache_lock_prerequisites() {
 fn warm_manifest_keys_subcore_limit_as_mold_jobs_one() {
     let mut cfg = KubernetesConfig::for_testing();
     cfg.warm_cpu_limit = "500m".into();
-    let job = build_warm_job(&cfg, "mold-one", "deadbeef", "example/warm:latest", None);
+    let job = build_warm_job(&cfg, "mold-one", "deadbeef", "example/warm:latest", None, &[]);
     let container = &job
         .spec
         .as_ref()
@@ -655,6 +680,7 @@ fn warm_pod_scheduling_propagates_from_config() {
         "deadbeef",
         "reg.example:5000/djinn-project-p:abc123",
         None,
+        &[],
     );
     let pod = job
         .spec
@@ -713,7 +739,7 @@ fn warm_job_name_is_deterministic_per_generation_and_label_safe() {
 fn build_warm_job_is_deterministic_in_project_and_generation() {
     let cfg = KubernetesConfig::for_testing();
     let name_of = |project: &str, generation: &str| {
-        build_warm_job(&cfg, project, generation, "example/warm:latest", None)
+        build_warm_job(&cfg, project, generation, "example/warm:latest", None, &[])
             .metadata
             .name
             .expect("warm Job is built with a name")
@@ -747,10 +773,48 @@ fn build_warm_job_agrees_with_the_durable_warm_identity_name() {
     );
 
     assert_eq!(
-        build_warm_job(&cfg, "proj-xyz", revision, "example/warm:latest", None)
+        build_warm_job(&cfg, "proj-xyz", revision, "example/warm:latest", None, &[])
             .metadata
             .name
             .as_deref(),
         Some(identity.object_name.as_str())
+    );
+}
+
+/// The regression that motivated `djinn_k8s::js_install`: a repo whose JS
+/// workspace is NOT the repo root must still get that workspace installed.
+///
+/// Before the fix the warm script ran a single root-only lockfile probe, so a
+/// project like djinn (Rust in `server/`, JS in `ui/` and `website/`, plus an
+/// unrelated root `package-lock.json`) installed the wrong thing at the wrong
+/// place and left `ui/` untouched on every warm cycle.
+#[test]
+fn warm_script_installs_each_declared_js_workspace_root() {
+    let cfg = KubernetesConfig::for_testing();
+    let roots = vec!["ui".to_string(), "website".to_string()];
+    let job = build_warm_job(
+        &cfg,
+        "proj-xyz",
+        "deadbeef",
+        "example/warm:latest",
+        None,
+        &roots,
+    );
+    let cmd = job.spec.as_ref().unwrap().template.spec.as_ref().unwrap().containers[0]
+        .command
+        .clone()
+        .unwrap();
+    let script = &cmd[2];
+    assert!(
+        script.contains(r#"djinn_js_install_one "ui""#),
+        "the `ui` workspace must be installed: {script}"
+    );
+    assert!(
+        script.contains(r#"djinn_js_install_one "website""#),
+        "the `website` workspace must be installed: {script}"
+    );
+    assert!(
+        !script.contains(r#"djinn_js_install_one ".""#),
+        "with declared workspaces the root must NOT be installed as well: {script}"
     );
 }
