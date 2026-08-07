@@ -171,11 +171,32 @@ async fn run_tick(state: &AppState, heads: &dyn MirrorHeadSource) -> anyhow::Res
             continue;
         };
 
+        // The declared JS workspace roots the SCIP Pod must install before
+        // indexing. scip-typescript resolves `tsconfig` `extends` through
+        // `node_modules`, so a monorepo whose JS lives below the repo root
+        // indexes to nothing without this: the Pod used to probe for a lockfile
+        // at the root only, which silently skipped those workspaces entirely.
+        let js_workspace_roots = match repo.get_environment_config(project_id).await {
+            Ok(Some(raw)) => {
+                serde_json::from_str::<djinn_stack::environment::EnvironmentConfig>(&raw)
+                    .ok()
+                    .map(|cfg| djinn_k8s::js_install::js_workspace_roots(Some(&cfg)))
+                    .unwrap_or_default()
+            }
+            _ => Vec::new(),
+        };
+
         // `policy` is `None` deliberately: `warm_cache_env_vars` ignores the
         // cargo-cache policy (incremental-on is an invariant across all djinn
         // build pods), so passing it would imply an influence it does not have.
         let decision = scheduler
-            .tick_project(project_id, Some(&head), &image_tag, None)
+            .tick_project(
+                project_id,
+                Some(&head),
+                &image_tag,
+                None,
+                &js_workspace_roots,
+            )
             .await;
         if let ScipIndexDecision::Dispatch { revision } = &decision {
             tracing::info!(
