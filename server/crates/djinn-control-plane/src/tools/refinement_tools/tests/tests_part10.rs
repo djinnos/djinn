@@ -50,22 +50,36 @@ async fn typed_evidence_retry_fixture_covers_success_and_rejection_boundaries() 
     let scenarios = [
         (
             djinn_db::test_support::TypedEvidenceRetryScenarioForTest::Failed,
+            djinn_db::test_support::TypedEvidenceRetryAuthorityForTest::Judge,
+            true,
+        ),
+        (
+            djinn_db::test_support::TypedEvidenceRetryScenarioForTest::Failed,
+            djinn_db::test_support::TypedEvidenceRetryAuthorityForTest::Advocate,
             true,
         ),
         (
             djinn_db::test_support::TypedEvidenceRetryScenarioForTest::StaleFailure,
+            djinn_db::test_support::TypedEvidenceRetryAuthorityForTest::Judge,
             false,
         ),
         (
             djinn_db::test_support::TypedEvidenceRetryScenarioForTest::NonFailed,
+            djinn_db::test_support::TypedEvidenceRetryAuthorityForTest::Judge,
             false,
         ),
         (
             djinn_db::test_support::TypedEvidenceRetryScenarioForTest::OccupiedSlot,
+            djinn_db::test_support::TypedEvidenceRetryAuthorityForTest::Judge,
+            false,
+        ),
+        (
+            djinn_db::test_support::TypedEvidenceRetryScenarioForTest::Failed,
+            djinn_db::test_support::TypedEvidenceRetryAuthorityForTest::Unauthorized,
             false,
         ),
     ];
-    for (scenario, accepted) in scenarios {
+    for (scenario, authority, accepted) in scenarios {
         let (server, db, proposal, user_id, judge_task_id) = setup_demand_test().await;
         let repo = ProposalRepository::new(db.clone(), EventBus::noop());
         let project_id = repo.targets(&proposal.id).await.unwrap()[0]
@@ -78,6 +92,7 @@ async fn typed_evidence_retry_fixture_covers_success_and_rejection_boundaries() 
             &judge_task_id,
             &user_id,
             scenario,
+            authority,
         )
         .await;
         let before = djinn_db::test_support::typed_evidence_retry_snapshot_for_test(
@@ -87,12 +102,12 @@ async fn typed_evidence_retry_fixture_covers_success_and_rejection_boundaries() 
             &fixture.prior_spike_task_id,
         )
         .await;
-        let response = djinn_core::auth_context::SESSION_USER_ID.scope(Some(user_id), async {
+        let response = djinn_core::auth_context::SESSION_USER_ID.scope(Some(fixture.caller_user_id.clone()), async {
             server.dispatch_tool("proposal_refinement_retry_evidence", serde_json::json!({"finding_id": fixture.finding_id.clone(), "failed_transition_id": fixture.failed_transition_id.clone()})).await.unwrap()
         }).await;
         assert_eq!(
             response["accepted"], accepted,
-            "scenario {scenario:?}: {response}"
+            "scenario {scenario:?}/{authority:?}: {response}"
         );
         let after = djinn_db::test_support::typed_evidence_retry_snapshot_for_test(
             &db,

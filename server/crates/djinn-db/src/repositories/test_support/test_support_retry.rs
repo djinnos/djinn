@@ -10,6 +10,14 @@ pub enum TypedEvidenceRetryScenarioForTest {
     OccupiedSlot,
 }
 
+/// Caller authority materialized alongside a retry fixture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TypedEvidenceRetryAuthorityForTest {
+    Judge,
+    Advocate,
+    Unauthorized,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TypedEvidenceRetryFixtureForTest {
     pub finding_id: String,
@@ -18,6 +26,7 @@ pub struct TypedEvidenceRetryFixtureForTest {
     pub prior_spike_task_id: String,
     pub authority_task_id: String,
     pub caller_user_id: String,
+    pub authority: TypedEvidenceRetryAuthorityForTest,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,7 +43,9 @@ pub struct TypedEvidenceRetrySnapshotForTest {
     pub labels: Vec<(String, serde_json::Value)>,
 }
 
-/// Materialize retry boundary states which normally require a worker return.
+/// Materialize retry and active-authority boundary states which normally
+/// require a worker return. The authority task must belong to the active
+/// refinement run; this helper writes its complete persisted authority tuple.
 pub async fn materialize_typed_evidence_retry_fixture_for_test(
     db: &Database,
     proposal_id: &str,
@@ -42,8 +53,21 @@ pub async fn materialize_typed_evidence_retry_fixture_for_test(
     authority_task_id: &str,
     caller_user_id: &str,
     scenario: TypedEvidenceRetryScenarioForTest,
+    authority: TypedEvidenceRetryAuthorityForTest,
 ) -> TypedEvidenceRetryFixtureForTest {
     db.ensure_initialized().await.unwrap();
+    let (authority_role, authority_phase) = match authority {
+        TypedEvidenceRetryAuthorityForTest::Judge => ("judge", "judge_adjudication"),
+        TypedEvidenceRetryAuthorityForTest::Advocate => ("advocate", "advocate_revision"),
+        TypedEvidenceRetryAuthorityForTest::Unauthorized => ("judge", "judge_adjudication"),
+    };
+    let fixture_caller_user_id = if authority == TypedEvidenceRetryAuthorityForTest::Unauthorized {
+        // Session identity is an opaque string; no user row is needed to prove
+        // that it cannot match the authority task's persisted creator.
+        uuid::Uuid::now_v7().to_string()
+    } else {
+        caller_user_id.to_owned()
+    };
     let finding_id = uuid::Uuid::now_v7().to_string();
     let prior_spike_task_id = uuid::Uuid::now_v7().to_string();
     let failed_transition_id = uuid::Uuid::now_v7().to_string();
@@ -59,6 +83,26 @@ pub async fn materialize_typed_evidence_retry_fixture_for_test(
         "failed"
     };
     let mut tx = db.pool().begin().await.unwrap();
+    sqlx::query(
+        "UPDATE refinement_dispatch_intents SET role=$1, phase=$2, state='materialized' \
+         WHERE task_id=$3",
+    )
+    .bind(authority_role)
+    .bind(authority_phase)
+    .bind(authority_task_id)
+    .execute(&mut *tx)
+    .await
+    .expect("failed to materialize retry authority intent");
+    sqlx::query(
+        "UPDATE tasks SET agent_type=$1, refinement_role=$1, refinement_phase=$2, status='open' \
+         WHERE id=$3",
+    )
+    .bind(authority_role)
+    .bind(authority_phase)
+    .bind(authority_task_id)
+    .execute(&mut *tx)
+    .await
+    .expect("failed to materialize retry authority task");
     sqlx::query("INSERT INTO tasks (id,project_id,short_id,title,description,design,issue_type,priority,owner,status,labels,acceptance_criteria,created_by_user_id,agent_type) VALUES ($1,$2,$3,'Prior evidence spike','terminal retry fixture','','spike',0,'','closed',$4,'[]'::jsonb,$5,'architect')")
         .bind(&prior_spike_task_id).bind(project_id).bind(format!("e{}", &prior_spike_task_id[..7])).bind(serde_json::json!(["refinement-evidence", "read-only"])).bind(caller_user_id).execute(&mut *tx).await.unwrap();
     sqlx::query("INSERT INTO typed_evidence_findings (id,proposal_id,demand_hash,lifecycle,claim,demanded_revision_seq,created_by_task_id) VALUES ($1,$2,$3,$4,$5,1,$6)")
@@ -87,7 +131,8 @@ pub async fn materialize_typed_evidence_retry_fixture_for_test(
         latest_transition_id,
         prior_spike_task_id,
         authority_task_id: authority_task_id.into(),
-        caller_user_id: caller_user_id.into(),
+        caller_user_id: fixture_caller_user_id,
+        authority,
     }
 }
 
