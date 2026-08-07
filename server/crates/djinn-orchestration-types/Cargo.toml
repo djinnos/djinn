@@ -11,6 +11,7 @@ doctest = false
 djinn-provider = { path = "../djinn-provider" }
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
+tokio = { version = "1", features = ["sync", "time"] }
 workspace-hack.workspace = true
 
 [lints]

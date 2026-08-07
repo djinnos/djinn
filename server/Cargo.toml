@@ -39,6 +39,7 @@ test-support = ["dep:tower", "djinn-db/test-support"]
 djinn-agent = { path = "crates/djinn-agent" }
 djinn-compaction = { path = "crates/djinn-compaction" }
 djinn-coordinator = { path = "crates/djinn-coordinator" }
+djinn-orchestration-types = { path = "crates/djinn-orchestration-types" }
 djinn-slot = { path = "crates/djinn-slot" }
 djinn-telemetry = { path = "crates/djinn-telemetry" }
 djinn-core = { path = "crates/djinn-core", features = ["sqlx"] }

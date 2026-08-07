@@ -145,6 +145,15 @@ fn workload_inventory_from_warmer(
 /// persisted in the `dispatch_state` table via `DispatchStateRepository` (epic
 /// n6xw, proposal 8ipw). The other caches below are deliberately
 /// restart-safe-to-lose — they only feed poller/metrics decisions and are cheap
+/// How long shutdown waits for in-flight CI-route provider actions to finish.
+///
+/// Sized above the provider client's own request timeout so a call that is
+/// simply slow is joined rather than abandoned, and well below any orchestrator
+/// termination grace period so the bounded wait never becomes the reason a pod
+/// is SIGKILLed. Exceeding it is reported, not retried: the handoff loses its
+/// graceful proof and startup recovery defers.
+const PROVIDER_ACTION_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// to rebuild on the next sweep.
 pub(super) struct CoordinatorActor {
     // Ryhl core
@@ -252,6 +261,13 @@ pub(super) struct CoordinatorActor {
     pub(super) breaker_open_backoff_streak: HashMap<String, u32>,
     /// Shared tracker for in-flight background tasks.
     pub(super) background_work_tracker: BackgroundWorkTracker,
+    /// The leader-scoped provider-action registry (proposal `nafu`, wave 3).
+    ///
+    /// Every CI-route provider mutation must hold a guard from this scope for
+    /// the whole call. Leadership waits on the same scope before releasing the
+    /// coordinator advisory lock, which is what makes "the lock is held" a
+    /// proof that no provider-action future is alive.
+    pub(super) provider_action_scope: ProviderActionScope,
     /// Cached source for the stranded-ready doctor check. Refreshed each tick
     /// before the cheap doctor subset runs, so the check sees a bounded DB view
     /// without blocking the synchronous `DoctorCheck::run` seam. `None` in tests
@@ -278,6 +294,15 @@ pub(super) struct CoordinatorActor {
     pub(super) consolidation_runner: Arc<dyn ConsolidationRunner>,
     pub(super) mismatch_scan: crate::doctor::mismatch_scan::MismatchScanCoordinator,
     pub(super) last_stale_sweep: StdInstant,
+    /// Last pass of the CI-route reservation sweep (proposal `nafu`).
+    ///
+    /// Recurring rather than startup-only. Wave 3's own doc comment records
+    /// why: an exhausted reservation whose head Tier-2 lease is already held by
+    /// a peer stamps `retry_exhausted_at`, opens no lease, and stays in phase
+    /// `reserved`. Nothing in the repository re-drives it and the peer's lease
+    /// resolving does not wake it, so under a startup-only sweep that row sits
+    /// `reserved` until the process restarts.
+    pub(super) last_ci_route_sweep: StdInstant,
     /// ADR-051 §7 — timestamp of the last auto-dispatch safety-net sweep.
     pub(super) last_auto_dispatch_sweep: StdInstant,
     /// Timestamp of the last proposal-review backfill sweep (dispatches a
@@ -642,6 +667,7 @@ impl CoordinatorActor {
             health,
             role_registry,
             background_work_tracker,
+            provider_action_scope,
             lsp,
             graph_warmer,
             consolidation_runner,
@@ -764,6 +790,7 @@ impl CoordinatorActor {
             dispatch_failure_streak: HashMap::new(),
             breaker_open_backoff_streak: HashMap::new(),
             background_work_tracker,
+            provider_action_scope,
             stranded_ready_source: Some(Arc::clone(&stranded_ready_source)),
             closed_parent_open_children_source: Some(Arc::clone(
                 &closed_parent_open_children_source,
@@ -779,6 +806,7 @@ impl CoordinatorActor {
                 crate::events::event_bus_for(&events_tx),
             ),
             last_stale_sweep: SystemClock::new().now_instant(),
+            last_ci_route_sweep: SystemClock::new().now_instant(),
             last_auto_dispatch_sweep: SystemClock::new().now_instant(),
             last_proposal_review_sweep: SystemClock::new().now_instant(),
             last_graph_refresh: SystemClock::new().now_instant(),
@@ -1055,6 +1083,83 @@ impl CoordinatorActor {
         }
     }
 
+    /// Close CI-route action admission, join every in-flight provider action,
+    /// and stamp this incarnation's drain proof (proposal `nafu`, wave 3).
+    ///
+    /// # Why this runs here and not in `leadership.rs`
+    ///
+    /// The stamp is about *this* incarnation, and the incarnation id is this
+    /// actor's. Leadership holds the advisory lock but has never known which
+    /// incarnation is behind it. So the actor produces the proof and leadership
+    /// consumes it, through the scope both share.
+    ///
+    /// # Why it runs before the loop breaks
+    ///
+    /// Cancellation fires on every task watching the token at once —
+    /// leadership's release arm included. If the drain ran after the loop
+    /// exited, or off in a spawned task, leadership could release the lock
+    /// first and a new incarnation could acquire it while a provider future was
+    /// still live. The `select!` arm awaits this inline for exactly that
+    /// reason, and leadership waits on the scope rather than on a timer.
+    ///
+    /// # What a failure means
+    ///
+    /// Nothing is stamped, so a later recovering incarnation finds
+    /// `provider_actions_drained_at` NULL and
+    /// `CiQuiescenceProof::GracefulDrain` unsatisfied. It then defers instead
+    /// of racing. Degraded recovery latency, never lost exclusion — which is
+    /// why every step here is best-effort and none of them can panic the
+    /// shutdown path.
+    async fn quiesce_provider_actions(&self) {
+        // 1. No new route may enter `calling`.
+        self.provider_action_scope.close_admission();
+
+        // 2. Join what is already inside. Bounded: a provider call runs under
+        //    the client's own request timeout, so an unbounded wait here would
+        //    only ever be a bug elsewhere — and hanging shutdown is a worse
+        //    failure than an unstamped handoff.
+        let joined = tokio::time::timeout(
+            PROVIDER_ACTION_DRAIN_TIMEOUT,
+            self.provider_action_scope.wait_until_empty(),
+        )
+        .await
+        .is_ok();
+        if !joined {
+            tracing::error!(
+                incarnation_id = %self.coordinator_incarnation_id,
+                in_flight = self.provider_action_scope.in_flight(),
+                "CoordinatorActor: provider-action scope did not drain; releasing leadership \
+                 WITHOUT a graceful-drain proof — startup recovery will defer on these rows",
+            );
+            return;
+        }
+
+        // 3. Stamp. `mark_provider_actions_drained` refuses a row that never
+        //    entered `draining`, so the two writes are ordered rather than
+        //    merged.
+        let repo = djinn_db::CoordinatorIncarnationRepository::new(self.db.clone());
+        if let Err(error) = repo.mark_draining(&self.coordinator_incarnation_id).await {
+            tracing::error!(incarnation_id = %self.coordinator_incarnation_id, %error, "CoordinatorActor: failed to mark incarnation draining");
+            return;
+        }
+        match repo
+            .mark_provider_actions_drained(&self.coordinator_incarnation_id)
+            .await
+        {
+            Ok(_) => {
+                // 4. Only now may leadership release the lock.
+                self.provider_action_scope.mark_drained();
+                tracing::info!(
+                    incarnation_id = %self.coordinator_incarnation_id,
+                    "CoordinatorActor: provider actions quiesced; leadership may release the lock",
+                );
+            }
+            Err(error) => {
+                tracing::error!(incarnation_id = %self.coordinator_incarnation_id, %error, "CoordinatorActor: failed to stamp provider_actions_drained_at");
+            }
+        }
+    }
+
     /// Spawn the dedicated incarnation-lease renewal task.
     ///
     /// Renewal must NOT live on the coordinator mailbox / tick path. It used to
@@ -1103,6 +1208,12 @@ impl CoordinatorActor {
         // `poll_stack::boxed` — see that module for why the coordinator's poll
         // chain cannot afford to build its sub-futures in the caller's frame.
         poll_stack::boxed(|| self.register_coordinator_incarnation()).await;
+        // Proposal `nafu`: hand off CI-route `calling` rows left behind by a
+        // former incarnation. Startup-only, and strictly *after* this
+        // incarnation's own lease exists — the handoff compare-and-sets from the
+        // former owner to this one, so this id must be registered first.
+        // Reaching here at all means the advisory lock was won.
+        poll_stack::boxed(|| self.recover_ci_calling_owners_at_startup()).await;
         // Keep the incarnation lease fresh from a dedicated task so a slow tick
         // never lets the reaper read this live coordinator as expired.
         self.spawn_incarnation_renewal();
@@ -1208,6 +1319,7 @@ impl CoordinatorActor {
                 // 1. Graceful shutdown via cancellation token.
                 _ = self.cancel.cancelled() => {
                     tracing::info!("CoordinatorActor: cancellation token fired, stopping");
+                    poll_stack::boxed(|| self.quiesce_provider_actions()).await;
                     break;
                 }
 
@@ -1369,6 +1481,10 @@ impl CoordinatorActor {
             // for non-terminal tasks that sit outside poller-owned statuses.
             poll_stack::boxed(|| self.reconcile_blindspot_merged_prs()).await;
             self.last_stale_sweep = SystemClock::new().now_instant();
+        }
+        if self.last_ci_route_sweep.elapsed() >= crate::pr_poller::CI_ROUTE_SWEEP_INTERVAL {
+            poll_stack::boxed(|| self.sweep_ci_routes()).await;
+            self.last_ci_route_sweep = SystemClock::new().now_instant();
         }
         if self.last_auto_dispatch_sweep.elapsed() >= AUTO_DISPATCH_SWEEP_INTERVAL {
             poll_stack::boxed(|| self.sweep_stale_auto_dispatches()).await;
@@ -2602,6 +2718,60 @@ impl CoordinatorActor {
     }
 }
 
+/// Build a `CoordinatorActor` backed by a real ephemeral database, without
+/// spawning the run loop.
+///
+/// Hoisted out of this file's own `mod tests` so sibling test modules — notably
+/// the `pr_poller` CI-routing suite — can drive actor methods against real
+/// state. `CoordinatorActor::new(CoordinatorDeps::new(..))` is the same
+/// constructor production uses, so a method driven here is the production
+/// method.
+#[cfg(test)]
+pub(crate) fn actor_with_test_db(db: Database) -> CoordinatorActor {
+    use crate::test_helpers;
+    use djinn_slot::{ModelSlotConfig, SlotPoolConfig};
+    use std::collections::HashSet;
+
+    let (events_tx, _events_rx) = tokio::sync::broadcast::channel(16);
+    let cancel = CancellationToken::new();
+    let pool = SlotPoolHandle::spawn(
+        test_helpers::agent_context_from_db(db.clone(), cancel.clone()),
+        cancel.clone(),
+        SlotPoolConfig {
+            models: vec![ModelSlotConfig {
+                model_id: DEFAULT_MODEL_ID.to_owned(),
+                max_slots: 1,
+                roles: HashSet::from(["worker".to_owned()]),
+            }],
+            role_priorities: std::collections::HashMap::new(),
+        },
+    );
+    let (sender, receiver) = tokio::sync::mpsc::channel(64);
+    let (status_tx, _status_rx) = tokio::sync::watch::channel(SharedCoordinatorState {
+        dispatched: 0,
+        recovered: 0,
+        epic_throughput: std::collections::HashMap::new(),
+        pr_errors: std::collections::HashMap::new(),
+        rate_limited_until: None,
+    });
+    CoordinatorActor::new(
+        CoordinatorDeps::new(
+            events_tx,
+            cancel,
+            db,
+            pool,
+            CatalogService::new(),
+            HealthTracker::new(),
+            std::sync::Arc::new(RoleRegistry::new()),
+            BackgroundWorkTracker::default(),
+            djinn_lsp::LspManager::new(),
+        ),
+        receiver,
+        sender,
+        status_tx,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2723,45 +2893,7 @@ mod tests {
     /// Create a minimal actor for message-handling tests without spawning the
     /// full run-loop.  Returns the actor and a oneshot-capable sender.
     fn actor_with_test_db(db: Database) -> CoordinatorActor {
-        use crate::test_helpers;
-        let (events_tx, _events_rx) = broadcast::channel(16);
-        let cancel = CancellationToken::new();
-        let pool = SlotPoolHandle::spawn(
-            test_helpers::agent_context_from_db(db.clone(), cancel.clone()),
-            cancel.clone(),
-            SlotPoolConfig {
-                models: vec![ModelSlotConfig {
-                    model_id: DEFAULT_MODEL_ID.to_owned(),
-                    max_slots: 1,
-                    roles: HashSet::from(["worker".to_owned()]),
-                }],
-                role_priorities: HashMap::new(),
-            },
-        );
-        let (sender, receiver) = mpsc::channel(64);
-        let (status_tx, _status_rx) = watch::channel(SharedCoordinatorState {
-            dispatched: 0,
-            recovered: 0,
-            epic_throughput: HashMap::new(),
-            pr_errors: HashMap::new(),
-            rate_limited_until: None,
-        });
-        CoordinatorActor::new(
-            CoordinatorDeps::new(
-                events_tx,
-                cancel,
-                db,
-                pool,
-                CatalogService::new(),
-                HealthTracker::new(),
-                Arc::new(RoleRegistry::new()),
-                BackgroundWorkTracker::default(),
-                djinn_lsp::LspManager::new(),
-            ),
-            receiver,
-            sender,
-            status_tx,
-        )
+        super::actor_with_test_db(db)
     }
 
     #[tokio::test]

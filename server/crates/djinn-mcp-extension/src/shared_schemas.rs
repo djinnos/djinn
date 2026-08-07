@@ -474,7 +474,7 @@ pub fn tool_proposal_refinement_demand_evidence() -> RmcpTool {
         "Demand a read-only evidence spike for an insufficiently-evidenced feasibility claim. The Judge calls this when in-session research cannot resolve a load-bearing claim. Checks the per-run cap (max 2), records the claim, and parks refinement until spike findings arrive.".to_string(),
         object!({
             "type": "object",
-            "required": ["proposal_id", "round", "against_revision_seq", "question", "target_subsystem", "spec_unknown_anchor", "insufficient_in_session_research", "expected_findings"],
+            "required": ["proposal_id", "round", "against_revision_seq", "question", "target_subsystem", "spec_unknown_anchor", "insufficient_in_session_research", "expected_findings", "load_bearing_category"],
             "properties": {
                 "proposal_id": {"type": "string", "description": "Proposal UUID or short_id"},
                 "round": {"type": "integer", "description": "The 1-based debate round when the demand is issued (from your task description)"},
@@ -483,7 +483,8 @@ pub fn tool_proposal_refinement_demand_evidence() -> RmcpTool {
                 "target_subsystem": {"type": "string", "description": "The subsystem or module under investigation"},
                 "spec_unknown_anchor": {"type": "string", "description": "What in the spec is unknown or unverified"},
                 "insufficient_in_session_research": {"type": "string", "description": "Why in-session research was insufficient to resolve the claim"},
-                "expected_findings": {"type": "string", "description": "What the evidence spike should produce to resolve the claim"}
+                "expected_findings": {"type": "string", "description": "What the evidence spike should produce to resolve the claim"},
+                "load_bearing_category": {"type": "string", "enum": ["feasibility", "safety", "integrity", "compatibility", "rollout", "core_acceptance_criteria"], "description": "Which load-bearing threshold the claim meets. Declare it yourself; the server will not infer it from the question prose."}
             }
         }),
     )

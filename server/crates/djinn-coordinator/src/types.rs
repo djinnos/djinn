@@ -38,6 +38,9 @@ pub use djinn_orchestration_types::coordinator::{
     DebugDispatchState, DebugFailureStreak, DebugInflightEntry, DebugSlot, DebugTotals,
     DispatchPauseView,
 };
+pub use djinn_orchestration_types::provider_action_scope::{
+    ProviderActionGuard, ProviderActionScope,
+};
 
 /// State of the PR-poller's mechanical clean-merge fast path for one task.
 ///
@@ -156,6 +159,14 @@ pub struct CoordinatorDeps {
     /// Defaults are safe: no no-progress enforcement or checkpoint requirement
     /// unless explicitly enabled by production config.
     pub worker_lifecycle_config: super::worker_lifecycle::WorkerLifecycleConfig,
+    /// The leader-scoped registry every CI-route provider mutation is admitted
+    /// into (proposal `nafu`, wave 3).
+    ///
+    /// Shared with `server/src/leadership.rs`, which waits on it before
+    /// releasing the coordinator advisory lock. Off-server and test contexts
+    /// get a private scope from `Default`, which admits freely and is never
+    /// waited on — the routing feature is disabled there anyway.
+    pub provider_action_scope: ProviderActionScope,
 }
 
 impl CoordinatorDeps {
@@ -188,7 +199,18 @@ impl CoordinatorDeps {
             rpc_registry: None,
             pr_cleanup_config: PrCleanupConfig::default(),
             worker_lifecycle_config: super::worker_lifecycle::WorkerLifecycleConfig::default(),
+            provider_action_scope: ProviderActionScope::new(),
         }
+    }
+
+    /// Share the leader's provider-action scope with the coordinator.
+    ///
+    /// Production wires the same scope `server/src/leadership.rs` waits on, so
+    /// that "no provider-action future is alive" and "the advisory lock is
+    /// still held" are answers about the same set of futures.
+    pub fn with_provider_action_scope(mut self, scope: ProviderActionScope) -> Self {
+        self.provider_action_scope = scope;
+        self
     }
 
     /// Inject the production canonical-graph warmer, enabling the ADR-051 §3

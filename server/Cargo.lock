@@ -1651,6 +1651,7 @@ dependencies = [
  "djinn-provider",
  "serde",
  "thiserror 2.0.18",
+ "tokio",
  "workspace-hack",
 ]
 
@@ -1797,6 +1798,7 @@ dependencies = [
  "djinn-k8s",
  "djinn-launcher-protocol",
  "djinn-memory",
+ "djinn-orchestration-types",
  "djinn-provider",
  "djinn-runtime",
  "djinn-server",
