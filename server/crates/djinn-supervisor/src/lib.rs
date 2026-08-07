@@ -3849,6 +3849,57 @@ mod tests {
     #[allow(dead_code)]
     fn _obj_safe(_: &dyn SupervisorServices) {}
 
+    #[test]
+    fn model_turn_admission_wait_uses_interrupted_scheduling() {
+        let terminal = model_turn_admission_terminal_outcome(ModelTurnAdmissionStageOutcome::Wait(
+            djinn_db::ModelTurnAdmissionWait::Draining,
+        ));
+
+        assert!(matches!(
+            terminal,
+            ModelTurnAdmissionTerminalOutcome::Wait(djinn_db::ModelTurnAdmissionWait::Draining)
+        ));
+        assert_eq!(
+            model_turn_admission_task_run_status(&terminal),
+            TaskRunStatus::Interrupted
+        );
+    }
+
+    #[test]
+    fn model_turn_admission_rejection_uses_failed_scheduling() {
+        let terminal = model_turn_admission_terminal_outcome(
+            ModelTurnAdmissionStageOutcome::Rejected(djinn_db::ModelTurnAdmissionRejection::Off),
+        );
+
+        assert!(matches!(
+            terminal,
+            ModelTurnAdmissionTerminalOutcome::Rejected(djinn_db::ModelTurnAdmissionRejection::Off)
+        ));
+        assert_eq!(
+            model_turn_admission_task_run_status(&terminal),
+            TaskRunStatus::Failed
+        );
+    }
+
+    #[test]
+    fn model_turn_admission_dispatch_fence_uses_interrupted_scheduling() {
+        let terminal =
+            model_turn_admission_terminal_outcome(ModelTurnAdmissionStageOutcome::DispatchFenced(
+                djinn_db::ModelTurnLeaseMutationOutcome::Fenced,
+            ));
+
+        assert!(matches!(
+            terminal,
+            ModelTurnAdmissionTerminalOutcome::DispatchFenced(
+                djinn_db::ModelTurnLeaseMutationOutcome::Fenced
+            )
+        ));
+        assert_eq!(
+            model_turn_admission_task_run_status(&terminal),
+            TaskRunStatus::Interrupted
+        );
+    }
+
     const PLANNING_ISSUE_TYPES: [&str; 4] =
         ["planning", "decomposition", "review", "epic_breakdown"];
 
