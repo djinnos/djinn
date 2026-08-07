@@ -815,6 +815,11 @@ impl TaskRunResizeDrop {
 /// property survives the timeout and `0ppk-3`'s reconciler picks the row up.
 /// Bounding the quarantine loop itself instead would end an apiserver outage
 /// with the lease released and a Pod still holding a lifted ceiling.
+///
+/// Spent through the bridge's injected [`ResizeDropClock`], not through
+/// `tokio::time` — see [`TaskRunResizeDropBridge::confirm_drop`]. In production
+/// that clock is [`SystemResizeDropClock`], whose `sleep` **is**
+/// `tokio::time::sleep`, so this stays 45 seconds of real wall clock.
 pub const DROP_GATE_BUDGET: Duration = Duration::from_secs(45);
 
 /// Where the bridge gets its apiserver surface.
@@ -942,12 +947,33 @@ impl TaskRunResizeDropGate for TaskRunResizeDropBridge {
             invocation_id: Some(request.invocation_id.clone()),
             cause: ResizeDropCause::NormalExit,
         };
-        match tokio::time::timeout(self.budget, mechanism.drop_to_birth(&drop_request)).await {
-            Ok(outcome) if outcome.releases_lease() => ResizeDropVerdict::Releasable,
-            Ok(outcome) => ResizeDropVerdict::Held {
+        // THE BUDGET IS SPENT ON THE INJECTED CLOCK, never on `tokio::time`.
+        // The drop's backoff schedule and its 30-second confirmation window are
+        // already measured with `self.clock`; a `tokio::time::timeout` wrapped
+        // around them would be a SECOND, UNINJECTED timeline, and whichever of
+        // the two expired first decided the verdict. In production both are the
+        // same timeline — `SystemResizeDropClock::sleep` is `tokio::time::sleep`,
+        // so `DROP_GATE_BUDGET` still bounds this RPC at 45 seconds of real wall
+        // clock. In a fixture that injects a clock, the gate now gives up on the
+        // fixture's terms instead of on whatever the machine happened to be
+        // doing: under a contended Postgres a real timeout could expire before
+        // the mechanism had even written `drop_required`, so the "nonterminal
+        // resize state it reached" the budget's own doc promises was never
+        // reached, and a test asserting against it read `Lifted`.
+        //
+        // `biased` so a drop that settles in the same poll the budget expires in
+        // is reported as settled: the answer we have beats the one we gave up on.
+        let settled = tokio::select! {
+            biased;
+            outcome = mechanism.drop_to_birth(&drop_request) => Some(outcome),
+            () = self.clock.sleep(self.budget) => None,
+        };
+        match settled {
+            Some(outcome) if outcome.releases_lease() => ResizeDropVerdict::Releasable,
+            Some(outcome) => ResizeDropVerdict::Held {
                 detail: format!("{outcome:?}"),
             },
-            Err(_) => ResizeDropVerdict::Held {
+            None => ResizeDropVerdict::Held {
                 detail: format!(
                     "the drop for task run {} did not settle within {:?}; the permit row \
                      retains its resize state and the lease stays held",
