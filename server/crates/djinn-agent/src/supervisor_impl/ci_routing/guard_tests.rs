@@ -182,6 +182,43 @@ impl Guarded {
     async fn task_status(&self) -> String {
         djinn_db::test_support::task_status_for_test(&self.db, &self.subject.id).await
     }
+
+    /// Make the board believe `head` is this task's PR head, the way the PR
+    /// poller does.
+    ///
+    /// `Task::ci_head_sha` is not a column: every task SELECT derives it from
+    /// the newest `task_pr_ci_snapshots` row. So a snapshot upsert — not a
+    /// task update — is what "the head moved" looks like to the re-read
+    /// inside `apply_lead_ci_result`, and going through the production writer
+    /// is what stops this fixture from staging a value the production path
+    /// could never see.
+    async fn observe_pr_head(&self, head: &str) {
+        djinn_db::TaskRepository::new(self.db.clone(), djinn_core::events::EventBus::noop())
+            .upsert_ci_snapshot(djinn_core::models::TaskPrCiSnapshotInput {
+                task_id: self.subject.id.clone(),
+                pr_number: PR,
+                head_sha: head.to_owned(),
+                ci_status: djinn_core::models::CiStatus::Failing,
+                blocking_required_check_names: vec!["Quality Gate / test".to_owned()],
+                primary_blocking_check: Some("Quality Gate / test".to_owned()),
+                failure_annotations: None,
+                failure_fingerprint: None,
+                same_signature_count: 0,
+                last_remediation_base_sha: None,
+            })
+            .await
+            .expect("seed the board's PR head observation");
+    }
+
+    /// The production dependency bundle `apply_lead_ci_result` takes, over
+    /// **this** fixture's database, so the re-read it performs hits the rows
+    /// seeded above.
+    fn agent_context(&self) -> crate::context::AgentContext {
+        crate::test_helpers::agent_context_from_db(
+            self.db.clone(),
+            tokio_util::sync::CancellationToken::new(),
+        )
+    }
 }
 
 /// A valid repair, cited and with a repository-valid command.
@@ -312,6 +349,180 @@ async fn a_moved_head_applies_nothing() {
         stage_outcome_after_guard(&adjudication.plan, &effect, "stale"),
         StageOutcome::LeadRouteSuperseded { .. }
     ));
+}
+
+// ---------------------------------------------------------------------------
+// S20: where the guard's `observed` head actually comes from
+// ---------------------------------------------------------------------------
+
+/// The production derivation reads the **live** head, not the stored one.
+///
+/// # Why this fixture has to exist
+///
+/// Every other fixture in this file calls [`apply_under_guard`] with a
+/// `CiObservedNow` it built itself, which means the value under test is the
+/// test's own. That leaves the one line production actually depends on — the
+/// re-read of `Task::ci_head_sha` inside `stage::apply_lead_ci_result` —
+/// completely unwitnessed, and this mutation survives the entire `nafu`
+/// acceptance list green:
+///
+/// ```ignore
+/// &ci_routing::CiObservedNow { pr_head_sha: ci.guard.identity.pr_head_sha.clone() }
+/// ```
+///
+/// `observed_identity` then equals the stored identity by construction,
+/// `resolve_tier2_lease`'s head comparison can never fail, and **every** delayed
+/// or stale Lead result applies: a reopen plus a worker dispatch against
+/// evidence a newer head already superseded. That is the double-spent session
+/// the proposal exists to stop.
+///
+/// So this drives the production function, and the only difference between the
+/// two halves below is one row in the database.
+///
+/// NAMED FAILING MUTATIONS.
+/// (a) The mutation above (or any other way of deriving `observed_head` from
+///     `ci.guard.identity` rather than from the re-read): the moved half's
+///     `LeadRouteSuperseded` assertion fails AND its durable
+///     `SupersededBeforeApply` assertion fails — two independent witnesses, one
+///     the value the supervisor acts on and one the row the next poll reads.
+///     (The board-status and worker-attempt assertions are negative space, not
+///     the kill: nothing at this layer writes them on either branch. They are
+///     here to catch a future edit that makes the guarded path mutate the board
+///     directly, which is what "applies nothing" has to keep meaning.)
+/// (b) Drop the `.and_then(|task| task.ci_head_sha)` and re-read some other
+///     field: the moved half fails the same way, because the moved head is only
+///     ever visible through `ci_head_sha`.
+/// (c) Invert the guard (`CiGuardOutcome::Current` unconditionally, or a
+///     tautological repository comparison): the moved half fails.
+/// (d) Make the guard refuse unconditionally: the **current** half fails, which
+///     is the vacuity guard — without it every negative in the moved half would
+///     also hold for a function that never applies anything.
+/// (e) Point the re-read at a different task id: the current half's re-read
+///     misses, falls back to the stored head and still passes, but the moved
+///     half's re-read also misses and it fails on every assertion.
+#[tokio::test]
+async fn the_production_derivation_reads_the_live_head_not_the_stored_one() {
+    // ── The board still believes in the head the route reserved ────────────
+    let current = guarded().await;
+    current.observe_pr_head(HEAD).await;
+    let current_ctx = current.context();
+    let current_adjudication = repair(&current_ctx);
+
+    let applied = crate::supervisor_impl::stage::apply_lead_ci_result(
+        &current.agent_context(),
+        &current.subject.id,
+        &current_ctx,
+        &current_adjudication,
+    )
+    .await;
+
+    assert!(
+        matches!(applied, StageOutcome::LeadReopen { .. }),
+        "vacuity guard: a current head must still APPLY through the production \
+         derivation, or the refusal below proves nothing. Got {applied:?}"
+    );
+    let current_row = current.row().await;
+    assert_eq!(
+        current_row.adjudicated_outcome(),
+        Some(CiRouteOutcome::RepairReopened),
+        "and the guard's own transaction must have persisted the repair"
+    );
+    assert_eq!(
+        current_row.reopen_mode,
+        Some(djinn_db::CiReopenMode::Repair)
+    );
+
+    // ── The same call, the same payload, one different snapshot row ────────
+    let moved = guarded().await;
+    moved.observe_pr_head(MOVED_HEAD).await;
+    let moved_ctx = moved.context();
+    let moved_adjudication = repair(&moved_ctx);
+    let status_before = moved.task_status().await;
+    let attempts_before = moved.worker_attempts().await;
+
+    let refused = crate::supervisor_impl::stage::apply_lead_ci_result(
+        &moved.agent_context(),
+        &moved.subject.id,
+        &moved_ctx,
+        &moved_adjudication,
+    )
+    .await;
+
+    assert!(
+        matches!(refused, StageOutcome::LeadRouteSuperseded { .. }),
+        "the live head moved, so the supervisor must be handed the inert \
+         outcome rather than a reopen. Got {refused:?}"
+    );
+    let moved_row = moved.row().await;
+    assert_eq!(
+        moved_row.adjudicated_outcome(),
+        Some(CiRouteOutcome::SupersededBeforeApply),
+        "and the obsolete attempt must be closed as superseded in the same \
+         transaction, not left open for a second adjudication"
+    );
+    assert_eq!(
+        moved_row.reopen_mode, None,
+        "a superseded attempt records no reopen mode"
+    );
+    assert!(
+        moved_row.superseded_by_evidence.is_some(),
+        "the identity that defeated the compare-and-set must be recorded"
+    );
+    assert_eq!(
+        moved.task_status().await,
+        status_before,
+        "no board mutation: a `PrCiFailed` reopen against superseded evidence \
+         is the double-spend this guard exists to stop"
+    );
+    assert_eq!(
+        moved.worker_attempts().await,
+        attempts_before,
+        "and no worker session may be charged for it"
+    );
+}
+
+/// No snapshot to compare against is **not** evidence that the head moved.
+///
+/// The re-read is `Option`-typed all the way down and falls back to the stored
+/// head. That fallback is load-bearing in the opposite direction from the
+/// fixture above: a route whose task carries no `task_pr_ci_snapshots` row yet
+/// must still be able to apply, or the guard refuses every Lead result on a
+/// task the poller has not written a snapshot for.
+///
+/// NAMED FAILING MUTATIONS.
+/// (a) `unwrap_or_default()` in place of
+///     `unwrap_or_else(|| ci.guard.identity.pr_head_sha.clone())`: the observed
+///     head becomes `""`, which never equals the stored head, and this fails on
+///     both assertions.
+/// (b) Any fallback naming a constant other than the stored head: same failure.
+///
+/// This is also why the fixture above seeds a snapshot on BOTH halves — without
+/// it, its "current" half would be exercising this fallback rather than a
+/// successful re-read, and mutation (b) there would survive.
+#[tokio::test]
+async fn an_absent_snapshot_falls_back_to_the_stored_head_rather_than_refusing() {
+    let g = guarded().await;
+    let ctx = g.context();
+    let adjudication = repair(&ctx);
+
+    // Deliberately no `observe_pr_head`: `Task::ci_head_sha` is NULL here.
+    let applied = crate::supervisor_impl::stage::apply_lead_ci_result(
+        &g.agent_context(),
+        &g.subject.id,
+        &ctx,
+        &adjudication,
+    )
+    .await;
+
+    assert!(
+        matches!(applied, StageOutcome::LeadReopen { .. }),
+        "an absent snapshot is silence, not a moved head. Got {applied:?}"
+    );
+    assert_eq!(
+        g.row().await.adjudicated_outcome(),
+        Some(CiRouteOutcome::RepairReopened),
+        "and the resolution must be persisted, not merely projected"
+    );
 }
 
 /// A merge landed while Lead was thinking. Same answer, different mechanism:

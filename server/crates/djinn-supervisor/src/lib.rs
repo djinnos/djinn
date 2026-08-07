@@ -5563,20 +5563,37 @@ mod tests {
     ///     the deletion that has to be caught here.
     /// (c) Move the emit after the outcome `match` (so a `break`ing arm skips
     ///     it): same failure as (b), because every Lead outcome breaks.
+    ///
+    /// # Why `#[traced_test]` and not a thread-local subscriber
+    ///
+    /// This fixture used to install its own capture with
+    /// `tracing::dispatcher::set_default`, and it failed on unmutated `main`
+    /// under `cargo test` at default parallelism (11 of 14 runs; 3 of 3 alone;
+    /// 3 of 3 when paired with
+    /// [`lead_route_superseded_run_applies_nothing_and_stays_interrupted`]).
+    /// `set_default` is thread-local but `Interest` is **not**: `tracing_core`
+    /// caches one interest value per callsite in a process-global registry, and
+    /// the thread that first reaches a callsite decides that value for every
+    /// thread. A sibling test in this same filter drives the same production
+    /// run loop with no dispatcher installed on its thread, so it can reach the
+    /// `supervisor.stage_outcome` callsite first, register it against
+    /// `NoSubscriber` (`Interest::never()`), and disable it for the whole
+    /// process — permanently, because only registering another `Dispatch`
+    /// rebuilds the cache. The event then never reaches this thread's capture
+    /// while `stage_runs == 1` still passes, which reads as a missing emission
+    /// rather than a lost subscriber.
+    ///
+    /// `tracing-test` installs its capture once with `set_global_default` over
+    /// a leaked `Dispatch` (constructing it registers it, rebuilding every
+    /// cached interest and pinning the global max-level hint), so from then on
+    /// no thread is ever without a subscriber and no callsite can be poisoned.
+    /// `logs_contain`/`logs_assert` then filter that shared buffer by this
+    /// test's own span scope, so a sibling's events cannot satisfy — or
+    /// falsify — anything asserted below. `djinn-coordinator` uses the same
+    /// crate for the same assertion in `the_route_sweep_emits_the_routing_report`.
     #[tokio::test]
+    #[tracing_test::traced_test]
     async fn lead_route_superseded_emits_its_own_stage_outcome_label() {
-        let logs = CapturedLogs::default();
-        let subscriber = tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::INFO)
-            .with_writer(logs.clone())
-            .with_span_events(tracing_subscriber::fmt::format::FmtSpan::NONE)
-            .with_target(true)
-            .with_ansi(false)
-            .with_level(true)
-            .finish();
-        let dispatch = tracing::dispatcher::Dispatch::new(subscriber);
-        let _guard = tracing::dispatcher::set_default(&dispatch);
-
         let observed = run_lead_stage_case(
             "lead-route-superseded-telemetry",
             StageOutcome::LeadRouteSuperseded {
@@ -5586,13 +5603,33 @@ mod tests {
         .await;
         assert_eq!(observed.stage_runs, 1, "the fixture reached the Lead stage");
 
-        let captured = logs.take();
+        // Vacuity guard on the harness itself: if the capture were dead, every
+        // negative below would hold and the positives would be the only thing
+        // standing. So assert the positives first, and assert them together —
+        // `logs_assert` sees only the lines emitted inside this test's span,
+        // and requires ONE line to carry all three, so a `lead_route_superseded`
+        // label attached to some other task's event satisfies nothing.
+        logs_assert(|lines: &[&str]| {
+            let matched = lines
+                .iter()
+                .filter(|line| {
+                    line.contains("supervisor.stage_outcome")
+                        && line.contains("outcome=\"lead_route_superseded\"")
+                        && line.contains("task_id=lead-route-superseded-telemetry")
+                })
+                .count();
+            if matched == 1 {
+                return Ok(());
+            }
+            Err(format!(
+                "the run must emit exactly one stage-outcome event naming the \
+                 supersession and the task it happened to; found {matched} in:\n{}",
+                lines.join("\n"),
+            ))
+        });
         assert!(
-            captured.contains("supervisor.stage_outcome")
-                && captured.contains("outcome=\"lead_route_superseded\"")
-                && captured.contains("task_id=lead-route-superseded-telemetry"),
-            "the run must emit a stage-outcome event that names the supersession \
-             and the task it happened to, got:\n{captured}",
+            logs_contain("supervisor.stage_outcome"),
+            "and the event must be the stage-outcome one",
         );
         for sibling in [
             "outcome=\"failed\"",
@@ -5600,8 +5637,8 @@ mod tests {
             "outcome=\"lead_parked\"",
         ] {
             assert!(
-                !captured.contains(sibling),
-                "a superseded route must not be reported as {sibling}, got:\n{captured}",
+                !logs_contain(sibling),
+                "a superseded route must not be reported as {sibling}",
             );
         }
     }
