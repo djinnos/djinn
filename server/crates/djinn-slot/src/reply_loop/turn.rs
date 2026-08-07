@@ -55,7 +55,9 @@ use super::persistence::{
     record_compaction_started, serialize_llm_input, serialize_message,
 };
 use super::phase::SessionPhaseTracker;
-use super::streaming::{StreamLoopContext, StreamTurnState, consume_provider_stream};
+use super::streaming::{
+    CoveredAttemptTerminalGuard, StreamLoopContext, StreamTurnState, consume_provider_stream,
+};
 use super::tool_dispatch::{ToolDispatchContext, collect_tool_results, tool_runtime_metadata};
 use djinn_db::{CompactionTrigger, SessionCompactionBoundaryRepository};
 
@@ -103,6 +105,31 @@ async fn launch_prepared_covered_attempt<T>(
             permit.mark_active().await.map_err(anyhow::Error::from)?;
             after_active();
             Ok(launched)
+        }
+        ModelTurnPreparation::Wait(wait) => {
+            Err(anyhow::Error::new(ModelTurnAdmissionOutcome::Wait(wait)))
+        }
+        ModelTurnPreparation::Rejected(rejection) => Err(anyhow::Error::new(
+            ModelTurnAdmissionOutcome::Rejected(rejection),
+        )),
+        ModelTurnPreparation::DispatchFenced { outcome, .. } => Err(anyhow::Error::new(
+            ModelTurnAdmissionOutcome::DispatchFenced(outcome),
+        )),
+    }
+}
+
+/// Production hand-off: after `mark_active`, the terminal guard owns this
+/// precise lease rather than leaving any later exit to reconstruct ownership.
+async fn launch_prepared_covered_attempt_with_lease<T>(
+    preparation: ModelTurnPreparation,
+    launch: impl FnOnce() -> anyhow::Result<T>,
+) -> anyhow::Result<(T, Option<djinn_db::ModelTurnLeaseIdentity>)> {
+    match preparation {
+        ModelTurnPreparation::Permit(mut permit) => {
+            let lease = permit.lease.clone();
+            let launched = launch()?;
+            permit.mark_active().await.map_err(anyhow::Error::from)?;
+            Ok((launched, lease))
         }
         ModelTurnPreparation::Wait(wait) => {
             Err(anyhow::Error::new(ModelTurnAdmissionOutcome::Wait(wait)))
@@ -1002,7 +1029,7 @@ pub async fn run_reply_loop(
                         return Err(anyhow::anyhow!("covered admission plan became uncovered"));
                     }
                 };
-                let (attempt, mut parser) = launch_prepared_covered_attempt(
+                let ((attempt, parser), lease) = launch_prepared_covered_attempt_with_lease(
                     preparation,
                     || {
                         let normalizer = Arc::new(Mutex::new(ProviderApiKeyNormalizerV1::new(policy)));
@@ -1012,37 +1039,19 @@ pub async fn run_reply_loop(
                             request_conversation.as_ref(), tools, tool_choice,
                             ProviderAttemptContextV1::new(turns as u64, policy, normalizer, move || ProviderReceiptTimeV1 {
                                 wall: receipt_clock.now(),
-                                monotonic_ms: receipt_clock
-                                    .now_instant()
-                                    .saturating_duration_since(started)
-                                    .as_millis() as u64,
+                                monotonic_ms: receipt_clock.now_instant().saturating_duration_since(started).as_millis() as u64,
                             }),
                         ).map_err(|coverage| anyhow::anyhow!("covered B1 launch rejected: {coverage:?}"))?;
-                        let parser = provider.sse_frame_parser_v1().ok_or_else(||
-                            anyhow::anyhow!("covered B1 route has no authoritative frame parser"))?;
+                        let parser = provider.sse_frame_parser_v1().ok_or_else(|| anyhow::anyhow!("covered B1 route has no authoritative frame parser"))?;
                         Ok((attempt, parser))
                     },
-                    || {},
-                )
-                .await?;
-                Ok(Box::pin(async_stream::stream! {
-                    let mut frames = attempt.events;
-                    while let Some(frame) = frames.next().await {
-                        match frame {
-                            Ok(frame) => for event in parser.parse(frame) {
-                                let failed = event.is_err();
-                                yield event;
-                                if failed { return; }
-                            },
-                            Err(error) => { yield Err(error); return; }
-                        }
-                    }
-                }) as super::streaming::ProviderStream)
+                ).await?;
+                Ok((None, Some(CoveredAttemptTerminalGuard::new(attempt, parser, coordinator, lease))))
             } else {
                 // Explicit uncovered compatibility path: no B2 claim was made.
-                provider.stream(request_conversation.as_ref(), tools, tool_choice).await
+                provider.stream(request_conversation.as_ref(), tools, tool_choice).await.map(|stream| (Some(stream), None))
             };
-            let stream = match stream_result {
+            let (stream, mut covered_attempt) = match stream_result {
                 Ok(s) => s,
                 Err(e)
                     if !transport_compaction_guard.attempted()
@@ -1164,8 +1173,9 @@ pub async fn run_reply_loop(
                 cancel,
                 turn_inline_budget: None,
             };
-            let mut stream_state = match consume_provider_stream(StreamLoopContext {
+            let consume_result = consume_provider_stream(StreamLoopContext {
                 stream,
+                covered_attempt: covered_attempt.as_mut(),
                 tool_metadata: &tool_metadata,
                 dispatch: &dispatch_ctx,
                 phase_tracker: &phase_tracker,
@@ -1188,8 +1198,11 @@ pub async fn run_reply_loop(
                 total_cache_read: &mut total_cache_read,
                 total_cache_write: &mut total_cache_write,
                 total_reasoning_out: &mut total_reasoning_out,
-            })
-            .await {
+            }).await;
+            if let Some(covered_attempt) = &covered_attempt {
+                covered_attempt.finish(consume_result.as_ref().is_ok_and(|state| state.provider_done)).await;
+            }
+            let mut stream_state = match consume_result {
                 Ok(state) => state,
                 Err(e)
                     if !transport_compaction_guard.attempted()

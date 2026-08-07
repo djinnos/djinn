@@ -4,23 +4,27 @@
 //! emission, activity tracking, and host-callback RPCs (touch_activity,
 //! flush_session_tokens).  No `djinn-agent` imports.
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
 
 use djinn_core::events::DjinnEventEnvelope;
+use djinn_db::ModelTurnLeaseIdentity;
+use djinn_provider::ProviderOutcomeV1;
 use djinn_provider::message::ContentBlock;
-use djinn_provider::provider::StreamEvent;
+use djinn_provider::provider::client::ProviderSseAttemptV1;
+use djinn_provider::provider::{ProviderSseFrameParserV1, StreamEvent};
 
 use super::budget::record_provider_usage;
 use super::error_handling::{
     MAX_COMPACTION_RETRIES, ReplyLoopCancelled, is_context_length_error,
     is_orphaned_tool_call_error,
 };
+use super::model_turn_admission::ModelTurnAdmissionCoordinator;
 use super::tool_dispatch::{
     MAX_TOOL_CONCURRENCY, ToolDispatchContext, ToolRuntimeMetadataMap, is_side_query_tool,
     make_tool_future,
@@ -180,8 +184,104 @@ impl StreamTurnState {
 pub(super) type ProviderStream =
     Pin<Box<dyn futures::Stream<Item = anyhow::Result<StreamEvent>> + Send>>;
 
+/// Sole post-dispatch owner of a covered B1 attempt and its fenced lease.
+/// Raw B1 frames are adapted only through the authoritative `StreamEvent` seam.
+pub(super) struct CoveredAttemptTerminalGuard {
+    attempt: Arc<tokio::sync::Mutex<Option<ProviderSseAttemptV1>>>,
+    parser: Box<dyn ProviderSseFrameParserV1>,
+    pending: VecDeque<anyhow::Result<StreamEvent>>,
+    coordinator: ModelTurnAdmissionCoordinator,
+    identity: Option<ModelTurnLeaseIdentity>,
+    settled: Arc<AtomicBool>,
+}
+
+impl CoveredAttemptTerminalGuard {
+    pub(super) fn new(
+        attempt: ProviderSseAttemptV1,
+        parser: Box<dyn ProviderSseFrameParserV1>,
+        coordinator: ModelTurnAdmissionCoordinator,
+        identity: Option<ModelTurnLeaseIdentity>,
+    ) -> Self {
+        Self {
+            attempt: Arc::new(tokio::sync::Mutex::new(Some(attempt))),
+            parser,
+            pending: VecDeque::new(),
+            coordinator,
+            identity,
+            settled: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    async fn next_event(&mut self) -> Option<anyhow::Result<StreamEvent>> {
+        loop {
+            if let Some(event) = self.pending.pop_front() {
+                return Some(event);
+            }
+            let frame = {
+                let mut attempt = self.attempt.lock().await;
+                attempt.as_mut()?.events.next().await
+            }?;
+            match frame {
+                Ok(frame) => self.pending.extend(self.parser.parse(frame)),
+                Err(error) => return Some(Err(error)),
+            }
+        }
+    }
+
+    /// Observe B1's singular terminal outcome and reconcile precisely this lease.
+    pub(super) async fn finish(&self, completed: bool) {
+        if self.settled.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        settle_covered_attempt(
+            self.attempt.clone(),
+            self.coordinator.clone(),
+            self.identity.clone(),
+            !completed,
+        )
+        .await;
+    }
+}
+
+async fn settle_covered_attempt(
+    attempt: Arc<tokio::sync::Mutex<Option<ProviderSseAttemptV1>>>,
+    coordinator: ModelTurnAdmissionCoordinator,
+    identity: Option<ModelTurnLeaseIdentity>,
+    abort: bool,
+) {
+    let Some(mut attempt) = attempt.lock().await.take() else {
+        return;
+    };
+    if abort {
+        attempt.abort.abort();
+    }
+    let outcome: ProviderOutcomeV1 = attempt.outcome().await;
+    if let Some(identity) = identity
+        && let Err(error) = coordinator.reconcile(identity, &outcome).await
+    {
+        tracing::error!(error = %error, "covered attempt reconciliation failed; retaining conservative quarantine");
+    }
+}
+
+impl Drop for CoveredAttemptTerminalGuard {
+    fn drop(&mut self) {
+        if self.settled.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let attempt = self.attempt.clone();
+        let coordinator = self.coordinator.clone();
+        let identity = self.identity.clone();
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                settle_covered_attempt(attempt, coordinator, identity, true).await;
+            });
+        }
+    }
+}
+
 pub(super) struct StreamLoopContext<'a> {
-    pub stream: ProviderStream,
+    pub stream: Option<ProviderStream>,
+    pub covered_attempt: Option<&'a mut CoveredAttemptTerminalGuard>,
     pub tool_metadata: &'a ToolRuntimeMetadataMap,
     pub dispatch: &'a ToolDispatchContext<'a>,
     pub phase_tracker: &'a Arc<Mutex<super::phase::SessionPhaseTracker>>,
@@ -299,7 +399,12 @@ pub(super) async fn consume_provider_stream(
             Some(result) = streaming_inflight.next() => {
                 state.streaming_results.push(result);
             }
-            evt = ctx.stream.next() => {
+            evt = async {
+                match ctx.covered_attempt.as_deref_mut() {
+                    Some(attempt) => attempt.next_event().await,
+                    None => ctx.stream.as_mut().expect("stream source").next().await,
+                }
+            } => {
                 let Some(evt) = evt else {
                     state.early_stream_end = true;
                     break;
