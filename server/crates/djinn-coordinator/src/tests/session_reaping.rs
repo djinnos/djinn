@@ -9088,12 +9088,20 @@ async fn concurrent_session_exit_is_insert_once() {
         first.handle_event(event.clone()),
         second.handle_event(event.clone())
     );
+    let liveness = djinn_db::LivenessRepository::new(db.clone());
+    let immutable_exit = liveness
+        .get_session_liveness_fields(&session.id)
+        .await
+        .unwrap();
+    assert!(
+        immutable_exit.0.is_some(),
+        "the winning terminal delivery must initialize the logical exit result"
+    );
     TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx))
         .set_status(&task.id, "needs_task_review")
         .await
         .unwrap();
     first.handle_event(event).await;
-    let liveness = djinn_db::LivenessRepository::new(db);
     assert_eq!(
         liveness
             .count_evidence_for_session(&session.id, None)
@@ -9105,10 +9113,9 @@ async fn concurrent_session_exit_is_insert_once() {
         liveness
             .get_session_liveness_fields(&session.id)
             .await
-            .unwrap()
-            .0
-            .as_deref(),
-        Some("protocol_violation")
+            .unwrap(),
+        immutable_exit,
+        "replay after a later task transition must not resample or rewrite the winning exit"
     );
 }
 
