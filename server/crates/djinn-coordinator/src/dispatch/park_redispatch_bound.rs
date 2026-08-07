@@ -58,10 +58,12 @@ pub(crate) const NO_ATTEMPTED_REMEDIATION_KIND: &str = "no_attempted_remediation
 /// Count the `no_attempted_remediation` declines already recorded for the
 /// CURRENT intervention epoch.
 ///
-/// Scoping to `intervention_count` (which the marker payload carries) is what
-/// makes the bound re-arm after a genuine Planner intervention reshapes the
-/// task: a fresh epoch starts from zero declines, exactly like the
-/// reopen-count-keyed planner-intervention marker.
+/// 4etb: scoping is on the CANONICAL EVIDENCE EPOCH the marker payload carries
+/// (`evidence_floor`), not on `intervention_count`. Rung 1 is retired, so
+/// nothing advances that counter on this path and an intervention-keyed budget
+/// could never re-arm. The epoch advances exactly when an adjudication or human
+/// review resets the floor, which is the property the old counter stood in for:
+/// a fresh epoch starts from zero declines.
 ///
 /// Entries whose payload is missing, unparseable, or carries a different
 /// `kind`/epoch are ignored. That fails OPEN (toward the existing decline
@@ -69,7 +71,7 @@ pub(crate) const NO_ATTEMPTED_REMEDIATION_KIND: &str = "no_attempted_remediation
 /// could not be read.
 pub(crate) fn no_attempted_remediation_declines(
     entries: &[ActivityEntry],
-    intervention_count: i64,
+    evidence_floor: &str,
 ) -> usize {
     entries
         .iter()
@@ -77,7 +79,7 @@ pub(crate) fn no_attempted_remediation_declines(
         .filter_map(|entry| serde_json::from_str::<serde_json::Value>(&entry.payload).ok())
         .filter(|payload| {
             payload["kind"] == NO_ATTEMPTED_REMEDIATION_KIND
-                && payload["intervention_count"].as_i64() == Some(intervention_count)
+                && payload["evidence_floor"].as_str() == Some(evidence_floor)
         })
         .count()
 }
@@ -107,7 +109,7 @@ mod tests {
     use super::*;
     use crate::types::{NON_ATTEMPT_PARK_THRESHOLD, PARK_REDISPATCH_MARKER};
 
-    fn marker(kind: &str, non_attempt_count: usize, intervention_count: i64) -> ActivityEntry {
+    fn marker(kind: &str, non_attempt_count: usize, evidence_floor: &str) -> ActivityEntry {
         ActivityEntry {
             id: String::new(),
             task_id: None,
@@ -118,7 +120,7 @@ mod tests {
                 "kind": kind,
                 "fingerprint": serde_json::Value::Null,
                 "non_attempt_count": non_attempt_count,
-                "intervention_count": intervention_count,
+                "evidence_floor": evidence_floor,
             })
             .to_string(),
             created_at: String::new(),
@@ -154,12 +156,16 @@ mod tests {
             if !should_decline_no_attempted_remediation_park(
                 false,
                 1,
-                no_attempted_remediation_declines(&recorded, 2),
+                no_attempted_remediation_declines(&recorded, "2026-08-06T00:00:00.000Z"),
             ) {
                 break;
             }
             redispatched += 1;
-            recorded.push(marker(NO_ATTEMPTED_REMEDIATION_KIND, 1, 2));
+            recorded.push(marker(
+                NO_ATTEMPTED_REMEDIATION_KIND,
+                1,
+                "2026-08-06T00:00:00.000Z",
+            ));
         }
 
         assert_eq!(
@@ -176,9 +182,9 @@ mod tests {
     #[test]
     fn bound_never_turns_a_park_into_a_redispatch() {
         let saturated: Vec<ActivityEntry> = (0..MAX_PARK_REDISPATCH_DECLINES + 5)
-            .map(|_| marker(NO_ATTEMPTED_REMEDIATION_KIND, 1, 0))
+            .map(|_| marker(NO_ATTEMPTED_REMEDIATION_KIND, 1, "E0"))
             .collect();
-        let declines = no_attempted_remediation_declines(&saturated, 0);
+        let declines = no_attempted_remediation_declines(&saturated, "E0");
 
         assert!(!should_decline_no_attempted_remediation_park(true, 0, 0));
         assert!(!should_decline_no_attempted_remediation_park(
@@ -198,22 +204,22 @@ mod tests {
     #[test]
     fn declines_are_scoped_to_the_epoch_and_the_kind() {
         let entries = vec![
-            marker(NO_ATTEMPTED_REMEDIATION_KIND, 1, 1),
-            marker(NO_ATTEMPTED_REMEDIATION_KIND, 1, 1),
-            marker(NO_ATTEMPTED_REMEDIATION_KIND, 1, 2),
-            marker("first_occurrence_fingerprint", 0, 2),
+            marker(NO_ATTEMPTED_REMEDIATION_KIND, 1, "E1"),
+            marker(NO_ATTEMPTED_REMEDIATION_KIND, 1, "E1"),
+            marker(NO_ATTEMPTED_REMEDIATION_KIND, 1, "E2"),
+            marker("first_occurrence_fingerprint", 0, "E2"),
             ActivityEntry {
                 payload: "not json".to_owned(),
-                ..marker(NO_ATTEMPTED_REMEDIATION_KIND, 1, 2)
+                ..marker(NO_ATTEMPTED_REMEDIATION_KIND, 1, "E2")
             },
             ActivityEntry {
                 event_type: "status_changed".to_owned(),
-                ..marker(NO_ATTEMPTED_REMEDIATION_KIND, 1, 2)
+                ..marker(NO_ATTEMPTED_REMEDIATION_KIND, 1, "E2")
             },
         ];
 
-        assert_eq!(no_attempted_remediation_declines(&entries, 1), 2);
-        assert_eq!(no_attempted_remediation_declines(&entries, 2), 1);
-        assert_eq!(no_attempted_remediation_declines(&entries, 3), 0);
+        assert_eq!(no_attempted_remediation_declines(&entries, "E1"), 2);
+        assert_eq!(no_attempted_remediation_declines(&entries, "E2"), 1);
+        assert_eq!(no_attempted_remediation_declines(&entries, "E3"), 0);
     }
 }

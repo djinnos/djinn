@@ -2041,13 +2041,26 @@
   },
   {
     "concurrent_safe": false,
-    "description": "Mark a debate-trail objection as resolved by entry `id` (from `proposal_debate_list`). The Judge or Advocate calls this for each blocking objection the revision genuinely satisfies. Pair with a `proposal_debate_append` rebuttal explaining how.",
+    "description": "Judge-only global resolution for a debate-trail objection by entry `id` (from `proposal_debate_list`). For `human_feedback`, supply `verdict=accept` or `reject`; rejection requires non-empty needs-work `reason`.",
     "destructive": false,
     "idempotent": true,
     "inputSchema": {
       "properties": {
         "id": {
           "description": "The debate-trail entry id to resolve (from proposal_debate_list)",
+          "type": "string"
+        },
+        "reason": {
+          "description": "Required needs-work reasoning when rejecting human_feedback.",
+          "minLength": 1,
+          "type": "string"
+        },
+        "verdict": {
+          "description": "Required only for human_feedback.",
+          "enum": [
+            "accept",
+            "reject"
+          ],
           "type": "string"
         }
       },
@@ -2057,6 +2070,74 @@
       "type": "object"
     },
     "name": "proposal_debate_resolve",
+    "openWorld": false,
+    "readOnly": false
+  },
+  {
+    "concurrent_safe": false,
+    "description": "Propose an Advocate disposition for an unresolved `human_feedback` debate entry. Use `fixed_by_revision` with a newer revision on the same proposal, or `wont_fix` with non-empty reasoning. Only the Judge may accept or reject it.",
+    "destructive": false,
+    "idempotent": false,
+    "inputSchema": {
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "disposition": {
+                "const": "fixed_by_revision"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "fixed_by_revision"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "disposition": {
+                "const": "wont_fix"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "reason"
+            ]
+          }
+        }
+      ],
+      "properties": {
+        "disposition": {
+          "enum": [
+            "fixed_by_revision",
+            "wont_fix"
+          ],
+          "type": "string"
+        },
+        "fixed_by_revision": {
+          "description": "Required for fixed_by_revision; must be newer and on this proposal.",
+          "type": "integer"
+        },
+        "id": {
+          "description": "Unresolved human_feedback debate entry id.",
+          "type": "string"
+        },
+        "reason": {
+          "description": "Required non-empty reasoning for wont_fix.",
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "disposition"
+      ],
+      "type": "object"
+    },
+    "name": "proposal_feedback_disposition",
     "openWorld": false,
     "readOnly": false
   },

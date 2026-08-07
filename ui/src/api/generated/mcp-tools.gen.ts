@@ -8573,7 +8573,7 @@ export type ProposalFeedbackResolveOutput = ProposalFeedbackResolveOutputSchema.
 export namespace ProposalFeedbackWithdrawInputSchema {
   export interface ProposalFeedbackWithdrawInput {
   /**
-   * Feedback entry UUID.
+   * Feedback entry UUID. Only its original author may withdraw it.
    */
   id: string
   [k: string]: any

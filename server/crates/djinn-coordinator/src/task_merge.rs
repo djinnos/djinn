@@ -875,6 +875,7 @@ mod tests {
     /// impl, so we construct it field-by-field.
     fn minimal_task(short_id: &str) -> djinn_core::models::Task {
         djinn_core::models::Task {
+            escalation_evidence_at: None,
             id: "task-uuid".to_string(),
             project_id: String::new(),
             short_id: short_id.to_string(),

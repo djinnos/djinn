@@ -61,8 +61,8 @@ pub use services::{BranchPublicationResult, SupervisorServices};
 // Re-export runtime spec types at the crate root so the thin
 // `djinn_agent::supervisor` shim preserves every existing import path.
 pub use djinn_runtime::spec::{
-    LoopGuardKind, RoleKind, SupervisorFlow, TaskRunOutcome, TaskRunReport, TaskRunSpec,
-    role_sequence,
+    LoopGuardKind, ModelTurnAdmissionTerminalOutcome, RoleKind, SupervisorFlow, TaskRunOutcome,
+    TaskRunReport, TaskRunSpec, role_sequence,
 };
 
 /// Root under the shared cache PVC for per-task-run Cargo target directories.
@@ -268,6 +268,7 @@ pub enum StageOutcome {
         tokens_in: i64,
         tokens_out: i64,
     },
+    ModelTurnAdmission(ModelTurnAdmissionStageOutcome),
     /// Arbiter `submit_decision(decision="park")` — the arbiter parked the
     /// task with a structured `park_dossier` describing the hold. Maps to a
     /// human-review hold on the board; the task cannot be auto-closed by an
@@ -320,6 +321,42 @@ pub enum ParkReason {
     Budget,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum ModelTurnAdmissionStageOutcome {
+    Wait(djinn_db::ModelTurnAdmissionWait),
+    Rejected(djinn_db::ModelTurnAdmissionRejection),
+    DispatchFenced(djinn_db::ModelTurnLeaseMutationOutcome),
+}
+
+/// Carry a typed admission result across the stage/terminal boundary without
+/// reducing it to a diagnostic string.
+pub fn model_turn_admission_terminal_outcome(
+    admission: ModelTurnAdmissionStageOutcome,
+) -> ModelTurnAdmissionTerminalOutcome {
+    match admission {
+        ModelTurnAdmissionStageOutcome::Wait(wait) => ModelTurnAdmissionTerminalOutcome::Wait(wait),
+        ModelTurnAdmissionStageOutcome::Rejected(rejection) => {
+            ModelTurnAdmissionTerminalOutcome::Rejected(rejection)
+        }
+        ModelTurnAdmissionStageOutcome::DispatchFenced(fence) => {
+            ModelTurnAdmissionTerminalOutcome::DispatchFenced(fence)
+        }
+    }
+}
+
+/// Classify a typed admission terminal outcome through the cancellable task-run
+/// scheduling seam. A wait or dispatch fence is retryable/interrupted; an
+/// explicit rejection is a terminal admission failure.
+pub fn model_turn_admission_task_run_status(
+    admission: &ModelTurnAdmissionTerminalOutcome,
+) -> TaskRunStatus {
+    match admission {
+        ModelTurnAdmissionTerminalOutcome::Wait(..)
+        | ModelTurnAdmissionTerminalOutcome::DispatchFenced(..) => TaskRunStatus::Interrupted,
+        ModelTurnAdmissionTerminalOutcome::Rejected(..) => TaskRunStatus::Failed,
+    }
+}
+
 impl StageOutcome {
     /// Whether this outcome should short-circuit the role sequence.
     pub fn is_terminal(&self) -> bool {
@@ -329,6 +366,7 @@ impl StageOutcome {
                 | StageOutcome::Escalate { .. }
                 | StageOutcome::Failed { .. }
                 | StageOutcome::Parked { .. }
+                | StageOutcome::ModelTurnAdmission(..)
                 | StageOutcome::LoopGuardTripped { .. }
                 | StageOutcome::ReviewerRejected { .. }
                 | StageOutcome::VerifierFailed { .. }
@@ -372,6 +410,15 @@ fn emit_stage_outcome_event(
         StageOutcome::Failed { .. } => "failed",
         StageOutcome::LoopGuardTripped { .. } => "loop_guard_tripped",
         StageOutcome::Parked { .. } => "parked",
+        StageOutcome::ModelTurnAdmission(ModelTurnAdmissionStageOutcome::Wait(..)) => {
+            "model_turn_admission_wait"
+        }
+        StageOutcome::ModelTurnAdmission(ModelTurnAdmissionStageOutcome::Rejected(..)) => {
+            "model_turn_admission_rejected"
+        }
+        StageOutcome::ModelTurnAdmission(ModelTurnAdmissionStageOutcome::DispatchFenced(..)) => {
+            "model_turn_admission_dispatch_fenced"
+        }
     };
 
     tracing::info!(
@@ -544,6 +591,7 @@ fn session_exit_barrier_plan(
         StageOutcome::LoopGuardTripped { .. } | StageOutcome::Parked { .. } => {
             SessionExitBarrierPlan::InterruptedOrFailed
         }
+        StageOutcome::ModelTurnAdmission(..) => SessionExitBarrierPlan::InterruptedOrFailed,
     }
 }
 
@@ -3411,6 +3459,12 @@ impl TaskRunSupervisor {
                         });
                         break;
                     }
+                    StageOutcome::ModelTurnAdmission(admission) => {
+                        result = Some(TaskRunOutcome::ModelTurnAdmission(
+                            model_turn_admission_terminal_outcome(admission),
+                        ));
+                        break;
+                    }
                     StageOutcome::LoopGuardTripped {
                         kind,
                         offending_signature,
@@ -3608,6 +3662,9 @@ impl TaskRunSupervisor {
             // Completed so the task_run row is terminal without triggering
             // failure accounting.
             TaskRunOutcome::EnvironmentalNonAttempt { .. } => TaskRunStatus::Completed,
+            TaskRunOutcome::ModelTurnAdmission(admission) => {
+                model_turn_admission_task_run_status(admission)
+            }
             TaskRunOutcome::Failed { .. } => TaskRunStatus::Failed,
             TaskRunOutcome::LoopGuardTripped { .. } => TaskRunStatus::Failed,
             TaskRunOutcome::Interrupted => TaskRunStatus::Interrupted,
@@ -3792,6 +3849,57 @@ mod tests {
     #[allow(dead_code)]
     fn _obj_safe(_: &dyn SupervisorServices) {}
 
+    #[test]
+    fn model_turn_admission_wait_uses_interrupted_scheduling() {
+        let terminal = model_turn_admission_terminal_outcome(ModelTurnAdmissionStageOutcome::Wait(
+            djinn_db::ModelTurnAdmissionWait::Draining,
+        ));
+
+        assert!(matches!(
+            terminal,
+            ModelTurnAdmissionTerminalOutcome::Wait(djinn_db::ModelTurnAdmissionWait::Draining)
+        ));
+        assert_eq!(
+            model_turn_admission_task_run_status(&terminal),
+            TaskRunStatus::Interrupted
+        );
+    }
+
+    #[test]
+    fn model_turn_admission_rejection_uses_failed_scheduling() {
+        let terminal = model_turn_admission_terminal_outcome(
+            ModelTurnAdmissionStageOutcome::Rejected(djinn_db::ModelTurnAdmissionRejection::Off),
+        );
+
+        assert!(matches!(
+            terminal,
+            ModelTurnAdmissionTerminalOutcome::Rejected(djinn_db::ModelTurnAdmissionRejection::Off)
+        ));
+        assert_eq!(
+            model_turn_admission_task_run_status(&terminal),
+            TaskRunStatus::Failed
+        );
+    }
+
+    #[test]
+    fn model_turn_admission_dispatch_fence_uses_interrupted_scheduling() {
+        let terminal =
+            model_turn_admission_terminal_outcome(ModelTurnAdmissionStageOutcome::DispatchFenced(
+                djinn_db::ModelTurnLeaseMutationOutcome::Fenced,
+            ));
+
+        assert!(matches!(
+            terminal,
+            ModelTurnAdmissionTerminalOutcome::DispatchFenced(
+                djinn_db::ModelTurnLeaseMutationOutcome::Fenced
+            )
+        ));
+        assert_eq!(
+            model_turn_admission_task_run_status(&terminal),
+            TaskRunStatus::Interrupted
+        );
+    }
+
     const PLANNING_ISSUE_TYPES: [&str; 4] =
         ["planning", "decomposition", "review", "epic_breakdown"];
 
@@ -3822,6 +3930,7 @@ mod tests {
 
     fn fixture_task(task_id: &str, project_id: &str) -> Task {
         Task {
+            escalation_evidence_at: None,
             id: task_id.to_string(),
             project_id: project_id.to_string(),
             short_id: "lg-1".into(),

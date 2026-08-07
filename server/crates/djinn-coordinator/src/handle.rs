@@ -182,13 +182,13 @@ impl CoordinatorHandle {
     /// Creates a review task and dispatches the Planner to it.
     /// Called when Lead uses `request_planner` or auto-escalation fires on 2nd planner escalation.
     /// Per ADR-051 §8 the Planner is the escalation ceiling above Lead.
-    pub async fn dispatch_planner_escalation(
+    pub async fn dispatch_arbiter_adjudication(
         &self,
         source_task_id: &str,
         reason: &str,
         project_id: &str,
     ) -> Result<(), CoordinatorError> {
-        self.send(CoordinatorMessage::DispatchPlannerEscalation {
+        self.send(CoordinatorMessage::DispatchArbiterAdjudication {
             source_task_id: source_task_id.to_owned(),
             reason: reason.to_owned(),
             project_id: project_id.to_owned(),
@@ -199,13 +199,13 @@ impl CoordinatorHandle {
     /// Route a loop-guard-terminated task through the shared Planner
     /// intervention / second-strike park path. This is intentionally distinct
     /// from the ordinary dispatch-failure redispatch ladder.
-    pub async fn route_loop_guard_planner_intervention(
+    pub async fn route_loop_guard_arbiter_adjudication(
         &self,
         source_task_id: &str,
         role: &'static str,
         reason: &str,
     ) -> Result<(), CoordinatorError> {
-        self.send(CoordinatorMessage::RouteLoopGuardPlannerIntervention {
+        self.send(CoordinatorMessage::RouteLoopGuardArbiterAdjudication {
             source_task_id: source_task_id.to_owned(),
             role,
             reason: reason.to_owned(),
@@ -370,7 +370,7 @@ impl CoordinatorTrigger for CoordinatorHandle {
     fn try_route_no_progress_intervention(&self, task_id: &str, reason: &str) {
         match self
             .sender
-            .try_send(CoordinatorMessage::RouteLoopGuardPlannerIntervention {
+            .try_send(CoordinatorMessage::RouteLoopGuardArbiterAdjudication {
                 source_task_id: task_id.to_owned(),
                 role: "worker",
                 reason: reason.to_owned(),

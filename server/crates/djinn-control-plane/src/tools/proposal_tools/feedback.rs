@@ -43,7 +43,7 @@ pub struct ProposalFeedbackResolveParams {
 
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct ProposalFeedbackWithdrawParams {
-    /// Feedback entry UUID.
+    /// Feedback entry UUID. Only its original author may withdraw it.
     pub id: String,
 }
 

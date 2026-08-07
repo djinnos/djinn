@@ -31,7 +31,7 @@ async fn trigger_dispatch_increments_counter_for_ready_task() {
             |_pool, _model_id| async move { Ok::<(), PoolError>(()) },
         )
         .await;
-    assert!(matches!(outcome, DispatchOutcome::Dispatched));
+    assert!(matches!(outcome, DispatchOutcome::Dispatched { .. }));
     actor.dispatched += 1;
 
     assert!(
@@ -56,7 +56,7 @@ async fn trigger_dispatch_increments_counter_for_review_tasks() {
             |_pool, _model_id| async move { Ok::<(), PoolError>(()) },
         )
         .await;
-    assert!(matches!(outcome, DispatchOutcome::Dispatched));
+    assert!(matches!(outcome, DispatchOutcome::Dispatched { .. }));
     actor.dispatched += 1;
 
     assert!(

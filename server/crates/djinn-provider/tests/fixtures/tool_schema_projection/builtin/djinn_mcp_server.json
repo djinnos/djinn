@@ -18666,7 +18666,7 @@
       "type": "object",
       "properties": {
         "id": {
-          "description": "Feedback entry UUID.",
+          "description": "Feedback entry UUID. Only its original author may withdraw it.",
           "type": "string"
         }
       }

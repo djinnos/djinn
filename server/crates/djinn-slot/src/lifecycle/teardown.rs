@@ -150,7 +150,7 @@ pub(crate) async fn settle_no_progress_submission(task_id: &str, ctx: &SlotConte
         from_sync: false,
     });
     // Route the task into planner intervention via the coordinator. The
-    // coordinator's route_loop_guard_planner_intervention path clears
+    // coordinator's route_loop_guard_arbiter_adjudication path clears
     // dispatch_failure_streak and dispatches a Planner escalation, matching
     // the existing a8pv contract.
     if let Some(trigger) = ctx.coordinator_trigger.as_ref() {

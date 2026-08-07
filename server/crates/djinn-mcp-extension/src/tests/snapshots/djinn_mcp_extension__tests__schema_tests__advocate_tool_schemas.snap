@@ -880,6 +880,74 @@ expression: tool_schemas_advocate()
     "concurrent_safe": false
   },
   {
+    "name": "proposal_feedback_disposition",
+    "description": "Propose an Advocate disposition for an unresolved `human_feedback` debate entry. Use `fixed_by_revision` with a newer revision on the same proposal, or `wont_fix` with non-empty reasoning. Only the Judge may accept or reject it.",
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "id",
+        "disposition"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unresolved human_feedback debate entry id."
+        },
+        "disposition": {
+          "type": "string",
+          "enum": [
+            "fixed_by_revision",
+            "wont_fix"
+          ]
+        },
+        "fixed_by_revision": {
+          "type": "integer",
+          "description": "Required for fixed_by_revision; must be newer and on this proposal."
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Required non-empty reasoning for wont_fix."
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "disposition": {
+                "const": "fixed_by_revision"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "fixed_by_revision"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "disposition": {
+                "const": "wont_fix"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "reason"
+            ]
+          }
+        }
+      ]
+    },
+    "readOnly": false,
+    "destructive": false,
+    "idempotent": false,
+    "openWorld": false,
+    "concurrent_safe": false
+  },
+  {
     "name": "proposal_update",
     "description": "Update a proposal (by UUID or short_id): title, body, acceptance_criteria, status (draft|shared|ready|archived|superseded), and superseded_by. Only provided fields change.",
     "inputSchema": {

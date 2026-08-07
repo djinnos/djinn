@@ -36,6 +36,20 @@ pub const HUMAN_RELEASE_ACTOR: &str = "human";
 /// Role stamped on a release emitted by the human hold-task-close path.
 pub const HUMAN_RELEASE_ROLE: &str = "human_reviewer";
 
+/// 4etb: actor for a release the ARBITER produced.
+///
+/// Since tripwire holds route to the forensic arbiter rather than minting a
+/// terminal escalation child, an arbiter decision that clears the findings has
+/// to emit the release itself. It must NOT borrow the human actor: the payload
+/// is durable and would claim a human reviewed a hold no human saw, and
+/// [`build_hold_release_key`] folds `released_by` into the idempotency key, so
+/// an arbiter release and a genuine human release on the same head would
+/// collide on one key and the second would be swallowed.
+pub const ARBITER_RELEASE_ACTOR: &str = "arbiter";
+
+/// Role for a release the arbiter produced. See [`ARBITER_RELEASE_ACTOR`].
+pub const ARBITER_RELEASE_ROLE: &str = "lead";
+
 /// Build a deterministic idempotency key for a hold-release event.
 ///
 /// The key is a SHA-256 hex digest of:

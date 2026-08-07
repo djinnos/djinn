@@ -677,7 +677,7 @@ expression: tool_schemas_judge()
   },
   {
     "name": "proposal_debate_resolve",
-    "description": "Mark a debate-trail objection as resolved by entry `id` (from `proposal_debate_list`). The Judge or Advocate calls this for each blocking objection the revision genuinely satisfies. Pair with a `proposal_debate_append` rebuttal explaining how.",
+    "description": "Judge-only global resolution for a debate-trail objection by entry `id` (from `proposal_debate_list`). For `human_feedback`, supply `verdict=accept` or `reject`; rejection requires non-empty needs-work `reason`.",
     "inputSchema": {
       "type": "object",
       "required": [
@@ -687,6 +687,19 @@ expression: tool_schemas_judge()
         "id": {
           "type": "string",
           "description": "The debate-trail entry id to resolve (from proposal_debate_list)"
+        },
+        "verdict": {
+          "type": "string",
+          "enum": [
+            "accept",
+            "reject"
+          ],
+          "description": "Required only for human_feedback."
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Required needs-work reasoning when rejecting human_feedback."
         }
       }
     },

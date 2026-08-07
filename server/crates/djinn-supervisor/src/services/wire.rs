@@ -706,6 +706,7 @@ mod tests {
 
     fn fake_task() -> Task {
         Task {
+            escalation_evidence_at: None,
             id: "t1".into(),
             project_id: "p1".into(),
             short_id: "T-1".into(),
