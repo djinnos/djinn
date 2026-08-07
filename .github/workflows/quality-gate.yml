@@ -229,6 +229,12 @@ jobs:
         run: node --test scripts/ci-release-image-validation.test.mjs
       - name: Verify shard failure summary contract
         run: node --test scripts/ci-shard-failure-summary.test.mjs
+      # Guards the per-test timing artifact. Its predecessor failed silently in
+      # the worst way available — a valid, accepted, entirely uniform document —
+      # so these assertions are about the VALUES and the KEY FORMAT, not about
+      # the file being produced.
+      - name: Verify nextest per-test timing contract
+        run: node --test scripts/ci-nextest-timing.test.mjs
       - name: Verify MCP tool-schema golden manifest contract
         run: node --test scripts/tool-goldens.test.mjs
       # Cheap (filesystem walk, no build): fails if a NEW derived tool-schema
@@ -2028,15 +2034,49 @@ jobs:
           set -e
           elapsed_seconds=$(( $(date +%s) - started_seconds ))
           mkdir -p nextest-timing
-          jq -s --arg generated_at "$started_at" --argjson elapsed "$elapsed_seconds" '
-            (.[0]) as $ids |
-            ($ids | length) as $count |
-            {
-              version: "ci-nextest-timing/v1",
-              generated_at: $generated_at,
-              tests: (reduce $ids[] as $id ({}; .[$id] = (if $count > 0 then ($elapsed / $count) else 0 end)))
-            }
-          ' nextest-plan/shard-test-ids.json > "nextest-timing/timing-${{ matrix.shardIndex }}.json"
+          timing_file="nextest-timing/timing-${{ matrix.shardIndex }}.json"
+          # Real per-test durations, parsed out of the log teed above.
+          #
+          # This used to be an inline jq that wrote `elapsed / test_count` into
+          # every entry — the shard's whole wall clock spread uniformly. The
+          # document was schema-valid and was accepted and used by the planner,
+          # so nothing ever failed; it simply carried no per-test signal. All
+          # 12,462 entries of the last artifact published that way lay between
+          # 0.4599s and 0.56s, which makes duration balancing arithmetically
+          # identical to test-count balancing. Shards in one run landed at 534s
+          # and 866s, a 62% spread, for exactly that reason.
+          #
+          # The durations were already on disk: every settled nextest attempt
+          # prints `PASS [   0.011s] (n/m) <binary-id> <test-name>`. The parser
+          # and, critically, the reconciliation between that `<binary-id>
+          # <test-name>` and the planner's `package|binary|test` key live in
+          # scripts/ci-nextest-timing.mjs (which derives the mapping from the
+          # planner's own parseDiscovery, so the two cannot disagree).
+          #
+          # `nextest-timing-publish` requires this file's key set to equal this
+          # shard's matrix row exactly, so a hard failure here would red the
+          # gate rather than degrade balancing. The generator therefore handles
+          # a missing/unparseable log internally, and this final `||` keeps the
+          # old uniform document as a last resort for anything it cannot: a
+          # coarse artifact is the status quo ante, an absent one is an outage.
+          if ! node "$GITHUB_WORKSPACE/scripts/ci-nextest-timing.mjs" \
+            --discovery nextest-plan/discovery.json \
+            --test-ids nextest-plan/shard-test-ids.json \
+            --log "$RUNNER_TEMP/nextest-run.log" \
+            --elapsed "$elapsed_seconds" \
+            --generated-at "$started_at" \
+            --output "$timing_file" || [ ! -s "$timing_file" ]; then
+            echo "::warning::Per-test timing extraction failed; falling back to a uniform timing document for this shard."
+            jq -s --arg generated_at "$started_at" --argjson elapsed "$elapsed_seconds" '
+              (.[0]) as $ids |
+              ($ids | length) as $count |
+              {
+                version: "ci-nextest-timing/v1",
+                generated_at: $generated_at,
+                tests: (reduce $ids[] as $id ({}; .[$id] = (if $count > 0 then ($elapsed / $count) else 0 end)))
+              }
+            ' nextest-plan/shard-test-ids.json > "$timing_file"
+          fi
           exit "$status"
       - name: Surface shard failure at run level
         # Runs on ANY failure in this shard (test failure, or an earlier
