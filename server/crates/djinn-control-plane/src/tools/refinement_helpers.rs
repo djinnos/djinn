@@ -107,6 +107,19 @@ async fn find_active_evidence_authority_task(
         .map_err(|e| format!("failed to query active refinement authority: {e}"))
 }
 
+/// The caller must carry a session identity.
+///
+/// Authentication is the one check that legitimately precedes every
+/// structural precondition in `validate_demand_evidence`: it asks nothing
+/// about the proposal, so it discloses nothing about it.
+pub(crate) fn require_caller_identity() -> Result<String, String> {
+    djinn_core::auth_context::current_user_id().ok_or_else(|| {
+        "caller is not authenticated: no session user identity; \
+         only the active Judge may demand evidence"
+            .to_string()
+    })
+}
+
 /// Verify the caller is the active Judge for this proposal's refinement run.
 ///
 /// Checks:
@@ -116,6 +129,15 @@ async fn find_active_evidence_authority_task(
 ///
 /// Returns `Ok(judge_task_id)` when authorized, or `Err(rejection_reason)`
 /// when the caller is not the active Judge.
+///
+/// **Precondition.** `active_evidence_authority_task` resolves authority by
+/// joining a *running* refinement run, the materialized dispatch intent for
+/// `round`, and the proposal's `latest_revision_seq = against_revision_seq`.
+/// A `None` result therefore means "no authority task" only once the caller
+/// has already established that the run is live and that `round` /
+/// `against_revision_seq` are the canonical current values. Call this after
+/// those checks, never before them — otherwise "no refinement run",
+/// "wrong round" and "stale revision" all masquerade as "no authority".
 pub(crate) async fn verify_active_judge_authorization(
     repo: &ProposalRepository,
     proposal_id: &str,
@@ -123,12 +145,7 @@ pub(crate) async fn verify_active_judge_authorization(
     round: i32,
 ) -> Result<String, String> {
     // The caller must have a session identity.
-    let caller_user_id = djinn_core::auth_context::current_user_id();
-    let Some(caller_id) = caller_user_id else {
-        return Err("caller is not authenticated: no session user identity; \
-             only the active Judge may demand evidence"
-            .to_string());
-    };
+    let caller_id = require_caller_identity()?;
 
     // Find the active Judge task for this proposal's refinement run.
     let judge_task =
@@ -166,27 +183,32 @@ pub(crate) async fn verify_active_judge_authorization(
 /// `Err(rejection_reason)` when it should be rejected without side effects.
 ///
 /// Checks (in order):
-/// 0. **Caller is the active Judge** — verifies caller identity via
-///    `auth_context::current_user_id()` matches the active Judge task's
-///    `created_by_user_id` for this proposal's refinement run.
+/// 0. **Caller authenticated** — a session user identity exists
+///    (`auth_context::current_user_id()`).
 /// 1. **Proposal not terminal** — terminal proposals cannot accept demands.
 /// 2. **Refinement active** — must be in an active refinement run.
 /// 3. **Refinement not awaiting review** — the Judge must still be
 ///    adjudicating (not converged/parked for human accept/reject).
 /// 4. **Round matches** — demand round must equal the current refinement
 ///    round (prevents stale or ahead-of-time demands).
-/// 5. **`against_revision_seq` valid** — must be `<=` the proposal's
-///    `latest_revision_seq` (cannot target a future revision).
-/// 6. **Question specific & falsifiable** — non-empty, has a question mark,
+/// 5. **`against_revision_seq` matches** — must equal the proposal's
+///    `latest_revision_seq`; a demand is authority for the exact current
+///    revision, not merely for one no later than it.
+/// 6. **Caller is the active Adversary or Judge** — the caller's user id
+///    matches the authority task correlated to this run, round and
+///    revision. Deliberately ordered after 1-5, which establish the
+///    preconditions that make this question answerable; see the inline
+///    comment at the call site.
+/// 7. **Question specific & falsifiable** — non-empty, has a question mark,
 ///    and does not match any generic pattern.
-/// 7. **`target_subsystem` non-empty** — must identify a concrete subsystem.
-/// 8. **`spec_unknown_anchor` present in reviewed body** — the anchor text
+/// 8. **`target_subsystem` non-empty** — must identify a concrete subsystem.
+/// 9. **`spec_unknown_anchor` present in reviewed body** — the anchor text
 ///    must appear in the proposal revision being reviewed.
-/// 9. **`insufficient_in_session_research` non-empty** — must state what
+/// 10. **`insufficient_in_session_research` non-empty** — must state what
 ///    normal Judge research could not answer.
-/// 10. **Needs-evidence cap not exhausted** — uses persisted substrate
+/// 11. **Needs-evidence cap not exhausted** — uses persisted substrate
 ///     helpers (no in-memory counters).
-/// 11. **No existing open linked evidence spike** — a proposal can have at
+/// 12. **No existing open linked evidence spike** — a proposal can have at
 ///     most one open spike at a time.
 pub(crate) async fn validate_demand_evidence(
     repo: &ProposalRepository,
@@ -195,18 +217,10 @@ pub(crate) async fn validate_demand_evidence(
     refinement: &ProposalRefinementStatusModel,
     params: &ProposalRefinementDemandEvidenceParams,
 ) -> Result<String, String> {
-    // 0. Caller must be the active Judge for this proposal's refinement run.
-    //    This check runs before any state inspection so that non-Judge
-    //    callers receive a typed authorization rejection before any
-    //    proposal/task/debate/lifecycle mutation.
-    //    Returns the Judge task id on success.
-    let judge_task_id = verify_active_judge_authorization(
-        repo,
-        &proposal.id,
-        params.against_revision_seq,
-        params.round,
-    )
-    .await?;
+    // 0. Caller must be authenticated. This is the only check that precedes
+    //    proposal state inspection: it reads the session identity alone, so
+    //    an unauthenticated caller still learns nothing about the proposal.
+    require_caller_identity()?;
 
     // 1. Terminal proposals cannot accept demands.
     if TERMINAL_PROPOSAL_STATUSES.contains(&proposal.status.as_str()) {
@@ -241,8 +255,8 @@ pub(crate) async fn validate_demand_evidence(
         ));
     }
 
-    // A demand is authority for the exact current revision, not an older
-    // revision which happens still to be in history.
+    // 5. A demand is authority for the exact current revision, not an older
+    //    revision which happens still to be in history.
     if params.against_revision_seq != proposal.latest_revision_seq {
         return Err(format!(
             "against_revision_seq {} does not match the proposal's active revision seq {}",
@@ -250,7 +264,32 @@ pub(crate) async fn validate_demand_evidence(
         ));
     }
 
-    // 6. Question must be specific and falsifiable.
+    // 6. Caller must be the active Adversary or Judge for this proposal's
+    //    refinement run. This runs AFTER checks 1-5 on purpose. The authority
+    //    lookup is a correlated join over the running run, the materialized
+    //    intent for `round`, and `latest_revision_seq = against_revision_seq`;
+    //    it can only answer "no authority task in flight" once those three
+    //    are known to hold. Hoisting it above them made every one of
+    //    "proposal is terminal", "no refinement run", "wrong round" and
+    //    "stale revision" report itself as an authority failure, which both
+    //    misdiagnoses the caller and collapses four distinct rejections into
+    //    one indistinguishable message.
+    //
+    //    Ordering is still safe for the no-mutation-on-reject contract:
+    //    `validate_demand_evidence` mutates nothing, and `proposal` and
+    //    `refinement` are already loaded by the caller, so checks 1-5 issue
+    //    no reads of their own. Every mutation happens after this function
+    //    returns `Ok`.
+    //    Returns the Judge task id on success.
+    let judge_task_id = verify_active_judge_authorization(
+        repo,
+        &proposal.id,
+        params.against_revision_seq,
+        params.round,
+    )
+    .await?;
+
+    // 7. Question must be specific and falsifiable.
     let question_trimmed = params.question.trim();
     if question_trimmed.is_empty() {
         return Err("question must not be empty".to_string());
@@ -280,7 +319,7 @@ pub(crate) async fn validate_demand_evidence(
         );
     }
 
-    // 7. `target_subsystem` must be non-empty.
+    // 8. `target_subsystem` must be non-empty.
     if params.target_subsystem.trim().is_empty() {
         return Err("target_subsystem must not be empty".to_string());
     }
@@ -303,7 +342,7 @@ pub(crate) async fn validate_demand_evidence(
     if anchor.is_empty() {
         return Err("spec_unknown_anchor must not be empty".to_string());
     }
-    // 9. `insufficient_in_session_research` must be non-empty.
+    // 10. `insufficient_in_session_research` must be non-empty.
     if params.insufficient_in_session_research.trim().is_empty() {
         return Err(
             "insufficient_in_session_research must state what normal Judge research could not answer"
@@ -331,7 +370,7 @@ pub(crate) async fn validate_demand_evidence(
         return Err("expected_findings must name focused, concrete checks".to_string());
     }
 
-    // 10. Cap must not be exhausted.
+    // 11. Cap must not be exhausted.
     match check_needs_evidence_cap(repo, &proposal.id).await {
         Ok(cap_status) => {
             if cap_status.no_refinement_run {

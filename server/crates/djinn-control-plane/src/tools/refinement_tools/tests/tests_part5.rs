@@ -317,10 +317,36 @@ async fn no_judge_task_in_flight_rejected() {
         .await
         .unwrap();
 
-    // Start refinement but do NOT create a Judge task.
+    // Admit a REAL running refinement run, but create no Judge or Adversary
+    // task. `refinement.active` is decided by the run, not by the legacy
+    // lifecycle row, so the lifecycle row alone would leave the refinement
+    // inactive and this test would silently duplicate
+    // `inactive_refinement_rejected` instead of exercising its own AC.
+    //
+    // A live run with no materialized authority task is the one state in
+    // which "no authority task in flight" is the true and only reason.
     repo.record_refinement_lifecycle(&p.id, "refinement_start", None)
         .await
         .unwrap();
+    let outcome = repo
+        .reap_and_admit(djinn_db::AdmitRefinementRunRequest {
+            proposal_id: p.id.clone(),
+            idempotency_key: format!("no-judge-task/{}", p.id),
+            source: djinn_db::RefinementAdmissionSource::Demand {
+                demand_id: format!("no-judge-task/{}", p.id),
+            },
+            heartbeat_grace_millis: 60_000,
+        })
+        .await
+        .unwrap();
+    assert!(
+        matches!(
+            outcome,
+            djinn_db::RefinementAdmissionOutcome::Admitted { .. }
+        ),
+        "test needs a live refinement run so the rejection is authority-absence, \
+         not refinement-absence: {outcome:?}"
+    );
 
     let user_id = create_test_user(&db, "no-judge-user").await;
     let snap = mutation_snapshot(&repo, &p.id).await;
@@ -339,8 +365,16 @@ async fn no_judge_task_in_flight_rejected() {
 
     let error = resp.get("error").and_then(|v| v.as_str()).unwrap();
     assert!(
-        error.contains("no active Judge task"),
-        "should mention no Judge task: {error}"
+        error.contains("no active Adversary or Judge task in flight"),
+        "should mention no authority task in flight: {error}"
+    );
+    // This AC is authority-absence with a LIVE run. It must never collapse
+    // into the refinement-absence rejection owned by
+    // `inactive_refinement_rejected`, or a regression that merges the two
+    // paths would pass both tests.
+    assert!(
+        !error.contains("refinement is not active"),
+        "authority-absence must stay distinct from refinement-absence: {error}"
     );
     assert!(
         !resp
@@ -399,6 +433,13 @@ async fn terminal_proposal_rejected() {
         error.contains("terminal"),
         "should mention terminal status: {error}"
     );
+    // No refinement run is admitted here, so the authority lookup would also
+    // come back empty. Terminal status is the more specific cause and must
+    // win; it must not be reported as missing authority.
+    assert!(
+        !error.contains("no active Adversary or Judge task in flight"),
+        "a terminal proposal must not masquerade as authority-absence: {error}"
+    );
     assert!(
         !resp
             .get("accepted")
@@ -449,8 +490,16 @@ async fn inactive_refinement_rejected() {
 
     let error = resp.get("error").and_then(|v| v.as_str()).unwrap();
     assert!(
-        error.contains("not active"),
+        error.contains("refinement is not active"),
         "should mention inactive refinement: {error}"
+    );
+    // A Judge task exists here (see above) but no refinement run does, so the
+    // authority lookup would also come back empty. The rejection must name
+    // the real cause — no run — and not borrow the authority-absence reason
+    // owned by `no_judge_task_in_flight_rejected`.
+    assert!(
+        !error.contains("no active Adversary or Judge task in flight"),
+        "refinement-absence must stay distinct from authority-absence: {error}"
     );
 }
 
@@ -476,8 +525,14 @@ async fn round_mismatch_rejected() {
 
     let error = resp.get("error").and_then(|v| v.as_str()).unwrap();
     assert!(
-        error.contains("does not match"),
+        error.contains("does not match the current refinement round"),
         "should mention round mismatch: {error}"
+    );
+    // `round` is an input to the authority correlation, so a wrong round must
+    // report itself as a round mismatch and never as missing authority.
+    assert!(
+        !error.contains("no active Adversary or Judge task in flight"),
+        "a wrong round must not masquerade as authority-absence: {error}"
     );
     assert!(
         !resp
@@ -511,9 +566,18 @@ async fn against_revision_seq_exceeds_latest_rejected() {
         .expect("tool should be registered");
 
     let error = resp.get("error").and_then(|v| v.as_str()).unwrap();
+    // A demand is authority for the EXACT active revision, so a seq beyond
+    // `latest_revision_seq` is rejected as a mismatch rather than as an
+    // "exceeds" bound — the check is `!=`, not `>`.
     assert!(
-        error.contains("exceeds"),
-        "should mention revision seq exceeds: {error}"
+        error.contains("does not match the proposal's active revision seq"),
+        "should mention revision seq mismatch: {error}"
+    );
+    // `against_revision_seq` is an input to the authority correlation, so a
+    // stale or future seq must report itself and never as missing authority.
+    assert!(
+        !error.contains("no active Adversary or Judge task in flight"),
+        "a stale revision seq must not masquerade as authority-absence: {error}"
     );
     assert!(
         !resp
