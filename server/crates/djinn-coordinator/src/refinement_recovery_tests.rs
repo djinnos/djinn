@@ -776,3 +776,186 @@ async fn recovery_hydrates_both_parks_and_omits_terminal_exact_runs() {
         assert!(!actor.active_refinements.contains_key(&run_id));
     }
 }
+
+// ── Outstanding-verdict rehydration (end-to-end through recovery) ───────────
+//
+// `RefinementLoopState::new` seeds `pending_blocking_verdict` false, so a
+// projection rebuilt from the ledger loses the fact that the Judge left a
+// remedy owed. The next dry Adversary pass would then bounce an unchanged spec
+// back to the Judge — re-stranding exactly the verdict the restart interrupted.
+// These tests exercise the real `recover_interrupted_refinements` wiring, not
+// the `with_pending_blocking_verdict` setter.
+
+/// Write a judge verdict onto the proposal's debate trail.
+async fn append_judge_verdict(
+    repo: &ProposalRepository,
+    proposal_id: &str,
+    blocking: bool,
+    round: i32,
+    body: &str,
+) {
+    repo.add_debate_trail_entry(djinn_db::ProposalDebateTrailCreateInput {
+        proposal_id,
+        kind: "verdict",
+        body,
+        blocking,
+        agent_role: "judge",
+        author_kind: "agent",
+        author_model: Some("test-judge"),
+        source_task_id: None,
+        against_revision_seq: 1,
+        round,
+        body_metadata: None,
+    })
+    .await
+    .expect("append judge verdict");
+}
+
+/// `created_at` is millisecond-precision and the run boundary comparison is a
+/// strict `>`, so two writes in the same millisecond are not ordered. Separate
+/// them.
+async fn advance_wall_clock() {
+    tokio::time::sleep(std::time::Duration::from_millis(15)).await;
+}
+
+/// A run recovered after a needs-work verdict must rehydrate the outstanding
+/// remedy, so its next dry Adversary pass reaches the Advocate.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn recovery_rehydrates_an_outstanding_verdict_and_reroutes_the_next_dry_pass() {
+    let db = crate::test_helpers::create_test_db();
+    let fixture = seed_refinement_fixture(&db).await;
+    let (events_tx, _events_rx) = tokio::sync::broadcast::channel::<DjinnEventEnvelope>(16);
+    let mut actor = build_refinement_actor(&db, &events_tx, spawn_test_pool(&db, 1));
+    let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+
+    // The run starts, then the Judge rejects — both inside this run.
+    repo.record_refinement_lifecycle(&fixture.proposal_id, "refinement_start", None)
+        .await
+        .expect("record refinement start boundary");
+    advance_wall_clock().await;
+    let (run_id, _generation, _) = admit(&repo, &fixture.proposal_id, "verdict-rehydrate").await;
+    append_judge_verdict(
+        &repo,
+        &fixture.proposal_id,
+        true,
+        1,
+        "needs-work: AC 2 is untestable; assert on the emitted row count",
+    )
+    .await;
+
+    // The coordinator restarts and rebuilds the projection from the ledger.
+    actor.recover_interrupted_refinements().await;
+    let state = actor
+        .active_refinements
+        .get(&run_id)
+        .expect("exact run projection");
+    assert_eq!(state.phase, RefinementPhase::AdversaryAttack);
+    assert!(
+        state.pending_blocking_verdict,
+        "recovery must rehydrate the outstanding needs-work verdict from the trail"
+    );
+
+    // The behavior that flag exists for: a dry pass reaches the Advocate.
+    let mut resumed = state.clone();
+    resumed.process_adversary_pass(&crate::refinement::AdversaryPassResult {
+        objections: vec![],
+        explicit_dry: true,
+    });
+    assert_eq!(
+        resumed.phase,
+        RefinementPhase::AdvocateRevision,
+        "a recovered run must still implement the verdict the restart interrupted"
+    );
+}
+
+/// A verdict written before this run's `refinement_start` belongs to a PREVIOUS
+/// run and must not reroute anything.
+///
+/// `ProposalRepository::latest_judge_verdict` is proposal-scoped
+/// (`WHERE proposal_id = $1 ORDER BY created_at DESC LIMIT 1`), so using it here
+/// would let a superseded run's remedy drive a fresh run's routing — incident
+/// 019f0c29's failure mode, and the same class of stale-verdict-authority defect
+/// this loop change exists to remove.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn recovery_ignores_a_prior_runs_blocking_verdict() {
+    let db = crate::test_helpers::create_test_db();
+    let fixture = seed_refinement_fixture(&db).await;
+    let (events_tx, _events_rx) = tokio::sync::broadcast::channel::<DjinnEventEnvelope>(16);
+    let mut actor = build_refinement_actor(&db, &events_tx, spawn_test_pool(&db, 1));
+    let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+
+    // Previous run: rejected, then abandoned.
+    repo.record_refinement_lifecycle(&fixture.proposal_id, "refinement_start", None)
+        .await
+        .expect("record prior run start");
+    advance_wall_clock().await;
+    append_judge_verdict(
+        &repo,
+        &fixture.proposal_id,
+        true,
+        3,
+        "needs-work: stale remedy from the abandoned run",
+    )
+    .await;
+    advance_wall_clock().await;
+
+    // A FRESH run starts after that verdict.
+    repo.record_refinement_lifecycle(&fixture.proposal_id, "refinement_start", None)
+        .await
+        .expect("record fresh run start");
+    advance_wall_clock().await;
+    let (run_id, _generation, _) = admit(&repo, &fixture.proposal_id, "fresh-after-stale").await;
+
+    actor.recover_interrupted_refinements().await;
+    let state = actor
+        .active_refinements
+        .get(&run_id)
+        .expect("exact run projection");
+    assert!(
+        !state.pending_blocking_verdict,
+        "a prior run's verdict must not carry into a fresh run"
+    );
+
+    // And the routing consequence: the dry pass goes to the Judge, exactly as it
+    // would without any rebuild. Rebuilding must not change routing.
+    let mut resumed = state.clone();
+    resumed.process_adversary_pass(&crate::refinement::AdversaryPassResult {
+        objections: vec![],
+        explicit_dry: true,
+    });
+    assert_eq!(
+        resumed.phase,
+        RefinementPhase::JudgeAdjudication,
+        "a fresh run must not implement a superseded run's remedy"
+    );
+}
+
+/// A ready verdict inside the current run leaves nothing owed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn recovery_does_not_rehydrate_an_answered_verdict() {
+    let db = crate::test_helpers::create_test_db();
+    let fixture = seed_refinement_fixture(&db).await;
+    let (events_tx, _events_rx) = tokio::sync::broadcast::channel::<DjinnEventEnvelope>(16);
+    let mut actor = build_refinement_actor(&db, &events_tx, spawn_test_pool(&db, 1));
+    let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+
+    repo.record_refinement_lifecycle(&fixture.proposal_id, "refinement_start", None)
+        .await
+        .expect("record refinement start boundary");
+    advance_wall_clock().await;
+    let (run_id, _generation, _) = admit(&repo, &fixture.proposal_id, "answered-verdict").await;
+    append_judge_verdict(&repo, &fixture.proposal_id, true, 1, "needs-work: round 1").await;
+    advance_wall_clock().await;
+    // The Judge later rules ready — the LATEST verdict wins, not the first.
+    append_judge_verdict(&repo, &fixture.proposal_id, false, 2, "ready").await;
+
+    actor.recover_interrupted_refinements().await;
+    let state = actor
+        .active_refinements
+        .get(&run_id)
+        .expect("exact run projection");
+    assert!(
+        !state.pending_blocking_verdict,
+        "a later ready verdict supersedes the earlier needs-work"
+    );
+}

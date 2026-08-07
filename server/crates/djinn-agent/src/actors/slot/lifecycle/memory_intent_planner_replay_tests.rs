@@ -338,6 +338,13 @@ async fn checked_in_replays_enter_the_production_assemble_prompt_context_boundar
             "{} prompt drift",
             case.name
         );
+        // R1: the golden corpus still pins the exact production-rendered
+        // context byte-for-byte. Only the scope-note line's *shape* changed —
+        // `- **[Pattern] <title>**: <summary> (permalink: <slug>)` became
+        // `- **[Pattern] <slug>**: <summary>` — so every `expected_context` in
+        // `replay_cases.json` was re-rendered accordingly. The planner-sourced
+        // `**[Note]` lines are produced by a different renderer and are
+        // unchanged.
         assert_eq!(
             first.knowledge_context.as_deref(),
             Some(case.expected_context.as_str()),

@@ -1,6 +1,7 @@
 mod commands;
 mod deterministic_embeddings;
 mod fixtures;
+pub mod injection_probe;
 mod loader;
 mod metrics;
 pub mod qa;
@@ -48,6 +49,16 @@ enum Commands {
     /// exits non-zero so the non-gating workflow can surface the provider error
     /// without making Phase 2 a PR or merge-queue gate.
     QaJudge,
+    /// Run the session-start injection probe: exercise
+    /// `NoteRepository::query_by_scope_overlap` against the committed fixtures
+    /// and render the result through `pack_ranked_knowledge_notes` under the
+    /// shipped default injection settings, reporting the final packed prompt
+    /// text rather than repository ranking alone. Deterministic, no LLM calls.
+    InjectionProbe {
+        /// Task scope paths the scope-overlap query runs with. Repeatable.
+        #[arg(long = "task-path")]
+        task_paths: Vec<String>,
+    },
 }
 
 #[tokio::main]
@@ -74,5 +85,8 @@ async fn main() -> anyhow::Result<()> {
         Commands::ValidateFixtures => commands::cmd_validate_fixtures(&crate_root),
         Commands::QaRun => commands::cmd_qa_run(&crate_root).await,
         Commands::QaJudge => commands::cmd_qa_judge(&crate_root).await,
+        Commands::InjectionProbe { task_paths } => {
+            commands::cmd_injection_probe(&crate_root, &task_paths).await
+        }
     }
 }

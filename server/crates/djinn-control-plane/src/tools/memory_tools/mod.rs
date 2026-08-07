@@ -18,6 +18,7 @@ mod confirm;
 pub(crate) mod contradiction;
 mod delete_ops;
 mod edit_ops;
+mod injected_pull_rate_report;
 mod lifecycle;
 mod move_ops;
 pub mod ops;
@@ -50,6 +51,8 @@ mod embedding_precedence_tests;
 #[cfg(test)]
 mod entity_types_tests;
 #[cfg(test)]
+mod injected_pull_rate_report_tests;
+#[cfg(test)]
 mod ops_test_support;
 #[cfg(test)]
 mod ops_tests;
@@ -76,6 +79,7 @@ impl DjinnMcpServer {
             + Self::memory_search_router()
             + Self::memory_recall_trace_router()
             + Self::memory_retrieval_outcomes_report_router()
+            + Self::memory_injected_pull_rate_report_router()
             + Self::memory_associations_router()
             + Self::memory_repair_embeddings_router()
             + Self::memory_run_enrichment_router()

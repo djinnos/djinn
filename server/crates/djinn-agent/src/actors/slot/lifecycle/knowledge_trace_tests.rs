@@ -28,13 +28,19 @@ async fn set_note_confidence(db: &djinn_db::Database, note_id: &str, confidence:
 }
 
 /// Create a scoped pattern note that overlaps the given task paths.
+///
+/// R1: returns the whole note rather than only its id, because the rendered
+/// prompt line is now labelled by the note's `permalink` (the title is no
+/// longer rendered at all). Callers that need to assert "this note reached the
+/// prompt" must look for `note.permalink`, taken from the created row instead
+/// of a retyped slug literal.
 async fn seed_scoped_note(
     db: &djinn_db::Database,
     project_id: &str,
     title: &str,
     scope_paths: &str,
     confidence: f64,
-) -> String {
+) -> djinn_memory::Note {
     let note_repo = NoteRepository::new(db.clone(), EventBus::noop());
     let note = note_repo
         .create_with_scope(
@@ -49,7 +55,7 @@ async fn seed_scoped_note(
         .await
         .expect("create note");
     set_note_confidence(db, &note.id, confidence).await;
-    note.id
+    note
 }
 
 /// Fetch the most recent `LoadKnowledgeContext` trace for a project.
@@ -134,8 +140,11 @@ async fn load_knowledge_context_prompt_output_unchanged_with_tracing() {
     // Verify the prompt is produced and contains the note.
     assert!(result.is_some(), "knowledge context should be Some");
     let prompt = result.unwrap();
+    // R1: the note's title is no longer rendered; the permalink is the line's
+    // label. Same property ("this note reached the prompt"), identified by the
+    // permalink taken from the created row.
     assert!(
-        prompt.contains("Global Pattern"),
+        prompt.contains(&global.permalink),
         "prompt should contain the note"
     );
 
@@ -403,7 +412,8 @@ async fn trace_persistence_failure_does_not_change_prompt_output() {
         prompt, expected,
         "prompt output must be byte-identical with and without trace persistence"
     );
-    assert!(prompt.contains("Fail Pattern"));
+    // R1: the seeded note is identified by its permalink label, not its title.
+    assert!(prompt.contains(&note.permalink));
 }
 
 #[tokio::test]
@@ -516,6 +526,7 @@ fn apply_budget_outcomes_dedupe_duplicate_permalink() {
             disposition: crate::actors::slot::helpers::NotePackDisposition::Injected,
             estimated_rendered_chars: Some(100),
             estimated_rendered_tokens: Some(25),
+            action_excerpt: None,
         }],
         total_injected_chars: 100,
         total_injected_tokens: 25,
@@ -552,6 +563,7 @@ fn apply_budget_outcomes_budget_pruned_injected_candidate() {
             disposition: crate::actors::slot::helpers::NotePackDisposition::BudgetPruned,
             estimated_rendered_chars: None,
             estimated_rendered_tokens: None,
+            action_excerpt: None,
         }],
         total_injected_chars: 0,
         total_injected_tokens: 0,
@@ -563,6 +575,188 @@ fn apply_budget_outcomes_budget_pruned_injected_candidate() {
     assert_eq!(result.len(), 1);
     assert_eq!(result[0].outcome, CandidateOutcome::Skipped);
     assert_eq!(result[0].skipped_reason, Some(SkippedReason::BudgetPruned));
+}
+
+/// Regression: an `OversizedSkipped` pack disposition used to leave the
+/// candidate `Injected`, because only `BudgetPruned` was matched. The note was
+/// dropped from the prompt while the trace claimed it had been injected.
+#[test]
+fn apply_budget_outcomes_oversized_skipped_injected_candidate() {
+    let candidates_raw = vec![tc("n1", "p/n1", "Note 1", 0.9, 1)];
+    let production_ids: std::collections::HashSet<&str> = std::collections::HashSet::from(["n1"]);
+    let classified = classify_knowledge_candidates(&candidates_raw, &production_ids);
+    assert_eq!(
+        classified[0].outcome,
+        CandidateOutcome::Injected,
+        "precondition: the candidate starts out injected"
+    );
+
+    let packed = crate::actors::slot::helpers::PackedKnowledgeNotes {
+        rendered: String::new(),
+        outcomes: vec![crate::actors::slot::helpers::NotePackOutcome {
+            permalink: "p/n1".to_string(),
+            title: "Note 1".to_string(),
+            disposition: crate::actors::slot::helpers::NotePackDisposition::OversizedSkipped,
+            estimated_rendered_chars: None,
+            estimated_rendered_tokens: None,
+            action_excerpt: None,
+        }],
+        total_injected_chars: 0,
+        total_injected_tokens: 0,
+    };
+
+    let notes: Vec<djinn_memory::Note> = Vec::new();
+    let result = apply_budget_outcomes(classified, &packed, &notes);
+
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].outcome, CandidateOutcome::Skipped);
+    assert_eq!(
+        result[0].skipped_reason,
+        Some(SkippedReason::OversizedSkipped),
+        "an oversized drop must not be reported as budget_pruned"
+    );
+}
+
+// ── Oversized-vs-budget disposition reporting (proposal u46i AC4) ────────────
+
+/// Build a note whose rendered summary line costs `permalink_len` bytes of
+/// fixed overhead in the permalink alone, so `line_byte_cap` can be tuned to
+/// force `rendered_line` to return `None` (a whole-note DROP).
+fn oversize_test_note(id: &str, permalink: &str, confidence: f64) -> djinn_memory::Note {
+    djinn_memory::Note {
+        id: id.to_string(),
+        project_id: "p".into(),
+        permalink: permalink.to_string(),
+        title: id.to_string(),
+        file_path: String::new(),
+        storage: "db".into(),
+        note_type: "pattern".into(),
+        folder: "patterns".into(),
+        status: "active".into(),
+        tags: "[]".into(),
+        content: "body".into(),
+        retrieval_anchor: None,
+        created_at: String::new(),
+        updated_at: String::new(),
+        lifecycle_changed_at: None,
+        last_accessed: String::new(),
+        access_count: 0,
+        confidence,
+        abstract_: Some("abstract".to_string()),
+        overview: None,
+        scope_paths: "[]".into(),
+    }
+}
+
+/// `trace_candidates_from_pack` must report the two non-injection dispositions
+/// distinctly, and the distinction must survive serialization — the persisted
+/// JSON is what the operator reads back through `memory_recall_trace`.
+#[test]
+fn trace_candidates_from_pack_reports_oversized_and_budget_distinctly() {
+    use crate::actors::slot::helpers::{NotePackDisposition, NotePackOutcome};
+
+    let notes = vec![
+        oversize_test_note("n-oversized", "patterns/oversized", 0.9),
+        oversize_test_note("n-budget", "patterns/budget", 0.8),
+    ];
+    let packed = crate::actors::slot::helpers::PackedKnowledgeNotes {
+        rendered: String::new(),
+        outcomes: vec![
+            NotePackOutcome {
+                permalink: "patterns/oversized".to_string(),
+                title: "n-oversized".to_string(),
+                disposition: NotePackDisposition::OversizedSkipped,
+                estimated_rendered_chars: None,
+                estimated_rendered_tokens: None,
+                action_excerpt: None,
+            },
+            NotePackOutcome {
+                permalink: "patterns/budget".to_string(),
+                title: "n-budget".to_string(),
+                disposition: NotePackDisposition::BudgetPruned,
+                estimated_rendered_chars: None,
+                estimated_rendered_tokens: None,
+                action_excerpt: None,
+            },
+        ],
+        total_injected_chars: 0,
+        total_injected_tokens: 0,
+    };
+
+    let candidates = trace_candidates_from_pack(&notes, &packed);
+    assert_eq!(candidates.len(), 2);
+
+    // Assert on the serialized trace payload, not only the Rust enum.
+    let serialized = serde_json::to_value(&candidates).expect("serialize trace candidates");
+    let rows = serialized.as_array().expect("candidate array");
+    assert_eq!(rows[0]["outcome"].as_str(), Some("skipped"));
+    assert_eq!(
+        rows[0]["skipped_reason"].as_str(),
+        Some("oversized_skipped")
+    );
+    assert_eq!(rows[1]["outcome"].as_str(), Some("skipped"));
+    assert_eq!(rows[1]["skipped_reason"].as_str(), Some("budget_pruned"));
+
+    // And the persisted vocabulary must validate against the DB contract.
+    assert!(
+        djinn_db::repositories::retrieval_trace::validate_candidates(&candidates).is_ok(),
+        "oversized_skipped must be an accepted skipped_reason"
+    );
+}
+
+/// End-to-end: a note that `rendered_line` DROPS (fixed overhead alone exceeds
+/// the per-line cap, so nothing at all is rendered) must reach the trace as
+/// `oversized_skipped`. Without this the drop was indistinguishable from a
+/// budget loss and the deletion was invisible to the operator.
+#[test]
+fn dropped_note_surfaces_as_oversized_skipped_end_to_end() {
+    use crate::actors::slot::helpers::{
+        KnowledgePackConfig, NotePackDisposition, pack_ranked_knowledge_notes,
+    };
+    use djinn_slot::helpers::rendered_line_overhead_bytes;
+
+    // A long permalink makes the fixed per-line overhead exceed any small cap.
+    let dropped = oversize_test_note("n-dropped", &format!("patterns/{}", "x".repeat(200)), 0.9);
+    let kept = oversize_test_note("n-kept", "patterns/short", 0.8);
+
+    // Cap the line just under the dropped note's fixed overhead, but well
+    // above the kept note's, so exactly one note is un-renderable.
+    let line_byte_cap = rendered_line_overhead_bytes(&dropped) - 1;
+    assert!(
+        rendered_line_overhead_bytes(&kept) < line_byte_cap,
+        "the short note's overhead must still fit the cap"
+    );
+
+    let notes = vec![dropped, kept];
+    let packed = pack_ranked_knowledge_notes(
+        &notes,
+        KnowledgePackConfig {
+            minimum_confidence: f64::NEG_INFINITY,
+            top_k: notes.len(),
+            total_byte_budget: 100_000,
+            line_byte_cap,
+        },
+    );
+    assert_eq!(
+        packed.outcomes[0].disposition,
+        NotePackDisposition::OversizedSkipped,
+        "precondition: packing drops the note whole"
+    );
+    assert_eq!(
+        packed.outcomes[1].disposition,
+        NotePackDisposition::Injected
+    );
+
+    let candidates = trace_candidates_from_pack(&notes, &packed);
+    let serialized = serde_json::to_value(&candidates).expect("serialize trace candidates");
+    let rows = serialized.as_array().expect("candidate array");
+    assert_eq!(
+        rows[0]["skipped_reason"].as_str(),
+        Some("oversized_skipped"),
+        "a silently dropped note must be visible as oversized_skipped"
+    );
+    assert_eq!(rows[1]["outcome"].as_str(), Some("injected"));
+    assert!(rows[1]["skipped_reason"].is_null());
 }
 
 #[test]
@@ -600,13 +794,13 @@ async fn trace_candidate_search_failure_does_not_change_prompt_output() {
 
     // Seed two notes with high confidence. Both will appear in both queries.
     let note_a = seed_scoped_note(&db, &project_id, "TC fail A", "[]", 0.85).await;
-    let _note_b = seed_scoped_note(&db, &project_id, "TC fail B", "[]", 0.75).await;
+    let note_b = seed_scoped_note(&db, &project_id, "TC fail B", "[]", 0.75).await;
 
     // NULL note A's confidence. The production query (`confidence >= 0.3`)
     // excludes NULL rows, so it will only return note B. The trace-candidate
     // query has no confidence filter and includes the NULL row, causing
     // `query_as` to fail when mapping NULL → f64.
-    djinn_db::test_support::nullify_note_confidence_for_test(&db, &note_a).await;
+    djinn_db::test_support::nullify_note_confidence_for_test(&db, &note_a.id).await;
 
     let app_state = agent_context_from_db(db.clone(), CancellationToken::new());
 
@@ -616,12 +810,15 @@ async fn trace_candidate_search_failure_does_not_change_prompt_output() {
     let result = load_knowledge_context(&task, None, &app_state).await;
     assert!(result.is_some(), "prompt should still be produced");
     let prompt = result.unwrap();
+    // R1: identify each note by its permalink — the title is no longer
+    // rendered. The two permalinks stay distinct (`.../tc-fail-a` vs
+    // `.../tc-fail-b`), so the negative assertion still discriminates.
     assert!(
-        prompt.contains("TC fail B"),
+        prompt.contains(&note_b.permalink),
         "non-NULL-confidence note should appear in rendered prompt"
     );
     assert!(
-        !prompt.contains("TC fail A"),
+        !prompt.contains(&note_a.permalink),
         "NULL-confidence note excluded from production results"
     );
     let trace = latest_trace(&db, &project_id).await.expect("error trace");
@@ -749,9 +946,10 @@ async fn load_knowledge_context_rendered_matches_pack_knowledge_notes() {
         "load_knowledge_context rendered output must match pack_knowledge_notes byte-for-byte"
     );
 
-    // Both note titles must appear in the rendered text.
-    assert!(rendered.contains("High Confidence Note"));
-    assert!(rendered.contains("Low Confidence Note"));
+    // Both notes must appear in the rendered text. R1: a line is labelled by
+    // the note's permalink, not its title, so the permalinks are the handles.
+    assert!(rendered.contains(&high_note.permalink));
+    assert!(rendered.contains(&low_note.permalink));
 }
 
 #[tokio::test]
@@ -834,7 +1032,11 @@ async fn successful_trace_replays_oversized_rank_one_with_taxonomy_v1_histogram(
         .await
         .expect("fitting candidate survives");
     assert_eq!(rendered.len(), 128);
-    assert!(rendered.contains("Rank two fitting"));
+    // R1: the rank-two note is identified by its permalink label. The scenario
+    // still bites: rank one's permalink alone (9 + 100 bytes) plus the fixed
+    // scaffold exceeds the 128-byte line cap, so it is still dropped whole
+    // (`oversized_skipped`), and rank three still misses the 256-byte budget.
+    assert!(rendered.contains(&injected.permalink));
     let trace = latest_trace(&db, &project_id)
         .await
         .expect("terminal trace");

@@ -81,10 +81,19 @@ impl CoordinatorActor {
                 .refinement_run_captured_snapshot_seq(&run.run_id)
                 .await
                 .unwrap_or_default();
+            // Rebuilt projections seed `pending_blocking_verdict` false. A run
+            // recovered while parked at `AdversaryAttack` after a needs-work
+            // verdict would then send its next dry pass back to the Judge and
+            // re-strand exactly the verdict the restart interrupted. The durable
+            // authority is the debate trail, scoped to THIS run.
+            let pending_blocking_verdict = self
+                .outstanding_blocking_verdict(&proposal_repo, &exact.proposal_id)
+                .await;
             let mut state =
                 RefinementLoopState::new(&exact.proposal_id, proposal.latest_revision_seq)
                     .with_run_identity(run.run_id.clone(), exact.generation)
                     .with_recovered_snapshot_seq(captured_snapshot_seq)
+                    .with_pending_blocking_verdict(pending_blocking_verdict)
                     .with_attributed_user(proposal.refinement_owner_user_id.clone());
 
             if let Some(park) = exact.snapshot.park.as_ref() {
