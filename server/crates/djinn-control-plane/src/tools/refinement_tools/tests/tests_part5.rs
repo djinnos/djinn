@@ -232,6 +232,35 @@ pub(super) async fn setup_demand_test() -> (
     .await;
 
     let updated = repo.get(&p.id).await.unwrap().unwrap();
+    // The setup body intentionally contains prose, an Open questions heading,
+    // and a QuestionForm. They are UI text only: setup must not synthesize
+    // typed evidence or its legacy active-demand projection.
+    let finding_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM typed_evidence_findings WHERE proposal_id = $1")
+            .bind(&p.id)
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+    let attempt_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM typed_evidence_attempts WHERE finding_id IN \
+         (SELECT id FROM typed_evidence_findings WHERE proposal_id = $1)",
+    )
+    .bind(&p.id)
+    .fetch_one(db.pool())
+    .await
+    .unwrap();
+    assert_eq!(
+        finding_count, 0,
+        "prose and QuestionForm must not create findings"
+    );
+    assert_eq!(
+        attempt_count, 0,
+        "prose and QuestionForm must not create attempts"
+    );
+    assert!(
+        updated.linked_spike_task_id.is_none() && updated.needs_evidence_claim.is_none(),
+        "prose and QuestionForm must not create legacy evidence state"
+    );
     (server, db, updated, user_id, judge_task_id)
 }
 
@@ -265,7 +294,8 @@ pub(super) async fn mutation_snapshot(
 async fn no_session_identity_rejected() {
     let (server, db, p, _user_id, _judge_task_id) = setup_demand_test().await;
     let repo = ProposalRepository::new(db.clone(), EventBus::noop());
-    let snap = mutation_snapshot(&repo, &p.id).await;
+    let project_id = repo.targets(&p.id).await.unwrap()[0].project_id.clone();
+    let snap = atomic_demand_snapshot(&db, &repo, &p.id, &project_id).await;
 
     // Call dispatch_tool WITHOUT a SESSION_USER_ID scope — simulates
     // an unauthenticated caller or background path with no session.
@@ -289,8 +319,11 @@ async fn no_session_identity_rejected() {
             .unwrap_or(true)
     );
 
-    let after = mutation_snapshot(&repo, &p.id).await;
-    assert_eq!(snap, after, "rejected demand must not mutate state");
+    assert_eq!(
+        snap,
+        atomic_demand_snapshot(&db, &repo, &p.id, &project_id).await,
+        "unauthenticated demand must not mutate any demand-owned relation"
+    );
 }
 
 // ── AC: Non-Judge caller rejected (wrong user) ──────────────────
@@ -299,7 +332,8 @@ async fn no_session_identity_rejected() {
 async fn wrong_user_rejected() {
     let (server, db, p, _user_id, _judge_task_id) = setup_demand_test().await;
     let repo = ProposalRepository::new(db.clone(), EventBus::noop());
-    let snap = mutation_snapshot(&repo, &p.id).await;
+    let project_id = repo.targets(&p.id).await.unwrap()[0].project_id.clone();
+    let snap = atomic_demand_snapshot(&db, &repo, &p.id, &project_id).await;
 
     // Call as a DIFFERENT user — not the one attributed to the Judge task.
     let impostor_id = create_test_user(&db, "impostor-user").await;
@@ -327,8 +361,11 @@ async fn wrong_user_rejected() {
             .unwrap_or(true)
     );
 
-    let after = mutation_snapshot(&repo, &p.id).await;
-    assert_eq!(snap, after, "rejected demand must not mutate state");
+    assert_eq!(
+        snap,
+        atomic_demand_snapshot(&db, &repo, &p.id, &project_id).await,
+        "unauthorized demand must not mutate any demand-owned relation"
+    );
 }
 
 // ── AC: No Judge task in flight rejected ─────────────────────────
@@ -540,7 +577,8 @@ async fn inactive_refinement_rejected() {
 async fn round_mismatch_rejected() {
     let (server, db, p, user_id, _judge_task_id) = setup_demand_test().await;
     let repo = ProposalRepository::new(db.clone(), EventBus::noop());
-    let snap = mutation_snapshot(&repo, &p.id).await;
+    let project_id = repo.targets(&p.id).await.unwrap()[0].project_id.clone();
+    let snap = atomic_demand_snapshot(&db, &repo, &p.id, &project_id).await;
 
     let mut params = valid_demand_params(&p.id);
     params["round"] = serde_json::json!(99); // Wrong round.
@@ -572,8 +610,11 @@ async fn round_mismatch_rejected() {
             .unwrap_or(true)
     );
 
-    let after = mutation_snapshot(&repo, &p.id).await;
-    assert_eq!(snap, after, "rejected demand must not mutate state");
+    assert_eq!(
+        snap,
+        atomic_demand_snapshot(&db, &repo, &p.id, &project_id).await,
+        "round mismatch must not mutate any demand-owned relation"
+    );
 }
 
 // ── AC: against_revision_seq exceeds latest rejected ─────────────
@@ -582,7 +623,8 @@ async fn round_mismatch_rejected() {
 async fn against_revision_seq_exceeds_latest_rejected() {
     let (server, db, p, user_id, _judge_task_id) = setup_demand_test().await;
     let repo = ProposalRepository::new(db.clone(), EventBus::noop());
-    let snap = mutation_snapshot(&repo, &p.id).await;
+    let project_id = repo.targets(&p.id).await.unwrap()[0].project_id.clone();
+    let snap = atomic_demand_snapshot(&db, &repo, &p.id, &project_id).await;
 
     let mut params = valid_demand_params(&p.id);
     params["against_revision_seq"] = serde_json::json!(999);
@@ -617,8 +659,11 @@ async fn against_revision_seq_exceeds_latest_rejected() {
             .unwrap_or(true)
     );
 
-    let after = mutation_snapshot(&repo, &p.id).await;
-    assert_eq!(snap, after, "rejected demand must not mutate state");
+    assert_eq!(
+        snap,
+        atomic_demand_snapshot(&db, &repo, &p.id, &project_id).await,
+        "revision mismatch must not mutate any demand-owned relation"
+    );
 }
 
 // ── AC: Empty question rejected ──────────────────────────────────
@@ -699,14 +744,19 @@ async fn question_without_question_mark_rejected() {
 async fn generic_question_pattern_rejected() {
     let (server, db, p, user_id, _judge_task_id) = setup_demand_test().await;
     let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+    let project_id = repo.targets(&p.id).await.unwrap()[0].project_id.clone();
 
-    for pattern in &[
-        "Please investigate further if this is correct?",
-        "Can we improve the token handling?",
-        "Should we design more tests for this?",
+    for (pattern, rejection) in [
+        ("Please investigate further if this is correct?", "generic"),
+        ("Can we improve the token handling?", "generic"),
+        ("Should we design more tests for this?", "generic"),
+        ("Is blue better than green?", "preference-only"),
+        (
+            "Which function currently parses this header?",
+            "repository-answerable",
+        ),
     ] {
-        let snap = mutation_snapshot(&repo, &p.id).await;
-
+        let snap = atomic_demand_snapshot(&db, &repo, &p.id, &project_id).await;
         let mut params = valid_demand_params(&p.id);
         params["question"] = serde_json::json!(pattern);
 
@@ -722,9 +772,8 @@ async fn generic_question_pattern_rejected() {
 
         let error = resp.get("error").and_then(|v| v.as_str()).unwrap();
         assert!(
-            error.contains("generic"),
-            "pattern '{}' should be rejected as generic: {error}",
-            pattern,
+            error.contains(rejection),
+            "pattern '{pattern}' should be rejected as {rejection}: {error}",
         );
         assert!(
             !resp
@@ -732,9 +781,11 @@ async fn generic_question_pattern_rejected() {
                 .and_then(|v| v.as_bool())
                 .unwrap_or(true)
         );
-
-        let after = mutation_snapshot(&repo, &p.id).await;
-        assert_eq!(snap, after, "rejected demand must not mutate state");
+        assert_eq!(
+            snap,
+            atomic_demand_snapshot(&db, &repo, &p.id, &project_id).await,
+            "rejected question '{pattern}' must not mutate any demand-owned relation"
+        );
     }
 }
 
@@ -1526,6 +1577,33 @@ async fn demand_matrix_persists_every_load_bearing_category_for_each_authority_r
                 Some(true),
                 "{role}/{category} must be accepted: {response}"
             );
+            let spike_task_id = response["result"]["spike_task_id"]
+                .as_str()
+                .expect("accepted matrix response must identify its spike task");
+            let spike = djinn_db::TaskRepository::new(db.clone(), EventBus::noop())
+                .get(spike_task_id)
+                .await
+                .unwrap()
+                .expect("accepted matrix spike task must persist");
+            let labels: Vec<String> = serde_json::from_str(&spike.labels).unwrap();
+            assert_eq!(
+                spike.agent_type.as_deref(),
+                Some("architect"),
+                "{role}/{category}"
+            );
+            assert_eq!(spike.issue_type, "spike", "{role}/{category}");
+            assert!(
+                labels.contains(&"refinement-evidence".to_owned()),
+                "{role}/{category}"
+            );
+            assert!(
+                labels.contains(&"read-only".to_owned()),
+                "{role}/{category}"
+            );
+            assert!(
+                labels.contains(&format!("proposal:{}", proposal.short_id)),
+                "{role}/{category} must retain its proposal label"
+            );
             let after = atomic_demand_snapshot(&db, &repo, &proposal.id, &project_id).await;
             assert_eq!(after.0.tasks, before.0.tasks + 1);
             assert_eq!(after.0.findings, before.0.findings + 1);
@@ -1540,4 +1618,46 @@ async fn demand_matrix_persists_every_load_bearing_category_for_each_authority_r
             assert_eq!(debate.last().unwrap().agent_role, role);
         }
     }
+}
+
+/// A database fault at the debate boundary happens after task, typed, and
+/// legacy rows have been staged. The composed transaction must roll all of
+/// them back rather than leaving a partial evidence demand behind.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn atomic_demand_rolls_back_every_owned_relation_after_late_debate_failure() {
+    let (_server, db, proposal, _user_id, judge_task_id) = setup_demand_test().await;
+    let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+    let project_id = repo.targets(&proposal.id).await.unwrap()[0]
+        .project_id
+        .clone();
+    let before = atomic_demand_snapshot(&db, &repo, &proposal.id, &project_id).await;
+    sqlx::query("CREATE FUNCTION reject_atomic_demand_debate_for_test() RETURNS trigger AS $$ BEGIN RAISE EXCEPTION 'injected atomic demand debate failure'; END; $$ LANGUAGE plpgsql")
+        .execute(db.pool()).await.unwrap();
+    sqlx::query("CREATE TRIGGER reject_atomic_demand_debate_for_test BEFORE INSERT ON proposal_debate_trail FOR EACH ROW EXECUTE FUNCTION reject_atomic_demand_debate_for_test()")
+        .execute(db.pool()).await.unwrap();
+
+    let claim = atomic_demand_claim(&judge_task_id);
+    let labels = serde_json::json!(["refinement-evidence", "read-only"]);
+    let error = repo
+        .demand_evidence_atomically(djinn_db::AtomicEvidenceDemandInput {
+            proposal_id: &proposal.id,
+            project_id: &project_id,
+            claim: &claim,
+            title: "Evidence spike: token expiry",
+            description: "Read-only evidence investigation",
+            labels: &labels,
+            load_bearing_category: "feasibility",
+        })
+        .await
+        .expect_err("late debate fault must abort the atomic demand");
+    assert!(
+        error
+            .to_string()
+            .contains("injected atomic demand debate failure")
+    );
+    assert_eq!(
+        before,
+        atomic_demand_snapshot(&db, &repo, &proposal.id, &project_id).await,
+        "late failure must roll back task, typed, legacy, debate, and lifecycle state"
+    );
 }
