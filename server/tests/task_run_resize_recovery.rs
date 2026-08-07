@@ -1649,6 +1649,31 @@ async fn a_settled_but_unreleasable_outcome_still_holds_the_lease() {
 /// The reconciler has no prior claim on a row resting in a lift state: it must
 /// WIN the compare-and-swap into `drop_required` before it may touch the Pod.
 ///
+/// # Why the pass is split, and what is still a race
+///
+/// Both drivers are still two separate processes with separate pools, both
+/// still run concurrently against ONE real Postgres, and the durable
+/// compare-and-swap is still the only thing that decides which of them wins —
+/// which of the two wins is not fixed here and does not matter.
+///
+/// What IS fixed is that both drivers observed the row in the SAME state. A
+/// bare `join!` over two whole passes did not fix that, and could not: it bet
+/// that the right driver's `list_nonterminal_resize` landed before the left
+/// driver's CAS committed. Losing that bet cost about 6 runs in 80 observed,
+/// in two distinct shapes:
+///
+/// * the right driver reads the row already at `drop_required`, for which
+///   `claim` returns `true` WITHOUT a compare-and-swap (it is a self-transition
+///   the drop resumes idempotently) — so both drivers PATCH, and
+///   `resize_patches() == 1` fails; or
+/// * the left driver finishes the whole pass first, the right driver scans zero
+///   rows and is merely IDLE — so no `ClaimLost` is reported at all.
+///
+/// Joining the SCANS establishes the missing happens-before edge, then joining
+/// the DRIVES races the CAS proper. The assertion below is correspondingly
+/// stronger than it was: exactly one `ClaimLost`, not "at least one, if the
+/// scheduler cooperated".
+///
 /// NAMED FAILING MUTATION: delete the `claim` call (drive `drop_to_birth`
 /// directly, as the worker's own terminal path does) and this fails with a
 /// doubled PATCH counter — both drivers actuate the same drop.
@@ -1681,22 +1706,44 @@ async fn two_concurrent_drivers_issue_exactly_one_patch() {
     let left_reconciler = left.reconciler(None, Arc::new(ArmedGate));
     let right_reconciler = right.reconciler(None, Arc::new(ArmedGate));
 
-    let (left_pass, right_pass) =
-        tokio::join!(left_reconciler.run_pass(), right_reconciler.run_pass(),);
+    // ── THE BARRIER: both drivers OBSERVE, neither has acted. ──
+    let (left_scan, right_scan) = tokio::join!(left_reconciler.scan(), right_reconciler.scan());
+    assert_eq!(
+        (left_scan.scanned(), right_scan.scanned()),
+        (1, 1),
+        "both drivers must have read the SAME durable row, or the race below is \
+         not a race over one row at all"
+    );
+    assert_eq!(
+        permit_state(&db, &task_run_id).await,
+        BuildPodPermitState::Lifted,
+        "precondition: an observing pass writes nothing, so the row both \
+         drivers are about to contend for is still resting in its lift state"
+    );
+
+    // ── THE RACE: two concurrent drives, one durable compare-and-swap. ──
+    let (left_pass, right_pass) = tokio::join!(
+        left_reconciler.drive(left_scan),
+        right_reconciler.drive(right_scan)
+    );
 
     let resumed = left_pass.resumed + right_pass.resumed;
     assert_eq!(
         resumed, 1,
         "exactly one driver may claim the row; left={left_pass:?} right={right_pass:?}"
     );
-    assert!(
-        left_pass
-            .skipped
-            .iter()
-            .chain(right_pass.skipped.iter())
-            .any(|(_, reason)| *reason == SkipReason::ClaimLost),
-        "the losing driver must be REJECTED, not merely idle; \
-         left={left_pass:?} right={right_pass:?}"
+    let claim_lost: Vec<(String, SkipReason)> = left_pass
+        .skipped
+        .iter()
+        .chain(right_pass.skipped.iter())
+        .cloned()
+        .filter(|(_, reason)| *reason == SkipReason::ClaimLost)
+        .collect();
+    assert_eq!(
+        claim_lost,
+        vec![(task_run_id.clone(), SkipReason::ClaimLost)],
+        "the losing driver must be REJECTED by the compare-and-swap, not merely \
+         idle; left={left_pass:?} right={right_pass:?}"
     );
     assert_eq!(
         cluster.resize_patches(),

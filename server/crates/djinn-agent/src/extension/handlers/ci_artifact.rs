@@ -82,10 +82,17 @@ async fn fetch_artifact_with_timeout(
         timeout,
         #[cfg(test)]
         None,
+        #[cfg(test)]
+        None,
     )
     .await
 }
 
+/// `cancellation` is a test-only seam. Production always mints its own token,
+/// and the only thing that ever cancels it is the deadline arm below. A test
+/// that holds the same token can therefore fire the deadline's effect on an
+/// in-flight renderer at a point it chooses, instead of betting that a wall
+/// clock lands between two events it does not control.
 async fn fetch_artifact_with_timeout_inner(
     client: &GitHubApiClient,
     owner: &str,
@@ -94,8 +101,12 @@ async fn fetch_artifact_with_timeout_inner(
     name: &str,
     timeout: Duration,
     #[cfg(test)] render_hook: Option<RenderTestHook>,
+    #[cfg(test)] cancellation: Option<CancellationToken>,
 ) -> Result<String, String> {
     let deadline = tokio::time::Instant::now() + timeout;
+    #[cfg(test)]
+    let cancellation = cancellation.unwrap_or_default();
+    #[cfg(not(test))]
     let cancellation = CancellationToken::new();
     let render_cancellation = RenderCancellation {
         deadline: Some(deadline),
@@ -567,6 +578,29 @@ mod tests {
         assert!(!error.contains("must-not-escape"));
     }
 
+    /// The operation deadline reaching a renderer that is ALREADY RUNNING
+    /// returns the bare timeout error and no fragment of the artifact.
+    ///
+    /// The deadline is fired through the seam rather than by a wall clock. The
+    /// only thing `timeout_at`'s expiry does to an in-flight renderer is
+    /// `cancellation.cancel()`, and this test performs exactly that write —
+    /// after `started_rx` proves the blocking renderer is inside the archive.
+    /// That ordering used to be bought with a 30ms deadline and three real
+    /// loopback round-trips before `spawn_blocking` even ran, so on a loaded
+    /// machine the deadline landed BEFORE the renderer started, `started_tx`
+    /// was dropped with the abandoned future, and `started_rx.await` panicked —
+    /// about 6 runs in 80 observed. Nothing below now depends on elapsed time.
+    ///
+    /// It is also strictly more than the old version proved: with the deadline
+    /// far away, `timeout_at` resolves `Ok(Err(RENDER_CANCELLED))` and the
+    /// assertion runs through the `RENDER_CANCELLED` mapping arm. The wall-clock
+    /// version always took the outer `Err(_)` arm instead, so that mapping was
+    /// never exercised here at all.
+    ///
+    /// NAMED FAILING MUTATION: delete the
+    /// `Ok(Err(error)) if error == RENDER_CANCELLED => Err(fetch_timeout_error())`
+    /// arm, so a cancelled render reports its internal marker. This test then
+    /// fails on the error equality.
     #[tokio::test]
     async fn fetch_deadline_expires_during_active_rendering_without_partial_report() {
         let server = MockServer::start().await;
@@ -602,6 +636,8 @@ mod tests {
             completed: completed.clone(),
         };
         let client = client(&server);
+        let cancellation = CancellationToken::new();
+        let operation_cancellation = cancellation.clone();
         let fetch = tokio::spawn(async move {
             fetch_artifact_with_timeout_inner(
                 &client,
@@ -609,13 +645,18 @@ mod tests {
                 REPO,
                 explicit(10),
                 "report",
-                Duration::from_millis(30),
+                // Far enough out that no amount of scheduling delay lets the
+                // real deadline decide anything. The cancel below is what fires.
+                Duration::from_secs(300),
                 Some(hook),
+                Some(operation_cancellation),
             )
             .await
         });
+        // HAPPENS-BEFORE: the renderer is provably inside `spawn_blocking` and
+        // holding the archive before the deadline's effect is applied.
         started_rx.await.expect("renderer did not start");
-        tokio::time::sleep(Duration::from_millis(60)).await;
+        cancellation.cancel();
         release_tx.send(()).unwrap();
 
         let error = fetch.await.unwrap().unwrap_err();
