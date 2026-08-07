@@ -750,6 +750,74 @@ async fn same_tick_session_row_lag_defers_second_admission() {
     );
 }
 
+/// Resident admission remains the conjunction of the per-model cap (whose
+/// missing setting defaults to one) and the role-mapped lane cap. Model-turn
+/// B2 admission is downstream of this gate and must not reinterpret roles.
+#[test]
+fn resident_admission_keeps_default_model_cap_and_role_mapped_lane_conjunction() {
+    use djinn_core::models::{LaneMaxSessions, ModelLane};
+
+    let user = "resident-user";
+    let model = "provider/model";
+    let empty_running_by_model: HashMap<(String, String), u32> = HashMap::new();
+    let empty_running_by_lane: HashMap<(String, ModelLane), u32> = HashMap::new();
+    let empty_max_sessions: HashMap<String, u32> = HashMap::new();
+    let limits = LaneMaxSessions {
+        plan: 3,
+        implement: 1,
+        review: 2,
+    };
+
+    // This calls the actual outer admission composition used by normal dispatch,
+    // including settings resolution's missing-model default of one.
+    assert!(CoordinatorActor::resident_admission_allows(
+        &empty_running_by_model,
+        &empty_running_by_lane,
+        user,
+        model,
+        "worker",
+        &empty_max_sessions,
+        Some(&limits),
+    ));
+
+    // The missing max_sessions entry independently blocks at its exact default.
+    let model_full = HashMap::from([((user.to_owned(), model.to_owned()), 1)]);
+    assert!(!CoordinatorActor::resident_admission_allows(
+        &model_full,
+        &empty_running_by_lane,
+        user,
+        model,
+        "worker",
+        &empty_max_sessions,
+        Some(&limits),
+    ));
+
+    // An explicit model cap leaves room, but the worker's mapped implement lane
+    // independently blocks. A full review lane proves reviewer is not mapped to
+    // either implement or plan.
+    let model_caps = HashMap::from([(model.to_owned(), 2)]);
+    let worker_lane_full = HashMap::from([((user.to_owned(), ModelLane::Implement), 1)]);
+    assert!(!CoordinatorActor::resident_admission_allows(
+        &empty_running_by_model,
+        &worker_lane_full,
+        user,
+        model,
+        "worker",
+        &model_caps,
+        Some(&limits),
+    ));
+    let reviewer_lane_full = HashMap::from([((user.to_owned(), ModelLane::Review), 2)]);
+    assert!(!CoordinatorActor::resident_admission_allows(
+        &empty_running_by_model,
+        &reviewer_lane_full,
+        user,
+        model,
+        "reviewer",
+        &model_caps,
+        Some(&limits),
+    ));
+}
+
 // ── AC#6: Dispatch/setup failure clears in-flight reservation ────────
 
 /// Regression: when pool.dispatch() fails after a refinement task has
