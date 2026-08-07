@@ -164,15 +164,14 @@ async fn truncation_and_short_read_are_incomplete() {
     let install_id = seed_installation_token();
     mount_pr(&server).await;
 
-    // 10 full pages of 100. `MAX_PAGES` is 10, so the walk is cut off with the
-    // tenth page full — and `total_count` is reported as exactly what arrived,
-    // so the short-read comparison stays quiet.
+    // 10 full pages of 100 and a `total_count` of 1500: the walk was cut off by
+    // `MAX_PAGES` with 500 runs still unseen. This is genuine truncation.
     for p in 1..=10u64 {
         let start = (p - 1) * 100;
         Mock::given(method("GET"))
             .and(path_regex(CHECK_RUNS_PATH))
             .and(query_param("page", p.to_string()))
-            .respond_with(ResponseTemplate::new(200).set_body_json(page(1000, start..start + 100)))
+            .respond_with(ResponseTemplate::new(200).set_body_json(page(1500, start..start + 100)))
             .mount(&server)
             .await;
     }
@@ -184,11 +183,7 @@ async fn truncation_and_short_read_are_incomplete() {
         .unwrap();
 
     assert_eq!(checks.check_runs.len(), 1000);
-    assert_eq!(
-        checks.check_runs.len(),
-        checks.total_count as usize,
-        "precondition: the counts agree, so only the MAX_PAGES fact detects this",
-    );
+    assert_eq!(checks.total_count, 1500);
     assert_eq!(
         checks.completeness,
         CheckSetCompleteness::Incomplete(CheckSetIncompleteReason::MaxPagesTruncated),
@@ -294,5 +289,165 @@ async fn complete_single_and_final_pages_are_complete() {
         "an empty set that was actually fetched is complete — this is the one \
          empty set the lane no-CI paths may act on, and it is byte-identical \
          in shape to the failed-first-page fixture above",
+    );
+}
+
+/// Reaching the ceiling is not the same fact as being truncated by it.
+///
+/// A PR with exactly `MAX_PAGES * PER_PAGE` check runs produces a *full* tenth
+/// page, which sets the ceiling flag — and it also produces a `total_count` that
+/// exactly matches what arrived, which proves nothing was left behind. The
+/// verdict used to be computed from the flag alone, so such a PR was declared
+/// permanently incomplete; and unlike a failed page, `MaxPagesTruncated` has no
+/// re-poll that can clear it, so that PR's CI gate wedged for good.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_walk_that_exactly_fills_the_ceiling_is_complete() {
+    let server = MockServer::start().await;
+    let install_id = seed_installation_token();
+    mount_pr(&server).await;
+
+    for p in 1..=10u64 {
+        let start = (p - 1) * 100;
+        Mock::given(method("GET"))
+            .and(path_regex(CHECK_RUNS_PATH))
+            .and(query_param("page", p.to_string()))
+            .respond_with(ResponseTemplate::new(200).set_body_json(page(1000, start..start + 100)))
+            .mount(&server)
+            .await;
+    }
+
+    let client = GitHubApiClient::for_installation_with_base_url(install_id, server.uri());
+    let (_pr, checks): (_, CheckRunsResponse) = client
+        .get_pull_request("djinnos", "server", 42)
+        .await
+        .unwrap();
+
+    assert_eq!(checks.check_runs.len(), 1000);
+    assert_eq!(
+        checks.check_runs.len(),
+        checks.total_count as usize,
+        "precondition: the provider's own count agrees with what arrived",
+    );
+    assert_eq!(
+        checks.completeness,
+        CheckSetCompleteness::Complete,
+        "a full final page whose count is exonerated by `total_count` is complete",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// `list_check_runs_for_ref`
+// ---------------------------------------------------------------------------
+
+const REF_CHECK_RUNS_PATH: &str = r"/repos/djinnos/server/commits/queuesha/check-runs";
+
+/// The merge-group lane's enumeration used to forge its verdict.
+///
+/// It fetched a single page of 100 and returned the parsed body unchanged. The
+/// `completeness` field is `#[serde(default)]` and the default is `Complete`, so
+/// a merge-group ref with more than 100 check runs silently truncated *and told
+/// every caller the set was authoritative* — defeating the exact contract the
+/// field exists for, on the one path where the real merge-queue failures live.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ref_enumeration_pages_and_reports_its_own_completeness() {
+    // --- multi-page walk ending on a short final page: complete ------------
+    let server = MockServer::start().await;
+    let install_id = seed_installation_token();
+    Mock::given(method("GET"))
+        .and(path_regex(REF_CHECK_RUNS_PATH))
+        .and(query_param("page", "1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(page(142, 0..100)))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path_regex(REF_CHECK_RUNS_PATH))
+        .and(query_param("page", "2"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(page(142, 100..142)))
+        .mount(&server)
+        .await;
+
+    let client = GitHubApiClient::for_installation_with_base_url(install_id, server.uri());
+    let checks = client
+        .list_check_runs_for_ref("djinnos", "server", "queuesha")
+        .await
+        .unwrap();
+    assert_eq!(
+        checks.check_runs.len(),
+        142,
+        "the second page must be fetched, not silently dropped"
+    );
+    assert_eq!(checks.completeness, CheckSetCompleteness::Complete);
+
+    // --- short read: incomplete, not a forged Complete ---------------------
+    let server = MockServer::start().await;
+    let install_id = seed_installation_token();
+    Mock::given(method("GET"))
+        .and(path_regex(REF_CHECK_RUNS_PATH))
+        .and(query_param("page", "1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(page(7, 0..3)))
+        .mount(&server)
+        .await;
+
+    let client = GitHubApiClient::for_installation_with_base_url(install_id, server.uri());
+    let checks = client
+        .list_check_runs_for_ref("djinnos", "server", "queuesha")
+        .await
+        .unwrap();
+    assert_eq!(checks.check_runs.len(), 3);
+    assert_eq!(
+        checks.completeness,
+        CheckSetCompleteness::Incomplete(CheckSetIncompleteReason::ShortRead),
+        "a serde default must never stand in for a completeness computation",
+    );
+
+    // --- a later page failing is INCOMPLETE, not a truncated Complete ------
+    let server = MockServer::start().await;
+    let install_id = seed_installation_token();
+    Mock::given(method("GET"))
+        .and(path_regex(REF_CHECK_RUNS_PATH))
+        .and(query_param("page", "1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(page(250, 0..100)))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path_regex(REF_CHECK_RUNS_PATH))
+        .and(query_param("page", "2"))
+        .respond_with(ResponseTemplate::new(502).set_body_string("bad gateway"))
+        .mount(&server)
+        .await;
+
+    let client = GitHubApiClient::for_installation_with_base_url(install_id, server.uri());
+    let checks = client
+        .list_check_runs_for_ref("djinnos", "server", "queuesha")
+        .await
+        .unwrap();
+    assert_eq!(checks.check_runs.len(), 100);
+    assert_eq!(
+        checks.completeness,
+        CheckSetCompleteness::Incomplete(CheckSetIncompleteReason::PageFetchFailed),
+    );
+
+    // --- a page-1 failure still surfaces as an error ----------------------
+    //
+    // There is no partial result to report, and the merge-group route treats an
+    // outright failure as `CheckApiError` — a complete-but-unusable input whose
+    // run identity is already known — rather than as a re-pollable enumeration
+    // failure.
+    let server = MockServer::start().await;
+    let install_id = seed_installation_token();
+    Mock::given(method("GET"))
+        .and(path_regex(REF_CHECK_RUNS_PATH))
+        .and(query_param("page", "1"))
+        .respond_with(ResponseTemplate::new(500).set_body_string("boom"))
+        .mount(&server)
+        .await;
+
+    let client = GitHubApiClient::for_installation_with_base_url(install_id, server.uri());
+    assert!(
+        client
+            .list_check_runs_for_ref("djinnos", "server", "queuesha")
+            .await
+            .is_err(),
+        "a page-1 failure has no partial result and must not read as an empty set",
     );
 }
