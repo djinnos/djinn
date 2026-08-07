@@ -3144,7 +3144,8 @@ fn the_reserved_sweep_interval_is_bounded_in_absolute_time() {
          {FLOOR:?} floor, which makes it a hot loop over the route table",
     );
     assert_eq!(
-        crate::pr_poller::CI_ROUTE_SWEEP_INTERVAL, RESERVED_SWEEP_INTERVAL,
+        crate::pr_poller::CI_ROUTE_SWEEP_INTERVAL,
+        RESERVED_SWEEP_INTERVAL,
         "the tick's interval IS the executor's constant; a second, independent \
          constant lets the tick and the recovery contract drift apart",
     );
@@ -3207,7 +3208,8 @@ async fn the_actor_admits_into_the_leaders_provider_action_scope() {
         .admit()
         .expect("an open scope admits");
     assert_eq!(
-        leader.in_flight(), 1,
+        leader.in_flight(),
+        1,
         "a future the coordinator admitted must be visible to the half that \
          holds the advisory lock",
     );
