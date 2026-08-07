@@ -51,6 +51,17 @@
 
 use std::time::Duration;
 
+// How long leadership waits for the coordinator to quiesce its provider actions
+// before releasing the advisory lock.
+//
+// Owned by `djinn_coordinator::pr_poller::ci_routing::quiescence` rather than
+// declared here, because it is one half of a relation: it must be strictly
+// longer than the coordinator's own drain budget, or leadership gives up while
+// the coordinator is still joining and releases the lock with the stamp attempt
+// still outstanding. Spelled in two crates that relation was documented twice
+// and asserted nowhere; spelled once it carries a compile-time assertion and a
+// unit test inside the CI-routing acceptance filter.
+use djinn_coordinator::PROVIDER_ACTION_DRAIN_WAIT;
 use djinn_db::advisory_lock;
 use djinn_orchestration_types::ProviderActionScope;
 use sqlx::Connection;
@@ -59,43 +70,22 @@ use tokio_util::sync::CancellationToken;
 
 /// Advisory-lock classid: ASCII "djin" (0x646A696E). Arbitrary-but-fixed
 /// namespace for djinn's own process-level locks.
-const LOCK_CLASSID: i32 = 0x646A_696E;
+///
+/// Public so an integration test can probe *this* lock from its own connection
+/// instead of hardcoding the literal. The only observable fact about the
+/// release ordering is lock availability from a second session, and a test that
+/// silently probed a different key would pass vacuously forever.
+pub const LOCK_CLASSID: i32 = 0x646A_696E;
 /// Advisory-lock objid for the singleton coordinator. Bump only if you ever
 /// need a *second* independent singleton role.
-const LOCK_OBJID: i32 = 1;
+///
+/// Public for the same reason as [`LOCK_CLASSID`].
+pub const LOCK_OBJID: i32 = 1;
 
 /// How often a standby retries the lock, and how often the leader pings its
 /// held connection to detect loss. Kept short so promotion after the old pod
 /// exits is sub-deploy-window; the query is a trivial `pg_try_advisory_lock`.
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
-
-/// Race for leadership, then run the active subsystems on the winner.
-///
-/// * `dsn` — Postgres DSN for the dedicated lock connection. `None` means
-///   "no advisory lock" (in-process / non-Postgres / dev): we become leader
-///   immediately. The caller passes `None` outside the Kubernetes runtime so
-///   single-process dev and tests don't depend on a reachable Postgres for the
-///   lock.
-/// * `cancel` — process-wide shutdown token. On cancel we release the lock (if
-///   held) and return.
-/// * `on_acquire` — called **exactly once**, when this process becomes leader.
-///   Starts the coordinator + slot pool, the worker RPC listener, and the other
-///   mutating/periodic subsystems.
-///
-/// This future runs for the life of the process: it does not return after
-/// `on_acquire`; it holds the lock until cancellation (or exits the process if
-/// the lock connection is lost). Spawn it as a background task alongside the
-/// HTTP server.
-/// How long leadership waits for the coordinator to quiesce its provider
-/// actions before releasing the advisory lock.
-///
-/// Strictly longer than the coordinator's own drain budget so the ordinary
-/// outcome is "the coordinator finished and stamped", never "leadership gave up
-/// while the coordinator was still joining". Exceeding it is reported and the
-/// lock is released without a graceful proof — a degraded but safe outcome,
-/// because `recover_calling_owner` requires the stamp and will defer without
-/// it.
-const PROVIDER_ACTION_DRAIN_WAIT: std::time::Duration = std::time::Duration::from_secs(45);
 
 /// Close the CI-route provider-action gate and wait for the coordinator's drain
 /// stamp (proposal `nafu`, wave 3).
@@ -135,11 +125,30 @@ async fn quiesce_provider_actions(scope: Option<&ProviderActionScope>) {
             in_flight = scope.in_flight(),
             "leadership: provider-action scope did not report a graceful drain within \
              {PROVIDER_ACTION_DRAIN_WAIT:?}; releasing the advisory lock WITHOUT a drain proof. \
-             `calling` rows owned by this incarnation stay unrecoverable until process death.",
+             `calling` rows owned by this incarnation are recoverable by nobody: the next \
+             leader will defer on them indefinitely, and only this incarnation's own fenced \
+             finalizer can still terminalize them.",
         );
     }
 }
 
+/// Race for leadership, then run the active subsystems on the winner.
+///
+/// * `dsn` — Postgres DSN for the dedicated lock connection. `None` means
+///   "no advisory lock" (in-process / non-Postgres / dev): we become leader
+///   immediately. The caller passes `None` outside the Kubernetes runtime so
+///   single-process dev and tests don't depend on a reachable Postgres for the
+///   lock.
+/// * `cancel` — process-wide shutdown token. On cancel we release the lock (if
+///   held) and return.
+/// * `on_acquire` — called **exactly once**, when this process becomes leader.
+///   Starts the coordinator + slot pool, the worker RPC listener, and the other
+///   mutating/periodic subsystems.
+///
+/// This future runs for the life of the process: it does not return after
+/// `on_acquire`; it holds the lock until cancellation (or exits the process if
+/// the lock connection is lost). Spawn it as a background task alongside the
+/// HTTP server.
 pub async fn run_with_leadership<F, Fut>(
     dsn: Option<String>,
     cancel: CancellationToken,

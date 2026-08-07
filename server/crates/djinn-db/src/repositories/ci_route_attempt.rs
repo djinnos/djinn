@@ -136,7 +136,8 @@ const ROW_COLUMNS: &str = "subject_kind, subject_id, provider_action_key, lane, 
     to_char(retry_exhausted_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS retry_exhausted_at, \
     tier2_lease_id, tier2_lease_key, tier2_lease_state, tier2_lease_reason, \
     to_char(tier2_leased_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS tier2_leased_at, \
-    tier2_resolution, lead_session_id, reopen_mode, diagnostic_reason, park_justification, \
+    tier2_resolution, lead_session_id, lead_session_count, reopen_mode, diagnostic_reason, park_justification, \
+    lead_rejection, \
     provider_error::text AS provider_error, superseded_by_evidence::text AS superseded_by_evidence";
 
 /// `WHERE` fragment naming one row by its full subject-scoped primary key.
@@ -339,6 +340,74 @@ durable_enum! {
 }
 
 durable_enum! {
+    /// Why a delivered Lead result was replaced by the single diagnostic
+    /// fallback (proposal `nafu`, wave 5).
+    ///
+    /// # Why this is durable and not a log line
+    ///
+    /// The supervisor derives a fallback's [`CiDiagnosticReason`] from the
+    /// *route's* Tier-2 reason, so a Lead that timed out on a `causal_failure`
+    /// route is recorded with `no_grounded_remedy` — the identical spelling a
+    /// Lead that answered and genuinely found no remedy produces. Reporting
+    /// therefore conflates "Lead diagnosed" with "Lead never answered" unless
+    /// the rejection itself is stored. `None` means the delivered result was
+    /// accepted as submitted.
+    ///
+    /// This is the same closed set the supervisor validates against; it lives
+    /// here so the vocabulary is spelled once in Rust and once in migration
+    /// 193's CHECK, like every other durable enum in this module.
+    CiLeadRejection {
+        /// `approve` / `approve_conflict` on non-passing CI evidence.
+        ApprovedNonPassingCi => "approved_non_passing_ci",
+        /// A reopen naming both plans, or neither.
+        ReopenPlanAmbiguous => "reopen_plan_ambiguous",
+        /// A repair whose `verification_command` was not copied from
+        /// repository/task context or CI evidence.
+        VerificationCommandNotRepositoryValid => "verification_command_not_repository_valid",
+        /// A reopen whose directive is empty or cites no evidence handle.
+        DirectiveNotGrounded => "directive_not_grounded",
+        /// A `diagnostic_reason` outside the closed set.
+        DiagnosticReasonUnknown => "diagnostic_reason_unknown",
+        /// A park on a route the proposal says must reopen.
+        ParkUnavailableForRoute => "park_unavailable_for_route",
+        /// A `repair` reopen on a **run-absent** route. With no run there is
+        /// nothing to re-run and no run-scoped CI evidence to ground a
+        /// verification command in, so the only honest adjudication left is a
+        /// diagnose. See [`CiRouteAttempt::is_run_absent`].
+        RepairUnavailableForRoute => "repair_unavailable_for_route",
+        /// A park whose dossier is missing, incomplete, or cites no evidence.
+        ParkNotCited => "park_not_cited",
+        /// A supersede with no replacement tasks.
+        SupersedeWithoutReplacements => "supersede_without_replacements",
+        /// A decision string outside the five existing results.
+        UnknownDecision => "unknown_decision",
+        /// The session finalized through a tool that is not `submit_decision`.
+        UnsupportedFinalizeTool => "unsupported_finalize_tool",
+        /// The session produced no result at all.
+        NoResult => "no_result",
+        /// The session timed out. **The reason this enum exists**: without it
+        /// this case is indistinguishable from a delivered `no_grounded_remedy`.
+        TimedOut => "timed_out",
+    }
+}
+
+impl CiLeadRejection {
+    /// Whether Lead produced no adjudication at all, as opposed to producing
+    /// one this contract refused.
+    ///
+    /// The distinction is the operational one: the first three are a Lead that
+    /// never answered (prompt, deadline, or transport), the rest are a Lead
+    /// that answered something the contract does not allow.
+    #[must_use]
+    pub fn is_absent_result(self) -> bool {
+        matches!(
+            self,
+            Self::TimedOut | Self::NoResult | Self::UnsupportedFinalizeTool
+        )
+    }
+}
+
+durable_enum! {
     /// State of the current-evidence Tier-2 hold.
     CiTier2LeaseState {
         Open => "open",
@@ -349,17 +418,30 @@ durable_enum! {
 durable_enum! {
     /// How a former `calling` owner's provider futures were proven gone.
     ///
-    /// Note what is absent: elapsed time. The 300-second floor is a
-    /// *necessary* condition layered on top of one of these proofs, never a
-    /// substitute for one.
+    /// One proof and one absence, deliberately. Note what is *not* here:
+    /// elapsed time, an expired owner lease, and process death.
+    ///
+    /// The first two are the same mistake — the 300-second floor is a
+    /// *necessary* condition layered on top of the proof, never a substitute
+    /// for one. The third looks different and is not, because it has no
+    /// admissible witness. The only trace an abrupt death could leave is the
+    /// automatic release of the session-scoped coordinator advisory lock, and
+    /// Postgres performs that release at backend termination — strictly before
+    /// the client process can observe anything. A live process whose lock
+    /// connection was dropped by a failover or a restart is therefore
+    /// indistinguishable from a dead one until it notices and exits, with its
+    /// provider futures running throughout, and closing that interval needs
+    /// exactly the elapsed-time inference the proposal forbids. See migration
+    /// 196.
     CiQuiescenceProof {
         /// Leadership cancellation closed action admission, joined every
         /// leader-owned provider-action future, and recorded
         /// `provider_actions_drained_at` before releasing the advisory lock.
+        ///
+        /// The only value that authorises a handoff — and it is re-read from
+        /// the former incarnation's own row rather than believed, so a caller
+        /// cannot assert it into existence.
         GracefulDrain => "graceful_drain",
-        /// The owning process died, which destroyed its futures before its
-        /// advisory-lock session could close.
-        ProcessTerminated => "process_terminated",
         /// No proof. Recorded on deferrals so the deferral is auditable.
         None => "none",
     }
@@ -426,7 +508,21 @@ pub struct CiEvidenceIdentity {
     pub lane: CiLane,
     pub pr_number: i64,
     pub pr_head_sha: String,
-    pub run_id: i64,
+    /// The provider's run identifier, or `None` when the capture **never named
+    /// a run**.
+    ///
+    /// `None` is an honest absence, not a placeholder. Wave 5 previously wrote
+    /// `0` here for lane-level captures that failed closed before runs were
+    /// attributed, which collapsed two distinct dequeues of one head onto one
+    /// `provider_action_key` — so the second route silently reused the first
+    /// route's row. Migration 195 makes the sentinel unrepresentable
+    /// (`CHECK (run_id IS NULL OR run_id > 0)`) and
+    /// [`CiRouteAttemptRepository::reserve`] refuses it before the CHECK fires
+    /// so the message is readable.
+    ///
+    /// A run-absent identity is **diagnose-only**: see
+    /// [`CiRouteAttempt::is_run_absent`].
+    pub run_id: Option<i64>,
     pub run_head_sha: String,
     /// Merge-group dequeue event identity. `None` for the PR-head lane.
     pub dequeue_id: Option<String>,
@@ -483,11 +579,24 @@ pub struct CiRouteAttempt {
     pub tier2_lease_reason: Option<CiTier2Reason>,
     pub tier2_leased_at: Option<String>,
     pub tier2_resolution: Option<CiRouteOutcome>,
+    /// The **first** Lead session bound to this route's lease, retained and
+    /// never overwritten. It is the audit handle for the adjudication that
+    /// opened; it is *not* a count of how many sessions ran.
     pub lead_session_id: Option<String>,
+    /// How many Lead sessions were attached to this route, in total.
+    ///
+    /// This is the field cost metrics read. `lead_session_id` cannot serve
+    /// that purpose: it is one slot, so two sessions on one route used to
+    /// report as one and the proposal's "Lead sessions per merged PR" was
+    /// structurally incapable of exceeding one per route.
+    pub lead_session_count: i64,
 
     pub reopen_mode: Option<CiReopenMode>,
     pub diagnostic_reason: Option<CiDiagnosticReason>,
     pub park_justification: Option<String>,
+    /// Why the delivered Lead result was replaced by the diagnostic fallback,
+    /// or `None` when it was accepted as submitted.
+    pub lead_rejection: Option<CiLeadRejection>,
 
     pub provider_error: Option<String>,
     pub superseded_by_evidence: Option<String>,
@@ -511,7 +620,7 @@ impl CiRouteAttempt {
                 lane: CiLane::parse(row.try_get::<String, _>("lane")?.as_str())?,
                 pr_number: row.try_get("pr_number")?,
                 pr_head_sha: row.try_get("pr_head_sha")?,
-                run_id: row.try_get("run_id")?,
+                run_id: row.try_get::<Option<i64>, _>("run_id")?,
                 run_head_sha: row.try_get("run_head_sha")?,
                 dequeue_id: row.try_get("dequeue_id")?,
             },
@@ -542,12 +651,14 @@ impl CiRouteAttempt {
             tier2_leased_at: row.try_get("tier2_leased_at")?,
             tier2_resolution: opt_enum(row.try_get("tier2_resolution")?, CiRouteOutcome::parse)?,
             lead_session_id: row.try_get("lead_session_id")?,
+            lead_session_count: row.try_get("lead_session_count")?,
             reopen_mode: opt_enum(row.try_get("reopen_mode")?, CiReopenMode::parse)?,
             diagnostic_reason: opt_enum(
                 row.try_get("diagnostic_reason")?,
                 CiDiagnosticReason::parse,
             )?,
             park_justification: row.try_get("park_justification")?,
+            lead_rejection: opt_enum(row.try_get("lead_rejection")?, CiLeadRejection::parse)?,
             provider_error: row.try_get("provider_error")?,
             superseded_by_evidence: row.try_get("superseded_by_evidence")?,
         })
@@ -557,6 +668,32 @@ impl CiRouteAttempt {
     #[must_use]
     pub fn is_terminal(&self) -> bool {
         self.action_phase == CiActionPhase::Terminal
+    }
+
+    /// Whether this route's evidence identity **names no run**.
+    ///
+    /// True exactly when `identity.run_id` is `None`, which happens when the
+    /// lane capture failed closed before runs were attributed
+    /// (`CheckEnumerationUnavailable`, the four blocking-completeness timestamp
+    /// reasons, `AmbiguousMergeGroupCorrelation`).
+    ///
+    /// **A run-absent route is diagnose-only.** With no run there is nothing to
+    /// re-run and no run-scoped CI evidence for a repair's `verification_command`
+    /// to be copied from, so a repair reopen on such a route would dispatch a
+    /// worker against a plan nothing grounds.
+    ///
+    /// This predicate is the **database-side half** of that rule:
+    /// [`CiRouteAttemptRepository::resolve_tier2_lease`] refuses a
+    /// [`CiRouteOutcome::RepairReopened`] resolution on a row where this is
+    /// true, which is the last fence before the adjudication becomes durable.
+    /// The other half is the agent-side validator, which rejects the delivered
+    /// result with [`CiLeadRejection::RepairUnavailableForRoute`] and can
+    /// explain itself to Lead. Neither is redundant: the validator produces the
+    /// good error message, this one holds even if a future caller reaches the
+    /// repository without going through it.
+    #[must_use]
+    pub fn is_run_absent(&self) -> bool {
+        self.identity.run_id.is_none()
     }
 
     /// Whether the row currently holds an **open** Tier-2 lease.
@@ -635,6 +772,13 @@ pub enum CiReserveOutcome {
     /// This exact evidence identity already has an attempt row *for this
     /// subject*. A duplicate poll or a restart landed here; the existing row
     /// is authoritative.
+    ///
+    /// The returned row is **not** necessarily under the key that was asked
+    /// for. Two run-absent captures of one lane/PR/head/dequeue are one
+    /// identity under `NULLS NOT DISTINCT`, so a second irrecoverable reason
+    /// collapses onto the first reason's row and gets it back here — which is
+    /// the intended reading: one identity earns one route and one
+    /// adjudication, not one per reason.
     AlreadyPresent(Box<CiRouteAttempt>),
     /// The budgets were already spent, so no reservation was created and no
     /// Tier-1 action is possible for this evidence.
@@ -772,6 +916,25 @@ pub enum CiTier2LeaseOutcome {
     NotFound,
 }
 
+/// Result of [`CiRouteAttemptRepository::attach_lead_session`].
+///
+/// The two variants answer "did the fence match?", not "was this the first
+/// session?" — that question is answered by `session_count`, which is the
+/// post-increment total. `session_count == 1` is a first attach; anything
+/// higher is an additional Lead session on the same route, which is a real and
+/// reportable cost the previous blind overwrite silently erased.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CiLeadSessionAttachment {
+    /// The session was counted against this route's open lease.
+    Attached {
+        /// Total Lead sessions attached to this route, including this one.
+        session_count: i64,
+    },
+    /// No row matched the fence: wrong lease id, or the lease is no longer
+    /// open. Nothing was written.
+    NotFound,
+}
+
 /// A validated Tier-2 resolution, applied atomically with the guard.
 #[derive(Clone, Debug)]
 pub struct CiTier2Resolution {
@@ -779,6 +942,10 @@ pub struct CiTier2Resolution {
     pub reopen_mode: Option<CiReopenMode>,
     pub diagnostic_reason: Option<CiDiagnosticReason>,
     pub park_justification: Option<String>,
+    /// Set when this resolution is the **fallback** rather than Lead's own
+    /// result. See [`CiLeadRejection`] for why it cannot be inferred from
+    /// `diagnostic_reason`.
+    pub rejection: Option<CiLeadRejection>,
 }
 
 impl CiTier2Resolution {
@@ -793,6 +960,7 @@ impl CiTier2Resolution {
             reopen_mode: Some(CiReopenMode::Repair),
             diagnostic_reason: None,
             park_justification: None,
+            rejection: None,
         }
     }
 
@@ -804,6 +972,7 @@ impl CiTier2Resolution {
             reopen_mode: Some(CiReopenMode::Diagnose),
             diagnostic_reason: Some(reason),
             park_justification: None,
+            rejection: None,
         }
     }
 
@@ -815,6 +984,7 @@ impl CiTier2Resolution {
             reopen_mode: None,
             diagnostic_reason: None,
             park_justification: Some(justification.into()),
+            rejection: None,
         }
     }
 
@@ -826,10 +996,30 @@ impl CiTier2Resolution {
             reopen_mode: None,
             diagnostic_reason: None,
             park_justification: None,
+            rejection: None,
         }
     }
 
+    /// Mark this resolution as the fallback that replaced a delivered result.
+    ///
+    /// Only legal on a diagnostic reopen: the fallback is *always* one
+    /// diagnostic reopen, and a repair, park, or supersede is by definition a
+    /// result Lead produced and this contract accepted. [`Self::validate`]
+    /// enforces that, and so does migration 193's
+    /// `ci_route_attempts_rejection_pairing_check`.
+    #[must_use]
+    pub fn rejected_as(mut self, rejection: CiLeadRejection) -> Self {
+        self.rejection = Some(rejection);
+        self
+    }
+
     fn validate(&self) -> Result<()> {
+        if self.rejection.is_some() && self.reopen_mode != Some(CiReopenMode::Diagnose) {
+            return Err(DbError::InvalidData(format!(
+                "`{}` cannot carry a Lead rejection: the fallback is always one diagnostic reopen",
+                self.outcome.as_str()
+            )));
+        }
         if self.outcome.is_provider_finalization() {
             return Err(DbError::InvalidData(format!(
                 "`{}` asserts a provider call and cannot be a Tier-2 resolution",
@@ -920,6 +1110,16 @@ pub struct CiRouteAttemptRepository {
 
 impl CiRouteAttemptRepository {
     #[must_use]
+    /// The pool this repository reads and writes.
+    ///
+    /// Sibling module access only ([`super::ci_route_report`]), so the
+    /// reporting reads sit next to the writes they report on without either
+    /// side re-deriving a connection.
+    pub(crate) fn db(&self) -> &Database {
+        &self.db
+    }
+
+    #[must_use]
     pub fn new(db: Database) -> Self {
         Self { db }
     }
@@ -1006,11 +1206,28 @@ impl CiRouteAttemptRepository {
     /// (`CiChargeOutcome::BudgetExhausted`). The ceiling is enforced where the
     /// spending happens, not where the bookkeeping starts.
     ///
+    /// # The run-id sentinel is refused here, before the CHECK
+    ///
+    /// `run_id` is either a real provider run or `None`. A `Some(0)` — or any
+    /// non-positive value — is the fabricated placeholder migration 195 exists
+    /// to abolish, and it is rejected here rather than left to
+    /// `ci_route_attempts_run_id_positive_check` so the caller gets a sentence
+    /// naming the field instead of SQLSTATE 23514 naming a constraint. The
+    /// CHECK is still the enforcement; this is the readable error.
+    ///
     /// # Errors
     ///
-    /// Database failures.
+    /// Database failures, or a non-positive `run_id`.
     pub async fn reserve(&self, input: &CiRouteReservation) -> Result<CiReserveOutcome> {
         self.db.ensure_initialized().await?;
+        if let Some(run_id) = input.identity.run_id
+            && run_id <= 0
+        {
+            return Err(DbError::InvalidData(format!(
+                "run_id `{run_id}` is not a provider run: an evidence identity that names no run \
+                 must use `run_id: None`, never a `0` placeholder"
+            )));
+        }
         let mut tx = self.db.pool().begin().await?;
 
         if let Some(existing) =
@@ -1038,11 +1255,27 @@ impl CiRouteAttemptRepository {
         // loser's insert must resolve to `AlreadyPresent` rather than a raw
         // unique violation. The unique key is still what enforces one row per
         // evidence identity — this only decides how the loser is *told*.
+        //
+        // **No conflict target**, deliberately, so the arbiter is *any* unique
+        // index. Two of them can fire here and they are not the same event:
+        //
+        // * the primary key — a duplicate poll recomputed the same
+        //   `provider_action_key`; and
+        // * `ci_route_attempts_evidence_identity_uniq` — a *different* key over
+        //   the same expanded identity. That is what happens when two distinct
+        //   irrecoverable reasons produce two run-absent captures of one
+        //   lane/PR/head/dequeue: under `NULLS NOT DISTINCT` they are one
+        //   identity, so they collapse onto one row.
+        //
+        // A named target would have covered only the first and let the second
+        // escape as SQLSTATE 23505 — a raw constraint violation out of the
+        // method whose entire job is to answer "is this evidence already
+        // routed?".
         let inserted = sqlx::query(
             "INSERT INTO ci_route_attempts (subject_kind, subject_id, provider_action_key, lane, pr_number, pr_head_sha, run_id, run_head_sha, dequeue_id, \
              origin_state, class, action, transient_fingerprint, retry_budget_key, head_budget_key, action_phase) \
              VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,'reserved') \
-             ON CONFLICT (subject_kind, subject_id, provider_action_key) DO NOTHING",
+             ON CONFLICT DO NOTHING",
         )
         .bind(input.subject.kind.as_str())
         .bind(&input.subject.id)
@@ -1062,9 +1295,22 @@ impl CiRouteAttemptRepository {
         .execute(&mut *tx)
         .await?;
 
-        let row = fetch_in_tx(&mut tx, &input.subject, &input.provider_action_key)
+        // The authoritative row is normally this key's own. When the identity
+        // index was the arbiter it is a row under a DIFFERENT key, so the
+        // fallback looks the collapse up by the expanded identity — otherwise
+        // the caller would be told "row disappeared" about a row that is
+        // sitting right there.
+        let row = match fetch_in_tx(&mut tx, &input.subject, &input.provider_action_key).await? {
+            Some(row) => row,
+            None => fetch_by_evidence_identity_in_tx(
+                &mut tx,
+                &input.subject,
+                &input.identity,
+                input.action,
+            )
             .await?
-            .ok_or_else(|| DbError::Internal("reserved route row disappeared".to_owned()))?;
+            .ok_or_else(|| DbError::Internal("reserved route row disappeared".to_owned()))?,
+        };
         tx.commit().await?;
         Ok(if inserted.rows_affected() == 1 {
             CiReserveOutcome::Reserved(Box::new(row))
@@ -1516,10 +1762,11 @@ impl CiRouteAttemptRepository {
 
         // (4) quiescence. `None` is never enough, and a claimed graceful
         // drain is checked against the former incarnation's own record rather
-        // than believed.
+        // than believed. There is deliberately no third arm: every attestation
+        // this repository accepts is re-derived from durable state here, so no
+        // caller can win a row by asserting a proof it did not earn.
         let quiescent = match authority.quiescence_proof {
             CiQuiescenceProof::None => false,
-            CiQuiescenceProof::ProcessTerminated => true,
             CiQuiescenceProof::GracefulDrain => {
                 let drained: Option<Option<String>> = sqlx::query_scalar(
                     "SELECT provider_actions_drained_at FROM coordinator_incarnations WHERE id = $1",
@@ -1791,10 +2038,32 @@ impl CiRouteAttemptRepository {
         })
     }
 
-    /// Bind a dispatched Lead session to an open lease.
+    /// Bind a dispatched Lead session to an open lease. **Append-only.**
     ///
     /// Fenced to the exact lease id so a stale caller cannot attach a session
     /// to a lease that has already been resolved.
+    ///
+    /// # The id is retained; the count is incremented
+    ///
+    /// This used to be a blind `SET lead_session_id = $5`, which made a second
+    /// Lead session on one route indistinguishable from the first: the row
+    /// still showed one id, and `lead_invocations` — which counted rows with a
+    /// non-NULL id — could never exceed one per route. The proposal's whole
+    /// cost bound is "Lead sessions per merged PR", so the metric was
+    /// structurally incapable of reporting the overrun it exists to detect.
+    ///
+    /// So, when the fence matches:
+    ///
+    /// * `lead_session_id` is written **only if it is currently NULL**
+    ///   (`COALESCE(lead_session_id, $5)`). The FIRST session id is the audit
+    ///   handle for the adjudication that opened and is never overwritten — a
+    ///   respawn does not rewrite history.
+    /// * `lead_session_count` is incremented **every time**. This is the field
+    ///   metrics read.
+    ///
+    /// The returned [`CiLeadSessionAttachment::Attached::session_count`] is the
+    /// post-increment total, so a caller can tell a first attach
+    /// (`session_count == 1`) from an additional one without re-reading the row.
     ///
     /// # Errors
     ///
@@ -1805,20 +2074,26 @@ impl CiRouteAttemptRepository {
         provider_action_key: &str,
         lease_id: &str,
         lead_session_id: &str,
-    ) -> Result<bool> {
+    ) -> Result<CiLeadSessionAttachment> {
         self.db.ensure_initialized().await?;
-        let updated = sqlx::query(&format!(
-            "UPDATE ci_route_attempts SET lead_session_id = $5, updated_at = now() \
-             WHERE {BY_PK} AND tier2_lease_id = $4 AND tier2_lease_state = 'open'"
+        let count: Option<i64> = sqlx::query_scalar(&format!(
+            "UPDATE ci_route_attempts \
+             SET lead_session_id = COALESCE(lead_session_id, $5), \
+                 lead_session_count = lead_session_count + 1, updated_at = now() \
+             WHERE {BY_PK} AND tier2_lease_id = $4 AND tier2_lease_state = 'open' \
+             RETURNING lead_session_count"
         ))
         .bind(subject.kind.as_str())
         .bind(&subject.id)
         .bind(provider_action_key)
         .bind(lease_id)
         .bind(lead_session_id)
-        .execute(self.db.pool())
+        .fetch_optional(self.db.pool())
         .await?;
-        Ok(updated.rows_affected() == 1)
+        Ok(match count {
+            Some(session_count) => CiLeadSessionAttachment::Attached { session_count },
+            None => CiLeadSessionAttachment::NotFound,
+        })
     }
 
     /// Apply a Lead result under the same atomic identity guard.
@@ -1831,10 +2106,26 @@ impl CiRouteAttemptRepository {
     /// write-once. Use [`CiRouteAttempt::adjudicated_outcome`] to read it back
     /// without caring which case applied.
     ///
+    /// # A run-absent route is diagnose-only
+    ///
+    /// If the stored row names no run ([`CiRouteAttempt::is_run_absent`]), a
+    /// [`CiRouteOutcome::RepairReopened`] resolution is refused with
+    /// [`DbError::InvalidData`]. There is no run to re-run and no run-scoped CI
+    /// evidence for a repair's `verification_command` to be copied from, so the
+    /// repair would dispatch a worker against a plan nothing grounds.
+    ///
+    /// This is the **database-side half** of the rule and it is deliberately
+    /// the last one: the agent-side validator rejects the delivered result with
+    /// [`CiLeadRejection::RepairUnavailableForRoute`] and substitutes the
+    /// diagnostic fallback, which is where the good explanation belongs. This
+    /// fence exists because a guard that lives only in the layer above is a
+    /// guard that a future call site can miss. A diagnose resolution on the
+    /// same row is accepted unchanged.
+    ///
     /// # Errors
     ///
-    /// Database failures, or a resolution whose payload contradicts its
-    /// outcome.
+    /// Database failures, a resolution whose payload contradicts its outcome,
+    /// or a repair reopen on a run-absent route.
     pub async fn resolve_tier2_lease(
         &self,
         subject: &CiRouteSubject,
@@ -1856,6 +2147,19 @@ impl CiRouteAttemptRepository {
         {
             tx.commit().await?;
             return Ok(false);
+        }
+
+        // Diagnose-only. Checked against the STORED identity rather than the
+        // observed one: what makes a repair ungroundable is that *this route*
+        // never named a run, and that is a property of the row the Lead session
+        // was dispatched about.
+        if attempt.is_run_absent() && resolution.outcome == CiRouteOutcome::RepairReopened {
+            tx.commit().await?;
+            return Err(DbError::InvalidData(format!(
+                "route `{provider_action_key}` names no run, so it is diagnose-only: a repair \
+                 reopen has nothing to re-run and no run-scoped evidence to ground a \
+                 verification command in"
+            )));
         }
 
         // Same fence as `open_tier2_lease`, for the same reason: the
@@ -2104,6 +2408,42 @@ async fn fetch_in_tx(
     row.as_ref().map(CiRouteAttempt::from_row).transpose()
 }
 
+/// Find the row that owns an expanded evidence identity, whatever key it was
+/// written under.
+///
+/// `IS NOT DISTINCT FROM` on the two nullable columns rather than `=`, because
+/// this query has to reproduce what
+/// `ci_route_attempts_evidence_identity_uniq` decided, and that index is
+/// `NULLS NOT DISTINCT`: a run-absent, dequeue-less identity must match another
+/// run-absent, dequeue-less identity. With plain equality every NULL comparison
+/// yields NULL, the `WHERE` drops the row, and the lookup returns nothing for
+/// precisely the rows the index collapsed.
+async fn fetch_by_evidence_identity_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    subject: &CiRouteSubject,
+    identity: &CiEvidenceIdentity,
+    action: CiAction,
+) -> Result<Option<CiRouteAttempt>> {
+    let row = sqlx::query(&format!(
+        "SELECT {ROW_COLUMNS} FROM ci_route_attempts \
+         WHERE subject_kind = $1 AND subject_id = $2 AND lane = $3 AND pr_number = $4 \
+           AND pr_head_sha = $5 AND run_id IS NOT DISTINCT FROM $6 AND run_head_sha = $7 \
+           AND dequeue_id IS NOT DISTINCT FROM $8 AND action = $9"
+    ))
+    .bind(subject.kind.as_str())
+    .bind(&subject.id)
+    .bind(identity.lane.as_str())
+    .bind(identity.pr_number)
+    .bind(&identity.pr_head_sha)
+    .bind(identity.run_id)
+    .bind(&identity.run_head_sha)
+    .bind(identity.dequeue_id.as_deref())
+    .bind(action.as_str())
+    .fetch_optional(&mut **tx)
+    .await?;
+    row.as_ref().map(CiRouteAttempt::from_row).transpose()
+}
+
 /// Take the row lock, then re-read through the rendering projection.
 ///
 /// Two statements rather than one because `ROW_COLUMNS` contains `to_char`
@@ -2290,7 +2630,8 @@ async fn resolve_lease_in_tx(
     sqlx::query(&format!(
         "UPDATE ci_route_attempts \
          SET tier2_lease_state = 'resolved', tier2_resolved_at = now(), tier2_resolution = $5, \
-             reopen_mode = $6, diagnostic_reason = $7, park_justification = $8, updated_at = now() \
+             reopen_mode = $6, diagnostic_reason = $7, park_justification = $8, \
+             lead_rejection = $9, updated_at = now() \
          WHERE {BY_PK} AND tier2_lease_id = $4"
     ))
     .bind(subject.kind.as_str())
@@ -2301,6 +2642,7 @@ async fn resolve_lease_in_tx(
     .bind(resolution.reopen_mode.map(CiReopenMode::as_str))
     .bind(resolution.diagnostic_reason.map(CiDiagnosticReason::as_str))
     .bind(resolution.park_justification.as_deref())
+    .bind(resolution.rejection.map(CiLeadRejection::as_str))
     .execute(&mut **tx)
     .await?;
     Ok(())
