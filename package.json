@@ -1,6 +1,5 @@
 {
   "dependencies": {
-    "pnpm": "^9.15.9",
     "yaml": "2.9.0"
   }
 }
