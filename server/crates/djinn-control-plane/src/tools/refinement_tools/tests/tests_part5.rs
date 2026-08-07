@@ -235,26 +235,15 @@ pub(super) async fn setup_demand_test() -> (
     // The setup body intentionally contains prose, an Open questions heading,
     // and a QuestionForm. They are UI text only: setup must not synthesize
     // typed evidence or its legacy active-demand projection.
-    let finding_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM typed_evidence_findings WHERE proposal_id = $1")
-            .bind(&p.id)
-            .fetch_one(db.pool())
-            .await
-            .unwrap();
-    let attempt_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM typed_evidence_attempts WHERE finding_id IN \
-         (SELECT id FROM typed_evidence_findings WHERE proposal_id = $1)",
-    )
-    .bind(&p.id)
-    .fetch_one(db.pool())
-    .await
-    .unwrap();
+    let demand_counts =
+        djinn_db::test_support::atomic_evidence_demand_counts_for_test(&db, &p.id, &project_id)
+            .await;
     assert_eq!(
-        finding_count, 0,
+        demand_counts.findings, 0,
         "prose and QuestionForm must not create findings"
     );
     assert_eq!(
-        attempt_count, 0,
+        demand_counts.attempts, 0,
         "prose and QuestionForm must not create attempts"
     );
     assert!(
@@ -1607,20 +1596,11 @@ async fn demand_matrix_persists_every_load_bearing_category_for_each_authority_r
             // The fixture materializes Judge authority. Switch every persisted
             // role column as one correlated tuple for the Adversary case.
             if role == "adversary" {
-                sqlx::query(
-                    "UPDATE refinement_dispatch_intents SET role = 'adversary' WHERE task_id = $1",
+                djinn_db::test_support::switch_to_adversary_authority_for_test(
+                    &db,
+                    &authority_task_id,
                 )
-                .bind(&authority_task_id)
-                .execute(db.pool())
-                .await
-                .unwrap();
-                sqlx::query(
-                    "UPDATE tasks SET agent_type = 'adversary', refinement_role = 'adversary' WHERE id = $1",
-                )
-                .bind(&authority_task_id)
-                .execute(db.pool())
-                .await
-                .unwrap();
+                .await;
             }
 
             let before = atomic_demand_snapshot(&db, &repo, &proposal.id, &project_id).await;
@@ -1696,10 +1676,7 @@ async fn atomic_demand_rolls_back_every_owned_relation_after_late_debate_failure
         .project_id
         .clone();
     let before = atomic_demand_snapshot(&db, &repo, &proposal.id, &project_id).await;
-    sqlx::query("CREATE FUNCTION reject_atomic_demand_debate_for_test() RETURNS trigger AS $$ BEGIN RAISE EXCEPTION 'injected atomic demand debate failure'; END; $$ LANGUAGE plpgsql")
-        .execute(db.pool()).await.unwrap();
-    sqlx::query("CREATE TRIGGER reject_atomic_demand_debate_for_test BEFORE INSERT ON proposal_debate_trail FOR EACH ROW EXECUTE FUNCTION reject_atomic_demand_debate_for_test()")
-        .execute(db.pool()).await.unwrap();
+    djinn_db::test_support::reject_atomic_demand_debate_inserts_for_test(&db).await;
 
     let claim = atomic_demand_claim(&judge_task_id);
     let labels = serde_json::json!(["refinement-evidence", "read-only"]);
