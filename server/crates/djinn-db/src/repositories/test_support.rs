@@ -893,6 +893,40 @@ pub async fn seed_session_row_with_id(
     .expect("failed to seed session row");
 }
 
+/// Replace an allocated task id with a durable fixture identity.
+///
+/// This narrow test-only seam retains production task creation and transition
+/// behavior while replaying a recorded task identity. Foreign keys follow the
+/// schema's existing `ON UPDATE CASCADE` constraints.
+///
+/// **Not for production use.** Panics on SQL errors.
+pub async fn replace_task_id_for_test(db: &Database, allocated_id: &str, fixture_id: &str) {
+    db.ensure_initialized().await.unwrap();
+    sqlx::query("UPDATE tasks SET id = $1 WHERE id = $2")
+        .bind(fixture_id)
+        .bind(allocated_id)
+        .execute(db.pool())
+        .await
+        .expect("failed to install fixture task id");
+}
+
+/// Replace an allocated session id with a durable fixture identity.
+///
+/// Call this immediately after production session creation and before creating
+/// rows that refer to the session. Explicit-id fixture SQL remains inside the
+/// database owner crate.
+///
+/// **Not for production use.** Panics on SQL errors.
+pub async fn replace_session_id_for_test(db: &Database, allocated_id: &str, fixture_id: &str) {
+    db.ensure_initialized().await.unwrap();
+    sqlx::query("UPDATE sessions SET id = $1 WHERE id = $2")
+        .bind(fixture_id)
+        .bind(allocated_id)
+        .execute(db.pool())
+        .await
+        .expect("failed to install fixture session id");
+}
+
 /// Delete a session row for integration tests that must verify FK cascade
 /// behavior without bypassing the database repository boundary.
 ///

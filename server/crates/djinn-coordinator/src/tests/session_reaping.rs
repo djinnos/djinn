@@ -8868,12 +8868,8 @@ async fn known_terminal_fixture(
     // rows. Install them before producing the durable task transition and the
     // terminal-event payload which the production actor will read back.
     let (mut task, _) = create_task_with_note(db, tx, fixture.task_title).await;
-    sqlx::query("UPDATE tasks SET id = $1 WHERE id = $2")
-        .bind(fixture.task_id)
-        .bind(&task.id)
-        .execute(db.pool())
-        .await
-        .unwrap();
+    djinn_db::repositories::test_support::replace_task_id_for_test(db, &task.id, fixture.task_id)
+        .await;
     task.id = fixture.task_id.to_owned();
     let tasks = TaskRepository::new(db.clone(), crate::events::event_bus_for(tx));
     tasks.set_status(&task.id, "in_progress").await.unwrap();
@@ -8914,12 +8910,12 @@ async fn known_terminal_fixture(
         .unwrap();
     // Production allocation stays v7. The oracle installs the historical
     // identity on its isolated test row before it acquires dependants.
-    sqlx::query("UPDATE sessions SET id = $1 WHERE id = $2")
-        .bind(fixture.session_id)
-        .bind(&created.id)
-        .execute(db.pool())
-        .await
-        .unwrap();
+    djinn_db::repositories::test_support::replace_session_id_for_test(
+        db,
+        &created.id,
+        fixture.session_id,
+    )
+    .await;
     let session = sessions
         .update(
             fixture.session_id,
@@ -9229,11 +9225,7 @@ async fn known_session_exit_replay_oracle() {
     let (unavailable_task, unavailable_session) =
         known_terminal_fixture(&db, &tx, unavailable_fixture).await;
     let unavailable_attempt = seed_pending_attempt(&db, &unavailable_task.id, "worker").await;
-    sqlx::query("DELETE FROM sessions WHERE id = $1")
-        .bind(&unavailable_session.id)
-        .execute(db.pool())
-        .await
-        .unwrap();
+    djinn_db::repositories::test_support::delete_session_row(&db, &unavailable_session.id).await;
     actor
         .handle_event(terminal_session_event("interrupted", &unavailable_session))
         .await;
