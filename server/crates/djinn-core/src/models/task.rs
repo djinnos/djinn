@@ -957,6 +957,36 @@ impl TaskStatus {
             other => Err(Error::Internal(format!("unknown task status: {other}"))),
         }
     }
+
+    /// Every status the task state model treats as terminal.
+    ///
+    /// This is deliberately *derived from* the existing transition table rather
+    /// than being a second, independently maintained opinion about what "done"
+    /// means: `Close` and `ForceClose` are legal from every status except the
+    /// one they converge on, so a status is terminal exactly when no `Close`
+    /// transition remains available from it. `terminal_predicate_matches_transition_table`
+    /// pins that equivalence, so adding a new terminal status to the table
+    /// without updating this predicate fails the build's tests.
+    ///
+    /// Proposal `t5rn` T4 keys working-spec archival off this predicate so no
+    /// separate close-event interpretation is introduced.
+    pub const fn is_terminal(&self) -> bool {
+        matches!(self, Self::Closed)
+    }
+
+    /// Every status, for exhaustive tests over the state model.
+    pub const ALL: [Self; 10] = [
+        Self::Open,
+        Self::InProgress,
+        Self::NeedsTaskReview,
+        Self::InTaskReview,
+        Self::Approved,
+        Self::PrDraft,
+        Self::PrReview,
+        Self::NeedsLeadIntervention,
+        Self::InLeadIntervention,
+        Self::Closed,
+    ];
 }
 
 impl std::fmt::Display for TaskStatus {
@@ -2695,6 +2725,43 @@ mod tests {
                 "Escalate from {from:?} must reset continuation"
             );
         }
+    }
+
+    /// `TaskStatus::is_terminal` must agree with the transition table rather
+    /// than being a second opinion that can silently drift from it.
+    ///
+    /// `Close` is legal from every status except the one it converges on, so
+    /// "no `Close` transition remains available" is the state model's own
+    /// definition of terminal. If a future status becomes terminal in the table
+    /// without `is_terminal` being updated, this fails — which matters because
+    /// `t5rn` T4 archives working specs off this predicate.
+    #[test]
+    fn terminal_predicate_matches_transition_table() {
+        let mut terminal_count = 0;
+        for status in TaskStatus::ALL {
+            let close_available =
+                compute_transition(&TransitionAction::Close, &status, None).is_ok();
+            let force_close_available =
+                compute_transition(&TransitionAction::ForceClose, &status, None).is_ok();
+            assert_eq!(
+                status.is_terminal(),
+                !close_available,
+                "is_terminal disagrees with Close availability for {status:?}"
+            );
+            assert_eq!(
+                status.is_terminal(),
+                !force_close_available,
+                "is_terminal disagrees with ForceClose availability for {status:?}"
+            );
+            if status.is_terminal() {
+                terminal_count += 1;
+            }
+        }
+        assert_eq!(
+            terminal_count, 1,
+            "the model currently has exactly one terminal status; update t5rn T4 \
+             working-spec archival deliberately if this changes"
+        );
     }
 
     /// Terminal and already-in-Lead statuses must reject Escalate with a clear

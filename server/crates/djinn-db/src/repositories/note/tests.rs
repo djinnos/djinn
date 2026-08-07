@@ -36,6 +36,7 @@ mod search_ranking;
 mod search_stats;
 mod session_scoped_consolidation;
 mod wikilink_graph;
+mod working_spec_lifecycle;
 
 /// Mutex kept around so embedding tests can serialize against the
 /// shared sqlite-vec extension state. With the MySQL migration the

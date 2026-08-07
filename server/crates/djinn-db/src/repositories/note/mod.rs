@@ -38,6 +38,7 @@ mod revisions;
 pub mod rrf;
 mod scoring;
 mod search;
+pub(crate) mod working_spec;
 
 // Note: as of the db-only knowledge-base cut-over, `indexing` exposes only
 // the wikilink graph helpers (used by `crud.rs`). The on-disk reindex
@@ -137,6 +138,11 @@ pub use lifecycle::NoteStatus;
 pub use mutation::{
     NoteRevisionCreateState, NoteRevisionDesiredState, NoteRevisionEvent, NoteRevisionMutation,
     NoteRevisionMutationResult, NoteRevisionUpdateState, NoteSupersedesAssociation,
+};
+pub use working_spec::{
+    PersistWorkingSpecRequest, PersistedWorkingSpec, PromoteWorkingSpecSection,
+    PromotedWorkingSpecNote, WORKING_SPEC_CONSTRAINT_SENTENCE, WORKING_SPEC_TAG,
+    working_spec_permalink, working_spec_title,
 };
 
 /// Compact scope-overlap candidate row returned by

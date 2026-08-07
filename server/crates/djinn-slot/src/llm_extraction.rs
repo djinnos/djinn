@@ -1173,6 +1173,17 @@ pub(crate) trait ExtractionNoteRepository: Send + Sync {
         text: &str,
         limit: usize,
     ) -> djinn_db::Result<Vec<djinn_db::NoteDedupCandidate>>;
+    /// Task-lock-serialized working-spec persistence (proposal `t5rn`, T4).
+    ///
+    /// This is a single repository call rather than a read-then-write pair
+    /// because the task row lock, the note write, and the immutable revision
+    /// must share one transaction; otherwise a terminal transition can
+    /// interleave and leave an active working spec on a closed task.
+    async fn persist_task_working_spec(
+        &self,
+        request: djinn_db::PersistWorkingSpecRequest<'_>,
+        render: &(dyn for<'r> Fn(Option<&'r str>) -> String + Send + Sync),
+    ) -> djinn_db::Result<djinn_db::PersistedWorkingSpec>;
 }
 
 /// Record the sole terminal event for a run that committed no canonical note
@@ -1352,6 +1363,13 @@ impl ExtractionNoteRepository for NoteRepository {
         limit: usize,
     ) -> djinn_db::Result<Vec<djinn_db::NoteDedupCandidate>> {
         NoteRepository::dedup_candidates(self, project_id, folder, note_type, text, limit).await
+    }
+    async fn persist_task_working_spec(
+        &self,
+        request: djinn_db::PersistWorkingSpecRequest<'_>,
+        render: &(dyn for<'r> Fn(Option<&'r str>) -> String + Send + Sync),
+    ) -> djinn_db::Result<djinn_db::PersistedWorkingSpec> {
+        NoteRepository::persist_task_working_spec(self, request, render).await
     }
 }
 
@@ -2436,87 +2454,62 @@ async fn persist_working_spec(
     };
     // Non-panicking fallback: `"[]"` is the safe empty scope set.
     let scope_paths_json = serde_json::to_string(&scope_paths).unwrap_or_else(|_| "[]".to_string());
-    let title = format!("Working Spec {}", extraction_context.task_short_id);
-    let permalink = permalink_for("design", &title);
     let section = render_working_spec_entry(extraction_context, note, reasons, &scope_paths);
+
+    // One repository call, one transaction. The repository takes the task row
+    // lock, derives the note's final status from the *locked* task state
+    // (`active` only while the task is non-terminal), and writes the note and
+    // its immutable revision together. Rendering stays here; the transaction
+    // boundary belongs to the repository.
+    let render = |existing: Option<&str>| match existing {
+        Some(existing) => merge_working_spec_content(existing, &section),
+        None => render_working_spec_document(extraction_context, &section, &scope_paths),
+    };
+
+    let reason = match NoteRevisionReason::new("persisted extraction working specification") {
+        Ok(reason) => reason,
+        Err(error) => {
+            tracing::error!(%error, "llm_extraction: invalid working spec revision reason");
+            return false;
+        }
+    };
+    let request = djinn_db::PersistWorkingSpecRequest {
+        project_id: extraction_context.project_id,
+        task_id: extraction_context.task_id,
+        task_short_id: extraction_context.task_short_id,
+        session_id: extraction_context.session_id,
+        task_run_id: extraction_context.task_run_id,
+        scope_paths: &scope_paths_json,
+        reason,
+    };
+
     match extraction_context
         .note_repo
-        .get_by_permalink(extraction_context.project_id, &permalink)
+        .persist_task_working_spec(request, &render)
         .await
     {
-        Ok(Some(existing)) => {
-            let merged = merge_working_spec_content(&existing.content, &section);
-            match extraction_context
-                .mutate_existing(
-                    &existing,
-                    merged.clone(),
-                    existing.confidence,
-                    NoteRevisionEventKind::Updated,
-                    "updated extraction working specification",
-                )
-                .await
-            {
-                Ok(result) => {
-                    let updated_id = result
-                        .note
-                        .as_ref()
-                        .map(|note| note.id.as_str())
-                        .unwrap_or("unknown");
-                    tracing::debug!(
-                        session_id = %extraction_context.session_id,
-                        note_id = %updated_id,
-                        permalink = %permalink,
-                        "llm_extraction: updated task working spec"
-                    );
-                    return result.changed;
-                }
-                Err(error) => tracing::warn!(
-                    session_id = %extraction_context.session_id,
-                    permalink = %permalink,
-                    error = %error,
-                    "llm_extraction: failed to update working spec"
-                ),
-            }
+        Ok(persisted) => {
+            tracing::debug!(
+                session_id = %extraction_context.session_id,
+                note_id = %persisted.note_id,
+                permalink = %persisted.permalink,
+                status = %persisted.status,
+                task_status = %persisted.locked_task_status,
+                created = persisted.created,
+                "llm_extraction: persisted task working spec"
+            );
+            persisted.changed
         }
-        Ok(None) => match extraction_context
-            .create_extracted_note(
-                &title,
-                &render_working_spec_document(extraction_context, &section, &scope_paths),
-                "design",
-                &scope_paths_json,
-                None,
-            )
-            .await
-        {
-            Ok(result) => {
-                let created_id = result
-                    .note
-                    .as_ref()
-                    .map(|note| note.id.as_str())
-                    .unwrap_or("unknown");
-                tracing::debug!(
+        Err(error) => {
+            tracing::warn!(
                 session_id = %extraction_context.session_id,
-                note_id = %created_id,
-                permalink = %permalink,
-                "llm_extraction: created task working spec"
-                );
-                return true;
-            }
-            Err(error) => tracing::warn!(
-                session_id = %extraction_context.session_id,
-                permalink = %permalink,
+                task_id = %extraction_context.task_id,
                 error = %error,
-                "llm_extraction: failed to create working spec"
-            ),
-        },
-        Err(error) => tracing::warn!(
-            session_id = %extraction_context.session_id,
-            permalink = %permalink,
-            error = %error,
-            "llm_extraction: failed to load existing working spec"
-        ),
+                "llm_extraction: failed to persist working spec"
+            );
+            false
+        }
     }
-    false
 }
 
 fn render_working_spec_document(
@@ -2533,11 +2526,14 @@ fn render_working_spec_document(
             .collect::<Vec<_>>()
             .join("\n")
     };
+    // The constraint sentence is the shared constant migration 198 matches on
+    // verbatim, so the renderer and the legacy predicate cannot drift.
     format!(
-        "# Working Spec\n\n## Active objective\n- Task {task_short_id}: {task_title}\n- {task_description}\n\n## Relevant scope\n{scope_lines}\n\n## Constraints\n- This note is task-scoped working context routed from non-durable extraction output.\n- Keep mutable hypotheses and open questions here instead of promoting them to durable case/pattern/pitfall notes.\n\n## Current hypotheses\n- Session-local understanding may evolve as implementation continues.\n\n## Open questions\n- Which parts of this working context should be promoted or discarded when the task completes?\n\n## Captured session knowledge\n{section}",
+        "# Working Spec\n\n## Active objective\n- Task {task_short_id}: {task_title}\n- {task_description}\n\n## Relevant scope\n{scope_lines}\n\n## Constraints\n- {constraint}\n- Keep mutable hypotheses and open questions here instead of promoting them to durable case/pattern/pitfall notes.\n\n## Current hypotheses\n- Session-local understanding may evolve as implementation continues.\n\n## Open questions\n- Which parts of this working context should be promoted or discarded when the task completes?\n\n## Captured session knowledge\n{section}",
         task_short_id = extraction_context.task_short_id,
         task_title = extraction_context.task_title,
         task_description = extraction_context.task_description,
+        constraint = djinn_db::WORKING_SPEC_CONSTRAINT_SENTENCE,
     )
 }
 
@@ -4681,6 +4677,45 @@ mod evidence_merge_regression_tests {
         ) -> djinn_db::Result<Vec<djinn_db::NoteDedupCandidate>> {
             Ok(Vec::new())
         }
+
+        /// In-memory stand-in for the task-lock-serialized repository call.
+        ///
+        /// The fake has no task table, so it models the **non-terminal** branch
+        /// only: it renders against whatever content it holds and reports
+        /// whether that changed anything. The terminal branch, the row lock, and
+        /// the interleavings are covered where they actually live — against real
+        /// Postgres in `djinn-db`'s `working_spec_lifecycle` tests.
+        async fn persist_task_working_spec(
+            &self,
+            request: djinn_db::PersistWorkingSpecRequest<'_>,
+            render: &(dyn for<'r> Fn(Option<&'r str>) -> String + Send + Sync),
+        ) -> djinn_db::Result<djinn_db::PersistedWorkingSpec> {
+            let permalink = djinn_db::working_spec_permalink(request.task_short_id);
+            let mut existing = self.existing.lock().unwrap();
+            let previous = existing
+                .as_ref()
+                .filter(|note| note.permalink == permalink)
+                .map(|note| note.content.clone());
+            let content = render(previous.as_deref());
+            let changed = previous.as_deref() != Some(content.as_str());
+            let (note_id, created) = match existing.as_mut() {
+                Some(note) if note.permalink == permalink => {
+                    note.content = content;
+                    (note.id.clone(), false)
+                }
+                _ => (uuid::Uuid::now_v7().to_string(), true),
+            };
+            Ok(djinn_db::PersistedWorkingSpec {
+                note_id,
+                permalink,
+                status: "active".to_owned(),
+                created,
+                changed,
+                locked_task_status: "in_progress".to_owned(),
+                task_terminal: false,
+                revision_id: None,
+            })
+        }
     }
 
     enum ScriptedProviderResponse {
@@ -5204,21 +5239,23 @@ mod evidence_merge_regression_tests {
         assert!(!changed);
         finalize_test_output(&repo, usize::from(changed)).await;
         let revisions = repo.revisions();
+        // t5rn T4: working-spec persistence is now one task-lock-serialized
+        // repository call that detects the no-op inside its own transaction, so
+        // an unchanged spec appends no revision at all. Previously this path
+        // round-tripped through `mutate_with_revision` and recorded a `changed:
+        // false` `Updated` event that described nothing. The invariant this test
+        // exists for is unchanged and now exact: a terminal run that produced no
+        // durable output records exactly ONE trusted extraction-skipped revision.
         assert_eq!(
             revisions.len(),
-            2,
-            "the no-op mutation and terminal skip are recorded"
+            1,
+            "an unchanged working spec must append no revision; only the terminal skip is recorded"
         );
-        assert!(!revisions[0].changed);
         assert_eq!(
             revisions[0].mutation.event_kind,
-            NoteRevisionEventKind::Updated
-        );
-        assert_eq!(
-            revisions[1].mutation.event_kind,
             NoteRevisionEventKind::ExtractionSkipped
         );
-        assert_extraction_identity(&revisions[1], EXTRACTION_SKIPPED_REASON);
+        assert_extraction_identity(&revisions[0], EXTRACTION_SKIPPED_REASON);
     }
 
     #[tokio::test]
