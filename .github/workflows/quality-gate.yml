@@ -64,6 +64,50 @@ env:
   # exactly where runner-host failures surface and where nobody currently has
   # anything to look at.
   CI_RUNNER_DISK_WARN_GB: "22"
+  # ---------------------------------------------------------------------------
+  # Postgres test template build + verification (shared body, defined ONCE here)
+  #
+  # Invoked by every DB-backed job as `bash -c "$CI_BUILD_TEST_TEMPLATE"` from
+  # `server/`. It builds `djinn_test_template`, PROVES it is fully migrated, and
+  # only then exports `DJINN_TEST_TEMPLATE_PREBUILT=1` for the rest of the job.
+  #
+  # Why the export matters. `cargo nextest` runs every test in its own PROCESS,
+  # so the per-process `TEMPLATE_READY` latch in
+  # `server/crates/djinn-db/src/template_bootstrap.rs` never fired in CI. Every
+  # one of the ~12k DB-backed tests re-took the template advisory lock in
+  # EXCLUSIVE mode, re-ran `UPDATE pg_database SET datistemplate = TRUE` (a
+  # shared-catalog write) and re-walked all ~190 embedded migrations — while
+  # every peer's `CREATE DATABASE … TEMPLATE` queued behind that same lock in
+  # SHARED mode. `DJINN_TEST_TEMPLATE_PREBUILT=1` turns that whole maintenance
+  # window into an early return.
+  #
+  # Why the grep matters, and why it is not optional. The flag ASSERTS the
+  # template is fully migrated; if it is exported over a template that is not,
+  # every test silently runs against an empty/stale schema. `cargo test --test
+  # <target> -- --ignored <filter>` exits 0 when the filter matches NO tests, so
+  # a renamed or deleted `setup_test_template` would otherwise look exactly like
+  # a successful build. `setup_test_template` therefore verifies each embedded
+  # migration is applied to the template with a matching checksum, that the
+  # reserved designated-operator row exists, and that `datistemplate` is set —
+  # then prints this sentinel. No sentinel, no export, and the step fails.
+  #
+  # `set -o pipefail` is likewise load-bearing: without it the `| tee` would
+  # mask a failing `cargo test`.
+  CI_BUILD_TEST_TEMPLATE: |
+    set -euo pipefail
+    until pg_isready -h 127.0.0.1 -p 5433 -U postgres >/dev/null 2>&1; do sleep 1; done
+    psql -h 127.0.0.1 -p 5433 -U postgres -d postgres -v ON_ERROR_STOP=1 -c "DROP DATABASE IF EXISTS djinn_test_template"
+    psql -h 127.0.0.1 -p 5433 -U postgres -d postgres -v ON_ERROR_STOP=1 -c "CREATE DATABASE djinn_test_template"
+    SQLX_OFFLINE=true DJINN_TEST_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5433/postgres \
+      cargo test -p djinn-db --test setup_test_template -- --ignored --nocapture \
+      | tee "$RUNNER_TEMP/setup-test-template.log"
+    psql -h 127.0.0.1 -p 5433 -U postgres -d postgres -v ON_ERROR_STOP=1 -c "UPDATE pg_database SET datistemplate = TRUE WHERE datname = 'djinn_test_template'"
+    if ! grep -q 'DJINN_TEST_TEMPLATE_VERIFIED' "$RUNNER_TEMP/setup-test-template.log"; then
+      echo "::error title=Test template not verified::setup_test_template did not print DJINN_TEST_TEMPLATE_VERIFIED. The template was NOT proven migrated, so DJINN_TEST_TEMPLATE_PREBUILT will not be exported. Check that the test still exists and still runs under --ignored."
+      exit 1
+    fi
+    echo "DJINN_TEST_TEMPLATE_PREBUILT=1" >> "$GITHUB_ENV"
+    echo "::notice title=Test template prebuilt::djinn_test_template verified; DB tests will skip the per-process template re-verify."
   # Invoked by the heavy jobs as `bash -c "$CI_RUNNER_DISK_PREFLIGHT"`. Kept as
   # a workflow-level env body rather than copied per job so the threshold and
   # the reclaim set exist in exactly one place; a composite action would be the
@@ -1124,14 +1168,13 @@ jobs:
             DJINN_MIGRATE_OPERATOR_GITHUB_ID=9000000002 \
             DJINN_MIGRATE_OPERATOR_LOGIN=djinn-ci-migration-operator \
             cargo test -p djinn-db --test apply_migrations -- --ignored --nocapture
-      - name: Build Postgres test template
+      - name: Build and verify Postgres test template
+        # Body: CI_BUILD_TEST_TEMPLATE at the top of this file. It exports
+        # DJINN_TEST_TEMPLATE_PREBUILT=1 only after proving the template is
+        # fully migrated.
         env:
           PGPASSWORD: postgres
-        run: |
-          psql -h 127.0.0.1 -p 5433 -U postgres -d postgres -v ON_ERROR_STOP=1 -c "DROP DATABASE IF EXISTS djinn_test_template"
-          psql -h 127.0.0.1 -p 5433 -U postgres -d postgres -v ON_ERROR_STOP=1 -c "CREATE DATABASE djinn_test_template"
-          SQLX_OFFLINE=true DJINN_TEST_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5433/postgres cargo test -p djinn-db --test setup_test_template -- --ignored
-          psql -h 127.0.0.1 -p 5433 -U postgres -d postgres -v ON_ERROR_STOP=1 -c "UPDATE pg_database SET datistemplate = TRUE WHERE datname = 'djinn_test_template'"
+        run: bash -c "$CI_BUILD_TEST_TEMPLATE"
       - uses: taiki-e/install-action@nextest
       - name: Prove the cutover preflight against a live render and real Postgres
         run: |
@@ -1857,15 +1900,37 @@ jobs:
             DJINN_MIGRATE_OPERATOR_GITHUB_ID=9000000002 \
             DJINN_MIGRATE_OPERATOR_LOGIN=djinn-ci-migration-operator \
             cargo test -p djinn-db --test apply_migrations -- --ignored --nocapture
-      - name: Build Postgres test template
+      - name: Build and verify Postgres test template
+        # Body: CI_BUILD_TEST_TEMPLATE at the top of this file. It exports
+        # DJINN_TEST_TEMPLATE_PREBUILT=1 only after proving the template is
+        # fully migrated — which is what lets every test process in this shard
+        # skip the exclusive-lock template re-verify.
+        env:
+          PGPASSWORD: postgres
+        run: bash -c "$CI_BUILD_TEST_TEMPLATE"
+      - name: Start leaked test-database reaper (background)
+        # Pairs with DJINN_TEST_DB_REAPER=external on the nextest step below.
+        # With that set, `TestDbInit::drop` no longer connects + terminates +
+        # DROPs (a joined, synchronous ~16 MB unlink on the critical path of
+        # every DB test, in a process that exits immediately afterwards so
+        # there is nowhere else to put it). This loop becomes the only thing
+        # reclaiming the clones, so it must actually reap: it prints a running
+        # total every sweep, and its predicate — `djinn_test_<32 hex>` only,
+        # older than any test may run, and with no live session — cannot touch
+        # `djinn_test_template` or a running test's database. See
+        # scripts/djinn-test-db-reaper.sh.
+        working-directory: ${{ github.workspace }}
         env:
           PGPASSWORD: postgres
         run: |
-          until pg_isready -h 127.0.0.1 -p 5433 -U postgres >/dev/null 2>&1; do sleep 1; done
-          psql -h 127.0.0.1 -p 5433 -U postgres -d postgres -v ON_ERROR_STOP=1 -c "DROP DATABASE IF EXISTS djinn_test_template"
-          psql -h 127.0.0.1 -p 5433 -U postgres -d postgres -v ON_ERROR_STOP=1 -c "CREATE DATABASE djinn_test_template"
-          SQLX_OFFLINE=true DJINN_TEST_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5433/postgres cargo test -p djinn-db --test setup_test_template -- --ignored
-          psql -h 127.0.0.1 -p 5433 -U postgres -d postgres -v ON_ERROR_STOP=1 -c "UPDATE pg_database SET datistemplate = TRUE WHERE datname = 'djinn_test_template'"
+          # --max-outstanding is the disk bound, and it is the reason skipping
+          # the in-test DROP cannot fill the runner: 128 clones x ~16 MB caps
+          # the backlog at ~2 GB regardless of how fast the suite gets. Without
+          # it, peak usage scales with test throughput (see the script header).
+          nohup ./scripts/djinn-test-db-reaper.sh --loop --interval-seconds 10 \
+            --min-age-seconds 150 --max-outstanding 128 \
+            > "$RUNNER_TEMP/test-db-reaper.log" 2>&1 &
+          echo "test-db reaper started"
       - name: Create test vault key
         run: |
           mkdir -p /var/tmp/djinn-test-vault
@@ -2012,6 +2077,12 @@ jobs:
         if: steps.shard.outputs.active == 'true'
         env:
           NEXTEST_PROFILE: ${{ github.event_name == 'pull_request' && 'pull-request' || github.event_name == 'merge_group' && 'merge-group' || 'full-validation' }}
+          # Hand per-test database teardown to the background reaper started
+          # above. Scoped to THIS step: no other step in this job opens a
+          # template clone, and nothing outside CI ever sets it, so local runs
+          # and worker pods keep the synchronous DROP. See
+          # `external_test_db_reaper` in server/crates/djinn-db/src/database.rs.
+          DJINN_TEST_DB_REAPER: external
           # NOTE: there is deliberately NO `RUST_MIN_STACK` here. One used to be
           # (`8388608`, added in 1b4641fc0 "eliminate coordinator shard
           # stack-overflow failures"), and it masked a real defect for eleven
@@ -2488,15 +2559,13 @@ jobs:
             DJINN_MIGRATE_OPERATOR_GITHUB_ID=9000000002 \
             DJINN_MIGRATE_OPERATOR_LOGIN=djinn-ci-migration-operator \
             cargo test -p djinn-db --test apply_migrations -- --ignored --nocapture
-      - name: Build Postgres test template
+      - name: Build and verify Postgres test template
+        # Body: CI_BUILD_TEST_TEMPLATE at the top of this file. It exports
+        # DJINN_TEST_TEMPLATE_PREBUILT=1 only after proving the template is
+        # fully migrated.
         env:
           PGPASSWORD: postgres
-        run: |
-          until pg_isready -h 127.0.0.1 -p 5433 -U postgres >/dev/null 2>&1; do sleep 1; done
-          psql -h 127.0.0.1 -p 5433 -U postgres -d postgres -v ON_ERROR_STOP=1 -c "DROP DATABASE IF EXISTS djinn_test_template"
-          psql -h 127.0.0.1 -p 5433 -U postgres -d postgres -v ON_ERROR_STOP=1 -c "CREATE DATABASE djinn_test_template"
-          SQLX_OFFLINE=true DJINN_TEST_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5433/postgres cargo test -p djinn-db --test setup_test_template -- --ignored
-          psql -h 127.0.0.1 -p 5433 -U postgres -d postgres -v ON_ERROR_STOP=1 -c "UPDATE pg_database SET datistemplate = TRUE WHERE datname = 'djinn_test_template'"
+        run: bash -c "$CI_BUILD_TEST_TEMPLATE"
       - name: Create test vault key
         run: |
           mkdir -p /var/tmp/djinn-test-vault
@@ -2566,15 +2635,14 @@ jobs:
           echo "rustc=$(rustc --version || echo 'unknown')"
           echo "cache-hit=${{ steps.rust-cache.outputs.cache-hit }}"
           echo "::notice::cache-family=server-test shared-key=server-test cache-hit=${{ steps.rust-cache.outputs.cache-hit }}"
-      - name: Build migrated Postgres template
+      - name: Build and verify migrated Postgres template
+        # Body: CI_BUILD_TEST_TEMPLATE at the top of this file. It exports
+        # DJINN_TEST_TEMPLATE_PREBUILT=1 only after proving the template is
+        # fully migrated. Note the shared body DROPs the template first; this
+        # job previously relied on a fresh runner never having one.
         env:
           PGPASSWORD: postgres
-        run: |
-          set -euo pipefail
-          until pg_isready -h 127.0.0.1 -p 5433 -U postgres >/dev/null 2>&1; do sleep 1; done
-          psql -h 127.0.0.1 -p 5433 -U postgres -d postgres -v ON_ERROR_STOP=1 -c "CREATE DATABASE djinn_test_template"
-          SQLX_OFFLINE=true DJINN_TEST_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5433/postgres cargo test -p djinn-db --test setup_test_template -- --ignored
-          psql -h 127.0.0.1 -p 5433 -U postgres -d postgres -v ON_ERROR_STOP=1 -c "UPDATE pg_database SET datistemplate = TRUE WHERE datname = 'djinn_test_template'"
+        run: bash -c "$CI_BUILD_TEST_TEMPLATE"
       - name: Build qa runner once
         run: cargo build -p djinn-qa
       - name: Precompile selected smoke test binaries

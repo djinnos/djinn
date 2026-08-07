@@ -151,6 +151,22 @@ function stepText(step) {
   return blockCode(step);
 }
 
+// Extract a top-level `env:` block-scalar body (e.g. CI_BUILD_TEST_TEMPLATE,
+// CI_RUNNER_DISK_PREFLIGHT). Jobs invoke these as `bash -c "$NAME"`, so a
+// contract about what the work DOES has to read the body, not the call site.
+function sharedEnvBody(source, name) {
+  const lines = source.split('\n');
+  const start = lines.findIndex((line) => new RegExp(`^  ${name}:\\s*\\|`).test(line));
+  if (start === -1) fail(`workflow must define a shared env body named ${name}`);
+  const body = [];
+  for (const line of lines.slice(start + 1)) {
+    if (line.trim() !== '' && !/^ {4}/.test(line)) break;
+    body.push(line);
+  }
+  if (body.every((line) => line.trim() === '')) fail(`shared env body ${name} must not be empty`);
+  return body.join('\n');
+}
+
 function namedStep(job, name) {
   const step = steps(job).find((candidate) => stepName(candidate) === name);
   assert.ok(step, `${job.id} must contain the ${name} step`);
@@ -244,13 +260,23 @@ test('qa-smoke owns only a restore-only test cache and a disposable host databas
     'clone ownership must use the disposable maintenance database');
   assert.match(source, /^ {6}DATABASE_URL:\s*postgres:\/\/postgres:postgres@127\.0\.0\.1:5433\/djinn_test_template\s*$/m,
     'SQLx compilation must use the migrated template database');
-  assert.match(source, /CREATE DATABASE djinn_test_template/, 'qa-smoke must create its template database');
-  assert.match(source, /cargo test -p djinn-db --test setup_test_template -- --ignored/,
-    'qa-smoke must build the template through the repository-owned migration runner before compiling SQLx consumers');
+  // The template build moved into the shared `CI_BUILD_TEST_TEMPLATE` env body
+  // (same convention as CI_RUNNER_DISK_PREFLIGHT), so qa-smoke must invoke it
+  // AND that body must still do the work. Asserting only the invocation would
+  // let an empty body pass; asserting only the body would let qa-smoke skip it.
+  assert.match(source, /bash -c "\$CI_BUILD_TEST_TEMPLATE"/,
+    'qa-smoke must build its template through the shared CI_BUILD_TEST_TEMPLATE body');
+  const buildTemplateBody = sharedEnvBody(readFileSync(WORKFLOW, 'utf8'), 'CI_BUILD_TEST_TEMPLATE');
+  assert.match(buildTemplateBody, /CREATE DATABASE djinn_test_template/,
+    'the shared template body must create the template database');
+  assert.match(buildTemplateBody, /cargo test -p djinn-db --test setup_test_template -- --ignored/,
+    'the shared template body must build the template through the repository-owned migration runner before compiling SQLx consumers');
   assert.doesNotMatch(source, /sqlx\s+migrate\s+run|migrations_postgres(?:\/|\\)/,
     'qa-smoke must not bypass the repository-owned migration runner');
-  assert.match(source, /UPDATE pg_database SET datistemplate = TRUE WHERE datname = 'djinn_test_template'/,
-    'qa-smoke must mark its dedicated database as a template');
+  assert.doesNotMatch(buildTemplateBody, /sqlx\s+migrate\s+run|migrations_postgres(?:\/|\\)/,
+    'the shared template body must not bypass the repository-owned migration runner either');
+  assert.match(buildTemplateBody, /UPDATE pg_database SET datistemplate = TRUE WHERE datname = 'djinn_test_template'/,
+    'the shared template body must mark the dedicated database as a template');
   assertQaJobHasNoLiveDependencies(qa);
 });
 
@@ -259,7 +285,7 @@ test('qa-smoke builds, precompiles, and directly executes in deterministic order
   assert.ok(qa, 'qa-smoke job must exist');
   const source = blockCode(qa);
   assertStepOrder(qa, [
-    'Build migrated Postgres template',
+    'Build and verify migrated Postgres template',
     'Build qa runner once',
     'Precompile selected smoke test binaries',
     'Run deterministic qa smoke and coverage gate',
