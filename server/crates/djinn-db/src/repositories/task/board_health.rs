@@ -130,10 +130,18 @@ fn dispatched_role_for_status_type(status: &str, issue_type: &str) -> &'static s
 /// Bounded recent liveness-classifier evidence.
 pub(super) async fn liveness_outcomes_section(pool: &sqlx::PgPool) -> serde_json::Value {
     let rows = sqlx::query(
-        r#"SELECT le.verdict, le.outcome_kind, le.outcome_reason,
+        r#"WITH logical_evidence AS (
+                SELECT le.*, ROW_NUMBER() OVER (
+                    PARTITION BY COALESCE(le.trigger_identity, le.id)
+                    ORDER BY le.created_at DESC, le.id DESC
+                ) AS logical_rank
+                FROM liveness_evidence le
+           )
+           SELECT le.verdict, le.outcome_kind, le.outcome_reason,
                   le.created_at, le.task_id, le.session_id
-           FROM liveness_evidence le
-           ORDER BY le.created_at DESC
+           FROM logical_evidence le
+           WHERE le.logical_rank = 1
+           ORDER BY le.created_at DESC, le.id DESC
            LIMIT $1"#,
     )
     .bind(LIVENESS_OUTCOMES_LIMIT)
@@ -175,16 +183,24 @@ pub(super) async fn liveness_outcomes_section(pool: &sqlx::PgPool) -> serde_json
 /// Bounded recent protocol-violation evidence.
 pub(super) async fn protocol_violations_section(pool: &sqlx::PgPool) -> serde_json::Value {
     let rows = sqlx::query(
-        r#"SELECT le.verdict, le.outcome_kind, le.outcome_reason,
+        r#"WITH logical_evidence AS (
+                SELECT le.*, ROW_NUMBER() OVER (
+                    PARTITION BY COALESCE(le.trigger_identity, le.id)
+                    ORDER BY le.created_at DESC, le.id DESC
+                ) AS logical_rank
+                FROM liveness_evidence le
+           )
+           SELECT le.verdict, le.outcome_kind, le.outcome_reason,
                   le.created_at, le.task_id, le.session_id,
                   t.short_id AS task_short_id,
                   t.title    AS task_title,
                   t.status   AS task_status
-           FROM liveness_evidence le
+           FROM logical_evidence le
            LEFT JOIN tasks t ON t.id = le.task_id
-           WHERE le.verdict = 'protocol_violation'
-              OR le.outcome_kind = 'protocol_violation'
-           ORDER BY le.created_at DESC
+           WHERE le.logical_rank = 1
+             AND (le.verdict = 'protocol_violation'
+                  OR le.outcome_kind = 'protocol_violation')
+           ORDER BY le.created_at DESC, le.id DESC
            LIMIT $1"#,
     )
     .bind(PROTOCOL_VIOLATIONS_LIMIT)
