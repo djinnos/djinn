@@ -6,7 +6,7 @@
 // files, derivation output bytes — never the wording of a log line.
 
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
+import { chmodSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -382,9 +382,20 @@ test("selecting an unknown producer is an error, not a silent no-op", () => {
 });
 
 test("the golden pipeline enables the provisioned pnpm toolchain", () => {
-  const pnpm = resolvePnpmCommand({ PNPM_HOME: "/cache/pnpm", PATH: "" });
-  assert.equal(pnpm, "/cache/pnpm/bin/pnpm");
-  assert.equal(withPnpmOnPath({ PNPM_HOME: "/cache/pnpm", PATH: "" }).PATH, "/cache/pnpm/bin");
+  const pnpmHome = mkdtempSync(path.join(os.tmpdir(), "tool-goldens-pnpm-"));
+  const pnpmBin = path.join(pnpmHome, "bin");
+  const pnpmExecutable = path.join(pnpmBin, "pnpm");
+  try {
+    mkdirSync(pnpmBin);
+    writeFileSync(pnpmExecutable, "#!/bin/sh\nexit 0\n");
+    chmodSync(pnpmExecutable, 0o755);
+
+    const pnpm = resolvePnpmCommand({ PNPM_HOME: pnpmHome, PATH: "" });
+    assert.equal(pnpm, pnpmExecutable);
+    assert.equal(withPnpmOnPath({ PNPM_HOME: pnpmHome, PATH: "" }).PATH, pnpmBin);
+  } finally {
+    rmSync(pnpmHome, { recursive: true, force: true });
+  }
 });
 
 test("the git pathspec covers every declared artifact pattern", () => {
