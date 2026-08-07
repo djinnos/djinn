@@ -104,13 +104,24 @@ pub async fn materialize_typed_evidence_retry_fixture_for_test(
     .await
     .expect("failed to materialize retry authority task");
     sqlx::query("INSERT INTO tasks (id,project_id,short_id,title,description,design,issue_type,priority,owner,status,labels,acceptance_criteria,created_by_user_id,agent_type) VALUES ($1,$2,$3,'Prior evidence spike','terminal retry fixture','','spike',0,'','closed',$4,'[]'::jsonb,$5,'architect')")
-        .bind(&prior_spike_task_id).bind(project_id).bind(format!("e{}", &prior_spike_task_id[..7])).bind(serde_json::json!(["refinement-evidence", "read-only"])).bind(caller_user_id).execute(&mut *tx).await.unwrap();
+        .bind(&prior_spike_task_id).bind(project_id).bind(format!(
+            "r{}",
+            &prior_spike_task_id[prior_spike_task_id.len() - 7..]
+        )).bind(serde_json::json!(["refinement-evidence", "read-only"])).bind(caller_user_id).execute(&mut *tx).await.unwrap();
     sqlx::query("INSERT INTO typed_evidence_findings (id,proposal_id,demand_hash,lifecycle,claim,demanded_revision_seq,created_by_task_id) VALUES ($1,$2,$3,$4,$5,1,$6)")
         .bind(&finding_id).bind(proposal_id).bind(format!("retry-fixture-{finding_id}")).bind(lifecycle).bind(serde_json::json!({"fixture":"retry"})).bind(authority_task_id).execute(&mut *tx).await.unwrap();
     sqlx::query("INSERT INTO typed_evidence_attempts (id,finding_id,sequence,spike_task_id) VALUES ($1,$2,1,$3)").bind(&attempt_id).bind(&finding_id).bind(&prior_spike_task_id).execute(&mut *tx).await.unwrap();
     sqlx::query("INSERT INTO typed_evidence_planned_checks (id,attempt_id,ordinal,check_id,method) VALUES ($1,$2,1,'retry-fixture-check','code')").bind(uuid::Uuid::now_v7().to_string()).bind(&attempt_id).execute(&mut *tx).await.unwrap();
     sqlx::query("INSERT INTO typed_evidence_transitions (id,finding_id,ordinal,from_lifecycle,to_lifecycle,actor_task_id,metadata) VALUES ($1,$2,1,NULL,'demanded',$3,'{}'),($4,$2,2,'demanded','spike_active',$3,'{}'),($5,$2,3,'spike_active',$6,$3,'{}')")
-        .bind(uuid::Uuid::now_v7().to_string()).bind(&finding_id).bind(authority_task_id).bind(&failed_transition_id).bind(lifecycle).execute(&mut *tx).await.unwrap();
+        .bind(uuid::Uuid::now_v7().to_string())
+        .bind(&finding_id)
+        .bind(authority_task_id)
+        .bind(uuid::Uuid::now_v7().to_string())
+        .bind(&failed_transition_id)
+        .bind(lifecycle)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
     if scenario == TypedEvidenceRetryScenarioForTest::StaleFailure {
         sqlx::query("INSERT INTO typed_evidence_transitions (id,finding_id,ordinal,from_lifecycle,to_lifecycle,actor_task_id,metadata) VALUES ($1,$2,4,'failed','failed',$3,'{}')").bind(&latest_transition_id).bind(&finding_id).bind(authority_task_id).execute(&mut *tx).await.unwrap();
     }

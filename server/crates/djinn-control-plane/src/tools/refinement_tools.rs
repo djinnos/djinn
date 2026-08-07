@@ -1042,36 +1042,34 @@ impl DjinnMcpServer {
                 return Json(err_retry_evidence(e.to_string(), code));
             }
         };
-        if !allocated.replayed {
-            if let Some(coordinator) = self.state.coordinator().await {
-                if let Err(e) = coordinator
-                    .trigger_dispatch_for_project(&allocated.project_id)
-                    .await
-                {
-                    let _ = typed
-                        .append_retry_dispatch_error(
-                            djinn_db::TypedEvidenceRetryDispatchErrorInput {
-                                finding_id: p.finding_id.clone(),
-                                attempt_id: allocated.allocation.attempt_id.clone(),
-                                spike_task_id: allocated.allocation.spike_task_id.clone(),
-                                error: e,
-                            },
-                        )
-                        .await;
-                } else if let Ok(mut dispatch_tx) = self.state.db().pool().begin().await {
-                    let _ = TypedEvidenceRepository::dispatch_retry_success_in_transaction(
-                        &mut dispatch_tx,
-                        DispatchTypedEvidenceRetryInput {
-                            finding_id: p.finding_id.clone(),
-                            attempt_id: allocated.allocation.attempt_id.clone(),
-                            spike_task_id: allocated.allocation.spike_task_id.clone(),
-                            transition_id: uuid::Uuid::now_v7().to_string(),
-                            actor_task_id: None,
-                        },
-                    )
+        if !allocated.replayed
+            && let Some(coordinator) = self.state.coordinator().await
+        {
+            if let Err(e) = coordinator
+                .trigger_dispatch_for_project(&allocated.project_id)
+                .await
+            {
+                let _ = typed
+                    .append_retry_dispatch_error(djinn_db::TypedEvidenceRetryDispatchErrorInput {
+                        finding_id: p.finding_id.clone(),
+                        attempt_id: allocated.allocation.attempt_id.clone(),
+                        spike_task_id: allocated.allocation.spike_task_id.clone(),
+                        error: e,
+                    })
                     .await;
-                    let _ = dispatch_tx.commit().await;
-                }
+            } else if let Ok(mut dispatch_tx) = self.state.db().pool().begin().await {
+                let _ = TypedEvidenceRepository::dispatch_retry_success_in_transaction(
+                    &mut dispatch_tx,
+                    DispatchTypedEvidenceRetryInput {
+                        finding_id: p.finding_id.clone(),
+                        attempt_id: allocated.allocation.attempt_id.clone(),
+                        spike_task_id: allocated.allocation.spike_task_id.clone(),
+                        transition_id: uuid::Uuid::now_v7().to_string(),
+                        actor_task_id: None,
+                    },
+                )
+                .await;
+                let _ = dispatch_tx.commit().await;
             }
         }
         Json(EvidenceRetryResponse {
