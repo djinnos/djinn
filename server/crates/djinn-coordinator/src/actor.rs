@@ -1262,6 +1262,28 @@ impl CoordinatorActor {
         tracing::info!("CoordinatorActor stopped");
     }
 
+    /// Drive [`Self::run_dispatch_loop`] — the production loop, not a copy of
+    /// it — so a sibling test module can witness its cancellation arm.
+    ///
+    /// The arm is where CI-route provider actions are quiesced and this
+    /// incarnation's `provider_actions_drained_at` stamp is earned, and that
+    /// stamp is the *only* thing that ever lets a later incarnation recover a
+    /// charged `calling` row. Nothing else in this crate constructs a
+    /// `CoordinatorActor` and runs it, so until this existed the call could be
+    /// deleted outright with the whole suite still green: the drain would never
+    /// run in production, no stamp would ever be written, and every `calling`
+    /// row would strand for good.
+    ///
+    /// A shim rather than a visibility change on the loop itself, because the
+    /// proof token is deliberately unforgeable outside this module: the loop's
+    /// contract is "startup imports finished first", and a test that could
+    /// mint the token would erode it.
+    #[cfg(test)]
+    pub(crate) async fn drive_dispatch_loop_for_test(&mut self) {
+        self.run_dispatch_loop(StartupLegacySettingsImportsComplete)
+            .await;
+    }
+
     /// Enter the normal, potentially infinite dispatch loop only after the
     /// finite startup import phase has completed.
     async fn run_dispatch_loop(&mut self, _imports_complete: StartupLegacySettingsImportsComplete) {
