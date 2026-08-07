@@ -655,12 +655,10 @@ fn wire(status: DbTaskStatus) -> String {
         .unwrap_or_default()
 }
 
-/// TRIPWIRE. `is_settled` claims to list recorded handoffs, but two of its
-/// entries are CLAIM statuses that only a live session holds — the exact
-/// set [`is_session_held_status`] names. That overlap is deliberate and
-/// load-bearing: see the `is_settled` doc for why narrowing it is unsafe
-/// while the supervisor settles the session row BEFORE issuing the
-/// reviewer's transition.
+/// TRIPWIRE. `is_settled` includes two session-held statuses. That overlap is
+/// deliberate: once the supervisor's durable barrier has settled the session
+/// and read back its Required transition, these review/intervention boundaries
+/// are confirmed handoff destinations rather than evidence of abandonment.
 ///
 /// If this fails, someone changed one of the two lists. Read that doc
 /// before "fixing" the test — the two helpers are one axis, and moving
@@ -689,13 +687,13 @@ fn is_settled_overlaps_session_held_on_exactly_the_two_claim_statuses() {
     assert_eq!(
         overlap,
         vec!["in_task_review", "in_lead_intervention"],
-        "a session-held status is a CLAIM, not a handoff destination; these \
-         two are excused anyway only because the exit classifier races the \
-         supervisor's transition RPC (see DbTaskStatus::is_settled)"
+        "these two session-held review/intervention boundaries are settled \
+         handoff destinations after the supervisor's durable read-back (see \
+         DbTaskStatus::is_settled)"
     );
 
-    // The third session-held status is NOT excused — that asymmetry is the
-    // whole reason the overlap above is suspicious rather than principled.
+    // The dispatch-held status remains unsettled: without a recorded transition
+    // out of it, a terminal session positively establishes an abandoned handoff.
     assert!(
         !DbTaskStatus::InProgress.is_settled(),
         "in_progress is session-held AND unsettled; in_task_review is \
@@ -703,39 +701,24 @@ fn is_settled_overlaps_session_held_on_exactly_the_two_claim_statuses() {
     );
 }
 
-/// CHARACTERIZATION of the hole, built from the real traced path rather
-/// than from guesswork.
-///
-/// A reviewer that ends without calling `submit_review` returns a
-/// non-terminal `StageOutcome::Failed` that performs NO task transition,
-/// yet settles its session `completed` (the settlement keys on the reply
-/// loop's `Ok(())`, not on the outcome), so the pod exits 0. The exit
-/// classifier consequently sees precisely this packet — and returns
-/// `Live` with no outcome at all. The abandonment is invisible in the
-/// liveness ledger.
-///
-/// This is asserted, not endorsed. It is pinned so that any future change
-/// to `is_settled` or to the precedence order surfaces here with the
-/// reasoning attached, instead of silently flipping a production
-/// false-positive rate nobody measured.
+/// A completed reviewer exit at a confirmed review boundary is exonerated.
+/// The durable supervisor barrier settles the session only after its Required
+/// transition has been applied and read back, so this packet uses the addressed
+/// session's truthful `Completed` status rather than a fabricated running row.
 #[test]
-fn no_verdict_reviewer_exit_is_invisible_to_the_exit_classifier() {
-    // Exactly what classify_session_exit_liveness builds for a "completed"
-    // session whose task never left in_task_review.
+fn completed_reviewer_handoff_is_exonerated_by_settled_boundary() {
+    // Exactly what classify_session_exit_liveness builds for a completed session
+    // whose supervisor-confirmed Required transition reaches in_task_review.
     let ev = LivenessEvidence {
         pod_phase: Some(PodPhase::Succeeded),
         activity: ActivitySignal::Idle,
-        db_session_status: Some(DbSessionStatus::Running),
+        db_session_status: Some(DbSessionStatus::Completed),
         db_task_status: Some(DbTaskStatus::InTaskReview),
         claim_ttl_remaining: None,
         extension_budget_exhausted: false,
         hard_runtime_deadline_exceeded: false,
         exit_code: Some(0),
-        // Last transition was needs_task_review → in_task_review, i.e. INTO
-        // a session-held status: a claim, which proves nothing.
-        handed_off_from_session_held_status: false,
-        // The reviewer exited 0 with no provider error at all — this scenario
-        // is about an abandoned post, not an upstream fault.
+        handed_off_from_session_held_status: true,
         transient_provider_fault: false,
     };
 
@@ -743,16 +726,15 @@ fn no_verdict_reviewer_exit_is_invisible_to_the_exit_classifier() {
     assert_eq!(
         result.verdict,
         Verdict::Live,
-        "a reviewer that abandoned its post is currently recorded as live"
+        "a confirmed reviewer handoff is not a protocol violation"
     );
-    assert_eq!(result.outcome, None, "and carries no outcome at all");
+    assert_eq!(result.outcome, None, "the handoff needs no exit action");
     assert_eq!(result.reason, None);
 
-    // The single term keeping it out of the violation branch.
+    // The settled review boundary itself keeps it out of the violation branch.
     assert!(
         DbTaskStatus::InTaskReview.is_settled(),
-        "is_settled is the only guard standing between this packet and \
-         ProtocolViolation/clean_exit_nonterminal"
+        "the confirmed review boundary is a valid Required handoff destination"
     );
 
     // And every later branch is structurally unreachable for a clean exit:

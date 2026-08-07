@@ -3815,6 +3815,19 @@ async fn protocol_violation_clean_exit_classified_as_failed_attempt() {
         .await
         .unwrap();
 
+    session_repo
+        .update(
+            &session.id,
+            djinn_core::models::SessionStatus::Completed,
+            1,
+            1,
+            0,
+            0,
+            None,
+        )
+        .await
+        .unwrap();
+
     let actor = coordinator_actor_for_tests(&db, &tx);
     let result = actor
         .classify_session_exit_liveness(&session.id, &task.id, Some(run_id), "completed", "worker")
@@ -3905,6 +3918,19 @@ async fn nonzero_exit_is_crash_outcome_distinct_from_clean_violation() {
             pricing: None,
             cost_basis: None,
         })
+        .await
+        .unwrap();
+
+    session_repo
+        .update(
+            &session.id,
+            djinn_core::models::SessionStatus::Failed,
+            1,
+            1,
+            0,
+            0,
+            None,
+        )
         .await
         .unwrap();
 
@@ -4012,6 +4038,19 @@ async fn reviewer_reject_exit_is_not_a_protocol_violation() {
         )
         .await
         .unwrap();
+
+    session_repo
+        .update(
+            &session.id,
+            djinn_core::models::SessionStatus::Completed,
+            1,
+            1,
+            0,
+            0,
+            None,
+        )
+        .await
+        .unwrap();
     assert_eq!(
         rejected.status, "open",
         "task_review_reject must land the task at open (rework queue)"
@@ -4102,6 +4141,19 @@ async fn worker_clean_exit_at_in_progress_is_still_a_protocol_violation() {
         .await
         .unwrap();
 
+    session_repo
+        .update(
+            &session.id,
+            djinn_core::models::SessionStatus::Completed,
+            1,
+            1,
+            0,
+            0,
+            None,
+        )
+        .await
+        .unwrap();
+
     let actor = coordinator_actor_for_tests(&db, &tx);
     let result = actor
         .classify_session_exit_liveness(&session.id, &task.id, Some(run_id), "completed", "worker")
@@ -4168,6 +4220,19 @@ async fn already_terminal_task_exit_preserves_kill_noop() {
     // Close the task BEFORE the exit classification runs — race condition.
     TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx))
         .set_status(&task.id, "closed")
+        .await
+        .unwrap();
+
+    session_repo
+        .update(
+            &session.id,
+            djinn_core::models::SessionStatus::Completed,
+            1,
+            1,
+            0,
+            0,
+            None,
+        )
         .await
         .unwrap();
 
@@ -4317,7 +4382,7 @@ async fn explicit_kill_cleanup_full_evidence_chain_for_terminal_task() {
 /// produces the same crash/protocol-violation semantics as "failed".
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn interrupted_session_nonterminal_is_crash_protocol_violation() {
-    use djinn_db::{CreateSessionParams, SessionRepository};
+    use djinn_db::{CreateSessionParams, SessionRepository, TaskAttemptRepository};
 
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
@@ -4358,6 +4423,23 @@ async fn interrupted_session_nonterminal_is_crash_protocol_violation() {
         .await
         .unwrap();
 
+    session_repo
+        .update(
+            &session.id,
+            djinn_core::models::SessionStatus::Interrupted,
+            1,
+            1,
+            0,
+            0,
+            None,
+        )
+        .await
+        .unwrap();
+
+    // A stranded Required handoff must use the existing crashed accounting,
+    // rather than treating this terminal interruption as environmental.
+    let attempt_id = seed_pending_attempt(&db, &task.id, "worker").await;
+
     let actor = coordinator_actor_for_tests(&db, &tx);
     let result = actor
         .classify_session_exit_liveness(
@@ -4385,6 +4467,16 @@ async fn interrupted_session_nonterminal_is_crash_protocol_violation() {
         Some(crate::dispatch::liveness::LivenessReason::NonzeroExitNonterminal),
         "reason must be NonzeroExitNonterminal for interrupted session"
     );
+    let attempt = TaskAttemptRepository::new(db.clone())
+        .get(&attempt_id)
+        .await
+        .unwrap()
+        .expect("pending attempt must exist");
+    assert_eq!(
+        attempt.outcome, "crashed",
+        "an interrupted exit that abandoned its Required handoff must use crashed accounting"
+    );
+    assert!(attempt.terminal_at.is_some());
 }
 
 /// AC 1/3: Dead + recent DB activity suppression — a session that is within
@@ -5341,10 +5433,10 @@ async fn stall_timeout_terminalizes_attempt_as_timed_out() {
 
 // ── Deploy/reap interruptions are environmental (fix/deploy-interruptions) ──
 
-/// A session `interrupted` by INFRASTRUCTURE (deploy/rollout/pod-eviction/reap)
-/// while its task is still nonterminal must terminalize the live attempt as the
-/// environmental `interrupted` outcome — NOT `crashed`. This is what lets the
-/// dispatch reappearance path spare the task from a failure streak / cooldown.
+/// A session `interrupted` by INFRASTRUCTURE after its Required handoff has
+/// completed must terminalize the live attempt as the environmental `interrupted`
+/// outcome — NOT `crashed`. An absent handoff is instead a protocol violation and
+/// must use crashed accounting.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn interrupted_session_terminalizes_attempt_as_environmental_interrupt() {
     use djinn_core::models::{SessionStatus, task_attempt::TaskAttemptOutcome};
@@ -5388,8 +5480,17 @@ async fn interrupted_session_terminalizes_attempt_as_environmental_interrupt() {
         .await
         .unwrap();
 
+    // The Required handoff was confirmed before the infrastructure interruption.
+    // This distinguishes an environmental exit from an interrupted session that
+    // stranded its in-progress task and therefore earns crashed accounting.
+    TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx))
+        .set_status(&task.id, "open")
+        .await
+        .unwrap();
+
     // Accounting follows the addressed row's durable terminal truth, not the
-    // terminal event string supplied to the adapter below.
+    // terminal event string supplied to the adapter below. The barrier settles
+    // this row only after the Required handoff above is durable.
     session_repo
         .update(&session.id, SessionStatus::Interrupted, 1, 1, 0, 0, None)
         .await
@@ -5544,6 +5645,19 @@ async fn interrupted_event_does_not_reclassify_already_terminal_failure() {
             pricing: None,
             cost_basis: None,
         })
+        .await
+        .unwrap();
+
+    session_repo
+        .update(
+            &session.id,
+            djinn_core::models::SessionStatus::Interrupted,
+            1,
+            1,
+            0,
+            0,
+            None,
+        )
         .await
         .unwrap();
 
@@ -6512,6 +6626,19 @@ async fn classify_session_exit_clean_nonterminal_vs_terminal_are_distinct_and_id
             pricing: None,
             cost_basis: None,
         })
+        .await
+        .unwrap();
+
+    session_repo
+        .update(
+            &session.id,
+            djinn_core::models::SessionStatus::Completed,
+            1,
+            1,
+            0,
+            0,
+            None,
+        )
         .await
         .unwrap();
 
