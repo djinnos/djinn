@@ -27,14 +27,15 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use djinn_db::{
-    CiActionPhase, CiEvidenceIdentity, CiLane, CiOriginState, CiQuiescenceProof, CiRouteOutcome,
-    CiRouteSubject, CiSubjectKind, Database,
+    CiActionPhase, CiCallingRecoveryReason, CiEvidenceIdentity, CiLane, CiOriginState,
+    CiQuiescenceProof, CiRouteOutcome, CiRouteSubject, CiSubjectKind, Database,
 };
 use djinn_provider::github_api::{
     CheckAnnotation, CheckRun, CheckRunsResponse, GitHubApiError, MergeMethod,
 };
 
 use super::*;
+use crate::pr_poller::ci_lane_routing::CiLaneDisposition;
 use crate::pr_poller::ci_routing::gate::CiRoutingGate;
 use crate::pr_poller::ci_routing::{CiCapture, CiRouteAttempt};
 
@@ -62,8 +63,14 @@ struct FakeState {
     calls: ProviderCalls,
     /// When set, the next mutation returns this error instead of succeeding.
     fail_mutations: bool,
+    /// `CheckApiError`'s producer: `list_check_runs_for_ref` refusing *after*
+    /// the merge-group run identity is already known.
     fail_check_runs: bool,
+    /// `LogApiError`'s producer: the annotation read failing, likewise after an
+    /// immutable run is known.
     fail_annotations: bool,
+    /// What `list_check_runs_for_ref` returns when it does not fail.
+    check_runs: Vec<CheckRun>,
     /// Every `(owner, repo, run_id)` triple `rerun_failed_jobs` was asked for,
     /// so a fixture can prove *which* run was re-run, not just how many.
     reran: Vec<(String, String, u64)>,
@@ -91,6 +98,24 @@ impl FakeProvider {
         let me = Self::default();
         me.state.lock().expect("fake provider mutex").fail_mutations = true;
         me
+    }
+
+    fn set_fail_check_runs(&self) {
+        self.state
+            .lock()
+            .expect("fake provider mutex")
+            .fail_check_runs = true;
+    }
+
+    fn set_fail_annotations(&self) {
+        self.state
+            .lock()
+            .expect("fake provider mutex")
+            .fail_annotations = true;
+    }
+
+    fn set_check_runs(&self, runs: Vec<CheckRun>) {
+        self.state.lock().expect("fake provider mutex").check_runs = runs;
     }
 }
 
@@ -150,7 +175,7 @@ impl CiRouteProvider for FakeProvider {
         if state.fail_check_runs {
             return Err(api_error("list_check_runs_for_ref"));
         }
-        Ok(CheckRunsResponse::complete(Vec::new()))
+        Ok(CheckRunsResponse::complete(state.check_runs.clone()))
     }
 
     async fn get_check_run_annotations(
@@ -247,6 +272,16 @@ impl Fixture {
             route_rows: ts::ci_route_row_count_for_test(&self.db, &self.subject.id).await,
             provider_mutations: self.provider.calls().mutations(),
         }
+    }
+
+    async fn ci_snapshot(&self) -> Option<djinn_core::models::TaskPrCiSnapshot> {
+        djinn_db::TaskRepository::new(
+            self.db.clone(),
+            djinn_db::test_support::event_bus_for(&tokio::sync::broadcast::channel(4).0),
+        )
+        .get_ci_snapshot_for_task_pr(&self.task_id, PR)
+        .await
+        .expect("snapshot read")
     }
 
     async fn budgets(&self, identity: &CiEvidenceIdentity, fingerprint: &str) -> (i64, i64) {
@@ -395,6 +430,105 @@ async fn run(
         blocking,
     )
     .await
+}
+
+/// Drive one route from an explicit capture, for the lane-level captures that
+/// have no per-run blocking set (complete-empty, hold, incomplete).
+async fn run_capture(
+    f: &Fixture,
+    target: &CiLaneTarget<'_>,
+    identity: &CiEvidenceIdentity,
+    capture: CiCapture<'_>,
+) -> CiLaneOutcome {
+    let observation = CiObservation {
+        evidence: identity,
+        observed_current: identity,
+        capture,
+    };
+    execute_route(&f.routes, &f.provider, &f.scope, target, &observation, &[]).await
+}
+
+/// A check run that concluded green.
+fn passing_check(name: &str) -> CheckRun {
+    CheckRun {
+        conclusion: Some("success".to_owned()),
+        ..inconclusive_check(name, 1)
+    }
+}
+
+const MERGE_GROUP_SHA: &str = "cccccccccccccccccccccccccccccccccccccccc";
+const DEQUEUE_ID: &str = "refs/heads/gh-readonly-queue/main/pr-4242-a@2026-08-06T00:00:00Z";
+
+/// A terminal merge-group run that `correlate_merge_group_run` will accept:
+/// the `pr-4242-` marker in its branch and a failing conclusion.
+fn merge_group_run(id: u64) -> djinn_provider::github_api::WorkflowRun {
+    djinn_provider::github_api::WorkflowRun {
+        id,
+        workflow_id: None,
+        name: Some("CI".to_owned()),
+        path: Some(".github/workflows/ci.yml".to_owned()),
+        head_branch: Some("gh-readonly-queue/main/pr-4242-abc".to_owned()),
+        head_sha: MERGE_GROUP_SHA.to_owned(),
+        status: Some("completed".to_owned()),
+        conclusion: Some("failure".to_owned()),
+    }
+}
+
+fn dequeue_event() -> djinn_provider::github_api::DequeueEvent {
+    djinn_provider::github_api::DequeueEvent {
+        reason: Some("failed_checks".to_owned()),
+        merge_group_ref: Some("refs/heads/gh-readonly-queue/main/pr-4242-a".to_owned()),
+        created_at: Some("2026-08-06T00:00:00Z".to_owned()),
+        before_commit_sha: None,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The lane-wrapper harness
+// ---------------------------------------------------------------------------
+
+/// A real `CoordinatorActor` over a real ephemeral database.
+///
+/// `crate::actor::actor_with_test_db` uses the same
+/// `CoordinatorActor::new(CoordinatorDeps::new(..))` constructor production
+/// does, so a method driven through this is the production method — not a
+/// reimplementation of it.
+struct LaneHarness {
+    actor: crate::actor::CoordinatorActor,
+    db: Database,
+    task_id: String,
+}
+
+impl LaneHarness {
+    async fn ci_snapshot(&self) -> Option<djinn_core::models::TaskPrCiSnapshot> {
+        djinn_db::TaskRepository::new(
+            self.db.clone(),
+            djinn_db::test_support::event_bus_for(&tokio::sync::broadcast::channel(4).0),
+        )
+        .get_ci_snapshot_for_task_pr(&self.task_id, PR)
+        .await
+        .expect("snapshot read")
+    }
+}
+
+async fn lane_harness() -> LaneHarness {
+    let db = Database::open_in_memory().expect("ephemeral test database");
+    let project = djinn_db::test_support::make_project(&db, std::path::Path::new("ci-lane")).await;
+    let task_id = djinn_db::test_support::seed_task_row(
+        &db,
+        djinn_db::test_support::UsageTestTaskSeed {
+            project_id: &project.id,
+            status: "pr_review",
+            close_reason: None,
+            total_reopen_count: 0,
+        },
+    )
+    .await;
+    LaneHarness {
+        actor: crate::actor::actor_with_test_db(db.clone()),
+        db,
+        task_id,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -601,6 +735,16 @@ async fn live_calling_owner_after_acceptance_is_not_recovered() {
     );
 
     // A startup handoff must also refuse while the owner is live and undrained.
+    //
+    // The `age_calling` is load-bearing and its absence made this test a label.
+    // Without it the row's `calling_at` is seconds old, so `recover_calling_owner`
+    // defers on `TimeoutNotElapsed` and never evaluates the quiescence
+    // predicate at all — mutating `CiQuiescenceProof::None` to "recoverable"
+    // survived the whole coordinator suite, caught only by W1's own repository
+    // test. Aging past the 300s window is what makes the timeout stop being the
+    // reason, so the deferral this asserts is the one the name claims.
+    age_calling(&f, &key, 400).await;
+
     let report = recover_calling_owners_at_startup(
         &f.routes,
         &FixedHead(Some(HEAD.to_owned())),
@@ -611,8 +755,31 @@ async fn live_calling_owner_after_acceptance_is_not_recovered() {
     )
     .await;
     assert_eq!(report.examined, 1);
-    assert_eq!(report.deferred, 1, "no quiescence proof, no handoff");
+    assert_eq!(report.deferred, 1);
     assert_eq!(report.outcome_unknown, 0);
+
+    // And assert *which* refusal, from the repository's own audit trail rather
+    // than from a count that any of seven reasons would satisfy.
+    let audit = f
+        .routes
+        .calling_recovery_audit(&f.subject, &key)
+        .await
+        .expect("calling-recovery audit");
+    let reasons: Vec<CiCallingRecoveryReason> =
+        audit.iter().map(|record| record.recovery_reason).collect();
+    assert!(
+        reasons.contains(&CiCallingRecoveryReason::LiveOwnerDeferred),
+        "a live, undrained owner must be refused for *that* reason, not a timeout; got {reasons:?}",
+    );
+    assert!(
+        !reasons.contains(&CiCallingRecoveryReason::TimeoutNotElapsed),
+        "the 300s window must already have elapsed, or the quiescence predicate \
+         is never reached; got {reasons:?}",
+    );
+    assert!(
+        audit.iter().all(|record| !record.cas_won),
+        "no compare-and-set may win against a live owner"
+    );
     assert_eq!(f.effects().await, after);
 }
 
@@ -1610,4 +1777,633 @@ async fn a_second_subject_sharing_a_pr_number_gets_its_own_call() {
         "byte-identical evidence in another subject is a different route"
     );
     assert_eq!(f.provider.calls().rerun_failed_jobs, 2);
+}
+
+// ===========================================================================
+// `from_env` — the function every production call site actually uses
+// ===========================================================================
+
+/// The *absent* case is the production default, and it had zero coverage.
+///
+/// `from_value` was exhaustively tested and tested nothing that mattered: the
+/// default lived in `from_env`'s `unwrap_or_default()`, and changing that one
+/// call to `unwrap_or(Enabled)` turned `ci_evidence_routing` on fleet-wide with
+/// all 2148 tests green. The default now lives in `from_lookup`, which takes the
+/// environment as an argument, so this drives it directly.
+#[test]
+fn the_absent_gate_value_resolves_to_disabled_clean() {
+    // Absent — the production default on every machine that has not opted in.
+    assert_eq!(
+        CiRoutingGate::from_lookup(|_| None),
+        CiRoutingGate::DisabledClean,
+        "an unset DJINN_CI_EVIDENCE_ROUTING must leave the feature off",
+    );
+
+    // Present but meaningless. None of these may opt in by accident, and the
+    // boolean spellings are called out because the older flags in this crate
+    // use them — an operator who types `true` must not get a feature whose
+    // three states they did not choose between.
+    for value in [
+        "",
+        " ",
+        "\t",
+        "0",
+        "1",
+        "true",
+        "TRUE",
+        "yes",
+        "no",
+        "on",
+        "off",
+        "disabled",
+        "disabled_clean",
+        "enable",
+        "quiesce",
+        "garbage",
+        "Enabled=1",
+    ] {
+        assert_eq!(
+            CiRoutingGate::from_lookup(|_| Some(value.to_owned())),
+            CiRoutingGate::DisabledClean,
+            "gate value {value:?} must not enable the feature",
+        );
+    }
+
+    // The two opt-ins, and only these two.
+    for (value, expected) in [
+        ("enabled", CiRoutingGate::Enabled),
+        ("  Enabled  ", CiRoutingGate::Enabled),
+        ("ENABLED", CiRoutingGate::Enabled),
+        ("quiescing", CiRoutingGate::Quiescing),
+        ("  Quiescing\n", CiRoutingGate::Quiescing),
+    ] {
+        assert_eq!(
+            CiRoutingGate::from_lookup(|_| Some(value.to_owned())),
+            expected,
+            "gate value {value:?}",
+        );
+    }
+}
+
+/// The lookup is asked for the documented variable and nothing else.
+#[test]
+fn the_gate_reads_exactly_one_environment_variable() {
+    let mut seen: Vec<String> = Vec::new();
+    let gate = CiRoutingGate::from_lookup(|key| {
+        seen.push(key.to_owned());
+        None
+    });
+    assert_eq!(gate, CiRoutingGate::DisabledClean);
+    assert_eq!(seen, vec!["DJINN_CI_EVIDENCE_ROUTING".to_owned()]);
+}
+
+/// `from_env` must stay a bare delegation to the covered function.
+///
+/// Textual, and deliberately so: the default logic is now in `from_lookup`
+/// where a test can reach it, and the only way to reintroduce the fleet-wide
+/// mutation is to put logic back into `from_env`. This is the same
+/// source-inspection guard `context.rs` uses for its own env wiring, and it is
+/// the cheap half of a pair — the expensive half is the exhaustive
+/// `from_lookup` test above.
+#[test]
+fn from_env_delegates_to_the_covered_lookup() {
+    let source = include_str!("../gate.rs");
+    let body = source
+        .split("pub(crate) fn from_env() -> Self {")
+        .nth(1)
+        .expect("from_env is defined in gate.rs")
+        .split("\n    }")
+        .next()
+        .expect("from_env has a body");
+    assert!(
+        body.contains("Self::from_lookup(|key| std::env::var(key).ok())"),
+        "from_env must delegate to from_lookup; found: {body}",
+    );
+    assert!(
+        !body.contains("unwrap_or"),
+        "the default belongs in from_lookup, where a test can reach it; found: {body}",
+    );
+}
+
+// ===========================================================================
+// The complete-empty compatibility paths
+// ===========================================================================
+
+/// An authoritatively complete *empty* enumeration is a verdict of green, and
+/// somebody has to write it down.
+///
+/// This was a wedge. `CiCompleteEmptyRoute` was produced by the classifier and
+/// read by nobody: `fold` consulted only `suppresses_legacy_path`, which is true
+/// of everything except `GateClosed`, so a merge-group dequeue whose correlated
+/// run had no failing checks returned "routed", `handle_queue_failure` returned
+/// early, and *nothing* recorded `Passing`, re-enqueued, or reopened. The task
+/// sat in `pr_review` until a human noticed.
+#[tokio::test]
+async fn a_complete_empty_merge_group_records_passing_and_allows_the_gate() {
+    let f = fixture().await;
+    let snapshot_before = f.ci_snapshot().await;
+    assert!(snapshot_before.is_none(), "precondition: no snapshot yet");
+
+    let outcome = run_capture(
+        &f,
+        &f.target(),
+        &merge_group_identity(970),
+        CiCapture::prove_complete(
+            djinn_provider::github_api::CheckSetCompleteness::Complete,
+            &[],
+        ),
+    )
+    .await;
+
+    assert_eq!(
+        outcome,
+        CiLaneOutcome::CompleteEmpty(CiCompleteEmptyRoute::MergeGroupRecordPassing),
+        "the classifier's answer for the review lane",
+    );
+    // The executor itself writes nothing durable — the snapshot is the lane
+    // wrapper's job, and that is what the disposition test below drives.
+    let effects = f.effects().await;
+    assert_eq!(effects.route_rows, 0, "complete-empty creates no route row");
+    assert_eq!(effects.tier2_leases, 0);
+    assert_eq!(effects.provider_mutations, 0);
+    assert_eq!(effects.worker_attempts, 0);
+}
+
+/// The lane wrapper executes the decision: `Passing` is persisted for the
+/// current head, and the caller is told to skip remediation.
+///
+/// This is the assertion the wedge would fail. It drives
+/// `route_merge_group_ci_evidence` — the production entry point
+/// `handle_queue_failure` calls — with a correlated terminal merge-group run
+/// whose check set comes back empty.
+#[tokio::test]
+async fn the_merge_group_lane_executes_the_complete_empty_route() {
+    let h = lane_harness().await;
+    let provider = FakeProvider::default();
+
+    let disposition = h
+        .actor
+        .route_merge_group_ci_evidence(
+            &provider,
+            &h.task_id,
+            "task-short",
+            "acme",
+            "widgets",
+            PR as u64,
+            HEAD,
+            "PR_node",
+            MergeMethod::Squash,
+            &[merge_group_run(970)],
+            Some(&dequeue_event()),
+            CiRoutingGate::Enabled,
+        )
+        .await;
+
+    assert_eq!(
+        disposition.complete_empty(),
+        Some(CiCompleteEmptyRoute::MergeGroupRecordPassing),
+    );
+    assert!(
+        disposition.is_routed(),
+        "a verdict of green must not fall through to the reopen-for-rework path",
+    );
+    let snapshot = h
+        .ci_snapshot()
+        .await
+        .expect("the review lane must record a verdict, or the merge gate holds forever");
+    assert_eq!(snapshot.ci_status, djinn_core::models::CiStatus::Passing);
+    assert_eq!(snapshot.head_sha, HEAD);
+    assert_eq!(provider.calls().mutations(), 0, "no re-enqueue, no rerun");
+    assert_eq!(
+        djinn_db::test_support::ci_route_row_count_for_test(&h.db, &h.task_id).await,
+        0,
+        "complete-empty creates no route row",
+    );
+    assert_eq!(
+        djinn_db::test_support::task_attempt_count_for_test(&h.db, &h.task_id).await,
+        0,
+        "and dispatches no worker",
+    );
+}
+
+/// The PR-head lane's half of the same contract.
+#[tokio::test]
+async fn the_pr_head_lane_executes_the_complete_empty_route() {
+    let h = lane_harness().await;
+    let provider = FakeProvider::default();
+
+    let disposition = h
+        .actor
+        .route_pr_head_ci_evidence(
+            &provider,
+            &h.task_id,
+            "task-short",
+            "acme",
+            "widgets",
+            PR as u64,
+            HEAD,
+            &CheckRunsResponse::complete(Vec::new()),
+            &[],
+            CiRoutingGate::Enabled,
+        )
+        .await;
+
+    assert_eq!(
+        disposition.complete_empty(),
+        Some(CiCompleteEmptyRoute::PrHeadProceed),
+    );
+    let snapshot = h
+        .ci_snapshot()
+        .await
+        .expect("current-head verdict recorded");
+    assert_eq!(snapshot.ci_status, djinn_core::models::CiStatus::Passing);
+    assert_eq!(provider.calls().mutations(), 0);
+    assert_eq!(
+        djinn_db::test_support::ci_route_row_count_for_test(&h.db, &h.task_id).await,
+        0,
+    );
+}
+
+// ===========================================================================
+// The lane wrappers, and the two producer-only incompleteness reasons
+// ===========================================================================
+
+/// `CheckApiError` has a producer, and this is it.
+///
+/// The reason is scoped to "after an immutable run is known", which is why it
+/// can only arise here — once `correlate_merge_group_run` has named exactly one
+/// terminal run and the check API *then* refuses. It is complete-but-unusable,
+/// so it takes the guarded Tier-2 route rather than holding, and it keys its
+/// route row on the known run rather than on a synthetic identity.
+#[tokio::test]
+async fn a_check_api_failure_after_correlation_routes_to_guarded_tier_two() {
+    let h = lane_harness().await;
+    let provider = FakeProvider::default();
+    provider.set_fail_check_runs();
+
+    let disposition = h
+        .actor
+        .route_merge_group_ci_evidence(
+            &provider,
+            &h.task_id,
+            "task-short",
+            "acme",
+            "widgets",
+            PR as u64,
+            HEAD,
+            "PR_node",
+            MergeMethod::Squash,
+            &[merge_group_run(971)],
+            Some(&dequeue_event()),
+            CiRoutingGate::Enabled,
+        )
+        .await;
+
+    assert!(disposition.is_routed());
+    assert_eq!(provider.calls().list_check_runs, 1);
+    assert_eq!(provider.calls().mutations(), 0, "no provider mutation");
+    assert_eq!(
+        djinn_db::test_support::ci_route_lease_count_for_test(&h.db, &h.task_id).await,
+        1,
+        "complete-but-unusable evidence earns exactly one adjudication",
+    );
+    assert_eq!(
+        djinn_db::test_support::task_attempt_count_for_test(&h.db, &h.task_id).await,
+        0,
+        "and no worker",
+    );
+    // Keyed on the known run, not on a synthetic per-head identity.
+    let identity = CiEvidenceIdentity {
+        lane: CiLane::MergeGroup,
+        pr_number: PR,
+        pr_head_sha: HEAD.to_owned(),
+        run_id: 971,
+        run_head_sha: MERGE_GROUP_SHA.to_owned(),
+        dequeue_id: Some(DEQUEUE_ID.to_owned()),
+    };
+    let subject = CiRouteSubject::task(h.task_id.clone());
+    assert!(
+        CiRouteAttemptRepository::new(h.db.clone())
+            .get(
+                &subject,
+                &provider_action_key(&subject, &identity, CiAction::AskLead)
+            )
+            .await
+            .expect("route read")
+            .is_some(),
+        "the route row must be keyed on the run the correlation named",
+    );
+}
+
+/// `LogApiError`'s producer: the annotation read the evidence bundle depends on,
+/// failing after the run identity is already known.
+#[tokio::test]
+async fn an_annotation_failure_after_correlation_routes_to_guarded_tier_two() {
+    let h = lane_harness().await;
+    let provider = FakeProvider::default();
+    provider.set_fail_annotations();
+    provider.set_check_runs(vec![causal_check("merge-group / integration", 972)]);
+
+    let disposition = h
+        .actor
+        .route_merge_group_ci_evidence(
+            &provider,
+            &h.task_id,
+            "task-short",
+            "acme",
+            "widgets",
+            PR as u64,
+            HEAD,
+            "PR_node",
+            MergeMethod::Squash,
+            &[merge_group_run(972)],
+            Some(&dequeue_event()),
+            CiRoutingGate::Enabled,
+        )
+        .await;
+
+    assert!(disposition.is_routed());
+    assert_eq!(
+        provider.calls().annotations,
+        1,
+        "the annotation read is what produces LogApiError",
+    );
+    assert_eq!(provider.calls().mutations(), 0);
+    assert_eq!(
+        djinn_db::test_support::ci_route_lease_count_for_test(&h.db, &h.task_id).await,
+        1,
+    );
+    assert_eq!(
+        djinn_db::test_support::task_attempt_count_for_test(&h.db, &h.task_id).await,
+        0,
+    );
+}
+
+/// A dequeue this poll cannot name leaves the lane to the legacy path rather
+/// than inventing an identity it could not revalidate on a later poll.
+#[tokio::test]
+async fn an_unidentifiable_dequeue_leaves_the_lane_to_the_legacy_path() {
+    let h = lane_harness().await;
+    let provider = FakeProvider::default();
+
+    let disposition = h
+        .actor
+        .route_merge_group_ci_evidence(
+            &provider,
+            &h.task_id,
+            "task-short",
+            "acme",
+            "widgets",
+            PR as u64,
+            HEAD,
+            "PR_node",
+            MergeMethod::Squash,
+            &[merge_group_run(973)],
+            None,
+            CiRoutingGate::Enabled,
+        )
+        .await;
+
+    assert_eq!(disposition, CiLaneDisposition::Legacy);
+    assert!(!disposition.is_routed());
+    assert_eq!(provider.calls().mutations(), 0);
+}
+
+/// Both lane wrappers decline with the gate off, without touching the database.
+#[tokio::test]
+async fn the_lane_wrappers_decline_when_the_gate_is_off() {
+    let h = lane_harness().await;
+    let provider = FakeProvider::default();
+
+    let merge = h
+        .actor
+        .route_merge_group_ci_evidence(
+            &provider,
+            &h.task_id,
+            "task-short",
+            "acme",
+            "widgets",
+            PR as u64,
+            HEAD,
+            "PR_node",
+            MergeMethod::Squash,
+            &[merge_group_run(974)],
+            Some(&dequeue_event()),
+            CiRoutingGate::DisabledClean,
+        )
+        .await;
+    let head = h
+        .actor
+        .route_pr_head_ci_evidence(
+            &provider,
+            &h.task_id,
+            "task-short",
+            "acme",
+            "widgets",
+            PR as u64,
+            HEAD,
+            &CheckRunsResponse::complete(vec![inconclusive_check("q", 974)]),
+            &[],
+            CiRoutingGate::DisabledClean,
+        )
+        .await;
+
+    assert_eq!(merge, CiLaneDisposition::Legacy);
+    assert_eq!(head, CiLaneDisposition::Legacy);
+    assert_eq!(
+        provider.calls(),
+        ProviderCalls::default(),
+        "no API call at all"
+    );
+    assert!(h.ci_snapshot().await.is_none(), "and no snapshot written");
+    assert_eq!(
+        djinn_db::test_support::ci_route_row_count_for_test(&h.db, &h.task_id).await,
+        0,
+    );
+}
+
+// ===========================================================================
+// `record_ci_snapshot`'s completeness gate, driven
+// ===========================================================================
+
+/// The snapshot writer refuses to record a verdict it cannot prove.
+///
+/// This is the third completeness guard and the only one reachable without a
+/// network seam: the early return fires before the GitHub client is used at all.
+/// It is what converts an unproven enumeration into `Unknown` — which the merge
+/// gate maps to `Hold` — instead of into a green verdict for a prefix that may
+/// be missing the one causal failure nobody saw.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn record_ci_snapshot_refuses_an_unproven_enumeration() {
+    let h = lane_harness().await;
+    let client = djinn_provider::github_api::GitHubApiClient::for_installation(1);
+
+    // Establish the head first. Writing this test surfaced an ordering fact
+    // worth recording: the completeness gate sits *after* the head-SHA-change
+    // branch, and that branch returns `Pending` outright for an empty or
+    // still-running check list. So on the very first observation of a new head
+    // the gate is not reached at all — the hold comes from the reset branch
+    // instead. Same outcome (`Pending` and `Unknown` both map to `Hold` at the
+    // merge gate, and neither writes a verdict), different mechanism, and a
+    // test that did not seed the head would have been asserting the reset
+    // branch while claiming to assert the gate.
+    let established = h
+        .actor
+        .record_ci_snapshot(
+            &h.task_id,
+            "task-short",
+            PR,
+            HEAD,
+            "main",
+            PR as u64,
+            &client,
+            "acme",
+            "widgets",
+            &CheckRunsResponse::complete(Vec::new()),
+        )
+        .await;
+    assert_eq!(
+        established,
+        djinn_core::models::CiStatus::Pending,
+        "precondition: the head-change branch answers first on a fresh head",
+    );
+
+    for (reason, runs) in [
+        (
+            djinn_provider::github_api::CheckSetIncompleteReason::PageFetchFailed,
+            Vec::new(),
+        ),
+        (
+            djinn_provider::github_api::CheckSetIncompleteReason::ShortRead,
+            vec![passing_check("Quality Gate / build")],
+        ),
+        (
+            djinn_provider::github_api::CheckSetIncompleteReason::MaxPagesTruncated,
+            vec![passing_check("Quality Gate / build")],
+        ),
+    ] {
+        let checks = CheckRunsResponse::incomplete(9, runs, reason);
+        let status = h
+            .actor
+            .record_ci_snapshot(
+                &h.task_id,
+                "task-short",
+                PR,
+                HEAD,
+                "main",
+                PR as u64,
+                &client,
+                "acme",
+                "widgets",
+                &checks,
+            )
+            .await;
+
+        assert_eq!(
+            status,
+            djinn_core::models::CiStatus::Unknown,
+            "{reason:?} must hold, not resolve to a verdict",
+        );
+        assert_ne!(
+            h.ci_snapshot().await.map(|s| s.ci_status),
+            Some(djinn_core::models::CiStatus::Passing),
+            "{reason:?} must never be recorded as Passing",
+        );
+    }
+
+    // The filter has to let the real thing through, or a no-CI repository
+    // wedges in `pr_draft` forever.
+    let status = h
+        .actor
+        .record_ci_snapshot(
+            &h.task_id,
+            "task-short",
+            PR,
+            HEAD,
+            "main",
+            PR as u64,
+            &client,
+            "acme",
+            "widgets",
+            &CheckRunsResponse::complete(vec![passing_check("Quality Gate / build")]),
+        )
+        .await;
+    assert_eq!(status, djinn_core::models::CiStatus::Passing);
+}
+
+/// Both lane fast paths must keep asking the completeness question.
+///
+/// Source-level, and honestly labelled as such. Driving `poll_pr_draft_tasks`
+/// or `poll_pr_review_tasks` end to end would need a GitHub base-URL seam that
+/// does not exist — `resolve_installation_client` builds
+/// `GitHubApiClient::for_installation`, which hard-codes `api.github.com` — so
+/// the reachable guarantees are the predicate test (which proves the shared
+/// function is right) and this one (which proves both branches still call it).
+/// Reverting either branch to a bare `checks.check_runs.is_empty()` fails here.
+#[test]
+fn both_lane_fast_paths_consult_the_completeness_predicate() {
+    for (label, source) in [
+        ("pr_draft", include_str!("../../pr_watcher.rs")),
+        ("pr_review", include_str!("../../pr_review_watcher.rs")),
+    ] {
+        assert!(
+            source.contains("empty_check_set_is_authoritatively_green"),
+            "the {label} no-CI fast path must consult the completeness predicate",
+        );
+        assert!(
+            !source.contains("checks.check_runs.is_empty() && checks.completeness.is_complete()"),
+            "the {label} fast path must not re-inline the predicate; there is one definition",
+        );
+    }
+}
+
+// ===========================================================================
+// Fail-closed on a route-table outage
+// ===========================================================================
+
+/// A route-table outage suppresses CI remediation on both lanes, and that is
+/// deliberate — but it must be observable rather than discovered in production.
+///
+/// `Deferred(RepositoryError)` suppresses the legacy path, so an outage silently
+/// stops all remediation. Fail-closed is the right direction (the alternative is
+/// re-running the legacy reopen against evidence whose route state is unknown,
+/// which can double-remedy), but it is also a total feature outage and the
+/// operator needs to know it is the designed behaviour.
+#[tokio::test]
+async fn a_route_table_outage_fails_closed_on_both_lanes() {
+    let f = fixture().await;
+    // Cascade: the budget-counter and lease tables reference this one, so a
+    // plain DROP is refused and the outage is not simulated at all.
+    djinn_db::test_support::drop_table_cascade_for_test(&f.db, "ci_route_attempts").await;
+
+    let checks = [inconclusive_check("Quality Gate / test", 980)];
+    let blocking = refs(&checks);
+    let head = run(
+        &f,
+        &f.target(),
+        &pr_head_identity(980),
+        &pr_head_identity(980),
+        &blocking,
+    )
+    .await;
+
+    let auto = CiAutoMergeTarget {
+        node_id: "PR_node",
+        commit_headline: "h",
+        method: MergeMethod::Squash,
+    };
+    let merge_id = merge_group_identity(981);
+    let merge = run(&f, &f.merge_target(&auto), &merge_id, &merge_id, &blocking).await;
+
+    assert_eq!(head, CiLaneOutcome::Deferred(CiDeferral::RepositoryError));
+    assert_eq!(merge, CiLaneOutcome::Deferred(CiDeferral::RepositoryError));
+    assert!(
+        head.suppresses_legacy_path() && merge.suppresses_legacy_path(),
+        "an unknown route state must not hand the evidence to a second remedy",
+    );
+    assert_eq!(
+        f.provider.calls().mutations(),
+        0,
+        "no provider mutation without a committed reservation",
+    );
 }

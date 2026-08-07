@@ -70,11 +70,32 @@ impl CiRoutingGate {
         }
     }
 
+    /// Resolve the gate from a lookup, absent included.
+    ///
+    /// # Why the default lives here and not in [`Self::from_env`]
+    ///
+    /// It used to be `std::env::var(..).map(from_value).unwrap_or_default()`,
+    /// with the whole expression inside `from_env` — and `from_env` had no
+    /// test, because a test would have had to mutate process-global
+    /// environment. `from_value` was covered exhaustively and covered nothing
+    /// that mattered: changing that one `unwrap_or_default()` to
+    /// `unwrap_or(Enabled)` turned the feature on fleet-wide and the entire
+    /// 2148-test suite stayed green.
+    ///
+    /// The *absent* case is the production default, so it belongs in a function
+    /// a test can call. `from_env` is now a one-line delegation with nothing
+    /// left in it to mutate, and [`the wiring test`] asserts it stays that way.
+    ///
+    /// [`the wiring test`]: super::executor::tests
+    pub(crate) fn from_lookup(lookup: impl FnOnce(&str) -> Option<String>) -> Self {
+        lookup(ENV_CI_EVIDENCE_ROUTING)
+            .map(|value| Self::from_value(&value))
+            .unwrap_or(Self::DisabledClean)
+    }
+
     /// Read the gate from [`ENV_CI_EVIDENCE_ROUTING`]. Absent is off.
     pub(crate) fn from_env() -> Self {
-        std::env::var(ENV_CI_EVIDENCE_ROUTING)
-            .map(|v| Self::from_value(&v))
-            .unwrap_or_default()
+        Self::from_lookup(|key| std::env::var(key).ok())
     }
 
     /// Whether a *new* route may be reserved, charged, or handed a provider

@@ -22,7 +22,9 @@ use super::ci_routing::executor::{
     recover_calling_owners_at_startup, sweep_reserved_routes,
 };
 use super::ci_routing::gate::CiRoutingGate;
-use super::ci_routing::{CiCapture, CiIncompleteReason, CiObservation, CiRouteSubject};
+use super::ci_routing::{
+    CiCapture, CiCompleteEmptyRoute, CiIncompleteReason, CiObservation, CiRouteSubject,
+};
 use super::ci_snapshot::evidence::{
     CiLaneEvidence, CiRunEvidence, capture_merge_group_evidence, capture_pr_head_evidence,
     correlate_merge_group_run, dequeue_identity,
@@ -36,11 +38,45 @@ pub(crate) enum CiLaneDisposition {
     Routed,
     /// The route layer declined. Run the legacy path unchanged.
     Legacy,
+    /// The enumeration was provably complete and contained nothing blocking.
+    ///
+    /// # Why this is a third answer and not `Routed`
+    ///
+    /// It was `Routed`, and that was a gate-on wedge. `CiCompleteEmptyRoute` was
+    /// produced by the classifier and read by nobody: `fold` only consulted
+    /// `suppresses_legacy_path`, which is true of everything except
+    /// `GateClosed`. So a merge-group dequeue whose correlated run yielded an
+    /// empty failing-check set returned `CompleteEmpty(MergeGroupRecordPassing)`
+    /// → `is_routed()` → `handle_queue_failure` returned early — and nothing
+    /// recorded `Passing`, nothing re-enqueued, nothing reopened. The task sat
+    /// in `pr_review` indefinitely, which is the opposite of the proposal's
+    /// "records current-head `Passing` and allows the existing review merge
+    /// gate".
+    ///
+    /// It is not `Legacy` either: the legacy path for both call sites is
+    /// *remediation*, and complete-empty is the compatibility path to green.
+    /// The lane's `Passing` snapshot is written before this is returned; the
+    /// caller's job is only to skip remediation and let its existing gate run.
+    CompleteEmpty(CiCompleteEmptyRoute),
 }
 
 impl CiLaneDisposition {
+    /// Whether the caller must withhold its legacy *remediation* path.
+    ///
+    /// True for `CompleteEmpty` as well as `Routed`: an authoritatively empty
+    /// enumeration is a verdict of green, and reopening a task for rework on
+    /// the strength of it would be the same wrong answer the completeness
+    /// verdict exists to prevent.
     pub(crate) fn is_routed(self) -> bool {
-        matches!(self, Self::Routed)
+        matches!(self, Self::Routed | Self::CompleteEmpty(_))
+    }
+
+    /// The lane compatibility path, when there is one.
+    pub(crate) fn complete_empty(self) -> Option<CiCompleteEmptyRoute> {
+        match self {
+            Self::CompleteEmpty(route) => Some(route),
+            _ => None,
+        }
     }
 }
 
@@ -51,7 +87,17 @@ impl CiLaneDisposition {
 /// sticky: if *any* route took ownership, the legacy path must stay withheld,
 /// or the one run the route layer declined would reopen the task while the
 /// other's re-run is in flight.
+///
+/// Complete-empty is answered before ownership because it is a *lane-level*
+/// capture: it can only arise when the lane produced no per-run evidence at
+/// all, so it is never in a vector alongside a route that took ownership.
 fn fold(outcomes: &[CiLaneOutcome]) -> CiLaneDisposition {
+    if let Some(route) = outcomes.iter().find_map(|outcome| match outcome {
+        CiLaneOutcome::CompleteEmpty(route) => Some(*route),
+        _ => None,
+    }) {
+        return CiLaneDisposition::CompleteEmpty(route);
+    }
     if outcomes.iter().any(CiLaneOutcome::suppresses_legacy_path) {
         CiLaneDisposition::Routed
     } else {
@@ -66,8 +112,74 @@ impl CoordinatorActor {
 
     /// The gate, read once per call site so a mid-poll environment change
     /// cannot split one lane's decisions across two postures.
+    ///
+    /// The lane methods take the resolved gate as a *parameter* rather than
+    /// reading it themselves. That is what makes them testable: a fixture that
+    /// had to mutate `DJINN_CI_EVIDENCE_ROUTING` to exercise the enabled path
+    /// would be mutating process-global state that every other test in the
+    /// binary can observe. The environment is read here, at the call site, and
+    /// nowhere else.
     pub(crate) fn ci_routing_gate(&self) -> CiRoutingGate {
         CiRoutingGate::from_env()
+    }
+
+    /// Record the lane compatibility verdict for an authoritatively complete
+    /// *empty* enumeration, and say which existing path the caller should take.
+    ///
+    /// Both lanes persist `Passing` for the current head, and the reason is the
+    /// same in each: the review merge gate maps `Unknown` to `Hold`, so a
+    /// repository with no blocking CI wedges forever unless something writes the
+    /// verdict down. Neither creates a route row, a Tier-2 lease, a Lead or
+    /// worker session, a provider action, or a Tier-1 charge — the snapshot is
+    /// the whole effect.
+    async fn record_complete_empty(
+        &self,
+        task_id: &str,
+        pull_number: u64,
+        head_sha: &str,
+        route: CiCompleteEmptyRoute,
+    ) -> CiLaneDisposition {
+        self.persist_ci_snapshot(
+            task_id,
+            pull_number,
+            head_sha,
+            djinn_core::models::CiStatus::Passing,
+            Vec::new(),
+            None,
+            0,
+            None,
+        )
+        .await;
+        tracing::info!(
+            task_id,
+            pr = pull_number,
+            ?route,
+            "ci route: authoritatively complete empty enumeration — recorded current-head Passing"
+        );
+        CiLaneDisposition::CompleteEmpty(route)
+    }
+
+    /// Fold a lane's outcomes and *execute* the compatibility path if that is
+    /// what they came to.
+    ///
+    /// Every `fold` call site goes through this. That is the point: the wedge
+    /// this replaces was a decision produced by the classifier and executed by
+    /// nobody, and a second `fold` call site that forgot to execute would
+    /// reintroduce it.
+    async fn settle(
+        &self,
+        outcomes: &[CiLaneOutcome],
+        task_id: &str,
+        pull_number: u64,
+        head_sha: &str,
+    ) -> CiLaneDisposition {
+        match fold(outcomes) {
+            CiLaneDisposition::CompleteEmpty(route) => {
+                self.record_complete_empty(task_id, pull_number, head_sha, route)
+                    .await
+            }
+            other => other,
+        }
     }
 
     /// Route the PR-head lane's terminal evidence.
@@ -92,8 +204,8 @@ impl CoordinatorActor {
         pr_head_sha: &str,
         checks: &CheckRunsResponse,
         blocking: &[&CheckRun],
+        gate: CiRoutingGate,
     ) -> CiLaneDisposition {
-        let gate = self.ci_routing_gate();
         if !gate.owns_routes() {
             return CiLaneDisposition::Legacy;
         }
@@ -116,7 +228,9 @@ impl CoordinatorActor {
         let outcomes = self
             .drive_lane(&target, &evidence, pr_number, pr_head_sha, provider, None)
             .await;
-        let disposition = fold(&outcomes);
+        let disposition = self
+            .settle(&outcomes, task_id, pull_number, pr_head_sha)
+            .await;
         tracing::debug!(
             task_id = %task_short_id,
             pr = pull_number,
@@ -156,8 +270,8 @@ impl CoordinatorActor {
         merge_method: MergeMethod,
         runs: &[WorkflowRun],
         dequeue: Option<&DequeueEvent>,
+        gate: CiRoutingGate,
     ) -> CiLaneDisposition {
-        let gate = self.ci_routing_gate();
         if !gate.owns_routes() {
             return CiLaneDisposition::Legacy;
         }
@@ -208,7 +322,9 @@ impl CoordinatorActor {
                 let outcomes = self
                     .drive_lane(&target, &evidence, pr_number, pr_head_sha, provider, None)
                     .await;
-                return fold(&outcomes);
+                return self
+                    .settle(&outcomes, task_id, pull_number, pr_head_sha)
+                    .await;
             }
         };
 
@@ -251,7 +367,9 @@ impl CoordinatorActor {
                         Some(known),
                     )
                     .await;
-                return fold(&outcomes);
+                return self
+                    .settle(&outcomes, task_id, pull_number, pr_head_sha)
+                    .await;
             }
         };
 
@@ -286,7 +404,9 @@ impl CoordinatorActor {
                     Some(known),
                 )
                 .await;
-            return fold(&outcomes);
+            return self
+                .settle(&outcomes, task_id, pull_number, pr_head_sha)
+                .await;
         }
 
         let evidence = capture_merge_group_evidence(
@@ -300,7 +420,9 @@ impl CoordinatorActor {
         let outcomes = self
             .drive_lane(&target, &evidence, pr_number, pr_head_sha, provider, None)
             .await;
-        let disposition = fold(&outcomes);
+        let disposition = self
+            .settle(&outcomes, task_id, pull_number, pr_head_sha)
+            .await;
         tracing::debug!(
             task_id = %task_short_id,
             pr = pull_number,

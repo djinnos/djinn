@@ -308,7 +308,8 @@ impl CoordinatorActor {
                 // queue via `enable_auto_merge`, stays `pr_review`, and
                 // dispatches no worker; everything else falls through to the
                 // reopen below exactly as before. Gate-off is a pure decline.
-                if self.ci_routing_gate().owns_routes() {
+                let gate = self.ci_routing_gate();
+                if gate.owns_routes() {
                     // Resolved only when the gate is on: enabling auto-merge
                     // with a method the repository forbids soft-fails and
                     // forfeits the gating, but the extra `GET /repos` must not
@@ -320,6 +321,11 @@ impl CoordinatorActor {
                         .first()
                         .copied()
                         .unwrap_or(MergeMethod::Squash);
+                    // Complete-empty is included in `is_routed`: the route
+                    // layer has already recorded current-head `Passing`, and the
+                    // existing review merge gate — which maps `Unknown` to
+                    // `Hold` — progresses on the next poll. Reopening for rework
+                    // here would contradict a verdict of green.
                     if self
                         .route_merge_group_ci_evidence(
                             gh_client,
@@ -333,6 +339,7 @@ impl CoordinatorActor {
                             method,
                             &runs,
                             dequeue,
+                            gate,
                         )
                         .await
                         .is_routed()

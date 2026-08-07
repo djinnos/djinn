@@ -695,19 +695,29 @@ impl CiProviderAction {
     /// than a convention every lane executor has to remember: a call site that
     /// skipped the scope would have nothing to pass to the provider.
     ///
-    /// # This is load-bearing, and it was not
+    /// # What this actually guarantees, and what it does not
     ///
-    /// The paragraph above used to be false. `CiProviderAction` exposed
-    /// `kind()` and `run_id()` as `pub(crate)`, so any module in the crate
-    /// could read the call target straight off the *unadmitted* value and call
-    /// `rerun_failed_jobs(owner, repo, action.run_id() as u64)` with no scope,
-    /// no guard, and no compiler complaint. The guarantee was a doc comment.
+    /// The accessor route is closed. `CiProviderAction` used to expose `kind()`
+    /// and `run_id()` as `pub(crate)`, so a sibling module could read the call
+    /// target straight off the *unadmitted* value; both now live on
+    /// [`AdmittedCiProviderAction`] alone, and `action.run_id()` no longer
+    /// compiles. That removes the accidental path — the one a reader would
+    /// reach for — and it is worth having.
     ///
-    /// Both accessors now live on [`AdmittedCiProviderAction`] and nowhere
-    /// else, so the only way to learn *which* call to make is to have already
-    /// entered the scope — and a scope that refused admission yields nothing to
-    /// read. That is the structural property the fixtures rely on when they
-    /// assert that a closed scope performs no provider mutation.
+    /// **It is not a proof, and this comment previously claimed it was.** The
+    /// executor is handed a `CiEvidenceIdentity` whose `run_id` and `lane` are
+    /// public fields on the `djinn-db` type, and `CiRouteDecision::provider_action`
+    /// is `pub(crate)`. A sibling module that reads the authorization bit and
+    /// then calls `provider.rerun_failed_jobs(owner, repo, identity.run_id as
+    /// u64)` with no scope and no guard compiles cleanly today. Closing that
+    /// would mean making the identity's fields private across `djinn-db`, which
+    /// is a wave-1 change with a large blast radius and is not attempted here.
+    ///
+    /// So: "no provider call escapes the tracked scope" is enforced by this
+    /// type for the obvious route, and by review for the rest. The fixtures
+    /// assert the *observable* property instead — a closed scope performs no
+    /// provider mutation, counted on the seam — which does not depend on the
+    /// stronger claim.
     pub(crate) fn admit(&self, scope: &ProviderActionScope) -> Option<AdmittedCiProviderAction> {
         scope.admit().map(|guard| AdmittedCiProviderAction {
             kind: self.kind,

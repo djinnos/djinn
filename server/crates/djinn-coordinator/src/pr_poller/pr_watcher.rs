@@ -216,6 +216,7 @@ impl CoordinatorActor {
                         .iter()
                         .filter(|cr| is_failing_conclusion(cr.conclusion.as_deref()))
                         .collect();
+                    let gate = self.ci_routing_gate();
                     let routed = poll_stack::boxed(|| {
                         self.route_pr_head_ci_evidence(
                             gh_client,
@@ -227,25 +228,34 @@ impl CoordinatorActor {
                             &pr.head.sha,
                             &checks,
                             &failing,
+                            gate,
                         )
                     })
                     .await;
-                    if !routed.is_routed() {
-                        poll_stack::boxed(|| {
-                            self.retrigger_inconclusive_run(
-                                gh_client,
-                                &task.id,
-                                &task.short_id,
-                                &pr.head.sha,
-                                &owner,
-                                &repo,
-                                pull_number,
-                                &checks,
-                            )
-                        })
-                        .await;
+                    // An authoritatively complete *empty* enumeration is the
+                    // lane's no-CI compatibility path, not remediation: the
+                    // route layer has already recorded current-head `Passing`,
+                    // so fall through to the undraft path rather than holding.
+                    if routed.complete_empty().is_some() {
+                        // fall through to the merge-conflict / undraft block
+                    } else {
+                        if !routed.is_routed() {
+                            poll_stack::boxed(|| {
+                                self.retrigger_inconclusive_run(
+                                    gh_client,
+                                    &task.id,
+                                    &task.short_id,
+                                    &pr.head.sha,
+                                    &owner,
+                                    &repo,
+                                    pull_number,
+                                    &checks,
+                                )
+                            })
+                            .await;
+                        }
+                        continue;
                     }
-                    continue;
                 }
                 CiStatus::Pending | CiStatus::Unknown => {
                     // No CI configured after min-age guard — treat as green.
@@ -297,6 +307,7 @@ impl CoordinatorActor {
                     // route — adjudicate the captured evidence before spending
                     // another worker session. While the gate is off this
                     // declines and `handle_ci_failure` is the whole behaviour.
+                    let gate = self.ci_routing_gate();
                     let routed = poll_stack::boxed(|| {
                         self.route_pr_head_ci_evidence(
                             gh_client,
@@ -308,48 +319,54 @@ impl CoordinatorActor {
                             &pr.head.sha,
                             &checks,
                             &failed_checks,
+                            gate,
                         )
                     })
                     .await;
-                    if routed.is_routed() {
+                    // Complete-empty falls through to undraft (the route layer
+                    // recorded `Passing`); every other routed answer holds.
+                    if routed.is_routed() && routed.complete_empty().is_none() {
                         self.pr_status_cache.remove(&task.id);
                         self.pr_draft_first_seen.remove(&task.id);
                         self.review_stuck_sha_first_seen.remove(&task.id);
                         continue;
                     }
-                    let handled = self
-                        .handle_ci_failure(
-                            gh_client,
-                            &task,
-                            &pr,
-                            &failed_checks,
-                            pr_url,
-                            &owner,
-                            &repo,
-                            pull_number,
-                        )
+                    if routed.complete_empty().is_none() {
+                        let handled = self
+                            .handle_ci_failure(
+                                gh_client,
+                                &task,
+                                &pr,
+                                &failed_checks,
+                                pr_url,
+                                &owner,
+                                &repo,
+                                pull_number,
+                            )
+                            .await;
+                        if handled {
+                            self.pr_status_cache.remove(&task.id);
+                            self.pr_draft_first_seen.remove(&task.id);
+                            self.review_stuck_sha_first_seen.remove(&task.id);
+                            continue;
+                        }
+                        // Advisory-only failures slipped through (required
+                        // checks are green). Overwrite the failing snapshot
+                        // with passing.
+                        poll_stack::boxed(|| {
+                            self.persist_ci_snapshot(
+                                &task.id,
+                                pull_number,
+                                &pr.head.sha,
+                                CiStatus::Passing,
+                                vec![],
+                                None,
+                                0,
+                                None,
+                            )
+                        })
                         .await;
-                    if handled {
-                        self.pr_status_cache.remove(&task.id);
-                        self.pr_draft_first_seen.remove(&task.id);
-                        self.review_stuck_sha_first_seen.remove(&task.id);
-                        continue;
                     }
-                    // Advisory-only failures slipped through (required checks
-                    // are green).  Overwrite the failing snapshot with passing.
-                    poll_stack::boxed(|| {
-                        self.persist_ci_snapshot(
-                            &task.id,
-                            pull_number,
-                            &pr.head.sha,
-                            CiStatus::Passing,
-                            vec![],
-                            None,
-                            0,
-                            None,
-                        )
-                    })
-                    .await;
                 }
                 CiStatus::Passing => {
                     // All required checks passed — proceed to merge-conflict

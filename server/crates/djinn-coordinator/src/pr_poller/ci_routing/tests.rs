@@ -226,13 +226,18 @@ fn fully_inconclusive_pr_head_run_is_tier_one_rerun() {
     assert_eq!(admitted.run_id(), 900);
 }
 
-/// The structural claim [`CiProviderAction::admit`] makes, asserted rather than
-/// documented: there is no way to learn the call target without a live guard.
+/// A closed scope yields no call target through the accessor route.
 ///
-/// A closed scope yields `None`, and `None` carries neither the action kind nor
-/// the run id — so the sibling-module executor that used to be writable
-/// (`rerun_failed_jobs(owner, repo, action.run_id() as u64)`, no scope, clean
-/// compile) no longer has anything to pass.
+/// `None` carries neither the action kind nor the run id, so the sibling-module
+/// executor that used to be writable (`rerun_failed_jobs(owner, repo,
+/// action.run_id() as u64)`, no scope, clean compile) no longer has anything to
+/// pass.
+///
+/// Scoped deliberately: this asserts the accessor route is closed, **not** that
+/// the scope cannot be bypassed at all. `CiEvidenceIdentity::run_id` is a public
+/// field on the `djinn-db` type the executor already holds, so a determined
+/// caller can still reconstruct the target. See [`CiProviderAction::admit`] for
+/// why that gap is left open and what it means.
 #[test]
 fn a_refused_admission_yields_no_call_target_at_all() {
     let checks = [ran_then_cancelled("Quality Gate / test (1)", 900)];

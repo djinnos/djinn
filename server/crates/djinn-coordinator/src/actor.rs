@@ -2718,6 +2718,60 @@ impl CoordinatorActor {
     }
 }
 
+/// Build a `CoordinatorActor` backed by a real ephemeral database, without
+/// spawning the run loop.
+///
+/// Hoisted out of this file's own `mod tests` so sibling test modules — notably
+/// the `pr_poller` CI-routing suite — can drive actor methods against real
+/// state. `CoordinatorActor::new(CoordinatorDeps::new(..))` is the same
+/// constructor production uses, so a method driven here is the production
+/// method.
+#[cfg(test)]
+pub(crate) fn actor_with_test_db(db: Database) -> CoordinatorActor {
+    use crate::test_helpers;
+    use djinn_slot::{ModelSlotConfig, SlotPoolConfig};
+    use std::collections::HashSet;
+
+    let (events_tx, _events_rx) = tokio::sync::broadcast::channel(16);
+    let cancel = CancellationToken::new();
+    let pool = SlotPoolHandle::spawn(
+        test_helpers::agent_context_from_db(db.clone(), cancel.clone()),
+        cancel.clone(),
+        SlotPoolConfig {
+            models: vec![ModelSlotConfig {
+                model_id: DEFAULT_MODEL_ID.to_owned(),
+                max_slots: 1,
+                roles: HashSet::from(["worker".to_owned()]),
+            }],
+            role_priorities: std::collections::HashMap::new(),
+        },
+    );
+    let (sender, receiver) = tokio::sync::mpsc::channel(64);
+    let (status_tx, _status_rx) = tokio::sync::watch::channel(SharedCoordinatorState {
+        dispatched: 0,
+        recovered: 0,
+        epic_throughput: std::collections::HashMap::new(),
+        pr_errors: std::collections::HashMap::new(),
+        rate_limited_until: None,
+    });
+    CoordinatorActor::new(
+        CoordinatorDeps::new(
+            events_tx,
+            cancel,
+            db,
+            pool,
+            CatalogService::new(),
+            HealthTracker::new(),
+            std::sync::Arc::new(RoleRegistry::new()),
+            BackgroundWorkTracker::default(),
+            djinn_lsp::LspManager::new(),
+        ),
+        receiver,
+        sender,
+        status_tx,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2839,45 +2893,7 @@ mod tests {
     /// Create a minimal actor for message-handling tests without spawning the
     /// full run-loop.  Returns the actor and a oneshot-capable sender.
     fn actor_with_test_db(db: Database) -> CoordinatorActor {
-        use crate::test_helpers;
-        let (events_tx, _events_rx) = broadcast::channel(16);
-        let cancel = CancellationToken::new();
-        let pool = SlotPoolHandle::spawn(
-            test_helpers::agent_context_from_db(db.clone(), cancel.clone()),
-            cancel.clone(),
-            SlotPoolConfig {
-                models: vec![ModelSlotConfig {
-                    model_id: DEFAULT_MODEL_ID.to_owned(),
-                    max_slots: 1,
-                    roles: HashSet::from(["worker".to_owned()]),
-                }],
-                role_priorities: HashMap::new(),
-            },
-        );
-        let (sender, receiver) = mpsc::channel(64);
-        let (status_tx, _status_rx) = watch::channel(SharedCoordinatorState {
-            dispatched: 0,
-            recovered: 0,
-            epic_throughput: HashMap::new(),
-            pr_errors: HashMap::new(),
-            rate_limited_until: None,
-        });
-        CoordinatorActor::new(
-            CoordinatorDeps::new(
-                events_tx,
-                cancel,
-                db,
-                pool,
-                CatalogService::new(),
-                HealthTracker::new(),
-                Arc::new(RoleRegistry::new()),
-                BackgroundWorkTracker::default(),
-                djinn_lsp::LspManager::new(),
-            ),
-            receiver,
-            sender,
-            status_tx,
-        )
+        super::actor_with_test_db(db)
     }
 
     #[tokio::test]
