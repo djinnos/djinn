@@ -565,6 +565,7 @@ mod tests {
                     ReadParams {
                         project: project_path.clone(),
                         identifier: "brief".to_string(),
+                        invocation_id: None,
                     },
                     &djinn_db::NoteAccessAttribution::unattributed(),
                 )
@@ -579,6 +580,7 @@ mod tests {
                     ReadParams {
                         project: project_path.clone(),
                         identifier: "roadmap".to_string(),
+                        invocation_id: None,
                     },
                     &djinn_db::NoteAccessAttribution::unattributed(),
                 )
@@ -654,6 +656,7 @@ mod tests {
                     ReadParams {
                         project: project.slug(),
                         identifier: permalink.to_string(),
+                        invocation_id: None,
                     },
                     &djinn_db::NoteAccessAttribution::unattributed(),
                 )

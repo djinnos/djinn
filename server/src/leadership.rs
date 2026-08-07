@@ -51,6 +51,17 @@
 
 use std::time::Duration;
 
+// How long leadership waits for the coordinator to quiesce its provider actions
+// before releasing the advisory lock.
+//
+// Owned by `djinn_coordinator::pr_poller::ci_routing::quiescence` rather than
+// declared here, because it is one half of a relation: it must be strictly
+// longer than the coordinator's own drain budget, or leadership gives up while
+// the coordinator is still joining and releases the lock with the stamp attempt
+// still outstanding. Spelled in two crates that relation was documented twice
+// and asserted nowhere; spelled once it carries a compile-time assertion and a
+// unit test inside the CI-routing acceptance filter.
+use djinn_coordinator::PROVIDER_ACTION_DRAIN_WAIT;
 use djinn_db::advisory_lock;
 use djinn_orchestration_types::ProviderActionScope;
 use sqlx::Connection;
@@ -75,37 +86,6 @@ pub const LOCK_OBJID: i32 = 1;
 /// held connection to detect loss. Kept short so promotion after the old pod
 /// exits is sub-deploy-window; the query is a trivial `pg_try_advisory_lock`.
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
-
-/// Race for leadership, then run the active subsystems on the winner.
-///
-/// * `dsn` — Postgres DSN for the dedicated lock connection. `None` means
-///   "no advisory lock" (in-process / non-Postgres / dev): we become leader
-///   immediately. The caller passes `None` outside the Kubernetes runtime so
-///   single-process dev and tests don't depend on a reachable Postgres for the
-///   lock.
-/// * `cancel` — process-wide shutdown token. On cancel we release the lock (if
-///   held) and return.
-/// * `on_acquire` — called **exactly once**, when this process becomes leader.
-///   Starts the coordinator + slot pool, the worker RPC listener, and the other
-///   mutating/periodic subsystems.
-///
-/// This future runs for the life of the process: it does not return after
-/// `on_acquire`; it holds the lock until cancellation (or exits the process if
-/// the lock connection is lost). Spawn it as a background task alongside the
-/// HTTP server.
-/// How long leadership waits for the coordinator to quiesce its provider
-/// actions before releasing the advisory lock.
-///
-/// Strictly longer than the coordinator's own drain budget so the ordinary
-/// outcome is "the coordinator finished and stamped", never "leadership gave up
-/// while the coordinator was still joining". Exceeding it is reported and the
-/// lock is released without a graceful proof — degraded but safe, and the
-/// safety is entirely on the *proof* side rather than the lock side:
-/// `recover_calling_owner` takes a row only against the former owner's own
-/// `provider_actions_drained_at` stamp, and `CiIncarnationLiveness` reads no
-/// other fact. A new lock owner that finds no stamp defers indefinitely, so an
-/// early release costs recovery latency and can never cost exclusion.
-const PROVIDER_ACTION_DRAIN_WAIT: std::time::Duration = std::time::Duration::from_secs(45);
 
 /// Close the CI-route provider-action gate and wait for the coordinator's drain
 /// stamp (proposal `nafu`, wave 3).
@@ -152,6 +132,23 @@ async fn quiesce_provider_actions(scope: Option<&ProviderActionScope>) {
     }
 }
 
+/// Race for leadership, then run the active subsystems on the winner.
+///
+/// * `dsn` — Postgres DSN for the dedicated lock connection. `None` means
+///   "no advisory lock" (in-process / non-Postgres / dev): we become leader
+///   immediately. The caller passes `None` outside the Kubernetes runtime so
+///   single-process dev and tests don't depend on a reachable Postgres for the
+///   lock.
+/// * `cancel` — process-wide shutdown token. On cancel we release the lock (if
+///   held) and return.
+/// * `on_acquire` — called **exactly once**, when this process becomes leader.
+///   Starts the coordinator + slot pool, the worker RPC listener, and the other
+///   mutating/periodic subsystems.
+///
+/// This future runs for the life of the process: it does not return after
+/// `on_acquire`; it holds the lock until cancellation (or exits the process if
+/// the lock connection is lost). Spawn it as a background task alongside the
+/// HTTP server.
 pub async fn run_with_leadership<F, Fut>(
     dsn: Option<String>,
     cancel: CancellationToken,

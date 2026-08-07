@@ -1,11 +1,28 @@
 use super::*;
 use crate::database::NoteSearchBackend as DatabaseNoteSearchBackend;
 use crate::repositories::note::embeddings::embedding_branch_filter_sql;
-use crate::repositories::note::rrf::rrf_fuse;
+use crate::repositories::note::rrf::{
+    KNOWLEDGE_INJECTION_CANDIDATE_WINDOW, RankingProfile, injection_rrf_k, rrf_fuse,
+    rrf_fuse_with_ranks,
+};
+use crate::repositories::note::scope_rank::{
+    ScopeCandidate, normalize_scope_path, rank_scope_candidates,
+};
 use crate::repositories::proposal::ProposalRepository;
 use djinn_memory::{ContradictionCandidate, MemorySearchEntityRow, ProposalSearchResult, TypeRisk};
 use std::time::Duration;
 use tokio::time::Instant;
+
+/// Sort a signal list by score descending, note ID ascending, and truncate.
+///
+/// Truncation is always applied **after** sorting, so it can only remove the
+/// weakest members of a list — never a high scorer that happened to arrive late
+/// or whose ID sorts late.
+fn cap_by_score(mut scores: Vec<(String, f64)>, limit: usize) -> Vec<(String, f64)> {
+    scores.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    scores.truncate(limit);
+    scores
+}
 
 fn merge_candidate_ids(lists: &[&[(String, f64)]]) -> Vec<String> {
     let mut ids = Vec::new();
@@ -18,6 +35,86 @@ fn merge_candidate_ids(lists: &[&[(String, f64)]]) -> Vec<String> {
         }
     }
     ids
+}
+
+/// How much wider than the candidate window raw signal generation runs, so the
+/// note-type/status eligibility filter still leaves a full window per signal.
+const INJECTION_RAW_SIGNAL_MULTIPLIER: usize = 4;
+
+/// Hard bound on rows scanned by the ranked-scope prefilter.
+///
+/// The scan is ordered by a score-correlated distance proxy (see
+/// [`NoteRepository::ranked_scope_signal`]), so the cap can only ever discard
+/// the *coarsest* matches — never an exact or near match. `n.id` breaks ties so
+/// the cut is deterministic.
+const INJECTION_SCOPE_SCAN_CAP: usize = 2000;
+
+/// SQL expression yielding the canonical form of one `scope_paths` element,
+/// applying the same rules as
+/// [`normalize_scope_path`](crate::repositories::note::scope_rank::normalize_scope_path):
+/// `\` folded to `/`, any leading `./` removed, repeated separators collapsed,
+/// trailing separator dropped.
+///
+/// It must stay in step with the Rust rules. If SQL normalized *less* than Rust
+/// does, the prefilter would stop being a superset and would silently discard
+/// notes whose stored scope path is merely non-canonical — which is exactly the
+/// bug this expression exists to prevent.
+///
+/// Absolute and `..`-bearing stored values are deliberately **not** repaired
+/// here; they survive the prefilter and are then rejected in Rust, so the two
+/// sides agree on the outcome.
+const NORMALIZED_SCOPE_VALUE_SQL: &str = "rtrim(regexp_replace(regexp_replace(\
+     replace(sp.value, '\\', '/'), '^(\\./)+', ''), '/+', '/', 'g'), '/')";
+
+/// One-based ranks of a candidate within each contributing signal list, in the
+/// fixed order lexical, embedding, temporal, graph, task-affinity, scope.
+///
+/// `None` means the candidate was absent from that signal's list.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct InjectionSignalRanks {
+    pub lexical: Option<usize>,
+    pub semantic: Option<usize>,
+    pub temporal: Option<usize>,
+    pub graph: Option<usize>,
+    pub task_affinity: Option<usize>,
+    pub scope: Option<usize>,
+}
+
+/// One fused knowledge-injection candidate with its full trace provenance.
+#[derive(Debug, Clone)]
+pub struct KnowledgeInjectionCandidate {
+    pub note: Note,
+    /// 1-based position in the single fused list handed to packing.
+    pub fused_rank: usize,
+    pub fused_score: f64,
+    pub signal_ranks: InjectionSignalRanks,
+}
+
+/// Inputs to [`NoteRepository::search_knowledge_injection_candidates`].
+#[derive(Debug)]
+pub struct KnowledgeInjectionSearchParams<'a> {
+    pub project_id: &'a str,
+    /// Task text used for lexical retrieval.
+    pub query: &'a str,
+    pub task_id: Option<&'a str>,
+    pub note_types: &'a [&'a str],
+    /// Repository paths already validated against the base-revision tree. An
+    /// empty slice yields an empty scope signal, never a recency fallback.
+    pub task_paths: &'a [String],
+    /// Requested injected cutoff. Sets `rrf_k` only.
+    pub top_k: usize,
+    /// Optional embedding list. `None` contributes an empty signal.
+    pub semantic_scores: Option<Vec<(String, f64)>>,
+}
+
+/// The single ordered candidate list handed to packing, plus the ranking
+/// identity recorded in retrieval traces.
+#[derive(Debug, Clone)]
+pub struct KnowledgeInjectionSearchResult {
+    pub candidates: Vec<KnowledgeInjectionCandidate>,
+    pub profile: RankingProfile,
+    pub rrf_k: f64,
+    pub candidate_window: usize,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -737,11 +834,408 @@ impl NoteRepository {
         Ok(query.fetch_all(self.db.pool()).await?)
     }
 
+    // ── Knowledge-injection ranked retrieval (proposal 5205) ───────────────
+
+    /// The deterministic ranked-scope signal list for `task_paths`.
+    ///
+    /// The SQL clause is a *superset* prefilter that bounds the scan; exact
+    /// component comparability, distance, best-pair aggregation, ordering, and
+    /// truncation are decided by
+    /// [`rank_scope_candidates`](crate::repositories::note::scope_rank::rank_scope_candidates),
+    /// which is pure and unit-tested. Global notes (empty `scope_paths`) are
+    /// deliberately excluded from this signal; they still reach fusion through
+    /// lexical, temporal, graph, or task-affinity lists.
+    pub async fn ranked_scope_signal(
+        &self,
+        project_id: &str,
+        task_paths: &[String],
+        note_types: &[&str],
+        window: usize,
+    ) -> Result<Vec<(String, f64)>> {
+        self.db.ensure_initialized().await?;
+        if task_paths.is_empty() || note_types.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Normalize the task side once, here, so the SQL prefilter compares
+        // canonical forms. An unsafe path (absolute or containing `.`/`..`) is
+        // dropped rather than resolved, matching `normalized_components`.
+        let task_paths: Vec<String> = task_paths
+            .iter()
+            .filter_map(|path| normalize_scope_path(path))
+            .collect();
+        if task_paths.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let types_in = note_types
+            .iter()
+            .map(|t| format!("'{t}'"))
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        // Postgres positional binds: $1 = project_id; per-task-path binds start
+        // at $2 and consume three placeholders each (LIKE/LIKE/=). The ORDER BY
+        // below reuses those same placeholders and adds none of its own.
+        let mut path_binds: Vec<String> = Vec::new();
+        let mut next = 2;
+        let mut exists_parts = Vec::new();
+        let mut distance_parts = Vec::new();
+        // The stored side is normalized in SQL with the same rules Rust uses:
+        // `\` folded to `/`, leading `./` removed, repeated separators
+        // collapsed, trailing separator dropped. Without this the prefilter is
+        // not a superset of what `component_distance` accepts, and a note
+        // scoped to `./src/app` is discarded before Rust ever sees it.
+        let scope_value = NORMALIZED_SCOPE_VALUE_SQL;
+        for task_path in &task_paths {
+            let p_like_task = next;
+            let p_like_scope = next + 1;
+            let p_eq = next + 2;
+            next += 3;
+            path_binds.push(task_path.clone());
+            path_binds.push(task_path.clone());
+            path_binds.push(task_path.clone());
+            let overlap = format!(
+                "${p_like_task} LIKE {scope_value} || '/%' \
+                 OR {scope_value} LIKE ${p_like_scope} || '/%' \
+                 OR {scope_value} = ${p_eq}"
+            );
+            exists_parts.push(format!(
+                "EXISTS (SELECT 1 FROM jsonb_array_elements_text(n.scope_paths) AS sp(value) \
+                 WHERE {overlap})"
+            ));
+            // Component count of this task path, computed here rather than in
+            // SQL because it is a constant per path. Interpolated as a plain
+            // integer literal, so it carries no injection surface.
+            let task_components = task_path.split('/').filter(|c| !c.is_empty()).count();
+            distance_parts.push(format!(
+                "(SELECT MIN(abs({task_components} - \
+                    COALESCE(array_length(string_to_array({scope_value}, '/'), 1), 0))) \
+                  FROM jsonb_array_elements_text(n.scope_paths) AS sp(value) \
+                  WHERE {overlap})"
+            ));
+        }
+        let exists_or = exists_parts.join(" OR ");
+        // `LEAST` ignores NULL arguments in Postgres, so a task path that
+        // matches nothing on this row simply does not contribute.
+        let best_distance = format!("LEAST({})", distance_parts.join(", "));
+
+        // NOTE: dynamic SQL (note_type IN list, per-task-path EXISTS clauses,
+        // and the distance expression built at runtime) — compile-time check
+        // not possible.
+        //
+        // The scan cap must not defeat `rank_scope_candidates`' sort-then-
+        // truncate guarantee (AC3). Ordering by `n.id` would do exactly that:
+        // on a project with more matching notes than the cap, an exact-match
+        // note whose ID sorts late would be dropped before scoring ever ran.
+        //
+        // So the cap is ordered by a *score-correlated* proxy instead: the
+        // minimum component-count difference between any task path and any
+        // overlapping scope path. The Rust score is `1 / (1 + min_distance)`,
+        // strictly decreasing in that distance, so ascending distance is
+        // descending score. Exact matches therefore always survive the cap,
+        // then nearest ancestors, and only the coarsest matches can be cut.
+        // `n.id` remains the tie-break so the cut stays deterministic.
+        //
+        // The proxy is computed over the LIKE prefilter, which is a superset of
+        // true component comparability; exactness is still decided in Rust.
+        let sql = format!(
+            "SELECT n.id, n.scope_paths::text AS scope_paths
+             FROM notes n
+             WHERE n.project_id = $1
+               AND n.status = 'active'
+               AND n.note_type IN ({types_in})
+               AND jsonb_array_length(n.scope_paths) > 0
+               AND ({exists_or})
+             ORDER BY {best_distance} NULLS LAST, n.id
+             LIMIT {INJECTION_SCOPE_SCAN_CAP}"
+        );
+
+        let mut query = sqlx::query_as::<_, (String, String)>(&sql).bind(project_id);
+        for value in &path_binds {
+            query = query.bind(value);
+        }
+        let rows = query.fetch_all(self.db.pool()).await?;
+
+        let candidates: Vec<ScopeCandidate> = rows
+            .into_iter()
+            .map(|(note_id, scope_paths)| ScopeCandidate {
+                note_id,
+                scope_paths: serde_json::from_str::<Vec<String>>(&scope_paths).unwrap_or_default(),
+            })
+            .collect();
+
+        Ok(rank_scope_candidates(&task_paths, &candidates, window))
+    }
+
+    /// Ranked knowledge-injection retrieval under
+    /// [`RankingProfile::KnowledgeInjectionV1`].
+    ///
+    /// This is the *only* caller of the injection profile. It fuses lexical,
+    /// embedding, temporal, graph, task-affinity, and validated-scope lists,
+    /// each requesting and retaining at most
+    /// [`KNOWLEDGE_INJECTION_CANDIDATE_WINDOW`] eligible notes, and returns at
+    /// most that many fused candidates in a single ordered list. Missing or
+    /// inapplicable signals contribute an empty list and never change another
+    /// signal's window. `top_k` only sets `rrf_k`; it never changes the window.
+    ///
+    /// Packing (`pack_ranked_knowledge_notes`) is the sole owner of the
+    /// confidence floor, top-k, and byte budget; nothing here filters by
+    /// confidence or truncates to `top_k`.
+    pub async fn search_knowledge_injection_candidates(
+        &self,
+        params: KnowledgeInjectionSearchParams<'_>,
+    ) -> Result<KnowledgeInjectionSearchResult> {
+        self.db.ensure_initialized().await?;
+
+        let KnowledgeInjectionSearchParams {
+            project_id,
+            query,
+            task_id,
+            note_types,
+            task_paths,
+            top_k,
+            semantic_scores,
+        } = params;
+
+        let window = KNOWLEDGE_INJECTION_CANDIDATE_WINDOW;
+        let rrf_k = injection_rrf_k(top_k);
+        let empty = || KnowledgeInjectionSearchResult {
+            candidates: Vec::new(),
+            profile: RankingProfile::KnowledgeInjectionV1,
+            rrf_k,
+            candidate_window: window,
+        };
+        if note_types.is_empty() {
+            return Ok(empty());
+        }
+
+        // Raw candidate generation runs wider than the window so that the
+        // note-type/status eligibility filter below still has `window`
+        // *eligible* rows to retain per signal.
+        let raw_limit = window.saturating_mul(INJECTION_RAW_SIGNAL_MULTIPLIER);
+
+        let lexical_scores = self
+            .ranked_lexical_scores(project_id, "", "", query, raw_limit as i64)
+            .await?;
+        let semantic_scores = semantic_scores.unwrap_or_default();
+        let scope_scores = self
+            .ranked_scope_signal(project_id, task_paths, note_types, window)
+            .await?;
+
+        // `seed_ids` are only the *seeds* for spreading activation, not the
+        // candidate universe. Graph proximity returns neighbours outside its
+        // seed set and task affinity is derived from task/epic memory refs
+        // independently of any seed, so both must be allowed to introduce
+        // candidates. Computing eligibility over the seeds alone would filter
+        // exactly those introductions away and reduce two of the six signals to
+        // re-orderers of what lexical/semantic/scope already found.
+        let seed_ids = merge_candidate_ids(&[&lexical_scores, &semantic_scores, &scope_scores]);
+
+        let (graph_result, task_scores) = tokio::join!(
+            self.graph_proximity_scores_with_edge_kinds(&seed_ids, 2, None),
+            self.task_affinity_scores(project_id, task_id),
+        );
+        let (graph_scores, _graph_warnings) = graph_result?;
+        let task_scores = task_scores?;
+
+        // Bound each contributing list by score before it widens the universe,
+        // so the eligibility query stays well inside Postgres' bind limit. This
+        // truncation is score-ordered (with note-ID ties), never ID-ordered, so
+        // it can only drop the weakest members of a signal.
+        let graph_scores = cap_by_score(graph_scores, raw_limit);
+        let task_scores = cap_by_score(task_scores, raw_limit);
+
+        // The candidate universe is the union of *every* signal's candidates.
+        let universe = merge_candidate_ids(&[
+            &lexical_scores,
+            &semantic_scores,
+            &scope_scores,
+            &graph_scores,
+            &task_scores,
+        ]);
+        if universe.is_empty() {
+            return Ok(empty());
+        }
+
+        // Temporal is a re-scorer: it ranks the universe rather than widening
+        // it, so it runs after the universe is complete and therefore covers
+        // graph- and task-introduced candidates too.
+        let temporal_scores = self.temporal_scores(project_id, &universe).await?;
+
+        // Every signal is filtered by the same search filters — project, active
+        // status, and the injected note types — and only then truncated to the
+        // window, so each retains at most `window` *eligible* notes.
+        let eligible = self
+            .injection_eligible_ids(project_id, note_types, &universe)
+            .await?;
+        let retain = |scores: Vec<(String, f64)>| -> Vec<(String, f64)> {
+            let mut kept: Vec<(String, f64)> = scores
+                .into_iter()
+                .filter(|(id, _)| eligible.contains(id))
+                .collect();
+            kept.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+            kept.truncate(window);
+            kept
+        };
+
+        // Signal order is fixed and mirrored by `InjectionSignalRanks`.
+        let signals = vec![
+            (retain(lexical_scores), rrf_k),
+            (retain(semantic_scores), rrf_k),
+            (retain(temporal_scores), rrf_k),
+            (retain(graph_scores), rrf_k),
+            (retain(task_scores), rrf_k),
+            (retain(scope_scores), rrf_k),
+        ];
+
+        let fusion_ids = merge_candidate_ids(
+            &signals
+                .iter()
+                .map(|(list, _)| list.as_slice())
+                .collect::<Vec<_>>(),
+        );
+        if fusion_ids.is_empty() {
+            return Ok(empty());
+        }
+        let confidence_map = self.note_confidence_map(&fusion_ids).await?;
+
+        let (fused, signal_ranks) = rrf_fuse_with_ranks(
+            &signals,
+            &confidence_map,
+            RankingProfile::KnowledgeInjectionV1,
+        );
+        let selected: Vec<(String, f64)> = fused.into_iter().take(window).collect();
+        if selected.is_empty() {
+            return Ok(empty());
+        }
+
+        let selected_ids: Vec<String> = selected.iter().map(|(id, _)| id.clone()).collect();
+        let notes_by_id = self
+            .injection_notes_by_id(project_id, &selected_ids)
+            .await?;
+
+        let rank_of = |signal_index: usize, note_id: &str| -> Option<usize> {
+            signal_ranks
+                .get(signal_index)
+                .and_then(|ranks| ranks.get(note_id).copied())
+        };
+
+        let candidates = selected
+            .into_iter()
+            .filter_map(|(id, fused_score)| {
+                notes_by_id
+                    .get(&id)
+                    .map(|note| KnowledgeInjectionCandidate {
+                        signal_ranks: InjectionSignalRanks {
+                            lexical: rank_of(0, &id),
+                            semantic: rank_of(1, &id),
+                            temporal: rank_of(2, &id),
+                            graph: rank_of(3, &id),
+                            task_affinity: rank_of(4, &id),
+                            scope: rank_of(5, &id),
+                        },
+                        note: note.clone(),
+                        fused_rank: 0,
+                        fused_score,
+                    })
+            })
+            .enumerate()
+            .map(|(index, mut candidate)| {
+                candidate.fused_rank = index + 1;
+                candidate
+            })
+            .collect();
+
+        Ok(KnowledgeInjectionSearchResult {
+            candidates,
+            profile: RankingProfile::KnowledgeInjectionV1,
+            rrf_k,
+            candidate_window: window,
+        })
+    }
+
+    /// Ids from `candidate_ids` that pass the shared injection search filters:
+    /// same project, active status, and one of the injected note types.
+    async fn injection_eligible_ids(
+        &self,
+        project_id: &str,
+        note_types: &[&str],
+        candidate_ids: &[String],
+    ) -> Result<HashSet<String>> {
+        if candidate_ids.is_empty() {
+            return Ok(HashSet::new());
+        }
+        let types_in = note_types
+            .iter()
+            .map(|t| format!("'{t}'"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        // NOTE: dynamic SQL (note_type IN list + id IN list). project_id is $1,
+        // so the id IN list starts at $2.
+        let placeholders = crate::repositories::pg_placeholders(candidate_ids.len(), 2);
+        let sql = format!(
+            "SELECT id FROM notes
+             WHERE project_id = $1
+               AND status = 'active'
+               AND note_type IN ({types_in})
+               AND id IN ({placeholders})"
+        );
+        let mut query = sqlx::query_scalar::<_, String>(&sql).bind(project_id);
+        for id in candidate_ids {
+            query = query.bind(id);
+        }
+        Ok(query.fetch_all(self.db.pool()).await?.into_iter().collect())
+    }
+
+    /// Hydrate full note rows for the fused injection candidates.
+    async fn injection_notes_by_id(
+        &self,
+        project_id: &str,
+        note_ids: &[String],
+    ) -> Result<HashMap<String, Note>> {
+        if note_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        // NOTE: dynamic SQL (id IN list). Non-macro `query_as::<_, Note>`:
+        // JSONB columns must be cast to text with plain aliases for `FromRow`.
+        let placeholders = crate::repositories::pg_placeholders(note_ids.len(), 2);
+        let sql = format!(
+            "SELECT n.id, n.project_id, n.permalink, n.title, n.file_path,
+                    n.storage, n.note_type, n.folder, n.status, n.tags::text AS tags, n.content,
+                    n.retrieval_anchor, n.created_at, n.updated_at, n.lifecycle_changed_at, n.last_accessed,
+                    n.access_count, n.confidence, n.abstract AS abstract_, n.overview,
+                    n.scope_paths::text AS scope_paths
+             FROM notes n
+             WHERE n.project_id = $1 AND n.id IN ({placeholders})"
+        );
+        let mut query = sqlx::query_as::<_, Note>(&sql).bind(project_id);
+        for id in note_ids {
+            query = query.bind(id);
+        }
+        Ok(query
+            .fetch_all(self.db.pool())
+            .await?
+            .into_iter()
+            .map(|note| (note.id.clone(), note))
+            .collect())
+    }
+
     /// Query notes whose `scope_paths` overlap with the given task paths.
     ///
     /// A note matches if it is either global (`scope_paths` is empty JSON array)
     /// or any of its scope path entries is a prefix of any provided task path.
     /// When `task_paths` is empty, only global notes are returned.
+    ///
+    /// Used by the JIT pitfalls retrieval path **and, on this branch, still by
+    /// `load_knowledge_context`**.
+    ///
+    /// Proposal `5205` retires this query for the knowledge-injection entry
+    /// point in favour of
+    /// [`Self::search_knowledge_injection_candidates`], but that cutover
+    /// (delivery-order step 4) is deliberately not flipped here: the ranked
+    /// machinery has landed while `prompt_context.rs` still calls this method.
+    /// The JIT call site is out of scope and keeps using it either way.
     pub async fn query_by_scope_overlap(
         &self,
         project_id: &str,

@@ -1107,6 +1107,92 @@ async fn terminalization_happens_exactly_once_across_reload() {
 // Calling owner handoff
 // ---------------------------------------------------------------------------
 
+/// The quiescence vocabulary is exactly one proof and one absence, in Rust and
+/// in the schema alike.
+///
+/// Migration 196 retired `process_terminated`. It was never producible: the
+/// only trace an abrupt death leaves behind is the automatic release of the
+/// coordinator advisory lock, and Postgres performs that release at backend
+/// termination — before the dying (or merely disconnected) client can react —
+/// so it proves the connection went away and never that the process did.
+/// Closing that gap needs elapsed time, which AC5 forbids.
+///
+/// A dead value that the schema still calls legal is not inert: the next reader
+/// wires a producer to it, which is exactly the elapsed-time inference this
+/// wave removed. So both halves are pinned here.
+///
+/// NAMED FAILING MUTATIONS. (a) Re-add `ProcessTerminated => "process_terminated"`
+/// to the `CiQuiescenceProof` `durable_enum!`: `parse` starts answering `Ok`
+/// and the first assertion fails. (b) Restore migration 193's wider CHECK (or
+/// drop 196's narrowed one): the INSERT succeeds and the second assertion
+/// fails. Neither mutation is caught by any other fixture, because every other
+/// caller of this repository now spells only `GracefulDrain` and `None`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn process_death_is_not_a_quiescence_proof_in_rust_or_in_the_schema() {
+    let f = fixture().await;
+    let repository = repo(&f.db);
+
+    assert!(
+        CiQuiescenceProof::parse("process_terminated").is_err(),
+        "`process_terminated` must not round trip: a spelling the enum accepts \
+         is a spelling a witness can be written for"
+    );
+    // Vacuity: `parse` really does accept the vocabulary that survives, so the
+    // assertion above is about the retired value rather than about `parse`
+    // rejecting everything.
+    assert_eq!(
+        CiQuiescenceProof::parse("graceful_drain").unwrap(),
+        CiQuiescenceProof::GracefulDrain
+    );
+    assert_eq!(
+        CiQuiescenceProof::parse("none").unwrap(),
+        CiQuiescenceProof::None
+    );
+
+    // And the database refuses it independently of Rust. The audit table has a
+    // foreign key onto the route, so a real reserved row goes in first —
+    // otherwise the INSERT would fail for the wrong reason and this would pass
+    // vacuously.
+    let input = reservation(
+        &f.subject,
+        "key-vocabulary",
+        pr_head_identity(1, "headsha-vocabulary"),
+        "fp-a",
+    );
+    repository.reserve(&input).await.unwrap();
+
+    let insert = |proof: &'static str| {
+        let db = f.db.clone();
+        let subject_id = f.subject.id.clone();
+        async move {
+            sqlx::query(
+                r#"INSERT INTO ci_route_calling_recoveries
+                     (id, subject_kind, subject_id, provider_action_key,
+                      recovering_incarnation, holds_exclusive_lock, quiescence_proof,
+                      recovery_reason, calling_recovery_timeout_secs, cas_won)
+                   VALUES ($1, 'task', $2, 'key-vocabulary', $3, TRUE, $4,
+                           'live_owner_deferred', 300, FALSE)"#,
+            )
+            .bind(uuid::Uuid::now_v7().to_string())
+            .bind(subject_id)
+            .bind(uuid::Uuid::now_v7().to_string())
+            .bind(proof)
+            .execute(db.pool())
+            .await
+        }
+    };
+
+    assert!(
+        insert("process_terminated").await.is_err(),
+        "the CHECK must refuse the retired spelling"
+    );
+    // Vacuity again: the same INSERT with a surviving spelling succeeds, so the
+    // refusal above is the CHECK and not a malformed statement.
+    insert("none")
+        .await
+        .expect("the surviving vocabulary still inserts");
+}
+
 /// A live `calling` owner is untouchable. Every illegal recovery shape — no
 /// lock, no quiescence proof, timeout not elapsed, wrong former owner — leaves
 /// the row unchanged and opens no Tier-2 lease, and every one of them is
@@ -1128,17 +1214,18 @@ async fn live_calling_owner_is_never_recovered() {
     let (_handle, sweeper) = reopened(&f.db);
 
     // 1. A periodic sweep that does not hold the exclusive lock.
+    //
+    // The proof passed here and in cases 4 and 5 is the *strongest* one the
+    // vocabulary has. That is the point: each of those deferrals must come
+    // from its own named predicate, so handing the call a proof that would
+    // otherwise be sufficient is what stops the assertion passing because the
+    // quiescence gate happened to refuse first.
     let deferred = sweeper
         .recover_calling_owner(
             &f.subject,
             "key-live",
             &identity,
-            &authority(
-                &owner,
-                &recovering,
-                CiQuiescenceProof::ProcessTerminated,
-                false,
-            ),
+            &authority(&owner, &recovering, CiQuiescenceProof::GracefulDrain, false),
             "lease-live",
         )
         .await
@@ -1177,25 +1264,34 @@ async fn live_calling_owner_is_never_recovered() {
         .unwrap();
     assert_deferred(&deferred, CiCallingRecoveryReason::LiveOwnerDeferred);
 
-    // 4. Process death is proven, but `calling_at` has not aged past the floor.
+    // 4. The drain is now genuinely recorded, so the quiescence gate is
+    //    satisfied — but `calling_at` has not aged past the floor.
+    //
+    //    Completing the owner's drain here is what makes this case test the
+    //    floor rather than re-test case 3: without it the call would defer on
+    //    `LiveOwnerDeferred` again and `TimeoutNotElapsed` would be
+    //    unreachable from this fixture.
+    let incarnations = CoordinatorIncarnationRepository::new(f.db.clone());
+    assert!(incarnations.mark_draining(&owner).await.unwrap());
+    assert!(
+        incarnations
+            .mark_provider_actions_drained(&owner)
+            .await
+            .unwrap()
+    );
     let deferred = sweeper
         .recover_calling_owner(
             &f.subject,
             "key-live",
             &identity,
-            &authority(
-                &owner,
-                &recovering,
-                CiQuiescenceProof::ProcessTerminated,
-                true,
-            ),
+            &authority(&owner, &recovering, CiQuiescenceProof::GracefulDrain, true),
             "lease-live",
         )
         .await
         .unwrap();
     assert_deferred(&deferred, CiCallingRecoveryReason::TimeoutNotElapsed);
 
-    // 5. Aged out, but fenced to the wrong former owner.
+    // 5. Aged out and provably drained, but fenced to the wrong former owner.
     age_calling(&f.db, "key-live", CI_CALLING_RECOVERY_TIMEOUT_SECS + 60).await;
     let deferred = sweeper
         .recover_calling_owner(
@@ -1205,7 +1301,7 @@ async fn live_calling_owner_is_never_recovered() {
             &authority(
                 &incarnation(),
                 &recovering,
-                CiQuiescenceProof::ProcessTerminated,
+                CiQuiescenceProof::GracefulDrain,
                 true,
             ),
             "lease-live",
@@ -1439,7 +1535,7 @@ async fn obsolete_row_handoff_closes_superseded_after_call() {
             &authority(
                 &former,
                 &incarnation(),
-                CiQuiescenceProof::ProcessTerminated,
+                CiQuiescenceProof::GracefulDrain,
                 true,
             ),
             "lease-gone",

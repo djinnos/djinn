@@ -16,6 +16,7 @@ mod abstract_regeneration;
 mod access_events;
 mod association;
 pub(crate) mod consolidation;
+pub(crate) mod consolidation_lifecycle;
 mod context;
 mod crud;
 mod embedding_associations;
@@ -35,8 +36,10 @@ mod note_quality;
 pub mod replay_validation;
 mod revisions;
 pub mod rrf;
+pub mod scope_rank;
 mod scoring;
 mod search;
+pub(crate) mod working_spec;
 
 // Note: as of the db-only knowledge-base cut-over, `indexing` exposes only
 // the wikilink graph helpers (used by `crud.rs`). The on-disk reindex
@@ -51,7 +54,8 @@ pub use abstract_regeneration::{
     select_stale_abstract_note_ids,
 };
 pub use access_events::{
-    NoteAccessAttribution, NoteAccessEvent, NoteAccessSource, note_access_events_for_note,
+    ExplicitAccessOutcome, INVOCATION_ID_MAX_CHARS, NoteAccessAttribution, NoteAccessEvent,
+    NoteAccessSource, access_event_timestamp, note_access_events_for_note,
 };
 pub use association::{
     NoteAssociationEntry, NoteAssociationKind, NoteAssociationProvenanceRow,
@@ -60,6 +64,21 @@ pub use association::{
 pub use consolidation::{
     CreateCanonicalConsolidatedNote, CreateConsolidationRunMetric,
     CreatedCanonicalConsolidatedNote, NoteConsolidationRepository,
+    is_consolidation_eligible_note_type,
+};
+pub use consolidation_lifecycle::{
+    BoundedCluster, BoundedClusteringOutcome, CONSOLIDATION_ATTEMPT_VERSION,
+    CONSOLIDATION_BACKFILL_BATCH_ROWS, CONSOLIDATION_CANONICAL_TAG,
+    CONSOLIDATION_DEFAULT_SCORE_THRESHOLD, CONSOLIDATION_ELIGIBLE_NOTE_TYPES,
+    CONSOLIDATION_MAX_ADMISSION_COMPARISONS, CONSOLIDATION_MAX_CLUSTER_SOURCES,
+    CONSOLIDATION_MAX_PARTITION_INPUTS, CONSOLIDATION_MIN_CLUSTER_SOURCES,
+    CommitConsolidationCanonical, CommittedConsolidationCanonical, ConsolidationAttemptWitness,
+    ConsolidationCommitOutcome, ConsolidationConflict, ConsolidationConflictReason,
+    ConsolidationPartitionKey, ConsolidationWriteBoundary, DirectedScoreRow,
+    EligibleSourceSelection, PartitionPressureMetric, ProvenanceBackfillReport,
+    build_bounded_clusters, cluster_source_id_set, clusters_are_disjoint,
+    connected_components_from_score_matrix, consolidation_attempt_id,
+    minimum_valid_score_threshold,
 };
 pub use djinn_memory::{
     BuildContextResponse, ConsolidatedNoteProvenance, ConsolidationCandidateEdge,
@@ -94,10 +113,21 @@ pub use revisions::{
     RevisionHistoryPage, RevisionLookupRequest, RevisionRangeRequest, SessionRevisionPage,
     SessionRevisionRequest, TrustedNoteRevisionAttribution, TrustedNoteRevisionProvenance,
 };
-pub use rrf::rrf_fuse;
+pub use rrf::{
+    KNOWLEDGE_INJECTION_CANDIDATE_WINDOW, RankingProfile, injection_rrf_k, rrf_fuse,
+    rrf_fuse_with_profile, rrf_fuse_with_ranks,
+};
+pub use scope_rank::{
+    ScopeCandidate, best_pair_score, component_distance, normalize_scope_path,
+    rank_scope_candidates,
+};
 pub use scoring::{
-    CO_ACCESS_HIGH, CONFIDENCE_CEILING, CONFIDENCE_FLOOR, CONTRADICTION, STALE_CITATION,
-    STALE_DECAY_SIGNAL, USER_CONFIRM, bayesian_update, decay_signal_for_elapsed_days,
+    CONFIDENCE_CEILING, CONFIDENCE_FLOOR, CONTRADICTION, STALE_CITATION, STALE_DECAY_SIGNAL,
+    USER_CONFIRM, bayesian_update, decay_signal_for_elapsed_days,
+};
+pub use search::{
+    InjectionSignalRanks, KnowledgeInjectionCandidate, KnowledgeInjectionSearchParams,
+    KnowledgeInjectionSearchResult,
 };
 
 use file_helpers::build_catalog;
@@ -121,6 +151,11 @@ pub use lifecycle::NoteStatus;
 pub use mutation::{
     NoteRevisionCreateState, NoteRevisionDesiredState, NoteRevisionEvent, NoteRevisionMutation,
     NoteRevisionMutationResult, NoteRevisionUpdateState, NoteSupersedesAssociation,
+};
+pub use working_spec::{
+    PersistWorkingSpecRequest, PersistedWorkingSpec, PromoteWorkingSpecSection,
+    PromotedWorkingSpecNote, WORKING_SPEC_CONSTRAINT_SENTENCE, WORKING_SPEC_TAG,
+    working_spec_permalink, working_spec_title,
 };
 
 /// Compact scope-overlap candidate row returned by
@@ -257,6 +292,9 @@ pub struct NoteRepository {
     vector_store: Arc<dyn NoteVectorStore>,
     revision_event_failure: std::sync::Arc<std::sync::atomic::AtomicBool>,
     association_failure: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Test-only seam proving that a failed `(note_id, session_id)` provenance
+    /// insert rolls back the extraction note mutation *and* its revision.
+    extraction_provenance_failure: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl NoteRepository {
@@ -269,6 +307,7 @@ impl NoteRepository {
             vector_store: Arc::new(NoopNoteVectorStore) as Arc<dyn NoteVectorStore>,
             revision_event_failure: mutation::revision_failure_flag(),
             association_failure: mutation::revision_failure_flag(),
+            extraction_provenance_failure: mutation::revision_failure_flag(),
         }
     }
 

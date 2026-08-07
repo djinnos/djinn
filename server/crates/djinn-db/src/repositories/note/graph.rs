@@ -605,7 +605,86 @@ impl NoteRepository {
         })
     }
 
+    /// Latest immutable revision for every supplied note, in **one** round trip.
+    ///
+    /// `DISTINCT ON (note_id)` with `ORDER BY note_id, note_seq DESC,
+    /// created_at DESC, id DESC` selects exactly the row the previous
+    /// per-note `note_revision_history(limit = 1)` call returned, so the
+    /// attribution reported by the audit is unchanged.
+    async fn latest_revision_attributions(
+        &self,
+        project_id: &str,
+        note_ids: &[String],
+    ) -> Result<HashMap<String, ExtractedNoteAuditAttribution>> {
+        if note_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let rows: Vec<LatestRevisionRow> = sqlx::query_as(
+            "SELECT DISTINCT ON (note_id) id, note_id, note_seq, event_kind, actor_kind, \
+             actor_id, subsystem, session_id, task_id, task_run_id, reason, created_at \
+             FROM note_revision_events \
+             WHERE project_id = $1 AND note_id = ANY($2::text[]) \
+             ORDER BY note_id, note_seq DESC, created_at DESC, id DESC",
+        )
+        .bind(project_id)
+        .bind(note_ids)
+        .fetch_all(self.db.pool())
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| {
+                (
+                    row.note_id,
+                    ExtractedNoteAuditAttribution {
+                        revision_id: row.id,
+                        revision_kind: row.event_kind,
+                        revision_seq: row.note_seq,
+                        revision_created_at: row.created_at,
+                        actor_kind: row.actor_kind,
+                        actor_id: row.actor_id,
+                        subsystem: row.subsystem,
+                        session_id: row.session_id,
+                        task_id: row.task_id,
+                        task_run_id: row.task_run_id,
+                        reason: row.reason,
+                    },
+                )
+            })
+            .collect())
+    }
+
+    /// Note IDs with at least one inbound wikilink, in **one** round trip.
+    /// Replaces the per-note `EXISTS(... note_links ...)` probe.
+    async fn linked_note_ids(&self, note_ids: &[String]) -> Result<HashSet<String>> {
+        if note_ids.is_empty() {
+            return Ok(HashSet::new());
+        }
+        let rows: Vec<String> = sqlx::query_scalar(
+            "SELECT DISTINCT target_id FROM note_links \
+             WHERE target_id = ANY($1::text[])",
+        )
+        .bind(note_ids)
+        .fetch_all(self.db.pool())
+        .await?;
+        Ok(rows.into_iter().collect())
+    }
+
     /// ADR-054 corpus audit for existing extracted case/pattern/pitfall notes.
+    ///
+    /// # Round-trip budget (proposal `t5rn`, T5)
+    ///
+    /// | Round trips | Operation |
+    /// | ---: | --- |
+    /// | 1 | eligible notes with deterministic per-type candidate ordinals |
+    /// | 1 | latest revision for every eligible note (`DISTINCT ON`) |
+    /// | 1 | inbound-link aggregate for every eligible note |
+    /// | 0–3 | one directed score-matrix query per eligible type, each capped to its first 200 inputs |
+    /// | **3–6 total** | independent of note count |
+    ///
+    /// There is deliberately no query inside a per-note, per-seed, or per-pair
+    /// loop. An empty type skips its score query and does not reallocate the
+    /// budget to anything else.
     pub async fn extracted_note_audit(&self, project_id: &str) -> Result<ExtractedNoteAuditReport> {
         self.db.ensure_initialized().await?;
 
@@ -631,52 +710,64 @@ impl NoteRepository {
         let mut archive_candidates = Vec::new();
         let mut seen = BTreeSet::new();
 
+        let note_ids = notes.iter().map(|note| note.id.clone()).collect::<Vec<_>>();
+
+        // Round trip 2: latest immutable revision for every eligible note. An
+        // absent entry is expected for pre-migration notes and deliberately
+        // remains unattributed.
+        let attribution_by_note = self
+            .latest_revision_attributions(project_id, &note_ids)
+            .await?;
+
+        // Round trip 3: inbound wikilink aggregate for every eligible note.
+        let linked_note_ids = self.linked_note_ids(&note_ids).await?;
+
+        // Round trips 4-6: one set-based directed score matrix per eligible
+        // type, each capped to that type's first 200 candidates. `notes` is
+        // already ordered by `(note_type, permalink)`, so `take` yields a
+        // deterministic per-type candidate ordinal.
         let consolidation_repo = NoteConsolidationRepository::new(self.db.clone());
         let mut cluster_by_note_id = BTreeMap::new();
-        for note_type in ["case", "pattern", "pitfall"] {
-            for cluster in consolidation_repo
-                .likely_duplicate_clusters(project_id, note_type)
-                .await?
-            {
-                let related = cluster
-                    .notes
-                    .iter()
-                    .map(|note| note.id.clone())
-                    .collect::<Vec<_>>();
-                for note in &cluster.notes {
-                    cluster_by_note_id.insert(note.id.clone(), related.clone());
+        for note_type in CONSOLIDATION_ELIGIBLE_NOTE_TYPES {
+            let inputs = notes
+                .iter()
+                .filter(|note| note.note_type == note_type)
+                .take(CONSOLIDATION_MAX_PARTITION_INPUTS)
+                .map(audit_consolidation_note)
+                .collect::<Vec<_>>();
+            if inputs.len() < 2 {
+                continue;
+            }
+            // Both halves of the old predicate are reproduced: the `0.0` floor
+            // with a strict `>` comparison, *and* the per-seed
+            // `ORDER BY score DESC LIMIT 16` truncation that
+            // `dedup_candidates_for_group` applied via `DEDUP_LIMIT`.
+            //
+            // The truncation is load-bearing here. These neighborhoods are
+            // connected components, so an untruncated edge set is strictly
+            // larger and can collapse a dense capped partition into one giant
+            // "likely duplicate" group the previous report never produced.
+            // The tie-break on `candidate_id` is new and makes the truncation
+            // deterministic; the old `ORDER BY score DESC` left ties arbitrary.
+            let scores = consolidation_repo
+                .directed_score_matrix(
+                    project_id,
+                    folder_for_type(note_type),
+                    note_type,
+                    &inputs,
+                    0.0,
+                    Some(AUDIT_DEDUP_PER_SEED_LIMIT),
+                )
+                .await?;
+            for component in connected_components_from_score_matrix(&inputs, &scores) {
+                for note_id in &component {
+                    cluster_by_note_id.insert(note_id.clone(), component.clone());
                 }
             }
         }
 
         for note in &notes {
-            // Select the latest immutable event under the same project/note
-            // scope as the audit. An empty history is expected for
-            // pre-migration notes and deliberately remains unattributed.
-            let attribution = self
-                .note_revision_history(NoteHistoryRequest {
-                    project_id,
-                    note_id: &note.id,
-                    limit: 1,
-                    before: None,
-                })
-                .await?
-                .events
-                .into_iter()
-                .next()
-                .map(|event| ExtractedNoteAuditAttribution {
-                    revision_id: event.id,
-                    revision_kind: event.event_kind.as_str().to_owned(),
-                    revision_seq: event.note_seq,
-                    revision_created_at: event.created_at,
-                    actor_kind: event.attribution.actor_kind().as_str().to_owned(),
-                    actor_id: event.attribution.actor_id().map(ToOwned::to_owned),
-                    subsystem: event.attribution.subsystem().map(ToOwned::to_owned),
-                    session_id: event.provenance.session_id().map(ToOwned::to_owned),
-                    task_id: event.provenance.task_id().map(ToOwned::to_owned),
-                    task_run_id: event.provenance.task_run_id().map(ToOwned::to_owned),
-                    reason: event.reason.into_inner(),
-                });
+            let attribution = attribution_by_note.get(&note.id).cloned();
             if let Some(related_ids) = cluster_by_note_id.get(&note.id)
                 && seen.insert((note.id.clone(), "merge"))
             {
@@ -706,12 +797,7 @@ impl NoteRepository {
                 && quality.paragraph_count <= 2
                 && quality.missing_sections.len() == required_sections(&note.note_type).len();
             let looks_task_local = looks_task_local(&note.title, &note.content);
-            let is_orphan = !sqlx::query_scalar!(
-                r#"SELECT EXISTS(SELECT 1 FROM note_links WHERE target_id = $1) AS "exists!: bool""#,
-                note.id
-            )
-            .fetch_one(self.db.pool())
-            .await?;
+            let is_orphan = !linked_note_ids.contains(&note.id);
 
             if quality.is_underspecified && seen.insert((note.id.clone(), "underspecified")) {
                 underspecified.push(ExtractedNoteAuditFinding {
@@ -1048,5 +1134,46 @@ impl NoteRepository {
         });
 
         Ok(ranked)
+    }
+}
+
+/// Per-seed candidate truncation for the corpus audit's likely-duplicate
+/// neighborhoods. This is the `DEDUP_LIMIT` the previous per-seed
+/// `dedup_candidates_for_group` call applied; preserving it keeps the reported
+/// neighborhoods identical to the pre-batching behaviour.
+const AUDIT_DEDUP_PER_SEED_LIMIT: i64 = 16;
+
+/// Raw row shape for the set-based latest-revision load.
+#[derive(Debug, sqlx::FromRow)]
+struct LatestRevisionRow {
+    id: String,
+    note_id: String,
+    note_seq: Option<i64>,
+    event_kind: String,
+    actor_kind: String,
+    actor_id: Option<String>,
+    subsystem: Option<String>,
+    session_id: Option<String>,
+    task_id: Option<String>,
+    task_run_id: Option<String>,
+    reason: String,
+    created_at: String,
+}
+
+/// Project an audit note onto the compact payload the score-matrix query and
+/// the grouping algorithm consume.
+fn audit_consolidation_note(note: &Note) -> djinn_memory::ConsolidationNote {
+    djinn_memory::ConsolidationNote {
+        id: note.id.clone(),
+        project_id: note.project_id.clone(),
+        permalink: note.permalink.clone(),
+        title: note.title.clone(),
+        note_type: note.note_type.clone(),
+        folder: note.folder.clone(),
+        scope_paths: note.scope_paths.clone(),
+        content: note.content.clone(),
+        abstract_: note.abstract_.clone(),
+        overview: note.overview.clone(),
+        confidence: note.confidence,
     }
 }

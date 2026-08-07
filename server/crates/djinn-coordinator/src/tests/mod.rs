@@ -318,10 +318,11 @@ async fn create_task_with_note(
 /// Poll the activity log until a coordinator-recorded outcome marker with
 /// `kind` and `reopen_count` exists for `task_id`, or panic on timeout.
 ///
-/// The coordinator applies outcome-confidence penalties asynchronously:
-/// `set_status*` logs a `status_changed` activity (which broadcasts an
-/// event), and the coordinator actor later fetches the task, applies the
-/// Bayesian penalty, and records the marker.  Tests that used a fixed
+/// The coordinator handles task outcomes asynchronously: `set_status*` logs a
+/// `status_changed` activity (which broadcasts an event), and the coordinator
+/// actor later fetches the task, resolves its `memory_refs`, and records the
+/// marker. (Since 9xih the marker is the whole side effect — the confidence
+/// penalty that used to accompany it was removed.)  Tests that used a fixed
 /// `sleep` to wait for that side-effect flaked under load because 50-
 /// 150ms is not a hard upper bound on scheduler + DB latency.  Polling
 /// for the marker directly observes the coordinator's completed work.

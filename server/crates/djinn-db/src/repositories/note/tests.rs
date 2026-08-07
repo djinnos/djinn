@@ -14,6 +14,7 @@ use super::*;
 mod association;
 mod association_source_aware;
 mod consolidation_housekeeping;
+mod consolidation_lifecycle;
 mod crud_storage;
 mod embedding_associations;
 mod embeddings;
@@ -23,6 +24,7 @@ mod graph_health;
 mod graph_proposals;
 mod graph_scoring;
 mod guidance;
+mod injection_ranking_signals;
 mod lifecycle_archive;
 mod lifecycle_decay;
 mod lifecycle_graph;
@@ -35,6 +37,7 @@ mod search_ranking;
 mod search_stats;
 mod session_scoped_consolidation;
 mod wikilink_graph;
+mod working_spec_lifecycle;
 
 /// Mutex kept around so embedding tests can serialize against the
 /// shared sqlite-vec extension state. With the MySQL migration the

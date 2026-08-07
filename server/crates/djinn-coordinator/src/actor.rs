@@ -1262,6 +1262,28 @@ impl CoordinatorActor {
         tracing::info!("CoordinatorActor stopped");
     }
 
+    /// Drive [`Self::run_dispatch_loop`] — the production loop, not a copy of
+    /// it — so a sibling test module can witness its cancellation arm.
+    ///
+    /// The arm is where CI-route provider actions are quiesced and this
+    /// incarnation's `provider_actions_drained_at` stamp is earned, and that
+    /// stamp is the *only* thing that ever lets a later incarnation recover a
+    /// charged `calling` row. Nothing else in this crate constructs a
+    /// `CoordinatorActor` and runs it, so until this existed the call could be
+    /// deleted outright with the whole suite still green: the drain would never
+    /// run in production, no stamp would ever be written, and every `calling`
+    /// row would strand for good.
+    ///
+    /// A shim rather than a visibility change on the loop itself, because the
+    /// proof token is deliberately unforgeable outside this module: the loop's
+    /// contract is "startup imports finished first", and a test that could
+    /// mint the token would erode it.
+    #[cfg(test)]
+    pub(crate) async fn drive_dispatch_loop_for_test(&mut self) {
+        self.run_dispatch_loop(StartupLegacySettingsImportsComplete)
+            .await;
+    }
+
     /// Enter the normal, potentially infinite dispatch loop only after the
     /// finite startup import phase has completed.
     async fn run_dispatch_loop(&mut self, _imports_complete: StartupLegacySettingsImportsComplete) {
@@ -1457,6 +1479,14 @@ impl CoordinatorActor {
         if self.prune_tick_counter >= 120 {
             self.prune_tick_counter = 0;
             poll_stack::boxed(|| self.prune_note_associations()).await;
+            // t5rn T6: passive per-(project, note_type) retrieval pressure,
+            // captured once per housekeeping sweep from one snapshot. Strictly
+            // report-only — no actuator, task, prompt policy, or deletion is
+            // derived from it, and it never runs on a write path.
+            poll_stack::boxed(|| async {
+                super::consolidation::report_partition_pressure(&self.db).await;
+            })
+            .await;
             if !self.should_skip_background_llm_work("hourly_note_consolidation") {
                 poll_stack::boxed(|| {
                     super::consolidation::run_note_consolidation(
@@ -2093,17 +2123,16 @@ impl CoordinatorActor {
             return;
         };
 
-        if let Err(e) = poll_stack::boxed(|| self.maybe_apply_task_outcome_confidence(&task)).await
-        {
+        if let Err(e) = poll_stack::boxed(|| self.maybe_record_task_outcome_marker(&task)).await {
             tracing::warn!(
                 task_id = %task_id,
                 error = %e,
-                "failed to apply task outcome confidence penalty"
+                "failed to record task outcome marker"
             );
         }
     }
 
-    async fn maybe_apply_task_outcome_confidence(
+    async fn maybe_record_task_outcome_marker(
         &self,
         task: &djinn_core::models::Task,
     ) -> djinn_db::Result<()> {
@@ -2113,9 +2142,12 @@ impl CoordinatorActor {
                 .task_outcome_marker_exists(task, TASK_OUTCOME_FAILED_CLOSE)
                 .await?
         {
-            poll_stack::boxed(|| self.apply_task_outcome_confidence_to_task_refs(task)).await?;
-            poll_stack::boxed(|| self.record_task_outcome_marker(task, TASK_OUTCOME_FAILED_CLOSE))
-                .await?;
+            let referenced =
+                poll_stack::boxed(|| self.task_outcome_referenced_note_ids(task)).await?;
+            poll_stack::boxed(|| {
+                self.record_task_outcome_marker(task, TASK_OUTCOME_FAILED_CLOSE, referenced)
+            })
+            .await?;
         }
 
         if task.status == "open"
@@ -2124,9 +2156,12 @@ impl CoordinatorActor {
                 .task_outcome_marker_exists(task, TASK_OUTCOME_REOPEN_COUNT)
                 .await?
         {
-            poll_stack::boxed(|| self.apply_task_outcome_confidence_to_task_refs(task)).await?;
-            poll_stack::boxed(|| self.record_task_outcome_marker(task, TASK_OUTCOME_REOPEN_COUNT))
-                .await?;
+            let referenced =
+                poll_stack::boxed(|| self.task_outcome_referenced_note_ids(task)).await?;
+            poll_stack::boxed(|| {
+                self.record_task_outcome_marker(task, TASK_OUTCOME_REOPEN_COUNT, referenced)
+            })
+            .await?;
         }
 
         Ok(())
@@ -2174,11 +2209,15 @@ impl CoordinatorActor {
         &self,
         task: &djinn_core::models::Task,
         kind: &str,
+        referenced_notes: Vec<String>,
     ) -> djinn_db::Result<()> {
         let task_repo = self.task_repo();
         let payload = serde_json::json!({
             "kind": kind,
             "reopen_count": task.reopen_count,
+            // Notes this outcome referenced. Recorded, never scored: since
+            // 9xih no confidence value is derived from a task outcome.
+            "referenced_notes": referenced_notes,
         })
         .to_string();
 
@@ -2195,15 +2234,32 @@ impl CoordinatorActor {
         Ok(())
     }
 
-    async fn apply_task_outcome_confidence_to_task_refs(
+    /// Record which notes a failing/reopened task referenced.
+    ///
+    /// **This no longer writes `notes.confidence` (proposal 9xih.)** It used to
+    /// apply `TASK_OUTCOME_CONFIDENCE_SIGNAL` (0.1 — as harsh as
+    /// `CONTRADICTION`) to every referenced note on a failed close or a reopen.
+    ///
+    /// That is precisely "task failure after injection", which AC1 of 9xih puts
+    /// on the forbidden side of the epistemic confidence write boundary: a task
+    /// failing while referencing a note says the note did not help, not that the
+    /// note is false. Because `notes.confidence` also gates injection
+    /// eligibility and archival lifecycle, the old behaviour let one failed task
+    /// drive a correct note toward the confidence floor and out of retrieval
+    /// entirely.
+    ///
+    /// The resolution loop is kept, and the resolved ids are returned to the
+    /// caller's activity marker, so the outcome stays observable.
+    async fn task_outcome_referenced_note_ids(
         &self,
         task: &djinn_core::models::Task,
-    ) -> djinn_db::Result<()> {
+    ) -> djinn_db::Result<Vec<String>> {
         let note_repo = NoteRepository::new(
             self.db.clone(),
             crate::events::event_bus_for(&self.events_tx),
         );
 
+        let mut referenced = Vec::new();
         for permalink in parse_json_array(&task.memory_refs) {
             let Some(note) = note_repo
                 .get_by_permalink(&task.project_id, &permalink)
@@ -2211,13 +2267,10 @@ impl CoordinatorActor {
             else {
                 continue;
             };
-
-            note_repo
-                .update_confidence(&note.id, TASK_OUTCOME_CONFIDENCE_SIGNAL)
-                .await?;
+            referenced.push(note.id);
         }
 
-        Ok(())
+        Ok(referenced)
     }
 
     /// ADR-051 §3 proactive canonical-graph staleness refresh.

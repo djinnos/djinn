@@ -207,6 +207,7 @@ mod tests {
             .memory_read(Parameters(ReadParams {
                 project: project.slug(),
                 identifier: legacy.permalink.clone(),
+                invocation_id: None,
             }))
             .await;
 

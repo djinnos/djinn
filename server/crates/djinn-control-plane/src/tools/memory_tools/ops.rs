@@ -4,8 +4,8 @@ use djinn_db::repositories::retrieval_trace::{
     RetrievalTraceRepository, TaxonomyV1RetrievalHealthGroup,
 };
 use djinn_db::{
-    NoteAccessAttribution, NoteAccessSource, NoteRepository, ProjectRepository,
-    normalize_virtual_note_path, permalink_from_virtual_note_path, resolve_short_ids,
+    NoteAccessAttribution, NoteRepository, ProjectRepository, normalize_virtual_note_path,
+    permalink_from_virtual_note_path, resolve_short_ids,
 };
 use djinn_telemetry::memory_retrieval::{
     MemoryRetrievalMetrics, RetrievalEntryPoint, RetrievalOutcome, RetrievalStage,
@@ -140,24 +140,29 @@ fn permalink_candidates(identifier: &str) -> Vec<String> {
     candidates
 }
 
+/// Note the search results in the session's in-memory co-access set.
+///
+/// **ADR-054 is superseded here for PERSISTED note access (proposal 9xih).**
+/// This used to call `NoteRepository::touch_accessed`, so appearing in a result
+/// set incremented `access_count` and advanced `last_accessed` exactly like an
+/// explicit `memory_read` did. The two became indistinguishable in those
+/// scalars, which is why migration 197 has to rebase them rather than partition
+/// them.
+///
+/// A note the agent never asked for by name is not an access. Search-result
+/// display now writes NO persisted note state: no `note_access_events` row, no
+/// counter, no timestamp. Only session-level co-access telemetry remains, and
+/// that touches neither confidence nor the access fields.
+///
+/// `_attribution` is retained in the signature because the caller has it and a
+/// future ledger source may need it; it is deliberately unused today.
 async fn record_retrieved_notes(
     server: &DjinnMcpServer,
-    repo: &NoteRepository,
+    _repo: &NoteRepository,
     note_ids: &[String],
-    attribution: &NoteAccessAttribution,
+    _attribution: &NoteAccessAttribution,
 ) {
-    // ADR-054 retrieval boundary: notes returned to the MCP client count as accessed,
-    // even if the client does not issue a follow-up `memory_read`. This keeps search
-    // result retrieval flows visible to temporal/co-access scoring without touching
-    // notes that were only considered internally during ranking.
-    //
-    // The ledger source is `MemorySearch`, NOT `MemoryRead`: appearing in a
-    // result set is not a pull, and the injected-pull-rate metric must never
-    // count it as one.
     for note_id in note_ids {
-        let _ = repo
-            .touch_accessed(note_id, NoteAccessSource::MemorySearch, attribution)
-            .await;
         server.record_memory_read(note_id).await;
     }
 }
@@ -274,11 +279,39 @@ fn extract_short_id_candidates(content: &str) -> Vec<String> {
 /// [`NoteAccessAttribution::unattributed`] from session-less surfaces (the host
 /// MCP server, operator tooling); the access is still recorded and is counted in
 /// the report's coverage diagnostics rather than dropped.
+///
+/// # The counted access boundary (proposal 9xih)
+///
+/// A counted access is **exactly one successful external `memory_read` handler
+/// result construction for a resolved note**. Everything about the ordering
+/// below is load-bearing:
+///
+/// 1. `invocation_id` is validated FIRST, before the project or the note is
+///    resolved, so an invalid id can never leave partial state behind.
+/// 2. The response is fully constructed BEFORE the access is recorded. A
+///    not-found read, an invalid request, or a failed construction therefore
+///    writes nothing.
+/// 3. `event_timestamp` is captured after resolution and immediately BEFORE the
+///    transaction, so it is the instant the read succeeded rather than whenever
+///    the write reached the database.
+///
+/// This boundary deliberately does NOT claim delivery to the client: once the
+/// handler returns, the server cannot observe the transport. If the connection
+/// drops after commit, the access stays counted — and a caller that supplied an
+/// `invocation_id` can retry safely, because the retry is recognised as a replay
+/// and counts nothing further.
 pub async fn memory_read(
     server: &DjinnMcpServer,
     p: ReadParams,
     attribution: &NoteAccessAttribution,
 ) -> MemoryNoteResponse {
+    // Before note resolution, on purpose: a blank or over-limit id is rejected
+    // without reading, touching, or counting anything.
+    let invocation_id = match super::reads::resolve_invocation_id(p.invocation_id.as_deref()) {
+        Ok(invocation_id) => invocation_id,
+        Err(error) => return MemoryNoteResponse::error(error),
+    };
+
     let project_id = match resolve_project_id(server, &p.project).await {
         Ok(id) => id,
         Err(error) => return MemoryNoteResponse::error(error),
@@ -327,9 +360,6 @@ pub async fn memory_read(
         }
     };
 
-    let _ = repo
-        .touch_accessed(&note.id, NoteAccessSource::MemoryRead, attribution)
-        .await;
     if note.abstract_.is_none() || note.overview.is_none() {
         server.enqueue_missing_summary_backfill(&note.id).await;
     }
@@ -371,6 +401,26 @@ pub async fn memory_read(
                 })
                 .collect();
         }
+    }
+
+    // The result is now fully constructed and this read has succeeded, so it
+    // counts. Stamp the event BEFORE opening the transaction: the recorded
+    // instant is when the read succeeded, not when the write landed.
+    let event_timestamp = djinn_db::repositories::note::access_event_timestamp();
+    if let Err(error) = repo
+        .record_explicit_access(&note.id, &invocation_id, &event_timestamp, attribution)
+        .await
+    {
+        // Fail-open on the response, never on the counter: instrumentation must
+        // not turn a successful read into an error for the caller. The access is
+        // simply not counted, which is the safe direction — an under-count is
+        // recoverable, a phantom count is not.
+        tracing::warn!(
+            %error,
+            note_id = %note.id,
+            invocation_id = %invocation_id,
+            "failed to record explicit note access; this read will not be counted"
+        );
     }
 
     response

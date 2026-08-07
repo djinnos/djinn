@@ -2,9 +2,12 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use djinn_core::models::{DjinnSettings, KnowledgeInjectionConfig};
 use djinn_db::{
-    CreateCanonicalConsolidatedNote, CreateConsolidationRunMetric, Database, DbNoteGroup,
-    NoteConsolidationRepository, NoteRevisionReason,
+    BoundedCluster, CONSOLIDATION_DEFAULT_SCORE_THRESHOLD, CommitConsolidationCanonical,
+    ConsolidationCommitOutcome, ConsolidationPartitionKey, CreateCanonicalConsolidatedNote,
+    CreateConsolidationRunMetric, Database, DbNoteGroup, NoteConsolidationRepository,
+    NoteRevisionReason, PartitionPressureMetric, SettingsRepository,
 };
 use djinn_memory::ConsolidationCluster;
 use time::OffsetDateTime;
@@ -301,6 +304,301 @@ fn now_rfc3339() -> String {
             OffsetDateTime::now_utc().to_string()
         }
     }
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Bounded, gated consolidation run (proposal `t5rn`, T2 + T6)
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// Environment variable names for the enablement gate.
+///
+/// The partition is read from configuration on purpose: nothing in this crate
+/// may name a particular deployment's project, session, or note type.
+pub const CONSOLIDATION_WRITES_ENV: &str = "DJINN_CONSOLIDATION_CANONICAL_WRITES";
+pub const CONSOLIDATION_PROJECT_ENV: &str = "DJINN_CONSOLIDATION_PROJECT_ID";
+pub const CONSOLIDATION_SESSION_ENV: &str = "DJINN_CONSOLIDATION_SESSION_ID";
+pub const CONSOLIDATION_NOTE_TYPE_ENV: &str = "DJINN_CONSOLIDATION_NOTE_TYPE";
+pub const CONSOLIDATION_THRESHOLD_ENV: &str = "DJINN_CONSOLIDATION_SCORE_THRESHOLD";
+
+/// The exactly-one-partition enablement gate.
+///
+/// Canonical writes default **off**. An enabled request is valid only when
+/// configuration supplies exactly one non-blank `project_id`, `session_id`, and
+/// eligible `note_type`; missing, extra, wildcard, or multi-valued keys are
+/// rejected before any synthesis.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConsolidationEnablement {
+    pub canonical_writes_enabled: bool,
+    pub project_id: Option<String>,
+    pub session_id: Option<String>,
+    pub note_type: Option<String>,
+    pub score_threshold: f64,
+}
+
+impl Default for ConsolidationEnablement {
+    fn default() -> Self {
+        Self {
+            canonical_writes_enabled: false,
+            project_id: None,
+            session_id: None,
+            note_type: None,
+            score_threshold: CONSOLIDATION_DEFAULT_SCORE_THRESHOLD,
+        }
+    }
+}
+
+impl ConsolidationEnablement {
+    /// Read the gate from the process environment. Absent keys stay `None` and
+    /// absent/unparseable enablement stays off.
+    pub fn from_env() -> Self {
+        fn non_blank(name: &str) -> Option<String> {
+            std::env::var(name)
+                .ok()
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty())
+        }
+        Self {
+            canonical_writes_enabled: non_blank(CONSOLIDATION_WRITES_ENV).is_some_and(|value| {
+                matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes")
+            }),
+            project_id: non_blank(CONSOLIDATION_PROJECT_ENV),
+            session_id: non_blank(CONSOLIDATION_SESSION_ENV),
+            note_type: non_blank(CONSOLIDATION_NOTE_TYPE_ENV),
+            // A configured value that is not a finite *positive* number falls
+            // back to the default rather than arming an indiscriminate merge;
+            // the gate rejects it again before any synthesis.
+            score_threshold: non_blank(CONSOLIDATION_THRESHOLD_ENV)
+                .and_then(|value| value.parse::<f64>().ok())
+                .filter(|value| value.is_finite() && *value > 0.0)
+                .unwrap_or(CONSOLIDATION_DEFAULT_SCORE_THRESHOLD),
+        }
+    }
+
+    /// Resolve the requested partition, or the reason it was rejected.
+    fn resolve_partition(&self) -> std::result::Result<ConsolidationPartitionKey, String> {
+        let (Some(project_id), Some(session_id), Some(note_type)) = (
+            self.project_id.as_ref(),
+            self.session_id.as_ref(),
+            self.note_type.as_ref(),
+        ) else {
+            return Err(
+                "consolidation requires exactly one project_id, session_id, and note_type"
+                    .to_owned(),
+            );
+        };
+        let key = ConsolidationPartitionKey {
+            project_id: project_id.clone(),
+            session_id: session_id.clone(),
+            note_type: note_type.clone(),
+        };
+        key.validate().map_err(|error| error.to_string())?;
+        // A non-positive threshold would admit every note to every other note,
+        // committing an arbitrary 8-note merge on a subtractive path. Refuse it
+        // rather than clamping, so the misconfiguration is visible.
+        djinn_db::minimum_valid_score_threshold(self.score_threshold)
+            .map_err(|error| error.to_string())?;
+        Ok(key)
+    }
+}
+
+/// Settings key holding the serialized `DjinnSettings` blob.
+const SETTINGS_RAW_KEY: &str = "settings.raw";
+
+/// Report per-`(project_id, note_type)` retrieval pressure once per housekeeping
+/// sweep (proposal `t5rn`, T6).
+///
+/// This is strictly report-only. It performs one read of the configured
+/// injection budget and one grouped snapshot query, emits the readings, and
+/// stops. It creates no prompt policy, no task, no cooldown, no deletion, and no
+/// automatic actuator, and it is never invoked on a write path.
+///
+/// `injectable_slots` is the configured `knowledge_injection_limit`. That budget
+/// is shared across the eligible note types rather than split per type, so the
+/// per-type ceiling is the whole limit: each type could in principle fill the
+/// entire context build. Reporting it per type keeps the ratio comparable
+/// across types without inventing a split the retrieval path does not implement.
+pub async fn report_partition_pressure(db: &Database) -> Vec<PartitionPressureMetric> {
+    let settings = match SettingsRepository::new(db.clone(), djinn_core::events::EventBus::noop())
+        .get(SETTINGS_RAW_KEY)
+        .await
+    {
+        Ok(setting) => setting
+            .map(|setting| DjinnSettings::from_db_value(&setting.value))
+            .unwrap_or_default(),
+        Err(error) => {
+            tracing::warn!(%error, "consolidation pressure: failed to load settings; using defaults");
+            DjinnSettings::default()
+        }
+    };
+    let injectable_slots = match KnowledgeInjectionConfig::from_settings_and_env(&settings) {
+        Ok(config) => i64::from(config.knowledge_injection_limit),
+        Err(error) => {
+            tracing::warn!(%error, "consolidation pressure: invalid knowledge injection config");
+            i64::from(KnowledgeInjectionConfig::DEFAULT_KNOWLEDGE_INJECTION_LIMIT)
+        }
+    };
+    let slots_by_note_type = djinn_db::CONSOLIDATION_ELIGIBLE_NOTE_TYPES
+        .iter()
+        .map(|note_type| ((*note_type).to_owned(), injectable_slots))
+        .collect::<std::collections::HashMap<_, _>>();
+
+    let metrics = match NoteConsolidationRepository::new(db.clone())
+        .partition_pressure_metrics(&slots_by_note_type)
+        .await
+    {
+        Ok(metrics) => metrics,
+        Err(error) => {
+            tracing::warn!(%error, "consolidation pressure: failed to snapshot partition pressure");
+            return Vec::new();
+        }
+    };
+
+    for metric in &metrics {
+        tracing::info!(
+            project_id = %metric.project_id,
+            note_type = %metric.note_type,
+            eligible_notes = metric.eligible_notes,
+            injectable_slots = metric.injectable_slots,
+            oversubscription_ratio = metric.oversubscription_ratio,
+            unbounded_pressure = metric.unbounded_pressure,
+            "consolidation partition pressure"
+        );
+    }
+    metrics
+}
+
+/// The committed effects of the single canonical transaction a run may perform.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConsolidationWriteResult {
+    pub canonical_note_id: String,
+    pub consolidation_attempt_id: String,
+    pub canonical_body_digest: String,
+    pub canonical_provenance_session_ids: Vec<String>,
+    pub supersedes_source_note_ids: Vec<String>,
+    pub final_source_statuses: Vec<(String, String)>,
+}
+
+/// Machine-readable outcome of one bounded consolidation run.
+///
+/// There is exactly one requested partition, at most one `write_result`, and a
+/// `deferred_clusters` entry for every other qualifying cluster. A disabled,
+/// rejected, empty, or conflict run has no `write_result`.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ConsolidationRunReport {
+    pub requested_partition: Option<ConsolidationPartitionKey>,
+    pub canonical_writes_enabled: bool,
+    pub rejection_reason: Option<String>,
+    pub conflict_reason: Option<String>,
+    pub input_count: usize,
+    pub overflow_count: usize,
+    pub admission_comparisons: usize,
+    pub qualifying_cluster_count: usize,
+    pub write_result: Option<ConsolidationWriteResult>,
+    /// Sorted source IDs of every qualifying cluster this run did **not**
+    /// synthesize or mutate.
+    pub deferred_clusters: Vec<Vec<String>>,
+}
+
+/// Execute one bounded consolidation run for the configured partition.
+///
+/// Regardless of enablement the run reports candidates, overflow, and every
+/// qualifying cluster. When enabled and valid it commits **at most the first**
+/// deterministic qualifying cluster and defers all the rest; widening either
+/// the partition or the one-canonical-per-run limit is out of scope.
+pub async fn run_bounded_consolidation(
+    db: &Database,
+    config: &ConsolidationEnablement,
+) -> djinn_db::Result<ConsolidationRunReport> {
+    let mut report = ConsolidationRunReport {
+        canonical_writes_enabled: config.canonical_writes_enabled,
+        ..ConsolidationRunReport::default()
+    };
+
+    let partition = match config.resolve_partition() {
+        Ok(partition) => partition,
+        Err(reason) => {
+            report.rejection_reason = Some(reason);
+            return Ok(report);
+        }
+    };
+    report.requested_partition = Some(partition.clone());
+
+    let repo = NoteConsolidationRepository::new(db.clone());
+    let outcome = repo
+        .bounded_clusters_for_partition(&partition, config.score_threshold)
+        .await?;
+    report.input_count = outcome.input_count;
+    report.overflow_count = outcome.overflow_count;
+    report.admission_comparisons = outcome.admission_comparisons;
+    report.qualifying_cluster_count = outcome.clusters.len();
+
+    let mut clusters = outcome.clusters.into_iter();
+    let Some(first) = clusters.next() else {
+        return Ok(report);
+    };
+    let deferred = clusters.collect::<Vec<_>>();
+
+    if !config.canonical_writes_enabled {
+        // Disabled: report the first cluster as deferred too. Nothing is
+        // synthesized and nothing is mutated.
+        report.deferred_clusters = std::iter::once(first)
+            .chain(deferred)
+            .map(|cluster| cluster.source_note_ids)
+            .collect();
+        return Ok(report);
+    }
+
+    report.deferred_clusters = deferred
+        .iter()
+        .map(|cluster| cluster.source_note_ids.clone())
+        .collect();
+
+    let synthesized = synthesize_bounded_cluster(&first);
+    let reason = NoteRevisionReason::new("consolidation:create canonical cluster note")
+        .map_err(|e| djinn_db::error::DbError::InvalidData(e.to_string()))?;
+    let commit = repo
+        .commit_consolidation_canonical(CommitConsolidationCanonical {
+            partition: &partition,
+            source_note_ids: &first.source_note_ids,
+            title: &synthesized.title,
+            content: &synthesized.content,
+            abstract_: synthesized.abstract_.as_deref(),
+            overview: synthesized.overview.as_deref(),
+            confidence: synthesized.confidence,
+            scope_paths: &synthesized.scope_paths,
+            reason,
+        })
+        .await?;
+
+    match commit {
+        ConsolidationCommitOutcome::Committed(committed)
+        | ConsolidationCommitOutcome::AlreadyCommitted(committed) => {
+            report.write_result = Some(ConsolidationWriteResult {
+                canonical_note_id: committed.canonical_note_id,
+                consolidation_attempt_id: committed.consolidation_attempt_id,
+                canonical_body_digest: committed.canonical_body_digest,
+                canonical_provenance_session_ids: committed.canonical_provenance_session_ids,
+                supersedes_source_note_ids: committed.supersedes_source_note_ids,
+                final_source_statuses: committed.final_source_statuses,
+            });
+        }
+        ConsolidationCommitOutcome::Conflict(conflict) => {
+            // A conflict creates nothing, so the attempted cluster joins the
+            // deferred list and no `write_result` is emitted.
+            report.conflict_reason = Some(format!("{:?}: {}", conflict.reason, conflict.detail));
+            report.deferred_clusters.insert(0, first.source_note_ids);
+        }
+    }
+
+    Ok(report)
+}
+
+fn synthesize_bounded_cluster(cluster: &BoundedCluster) -> SynthesizedClusterNote {
+    synthesize_cluster(&ConsolidationCluster {
+        note_ids: cluster.source_note_ids.clone(),
+        notes: cluster.ordered_notes.clone(),
+        edges: Vec::new(),
+    })
 }
 
 pub(super) async fn run_note_consolidation(
@@ -1012,5 +1310,260 @@ mod tests {
         assert_eq!(metric.consolidated_note_count, 1);
         assert_eq!(metric.source_note_count, 3);
         assert!(metric.completed_at.is_some());
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // t5rn AC6 — enablement gate, one commit per run, deferred clusters
+    // ═══════════════════════════════════════════════════════════════════════
+
+    async fn note_status(db: &Database, note_id: &str) -> Option<String> {
+        let repo = NoteRepository::new(db.clone(), djinn_core::events::EventBus::noop());
+        repo.get(note_id).await.unwrap().map(|note| note.status)
+    }
+
+    /// Count notes whose *immutable* creation revision is consolidation
+    /// attributed — the authoritative canonical identity, not the display tag.
+    async fn canonical_note_count(db: &Database, project_id: &str, note_type: &str) -> usize {
+        let repo = NoteConsolidationRepository::new(db.clone());
+        let notes = repo
+            .list_db_notes_in_group(project_id, note_type)
+            .await
+            .unwrap();
+        let mut count = 0usize;
+        for note in notes {
+            if repo.is_consolidation_canonical(&note.id).await.unwrap() {
+                count += 1;
+            }
+        }
+        count
+    }
+
+    /// Build a dense, fully-eligible partition of `count` similar notes.
+    async fn dense_partition(
+        db: &Database,
+        tx: &broadcast::Sender<djinn_core::events::DjinnEventEnvelope>,
+        project_id: &str,
+        count: usize,
+    ) -> (String, Vec<String>) {
+        let note_repo = NoteRepository::new(db.clone(), crate::events::event_bus_for(tx));
+        let consolidation_repo = NoteConsolidationRepository::new(db.clone());
+        let session_repo = SessionRepository::new(db.clone(), crate::events::event_bus_for(tx));
+        let session = session_repo
+            .create(CreateSessionParams {
+                project_id,
+                task_id: None,
+                model: "test-model",
+                agent_type: "worker",
+                metadata_json: None,
+                task_run_id: None,
+                pricing: None,
+                cost_basis: None,
+            })
+            .await
+            .unwrap();
+
+        let mut note_ids = Vec::with_capacity(count);
+        for index in 0..count {
+            let note = note_repo
+                .create_db_note(
+                    project_id,
+                    &format!("Retry Storm Variant {index}"),
+                    "Retry storms amplify duplicate recovery work during incident recovery.",
+                    "pattern",
+                    "[]",
+                )
+                .await
+                .unwrap();
+            consolidation_repo
+                .add_provenance(&note.id, &session.id)
+                .await
+                .unwrap();
+            note_ids.push(note.id);
+        }
+        (session.id, note_ids)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn canonical_writes_default_off_and_report_defers_every_cluster() {
+        let db = test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(256);
+        let project = test_helpers::create_test_project(&db).await;
+        let (session, note_ids) = dense_partition(&db, &tx, &project.id, 12).await;
+
+        // The shipped default gate is off.
+        assert!(!ConsolidationEnablement::default().canonical_writes_enabled);
+
+        let config = ConsolidationEnablement {
+            canonical_writes_enabled: false,
+            project_id: Some(project.id.clone()),
+            session_id: Some(session.clone()),
+            note_type: Some("pattern".to_owned()),
+            // Relaxed so this fixture's real `ts_rank` scores clear it; the
+            // production default remains `CONSOLIDATION_DEFAULT_SCORE_THRESHOLD`.
+            score_threshold: 1e-6,
+        };
+        let report = run_bounded_consolidation(&db, &config).await.unwrap();
+
+        assert!(
+            report.write_result.is_none(),
+            "a disabled run must not write"
+        );
+        assert!(report.rejection_reason.is_none());
+        assert_eq!(report.input_count, 12);
+        assert!(
+            !report.deferred_clusters.is_empty(),
+            "the fixture must produce at least one qualifying cluster to defer"
+        );
+        assert_eq!(
+            report.deferred_clusters.len(),
+            report.qualifying_cluster_count
+        );
+
+        // Nothing was mutated and no canonical exists.
+        assert_eq!(canonical_note_count(&db, &project.id, "pattern").await, 0);
+        for note_id in &note_ids {
+            assert_eq!(note_status(&db, note_id).await.as_deref(), Some("active"));
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn invalid_exact_one_partition_keys_are_rejected_before_synthesis() {
+        let db = test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(256);
+        let project = test_helpers::create_test_project(&db).await;
+        let (session, note_ids) = dense_partition(&db, &tx, &project.id, 4).await;
+
+        let invalid = [
+            (None, Some(session.clone()), Some("pattern".to_owned())),
+            (Some(project.id.clone()), None, Some("pattern".to_owned())),
+            (Some(project.id.clone()), Some(session.clone()), None),
+            (
+                Some(project.id.clone()),
+                Some(session.clone()),
+                Some("design".to_owned()),
+            ),
+            (
+                Some(project.id.clone()),
+                Some(session.clone()),
+                Some("case,pattern".to_owned()),
+            ),
+            (
+                Some("*".to_owned()),
+                Some(session.clone()),
+                Some("pattern".to_owned()),
+            ),
+        ];
+
+        for (project_id, session_id, note_type) in invalid {
+            let config = ConsolidationEnablement {
+                canonical_writes_enabled: true,
+                project_id: project_id.clone(),
+                session_id: session_id.clone(),
+                note_type: note_type.clone(),
+                score_threshold: 1e-6,
+            };
+            let report = run_bounded_consolidation(&db, &config).await.unwrap();
+            assert!(
+                report.rejection_reason.is_some(),
+                "expected rejection for {project_id:?}/{session_id:?}/{note_type:?}"
+            );
+            assert!(report.write_result.is_none());
+            assert!(report.requested_partition.is_none());
+        }
+
+        assert_eq!(canonical_note_count(&db, &project.id, "pattern").await, 0);
+        for note_id in &note_ids {
+            assert_eq!(note_status(&db, note_id).await.as_deref(), Some("active"));
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn enabled_dense_run_commits_only_its_first_cluster_and_defers_the_rest() {
+        let db = test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(256);
+        let project = test_helpers::create_test_project(&db).await;
+        let (session, note_ids) = dense_partition(
+            &db,
+            &tx,
+            &project.id,
+            djinn_db::CONSOLIDATION_MAX_PARTITION_INPUTS,
+        )
+        .await;
+
+        let config = ConsolidationEnablement {
+            canonical_writes_enabled: true,
+            project_id: Some(project.id.clone()),
+            session_id: Some(session.clone()),
+            note_type: Some("pattern".to_owned()),
+            score_threshold: 1e-6,
+        };
+        let report = run_bounded_consolidation(&db, &config).await.unwrap();
+
+        assert!(report.rejection_reason.is_none());
+        assert!(report.conflict_reason.is_none());
+        assert_eq!(
+            report.input_count,
+            djinn_db::CONSOLIDATION_MAX_PARTITION_INPUTS
+        );
+        assert!(report.admission_comparisons <= djinn_db::CONSOLIDATION_MAX_ADMISSION_COMPARISONS);
+
+        let write_result = report
+            .write_result
+            .as_ref()
+            .expect("an enabled dense run commits its first qualifying cluster");
+        let committed_sources = write_result
+            .supersedes_source_note_ids
+            .iter()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(committed_sources.len() >= djinn_db::CONSOLIDATION_MIN_CLUSTER_SOURCES);
+        assert!(committed_sources.len() <= djinn_db::CONSOLIDATION_MAX_CLUSTER_SOURCES);
+        assert!(!write_result.canonical_note_id.is_empty());
+        assert!(!write_result.consolidation_attempt_id.is_empty());
+        assert!(
+            write_result
+                .canonical_provenance_session_ids
+                .contains(&session)
+        );
+        assert!(
+            write_result
+                .final_source_statuses
+                .iter()
+                .all(|(_, status)| status == "superseded")
+        );
+
+        // Exactly one canonical transaction ran.
+        assert_eq!(canonical_note_count(&db, &project.id, "pattern").await, 1);
+
+        // Every other source is untouched.
+        for note_id in &note_ids {
+            let expected = if committed_sources.contains(note_id) {
+                "superseded"
+            } else {
+                "active"
+            };
+            assert_eq!(
+                note_status(&db, note_id).await.as_deref(),
+                Some(expected),
+                "note {note_id} should be {expected}"
+            );
+        }
+
+        // Every remaining qualifying cluster is reported and disjoint from the
+        // committed one.
+        assert!(
+            !report.deferred_clusters.is_empty(),
+            "a dense 200-input run must defer the clusters it did not commit"
+        );
+        assert_eq!(
+            report.deferred_clusters.len(),
+            report.qualifying_cluster_count - 1
+        );
+        for deferred in &report.deferred_clusters {
+            assert!(
+                deferred.iter().all(|id| !committed_sources.contains(id)),
+                "deferred clusters must not overlap the committed cluster"
+            );
+        }
     }
 }

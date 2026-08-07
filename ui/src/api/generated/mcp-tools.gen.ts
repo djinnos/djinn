@@ -4769,6 +4769,10 @@ export namespace MemoryReadInputSchema {
    * Note permalink (e.g. "decisions/my-adr") or title.
    */
   identifier: string
+  /**
+   * Optional caller-supplied id identifying ONE logical read invocation, max 64 characters. Reusing it on a retry makes the access count exactly once; omitting it makes every attempt a distinct access.
+   */
+  invocation_id?: string
   project: string
   [k: string]: any
   }

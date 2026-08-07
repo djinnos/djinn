@@ -88,9 +88,20 @@ pub struct CreatedCanonicalConsolidatedNote {
     pub superseded_source_note_count: usize,
 }
 
+/// The three note types consolidation is ever allowed to touch. Hand-authored
+/// types (`adr`, `design`, `reference`, …) are outside this boundary and can
+/// never become a consolidation source.
+pub fn is_consolidation_eligible_note_type(note_type: &str) -> bool {
+    matches!(note_type, "case" | "pattern" | "pitfall")
+}
+
 pub struct NoteConsolidationRepository {
-    db: Database,
-    note_repo: NoteRepository,
+    pub(super) db: Database,
+    pub(super) note_repo: NoteRepository,
+    /// Test-only fault-injection point inside the atomic canonical transaction.
+    /// `0` disables injection; otherwise it is a
+    /// [`super::ConsolidationWriteBoundary`] discriminant.
+    pub(super) canonical_write_failure: std::sync::Arc<std::sync::atomic::AtomicU8>,
 }
 
 impl NoteConsolidationRepository {
@@ -98,6 +109,7 @@ impl NoteConsolidationRepository {
         Self {
             note_repo: NoteRepository::new(db.clone(), EventBus::noop()),
             db,
+            canonical_write_failure: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0)),
         }
     }
 
@@ -105,7 +117,11 @@ impl NoteConsolidationRepository {
     /// insert rolls back repository-owned canonical creation.
     #[cfg(any(test, feature = "test-support"))]
     pub fn with_note_repository_for_test(db: Database, note_repo: NoteRepository) -> Self {
-        Self { db, note_repo }
+        Self {
+            db,
+            note_repo,
+            canonical_write_failure: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0)),
+        }
     }
 
     /// Return distinct session IDs that have at least one provenance entry,
@@ -834,7 +850,7 @@ fn sql_placeholders(count: usize, start_index: usize) -> String {
     crate::repositories::pg_placeholders(count, start_index)
 }
 
-fn sanitize_fts5_query(query: &str) -> Option<String> {
+pub(super) fn sanitize_fts5_query(query: &str) -> Option<String> {
     let terms = query
         .split_whitespace()
         .map(|term| {

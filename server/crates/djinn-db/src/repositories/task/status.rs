@@ -190,6 +190,19 @@ impl TaskRepository {
                 async move {
                     let mut tx = self.db.pool().begin().await?;
 
+                    // t5rn T4: take the task row lock *before* reading, and hold
+                    // it for the whole transaction. Working-spec persistence
+                    // locks this same row, so a terminal transition and an
+                    // in-flight persistence can never interleave in a way that
+                    // leaves an active working spec attached to a terminal task.
+                    // The lock is a separate statement because the projection
+                    // macro below carries correlated subqueries that `FOR UPDATE`
+                    // would try to lock too.
+                    sqlx::query("SELECT id FROM tasks WHERE id = $1 FOR UPDATE")
+                        .bind(&id)
+                        .execute(&mut *tx)
+                        .await?;
+
                     let current: Task =
                         task_select_where_id!(&id).fetch_one(&mut *tx).await?;
                     let from = TaskStatus::parse(&current.status)?;
@@ -313,6 +326,33 @@ impl TaskRepository {
                             "4etb: adjudication child-close transaction failed"
                         );
                         return Err(e);
+                    }
+
+                    // t5rn T4: a terminal transition archives every matching
+                    // active working spec in THIS transaction, under the task
+                    // row lock taken above. Keyed off the state model's own
+                    // terminal predicate, not a separate close-event reading, so
+                    // every status the model classifies as terminal is covered.
+                    // Idempotent: the archive's `status = 'active'` guard makes
+                    // a repeated terminal delivery a no-op.
+                    if TaskStatus::parse(&task.status)
+                        .map(|status| status.is_terminal())
+                        .unwrap_or(false)
+                    {
+                        let archived =
+                            crate::repositories::note::working_spec::archive_task_working_specs_tx(
+                                &mut tx,
+                                &task.id,
+                                "archived task working spec on terminal task state",
+                            )
+                            .await?;
+                        if !archived.is_empty() {
+                            tracing::debug!(
+                                task_id = %task.short_id,
+                                archived = archived.len(),
+                                "t5rn: archived working specs on terminal task state"
+                            );
+                        }
                     }
 
                     tx.commit().await?;

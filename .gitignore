@@ -54,3 +54,17 @@ report.json
 # `git show --stat` check before push.
 core.[0-9]*
 core
+
+# Knowledge-injection ranking evaluation corpus (proposal 5205).
+#
+# The judged fixture, its manifest, and the captured baseline are
+# PER-DEPLOYMENT empirical artifacts: they contain real note IDs, task IDs,
+# retrieval-trace IDs, base commits, and human relevance judgments from one
+# specific installation. They must never be committed — this repository is
+# shared across deployments, and a hand-authored substitute would make every
+# downstream metric green while proving nothing.
+#
+# Each operator supplies their own corpus here and points the evaluator at it:
+#   cargo run -p djinn-memory-eval -- injection-ranking \
+#     --manifest server/crates/djinn-memory-eval/fixtures/local/injection-ranking-v1.manifest.json
+server/crates/djinn-memory-eval/fixtures/local/

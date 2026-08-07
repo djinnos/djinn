@@ -795,8 +795,253 @@ fn format_related_names(syms: &[djinn_control_plane::bridge::RelatedSymbol], max
         .join(", ")
 }
 
-/// Extract crate/module path prefixes from a task's description, design, and epic context.
+/// Compiled matcher for path-shaped prose tokens.
+///
+/// Matches things like `crates/foo`, `src/bar/baz`, `server/crates/djinn-db` —
+/// anything with at least two slash-separated segments. It is deliberately
+/// permissive: it also matches prose pairs such as `accept/reject`, `Pod/Job`,
+/// and `and/or`. Discriminating real repository paths from prose is the job of
+/// [`derive_task_scope_paths`], which validates every token against the task
+/// attempt's base-revision Git tree.
+fn task_scope_path_regex() -> Option<&'static regex::Regex> {
+    use regex::Regex;
+    use std::sync::OnceLock;
+    static TASK_SCOPE_PATH_RE: OnceLock<Result<Regex, regex::Error>> = OnceLock::new();
+    match TASK_SCOPE_PATH_RE.get_or_init(|| {
+        Regex::new(r#"(?:^|[\s`"(])([a-zA-Z0-9_-]+(?:/[a-zA-Z0-9_.-]+){1,6})(?:[\s`")\.,:]|$)"#)
+    }) {
+        Ok(re) => Some(re),
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                "failed to compile task-scope path regex; skipping scope derivation"
+            );
+            None
+        }
+    }
+}
+
+/// A read-only view of the task attempt's **base-revision Git tree**.
+///
+/// This is deliberately not the mutable worker worktree and not a SCIP graph
+/// snapshot: prose tokens are validated against the immutable revision the
+/// attempt branched from, so validation is reproducible for a given task.
+pub trait BaseTreeProvider: Send + Sync {
+    /// True when `path` names a tracked blob at the base revision.
+    fn is_file(&self, path: &str) -> bool;
+    /// True when `path` names a directory holding tracked entries at the base
+    /// revision.
+    fn is_directory(&self, path: &str) -> bool;
+}
+
+/// A [`BaseTreeProvider`] built from the tracked path list of one revision,
+/// e.g. `git ls-tree -r --name-only <base_commit>`.
+///
+/// Directory membership is derived from the file list, so a directory exists
+/// exactly when it holds at least one tracked file — which is precisely Git's
+/// own notion of a tree.
+#[derive(Debug, Clone, Default)]
+pub struct ListedBaseTree {
+    files: std::collections::HashSet<String>,
+    directories: std::collections::HashSet<String>,
+}
+
+impl ListedBaseTree {
+    /// Build from tracked file paths, which must already be repository-relative
+    /// and `/`-separated (Git's own output form).
+    pub fn from_tracked_files<I, S>(paths: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let mut files = std::collections::HashSet::new();
+        let mut directories = std::collections::HashSet::new();
+        for path in paths {
+            let path = path.as_ref().trim();
+            if path.is_empty() {
+                continue;
+            }
+            files.insert(path.to_owned());
+            let components: Vec<&str> = path.split('/').filter(|c| !c.is_empty()).collect();
+            for end in 1..components.len() {
+                directories.insert(components[..end].join("/"));
+            }
+        }
+        Self { files, directories }
+    }
+
+    /// Number of tracked files, for diagnostics.
+    pub fn file_count(&self) -> usize {
+        self.files.len()
+    }
+}
+
+impl BaseTreeProvider for ListedBaseTree {
+    fn is_file(&self, path: &str) -> bool {
+        self.files.contains(path)
+    }
+    fn is_directory(&self, path: &str) -> bool {
+        self.directories.contains(path)
+    }
+}
+
+/// Why validated scope derivation could not consult a base-revision tree.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScopeFallbackReason {
+    /// No base-revision tree provider was supplied or it could not be built.
+    /// Retrieval then ranks by task text and the remaining signals; it must not
+    /// trust unvalidated regex tokens.
+    TreeProviderUnavailable,
+}
+
+impl ScopeFallbackReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::TreeProviderUnavailable => "tree_provider_unavailable",
+        }
+    }
+}
+
+/// Result of validated task-scope derivation.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DerivedTaskScope {
+    /// Validated repository paths, deduplicated and sorted for determinism.
+    /// Empty whenever `fallback_reason` is set.
+    pub paths: Vec<String>,
+    /// Set when the base tree was unavailable, so traces can distinguish
+    /// "nothing matched" from "we could not check".
+    pub fallback_reason: Option<ScopeFallbackReason>,
+}
+
+/// Normalize one prose token into a candidate repository path.
+///
+/// 1. converts `\` separators to `/`,
+/// 2. removes a leading `./`,
+/// 3. collapses repeated separators, and
+/// 4. rejects absolute paths and any `.` or `..` component.
+///
+/// Git path case is preserved. Returns `None` for a token that can never be a
+/// safe repository-relative path.
+pub fn normalize_scope_token(raw: &str) -> Option<String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let unified = raw.replace('\\', "/");
+    // Absolute paths (POSIX root or a Windows drive letter) are rejected
+    // outright rather than silently reinterpreted as relative.
+    if unified.starts_with('/') {
+        return None;
+    }
+    let stripped = unified.strip_prefix("./").unwrap_or(&unified);
+    let mut components: Vec<&str> = Vec::new();
+    for component in stripped.split('/') {
+        if component.is_empty() {
+            // Collapse repeated separators.
+            continue;
+        }
+        if component == "." || component == ".." {
+            // Traversal is rejected, never resolved.
+            return None;
+        }
+        components.push(component);
+    }
+    if components.is_empty() {
+        return None;
+    }
+    Some(components.join("/"))
+}
+
+/// Resolve a normalized token against the base tree.
+///
+/// Emits the token itself when it is an existing tracked file or directory;
+/// otherwise truncates components until the longest existing ancestor
+/// directory is found and emits that ancestor; otherwise returns `None`.
+///
+/// This is what admits a not-yet-created file through its existing parent while
+/// rejecting prose pairs such as `accept/reject`, and what lets a renamed or
+/// newly introduced path degrade to coarse-but-real scope.
+pub fn resolve_scope_token(normalized: &str, tree: &dyn BaseTreeProvider) -> Option<String> {
+    let components: Vec<&str> = normalized.split('/').filter(|c| !c.is_empty()).collect();
+    if components.is_empty() {
+        return None;
+    }
+    if tree.is_file(normalized) || tree.is_directory(normalized) {
+        return Some(normalized.to_owned());
+    }
+    // Truncate toward the root, stopping before the repository root itself:
+    // `end == 0` would be the root, which is never emitted as a scope path.
+    for end in (1..components.len()).rev() {
+        let ancestor = components[..end].join("/");
+        if tree.is_directory(&ancestor) {
+            return Some(ancestor);
+        }
+    }
+    None
+}
+
+/// Extract path-shaped tokens from a task's description, design, and epic
+/// context, then validate each against the task attempt's base-revision Git
+/// tree.
+///
+/// When `tree` is `None` the result is an **empty** scope with
+/// [`ScopeFallbackReason::TreeProviderUnavailable`]: unvalidated regex tokens
+/// are never trusted, because 686 of 820 sampled production values were prose
+/// junk such as `accept/reject`, `Pod/Job`, and `and/or`.
 pub fn derive_task_scope_paths(
+    task: &djinn_core::models::Task,
+    epic_context: Option<&str>,
+    tree: Option<&dyn BaseTreeProvider>,
+) -> DerivedTaskScope {
+    let Some(tree) = tree else {
+        return DerivedTaskScope {
+            paths: Vec::new(),
+            fallback_reason: Some(ScopeFallbackReason::TreeProviderUnavailable),
+        };
+    };
+    let Some(re) = task_scope_path_regex() else {
+        return DerivedTaskScope::default();
+    };
+
+    let mut resolved = std::collections::BTreeSet::new();
+    let epic = epic_context.unwrap_or("");
+    for text in [
+        task.title.as_str(),
+        task.description.as_str(),
+        task.design.as_str(),
+        epic,
+    ] {
+        for capture in re.captures_iter(text) {
+            let Some(matched) = capture.get(1) else {
+                continue;
+            };
+            let token = matched.as_str();
+            if token.starts_with("http") || token.starts_with("//") {
+                continue;
+            }
+            let Some(normalized) = normalize_scope_token(token) else {
+                continue;
+            };
+            if let Some(path) = resolve_scope_token(&normalized, tree) {
+                resolved.insert(path);
+            }
+        }
+    }
+
+    DerivedTaskScope {
+        paths: resolved.into_iter().collect(),
+        fallback_reason: None,
+    }
+}
+
+/// Legacy unvalidated extraction of crate/module path prefixes.
+///
+/// Retained **only** for the code-graph context block, which uses these values
+/// as directory prefixes to filter symbol file paths and is unaffected by
+/// proposal `5205`. Knowledge injection must use [`derive_task_scope_paths`]
+/// instead; these tokens are not validated against any repository tree.
+pub fn derive_task_scope_path_tokens(
     task: &djinn_core::models::Task,
     epic_context: Option<&str>,
 ) -> Vec<String> {

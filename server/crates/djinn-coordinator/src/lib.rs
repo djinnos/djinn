@@ -169,7 +169,20 @@ mod worker_lifecycle;
 
 // ─── Public re-exports (matching djinn-agent facade paths) ───────────────
 
+pub use consolidation::{
+    CONSOLIDATION_NOTE_TYPE_ENV, CONSOLIDATION_PROJECT_ENV, CONSOLIDATION_SESSION_ENV,
+    CONSOLIDATION_THRESHOLD_ENV, CONSOLIDATION_WRITES_ENV, ConsolidationEnablement,
+    ConsolidationRunReport, ConsolidationWriteResult, run_bounded_consolidation,
+};
 pub use handle::CoordinatorHandle;
+/// How long leadership waits for the coordinator's provider-action drain stamp
+/// before releasing the advisory lock (proposal `nafu`).
+///
+/// Re-exported rather than restated in `server/src/leadership.rs`: it is one
+/// half of a relation whose other half is the coordinator's own drain budget,
+/// and a number spelled in two crates is a relation nothing checks. Its owning
+/// module holds both, plus the compile-time assertion that orders them.
+pub use pr_poller::ci_routing::quiescence::PROVIDER_ACTION_DRAIN_WAIT;
 pub use types::{
     AutoMergeTracker, BackgroundWorkTracker, BreakerDebugEntry, CoordinatorDebugSnapshot,
     CoordinatorDeps, CoordinatorError, CoordinatorStatus, DebugCooldown, DebugDispatchState,

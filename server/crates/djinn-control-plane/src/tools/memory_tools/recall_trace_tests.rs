@@ -332,12 +332,16 @@ mod tests {
             repo.set_confidence(&note.id, confidence).await.unwrap();
         }
 
+        // A coarser scope than the exact-match notes above (`server/src` is a
+        // component ancestor at distance 3, scoring 0.25 against their 1.0), so
+        // ranked retrieval places it below all ten of them deterministically
+        // rather than by confidence order.
         let over_limit = create_scoped_note(
             &setup.server,
             project_id,
             "Over production limit",
             &(0..1200).map(|i| format!("word{i} ")).collect::<String>(),
-            scope,
+            r#"["server/src"]"#,
         )
         .await;
         let repo = NoteRepository::new(
@@ -362,16 +366,33 @@ mod tests {
             .await
             .unwrap();
 
-        // Invoke the real production dispatch path. This runs the production
-        // scope-overlap query, the capped trace-candidate query, deterministic
-        // classification, prompt packing, and fail-open trace persistence.
+        // Collapse the temporal signal to a constant so the validated-scope
+        // signal under test decides the order and ties fall through to the
+        // deterministic note-ID tie-break. Notes seeded milliseconds apart
+        // otherwise get temporal scores whose rank spread matches the scope
+        // signal's, which is enough to reorder adjacent candidates.
+        djinn_db::test_support::equalize_note_temporal_signals_for_test(
+            setup.server.state.db(),
+            project_id,
+        )
+        .await;
+
+        // Invoke the real production dispatch path: base-tree-validated scope
+        // derivation, the ranked `KnowledgeInjectionV1` search, prompt packing,
+        // and fail-open trace persistence. The base tree carries the one path
+        // the task description names, so the derived scope validates.
         let app_state = djinn_agent::test_helpers::agent_context_from_db(
             setup.server.state.db().clone(),
             CancellationToken::new(),
         );
         let _rendered =
-            djinn_agent::test_helpers::run_load_knowledge_context_for_test(&task, None, &app_state)
-                .await;
+            djinn_agent::test_helpers::run_load_knowledge_context_with_base_tree_for_test(
+                &task,
+                None,
+                &app_state,
+                &["server/src/server/state/mod.rs"],
+            )
+            .await;
 
         // List the persisted trace by its entry point; keep the response compact.
         let list_resp = ops::memory_recall_trace(

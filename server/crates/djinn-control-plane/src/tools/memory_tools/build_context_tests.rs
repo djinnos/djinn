@@ -534,7 +534,7 @@ mod tests {
             )
             .await
             .unwrap();
-        // confidence defaults to 1.0, no need to set
+        // confidence defaults to CONFIDENCE_CEILING (0.975), no need to set
 
         (seed.permalink, low_conf.title, stale.title, normal.title)
     }
