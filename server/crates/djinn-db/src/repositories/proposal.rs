@@ -14,7 +14,8 @@ use crate::repositories::note::NoteRepository;
 use crate::repositories::note::{LexicalSearchBackend, sanitize_postgres_tsquery};
 use crate::repositories::task::{EffectiveCreatorProvenance, resolve_effective_creator};
 use crate::repositories::typed_evidence::{
-    DemandTypedEvidenceInput, TypedEvidenceRepository, legacy_demand_hash, normalized_demand_hash,
+    AllocateTypedEvidenceRetryInput, DemandTypedEvidenceInput, TypedEvidenceAttemptAllocation,
+    TypedEvidenceRepository, legacy_demand_hash, normalized_demand_hash,
 };
 use crate::{Error, Result};
 
@@ -32,6 +33,20 @@ use sqlx::{Postgres, Row, Transaction};
 #[derive(Clone, Debug)]
 enum SqlParam {
     Text(String),
+}
+
+pub struct AtomicEvidenceRetryInput {
+    pub finding_id: String,
+    pub failed_transition_id: String,
+    pub caller_user_id: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct AtomicEvidenceRetryResult {
+    pub project_id: String,
+    pub actor_task_id: String,
+    pub allocation: TypedEvidenceAttemptAllocation,
+    pub replayed: bool,
 }
 
 /// Memory note reached through a proposal's graduated epics and their tasks.
@@ -3719,6 +3734,64 @@ impl ProposalRepository {
             finding_id: typed.finding.id,
             attempt_id,
             spike_task_id: task_id,
+            replayed: false,
+        })
+    }
+
+    pub async fn retry_evidence_atomically(
+        &self,
+        input: AtomicEvidenceRetryInput,
+    ) -> Result<AtomicEvidenceRetryResult> {
+        self.db.ensure_initialized().await?;
+        let mut tx = self.db.pool().begin().await?;
+        let proposal_id: String = sqlx::query_scalar(
+            "SELECT proposal_id FROM typed_evidence_findings WHERE id=$1 FOR UPDATE",
+        )
+        .bind(&input.finding_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| Error::InvalidData("evidence_finding_not_found".into()))?;
+        let actor_task_id: String = sqlx::query_scalar("SELECT t.id FROM tasks t JOIN refinement_dispatch_intents i ON i.id=t.refinement_intent_id JOIN refinement_runs r ON r.id=i.run_id WHERE r.proposal_id=$1 AND r.state='running' AND i.state='materialized' AND i.task_id=t.id AND t.status IN ('open','in_progress') AND t.agent_type IN ('advocate','judge') AND t.refinement_run_id=r.id AND t.refinement_generation=r.generation AND t.refinement_round=i.round AND t.refinement_phase=i.phase AND t.refinement_role=i.role AND t.created_by_user_id=$2 LIMIT 1 FOR UPDATE OF t,i,r").bind(&proposal_id).bind(&input.caller_user_id).fetch_optional(&mut *tx).await?.ok_or_else(|| Error::InvalidTransition("retry_unauthorized_active_advocate_or_judge_required".into()))?;
+        let project_id: String = sqlx::query_scalar(
+            "SELECT project_id FROM proposal_targets WHERE proposal_id=$1 LIMIT 1",
+        )
+        .bind(&proposal_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| Error::InvalidData("proposal_has_no_target_project".into()))?;
+        if let Some(row) = sqlx::query("SELECT a.id,a.sequence,a.spike_task_id FROM typed_evidence_retry_idempotency r JOIN typed_evidence_attempts a ON a.id=r.retry_attempt_id WHERE r.finding_id=$1 AND r.failed_transition_id=$2").bind(&input.finding_id).bind(&input.failed_transition_id).fetch_optional(&mut *tx).await? {
+            let attempt_id: String = row.get("id");
+            let allocation = TypedEvidenceAttemptAllocation { spike_task_id: row.get("spike_task_id"), sequence: row.get("sequence"), planned_checks: TypedEvidenceRepository::planned_checks_for_attempt_in_transaction(&mut tx, &attempt_id).await?, attempt_id };
+            tx.commit().await?;
+            return Ok(AtomicEvidenceRetryResult { project_id, actor_task_id, allocation, replayed: true });
+        }
+        let checks =
+            TypedEvidenceRepository::copy_planned_checks_for_latest_attempt_in_transaction(
+                &mut tx,
+                &input.finding_id,
+            )
+            .await?;
+        let task_id = uuid::Uuid::now_v7().to_string();
+        sqlx::query("INSERT INTO tasks (id,project_id,short_id,title,description,design,issue_type,priority,owner,status,labels,acceptance_criteria,created_by_user_id,agent_type) VALUES ($1,$2,$3,'Evidence retry spike','Read-only retry of failed typed evidence.','', 'spike',0,'','open',$4,'[]'::jsonb,$5,'architect')").bind(&task_id).bind(&project_id).bind(format!("e{}", &task_id[..7])).bind(serde_json::json!(["refinement-evidence", "read-only"])).bind(&input.caller_user_id).execute(&mut *tx).await?;
+        let allocation = TypedEvidenceRepository::allocate_retry_in_transaction(
+            &mut tx,
+            AllocateTypedEvidenceRetryInput {
+                finding_id: input.finding_id,
+                failed_transition_id: input.failed_transition_id,
+                retry_attempt_id: uuid::Uuid::now_v7().to_string(),
+                retry_spike_task_id: task_id,
+                evidence_plan_id: None,
+                planned_checks: checks,
+                demanded_transition_id: uuid::Uuid::now_v7().to_string(),
+                actor_task_id: Some(actor_task_id.clone()),
+            },
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(AtomicEvidenceRetryResult {
+            project_id,
+            actor_task_id,
+            allocation,
             replayed: false,
         })
     }

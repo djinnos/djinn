@@ -1256,6 +1256,28 @@ pub struct NeedsEvidenceDemandResponse {
     pub conflict_code: Option<String>,
 }
 
+/// Additive response for a failed evidence retry reservation.
+#[derive(Serialize, Deserialize, Clone, schemars::JsonSchema)]
+pub struct EvidenceRetryResponse {
+    pub accepted: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finding_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attempt_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spike_task_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sequence: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lifecycle: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replayed: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conflict_code: Option<String>,
+}
+
 #[cfg(test)]
 mod lint_response_compat_tests {
     use super::{ProposalRevisionModel, ProposalShowResponse};

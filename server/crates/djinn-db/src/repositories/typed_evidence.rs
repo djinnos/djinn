@@ -219,6 +219,35 @@ impl TypedEvidenceRepository {
         &self.db
     }
 
+    pub async fn planned_checks_for_attempt_in_transaction(
+        tx: &mut Transaction<'_, Postgres>,
+        attempt_id: &str,
+    ) -> Result<Vec<TribunalEvidencePlannedCheck>> {
+        checks(tx, attempt_id).await
+    }
+
+    pub async fn copy_planned_checks_for_latest_attempt_in_transaction(
+        tx: &mut Transaction<'_, Postgres>,
+        finding_id: &str,
+    ) -> Result<Vec<PlannedTypedEvidenceCheckInput>> {
+        let rows = sqlx::query("SELECT check_id,method,evidence_plan_id,evidence_plan_check_id,ordinal FROM typed_evidence_planned_checks WHERE attempt_id=(SELECT id FROM typed_evidence_attempts WHERE finding_id=$1 ORDER BY sequence DESC LIMIT 1) ORDER BY ordinal").bind(finding_id).fetch_all(&mut **tx).await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| PlannedTypedEvidenceCheckInput {
+                id: uuid::Uuid::now_v7().to_string(),
+                ordinal: row.get("ordinal"),
+                check_id: row.get("check_id"),
+                method: match row.get::<String, _>("method").as_str() {
+                    "code" => TribunalEvidenceAnchorMethod::Code,
+                    "graph" => TribunalEvidenceAnchorMethod::Graph,
+                    _ => TribunalEvidenceAnchorMethod::Command,
+                },
+                evidence_plan_id: row.get("evidence_plan_id"),
+                evidence_plan_check_id: row.get("evidence_plan_check_id"),
+            })
+            .collect())
+    }
+
     /// Backfill only actively parked legacy rows. It is re-runnable and never
     /// changes legacy authority, which keeps rollback recovery intact.
     pub async fn backfill_active_legacy_evidence(&self) -> Result<TypedEvidenceBackfillReport> {
