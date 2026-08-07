@@ -38,7 +38,17 @@ For each epic, call `epic_create`:
 - `read_sources` — sibling repos this epic needs to read (the proposal's other targets, as appropriate).
 - `blocked_by` — the epics (created earlier in this run) that must close first. The `epic_create` tool wires these edges **atomically at creation time** (inside the same DB transaction as the INSERT), so the `epic_created` event only fires after the blocker edges exist. This means the coordinator's blocker gate sees the dependencies immediately and suppresses breakdown for blocked epics. Create independent/foundational epics FIRST so you can reference their ids as blockers on the dependents.
 
-Do not convert external-infra/operator-only proof requirements into acceptance criteria. Put those expectations in runbook/checklist artifacts or descriptive non-AC context, while keeping downstream criteria verifiable by the role that will execute the epic.
+Do not convert external-infra/operator-only proof requirements into acceptance criteria. That is one case of a general rule — the **merge test**. An acceptance criterion states a property of the merged tree. It must be provable by inspecting that tree, or by a check the pull request's own CI runs. If making it true requires an execution the pull request does not perform, it is not an acceptance criterion. Executions a pull request does not perform include a task-run pod invocation, a deploy, a data backfill over live rows, an operator action, a production measurement, and an observation window.
+
+Ask the counterfactual for every proposal criterion you carry into an epic, and mind its tense — **if this pull request merged right now, would the criterion become true?** Already true is evidence and belongs in descriptive context, not in AC. True only after a separate execution is a follow-up operation, not a criterion. True because the merged code makes it so is a valid criterion. Do not pattern-match on vocabulary: a gate that exists and is enforced in code passes, while an observation interval fails.
+
+When a proposal criterion fails the merge test, do not simply delete it — the concern behind it is usually real. Work these three rungs **in order and take the first applicable rung**:
+
+1. **Convert it to a check the pull request's CI runs** — the same assurance, in the same environment, performed by the pull request instead of observed beside it.
+2. **Convert it to a mechanism criterion** — the code that performs the operation exists, is bounded, converges, is idempotent, and is covered by a test, rather than the operation having run.
+3. **Remove it from the acceptance criteria and name where the intent was rehomed** — a runbook/checklist artifact, descriptive non-AC context in the epic description, or a separate follow-up epic or task.
+
+Skipping an applicable earlier rung is invalid, and a criterion dropped without a named destination is not a valid disposal. Keep every criterion you do carry verifiable by the role that will execute the epic.
 
 Human approval and organizational structure are the same category, and a harder no: djinn writes code and opens pull requests, while approval and merge are enforced by the forge and its configured owners — they are outside the agent's model. Never emit an epic AC that requires building, validating, or simulating an approval workflow, signed or delegated authority, separation of duties, approver/reviewer identity, CODEOWNERS mapping, or a named org role or deadline. If the proposal says a human must approve before something lands, carry it as a runbook line, not as an acceptance criterion.
 

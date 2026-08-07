@@ -115,8 +115,6 @@ If you cannot point to the specific words that fail (or pass), you are pattern-m
 **Reject criteria that no agent can confirm**, for example:
 - Business / usage metrics: "10 users onboarded", "X% logs reduced", "adoption
   improves", "users can transact live in production".
-- External / operator-only proofs: manual UX review, an SLA measured in prod, a
-  paid third-party API run, an external dashboard reading.
 - Pure adjectives with no observable test: "fast", "robust", "clean", "scalable"
   with no measurable threshold or command behind them.
 - Human approval and organizational structure: sign-off gates, delegated or
@@ -127,6 +125,24 @@ If you cannot point to the specific words that fail (or pass), you are pattern-m
   model.** A proposal may say in a
   runbook that a human must approve before something lands — it may not make that
   an AC, and no worker may be asked to build, validate, or simulate the workflow.
+
+**Achievability — the merge test. Reject criteria no pull request can make true:**
+
+The list above asks whether an outsider can *decide* the criterion. This dimension asks whether the work that implements it can ever *satisfy* it. The two are independent, and a criterion must pass both — a perfectly decidable criterion can still be impossible for any pull request to make true, and that is exactly how such criteria survive review.
+
+An acceptance criterion states a property of the merged tree. It must be provable by inspecting that tree, or by a check the pull request's own CI runs. If making it true requires an execution the pull request does not perform, it is not an acceptance criterion.
+
+Apply the counterfactual, and mind its tense — **if this pull request merged right now, would the criterion become true?**
+
+- **Already true** (a production run that happened last week, a measurement taken during investigation): that is **evidence**, not a criterion. It belongs in the body, in the field for evidence.
+- **True only after a separate execution** (a task-run pod invocation, a deploy, a data backfill over live rows, an operator action, an observation window): that is a **follow-up operation**, not a criterion. Apply the disposal ladder below.
+- **True because the merged code makes it so**: a valid acceptance criterion.
+
+**External / operator-only proofs** — manual UX review, an SLA measured in prod, a paid third-party API run, an external dashboard reading — all fail here. The pull request performs none of them, so none of them is an acceptance criterion, however precisely it is worded.
+
+**Do not pattern-match on vocabulary.** A gate that exists and is enforced in code passes; an observation interval fails. "New writers cannot run until all readers use the contract; rollback cannot begin until route work and provider futures are drained" **passes**: feature gating and compile-time atomic groups are code, and mixed-version enforcement is provable by a fixture matrix in CI. "Zero old server, coordinator, supervisor, agent, and launcher versions for two consecutive inventory intervals" **fails**: it names an observation interval over a live fleet, and that clause is the whole difference between the two. Rejecting the first would be a misapplication of this rule.
+
+**The disposal ladder is ordered, and enforcing the order is your job.** When a criterion fails the merge test, the Advocate must work three rungs in order and take the **first applicable** rung: (1) convert it to a check the pull request's CI runs; (2) convert it to a mechanism criterion — the code that performs the operation exists, is bounded, converges, is idempotent, and is covered by a test, rather than the operation having run; (3) remove it from the acceptance criteria and name where the intent was rehomed. Reject a disposal that skipped an applicable earlier rung, and reject a rung 3 disposal that does not name where the intent was rehomed — a criterion dropped without a named destination is not a valid disposal.
 
 **Goodhart antibodies — reject criteria that are gameable or unbounded:**
 - **Machine-decidability by a domain-outsider running one named check.** A done criterion must be confirmable by someone who did not write the change. Name the single check (a command, a file path, a grep, an assertion) that yields a yes/no. "The implementer will know it when they see it" is not decidable and is rejectable.

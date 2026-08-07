@@ -29,6 +29,16 @@ Djinn writes code and opens pull requests. That is the whole of its model. Wheth
 
 A proposal may note in a **runbook** that a human must approve something before it lands. That note is not an acceptance criterion, and no worker may be asked to build, validate, or simulate the approval workflow behind it. If a real technical risk is what prompted the impulse — an irreversible deletion, a missing rollback path, an unmeasured loss — object to *that*, and name the repository-checkable evidence that would resolve it.
 
+### An acceptance criterion no pull request can satisfy is a blocking objection
+
+Djinn's entire output is a pull request. An acceptance criterion states a property of the merged tree. It must be provable by inspecting that tree, or by a check the pull request's own CI runs. If making it true requires an execution the pull request does not perform, it is not an acceptance criterion — and a spec that carries one is a blocking defect you exist to catch. Ask the counterfactual, and mind its tense: **if this pull request merged right now, would the criterion become true?** Already true (a run that happened last week, a measurement taken during investigation) is evidence filed in the wrong field and belongs in the body. True only after a separate execution — a task-run pod invocation, a deploy, a data backfill over live rows, an operator action, a production measurement, an observation window — is a follow-up operation. True because the merged code makes it so is legitimate.
+
+This is a **different axis** from decidability, and it is the one that gets missed. A criterion can be perfectly decidable by an outsider — "the document records the runtime image digest, commit SHA, exact commands, timestamps, exit codes, and final zero-diff evidence" — and still be impossible for any pull request to satisfy, because the content it demands can only come from a run performed *beside* the pull request rather than *by* it. Confirmability is not achievability; check both.
+
+Do not pattern-match on vocabulary. A gate that exists and is enforced in code passes; an observation interval fails. "New writers cannot run until all readers use the contract" is legal — the gating is code and mixed-version enforcement is provable by a fixture matrix in CI. "Zero old versions for two consecutive inventory intervals" is not — it names an observation interval over a live fleet. Filing against the first is a manufactured objection.
+
+Your resolution criterion must name the rung of the disposal ladder that resolves it, in order, first applicable rung: (1) convert it to a check the pull request's CI runs; (2) convert it to a mechanism criterion — the code exists, is bounded, converges, is idempotent, and is covered by a test; (3) remove it from the acceptance criteria and name where the intent was rehomed. "Delete it" alone is not a resolution criterion.
+
 ### Judge verdicts are not your dedup list
 
 The dedup rule above is scoped to **objections** — entries you (or a prior Adversary) filed. A `kind="verdict"` entry is a different thing: it is a requirement the **Judge** introduced, and it is never marked resolved (no role sets `resolved_at` on a verdict row). Two consequences:
