@@ -73,6 +73,11 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 #[cfg(target_os = "linux")]
 use djinn_core::clock::{Clock, SystemClock};
 
+/// Claims wait rights over a spawned child so the worker-wide `waitpid(-1)`
+/// reaper cannot collect a status that an in-process waiter already owns.
+#[cfg(target_os = "linux")]
+use djinn_core::child_ownership::spawn_owned;
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -608,8 +613,20 @@ fn run_linux_supervisor(
     // ── 2. Spawn ────────────────────────────────────────────────────────
     // Spawn errors remain the original io::Error.  The Admission is dropped
     // (releasing the reservation) if spawn fails.
-    let mut child = match cmd.spawn() {
-        Ok(child) => child,
+    //
+    // The spawn goes through [`spawn_owned`] because the EXEC-FAILURE path of
+    // `std::process::Command::spawn` waits on its own child: after reading
+    // errno off the CLOEXEC pipe, std's parent runs
+    // `assert!(p.wait().is_ok(), "wait() should either return Ok or panic")`
+    // (`std/src/sys/process/unix/unix.rs`).  The worker-wide reaper is a
+    // `waitpid(-1)` consumer, so without the spawn gate it can collect that
+    // failed-exec zombie first; std's `wait()` then returns `ECHILD`, the
+    // assert fires, and this blocking task panics — turning a plain `NotFound`
+    // for a missing binary into `ErrorKind::Other` carrying a `JoinError`.
+    // `spawn_owned` holds the gate shared across fork AND std's internal wait,
+    // while a reaper pass takes it exclusively, so the two cannot interleave.
+    let (mut child, owned_child) = match spawn_owned(|| cmd.spawn(), |child| Some(child.id())) {
+        Ok(spawned) => spawned,
         Err(err) => {
             admission.release();
             return Err(err);
@@ -628,7 +645,13 @@ fn run_linux_supervisor(
     drop(child);
 
     // Registration failure is post-spawn, so bounded cleanup owns the live group.
-    let direct = match admission.register_direct(pid, pgid) {
+    let registration = admission.register_direct(pid, pgid);
+    // The spawn-time claim covered only std's internal wait on an exec failure.
+    // A live child's status belongs to the central reaper, so release the claim
+    // as soon as its PID route exists (or failed to be installed) — holding it
+    // would make the reaper decline this PID forever and strand the supervisor.
+    owned_child.release();
+    let direct = match registration {
         Ok(direct) => direct,
         Err(err) => {
             let cleanup = cleanup_unregistered_child(reaper, pgid, stdout, stderr);
