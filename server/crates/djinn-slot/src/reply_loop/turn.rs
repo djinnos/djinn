@@ -2310,7 +2310,10 @@ mod tests {
             djinn_db::ModelTurnAdmissionRepository::new(db.clone()),
         );
         let preparation = coordinator
-            .prepare(&covered_admission_plan(), admission_request("fake-transport-loss"))
+            .prepare(
+                &covered_admission_plan(),
+                admission_request("fake-transport-loss"),
+            )
             .await
             .expect("prepare");
         let lease = match &preparation {
@@ -2351,7 +2354,10 @@ mod tests {
         guard.finish(false).await;
         guard.finish(false).await;
 
-        assert!(observed_abort.is_aborted(), "loss cleanup must abort B1 I/O");
+        assert!(
+            observed_abort.is_aborted(),
+            "loss cleanup must abort B1 I/O"
+        );
         assert_eq!(
             model_turn_lease_lifecycle_fixture(&db, &lease.lease_id).await,
             "reconciled"

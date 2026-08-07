@@ -188,11 +188,22 @@ pub(super) type ProviderStream =
 /// Raw B1 frames are adapted only through the authoritative `StreamEvent` seam.
 pub(super) struct CoveredAttemptTerminalGuard {
     attempt: Arc<tokio::sync::Mutex<Option<ProviderSseAttemptV1>>>,
+    /// Available even while `next_event` is polling under the attempt mutex,
+    /// so cancellation can request B1 abort immediately.
+    abort: djinn_provider::ProviderAttemptAbortHandleV1,
     parser: Box<dyn ProviderSseFrameParserV1>,
     pending: VecDeque<anyhow::Result<StreamEvent>>,
     coordinator: ModelTurnAdmissionCoordinator,
     identity: Option<ModelTurnLeaseIdentity>,
-    settled: Arc<AtomicBool>,
+    settlement: Arc<CoveredAttemptSettlement>,
+}
+
+/// Independently-owned terminal state. Once scheduled, the runtime task—not
+/// the reply-loop future—owns observation of B1's one-shot and reconciliation.
+struct CoveredAttemptSettlement {
+    scheduled: AtomicBool,
+    complete: AtomicBool,
+    notify: tokio::sync::Notify,
 }
 
 impl CoveredAttemptTerminalGuard {
@@ -202,13 +213,19 @@ impl CoveredAttemptTerminalGuard {
         coordinator: ModelTurnAdmissionCoordinator,
         identity: Option<ModelTurnLeaseIdentity>,
     ) -> Self {
+        let abort = attempt.abort.clone();
         Self {
             attempt: Arc::new(tokio::sync::Mutex::new(Some(attempt))),
+            abort,
             parser,
             pending: VecDeque::new(),
             coordinator,
             identity,
-            settled: Arc::new(AtomicBool::new(false)),
+            settlement: Arc::new(CoveredAttemptSettlement {
+                scheduled: AtomicBool::new(false),
+                complete: AtomicBool::new(false),
+                notify: tokio::sync::Notify::new(),
+            }),
         }
     }
 
@@ -230,16 +247,44 @@ impl CoveredAttemptTerminalGuard {
 
     /// Observe B1's singular terminal outcome and reconcile precisely this lease.
     pub(super) async fn finish(&self, completed: bool) {
-        if self.settled.swap(true, Ordering::AcqRel) {
+        self.schedule_settlement(!completed);
+        self.wait_for_settlement().await;
+    }
+
+    fn schedule_settlement(&self, abort: bool) {
+        if self.settlement.scheduled.swap(true, Ordering::AcqRel) {
             return;
         }
-        settle_covered_attempt(
-            self.attempt.clone(),
-            self.coordinator.clone(),
-            self.identity.clone(),
-            !completed,
-        )
-        .await;
+        if abort {
+            self.abort.abort();
+        }
+        let attempt = self.attempt.clone();
+        let coordinator = self.coordinator.clone();
+        let identity = self.identity.clone();
+        let settlement = self.settlement.clone();
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                settle_covered_attempt(attempt, coordinator, identity).await;
+                settlement.complete.store(true, Ordering::Release);
+                settlement.notify.notify_waiters();
+            });
+        } else {
+            // No safe synchronous way exists to await B1's one-shot here.
+            // Preserve the Phase A quarantine rather than refunding it.
+            tracing::error!(
+                "covered attempt dropped without a Tokio runtime; retaining conservative quarantine"
+            );
+        }
+    }
+
+    async fn wait_for_settlement(&self) {
+        while !self.settlement.complete.load(Ordering::Acquire) {
+            let notified = self.settlement.notify.notified();
+            if self.settlement.complete.load(Ordering::Acquire) {
+                return;
+            }
+            notified.await;
+        }
     }
 }
 
@@ -247,14 +292,10 @@ async fn settle_covered_attempt(
     attempt: Arc<tokio::sync::Mutex<Option<ProviderSseAttemptV1>>>,
     coordinator: ModelTurnAdmissionCoordinator,
     identity: Option<ModelTurnLeaseIdentity>,
-    abort: bool,
 ) {
     let Some(mut attempt) = attempt.lock().await.take() else {
         return;
     };
-    if abort {
-        attempt.abort.abort();
-    }
     let outcome: ProviderOutcomeV1 = attempt.outcome().await;
     if let Some(identity) = identity
         && let Err(error) = coordinator.reconcile(identity, &outcome).await
@@ -265,17 +306,9 @@ async fn settle_covered_attempt(
 
 impl Drop for CoveredAttemptTerminalGuard {
     fn drop(&mut self) {
-        if self.settled.swap(true, Ordering::AcqRel) {
-            return;
-        }
-        let attempt = self.attempt.clone();
-        let coordinator = self.coordinator.clone();
-        let identity = self.identity.clone();
-        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-            runtime.spawn(async move {
-                settle_covered_attempt(attempt, coordinator, identity, true).await;
-            });
-        }
+        // Scheduling precedes every awaited operation, so cancellation of
+        // `finish` cannot suppress cleanup.
+        self.schedule_settlement(true);
     }
 }
 
