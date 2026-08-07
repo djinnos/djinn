@@ -3815,6 +3815,19 @@ async fn protocol_violation_clean_exit_classified_as_failed_attempt() {
         .await
         .unwrap();
 
+    session_repo
+        .update(
+            &session.id,
+            djinn_core::models::SessionStatus::Completed,
+            1,
+            1,
+            0,
+            0,
+            None,
+        )
+        .await
+        .unwrap();
+
     let actor = coordinator_actor_for_tests(&db, &tx);
     let result = actor
         .classify_session_exit_liveness(&session.id, &task.id, Some(run_id), "completed", "worker")
@@ -3905,6 +3918,19 @@ async fn nonzero_exit_is_crash_outcome_distinct_from_clean_violation() {
             pricing: None,
             cost_basis: None,
         })
+        .await
+        .unwrap();
+
+    session_repo
+        .update(
+            &session.id,
+            djinn_core::models::SessionStatus::Failed,
+            1,
+            1,
+            0,
+            0,
+            None,
+        )
         .await
         .unwrap();
 
@@ -4012,6 +4038,19 @@ async fn reviewer_reject_exit_is_not_a_protocol_violation() {
         )
         .await
         .unwrap();
+
+    session_repo
+        .update(
+            &session.id,
+            djinn_core::models::SessionStatus::Completed,
+            1,
+            1,
+            0,
+            0,
+            None,
+        )
+        .await
+        .unwrap();
     assert_eq!(
         rejected.status, "open",
         "task_review_reject must land the task at open (rework queue)"
@@ -4102,6 +4141,19 @@ async fn worker_clean_exit_at_in_progress_is_still_a_protocol_violation() {
         .await
         .unwrap();
 
+    session_repo
+        .update(
+            &session.id,
+            djinn_core::models::SessionStatus::Completed,
+            1,
+            1,
+            0,
+            0,
+            None,
+        )
+        .await
+        .unwrap();
+
     let actor = coordinator_actor_for_tests(&db, &tx);
     let result = actor
         .classify_session_exit_liveness(&session.id, &task.id, Some(run_id), "completed", "worker")
@@ -4168,6 +4220,19 @@ async fn already_terminal_task_exit_preserves_kill_noop() {
     // Close the task BEFORE the exit classification runs — race condition.
     TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx))
         .set_status(&task.id, "closed")
+        .await
+        .unwrap();
+
+    session_repo
+        .update(
+            &session.id,
+            djinn_core::models::SessionStatus::Completed,
+            1,
+            1,
+            0,
+            0,
+            None,
+        )
         .await
         .unwrap();
 
@@ -4317,7 +4382,7 @@ async fn explicit_kill_cleanup_full_evidence_chain_for_terminal_task() {
 /// produces the same crash/protocol-violation semantics as "failed".
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn interrupted_session_nonterminal_is_crash_protocol_violation() {
-    use djinn_db::{CreateSessionParams, SessionRepository};
+    use djinn_db::{CreateSessionParams, SessionRepository, TaskAttemptRepository};
 
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
@@ -4358,6 +4423,23 @@ async fn interrupted_session_nonterminal_is_crash_protocol_violation() {
         .await
         .unwrap();
 
+    session_repo
+        .update(
+            &session.id,
+            djinn_core::models::SessionStatus::Interrupted,
+            1,
+            1,
+            0,
+            0,
+            None,
+        )
+        .await
+        .unwrap();
+
+    // A stranded Required handoff must use the existing crashed accounting,
+    // rather than treating this terminal interruption as environmental.
+    let attempt_id = seed_pending_attempt(&db, &task.id, "worker").await;
+
     let actor = coordinator_actor_for_tests(&db, &tx);
     let result = actor
         .classify_session_exit_liveness(
@@ -4385,6 +4467,16 @@ async fn interrupted_session_nonterminal_is_crash_protocol_violation() {
         Some(crate::dispatch::liveness::LivenessReason::NonzeroExitNonterminal),
         "reason must be NonzeroExitNonterminal for interrupted session"
     );
+    let attempt = TaskAttemptRepository::new(db.clone())
+        .get(&attempt_id)
+        .await
+        .unwrap()
+        .expect("pending attempt must exist");
+    assert_eq!(
+        attempt.outcome, "crashed",
+        "an interrupted exit that abandoned its Required handoff must use crashed accounting"
+    );
+    assert!(attempt.terminal_at.is_some());
 }
 
 /// AC 1/3: Dead + recent DB activity suppression — a session that is within
@@ -5341,10 +5433,10 @@ async fn stall_timeout_terminalizes_attempt_as_timed_out() {
 
 // ── Deploy/reap interruptions are environmental (fix/deploy-interruptions) ──
 
-/// A session `interrupted` by INFRASTRUCTURE (deploy/rollout/pod-eviction/reap)
-/// while its task is still nonterminal must terminalize the live attempt as the
-/// environmental `interrupted` outcome — NOT `crashed`. This is what lets the
-/// dispatch reappearance path spare the task from a failure streak / cooldown.
+/// A session `interrupted` by INFRASTRUCTURE after its Required handoff has
+/// completed must terminalize the live attempt as the environmental `interrupted`
+/// outcome — NOT `crashed`. An absent handoff is instead a protocol violation and
+/// must use crashed accounting.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn interrupted_session_terminalizes_attempt_as_environmental_interrupt() {
     use djinn_core::models::{SessionStatus, task_attempt::TaskAttemptOutcome};
@@ -5388,8 +5480,17 @@ async fn interrupted_session_terminalizes_attempt_as_environmental_interrupt() {
         .await
         .unwrap();
 
+    // The Required handoff was confirmed before the infrastructure interruption.
+    // This distinguishes an environmental exit from an interrupted session that
+    // stranded its in-progress task and therefore earns crashed accounting.
+    TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx))
+        .set_status(&task.id, "open")
+        .await
+        .unwrap();
+
     // Accounting follows the addressed row's durable terminal truth, not the
-    // terminal event string supplied to the adapter below.
+    // terminal event string supplied to the adapter below. The barrier settles
+    // this row only after the Required handoff above is durable.
     session_repo
         .update(&session.id, SessionStatus::Interrupted, 1, 1, 0, 0, None)
         .await
@@ -5544,6 +5645,19 @@ async fn interrupted_event_does_not_reclassify_already_terminal_failure() {
             pricing: None,
             cost_basis: None,
         })
+        .await
+        .unwrap();
+
+    session_repo
+        .update(
+            &session.id,
+            djinn_core::models::SessionStatus::Interrupted,
+            1,
+            1,
+            0,
+            0,
+            None,
+        )
         .await
         .unwrap();
 
@@ -6512,6 +6626,19 @@ async fn classify_session_exit_clean_nonterminal_vs_terminal_are_distinct_and_id
             pricing: None,
             cost_basis: None,
         })
+        .await
+        .unwrap();
+
+    session_repo
+        .update(
+            &session.id,
+            djinn_core::models::SessionStatus::Completed,
+            1,
+            1,
+            0,
+            0,
+            None,
+        )
         .await
         .unwrap();
 
@@ -8405,8 +8532,8 @@ async fn expired_owner_group_reap_redispatches_after_reaping_each_eligible_group
 }
 
 /// Repository-backed counterpart to the pure status matrix: the exit adapter
-/// must read terminal truth from each addressed session row for every task
-/// status, append evidence, and never manufacture a protocol violation.
+/// reads terminal truth from each addressed session row. An absent Required
+/// handoff is one violation; a recorded handoff and settled task states are not.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn terminal_persisted_exit_rows_cover_every_task_status() {
     use djinn_core::models::SessionStatus;
@@ -8424,20 +8551,30 @@ async fn terminal_persisted_exit_rows_cover_every_task_status() {
         (SessionStatus::Failed, "failed"),
         (SessionStatus::Interrupted, "interrupted"),
     ] {
-        for task_status in [
-            "open",
-            "in_progress",
-            "needs_task_review",
-            "in_task_review",
-            "approved",
-            "pr_draft",
-            "pr_review",
-            "needs_lead_intervention",
-            "in_lead_intervention",
-            "closed",
+        for (task_status, confirmed_handoff) in [
+            ("open", false),
+            ("in_progress", false),
+            ("open", true),
+            ("needs_task_review", false),
+            ("in_task_review", false),
+            ("in_task_review", true),
+            ("approved", false),
+            ("pr_draft", false),
+            ("pr_review", false),
+            ("needs_lead_intervention", false),
+            ("in_lead_intervention", false),
+            ("in_lead_intervention", true),
+            ("closed", false),
         ] {
-            let (task, _) =
-                create_task_with_note(&db, &tx, &format!("persisted-{event}-{task_status}")).await;
+            let (task, _) = create_task_with_note(
+                &db,
+                &tx,
+                &format!("persisted-{event}-{task_status}-{confirmed_handoff}"),
+            )
+            .await;
+            if confirmed_handoff {
+                tasks.set_status(&task.id, "in_progress").await.unwrap();
+            }
             tasks.set_status(&task.id, task_status).await.unwrap();
             let session = sessions
                 .create(CreateSessionParams {
@@ -8498,10 +8635,25 @@ async fn terminal_persisted_exit_rows_cover_every_task_status() {
                 .classify_session_exit_liveness(&session.id, &task.id, None, event, "worker")
                 .await
                 .expect("persisted terminal row must classify");
-            assert_ne!(
-                result.verdict,
-                crate::dispatch::liveness::Verdict::ProtocolViolation,
-                "persisted {event} with task {task_status}"
+            let required_handoff_absent = matches!(
+                task_status,
+                "open" | "in_progress" | "in_task_review" | "in_lead_intervention"
+            ) && !confirmed_handoff;
+            assert_eq!(
+                result.verdict == crate::dispatch::liveness::Verdict::ProtocolViolation,
+                required_handoff_absent,
+                "persisted {event} with task {task_status}, confirmed_handoff={confirmed_handoff}"
+            );
+            assert_eq!(
+                result.evidence.db_session_status,
+                Some(match persisted {
+                    SessionStatus::Completed =>
+                        crate::dispatch::liveness::DbSessionStatus::Completed,
+                    SessionStatus::Failed => crate::dispatch::liveness::DbSessionStatus::Failed,
+                    SessionStatus::Interrupted =>
+                        crate::dispatch::liveness::DbSessionStatus::Interrupted,
+                    _ => unreachable!("matrix contains only terminal statuses"),
+                })
             );
             if task_status == "closed" {
                 assert_eq!(
@@ -8509,11 +8661,11 @@ async fn terminal_persisted_exit_rows_cover_every_task_status() {
                     Some(crate::dispatch::liveness::LivenessOutcome::KillNoop)
                 );
             }
-            let expected_outcome = match (event, task_status == "closed") {
-                ("failed", false) => "crashed",
-                ("interrupted", false) => "interrupted",
-                ("completed", false) if task_status == "needs_task_review" => "crashed",
-                ("completed", false) if task_status == "in_progress" => "submitted",
+            let expected_outcome = match (event, task_status == "closed", required_handoff_absent) {
+                ("failed", false, _) | ("interrupted", false, true) => "crashed",
+                ("interrupted", false, false) => "interrupted",
+                ("completed", false, _) if task_status == "needs_task_review" => "crashed",
+                ("completed", false, _) if task_status == "in_progress" => "submitted",
                 _ => "pending",
             };
             let after = attempts.get(&attempt_id).await.unwrap().unwrap();
@@ -8531,9 +8683,9 @@ async fn terminal_persisted_exit_rows_cover_every_task_status() {
                 .classify_session_exit_liveness(&session.id, &task.id, None, event, "worker")
                 .await
                 .expect("repeated persisted terminal classification must succeed");
-            assert_ne!(
-                repeated.verdict,
-                crate::dispatch::liveness::Verdict::ProtocolViolation
+            assert_eq!(
+                repeated.verdict, result.verdict,
+                "replay returns the immutable classification for this session exit"
             );
             let after_repeat = attempts.get(&attempt_id).await.unwrap().unwrap();
             assert_eq!(after_repeat.outcome, after.outcome);
@@ -8612,7 +8764,7 @@ async fn mismatched_exit_event_uses_persisted_status_and_persists_evidence() {
         .classify_session_exit_liveness(&session.id, &task.id, None, "failed", "worker")
         .await
         .expect("mismatch must classify");
-    assert_ne!(
+    assert_eq!(
         result.verdict,
         crate::dispatch::liveness::Verdict::ProtocolViolation
     );
@@ -8622,9 +8774,9 @@ async fn mismatched_exit_event_uses_persisted_status_and_persists_evidence() {
     );
     assert_eq!(
         result.evidence.pod_phase,
-        Some(crate::dispatch::liveness::PodPhase::Failed)
+        Some(crate::dispatch::liveness::PodPhase::Succeeded)
     );
-    assert_eq!(result.evidence.exit_code, Some(1));
+    assert_eq!(result.evidence.exit_code, Some(0));
     let after = attempts.get(&attempt_id).await.unwrap().unwrap();
     assert_eq!(
         serde_json::to_value(&after).unwrap(),

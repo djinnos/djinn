@@ -257,8 +257,9 @@ fn succeeded_pod_unknown_exit_still_clean_violation() {
 }
 
 #[test]
-fn terminal_session_with_exited_pod_is_not_protocol_violation() {
-    // If the session is already terminal, the pod exit is expected
+fn terminal_session_with_absent_required_handoff_is_protocol_violation() {
+    // Terminal session truth is not an exoneration: a completed exit whose
+    // Required handoff is still absent is positive inconsistency.
     let mut ev = live_evidence();
     ev.pod_phase = Some(PodPhase::Succeeded);
     ev.exit_code = Some(0);
@@ -266,61 +267,69 @@ fn terminal_session_with_exited_pod_is_not_protocol_violation() {
     ev.activity = ActivitySignal::Active;
 
     let result = classify(&ev);
-    assert_ne!(result.verdict, Verdict::ProtocolViolation);
+    assert_eq!(result.verdict, Verdict::ProtocolViolation);
 }
 
-/// A persisted terminal session makes an exited pod expected, regardless of
-/// where the task state machine currently is. Keep this as an exhaustive
-/// table rather than relying on the handoff subset: `open` and `in_progress`
-/// are precisely the states that would otherwise satisfy the structural
-/// inconsistency guard.
+/// Terminal session truth is evidence, not an exoneration. The durable
+/// StageOutcome barrier has already made a Required handoff visible before this
+/// terminal observation; an unsettled task is therefore one positive violation.
 #[test]
-fn terminal_persisted_sessions_never_violate_protocol_for_any_task_status() {
-    let terminal_session_statuses = [
-        DbSessionStatus::Completed,
-        DbSessionStatus::Failed,
-        DbSessionStatus::Interrupted,
-    ];
-    let all_task_statuses = [
-        DbTaskStatus::Open,
-        DbTaskStatus::InProgress,
-        DbTaskStatus::NeedsTaskReview,
-        DbTaskStatus::InTaskReview,
-        DbTaskStatus::Approved,
-        DbTaskStatus::PrDraft,
-        DbTaskStatus::PrReview,
-        DbTaskStatus::NeedsLeadIntervention,
-        DbTaskStatus::InLeadIntervention,
-        DbTaskStatus::Closed,
-    ];
-
-    for session_status in terminal_session_statuses {
-        for task_status in all_task_statuses {
-            let mut ev = live_evidence();
-            ev.pod_phase = Some(PodPhase::Succeeded);
-            ev.exit_code = Some(0);
-            ev.db_session_status = Some(session_status);
-            ev.db_task_status = Some(task_status);
-
-            let result = classify(&ev);
-            assert_ne!(
-                result.verdict,
-                Verdict::ProtocolViolation,
-                "terminal persisted session {session_status:?} with task {task_status:?}"
-            );
-            if task_status == DbTaskStatus::Closed {
-                assert_eq!(
-                    result.outcome,
-                    Some(LivenessOutcome::KillNoop),
-                    "closed task must retain KillNoop precedence for {session_status:?}"
-                );
-            }
-        }
+fn terminal_session_status_matrix_classifies_truthfully() {
+    for (session_status, pod_phase, exit_code, reason) in [
+        (
+            DbSessionStatus::Completed,
+            PodPhase::Succeeded,
+            0,
+            LivenessReason::CleanExitNonterminal,
+        ),
+        (
+            DbSessionStatus::Failed,
+            PodPhase::Failed,
+            1,
+            LivenessReason::NonzeroExitNonterminal,
+        ),
+        (
+            DbSessionStatus::Interrupted,
+            PodPhase::Failed,
+            1,
+            LivenessReason::NonzeroExitNonterminal,
+        ),
+    ] {
+        let mut ev = live_evidence();
+        ev.pod_phase = Some(pod_phase);
+        ev.exit_code = Some(exit_code);
+        ev.db_session_status = Some(session_status);
+        ev.db_task_status = Some(DbTaskStatus::InProgress);
+        let result = classify(&ev);
+        assert_eq!(
+            result.verdict,
+            Verdict::ProtocolViolation,
+            "{session_status:?}"
+        );
+        assert_eq!(result.reason, Some(reason));
     }
 }
 
-/// Terminal persisted status only exonerates the structural-exit rung. It must
-/// not bypass the higher-priority hard runtime cap.
+#[test]
+fn terminal_session_handoff_and_missing_evidence_fail_closed() {
+    let mut ev = live_evidence();
+    ev.pod_phase = Some(PodPhase::Succeeded);
+    ev.exit_code = Some(0);
+    ev.db_session_status = Some(DbSessionStatus::Completed);
+    ev.db_task_status = Some(DbTaskStatus::Open);
+    ev.handed_off_from_session_held_status = true;
+    assert_ne!(classify(&ev).verdict, Verdict::ProtocolViolation);
+
+    ev.handed_off_from_session_held_status = false;
+    ev.db_session_status = None;
+    assert_ne!(classify(&ev).verdict, Verdict::ProtocolViolation);
+    ev.db_session_status = Some(DbSessionStatus::Completed);
+    ev.db_task_status = None;
+    assert_ne!(classify(&ev).verdict, Verdict::ProtocolViolation);
+}
+
+/// A required handoff failure does not bypass the higher-priority hard runtime
+/// cap.
 #[test]
 fn hard_runtime_precedes_terminal_session_structural_exoneration() {
     let mut ev = live_evidence();
@@ -350,16 +359,16 @@ fn absent_pod_with_no_activity_is_dead() {
 }
 
 #[test]
-fn failed_pod_with_terminal_session_and_no_activity_is_dead() {
+fn failed_pod_with_terminal_session_and_absent_handoff_is_protocol_violation() {
     let mut ev = live_evidence();
     ev.pod_phase = Some(PodPhase::Failed);
     ev.exit_code = Some(1);
     ev.activity = ActivitySignal::Idle;
-    // Session already terminated — pod exit is expected, not a violation
+    // Persisted termination does not excuse an absent Required handoff.
     ev.db_session_status = Some(DbSessionStatus::Failed);
 
     let result = classify(&ev);
-    assert_eq!(result.verdict, Verdict::Dead);
+    assert_eq!(result.verdict, Verdict::ProtocolViolation);
     assert_eq!(result.outcome, Some(LivenessOutcome::Crash));
     assert_eq!(result.reason, Some(LivenessReason::NonzeroExitNonterminal));
 }
@@ -521,32 +530,35 @@ fn no_task_status_with_exited_pod_is_not_a_protocol_violation() {
     assert_ne!(result.verdict, Verdict::ProtocolViolation);
 }
 
-/// A session that exits with its task parked at a recorded handoff did its
-/// job. Every `is_settled` status must be exonerated, on both a clean and a
-/// crashing exit.
+/// Queue and post-session destinations exonerate an exited session without
+/// separate handoff evidence. Session-held reviewer/lead claim states are
+/// intentionally excluded: after the 7luh barrier they require a confirmed
+/// Required transition, as covered by `terminal_reviewer_and_lead_claims_require_confirmed_handoff`.
 #[test]
-fn exit_at_a_recorded_handoff_is_not_a_protocol_violation() {
+fn exit_at_a_queue_or_post_session_destination_is_not_a_protocol_violation() {
     for status in [
         DbTaskStatus::NeedsTaskReview,
-        DbTaskStatus::InTaskReview,
         DbTaskStatus::Approved,
         DbTaskStatus::PrDraft,
         DbTaskStatus::PrReview,
         DbTaskStatus::NeedsLeadIntervention,
-        DbTaskStatus::InLeadIntervention,
     ] {
-        for (phase, code) in [(PodPhase::Succeeded, 0), (PodPhase::Failed, 1)] {
+        for (session_status, phase, code) in [
+            (DbSessionStatus::Completed, PodPhase::Succeeded, 0),
+            (DbSessionStatus::Failed, PodPhase::Failed, 1),
+            (DbSessionStatus::Interrupted, PodPhase::Failed, 1),
+        ] {
             let mut ev = live_evidence();
             ev.pod_phase = Some(phase);
             ev.exit_code = Some(code);
-            ev.db_session_status = Some(DbSessionStatus::Running);
+            ev.db_session_status = Some(session_status);
             ev.db_task_status = Some(status);
 
             let result = classify(&ev);
             assert_ne!(
                 result.verdict,
                 Verdict::ProtocolViolation,
-                "{status:?} is a recorded handoff, not a structural inconsistency"
+                "{status:?} is a queue or post-session destination"
             );
         }
     }
@@ -646,12 +658,9 @@ fn wire(status: DbTaskStatus) -> String {
         .unwrap_or_default()
 }
 
-/// TRIPWIRE. `is_settled` claims to list recorded handoffs, but two of its
-/// entries are CLAIM statuses that only a live session holds — the exact
-/// set [`is_session_held_status`] names. That overlap is deliberate and
-/// load-bearing: see the `is_settled` doc for why narrowing it is unsafe
-/// while the supervisor settles the session row BEFORE issuing the
-/// reviewer's transition.
+/// TRIPWIRE. `is_settled` includes two session-held statuses for its broader
+/// callers. The exit classifier must overlay ownership/handoff evidence rather
+/// than treating this overlap as intrinsic exoneration.
 ///
 /// If this fails, someone changed one of the two lists. Read that doc
 /// before "fixing" the test — the two helpers are one axis, and moving
@@ -680,13 +689,13 @@ fn is_settled_overlaps_session_held_on_exactly_the_two_claim_statuses() {
     assert_eq!(
         overlap,
         vec!["in_task_review", "in_lead_intervention"],
-        "a session-held status is a CLAIM, not a handoff destination; these \
-         two are excused anyway only because the exit classifier races the \
-         supervisor's transition RPC (see DbTaskStatus::is_settled)"
+        "these two claim states retain broad settled semantics but remain \
+         session-owned until the supervisor's durable read-back confirms a \
+         Required handoff (see DbTaskStatus::is_settled)"
     );
 
-    // The third session-held status is NOT excused — that asymmetry is the
-    // whole reason the overlap above is suspicious rather than principled.
+    // The dispatch-held status remains unsettled: without a recorded transition
+    // out of it, a terminal session positively establishes an abandoned handoff.
     assert!(
         !DbTaskStatus::InProgress.is_settled(),
         "in_progress is session-held AND unsettled; in_task_review is \
@@ -694,70 +703,36 @@ fn is_settled_overlaps_session_held_on_exactly_the_two_claim_statuses() {
     );
 }
 
-/// CHARACTERIZATION of the hole, built from the real traced path rather
-/// than from guesswork.
-///
-/// A reviewer that ends without calling `submit_review` returns a
-/// non-terminal `StageOutcome::Failed` that performs NO task transition,
-/// yet settles its session `completed` (the settlement keys on the reply
-/// loop's `Ok(())`, not on the outcome), so the pod exits 0. The exit
-/// classifier consequently sees precisely this packet — and returns
-/// `Live` with no outcome at all. The abandonment is invisible in the
-/// liveness ledger.
-///
-/// This is asserted, not endorsed. It is pinned so that any future change
-/// to `is_settled` or to the precedence order surfaces here with the
-/// reasoning attached, instead of silently flipping a production
-/// false-positive rate nobody measured.
+/// Truthful terminal exits that remain in reviewer/lead claim states require a
+/// confirmed transition. The 7luh barrier makes the single read-back decisive.
 #[test]
-fn no_verdict_reviewer_exit_is_invisible_to_the_exit_classifier() {
-    // Exactly what classify_session_exit_liveness builds for a "completed"
-    // session whose task never left in_task_review.
-    let ev = LivenessEvidence {
-        pod_phase: Some(PodPhase::Succeeded),
-        activity: ActivitySignal::Idle,
-        db_session_status: Some(DbSessionStatus::Running),
-        db_task_status: Some(DbTaskStatus::InTaskReview),
-        claim_ttl_remaining: None,
-        extension_budget_exhausted: false,
-        hard_runtime_deadline_exceeded: false,
-        exit_code: Some(0),
-        // Last transition was needs_task_review → in_task_review, i.e. INTO
-        // a session-held status: a claim, which proves nothing.
-        handed_off_from_session_held_status: false,
-        // The reviewer exited 0 with no provider error at all — this scenario
-        // is about an abandoned post, not an upstream fault.
-        transient_provider_fault: false,
-    };
+fn terminal_reviewer_and_lead_claims_require_confirmed_handoff() {
+    for (session_status, phase, exit_code) in [
+        (DbSessionStatus::Completed, PodPhase::Succeeded, 0),
+        (DbSessionStatus::Failed, PodPhase::Failed, 1),
+        (DbSessionStatus::Interrupted, PodPhase::Failed, 1),
+    ] {
+        for task_status in [DbTaskStatus::InTaskReview, DbTaskStatus::InLeadIntervention] {
+            let mut ev = live_evidence();
+            ev.pod_phase = Some(phase);
+            ev.exit_code = Some(exit_code);
+            ev.db_session_status = Some(session_status);
+            ev.db_task_status = Some(task_status);
+            ev.handed_off_from_session_held_status = false;
+            assert_eq!(
+                classify(&ev).verdict,
+                Verdict::ProtocolViolation,
+                "{session_status:?} at {task_status:?} without Required handoff"
+            );
 
-    let result = classify(&ev);
-    assert_eq!(
-        result.verdict,
-        Verdict::Live,
-        "a reviewer that abandoned its post is currently recorded as live"
-    );
-    assert_eq!(result.outcome, None, "and carries no outcome at all");
-    assert_eq!(result.reason, None);
-
-    // The single term keeping it out of the violation branch.
-    assert!(
-        DbTaskStatus::InTaskReview.is_settled(),
-        "is_settled is the only guard standing between this packet and \
-         ProtocolViolation/clean_exit_nonterminal"
-    );
-
-    // And every later branch is structurally unreachable for a clean exit:
-    // Succeeded is neither absent-or-failed (precedence 4) nor running
-    // (precedence 5), so `Live` is the fall-through, not a judgement.
-    let mut crashed = ev.clone();
-    crashed.pod_phase = Some(PodPhase::Failed);
-    crashed.exit_code = Some(1);
-    assert_eq!(
-        classify(&crashed).verdict,
-        Verdict::Dead,
-        "the same packet with a Failed pod DOES reach precedence 4 — only \
-         the clean-exit shape falls all the way through"
-    );
+            ev.handed_off_from_session_held_status = true;
+            assert_ne!(
+                classify(&ev).verdict,
+                Verdict::ProtocolViolation,
+                "{session_status:?} at {task_status:?} with confirmed handoff"
+            );
+        }
+    }
 }
 
 /// Explicit regression for #2748: a reviewer that rejected work back to the

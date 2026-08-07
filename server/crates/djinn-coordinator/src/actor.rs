@@ -2014,10 +2014,10 @@ impl CoordinatorActor {
             // up the epic its task was attached to and recheck whether an
             // auto-dispatch should fire (now that the guard no longer skips).
             // Also: classify session exit for protocol-violation detection
-            // on ALL session types (not just planner). A status-0 worker
-            // exit while the task remains nonterminal is a protocol
-            // violation and must count as a failed attempt for retry
-            // accounting.
+            // on ALL session types (not just planner). An exit whose durable
+            // supervisor-owned handoff is absent is a protocol violation.
+            // Failed/interrupted exits retain crashed-attempt accounting;
+            // completed exits record evidence only.
             ("session", "completed" | "interrupted" | "failed") => {
                 let Some(session) = envelope.parse_payload::<djinn_core::models::SessionRecord>()
                 else {
@@ -2026,9 +2026,9 @@ impl CoordinatorActor {
                 // ── Protocol-violation classification (all session types) ──
                 // When a session ends and the task is still nonterminal,
                 // classify the exit and persist structured evidence. This
-                // ensures protocol violations are recorded and count as
-                // failed attempts. Slow extensions never reach this path
-                // (they extend the claim without ending the session).
+                // ensures protocol violations are recorded. Slow extensions
+                // never reach this path (they extend the claim without ending
+                // the session).
                 // For failed/interrupted exits on a nonterminal task this
                 // also terminalizes the live task_attempts row (crashed) so
                 // the respawn guard does not defer the (task, role) pair
