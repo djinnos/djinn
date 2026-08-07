@@ -3235,6 +3235,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn watchdog_uses_paused_time_for_twenty_second_commits_and_forty_second_abort() {
+        use std::time::Duration;
+
+        let db = Database::ephemeral().await.expect("db");
+        seed_model_turn_admission_fixture(&db, "enforce", "supported", 2).await;
+        let hooks = Arc::new(ModelTurnAdmissionTestHooks::default());
+        let coordinator = ModelTurnAdmissionCoordinator::with_test_hooks(
+            djinn_db::ModelTurnAdmissionRepository::new(db),
+            hooks.clone(),
+        );
+        let preparation = coordinator
+            .prepare(
+                &covered_admission_plan(),
+                admission_request("watchdog-clock"),
+            )
+            .await
+            .expect("prepare");
+        let abort = ProviderAttemptAbortHandleV1::new();
+        let observed_abort = abort.clone();
+        let (_outcome_tx, outcome_rx) = tokio::sync::oneshot::channel();
+        let guard = launch_prepared_covered_attempt_with_lease(
+            preparation,
+            move || {
+                Ok((
+                    djinn_provider::provider::client::ProviderSseAttemptV1::for_test(
+                        Box::pin(futures::stream::pending()),
+                        abort,
+                        outcome_rx,
+                    ),
+                    Box::new(MatrixParser),
+                ))
+            },
+            coordinator,
+            tokio_util::sync::CancellationToken::new(),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .expect("launch");
+
+        // No provider frame is supplied: only the owned watchdog can progress.
+        tokio::time::pause();
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(19)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(hooks.heartbeats.load(Ordering::Acquire), 0);
+        tokio::time::advance(Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(hooks.heartbeats.load(Ordering::Acquire), 1);
+        assert!(!observed_abort.is_aborted());
+
+        // The successful 20-second commit resets the failure interval. A failed
+        // commit at 40 cannot abort until 60.
+        hooks.fail_heartbeat.store(true, Ordering::Release);
+        tokio::time::advance(Duration::from_secs(39)).await;
+        tokio::task::yield_now().await;
+        assert!(!observed_abort.is_aborted());
+        tokio::time::advance(Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(hooks.heartbeats.load(Ordering::Acquire), 2);
+        assert!(!observed_abort.is_aborted());
+        tokio::time::advance(Duration::from_secs(20)).await;
+        tokio::task::yield_now().await;
+        assert!(observed_abort.is_aborted());
+        tokio::time::resume();
+        drop(guard);
+    }
+
+    #[tokio::test]
     async fn covered_launch_rejection_cleans_up_definitely_unsent_permit() {
         let db = Database::ephemeral().await.expect("db");
         let pool = seed_model_turn_admission_fixture(&db, "enforce", "supported", 2).await;
