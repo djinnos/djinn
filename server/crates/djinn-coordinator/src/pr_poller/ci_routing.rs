@@ -82,16 +82,21 @@
 
 use std::collections::BTreeSet;
 
-use djinn_provider::github_api::CheckRun;
+use djinn_provider::github_api::{CheckRun, CheckSetCompleteness, CheckSetIncompleteReason};
 use sha2::{Digest, Sha256};
+
+use crate::types::{ProviderActionGuard, ProviderActionScope};
 
 use super::ci_triage::{self, CheckEvidence};
 
 pub(crate) use djinn_db::{
-    CI_HEAD_BUDGET_LIMIT, CI_SIGNATURE_BUDGET_LIMIT, CiAction, CiActionPhase, CiBudgetCounts,
-    CiClass, CiEvidenceIdentity, CiLane, CiReservedRecovery, CiRouteAttempt, CiRouteOutcome,
-    CiRouteSubject, CiTier2Reason,
+    CiAction, CiActionPhase, CiBudgetCounts, CiClass, CiEvidenceIdentity, CiLane,
+    CiReservedRecovery, CiRouteAttempt, CiRouteOutcome, CiRouteSubject, CiTier2Reason,
 };
+// Read only by `budget_ceilings`, which exists so a test can assert the numbers
+// the routing contract enforces are the numbers the repository charges against.
+#[cfg(test)]
+pub(crate) use djinn_db::{CI_HEAD_BUDGET_LIMIT, CI_SIGNATURE_BUDGET_LIMIT};
 
 // ---------------------------------------------------------------------------
 // Subject scope
@@ -337,14 +342,22 @@ pub(crate) enum CiIncompleteReason {
     /// never ran. Contradictory evidence cannot authorize an automatic
     /// retry — this is the "false transient" the proposal names as risk #1.
     NonPositiveExecutionInterval,
-    /// The check list could not be enumerated at all.
+    /// A page of the check-run enumeration returned a non-success status, so
+    /// the collected list is a prefix — possibly the empty prefix, when page 1
+    /// is the one that failed.
+    EnumerationPageFailed,
+    /// The enumeration walk hit its page ceiling, so the check list could not
+    /// be enumerated in full.
     CheckEnumerationUnavailable,
     /// The enumeration returned fewer runs than the provider's own
     /// `total_count`, so the blocking set may be missing a causal member.
     PartialPagination,
-    /// The check API returned an error for this ref.
+    /// The check API returned an error for a ref whose immutable run identity
+    /// is already known — a *complete-but-unusable* case, not an enumeration
+    /// that can be re-polled into completeness.
     CheckApiError,
-    /// A log/annotation read that completeness depended on failed.
+    /// A log/annotation read that completeness depended on failed, again after
+    /// an immutable run is known.
     LogApiError,
     /// More than one terminal merge-group run correlates to this PR.
     AmbiguousMergeGroupCorrelation,
@@ -356,26 +369,236 @@ pub(crate) enum CiIncompleteReason {
     RunAttributionUnavailable,
 }
 
+impl CiIncompleteReason {
+    /// Whether the *enumeration itself* failed, as opposed to the enumeration
+    /// succeeding and its contents being unusable.
+    ///
+    /// This predicate is the difference between two rows of the proposal's
+    /// table that both look like "we don't know":
+    ///
+    /// * **Enumeration failure → hold, with no route row.** The set we hold is
+    ///   not an immutable CI evidence bundle at all; a later poll can turn it
+    ///   into one for free. Spending a route row, a Tier-2 lease, and a Lead
+    ///   session on it would mean paying for adjudication of evidence that does
+    ///   not exist yet — and, because incomplete polls repeat, paying again on
+    ///   every poll until the provider recovers.
+    /// * **Complete but unusable → Tier 2 after the current-identity guard.**
+    ///   Here the evidence *is* an immutable bundle with a constructible
+    ///   run/lane identity; it is simply one no automatic action can read. That
+    ///   has a deduplicated adjudication and will not fix itself.
+    ///
+    /// Note which side the two API-error reasons sit on. `CheckApiError` and
+    /// `LogApiError` are Tier 2 because the proposal scopes them to "after an
+    /// immutable run is known" — the run identity survives the error, so the
+    /// route can be keyed. A page failure during enumeration has no run yet.
+    ///
+    /// # `CheckEnumerationUnavailable` is on the *other* side, and that is a fix
+    ///
+    /// It used to sit here with the other two, and that made it a permanent
+    /// wedge. A hold's whole premise is that "a later poll can turn this into an
+    /// evidence bundle for free" — true of a failed page (a provider incident)
+    /// and of a short read (the provider disagreeing with itself), and false of
+    /// pagination truncation. Truncation means the PR genuinely has more check
+    /// runs than `MAX_PAGES * PER_PAGE`, which is a property of the PR, not of
+    /// the moment: every subsequent enumeration returns the identical verdict,
+    /// so the route holds on every poll forever, with no route row, no
+    /// adjudication, and nothing on the board to say why the task stopped.
+    ///
+    /// It is instead complete-but-unusable current evidence: a real enumeration
+    /// whose contents no automatic action can read. That is the guarded Tier-2
+    /// row of the proposal's table, and it is bounded — the head-scoped lease
+    /// makes it exactly one Lead adjudication per PR head, not one per poll.
+    pub(crate) fn is_enumeration_failure(self) -> bool {
+        matches!(self, Self::EnumerationPageFailed | Self::PartialPagination)
+    }
+}
+
 /// What the poller managed to capture for one evidence identity.
 ///
-/// The discriminator between the proposal's "empty blocking set on a completed
-/// run" row and its "passing complete set" row is the *run conclusion*, not
-/// the blocking set: [`CiCapture::Passing`] means the run concluded green,
-/// while `FailedComplete(&[])` means the run concluded red and yet nothing
-/// blocking could be enumerated to explain it. Absence is not proof of
-/// transience, so the second is Tier 2 and the first is no route at all.
+/// # Why this is a newtype and not a plain enum
+///
+/// The dangerous variant is the complete one. `is_inconclusive` is true of a
+/// blocking set in which no member carries causal evidence — and a check that
+/// is still `in_progress` carries no causal evidence *yet*. So a caller that
+/// hand-builds "complete" from a set of running checks gets `NeverExecuted` for
+/// each, `is_inconclusive` returns true, and the classifier hands back a
+/// Tier-1 provider authorization for a run that has not finished. Nothing in
+/// the type system stopped that while the variants were public.
+///
+/// They are private now. [`CiCapture::prove_complete`] is the only door to a
+/// complete capture, it takes the provider's own enumeration verdict as an
+/// argument, and it downgrades to `NonTerminal` or `Incomplete` on its own
+/// authority. "Asserts no Tier 1 on a non-terminal run" is therefore a property
+/// of the constructor rather than a claim about a call site.
+///
+/// # The three shapes of "nothing blocking"
+///
+/// | Shape | Capture | Route |
+/// | --- | --- | --- |
+/// | run concluded green | [`CiCapture::passing`] | existing passing path |
+/// | enumeration provably complete, blocking set empty | `CompleteEmpty` | lane no-CI compatibility path |
+/// | enumeration could not be proven complete | `Incomplete` | hold and re-poll |
+///
+/// Rows two and three are byte-identical at the collected-runs level — a failed
+/// first page returns zero runs with `total_count: 0`. Only the provider's
+/// verdict separates them, which is why it is an argument here rather than
+/// something re-derived from the list.
 #[derive(Clone, Copy, Debug)]
-pub(crate) enum CiCapture<'a> {
+pub(crate) struct CiCapture<'a>(Capture<'a>);
+
+#[derive(Clone, Copy, Debug)]
+enum Capture<'a> {
     /// Do not classify yet.
     NonTerminal(CiPendingReason),
     /// The run concluded successfully with the complete required set green.
     Passing,
     /// The PR/task already merged.
     Merged,
-    /// A terminal failing run whose complete blocking set is `blocking`.
+    /// The enumeration is provably complete and the blocking set is empty.
+    CompleteEmpty,
+    /// A terminal failing run whose complete, non-empty blocking set is
+    /// `blocking`.
     FailedComplete { blocking: &'a [&'a CheckRun] },
     /// A terminal failing run whose evidence set could not be completed.
     Incomplete(CiIncompleteReason),
+}
+
+impl<'a> CiCapture<'a> {
+    /// Nothing terminal to classify yet.
+    pub(crate) fn non_terminal(reason: CiPendingReason) -> Self {
+        Self(Capture::NonTerminal(reason))
+    }
+
+    /// The run concluded green.
+    pub(crate) fn passing() -> Self {
+        Self(Capture::Passing)
+    }
+
+    /// The PR/task already merged.
+    pub(crate) fn merged() -> Self {
+        Self(Capture::Merged)
+    }
+
+    /// Terminal, but the evidence could not be completed. Fails closed.
+    pub(crate) fn incomplete(reason: CiIncompleteReason) -> Self {
+        Self(Capture::Incomplete(reason))
+    }
+
+    /// The incompleteness reason, when this capture is incomplete.
+    pub(crate) fn incomplete_reason(&self) -> Option<CiIncompleteReason> {
+        match self.0 {
+            Capture::Incomplete(reason) => Some(reason),
+            _ => None,
+        }
+    }
+
+    /// Whether this capture is the authoritatively complete *empty* one.
+    #[cfg(test)]
+    pub(crate) fn is_complete_empty(&self) -> bool {
+        matches!(self.0, Capture::CompleteEmpty)
+    }
+
+    /// The **only** constructor that can yield a complete capture.
+    ///
+    /// It discharges four obligations in a fixed order, and the order is the
+    /// contract:
+    ///
+    /// 1. **The enumeration is provably complete.** Taken from the provider's
+    ///    own verdict, never inferred from the collected list — the list cannot
+    ///    tell a failed first page from a repository with no CI.
+    /// 2. **Every blocking member is terminal.** This is the seal's whole
+    ///    point: a running check is not causal *yet*, and treating "not causal
+    ///    yet" as "inconclusive" is a provider retry on a live run.
+    /// 3. **An empty blocking set is complete-empty**, not a failure with no
+    ///    explanation. It leaves remediation routing entirely.
+    /// 4. **The execution evidence is usable** — timestamps present, mutually
+    ///    comparable, and not contradicting a hard-failure conclusion.
+    ///
+    /// (3) sits before (4) deliberately: an empty set trivially satisfies (4),
+    /// and running the timestamp checks on it would only obscure which row of
+    /// the proposal's table it took.
+    pub(crate) fn prove_complete(
+        enumeration: CheckSetCompleteness,
+        blocking: &'a [&'a CheckRun],
+    ) -> Self {
+        if let Some(reason) = enumeration.incomplete_reason() {
+            return Self(Capture::Incomplete(enumeration_incomplete_reason(reason)));
+        }
+        if blocking.iter().any(|cr| cr.status != "completed") {
+            return Self(Capture::NonTerminal(
+                CiPendingReason::RequiredCheckNonTerminal,
+            ));
+        }
+        if blocking.is_empty() {
+            return Self(Capture::CompleteEmpty);
+        }
+        if let Some(reason) = blocking_evidence_completeness(blocking) {
+            return Self(Capture::Incomplete(reason));
+        }
+        Self(Capture::FailedComplete { blocking })
+    }
+}
+
+/// Map the provider's enumeration verdict onto the classifier's closed reason
+/// set.
+///
+/// The three provider reasons are kept distinct here rather than folded into
+/// one `PartialPagination`, because they answer different operational
+/// questions: a failed page is a provider incident, a truncated walk is a PR
+/// that outgrew the ceiling, and a short read is the provider disagreeing with
+/// itself. All three route identically — hold — so nothing branches on the
+/// difference; only the report does.
+fn enumeration_incomplete_reason(reason: CheckSetIncompleteReason) -> CiIncompleteReason {
+    match reason {
+        CheckSetIncompleteReason::PageFetchFailed => CiIncompleteReason::EnumerationPageFailed,
+        CheckSetIncompleteReason::MaxPagesTruncated => {
+            CiIncompleteReason::CheckEnumerationUnavailable
+        }
+        CheckSetIncompleteReason::ShortRead => CiIncompleteReason::PartialPagination,
+    }
+}
+
+/// Whether the blocking set's execution evidence is complete enough to route
+/// automatically.
+///
+/// Checked in a fixed order so the answer does not depend on how the provider
+/// ordered the check list:
+///
+/// 1. a missing `started_at`, then
+/// 2. a missing `completed_at`, then
+/// 3. two timestamps that exist but are not mutually comparable, then
+/// 4. a **hard-failure conclusion with a non-positive interval**.
+///
+/// (4) deserves its own note. [`ci_triage::executed`] deliberately treats a
+/// non-positive interval as proof of non-execution, which is what makes a
+/// `needs:`-sealed aggregator sort last and what makes a run of them
+/// *inconclusive*. That tolerance is correct for ranking and is left exactly as
+/// it is. But a lane that reports `failure`/`timed_out` — a verdict about its
+/// own work — while also reporting that it never ran is contradicting itself,
+/// and routing that to an automatic retry is the proposal's "false transient"
+/// risk. So the contradiction, and only the contradiction, fails closed to
+/// Lead. A plain `cancelled` lane with a non-positive interval stays exactly
+/// what `ci_triage` says it is: never executed, and Tier-1 eligible.
+pub(crate) fn blocking_evidence_completeness(blocking: &[&CheckRun]) -> Option<CiIncompleteReason> {
+    if blocking.iter().any(|cr| cr.started_at.is_none()) {
+        return Some(CiIncompleteReason::MissingStartTimestamp);
+    }
+    if blocking.iter().any(|cr| cr.completed_at.is_none()) {
+        return Some(CiIncompleteReason::MissingCompletionTimestamp);
+    }
+    if blocking
+        .iter()
+        .any(|cr| ci_triage::completed_after_start(cr).is_none())
+    {
+        return Some(CiIncompleteReason::MalformedExecutionInterval);
+    }
+    if blocking.iter().any(|cr| {
+        super::ci_helpers::is_hard_failure_conclusion(cr.conclusion.as_deref())
+            && ci_triage::completed_after_start(cr) == Some(false)
+    }) {
+        return Some(CiIncompleteReason::NonPositiveExecutionInterval);
+    }
+    None
 }
 
 /// Which component of the immutable identity diverged, reported in declaration
@@ -458,10 +681,70 @@ pub(crate) enum CiProviderActionKind {
 }
 
 impl CiProviderAction {
+    /// Admit this action into the leader's provider-action scope.
+    ///
+    /// `None` means admission is closed — leadership is winding down — and the
+    /// caller must not call the provider **or** advance its route row to
+    /// `calling`. A charged `calling` row with no future behind it is worse
+    /// than no row at all: it holds its slots and nothing but startup recovery
+    /// will ever finalize it.
+    ///
+    /// The returned value is the only thing that names a *call target*, and it
+    /// owns the scope guard for as long as it lives. That is what makes "no
+    /// provider call escapes the tracked scope" a property of the type rather
+    /// than a convention every lane executor has to remember: a call site that
+    /// skipped the scope would have nothing to pass to the provider.
+    ///
+    /// # What this actually guarantees, and what it does not
+    ///
+    /// The accessor route is closed. `CiProviderAction` used to expose `kind()`
+    /// and `run_id()` as `pub(crate)`, so a sibling module could read the call
+    /// target straight off the *unadmitted* value; both now live on
+    /// [`AdmittedCiProviderAction`] alone, and `action.run_id()` no longer
+    /// compiles. That removes the accidental path — the one a reader would
+    /// reach for — and it is worth having.
+    ///
+    /// **It is not a proof, and this comment previously claimed it was.** The
+    /// executor is handed a `CiEvidenceIdentity` whose `run_id` and `lane` are
+    /// public fields on the `djinn-db` type, and `CiRouteDecision::provider_action`
+    /// is `pub(crate)`. A sibling module that reads the authorization bit and
+    /// then calls `provider.rerun_failed_jobs(owner, repo, identity.run_id as
+    /// u64)` with no scope and no guard compiles cleanly today. Closing that
+    /// would mean making the identity's fields private across `djinn-db`, which
+    /// is a wave-1 change with a large blast radius and is not attempted here.
+    ///
+    /// So: "no provider call escapes the tracked scope" is enforced by this
+    /// type for the obvious route, and by review for the rest. The fixtures
+    /// assert the *observable* property instead — a closed scope performs no
+    /// provider mutation, counted on the seam — which does not depend on the
+    /// stronger claim.
+    pub(crate) fn admit(&self, scope: &ProviderActionScope) -> Option<AdmittedCiProviderAction> {
+        scope.admit().map(|guard| AdmittedCiProviderAction {
+            kind: self.kind,
+            run_id: self.run_id,
+            _guard: guard,
+        })
+    }
+}
+
+/// A provider action that holds a live scope guard.
+///
+/// Deliberately not `Clone` and with no public constructor: it exists only
+/// between [`CiProviderAction::admit`] and the end of the provider call, and
+/// dropping it is what leaves the scope.
+#[derive(Debug)]
+pub(crate) struct AdmittedCiProviderAction {
+    kind: CiProviderActionKind,
+    run_id: i64,
+    _guard: ProviderActionGuard,
+}
+
+impl AdmittedCiProviderAction {
     pub(crate) fn kind(&self) -> CiProviderActionKind {
         self.kind
     }
 
+    /// The Actions run id to call the provider with.
     pub(crate) fn run_id(&self) -> i64 {
         self.run_id
     }
@@ -479,7 +762,8 @@ pub(crate) enum CiRouteRationale {
     Inconclusive,
     /// At least one blocking check carries causal evidence.
     CausalFailure,
-    /// The run concluded red with nothing blocking to explain it.
+    /// The enumeration was provably complete and nothing blocking was in it.
+    /// Lane-specific compatibility behaviour; creates no remediation state.
     EmptyBlockingSet,
     /// Terminal run, incomplete evidence.
     IncompleteEvidence(CiIncompleteReason),
@@ -488,6 +772,8 @@ pub(crate) enum CiRouteRationale {
     /// The provider call returned an explicit error.
     ProviderActionFailed,
     /// A `calling` row was legally handed off and its result is unknowable.
+    /// Produced by [`unknown_outcome_route`]; see its note.
+    #[allow(dead_code)]
     ProviderOutcomeUnknown,
     /// A newer passing observation closes the route.
     NewerPass,
@@ -500,6 +786,31 @@ pub(crate) enum CiRouteRationale {
 /// Constructible only by this module's classifiers. The accessors below are
 /// the complete set of authorizations a decision carries; there is no other
 /// door.
+/// The lane-specific behaviour an authoritatively complete *empty* enumeration
+/// takes.
+///
+/// The two lanes genuinely differ in this repository and the proposal (rev 49)
+/// is explicit that they must not be collapsed:
+///
+/// * the draft lane already maps a no-CI PR to `PrDraftCiAction::Proceed` once
+///   the minimum-age guard has elapsed, and
+/// * the review lane already persists `Passing` for the current head, because a
+///   `pr_review` PR has *already* cleared that guard and would otherwise wedge
+///   forever on a repository with no CI (`Unknown` maps to `Hold` at the gate).
+///
+/// Neither creates a route row, a Tier-2 lease, a Lead or worker session, a
+/// provider remediation action, or a Tier-1 charge. This value exists so a lane
+/// executor is told which existing path to take rather than inventing one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CiCompleteEmptyRoute {
+    /// `pr_draft`: existing `PrDraftCiAction::Proceed`, after the minimum-age
+    /// guard.
+    PrHeadProceed,
+    /// `pr_review`: persist current-head `Passing`, let the existing merge gate
+    /// progress.
+    MergeGroupRecordPassing,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct CiRouteDecision {
     class: CiClass,
@@ -507,6 +818,8 @@ pub(crate) struct CiRouteDecision {
     rationale: CiRouteRationale,
     provider_action: Option<CiProviderAction>,
     tier2_reason: Option<CiTier2Reason>,
+    complete_empty: Option<CiCompleteEmptyRoute>,
+    creates_route_row: bool,
     closes_route: bool,
 }
 
@@ -534,8 +847,32 @@ impl CiRouteDecision {
         self.tier2_reason
     }
 
+    #[cfg(test)]
     pub(crate) fn opens_tier2_lease(&self) -> bool {
         self.tier2_reason.is_some()
+    }
+
+    /// The lane compatibility path for an authoritatively complete empty
+    /// enumeration. `None` for every other route.
+    pub(crate) fn complete_empty_route(&self) -> Option<CiCompleteEmptyRoute> {
+        self.complete_empty
+    }
+
+    /// Whether this decision may write a `ci_route_attempts` row at all.
+    ///
+    /// False for holds, discards, complete-empty, passing, and merged. It is
+    /// the single predicate the "no route row" half of every negative-space
+    /// assertion reads, so those assertions cannot drift apart from the
+    /// executor.
+    pub(crate) fn creates_route_row(&self) -> bool {
+        self.creates_route_row
+    }
+
+    /// Whether this decision consumes a Tier-1 retry charge. Only a decision
+    /// carrying a provider authorization can.
+    #[cfg(test)]
+    pub(crate) fn consumes_tier1_charge(&self) -> bool {
+        self.provider_action.is_some()
     }
 
     /// True for the two routes that mean "an existing route row, if any, is
@@ -549,11 +886,13 @@ impl CiRouteDecision {
     /// exactly one place — a resolved Tier-2 lease carrying a validated Lead
     /// result (wave 4) — and this accessor exists so that invariant is
     /// asserted by tests rather than assumed.
+    #[cfg(test)]
     pub(crate) fn authorizes_board_transition(&self) -> bool {
         false
     }
 
     /// See [`Self::authorizes_board_transition`].
+    #[cfg(test)]
     pub(crate) fn authorizes_worker_dispatch(&self) -> bool {
         false
     }
@@ -565,6 +904,32 @@ impl CiRouteDecision {
             rationale: CiRouteRationale::Pending(reason),
             provider_action: None,
             tier2_reason: None,
+            complete_empty: None,
+            // A hold is the proposal's "no route row" answer, verbatim:
+            // incomplete or non-terminal evidence is not an immutable CI
+            // evidence bundle and cannot enter remediation. The row would be
+            // the synthetic identity the scope explicitly rules out.
+            creates_route_row: false,
+            closes_route: false,
+        }
+    }
+
+    /// The hold an *enumeration failure* takes.
+    ///
+    /// Structurally identical to [`Self::hold`] — no row, no lease, no charge,
+    /// re-poll — but it carries the incompleteness reason rather than a pending
+    /// reason, because "the provider did not finish telling us" is a different
+    /// fact from "the run has not finished", and the stale/held suppression
+    /// report distinguishes them.
+    fn hold_incomplete(reason: CiIncompleteReason) -> Self {
+        Self {
+            class: CiClass::Unknown,
+            action: CiAction::Hold,
+            rationale: CiRouteRationale::IncompleteEvidence(reason),
+            provider_action: None,
+            tier2_reason: None,
+            complete_empty: None,
+            creates_route_row: false,
             closes_route: false,
         }
     }
@@ -576,6 +941,8 @@ impl CiRouteDecision {
             rationale: CiRouteRationale::Stale(field),
             provider_action: None,
             tier2_reason: None,
+            complete_empty: None,
+            creates_route_row: false,
             closes_route: false,
         }
     }
@@ -591,6 +958,8 @@ impl CiRouteDecision {
             rationale: CiRouteRationale::Inconclusive,
             provider_action: Some(CiProviderAction { kind, run_id }),
             tier2_reason: None,
+            complete_empty: None,
+            creates_route_row: true,
             closes_route: false,
         }
     }
@@ -602,6 +971,33 @@ impl CiRouteDecision {
             rationale,
             provider_action: None,
             tier2_reason: Some(reason),
+            complete_empty: None,
+            creates_route_row: true,
+            closes_route: false,
+        }
+    }
+
+    /// The lane compatibility route for an authoritatively complete empty
+    /// enumeration.
+    ///
+    /// `action` is `Discard` because there is nothing to re-poll for and
+    /// nothing to remediate: the evidence was complete and it said "this
+    /// repository has no blocking CI here". It is *not* `Hold`, which would
+    /// claim a later poll could change the answer. Nothing durable is written
+    /// either way — `creates_route_row` is false — so the durable vocabulary
+    /// never sees this value.
+    fn complete_empty(lane: CiLane) -> Self {
+        Self {
+            class: CiClass::Unknown,
+            action: CiAction::Discard,
+            rationale: CiRouteRationale::EmptyBlockingSet,
+            provider_action: None,
+            tier2_reason: None,
+            complete_empty: Some(match lane {
+                CiLane::PrHead => CiCompleteEmptyRoute::PrHeadProceed,
+                CiLane::MergeGroup => CiCompleteEmptyRoute::MergeGroupRecordPassing,
+            }),
+            creates_route_row: false,
             closes_route: false,
         }
     }
@@ -613,6 +1009,8 @@ impl CiRouteDecision {
             rationale,
             provider_action: None,
             tier2_reason: None,
+            complete_empty: None,
+            creates_route_row: false,
             closes_route: true,
         }
     }
@@ -645,22 +1043,24 @@ impl CiRouteDecision {
 /// still recorded with the class its evidence actually carried. That keeps the
 /// stale-suppression report able to say what was thrown away.
 pub(crate) fn classify(observation: &CiObservation<'_>) -> CiRouteDecision {
-    match observation.capture {
-        CiCapture::Merged => return CiRouteDecision::closed(CiRouteRationale::NewerMerge),
-        CiCapture::Passing => return CiRouteDecision::closed(CiRouteRationale::NewerPass),
+    match observation.capture.0 {
+        Capture::Merged => return CiRouteDecision::closed(CiRouteRationale::NewerMerge),
+        Capture::Passing => return CiRouteDecision::closed(CiRouteRationale::NewerPass),
         _ => {}
     }
 
-    let (class, complete) = match observation.capture {
-        CiCapture::NonTerminal(_) => (CiClass::Unknown, None),
-        CiCapture::Incomplete(reason) => (
+    let (class, complete) = match observation.capture.0 {
+        Capture::NonTerminal(_) | Capture::CompleteEmpty => (CiClass::Unknown, None),
+        Capture::Incomplete(reason) => (
             CiClass::Unknown,
             Some(CiRouteRationale::IncompleteEvidence(reason)),
         ),
-        CiCapture::FailedComplete { blocking } => {
-            if blocking.is_empty() {
-                (CiClass::Unknown, Some(CiRouteRationale::EmptyBlockingSet))
-            } else if ci_triage::is_inconclusive(blocking) {
+        Capture::FailedComplete { blocking } => {
+            // `prove_complete` guarantees this set is non-empty and terminal,
+            // so `is_inconclusive`'s "no member is causal" genuinely means
+            // "nothing reached a verdict about the code" rather than "nothing
+            // has reached a verdict *yet*".
+            if ci_triage::is_inconclusive(blocking) {
                 (CiClass::Inconclusive, Some(CiRouteRationale::Inconclusive))
             } else {
                 (
@@ -669,18 +1069,29 @@ pub(crate) fn classify(observation: &CiObservation<'_>) -> CiRouteDecision {
                 )
             }
         }
-        CiCapture::Merged | CiCapture::Passing => unreachable!("handled above"),
+        Capture::Merged | Capture::Passing => unreachable!("handled above"),
     };
 
     // The current-identity guard. Obsolete evidence cannot authorize a
     // provider call, a Tier-2 lease, a board mutation, or a worker — so it is
     // discarded before any of those can be produced, whatever it classified as.
+    //
+    // Complete-empty is guarded too. It creates no remediation state, but it
+    // does drive a lane through its no-CI fast path to *green*, and doing that
+    // on the strength of a superseded head is exactly the stale mutation the
+    // proposal forbids.
     if let Some(field) = stale_field(observation.evidence, observation.observed_current) {
         return CiRouteDecision::discard(class, field);
     }
 
-    match (observation.capture, complete) {
-        (CiCapture::NonTerminal(reason), _) => CiRouteDecision::hold(class, reason),
+    match (observation.capture.0, complete) {
+        (Capture::NonTerminal(reason), _) => CiRouteDecision::hold(class, reason),
+        (Capture::CompleteEmpty, _) => CiRouteDecision::complete_empty(observation.evidence.lane),
+        // The enumeration failed. This is not an evidence bundle, so it holds
+        // and re-polls; it may not open a route row, a lease, or a session.
+        (Capture::Incomplete(reason), _) if reason.is_enumeration_failure() => {
+            CiRouteDecision::hold_incomplete(reason)
+        }
         (_, Some(CiRouteRationale::Inconclusive)) => {
             CiRouteDecision::tier1(observation.evidence.lane, observation.evidence.run_id)
         }
@@ -690,7 +1101,7 @@ pub(crate) fn classify(observation: &CiObservation<'_>) -> CiRouteDecision {
         (_, Some(rationale)) => {
             CiRouteDecision::tier2(class, rationale, CiTier2Reason::EvidenceUnknown)
         }
-        (_, None) => unreachable!("only NonTerminal has no completeness rationale"),
+        (_, None) => unreachable!("NonTerminal and CompleteEmpty are handled above"),
     }
 }
 
@@ -709,6 +1120,7 @@ pub(crate) fn classify(observation: &CiObservation<'_>) -> CiRouteDecision {
 /// Returned as a pair so a test can assert the numbers the routing contract
 /// actually enforces are the numbers the repository charges against — a local
 /// copy of `2` and `4` would drift the first time either is tuned.
+#[cfg(test)]
 pub(crate) fn budget_ceilings() -> (i64, i64) {
     (CI_SIGNATURE_BUDGET_LIMIT, CI_HEAD_BUDGET_LIMIT)
 }
@@ -739,6 +1151,14 @@ pub(crate) fn provider_failure_route(class: CiClass) -> CiRouteDecision {
 
 /// The Tier-2 route for a `calling` row whose external result became unknowable
 /// after a quiescent exclusive startup handoff.
+// The classifier's name for a legally handed-off `calling` row whose external
+// result is unknowable. The *durable* transition is owned by
+// `recover_calling_owner`, which writes `outcome_unknown` and opens the lease in
+// one transaction; this is the decision-shaped view of the same fact, and wave 4
+// consumes it when it builds the Lead evidence bundle for such a route. Kept
+// beside its two siblings rather than deleted so the four Tier-2 entry reasons
+// stay one enumerable set.
+#[allow(dead_code)]
 pub(crate) fn unknown_outcome_route(class: CiClass) -> CiRouteDecision {
     CiRouteDecision::tier2(
         class,
@@ -755,6 +1175,12 @@ pub(crate) fn unknown_outcome_route(class: CiClass) -> CiRouteDecision {
 /// terminal outcome, and they are distinguished because the proposal reports
 /// obsolete routes suppressed before the provider call, before Lead dispatch,
 /// and before supervisor application as separate counts.
+///
+/// Only `AfterCall` has a coordinator consumer today — the startup owner
+/// handoff. The other three name supersessions the *supervisor* detects (before
+/// Lead dispatch, and atomically with applying a Lead result), which is wave 4's
+/// half of the contract, and the wave-5 report counts all four separately.
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum CiRouteStage {
     /// Reserved, no provider call has happened.
@@ -920,6 +1346,10 @@ pub(crate) fn may_open_tier2(attempt: &CiRouteAttempt) -> bool {
 /// report that reads `terminal_outcome` alone counts such a route as a provider
 /// failure and drops the reopen entirely — which is every reopen that followed
 /// a provider failure or an unknown outcome.
+// Read back by the wave-5 reporting surface (repair vs diagnostic reopens, parks
+// with cited cause). No coordinator path reads a resolved Tier-2 lease yet,
+// because nothing dispatches Lead yet.
+#[allow(dead_code)]
 pub(crate) fn is_reopen(attempt: &CiRouteAttempt) -> bool {
     matches!(
         attempt.adjudicated_outcome(),
@@ -929,9 +1359,13 @@ pub(crate) fn is_reopen(attempt: &CiRouteAttempt) -> bool {
 
 /// Whether this route ended in a park. See [`is_reopen`] on why this reads the
 /// adjudicated outcome rather than the terminal one.
+#[allow(dead_code)]
 pub(crate) fn is_park(attempt: &CiRouteAttempt) -> bool {
     attempt.adjudicated_outcome() == Some(CiRouteOutcome::Parked)
 }
+
+pub(crate) mod executor;
+pub(crate) mod gate;
 
 #[cfg(test)]
 mod tests;
