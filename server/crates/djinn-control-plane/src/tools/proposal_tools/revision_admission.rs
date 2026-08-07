@@ -30,7 +30,7 @@ pub(super) async fn admit_committed_revision_resume(
         .map(|revision| revision.id)
         .ok_or_else(|| "InvalidState".to_owned())?;
 
-    let pending_dispatch = admit_refinement_run(
+    let admission = admit_refinement_run(
         server,
         repo,
         &updated.id,
@@ -39,7 +39,7 @@ pub(super) async fn admit_committed_revision_resume(
     )
     .await
     .map_err(|rejection| rejection.message)?;
-    if pending_dispatch {
+    if admission.pending_dispatch {
         // The intent was committed by reap_and_admit and remains retryable;
         // ProposalSingleResponse has no dispatch field to extend compatibly.
         tracing::warn!(proposal_id = %updated.id, "revision refinement admission accepted; dispatch pending");

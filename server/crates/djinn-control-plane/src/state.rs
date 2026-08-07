@@ -17,6 +17,22 @@ use crate::bridge::{
     RepoGraphOps, RuntimeOps, SemanticQueryEmbedding, SlotPoolOps, TaskrunJobRef,
 };
 
+/// Independent controls for feedback-derived tribunal work.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FeedbackRefinementControls {
+    pub auto_resume: bool,
+    pub capture: bool,
+}
+
+impl Default for FeedbackRefinementControls {
+    fn default() -> Self {
+        Self {
+            auto_resume: true,
+            capture: true,
+        }
+    }
+}
+
 /// Subset of application state consumed by the MCP layer.
 ///
 /// Holds the database, catalog, and boxed bridge-trait handles for
@@ -61,6 +77,7 @@ pub struct McpState {
     /// otherwise clobber each other, and whichever registered last would serve
     /// every caller, including the ones bound to a different database.
     doctor_registry: Option<Arc<DoctorRegistry>>,
+    feedback_refinement_controls: FeedbackRefinementControls,
 }
 
 impl McpState {
@@ -138,6 +155,7 @@ impl McpState {
             enrichment_ops,
             extension_diagnostics_probe: None,
             doctor_registry: None,
+            feedback_refinement_controls: FeedbackRefinementControls::default(),
         }
     }
 
@@ -160,6 +178,19 @@ impl McpState {
     pub fn with_doctor_registry(mut self, registry: Arc<DoctorRegistry>) -> Self {
         self.doctor_registry = Some(registry);
         self
+    }
+
+    /// Inject feedback refinement policy without a parallel role authority.
+    pub fn with_feedback_refinement_controls(
+        mut self,
+        controls: FeedbackRefinementControls,
+    ) -> Self {
+        self.feedback_refinement_controls = controls;
+        self
+    }
+
+    pub fn feedback_refinement_controls(&self) -> FeedbackRefinementControls {
+        self.feedback_refinement_controls
     }
 
     /// The doctor check registry `doctor_run` / `doctor_fix` must consult.
