@@ -3282,6 +3282,147 @@ async fn an_annotation_failure_after_correlation_routes_to_guarded_tier_two() {
     );
 }
 
+/// A lane-opened Tier-2 lease becomes a Lead session, bound to that route.
+///
+/// `CiLaneRouting::settle` calls `dispatch_opened_tier2_leases`, and until this
+/// fixture existed that call could be deleted with the entire `nafu` command
+/// list green. Every other lane fixture asserts the *lease* (`1`) and the
+/// absence of a worker (`0`), and neither number moves when the dispatch is
+/// removed. The one fixture that does assert an arbitration row — the
+/// twelve-poll hold escalation — reaches Lead through `ci_hold`'s own
+/// `dispatch_escalated_hold`, a different call site entirely, so it stays green
+/// too.
+///
+/// The consequence of the deletion is precisely the wedge the comment at that
+/// call site describes: the lane withholds the legacy remediation path because
+/// an adjudication is pending, and nothing ever adjudicates. The task sits in
+/// `pr_review` with an open head-scoped lease that also blocks every other
+/// Tier-2 route for that head.
+///
+/// `lead_session_id` is asserted, not merely the arbitration count: a row that
+/// happens to exist proves the coordinator wrote *an* arbitration, while the
+/// binding proves it wrote the one **this** route is adjudicated under. That
+/// binding is also what makes `unapplied_lead_results` in the rollback
+/// quiescence report mean "a Lead was dispatched" rather than "a lease exists".
+///
+/// NAMED FAILING MUTATIONS.
+/// (a) Delete `self.dispatch_opened_tier2_leases(outcomes, task_id).await;`
+///     from `settle`: no arbitration row, the task stays `pr_review`, and the
+///     route row's `lead_session_count` stays `0`.
+/// (b) Read the boolean instead of the handoff in `dispatch_opened_tier2_leases`
+///     (`Tier2 { lease_opened: true, .. } => …` with no handoff to bind): there
+///     is nothing to pass to `dispatch_ci_tier2_lead`, so it cannot compile —
+///     and if it is made to, the `provider_action_key` assertion fails.
+/// (c) Move the dispatch above `fold` and into the `CompleteEmpty` arm: this
+///     route is not complete-empty, so nothing dispatches, as in (a).
+/// (d) Drop the `attach_lead_session` call from `dispatch_ci_tier2_lead`: the
+///     arbitration and the board transition still land, and the two
+///     `lead_session_*` assertions fail alone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_lane_opened_tier2_lease_becomes_a_lead_session_bound_to_its_route() {
+    let h = lane_harness().await;
+    let provider = FakeProvider::default();
+    provider.set_check_runs(vec![causal_check("merge-group / integration", 980)]);
+
+    assert_eq!(
+        arbitration_rows(&h.db).await,
+        0,
+        "precondition: nothing has adjudicated anything yet",
+    );
+    assert_eq!(
+        djinn_db::test_support::task_status_for_test(&h.db, &h.task_id).await,
+        "pr_review",
+        "precondition: the task starts in this lane's origin state",
+    );
+
+    let disposition = h
+        .actor
+        .route_merge_group_ci_evidence(
+            &provider,
+            &h.task_id,
+            "task-short",
+            "acme",
+            "widgets",
+            PR as u64,
+            HEAD,
+            "PR_node",
+            MergeMethod::Squash,
+            &[merge_group_run(980)],
+            Some(&dequeue_event()),
+            CiRoutingGate::Enabled,
+        )
+        .await;
+
+    assert!(disposition.is_routed());
+    assert_eq!(
+        djinn_db::test_support::ci_route_lease_count_for_test(&h.db, &h.task_id).await,
+        1,
+        "precondition: a complete causal failure opens exactly one adjudication",
+    );
+
+    // ── The lease became a Lead session ─────────────────────────────────────
+    assert_eq!(
+        arbitration_rows(&h.db).await,
+        1,
+        "an opened lease must become a Lead session, or the lane suppresses the \
+         legacy path and nothing adjudicates in its place",
+    );
+    assert_eq!(
+        djinn_db::test_support::task_status_for_test(&h.db, &h.task_id).await,
+        "needs_lead_intervention",
+        "and the board must enter the only lane a Lead session runs from",
+    );
+
+    // ── …and it is bound to THIS route, not merely coincident with it ───────
+    let identity = CiEvidenceIdentity {
+        lane: CiLane::MergeGroup,
+        pr_number: PR,
+        pr_head_sha: HEAD.to_owned(),
+        run_id: Some(980),
+        run_head_sha: MERGE_GROUP_SHA.to_owned(),
+        dequeue_id: Some(DEQUEUE_ID.to_owned()),
+    };
+    let subject = CiRouteSubject::task(h.task_id.clone());
+    let key = provider_action_key(&subject, &identity, CiAction::AskLead);
+    let row = CiRouteAttemptRepository::new(h.db.clone())
+        .get(&subject, &key)
+        .await
+        .expect("route read")
+        .expect("a complete causal merge-group failure takes one Tier-2 route");
+    assert_eq!(
+        row.lead_session_count, 1,
+        "exactly one Lead session is attached to the route it adjudicates",
+    );
+    assert!(
+        row.lead_session_id
+            .as_deref()
+            .is_some_and(|id| id.starts_with(&format!("arbitration:{}:", h.task_id))),
+        "the route must name the arbitration adjudicating it, got {:?}",
+        row.lead_session_id,
+    );
+
+    let directive =
+        djinn_db::repositories::task_arbitration::TaskArbitrationRepository::new(h.db.clone())
+            .get_latest_for_task(&h.task_id)
+            .await
+            .expect("arbitration read")
+            .and_then(|record| record.directive)
+            .expect("the dispatch writes the directive the Lead session reads");
+    assert_eq!(
+        directive["ci_route"]["provider_action_key"].as_str(),
+        Some(key.as_str()),
+        "the block Lead reads must name the route the lease was opened on",
+    );
+
+    // ── And the adjudication spends nothing else ────────────────────────────
+    assert_eq!(provider.calls().mutations(), 0, "no provider mutation");
+    assert_eq!(
+        djinn_db::test_support::task_attempt_count_for_test(&h.db, &h.task_id).await,
+        0,
+        "a Tier-2 adjudication dispatches no worker",
+    );
+}
+
 /// A dequeue this poll cannot name leaves the lane to the legacy path rather
 /// than inventing an identity it could not revalidate on a later poll.
 #[tokio::test]
