@@ -1799,7 +1799,10 @@ mod tests {
             )
         );
         assert_eq!(revisions[0].confidence_before, None);
-        assert_eq!(revisions[0].confidence_after, Some(0.0));
+        // `CONFIDENCE_FLOOR`, not 0.0: `notes.confidence` is bounded by
+        // `[CONFIDENCE_FLOOR, CONFIDENCE_CEILING]` and the revision boundary
+        // now rejects anything outside it.
+        assert_eq!(revisions[0].confidence_after, Some(CONFIDENCE_FLOOR));
         assert_eq!(revisions[0].reason, "enrichment:create entity note");
         assert_eq!(revisions[1].actor_kind, "system");
         assert_eq!(revisions[1].subsystem.as_deref(), Some("enrichment"));
@@ -1812,7 +1815,7 @@ mod tests {
             )
         );
         assert_eq!(revisions[1].confidence_before, None);
-        assert_eq!(revisions[1].confidence_after, Some(0.0));
+        assert_eq!(revisions[1].confidence_after, Some(CONFIDENCE_FLOOR));
         assert_eq!(revisions[1].reason, "enrichment:create claim note");
 
         let (same_entity_id, entity_changed) =

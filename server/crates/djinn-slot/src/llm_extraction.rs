@@ -5206,8 +5206,16 @@ mod evidence_merge_regression_tests {
         let provider = ScriptedProvider::new(vec![
             r#"{"decision":"already_known","existing_note_id":"existing-note-1"}"#.to_owned(),
         ]);
+        // `CONFIDENCE_CEILING`, not `1.0`. This fixture needs a prior on which
+        // the duplicate boost is a no-op, and it used to get that from `1.0`
+        // being an absorbing state of the raw Bayesian update — which is the
+        // very defect proposal 9xih removed: a note at 1.0 cannot be moved by
+        // ANY signal, including `CONTRADICTION`. The boost now clamps, so the
+        // ceiling is the real fixed point, and `1.0` is no longer a state a
+        // note can be in (migration 201 repaired the stored rows and the
+        // revision boundary rejects it).
         let mut existing = test_existing_note();
-        existing.confidence = 1.0;
+        existing.confidence = djinn_db::repositories::note::CONFIDENCE_CEILING;
         let repo = RecordingExtractionRepository::with_existing(existing);
         let context = test_context(&repo, &provider);
         let mut quality = ExtractionQuality::default();
