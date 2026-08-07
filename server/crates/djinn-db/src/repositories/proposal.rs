@@ -1621,6 +1621,35 @@ impl ProposalRepository {
             .await
     }
 
+    /// Whether the next enabled capture boundary can materialize a new
+    /// human-feedback obligation. Already-injected generations are deliberately
+    /// excluded: they remain drainable regardless of the current capability
+    /// gate, while uncaptured blocking sources and queued claims still require
+    /// the role contract before admission wakes a tribunal.
+    pub async fn has_capturable_feedback_refinement_boundary(
+        &self,
+        proposal_id: &str,
+    ) -> Result<bool> {
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_scalar::<_, bool>(
+            r#"SELECT EXISTS (
+                    SELECT 1 FROM proposal_feedback f
+                    WHERE f.proposal_id=$1 AND f.severity='blocking'
+                      AND f.resolved_at IS NULL AND f.withdrawn_at IS NULL
+                      AND NOT EXISTS (
+                          SELECT 1 FROM proposal_feedback_refinement_sources s
+                          WHERE s.source_feedback_id=f.id
+                      )
+                ) OR EXISTS (
+                    SELECT 1 FROM proposal_feedback_refinement_injections i
+                    WHERE i.proposal_id=$1 AND i.state='queued'
+                )"#,
+        )
+        .bind(proposal_id)
+        .fetch_one(self.db.pool())
+        .await?)
+    }
+
     /// Capture a feedback boundary and consume every pending handoff represented
     /// by that capture in the same proposal-serialized transaction.
     pub(crate) async fn capture_feedback_refinement_boundary_and_complete_handoff(
@@ -6132,6 +6161,117 @@ mod tests {
             1
         );
         assert_eq!(sqlx::query_scalar::<_, i64>("SELECT count(*) FROM proposal_debate_trail WHERE proposal_id=$1 AND kind='human_feedback'").bind(&proposal.id).fetch_one(db.pool()).await.unwrap(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn immediate_admission_consumes_later_non_owner_cohort_member() {
+        let db = test_db();
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let proposal = repo
+            .create(create_input("Immediate feedback cohort"))
+            .await
+            .unwrap();
+        assert!(
+            !repo
+                .has_capturable_feedback_refinement_boundary(&proposal.id)
+                .await
+                .unwrap()
+        );
+        let run_id = match repo
+            .reap_and_admit(crate::AdmitRefinementRunRequest {
+                proposal_id: proposal.id.clone(),
+                idempotency_key: "immediate-feedback-cohort".into(),
+                source: crate::RefinementAdmissionSource::Demand {
+                    demand_id: "immediate-feedback-cohort".into(),
+                },
+                heartbeat_grace_millis: 60_000,
+            })
+            .await
+            .unwrap()
+        {
+            crate::RefinementAdmissionOutcome::Admitted { run_id, .. } => run_id,
+            other => panic!("expected immediate admission, got {other:?}"),
+        };
+        let first = repo
+            .add_feedback_with_severity_and_pending_handoff(
+                ProposalFeedbackCreateInput {
+                    proposal_id: &proposal.id,
+                    parent_id: None,
+                    author_kind: "user",
+                    author_model: None,
+                    body: "owner boundary",
+                },
+                "blocking",
+                true,
+            )
+            .await
+            .unwrap()
+            .0;
+        let second = repo
+            .add_feedback_with_severity_and_pending_handoff(
+                ProposalFeedbackCreateInput {
+                    proposal_id: &proposal.id,
+                    parent_id: Some(&first.id),
+                    author_kind: "user",
+                    author_model: None,
+                    body: "later non-owner boundary",
+                },
+                "blocking",
+                true,
+            )
+            .await
+            .unwrap()
+            .0;
+        assert!(
+            repo.has_capturable_feedback_refinement_boundary(&proposal.id)
+                .await
+                .unwrap()
+        );
+
+        repo.complete_pending_feedback_refinement_handoff(&proposal.id, &run_id)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM pending_feedback_refinement_handoffs WHERE proposal_id=$1 AND state='admitted' AND successor_run_id=$2"
+            )
+            .bind(&proposal.id)
+            .bind(&run_id)
+            .fetch_one(db.pool())
+            .await
+            .unwrap(),
+            2
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM pending_feedback_refinement_handoffs WHERE proposal_id=$1 AND state='pending'"
+            )
+            .bind(&proposal.id)
+            .fetch_one(db.pool())
+            .await
+            .unwrap(),
+            0,
+            "the admitted cohort must not retain an ownerless pending member"
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM proposal_feedback_refinement_sources WHERE source_feedback_id IN ($1,$2)"
+            )
+            .bind(&first.id)
+            .bind(&second.id)
+            .fetch_one(db.pool())
+            .await
+            .unwrap(),
+            2,
+            "each cohort source is captured exactly once"
+        );
+        assert!(
+            !repo
+                .has_capturable_feedback_refinement_boundary(&proposal.id)
+                .await
+                .unwrap()
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

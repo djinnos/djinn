@@ -343,11 +343,27 @@ impl DjinnMcpServer {
             }
         }
 
-        // A start boundary captures unresolved feedback when capture is
-        // enabled. Do not admit/wake a run until the active Advocate and Judge
-        // schemas can drain that captured human-feedback obligation.
+        // Gate only a boundary that can actually materialize a new feedback
+        // obligation. Ordinary refinement remains available when there is no
+        // uncaptured blocking source, and already-materialized generations stay
+        // drainable when the active schema registry is incompatible.
         let controls = self.state.feedback_refinement_controls();
-        if controls.capture && !human_feedback_disposition_contract_available() {
+        let captures_new_feedback = if controls.capture {
+            match repo
+                .has_capturable_feedback_refinement_boundary(&proposal.id)
+                .await
+            {
+                Ok(capturable) => capturable,
+                Err(error) => {
+                    return Json(err_refinement_start(format!(
+                        "failed to inspect feedback capture boundary: {error}"
+                    )));
+                }
+            }
+        } else {
+            false
+        };
+        if captures_new_feedback && !human_feedback_disposition_contract_available() {
             return Json(err_refinement_start(
                 "human-feedback refinement capture requires compatible active Advocate and Judge role schemas"
                     .to_owned(),
@@ -539,11 +555,31 @@ impl DjinnMcpServer {
             }
         }
 
-        // Demand is also a capture boundary. Fail closed before durable
-        // admission so an incompatible tribunal cannot be woken for a newly
-        // materialized human-feedback generation.
+        // As with explicit start, fail closed only when this demand can create a
+        // new human-feedback generation. A plain demanded round does not depend
+        // on the source-specific disposition schema.
         let controls = self.state.feedback_refinement_controls();
-        if controls.capture && !human_feedback_disposition_contract_available() {
+        let captures_new_feedback = if controls.capture {
+            match repo
+                .has_capturable_feedback_refinement_boundary(&proposal.id)
+                .await
+            {
+                Ok(capturable) => capturable,
+                Err(error) => {
+                    return Json(DemandRoundResponse {
+                        proposal_id: Some(proposal.id),
+                        accepted: false,
+                        refinement: Some(current_refinement),
+                        error: Some(format!(
+                            "failed to inspect feedback capture boundary: {error}"
+                        )),
+                    });
+                }
+            }
+        } else {
+            false
+        };
+        if captures_new_feedback && !human_feedback_disposition_contract_available() {
             return Json(DemandRoundResponse {
                 proposal_id: Some(proposal.id),
                 accepted: false,
