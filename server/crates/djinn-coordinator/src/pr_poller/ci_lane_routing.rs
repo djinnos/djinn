@@ -22,7 +22,6 @@ use super::ci_routing::executor::{
     CiAutoMergeTarget, CiIncarnationLiveness, CiLaneOutcome, CiLaneTarget, CiTier2Handoff,
     execute_route, recover_calling_owners_at_startup, sweep_reserved_routes,
 };
-use super::ci_routing::gate::CiRoutingGate;
 use super::ci_routing::tier2_dispatch::CiTier2Dispatch;
 use super::ci_routing::{
     CiCapture, CiCompleteEmptyRoute, CiIncompleteReason, CiObservation, CiRouteSubject,
@@ -44,11 +43,11 @@ pub(crate) enum CiLaneDisposition {
     ///
     /// # Why this is a third answer and not `Routed`
     ///
-    /// It was `Routed`, and that was a gate-on wedge. `CiCompleteEmptyRoute` was
-    /// produced by the classifier and read by nobody: `fold` only consulted
-    /// `suppresses_legacy_path`, which is true of everything except
-    /// `GateClosed`. So a merge-group dequeue whose correlated run yielded an
-    /// empty failing-check set returned `CompleteEmpty(MergeGroupRecordPassing)`
+    /// It was `Routed`, and that was a wedge. `CiCompleteEmptyRoute` was
+    /// produced by the classifier and read by nobody: `fold` only asked whether
+    /// the lane produced any outcome at all. So a merge-group dequeue whose
+    /// correlated run yielded an empty failing-check set returned
+    /// `CompleteEmpty(MergeGroupRecordPassing)`
     /// → `is_routed()` → `handle_queue_failure` returned early — and nothing
     /// recorded `Passing`, nothing re-enqueued, nothing reopened. The task sat
     /// in `pr_review` indefinitely, which is the opposite of the proposal's
@@ -86,24 +85,34 @@ impl CiLaneDisposition {
 ///
 /// A lane can produce several evidence identities — a PR head with two failing
 /// workflow runs is two routes — and the caller needs one answer. Ownership is
-/// sticky: if *any* route took ownership, the legacy path must stay withheld,
-/// or the one run the route layer declined would reopen the task while the
-/// other's re-run is in flight.
+/// sticky: if the lane produced *any* outcome the route layer owns this
+/// evidence and the legacy path must stay withheld, or the one run the route
+/// layer answered least decisively would reopen the task while the other's
+/// re-run is in flight.
+///
+/// Note which side the deferrals sit on. A route deferred because a provider
+/// call is in flight, or because admission closed with a recoverable `reserved`
+/// row behind it, has *already* taken ownership of this evidence; letting the
+/// legacy path also run would reopen the task for rework while the queue
+/// re-entry it triggered is still live — one failure spending two remedies. So
+/// every outcome the executor can produce suppresses the legacy path, and the
+/// only `Legacy` answer here is the fail-safe for a lane that produced no
+/// outcome at all.
 ///
 /// Complete-empty is answered before ownership because it is a *lane-level*
 /// capture: it can only arise when the lane produced no per-run evidence at
 /// all, so it is never in a vector alongside a route that took ownership.
-fn fold(outcomes: &[CiLaneOutcome]) -> CiLaneDisposition {
+pub(crate) fn fold(outcomes: &[CiLaneOutcome]) -> CiLaneDisposition {
     if let Some(route) = outcomes.iter().find_map(|outcome| match outcome {
         CiLaneOutcome::CompleteEmpty(route) => Some(*route),
         _ => None,
     }) {
         return CiLaneDisposition::CompleteEmpty(route);
     }
-    if outcomes.iter().any(CiLaneOutcome::suppresses_legacy_path) {
-        CiLaneDisposition::Routed
-    } else {
+    if outcomes.is_empty() {
         CiLaneDisposition::Legacy
+    } else {
+        CiLaneDisposition::Routed
     }
 }
 
@@ -240,30 +249,6 @@ impl CoordinatorActor {
             .await
     }
 
-    /// The gate, read once per call site so a mid-poll environment change
-    /// cannot split one lane's decisions across two postures.
-    ///
-    /// The lane methods take the resolved gate as a *parameter* rather than
-    /// reading it themselves. That is what makes them testable: a fixture that
-    /// had to mutate `DJINN_CI_EVIDENCE_ROUTING` to exercise the enabled path
-    /// would be mutating process-global state that every other test in the
-    /// binary can observe. The environment is read here, at the call site, and
-    /// nowhere else.
-    ///
-    /// The one exception is `CoordinatorActor::test_ci_routing_gate`, which
-    /// is `#[cfg(test)]` and `None` everywhere else. It exists so the AC12
-    /// wiring fixtures can drive the *production* startup path and the
-    /// *production* tick — both of which read the gate through this method —
-    /// without touching the process environment. See that field for why the
-    /// environment is not usable there.
-    pub(crate) fn ci_routing_gate(&self) -> CiRoutingGate {
-        #[cfg(test)]
-        if let Some(gate) = self.test_ci_routing_gate {
-            return gate;
-        }
-        CiRoutingGate::from_env()
-    }
-
     /// Record the lane compatibility verdict for an authoritatively complete
     /// *empty* enumeration, and say which existing path the caller should take.
     ///
@@ -376,8 +361,8 @@ impl CoordinatorActor {
 
     /// Route the PR-head lane's terminal evidence.
     ///
-    /// Replaces `retrigger_inconclusive_run`'s fan-out when the gate is on. The
-    /// two differ in exactly the way the proposal requires: the legacy helper
+    /// Replaces `retrigger_inconclusive_run`'s fan-out. The two differ in
+    /// exactly the way the proposal requires: the legacy helper
     /// derives its run ids from `parse_actions_run_id` over *every* failing
     /// check and re-runs all of them under an in-memory dedupe set, while this
     /// path derives one immutable [`CiEvidenceIdentity`] per Actions run via
@@ -395,10 +380,10 @@ impl CoordinatorActor {
     ///
     /// So the lane takes its own enumeration, under its own reserved sequence,
     /// through the `list_check_runs_for_ref` seam the merge-group lane already
-    /// uses. It costs one extra read per poll of a *failing* PR with the gate
-    /// on — this method is reached only from the `Inconclusive` and `Failing`
-    /// branches — and it is the difference between a fixture that witnesses the
-    /// ordering and one that performs it.
+    /// uses. It costs one extra read per poll of a *failing* PR — this method
+    /// is reached only from the `Inconclusive` and `Failing` branches — and it
+    /// is the difference between a fixture that witnesses the ordering and one
+    /// that performs it.
     ///
     /// `blocking_filter` replaces the pre-filtered slice for the same reason:
     /// the slice was computed from the stale response. The two call sites use
@@ -415,12 +400,7 @@ impl CoordinatorActor {
         pull_number: u64,
         pr_head_sha: &str,
         blocking_filter: fn(&CheckRun) -> bool,
-        gate: CiRoutingGate,
     ) -> CiLaneDisposition {
-        if !gate.owns_routes() {
-            return CiLaneDisposition::Legacy;
-        }
-
         let subject = CiRouteSubject::task(task_id);
         let incarnation = self.coordinator_incarnation_id.clone();
         let pr_number = i64::try_from(pull_number).unwrap_or_default();
@@ -485,7 +465,6 @@ impl CoordinatorActor {
             owner,
             repo,
             incarnation_id: &incarnation,
-            gate,
             auto_merge: None,
         };
 
@@ -507,7 +486,6 @@ impl CoordinatorActor {
         tracing::debug!(
             task_id = %task_short_id,
             pr = pull_number,
-            gate = gate.as_str(),
             sequence = poll.sequence(),
             ?disposition,
             "ci route: pr_head lane"
@@ -550,12 +528,7 @@ impl CoordinatorActor {
         merge_method: MergeMethod,
         runs: &[WorkflowRun],
         dequeue: Option<&DequeueEvent>,
-        gate: CiRoutingGate,
     ) -> CiLaneDisposition {
-        if !gate.owns_routes() {
-            return CiLaneDisposition::Legacy;
-        }
-
         let subject = CiRouteSubject::task(task_id);
         let incarnation = self.coordinator_incarnation_id.clone();
         let pr_number = i64::try_from(pull_number).unwrap_or_default();
@@ -575,7 +548,6 @@ impl CoordinatorActor {
             owner,
             repo,
             incarnation_id: &incarnation,
-            gate,
             auto_merge: Some(auto_merge),
         };
 
@@ -786,7 +758,6 @@ impl CoordinatorActor {
             task_id = %task_short_id,
             pr = pull_number,
             run_id = run.id,
-            gate = gate.as_str(),
             sequence = poll.sequence(),
             ?disposition,
             "ci route: merge_group lane"
@@ -904,19 +875,14 @@ impl CoordinatorActor {
     /// Tier-1 re-run would leave its route rows non-terminal forever, holding
     /// the head's Tier-2 lease against the next head that needs it.
     ///
-    /// Cheap when the feature is off (one gate read, no query) and cheap when it
-    /// is on and there is nothing to close (one `UPDATE ... WHERE` matching
-    /// zero rows).
+    /// Cheap when there is nothing to close: one `UPDATE ... WHERE` matching
+    /// zero rows.
     pub(crate) async fn close_ci_routes_on_success(
         &self,
         task_id: &str,
         pull_number: u64,
         merged: bool,
     ) {
-        let gate = self.ci_routing_gate();
-        if !gate.owns_routes() {
-            return;
-        }
         let subject = CiRouteSubject::task(task_id);
         let pr_number = i64::try_from(pull_number).unwrap_or_default();
         // Route the decision through the classifier rather than hard-coding the
@@ -976,10 +942,6 @@ impl CoordinatorActor {
     /// fact about where that process's provider futures went, not about how
     /// long a row has sat. Without it the row is deferred, not taken.
     pub(crate) async fn recover_ci_calling_owners_at_startup(&self) {
-        let gate = self.ci_routing_gate();
-        if !gate.owns_routes() {
-            return;
-        }
         let liveness = CiIncarnationLiveness {
             incarnations: djinn_db::CoordinatorIncarnationRepository::new(self.db.clone()),
         };
@@ -991,7 +953,6 @@ impl CoordinatorActor {
             // The coordinator actor only runs behind `run_with_leadership`, so
             // reaching here at all is the advisory-lock attestation.
             true,
-            gate,
         )
         .await;
         if report.examined > 0 {
@@ -1012,14 +973,10 @@ impl CoordinatorActor {
     /// see [`sweep_reserved_routes`] for why a startup-only sweep strands the
     /// head-lease-blocked rows forever.
     pub(crate) async fn sweep_ci_routes(&self) {
-        let gate = self.ci_routing_gate();
-        if !gate.owns_routes() {
-            return;
-        }
         let routes = self.ci_routes();
         let witness = self.task_repo();
         let report =
-            sweep_reserved_routes(&routes, &witness, &self.coordinator_incarnation_id, gate).await;
+            sweep_reserved_routes(&routes, &witness, &self.coordinator_incarnation_id).await;
         if report.examined > 0 {
             tracing::info!(
                 examined = report.examined,
@@ -1037,15 +994,18 @@ impl CoordinatorActor {
         // a query someone could write.
         self.emit_ci_route_report().await;
 
-        // While draining, take the rollback quiescence report on every pass.
-        // The proposal blocks a binary rollback on "one repository-checkable
-        // report" reading zero across six counts, and an operator watching a
-        // drain needs to see it converge, not to poll for it by hand. It is
-        // recorded whether or not it is clean: a blocked attempt is exactly what
-        // has to be auditable afterwards.
-        if gate == CiRoutingGate::Quiescing
-            && let Err(error) = self.record_ci_rollback_quiescence_report().await
-        {
+        // Take the route-drain quiescence report on every pass. The proposal
+        // asks for "one repository-checkable report" reading zero across six
+        // counts, and an operator watching the route layer drain needs to see it
+        // converge, not to poll for it by hand. It is recorded whether or not it
+        // is clean: a non-zero count is exactly what has to be auditable
+        // afterwards.
+        //
+        // This used to be taken only under the `quiescing` posture of the
+        // `ci_evidence_routing` gate. There is no posture any more, so the
+        // report is unconditional — see `record_ci_rollback_quiescence_report`
+        // for what its verdict now means.
+        if let Err(error) = self.record_ci_rollback_quiescence_report().await {
             tracing::warn!(%error, "ci route: rollback quiescence report failed");
         }
     }

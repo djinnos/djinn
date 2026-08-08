@@ -760,8 +760,6 @@ mod tests {
             model_priorities: std::collections::HashMap::new(),
             #[cfg(test)]
             test_use_live_credential_resolution: false,
-            #[cfg(test)]
-            test_ci_routing_gate: None,
             pr_errors: std::collections::HashMap::new(),
             last_dispatched: std::collections::HashMap::new(),
             inflight_dispatches: std::collections::HashMap::new(),

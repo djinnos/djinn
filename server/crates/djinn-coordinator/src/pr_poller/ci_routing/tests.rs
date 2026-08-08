@@ -957,7 +957,7 @@ fn every_incomplete_evidence_case_fails_closed_without_provider_mutation() {
 }
 
 /// The completeness gate reaches the *existing* merge gate, not just the new
-/// route — and it is not behind `ci_evidence_routing`.
+/// route — it applies to every snapshot, routed or not.
 ///
 /// # This test used to be a label
 ///

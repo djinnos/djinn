@@ -302,50 +302,52 @@ impl CoordinatorActor {
             .await
         {
             Ok(runs) => {
-                // ── `nafu` wave 3b: the durable route layer gets first refusal ──
+                // ── `nafu`: the durable route layer gets first refusal ─────
                 //
                 // Tier 1 only. An inconclusive merge-group run re-enters the
                 // queue via `enable_auto_merge`, stays `pr_review`, and
                 // dispatches no worker; everything else falls through to the
-                // reopen below exactly as before. Gate-off is a pure decline.
-                let gate = self.ci_routing_gate();
-                if gate.owns_routes() {
-                    // Resolved only when the gate is on: enabling auto-merge
-                    // with a method the repository forbids soft-fails and
-                    // forfeits the gating, but the extra `GET /repos` must not
-                    // be paid on every dequeue in a deployment where the
-                    // feature is off.
-                    let method = self
-                        .resolve_allowed_merge_methods(gh_client, owner, repo)
-                        .await
-                        .first()
-                        .copied()
-                        .unwrap_or(MergeMethod::Squash);
-                    // Complete-empty is included in `is_routed`: the route
-                    // layer has already recorded current-head `Passing`, and the
-                    // existing review merge gate — which maps `Unknown` to
-                    // `Hold` — progresses on the next poll. Reopening for rework
-                    // here would contradict a verdict of green.
-                    if self
-                        .route_merge_group_ci_evidence(
-                            gh_client,
-                            task_id,
-                            task_short_id,
-                            owner,
-                            repo,
-                            pull_number,
-                            pr_head_sha,
-                            pr_node_id,
-                            method,
-                            &runs,
-                            dequeue,
-                            gate,
-                        )
-                        .await
-                        .is_routed()
-                    {
-                        return;
-                    }
+                // reopen below exactly as before.
+                //
+                // The lane declines — and the legacy remedies below run
+                // unchanged — when the evidence carries no immutable identity to
+                // key a route on: a dequeue this poll cannot name, or a poll
+                // sequence that could not be reserved. That is a decline for
+                // want of evidence, and it is the reason this call is not the
+                // whole of `handle_queue_failure`.
+                //
+                // Enabling auto-merge with a method the repository forbids
+                // soft-fails and forfeits the gating, so the allowed set is
+                // resolved before the call rather than assumed.
+                let method = self
+                    .resolve_allowed_merge_methods(gh_client, owner, repo)
+                    .await
+                    .first()
+                    .copied()
+                    .unwrap_or(MergeMethod::Squash);
+                // Complete-empty is included in `is_routed`: the route layer has
+                // already recorded current-head `Passing`, and the existing
+                // review merge gate — which maps `Unknown` to `Hold` —
+                // progresses on the next poll. Reopening for rework here would
+                // contradict a verdict of green.
+                if self
+                    .route_merge_group_ci_evidence(
+                        gh_client,
+                        task_id,
+                        task_short_id,
+                        owner,
+                        repo,
+                        pull_number,
+                        pr_head_sha,
+                        pr_node_id,
+                        method,
+                        &runs,
+                        dequeue,
+                    )
+                    .await
+                    .is_routed()
+                {
+                    return;
                 }
 
                 // ── Correlate the dequeue to exactly one terminal run ──────
