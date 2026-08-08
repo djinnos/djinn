@@ -3832,8 +3832,6 @@ mod inflight_ledger_tests {
             model_priorities: HashMap::new(),
             #[cfg(test)]
             test_use_live_credential_resolution: false,
-            #[cfg(test)]
-            test_ci_routing_gate: None,
             pr_errors: HashMap::new(),
             last_dispatched: HashMap::new(),
             inflight_dispatches: HashMap::new(),
@@ -5101,8 +5099,6 @@ mod failover_chain_tests {
             model_priorities: HashMap::new(),
             #[cfg(test)]
             test_use_live_credential_resolution: false,
-            #[cfg(test)]
-            test_ci_routing_gate: None,
             pr_errors: HashMap::new(),
             last_dispatched: HashMap::new(),
             inflight_dispatches: HashMap::new(),
@@ -7617,8 +7613,6 @@ mod monitored_reopen_no_eligible_model_tests {
             model_priorities: HashMap::new(),
             #[cfg(test)]
             test_use_live_credential_resolution: false,
-            #[cfg(test)]
-            test_ci_routing_gate: None,
             pr_errors: HashMap::new(),
             last_dispatched: HashMap::new(),
             inflight_dispatches: HashMap::new(),
@@ -8153,8 +8147,6 @@ mod build_admission_route_tests {
             model_priorities: HashMap::new(),
             #[cfg(test)]
             test_use_live_credential_resolution: false,
-            #[cfg(test)]
-            test_ci_routing_gate: None,
             pr_errors: HashMap::new(),
             last_dispatched: HashMap::new(),
             inflight_dispatches: HashMap::new(),

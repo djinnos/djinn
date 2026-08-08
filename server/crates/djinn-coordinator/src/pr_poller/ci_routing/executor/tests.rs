@@ -40,7 +40,6 @@ use djinn_provider::github_api::{
 
 use super::*;
 use crate::pr_poller::ci_lane_routing::CiLaneDisposition;
-use crate::pr_poller::ci_routing::gate::CiRoutingGate;
 use crate::pr_poller::ci_routing::quiescence::{
     CiDrainOutcome, PROVIDER_ACTION_DRAIN_TIMEOUT, quiesce_provider_actions,
 };
@@ -442,7 +441,6 @@ impl Fixture {
             owner: "acme",
             repo: "widgets",
             incarnation_id: &self.incarnation,
-            gate: CiRoutingGate::Enabled,
             auto_merge: None,
         }
     }
@@ -881,13 +879,8 @@ async fn live_calling_owner_before_provider_is_not_recovered() {
     );
 
     // The sweep is the other door. It must leave the row alone too.
-    let report = sweep_reserved_routes(
-        &f.routes,
-        &FixedHead(Some(HEAD.to_owned())),
-        &f.incarnation,
-        CiRoutingGate::Enabled,
-    )
-    .await;
+    let report =
+        sweep_reserved_routes(&f.routes, &FixedHead(Some(HEAD.to_owned())), &f.incarnation).await;
     assert_eq!(report.resumed, 0, "a `calling` row is never resumed");
     assert_eq!(report.superseded, 0);
     assert_eq!(f.effects().await, after);
@@ -958,7 +951,6 @@ async fn live_calling_owner_after_acceptance_is_not_recovered() {
         &FixedLiveness(CiQuiescenceProof::None),
         &f.incarnation,
         true,
-        CiRoutingGate::Enabled,
     )
     .await;
     assert_eq!(report.examined, 1);
@@ -1062,7 +1054,6 @@ async fn terminated_owner_handoff_recovers_calling_once() {
         &FixedLiveness(CiQuiescenceProof::GracefulDrain),
         &f.incarnation,
         true,
-        CiRoutingGate::Enabled,
     )
     .await;
     assert_eq!(first.outcome_unknown, 1, "still current: outcome_unknown");
@@ -1075,7 +1066,6 @@ async fn terminated_owner_handoff_recovers_calling_once() {
         &FixedLiveness(CiQuiescenceProof::GracefulDrain),
         &f.incarnation,
         true,
-        CiRoutingGate::Enabled,
     )
     .await;
     assert_eq!(
@@ -1158,7 +1148,6 @@ async fn provider_finalizer_wins_owner_handoff_race() {
         &FixedLiveness(CiQuiescenceProof::GracefulDrain),
         &f.incarnation,
         true,
-        CiRoutingGate::Enabled,
     )
     .await;
     assert_eq!(
@@ -1241,7 +1230,6 @@ async fn handoff_with(f: &Fixture, liveness: &CiIncarnationLiveness) -> CiHandof
         liveness,
         &f.incarnation,
         true,
-        CiRoutingGate::Enabled,
     )
     .await
 }
@@ -2387,16 +2375,16 @@ async fn graceful_shutdown_quiesces_calling_before_lock_release() {
     assert_eq!(f.scope.counts().refused_total, 1);
 }
 
-/// Rolling the feature back while a route is `calling` drains authoritatively:
-/// the owner keeps the row, no new route is admitted, and — critically — the
-/// legacy path stays withheld from that evidence.
+/// A live `calling` row drains authoritatively: its owner keeps it, the poll
+/// that finds it takes ownership of the evidence rather than handing it back,
+/// and the drain report stays non-quiescent until that owner finalizes.
 ///
-/// Handing it back would double-remedy: the queue re-entry the route triggered
-/// is still live, and `handle_queue_failure` would reopen the task for rework at
-/// the same time. Only `disabled_clean` returns the evidence to the legacy path,
-/// and it is legal only once the quiescence report reads zero.
+/// Handing the evidence back would double-remedy: the queue re-entry the route
+/// triggered is still live, and `handle_queue_failure` would reopen the task for
+/// rework at the same time. The counts are the AC10 evidence a binary rollback
+/// is read against, and this is the transition that makes them move.
 #[tokio::test]
-async fn rollback_disable_during_calling_drains_authoritatively() {
+async fn a_live_calling_row_defers_without_stealing_and_blocks_the_drain() {
     let f = fixture().await;
     let checks = [inconclusive_check("merge-group / integration", 909)];
     let blocking = refs(&checks);
@@ -2430,36 +2418,28 @@ async fn rollback_disable_during_calling_drains_authoritatively() {
         .await
         .expect("charge");
 
-    let quiescing = CiLaneTarget {
-        gate: CiRoutingGate::Quiescing,
-        ..f.merge_target(&auto)
-    };
+    let target = f.merge_target(&auto);
     let before = f.effects().await;
-    let outcome = run(&f, &quiescing, &id, &id, &blocking).await;
+    let outcome = run(&f, &target, &id, &id, &blocking).await;
     let after = f.effects().await;
 
     assert_eq!(
         outcome,
         CiLaneOutcome::Deferred(CiDeferral::ProviderCallInFlight)
     );
-    assert!(
-        outcome.suppresses_legacy_path(),
-        "a live `calling` row must keep the legacy reopen withheld while quiescing"
-    );
     assert_no_effects_beyond_routes(&before, &after);
     assert_eq!(
         f.attempt(&id, CiAction::Reenqueue).await.action_phase,
         CiActionPhase::Calling,
-        "quiescing drains; it does not steal"
+        "the route defers to the live owner; it does not steal"
     );
 
-    // Rollback is blocked until the quiescence report reads zero.
+    // The drain is blocked until the quiescence counts read zero.
     let counts = f.routes.quiescence_counts().await.expect("quiescence");
     assert_eq!(counts.calling_rows, 1);
-    assert!(!counts.is_quiescent(), "rollback stays blocked");
+    assert!(!counts.is_quiescent(), "the drain stays blocked");
 
-    // The owner finalizes; now the report is clean and `disabled_clean` returns
-    // the evidence to the legacy path.
+    // The owner finalizes; only now do the counts converge.
     f.routes
         .finalize_calling(&f.subject, &key, &other, CiRouteOutcome::Reenqueued, None)
         .await
@@ -2470,18 +2450,7 @@ async fn rollback_disable_during_calling_drains_authoritatively() {
             .await
             .expect("quiescence")
             .is_quiescent(),
-        "with no reserved, calling, or leased rows the rollback report passes"
-    );
-
-    let disabled = CiLaneTarget {
-        gate: CiRoutingGate::DisabledClean,
-        ..f.merge_target(&auto)
-    };
-    let handed_back = run(&f, &disabled, &id, &id, &blocking).await;
-    assert_eq!(handed_back, CiLaneOutcome::GateClosed);
-    assert!(
-        !handed_back.suppresses_legacy_path(),
-        "only `disabled_clean` returns evidence to the legacy path"
+        "with no reserved, calling, or leased rows the drain report reads clean"
     );
 }
 
@@ -2710,8 +2679,9 @@ async fn an_incomplete_enumeration_holds_without_route_lease_or_charge() {
         matches!(outcome, CiLaneOutcome::Held(_)),
         "an enumeration failure holds, got {outcome:?}"
     );
-    assert!(
-        outcome.suppresses_legacy_path(),
+    assert_eq!(
+        crate::pr_poller::ci_lane_routing::fold(std::slice::from_ref(&outcome)),
+        CiLaneDisposition::Routed,
         "holding is the answer; the legacy reopen must not also run"
     );
     assert_no_effects_beyond_routes(&before, &after);
@@ -2768,13 +2738,8 @@ async fn the_recurring_sweep_never_resumes_a_route_it_cannot_call() {
     .await;
 
     let mutations_before = f.provider.calls().mutations();
-    let report = sweep_reserved_routes(
-        &f.routes,
-        &FixedHead(Some(HEAD.to_owned())),
-        &f.incarnation,
-        CiRoutingGate::Enabled,
-    )
-    .await;
+    let report =
+        sweep_reserved_routes(&f.routes, &FixedHead(Some(HEAD.to_owned())), &f.incarnation).await;
 
     assert_eq!(report.resumed, 0, "the sweep never resumes");
     assert_eq!(
@@ -2818,13 +2783,7 @@ async fn the_sweep_leaves_a_row_it_cannot_witness_alone() {
         .await
         .expect("reserve");
 
-    let report = sweep_reserved_routes(
-        &f.routes,
-        &FixedHead(None),
-        &f.incarnation,
-        CiRoutingGate::Enabled,
-    )
-    .await;
+    let report = sweep_reserved_routes(&f.routes, &FixedHead(None), &f.incarnation).await;
 
     assert_eq!(report.unverifiable, 1);
     assert_eq!(report.resumed + report.superseded + report.escalated, 0);
@@ -2865,7 +2824,6 @@ async fn the_sweep_closes_an_obsolete_reservation_without_cost() {
         &f.routes,
         &FixedHead(Some(MOVED_HEAD.to_owned())),
         &f.incarnation,
-        CiRoutingGate::Enabled,
     )
     .await;
     let after = f.effects().await;
@@ -2878,84 +2836,6 @@ async fn the_sweep_closes_an_obsolete_reservation_without_cost() {
         Some(CiRouteOutcome::SupersededPreCall)
     );
     assert_eq!(f.budgets(&id, &fingerprint).await, (0, 0), "uncharged");
-}
-
-// ===========================================================================
-// The gate
-// ===========================================================================
-
-/// The gate is default-off, and no accidental environment value turns it on.
-#[test]
-fn the_ci_evidence_routing_gate_is_default_off() {
-    assert_eq!(CiRoutingGate::default(), CiRoutingGate::DisabledClean);
-    for value in [
-        "", " ", "0", "1", "true", "TRUE", "yes", "on", "off", "no", "disabled", "enable",
-        "Enabled ", "quiesce", "garbage",
-    ] {
-        let parsed = CiRoutingGate::from_value(value);
-        let expected = match value.trim().to_ascii_lowercase().as_str() {
-            "enabled" => CiRoutingGate::Enabled,
-            "quiescing" => CiRoutingGate::Quiescing,
-            _ => CiRoutingGate::DisabledClean,
-        };
-        assert_eq!(parsed, expected, "gate value {value:?}");
-    }
-    assert_eq!(CiRoutingGate::from_value("enabled"), CiRoutingGate::Enabled);
-    assert_eq!(
-        CiRoutingGate::from_value("  Quiescing  "),
-        CiRoutingGate::Quiescing
-    );
-    assert!(!CiRoutingGate::default().admits_new_routes());
-    assert!(!CiRoutingGate::default().owns_routes());
-    assert!(CiRoutingGate::Quiescing.owns_routes());
-    assert!(!CiRoutingGate::Quiescing.admits_new_routes());
-}
-
-/// With the gate off the executor is inert: no row, no call, no read of the
-/// database at all, and the caller keeps its legacy path.
-#[tokio::test]
-async fn a_disabled_gate_leaves_every_lane_to_the_legacy_path() {
-    let f = fixture().await;
-    let checks = [inconclusive_check("Quality Gate / test", 960)];
-    let blocking = refs(&checks);
-    let id = pr_head_identity(960);
-    let target = CiLaneTarget {
-        gate: CiRoutingGate::DisabledClean,
-        ..f.target()
-    };
-
-    let before = f.effects().await;
-    let outcome = run(&f, &target, &id, &id, &blocking).await;
-    let after = f.effects().await;
-
-    assert_eq!(outcome, CiLaneOutcome::GateClosed);
-    assert!(!outcome.suppresses_legacy_path());
-    assert_no_effects_beyond_routes(&before, &after);
-    assert_eq!(after.route_rows, 0);
-}
-
-/// A quiescing gate admits no new route, but hands evidence with no live route
-/// back to the legacy path rather than stranding it.
-#[tokio::test]
-async fn a_quiescing_gate_admits_no_new_route() {
-    let f = fixture().await;
-    let checks = [inconclusive_check("Quality Gate / test", 961)];
-    let blocking = refs(&checks);
-    let id = pr_head_identity(961);
-    let target = CiLaneTarget {
-        gate: CiRoutingGate::Quiescing,
-        ..f.target()
-    };
-
-    let outcome = run(&f, &target, &id, &id, &blocking).await;
-
-    assert_eq!(
-        outcome,
-        CiLaneOutcome::GateClosed,
-        "with no live route for this evidence, quiescing returns it to the legacy path"
-    );
-    assert_eq!(f.provider.calls().mutations(), 0);
-    assert_eq!(f.effects().await.route_rows, 0);
 }
 
 /// A subject id namespaces every key, so a second project's PR #4242 gets its
@@ -3002,188 +2882,6 @@ async fn a_second_subject_sharing_a_pr_number_gets_its_own_call() {
         "byte-identical evidence in another subject is a different route"
     );
     assert_eq!(f.provider.calls().rerun_failed_jobs, 2);
-}
-
-// ===========================================================================
-// `from_env` — the function every production call site actually uses
-// ===========================================================================
-
-/// The *absent* case is the production default, and it had zero coverage.
-///
-/// `from_value` was exhaustively tested and tested nothing that mattered: the
-/// default lived in `from_env`'s `unwrap_or_default()`, and changing that one
-/// call to `unwrap_or(Enabled)` turned `ci_evidence_routing` on fleet-wide with
-/// all 2148 tests green. The default now lives in `from_lookup`, which takes the
-/// environment as an argument, so this drives it directly.
-#[test]
-fn the_absent_gate_value_resolves_to_disabled_clean() {
-    // Absent — the production default on every machine that has not opted in.
-    assert_eq!(
-        CiRoutingGate::from_lookup(|_| None),
-        CiRoutingGate::DisabledClean,
-        "an unset DJINN_CI_EVIDENCE_ROUTING must leave the feature off",
-    );
-
-    // Present but meaningless. None of these may opt in by accident, and the
-    // boolean spellings are called out because the older flags in this crate
-    // use them — an operator who types `true` must not get a feature whose
-    // three states they did not choose between.
-    for value in [
-        "",
-        " ",
-        "\t",
-        "0",
-        "1",
-        "true",
-        "TRUE",
-        "yes",
-        "no",
-        "on",
-        "off",
-        "disabled",
-        "disabled_clean",
-        "enable",
-        "quiesce",
-        "garbage",
-        "Enabled=1",
-    ] {
-        assert_eq!(
-            CiRoutingGate::from_lookup(|_| Some(value.to_owned())),
-            CiRoutingGate::DisabledClean,
-            "gate value {value:?} must not enable the feature",
-        );
-    }
-
-    // The two opt-ins, and only these two.
-    for (value, expected) in [
-        ("enabled", CiRoutingGate::Enabled),
-        ("  Enabled  ", CiRoutingGate::Enabled),
-        ("ENABLED", CiRoutingGate::Enabled),
-        ("quiescing", CiRoutingGate::Quiescing),
-        ("  Quiescing\n", CiRoutingGate::Quiescing),
-    ] {
-        assert_eq!(
-            CiRoutingGate::from_lookup(|_| Some(value.to_owned())),
-            expected,
-            "gate value {value:?}",
-        );
-    }
-}
-
-/// The lookup is asked for the documented variable and nothing else.
-#[test]
-fn the_gate_reads_exactly_one_environment_variable() {
-    let mut seen: Vec<String> = Vec::new();
-    let gate = CiRoutingGate::from_lookup(|key| {
-        seen.push(key.to_owned());
-        None
-    });
-    assert_eq!(gate, CiRoutingGate::DisabledClean);
-    assert_eq!(seen, vec!["DJINN_CI_EVIDENCE_ROUTING".to_owned()]);
-}
-
-/// `from_env` must stay a bare delegation to the covered function.
-///
-/// Textual, and deliberately so: the default logic is now in `from_lookup`
-/// where a test can reach it, and the only way to reintroduce the fleet-wide
-/// mutation is to put logic back into `from_env`. This is the same
-/// source-inspection guard `context.rs` uses for its own env wiring, and it is
-/// the cheap half of a pair — the expensive half is the exhaustive
-/// `from_lookup` test above.
-#[test]
-fn from_env_delegates_to_the_covered_lookup() {
-    let source = include_str!("../gate.rs");
-    let body = source
-        .split("pub(crate) fn from_env() -> Self {")
-        .nth(1)
-        .expect("from_env is defined in gate.rs")
-        .split("\n    }")
-        .next()
-        .expect("from_env has a body");
-    assert!(
-        body.contains("Self::from_lookup(|key| std::env::var(key).ok())"),
-        "from_env must delegate to from_lookup; found: {body}",
-    );
-    assert!(
-        !body.contains("unwrap_or"),
-        "the default belongs in from_lookup, where a test can reach it; found: {body}",
-    );
-}
-
-/// …and the poller's accessor must actually CALL it.
-///
-/// SOURCE-LEVEL, and honestly labelled, for the reason the accessor's own doc
-/// comment gives: `CoordinatorActor::ci_routing_gate` carries a `#[cfg(test)]`
-/// seam (`test_ci_routing_gate`) precisely so no fixture has to mutate
-/// process-global environment, and **every** fixture in this file sets it. That
-/// same seam is what leaves the production fall-through unwitnessed. Replace
-/// `CiRoutingGate::from_env()` with `CiRoutingGate::DisabledClean` and
-/// `DJINN_CI_EVIDENCE_ROUTING` is read by nothing in the tree — the feature is
-/// permanently unreachable in production, on every deploy, with no operator
-/// action that can turn it on — while the whole `nafu` command list stays at
-/// its baseline counts, because the fixtures never reach this line.
-///
-/// This is the *same shape* the gate module confesses next door:
-/// `unwrap_or_default()` → `unwrap_or(Enabled)` inside `from_env` turned the
-/// feature on fleet-wide with 2148 tests green. That mutation was closed by
-/// moving the default into `from_lookup` and pinning `from_env` above. This is
-/// the other half — the *call to* `from_env` — and it fails in the opposite
-/// direction: silently off rather than silently on.
-///
-/// NAMED FAILING MUTATIONS.
-/// (a) `CiRoutingGate::from_env()` → any `CiRoutingGate::<posture>` literal:
-///     the `from_env()` assertion fails AND the posture ban fails.
-/// (b) `CiRoutingGate::from_env()` → `CiRoutingGate::default()`: the same two.
-/// (c) Dropping the `#[cfg(test)]` on the override so the seam ships: the seam
-///     assertion fails — a production binary whose gate can be overridden from
-///     memory is not a gate.
-/// (d) Deleting or renaming the accessor: the uniqueness `expect` fails, which
-///     is what forces a new accessor to be looked at rather than silently
-///     inheriting no guard.
-#[test]
-fn the_ci_routing_gate_accessor_reads_the_environment_in_production() {
-    const SIGNATURE: &str = "pub(crate) fn ci_routing_gate(&self) -> CiRoutingGate {";
-    let source = strip_line_comments(include_str!("../../ci_lane_routing.rs"));
-    assert_eq!(
-        source.matches(SIGNATURE).count(),
-        1,
-        "exactly one gate accessor; a changed count needs this test updated, \
-         not ignored",
-    );
-
-    let body = source
-        .split(SIGNATURE)
-        .nth(1)
-        .expect("ci_lane_routing.rs defines the gate accessor");
-    let body = &body[..body
-        .find("\n    }")
-        .expect("the accessor body terminates at its own indentation")];
-    assert!(
-        !body.trim().is_empty(),
-        "vacuity guard: the extracted accessor body is empty, so nothing below \
-         is being asserted about anything",
-    );
-
-    assert!(
-        body.contains("CiRoutingGate::from_env()"),
-        "the accessor's production fall-through must READ the environment \
-         through the covered constructor; without this call the gate variable \
-         is never read and the whole feature is unreachable in production. \
-         Found:\n{body}",
-    );
-    for posture in ["DisabledClean", "Quiescing", "Enabled", "default()"] {
-        assert!(
-            !body.contains(&format!("CiRoutingGate::{posture}")),
-            "the accessor RESOLVES a posture, it never names one; found \
-             `CiRoutingGate::{posture}` in:\n{body}",
-        );
-    }
-    assert!(
-        body.contains("#[cfg(test)]") && body.contains("self.test_ci_routing_gate"),
-        "the one permitted override is the `#[cfg(test)]` seam; an \
-         unconditional override would ship a gate production cannot trust. \
-         Found:\n{body}",
-    );
 }
 
 /// The recurring reservation sweep has to fire inside a process lifetime.
@@ -3660,7 +3358,6 @@ async fn the_merge_group_lane_executes_the_complete_empty_route() {
             MergeMethod::Squash,
             &[merge_group_run(970)],
             Some(&dequeue_event()),
-            CiRoutingGate::Enabled,
         )
         .await;
 
@@ -3708,7 +3405,6 @@ async fn the_pr_head_lane_executes_the_complete_empty_route() {
             PR as u64,
             HEAD,
             failing_filter,
-            CiRoutingGate::Enabled,
         )
         .await;
 
@@ -3759,7 +3455,6 @@ async fn a_check_api_failure_after_correlation_routes_to_guarded_tier_two() {
             MergeMethod::Squash,
             &[merge_group_run(971)],
             Some(&dequeue_event()),
-            CiRoutingGate::Enabled,
         )
         .await;
 
@@ -3822,7 +3517,6 @@ async fn an_annotation_failure_after_correlation_routes_to_guarded_tier_two() {
             MergeMethod::Squash,
             &[merge_group_run(972)],
             Some(&dequeue_event()),
-            CiRoutingGate::Enabled,
         )
         .await;
 
@@ -3931,7 +3625,6 @@ async fn a_lane_opened_tier2_lease_becomes_a_lead_session_bound_to_its_route() {
             MergeMethod::Squash,
             &[merge_group_run(980)],
             Some(&dequeue_event()),
-            CiRoutingGate::Enabled,
         )
         .await;
 
@@ -4027,7 +3720,6 @@ async fn an_unidentifiable_dequeue_leaves_the_lane_to_the_legacy_path() {
             MergeMethod::Squash,
             &[merge_group_run(973)],
             None,
-            CiRoutingGate::Enabled,
         )
         .await;
 
@@ -4107,7 +3799,6 @@ async fn a_lane_level_merge_group_capture_keys_on_a_real_identity() {
             MergeMethod::Squash,
             &[merge_group_run(975)],
             Some(&dequeue_event()),
-            CiRoutingGate::Enabled,
         )
         .await;
 
@@ -4171,7 +3862,6 @@ async fn an_ambiguous_correlation_keys_its_route_on_the_real_dequeue() {
             MergeMethod::Squash,
             &[merge_group_run(976), merge_group_run(977)],
             Some(&dequeue_event()),
-            CiRoutingGate::Enabled,
         )
         .await;
 
@@ -4240,7 +3930,6 @@ async fn no_correlated_merge_group_run_holds_without_a_route_row() {
             MergeMethod::Squash,
             &[other_pr],
             Some(&dequeue_event()),
-            CiRoutingGate::Enabled,
         )
         .await;
 
@@ -4299,7 +3988,6 @@ async fn an_unattributable_blocking_check_takes_one_run_absent_route() {
             PR as u64,
             HEAD,
             failing_filter,
-            CiRoutingGate::Enabled,
         )
         .await;
 
@@ -4456,58 +4144,6 @@ async fn unusable_timestamp_evidence_takes_one_run_absent_route() {
         row.identity.run_head_sha, HEAD,
         "and the run head is normalised to the observed PR head, or the row \
          would still be distinct from its run-absent sibling",
-    );
-}
-
-/// Both lane wrappers decline with the gate off, without touching the database.
-#[tokio::test]
-async fn the_lane_wrappers_decline_when_the_gate_is_off() {
-    let h = lane_harness().await;
-    let provider = FakeProvider::default();
-
-    let merge = h
-        .actor
-        .route_merge_group_ci_evidence(
-            &provider,
-            &h.task_id,
-            "task-short",
-            "acme",
-            "widgets",
-            PR as u64,
-            HEAD,
-            "PR_node",
-            MergeMethod::Squash,
-            &[merge_group_run(974)],
-            Some(&dequeue_event()),
-            CiRoutingGate::DisabledClean,
-        )
-        .await;
-    let head = h
-        .actor
-        .route_pr_head_ci_evidence(
-            &provider,
-            &h.task_id,
-            "task-short",
-            "acme",
-            "widgets",
-            PR as u64,
-            HEAD,
-            failing_filter,
-            CiRoutingGate::DisabledClean,
-        )
-        .await;
-
-    assert_eq!(merge, CiLaneDisposition::Legacy);
-    assert_eq!(head, CiLaneDisposition::Legacy);
-    assert_eq!(
-        provider.calls(),
-        ProviderCalls::default(),
-        "no API call at all"
-    );
-    assert!(h.ci_snapshot().await.is_none(), "and no snapshot written");
-    assert_eq!(
-        djinn_db::test_support::ci_route_row_count_for_test(&h.db, &h.task_id).await,
-        0,
     );
 }
 
@@ -4692,8 +4328,12 @@ async fn a_route_table_outage_fails_closed_on_both_lanes() {
 
     assert_eq!(head, CiLaneOutcome::Deferred(CiDeferral::RepositoryError));
     assert_eq!(merge, CiLaneOutcome::Deferred(CiDeferral::RepositoryError));
-    assert!(
-        head.suppresses_legacy_path() && merge.suppresses_legacy_path(),
+    assert_eq!(
+        (
+            crate::pr_poller::ci_lane_routing::fold(std::slice::from_ref(&head)),
+            crate::pr_poller::ci_lane_routing::fold(std::slice::from_ref(&merge)),
+        ),
+        (CiLaneDisposition::Routed, CiLaneDisposition::Routed),
         "an unknown route state must not hand the evidence to a second remedy",
     );
     assert_eq!(
@@ -4986,7 +4626,6 @@ async fn poll_pr_head(
             PR as u64,
             HEAD,
             failing_filter,
-            CiRoutingGate::Enabled,
         )
         .await
 }
@@ -5700,7 +5339,6 @@ async fn count_eleven_race_escalates_once_at_twelve() {
         PR as u64,
         HEAD,
         failing_filter,
-        CiRoutingGate::Enabled,
     );
     let race_two = restarted.route_pr_head_ci_evidence(
         &second,
@@ -5711,7 +5349,6 @@ async fn count_eleven_race_escalates_once_at_twelve() {
         PR as u64,
         HEAD,
         failing_filter,
-        CiRoutingGate::Enabled,
     );
     let starter = async {
         // Both sequences reserved before either result is applied. That is what
@@ -6410,17 +6047,15 @@ async fn route_row(
 ///     incarnation has no ledger row yet, and the audit assertion below stops
 ///     reading a single `StartupOwnerHandoff`. This mutation is why the
 ///     ordering comment at the call site exists.
-/// (c) Guard it on anything beyond `gate.owns_routes()`: the gate here is
-///     `Enabled` and the row is eligible on every other axis, so any added
-///     refusal turns the recovery into a deferral and the outcome assertion
-///     fails.
+/// (c) Guard the recovery on anything at all: the row is eligible on every
+///     axis, so any added refusal turns the recovery into a deferral and the
+///     outcome assertion fails.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_startup_path_hands_off_a_calling_row_left_by_a_former_incarnation() {
     let (db, task_id, subject) = wiring_subject("ci-startup-wiring").await;
     let routes = CiRouteAttemptRepository::new(db.clone());
 
-    let mut actor = crate::actor::actor_with_test_db(db.clone());
-    actor.test_ci_routing_gate = Some(CiRoutingGate::Enabled);
+    let actor = crate::actor::actor_with_test_db(db.clone());
     let recovering = actor.coordinator_incarnation_id.clone();
     let cancel = actor.cancel.clone();
 
@@ -6586,12 +6221,12 @@ fn a_sweep_interval_ago() -> std::time::Instant {
 ///     the tick touches a route row, so the planted reservation stays
 ///     `Reserved` with `terminal_outcome: None` and the first post-tick
 ///     assertion fails; the second half then finds no rollback report either.
-/// (b) Delete only `self.record_ci_rollback_quiescence_report()` from
-///     `sweep_ci_routes`, or narrow its `gate == Quiescing` guard: the sweep
-///     half still passes and the report half fails on `None`.
+/// (b) Delete `self.record_ci_rollback_quiescence_report()` from
+///     `sweep_ci_routes`, or put it back behind a condition: the sweep half
+///     still passes and the report half fails on `None`.
 /// (c) Drop the interval guard and sweep on every tick: the vacuity guard
-///     between the two halves — a tick taken WITHOUT backdating, which must
-///     record nothing — fails.
+///     between the halves — a tick taken WITHOUT backdating, which must record
+///     no NEW report — fails.
 /// (d) Reset `last_ci_route_sweep` before the sweep rather than after, or reset
 ///     it outside the block: the second half's backdate is overwritten by an
 ///     earlier tick and the report is never taken.
@@ -6601,7 +6236,6 @@ async fn the_ticks_sweep_block_closes_a_stranded_reservation_and_takes_the_rollb
     let routes = CiRouteAttemptRepository::new(db.clone());
 
     let mut actor = crate::actor::actor_with_test_db(db.clone());
-    actor.test_ci_routing_gate = Some(CiRoutingGate::Enabled);
     let incarnation = actor.coordinator_incarnation_id.clone();
 
     // The witness reports a head that has MOVED past the reservation's, which
@@ -6667,33 +6301,12 @@ async fn the_ticks_sweep_block_closes_a_stranded_reservation_and_takes_the_rollb
         "and closed uncharged: the sweep holds no provider client"
     );
 
-    // ── Vacuity: the interval is a real gate, not a formality ───────────────
-    //
-    // The block reset `last_ci_route_sweep` to now, so this tick must not
-    // re-enter it. Without this, a sweep that ran unconditionally on every tick
-    // would satisfy everything above and the half below would prove nothing
-    // about the interval.
-    actor.test_ci_routing_gate = Some(CiRoutingGate::Quiescing);
-    actor.drive_tick_for_test().await;
-    assert!(
-        routes
-            .latest_rollback_quiescence_report()
-            .await
-            .expect("report read")
-            .is_none(),
-        "a tick inside the sweep interval must not run the sweep"
-    );
-
-    // ── The drain posture takes the rollback report on every pass ───────────
-    actor.last_ci_route_sweep = a_sweep_interval_ago();
-    actor.drive_tick_for_test().await;
-
+    // ── …and the same pass takes the quiescence report ─────────────────────
     let report = routes
         .latest_rollback_quiescence_report()
         .await
         .expect("report read")
-        .expect("a quiescing sweep must record the rollback report without being asked");
-    assert_eq!(report.gate_state, "quiescing");
+        .expect("the sweep must record the quiescence report without being asked");
     assert_eq!(
         report.recorded_by_incarnation, incarnation,
         "the report names the incarnation whose tick took it, which is what ties \
@@ -6708,6 +6321,39 @@ async fn the_ticks_sweep_block_closes_a_stranded_reservation_and_takes_the_rollb
         report.permits_rollback,
         report.recomputed_verdict(),
         "the stored verdict must agree with the function it is checked against"
+    );
+
+    // ── Vacuity: the interval is a real gate, not a formality ───────────────
+    //
+    // The block reset `last_ci_route_sweep` to now, so this tick must not
+    // re-enter it. Without this, a sweep that ran unconditionally on every tick
+    // would satisfy everything above and the half below would prove nothing
+    // about the interval.
+    actor.drive_tick_for_test().await;
+    assert_eq!(
+        routes
+            .latest_rollback_quiescence_report()
+            .await
+            .expect("report read")
+            .expect("the report taken above is still the latest")
+            .id,
+        report.id,
+        "a tick inside the sweep interval must not run the sweep"
+    );
+
+    // ── And the report is taken on EVERY pass, not once per process ─────────
+    actor.last_ci_route_sweep = a_sweep_interval_ago();
+    actor.drive_tick_for_test().await;
+    assert_ne!(
+        routes
+            .latest_rollback_quiescence_report()
+            .await
+            .expect("report read")
+            .expect("a second sweep records a second report")
+            .id,
+        report.id,
+        "an operator watching the counts converge needs a report per pass, not \
+         a single row taken the first time the sweep ever ran"
     );
 }
 
@@ -6822,7 +6468,7 @@ fn logical_lines(code: &str) -> Vec<(usize, String)> {
     out
 }
 
-/// The PR poller hands both lane routers the LIVE gate.
+/// The PR poller calls both lane routers, on every lane that has one.
 ///
 /// Source-level, and honestly labelled as such, for exactly the reason
 /// `both_lane_fast_paths_consult_the_completeness_predicate` above is:
@@ -6830,54 +6476,30 @@ fn logical_lines(code: &str) -> Vec<(usize, String)> {
 /// which hard-codes `api.github.com`, so `poll_pr_draft_tasks` and
 /// `handle_queue_failure` cannot be driven end to end from this crate. Every
 /// behavioural fixture in this file therefore enters at
-/// `route_pr_head_ci_evidence` / `route_merge_group_ci_evidence` with a gate
-/// value of its own choosing — which is precisely the seam this test guards,
-/// because passing `CiRoutingGate::DisabledClean` at the three real call sites
-/// makes the whole feature permanently unreachable from the running poller with
-/// the entire suite green.
+/// `route_pr_head_ci_evidence` / `route_merge_group_ci_evidence` directly, so
+/// nothing else in this crate would notice a deleted call site.
 ///
-/// NAMED FAILING MUTATIONS, at any of the three sites.
-/// (a) `self.ci_routing_gate()` → `CiRoutingGate::DisabledClean` inline in the
-///     call: the final-argument check fails (the argument is no longer `gate`)
-///     AND the `CiRoutingGate::` ban fails.
-/// (b) `let gate = CiRoutingGate::DisabledClean;`: the count of live reads drops
-///     below the call count, and the `CiRoutingGate::` ban fails.
-/// (c) A second `let gate = …` shadowing the live one between the read and the
-///     call: `let gate ` occurs more often than `let gate = self.ci_routing_gate();`.
-/// (d) Deleting a router call site outright: the call count no longer matches.
+/// This used to also pin that each call was handed the live
+/// `ci_evidence_routing` gate. That gate is gone — routing is the only path —
+/// so what is left to pin is the count: three call sites, two lanes, and no
+/// silent loss of one of them.
+///
+/// NAMED FAILING MUTATIONS.
+/// (a) Delete a router call site outright: the call count no longer matches.
+/// (b) Add a second unguarded call site in either module: same failure, which is
+///     what forces a new caller to be looked at rather than silently inheriting
+///     the dispositions the two guards below assert.
 #[test]
-fn the_pr_poller_hands_the_live_gate_to_both_lane_routers() {
+fn the_pr_poller_calls_both_lane_routers() {
     for (label, source, expected_calls) in [
         ("pr_watcher", include_str!("../../pr_watcher.rs"), 2usize),
         ("pr_commands", include_str!("../../pr_commands.rs"), 1usize),
     ] {
-        let calls: Vec<&str> = source.split("_ci_evidence(").skip(1).collect();
         assert_eq!(
-            calls.len(),
+            source.split("_ci_evidence(").skip(1).count(),
             expected_calls,
             "{label}: the poller's lane-router call sites are the thing under \
              guard here; a changed count needs this test updated, not ignored",
-        );
-        assert_eq!(
-            source.matches("let gate = self.ci_routing_gate();").count(),
-            expected_calls,
-            "{label}: every router call must be preceded by a LIVE gate read",
-        );
-        assert_eq!(
-            source.matches("let gate ").count(),
-            expected_calls,
-            "{label}: no other `gate` binding may shadow the live read",
-        );
-        for (index, args) in calls.into_iter().enumerate() {
-            assert_eq!(
-                final_argument(args),
-                "gate",
-                "{label}: router call {index} must be handed the live gate binding",
-            );
-        }
-        assert!(
-            !source.contains("CiRoutingGate::"),
-            "{label}: the poller must never name a gate posture; it reads one",
         );
     }
 }
@@ -6886,39 +6508,36 @@ fn the_pr_poller_hands_the_live_gate_to_both_lane_routers() {
 // `close_ci_routes_on_success`: the callee, then its two call sites
 // ===========================================================================
 
-/// A newer pass or merge terminalizes this subject's open route and unblocks
-/// the rollback gate.
+/// A newer pass or merge terminalizes this subject's open route and clears the
+/// evidence-advance high-watermark.
 ///
-/// Behavioural, over the production repository and the production rollback
+/// Behavioural, over the production repository and the production quiescence
 /// report. The assertion is the stored `terminal_outcome` and the durable
 /// quiescence row, never the name of the branch the method took.
 ///
-/// The chain is the one the proposal's rollback safety argument rests on: an
-/// open route row keeps `current_failed_identity_count` above zero, which keeps
-/// `permits_rollback` false, so a coordinator that never closes its routes on
-/// success can never be rolled back — the drain would sit at "1 route identity
-/// that is still the current failed evidence for its lane" forever, for a PR
-/// that merged.
+/// The chain is the one the proposal's drain-safety argument rests on: an open
+/// route row keeps `current_failed_identity_count` above zero, so a coordinator
+/// that never closes its routes on success can never be drained — the report
+/// would sit at "1 route identity that is still the current failed evidence for
+/// its lane" forever, for a PR that merged.
 ///
 /// NAMED FAILING MUTATIONS.
 /// (a) Delete the `close_routes_for_newer_outcome` call from
 ///     `close_ci_routes_on_success`: the row stays `Reserved` with
-///     `terminal_outcome: None`, and the report stays blocked.
-/// (b) Drop the `gate.owns_routes()` guard: the `DisabledClean` phase — taken
-///     first, on the same row — closes a row the disabled feature must not own.
-/// (c) Invert `if !decision.closes_route() { return; }`, or hand `classify` a
+///     `terminal_outcome: None`, and the high-watermark stays at one.
+/// (b) Invert `if !decision.closes_route() { return; }`, or hand `classify` a
 ///     capture other than `merged()`/`passing()`: nothing closes, as in (a).
-/// (d) Swap `CiRouteOutcome::Merged` and `CiRouteOutcome::Passed`: the outcome
+/// (c) Swap `CiRouteOutcome::Merged` and `CiRouteOutcome::Passed`: the outcome
 ///     assertion fails in both halves of the loop.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn close_ci_routes_on_success_terminalizes_the_route_and_unblocks_rollback() {
+async fn close_ci_routes_on_success_terminalizes_the_route_and_clears_the_watermark() {
     for (merged, expected) in [
         (false, CiRouteOutcome::Passed),
         (true, CiRouteOutcome::Merged),
     ] {
         let (db, task_id, subject) = wiring_subject("ci-close-on-success").await;
         let routes = CiRouteAttemptRepository::new(db.clone());
-        let mut actor = crate::actor::actor_with_test_db(db.clone());
+        let actor = crate::actor::actor_with_test_db(db.clone());
 
         let checks = [inconclusive_check("Quality Gate / test", 993)];
         let blocking = refs(&checks);
@@ -6934,23 +6553,7 @@ async fn close_ci_routes_on_success_terminalizes_the_route_and_unblocks_rollback
         );
         assert_eq!(before.terminal_outcome, None);
 
-        // ── The disabled feature owns no routes ─────────────────────────────
-        //
-        // Taken first, and on the same row the draining phase below closes, so
-        // it is a real control rather than a separate fixture that could pass
-        // for reasons of its own.
-        actor.test_ci_routing_gate = Some(CiRoutingGate::DisabledClean);
-        actor
-            .close_ci_routes_on_success(&task_id, PR as u64, merged)
-            .await;
-        assert_eq!(
-            route_row(&routes, &subject, &key).await.action_phase,
-            CiActionPhase::Reserved,
-            "`DisabledClean` owns no route rows, so the close must not touch one",
-        );
-
-        // ── Draining, with the route still open ─────────────────────────────
-        actor.test_ci_routing_gate = Some(CiRoutingGate::Quiescing);
+        // ── The drain, with the route still open ────────────────────────────
         let blocked = actor
             .record_ci_rollback_quiescence_report()
             .await
@@ -6958,11 +6561,6 @@ async fn close_ci_routes_on_success_terminalizes_the_route_and_unblocks_rollback
         assert_eq!(
             blocked.current_failed_identities, 1,
             "an open route is still the current failed evidence for its lane",
-        );
-        assert!(
-            !blocked.permits_rollback,
-            "and that alone blocks a binary rollback: {:?}",
-            blocked.blocking_reasons(),
         );
 
         // ── The newer authoritative outcome ─────────────────────────────────
@@ -6991,8 +6589,11 @@ async fn close_ci_routes_on_success_terminalizes_the_route_and_unblocks_rollback
             "the closed identity has advanced, so the high-watermark is clear",
         );
         assert!(
-            clean.permits_rollback,
-            "and the drain is now clean: {:?}",
+            !clean
+                .blocking_reasons()
+                .iter()
+                .any(|reason| reason.contains("current failed evidence")),
+            "and the route no longer appears among the drain's blocking counts: {:?}",
             clean.blocking_reasons(),
         );
         assert_eq!(
@@ -7003,8 +6604,7 @@ async fn close_ci_routes_on_success_terminalizes_the_route_and_unblocks_rollback
     }
 }
 
-/// The rollback report attests the **leader's live provider futures**, and one
-/// of them alone blocks the rollback.
+/// The quiescence report attests the **leader's live provider futures**.
 ///
 /// # The one count no query can replace
 ///
@@ -7017,44 +6617,44 @@ async fn close_ci_routes_on_success_terminalizes_the_route_and_unblocks_rollback
 /// `registered_provider_futures = scope.in_flight()` in
 /// `record_ci_rollback_quiescence_report` could be pinned to `0` and every
 /// existing fixture would stay green, since none of them holds a guard while
-/// taking a report. A rollback would then read "clean" with a live
-/// `rerun_failed_jobs` in flight, which is the one thing the gate exists to
-/// prevent.
+/// taking a report. The drain would then read zero with a live
+/// `rerun_failed_jobs` in flight, which is the one thing this count exists to
+/// expose.
 ///
-/// Every database-derived count is asserted zero in the blocked half, so the
-/// live future is provably the *only* thing blocking; and the clean report
-/// taken first is the vacuity guard proving the verdict was reachable at all.
+/// Every database-derived count is asserted zero alongside it, so the live
+/// future is provably the *only* non-zero one; and the empty-scope report taken
+/// first is the vacuity guard proving the count moves at all.
 ///
 /// NAMED FAILING MUTATIONS.
 /// (a) `registered_provider_futures = 0` (or any constant): the count assertion
-///     fails, and `permits_rollback` reads true with a guard held.
+///     fails, and the drain reads empty with a guard held.
 /// (b) Read a fresh `ProviderActionScope::new().in_flight()` instead of
 ///     `self.provider_action_scope`: identical failure.
 /// (c) Take the scope reading *after* the repository counts and let a guard
 ///     drop in between — not expressible here, but the ordering comment on the
 ///     read is what (a) and (b) protect.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn the_rollback_report_counts_the_leaders_live_provider_futures() {
+async fn the_quiescence_report_counts_the_leaders_live_provider_futures() {
     let db = Database::open_in_memory().expect("ephemeral test database");
     let leader = ProviderActionScope::new();
-    let mut actor = crate::actor::actor_with_test_db_and_scope(db.clone(), leader.clone());
-    // The gate posture a drain is actually taken under. `enabled` can never
-    // permit a rollback, so it would make every assertion below vacuous.
-    actor.test_ci_routing_gate = Some(CiRoutingGate::Quiescing);
+    let actor = crate::actor::actor_with_test_db_and_scope(db.clone(), leader.clone());
 
-    // ── Vacuity: with an empty scope this drain is clean ────────────────────
+    // ── Vacuity: with an empty scope this count is zero ─────────────────────
     let clean = actor
         .record_ci_rollback_quiescence_report()
         .await
         .expect("quiescence report");
     assert_eq!(clean.registered_provider_futures, 0);
     assert!(
-        clean.permits_rollback,
-        "the verdict must be reachable, or the blocked half proves nothing: {:?}",
+        clean
+            .blocking_reasons()
+            .iter()
+            .all(|reason| !reason.contains("provider-action futures")),
+        "no future is in flight, so none may be reported: {:?}",
         clean.blocking_reasons(),
     );
 
-    // ── One live provider future — the state a rollback would strand ────────
+    // ── One live provider future — the state a drain would strand ───────────
     let live = leader.admit().expect("an open scope admits");
 
     let blocked = actor
@@ -7066,36 +6666,34 @@ async fn the_rollback_report_counts_the_leaders_live_provider_futures() {
         "the report must attest the LEADER's in-flight count; it is the only one \
          of the six the database cannot derive",
     );
-    assert!(
-        !blocked.permits_rollback,
-        "and a live provider future alone blocks a binary rollback",
-    );
-    assert!(
-        !blocked.recomputed_verdict(),
+    assert_eq!(
+        blocked.permits_rollback,
+        blocked.recomputed_verdict(),
         "the stored verdict and the function it is checked against must agree",
     );
 
     // Every count the DATABASE can answer is still zero, so the future really is
-    // the only blocker rather than one of several.
+    // the only non-zero one rather than one of several.
     assert_eq!(blocked.reserved_rows, 0);
     assert_eq!(blocked.calling_rows, 0);
     assert_eq!(blocked.open_tier2_leases, 0);
     assert_eq!(blocked.unapplied_lead_results, 0);
     assert_eq!(blocked.current_failed_identities, 0);
-    assert_eq!(
+    assert!(
+        blocked
+            .blocking_reasons()
+            .contains(&"1 registered provider-action futures".to_owned()),
+        "and the operator is told which one: {:?}",
         blocked.blocking_reasons(),
-        vec!["1 registered provider-action futures".to_owned()],
-        "and the operator is told which one",
     );
 
-    // ── The future returns; only now is the drain clean again ───────────────
+    // ── The future returns; only now is the count clear again ───────────────
     drop(live);
     let after = actor
         .record_ci_rollback_quiescence_report()
         .await
         .expect("quiescence report");
     assert_eq!(after.registered_provider_futures, 0);
-    assert!(after.permits_rollback, "{:?}", after.blocking_reasons());
 }
 
 /// Both production call sites of `close_ci_routes_on_success` still exist, in
@@ -7415,8 +7013,8 @@ fn a_routed_pr_draft_disposition_turns_the_legacy_remedy_off() {
 ///     legacy remedy anywhere in the file: the occurrence counts fail, which
 ///     forces a new caller to be looked at rather than silently inheriting no
 ///     guard.
-/// (f) Qualify the condition — `… .is_routed() && false`, or `&& gate ==
-///     CiRoutingGate::Enabled`, or any other conjunct: the head is still
+/// (f) Qualify the condition — `… .is_routed() && false`, or any other
+///     conjunct: the head is still
 ///     `if self`, `return;` is still inside a well-formed block, and the block
 ///     still ends before both remedies, so (a)–(e) all hold. The
 ///     nothing-between-the-disposition-and-the-brace assertion is what fails,
@@ -7547,8 +7145,8 @@ fn a_routed_merge_group_disposition_replaces_the_legacy_queue_remedy() {
 /// (b) Move it ABOVE `sweep_reserved_routes` in `sweep_ci_routes`: the sweep has
 ///     not yet superseded the planted row, every count the early return tests is
 ///     zero, the report returns silently, and both assertions fail.
-/// (c) Put it behind the `gate == CiRoutingGate::Quiescing` arm the rollback
-///     report uses: this fixture runs `Enabled`, so nothing is emitted.
+/// (c) Put it behind a condition of any kind — the sweep emits its report on
+///     every pass, so any guard at all leaves this fixture emitting nothing.
 /// (d) Invert `emit_ci_route_report`'s early return (emit only when every count
 ///     is zero): the same failure.
 /// (e) Drop `suppressed_before_provider_call` from the emitted fields: the
@@ -7561,7 +7159,6 @@ async fn the_route_sweep_emits_the_routing_report() {
     let routes = CiRouteAttemptRepository::new(db.clone());
 
     let mut actor = crate::actor::actor_with_test_db(db.clone());
-    actor.test_ci_routing_gate = Some(CiRoutingGate::Enabled);
 
     // A head that has MOVED past the reservation's: the sweep supersedes the row
     // pre-call, which is the one count that makes the report non-silent.
@@ -7652,7 +7249,7 @@ fn the_routing_modules_consume_ci_triage_and_branch_on_no_forbidden_key() {
     // Every `nafu`-owned production module in this crate. Test modules are
     // separate files and are deliberately excluded: a fixture may say whatever
     // it likes about a job name.
-    const ROUTING_MODULES: [(&str, &str); 8] = [
+    const ROUTING_MODULES: [(&str, &str); 7] = [
         ("ci_routing.rs", include_str!("../../ci_routing.rs")),
         (
             "ci_lane_routing.rs",
@@ -7661,7 +7258,6 @@ fn the_routing_modules_consume_ci_triage_and_branch_on_no_forbidden_key() {
         ("ci_hold.rs", include_str!("../../ci_hold.rs")),
         ("ci_reporting.rs", include_str!("../../ci_reporting.rs")),
         ("ci_routing/executor.rs", include_str!("../executor.rs")),
-        ("ci_routing/gate.rs", include_str!("../gate.rs")),
         ("ci_routing/quiescence.rs", include_str!("../quiescence.rs")),
         (
             "ci_routing/tier2_dispatch.rs",

@@ -144,8 +144,6 @@ pub(crate) fn build_refinement_actor(
         model_priorities: HashMap::from([("planner".to_owned(), vec![TEST_MODEL.to_owned()])]),
         #[cfg(test)]
         test_use_live_credential_resolution: false,
-        #[cfg(test)]
-        test_ci_routing_gate: None,
         pr_errors: HashMap::new(),
         last_dispatched: HashMap::new(),
         inflight_dispatches: HashMap::new(),

@@ -202,16 +202,16 @@ impl CoordinatorActor {
                     // task `tlu1`: agents were sent to fix code that had never
                     // been shown to be broken.
                     //
-                    // Proposal `nafu` wave 3b: when `ci_evidence_routing` is
-                    // on, the durable route layer owns this. It derives one
-                    // immutable evidence identity per Actions run, charges a
-                    // monotonic budget, and calls the provider exactly once per
-                    // evidence across polls and restarts — none of which the
-                    // in-memory `ci_inconclusive_retriggered` dedupe below can
-                    // do. The legacy helper stays the whole behaviour whenever
-                    // the route layer declines, which is every deployment until
-                    // the gate is enabled.
-                    let gate = self.ci_routing_gate();
+                    // Proposal `nafu`: the durable route layer owns this. It
+                    // derives one immutable evidence identity per Actions run,
+                    // charges a monotonic budget, and calls the provider exactly
+                    // once per evidence across polls and restarts — none of
+                    // which the in-memory `ci_inconclusive_retriggered` dedupe
+                    // below can do. The legacy helper remains only for evidence
+                    // the route layer cannot key: it declines when the poll
+                    // sequence that orders this enumeration could not be
+                    // reserved, and that evidence must still be remediated.
+                    //
                     // The route layer takes its own enumeration under its own
                     // reserved poll sequence, so it receives the *predicate*
                     // rather than the slice above — which was filtered from a
@@ -226,7 +226,6 @@ impl CoordinatorActor {
                             pull_number,
                             &pr.head.sha,
                             |cr| is_failing_conclusion(cr.conclusion.as_deref()),
-                            gate,
                         )
                     })
                     .await;
@@ -301,11 +300,10 @@ impl CoordinatorActor {
                             )
                         })
                         .collect();
-                    // `nafu` wave 3b: a complete causal failure is a Tier-2
-                    // route — adjudicate the captured evidence before spending
-                    // another worker session. While the gate is off this
-                    // declines and `handle_ci_failure` is the whole behaviour.
-                    let gate = self.ci_routing_gate();
+                    // `nafu`: a complete causal failure is a Tier-2 route —
+                    // adjudicate the captured evidence before spending another
+                    // worker session. `handle_ci_failure` below is reached only
+                    // for evidence the route layer could not key.
                     let routed = poll_stack::boxed(|| {
                         self.route_pr_head_ci_evidence(
                             gh_client,
@@ -321,7 +319,6 @@ impl CoordinatorActor {
                                     Some("failure") | Some("timed_out") | Some("cancelled")
                                 )
                             },
-                            gate,
                         )
                     })
                     .await;

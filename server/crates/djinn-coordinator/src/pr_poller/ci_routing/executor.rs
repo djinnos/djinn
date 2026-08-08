@@ -55,7 +55,6 @@ use djinn_provider::github_api::{
 use crate::pr_poller::ci_provider::CiRouteProvider;
 use crate::types::ProviderActionScope;
 
-use super::gate::CiRoutingGate;
 use super::{
     CiAction, CiCompleteEmptyRoute, CiEvidenceIdentity, CiObservation, CiProviderActionKind,
     CiReservedRecoveryRoute, CiRouteOutcome, CiRouteRationale, CiRouteSubject, CiStaleField,
@@ -83,7 +82,6 @@ pub(crate) struct CiLaneTarget<'a> {
     pub owner: &'a str,
     pub repo: &'a str,
     pub incarnation_id: &'a str,
-    pub gate: CiRoutingGate,
     /// Present for the merge-group lane; `None` makes the re-enqueue
     /// unexecutable, which is a route-level incompleteness rather than a panic.
     pub auto_merge: Option<CiAutoMergeTarget<'a>>,
@@ -104,8 +102,6 @@ pub(crate) enum CiDeferral {
     ProviderCallInFlight,
     /// The row already reached a terminal outcome.
     AlreadyTerminal,
-    /// The gate is `quiescing` and this is a new route.
-    GateQuiescing,
     /// The route needed a call target the lane could not supply (a merge-group
     /// re-enqueue with no PR node id). Fails closed: nothing is charged.
     UnexecutableTarget,
@@ -116,8 +112,6 @@ pub(crate) enum CiDeferral {
 /// What one evidence identity's route did.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum CiLaneOutcome {
-    /// The feature is off. The caller must take its legacy path unchanged.
-    GateClosed,
     /// A newer passing or merged observation closed this subject's routes.
     ClosedByNewerOutcome(CiRouteRationale),
     /// Hold and re-poll. No row, no lease, no charge — and the caller must not
@@ -173,22 +167,6 @@ pub(crate) struct CiTier2Handoff {
 }
 
 impl CiLaneOutcome {
-    /// Whether the caller must withhold its legacy remediation path.
-    ///
-    /// This is the single predicate both lane call sites read, so the two lanes
-    /// cannot drift on when the legacy `PrCiFailed` reopen is suppressed.
-    ///
-    /// [`Self::GateClosed`] is the only outcome that hands the evidence back.
-    /// Note which side the deferrals sit on: a route deferred because a
-    /// provider call is in flight, or because admission closed with a
-    /// recoverable `reserved` row behind it, has *already* taken ownership of
-    /// this evidence. Letting the legacy path also run would reopen the task
-    /// for rework while the queue re-entry it triggered is still live — one
-    /// failure spending two remedies.
-    pub(crate) fn suppresses_legacy_path(&self) -> bool {
-        !matches!(self, Self::GateClosed)
-    }
-
     /// Whether this outcome consumed a Tier-1 charge.
     #[cfg(test)]
     pub(crate) fn charged(&self) -> bool {
@@ -215,15 +193,10 @@ pub(crate) async fn execute_route(
     observation: &CiObservation<'_>,
     blocking: &[&CheckRun],
 ) -> CiLaneOutcome {
-    if !target.gate.owns_routes() {
-        return CiLaneOutcome::GateClosed;
-    }
-
     let decision = classify(observation);
 
     // A newer pass or merge outranks everything, staleness included, so it is
-    // answered before the gate's new-route refusal: closing obsolete keys is
-    // draining, not admitting.
+    // answered first: closing obsolete keys is draining, not admitting.
     if decision.closes_route() {
         let outcome = match decision.rationale() {
             CiRouteRationale::NewerMerge => CiRouteOutcome::Merged,
@@ -244,7 +217,7 @@ pub(crate) async fn execute_route(
     }
 
     // Holds, discards, and the complete-empty compatibility paths never touch
-    // the durable layer, so they answer identically under every gate state.
+    // the durable layer at all.
     if !decision.creates_route_row() {
         if let Some(route) = decision.complete_empty_route() {
             return CiLaneOutcome::CompleteEmpty(route);
@@ -256,25 +229,6 @@ pub(crate) async fn execute_route(
     }
 
     let keys = RouteKeys::derive(target, observation.evidence, blocking, decision.action());
-
-    // `quiescing` admits no new route, but it must still tell the caller
-    // whether *this* evidence already has a live one, or the legacy path would
-    // double-remedy a failure whose queue re-entry is in flight.
-    if !target.gate.admits_new_routes() {
-        return match routes.get(target.subject, &keys.action).await {
-            Ok(Some(attempt)) if attempt.action_phase == djinn_db::CiActionPhase::Calling => {
-                CiLaneOutcome::Deferred(CiDeferral::ProviderCallInFlight)
-            }
-            Ok(Some(attempt)) if !attempt.is_terminal() => {
-                CiLaneOutcome::Deferred(CiDeferral::GateQuiescing)
-            }
-            Ok(_) => CiLaneOutcome::GateClosed,
-            Err(error) => {
-                tracing::warn!(%error, "ci route: failed to read route under a quiescing gate");
-                CiLaneOutcome::Deferred(CiDeferral::RepositoryError)
-            }
-        };
-    }
 
     let counts = match routes
         .budget_counts(target.subject, &keys.retry_budget, &keys.head_budget)
@@ -842,12 +796,8 @@ pub(crate) async fn sweep_reserved_routes(
     routes: &CiRouteAttemptRepository,
     witness: &dyn CiCurrentHeadWitness,
     incarnation_id: &str,
-    gate: CiRoutingGate,
 ) -> CiSweepReport {
     let mut report = CiSweepReport::default();
-    if !gate.owns_routes() {
-        return report;
-    }
 
     let rows = match routes.non_terminal_identities().await {
         Ok(rows) => rows,
@@ -1004,12 +954,8 @@ pub(crate) async fn recover_calling_owners_at_startup(
     liveness: &dyn CiOwnerLiveness,
     recovering_incarnation: &str,
     holds_exclusive_lock: bool,
-    gate: CiRoutingGate,
 ) -> CiHandoffReport {
     let mut report = CiHandoffReport::default();
-    if !gate.owns_routes() {
-        return report;
-    }
 
     let rows = match routes.non_terminal_identities().await {
         Ok(rows) => rows,
