@@ -27,11 +27,15 @@ async fn proposal_chat_feedback_intent_preserves_spec_and_routes_by_severity() {
         })
         .await
         .unwrap();
+    // Refinement audit events share proposal_revisions but have empty bodies;
+    // compare only actual spec snapshots so required durable audit capture is
+    // not mistaken for a chat-driven proposal rewrite.
     let revision_sequence_before: Vec<_> = repo
         .revisions(&proposal.id)
         .await
         .unwrap()
         .iter()
+        .filter(|row| !row.body.is_empty())
         .map(|row| row.seq)
         .collect();
 
@@ -51,6 +55,27 @@ async fn proposal_chat_feedback_intent_preserves_spec_and_routes_by_severity() {
     let feedback = repo.feedback(&proposal.id).await.unwrap();
     assert_eq!(feedback.len(), 1);
     assert_eq!(feedback[0].severity, "blocking");
+    let blocking_lifecycle = repo
+        .load_feedback_refinement_lifecycle_state(&proposal.id, &blocking_id, &blocking_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        (
+            blocking_lifecycle.runs,
+            blocking_lifecycle.running,
+            blocking_lifecycle.intents,
+            blocking_lifecycle.intent_rounds,
+            blocking_lifecycle.dispatched_tasks,
+            blocking_lifecycle.objections,
+            blocking_lifecycle.injections,
+            blocking_lifecycle.immutable_generations,
+            blocking_lifecycle.immutable_sources,
+            blocking_lifecycle.pending,
+            blocking_lifecycle.pending_owners,
+        ),
+        (1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 0),
+        "blocking chat feedback must admit exactly one run/intent/round and one immutable capture without dispatching a duplicate task",
+    );
     let active = repo
         .load_feedback_refinement_active_boundary(&proposal.id, &blocking_id)
         .await
@@ -59,39 +84,11 @@ async fn proposal_chat_feedback_intent_preserves_spec_and_routes_by_severity() {
     assert_eq!(active.generation, 1);
     assert_eq!(active.source_captures, 1);
 
-    let advisory = server
-        .dispatch_tool(
-            "proposal_feedback_add",
-            serde_json::json!({
-                "proposal_id": proposal.id,
-                "body": "Advisory chat feedback: optional follow-up.",
-                "severity": "advisory",
-            }),
-        )
-        .await
-        .unwrap();
-    assert!(advisory["error"].is_null(), "{advisory}");
-    let advisory_id = advisory["feedback"]["id"].as_str().unwrap().to_owned();
-    let feedback = repo.feedback(&proposal.id).await.unwrap();
-    assert_eq!(feedback.len(), 2);
-    assert_eq!(feedback[1].severity, "advisory");
-    let advisory_state = repo
-        .load_pending_feedback_refinement_state(&proposal.id, &advisory_id)
-        .await
-        .unwrap();
-    assert_eq!(
-        (
-            advisory_state.pending_members,
-            advisory_state.pending_owners,
-            advisory_state.source_captures
-        ),
-        (0, 0, 0)
-    );
-
     let revisions_after = repo.revisions(&proposal.id).await.unwrap();
     assert_eq!(
         revisions_after
             .iter()
+            .filter(|row| !row.body.is_empty())
             .map(|row| row.seq)
             .collect::<Vec<_>>(),
         revision_sequence_before
@@ -101,6 +98,61 @@ async fn proposal_chat_feedback_intent_preserves_spec_and_routes_by_severity() {
     assert_eq!(
         proposal_after.latest_revision_seq,
         proposal.latest_revision_seq
+    );
+
+    // Use an otherwise untouched proposal so that every durable lifecycle
+    // cardinality can remain zero; the blocking proposal above deliberately
+    // has an active run and would mask an accidental advisory admission.
+    let advisory_proposal = repo
+        .create(ProposalCreateInput {
+            title: "Advisory chat feedback must not start refinement",
+            body: "Advisory feedback remains discussion without tribunal work.",
+            acceptance_criteria: Some("[]"),
+            status: Some("in_review"),
+            body_format: None,
+        })
+        .await
+        .unwrap();
+    let advisory_lifecycle_before = repo
+        .load_feedback_refinement_lifecycle_state(&advisory_proposal.id, "", "")
+        .await
+        .unwrap();
+
+    let advisory = server
+        .dispatch_tool(
+            "proposal_feedback_add",
+            serde_json::json!({
+                "proposal_id": advisory_proposal.id,
+                "body": "Advisory chat feedback: optional follow-up.",
+                "severity": "advisory",
+            }),
+        )
+        .await
+        .unwrap();
+    assert!(advisory["error"].is_null(), "{advisory}");
+    let advisory_id = advisory["feedback"]["id"].as_str().unwrap().to_owned();
+    let advisory_feedback = repo.feedback(&advisory_proposal.id).await.unwrap();
+    assert_eq!(advisory_feedback.len(), 1);
+    assert_eq!(advisory_feedback[0].severity, "advisory");
+    let advisory_lifecycle_after = repo
+        .load_feedback_refinement_lifecycle_state(&advisory_proposal.id, &advisory_id, &advisory_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        advisory_lifecycle_after, advisory_lifecycle_before,
+        "advisory chat feedback must not admit a run, create a round or dispatch task, or capture a refinement generation",
+    );
+    let advisory_state = repo
+        .load_pending_feedback_refinement_state(&advisory_proposal.id, &advisory_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        (
+            advisory_state.pending_members,
+            advisory_state.pending_owners,
+            advisory_state.source_captures
+        ),
+        (0, 0, 0)
     );
 }
 
