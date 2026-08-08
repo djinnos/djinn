@@ -78,6 +78,15 @@ impl Harness {
             .and_then(|record| record.directive)
     }
 
+    /// The evidence dossier the Lead prompt renders, as stored.
+    async fn dossier(&self) -> Option<serde_json::Value> {
+        djinn_db::repositories::task_arbitration::TaskArbitrationRepository::new(self.db.clone())
+            .get_latest_for_task(&self.task_id)
+            .await
+            .expect("arbitration read")
+            .and_then(|record| record.dossier)
+    }
+
     fn handoff(&self, origin: CiOriginState, lane: CiLane) -> CiTier2Handoff {
         CiTier2Handoff {
             subject: CiRouteSubject::task(&self.task_id),
@@ -280,6 +289,97 @@ fn every_tier_two_reason_can_reach_a_lead_dispatch() {
             "{reason:?} must be dispatchable"
         );
     }
+}
+
+/// `diagnose_only` is derived from the route's run identity, in **both**
+/// directions.
+///
+/// # Why the flag is worth a fixture of its own
+///
+/// It is the one field in the block that is an inference rather than a copy,
+/// and the module's own comment says why it exists: the supervisor rejects a
+/// repair on a run-absent route as `repair_unavailable_for_route`, so an
+/// inference that went the other way "would cost a whole Lead session to
+/// discover". Nothing read it back. Pin it to a constant —
+/// `"diagnose_only": false` — and a run-absent route tells Lead it may plan a
+/// repair, Lead spends a session planning one, the supervisor refuses it, and
+/// the route buys a diagnostic fallback for the price of a full adjudication.
+/// Every other assertion in this file, and the whole acceptance list, stays
+/// green.
+///
+/// Both halves are asserted because either constant is a live mutation: pinning
+/// `false` breaks the run-absent half, pinning `true` breaks the run-named one.
+/// The dossier carries the same flag and is checked with it, since it is a
+/// second copy of the same inference in the same function.
+///
+/// NAMED FAILING MUTATIONS.
+/// (a) `"diagnose_only": handoff.identity.run_id.is_none()` → `false` in
+///     `route_directive`: the run-absent half fails.
+/// (b) → `true`: the run-named half fails.
+/// (c) The same two mutations in `ci_dossier`: the dossier assertions fail
+///     alone, which is the point of asserting them separately.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn diagnose_only_tracks_whether_the_route_named_a_run() {
+    // ── A route that named a run: a repair is available ─────────────────────
+    let named = harness("pr_draft").await;
+    let handoff = named.handoff(CiOriginState::PrDraft, CiLane::PrHead);
+    assert!(
+        handoff.identity.run_id.is_some(),
+        "vacuity: this half must actually carry a run identity",
+    );
+    let task = named.task().await;
+    assert_eq!(
+        named
+            .actor
+            .dispatch_ci_tier2_lead(&task, &handoff, None)
+            .await,
+        CiTier2Dispatch::Dispatched
+    );
+    let directive = named.directive().await.expect("directive");
+    assert_eq!(directive["ci_route"]["run_id"], 90210);
+    assert_eq!(
+        directive["ci_route"]["diagnose_only"], false,
+        "a route with a run to repair from must not be marked diagnose-only, or \
+         Lead diagnoses a failure it could have fixed",
+    );
+    assert_eq!(
+        named.dossier().await.expect("dossier")["diagnose_only"],
+        false,
+        "and the dossier Lead reads must agree with the block the supervisor parses",
+    );
+
+    // ── A run-absent route: `approve` and `repair` are both invalid ─────────
+    let absent = harness("pr_draft").await;
+    let mut handoff = absent.handoff(CiOriginState::PrDraft, CiLane::PrHead);
+    handoff.identity.run_id = None;
+    let task = absent.task().await;
+    assert_eq!(
+        absent
+            .actor
+            .dispatch_ci_tier2_lead(&task, &handoff, None)
+            .await,
+        CiTier2Dispatch::Dispatched
+    );
+    let directive = absent.directive().await.expect("directive");
+    assert!(
+        directive["ci_route"]["run_id"].is_null(),
+        "vacuity: absence is spelled as absence — there is no sentinel run id",
+    );
+    assert_eq!(
+        directive["ci_route"]["diagnose_only"], true,
+        "a run-absent route is diagnose-only: the supervisor rejects a repair on \
+         it as `repair_unavailable_for_route`, and inferring that from a missing \
+         field costs a whole Lead session to discover",
+    );
+    let dossier = absent.dossier().await.expect("dossier");
+    assert_eq!(dossier["diagnose_only"], true);
+    assert!(
+        dossier["summary"]
+            .as_str()
+            .is_some_and(|summary| summary.contains("diagnose-only")),
+        "and the prose Lead actually reads must say so too: {:?}",
+        dossier["summary"],
+    );
 }
 
 // ---------------------------------------------------------------------------
