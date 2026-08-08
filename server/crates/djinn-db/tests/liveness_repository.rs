@@ -725,13 +725,17 @@ async fn liveness_exit_projection_contract() {
         evidence: json!({"sample": "losing replay", "exit_code": 1}),
     };
 
-    let (first_result, replay_result) = tokio::join!(
-        repo.persist_evidence(&first),
+    // Establish the canonical exit observation, then race two independently
+    // delivered replays against it. This keeps the expected winner taxonomy
+    // deterministic while exercising the same conflict path used by
+    // concurrent exit delivery.
+    let first_id = repo.persist_evidence(&first).await.unwrap();
+    let (replay_result, concurrent_replay_result) = tokio::join!(
+        repo.persist_evidence(&replay),
         repo.persist_evidence(&replay),
     );
-    let first_id = first_result.unwrap();
-    let replay_id = replay_result.unwrap();
-    assert_eq!(first_id, replay_id);
+    assert_eq!(replay_result.unwrap(), first_id);
+    assert_eq!(concurrent_replay_result.unwrap(), first_id);
 
     let evidence_row = sqlx::query(
         "SELECT session_id, task_id, task_run_id, verdict, outcome_kind, outcome_reason, evidence, created_at
@@ -749,6 +753,10 @@ async fn liveness_exit_projection_contract() {
     let original_reason: Option<String> = evidence_row.get("outcome_reason");
     let original_evidence: serde_json::Value = evidence_row.get("evidence");
     let original_created_at: String = evidence_row.get("created_at");
+    assert_eq!(original_verdict, "protocol_violation");
+    assert_eq!(original_kind.as_deref(), Some("protocol_violation"));
+    assert_eq!(original_reason.as_deref(), Some("clean_exit_nonterminal"));
+    assert_eq!(original_evidence, first.evidence);
 
     sqlx::query("UPDATE tasks SET status = 'closed' WHERE id = $1")
         .bind(&task_id)
