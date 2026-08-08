@@ -43,6 +43,28 @@ pub struct TypedEvidenceRetrySnapshotForTest {
     pub labels: Vec<(String, serde_json::Value)>,
 }
 
+/// Fixture for dispatched terminal-evidence disposition tests.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypedEvidenceDispositionFixtureForTest {
+    pub finding_id: String,
+    pub validation_result_id: String,
+    pub caller_user_id: String,
+    pub authority_task_id: String,
+}
+
+/// All persistence relations a rejected disposition must preserve.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypedEvidenceDispositionSnapshotForTest {
+    pub findings: Vec<(String, String)>,
+    pub attempts: Vec<(String, i32, String)>,
+    pub transitions: Vec<(String, i32, Option<String>, String)>,
+    pub dispositions: Vec<(String, String, Option<String>, i32, String, String)>,
+    pub tasks: Vec<(String, String, String)>,
+    pub debate_rows: Vec<(String, String, Option<String>)>,
+    pub lifecycle_events: Vec<(String, String)>,
+    pub legacy_link_and_claim: (Option<String>, Option<String>),
+}
+
 /// Materialize retry and active-authority boundary states which normally
 /// require a worker return. The authority task must belong to the active
 /// refinement run; this helper writes its complete persisted authority tuple.
@@ -192,5 +214,94 @@ pub async fn typed_evidence_retry_snapshot_for_test(
         prior_task_status,
         routing,
         labels,
+    }
+}
+
+pub async fn materialize_typed_evidence_disposition_fixture_for_test(
+    db: &Database,
+    proposal_id: &str,
+    project_id: &str,
+    judge_task_id: &str,
+    caller_user_id: &str,
+) -> TypedEvidenceDispositionFixtureForTest {
+    db.ensure_initialized().await.unwrap();
+    let finding_id = uuid::Uuid::now_v7().to_string();
+    let attempt_id = uuid::Uuid::now_v7().to_string();
+    let validation_result_id = uuid::Uuid::now_v7().to_string();
+    let spike = uuid::Uuid::now_v7().to_string();
+    let claim = serde_json::json!({
+        "fixture": "disposition",
+        "created_by_task_id": judge_task_id,
+        "against_revision_seq": 1,
+    });
+    let demand_hash = crate::repositories::typed_evidence::legacy_demand_hash(&claim, Some(&spike));
+    let mut tx = db.pool().begin().await.unwrap();
+    sqlx::query("INSERT INTO tasks (id,project_id,short_id,title,description,design,issue_type,priority,owner,status,labels,acceptance_criteria,created_by_user_id,agent_type) VALUES ($1,$2,$3,'Disposition spike','fixture','','spike',0,'','open',$4,'[]'::jsonb,$5,'architect')").bind(&spike).bind(project_id).bind(format!("d{}", &spike[..7])).bind(serde_json::json!(["refinement-evidence", "read-only"])).bind(caller_user_id).execute(&mut *tx).await.unwrap();
+    sqlx::query("INSERT INTO typed_evidence_findings (id,proposal_id,demand_hash,lifecycle,claim,demanded_revision_seq,created_by_task_id) VALUES ($1,$2,$3,'evidence_received',$4,1,$5)").bind(&finding_id).bind(proposal_id).bind(&demand_hash).bind(&claim).bind(judge_task_id).execute(&mut *tx).await.unwrap();
+    sqlx::query("INSERT INTO typed_evidence_attempts (id,finding_id,sequence,spike_task_id) VALUES ($1,$2,1,$3)").bind(&attempt_id).bind(&finding_id).bind(&spike).execute(&mut *tx).await.unwrap();
+    sqlx::query("INSERT INTO typed_evidence_validation_results (id,attempt_id,payload_sha256,outcome,validator_facts) VALUES ($1,$2,'fixture-sha','resolved','{}')").bind(&validation_result_id).bind(&attempt_id).execute(&mut *tx).await.unwrap();
+    sqlx::query("INSERT INTO typed_evidence_transitions (id,finding_id,ordinal,from_lifecycle,to_lifecycle,actor_task_id,metadata) VALUES ($1,$2,1,NULL,'demanded',$3,'{}'),($4,$2,2,'demanded','spike_active',$3,'{}'),($5,$2,3,'spike_active','evidence_received',$3,'{}')").bind(uuid::Uuid::now_v7().to_string()).bind(&finding_id).bind(judge_task_id).bind(uuid::Uuid::now_v7().to_string()).bind(uuid::Uuid::now_v7().to_string()).execute(&mut *tx).await.unwrap();
+    sqlx::query(
+        "UPDATE proposals SET linked_spike_task_id=NULL,needs_evidence_claim=NULL WHERE id=$1",
+    )
+    .bind(proposal_id)
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    TypedEvidenceDispositionFixtureForTest {
+        finding_id,
+        validation_result_id,
+        caller_user_id: caller_user_id.into(),
+        authority_task_id: judge_task_id.into(),
+    }
+}
+
+pub async fn typed_evidence_disposition_snapshot_for_test(
+    db: &Database,
+    proposal_id: &str,
+) -> TypedEvidenceDispositionSnapshotForTest {
+    db.ensure_initialized().await.unwrap();
+    let findings = sqlx::query_as(
+        "SELECT id,lifecycle FROM typed_evidence_findings WHERE proposal_id=$1 ORDER BY id",
+    )
+    .bind(proposal_id)
+    .fetch_all(db.pool())
+    .await
+    .unwrap();
+    let attempts = sqlx::query_as("SELECT a.id,a.sequence,a.spike_task_id FROM typed_evidence_attempts a JOIN typed_evidence_findings f ON f.id=a.finding_id WHERE f.proposal_id=$1 ORDER BY a.id").bind(proposal_id).fetch_all(db.pool()).await.unwrap();
+    let transitions = sqlx::query_as("SELECT t.id,t.ordinal,t.from_lifecycle,t.to_lifecycle FROM typed_evidence_transitions t JOIN typed_evidence_findings f ON f.id=t.finding_id WHERE f.proposal_id=$1 ORDER BY t.id").bind(proposal_id).fetch_all(db.pool()).await.unwrap();
+    let dispositions = sqlx::query_as("SELECT d.id,d.finding_id,d.validation_result_id,d.folding_revision,d.outcome,d.disposition FROM typed_evidence_dispositions d JOIN typed_evidence_findings f ON f.id=d.finding_id WHERE f.proposal_id=$1 ORDER BY d.id").bind(proposal_id).fetch_all(db.pool()).await.unwrap();
+    let tasks = sqlx::query_as("SELECT id,status,agent_type FROM tasks WHERE project_id=(SELECT project_id FROM proposal_targets WHERE proposal_id=$1 LIMIT 1) ORDER BY id").bind(proposal_id).fetch_all(db.pool()).await.unwrap();
+    let debate_rows = sqlx::query_as(
+        "SELECT id,kind,source_task_id FROM proposal_debate_trail WHERE proposal_id=$1 ORDER BY id",
+    )
+    .bind(proposal_id)
+    .fetch_all(db.pool())
+    .await
+    .unwrap();
+    let lifecycle_events = sqlx::query_as(
+        "SELECT id,event_kind FROM proposal_revisions WHERE proposal_id=$1 ORDER BY id",
+    )
+    .bind(proposal_id)
+    .fetch_all(db.pool())
+    .await
+    .unwrap();
+    let legacy_link_and_claim = sqlx::query_as(
+        "SELECT linked_spike_task_id,needs_evidence_claim FROM proposals WHERE id=$1",
+    )
+    .bind(proposal_id)
+    .fetch_one(db.pool())
+    .await
+    .unwrap();
+    TypedEvidenceDispositionSnapshotForTest {
+        findings,
+        attempts,
+        transitions,
+        dispositions,
+        tasks,
+        debate_rows,
+        lifecycle_events,
+        legacy_link_and_claim,
     }
 }
