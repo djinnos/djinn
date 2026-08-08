@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { HugeiconsIcon } from "@hugeicons/react";
 import {
   Alert02Icon,
@@ -63,15 +63,23 @@ function groupByRound(trail: ProposalDebateTrailRow[]): RoundGroup[] {
     .sort((a, b) => a.round - b.round);
 }
 
-function EntryRow({ row }: { row: ProposalDebateTrailRow }) {
+function EntryRow({ row, selected }: { row: ProposalDebateTrailRow; selected: boolean }) {
   const [open, setOpen] = useState(false);
   const outcome = row.kind === "verdict" ? verdictOutcome(row) : null;
   const excerpt = row.body.replace(/\s+/g, " ").trim();
   const isLong = excerpt.length > 160 || row.body.trim().includes("\n");
 
+  useEffect(() => {
+    if (!selected) return;
+    const target = document.getElementById(`proposal-debate-entry-${row.id}`);
+    target?.scrollIntoView({ behavior: "smooth", block: "center" });
+    target?.focus({ preventScroll: true });
+  }, [row.id, selected]);
+
   return (
     <li
       id={`proposal-debate-entry-${row.id}`}
+      tabIndex={-1}
       className="rounded-md border bg-background/60 px-2.5 py-2"
     >
       <div className="flex flex-wrap items-center gap-2 text-xs">
@@ -149,11 +157,14 @@ function EntryRow({ row }: { row: ProposalDebateTrailRow }) {
 function RoundBlock({
   group,
   defaultOpen,
+  targetEntryId,
 }: {
   group: RoundGroup;
   defaultOpen: boolean;
+  targetEntryId?: string;
 }) {
-  const [open, setOpen] = useState(defaultOpen);
+  const containsTarget = !!targetEntryId && group.entries.some((entry) => entry.id === targetEntryId);
+  const [open, setOpen] = useState(defaultOpen || containsTarget);
   const revLabel =
     group.fromRev === group.toRev
       ? `rev ${group.fromRev}`
@@ -205,7 +216,7 @@ function RoundBlock({
       {open && (
         <ul className="space-y-1.5 px-3 pb-3">
           {group.entries.map((e) => (
-            <EntryRow key={e.id} row={e} />
+            <EntryRow key={e.id} row={e} selected={e.id === targetEntryId} />
           ))}
         </ul>
       )}
@@ -221,8 +232,11 @@ function RoundBlock({
  */
 export function ProposalDebateTrail({
   trail,
+  targetEntryId,
 }: {
   trail: ProposalDebateTrailRow[];
+  /** Entry selected from an in-page lifecycle source link. */
+  targetEntryId?: string;
 }) {
   const groups = useMemo(() => groupByRound(trail), [trail]);
 
@@ -240,9 +254,10 @@ export function ProposalDebateTrail({
     <ul className="divide-y rounded-md border">
       {groups.map((group) => (
         <RoundBlock
-          key={group.round}
+          key={`${group.round}-${targetEntryId ?? ""}`}
           group={group}
           defaultOpen={group.round === latestRound}
+          targetEntryId={targetEntryId}
         />
       ))}
     </ul>

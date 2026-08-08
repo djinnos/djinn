@@ -60,6 +60,7 @@ import { ProposalDetailTour } from "@/components/proposals/ProposalDetailTour";
 import { ReadinessPanel } from "@/components/proposals/ReadinessPanel";
 import { ProposalHistory } from "@/components/proposals/ProposalHistory";
 import { FeedbackRefinementCards } from "@/components/proposals/FeedbackRefinementCards";
+import { ProposalDebateTrail } from "@/components/proposals/ProposalDebateTrail";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -976,6 +977,7 @@ function ProposalDetailView({
           proposal={proposal}
           feedback={feedback}
           refinements={detail.feedback_refinements ?? []}
+          debateTrail={detail.debate_trail}
           canEdit={canDirectEdit}
           onChanged={onChanged}
         />
@@ -990,12 +992,14 @@ export function FeedbackThread({
   proposal,
   feedback,
   refinements,
+  debateTrail,
   canEdit,
   onChanged,
 }: {
   proposal: Proposal;
   feedback: ProposalFeedback[];
   refinements?: ProposalDetailData["feedback_refinements"];
+  debateTrail: ProposalDetailData["debate_trail"];
   canEdit: boolean;
   onChanged: () => void;
 }) {
@@ -1004,6 +1008,7 @@ export function FeedbackThread({
   const userFor = (id?: string | null) =>
     id ? (usersQuery.data ?? []).find((u: OrgUser) => u.id === id) : undefined;
   const startChat = useStartProposalChat();
+  const [sourceDebateEntryId, setSourceDebateEntryId] = useState<string>();
 
   const authorName = (f: ProposalFeedback) => {
     if (f.author_kind === "ai") return f.author_model ?? "ai";
@@ -1055,7 +1060,22 @@ export function FeedbackThread({
         )}
       </div>
 
-      <FeedbackRefinementCards refinements={projectedRefinements} />
+      <FeedbackRefinementCards
+        refinements={projectedRefinements}
+        onSourceDebateEntry={setSourceDebateEntryId}
+      />
+
+      {sourceDebateEntryId && (
+        <section className="space-y-2" aria-label="Source debate trail">
+          <Label className="text-xs uppercase text-muted-foreground">
+            Source debate trail
+          </Label>
+          <ProposalDebateTrail
+            trail={debateTrail}
+            targetEntryId={sourceDebateEntryId}
+          />
+        </section>
+      )}
 
       <div className="space-y-3">
         {projectedRefinements.length === 0 && advisoryDiscussion.length === 0 && (

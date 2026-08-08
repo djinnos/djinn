@@ -29,8 +29,11 @@ function feedbackAuthor(
 /** Canonical server-projected feedback refinement generations. */
 export function FeedbackRefinementCards({
   refinements,
+  onSourceDebateEntry,
 }: {
   refinements: ProposalFeedbackRefinement[];
+  /** Reveals this exact entry in the canonical proposal debate trail. */
+  onSourceDebateEntry?: (entryId: string) => void;
 }) {
   const usersQuery = useQuery(usersQueryOptions());
   const userFor = (id?: string | null) =>
@@ -64,6 +67,7 @@ export function FeedbackRefinementCards({
               {generation.debate_entry_id && (
                 <a
                   href={`#proposal-debate-entry-${generation.debate_entry_id}`}
+                  onClick={() => onSourceDebateEntry?.(generation.debate_entry_id!)}
                   className="ml-auto text-xs text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
                 >
                   View source debate entry
