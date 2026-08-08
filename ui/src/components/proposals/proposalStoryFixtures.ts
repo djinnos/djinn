@@ -187,7 +187,6 @@ export const debateTrail: ProposalDebateTrailRow[] = [
     against_revision_seq: 1,
     round: 1,
     resolved_at: ISO(days(3)),
-    resolved_by_user_id: null,
     created_at: ISO(days(5)),
     updated_at: ISO(days(3)),
   },

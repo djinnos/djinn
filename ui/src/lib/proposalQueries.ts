@@ -64,7 +64,7 @@ export interface ProposalDetail {
   targets: ProposalTarget[];
   feedback: ProposalFeedback[];
   /** Canonical feedback-refinement root/generation lifecycle. */
-  feedback_refinements: ProposalFeedbackRefinement[];
+  feedback_refinements?: ProposalFeedbackRefinement[];
   /**
    * Chronological proposal history rows. Spec-revision fields remain present;
    * status-history metadata is optional for non-spec lifecycle events.
