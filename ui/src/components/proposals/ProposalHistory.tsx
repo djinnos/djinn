@@ -322,7 +322,7 @@ export function ProposalHistory({ detail }: { detail: ProposalDetail }) {
             const rangeLabel =
               head.seq === fromSeq ? `rev ${head.seq}` : `rev ${fromSeq}–${head.seq}`;
             return (
-              <li key={`refine-${head.id}`}>
+              <li key={`refine-${head.id}`} id={`proposal-revision-${head.seq}`}>
                 <button
                   onClick={() => toggle(head.id)}
                   className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm hover:bg-muted/40"
@@ -394,7 +394,7 @@ export function ProposalHistory({ detail }: { detail: ProposalDetail }) {
                 .map((a) => `criterion ${(a.index ?? 0) + 1} ${amendmentVerb(a.operation)}`)
                 .join(", ") || "acceptance criteria amended";
             return (
-              <li key={r.id}>
+              <li key={r.id} id={`proposal-revision-${r.seq}`}>
                 <button
                   onClick={() => toggle(r.id)}
                   className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm hover:bg-muted/40"
@@ -507,7 +507,7 @@ export function ProposalHistory({ detail }: { detail: ProposalDetail }) {
                 ? "Marked done (implemented externally)"
                 : "Status changed";
             return (
-              <li key={r.id}>
+              <li key={r.id} id={`proposal-revision-${r.seq}`}>
                 <div className="flex w-full items-center gap-2 px-3 py-2 text-sm">
                   <Badge variant="secondary" className="font-mono">
                     status
@@ -540,7 +540,7 @@ export function ProposalHistory({ detail }: { detail: ProposalDetail }) {
             );
           }
           return (
-            <li key={r.id}>
+            <li key={r.id} id={`proposal-revision-${r.seq}`}>
               <button
                 onClick={() => toggle(r.id)}
                 className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm hover:bg-muted/40"

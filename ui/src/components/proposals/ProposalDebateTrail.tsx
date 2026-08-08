@@ -70,7 +70,10 @@ function EntryRow({ row }: { row: ProposalDebateTrailRow }) {
   const isLong = excerpt.length > 160 || row.body.trim().includes("\n");
 
   return (
-    <li className="rounded-md border bg-background/60 px-2.5 py-2">
+    <li
+      id={`proposal-debate-entry-${row.id}`}
+      className="rounded-md border bg-background/60 px-2.5 py-2"
+    >
       <div className="flex flex-wrap items-center gap-2 text-xs">
         <HugeiconsIcon
           icon={entryIcon(row)}
