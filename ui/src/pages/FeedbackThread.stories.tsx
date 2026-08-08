@@ -1,8 +1,7 @@
 /**
  * Proposals/FeedbackThread — the human feedback thread on a proposal detail
- * (exported from `ProposalsPage`). Lists unresolved comments (human + AI
- * authors) with "Address with djinn" / "Dismiss" actions, and a collapsible
- * "resolved" section noting the revision that addressed each. `canEdit` is a
+ * (exported from `ProposalsPage`). Lists advisory discussion and canonical
+ * feedback-refinement lifecycle cards. `canEdit` is a
  * plain prop here (unlike the page, which derives it from the auth user), so
  * the action buttons render. Reads org users via TanStack Query (seeded) and
  * uses `useStartProposalChat`, which needs a router.
@@ -14,7 +13,9 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 import { FeedbackThread } from "./ProposalsPage";
 import {
+  debateTrail,
   feedback,
+  feedbackRefinements,
   richProposal,
   users,
 } from "@/components/proposals/proposalStoryFixtures";
@@ -44,6 +45,7 @@ const meta = {
   ],
   args: {
     proposal: richProposal,
+    debateTrail,
     onChanged: () => {},
   },
 } satisfies Meta<typeof FeedbackThread>;
@@ -58,6 +60,7 @@ type Story = StoryObj<typeof meta>;
 export const Mixed: Story = {
   args: {
     feedback,
+    refinements: feedbackRefinements,
     canEdit: true,
   },
 };

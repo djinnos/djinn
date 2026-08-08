@@ -214,6 +214,8 @@ type HistoryRow =
       head: ProposalHistoryEntry;
       before?: ProposalHistoryEntry;
       fromSeq: number;
+      /** Every revision identity represented by this collapsed tribunal run. */
+      revisionSeqs: number[];
       rounds: number;
       at: string;
     };
@@ -287,6 +289,7 @@ export function ProposalHistory({ detail }: { detail: ProposalDetail }) {
           head,
           before: bySeq.get(fromSeq - 1),
           fromSeq,
+          revisionSeqs: group.map((revision) => revision.seq),
           rounds,
           at: head.created_at,
         });
@@ -298,7 +301,7 @@ export function ProposalHistory({ detail }: { detail: ProposalDetail }) {
     }
     statusEvents.forEach((e) => out.push({ type: "status", entry: e, at: e.created_at }));
     out.sort(
-      (a, b) => b.at.localeCompare(a.at) || (b.type === "status" ? -1 : 1),
+      (a, b) => b.at.localeCompare(a.at) || (a.type === "status" ? -1 : 1),
     );
     return out;
   }, [specRevisions, statusEvents, bySeq]);
@@ -316,13 +319,23 @@ export function ProposalHistory({ detail }: { detail: ProposalDetail }) {
         {rows.map((row) => {
           // ── Collapsed tribunal run ──────────────────────────────────────
           if (row.type === "refinement") {
-            const { head, before, fromSeq, rounds } = row;
+            const { head, before, fromSeq, revisionSeqs, rounds } = row;
             const isHead = head.seq === proposal.latest_revision_seq;
             const isOpen = open.includes(head.id);
             const rangeLabel =
               head.seq === fromSeq ? `rev ${head.seq}` : `rev ${fromSeq}–${head.seq}`;
             return (
-              <li key={`refine-${head.id}`}>
+              <li key={`refine-${head.id}`} id={`proposal-revision-${head.seq}`}>
+                {revisionSeqs
+                  .filter((seq) => seq !== head.seq)
+                  .map((seq) => (
+                    <span
+                      key={seq}
+                      id={`proposal-revision-${seq}`}
+                      className="block h-0 scroll-mt-4"
+                      aria-hidden="true"
+                    />
+                  ))}
                 <button
                   onClick={() => toggle(head.id)}
                   className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm hover:bg-muted/40"
@@ -394,7 +407,11 @@ export function ProposalHistory({ detail }: { detail: ProposalDetail }) {
                 .map((a) => `criterion ${(a.index ?? 0) + 1} ${amendmentVerb(a.operation)}`)
                 .join(", ") || "acceptance criteria amended";
             return (
-              <li key={r.id}>
+              <li
+                key={r.id}
+                id={`proposal-revision-${r.seq}`}
+                data-testid="proposal-spec-revision"
+              >
                 <button
                   onClick={() => toggle(r.id)}
                   className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm hover:bg-muted/40"
@@ -540,7 +557,11 @@ export function ProposalHistory({ detail }: { detail: ProposalDetail }) {
             );
           }
           return (
-            <li key={r.id}>
+            <li
+              key={r.id}
+              id={`proposal-revision-${r.seq}`}
+              data-testid="proposal-spec-revision"
+            >
               <button
                 onClick={() => toggle(r.id)}
                 className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm hover:bg-muted/40"
