@@ -698,7 +698,7 @@ async fn persist_evidence_rolls_back_insert_and_session_update_when_task_run_upd
 }
 
 #[tokio::test]
-async fn session_exit_trigger_is_insert_once_and_replays_are_immutable() {
+async fn liveness_exit_projection_contract() {
     let db = Database::open_in_memory().unwrap();
     let (_, task_id, session_id, task_run_id) = seed_full_fixture(&db).await;
     let repo = LivenessRepository::new(db.clone());
@@ -803,28 +803,109 @@ async fn session_exit_trigger_is_insert_once_and_replays_are_immutable() {
             .unwrap();
     assert_eq!(row_count, 1);
 
-    let session_projection: (Option<String>, Option<String>, Option<serde_json::Value>) =
-        sqlx::query_as(
-            "SELECT liveness_verdict, liveness_outcome_kind, liveness_evidence
-             FROM sessions WHERE id = $1",
-        )
-        .bind(&session_id)
-        .fetch_one(db.pool())
-        .await
-        .unwrap();
+    let session_projection: (
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<serde_json::Value>,
+    ) = sqlx::query_as(
+        "SELECT liveness_verdict, liveness_outcome_kind, liveness_outcome_reason,
+                liveness_evidence
+         FROM sessions WHERE id = $1",
+    )
+    .bind(&session_id)
+    .fetch_one(db.pool())
+    .await
+    .unwrap();
     assert_eq!(
         session_projection.0.as_deref(),
         Some(original_verdict.as_str())
     );
     assert_eq!(session_projection.1, original_kind);
-    assert_eq!(session_projection.2, Some(original_evidence.clone()));
-    let run_projection: (Option<String>, Option<serde_json::Value>) = sqlx::query_as(
-        "SELECT liveness_outcome_kind, liveness_evidence FROM task_runs WHERE id = $1",
-    )
-    .bind(&task_run_id)
-    .fetch_one(db.pool())
-    .await
-    .unwrap();
+    assert_eq!(session_projection.2, original_reason);
+    assert_eq!(session_projection.3, Some(original_evidence.clone()));
+    let run_projection: (Option<String>, Option<String>, Option<serde_json::Value>) =
+        sqlx::query_as(
+            "SELECT liveness_outcome_kind, liveness_outcome_reason, liveness_evidence
+             FROM task_runs WHERE id = $1",
+        )
+        .bind(&task_run_id)
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
     assert_eq!(run_projection.0, original_kind);
-    assert_eq!(run_projection.1, Some(original_evidence));
+    assert_eq!(run_projection.1, original_reason);
+    assert_eq!(run_projection.2, Some(original_evidence));
+
+    // No trigger identity retains the legacy append-only contract. Keep this
+    // separate owner in this selector so exit-trigger idempotency does not
+    // accidentally make older classification evidence unreadable.
+    let (_, legacy_task_id, legacy_session_id, legacy_task_run_id) = seed_full_fixture(&db).await;
+    let legacy_first = LivenessEvidenceSnapshot {
+        session_id: Some(legacy_session_id.clone()),
+        task_id: Some(legacy_task_id.clone()),
+        task_run_id: Some(legacy_task_run_id.clone()),
+        trigger_identity: None,
+        verdict: "live".to_owned(),
+        outcome_kind: Some("success".to_owned()),
+        outcome_reason: None,
+        evidence: json!({"sample": "legacy first"}),
+    };
+    let legacy_second = LivenessEvidenceSnapshot {
+        session_id: Some(legacy_session_id.clone()),
+        task_id: Some(legacy_task_id.clone()),
+        task_run_id: Some(legacy_task_run_id.clone()),
+        trigger_identity: None,
+        verdict: "dead".to_owned(),
+        outcome_kind: Some("dead_reclaimed".to_owned()),
+        outcome_reason: Some("hard_runtime_exceeded".to_owned()),
+        evidence: json!({"sample": "legacy second"}),
+    };
+    let legacy_first_id = repo.persist_evidence(&legacy_first).await.unwrap();
+    let legacy_second_id = repo.persist_evidence(&legacy_second).await.unwrap();
+    assert_ne!(legacy_first_id, legacy_second_id);
+
+    let legacy_rows: Vec<(Option<String>, String, Option<String>, Option<String>)> =
+        sqlx::query_as(
+            "SELECT trigger_identity, verdict, outcome_kind, outcome_reason
+             FROM liveness_evidence WHERE session_id = $1 ORDER BY id",
+        )
+        .bind(&legacy_session_id)
+        .fetch_all(db.pool())
+        .await
+        .unwrap();
+    assert_eq!(legacy_rows.len(), 2, "legacy evidence remains append-only");
+    assert!(legacy_rows.iter().all(|row| row.0.is_none()));
+    assert!(
+        legacy_rows.iter().any(|row| {
+            row.1 == "live" && row.2.as_deref() == Some("success") && row.3.is_none()
+        })
+    );
+    assert!(legacy_rows.iter().any(|row| {
+        row.1 == "dead"
+            && row.2.as_deref() == Some("dead_reclaimed")
+            && row.3.as_deref() == Some("hard_runtime_exceeded")
+    }));
+
+    let legacy_state = repo.load_current_state(&legacy_task_id).await.unwrap();
+    assert_eq!(
+        legacy_state.session_liveness_verdict.as_deref(),
+        Some("dead")
+    );
+    assert_eq!(
+        legacy_state.session_liveness_outcome_kind.as_deref(),
+        Some("dead_reclaimed")
+    );
+    assert_eq!(
+        legacy_state.session_liveness_outcome_reason.as_deref(),
+        Some("hard_runtime_exceeded")
+    );
+    assert_eq!(
+        legacy_state.task_run_liveness_outcome_kind.as_deref(),
+        Some("dead_reclaimed")
+    );
+    assert_eq!(
+        legacy_state.task_run_liveness_outcome_reason.as_deref(),
+        Some("hard_runtime_exceeded")
+    );
 }
