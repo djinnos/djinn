@@ -221,7 +221,7 @@ fn disposition_args(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn disposition_dispatch_successes_return_machine_fields_and_clear_legacy() {
+async fn typed_evidence_disposition_successes_return_machine_fields_and_clear_legacy() {
     for tool in [
         "proposal_refinement_resolve_evidence",
         "proposal_refinement_withdraw_evidence",
@@ -261,6 +261,10 @@ async fn disposition_dispatch_successes_return_machine_fields_and_clear_legacy()
         assert_eq!(after.dispositions.len(), before.dispositions.len() + 1);
         assert_eq!(after.transitions.len(), before.transitions.len() + 1);
         assert_eq!(after.legacy_link_and_claim, (None, None));
+        assert_eq!(
+            after.findings,
+            vec![(fixture.finding_id.clone(), expected.into())]
+        );
     }
 }
 
@@ -834,4 +838,83 @@ async fn disposition_unauthorized_and_duplicate_calls_do_not_mutate() {
         assert_eq!(duplicate["accepted"], false);
         assert_eq!(disposition_snapshot(&db, &proposal.id).await, terminal);
     }
+}
+
+#[tokio::test]
+async fn typed_evidence_disposition_isolates_decode_roles_and_stale_lifecycle() {
+    for (tool, missing) in [
+        ("proposal_refinement_resolve_evidence", "folding_revision"),
+        (
+            "proposal_refinement_resolve_evidence",
+            "validation_result_id",
+        ),
+        ("proposal_refinement_withdraw_evidence", "rationale"),
+        (
+            "proposal_refinement_withdraw_evidence",
+            "withdrawal_is_non_load_bearing",
+        ),
+    ] {
+        let (server, db, proposal, fixture) = disposition_fixture().await;
+        let before = disposition_snapshot(&db, &proposal.id).await;
+        let mut args = disposition_args(tool, &fixture, 1);
+        args.as_object_mut().unwrap().remove(missing);
+        let result = djinn_core::auth_context::SESSION_USER_ID
+            .scope(Some(fixture.caller_user_id.clone()), async {
+                server.dispatch_tool(tool, args).await
+            })
+            .await;
+        assert!(result.is_err(), "missing {missing} must reject decode");
+        assert_eq!(disposition_snapshot(&db, &proposal.id).await, before);
+    }
+    for role in ["advocate", "adversary"] {
+        for tool in [
+            "proposal_refinement_resolve_evidence",
+            "proposal_refinement_withdraw_evidence",
+        ] {
+            let (server, db, proposal, fixture) = disposition_fixture().await;
+            if role == "advocate" {
+                djinn_db::test_support::switch_to_advocate_authority_for_test(
+                    &db,
+                    &fixture.authority_task_id,
+                )
+                .await;
+            } else {
+                djinn_db::test_support::switch_to_adversary_authority_for_test(
+                    &db,
+                    &fixture.authority_task_id,
+                )
+                .await;
+            }
+            let before = disposition_snapshot(&db, &proposal.id).await;
+            let response = disposition_call(
+                &server,
+                &fixture.caller_user_id,
+                tool,
+                disposition_args(tool, &fixture, 1),
+            )
+            .await;
+            assert_eq!(
+                response["conflict_code"], "unauthorized",
+                "{role}/{tool}: {response}"
+            );
+            assert_eq!(disposition_snapshot(&db, &proposal.id).await, before);
+        }
+    }
+    let (server, db, proposal, fixture) = disposition_fixture().await;
+    djinn_db::test_support::set_typed_evidence_disposition_lifecycle_for_test(
+        &db,
+        &fixture.finding_id,
+        "spike_active",
+    )
+    .await;
+    let before = disposition_snapshot(&db, &proposal.id).await;
+    let stale = disposition_call(
+        &server,
+        &fixture.caller_user_id,
+        "proposal_refinement_resolve_evidence",
+        disposition_args("proposal_refinement_resolve_evidence", &fixture, 1),
+    )
+    .await;
+    assert_eq!(stale["conflict_code"], "legacy_typed_parity_mismatch");
+    assert_eq!(disposition_snapshot(&db, &proposal.id).await, before);
 }

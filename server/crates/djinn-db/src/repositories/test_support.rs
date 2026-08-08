@@ -113,6 +113,92 @@ pub async fn materialize_judge_authority_for_test(
     tx.commit().await.unwrap();
 }
 
+/// Switch an already-materialized authority tuple to active Advocate authority.
+/// **Not for production use.** Panics on SQL errors.
+pub async fn switch_to_advocate_authority_for_test(db: &Database, task_id: &str) {
+    switch_typed_evidence_authority_for_test(db, task_id, "advocate", "advocate_revision").await;
+}
+
+/// Restore an already-materialized authority tuple to active Judge authority.
+/// **Not for production use.** Panics on SQL errors.
+pub async fn switch_to_judge_authority_for_test(db: &Database, task_id: &str) {
+    switch_typed_evidence_authority_for_test(db, task_id, "judge", "judge_adjudication").await;
+}
+
+async fn switch_typed_evidence_authority_for_test(
+    db: &Database,
+    task_id: &str,
+    role: &str,
+    phase: &str,
+) {
+    db.ensure_initialized().await.unwrap();
+    let mut tx = db.pool().begin().await.unwrap();
+    sqlx::query("UPDATE refinement_dispatch_intents SET role=$1, phase=$2, state='materialized' WHERE task_id=$3")
+        .bind(role).bind(phase).bind(task_id).execute(&mut *tx).await.unwrap();
+    sqlx::query("UPDATE tasks SET agent_type=$1, refinement_role=$1, refinement_phase=$2, status='open' WHERE id=$3")
+        .bind(role).bind(phase).bind(task_id).execute(&mut *tx).await.unwrap();
+    tx.commit().await.unwrap();
+}
+
+/// Put a disposition fixture in an independently persisted non-terminal lifecycle.
+/// **Not for production use.** Panics on SQL errors.
+pub async fn set_typed_evidence_disposition_lifecycle_for_test(
+    db: &Database,
+    finding_id: &str,
+    lifecycle: &str,
+) {
+    db.ensure_initialized().await.unwrap();
+    sqlx::query("UPDATE typed_evidence_findings SET lifecycle=$1 WHERE id=$2")
+        .bind(lifecycle)
+        .bind(finding_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+}
+
+/// Counts used by the control-plane pending-feedback regression without raw SQL.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PendingFeedbackDispositionCountsForTest {
+    pub successor_count: i64,
+    pub pending_count: i64,
+    pub captured_count: i64,
+    pub nonterminal_run_count: i64,
+}
+
+/// **Not for production use.** Panics on SQL errors.
+pub async fn pending_feedback_disposition_counts_for_test(
+    db: &Database,
+    run_id: &str,
+    idempotency_key: &str,
+    proposal_id: &str,
+    feedback_id: &str,
+) -> PendingFeedbackDispositionCountsForTest {
+    db.ensure_initialized().await.unwrap();
+    let successor_count = sqlx::query_scalar(
+        "SELECT count(*) FROM refinement_dispatch_intents WHERE run_id=$1 AND idempotency_key=$2",
+    )
+    .bind(run_id)
+    .bind(idempotency_key)
+    .fetch_one(db.pool())
+    .await
+    .unwrap();
+    let pending_count = sqlx::query_scalar("SELECT count(*) FROM pending_feedback_refinement_handoffs WHERE proposal_id=$1 AND state='pending'").bind(proposal_id).fetch_one(db.pool()).await.unwrap();
+    let captured_count = sqlx::query_scalar(
+        "SELECT count(*) FROM proposal_feedback_refinement_sources WHERE source_feedback_id=$1",
+    )
+    .bind(feedback_id)
+    .fetch_one(db.pool())
+    .await
+    .unwrap();
+    let nonterminal_run_count = sqlx::query_scalar("SELECT count(*) FROM refinement_runs WHERE proposal_id=$1 AND state IN ('running', 'parked')").bind(proposal_id).fetch_one(db.pool()).await.unwrap();
+    PendingFeedbackDispositionCountsForTest {
+        successor_count,
+        pending_count,
+        captured_count,
+        nonterminal_run_count,
+    }
+}
+
 /// Switch an already-materialized Judge authority tuple to Adversary authority.
 ///
 /// Both persisted role columns are updated in one transaction so consumer tests

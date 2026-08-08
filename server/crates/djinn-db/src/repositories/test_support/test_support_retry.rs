@@ -49,6 +49,7 @@ pub struct TypedEvidenceDispositionFixtureForTest {
     pub finding_id: String,
     pub validation_result_id: String,
     pub caller_user_id: String,
+    pub authority_task_id: String,
 }
 
 /// All persistence relations a rejected disposition must preserve.
@@ -246,6 +247,7 @@ pub async fn materialize_typed_evidence_disposition_fixture_for_test(
         finding_id,
         validation_result_id,
         caller_user_id: caller_user_id.into(),
+        authority_task_id: judge_task_id.into(),
     }
 }
 
