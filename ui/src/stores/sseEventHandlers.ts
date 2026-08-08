@@ -88,6 +88,9 @@ let proposalCreatedUnsub: (() => void) | null = null;
 let proposalUpdatedUnsub: (() => void) | null = null;
 let proposalDeletedUnsub: (() => void) | null = null;
 let proposalFeedbackUnsub: (() => void) | null = null;
+let proposalFeedbackWithdrawnUnsub: (() => void) | null = null;
+let proposalFeedbackRefinementDispositionUpdatedUnsub: (() => void) | null = null;
+let proposalFeedbackRefinementDispositionRejectedUnsub: (() => void) | null = null;
 let dispatchPauseChangedUnsub: (() => void) | null = null;
 
 /**
@@ -216,6 +219,17 @@ export function initSSEEventHandlers(): () => void {
     // Feedback changes only affect a proposal's detail view; re-fetch it.
     debounceInvalidateQueries({ queryKey: ["proposals"] });
   });
+  proposalFeedbackWithdrawnUnsub = subscribe("proposal_feedback_withdrawn", () => {
+    debounceInvalidateQueries({ queryKey: ["proposals"] });
+  });
+  proposalFeedbackRefinementDispositionUpdatedUnsub = subscribe(
+    "proposal_feedback_refinement_disposition_updated",
+    () => debounceInvalidateQueries({ queryKey: ["proposals"] }),
+  );
+  proposalFeedbackRefinementDispositionRejectedUnsub = subscribe(
+    "proposal_feedback_refinement_disposition_rejected",
+    () => debounceInvalidateQueries({ queryKey: ["proposals"] }),
+  );
 
   // Session events — update active_session on the corresponding task
   const sessionDispatchedUnsub = subscribe("session_dispatched", (event: SSEEvent) => {
@@ -333,6 +347,9 @@ export function initSSEEventHandlers(): () => void {
     proposalUpdatedUnsub?.();
     proposalDeletedUnsub?.();
     proposalFeedbackUnsub?.();
+    proposalFeedbackWithdrawnUnsub?.();
+    proposalFeedbackRefinementDispositionUpdatedUnsub?.();
+    proposalFeedbackRefinementDispositionRejectedUnsub?.();
     dispatchPauseChangedUnsub?.();
     projectChangedUnsub?.();
     sessionDispatchedUnsub?.();
@@ -357,6 +374,9 @@ export function cleanupSSEEventHandlers(): void {
   proposalUpdatedUnsub?.();
   proposalDeletedUnsub?.();
   proposalFeedbackUnsub?.();
+  proposalFeedbackWithdrawnUnsub?.();
+  proposalFeedbackRefinementDispositionUpdatedUnsub?.();
+  proposalFeedbackRefinementDispositionRejectedUnsub?.();
   dispatchPauseChangedUnsub?.();
 
   taskCreatedUnsub = null;
@@ -369,6 +389,9 @@ export function cleanupSSEEventHandlers(): void {
   proposalUpdatedUnsub = null;
   proposalDeletedUnsub = null;
   proposalFeedbackUnsub = null;
+  proposalFeedbackWithdrawnUnsub = null;
+  proposalFeedbackRefinementDispositionUpdatedUnsub = null;
+  proposalFeedbackRefinementDispositionRejectedUnsub = null;
   dispatchPauseChangedUnsub = null;
   flushDebouncedInvalidations();
 }
