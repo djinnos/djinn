@@ -249,7 +249,7 @@ describe("ProposalHistory", () => {
   });
 
   it("renders multiple control events alongside spec revisions", () => {
-    render(
+    const { container } = render(
       <ProposalHistory
         detail={detail([
           revision(1),
@@ -283,8 +283,15 @@ describe("ProposalHistory", () => {
     expect(
       screen.getByText("Marked done (implemented externally)"),
     ).toBeInTheDocument();
+    // Status events sort before the spec revision at the same timestamp.
+    expect(container.querySelector("li")).toHaveTextContent("status");
     // Spec revision should be visible.
     expect(screen.getByText("rev 2")).toBeInTheDocument();
+    // Status events reuse the current revision sequence and sort first, but
+    // only the material spec snapshot owns the accepted-revision hash target.
+    const revisionTargets = container.querySelectorAll("#proposal-revision-2");
+    expect(revisionTargets).toHaveLength(1);
+    expect(revisionTargets[0]).toHaveAttribute("data-testid", "proposal-spec-revision");
   });
 
   it("renders verdict_override control event in history", () => {

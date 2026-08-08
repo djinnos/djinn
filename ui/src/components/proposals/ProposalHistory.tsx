@@ -301,7 +301,7 @@ export function ProposalHistory({ detail }: { detail: ProposalDetail }) {
     }
     statusEvents.forEach((e) => out.push({ type: "status", entry: e, at: e.created_at }));
     out.sort(
-      (a, b) => b.at.localeCompare(a.at) || (b.type === "status" ? -1 : 1),
+      (a, b) => b.at.localeCompare(a.at) || (a.type === "status" ? -1 : 1),
     );
     return out;
   }, [specRevisions, statusEvents, bySeq]);
@@ -407,7 +407,11 @@ export function ProposalHistory({ detail }: { detail: ProposalDetail }) {
                 .map((a) => `criterion ${(a.index ?? 0) + 1} ${amendmentVerb(a.operation)}`)
                 .join(", ") || "acceptance criteria amended";
             return (
-              <li key={r.id} id={`proposal-revision-${r.seq}`}>
+              <li
+                key={r.id}
+                id={`proposal-revision-${r.seq}`}
+                data-testid="proposal-spec-revision"
+              >
                 <button
                   onClick={() => toggle(r.id)}
                   className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm hover:bg-muted/40"
@@ -520,7 +524,7 @@ export function ProposalHistory({ detail }: { detail: ProposalDetail }) {
                 ? "Marked done (implemented externally)"
                 : "Status changed";
             return (
-              <li key={r.id} id={`proposal-revision-${r.seq}`}>
+              <li key={r.id}>
                 <div className="flex w-full items-center gap-2 px-3 py-2 text-sm">
                   <Badge variant="secondary" className="font-mono">
                     status
@@ -553,7 +557,11 @@ export function ProposalHistory({ detail }: { detail: ProposalDetail }) {
             );
           }
           return (
-            <li key={r.id} id={`proposal-revision-${r.seq}`}>
+            <li
+              key={r.id}
+              id={`proposal-revision-${r.seq}`}
+              data-testid="proposal-spec-revision"
+            >
               <button
                 onClick={() => toggle(r.id)}
                 className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm hover:bg-muted/40"
