@@ -355,19 +355,20 @@ impl DjinnMcpServer {
             }
         }
 
-        // A start boundary needs role schemas only if it will create a new
-        // human-feedback obligation. A registry outage must not block ordinary
-        // refinement or the replay/drain of an existing generation.
+        // Gate only a boundary that can actually materialize a new feedback
+        // obligation. Ordinary refinement remains available when there is no
+        // uncaptured blocking source, and already-materialized generations stay
+        // drainable when the active schema registry is incompatible.
         let controls = self.state.feedback_refinement_controls();
-        let has_capturable_feedback = if controls.capture {
+        let captures_new_feedback = if controls.capture {
             match repo
-                .has_capturable_unresolved_blocking_feedback(&proposal.id)
+                .has_capturable_feedback_refinement_boundary(&proposal.id)
                 .await
             {
-                Ok(value) => value,
+                Ok(capturable) => capturable,
                 Err(error) => {
                     return Json(err_refinement_start(format!(
-                        "failed to check capturable feedback sources: {error}"
+                        "failed to inspect feedback capture boundary: {error}"
                     )));
                 }
             }
@@ -376,7 +377,7 @@ impl DjinnMcpServer {
         };
         if feedback_capture_contract_required(
             controls.capture,
-            has_capturable_feedback,
+            captures_new_feedback,
             human_feedback_disposition_contract_available(),
         ) {
             return Json(err_refinement_start(
@@ -570,23 +571,23 @@ impl DjinnMcpServer {
             }
         }
 
-        // Demand follows the same conditional gate as start. Query failures are
-        // surfaced before admission, while a zero-source boundary keeps normal
-        // demand behavior even if the role registry is unavailable.
+        // As with explicit start, fail closed only when this demand can create a
+        // new human-feedback generation. A plain demanded round does not depend
+        // on the source-specific disposition schema.
         let controls = self.state.feedback_refinement_controls();
-        let has_capturable_feedback = if controls.capture {
+        let captures_new_feedback = if controls.capture {
             match repo
-                .has_capturable_unresolved_blocking_feedback(&proposal.id)
+                .has_capturable_feedback_refinement_boundary(&proposal.id)
                 .await
             {
-                Ok(value) => value,
+                Ok(capturable) => capturable,
                 Err(error) => {
                     return Json(DemandRoundResponse {
                         proposal_id: Some(proposal.id),
                         accepted: false,
                         refinement: Some(current_refinement),
                         error: Some(format!(
-                            "failed to check capturable feedback sources: {error}"
+                            "failed to inspect feedback capture boundary: {error}"
                         )),
                     });
                 }
@@ -596,7 +597,7 @@ impl DjinnMcpServer {
         };
         if feedback_capture_contract_required(
             controls.capture,
-            has_capturable_feedback,
+            captures_new_feedback,
             human_feedback_disposition_contract_available(),
         ) {
             return Json(DemandRoundResponse {
