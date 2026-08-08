@@ -193,9 +193,14 @@ pub(super) struct ModelTurnAdmissionTestHooks {
     pub fail_mark_active: std::sync::atomic::AtomicBool,
     /// Counts watchdog-owned commits independently of provider stream activity.
     pub heartbeats: AtomicUsize,
+    /// Exact identities presented by watchdog heartbeats, including fenced ones.
+    pub heartbeat_identities: std::sync::Mutex<Vec<ModelTurnLeaseIdentity>>,
     pub fail_heartbeat: std::sync::atomic::AtomicBool,
+    pub block_heartbeat: std::sync::atomic::AtomicBool,
     pub watchdog_started: TestNotify,
     pub heartbeat_finished: TestNotify,
+    pub heartbeat_reached: TestNotify,
+    pub heartbeat_release: TestNotify,
     pub heartbeat_committed: TestNotify,
     pub block_watchdog_deadline: std::sync::atomic::AtomicBool,
     pub watchdog_deadline_reached: TestNotify,
@@ -213,9 +218,13 @@ impl Default for ModelTurnAdmissionTestHooks {
         Self {
             fail_mark_active: std::sync::atomic::AtomicBool::new(false),
             heartbeats: AtomicUsize::new(0),
+            heartbeat_identities: std::sync::Mutex::new(Vec::new()),
             fail_heartbeat: std::sync::atomic::AtomicBool::new(false),
+            block_heartbeat: std::sync::atomic::AtomicBool::new(false),
             watchdog_started: TestNotify::new(),
             heartbeat_finished: TestNotify::new(),
+            heartbeat_reached: TestNotify::new(),
+            heartbeat_release: TestNotify::new(),
             heartbeat_committed: TestNotify::new(),
             block_watchdog_deadline: std::sync::atomic::AtomicBool::new(false),
             watchdog_deadline_reached: TestNotify::new(),
@@ -441,6 +450,9 @@ impl ModelTurnAdmissionCoordinator {
         #[cfg(test)]
         if let Some(hooks) = &self.test_hooks {
             hooks.heartbeats.fetch_add(1, Ordering::AcqRel);
+            hooks.heartbeat_identities.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(identity.clone());
+            hooks.heartbeat_reached.notify_waiters();
+            if hooks.block_heartbeat.load(Ordering::Acquire) { hooks.heartbeat_release.notified().await; }
             if hooks.fail_heartbeat.load(Ordering::Acquire) {
                 hooks.heartbeat_finished.notify_waiters();
                 return Err(djinn_db::Error::Internal(

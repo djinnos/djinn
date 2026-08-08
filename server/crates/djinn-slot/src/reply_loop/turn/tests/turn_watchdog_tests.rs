@@ -162,3 +162,36 @@ async fn watchdog_uses_paused_time_for_twenty_second_commits_and_forty_second_ab
         .expect("outcome");
     guard.finish(false).await;
 }
+
+#[derive(Clone, Copy)]
+enum DeadlineRace { Provider, Session, Supervisor }
+
+#[tokio::test(start_paused = true)]
+async fn watchdog_deadline_races_use_production_stream_cancellation_owners() {
+    for case in [DeadlineRace::Provider, DeadlineRace::Session, DeadlineRace::Supervisor] { run_deadline_race(case).await; }
+}
+
+async fn run_deadline_race(case: DeadlineRace) {
+    use djinn_provider::provider::client::SseFrame;
+    use djinn_provider::{ProviderAttemptAbortResultV1, ProviderOutcomeV1};
+    use tokio_util::sync::CancellationToken;
+    let db = Database::ephemeral().await.expect("db"); seed_model_turn_admission_fixture(&db, "enforce", "supported", 2).await;
+    let hooks = Arc::new(ModelTurnAdmissionTestHooks::default()); hooks.block_watchdog_deadline.store(true, Ordering::Release);
+    let coordinator = ModelTurnAdmissionCoordinator::with_test_hooks(djinn_db::ModelTurnAdmissionRepository::new(db.clone()), hooks.clone());
+    let preparation = coordinator.prepare(&covered_admission_plan(), admission_request("deadline-race")).await.expect("prepare");
+    let lease = match &preparation { ModelTurnPreparation::Permit(p) => p.lease.clone().expect("lease"), other => panic!("{other:?}") };
+    let (frame_tx, frame_rx) = futures::channel::mpsc::unbounded(); let (outcome_tx, outcome_rx) = tokio::sync::oneshot::channel();
+    let started = hooks.watchdog_started.notified(); tokio::pin!(started);
+    let mut guard = launch_prepared_covered_attempt_with_lease(preparation, move || Ok((djinn_provider::provider::client::ProviderSseAttemptV1::for_test(Box::pin(frame_rx), ProviderAttemptAbortHandleV1::new(), outcome_rx), Box::new(MatrixParser))), coordinator, CancellationToken::new(), CancellationToken::new()).await.expect("launch"); started.await;
+    let cancel = CancellationToken::new(); let global = CancellationToken::new(); let slot = crate::test_helpers::agent_context_from_db(db.clone(), CancellationToken::new()); let metadata = super::super::super::tool_dispatch::tool_runtime_metadata(&[]); let phase = Arc::new(Mutex::new(super::super::super::phase::SessionPhaseTracker::new(&slot, "worker")));
+    let dispatch = super::super::super::tool_dispatch::ToolDispatchContext { ctx: &slot, task_id: "task", worktree_path: std::path::Path::new("/var/tmp"), role_name: "worker", tool_metadata: &metadata, tool_dispatcher: slot.tool_dispatcher.as_deref().expect("dispatcher"), otel_session: None, phase_tracker: None, cancel: &cancel, turn_inline_budget: None };
+    let activity = Arc::new(std::sync::atomic::AtomicU64::new(0)); let rpc = Arc::new(std::sync::atomic::AtomicU64::new(0)); let flush = Arc::new(std::sync::atomic::AtomicU64::new(0)); let (mut current, mut input, mut output, mut read, mut write, mut reasoning) = (0,0,0,0,0,0);
+    let mut consumer = Box::pin(consume_provider_stream(StreamLoopContext { stream: None, covered_attempt: Some(&mut guard), tool_metadata: &metadata, dispatch: &dispatch, phase_tracker: &phase, task_id: "task", session_id: "session", role_name: "worker", project_path: "/var/tmp", worktree_path: std::path::Path::new("/var/tmp"), context_window: 100_000, ctx: &slot, cancel: &cancel, global_cancel: &global, activity_ts: &activity, last_rpc_touch: &rpc, last_token_flush: &flush, compaction_attempts: 0, current_context_tokens: &mut current, total_tokens_in: &mut input, total_tokens_out: &mut output, total_cache_read: &mut read, total_cache_write: &mut write, total_reasoning_out: &mut reasoning }));
+    let committed = hooks.heartbeat_committed.notified(); tokio::pin!(committed); tokio::time::advance(Duration::from_secs(20)).await; committed.await; hooks.fail_heartbeat.store(true, Ordering::Release); let failed = hooks.heartbeat_finished.notified(); tokio::pin!(failed); tokio::time::advance(Duration::from_secs(20)).await; failed.await;
+    let deadline = hooks.watchdog_deadline_reached.notified(); tokio::pin!(deadline); tokio::time::advance(Duration::from_secs(20)).await; deadline.await;
+    match case { DeadlineRace::Provider => { frame_tx.unbounded_send(Ok(SseFrame::Done)).expect("done"); outcome_tx.send(ProviderOutcomeV1 { terminal: djinn_provider::ProviderAttemptTerminalV1::Completed, authoritative_usage: None, observation: None, abort: ProviderAttemptAbortResultV1::NotRequested, token_emission: Default::default() }).expect("outcome"); }, DeadlineRace::Session => cancel.cancel(), DeadlineRace::Supervisor => global.cancel() }
+    hooks.watchdog_deadline_release.notify_waiters(); let state = consumer.await.expect("consumer"); let completed = matches!(case, DeadlineRace::Provider);
+    assert_eq!(state.provider_done, completed); assert_eq!(state.interrupted, match case { DeadlineRace::Provider => None, DeadlineRace::Session => Some(ReplyLoopCancelled::session()), DeadlineRace::Supervisor => Some(ReplyLoopCancelled::supervisor_shutdown()) });
+    if !completed { outcome_tx.send(ProviderOutcomeV1 { terminal: djinn_provider::ProviderAttemptTerminalV1::Aborted, authoritative_usage: None, observation: None, abort: ProviderAttemptAbortResultV1::Confirmed, token_emission: Default::default() }).expect("outcome"); }
+    guard.finish(completed).await; assert_eq!(hooks.reconciliations.lock().expect("hooks").as_slice(), std::slice::from_ref(&lease)); assert_eq!(model_turn_terminal_fixture(&db, &lease.lease_id, lease.generation, &lease.request_id).await.0, if completed { "completed" } else { "cancelled" });
+}
