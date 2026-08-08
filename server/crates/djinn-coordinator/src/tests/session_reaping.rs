@@ -8531,11 +8531,12 @@ async fn expired_owner_group_reap_redispatches_after_reaping_each_eligible_group
     assert_eq!(refreshed.status, "open");
 }
 
-/// Repository-backed counterpart to the pure status matrix: the exit adapter
-/// reads terminal truth from each addressed session row. An absent Required
-/// handoff is one violation; a recorded handoff and settled task states are not.
+/// Repository-backed truthful session-exit matrix. The exit adapter reads
+/// completed, failed, and interrupted truth from each addressed session row;
+/// it never invents a Running row from a terminal event. An absent Required
+/// handoff is one violation; recorded handoffs and settled task states are not.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn terminal_persisted_exit_rows_cover_every_task_status() {
+async fn session_exit_truthful_status_matrix() {
     use djinn_core::models::SessionStatus;
     use djinn_db::{CreateSessionParams, SessionRepository, TaskAttemptRepository};
 
@@ -8703,27 +8704,38 @@ async fn terminal_persisted_exit_rows_cover_every_task_status() {
             );
         }
     }
-}
 
-/// Missing addressed rows are observable no-ops, not synthetic Running rows.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn missing_addressed_exit_row_returns_none_without_evidence() {
-    let db = test_helpers::create_test_db();
-    let (tx, _rx) = broadcast::channel(256);
+    // Acquisition failure is fail-closed: a terminal event cannot manufacture
+    // healthy or Running evidence when its addressed durable row is absent.
+    // It also must not settle the active attempt or mutate the task.
     let (task, _) = create_task_with_note(&db, &tx, "missing-addressed-exit").await;
+    tasks.set_status(&task.id, "in_progress").await.unwrap();
+    let attempt_id = seed_pending_attempt(&db, &task.id, "worker").await;
+    let task_before = tasks.get(&task.id).await.unwrap().unwrap();
+    let attempt_before = attempts.get(&attempt_id).await.unwrap().unwrap();
     let missing = "00000000-0000-0000-0000-000000000001";
     assert!(
-        coordinator_actor_for_tests(&db, &tx)
+        actor
             .classify_session_exit_liveness(missing, &task.id, None, "completed", "worker")
             .await
             .is_none()
     );
     assert_eq!(
-        djinn_db::LivenessRepository::new(db)
+        evidence
             .count_evidence_for_session(missing, None)
             .await
             .unwrap(),
         0
+    );
+    assert_eq!(
+        tasks.get(&task.id).await.unwrap().unwrap().status,
+        task_before.status,
+        "missing addressed evidence must not change the task"
+    );
+    assert_eq!(
+        serde_json::to_value(attempts.get(&attempt_id).await.unwrap().unwrap()).unwrap(),
+        serde_json::to_value(attempt_before).unwrap(),
+        "missing addressed evidence must not settle or otherwise mutate the attempt"
     );
 }
 
