@@ -61,7 +61,7 @@ pub struct TypedEvidenceDispositionSnapshotForTest {
     pub tasks: Vec<(String, String, String)>,
     pub debate_rows: Vec<(String, String, Option<String>)>,
     pub lifecycle_events: Vec<(String, String)>,
-    pub legacy_link_and_claim: (Option<String>, Option<serde_json::Value>),
+    pub legacy_link_and_claim: (Option<String>, Option<String>),
 }
 
 /// Materialize retry and active-authority boundary states which normally
