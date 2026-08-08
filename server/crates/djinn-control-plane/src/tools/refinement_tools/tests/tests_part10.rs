@@ -45,6 +45,94 @@ fn assert_is_human_readable(rejection: &AdmissionRejection) {
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn withdraw_evidence_rejections_are_judge_only_and_do_not_clear_legacy_link() {
+    let (server, db, proposal, judge_user_id, judge_task_id) = setup_demand_test().await;
+    let demand = djinn_core::auth_context::SESSION_USER_ID
+        .scope(Some(judge_user_id.clone()), async {
+            server
+                .dispatch_tool(
+                    "proposal_refinement_demand_evidence",
+                    valid_demand_params(&proposal.id),
+                )
+                .await
+                .unwrap()
+        })
+        .await;
+    let finding_id = demand["result"]["finding_id"].as_str().unwrap().to_owned();
+    let transition_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM typed_evidence_transitions WHERE finding_id=$1")
+            .bind(&finding_id)
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+    let disposition_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM typed_evidence_dispositions WHERE finding_id=$1")
+            .bind(&finding_id)
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+    let legacy_link: Option<String> =
+        sqlx::query_scalar("SELECT linked_spike_task_id FROM proposals WHERE id=$1")
+            .bind(&proposal.id)
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+    for args in [
+        serde_json::json!({"finding_id": finding_id, "folding_revision": 1, "rationale": "", "withdrawal_is_non_load_bearing": true}),
+        serde_json::json!({"finding_id": finding_id, "folding_revision": 1, "rationale": "not load bearing", "withdrawal_is_non_load_bearing": false}),
+        serde_json::json!({"finding_id": finding_id, "folding_revision": 999, "rationale": "not load bearing", "withdrawal_is_non_load_bearing": true}),
+    ] {
+        let response = djinn_core::auth_context::SESSION_USER_ID
+            .scope(Some(judge_user_id.clone()), async {
+                server
+                    .dispatch_tool("proposal_refinement_withdraw_evidence", args)
+                    .await
+                    .unwrap()
+            })
+            .await;
+        assert_eq!(response["accepted"], false, "{response}");
+        let link: Option<String> =
+            sqlx::query_scalar("SELECT linked_spike_task_id FROM proposals WHERE id=$1")
+                .bind(&proposal.id)
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM typed_evidence_transitions WHERE finding_id=$1"
+            )
+            .bind(&finding_id)
+            .fetch_one(db.pool())
+            .await
+            .unwrap(),
+            transition_count
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM typed_evidence_dispositions WHERE finding_id=$1"
+            )
+            .bind(&finding_id)
+            .fetch_one(db.pool())
+            .await
+            .unwrap(),
+            disposition_count
+        );
+        assert_eq!(link, legacy_link);
+    }
+    sqlx::query("UPDATE tasks SET agent_type='advocate', refinement_role='advocate', refinement_phase='advocate_revision' WHERE id=$1").bind(&judge_task_id).execute(db.pool()).await.unwrap();
+    sqlx::query("UPDATE refinement_dispatch_intents SET role='advocate', phase='advocate_revision' WHERE task_id=$1").bind(&judge_task_id).execute(db.pool()).await.unwrap();
+    let response = djinn_core::auth_context::SESSION_USER_ID.scope(Some(judge_user_id), async { server.dispatch_tool("proposal_refinement_withdraw_evidence", serde_json::json!({"finding_id": finding_id, "folding_revision": 1, "rationale": "not load bearing", "withdrawal_is_non_load_bearing": true})).await.unwrap() }).await;
+    assert_eq!(response["conflict_code"], "unauthorized");
+    let link: Option<String> =
+        sqlx::query_scalar("SELECT linked_spike_task_id FROM proposals WHERE id=$1")
+            .bind(&proposal.id)
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+    assert_eq!(link, legacy_link);
+}
+
 async fn retry_fixture(
     scenario: djinn_db::test_support::TypedEvidenceRetryScenarioForTest,
     authority: djinn_db::test_support::TypedEvidenceRetryAuthorityForTest,

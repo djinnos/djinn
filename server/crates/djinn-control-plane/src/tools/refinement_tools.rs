@@ -43,7 +43,9 @@ fn err_refinement_start(error: impl Into<String>) -> ProposalRefinementStartResp
 }
 
 fn disposition_rejection_code(error: &str) -> &'static str {
-    if error.contains("disposition_unauthorized_active_judge_required") {
+    if error.contains("disposition_unauthorized_active_judge_required")
+        || error.contains("active Judge attribution required")
+    {
         "unauthorized"
     } else if error.contains("evidence_finding_not_found") || error.contains("finding not found") {
         "finding_not_found"
@@ -59,6 +61,10 @@ fn disposition_rejection_code(error: &str) -> &'static str {
         "rationale_required"
     } else if error.contains("legacy_typed_parity_mismatch") {
         "legacy_typed_parity_mismatch"
+    } else if error.contains(" -> ") {
+        "invalid_lifecycle"
+    } else if error.contains("disposition must be terminal") {
+        "invalid_disposition"
     } else {
         "disposition_rejected"
     }
