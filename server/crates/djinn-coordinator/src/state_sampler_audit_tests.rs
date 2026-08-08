@@ -182,10 +182,7 @@ fn validate_proposal_changed_guard_allowlist(document: &str) -> Result<(), Strin
         return Ok(());
     }
 
-    if declared
-        .iter()
-        .any(|guard| *guard == NO_CHANGED_GUARDS_SENTINEL)
-    {
+    if declared.contains(&NO_CHANGED_GUARDS_SENTINEL) {
         return Err("a non-empty changed-guard allowlist cannot contain `none`".to_owned());
     }
     let declared: HashSet<_> = declared.into_iter().collect();
