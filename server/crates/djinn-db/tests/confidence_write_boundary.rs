@@ -200,6 +200,179 @@ fn removed_outcome_writers_are_absent_from_their_former_call_sites() {
     }
 }
 
+// ── The THIRD confidence writer: `mutate_with_revision` ─────────────────────
+//
+// The allowlist above scans for `set_confidence(` / `update_confidence(`. Those
+// were the only two writers 9xih hardened, and for months the guard above was
+// read as "nothing else can write confidence". It was not true.
+//
+// `NoteRepository::mutate_with_revision` binds a caller-supplied `confidence`
+// straight into the notes UPDATE/INSERT. It is a confidence writer with a
+// completely different call shape, so the scan above never saw it — which is
+// how two defects lived in production with this file green:
+//
+//   * `memory_write` created every authored note at `0.5` (the session-
+//     extraction prior) instead of the ceiling, making the column default 9xih
+//     migrated dead code for the only path that actually creates authored notes.
+//   * the extraction duplicate boost re-derived the Bayesian posterior inline,
+//     skipping `bayesian_update`'s clamp, and walked notes above the ceiling
+//     toward the unfalsifiable 1.0 state 9xih exists to remove.
+//
+// Structurally, `mutate_with_revision` is now range-checked in
+// `validate_command`, so no caller can leave `[CONFIDENCE_FLOOR,
+// CONFIDENCE_CEILING]`. The tests below pin the remaining judgement calls: WHICH
+// files may name a confidence on a revision command at all, and that the two
+// values are the deliberate ones rather than whatever a refactor last copied.
+
+/// Every construction site of a revision desired-state that carries a
+/// confidence. Adding a file here asserts the same thing the allowlist above
+/// asserts: this call site concerns the note's TRUTH.
+const ALLOWED_REVISION_CONFIDENCE_FILES: [(&str, &str); 6] = [
+    (
+        "crates/djinn-db/src/repositories/note/mutation.rs",
+        "defines the revision desired states and range-checks them",
+    ),
+    (
+        "crates/djinn-db/src/repositories/note/consolidation.rs",
+        "carries the consolidated note's own clamped confidence forward",
+    ),
+    (
+        "crates/djinn-control-plane/src/tools/memory_tools/write_services.rs",
+        "memory_write: an authored assertion starts at CONFIDENCE_CEILING",
+    ),
+    (
+        "crates/djinn-control-plane/src/tools/memory_tools/edit_ops.rs",
+        "memory_edit carries the note's own confidence forward; editing prose is \
+         not evidence about the note's truth",
+    ),
+    (
+        "crates/djinn-slot/src/llm_extraction.rs",
+        "session-extraction prior (0.5) and the duplicate-confirmation posterior",
+    ),
+    (
+        "crates/djinn-slot/src/memory_enrichment.rs",
+        "entity/claim scaffolding notes sit at CONFIDENCE_FLOOR",
+    ),
+];
+
+/// `NoteRevisionCreateState`/`NoteRevisionUpdateState` construction and the
+/// `Existing`/`GuardedPatch` variants all carry a `confidence` field, written
+/// as `confidence:` in struct-literal position.
+#[test]
+fn only_epistemic_call_sites_may_name_a_confidence_on_a_revision_command() {
+    let root = server_root();
+    let mut files = Vec::new();
+    collect_rust_files(&root.join("crates"), &mut files);
+    collect_rust_files(&root.join("src"), &mut files);
+
+    let mut offenders: Vec<String> = Vec::new();
+    let mut seen_allowed: Vec<&str> = Vec::new();
+
+    for path in &files {
+        let relative = path
+            .strip_prefix(&root)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        if is_test_path(&relative) {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        let production = text.split("#[cfg(test)]").next().unwrap_or("");
+        // Only files that actually build a revision command.
+        if !production.contains("NoteRevisionDesiredState::") {
+            continue;
+        }
+        if !production.contains("confidence:") {
+            continue;
+        }
+        match ALLOWED_REVISION_CONFIDENCE_FILES
+            .iter()
+            .find(|(allowed, _)| *allowed == relative)
+        {
+            Some((allowed, _)) => seen_allowed.push(allowed),
+            None => offenders.push(relative),
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "these production files set notes.confidence through a revision command but are \
+         not on the epistemic allowlist in this test:\n  {}\n\n\
+         `mutate_with_revision` is a confidence writer just like `set_confidence` and \
+         `update_confidence`; the same rule applies (proposal 9xih AC1).",
+        offenders.join("\n  ")
+    );
+
+    for (allowed, reason) in ALLOWED_REVISION_CONFIDENCE_FILES {
+        assert!(
+            seen_allowed.contains(&allowed),
+            "expected `{allowed}` to still set a confidence on a revision command ({reason}); \
+             it does not, so this guard is no longer detecting anything and must be updated"
+        );
+    }
+}
+
+/// The value `memory_write` gives a new authored note, pinned by source.
+///
+/// AC2 says new notes default to the ceiling. The `notes.confidence` column
+/// default says the same thing. But `memory_write` goes through
+/// `mutate_with_revision`, which binds `confidence` explicitly — so the column
+/// default is never exercised for an authored note and cannot be the thing that
+/// makes AC2 true. From 2026-07-16 (#2168, the attributed-writer cutover) until
+/// this fix, that literal was `0.5` and every authored note in production was
+/// created off the ceiling while the migration test stayed green.
+///
+/// The behavioural proof lives in
+/// `djinn-control-plane`'s `memory_write_creates_notes_at_the_confidence_ceiling`,
+/// which reads the persisted row back. This is the cheap structural companion:
+/// it fails on a bare numeric literal reappearing at the create site.
+#[test]
+fn memory_write_creates_notes_at_the_named_ceiling_constant() {
+    let source = std::fs::read_to_string(
+        server_root().join("crates/djinn-control-plane/src/tools/memory_tools/write_services.rs"),
+    )
+    .expect("read write_services.rs");
+    let production = source.split("#[cfg(test)]").next().unwrap_or("");
+    assert!(
+        production.contains("confidence: CONFIDENCE_CEILING,"),
+        "memory_write must create authored notes at the named CONFIDENCE_CEILING \
+         constant, not a copied literal that can drift from the column default"
+    );
+}
+
+/// The extraction duplicate boost must go through `bayesian_update`, which is
+/// the only place the `[CONFIDENCE_FLOOR, CONFIDENCE_CEILING]` clamp lives.
+///
+/// It previously re-derived `(p*s) / (p*s + (1-p)*(1-s))` inline. The formula
+/// was right and the clamp was missing, so the boost walked notes past the
+/// ceiling toward 1.0. An inline re-derivation is the specific failure mode
+/// here, so the guard is on the shape of the arithmetic.
+#[test]
+fn extraction_duplicate_boost_uses_the_clamping_helper() {
+    let source =
+        std::fs::read_to_string(server_root().join("crates/djinn-slot/src/llm_extraction.rs"))
+            .expect("read llm_extraction.rs");
+    let production = source.split("#[cfg(test)]").next().unwrap_or("");
+    let boost = production
+        .split("async fn boost_duplicate_confidence")
+        .nth(1)
+        .expect("boost_duplicate_confidence must still exist");
+    let body = &boost[..boost.len().min(2_000)];
+    assert!(
+        body.contains("bayesian_update("),
+        "boost_duplicate_confidence must call bayesian_update, which clamps to \
+         [CONFIDENCE_FLOOR, CONFIDENCE_CEILING); re-deriving the posterior inline \
+         skips the clamp (proposal 9xih)"
+    );
+    assert!(
+        !body.contains("DUPLICATE_CONFIDENCE_SIGNAL)\n        / ("),
+        "boost_duplicate_confidence must not re-derive the Bayesian posterior inline"
+    );
+}
+
 /// `CO_ACCESS_HIGH` and `TASK_SUCCESS` were deleted, not merely unused: an
 /// available constant is an invitation to wire it back up.
 #[test]

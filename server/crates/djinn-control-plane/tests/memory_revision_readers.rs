@@ -252,7 +252,12 @@ async fn history_returns_newest_first_events_for_live_note() {
     assert_eq!(oldest["content_after"], "alpha\nbeta\n");
     assert_eq!(oldest["reason"], "create reader fixture");
     assert!(oldest["confidence_before"].is_null());
-    assert_eq!(oldest["confidence_after"], 0.5);
+    // `memory_write` creates an authored note at CONFIDENCE_CEILING; the
+    // session-extraction prior (0.5) belongs to a different writer.
+    assert_eq!(
+        oldest["confidence_after"],
+        djinn_db::repositories::note::CONFIDENCE_CEILING
+    );
 }
 
 #[tokio::test]
@@ -640,7 +645,10 @@ async fn diff_includes_intervening_non_content_events() {
     assert_eq!(event["note_seq"], 3);
     assert!(event["content_before"].is_null());
     assert!(event["content_after"].is_null());
-    assert_eq!(event["confidence_before"], 0.5);
+    assert_eq!(
+        event["confidence_before"],
+        djinn_db::repositories::note::CONFIDENCE_CEILING
+    );
     assert_eq!(event["confidence_after"], 0.9);
     assert_eq!(event["reason"], "bump confidence");
 }
