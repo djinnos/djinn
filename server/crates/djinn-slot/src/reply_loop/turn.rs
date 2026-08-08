@@ -169,6 +169,7 @@ async fn launch_prepared_covered_attempt_with_lease(
     match preparation {
         ModelTurnPreparation::Permit(mut permit) => {
             let lease = permit.lease.clone();
+            let enforced = lease.is_some();
             // Observe scheduling cancellation before B1 can create an attempt.
             // Once B1 accepts, the terminal guard owns abort and reconciliation.
             let (attempt, parser) = tokio::select! {
@@ -184,8 +185,26 @@ async fn launch_prepared_covered_attempt_with_lease(
             // Keep this in scope across `mark_active`; its Drop owns every
             // post-dispatch early return, including a database partition here.
             let guard = CoveredAttemptTerminalGuard::new(attempt, parser, coordinator, lease);
-            permit.mark_active().await.map_err(anyhow::Error::from)?;
-            Ok(guard)
+            // Shadow permits intentionally carry no durable lease ownership.
+            // B1 still owns the launched attempt, but there is no active fence
+            // to commit and no lease for a watchdog to heartbeat.
+            if !enforced {
+                return Ok(guard);
+            }
+            let active = permit.mark_active().await.map_err(anyhow::Error::from)?;
+            if matches!(
+                active,
+                djinn_db::ModelTurnLeaseMutationOutcome::Applied
+                    | djinn_db::ModelTurnLeaseMutationOutcome::Idempotent
+            ) {
+                guard.start_watchdog();
+                Ok(guard)
+            } else {
+                drop(guard);
+                Err(anyhow::anyhow!(
+                    "covered attempt active hand-off was fenced after provider launch"
+                ))
+            }
         }
         ModelTurnPreparation::Wait(wait) => {
             // A wait has already been selected as the typed supervisor
@@ -1364,11 +1383,12 @@ pub async fn run_reply_loop(
                 streaming_dispatched,
                 early_stream_end,
                 provider_done: _,
+                watchdog_aborted,
                 turn_flushed: _,
             } = stream_state;
             saw_any_event |= saw_round_event;
             if let Some(llm) = otel_llm {
-                if interrupted.is_some() || early_stream_end {
+                if interrupted.is_some() || early_stream_end || watchdog_aborted {
                     llm.end_error(if interrupted.is_some() { "interrupted" } else { "truncated" });
                 } else {
                     llm.record_usage(turn_tokens_in, turn_tokens_out);
@@ -1400,6 +1420,7 @@ pub async fn run_reply_loop(
             if let Some(cancelled) = interrupted {
                 return Err(anyhow::Error::new(cancelled));
             }
+            if watchdog_aborted { return Err(anyhow::anyhow!("lease heartbeat watchdog aborted provider attempt")); }
             // AC3: When the provider stream ended early (without StreamEvent::Done)
             // and partial content was produced, the truncated turn must not be
             // persisted as a complete assistant message.  The in-flight flush
@@ -2513,6 +2534,76 @@ mod tests {
             "active"
         );
         assert_eq!(model_turn_accounting_fixture(&db, pool).await, (1, 1, 0));
+    }
+
+    #[tokio::test]
+    async fn covered_shadow_launch_skips_active_fence_and_watchdog() {
+        struct EmptyParser;
+        impl djinn_provider::provider::ProviderSseFrameParserV1 for EmptyParser {
+            fn parse(
+                &mut self,
+                _: djinn_provider::provider::client::SseFrame,
+            ) -> Vec<anyhow::Result<djinn_provider::provider::StreamEvent>> {
+                Vec::new()
+            }
+        }
+
+        let db = Database::ephemeral().await.expect("db");
+        let pool = seed_model_turn_admission_fixture(&db, "shadow", "supported", 2).await;
+        let hooks = Arc::new(ModelTurnAdmissionTestHooks::default());
+        let coordinator = ModelTurnAdmissionCoordinator::with_test_hooks(
+            djinn_db::ModelTurnAdmissionRepository::new(db.clone()),
+            hooks.clone(),
+        );
+        let preparation = coordinator
+            .prepare(
+                &covered_admission_plan(),
+                admission_request("shadow-launch"),
+            )
+            .await
+            .expect("shadow preparation");
+        assert!(matches!(
+            &preparation,
+            ModelTurnPreparation::Permit(permit) if permit.lease.is_none()
+        ));
+
+        let abort = ProviderAttemptAbortHandleV1::new();
+        let observed_abort = abort.clone();
+        let (outcome_tx, outcome_rx) = tokio::sync::oneshot::channel();
+        outcome_tx
+            .send(djinn_provider::ProviderOutcomeV1 {
+                terminal: djinn_provider::ProviderAttemptTerminalV1::Completed,
+                authoritative_usage: None,
+                observation: None,
+                abort: djinn_provider::ProviderAttemptAbortResultV1::NotRequested,
+                token_emission: Default::default(),
+            })
+            .expect("one terminal outcome");
+        let guard = launch_prepared_covered_attempt_with_lease(
+            preparation,
+            move || {
+                Ok((
+                    djinn_provider::provider::client::ProviderSseAttemptV1::for_test(
+                        Box::pin(futures::stream::empty()),
+                        abort,
+                        outcome_rx,
+                    ),
+                    Box::new(EmptyParser),
+                ))
+            },
+            coordinator,
+            tokio_util::sync::CancellationToken::new(),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .expect("shadow launch must not be treated as an active fence");
+        guard.finish(true).await;
+
+        assert!(!observed_abort.is_aborted());
+        assert_eq!(hooks.heartbeats.load(Ordering::Acquire), 0);
+        assert!(hooks.reconciliations.lock().expect("observer").is_empty());
+        assert_eq!(model_turn_decision_count_fixture(&db, pool).await, 1);
+        assert_eq!(model_turn_accounting_fixture(&db, pool).await, (0, 2, 0));
     }
 
     #[tokio::test]
