@@ -76,8 +76,10 @@ pub(super) struct ChatCompletionRequest {
     /// Optional proposal (UUID or short_id) this chat is scoped to — the
     /// "Address with djinn" flow. When present, the handler seeds the system
     /// prompt with the proposal spec + its unresolved feedback and grants the
-    /// proposal-editing tool subset, so djinn can rewrite the spec (appending a
-    /// revision) and resolve feedback. Requires an authenticated user.
+    /// feedback/refinement tool subset. Feedback is stored without rewriting a
+    /// proposal revision: blocking feedback can start or join tribunal
+    /// refinement, while advisory feedback remains discussion. Requires an
+    /// authenticated user.
     #[serde(default)]
     pub proposal_id: Option<String>,
     /// Optional feedback entry the chat is centered on (highlighted in the
