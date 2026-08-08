@@ -214,6 +214,8 @@ type HistoryRow =
       head: ProposalHistoryEntry;
       before?: ProposalHistoryEntry;
       fromSeq: number;
+      /** Every revision identity represented by this collapsed tribunal run. */
+      revisionSeqs: number[];
       rounds: number;
       at: string;
     };
@@ -287,6 +289,7 @@ export function ProposalHistory({ detail }: { detail: ProposalDetail }) {
           head,
           before: bySeq.get(fromSeq - 1),
           fromSeq,
+          revisionSeqs: group.map((revision) => revision.seq),
           rounds,
           at: head.created_at,
         });
@@ -316,13 +319,23 @@ export function ProposalHistory({ detail }: { detail: ProposalDetail }) {
         {rows.map((row) => {
           // ── Collapsed tribunal run ──────────────────────────────────────
           if (row.type === "refinement") {
-            const { head, before, fromSeq, rounds } = row;
+            const { head, before, fromSeq, revisionSeqs, rounds } = row;
             const isHead = head.seq === proposal.latest_revision_seq;
             const isOpen = open.includes(head.id);
             const rangeLabel =
               head.seq === fromSeq ? `rev ${head.seq}` : `rev ${fromSeq}–${head.seq}`;
             return (
               <li key={`refine-${head.id}`} id={`proposal-revision-${head.seq}`}>
+                {revisionSeqs
+                  .filter((seq) => seq !== head.seq)
+                  .map((seq) => (
+                    <span
+                      key={seq}
+                      id={`proposal-revision-${seq}`}
+                      className="block h-0 scroll-mt-4"
+                      aria-hidden="true"
+                    />
+                  ))}
                 <button
                   onClick={() => toggle(head.id)}
                   className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm hover:bg-muted/40"
