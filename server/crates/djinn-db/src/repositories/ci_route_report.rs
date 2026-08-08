@@ -26,6 +26,19 @@
 //! "Lead diagnosed" with "Lead never answered". [`CiRouteReport`] splits them
 //! on `lead_rejection`, which wave 5 added for exactly this reason.
 //!
+//! **A merge is not an adjudication.** The trap above generalises one step too
+//! far if taken as "read `adjudicated` for everything": the adjudication
+//! columns describe how Lead decided ONE route's episode, and they are
+//! write-once precisely so that record survives. "The PR merged" is a fact
+//! about a different subject that arrives on its own schedule — usually after
+//! the adjudication — so it can never be stored there without either being
+//! dropped or destroying the verdict. Reading it out of `adjudicated` made
+//! [`CiRouteReport::merged_prs`] count exclusively the routes that never
+//! reached Lead, i.e. the exact complement of both ratios' numerators, so the
+//! per-merged-PR cost bounds were not merely wrong but uncomputable.
+//! `pr_merged_at` (migration 202) is the separate fact, and it is the one count
+//! here that deliberately does not read `adjudicated`.
+//!
 //! [`CiRouteAttempt::adjudicated_outcome`]: super::ci_route_attempt::CiRouteAttempt::adjudicated_outcome
 
 use serde::{Deserialize, Serialize};
@@ -204,7 +217,14 @@ pub struct CiRouteReport {
     // ── worker cost ───────────────────────────────────────────────────────
     /// Reopens that dispatch exactly one worker each: repairs plus diagnoses.
     pub worker_reopens: i64,
-    /// Distinct PRs whose routes reached `merged`.
+    /// Distinct PRs observed merged, counted from the routes' `pr_merged_at`
+    /// stamp rather than from any adjudication column.
+    ///
+    /// The distinction is the whole point: a route's adjudication says how Lead
+    /// decided its episode and is write-once, so a merge landing after that
+    /// decision has nowhere to go in it. Counting merges out of the
+    /// adjudication therefore excluded, by construction, every route that
+    /// reached Lead — which is the entire numerator of both ratios below.
     pub merged_prs: i64,
     /// Routes closed by a newer passing observation.
     pub passed: i64,
@@ -412,14 +432,25 @@ impl CiRouteAttemptRepository {
                COUNT(*) FILTER (WHERE adjudicated = 'superseded') AS supersedes,
                COUNT(*) FILTER (WHERE adjudicated IN ('repair_reopened', 'diagnostic_reopened'))
                                                                   AS worker_reopens,
-               -- The DENOMINATOR of both per-merged-PR ratios, so an
-               -- undercount here inflates every cost number in the report.
-               -- `terminal_outcome = 'merged'` misses a merge that landed in
-               -- `tier2_resolution` — which is what happens whenever the route
-               -- had already terminalized on its provider result, i.e. exactly
-               -- the population that reached Lead. Same `adjudicated` reading
-               -- as every other outcome count here.
-               COUNT(DISTINCT pr_number) FILTER (WHERE adjudicated = 'merged') AS merged_prs,
+               -- The DENOMINATOR of both per-merged-PR ratios, and the ONE
+               -- count in this report that deliberately does not read
+               -- `adjudicated`.
+               --
+               -- It used to. `adjudicated = 'merged'` reads an adjudication
+               -- column that `close_routes_for_newer_outcome` can only write
+               -- while the Tier-2 lease is still `'open'` and that its
+               -- `COALESCE` protects once written — so a merge that arrives
+               -- after Lead resolved the route lands nowhere, and the
+               -- denominator could only ever count routes that NEVER reached
+               -- Lead. The numerators (`lead_invocations`, `worker_reopens`)
+               -- count exactly the routes that DID. Two disjoint populations,
+               -- so the ratio was uncomputable rather than merely low:
+               -- production ran 13 merges past 7 Lead routes and read 0 here.
+               --
+               -- `pr_merged_at` is the separate, durable merge-observed fact,
+               -- stamped regardless of lease state or action phase. See
+               -- migration 202.
+               COUNT(DISTINCT pr_number) FILTER (WHERE pr_merged_at IS NOT NULL) AS merged_prs,
                COUNT(*) FILTER (WHERE terminal_outcome = 'passed') AS passed
              FROM scoped",
         )

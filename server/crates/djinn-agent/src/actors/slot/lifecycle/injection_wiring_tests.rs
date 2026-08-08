@@ -136,6 +136,7 @@ async fn assemble_like_dispatch(db: djinn_db::Database, task: &Task) -> PromptCo
         read_sources: &[],
         worker_resume_note: None,
         arbiter_directive: None,
+        ci_adjudication_bundle: None,
         mcp_server_instructions: &std::collections::BTreeMap::new(),
         extension_diagnostics: &[],
         cancellation: None,

@@ -138,6 +138,7 @@ const ROW_COLUMNS: &str = "subject_kind, subject_id, provider_action_key, lane, 
     to_char(tier2_leased_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS tier2_leased_at, \
     tier2_resolution, lead_session_id, lead_session_count, reopen_mode, diagnostic_reason, park_justification, \
     lead_rejection, \
+    to_char(pr_merged_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS pr_merged_at, \
     provider_error::text AS provider_error, superseded_by_evidence::text AS superseded_by_evidence";
 
 /// `WHERE` fragment naming one row by its full subject-scoped primary key.
@@ -598,6 +599,16 @@ pub struct CiRouteAttempt {
     /// or `None` when it was accepted as submitted.
     pub lead_rejection: Option<CiLeadRejection>,
 
+    /// When this route's PR was first observed merged, or `None` if it never
+    /// was.
+    ///
+    /// A fact about the **pull request**, deliberately kept out of the
+    /// adjudication columns: `tier2_resolution` records how Lead decided one
+    /// route's episode and is write-once for that reason, so a merge arriving
+    /// after Lead resolved has nowhere to land in it. This is the field the
+    /// per-merged-PR cost ratios count distinct PRs from.
+    pub pr_merged_at: Option<String>,
+
     pub provider_error: Option<String>,
     pub superseded_by_evidence: Option<String>,
 }
@@ -659,6 +670,7 @@ impl CiRouteAttempt {
             )?,
             park_justification: row.try_get("park_justification")?,
             lead_rejection: opt_enum(row.try_get("lead_rejection")?, CiLeadRejection::parse)?,
+            pr_merged_at: row.try_get("pr_merged_at")?,
             provider_error: row.try_get("provider_error")?,
             superseded_by_evidence: row.try_get("superseded_by_evidence")?,
         })
@@ -2231,6 +2243,14 @@ impl CiRouteAttemptRepository {
     /// that owner or through startup recovery, which is what the rollback
     /// quiescence gate waits for.
     ///
+    /// A **merge** additionally stamps [`CiRouteAttempt::pr_merged_at`] on
+    /// every row of the PR, whatever its lease state or action phase. That is
+    /// the durable "this PR merged" fact and it is what the per-merged-PR cost
+    /// ratios divide by; see migration 202 for why it cannot be read off
+    /// `tier2_resolution`. The stamp is write-once and touches no adjudication
+    /// column, so it neither closes a route nor overwrites a Lead verdict, and
+    /// it is not counted in the returned close count.
+    ///
     /// Returns the number of routes closed.
     ///
     /// # Errors
@@ -2278,6 +2298,31 @@ impl CiRouteAttemptRepository {
         .bind(observed_evidence_json)
         .execute(&mut *tx)
         .await?;
+        if outcome == CiRouteOutcome::Merged {
+            // No lease-state and no action-phase predicate, on purpose. Both
+            // of the statements above are scoped to the routes they may still
+            // legally transition; this one records a fact about the PULL
+            // REQUEST, which is equally true of a route Lead already
+            // adjudicated and of one a live owner is still calling for. The
+            // adjudication columns are untouched, so stamping a terminal or
+            // `calling` row steals nothing from anybody.
+            //
+            // `AND pr_merged_at IS NULL` makes the stamp write-once: a PR is
+            // polled repeatedly after it merges, and without it every poll
+            // would move the timestamp forward and destroy the one thing the
+            // column records that a boolean would not.
+            sqlx::query(
+                "UPDATE ci_route_attempts \
+                 SET pr_merged_at = now(), updated_at = now() \
+                 WHERE subject_kind = $1 AND subject_id = $2 AND pr_number = $3 \
+                   AND pr_merged_at IS NULL",
+            )
+            .bind(subject.kind.as_str())
+            .bind(&subject.id)
+            .bind(pr_number)
+            .execute(&mut *tx)
+            .await?;
+        }
         tx.commit().await?;
         Ok(closed.rows_affected())
     }

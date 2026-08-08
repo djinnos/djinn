@@ -140,6 +140,7 @@ fn make_ctx() -> TaskContext {
         ci_blocking_directive: None,
         worker_resume_note: None,
         arbiter_directive: None,
+        ci_adjudication_bundle: None,
     }
 }
 
