@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
-import type { ConnectedProvider } from "@/api/userConfig";
+import type { CatalogProvider, ConnectedProvider } from "@/api/userConfig";
+import { fetchUserCatalog, fetchUserConnectedProviders } from "@/api/userConfig";
 import { render, screen } from "@/test/test-utils";
 
 import { ConnectionsTab } from "./ConnectionsTab";
@@ -112,5 +113,34 @@ describe("ConnectionsTab", () => {
 
     // ChatGPT/Codex is its own compact row, not duplicated as a plain provider.
     expect(screen.getByText("ChatGPT / Codex")).toBeInTheDocument();
+  });
+
+  it("takes the codex revoked reason from the catalog, not the connected list", async () => {
+    // `provider_connected` drops every provider carrying a revoked reason and
+    // hardcodes `revoked_reason: null` on the ones it returns, so the reason is
+    // only ever present in the catalog. Reading it off the connected list could
+    // never yield anything, and the row silently degraded to the plain
+    // never-connected "Sign in with a device code" subtitle — leaving the user
+    // signed out with no stated cause.
+    const reason =
+      "chatgpt_codex rejected the credential (HTTP 401 — token revoked or invalid). " +
+      "Reconnect this provider to resume.";
+    vi.mocked(fetchUserConnectedProviders).mockResolvedValueOnce(
+      connected.filter((provider) => provider.id !== "openai"),
+    );
+    vi.mocked(fetchUserCatalog).mockResolvedValueOnce([
+      {
+        id: "openai",
+        name: "OpenAI",
+        connected: false,
+        connection_methods: [],
+        env_vars: ["OPENAI_API_KEY"],
+        revoked_reason: reason,
+      } as unknown as CatalogProvider,
+    ]);
+
+    render(<ConnectionsTab />);
+
+    expect(await screen.findByText(`Disconnected — ${reason}`)).toBeInTheDocument();
   });
 });
