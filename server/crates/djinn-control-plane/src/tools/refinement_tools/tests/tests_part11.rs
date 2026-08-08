@@ -8,7 +8,7 @@
 use super::*;
 use djinn_core::refinement_liveness::{RefinementPhase, RefinementRole, RefinementStopReason};
 use djinn_db::{
-    ClaimRefinementIntentRequest, SourceIntentTransitionRequest,
+    ClaimRefinementIntentRequest, RefinementAdmissionSource, SourceIntentTransitionRequest,
     TerminalRefinementRunFromIntentRequest,
 };
 
@@ -110,9 +110,45 @@ async fn post_cutoff_feedback_auto_resume_handoff_captures_the_live_cohort_once(
         "B must not leak into A's already immutable capture",
     );
 
-    // Replaying the durable boundaries themselves is harmless and does not
-    // create a synthetic feedback row.  This specifically protects the owner
-    // election that used to be lost when AlreadyActive was ignored.
+    // Replay the actual admission boundaries with the exact identities the
+    // public feedback operation used. A's committed boundary must resolve to
+    // Existing, while B must still report the live A run as AlreadyActive; no
+    // replay is allowed to manufacture another demand intent or run.
+    let replayed_a = crate::tools::refinement_tools::admit_refinement_run(
+        &server,
+        &repo,
+        &proposal.id,
+        RefinementAdmissionSource::Demand {
+            demand_id: format!("feedback:auto-resume:boundary:{first_id}"),
+        },
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(replayed_a.run_id, run_id);
+    assert!(
+        !replayed_a.admitted,
+        "replaying A's boundary must resolve to its existing admission"
+    );
+    let replayed_b = crate::tools::refinement_tools::admit_refinement_run(
+        &server,
+        &repo,
+        &proposal.id,
+        RefinementAdmissionSource::Demand {
+            demand_id: format!("feedback:auto-resume:boundary:{second_id}"),
+        },
+        None,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        replayed_b.code, "already_active",
+        "B's replay must retain the live-run auto-resume path"
+    );
+
+    // Replaying the durable handoff boundaries themselves is harmless and does
+    // not create a synthetic feedback row. This specifically protects the
+    // owner election that used to be lost when AlreadyActive was ignored.
     for feedback_id in [&first_id, &second_id] {
         repo.persist_pending_feedback_refinement_handoff(&proposal.id, feedback_id)
             .await
@@ -168,13 +204,24 @@ async fn post_cutoff_feedback_auto_resume_handoff_captures_the_live_cohort_once(
         "replaying lifecycle handoff must not create another successor"
     );
 
-    let (runs, running, intents, objections, immutable_sources, pending, owners):
-        (i64, i64, i64, i64, i64, i64, i64) = sqlx::query_as(
+    let (
+        runs,
+        running,
+        intents,
+        objections,
+        injections,
+        immutable_generations,
+        immutable_sources,
+        pending,
+        owners,
+    ): (i64, i64, i64, i64, i64, i64, i64, i64, i64) = sqlx::query_as(
         "SELECT \
            (SELECT count(*) FROM refinement_runs WHERE proposal_id=$1), \
            (SELECT count(*) FROM refinement_runs WHERE proposal_id=$1 AND state='running'), \
            (SELECT count(*) FROM refinement_dispatch_intents i JOIN refinement_runs r ON r.id=i.run_id WHERE r.proposal_id=$1), \
            (SELECT count(*) FROM proposal_debate_trail WHERE proposal_id=$1 AND kind='human_feedback'), \
+           (SELECT count(*) FROM proposal_feedback_refinement_injections WHERE proposal_id=$1), \
+           (SELECT count(DISTINCT (root_feedback_id, generation)) FROM proposal_feedback_refinement_injections WHERE proposal_id=$1), \
            (SELECT count(*) FROM proposal_feedback_refinement_sources WHERE source_feedback_id IN ($2,$3)), \
            (SELECT count(*) FROM pending_feedback_refinement_handoffs WHERE proposal_id=$1 AND state='pending'), \
            (SELECT count(*) FROM pending_feedback_refinement_handoffs WHERE proposal_id=$1 AND state='pending' AND cohort_owner)",
@@ -194,6 +241,14 @@ async fn post_cutoff_feedback_auto_resume_handoff_captures_the_live_cohort_once(
     assert_eq!(
         objections, 2,
         "each feedback root has one human-feedback objection"
+    );
+    assert_eq!(
+        injections, 2,
+        "the schedule has no queued or empty immutable injection generation"
+    );
+    assert_eq!(
+        immutable_generations, 2,
+        "A and B are the schedule's only immutable feedback generations"
     );
     assert_eq!(
         immutable_sources, 2,
