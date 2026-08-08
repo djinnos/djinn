@@ -125,6 +125,18 @@ pub async fn switch_to_judge_authority_for_test(db: &Database, task_id: &str) {
     switch_typed_evidence_authority_for_test(db, task_id, "judge", "judge_adjudication").await;
 }
 
+/// Make the active refinement caller the proposal author for a public edit test.
+/// **Not for production use.** Panics on SQL errors.
+pub async fn set_proposal_author_for_test(db: &Database, proposal_id: &str, user_id: &str) {
+    db.ensure_initialized().await.unwrap();
+    sqlx::query("UPDATE proposals SET author_user_id=$1 WHERE id=$2")
+        .bind(user_id)
+        .bind(proposal_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+}
+
 async fn switch_typed_evidence_authority_for_test(
     db: &Database,
     task_id: &str,
@@ -154,6 +166,38 @@ pub async fn set_typed_evidence_disposition_lifecycle_for_test(
         .execute(db.pool())
         .await
         .unwrap();
+}
+
+/// Rewind the disposition fixture to a parity-valid `spike_active` history.
+/// The active legacy link and claim remain intact.
+/// **Not for production use.** Panics on SQL errors.
+pub async fn seed_stale_typed_evidence_disposition_for_test(db: &Database, finding_id: &str) {
+    db.ensure_initialized().await.unwrap();
+    let mut tx = db.pool().begin().await.unwrap();
+    sqlx::query("ALTER TABLE typed_evidence_transitions DISABLE TRIGGER typed_evidence_transitions_append_only")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM typed_evidence_transitions WHERE finding_id=$1 AND ordinal=3")
+        .bind(finding_id)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE typed_evidence_findings SET lifecycle='spike_active' WHERE id=$1")
+        .bind(finding_id)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE proposals p SET linked_spike_task_id=a.spike_task_id,needs_evidence_claim=f.claim::text FROM typed_evidence_findings f JOIN typed_evidence_attempts a ON a.finding_id=f.id WHERE f.id=$1 AND p.id=f.proposal_id")
+        .bind(finding_id)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    sqlx::query("ALTER TABLE typed_evidence_transitions ENABLE TRIGGER typed_evidence_transitions_append_only")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
 }
 
 /// Counts used by the control-plane pending-feedback regression without raw SQL.

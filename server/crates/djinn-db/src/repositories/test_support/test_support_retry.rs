@@ -229,19 +229,25 @@ pub async fn materialize_typed_evidence_disposition_fixture_for_test(
     let attempt_id = uuid::Uuid::now_v7().to_string();
     let validation_result_id = uuid::Uuid::now_v7().to_string();
     let spike = uuid::Uuid::now_v7().to_string();
+    let claim = serde_json::json!({
+        "fixture": "disposition",
+        "created_by_task_id": judge_task_id,
+        "against_revision_seq": 1,
+    });
+    let demand_hash = crate::repositories::typed_evidence::legacy_demand_hash(&claim, Some(&spike));
     let mut tx = db.pool().begin().await.unwrap();
     sqlx::query("INSERT INTO tasks (id,project_id,short_id,title,description,design,issue_type,priority,owner,status,labels,acceptance_criteria,created_by_user_id,agent_type) VALUES ($1,$2,$3,'Disposition spike','fixture','','spike',0,'','open',$4,'[]'::jsonb,$5,'architect')").bind(&spike).bind(project_id).bind(format!("d{}", &spike[..7])).bind(serde_json::json!(["refinement-evidence", "read-only"])).bind(caller_user_id).execute(&mut *tx).await.unwrap();
-    sqlx::query("INSERT INTO typed_evidence_findings (id,proposal_id,demand_hash,lifecycle,claim,demanded_revision_seq,created_by_task_id) VALUES ($1,$2,$3,'evidence_received',$4,1,$5)").bind(&finding_id).bind(proposal_id).bind(format!("disposition-{finding_id}")).bind(serde_json::json!({"fixture":"disposition"})).bind(judge_task_id).execute(&mut *tx).await.unwrap();
+    sqlx::query("INSERT INTO typed_evidence_findings (id,proposal_id,demand_hash,lifecycle,claim,demanded_revision_seq,created_by_task_id) VALUES ($1,$2,$3,'evidence_received',$4,1,$5)").bind(&finding_id).bind(proposal_id).bind(&demand_hash).bind(&claim).bind(judge_task_id).execute(&mut *tx).await.unwrap();
     sqlx::query("INSERT INTO typed_evidence_attempts (id,finding_id,sequence,spike_task_id) VALUES ($1,$2,1,$3)").bind(&attempt_id).bind(&finding_id).bind(&spike).execute(&mut *tx).await.unwrap();
     sqlx::query("INSERT INTO typed_evidence_validation_results (id,attempt_id,payload_sha256,outcome,validator_facts) VALUES ($1,$2,'fixture-sha','resolved','{}')").bind(&validation_result_id).bind(&attempt_id).execute(&mut *tx).await.unwrap();
     sqlx::query("INSERT INTO typed_evidence_transitions (id,finding_id,ordinal,from_lifecycle,to_lifecycle,actor_task_id,metadata) VALUES ($1,$2,1,NULL,'demanded',$3,'{}'),($4,$2,2,'demanded','spike_active',$3,'{}'),($5,$2,3,'spike_active','evidence_received',$3,'{}')").bind(uuid::Uuid::now_v7().to_string()).bind(&finding_id).bind(judge_task_id).bind(uuid::Uuid::now_v7().to_string()).bind(uuid::Uuid::now_v7().to_string()).execute(&mut *tx).await.unwrap();
-    sqlx::query("UPDATE proposals SET linked_spike_task_id=$1,needs_evidence_claim=$2 WHERE id=$3")
-        .bind(&spike)
-        .bind(serde_json::json!({"fixture":"legacy"}))
-        .bind(proposal_id)
-        .execute(&mut *tx)
-        .await
-        .unwrap();
+    sqlx::query(
+        "UPDATE proposals SET linked_spike_task_id=NULL,needs_evidence_claim=NULL WHERE id=$1",
+    )
+    .bind(proposal_id)
+    .execute(&mut *tx)
+    .await
+    .unwrap();
     tx.commit().await.unwrap();
     TypedEvidenceDispositionFixtureForTest {
         finding_id,

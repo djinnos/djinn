@@ -179,7 +179,10 @@ async fn disposition_folding_revision(
     db: &Database,
     proposal: &djinn_core::models::Proposal,
     user_id: &str,
+    authority_task_id: &str,
 ) -> i32 {
+    djinn_db::test_support::set_proposal_author_for_test(db, &proposal.id, user_id).await;
+    djinn_db::test_support::switch_to_advocate_authority_for_test(db, authority_task_id).await;
     let response = disposition_call(
         server,
         user_id,
@@ -191,7 +194,7 @@ async fn disposition_folding_revision(
     )
     .await;
     assert!(response["error"].is_null(), "fold rejected: {response}");
-    ProposalRepository::new(db.clone(), EventBus::noop())
+    let revision = ProposalRepository::new(db.clone(), EventBus::noop())
         .revisions(&proposal.id)
         .await
         .unwrap()
@@ -199,7 +202,9 @@ async fn disposition_folding_revision(
         .filter(|revision| revision.event_kind == "spec_revision")
         .map(|revision| revision.seq)
         .max()
-        .expect("public fold committed a revision")
+        .expect("public Advocate fold committed a revision");
+    djinn_db::test_support::switch_to_judge_authority_for_test(db, authority_task_id).await;
+    revision
 }
 
 fn disposition_args(
@@ -227,8 +232,21 @@ async fn typed_evidence_disposition_successes_return_machine_fields_and_clear_le
         "proposal_refinement_withdraw_evidence",
     ] {
         let (server, db, proposal, fixture) = disposition_fixture().await;
-        let revision =
-            disposition_folding_revision(&server, &db, &proposal, &fixture.caller_user_id).await;
+        if tool.ends_with("withdraw_evidence") {
+            djinn_db::test_support::seed_stale_typed_evidence_disposition_for_test(
+                &db,
+                &fixture.finding_id,
+            )
+            .await;
+        }
+        let revision = disposition_folding_revision(
+            &server,
+            &db,
+            &proposal,
+            &fixture.caller_user_id,
+            &fixture.authority_task_id,
+        )
+        .await;
         let before = disposition_snapshot(&db, &proposal.id).await;
         let response = disposition_call(
             &server,
@@ -248,6 +266,14 @@ async fn typed_evidence_disposition_successes_return_machine_fields_and_clear_le
         assert_eq!(response["disposition"], expected);
         assert_eq!(response["lifecycle"], expected);
         assert_eq!(response["folding_revision"], revision);
+        assert_eq!(
+            response["validation_result_id"],
+            if expected == "resolved" {
+                serde_json::json!(fixture.validation_result_id)
+            } else {
+                serde_json::Value::Null
+            }
+        );
         assert_eq!(
             response["outcome"],
             if expected == "resolved" {
@@ -269,7 +295,7 @@ async fn typed_evidence_disposition_successes_return_machine_fields_and_clear_le
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn disposition_dispatch_rejections_and_decode_failures_are_exactly_pure() {
+async fn typed_evidence_disposition_dispatch_rejections_and_decode_failures_are_exactly_pure() {
     for (tool, mutation, code) in [
         (
             "proposal_refinement_resolve_evidence",
@@ -293,8 +319,14 @@ async fn disposition_dispatch_rejections_and_decode_failures_are_exactly_pure() 
         ),
     ] {
         let (server, db, proposal, fixture) = disposition_fixture().await;
-        let revision =
-            disposition_folding_revision(&server, &db, &proposal, &fixture.caller_user_id).await;
+        let revision = disposition_folding_revision(
+            &server,
+            &db,
+            &proposal,
+            &fixture.caller_user_id,
+            &fixture.authority_task_id,
+        )
+        .await;
         let before = disposition_snapshot(&db, &proposal.id).await;
         let mut args = disposition_args(tool, &fixture, revision);
         match mutation {
@@ -330,10 +362,16 @@ async fn disposition_dispatch_rejections_and_decode_failures_are_exactly_pure() 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn disposition_unauthorized_and_duplicate_terminal_calls_preserve_snapshot() {
+async fn typed_evidence_disposition_unauthorized_and_duplicate_terminal_calls_preserve_snapshot() {
     let (server, db, proposal, fixture) = disposition_fixture().await;
-    let revision =
-        disposition_folding_revision(&server, &db, &proposal, &fixture.caller_user_id).await;
+    let revision = disposition_folding_revision(
+        &server,
+        &db,
+        &proposal,
+        &fixture.caller_user_id,
+        &fixture.authority_task_id,
+    )
+    .await;
     let before = disposition_snapshot(&db, &proposal.id).await;
     let denied = disposition_call(
         &server,
@@ -454,7 +492,7 @@ fn assert_retry_allocation(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn retry_evidence_judge_and_advocate_allocate_one_architect_spike() {
+async fn typed_evidence_retry_judge_and_advocate_allocate_one_architect_spike() {
     for (authority, name) in [
         (
             djinn_db::test_support::TypedEvidenceRetryAuthorityForTest::Judge,
@@ -901,10 +939,9 @@ async fn typed_evidence_disposition_isolates_decode_roles_and_stale_lifecycle() 
         }
     }
     let (server, db, proposal, fixture) = disposition_fixture().await;
-    djinn_db::test_support::set_typed_evidence_disposition_lifecycle_for_test(
+    djinn_db::test_support::seed_stale_typed_evidence_disposition_for_test(
         &db,
         &fixture.finding_id,
-        "spike_active",
     )
     .await;
     let before = disposition_snapshot(&db, &proposal.id).await;
@@ -915,6 +952,6 @@ async fn typed_evidence_disposition_isolates_decode_roles_and_stale_lifecycle() 
         disposition_args("proposal_refinement_resolve_evidence", &fixture, 1),
     )
     .await;
-    assert_eq!(stale["conflict_code"], "legacy_typed_parity_mismatch");
+    assert_eq!(stale["conflict_code"], "invalid_lifecycle");
     assert_eq!(disposition_snapshot(&db, &proposal.id).await, before);
 }
