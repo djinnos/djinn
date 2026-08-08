@@ -204,15 +204,42 @@ impl DjinnEventEnvelope {
     /// Lifecycle notifications carry only stable identities; detail consumers
     /// refetch the canonical proposal projection.
     pub fn proposal_feedback_withdrawn(proposal_id: &str, feedback_id: &str) -> Self {
-        Self { entity_type: "proposal_feedback", action: "withdrawn", payload: serde_json::json!({"proposal_id": proposal_id, "feedback_id": feedback_id}), id: Some(feedback_id.to_owned()), project_id: None, from_sync: false }
+        Self {
+            entity_type: "proposal_feedback",
+            action: "withdrawn",
+            payload: serde_json::json!({"proposal_id": proposal_id, "feedback_id": feedback_id}),
+            id: Some(feedback_id.to_owned()),
+            project_id: None,
+            from_sync: false,
+        }
     }
 
-    pub fn proposal_feedback_refinement_disposition_updated(proposal_id: &str, injection_id: &str) -> Self {
-        Self { entity_type: "proposal_feedback_refinement", action: "disposition_updated", payload: serde_json::json!({"proposal_id": proposal_id, "injection_id": injection_id}), id: Some(injection_id.to_owned()), project_id: None, from_sync: false }
+    pub fn proposal_feedback_refinement_disposition_updated(
+        proposal_id: &str,
+        injection_id: &str,
+    ) -> Self {
+        Self {
+            entity_type: "proposal_feedback_refinement",
+            action: "disposition_updated",
+            payload: serde_json::json!({"proposal_id": proposal_id, "injection_id": injection_id}),
+            id: Some(injection_id.to_owned()),
+            project_id: None,
+            from_sync: false,
+        }
     }
 
-    pub fn proposal_feedback_refinement_disposition_rejected(proposal_id: &str, injection_id: &str) -> Self {
-        Self { entity_type: "proposal_feedback_refinement", action: "disposition_rejected", payload: serde_json::json!({"proposal_id": proposal_id, "injection_id": injection_id}), id: Some(injection_id.to_owned()), project_id: None, from_sync: false }
+    pub fn proposal_feedback_refinement_disposition_rejected(
+        proposal_id: &str,
+        injection_id: &str,
+    ) -> Self {
+        Self {
+            entity_type: "proposal_feedback_refinement",
+            action: "disposition_rejected",
+            payload: serde_json::json!({"proposal_id": proposal_id, "injection_id": injection_id}),
+            id: Some(injection_id.to_owned()),
+            project_id: None,
+            from_sync: false,
+        }
     }
 
     /// A debate-trail entry was appended to a proposal.
@@ -794,6 +821,52 @@ mod tests {
                 "step": "worktree_creating",
                 "detail": { "path": "/tmp/worktree" }
             })
+        );
+    }
+
+    #[test]
+    fn feedback_lifecycle_envelopes_use_identity_only_payloads() {
+        let withdrawn = DjinnEventEnvelope::proposal_feedback_withdrawn("proposal-1", "feedback-1");
+        let updated = DjinnEventEnvelope::proposal_feedback_refinement_disposition_updated(
+            "proposal-1",
+            "injection-1",
+        );
+        let rejected = DjinnEventEnvelope::proposal_feedback_refinement_disposition_rejected(
+            "proposal-1",
+            "injection-1",
+        );
+
+        assert_eq!(withdrawn.entity_type(), "proposal_feedback");
+        assert_eq!(withdrawn.action(), "withdrawn");
+        assert_eq!(withdrawn.id.as_deref(), Some("feedback-1"));
+        assert_eq!(
+            withdrawn.payload(),
+            &json!({"proposal_id": "proposal-1", "feedback_id": "feedback-1"})
+        );
+
+        for envelope in [updated, rejected] {
+            assert_eq!(envelope.entity_type(), "proposal_feedback_refinement");
+            assert_eq!(envelope.id.as_deref(), Some("injection-1"));
+            assert_eq!(
+                envelope.payload(),
+                &json!({"proposal_id": "proposal-1", "injection_id": "injection-1"})
+            );
+        }
+        assert_eq!(
+            DjinnEventEnvelope::proposal_feedback_refinement_disposition_updated(
+                "proposal-1",
+                "injection-1"
+            )
+            .action(),
+            "disposition_updated"
+        );
+        assert_eq!(
+            DjinnEventEnvelope::proposal_feedback_refinement_disposition_rejected(
+                "proposal-1",
+                "injection-1"
+            )
+            .action(),
+            "disposition_rejected"
         );
     }
 
