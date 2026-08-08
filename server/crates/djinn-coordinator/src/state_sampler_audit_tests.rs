@@ -91,9 +91,24 @@ fn follow_up_id(verdict: &str) -> Option<&str> {
     let start = verdict.find("FOLLOW-UP-")?;
     let suffix = &verdict[start..];
     let end = suffix
-        .find(|character: char| !(character.is_ascii_uppercase() || character == '-'))
+        .find(|character: char| {
+            !(character.is_ascii_uppercase() || character.is_ascii_digit() || character == '-')
+        })
         .unwrap_or(suffix.len());
-    Some(&suffix[..end])
+    let candidate = &suffix[..end];
+    stable_follow_up_id(candidate).then_some(candidate)
+}
+
+fn stable_follow_up_id(candidate: &str) -> bool {
+    candidate.strip_prefix("FOLLOW-UP-").is_some_and(|id| {
+        !id.is_empty()
+            && id.split('-').all(|token| {
+                !token.is_empty()
+                    && token.chars().all(|character| {
+                        character.is_ascii_uppercase() || character.is_ascii_digit()
+                    })
+            })
+    })
 }
 
 fn audit_rows(document: &str) -> Result<Vec<Vec<&str>>, String> {
@@ -142,6 +157,7 @@ fn validate_inventory(document: &str, declared: &[DeclaredEntryPoint]) -> Result
             tail.split_once("**")
                 .map(|(id, _)| format!("FOLLOW-UP-{id}"))
         })
+        .filter(|id| stable_follow_up_id(id))
         .collect();
     let mut by_id = HashMap::new();
 
@@ -175,7 +191,14 @@ fn validate_inventory(document: &str, declared: &[DeclaredEntryPoint]) -> Result
         }
     }
 
+    let mut declared_ids = HashSet::new();
     for entry in declared {
+        if !declared_ids.insert(entry.sampler_id) {
+            return Err(format!(
+                "duplicate declared sampler ID `{}`",
+                entry.sampler_id
+            ));
+        }
         let row = by_id
             .get(entry.sampler_id)
             .ok_or_else(|| format!("missing mandatory sampler `{}`", entry.sampler_id))?;
@@ -185,6 +208,14 @@ fn validate_inventory(document: &str, declared: &[DeclaredEntryPoint]) -> Result
                 entry.sampler_id, entry.source_anchor
             ));
         }
+    }
+    if let Some(undeclared) = by_id
+        .keys()
+        .find(|sampler_id| !declared_ids.contains(**sampler_id))
+    {
+        return Err(format!(
+            "inventory row `{undeclared}` has no declared production entry point"
+        ));
     }
     Ok(())
 }
@@ -213,9 +244,19 @@ fn state_sampler_audit_allows_referenced_unsafe_rows_and_rejects_bad_ones() {
     assert!(validate_inventory(FIXTURE, &DECLARED).is_ok());
     let unreferenced = FIXTURE.replace("- **FOLLOW-UP-FIXTURE**", "- **FOLLOW-UP-OTHER**");
     assert!(validate_inventory(&unreferenced, &DECLARED).is_err());
+    let malformed_follow_up = FIXTURE.replace("FOLLOW-UP-FIXTURE", "FOLLOW-UP-");
+    assert!(validate_inventory(&malformed_follow_up, &DECLARED).is_err());
     let malformed = FIXTURE.replace(
         "| `fixture-sampler` — entry |",
         "| fixture-sampler — entry |",
     );
     assert!(validate_inventory(&malformed, &DECLARED).is_err());
+    let undeclared = FIXTURE.replace(
+        "| `fixture-sampler` — entry | state | transit | transition_at | absent | bound | **unsafe — `FOLLOW-UP-FIXTURE`.** | preserve/report | `source::symbol` |\n",
+        concat!(
+            "| `fixture-sampler` — entry | state | transit | transition_at | absent | bound | **unsafe — `FOLLOW-UP-FIXTURE`.** | preserve/report | `source::symbol` |\n",
+            "| `undeclared-sampler` — entry | state | transit | transition_at | absent | bound | **safe.** | preserve/report | `other::symbol` |\n"
+        ),
+    );
+    assert!(validate_inventory(&undeclared, &DECLARED).is_err());
 }
