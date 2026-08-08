@@ -873,15 +873,15 @@ async fn liveness_exit_projection_contract() {
     let legacy_second_id = repo.persist_evidence(&legacy_second).await.unwrap();
     assert_ne!(legacy_first_id, legacy_second_id);
 
-    let legacy_rows: Vec<(Option<String>, String, Option<String>, Option<String>)> =
-        sqlx::query_as(
-            "SELECT trigger_identity, verdict, outcome_kind, outcome_reason
+    type LegacyEvidenceRow = (Option<String>, String, Option<String>, Option<String>);
+    let legacy_rows: Vec<LegacyEvidenceRow> = sqlx::query_as(
+        "SELECT trigger_identity, verdict, outcome_kind, outcome_reason
              FROM liveness_evidence WHERE session_id = $1 ORDER BY id",
-        )
-        .bind(&legacy_session_id)
-        .fetch_all(db.pool())
-        .await
-        .unwrap();
+    )
+    .bind(&legacy_session_id)
+    .fetch_all(db.pool())
+    .await
+    .unwrap();
     assert_eq!(legacy_rows.len(), 2, "legacy evidence remains append-only");
     assert!(legacy_rows.iter().all(|row| row.0.is_none()));
     assert!(
