@@ -155,6 +155,21 @@ pub struct TaskContext {
     /// injected into planner/reviewer/lead/architect prompts.  `None` when
     /// there is no active monitored reopen or the role does not receive it.
     pub arbiter_directive: Option<String>,
+
+    // ── CI adjudication bundle (nafu) ─────────────────────────────────────────
+    /// The CI evidence bundle a **Lead** session adjudicates, rendered from the
+    /// `ci_route` block the coordinator wrote when it opened the Tier-2 lease.
+    ///
+    /// This is the corpus the supervisor grades the result against: the
+    /// `evidence_references` a directive must quote to be grounded, and the
+    /// `repository_commands` a repair's `verification_command` must be drawn
+    /// from. Both are validated by exact (whitespace-normalized) comparison, so
+    /// a Lead that cannot read them can only guess — which is precisely what the
+    /// route report measured as `verification_command_not_repository_valid`.
+    ///
+    /// `None` for every role but Lead, and for a Lead session the coordinator
+    /// did not dispatch under a CI route.
+    pub ci_adjudication_bundle: Option<String>,
 }
 
 // ─── Renderer ─────────────────────────────────────────────────────────────────
@@ -286,6 +301,19 @@ pub fn render_prompt_for_role(
         _ => String::new(),
     };
     out = out.replace("{{arbiter_directive_section}}", &arbiter_directive_section);
+
+    // nafu: the CI evidence bundle a Lead session adjudicates. Rendered INSIDE
+    // `lead.md`'s CI Failure Adjudication section, immediately under the rule
+    // it satisfies — the corpus and the constraint have to be readable in one
+    // glance or the model reconstructs the command from memory of what CI runs.
+    //
+    // Sub-headings only (`###`). A `## ` inside this block would split the CI
+    // section and silently truncate the contract that follows it.
+    let ci_adjudication_section = match &ctx.ci_adjudication_bundle {
+        Some(text) if !text.trim().is_empty() => format!("\n{}\n", text.trim_end()),
+        _ => String::new(),
+    };
+    out = out.replace("{{ci_adjudication_section}}", &ci_adjudication_section);
 
     let epic_context_section = match &ctx.epic_context {
         Some(text) if !text.trim().is_empty() => format!("## Epic Context\n\n{text}\n"),

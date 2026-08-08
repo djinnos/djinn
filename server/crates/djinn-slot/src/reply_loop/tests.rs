@@ -312,6 +312,7 @@ impl ReplyLoopHarness {
             ci_blocking_directive: None,
             worker_resume_note: None,
             arbiter_directive: None,
+            ci_adjudication_bundle: None,
             // shared worker-prompt harness so signature-coverage assertions see
             // every worker tool.
         };
@@ -5333,6 +5334,7 @@ async fn rendered_worker_prompt_uses_signature_only_tool_section() {
         ci_blocking_directive: None,
         worker_resume_note: None,
         arbiter_directive: None,
+        ci_adjudication_bundle: None,
     };
     let system_prompt = djinn_roles::prompts::render_prompt_for_role(
         role_config,
