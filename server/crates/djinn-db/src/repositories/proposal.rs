@@ -5,7 +5,7 @@ use djinn_core::events::{DjinnEventEnvelope, EventBus};
 use djinn_core::models::{
     EvidenceFindings, NeedsEvidenceClaim, Proposal, ProposalDebateTrail, ProposalFeedback,
     ProposalFeedbackRefinementInjection, ProposalFeedbackRefinementSource, ProposalRevision,
-    ProposalSignoff, ProposalTarget,
+    ProposalSignoff, ProposalTarget, TribunalEvidenceLifecycle, TribunalEvidenceOutcome,
 };
 
 use crate::database::Database;
@@ -14,8 +14,9 @@ use crate::repositories::note::NoteRepository;
 use crate::repositories::note::{LexicalSearchBackend, sanitize_postgres_tsquery};
 use crate::repositories::task::{EffectiveCreatorProvenance, resolve_effective_creator};
 use crate::repositories::typed_evidence::{
-    AllocateTypedEvidenceRetryInput, DemandTypedEvidenceInput, TypedEvidenceAttemptAllocation,
-    TypedEvidenceRepository, legacy_demand_hash, normalized_demand_hash,
+    AllocateTypedEvidenceRetryInput, DemandTypedEvidenceInput, DisposeTypedEvidenceInput,
+    TypedEvidenceAttemptAllocation, TypedEvidenceDispositionProjection, TypedEvidenceRepository,
+    legacy_demand_hash, normalized_demand_hash,
 };
 use crate::{Error, Result};
 
@@ -33,6 +34,21 @@ use sqlx::{Postgres, Row, Transaction};
 #[derive(Clone, Debug)]
 enum SqlParam {
     Text(String),
+}
+
+/// Judge-only terminal disposition request, authorized in the mutation transaction.
+pub struct AtomicEvidenceDispositionInput {
+    pub finding_id: String,
+    pub validation_result_id: Option<String>,
+    pub folding_revision: i32,
+    pub disposition: TribunalEvidenceLifecycle,
+    pub rationale: String,
+    pub withdrawal_is_non_load_bearing: bool,
+    pub caller_user_id: String,
+}
+
+pub struct AtomicEvidenceDispositionResult {
+    pub projection: TypedEvidenceDispositionProjection,
 }
 
 pub struct AtomicEvidenceRetryInput {
@@ -4019,6 +4035,56 @@ impl ProposalRepository {
             allocation,
             replayed: false,
         })
+    }
+
+    /// Authorize the active Judge and invoke the canonical terminal disposition
+    /// primitive in one transaction so rejected calls cannot clear legacy state.
+    pub async fn dispose_evidence_atomically(
+        &self,
+        input: AtomicEvidenceDispositionInput,
+    ) -> Result<AtomicEvidenceDispositionResult> {
+        self.db.ensure_initialized().await?;
+        let mut tx = self.db.pool().begin().await?;
+        let proposal_id: String = sqlx::query_scalar(
+            "SELECT proposal_id FROM typed_evidence_findings WHERE id=$1 FOR UPDATE",
+        )
+        .bind(&input.finding_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| Error::InvalidData("evidence_finding_not_found".into()))?;
+        let judge_task_id: String = sqlx::query_scalar("SELECT t.id FROM tasks t JOIN refinement_dispatch_intents i ON i.id=t.refinement_intent_id JOIN refinement_runs r ON r.id=i.run_id WHERE r.proposal_id=$1 AND r.state='running' AND i.state='materialized' AND i.task_id=t.id AND t.status IN ('open','in_progress') AND t.agent_type='judge' AND t.refinement_run_id=r.id AND t.refinement_generation=r.generation AND t.refinement_round=i.round AND t.refinement_phase=i.phase AND t.refinement_role=i.role AND t.created_by_user_id=$2 LIMIT 1 FOR UPDATE OF t,i,r").bind(&proposal_id).bind(&input.caller_user_id).fetch_optional(&mut *tx).await?.ok_or_else(|| Error::InvalidTransition("disposition_unauthorized_active_judge_required".into()))?;
+        let outcome = if input.disposition == TribunalEvidenceLifecycle::Resolved {
+            let validation_id = input.validation_result_id.as_deref().ok_or_else(|| {
+                Error::InvalidData("resolution_requires_validation_result".into())
+            })?;
+            let outcome: String = sqlx::query_scalar("SELECT v.outcome FROM typed_evidence_validation_results v JOIN typed_evidence_attempts a ON a.id=v.attempt_id WHERE v.id=$1 AND a.finding_id=$2 FOR UPDATE").bind(validation_id).bind(&input.finding_id).fetch_optional(&mut *tx).await?.ok_or_else(|| Error::InvalidData("resolution_requires_applicable_validation_result".into()))?;
+            match outcome.as_str() {
+                "resolved" => TribunalEvidenceOutcome::Resolved,
+                "partial" => TribunalEvidenceOutcome::Partial,
+                "unresolved" => TribunalEvidenceOutcome::Unresolved,
+                _ => return Err(Error::InvalidData("unknown typed evidence outcome".into())),
+            }
+        } else {
+            TribunalEvidenceOutcome::Unresolved
+        };
+        let projection = TypedEvidenceRepository::dispose_in_transaction(
+            &mut tx,
+            DisposeTypedEvidenceInput {
+                disposition_id: uuid::Uuid::now_v7().to_string(),
+                transition_id: uuid::Uuid::now_v7().to_string(),
+                finding_id: input.finding_id,
+                validation_result_id: input.validation_result_id,
+                folding_revision: input.folding_revision,
+                outcome,
+                disposition: input.disposition,
+                judge_task_id,
+                rationale: input.rationale,
+                withdrawal_is_non_load_bearing: input.withdrawal_is_non_load_bearing,
+            },
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(AtomicEvidenceDispositionResult { projection })
     }
 
     /// Structured counterpart of [`Self::set_needs_evidence_spike`]: persists

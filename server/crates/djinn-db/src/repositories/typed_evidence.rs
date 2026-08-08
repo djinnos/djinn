@@ -1239,11 +1239,24 @@ impl TypedEvidenceRepository {
                 "withdrawal requires non-load-bearing assertion".into(),
             ));
         }
-        let row=sqlx::query("SELECT proposal_id,created_by_task_id,lifecycle FROM typed_evidence_findings WHERE id=$1 FOR UPDATE").bind(&input.finding_id).fetch_optional(&mut **tx).await?.ok_or_else(|| Error::InvalidData("finding not found".into()))?;
-        if row.get::<String, _>("created_by_task_id") != input.judge_task_id {
-            return Err(Error::InvalidData("Judge attribution required".into()));
-        }
+        let row = sqlx::query(
+            "SELECT proposal_id,lifecycle FROM typed_evidence_findings WHERE id=$1 FOR UPDATE",
+        )
+        .bind(&input.finding_id)
+        .fetch_optional(&mut **tx)
+        .await?
+        .ok_or_else(|| Error::InvalidData("finding not found".into()))?;
         let proposal_id: String = row.get("proposal_id");
+        // A finding may be demanded by an Adversary. Terminal attribution is
+        // the active Judge assigned to this proposal, not the demand-origin
+        // task. Preserve repository authority by validating that assignment in
+        // this transaction before any lifecycle or legacy-link mutation.
+        let active_judge: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM tasks t JOIN refinement_dispatch_intents i ON i.id=t.refinement_intent_id JOIN refinement_runs r ON r.id=i.run_id WHERE t.id=$1 AND r.proposal_id=$2 AND r.state='running' AND i.state='materialized' AND i.task_id=t.id AND t.status IN ('open','in_progress') AND t.agent_type='judge' AND t.refinement_run_id=r.id AND t.refinement_generation=r.generation AND t.refinement_round=i.round AND t.refinement_phase=i.phase AND t.refinement_role=i.role)").bind(&input.judge_task_id).bind(&proposal_id).fetch_one(&mut **tx).await?;
+        if !active_judge {
+            return Err(Error::InvalidData(
+                "active Judge attribution required".into(),
+            ));
+        }
         let legacy_link: Option<String> =
             sqlx::query_scalar("SELECT linked_spike_task_id FROM proposals WHERE id=$1 FOR UPDATE")
                 .bind(&proposal_id)

@@ -1,9 +1,13 @@
 //! Migration 176 typed tribunal evidence schema constraints.
 
-use djinn_core::models::{TribunalEvidenceLifecycle, TribunalEvidenceOutcome};
+use djinn_core::{
+    events::EventBus,
+    models::{TribunalEvidenceLifecycle, TribunalEvidenceOutcome},
+};
 use djinn_db::{
-    AppendTypedEvidenceTransitionInput, Database, DemandTypedEvidenceInput,
-    DisposeTypedEvidenceInput, TypedEvidenceRepository,
+    AdmitRefinementRunRequest, AppendTypedEvidenceTransitionInput, Database,
+    DemandTypedEvidenceInput, DisposeTypedEvidenceInput, ProposalRepository,
+    RefinementAdmissionOutcome, RefinementAdmissionSource, TypedEvidenceRepository,
 };
 
 async fn seed(db: &Database) -> (String, String, String, String) {
@@ -31,8 +35,8 @@ async fn seed(db: &Database) -> (String, String, String, String) {
     let task_id = uuid::Uuid::now_v7().to_string();
     sqlx::query(
         "INSERT INTO tasks \
-         (id, project_id, short_id, title, description, design, labels, acceptance_criteria, memory_refs, created_by_user_id) \
-         VALUES ($1, $2, $3, 'typed evidence', '', '', '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, $4)",
+         (id, project_id, short_id, title, description, design, labels, acceptance_criteria, memory_refs, created_by_user_id, agent_type) \
+         VALUES ($1, $2, $3, 'typed evidence', '', '', '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, $4, 'judge')",
     )
     .bind(&task_id)
     .bind(&project_id)
@@ -225,6 +229,38 @@ async fn typed_evidence_lifecycle_v1() {
     let db = Database::open_in_memory().unwrap();
     db.ensure_initialized().await.unwrap();
     let (proposal_id, judge_task_id, _, _) = seed(&db).await;
+    // Terminal disposition authority is the exact active Judge correlation,
+    // rather than the task that originated the demand. Materialize the running
+    // run, Judge intent, and task correlation production authorization needs.
+    let proposal_repo = ProposalRepository::new(db.clone(), EventBus::noop());
+    proposal_repo
+        .record_refinement_lifecycle(&proposal_id, "refinement_start", None)
+        .await
+        .unwrap();
+    let (run_id, generation) = match proposal_repo
+        .reap_and_admit(AdmitRefinementRunRequest {
+            proposal_id: proposal_id.clone(),
+            idempotency_key: format!("typed-evidence-lifecycle/{proposal_id}"),
+            source: RefinementAdmissionSource::Demand {
+                demand_id: format!("typed-evidence-lifecycle/{proposal_id}"),
+            },
+            heartbeat_grace_millis: 60_000,
+        })
+        .await
+        .unwrap()
+    {
+        RefinementAdmissionOutcome::Admitted {
+            run_id, generation, ..
+        } => (run_id, generation),
+        outcome => panic!("expected admitted refinement run, got {outcome:?}"),
+    };
+    djinn_db::test_support::materialize_judge_authority_for_test(
+        &db,
+        &judge_task_id,
+        &run_id,
+        i64::from(generation),
+    )
+    .await;
     let demand = |id: String, hash: &str, revision: i32| DemandTypedEvidenceInput {
         finding_id: id,
         proposal_id: proposal_id.clone(),
@@ -370,7 +406,7 @@ async fn typed_evidence_lifecycle_v1() {
             dispose(TribunalEvidenceLifecycle::Resolved, "not-the-judge".into(), 1, "folded", true),
         )
         .await,
-        Err(djinn_db::Error::InvalidData(message)) if message == "Judge attribution required"
+        Err(djinn_db::Error::InvalidData(message)) if message == "active Judge attribution required"
     ));
     assert!(matches!(
         TypedEvidenceRepository::dispose_in_transaction(
