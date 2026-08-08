@@ -15,20 +15,21 @@ use serde::Deserialize;
 
 use crate::server::DjinnMcpServer;
 use crate::tools::proposal_ops::{
-    DemandRoundResponse, EvidenceRetryResponse, NeedsEvidenceDemandResponse,
-    NeedsEvidenceDemandResult, ProposalRefinementStartResponse, ProposalRefinementStatusModel,
-    ProposalRefinementStatusResponse, ProposalRefinementStopResponse, VerdictOverrideResponse,
+    DemandRoundResponse, EvidenceDispositionResponse, EvidenceRetryResponse,
+    NeedsEvidenceDemandResponse, NeedsEvidenceDemandResult, ProposalRefinementStartResponse,
+    ProposalRefinementStatusModel, ProposalRefinementStatusResponse,
+    ProposalRefinementStopResponse, VerdictOverrideResponse,
 };
 use crate::tools::proposal_tools::feedback::human_feedback_disposition_contract_available;
 use crate::tools::refinement_helpers::validate_demand_evidence;
 pub use crate::tools::refinement_helpers::{
     ProposalRefinementDemandEvidenceParams, build_refinement_status,
 };
-use djinn_core::models::NeedsEvidenceClaim;
+use djinn_core::models::{NeedsEvidenceClaim, TribunalEvidenceLifecycle};
 use djinn_db::{
-    AdmitRefinementRunRequest, AtomicEvidenceRetryInput, DispatchTypedEvidenceRetryInput,
-    ProposalRepository, RefinementAdmissionError, RefinementAdmissionOutcome,
-    RefinementAdmissionSource, TaskRepository, TypedEvidenceRepository,
+    AdmitRefinementRunRequest, AtomicEvidenceDispositionInput, AtomicEvidenceRetryInput,
+    DispatchTypedEvidenceRetryInput, ProposalRepository, RefinementAdmissionError,
+    RefinementAdmissionOutcome, RefinementAdmissionSource, TaskRepository, TypedEvidenceRepository,
 };
 #[cfg(test)]
 use djinn_db::{NeedsEvidenceClaimLink, ProposalDebateTrailCreateInput};
@@ -38,6 +39,50 @@ fn err_refinement_start(error: impl Into<String>) -> ProposalRefinementStartResp
         proposal_id: None,
         refinement: None,
         error: Some(error.into()),
+    }
+}
+
+fn disposition_rejection_code(error: &str) -> &'static str {
+    if error.contains("disposition_unauthorized_active_judge_required")
+        || error.contains("active Judge attribution required")
+    {
+        "unauthorized"
+    } else if error.contains("evidence_finding_not_found") || error.contains("finding not found") {
+        "finding_not_found"
+    } else if error.contains("resolution_requires_validation_result") {
+        "validation_result_required"
+    } else if error.contains("resolution_requires_applicable_validation_result") {
+        "validation_result_inapplicable"
+    } else if error.contains("existing committed folding revision required") {
+        "committed_folding_revision_required"
+    } else if error.contains("withdrawal requires non-load-bearing assertion") {
+        "non_load_bearing_assertion_required"
+    } else if error.contains("must not be empty") {
+        "rationale_required"
+    } else if error.contains("legacy_typed_parity_mismatch") {
+        "legacy_typed_parity_mismatch"
+    } else if error.contains(" -> ") {
+        "invalid_lifecycle"
+    } else if error.contains("disposition must be terminal") {
+        "invalid_disposition"
+    } else {
+        "disposition_rejected"
+    }
+}
+
+fn err_disposition(error: impl Into<String>) -> EvidenceDispositionResponse {
+    let error = error.into();
+    EvidenceDispositionResponse {
+        accepted: false,
+        finding_id: None,
+        disposition_id: None,
+        disposition: None,
+        lifecycle: None,
+        folding_revision: None,
+        validation_result_id: None,
+        outcome: None,
+        error: Some(error.clone()),
+        conflict_code: Some(disposition_rejection_code(&error).into()),
     }
 }
 
@@ -292,6 +337,22 @@ pub struct ProposalRefinementRetryEvidenceParams {
     pub finding_id: String,
     /// The exact latest failed transition being retried.
     pub failed_transition_id: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct ProposalRefinementResolveEvidenceParams {
+    pub finding_id: String,
+    pub validation_result_id: String,
+    pub folding_revision: i32,
+    pub rationale: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct ProposalRefinementWithdrawEvidenceParams {
+    pub finding_id: String,
+    pub folding_revision: i32,
+    pub rationale: String,
+    pub withdrawal_is_non_load_bearing: bool,
 }
 
 fn err_retry_evidence(error: impl Into<String>, code: Option<&str>) -> EvidenceRetryResponse {
@@ -1190,6 +1251,93 @@ impl DjinnMcpServer {
             error: None,
             conflict_code: None,
         })
+    }
+
+    #[tool(
+        description = "Resolve typed evidence using an applicable validation result and an existing committed folding revision. Only the active Judge may resolve evidence."
+    )]
+    pub async fn proposal_refinement_resolve_evidence(
+        &self,
+        Parameters(p): Parameters<ProposalRefinementResolveEvidenceParams>,
+    ) -> Json<EvidenceDispositionResponse> {
+        self.disposition_evidence(
+            p.finding_id,
+            Some(p.validation_result_id),
+            p.folding_revision,
+            p.rationale,
+            TribunalEvidenceLifecycle::Resolved,
+            false,
+        )
+        .await
+    }
+
+    #[tool(
+        description = "Withdraw typed evidence with a non-empty rationale and explicit non-load-bearing assertion. Only the active Judge may withdraw evidence."
+    )]
+    pub async fn proposal_refinement_withdraw_evidence(
+        &self,
+        Parameters(p): Parameters<ProposalRefinementWithdrawEvidenceParams>,
+    ) -> Json<EvidenceDispositionResponse> {
+        self.disposition_evidence(
+            p.finding_id,
+            None,
+            p.folding_revision,
+            p.rationale,
+            TribunalEvidenceLifecycle::Withdrawn,
+            p.withdrawal_is_non_load_bearing,
+        )
+        .await
+    }
+
+    async fn disposition_evidence(
+        &self,
+        finding_id: String,
+        validation_result_id: Option<String>,
+        folding_revision: i32,
+        rationale: String,
+        disposition: TribunalEvidenceLifecycle,
+        withdrawal_is_non_load_bearing: bool,
+    ) -> Json<EvidenceDispositionResponse> {
+        let Some(caller_user_id) = djinn_core::auth_context::current_user_id() else {
+            return Json(err_disposition(
+                "disposition_unauthorized_active_judge_required",
+            ));
+        };
+        let repo = ProposalRepository::new(self.state.db().clone(), self.state.event_bus());
+        match repo
+            .dispose_evidence_atomically(AtomicEvidenceDispositionInput {
+                finding_id,
+                validation_result_id,
+                folding_revision,
+                disposition,
+                rationale,
+                withdrawal_is_non_load_bearing,
+                caller_user_id,
+            })
+            .await
+        {
+            Ok(value) => {
+                let disposition = value.projection.disposition;
+                let outcome = serde_json::to_value(disposition.outcome)
+                    .expect("typed evidence outcome serializes as a string")
+                    .as_str()
+                    .expect("typed evidence outcome is a string")
+                    .to_owned();
+                Json(EvidenceDispositionResponse {
+                    accepted: true,
+                    finding_id: Some(disposition.finding_id),
+                    disposition_id: Some(disposition.id),
+                    disposition: Some(disposition.disposition.as_str().into()),
+                    lifecycle: Some(value.projection.finding_lifecycle.as_str().into()),
+                    folding_revision: Some(disposition.folding_revision),
+                    validation_result_id: disposition.validation_result_id,
+                    outcome: Some(outcome),
+                    error: None,
+                    conflict_code: None,
+                })
+            }
+            Err(error) => Json(err_disposition(error.to_string())),
+        }
     }
 }
 
