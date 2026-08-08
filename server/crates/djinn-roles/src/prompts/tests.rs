@@ -103,6 +103,7 @@ pub(crate) fn make_ctx() -> TaskContext {
         ci_blocking_directive: None,
         worker_resume_note: None,
         arbiter_directive: None,
+        ci_adjudication_bundle: None,
     }
 }
 
@@ -1689,6 +1690,7 @@ fn arbiter_directive_injected_into_worker_prompt() {
     let task = make_task();
     let ctx = TaskContext {
         arbiter_directive: Some("Fix the retry loop in dispatch.rs".into()),
+        ci_adjudication_bundle: None,
         ..make_ctx()
     };
     let prompt = render_prompt(AgentType::Worker, &task, &ctx);
@@ -1728,6 +1730,7 @@ fn arbiter_directive_omitted_when_whitespace() {
     let task = make_task();
     let ctx = TaskContext {
         arbiter_directive: Some("   ".into()),
+        ci_adjudication_bundle: None,
         ..make_ctx()
     };
     let prompt = render_prompt(AgentType::Worker, &task, &ctx);

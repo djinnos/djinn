@@ -174,3 +174,24 @@ fn postgres_migration_196_is_immutable() {
         "1a4ef8d00cc4723c6ddc1e6d7e3bf6bcb39269252d8880c20e4a5ac1c55cc72b",
     );
 }
+
+/// 202 adds `ci_route_attempts.pr_merged_at` and backfills it from the merges
+/// the old `adjudicated` reading could see.
+///
+/// Pinned for the reason 193/194/195 are — the branch-diff guard classifies a
+/// migration added after a long-lived branch's fork point as `Added` and
+/// `--diff-filter=MRD` skips it — and for one specific to this file: the
+/// backfill is a one-shot `UPDATE`, so an edit to it is invisible on every
+/// database that already ran it and silently different on every database that
+/// has not. That is the failure mode where two deployments of the same commit
+/// report different `merged_prs`, which is worse than either being wrong.
+///
+/// Named `ci_route_attempts_…` so the pin is reachable from the proposal's
+/// `cargo test -p djinn-db ci_route_attempt` acceptance filter, matching 195.
+#[test]
+fn ci_route_attempts_migration_202_is_immutable() {
+    assert_migration_unchanged(
+        "202_ci_route_pr_merged_fact.sql",
+        "8a691152174d3f53630867b38379ee8add861be831e917eb61c5fff29bdb639e",
+    );
+}

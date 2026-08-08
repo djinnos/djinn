@@ -1557,6 +1557,27 @@ pub(crate) async fn execute_stage(
             "Supervisor stage: injected arbiter directive for monitored reopen"
         );
     }
+    // nafu: the other half of the same arbitration column. When the coordinator
+    // dispatched this Lead under a Tier-2 CI lease, the `ci_route` block carries
+    // the two closed corpora the supervisor will grade the result against —
+    // `evidence_references` and `repository_commands`. Rendering them is what
+    // makes `command_is_repository_valid` a rule Lead can follow rather than a
+    // guess it usually loses.
+    let ci_adjudication_bundle =
+        crate::actors::slot::lifecycle::prompt_context::load_ci_adjudication_bundle(
+            runtime_role_name,
+            &task.id,
+            agent_context,
+        )
+        .await;
+    if ci_adjudication_bundle.is_some() {
+        tracing::info!(
+            task_id = %task.short_id,
+            task_run_id = %task_run_id,
+            role = %runtime_role_name,
+            "Supervisor stage: injected CI adjudication evidence bundle"
+        );
+    }
     // Coarse pre-session progress marker for the host-side liveness deadline:
     // model/credential/MCP/skill resolution and prompt assembly happen here,
     // before any session row exists.
@@ -1584,6 +1605,7 @@ pub(crate) async fn execute_stage(
         read_sources: &read_sources,
         worker_resume_note: worker_resume_note.as_deref(),
         arbiter_directive: arbiter_directive.as_deref(),
+        ci_adjudication_bundle: ci_adjudication_bundle.as_deref(),
         mcp_server_instructions: &mcp_server_instructions,
         extension_diagnostics: &extension_diagnostics,
         cancellation: Some(&callbacks.cancel),
