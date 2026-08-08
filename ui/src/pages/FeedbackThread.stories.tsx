@@ -13,6 +13,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 import { FeedbackThread } from "./ProposalsPage";
 import {
+  debateTrail,
   feedback,
   feedbackRefinements,
   richProposal,
@@ -44,6 +45,7 @@ const meta = {
   ],
   args: {
     proposal: richProposal,
+    debateTrail,
     onChanged: () => {},
   },
 } satisfies Meta<typeof FeedbackThread>;
