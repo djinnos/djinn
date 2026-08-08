@@ -191,6 +191,9 @@ pub struct ModelTurnAdmissionCoordinator {
 #[cfg(test)]
 pub(super) struct ModelTurnAdmissionTestHooks {
     pub fail_mark_active: std::sync::atomic::AtomicBool,
+    /// Counts watchdog-owned commits independently of provider stream activity.
+    pub heartbeats: AtomicUsize,
+    pub fail_heartbeat: std::sync::atomic::AtomicBool,
     pub reconciliations: std::sync::Mutex<Vec<ModelTurnLeaseIdentity>>,
     pub reconcile_reached: TestNotify,
     pub reconcile_release: TestNotify,
@@ -203,6 +206,8 @@ impl Default for ModelTurnAdmissionTestHooks {
     fn default() -> Self {
         Self {
             fail_mark_active: std::sync::atomic::AtomicBool::new(false),
+            heartbeats: AtomicUsize::new(0),
+            fail_heartbeat: std::sync::atomic::AtomicBool::new(false),
             reconciliations: std::sync::Mutex::new(Vec::new()),
             reconcile_reached: TestNotify::new(),
             reconcile_release: TestNotify::new(),
@@ -416,6 +421,21 @@ impl ModelTurnAdmissionCoordinator {
             hooks.reconcile_finished.notify_waiters();
         }
         result
+    }
+    pub async fn heartbeat(
+        &self,
+        identity: &ModelTurnLeaseIdentity,
+    ) -> djinn_db::Result<ModelTurnLeaseMutationOutcome> {
+        #[cfg(test)]
+        if let Some(hooks) = &self.test_hooks {
+            hooks.heartbeats.fetch_add(1, Ordering::AcqRel);
+            if hooks.fail_heartbeat.load(Ordering::Acquire) {
+                return Err(djinn_db::Error::Internal(
+                    "injected heartbeat database failure".into(),
+                ));
+            }
+        }
+        self.repository.heartbeat(identity).await
     }
 }
 
