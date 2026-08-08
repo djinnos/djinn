@@ -881,137 +881,41 @@ fn advocate_rebuttal_channel_is_prompt_wired() {
 
 mod visual_spec;
 
-// ── Proposal-address prompt regressions (y4td) ───────────────────────────
-//
-// Verify that the proposal_address.md prompt text contains the expected
-// workflow guidance for progressive markdown-to-MDX enrichment via targeted
-// block patches, without inlining block vocabulary or forcing non-authoring
-// planner prompts to pay the catalog/skill body cost.
+// ── Proposal-address chat contract regressions ───────────────────────────
 
 #[test]
-fn proposal_address_prompt_contains_block_patch_workflow_guidance() {
+fn proposal_address_prompt_routes_feedback_without_mutating_the_spec() {
     let prompt = include_str!("../../../djinn-roles/src/prompts/proposal_address.md");
 
-    // Must reference the targeted block-patch primitive.
     assert!(
-        prompt.contains("proposal_block_patch"),
-        "proposal_address.md must mention proposal_block_patch for targeted enrichment"
-    );
-
-    // Must reference visual-spec skill loading.
-    assert!(
-        prompt.contains("visual-spec"),
-        "proposal_address.md must mention visual-spec native skill for authoring sessions"
+        prompt.contains("cannot rewrite the proposal or resolve feedback directly"),
+        "proposal_address.md must state that chat cannot rewrite or directly resolve feedback"
     );
     assert!(
-        prompt.contains("skill_read"),
-        "proposal_address.md must instruct skill_read to load visual-spec on demand"
-    );
-
-    // Must reference catalog pull on demand.
-    assert!(
-        prompt.contains("get_block_catalog"),
-        "proposal_address.md must instruct get_block_catalog pull on demand"
-    );
-
-    // Must reference memory retrieval for learned refinements.
-    assert!(
-        prompt.contains("memory_search") || prompt.contains("memory_build_context"),
-        "proposal_address.md must instruct memory retrieval for learned refinements"
-    );
-
-    // Must mention revision sequencing / latest_revision_seq inspection.
-    assert!(
-        prompt.contains("latest_revision_seq"),
-        "proposal_address.md must mention latest_revision_seq for patch sequencing"
-    );
-
-    // Must mention attribution fields.
-    assert!(
-        prompt.contains("native_skill_version"),
-        "proposal_address.md must mention native_skill_version for attribution"
+        prompt.contains("Blocking feedback on an in-review proposal starts or")
+            && prompt.contains("joins tribunal refinement"),
+        "proposal_address.md must route blocking feedback into tribunal refinement"
     );
     assert!(
-        prompt.contains("native_skill_name"),
-        "proposal_address.md must mention native_skill_name for attribution"
-    );
-
-    // Lazy semantics: must NOT inline the full block vocabulary (no concrete
-    // block tag names from the catalog).
-    let forbidden_block_tags = [
-        "AnnotatedCode",
-        "ApiEndpoint",
-        "Callout",
-        "Checklist",
-        "Columns",
-        "Decisions",
-        "Diagram",
-        "Diff",
-        "FileTree",
-        "JsonExplorer",
-        "QuestionForm",
-        "RichText",
-        "Tabs",
-        "Wireframe",
-    ];
-    for tag in &forbidden_block_tags {
-        assert!(
-            !prompt.contains(tag),
-            "proposal_address.md must not inline block vocabulary tag {tag}"
-        );
-    }
-
-    // Must not embed a giant catalog or list of block types.
-    assert!(
-        !prompt.contains("block_types"),
-        "proposal_address.md must not embed a block_types catalog list"
-    );
-}
-
-#[test]
-fn proposal_address_prompt_distinguishes_simple_update_from_block_patch() {
-    let prompt = include_str!("../../../djinn-roles/src/prompts/proposal_address.md");
-
-    // Both paths (simple update and block-patch) should be mentioned.
-    assert!(
-        prompt.contains("proposal_update"),
-        "proposal_address.md must still mention proposal_update for simple edits"
-    );
-    assert!(
-        prompt.contains("proposal_block_patch"),
-        "proposal_address.md must mention proposal_block_patch for MDX enrichment"
-    );
-
-    // The block-patch path should be framed as progressive enrichment.
-    let lower = prompt.to_lowercase();
-    assert!(
-        lower.contains("progressive") || lower.contains("one patch per revision"),
-        "proposal_address.md must frame block-patch as progressive enrichment"
-    );
-}
-
-#[test]
-fn proposal_address_prompt_preserves_existing_feedback_rules() {
-    let prompt = include_str!("../../../djinn-roles/src/prompts/proposal_address.md");
-
-    // The Advocate's feedback rule must use the source-scoped disposition
-    // channel and preserve Judge-only global resolution.
-    assert!(
-        prompt.contains("proposal_feedback_disposition"),
-        "proposal_address.md must mention proposal_feedback_disposition"
-    );
-    assert!(
-        !prompt.contains("proposal_debate_resolve("),
-        "proposal_address.md must not instruct the Advocate to globally resolve objections"
-    );
-    assert!(
-        prompt.contains("building"),
-        "proposal_address.md must still mention the building guard"
+        prompt.contains("Advisory feedback is stored discussion only")
+            && prompt.contains("does not dispatch refinement"),
+        "proposal_address.md must store advisory feedback without dispatch"
     );
     assert!(
         prompt.contains("{{PROPOSAL_CONTEXT}}"),
         "proposal_address.md must keep the PROPOSAL_CONTEXT substitution marker"
     );
+
+    for unavailable_workflow in [
+        "proposal_update",
+        "proposal_block_patch",
+        "proposal_feedback_resolve",
+    ] {
+        assert!(
+            !prompt.contains(unavailable_workflow),
+            "proposal_address.md must not expose legacy mutation workflow {unavailable_workflow}"
+        );
+    }
 }
 
 // ── Tool section: signatures only (wzz6 item 1) ─────────────────────────
