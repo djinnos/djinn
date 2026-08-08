@@ -21817,7 +21817,7 @@
   },
   {
     "name": "proposal_show",
-    "description": "Show a proposal (by UUID or short_id) with optional field selection. Pass `fields` to include only specific sections: proposal, targets, feedback, signoffs, revisions, debate, epics, gate_status (default: all). Pass `revision_bodies` to control revision verbosity: excerpt (default), full, omit. Omitted fields are absent from the response and their data is not loaded.",
+    "description": "Show a proposal (by UUID or short_id) with optional field selection. Pass `fields` to include only specific sections: proposal, targets, feedback, feedback_refinements, signoffs, revisions, debate, epics, gate_status (default: all). `feedback_refinements` exposes canonical queued/materialized/disposed feedback generations with source attribution and exact debate links. Pass `revision_bodies` to control revision verbosity: excerpt (default), full, omit. Omitted fields are absent from the response and their data is not loaded.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "required": [
@@ -21830,7 +21830,7 @@
           "type": "string"
         },
         "fields": {
-          "description": "Select which top-level sections to include in the response.\nAccepted values: `proposal`, `targets`, `feedback`, `signoffs`,\n`revisions`, `debate`, `epics`, `gate_status`.\nDefault: all fields selected. Invalid values return a validation error.",
+          "description": "Select which top-level sections to include in the response.\nAccepted values: `proposal`, `targets`, `feedback`, `feedback_refinements`, `signoffs`,\n`revisions`, `debate`, `epics`, `gate_status`.\nDefault: all fields selected. Invalid values return a validation error.",
           "type": [
             "array",
             "null"
@@ -22286,6 +22286,140 @@
             "updated_at"
           ]
         },
+        "ProposalFeedbackRefinementModel": {
+          "description": "One canonical root-scoped feedback-refinement lifecycle generation.",
+          "type": "object",
+          "properties": {
+            "root_feedback_id": {
+              "type": "string"
+            },
+            "generation": {
+              "type": "integer",
+              "format": "int32"
+            },
+            "state": {
+              "description": "`queued`, `injected`, `accepted`, `wont_fix`, or `withdrawn_by_author`.",
+              "type": "string"
+            },
+            "debate_entry_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "round": {
+              "type": "integer",
+              "format": "int32"
+            },
+            "source_rows": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/ProposalFeedbackSourceRowModel"
+              },
+              "default": []
+            },
+            "accepted_disposition": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "accepted_revision_seq": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int32"
+            },
+            "accepted_reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "accepted_at": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "accepted_by_user_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "withdrawn_at": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "withdrawn_by_user_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "root_feedback_id",
+            "generation",
+            "state",
+            "round"
+          ]
+        },
+        "ProposalFeedbackSourceRowModel": {
+          "description": "One verbatim snapshot captured into a feedback refinement generation.",
+          "type": "object",
+          "properties": {
+            "source_feedback_id": {
+              "type": "string"
+            },
+            "source_ordinal": {
+              "type": "integer",
+              "format": "int32"
+            },
+            "source_parent_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "author_kind": {
+              "type": "string"
+            },
+            "author_user_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "author_model": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "body": {
+              "type": "string"
+            },
+            "severity": {
+              "type": "string"
+            },
+            "created_at": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "source_feedback_id",
+            "source_ordinal",
+            "author_kind",
+            "body",
+            "severity",
+            "created_at"
+          ]
+        },
         "ProposalRevisionModel": {
           "type": "object",
           "properties": {
@@ -22636,57 +22770,6 @@
             "round",
             "created_at",
             "updated_at"
-          ]
-        },
-        "ProposalFeedbackSourceRowModel": {
-          "description": "One verbatim snapshot captured into a feedback refinement generation.",
-          "type": "object",
-          "properties": {
-            "source_feedback_id": {
-              "type": "string"
-            },
-            "source_ordinal": {
-              "type": "integer",
-              "format": "int32"
-            },
-            "source_parent_id": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "author_kind": {
-              "type": "string"
-            },
-            "author_user_id": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "author_model": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "body": {
-              "type": "string"
-            },
-            "severity": {
-              "type": "string"
-            },
-            "created_at": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "source_feedback_id",
-            "source_ordinal",
-            "author_kind",
-            "body",
-            "severity",
-            "created_at"
           ]
         },
         "ProposalRefinementStatusModel": {
@@ -23115,6 +23198,16 @@
           ],
           "items": {
             "$ref": "#/$defs/ProposalFeedbackModel"
+          }
+        },
+        "feedback_refinements": {
+          "description": "Canonical lifecycle projection. Optional for backward compatibility.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/ProposalFeedbackRefinementModel"
           }
         },
         "revisions": {

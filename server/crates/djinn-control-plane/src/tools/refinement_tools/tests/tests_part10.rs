@@ -954,4 +954,43 @@ async fn typed_evidence_disposition_isolates_decode_roles_and_stale_lifecycle() 
     .await;
     assert_eq!(stale["conflict_code"], "invalid_lifecycle");
     assert_eq!(disposition_snapshot(&db, &proposal.id).await, before);
+
+    // This is deliberately distinct from the parity-valid stale lifecycle above:
+    // corrupt only the finding, retaining the transition and legacy projection.
+    let (server, db, proposal, fixture) = disposition_fixture().await;
+    djinn_db::test_support::set_typed_evidence_disposition_lifecycle_for_test(
+        &db,
+        &fixture.finding_id,
+        "demanded",
+    )
+    .await;
+    let before = disposition_snapshot(&db, &proposal.id).await;
+    let invariant_invalid = disposition_call(
+        &server,
+        &fixture.caller_user_id,
+        "proposal_refinement_withdraw_evidence",
+        disposition_args("proposal_refinement_withdraw_evidence", &fixture, 1),
+    )
+    .await;
+    assert_eq!(
+        invariant_invalid["conflict_code"], "legacy_typed_parity_mismatch",
+        "{invariant_invalid}"
+    );
+    assert_eq!(disposition_snapshot(&db, &proposal.id).await, before);
+
+    // An empty identity is not an empty withdrawal rationale and must not be
+    // machine-classified as one. The repository must not mutate before lookup.
+    let (server, db, proposal, fixture) = disposition_fixture().await;
+    let before = disposition_snapshot(&db, &proposal.id).await;
+    let mut empty_finding = disposition_args("proposal_refinement_withdraw_evidence", &fixture, 1);
+    empty_finding["finding_id"] = serde_json::json!("");
+    let empty_finding = disposition_call(
+        &server,
+        &fixture.caller_user_id,
+        "proposal_refinement_withdraw_evidence",
+        empty_finding,
+    )
+    .await;
+    assert_eq!(empty_finding["conflict_code"], "finding_not_found");
+    assert_eq!(disposition_snapshot(&db, &proposal.id).await, before);
 }

@@ -57,9 +57,7 @@ fn disposition_rejection_code(error: &str) -> &'static str {
         "committed_folding_revision_required"
     } else if error.contains("withdrawal requires non-load-bearing assertion") {
         "non_load_bearing_assertion_required"
-    } else if error.contains("must not be empty")
-        || error.contains("typed evidence identity fields must be non-empty")
-    {
+    } else if error.contains("withdrawal rationale must not be empty") {
         "rationale_required"
     } else if error.contains("legacy_typed_parity_mismatch") {
         "legacy_typed_parity_mismatch"

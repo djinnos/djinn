@@ -145,6 +145,7 @@ pub(super) fn err_show(error: impl Into<String>) -> ProposalShowResponse {
         latest_lint: None,
         targets: None,
         feedback: None,
+        feedback_refinements: None,
         revisions: None,
         signoffs: None,
         epics: None,

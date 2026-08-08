@@ -1034,11 +1034,11 @@ mod body_excerpt_tests {
         let err = resp["error"]
             .as_str()
             .expect("response should contain error field");
-        assert!(
-            err.contains("invalid field: \"unknown_field\""),
-            "err: {err}"
+        assert_eq!(
+            err,
+            "invalid field: \"unknown_field\" (accepted: proposal, targets, feedback, \
+             feedback_refinements, signoffs, revisions, debate, epics, gate_status)"
         );
-        assert!(err.contains("accepted: proposal, targets, feedback, signoffs, revisions, debate, epics, gate_status"), "err: {err}");
     }
 
     /// Invalid `revision_bodies` returns an error naming the invalid value and accepted values.

@@ -21692,7 +21692,7 @@ expression: signatures
       "properties": {
         "fields": {
           "default": null,
-          "description": "Select which top-level sections to include in the response.\nAccepted values: `proposal`, `targets`, `feedback`, `signoffs`,\n`revisions`, `debate`, `epics`, `gate_status`.\nDefault: all fields selected. Invalid values return a validation error.",
+          "description": "Select which top-level sections to include in the response.\nAccepted values: `proposal`, `targets`, `feedback`, `feedback_refinements`, `signoffs`,\n`revisions`, `debate`, `epics`, `gate_status`.\nDefault: all fields selected. Invalid values return a validation error.",
           "items": {
             "type": "string"
           },
@@ -22209,6 +22209,89 @@ expression: signatures
             "severity",
             "created_at",
             "updated_at"
+          ],
+          "type": "object"
+        },
+        "ProposalFeedbackRefinementModel": {
+          "description": "One canonical root-scoped feedback-refinement lifecycle generation.",
+          "properties": {
+            "accepted_at": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "accepted_by_user_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "accepted_disposition": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "accepted_reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "accepted_revision_seq": {
+              "format": "int32",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "debate_entry_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "generation": {
+              "format": "int32",
+              "type": "integer"
+            },
+            "root_feedback_id": {
+              "type": "string"
+            },
+            "round": {
+              "format": "int32",
+              "type": "integer"
+            },
+            "source_rows": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/ProposalFeedbackSourceRowModel"
+              },
+              "type": "array"
+            },
+            "state": {
+              "description": "`queued`, `injected`, `accepted`, `wont_fix`, or `withdrawn_by_author`.",
+              "type": "string"
+            },
+            "withdrawn_at": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "withdrawn_by_user_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "root_feedback_id",
+            "generation",
+            "state",
+            "round"
           ],
           "type": "object"
         },
@@ -22974,6 +23057,16 @@ expression: signatures
         "feedback": {
           "items": {
             "$ref": "#/$defs/ProposalFeedbackModel"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "feedback_refinements": {
+          "description": "Canonical lifecycle projection. Optional for backward compatibility.",
+          "items": {
+            "$ref": "#/$defs/ProposalFeedbackRefinementModel"
           },
           "type": [
             "array",

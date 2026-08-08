@@ -2095,6 +2095,32 @@ impl ProposalRepository {
         Ok(Some(FeedbackRefinementGeneration { injection, sources }))
     }
 
+    /// Read every durable feedback-refinement generation for a proposal.
+    /// Includes queued and disposed generations, with canonical source order.
+    pub async fn feedback_refinement_generations(
+        &self,
+        proposal_id: &str,
+    ) -> Result<Vec<FeedbackRefinementGeneration>> {
+        self.db.ensure_initialized().await?;
+        let injections = sqlx::query_as::<_, ProposalFeedbackRefinementInjection>(
+            "SELECT id,proposal_id,root_feedback_id,generation,state,cutoff_at,cutoff_feedback_id,round,debate_entry_id,accepted_disposition,accepted_revision_seq,accepted_reason,accepted_at,accepted_by_user_id,created_at,updated_at FROM proposal_feedback_refinement_injections WHERE proposal_id=$1 ORDER BY root_feedback_id,generation",
+        )
+        .bind(proposal_id)
+        .fetch_all(self.db.pool())
+        .await?;
+        let mut generations = Vec::with_capacity(injections.len());
+        for injection in injections {
+            let sources = sqlx::query_as::<_, ProposalFeedbackRefinementSource>(
+                "SELECT injection_id,source_feedback_id,source_ordinal,source_parent_id,source_author_kind,source_author_user_id,source_author_model,source_body,source_severity,source_created_at,captured_at FROM proposal_feedback_refinement_sources WHERE injection_id=$1 ORDER BY source_ordinal",
+            )
+            .bind(&injection.id)
+            .fetch_all(self.db.pool())
+            .await?;
+            generations.push(FeedbackRefinementGeneration { injection, sources });
+        }
+        Ok(generations)
+    }
+
     /// Get a single debate-trail entry by id.
     pub async fn get_debate_trail_entry(
         &self,
@@ -4045,6 +4071,13 @@ impl ProposalRepository {
         input: AtomicEvidenceDispositionInput,
     ) -> Result<AtomicEvidenceDispositionResult> {
         self.db.ensure_initialized().await?;
+        if input.disposition == TribunalEvidenceLifecycle::Withdrawn
+            && input.rationale.trim().is_empty()
+        {
+            return Err(Error::InvalidData(
+                "withdrawal rationale must not be empty".into(),
+            ));
+        }
         let mut tx = self.db.pool().begin().await?;
         let proposal_id: String = sqlx::query_scalar(
             "SELECT proposal_id FROM typed_evidence_findings WHERE id=$1 FOR UPDATE",

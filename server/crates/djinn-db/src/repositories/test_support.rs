@@ -1843,6 +1843,22 @@ pub async fn ci_route_plant_reserved_for_test(
     .unwrap_or_else(|error| panic!("plant reserved route: {error}"));
 }
 
+/// Return a materialized feedback-refinement generation to its durable queued
+/// recovery state for cross-crate projection tests.
+///
+/// **Not for production use.** Panics on SQL errors.
+pub async fn queue_feedback_refinement_generation_for_test(db: &Database, injection_id: &str) {
+    db.ensure_initialized().await.unwrap();
+    sqlx::query(
+        "UPDATE proposal_feedback_refinement_injections \
+         SET state='queued', debate_entry_id=NULL WHERE id=$1",
+    )
+    .bind(injection_id)
+    .execute(db.pool())
+    .await
+    .unwrap_or_else(|error| panic!("queue feedback refinement generation: {error}"));
+}
+
 // Larger multi-row fixtures live beside this module and are re-exported here,
 // so `crate::repositories::test_support::*` remains the single import path.
 pub use super::test_support_fixtures::*;
