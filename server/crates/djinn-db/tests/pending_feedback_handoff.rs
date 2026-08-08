@@ -38,8 +38,8 @@ async fn failed_terminal_handoff_rolls_back_then_retries_without_losing_pending_
     let first = blocking_feedback(&repo, &proposal_id, "first rollback boundary").await;
     let second = blocking_feedback(&repo, &proposal_id, "second rollback boundary").await;
 
-    assert!(repo
-        .claim_refinement_intent(ClaimRefinementIntentRequest {
+    assert!(
+        repo.claim_refinement_intent(ClaimRefinementIntentRequest {
             run_id: run_id.clone(),
             intent_id: intent_id.clone(),
             generation,
@@ -48,7 +48,8 @@ async fn failed_terminal_handoff_rolls_back_then_retries_without_losing_pending_
         })
         .await
         .unwrap()
-        .is_some());
+        .is_some()
+    );
     let transition = SourceIntentTransitionRequest {
         run_id: run_id.clone(),
         intent_id: intent_id.clone(),
@@ -72,7 +73,11 @@ async fn failed_terminal_handoff_rolls_back_then_retries_without_losing_pending_
         })
         .await
         .expect_err("injected successor persistence failure must abort the handoff transaction");
-    assert!(error.to_string().contains("injected successor persistence failure"));
+    assert!(
+        error
+            .to_string()
+            .contains("injected successor persistence failure")
+    );
 
     assert_eq!(
         sqlx::query_scalar::<_, String>("SELECT state FROM refinement_runs WHERE id=$1")
@@ -153,8 +158,8 @@ async fn failed_terminal_handoff_rolls_back_then_retries_without_losing_pending_
         .await
         .unwrap();
 
-    assert!(repo
-        .terminal_refinement_run_from_intent(TerminalRefinementRunFromIntentRequest {
+    assert!(
+        repo.terminal_refinement_run_from_intent(TerminalRefinementRunFromIntentRequest {
             source: transition,
             reason: RefinementStopReason::OperatorStop {
                 actor: "handoff-regression".into(),
@@ -162,7 +167,8 @@ async fn failed_terminal_handoff_rolls_back_then_retries_without_losing_pending_
             },
         })
         .await
-        .unwrap());
+        .unwrap()
+    );
 
     let successor: (String, i32) = sqlx::query_as(
         "SELECT id, generation FROM refinement_runs WHERE proposal_id=$1 AND state='running' ORDER BY generation",
