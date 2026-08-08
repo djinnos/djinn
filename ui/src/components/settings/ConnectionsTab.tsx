@@ -65,9 +65,13 @@ export function ConnectionsTab() {
   // `openai` API key, by contrast, is an org-provided key.)
   const openaiProvider = (connected.data ?? []).find((p) => p.id === "openai");
   const codexConnected = openaiProvider?.connection_methods.includes("oauth") ?? false;
-  const codexRevokedReason = (
-    openaiProvider as { revoked_reason?: string } | undefined
-  )?.revoked_reason;
+  // The reason has to come from the CATALOG, not the connected list: the
+  // connected endpoint drops every provider carrying a revoked reason and
+  // hardcodes `revoked_reason: null` on the ones it returns, so sourcing it
+  // there can only ever yield `undefined` and the row silently degrades to the
+  // never-connected "Sign in with a device code" subtitle.
+  const codexRevokedReason = (catalog.data ?? []).find((p) => p.id === "openai")
+    ?.revoked_reason;
 
   // Split connected providers into the two buckets, then collapse subscriptions
   // by shared credential. The Codex sub is rendered by its dedicated OAuth row,
