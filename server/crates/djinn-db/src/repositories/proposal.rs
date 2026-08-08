@@ -3971,7 +3971,17 @@ impl ProposalRepository {
             )
             .await?;
         let task_id = uuid::Uuid::now_v7().to_string();
-        sqlx::query("INSERT INTO tasks (id,project_id,short_id,title,description,design,issue_type,priority,owner,status,labels,acceptance_criteria,created_by_user_id,agent_type) VALUES ($1,$2,$3,'Evidence retry spike','Read-only retry of failed typed evidence.','', 'spike',0,'','open',$4,'[]'::jsonb,$5,'architect')").bind(&task_id).bind(&project_id).bind(format!("e{}", &task_id[..7])).bind(serde_json::json!(["refinement-evidence", "read-only"])).bind(&input.caller_user_id).execute(&mut *tx).await?;
+        let created_by_user_id = resolve_effective_creator(
+            &mut tx,
+            EffectiveCreatorProvenance {
+                explicit_user_id: Some(&input.caller_user_id),
+                source_task_id: Some(&actor_task_id),
+                proposal_id: Some(&proposal_id),
+            },
+            None,
+        )
+        .await?;
+        sqlx::query("INSERT INTO tasks (id,project_id,short_id,title,description,design,issue_type,priority,owner,status,labels,acceptance_criteria,created_by_user_id,agent_type) VALUES ($1,$2,$3,'Evidence retry spike','Read-only retry of failed typed evidence.','', 'spike',0,'','open',$4,'[]'::jsonb,$5,'architect')").bind(&task_id).bind(&project_id).bind(format!("e{}", &task_id[..7])).bind(serde_json::json!(["refinement-evidence", "read-only"])).bind(&created_by_user_id).execute(&mut *tx).await?;
         let allocation = TypedEvidenceRepository::allocate_retry_in_transaction(
             &mut tx,
             AllocateTypedEvidenceRetryInput {
