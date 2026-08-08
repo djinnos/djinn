@@ -557,7 +557,10 @@ async fn apply_provider_breaker_feedback(
                 (false, true, retry_after_ms)
             }
             djinn_runtime::ProviderFailureClass::AuthInvalid => {
-                if refresh_oauth_credential_after_401(model_id, app_state).await {
+                // `creator_scope` is required: this runs outside the dispatch-time
+                // `SESSION_USER_ID` scope, so an owner-less lookup would miss a
+                // user-owned OAuth token and revoke a live credential.
+                if refresh_oauth_credential_after_401(model_id, app_state, creator_scope).await {
                     app_state
                         .health_tracker
                         .record_stall(creator_scope, model_id, false);
