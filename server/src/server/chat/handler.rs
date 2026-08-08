@@ -716,10 +716,9 @@ pub(super) async fn completions_handler_impl(
     }
 
     // Proposal-scoped chat ("Address with djinn"): seed the system prompt with
-    // the spec + unresolved feedback and grant the proposal-editing tools.
-    // This path edits the proposal as the requesting user, so — unlike generic
-    // chat — it MUST be authenticated: an anonymous caller hits the proposal
-    // edit gate's trusted-system bypass (`None ⇒ Ok`) and would slip past it.
+    // the spec + unresolved feedback and grant feedback/refinement tools only.
+    // This path writes durable feedback as the requesting user, so — unlike
+    // generic chat — it MUST be authenticated.
     let proposal_ref = req.proposal_id.as_deref().filter(|s| !s.trim().is_empty());
     if proposal_ref.is_some() && user_id.is_none() {
         return Err((
@@ -1134,7 +1133,7 @@ struct ChatLoopContext {
     model_id: String,
     context_window: i64,
     /// Extra MCP tools allowed for this loop on top of the global chat allowlist
-    /// (the proposal-editing subset for a proposal-scoped chat; empty otherwise).
+    /// (the proposal feedback/refinement subset for a proposal-scoped chat; empty otherwise).
     extra_allowed_mcp: Vec<String>,
     /// Stable notice ids included in the assembled first provider prompt.
     interruption_notice_ids: Vec<String>,

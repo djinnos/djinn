@@ -29,6 +29,8 @@ pub struct FeedbackRefinementLifecycleState {
     pub runs: i64,
     pub running: i64,
     pub intents: i64,
+    pub intent_rounds: i64,
+    pub dispatched_tasks: i64,
     pub objections: i64,
     pub injections: i64,
     pub immutable_generations: i64,
@@ -104,6 +106,8 @@ impl ProposalRepository {
                (SELECT count(*) FROM refinement_runs WHERE proposal_id=$1) AS runs, \
                (SELECT count(*) FROM refinement_runs WHERE proposal_id=$1 AND state='running') AS running, \
                (SELECT count(*) FROM refinement_dispatch_intents i JOIN refinement_runs r ON r.id=i.run_id WHERE r.proposal_id=$1) AS intents, \
+               (SELECT count(DISTINCT (i.run_id, i.round)) FROM refinement_dispatch_intents i JOIN refinement_runs r ON r.id=i.run_id WHERE r.proposal_id=$1) AS intent_rounds, \
+               (SELECT count(*) FROM tasks t JOIN refinement_dispatch_intents i ON i.id=t.refinement_intent_id JOIN refinement_runs r ON r.id=i.run_id WHERE r.proposal_id=$1) AS dispatched_tasks, \
                (SELECT count(*) FROM proposal_debate_trail WHERE proposal_id=$1 AND kind='human_feedback') AS objections, \
                (SELECT count(*) FROM proposal_feedback_refinement_injections WHERE proposal_id=$1) AS injections, \
                (SELECT count(DISTINCT (root_feedback_id, generation)) FROM proposal_feedback_refinement_injections WHERE proposal_id=$1) AS immutable_generations, \
