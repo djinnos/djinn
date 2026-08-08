@@ -254,6 +254,10 @@ async fn migration_round_trips_every_route_attempt_field() {
     assert_eq!(loaded.pre_call_resumptions, 0);
     assert!(loaded.charged_signature_count.is_none());
     assert!(loaded.tier2_lease_id.is_none());
+    // NULL is the honest spelling of "no merge observed". A reserved route has
+    // seen none, and the column must survive reload as absent rather than as a
+    // zero timestamp.
+    assert!(loaded.pr_merged_at.is_none());
 
     // And the two additive coordinator-incarnation drain columns round trip.
     let drained = drained_incarnation(&f.db).await;
@@ -4210,6 +4214,543 @@ async fn merged_prs_counts_a_merge_that_landed_in_the_tier_two_column() {
         report.merged_prs, 1,
         "reading only `terminal_outcome` would miss every merge that followed a \
          provider failure and inflate every per-merged-PR ratio in the report"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The per-merged-PR denominator, after the follow-up defect
+// ---------------------------------------------------------------------------
+//
+// The four fixtures below exist because the denominator used to be derived
+// from `COALESCE(tier2_resolution, terminal_outcome)`, and
+// `close_routes_for_newer_outcome` cannot write that column once Lead has
+// resolved the lease: its `WHERE` demands `tier2_lease_state = 'open'` and its
+// `COALESCE` preserves whatever is already there. So `merged_prs` counted only
+// routes that never reached Lead while `lead_invocations` counted only routes
+// that did — two disjoint populations, and a ratio that was uncomputable
+// rather than merely wrong. Production read `merged_prs = 0` with 13 merges
+// and 7 Lead routes behind it.
+//
+// `pr_merged_at` is the separate fact. Each fixture below names the mutation
+// it kills.
+
+/// **The production scenario.** A route reaches Lead, Lead adjudicates a
+/// repair, and the PR merges afterwards — and the cost ratios are computable.
+///
+/// Kills: reverting `merged_prs` to `FILTER (WHERE adjudicated = 'merged')`,
+/// and adding any lease-state or action-phase predicate to the `pr_merged_at`
+/// stamp in `close_routes_for_newer_outcome`. Either one puts this route's
+/// merge back out of reach of the denominator, `merged_prs` returns to 0 and
+/// both ratios collapse to `None`.
+///
+/// The `lead_invocations`/`worker_reopens` assertions are the vacuity guards:
+/// without them a stamp that also wiped the adjudication would satisfy
+/// `Some(..)` with a numerator of zero, which reads as the *best* possible cost
+/// and is the one wrong answer nobody would investigate.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn merged_prs_counts_a_pr_that_merged_after_lead_adjudicated_the_route() {
+    let f = fixture().await;
+    let repository = repo(&f.db);
+    let identity = pr_head_identity(960, "headsha-merged-after-lead");
+    repository
+        .reserve(&reservation(
+            &f.subject,
+            "key-after-lead",
+            identity.clone(),
+            "fp-after-lead",
+        ))
+        .await
+        .unwrap();
+    let lease_id = open_lease(
+        &repository,
+        &f.subject,
+        "key-after-lead",
+        &identity,
+        &tier2_lease_key(4242, "headsha-merged-after-lead"),
+    )
+    .await;
+    repository
+        .attach_lead_session(
+            &f.subject,
+            "key-after-lead",
+            &lease_id,
+            "session-after-lead",
+        )
+        .await
+        .unwrap();
+    // Lead answers. The lease is now `resolved` and `tier2_resolution` is
+    // spent — this is the state the old denominator could never see a merge
+    // reach.
+    assert!(
+        repository
+            .resolve_tier2_lease(
+                &f.subject,
+                "key-after-lead",
+                &lease_id,
+                &identity,
+                &CiTier2Resolution::repair(),
+            )
+            .await
+            .unwrap()
+    );
+
+    let before_merge = repository
+        .route_report(&CiRouteReportFilter::all())
+        .await
+        .unwrap();
+    assert_eq!(
+        before_merge.merged_prs, 0,
+        "vacuity: nothing has merged yet, so a denominator that already reads 1 \
+         is counting something other than a merge"
+    );
+    assert_eq!(before_merge.lead_sessions_per_merged_pr(), None);
+
+    // The PR merges some time later. Nothing about this route is `open` or
+    // `reserved` any more.
+    repository
+        .close_routes_for_newer_outcome(&f.subject, 4242, CiRouteOutcome::Merged, None)
+        .await
+        .unwrap();
+
+    let row = repository
+        .get(&f.subject, "key-after-lead")
+        .await
+        .unwrap()
+        .expect("row");
+    assert_eq!(
+        row.tier2_lease_state,
+        Some(CiTier2LeaseState::Resolved),
+        "vacuity: the lease must already be resolved, or this fixture is the \
+         open-lease case and proves nothing about the defect"
+    );
+    assert!(
+        row.pr_merged_at.is_some(),
+        "the merge is a fact about the PR and must be recorded on a route Lead \
+         already adjudicated"
+    );
+
+    let report = repository
+        .route_report(&CiRouteReportFilter::all())
+        .await
+        .unwrap();
+    assert_eq!(
+        report.merged_prs, 1,
+        "the PR merged, so the denominator of both cost ratios is 1"
+    );
+    assert_eq!(
+        report.lead_invocations, 1,
+        "vacuity: one Lead session ran, so a ratio built on this numerator is \
+         describing real cost"
+    );
+    assert_eq!(
+        report.worker_reopens, 1,
+        "vacuity: the repair reopen dispatched one worker"
+    );
+    assert_eq!(
+        report.lead_sessions_per_merged_pr(),
+        Some(1.0),
+        "one Lead session per merged PR — the exact number that read `None` in \
+         production while 13 PRs merged past 7 Lead routes"
+    );
+    assert_eq!(report.worker_reopens_per_merged_pr(), Some(1.0));
+}
+
+/// The merge does not clobber the adjudication it arrives after.
+///
+/// Kills: writing the merge into `tier2_resolution` (dropping the `COALESCE`,
+/// or widening the `WHERE` past `tier2_lease_state = 'open'`) as a shortcut to
+/// fixing the denominator. That would repair `merged_prs` by destroying
+/// `repair_reopens`, `worker_reopens`, and the audit record of a Lead session
+/// that actually ran — five numerators traded for one denominator.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_merge_after_lead_leaves_the_adjudication_intact() {
+    let f = fixture().await;
+    let repository = repo(&f.db);
+    let identity = pr_head_identity(961, "headsha-adjudication-intact");
+    repository
+        .reserve(&reservation(
+            &f.subject,
+            "key-intact",
+            identity.clone(),
+            "fp-intact",
+        ))
+        .await
+        .unwrap();
+    let lease_id = open_lease(
+        &repository,
+        &f.subject,
+        "key-intact",
+        &identity,
+        &tier2_lease_key(4242, "headsha-adjudication-intact"),
+    )
+    .await;
+    repository
+        .resolve_tier2_lease(
+            &f.subject,
+            "key-intact",
+            &lease_id,
+            &identity,
+            &CiTier2Resolution::repair(),
+        )
+        .await
+        .unwrap();
+
+    let adjudicated = repository
+        .get(&f.subject, "key-intact")
+        .await
+        .unwrap()
+        .expect("row");
+    assert_eq!(
+        adjudicated.tier2_resolution,
+        Some(CiRouteOutcome::RepairReopened),
+        "vacuity: the adjudication must be present before the merge, or the \
+         assertion below is comparing nothing to nothing"
+    );
+    assert_eq!(adjudicated.reopen_mode, Some(CiReopenMode::Repair));
+
+    repository
+        .close_routes_for_newer_outcome(&f.subject, 4242, CiRouteOutcome::Merged, None)
+        .await
+        .unwrap();
+
+    let after = repository
+        .get(&f.subject, "key-intact")
+        .await
+        .unwrap()
+        .expect("row");
+    assert_eq!(
+        after.tier2_resolution,
+        Some(CiRouteOutcome::RepairReopened),
+        "how Lead decided this route is not what the PR later did with itself"
+    );
+    assert_eq!(after.reopen_mode, Some(CiReopenMode::Repair));
+    assert!(after.pr_merged_at.is_some());
+
+    let report = repository
+        .route_report(&CiRouteReportFilter::all())
+        .await
+        .unwrap();
+    assert_eq!(
+        report.repair_reopens, 1,
+        "the repair is still counted as a repair after the merge"
+    );
+    assert_eq!(report.worker_reopens, 1);
+    assert_eq!(report.merged_prs, 1);
+}
+
+/// The open-lease close is byte-for-byte the behaviour it always had, plus the
+/// stamp.
+///
+/// Kills: replacing the two existing statements with the new one, i.e. "fixing"
+/// the denominator by making the merge stop resolving the lease and
+/// terminalizing the reserved row. That regression frees no current-evidence
+/// key and leaves a delayed Lead result something to apply to, and every
+/// assertion here except `pr_merged_at` would have passed before this change.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_merge_before_lead_resolves_still_closes_the_open_lease() {
+    let f = fixture().await;
+    let repository = repo(&f.db);
+    let identity = pr_head_identity(962, "headsha-merged-while-open");
+    repository
+        .reserve(&reservation(
+            &f.subject,
+            "key-while-open",
+            identity.clone(),
+            "fp-while-open",
+        ))
+        .await
+        .unwrap();
+    open_lease(
+        &repository,
+        &f.subject,
+        "key-while-open",
+        &identity,
+        &tier2_lease_key(4242, "headsha-merged-while-open"),
+    )
+    .await;
+
+    assert_eq!(
+        repository
+            .close_routes_for_newer_outcome(&f.subject, 4242, CiRouteOutcome::Merged, None)
+            .await
+            .unwrap(),
+        1,
+        "the `reserved` row is still terminalized by the merge and still \
+         counted as closed"
+    );
+
+    let row = repository
+        .get(&f.subject, "key-while-open")
+        .await
+        .unwrap()
+        .expect("row");
+    assert_eq!(row.tier2_lease_state, Some(CiTier2LeaseState::Resolved));
+    assert_eq!(
+        row.tier2_resolution,
+        Some(CiRouteOutcome::Merged),
+        "an UNADJUDICATED lease still takes the merge as its resolution"
+    );
+    assert_eq!(row.terminal_outcome, Some(CiRouteOutcome::Merged));
+    assert!(row.is_terminal());
+    assert!(row.pr_merged_at.is_some());
+
+    assert_eq!(
+        repository
+            .quiescence_counts()
+            .await
+            .unwrap()
+            .open_tier2_leases,
+        0,
+        "the current-evidence key is released, so a delayed Lead result finds \
+         nothing to apply to"
+    );
+    assert_eq!(
+        repository
+            .route_report(&CiRouteReportFilter::all())
+            .await
+            .unwrap()
+            .merged_prs,
+        1
+    );
+}
+
+/// The stamp is write-once, and a pass is not a merge.
+///
+/// Kills: dropping `AND pr_merged_at IS NULL` from the stamp (a merged PR is
+/// re-polled, so every later poll would move the recorded merge instant and the
+/// column would degrade into a boolean that lies about *when*), and stamping on
+/// `CiRouteOutcome::Passed` (which would make green CI count as a merged PR and
+/// silently divide the cost bounds by the wrong population).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_merge_stamp_is_write_once_and_a_pass_never_sets_it() {
+    let f = fixture().await;
+    let repository = repo(&f.db);
+
+    // A passing close on its own PR.
+    let passing = CiEvidenceIdentity {
+        pr_number: 5150,
+        ..pr_head_identity(963, "headsha-passed-not-merged")
+    };
+    repository
+        .reserve(&reservation(
+            &f.subject,
+            "key-passed",
+            passing.clone(),
+            "fp-passed",
+        ))
+        .await
+        .unwrap();
+    repository
+        .close_routes_for_newer_outcome(&f.subject, 5150, CiRouteOutcome::Passed, None)
+        .await
+        .unwrap();
+    let passed_row = repository
+        .get(&f.subject, "key-passed")
+        .await
+        .unwrap()
+        .expect("row");
+    assert_eq!(
+        passed_row.terminal_outcome,
+        Some(CiRouteOutcome::Passed),
+        "vacuity: the passing close must actually have landed"
+    );
+    assert!(
+        passed_row.pr_merged_at.is_none(),
+        "CI going green is not the PR merging"
+    );
+
+    // A merging close, polled twice.
+    let merging = pr_head_identity(964, "headsha-merged-twice");
+    repository
+        .reserve(&reservation(
+            &f.subject,
+            "key-twice",
+            merging.clone(),
+            "fp-twice",
+        ))
+        .await
+        .unwrap();
+    repository
+        .close_routes_for_newer_outcome(&f.subject, 4242, CiRouteOutcome::Merged, None)
+        .await
+        .unwrap();
+    // Rewind the stamp an hour before re-polling. Two closes a millisecond
+    // apart would compare equal whether or not the guard exists — `to_char`
+    // renders milliseconds — so the assertion below would be vacuous exactly
+    // when the mutation it kills is present. An hour is unmistakable.
+    sqlx::query(
+        "UPDATE ci_route_attempts SET pr_merged_at = now() - interval '1 hour' \
+                 WHERE provider_action_key = 'key-twice'",
+    )
+    .execute(f.db.pool())
+    .await
+    .expect("rewind the stamp to a distinguishable instant");
+    let first = repository
+        .get(&f.subject, "key-twice")
+        .await
+        .unwrap()
+        .expect("row")
+        .pr_merged_at
+        .expect("the merge is stamped");
+
+    repository
+        .close_routes_for_newer_outcome(&f.subject, 4242, CiRouteOutcome::Merged, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        repository
+            .get(&f.subject, "key-twice")
+            .await
+            .unwrap()
+            .expect("row")
+            .pr_merged_at
+            .as_deref(),
+        Some(first.as_str()),
+        "a re-poll of an already-merged PR records the FIRST observation, not \
+         the latest one"
+    );
+
+    let report = repository
+        .route_report(&CiRouteReportFilter::all())
+        .await
+        .unwrap();
+    assert_eq!(
+        report.merged_prs, 1,
+        "one PR merged and one only passed, across two closes of the merged one"
+    );
+    assert_eq!(
+        report.passed, 1,
+        "vacuity: the passing route is in the window, so `merged_prs = 1` is \
+         excluding it rather than never having seen it"
+    );
+}
+
+/// Migration 202's backfill recovers the merges the OLD reading could see.
+///
+/// Every merge that landed while its lease was still open did reach
+/// `tier2_resolution`, and those rows exist in production. Switching the
+/// denominator to a column the migration introduced would zero them at the
+/// cutover — the report would say fewer PRs merged the day of the deploy than
+/// the day before, which is the shape of a regression an operator would chase
+/// into the routing layer rather than into the schema.
+///
+/// The statement under test is read out of the SHIPPED migration file rather
+/// than restated here, so a predicate typo in the file fails this fixture
+/// instead of passing a copy of itself. Kills: dropping the backfill, and
+/// narrowing its predicate to `terminal_outcome = 'merged'` (which is the
+/// misreading the original defect comment was written to warn about).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn migration_202_backfills_merges_that_reached_the_adjudication_column() {
+    let f = fixture().await;
+    let repository = repo(&f.db);
+
+    // One route whose PR merged while its Tier-2 lease was open — the only
+    // shape the pre-202 denominator could ever count — and one that never
+    // merged at all.
+    let merged = pr_head_identity(965, "headsha-backfill-merged");
+    repository
+        .reserve(&reservation(
+            &f.subject,
+            "key-backfill-merged",
+            merged.clone(),
+            "fp-backfill-merged",
+        ))
+        .await
+        .unwrap();
+    open_lease(
+        &repository,
+        &f.subject,
+        "key-backfill-merged",
+        &merged,
+        &tier2_lease_key(4242, "headsha-backfill-merged"),
+    )
+    .await;
+    repository
+        .close_routes_for_newer_outcome(&f.subject, 4242, CiRouteOutcome::Merged, None)
+        .await
+        .unwrap();
+
+    let never_merged = CiEvidenceIdentity {
+        pr_number: 7070,
+        ..pr_head_identity(966, "headsha-backfill-open")
+    };
+    repository
+        .reserve(&reservation(
+            &f.subject,
+            "key-backfill-open",
+            never_merged,
+            "fp-backfill-open",
+        ))
+        .await
+        .unwrap();
+
+    // Rewind the stamp to reproduce a row written before 202 existed. Its
+    // `tier2_resolution` still says `merged`, which is exactly the production
+    // state the backfill has to recognise.
+    sqlx::query("UPDATE ci_route_attempts SET pr_merged_at = NULL")
+        .execute(f.db.pool())
+        .await
+        .expect("simulate rows written before migration 202");
+    assert_eq!(
+        repository
+            .route_report(&CiRouteReportFilter::all())
+            .await
+            .unwrap()
+            .merged_prs,
+        0,
+        "vacuity: with the stamp cleared the denominator must read 0, or the \
+         report is not reading the column this test is about"
+    );
+
+    let migration = include_str!("../../migrations_postgres/202_ci_route_pr_merged_fact.sql");
+    let backfill = migration
+        .split(';')
+        .map(|statement| {
+            statement
+                .lines()
+                .filter(|line| !line.trim_start().starts_with("--"))
+                .collect::<Vec<_>>()
+                .join("\n")
+                .trim()
+                .to_owned()
+        })
+        .find(|statement| statement.starts_with("UPDATE ci_route_attempts"))
+        .expect("migration 202 still carries a backfill UPDATE");
+    sqlx::query(&backfill)
+        .execute(f.db.pool())
+        .await
+        .expect("the shipped backfill applies");
+
+    assert!(
+        repository
+            .get(&f.subject, "key-backfill-merged")
+            .await
+            .unwrap()
+            .expect("row")
+            .pr_merged_at
+            .is_some(),
+        "a merge already recorded in `tier2_resolution` is carried into the \
+         new column rather than lost at the cutover"
+    );
+    assert!(
+        repository
+            .get(&f.subject, "key-backfill-open")
+            .await
+            .unwrap()
+            .expect("row")
+            .pr_merged_at
+            .is_none(),
+        "vacuity: a route whose PR never merged stays NULL, so the backfill is \
+         a predicate and not `WHERE true`"
+    );
+    assert_eq!(
+        repository
+            .route_report(&CiRouteReportFilter::all())
+            .await
+            .unwrap()
+            .merged_prs,
+        1,
+        "the denominator survives the migration boundary"
     );
 }
 
