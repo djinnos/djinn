@@ -48,6 +48,18 @@ fn err_refinement_status(error: impl Into<String>) -> ProposalRefinementStatusRe
     }
 }
 
+/// Role schemas are an admission prerequisite only when this boundary can add a
+/// new unresolved human-feedback obligation. Ordinary refinement must remain
+/// available when capture has no eligible source (including advisory-only and
+/// previously captured feedback).
+fn feedback_capture_contract_required(
+    capture_enabled: bool,
+    has_capturable_blocking_feedback: bool,
+    contract_available: bool,
+) -> bool {
+    capture_enabled && has_capturable_blocking_feedback && !contract_available
+}
+
 /// A rejected admission, rendered for a human but still machine-triageable.
 ///
 /// `message` is what reaches an error toast, so it says what happened and what
@@ -363,7 +375,11 @@ impl DjinnMcpServer {
         } else {
             false
         };
-        if captures_new_feedback && !human_feedback_disposition_contract_available() {
+        if feedback_capture_contract_required(
+            controls.capture,
+            captures_new_feedback,
+            human_feedback_disposition_contract_available(),
+        ) {
             return Json(err_refinement_start(
                 "human-feedback refinement capture requires compatible active Advocate and Judge role schemas"
                     .to_owned(),
@@ -579,7 +595,11 @@ impl DjinnMcpServer {
         } else {
             false
         };
-        if captures_new_feedback && !human_feedback_disposition_contract_available() {
+        if feedback_capture_contract_required(
+            controls.capture,
+            captures_new_feedback,
+            human_feedback_disposition_contract_available(),
+        ) {
             return Json(DemandRoundResponse {
                 proposal_id: Some(proposal.id),
                 accepted: false,
@@ -1059,6 +1079,19 @@ impl DjinnMcpServer {
             error: None,
             conflict_code: None,
         })
+    }
+}
+
+#[cfg(test)]
+mod feedback_capture_contract_tests {
+    use super::feedback_capture_contract_required;
+
+    #[test]
+    fn only_an_eligible_new_capture_requires_an_available_contract() {
+        assert!(!feedback_capture_contract_required(true, false, false));
+        assert!(!feedback_capture_contract_required(false, true, false));
+        assert!(!feedback_capture_contract_required(true, true, true));
+        assert!(feedback_capture_contract_required(true, true, false));
     }
 }
 

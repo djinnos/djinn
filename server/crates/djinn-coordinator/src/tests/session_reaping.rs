@@ -8792,3 +8792,519 @@ async fn mismatched_exit_event_uses_persisted_status_and_persists_evidence() {
             >= 1
     );
 }
+
+// ── Terminal-event ordering and immutable exit observations (cad4/5mzy) ─────
+
+fn terminal_session_event(
+    action: &'static str,
+    session: &djinn_core::models::SessionRecord,
+) -> DjinnEventEnvelope {
+    DjinnEventEnvelope {
+        entity_type: "session",
+        action,
+        payload: serde_json::to_value(session).unwrap(),
+        id: None,
+        project_id: None,
+        from_sync: false,
+    }
+}
+
+async fn terminal_fixture(
+    db: &Database,
+    tx: &broadcast::Sender<DjinnEventEnvelope>,
+    label: &str,
+    terminal_status: djinn_core::models::SessionStatus,
+    task_status: &str,
+) -> (djinn_core::models::Task, djinn_core::models::SessionRecord) {
+    use djinn_db::{CreateSessionParams, SessionRepository};
+
+    let (task, _) = create_task_with_note(db, tx, label).await;
+    let tasks = TaskRepository::new(db.clone(), crate::events::event_bus_for(tx));
+    tasks.set_status(&task.id, "in_progress").await.unwrap();
+    // Avoid manufacturing an `in_progress -> in_progress` transition. A
+    // transition *from* a session-held state is positive handoff evidence, so
+    // that no-op row would accidentally exonerate a failed-handoff fixture.
+    if task_status != "in_progress" {
+        tasks.set_status(&task.id, task_status).await.unwrap();
+    }
+    let sessions = SessionRepository::new(db.clone(), crate::events::event_bus_for(tx));
+    let session = sessions
+        .create(CreateSessionParams {
+            project_id: &task.project_id,
+            task_id: Some(&task.id),
+            model: "openai/gpt-5.5",
+            agent_type: "worker",
+            metadata_json: None,
+            task_run_id: None,
+            pricing: None,
+            cost_basis: None,
+        })
+        .await
+        .unwrap();
+    let session = sessions
+        .update(&session.id, terminal_status, 1, 1, 0, 0, None)
+        .await
+        .unwrap();
+    (task, session)
+}
+
+/// A replayable terminal observation captured from the named historical exit.
+/// The identity and every classifier input are fixture facts, not test labels.
+#[derive(Clone, Copy)]
+struct KnownSessionExitFixture {
+    session_id: &'static str,
+    task_id: &'static str,
+    task_title: &'static str,
+    terminal_status: djinn_core::models::SessionStatus,
+    task_status: &'static str,
+    transition_from_status: &'static str,
+    transition_to_status: &'static str,
+}
+
+async fn known_terminal_fixture(
+    db: &Database,
+    tx: &broadcast::Sender<DjinnEventEnvelope>,
+    fixture: KnownSessionExitFixture,
+) -> (djinn_core::models::Task, djinn_core::models::SessionRecord) {
+    use djinn_core::models::TransitionAction;
+    use djinn_db::{CreateSessionParams, SessionRepository};
+
+    // The named identities are fixture data, not labels on newly allocated
+    // rows. Install them before producing the durable task transition and the
+    // terminal-event payload which the production actor will read back.
+    let (mut task, _) = create_task_with_note(db, tx, fixture.task_title).await;
+    djinn_db::repositories::test_support::replace_task_id_for_test(db, &task.id, fixture.task_id)
+        .await;
+    task.id = fixture.task_id.to_owned();
+    let tasks = TaskRepository::new(db.clone(), crate::events::event_bus_for(tx));
+    tasks.set_status(&task.id, "in_progress").await.unwrap();
+    match fixture.task_status {
+        "in_progress" => {}
+        "needs_task_review" => {
+            tasks
+                .transition(
+                    &task.id,
+                    TransitionAction::SubmitTaskReview,
+                    "supervisor",
+                    "system",
+                    None,
+                    None,
+                )
+                .await
+                .unwrap();
+        }
+        "closed" => {
+            tasks.set_status(&task.id, "closed").await.unwrap();
+        }
+        status => panic!("unsupported known fixture task status: {status}"),
+    }
+
+    let sessions = SessionRepository::new(db.clone(), crate::events::event_bus_for(tx));
+    let created = sessions
+        .create(CreateSessionParams {
+            project_id: &task.project_id,
+            task_id: Some(&task.id),
+            model: "openai/gpt-5.5",
+            agent_type: "worker",
+            metadata_json: None,
+            task_run_id: None,
+            pricing: None,
+            cost_basis: None,
+        })
+        .await
+        .unwrap();
+    // Production allocation stays v7. The oracle installs the historical
+    // identity on its isolated test row before it acquires dependants.
+    djinn_db::repositories::test_support::replace_session_id_for_test(
+        db,
+        &created.id,
+        fixture.session_id,
+    )
+    .await;
+    let session = sessions
+        .update(
+            fixture.session_id,
+            fixture.terminal_status,
+            1,
+            1,
+            0,
+            0,
+            None,
+        )
+        .await
+        .unwrap();
+
+    // Verify the exact facts the actor's single read-back consumes.
+    assert_eq!(session.id, fixture.session_id);
+    assert_eq!(session.status, fixture.terminal_status.as_str());
+    assert_eq!(session.task_id.as_deref(), Some(fixture.task_id));
+    let state = djinn_db::LivenessRepository::new(db.clone())
+        .load_current_state(&task.id)
+        .await
+        .unwrap();
+    assert_eq!(state.task_status.as_deref(), Some(fixture.task_status));
+    assert_eq!(
+        state.last_transition_from_status.as_deref(),
+        Some(fixture.transition_from_status)
+    );
+    assert_eq!(fixture.transition_to_status, fixture.task_status);
+    (task, session)
+}
+
+/// The durable Required transition is written before the production terminal
+/// event entry point is called; fixture order, not elapsed time, is the oracle.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn healthy_handoff_precedes_terminal_event() {
+    use djinn_core::models::{SessionStatus, TransitionAction};
+    use djinn_db::{CreateSessionParams, SessionRepository};
+
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let (task, _) = create_task_with_note(&db, &tx, "019fcc80 healthy handoff").await;
+    let tasks = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+    tasks.set_status(&task.id, "in_progress").await.unwrap();
+    assert_eq!(
+        tasks
+            .transition(
+                &task.id,
+                TransitionAction::SubmitTaskReview,
+                "supervisor",
+                "system",
+                None,
+                None,
+            )
+            .await
+            .unwrap()
+            .status,
+        "needs_task_review"
+    );
+    let sessions = SessionRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+    let row = sessions
+        .create(CreateSessionParams {
+            project_id: &task.project_id,
+            task_id: Some(&task.id),
+            model: "openai/gpt-5.5",
+            agent_type: "worker",
+            metadata_json: None,
+            task_run_id: None,
+            pricing: None,
+            cost_basis: None,
+        })
+        .await
+        .unwrap();
+    let session = sessions
+        .update(&row.id, SessionStatus::Completed, 1, 1, 0, 0, None)
+        .await
+        .unwrap();
+    coordinator_actor_for_tests(&db, &tx)
+        .handle_event(terminal_session_event("completed", &session))
+        .await;
+    let liveness = djinn_db::LivenessRepository::new(db);
+    let (verdict, outcome) = liveness
+        .get_session_liveness_fields(&session.id)
+        .await
+        .unwrap();
+    assert_ne!(verdict.as_deref(), Some("protocol_violation"));
+    assert_ne!(outcome.as_deref(), Some("clean_exit_nonterminal"));
+    assert_eq!(
+        liveness
+            .count_evidence_for_session(&session.id, None)
+            .await
+            .unwrap(),
+        1
+    );
+}
+
+/// An absent Required target creates exactly one immutable violation and uses
+/// existing Crashed accounting; recovery may observe later state but not revise it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn failed_handoff_is_one_crashed_attempt() {
+    use djinn_core::models::SessionStatus;
+    use djinn_db::TaskAttemptRepository;
+
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let (task, session) = terminal_fixture(
+        &db,
+        &tx,
+        "genuine failed-handoff recovery fixture",
+        SessionStatus::Failed,
+        "in_progress",
+    )
+    .await;
+    let attempt_id = seed_pending_attempt(&db, &task.id, "worker").await;
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+
+    // Prove the durable classifier inputs before actor delivery: the task is
+    // still session-held, no Required handoff was confirmed, the addressed
+    // session is terminal failed, and no higher-precedence runtime/provider
+    // fact can explain the exit.
+    let liveness = djinn_db::LivenessRepository::new(db.clone());
+    let durable_state = liveness.load_current_state(&task.id).await.unwrap();
+    assert_eq!(durable_state.task_status.as_deref(), Some("in_progress"));
+    assert!(!durable_state.task_is_terminal);
+    assert_eq!(
+        durable_state.last_transition_from_status.as_deref(),
+        Some("open")
+    );
+    assert_eq!(session.status, "failed");
+    assert_eq!(session.task_id.as_deref(), Some(task.id.as_str()));
+    let classifier_input =
+        crate::dispatch::session_recovery::build_liveness_evidence(None, &durable_state);
+    assert!(!classifier_input.handed_off_from_session_held_status);
+    assert!(!classifier_input.hard_runtime_deadline_exceeded);
+    assert!(actor.health.peek_task_provider_failure(&task.id).is_none());
+
+    actor
+        .handle_event(terminal_session_event("failed", &session))
+        .await;
+    let attempts = TaskAttemptRepository::new(db.clone());
+    assert_eq!(
+        attempts.get(&attempt_id).await.unwrap().unwrap().outcome,
+        "crashed"
+    );
+    let immutable_exit = liveness
+        .get_session_liveness_fields(&session.id)
+        .await
+        .unwrap();
+    assert_eq!(immutable_exit.0.as_deref(), Some("protocol_violation"));
+    assert_eq!(immutable_exit.1.as_deref(), Some("crash"));
+    assert_eq!(
+        liveness
+            .count_evidence_for_session(&session.id, None)
+            .await
+            .unwrap(),
+        1
+    );
+
+    // Later recovery-visible state and replay cannot revise the winning
+    // `session_exit:{session_id}` observation.
+    TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx))
+        .set_status(&task.id, "needs_task_review")
+        .await
+        .unwrap();
+    actor
+        .classify_session_exit_liveness(&session.id, &task.id, None, "failed", "worker")
+        .await
+        .unwrap();
+    assert_eq!(
+        liveness
+            .get_session_liveness_fields(&session.id)
+            .await
+            .unwrap(),
+        immutable_exit
+    );
+    assert_eq!(
+        liveness
+            .count_evidence_for_session(&session.id, None)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(attempts.list_for_task(&task.id).await.unwrap().len(), 1);
+}
+
+/// Concurrent actors race the real terminal-event handler; replay after a
+/// later task-state change cannot append or rewrite its `session_exit` result.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_session_exit_is_insert_once() {
+    use djinn_core::models::SessionStatus;
+
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let (task, session) = terminal_fixture(
+        &db,
+        &tx,
+        "019fcc82 replay immutable",
+        SessionStatus::Failed,
+        "in_progress",
+    )
+    .await;
+    let event = terminal_session_event("failed", &session);
+    let mut first = coordinator_actor_for_tests(&db, &tx);
+    let mut second = coordinator_actor_for_tests(&db, &tx);
+    tokio::join!(
+        first.handle_event(event.clone()),
+        second.handle_event(event.clone())
+    );
+    let liveness = djinn_db::LivenessRepository::new(db.clone());
+    let immutable_exit = liveness
+        .get_session_liveness_fields(&session.id)
+        .await
+        .unwrap();
+    assert!(
+        immutable_exit.0.is_some(),
+        "the winning terminal delivery must initialize the logical exit result"
+    );
+    TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx))
+        .set_status(&task.id, "needs_task_review")
+        .await
+        .unwrap();
+    first.handle_event(event).await;
+    assert_eq!(
+        liveness
+            .count_evidence_for_session(&session.id, None)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        liveness
+            .get_session_liveness_fields(&session.id)
+            .await
+            .unwrap(),
+        immutable_exit,
+        "replay after a later task transition must not resample or rewrite the winning exit"
+    );
+}
+
+/// Five named, persisted exits span completed/failed/interrupted truth. Their
+/// exact session IDs, terminal rows, task rows, and final transitions are
+/// replayed through `handle_event`; no timing delta participates in the oracle.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn known_session_exit_replay_oracle() {
+    use djinn_core::models::SessionStatus;
+    use djinn_db::TaskAttemptRepository;
+
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+    let liveness = djinn_db::LivenessRepository::new(db.clone());
+    let known = [
+        KnownSessionExitFixture {
+            session_id: "019fcc80",
+            task_id: "019fcc80-task",
+            task_title: "durable completed Required handoff",
+            terminal_status: SessionStatus::Completed,
+            task_status: "needs_task_review",
+            transition_from_status: "in_progress",
+            transition_to_status: "needs_task_review",
+        },
+        KnownSessionExitFixture {
+            session_id: "019fcc82",
+            task_id: "019fcc82-task",
+            task_title: "durable failed Required handoff",
+            terminal_status: SessionStatus::Failed,
+            task_status: "needs_task_review",
+            transition_from_status: "in_progress",
+            transition_to_status: "needs_task_review",
+        },
+        KnownSessionExitFixture {
+            session_id: "019fcc84",
+            task_id: "019fcc84-task",
+            task_title: "durable interrupted Required handoff",
+            terminal_status: SessionStatus::Interrupted,
+            task_status: "needs_task_review",
+            transition_from_status: "in_progress",
+            transition_to_status: "needs_task_review",
+        },
+        KnownSessionExitFixture {
+            session_id: "019fcc30",
+            task_id: "019fcc30-task",
+            task_title: "durable completed terminal task",
+            terminal_status: SessionStatus::Completed,
+            task_status: "closed",
+            transition_from_status: "in_progress",
+            transition_to_status: "closed",
+        },
+        KnownSessionExitFixture {
+            session_id: "019fcc22",
+            task_id: "019fcc22-task",
+            task_title: "durable failed terminal task",
+            terminal_status: SessionStatus::Failed,
+            task_status: "closed",
+            transition_from_status: "in_progress",
+            transition_to_status: "closed",
+        },
+    ];
+    let mut false_violations = 0;
+    for fixture in known {
+        let (_, session) = known_terminal_fixture(&db, &tx, fixture).await;
+        let event = terminal_session_event(fixture.terminal_status.as_str(), &session);
+        actor.handle_event(event.clone()).await;
+        actor.handle_event(event).await;
+        false_violations += usize::from(
+            liveness
+                .get_session_liveness_fields(&session.id)
+                .await
+                .unwrap()
+                .0
+                .as_deref()
+                == Some("protocol_violation"),
+        );
+        assert_eq!(
+            liveness
+                .count_evidence_for_session(&session.id, None)
+                .await
+                .unwrap(),
+            1,
+            "{} must be insert-once",
+            fixture.session_id
+        );
+    }
+    let genuine_fixture = KnownSessionExitFixture {
+        session_id: "genuine-failed-handoff-recovery",
+        task_id: "genuine-failed-handoff-recovery-task",
+        task_title: "independently labeled genuine failed handoff recovery",
+        terminal_status: SessionStatus::Failed,
+        task_status: "in_progress",
+        transition_from_status: "open",
+        transition_to_status: "in_progress",
+    };
+    let (_, genuine) = known_terminal_fixture(&db, &tx, genuine_fixture).await;
+    actor
+        .handle_event(terminal_session_event("failed", &genuine))
+        .await;
+
+    // The production actor receives this terminal event, but its one addressed
+    // session read-back cannot acquire the row. Fail closed: do not invent a
+    // classification, immutable observation, or failed attempt from the event.
+    let unavailable_fixture = KnownSessionExitFixture {
+        session_id: "failed-evidence-acquisition",
+        task_id: "failed-evidence-acquisition-task",
+        task_title: "durable interrupted exit with unavailable evidence",
+        terminal_status: SessionStatus::Interrupted,
+        task_status: "needs_task_review",
+        transition_from_status: "in_progress",
+        transition_to_status: "needs_task_review",
+    };
+    let (unavailable_task, unavailable_session) =
+        known_terminal_fixture(&db, &tx, unavailable_fixture).await;
+    let unavailable_attempt = seed_pending_attempt(&db, &unavailable_task.id, "worker").await;
+    djinn_db::repositories::test_support::delete_session_row(&db, &unavailable_session.id).await;
+    actor
+        .handle_event(terminal_session_event("interrupted", &unavailable_session))
+        .await;
+    assert_eq!(
+        liveness
+            .count_evidence_for_session(&unavailable_session.id, None)
+            .await
+            .unwrap(),
+        0,
+        "failed acquisition must not fabricate an immutable exit observation"
+    );
+    assert_eq!(
+        TaskAttemptRepository::new(db.clone())
+            .get(&unavailable_attempt)
+            .await
+            .unwrap()
+            .unwrap()
+            .outcome,
+        "pending",
+        "failed acquisition must not infer a failed attempt"
+    );
+    assert_eq!(
+        false_violations, 0,
+        "known-session oracle is 0/5 false violations"
+    );
+    assert_eq!(
+        liveness
+            .get_session_liveness_fields(&genuine.id)
+            .await
+            .unwrap()
+            .0
+            .as_deref(),
+        Some("protocol_violation"),
+        "genuine failed-handoff oracle is 1/1 violation"
+    );
+}

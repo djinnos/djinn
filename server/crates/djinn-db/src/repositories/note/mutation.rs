@@ -1093,12 +1093,38 @@ fn validate_command(command: &NoteRevisionMutation) -> Result<()> {
             "event kind does not match desired final state".to_owned(),
         ));
     }
-    if let NoteRevisionDesiredState::GuardedPatch { confidence, .. } = &command.desired
+    // Every desired state that carries a confidence must be inside the
+    // epistemic range, not just `GuardedPatch`.
+    //
+    // `set_confidence` clamps and `update_confidence` goes through
+    // `bayesian_update` (which clamps), so those two writers cannot leave the
+    // range. `mutate_with_revision` is the third confidence writer and it binds
+    // the caller's value straight into the UPDATE/INSERT. While only
+    // `GuardedPatch` was checked, an out-of-range caller value landed silently:
+    // proposal 9xih's ceiling was breached in production by the extraction
+    // duplicate boost re-deriving a Bayesian posterior without the clamp, and
+    // notes reached ~1.0 — the unfalsifiable state the ceiling exists to
+    // prevent. Rejecting rather than clamping keeps the mistake loud at the
+    // call site instead of silently rewriting what the caller asked for.
+    let bounded_confidence = match &command.desired {
+        NoteRevisionDesiredState::Create(state) => Some(("create", state.confidence)),
+        NoteRevisionDesiredState::Existing { confidence, .. } => Some(("existing", *confidence)),
+        NoteRevisionDesiredState::ExistingWithMetadata(state) => {
+            Some(("existing with metadata", state.confidence))
+        }
+        NoteRevisionDesiredState::GuardedPatch { confidence, .. } => {
+            Some(("guarded patch", *confidence))
+        }
+        NoteRevisionDesiredState::DeprecateWithSupersedes { .. }
+        | NoteRevisionDesiredState::Delete
+        | NoteRevisionDesiredState::ExtractionSkipped => None,
+    };
+    if let Some((label, confidence)) = bounded_confidence
         && (!confidence.is_finite()
-            || !(CONFIDENCE_FLOOR..=CONFIDENCE_CEILING).contains(confidence))
+            || !(CONFIDENCE_FLOOR..=CONFIDENCE_CEILING).contains(&confidence))
     {
         return Err(Error::InvalidData(format!(
-            "guarded patch confidence must be within [{CONFIDENCE_FLOOR}, {CONFIDENCE_CEILING}]"
+            "{label} confidence must be within [{CONFIDENCE_FLOOR}, {CONFIDENCE_CEILING}], got {confidence}"
         )));
     }
     if command.event_kind == NoteRevisionEventKind::ExtractionSkipped

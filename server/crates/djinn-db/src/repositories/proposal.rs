@@ -1167,6 +1167,39 @@ impl ProposalRepository {
         Ok(feedback)
     }
 
+    /// Whether a capture boundary would create a new actionable human-feedback
+    /// obligation. This is deliberately the same source population capture
+    /// consumes: unresolved, unwithdrawn blocking feedback that no earlier
+    /// generation has already snapshotted. Advisory context and the broad
+    /// readiness badge count must not make schema availability an admission
+    /// prerequisite.
+    pub async fn has_capturable_unresolved_blocking_feedback(
+        &self,
+        proposal_id: &str,
+    ) -> Result<bool> {
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_scalar(
+            r#"SELECT EXISTS(
+                SELECT 1
+                FROM proposal_feedback f
+                WHERE f.proposal_id=$1
+                  AND f.severity='blocking'
+                  AND f.resolved_at IS NULL
+                  AND f.withdrawn_at IS NULL
+                  AND NOT EXISTS(
+                      SELECT 1
+                      FROM proposal_feedback_refinement_sources s
+                      JOIN proposal_feedback_refinement_injections i ON i.id=s.injection_id
+                      WHERE i.proposal_id=f.proposal_id
+                        AND s.source_feedback_id=f.id
+                  )
+            )"#,
+        )
+        .bind(proposal_id)
+        .fetch_one(self.db.pool())
+        .await?)
+    }
+
     /// Commit a feedback boundary together with its durable handoff whenever a
     /// non-resumable live run owns the proposal. This prevents a crash between
     /// feedback insertion and `AlreadyActive` recovery from stranding work.
@@ -5921,6 +5954,59 @@ mod tests {
         assert_eq!(result.captures[0].injection.id, queued_id);
         assert_eq!(result.captures[0].sources.len(), 1);
         assert!(result.captures[0].injection.debate_entry_id.is_some());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn capturable_blocking_feedback_predicate_excludes_advisory_and_captured_sources() {
+        let repo = ProposalRepository::new(test_db(), EventBus::noop());
+        let proposal = repo
+            .create(create_input("Capturable feedback predicate"))
+            .await
+            .unwrap();
+
+        repo.add_feedback_with_severity(
+            ProposalFeedbackCreateInput {
+                proposal_id: &proposal.id,
+                parent_id: None,
+                author_kind: "user",
+                author_model: None,
+                body: "discussion only",
+            },
+            "advisory",
+        )
+        .await
+        .unwrap();
+        assert!(
+            !repo
+                .has_capturable_unresolved_blocking_feedback(&proposal.id)
+                .await
+                .unwrap()
+        );
+
+        repo.add_feedback(ProposalFeedbackCreateInput {
+            proposal_id: &proposal.id,
+            parent_id: None,
+            author_kind: "user",
+            author_model: None,
+            body: "action required",
+        })
+        .await
+        .unwrap();
+        assert!(
+            repo.has_capturable_unresolved_blocking_feedback(&proposal.id)
+                .await
+                .unwrap()
+        );
+
+        repo.capture_feedback_refinement_boundary(&proposal.id)
+            .await
+            .unwrap();
+        assert!(
+            !repo
+                .has_capturable_unresolved_blocking_feedback(&proposal.id)
+                .await
+                .unwrap()
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

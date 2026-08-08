@@ -2177,9 +2177,17 @@ async fn boost_duplicate_confidence(
         Ok(Some(note)) => note,
         Ok(None) | Err(_) => return false,
     };
-    let updated_confidence = (existing.confidence * DUPLICATE_CONFIDENCE_SIGNAL)
-        / (existing.confidence * DUPLICATE_CONFIDENCE_SIGNAL
-            + (1.0 - existing.confidence) * (1.0 - DUPLICATE_CONFIDENCE_SIGNAL));
+    // `bayesian_update`, not an inline re-derivation of the same formula: the
+    // canonical helper clamps the posterior to
+    // `[CONFIDENCE_FLOOR, CONFIDENCE_CEILING]`. Re-deriving it here skipped
+    // that clamp and let repeated duplicate confirmations walk a note past the
+    // ceiling toward 1.0 — the unfalsifiable state proposal 9xih exists to
+    // remove, and the state in which `USER_CONFIRM` DEMOTES a note (its own
+    // clamp pulls it back to the ceiling, below untouched above-ceiling peers).
+    let updated_confidence = djinn_db::repositories::note::bayesian_update(
+        existing.confidence,
+        DUPLICATE_CONFIDENCE_SIGNAL,
+    );
     if updated_confidence == existing.confidence {
         return false;
     }
@@ -5198,8 +5206,16 @@ mod evidence_merge_regression_tests {
         let provider = ScriptedProvider::new(vec![
             r#"{"decision":"already_known","existing_note_id":"existing-note-1"}"#.to_owned(),
         ]);
+        // `CONFIDENCE_CEILING`, not `1.0`. This fixture needs a prior on which
+        // the duplicate boost is a no-op, and it used to get that from `1.0`
+        // being an absorbing state of the raw Bayesian update — which is the
+        // very defect proposal 9xih removed: a note at 1.0 cannot be moved by
+        // ANY signal, including `CONTRADICTION`. The boost now clamps, so the
+        // ceiling is the real fixed point, and `1.0` is no longer a state a
+        // note can be in (migration 201 repaired the stored rows and the
+        // revision boundary rejects it).
         let mut existing = test_existing_note();
-        existing.confidence = 1.0;
+        existing.confidence = djinn_db::repositories::note::CONFIDENCE_CEILING;
         let repo = RecordingExtractionRepository::with_existing(existing);
         let context = test_context(&repo, &provider);
         let mut quality = ExtractionQuality::default();
@@ -5601,6 +5617,121 @@ mod evidence_merge_regression_tests {
                 .iter()
                 .any(|op| op.mutation.event_kind == NoteRevisionEventKind::Updated)
         );
+    }
+
+    /// Proposal 9xih: `CONFIDENCE_CEILING` is a hard invariant on
+    /// `notes.confidence`, not a property of one code path. A note already at
+    /// the ceiling that is confirmed as a duplicate must stay at the ceiling.
+    ///
+    /// The duplicate boost writes through `mutate_with_revision` rather than
+    /// `update_confidence`, so it does not inherit `bayesian_update`'s clamp
+    /// for free. Before the fix it re-derived the posterior inline and drove
+    /// notes to ~1.0 — the exact unfalsifiable state the ceiling exists to
+    /// prevent, and the state that makes `USER_CONFIRM` DEMOTE a note (the
+    /// clamp pulls it back to the ceiling, below untouched above-ceiling
+    /// peers).
+    #[tokio::test]
+    async fn duplicate_confidence_boost_never_exceeds_the_confidence_ceiling() {
+        let provider = ScriptedProvider::new(vec![
+            r#"{"decision":"already_known","existing_note_id":"existing-note-1"}"#.to_string(),
+        ]);
+        // A prior just under the ceiling: the unclamped posterior for this
+        // prior is 0.9836…, i.e. the boost overshoots. Starting exactly AT the
+        // ceiling would not exercise the write at all, because the clamped
+        // posterior equals the prior and the boost short-circuits.
+        let mut near_ceiling = test_existing_note();
+        near_ceiling.confidence = 0.97;
+        let repo = RecordingExtractionRepository::with_existing(near_ceiling);
+        let context = ExtractionContext {
+            note_repo: &repo,
+            provider: &provider,
+            project_id: "project-1",
+            project_path: "/projects/project-1",
+            knowledge_branch_target: &KnowledgeBranchTarget::Main,
+            session_id: "new",
+            task_id: "task-1",
+            task_run_id: None,
+            task_short_id: "t1",
+            task_title: "Test task",
+            task_description: "Test task description",
+            provenance: "footer",
+            caller_attributed: true,
+            session_scope_paths: &[],
+            created_note_ids: Mutex::new(HashSet::new()),
+            candidate_lookup: CandidateLookup::with_override(test_candidate_lookup),
+        };
+        let mut quality = ExtractionQuality::default();
+        process_extracted_note(&context, "case", &test_extracted_case(), &mut quality).await;
+
+        let ceiling = djinn_db::repositories::note::CONFIDENCE_CEILING;
+        let revisions = repo.revisions();
+        // Negative control: if the duplicate path stopped running at all, the
+        // loop below would be vacuously satisfied.
+        let boost = revisions
+            .iter()
+            .find(|op| op.mutation.event_kind == NoteRevisionEventKind::ConfidenceChanged)
+            .expect("the duplicate-confidence path must still run for this test to prove anything");
+        assert_eq!(
+            boost.after_confidence,
+            Some(ceiling),
+            "a boost that would overshoot must land exactly on CONFIDENCE_CEILING"
+        );
+        for revision in &revisions {
+            if let Some(after) = revision.after_confidence {
+                assert!(
+                    after <= ceiling,
+                    "duplicate boost wrote confidence {after}, above CONFIDENCE_CEILING \
+                     {ceiling}; the ceiling is an invariant of notes.confidence, and a note \
+                     above it is demoted by USER_CONFIRM (proposal 9xih AC2)"
+                );
+            }
+        }
+    }
+
+    /// The companion property: a note already AT the ceiling is not written at
+    /// all by a duplicate confirmation. The clamped posterior equals the prior,
+    /// so there is no evidence to record and no revision event to emit.
+    #[tokio::test]
+    async fn duplicate_confirmation_of_a_ceiling_note_writes_nothing() {
+        let provider = ScriptedProvider::new(vec![
+            r#"{"decision":"already_known","existing_note_id":"existing-note-1"}"#.to_string(),
+        ]);
+        let mut at_ceiling = test_existing_note();
+        at_ceiling.confidence = djinn_db::repositories::note::CONFIDENCE_CEILING;
+        let repo = RecordingExtractionRepository::with_existing(at_ceiling);
+        let context = ExtractionContext {
+            note_repo: &repo,
+            provider: &provider,
+            project_id: "project-1",
+            project_path: "/projects/project-1",
+            knowledge_branch_target: &KnowledgeBranchTarget::Main,
+            session_id: "new",
+            task_id: "task-1",
+            task_run_id: None,
+            task_short_id: "t1",
+            task_title: "Test task",
+            task_description: "Test task description",
+            provenance: "footer",
+            caller_attributed: true,
+            session_scope_paths: &[],
+            created_note_ids: Mutex::new(HashSet::new()),
+            candidate_lookup: CandidateLookup::with_override(test_candidate_lookup),
+        };
+        let mut quality = ExtractionQuality::default();
+        process_extracted_note(&context, "case", &test_extracted_case(), &mut quality).await;
+
+        assert!(
+            !repo
+                .revisions()
+                .iter()
+                .any(|op| op.mutation.event_kind == NoteRevisionEventKind::ConfidenceChanged),
+            "a note at CONFIDENCE_CEILING has nowhere to go; the duplicate boost must \
+             record no confidence change rather than an above-ceiling one"
+        );
+        // Negative control: the decision path really did classify this as a
+        // duplicate, so "no confidence event" is a real outcome and not an
+        // extraction that never got that far.
+        assert_eq!(quality.boost_fallback, 1);
     }
 
     #[tokio::test]
