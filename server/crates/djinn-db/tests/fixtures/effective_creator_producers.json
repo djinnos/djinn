@@ -21,6 +21,12 @@
       "provenance_kind": "explicit_source_creator"
     },
     {
+      "path": "server/crates/djinn-db/src/repositories/proposal.rs",
+      "enclosing_symbol": "retry_evidence_atomically",
+      "boundary_method": "resolve_effective_creator",
+      "provenance_kind": "explicit_source_creator"
+    },
+    {
       "path": "server/crates/djinn-coordinator/src/rules.rs",
       "enclosing_symbol": "dispatch_proposal_reconcile",
       "boundary_method": "create_in_project_with_provenance",

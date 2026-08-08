@@ -15,8 +15,8 @@ use serde::Deserialize;
 
 use crate::server::DjinnMcpServer;
 use crate::tools::proposal_ops::{
-    DemandRoundResponse, NeedsEvidenceDemandResponse, NeedsEvidenceDemandResult,
-    ProposalRefinementStartResponse, ProposalRefinementStatusModel,
+    DemandRoundResponse, EvidenceRetryResponse, NeedsEvidenceDemandResponse,
+    NeedsEvidenceDemandResult, ProposalRefinementStartResponse, ProposalRefinementStatusModel,
     ProposalRefinementStatusResponse, ProposalRefinementStopResponse, VerdictOverrideResponse,
 };
 use crate::tools::proposal_tools::feedback::human_feedback_disposition_contract_available;
@@ -26,8 +26,9 @@ pub use crate::tools::refinement_helpers::{
 };
 use djinn_core::models::NeedsEvidenceClaim;
 use djinn_db::{
-    AdmitRefinementRunRequest, ProposalRepository, RefinementAdmissionError,
-    RefinementAdmissionOutcome, RefinementAdmissionSource, TaskRepository,
+    AdmitRefinementRunRequest, AtomicEvidenceRetryInput, DispatchTypedEvidenceRetryInput,
+    ProposalRepository, RefinementAdmissionError, RefinementAdmissionOutcome,
+    RefinementAdmissionSource, TaskRepository, TypedEvidenceRepository,
 };
 #[cfg(test)]
 use djinn_db::{NeedsEvidenceClaimLink, ProposalDebateTrailCreateInput};
@@ -283,6 +284,28 @@ pub struct ProposalVerdictOverrideParams {
     /// Optional debate-trail entry id of the verdict being overridden.
     #[serde(default)]
     pub overridden_verdict_entry_id: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct ProposalRefinementRetryEvidenceParams {
+    /// Typed finding whose latest lifecycle transition failed.
+    pub finding_id: String,
+    /// The exact latest failed transition being retried.
+    pub failed_transition_id: String,
+}
+
+fn err_retry_evidence(error: impl Into<String>, code: Option<&str>) -> EvidenceRetryResponse {
+    EvidenceRetryResponse {
+        accepted: false,
+        finding_id: None,
+        attempt_id: None,
+        spike_task_id: None,
+        sequence: None,
+        lifecycle: None,
+        replayed: None,
+        error: Some(error.into()),
+        conflict_code: code.map(str::to_owned),
+    }
 }
 
 fn err_demand_evidence(error: impl Into<String>) -> NeedsEvidenceDemandResponse {
@@ -1076,6 +1099,94 @@ impl DjinnMcpServer {
                 lifecycle: Some("spike_active".into()),
                 replayed: Some(allocated.replayed),
             }),
+            error: None,
+            conflict_code: None,
+        })
+    }
+
+    #[tool(
+        description = "Retry a failed typed evidence finding. Only the active Advocate or Judge may reserve a retry for the cited latest failed transition."
+    )]
+    pub async fn proposal_refinement_retry_evidence(
+        &self,
+        Parameters(p): Parameters<ProposalRefinementRetryEvidenceParams>,
+    ) -> Json<EvidenceRetryResponse> {
+        let Some(caller_user_id) = djinn_core::auth_context::current_user_id() else {
+            return Json(err_retry_evidence(
+                "retry_unauthorized_active_advocate_or_judge_required",
+                Some("unauthorized"),
+            ));
+        };
+        let typed = TypedEvidenceRepository::new(self.state.db().clone());
+        let repo = ProposalRepository::new(self.state.db().clone(), self.state.event_bus());
+        let allocated = match repo
+            .retry_evidence_atomically(AtomicEvidenceRetryInput {
+                finding_id: p.finding_id.clone(),
+                failed_transition_id: p.failed_transition_id.clone(),
+                caller_user_id,
+            })
+            .await
+        {
+            Ok(value) => value,
+            Err(e) => {
+                let code = if e.to_string().contains("active_evidence_conflict") {
+                    Some("active_evidence_conflict")
+                } else if e
+                    .to_string()
+                    .contains("retry_requires_latest_failed_transition")
+                {
+                    Some("retry_requires_latest_failed_transition")
+                } else if e
+                    .to_string()
+                    .contains("retry_unauthorized_active_advocate_or_judge_required")
+                {
+                    Some("unauthorized")
+                } else if e.to_string().contains("evidence_finding_not_found") {
+                    Some("finding_not_found")
+                } else {
+                    None
+                };
+                return Json(err_retry_evidence(e.to_string(), code));
+            }
+        };
+        if !allocated.replayed
+            && let Some(coordinator) = self.state.coordinator().await
+        {
+            if let Err(e) = coordinator
+                .trigger_dispatch_for_project(&allocated.project_id)
+                .await
+            {
+                let _ = typed
+                    .append_retry_dispatch_error(djinn_db::TypedEvidenceRetryDispatchErrorInput {
+                        finding_id: p.finding_id.clone(),
+                        attempt_id: allocated.allocation.attempt_id.clone(),
+                        spike_task_id: allocated.allocation.spike_task_id.clone(),
+                        error: e,
+                    })
+                    .await;
+            } else if let Ok(mut dispatch_tx) = self.state.db().pool().begin().await {
+                let _ = TypedEvidenceRepository::dispatch_retry_success_in_transaction(
+                    &mut dispatch_tx,
+                    DispatchTypedEvidenceRetryInput {
+                        finding_id: p.finding_id.clone(),
+                        attempt_id: allocated.allocation.attempt_id.clone(),
+                        spike_task_id: allocated.allocation.spike_task_id.clone(),
+                        transition_id: uuid::Uuid::now_v7().to_string(),
+                        actor_task_id: None,
+                    },
+                )
+                .await;
+                let _ = dispatch_tx.commit().await;
+            }
+        }
+        Json(EvidenceRetryResponse {
+            accepted: true,
+            finding_id: Some(p.finding_id),
+            attempt_id: Some(allocated.allocation.attempt_id),
+            spike_task_id: Some(allocated.allocation.spike_task_id),
+            sequence: Some(allocated.allocation.sequence),
+            lifecycle: Some("demanded".into()),
+            replayed: Some(allocated.replayed),
             error: None,
             conflict_code: None,
         })
