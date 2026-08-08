@@ -41,10 +41,11 @@ use crate::tools::list_response::{
     self, ListMeta, NamedListResponse, named_list_response_schema, serialize_named_list_response,
 };
 use crate::tools::proposal_ops::{
-    ProposalDebateTrailModel, ProposalDeleteResponse, ProposalEpicModel, ProposalListRow,
-    ProposalListSummary, ProposalModel, ProposalRevisionModel, ProposalShowResponse,
-    ProposalSignoffModel, ProposalSingleResponse, ProposalTargetModel, ProposalTargetsResponse,
-    apply_revision_body_mode, validate_revision_bodies_value, validate_show_fields,
+    ProposalDebateTrailModel, ProposalDeleteResponse, ProposalEpicModel,
+    ProposalFeedbackRefinementModel, ProposalListRow, ProposalListSummary, ProposalModel,
+    ProposalRevisionModel, ProposalShowResponse, ProposalSignoffModel, ProposalSingleResponse,
+    ProposalTargetModel, ProposalTargetsResponse, apply_revision_body_mode,
+    validate_revision_bodies_value, validate_show_fields,
 };
 use crate::tools::proposal_readiness::evaluate_latest_head_readiness;
 use crate::tools::validation::{
@@ -617,7 +618,7 @@ impl DjinnMcpServer {
 
     /// Show a proposal with configurable field selection and revision body modes.
     #[tool(
-        description = "Show a proposal (by UUID or short_id) with optional field selection. Pass `fields` to include only specific sections: proposal, targets, feedback, signoffs, revisions, debate, epics, gate_status (default: all). Pass `revision_bodies` to control revision verbosity: excerpt (default), full, omit. Omitted fields are absent from the response and their data is not loaded."
+        description = "Show a proposal (by UUID or short_id) with optional field selection. Pass `fields` to include only specific sections: proposal, targets, feedback, feedback_refinements, signoffs, revisions, debate, epics, gate_status (default: all). `feedback_refinements` exposes canonical queued/materialized/disposed feedback generations with source attribution and exact debate links. Pass `revision_bodies` to control revision verbosity: excerpt (default), full, omit. Omitted fields are absent from the response and their data is not loaded."
     )]
     pub async fn proposal_show(
         &self,
@@ -679,6 +680,69 @@ impl DjinnMcpServer {
             if field_selected("feedback") {
                 match repo.feedback(&proposal.id).await {
                     Ok(f) => Some(f.iter().map(Into::into).collect()),
+                    Err(e) => return Json(err_show(e.to_string())),
+                }
+            } else {
+                None
+            };
+
+        // ── feedback_refinements ─────────────────────────────────────────
+        let feedback_refinements: Option<Vec<ProposalFeedbackRefinementModel>> =
+            if field_selected("feedback_refinements") {
+                match repo.feedback_refinement_generations(&proposal.id).await {
+                    Ok(generations) => {
+                        let debate_by_id = match repo.debate_trail(&proposal.id).await {
+                            Ok(entries) => entries
+                                .into_iter()
+                                .map(|entry| (entry.id.clone(), entry))
+                                .collect::<std::collections::HashMap<_, _>>(),
+                            Err(e) => return Json(err_show(e.to_string())),
+                        };
+                        Some(
+                            generations
+                                .into_iter()
+                                .map(|generation| {
+                                    let withdrawal = (generation.injection.state
+                                        == "withdrawn_by_author")
+                                        .then(|| {
+                                            generation
+                                                .injection
+                                                .debate_entry_id
+                                                .as_ref()
+                                                .and_then(|id| debate_by_id.get(id))
+                                        })
+                                        .flatten();
+                                    ProposalFeedbackRefinementModel {
+                                        root_feedback_id: generation.injection.root_feedback_id,
+                                        generation: generation.injection.generation,
+                                        state: generation.injection.state,
+                                        debate_entry_id: generation.injection.debate_entry_id,
+                                        round: generation.injection.round,
+                                        source_rows: generation
+                                            .sources
+                                            .into_iter()
+                                            .map(Into::into)
+                                            .collect(),
+                                        accepted_disposition: generation
+                                            .injection
+                                            .accepted_disposition,
+                                        accepted_revision_seq: generation
+                                            .injection
+                                            .accepted_revision_seq,
+                                        accepted_reason: generation.injection.accepted_reason,
+                                        accepted_at: generation.injection.accepted_at,
+                                        accepted_by_user_id: generation
+                                            .injection
+                                            .accepted_by_user_id,
+                                        withdrawn_at: withdrawal
+                                            .and_then(|entry| entry.resolved_at.clone()),
+                                        withdrawn_by_user_id: withdrawal
+                                            .and_then(|entry| entry.resolved_by_user_id.clone()),
+                                    }
+                                })
+                                .collect(),
+                        )
+                    }
                     Err(e) => return Json(err_show(e.to_string())),
                 }
             } else {
@@ -808,6 +872,7 @@ impl DjinnMcpServer {
             latest_lint,
             targets,
             feedback,
+            feedback_refinements,
             revisions,
             signoffs,
             epics,
@@ -1259,3 +1324,6 @@ mod create_mdx_tests;
 
 #[cfg(test)]
 mod create_lint_tests;
+
+#[cfg(test)]
+mod feedback_refinement_tests;

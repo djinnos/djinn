@@ -45,7 +45,7 @@ pub struct ProposalShowParams {
     /// Proposal UUID or short_id.
     pub id: String,
     /// Select which top-level sections to include in the response.
-    /// Accepted values: `proposal`, `targets`, `feedback`, `signoffs`,
+    /// Accepted values: `proposal`, `targets`, `feedback`, `feedback_refinements`, `signoffs`,
     /// `revisions`, `debate`, `epics`, `gate_status`.
     /// Default: all fields selected. Invalid values return a validation error.
     #[serde(default)]
