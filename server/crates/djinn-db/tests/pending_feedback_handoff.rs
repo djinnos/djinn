@@ -28,6 +28,199 @@ async fn proposal(repo: &ProposalRepository) -> String {
     .id
 }
 
+#[tokio::test]
+async fn failed_terminal_handoff_rolls_back_then_retries_without_losing_pending_demand() {
+    let db = Database::open_in_memory().unwrap();
+    db.ensure_initialized().await.unwrap();
+    let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+    let proposal_id = proposal(&repo).await;
+    let (run_id, intent_id, generation) = live_run(&repo, &proposal_id).await;
+    let first = blocking_feedback(&repo, &proposal_id, "first rollback boundary").await;
+    let second = blocking_feedback(&repo, &proposal_id, "second rollback boundary").await;
+
+    assert!(repo
+        .claim_refinement_intent(ClaimRefinementIntentRequest {
+            run_id: run_id.clone(),
+            intent_id: intent_id.clone(),
+            generation,
+            owner: "terminal-handoff-rollback".into(),
+            lease_millis: GRACE,
+        })
+        .await
+        .unwrap()
+        .is_some());
+    let transition = SourceIntentTransitionRequest {
+        run_id: run_id.clone(),
+        intent_id: intent_id.clone(),
+        generation,
+        expected_round: 1,
+        expected_phase: RefinementPhase::AdversaryAttack,
+        expected_role: RefinementRole::Adversary,
+    };
+
+    // This trigger fires only after the production lifecycle has started its
+    // source transition and successor admission, so its error exercises the
+    // enclosing transaction rather than a precondition failure.
+    djinn_db::test_support::reject_refinement_successor_for_test(&db).await;
+    let error = repo
+        .terminal_refinement_run_from_intent(TerminalRefinementRunFromIntentRequest {
+            source: transition.clone(),
+            reason: RefinementStopReason::OperatorStop {
+                actor: "handoff-regression".into(),
+                reason: Some("inject successor failure".into()),
+            },
+        })
+        .await
+        .expect_err("injected successor persistence failure must abort the handoff transaction");
+    assert!(error.to_string().contains("injected successor persistence failure"));
+
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT state FROM refinement_runs WHERE id=$1")
+            .bind(&run_id)
+            .fetch_one(db.pool())
+            .await
+            .unwrap(),
+        "running",
+        "the source run terminalization must roll back"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT state FROM refinement_dispatch_intents WHERE id=$1",
+        )
+        .bind(&intent_id)
+        .fetch_one(db.pool())
+        .await
+        .unwrap(),
+        "claimed",
+        "the source intent completion must roll back"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM refinement_runs WHERE proposal_id=$1 AND generation > $2",
+        )
+        .bind(&proposal_id)
+        .bind(generation)
+        .fetch_one(db.pool())
+        .await
+        .unwrap(),
+        0,
+        "the failed handoff must not leave a successor run"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM refinement_dispatch_intents i JOIN refinement_runs r ON r.id=i.run_id \
+             WHERE r.proposal_id=$1 AND r.generation > $2",
+        )
+        .bind(&proposal_id)
+        .bind(generation)
+        .fetch_one(db.pool())
+        .await
+        .unwrap(),
+        0,
+        "the failed handoff must not leave a successor intent"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM proposal_feedback_refinement_sources WHERE source_feedback_id IN ($1,$2)",
+        )
+        .bind(&first.id)
+        .bind(&second.id)
+        .fetch_one(db.pool())
+        .await
+        .unwrap(),
+        0,
+        "source captures must roll back with successor admission"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM pending_feedback_refinement_handoffs \
+             WHERE proposal_id=$1 AND state='pending' AND successor_run_id IS NULL",
+        )
+        .bind(&proposal_id)
+        .fetch_one(db.pool())
+        .await
+        .unwrap(),
+        2,
+        "every pending boundary must remain durable and unadmitted after failure"
+    );
+
+    sqlx::query("DROP TRIGGER reject_refinement_successor_for_test ON refinement_dispatch_intents")
+        .execute(db.pool())
+        .await
+        .unwrap();
+    sqlx::query("DROP FUNCTION reject_refinement_successor_for_test()")
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+    assert!(repo
+        .terminal_refinement_run_from_intent(TerminalRefinementRunFromIntentRequest {
+            source: transition,
+            reason: RefinementStopReason::OperatorStop {
+                actor: "handoff-regression".into(),
+                reason: Some("retry after rollback".into()),
+            },
+        })
+        .await
+        .unwrap());
+
+    let successor: (String, i32) = sqlx::query_as(
+        "SELECT id, generation FROM refinement_runs WHERE proposal_id=$1 AND state='running' ORDER BY generation",
+    )
+    .bind(&proposal_id)
+    .fetch_one(db.pool())
+    .await
+    .unwrap();
+    assert_eq!(successor.1, generation + 1);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM refinement_runs WHERE proposal_id=$1 AND state='running'",
+        )
+        .bind(&proposal_id)
+        .fetch_one(db.pool())
+        .await
+        .unwrap(),
+        1,
+        "retry must admit exactly one successor run"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM refinement_dispatch_intents WHERE run_id=$1 AND state='pending'",
+        )
+        .bind(&successor.0)
+        .fetch_one(db.pool())
+        .await
+        .unwrap(),
+        1,
+        "retry must create exactly one normal successor intent"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM proposal_feedback_refinement_sources WHERE source_feedback_id IN ($1,$2)",
+        )
+        .bind(&first.id)
+        .bind(&second.id)
+        .fetch_one(db.pool())
+        .await
+        .unwrap(),
+        2,
+        "retry captures every boundary exactly once"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM pending_feedback_refinement_handoffs \
+             WHERE proposal_id=$1 AND state='admitted' AND successor_run_id=$2",
+        )
+        .bind(&proposal_id)
+        .bind(&successor.0)
+        .fetch_one(db.pool())
+        .await
+        .unwrap(),
+        2,
+        "retry admits every retained pending boundary into the one successor"
+    );
+}
+
 async fn live_run(repo: &ProposalRepository, proposal_id: &str) -> (String, String, i32) {
     match repo
         .admit_refinement_run(AdmitRefinementRunRequest {
