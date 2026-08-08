@@ -839,34 +839,28 @@ mod tests {
         assert_eq!(withdrawn.entity_type(), "proposal_feedback");
         assert_eq!(withdrawn.action(), "withdrawn");
         assert_eq!(withdrawn.id.as_deref(), Some("feedback-1"));
+        assert_eq!(withdrawn.project_id, None);
         assert_eq!(
             withdrawn.payload(),
             &json!({"proposal_id": "proposal-1", "feedback_id": "feedback-1"})
         );
 
-        for envelope in [updated, rejected] {
-            assert_eq!(envelope.entity_type(), "proposal_feedback_refinement");
-            assert_eq!(envelope.id.as_deref(), Some("injection-1"));
-            assert_eq!(
-                envelope.payload(),
-                &json!({"proposal_id": "proposal-1", "injection_id": "injection-1"})
-            );
-        }
+        assert_eq!(updated.entity_type(), "proposal_feedback_refinement");
+        assert_eq!(updated.action(), "disposition_updated");
+        assert_eq!(updated.id.as_deref(), Some("injection-1"));
+        assert_eq!(updated.project_id, None);
         assert_eq!(
-            DjinnEventEnvelope::proposal_feedback_refinement_disposition_updated(
-                "proposal-1",
-                "injection-1"
-            )
-            .action(),
-            "disposition_updated"
+            updated.payload(),
+            &json!({"proposal_id": "proposal-1", "injection_id": "injection-1"})
         );
+
+        assert_eq!(rejected.entity_type(), "proposal_feedback_refinement");
+        assert_eq!(rejected.action(), "disposition_rejected");
+        assert_eq!(rejected.id.as_deref(), Some("injection-1"));
+        assert_eq!(rejected.project_id, None);
         assert_eq!(
-            DjinnEventEnvelope::proposal_feedback_refinement_disposition_rejected(
-                "proposal-1",
-                "injection-1"
-            )
-            .action(),
-            "disposition_rejected"
+            rejected.payload(),
+            &json!({"proposal_id": "proposal-1", "injection_id": "injection-1"})
         );
     }
 

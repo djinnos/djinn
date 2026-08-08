@@ -6748,6 +6748,7 @@ mod tests {
             .find(|c| c.injection.generation > withdrawn.injection.generation)
             .unwrap();
         let before: String = sqlx::query_scalar("SELECT source_body FROM proposal_feedback_refinement_sources WHERE injection_id=$1 AND source_feedback_id=$2").bind(&generation.injection.id).bind(&blocking.id).fetch_one(db.pool()).await.unwrap();
+        event_capture.lock().unwrap().clear();
         let partial = repo
             .withdraw_feedback_with_refinement_derivation(&blocking.id, "author")
             .await
@@ -6774,13 +6775,31 @@ mod tests {
         );
         let after: String = sqlx::query_scalar("SELECT source_body FROM proposal_feedback_refinement_sources WHERE injection_id=$1 AND source_feedback_id=$2").bind(&generation.injection.id).bind(&blocking.id).fetch_one(db.pool()).await.unwrap();
         assert_eq!(before, after);
-        let events = event_capture.lock().unwrap();
-        assert_eq!(events.len(), 3);
-        for event in events.iter() {
-            assert_eq!(event.entity_type(), "proposal_feedback");
-            assert_eq!(event.action(), "withdrawn");
-            assert_eq!(event.payload()["proposal_id"], proposal.id);
+        {
+            let events = event_capture.lock().unwrap();
+            assert_eq!(events.len(), 3);
+            for (event, feedback_id) in events.iter().zip([
+                blocking.id.as_str(),
+                advisory.id.as_str(),
+                blocking_two.id.as_str(),
+            ]) {
+                assert_eq!(event.entity_type(), "proposal_feedback");
+                assert_eq!(event.action(), "withdrawn");
+                assert_eq!(event.id.as_deref(), Some(feedback_id));
+                assert_eq!(event.payload()["proposal_id"], proposal.id);
+                assert_eq!(event.payload()["feedback_id"], feedback_id);
+            }
         }
+        event_capture.lock().unwrap().clear();
+        assert!(
+            repo.withdraw_feedback_with_refinement_derivation("missing-feedback", "author")
+                .await
+                .is_err()
+        );
+        assert!(
+            event_capture.lock().unwrap().is_empty(),
+            "failed withdrawal must not publish"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
