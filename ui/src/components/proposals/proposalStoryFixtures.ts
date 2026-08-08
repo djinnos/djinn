@@ -13,6 +13,7 @@ import type {
   ProposalDebateTrailRow,
   ProposalEpic,
   ProposalFeedback,
+  ProposalFeedbackRefinement,
   ProposalGateStatus,
   ProposalListRow,
   ProposalListSummary,
@@ -375,6 +376,24 @@ export const feedback: ProposalFeedback[] = [
   },
 ];
 
+/** Lifecycle fixtures cover disposed, repeated blocking, and terminal states. */
+export const feedbackRefinements: ProposalFeedbackRefinement[] = [
+  {
+    root_feedback_id: "fb-1", generation: 1, round: 1, state: "accepted",
+    debate_entry_id: "dt-r1-obj-1", accepted_revision_seq: 3,
+    source_rows: [{ source_feedback_id: "fb-1", source_ordinal: 0, author_kind: "user", author_user_id: "u-bob", body: feedback[0].body, severity: "blocking", created_at: feedback[0].created_at }],
+  },
+  {
+    root_feedback_id: "fb-1", generation: 2, round: 2, state: "queued",
+    source_rows: [
+      { source_feedback_id: "fb-late", source_ordinal: 0, author_kind: "user", author_user_id: "u-bob", body: "A later blocking follow-up needs another refinement generation.", severity: "blocking", created_at: ISO(hours(4)) },
+      { source_feedback_id: "fb-advisory-mixed", source_ordinal: 1, author_kind: "user", author_user_id: "u-carol", body: "A related advisory note remains non-gating.", severity: "advisory", created_at: ISO(hours(3)) },
+    ],
+  },
+  { root_feedback_id: "fb-wont-fix", generation: 1, round: 2, state: "wont_fix", accepted_reason: "This conflicts with the agreed proposal scope.", source_rows: [] },
+  { root_feedback_id: "fb-withdrawn", generation: 1, round: 2, state: "withdrawn_by_author", withdrawn_at: ISO(hours(2)), source_rows: [] },
+];
+
 // ── Sign-offs ────────────────────────────────────────────────────────────────
 
 export const signoffsNone: ProposalSignoff[] = [];
@@ -461,6 +480,7 @@ export const richDetail: ProposalDetail = {
   proposal: richProposal,
   targets,
   feedback,
+  feedback_refinements: feedbackRefinements,
   revisions,
   signoffs: signoffsPartial,
   epics: [],

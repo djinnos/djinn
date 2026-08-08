@@ -5,12 +5,14 @@ import { fetchUsers, type OrgUser } from "@/api/users";
 import { proposalDetailTourStorageKey } from "@/components/proposals/proposalTourStorage";
 import type {
   Proposal,
+  ProposalDebateTrailRow,
   ProposalEpic,
+  ProposalFeedbackRefinement,
   ProposalLintResult,
   ProposalListRow,
 } from "@/api/types";
 import { render, screen, userEvent, waitFor, within } from "@/test/test-utils";
-import { ProposalsPage } from "./ProposalsPage";
+import { FeedbackThread, ProposalsPage } from "./ProposalsPage";
 
 const scrollIntoViewMock = vi.fn();
 
@@ -1190,4 +1192,35 @@ describe("ProposalsPage", () => {
       await screen.findByText("Could not load proposals"),
     ).toBeInTheDocument();
   });
+
+  it("navigates a lifecycle source link to an earlier collapsed debate entry", async () => {
+    const user = userEvent.setup();
+    const debateTrail: ProposalDebateTrailRow[] = [
+      { id: "source-entry", proposal_id: "feedback-link", kind: "objection", body: "The exact source debate entry.", blocking: true, agent_role: "adversary", author_kind: "agent", author_user_id: null, author_model: "gpt", source_task_id: null, against_revision_seq: 1, round: 1, resolved_at: null, resolved_by_user_id: null, reopened_at: null, reopened_by_user_id: null, created_at: "2026-06-01T00:00:00Z", updated_at: "2026-06-01T00:00:00Z" },
+      { id: "latest-entry", proposal_id: "feedback-link", kind: "objection", body: "Latest round entry.", blocking: false, agent_role: "adversary", author_kind: "agent", author_user_id: null, author_model: "gpt", source_task_id: null, against_revision_seq: 2, round: 2, resolved_at: null, resolved_by_user_id: null, reopened_at: null, reopened_by_user_id: null, created_at: "2026-06-02T00:00:00Z", updated_at: "2026-06-02T00:00:00Z" },
+    ];
+    const refinements: ProposalFeedbackRefinement[] = [{
+      root_feedback_id: "root", generation: 1, round: 1, state: "wont_fix",
+      debate_entry_id: "source-entry", source_rows: [],
+    }];
+
+    render(
+      <FeedbackThread
+        proposal={makeProposal({ id: "feedback-link", short_id: "flink", title: "Feedback link", status: "draft" })}
+        feedback={[]}
+        refinements={refinements}
+        debateTrail={debateTrail}
+        canEdit={false}
+        onChanged={vi.fn()}
+      />,
+    );
+
+    expect(screen.queryByText("The exact source debate entry.")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("link", { name: "View source debate entry" }));
+
+    const target = screen.getByText("The exact source debate entry.").closest("li");
+    expect(target).toHaveAttribute("id", "proposal-debate-entry-source-entry");
+    expect(screen.getByRole("button", { name: /Round 1/ })).toHaveAttribute("aria-expanded", "true");
+  });
+
 });

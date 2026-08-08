@@ -395,6 +395,42 @@ describe("ProposalHistory", () => {
     expect(screen.queryByText("rev 2")).not.toBeInTheDocument();
   });
 
+  it("keeps exact revision anchors for intermediate collapsed tribunal revisions", () => {
+    const { container } = render(
+      <ProposalHistory
+        detail={detail([
+          revision(1, { body: "Original spec." }),
+          revision(2, {
+            body: "First tribunal result.",
+            created_at: "2026-06-02T00:00:00Z",
+            event_metadata: JSON.stringify({ source: "refinement_loop", round: 1 }),
+          }),
+          revision(3, {
+            body: "First accepted feedback result.",
+            created_at: "2026-06-03T00:00:00Z",
+            event_metadata: JSON.stringify({ source: "refinement_loop", round: 2 }),
+          }),
+          revision(4, {
+            body: "Second tribunal result.",
+            created_at: "2026-06-04T00:00:00Z",
+            event_metadata: JSON.stringify({ source: "refinement_loop", round: 3 }),
+          }),
+          revision(5, {
+            body: "Second accepted feedback result.",
+            created_at: "2026-06-05T00:00:00Z",
+            event_metadata: JSON.stringify({ source: "refinement_loop", round: 4 }),
+          }),
+        ])}
+      />,
+    );
+
+    expect(screen.getByText("rev 2–5")).toBeInTheDocument();
+    // Generation 1 can link to revision 3 even when a later generation
+    // extends the same collapsed tribunal run through revision 5.
+    expect(container.querySelector("#proposal-revision-3")).toBeInTheDocument();
+    expect(container.querySelector("#proposal-revision-5")).toBeInTheDocument();
+  });
+
   it("keeps an older warning on its own row after a later clean revision", () => {
     render(<ProposalHistory detail={detail([
       revision(1),
