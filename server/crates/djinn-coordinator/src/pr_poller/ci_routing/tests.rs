@@ -2237,6 +2237,7 @@ fn dummy_attempt(phase: CiActionPhase) -> CiRouteAttempt {
         diagnostic_reason: None,
         park_justification: None,
         lead_rejection: None,
+        pr_merged_at: None,
         provider_error: None,
         superseded_by_evidence: None,
     }

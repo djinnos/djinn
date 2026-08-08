@@ -161,6 +161,61 @@ const REQUIRED_CLAUSES: &[Clause] = &[
         "If either the remedy or a valid command is unavailable, the repair plan is invalid and \
          you must use the diagnose plan.",
     ),
+    // ── Exactness of the two corpora (payload-quality fix) ───────────────
+    //
+    // The rule alone was already here and was already being obeyed *in
+    // spirit*: on 2026-08-08 four of five rejected adjudications proposed a
+    // semantically correct command that had been decorated or narrowed. What
+    // was missing is that the comparison is string equality, so "the same
+    // command" is not a defence. See `lead_prompt_requires_the_two_corpora_to
+    // _be_copied_verbatim`.
+    clause(
+        "corpora.delivered",
+        "reproduced verbatim in the *CI Evidence Bundle For This Route* block below",
+    ),
+    clause(
+        "corpora.reference_is_substring",
+        "Your `directive` is grounded only if it contains one of the listed strings **as an exact \
+         substring**",
+    ),
+    clause(
+        "corpora.command_is_equality",
+        "A repair's `verification_command` must **equal** one of the listed commands.",
+    ),
+    clause(
+        "exact.headline",
+        "**Copy the command character for character. Editing it makes it an invented command.**",
+    ),
+    clause(
+        "exact.equality_rule",
+        "string equality against the listed corpus after collapsing runs of whitespace",
+    ),
+    clause("exact.no_cd", "`cd server && <command>` is not `<command>`"),
+    clause(
+        "exact.no_env_prefix",
+        "`SQLX_OFFLINE=true <command>` or `UPDATE_FIXTURE=1 <command>` is not `<command>`",
+    ),
+    clause(
+        "exact.no_narrowing",
+        "replacing a workspace-wide run with `-p <crate>`, `--lib`, or a single test-path filter",
+    ),
+    clause(
+        "exact.no_flag_edits",
+        "adding, removing, or reordering any flag, and appending `-- --nocapture`",
+    ),
+    clause(
+        "exact.no_chaining",
+        "merging two listed commands into one `&&` chain",
+    ),
+    clause(
+        "exact.escape_hatch",
+        "reopen with the diagnose plan and `no_repository_command`, put the command you would \
+         have run in the `directive` as prose",
+    ),
+    clause(
+        "exact.reference_verbatim",
+        "paste one listed evidence reference into it verbatim",
+    ),
     // ── The run-absent, diagnose-only route (revision 58) ────────────────
     //
     // Keyed on the coordinator's explicit `diagnose_only` flag rather than on
@@ -516,6 +571,173 @@ fn lead_prompt_makes_repair_unavailable_on_a_run_absent_route() {
     assert!(
         section.contains("or park if the capture failure is itself a cited platform dead-end"),
         "the CI section must leave the cited park open as the other legal exit"
+    );
+}
+
+// ── The two corpora: delivery, and exactness ───────────────────────────────
+
+/// The supervisor grades a Lead result by **string comparison** against two
+/// closed corpora — `evidence_references` (exact substring) and
+/// `repository_commands` (exact equality after whitespace normalization). The
+/// prompt must say that, in those terms.
+///
+/// # The failure this pins
+///
+/// On 2026-08-08, 5 of 7 CI adjudications degraded to diagnoses. Four were
+/// `verification_command_not_repository_valid`, and not one of them was a
+/// hallucinated command: they were `cd server && cargo clippy …`,
+/// `SQLX_OFFLINE=true cargo test -p djinn-agent --lib <one test>`, and
+/// `UPDATE_DJINN_MCP_SERVER_FIXTURE=1 cargo test -p … -- --nocapture`. Every
+/// one names the right verification; every one is a different *string* from
+/// anything the corpus could hold.
+///
+/// "Do not invent a command" — which the prompt already said, and which
+/// `command.no_invention` above still pins — does not forbid any of those,
+/// because their authors were not inventing. The clause that forbids them is
+/// that the comparison is equality, so a decorated command is a new command.
+/// This test is what keeps that clause from being edited back out as
+/// redundant.
+#[test]
+fn lead_prompt_requires_the_two_corpora_to_be_copied_verbatim() {
+    let prompt = lead_prompt();
+    let section = ci_section(&prompt).expect("CI section present");
+
+    // The comparison must be named as string equality. A prompt that only says
+    // "repository-valid" leaves "same command, better spelled" open.
+    assert!(
+        section.contains(
+            "string equality against the listed corpus after collapsing runs of \
+                          whitespace"
+        ),
+        "the CI section must state that the command check is string equality, not judgement"
+    );
+    assert!(
+        section.contains("Copy the command character for character"),
+        "the CI section must require a character-for-character copy"
+    );
+
+    // Each of the four shapes that actually occurred in production must be
+    // named. Naming the general rule is not enough: every one of these was
+    // written by a Lead that believed it was complying with the general rule.
+    for (label, decoration) in [
+        (
+            "working-directory prefix",
+            "`cd server && <command>` is not `<command>`",
+        ),
+        (
+            "environment-variable prefix",
+            "`SQLX_OFFLINE=true <command>` or `UPDATE_FIXTURE=1 <command>` is not `<command>`",
+        ),
+        (
+            "narrowed test filter",
+            "replacing a workspace-wide run with `-p <crate>`, `--lib`, or a single test-path \
+             filter",
+        ),
+        (
+            "flag edits",
+            "adding, removing, or reordering any flag, and appending `-- --nocapture`",
+        ),
+    ] {
+        assert!(
+            section.contains(decoration),
+            "the CI section must name the '{label}' decoration as an invented command"
+        );
+    }
+
+    // And it must leave a correct exit, or the model picks the closest command
+    // rather than the diagnose plan — which is the whole degradation.
+    assert!(
+        section.contains(
+            "reopen with the diagnose plan and `no_repository_command`, put the command you \
+             would have run in the `directive` as prose"
+        ),
+        "the CI section must route an unavailable command to the diagnose plan, with the \
+         intended command preserved as prose"
+    );
+
+    // Grounding is the same class of check and failed the same way once
+    // (`directive_not_grounded`), so it carries the same instruction.
+    assert!(
+        section.contains("paste one listed evidence reference into it verbatim"),
+        "the CI section must require the directive to quote a reference verbatim"
+    );
+}
+
+/// The corpora must actually **reach** the model.
+///
+/// # The bug this kills
+///
+/// Before this fix the two corpora existed only in the arbitration row's
+/// `ci_route` block. That block reaches `load_arbiter_directive`, which is
+/// hard-gated to the worker role, and its sibling `ci_dossier` — commented "the
+/// evidence dossier the Lead prompt renders" — was written to a column no
+/// prompt reads. Lead was graded on exact equality against a list it had never
+/// been shown, and `lead.md` told it otherwise.
+///
+/// Every prompt-contract test in this module stayed green throughout, because
+/// each one asserts what `lead.md` *says*. This test asserts what the renderer
+/// *does*: delete the `{{ci_adjudication_section}}` placeholder from `lead.md`,
+/// or the `out.replace` for it in `render_prompt_for_role`, and it fails.
+#[test]
+fn lead_prompt_renders_the_delivered_ci_evidence_bundle() {
+    const BUNDLE: &str = "### CI Evidence Bundle For This Route\n\n\
+                          **Evidence references …**\n\n\
+                          - `31235016600`\n\n\
+                          - `cargo clippy --workspace -- -D warnings`\n";
+
+    let ctx = TaskContext {
+        ci_adjudication_bundle: Some(BUNDLE.to_owned()),
+        ..make_ctx()
+    };
+    let prompt = render_prompt(AgentType::Lead, &make_task(), &ctx);
+
+    // The placeholder is substituted, not left as literal template text.
+    assert!(
+        !prompt.contains("{{ci_adjudication_section}}"),
+        "the CI bundle placeholder must be substituted in the rendered prompt"
+    );
+    // The corpus strings the supervisor compares against are present verbatim.
+    for delivered in ["31235016600", "cargo clippy --workspace -- -D warnings"] {
+        assert!(
+            prompt.contains(delivered),
+            "the rendered prompt must carry the corpus entry '{delivered}' verbatim"
+        );
+    }
+    // And inside the CI section, next to the rule they satisfy — a corpus
+    // rendered into some other part of the prompt is a corpus the contract
+    // paragraph does not point at.
+    let section = ci_section(&prompt).expect("CI section present");
+    assert!(
+        section.contains("### CI Evidence Bundle For This Route"),
+        "the bundle must render inside the CI adjudication section"
+    );
+    assert!(
+        section.contains("cargo clippy --workspace -- -D warnings"),
+        "the command corpus must render inside the CI adjudication section"
+    );
+
+    // The contract paragraph promises this block by name; a rename on either
+    // side silently breaks the pointer.
+    assert!(
+        section.contains("*CI Evidence Bundle For This Route*"),
+        "the contract paragraph must name the bundle heading it points Lead at"
+    );
+
+    // A Lead session with no CI route renders no bundle and no stray
+    // placeholder — the section still has to read cleanly for the ordinary
+    // arbiter path.
+    let no_route = render_prompt(AgentType::Lead, &make_task(), &make_ctx());
+    assert!(
+        !no_route.contains("{{ci_adjudication_section}}"),
+        "the placeholder must vanish when there is no CI route"
+    );
+    assert!(
+        !no_route.contains("### CI Evidence Bundle For This Route"),
+        "an un-routed Lead session must not be shown an empty bundle heading"
+    );
+    assert!(
+        ci_section(&no_route).is_some_and(|s| s.contains("no board change")),
+        "the CI section must survive intact when no bundle is delivered"
     );
 }
 

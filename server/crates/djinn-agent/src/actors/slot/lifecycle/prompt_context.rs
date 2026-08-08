@@ -108,10 +108,12 @@ pub(crate) fn knowledge_context_test_env_guard() -> KnowledgeContextTestEnvGuard
 #[cfg(any(test, feature = "test-support"))]
 const MIRROR_ROOT_ENV: &str = "DJINN_MIRROR_ROOT";
 
+mod ci_adjudication;
 mod ci_directive;
 mod diagnostics;
 mod planner_enrichment;
 mod types;
+use ci_adjudication::{build_ci_adjudication_bundle, role_receives_ci_adjudication_bundle};
 use ci_directive::build_ci_blocking_directive;
 use planner_enrichment::merge_planned_knowledge;
 #[allow(unused_imports)] // Lifecycle seams are consumed by stage wiring and test modules.
@@ -1320,6 +1322,7 @@ pub(crate) async fn assemble_prompt_context(inputs: PromptContextInputs<'_>) -> 
         read_sources,
         worker_resume_note,
         arbiter_directive,
+        ci_adjudication_bundle,
         mcp_server_instructions,
         extension_diagnostics,
         cancellation,
@@ -1583,6 +1586,7 @@ pub(crate) async fn assemble_prompt_context(inputs: PromptContextInputs<'_>) -> 
             ci_blocking_directive: ci_blocking_directive.clone(),
             worker_resume_note: worker_resume_note.map(str::to_string),
             arbiter_directive: arbiter_directive.map(str::to_string),
+            ci_adjudication_bundle: ci_adjudication_bundle.map(str::to_string),
         },
     );
     let system_prompt_with_extensions =
@@ -1612,6 +1616,7 @@ pub(crate) async fn assemble_prompt_context(inputs: PromptContextInputs<'_>) -> 
         ci_blocking_directive,
         worker_resume_note: worker_resume_note.map(str::to_string),
         arbiter_directive: arbiter_directive.map(str::to_string),
+        ci_adjudication_bundle: ci_adjudication_bundle.map(str::to_string),
         prior_attempts,
         completed_dependency_parents,
         base_system_prompt,
@@ -1702,6 +1707,33 @@ pub(crate) async fn load_arbiter_directive(
         .and_then(|d| d.get("directive"))
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
+}
+
+/// Load the CI evidence bundle a Lead session adjudicates (proposal `nafu`).
+///
+/// Reads the **same** arbitration column as [`load_arbiter_directive`] and
+/// takes the other half of it: the worker gets `directive.directive`, Lead gets
+/// `directive.ci_route`.
+///
+/// Deliberately *not* one-shot. `load_arbiter_directive` claims
+/// `mark_directive_injected` because a monitored-reopen directive must reach
+/// exactly one worker prompt; this bundle is read-only reference material for
+/// the session that is adjudicating right now, and a redispatched Lead that
+/// could not see the corpus would be back to guessing at the command. Nothing
+/// here mutates the row.
+pub(crate) async fn load_ci_adjudication_bundle(
+    role_name: &str,
+    task_id: &str,
+    app_state: &AgentContext,
+) -> Option<String> {
+    if !role_receives_ci_adjudication_bundle(role_name) {
+        return None;
+    }
+    use djinn_db::repositories::task_arbitration::TaskArbitrationRepository;
+    let arb_repo = TaskArbitrationRepository::new(app_state.db.clone());
+    let (_hold_cycle, unconsumed_record) =
+        arb_repo.resolve_current_hold_cycle(task_id).await.ok()?;
+    build_ci_adjudication_bundle(unconsumed_record?.directive.as_ref())
 }
 
 /// Build one-line worker resume note. Returns None when not applicable.

@@ -94,6 +94,8 @@ pub(crate) struct PromptContext {
     pub completed_dependency_parents: Option<Vec<djinn_db::CompletedParentSummary>>,
     pub worker_resume_note: Option<String>,
     pub arbiter_directive: Option<String>,
+    /// nafu: the CI evidence bundle rendered into a Lead prompt.
+    pub ci_adjudication_bundle: Option<String>,
     pub base_system_prompt: String,
     pub system_prompt_with_extensions: String,
     /// Exact final provider prompt, after all rendering and capping.
@@ -145,6 +147,8 @@ pub(crate) struct PromptContextInputs<'a> {
     pub read_sources: &'a [ReadSourceInfo],
     pub worker_resume_note: Option<&'a str>,
     pub arbiter_directive: Option<&'a str>,
+    /// nafu: the rendered CI evidence bundle, Lead-only.
+    pub ci_adjudication_bundle: Option<&'a str>,
     pub mcp_server_instructions: &'a BTreeMap<String, String>,
     /// Canonical rows returned for the session-associated extension load pass.
     pub extension_diagnostics: &'a [ExtensionLoadDiagnosticV1],
