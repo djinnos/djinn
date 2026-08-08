@@ -59,6 +59,8 @@ import { ProposalRefinement } from "@/components/proposals/ProposalRefinement";
 import { ProposalDetailTour } from "@/components/proposals/ProposalDetailTour";
 import { ReadinessPanel } from "@/components/proposals/ReadinessPanel";
 import { ProposalHistory } from "@/components/proposals/ProposalHistory";
+import { FeedbackRefinementCards } from "@/components/proposals/FeedbackRefinementCards";
+import { ProposalDebateTrail } from "@/components/proposals/ProposalDebateTrail";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -974,6 +976,8 @@ function ProposalDetailView({
         <FeedbackThread
           proposal={proposal}
           feedback={feedback}
+          refinements={detail.feedback_refinements ?? []}
+          debateTrail={detail.debate_trail}
           canEdit={canDirectEdit}
           onChanged={onChanged}
         />
@@ -987,19 +991,24 @@ function ProposalDetailView({
 export function FeedbackThread({
   proposal,
   feedback,
+  refinements,
+  debateTrail,
   canEdit,
   onChanged,
 }: {
   proposal: Proposal;
   feedback: ProposalFeedback[];
+  refinements?: ProposalDetailData["feedback_refinements"];
+  debateTrail: ProposalDetailData["debate_trail"];
   canEdit: boolean;
   onChanged: () => void;
 }) {
-  const [showResolved, setShowResolved] = useState(false);
+  void onChanged;
   const usersQuery = useQuery(usersQueryOptions());
   const userFor = (id?: string | null) =>
     id ? (usersQuery.data ?? []).find((u: OrgUser) => u.id === id) : undefined;
   const startChat = useStartProposalChat();
+  const [sourceDebateEntryId, setSourceDebateEntryId] = useState<string>();
 
   const authorName = (f: ProposalFeedback) => {
     if (f.author_kind === "ai") return f.author_model ?? "ai";
@@ -1007,20 +1016,17 @@ export function FeedbackThread({
     return u ? userDisplayName(u) : "reviewer";
   };
 
-  // Dismiss = resolve with no revision (no spec change). Applying feedback runs
-  // through djinn in chat, which resolves it with the revision it landed in.
-  const dismiss = async (id: string) => {
-    try {
-      const res = await callMcpTool("proposal_feedback_resolve", { id });
-      if (res.error) throw new Error(res.error);
-      onChanged();
-    } catch (e) {
-      showToast.error("Failed to dismiss", { description: (e as Error).message });
-    }
-  };
-
-  const unresolved = feedback.filter((f) => f.resolved_at == null);
-  const resolved = feedback.filter((f) => f.resolved_at != null);
+  const projectedRefinements = refinements ?? [];
+  const capturedFeedbackIds = new Set(
+    projectedRefinements.flatMap((generation) =>
+      (generation.source_rows ?? []).map((row) => row.source_feedback_id),
+    ),
+  );
+  // Captured feedback is rendered from the canonical lifecycle projection.
+  // Keep only uncaptured advisory discussion in the direct thread.
+  const advisoryDiscussion = feedback.filter(
+    (item) => item.severity === "advisory" && !capturedFeedbackIds.has(item.id),
+  );
 
   const authorHeader = (f: ProposalFeedback) => (
     <div className="mb-1 flex items-center gap-2 text-xs text-muted-foreground">
@@ -1041,32 +1047,44 @@ export function FeedbackThread({
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <Label className="text-xs uppercase text-muted-foreground">Feedback</Label>
-        <div className="flex items-center gap-2">
-          {unresolved.length > 0 && (
-            <Badge variant="secondary">{unresolved.length} unresolved</Badge>
-          )}
-          {canEdit && (
-            <Button
-              size="sm"
-              variant="outline"
-              className="gap-1.5"
-              onClick={() => startChat(proposal)}
-            >
-              <HugeiconsIcon icon={Robot01Icon} size={15} />
-              Ask djinn
-            </Button>
-          )}
-        </div>
+        {canEdit && (
+          <Button
+            size="sm"
+            variant="outline"
+            className="gap-1.5"
+            onClick={() => startChat(proposal)}
+          >
+            <HugeiconsIcon icon={Robot01Icon} size={15} />
+            Ask djinn
+          </Button>
+        )}
       </div>
 
+      <FeedbackRefinementCards
+        refinements={projectedRefinements}
+        onSourceDebateEntry={setSourceDebateEntryId}
+      />
+
+      {sourceDebateEntryId && (
+        <section className="space-y-2" aria-label="Source debate trail">
+          <Label className="text-xs uppercase text-muted-foreground">
+            Source debate trail
+          </Label>
+          <ProposalDebateTrail
+            trail={debateTrail}
+            targetEntryId={sourceDebateEntryId}
+          />
+        </section>
+      )}
+
       <div className="space-y-3">
-        {unresolved.length === 0 && (
+        {projectedRefinements.length === 0 && advisoryDiscussion.length === 0 && (
           <p className="text-sm text-muted-foreground">
             No open feedback. Reviewers can leave feedback via the djinn MCP, and
             you can ask djinn to apply it.
           </p>
         )}
-        {unresolved.map((f) => (
+        {advisoryDiscussion.map((f) => (
           <div key={f.id} className="rounded-md border bg-muted/40 p-3">
             {authorHeader(f)}
             <div className="prose prose-sm max-w-none dark:prose-invert">
@@ -1083,43 +1101,11 @@ export function FeedbackThread({
                   <HugeiconsIcon icon={Robot01Icon} size={15} />
                   Address with djinn
                 </Button>
-                <Button size="sm" variant="ghost" onClick={() => dismiss(f.id)}>
-                  Dismiss
-                </Button>
               </div>
             )}
           </div>
         ))}
       </div>
-
-      {resolved.length > 0 && (
-        <div className="space-y-2">
-          <button
-            type="button"
-            onClick={() => setShowResolved((v) => !v)}
-            className="text-xs text-muted-foreground hover:text-foreground"
-          >
-            {showResolved ? "Hide" : "Show"} resolved ({resolved.length})
-          </button>
-          {showResolved && (
-            <div className="space-y-3 opacity-70">
-              {resolved.map((f) => (
-                <div key={f.id} className="rounded-md border bg-muted/20 p-3">
-                  {authorHeader(f)}
-                  <div className="prose prose-sm max-w-none dark:prose-invert">
-                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{f.body}</ReactMarkdown>
-                  </div>
-                  <p className="mt-2 text-xs text-muted-foreground">
-                    {f.resolved_revision_seq != null
-                      ? `Addressed in revision ${f.resolved_revision_seq}`
-                      : "Dismissed"}
-                  </p>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-      )}
     </div>
   );
 }
