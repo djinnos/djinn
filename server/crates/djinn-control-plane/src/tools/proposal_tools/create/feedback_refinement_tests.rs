@@ -3,9 +3,11 @@
 use crate::server::DjinnMcpServer;
 use crate::state::stubs::test_mcp_state;
 use djinn_core::events::EventBus;
+use djinn_db::test_support::queue_feedback_refinement_generation_for_test;
 use djinn_db::{
-    Database, ProposalCreateInput, ProposalDebateTrailCreateInput, ProposalFeedbackCreateInput,
-    ProposalRepository,
+    Database, FeedbackRefinementDisposition, FeedbackRefinementDispositionInput,
+    ProposalCreateInput, ProposalDebateTrailCreateInput, ProposalFeedbackCreateInput,
+    ProposalRepository, ProposalUpdateInput,
 };
 use serde_json::{Value, json};
 
@@ -92,15 +94,34 @@ async fn proposal_show_projects_persisted_feedback_refinement_generations() {
         .captures
         .pop()
         .unwrap();
-    sqlx::query(
-        "UPDATE proposal_feedback_refinement_injections SET state='accepted', \
-         accepted_disposition='fixed_revision', accepted_revision_seq=2, \
-         accepted_at='2025-01-01T00:00:00.000Z', accepted_by_user_id='judge-fixed' WHERE id=$1",
+    repo.update(
+        &proposal.id,
+        ProposalUpdateInput {
+            title: &proposal.title,
+            body: "body revised to address feedback",
+            acceptance_criteria: &proposal.acceptance_criteria,
+            status: &proposal.status,
+            superseded_by: proposal.superseded_by.as_deref(),
+            body_format: Some(&proposal.body_format),
+            event_metadata: None,
+        },
     )
-    .bind(&first.injection.id)
-    .execute(db.pool())
     .await
     .unwrap();
+    djinn_core::auth_context::SESSION_USER_ID
+        .scope(Some("judge-fixed".into()), async {
+            repo.dispose_feedback_refinement_generation(FeedbackRefinementDispositionInput {
+                proposal_id: proposal.id.clone(),
+                injection_id: first.injection.id.clone(),
+                root_feedback_id: first.injection.root_feedback_id.clone(),
+                generation: first.injection.generation,
+                debate_entry_id: first.debate_entry.id.clone(),
+                disposition: FeedbackRefinementDisposition::FixedRevision { revision_seq: 2 },
+            })
+            .await
+            .unwrap();
+        })
+        .await;
 
     let second_reply = repo
         .add_feedback(ProposalFeedbackCreateInput {
@@ -119,15 +140,22 @@ async fn proposal_show_projects_persisted_feedback_refinement_generations() {
         .captures
         .pop()
         .unwrap();
-    sqlx::query(
-        "UPDATE proposal_feedback_refinement_injections SET state='wont_fix', \
-         accepted_disposition='wont_fix', accepted_reason='outside the agreed scope', \
-         accepted_at='2025-01-02T00:00:00.000Z', accepted_by_user_id='judge-wont-fix' WHERE id=$1",
-    )
-    .bind(&second.injection.id)
-    .execute(db.pool())
-    .await
-    .unwrap();
+    djinn_core::auth_context::SESSION_USER_ID
+        .scope(Some("judge-wont-fix".into()), async {
+            repo.dispose_feedback_refinement_generation(FeedbackRefinementDispositionInput {
+                proposal_id: proposal.id.clone(),
+                injection_id: second.injection.id.clone(),
+                root_feedback_id: second.injection.root_feedback_id.clone(),
+                generation: second.injection.generation,
+                debate_entry_id: second.debate_entry.id.clone(),
+                disposition: FeedbackRefinementDisposition::WontFix {
+                    reason: "outside the agreed scope".into(),
+                },
+            })
+            .await
+            .unwrap();
+        })
+        .await;
 
     let third_reply = repo
         .add_feedback(ProposalFeedbackCreateInput {
@@ -146,21 +174,9 @@ async fn proposal_show_projects_persisted_feedback_refinement_generations() {
         .captures
         .pop()
         .unwrap();
-    sqlx::query(
-        "UPDATE proposal_feedback_refinement_injections SET state='withdrawn_by_author' WHERE id=$1",
-    )
-    .bind(&third.injection.id)
-    .execute(db.pool())
-    .await
-    .unwrap();
-    sqlx::query(
-        "UPDATE proposal_debate_trail SET resolved_at='2025-01-03T00:00:00.000Z', \
-         resolved_by_user_id='feedback-author' WHERE id=$1",
-    )
-    .bind(&third.debate_entry.id)
-    .execute(db.pool())
-    .await
-    .unwrap();
+    repo.withdraw_feedback_with_refinement_derivation(&third_reply.id, "feedback-author")
+        .await
+        .unwrap();
 
     let queued_reply = repo
         .add_feedback(ProposalFeedbackCreateInput {
@@ -179,13 +195,7 @@ async fn proposal_show_projects_persisted_feedback_refinement_generations() {
         .captures
         .pop()
         .unwrap();
-    sqlx::query(
-        "UPDATE proposal_feedback_refinement_injections SET state='queued', debate_entry_id=NULL WHERE id=$1",
-    )
-    .bind(&queued.injection.id)
-    .execute(db.pool())
-    .await
-    .unwrap();
+    queue_feedback_refinement_generation_for_test(&db, &queued.injection.id).await;
 
     let injected = repo
         .capture_feedback_refinement_boundary(&proposal.id)
@@ -212,13 +222,7 @@ async fn proposal_show_projects_persisted_feedback_refinement_generations() {
         .captures
         .pop()
         .unwrap();
-    sqlx::query(
-        "UPDATE proposal_feedback_refinement_injections SET state='queued', debate_entry_id=NULL WHERE id=$1",
-    )
-    .bind(&separately_queued.injection.id)
-    .execute(db.pool())
-    .await
-    .unwrap();
+    queue_feedback_refinement_generation_for_test(&db, &separately_queued.injection.id).await;
 
     let ordinary = repo
         .add_debate_trail_entry(ProposalDebateTrailCreateInput {
