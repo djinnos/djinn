@@ -1043,3 +1043,140 @@ async fn deprecate_with_supersedes_preserves_note_owned_data_and_recorded_associ
     assert_eq!(deprecate_event.task_id.as_deref(), Some("task"));
     assert_eq!(deprecate_event.task_run_id.as_deref(), Some("run"));
 }
+
+/// `mutate_with_revision` is the THIRD confidence writer, alongside
+/// `set_confidence` (which clamps) and `update_confidence` (which goes through
+/// `bayesian_update`, which clamps). It binds the caller's value straight into
+/// the INSERT/UPDATE, so without a range check it is the one writer that can
+/// leave `[CONFIDENCE_FLOOR, CONFIDENCE_CEILING]`.
+///
+/// It did. Production accumulated notes at ~1.0 — the unfalsifiable state
+/// proposal 9xih's ceiling exists to remove, and the state in which the
+/// POSITIVE `USER_CONFIRM` signal DEMOTES a note (its clamp pulls it back to
+/// the ceiling, below untouched above-ceiling peers).
+///
+/// Only `GuardedPatch` was validated before. Every desired state that names a
+/// confidence is validated now, asserted per variant so a future variant cannot
+/// quietly inherit the old hole.
+#[tokio::test]
+async fn revision_mutation_rejects_confidence_outside_the_epistemic_range() {
+    let tmp = crate::database::test_tempdir().unwrap();
+    let db = Database::open_in_memory().unwrap();
+    let (tx, _rx) = broadcast::channel(8);
+    let project = make_project(&db, tmp.path()).await;
+    let repo = NoteRepository::new(db.clone(), event_bus_for(&tx));
+
+    // The values production actually reached, plus both endpoints' neighbours.
+    let out_of_range = [
+        0.9863813229571984_f64, // one unclamped duplicate boost off the ceiling
+        0.999999999999202,      // many of them: effectively unfalsifiable
+        1.0,
+        0.0,
+        -0.5,
+        f64::NAN,
+    ];
+
+    for bad in out_of_range {
+        let note_id = uuid::Uuid::now_v7().to_string();
+        let mut command = create_command(&project.id, note_id.clone());
+        let NoteRevisionDesiredState::Create(state) = &mut command.desired else {
+            unreachable!("create_command builds a Create state")
+        };
+        state.permalink = format!("reference/ledger-note-{note_id}");
+        state.confidence = bad;
+        assert!(
+            repo.mutate_with_revision(command).await.is_err(),
+            "creating a note at confidence {bad} must be rejected"
+        );
+        assert!(
+            repo.get(&note_id).await.unwrap().is_none(),
+            "a rejected create at confidence {bad} must not have persisted a row"
+        );
+    }
+
+    // Now an existing in-range note, to prove the update variants are guarded
+    // too and that a rejection leaves the stored value untouched.
+    let note_id = uuid::Uuid::now_v7().to_string();
+    repo.mutate_with_revision(create_command(&project.id, note_id.clone()))
+        .await
+        .unwrap();
+    let before = repo.get(&note_id).await.unwrap().unwrap();
+
+    for bad in out_of_range {
+        for desired in [
+            NoteRevisionDesiredState::Existing {
+                content: "updated content".to_owned(),
+                confidence: bad,
+            },
+            NoteRevisionDesiredState::ExistingWithMetadata(NoteRevisionUpdateState {
+                title: before.title.clone(),
+                permalink: before.permalink.clone(),
+                content: "updated content".to_owned(),
+                note_type: before.note_type.clone(),
+                folder: before.folder.clone(),
+                tags: before.tags.clone(),
+                retrieval_anchor: None,
+                confidence: bad,
+            }),
+            NoteRevisionDesiredState::GuardedPatch {
+                expected_content: before.content.clone(),
+                content: "updated content".to_owned(),
+                confidence: bad,
+            },
+        ] {
+            assert!(
+                repo.mutate_with_revision(NoteRevisionMutation {
+                    project_id: project.id.clone(),
+                    note_id: Some(note_id.clone()),
+                    event_kind: NoteRevisionEventKind::Updated,
+                    desired,
+                    attribution: TrustedNoteRevisionAttribution::system(
+                        NoteRevisionSubsystem::Extraction
+                    ),
+                    provenance: TrustedNoteRevisionProvenance::new(
+                        Some("session".into()),
+                        Some("task".into()),
+                        Some("run".into())
+                    )
+                    .unwrap(),
+                    reason: NoteRevisionReason::new("out of range confidence").unwrap(),
+                })
+                .await
+                .is_err(),
+                "updating to confidence {bad} must be rejected"
+            );
+        }
+    }
+
+    let after = repo.get(&note_id).await.unwrap().unwrap();
+    assert_eq!(after.confidence, before.confidence);
+    assert_eq!(after.content, before.content);
+
+    // Negative control: an in-range value on the same command shape still
+    // commits, so the assertions above reject the confidence and not the shape.
+    let ok = repo
+        .mutate_with_revision(NoteRevisionMutation {
+            project_id: project.id.clone(),
+            note_id: Some(note_id.clone()),
+            event_kind: NoteRevisionEventKind::Updated,
+            desired: NoteRevisionDesiredState::Existing {
+                content: "updated content".to_owned(),
+                confidence: CONFIDENCE_CEILING,
+            },
+            attribution: TrustedNoteRevisionAttribution::system(NoteRevisionSubsystem::Extraction),
+            provenance: TrustedNoteRevisionProvenance::new(
+                Some("session".into()),
+                Some("task".into()),
+                Some("run".into()),
+            )
+            .unwrap(),
+            reason: NoteRevisionReason::new("in range confidence").unwrap(),
+        })
+        .await
+        .unwrap();
+    assert!(ok.changed);
+    assert_eq!(
+        repo.get(&note_id).await.unwrap().unwrap().confidence,
+        CONFIDENCE_CEILING
+    );
+}

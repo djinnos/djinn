@@ -1182,6 +1182,92 @@ impl ProposalRepository {
         Ok(feedback)
     }
 
+    /// Whether a capture boundary would create a new actionable human-feedback
+    /// obligation. This is deliberately the same source population capture
+    /// consumes: unresolved, unwithdrawn blocking feedback that no earlier
+    /// generation has already snapshotted. Advisory context and the broad
+    /// readiness badge count must not make schema availability an admission
+    /// prerequisite.
+    pub async fn has_capturable_unresolved_blocking_feedback(
+        &self,
+        proposal_id: &str,
+    ) -> Result<bool> {
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_scalar(
+            r#"SELECT EXISTS(
+                SELECT 1
+                FROM proposal_feedback f
+                WHERE f.proposal_id=$1
+                  AND f.severity='blocking'
+                  AND f.resolved_at IS NULL
+                  AND f.withdrawn_at IS NULL
+                  AND NOT EXISTS(
+                      SELECT 1
+                      FROM proposal_feedback_refinement_sources s
+                      JOIN proposal_feedback_refinement_injections i ON i.id=s.injection_id
+                      WHERE i.proposal_id=f.proposal_id
+                        AND s.source_feedback_id=f.id
+                  )
+            )"#,
+        )
+        .bind(proposal_id)
+        .fetch_one(self.db.pool())
+        .await?)
+    }
+
+    /// Commit a feedback boundary together with its durable handoff whenever a
+    /// non-resumable live run owns the proposal. This prevents a crash between
+    /// feedback insertion and `AlreadyActive` recovery from stranding work.
+    pub async fn add_feedback_with_severity_and_pending_handoff(
+        &self,
+        input: ProposalFeedbackCreateInput<'_>,
+        severity: &str,
+        persist_handoff_if_live: bool,
+    ) -> Result<(ProposalFeedback, bool)> {
+        self.db.ensure_initialized().await?;
+        if !matches!(severity, "advisory" | "blocking") {
+            return Err(Error::InvalidData(format!(
+                "invalid feedback severity: {severity}"
+            )));
+        }
+        let mut tx = self.db.pool().begin().await?;
+        let exists = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM proposals WHERE id=$1 FOR UPDATE)",
+        )
+        .bind(input.proposal_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if !exists {
+            return Err(Error::InvalidData(format!(
+                "proposal not found: {}",
+                input.proposal_id
+            )));
+        }
+        let id = uuid::Uuid::now_v7().to_string();
+        sqlx::query("INSERT INTO proposal_feedback (id,proposal_id,parent_id,author_kind,author_user_id,author_model,body,severity) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)")
+            .bind(&id).bind(input.proposal_id).bind(input.parent_id).bind(input.author_kind)
+            .bind(djinn_core::auth_context::current_user_id()).bind(input.author_model).bind(input.body).bind(severity)
+            .execute(&mut *tx).await?;
+        // Do not make persistence conditional on a liveness pre-check. Another
+        // transaction can admit a run after this lock is released; recording
+        // every activating boundary turns that race into recoverable pending
+        // work instead of a committed, stranded feedback row.
+        let handoff_persisted = persist_handoff_if_live && severity == "blocking";
+        if handoff_persisted {
+            sqlx::query("INSERT INTO pending_feedback_refinement_handoffs (id,proposal_id,boundary_feedback_id,cohort_owner) VALUES ($1,$2,$3,NOT EXISTS(SELECT 1 FROM pending_feedback_refinement_handoffs WHERE proposal_id=$2 AND state='pending' AND cohort_owner))")
+                .bind(uuid::Uuid::now_v7().to_string()).bind(input.proposal_id).bind(&id).execute(&mut *tx).await?;
+        }
+        let feedback: ProposalFeedback = sqlx::query_as("SELECT id,proposal_id,parent_id,author_kind,author_user_id,author_model,body,severity,withdrawn_at,withdrawn_by_user_id,resolved_at,resolved_revision_seq,resolved_by_user_id,created_at,updated_at FROM proposal_feedback WHERE id=$1")
+            .bind(&id).fetch_one(&mut *tx).await?;
+        tx.commit().await?;
+        self.events
+            .send(DjinnEventEnvelope::proposal_feedback_created(
+                input.proposal_id,
+                &feedback,
+            ));
+        Ok((feedback, handoff_persisted))
+    }
+
     /// Resolve a feedback entry: collapse it out of the active thread. Pass the
     /// revision that addressed it (when djinn applied a spec change) or `None`
     /// for a plain dismissal. Stamps the resolving user via `current_user_id()`.
@@ -1579,6 +1665,26 @@ impl ProposalRepository {
         &self,
         proposal_id: &str,
     ) -> Result<FeedbackRefinementBoundaryCapture> {
+        self.capture_feedback_refinement_boundary_inner(proposal_id, None)
+            .await
+    }
+
+    /// Capture a feedback boundary and consume every pending handoff represented
+    /// by that capture in the same proposal-serialized transaction.
+    pub(crate) async fn capture_feedback_refinement_boundary_and_complete_handoff(
+        &self,
+        proposal_id: &str,
+        successor_run_id: &str,
+    ) -> Result<FeedbackRefinementBoundaryCapture> {
+        self.capture_feedback_refinement_boundary_inner(proposal_id, Some(successor_run_id))
+            .await
+    }
+
+    async fn capture_feedback_refinement_boundary_inner(
+        &self,
+        proposal_id: &str,
+        successor_run_id: Option<&str>,
+    ) -> Result<FeedbackRefinementBoundaryCapture> {
         self.db.ensure_initialized().await?;
         let mut tx = self.db.pool().begin().await?;
         let revision_seq = sqlx::query_scalar::<_, i32>(
@@ -1599,6 +1705,12 @@ impl ProposalRepository {
         .fetch_one(&mut *tx)
         .await?;
         let Some(cutoff_id) = cutoff_id else {
+            self.complete_captured_pending_feedback_handoffs_in_tx(
+                &mut tx,
+                proposal_id,
+                successor_run_id,
+            )
+            .await?;
             tx.commit().await?;
             return Ok(Default::default());
         };
@@ -1716,6 +1828,12 @@ impl ProposalRepository {
                     reused_round: true,
                 });
             }
+            self.complete_captured_pending_feedback_handoffs_in_tx(
+                &mut tx,
+                proposal_id,
+                successor_run_id,
+            )
+            .await?;
             tx.commit().await?;
             return Ok(FeedbackRefinementBoundaryCapture { captures });
         }
@@ -1819,8 +1937,60 @@ impl ProposalRepository {
                 reused_round: queued_round.is_some(),
             });
         }
+        self.complete_captured_pending_feedback_handoffs_in_tx(
+            &mut tx,
+            proposal_id,
+            successor_run_id,
+        )
+        .await?;
         tx.commit().await?;
         Ok(FeedbackRefinementBoundaryCapture { captures })
+    }
+
+    /// Admit materialized handoffs and keep exactly one owner for work beyond
+    /// this capture's cutoff before releasing the proposal lock.
+    async fn complete_captured_pending_feedback_handoffs_in_tx(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        proposal_id: &str,
+        successor_run_id: Option<&str>,
+    ) -> Result<()> {
+        let Some(successor_run_id) = successor_run_id else {
+            return Ok(());
+        };
+        sqlx::query(
+            r#"UPDATE pending_feedback_refinement_handoffs h
+               SET state='admitted', cohort_owner=false, successor_run_id=$2,
+                   updated_at=to_char(transaction_timestamp() AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+               WHERE h.proposal_id=$1 AND h.state='pending'
+                 AND EXISTS (
+                     SELECT 1 FROM proposal_feedback_refinement_sources s
+                     JOIN proposal_feedback_refinement_injections i ON i.id=s.injection_id
+                     WHERE i.proposal_id=$1 AND s.source_feedback_id=h.boundary_feedback_id
+                 )"#,
+        )
+        .bind(proposal_id)
+        .bind(successor_run_id)
+        .execute(&mut **tx)
+        .await?;
+        sqlx::query(
+            r#"UPDATE pending_feedback_refinement_handoffs
+               SET cohort_owner=true,
+                   updated_at=to_char(transaction_timestamp() AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+               WHERE id=(
+                   SELECT id FROM pending_feedback_refinement_handoffs
+                   WHERE proposal_id=$1 AND state='pending'
+                   ORDER BY created_at,id LIMIT 1
+               )
+               AND NOT EXISTS (
+                   SELECT 1 FROM pending_feedback_refinement_handoffs
+                   WHERE proposal_id=$1 AND state='pending' AND cohort_owner
+               )"#,
+        )
+        .bind(proposal_id)
+        .execute(&mut **tx)
+        .await?;
+        Ok(())
     }
 
     // ── Debate trail (structured objections/rebuttals/verdicts) ──────────────
@@ -5828,6 +5998,59 @@ mod tests {
         assert_eq!(result.captures[0].injection.id, queued_id);
         assert_eq!(result.captures[0].sources.len(), 1);
         assert!(result.captures[0].injection.debate_entry_id.is_some());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn capturable_blocking_feedback_predicate_excludes_advisory_and_captured_sources() {
+        let repo = ProposalRepository::new(test_db(), EventBus::noop());
+        let proposal = repo
+            .create(create_input("Capturable feedback predicate"))
+            .await
+            .unwrap();
+
+        repo.add_feedback_with_severity(
+            ProposalFeedbackCreateInput {
+                proposal_id: &proposal.id,
+                parent_id: None,
+                author_kind: "user",
+                author_model: None,
+                body: "discussion only",
+            },
+            "advisory",
+        )
+        .await
+        .unwrap();
+        assert!(
+            !repo
+                .has_capturable_unresolved_blocking_feedback(&proposal.id)
+                .await
+                .unwrap()
+        );
+
+        repo.add_feedback(ProposalFeedbackCreateInput {
+            proposal_id: &proposal.id,
+            parent_id: None,
+            author_kind: "user",
+            author_model: None,
+            body: "action required",
+        })
+        .await
+        .unwrap();
+        assert!(
+            repo.has_capturable_unresolved_blocking_feedback(&proposal.id)
+                .await
+                .unwrap()
+        );
+
+        repo.capture_feedback_refinement_boundary(&proposal.id)
+            .await
+            .unwrap();
+        assert!(
+            !repo
+                .has_capturable_unresolved_blocking_feedback(&proposal.id)
+                .await
+                .unwrap()
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
