@@ -250,6 +250,7 @@ async fn assemble(
         read_sources: &[],
         worker_resume_note: None,
         arbiter_directive: None,
+        ci_adjudication_bundle: None,
         mcp_server_instructions: &BTreeMap::new(),
         extension_diagnostics: &[],
         cancellation: None,

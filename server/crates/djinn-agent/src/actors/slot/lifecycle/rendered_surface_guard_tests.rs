@@ -196,6 +196,7 @@ async fn runtime_and_serialized_surfaces_reject_project_local_djinn_paths() {
         ci_blocking_directive: None,
         worker_resume_note: None,
         arbiter_directive: None,
+        ci_adjudication_bundle: None,
         // Exercise the configured-plan surface so the guard also scans the
     };
     for agent_type in AGENT_TYPES {
