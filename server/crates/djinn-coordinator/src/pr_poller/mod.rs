@@ -141,11 +141,13 @@ mod ci_helpers;
 // transactions that bracket a provider enumeration and the sequence that makes
 // reservation order — rather than response-arrival order — authoritative.
 mod ci_hold;
-// Proposal `nafu`: the CI route classifier, its durable executors, and the
-// `ci_evidence_routing` gate. Wave 2 landed the classifier with no call sites
-// and disabled the feature by absence; wave 3b wired both lane executors and
-// replaced that absence with a real default-off gate
-// (`ci_routing::gate::CiRoutingGate`), so the `dead_code` allow is gone.
+// Proposal `nafu`: the CI route classifier and its durable executors. Wave 2
+// landed the classifier with no call sites; wave 3b wired both lane executors
+// behind a default-off `ci_evidence_routing` gate. The gate was validated in
+// production and then removed — evidence-led routing is now the only path, and
+// the only thing that returns evidence to the legacy remediation path is the
+// evidence itself (an unidentifiable dequeue, or a poll sequence that could not
+// be reserved).
 mod ci_lane_routing;
 mod ci_provider;
 // Wave 5: reporting reads and the rollback quiescence report.

@@ -25,6 +25,22 @@ use djinn_db::{
 
 use crate::actor::CoordinatorActor;
 
+/// The `gate_state` every quiescence report is now recorded under.
+///
+/// `ci_evidence_routing` was a three-state runtime gate; it was validated in
+/// production and removed, so evidence-led routing is the only path and there is
+/// no posture left to read. The durable report keeps the column — and the
+/// migration-193 CHECK that ties `permits_rollback` to it — because the column
+/// is what records *under which regime* a set of counts was taken, and rows
+/// written while the gate still existed must stay interpretable.
+///
+/// The consequence is deliberate and worth naming: `permits_rollback` is now
+/// always false, because the only honest answer to "may this binary be rolled
+/// back to one without the feature?" is no — nothing can stop new routes being
+/// admitted first. What survives, and what the report is kept for, is the six
+/// real counts.
+const CI_ROUTING_GATE_STATE: &str = "enabled";
+
 impl CoordinatorActor {
     /// The routing report for one lane/time window.
     ///
@@ -103,12 +119,15 @@ impl CoordinatorActor {
         );
     }
 
-    /// Take and durably record one rollback quiescence report.
+    /// Take and durably record one route-drain quiescence report.
     ///
-    /// This is the gate the proposal puts in front of a binary rollback. It is
-    /// recorded whether or not it permits one: a blocked attempt is precisely
-    /// what an operator needs to be able to point at afterwards, and a report
-    /// that only exists when it says "yes" is a report nobody can audit.
+    /// This is the report the proposal puts in front of a binary rollback. It is
+    /// recorded whether or not it is clean: a non-zero count is precisely what
+    /// an operator needs to be able to point at afterwards, and a report that
+    /// only exists when it says "yes" is a report nobody can audit.
+    ///
+    /// See [`CI_ROUTING_GATE_STATE`] for why the stored verdict is now always
+    /// `false` and the counts are the whole content.
     ///
     /// # Errors
     ///
@@ -133,7 +152,7 @@ impl CoordinatorActor {
 
         let report = routes
             .record_rollback_quiescence_report(
-                self.ci_routing_gate().as_str(),
+                CI_ROUTING_GATE_STATE,
                 &self.coordinator_incarnation_id,
                 CiRouteQuiescenceAttestation {
                     registered_provider_futures,
@@ -143,20 +162,16 @@ impl CoordinatorActor {
             .await
             .map_err(|error| error.to_string())?;
 
-        if report.permits_rollback {
-            tracing::info!(
-                report_id = %report.id,
-                gate = %report.gate_state,
-                "ci route: rollback quiescence report is clean — binary rollback permitted"
-            );
-        } else {
-            tracing::warn!(
-                report_id = %report.id,
-                gate = %report.gate_state,
-                blocking = ?report.blocking_reasons(),
-                "ci route: rollback quiescence report is not clean — binary rollback blocked"
-            );
-        }
+        tracing::info!(
+            report_id = %report.id,
+            reserved_rows = report.reserved_rows,
+            calling_rows = report.calling_rows,
+            open_tier2_leases = report.open_tier2_leases,
+            unapplied_lead_results = report.unapplied_lead_results,
+            registered_provider_futures = report.registered_provider_futures,
+            current_failed_identities = report.current_failed_identities,
+            "ci route: quiescence report recorded"
+        );
         Ok(report)
     }
 }
