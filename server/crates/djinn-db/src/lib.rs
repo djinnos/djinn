@@ -30,6 +30,7 @@ pub mod test_support {
         AtomicEvidenceDemandCountsForTest, HousekeepingFixture, HousekeepingFixtureExpectedCounts,
         HousekeepingFixtureProject, RefinementLifecycleAuditRowForTest, RefinementRunAuditForTest,
         RefinementRunReadOnlySnapshotForTest, StructuredEvidenceHandoffCountsForTest,
+        TypedEvidenceDispositionFixtureForTest, TypedEvidenceDispositionSnapshotForTest,
         TypedEvidenceRetryAuthorityForTest, TypedEvidenceRetryFixtureForTest,
         TypedEvidenceRetryScenarioForTest, TypedEvidenceRetrySnapshotForTest, UsageTestSessionSeed,
         UsageTestTaskSeed, activity_row_count_for_test, add_blocker_edge,
@@ -51,6 +52,7 @@ pub mod test_support {
         liveness_evidence_for_task_for_test, make_coordinator_incarnation_error_after_first_read,
         make_coordinator_incarnation_vanish_after_first_read, make_project,
         make_refinement_run_phantom_for_test, materialize_judge_authority_for_test,
+        materialize_typed_evidence_disposition_fixture_for_test,
         materialize_typed_evidence_retry_fixture_for_test, model_turn_accounting_fixture,
         model_turn_decision_count_fixture, model_turn_decision_fixture,
         model_turn_lease_lifecycle_fixture, model_turn_request_lifecycle_fixture,
@@ -69,7 +71,8 @@ pub mod test_support {
         seed_workspace_coverage_for_test, set_model_turn_capability_fixture,
         set_task_short_id_for_test, structured_evidence_handoff_counts_for_test,
         switch_to_adversary_authority_for_test, task_attempt_count_for_test,
-        task_row_count_for_test, task_status_for_test, typed_evidence_retry_snapshot_for_test,
+        task_row_count_for_test, task_status_for_test,
+        typed_evidence_disposition_snapshot_for_test, typed_evidence_retry_snapshot_for_test,
     };
 }
 
