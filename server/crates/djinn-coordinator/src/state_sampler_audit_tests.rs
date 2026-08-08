@@ -21,6 +21,15 @@ const HEADERS: [&str; 9] = [
     "regression or code evidence",
 ];
 
+/// Production age/staleness guards introduced or modified by proposal `5mzy`.
+///
+/// The proposal's audit is reporting-only for pre-existing samplers. Keep this
+/// allowlist deliberately narrow: a newly listed guard must be validated by the
+/// transition-evidence seam below rather than treating the inventory's existing
+/// unsafe rows as same-landing remediation.
+const PROPOSAL_CHANGED_AGE_STALENESS_GUARDS: [&str; 0] = [];
+const NO_CHANGED_GUARDS_SENTINEL: &str = "none";
+
 struct DeclaredEntryPoint {
     sampler_id: &'static str,
     source_anchor: &'static str,
@@ -140,6 +149,116 @@ fn audit_rows(document: &str) -> Result<Vec<Vec<&str>>, String> {
     Ok(rows)
 }
 
+fn proposal_changed_guards(document: &str) -> Result<Vec<&str>, String> {
+    let section = document
+        .split_once("## Proposal 5mzy changed age/staleness guard allowlist\n")
+        .ok_or_else(|| "missing proposal changed-guard allowlist heading".to_owned())?
+        .1
+        .split_once("\n## ")
+        .map_or_else(
+            || Err("proposal changed-guard allowlist is missing its next section".to_owned()),
+            |(section, _)| Ok(section),
+        )?;
+
+    let guards = section
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("- `"))
+        .filter_map(|line| line.split_once('`').map(|(guard, _)| guard))
+        .collect::<Vec<_>>();
+    if guards.is_empty() {
+        return Err("proposal changed-guard allowlist contains no declaration".to_owned());
+    }
+    Ok(guards)
+}
+
+fn validate_proposal_changed_guard_allowlist(document: &str) -> Result<(), String> {
+    let declared = proposal_changed_guards(document)?;
+    if PROPOSAL_CHANGED_AGE_STALENESS_GUARDS.is_empty() {
+        if declared != [NO_CHANGED_GUARDS_SENTINEL] {
+            return Err(format!(
+                "expected only `{NO_CHANGED_GUARDS_SENTINEL}` in the empty changed-guard allowlist, got {declared:?}"
+            ));
+        }
+        return Ok(());
+    }
+
+    if declared
+        .iter()
+        .any(|guard| *guard == NO_CHANGED_GUARDS_SENTINEL)
+    {
+        return Err("a non-empty changed-guard allowlist cannot contain `none`".to_owned());
+    }
+    let declared: HashSet<_> = declared.into_iter().collect();
+    let expected: HashSet<_> = PROPOSAL_CHANGED_AGE_STALENESS_GUARDS.into_iter().collect();
+    if declared != expected {
+        return Err(format!(
+            "proposal changed-guard allowlist drifted: expected {expected:?}, got {declared:?}"
+        ));
+    }
+    Ok(())
+}
+
+/// Evidence supplied to a sampler before it emits a terminal or destructive
+/// verdict about a transit-capable owner. This deliberately models the proof
+/// form, rather than a source layout, so controlled fixture mutations exercise
+/// the same fail-closed policy for every changed guard.
+#[derive(Clone, Copy, Debug)]
+enum TransitVerdictEvidence {
+    AuthoritativeTerminal,
+    StateEntryTime {
+        advances_on_every_relevant_transition: bool,
+        older_than_documented_bound: bool,
+    },
+    CreationTime {
+        older_than_documented_bound: bool,
+    },
+    ExactOwnerAbsence(ExactOwnerEvidence),
+    EvidenceReadError,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ExactOwnerEvidence {
+    Present,
+    Absent,
+    Unknown,
+    ReadError,
+}
+
+/// The only verdicts this audit contract permits a sampler to produce.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TransitVerdictPermission {
+    Preserve,
+    TerminalOrDestructive,
+}
+
+fn validate_transit_verdict_evidence(evidence: TransitVerdictEvidence) -> TransitVerdictPermission {
+    match evidence {
+        TransitVerdictEvidence::AuthoritativeTerminal => {
+            TransitVerdictPermission::TerminalOrDestructive
+        }
+        TransitVerdictEvidence::StateEntryTime {
+            advances_on_every_relevant_transition: true,
+            older_than_documented_bound: true,
+        }
+        | TransitVerdictEvidence::ExactOwnerAbsence(ExactOwnerEvidence::Absent) => {
+            TransitVerdictPermission::TerminalOrDestructive
+        }
+        TransitVerdictEvidence::CreationTime {
+            older_than_documented_bound,
+        } => {
+            let _creation_age_is_only_context = older_than_documented_bound;
+            TransitVerdictPermission::Preserve
+        }
+        TransitVerdictEvidence::StateEntryTime { .. }
+        | TransitVerdictEvidence::ExactOwnerAbsence(
+            ExactOwnerEvidence::Present
+            | ExactOwnerEvidence::Unknown
+            | ExactOwnerEvidence::ReadError,
+        )
+        | TransitVerdictEvidence::EvidenceReadError => TransitVerdictPermission::Preserve,
+    }
+}
+
 fn validate_inventory(document: &str, declared: &[DeclaredEntryPoint]) -> Result<(), String> {
     let rows = audit_rows(document)?;
     let follow_up_section = document
@@ -224,6 +343,64 @@ fn validate_inventory(document: &str, declared: &[DeclaredEntryPoint]) -> Result
 fn state_sampler_audit_inventory_is_complete() {
     validate_inventory(AUDIT, &DECLARED_ENTRY_POINTS)
         .unwrap_or_else(|error| panic!("state sampler audit contract failed: {error}"));
+    validate_proposal_changed_guard_allowlist(AUDIT)
+        .unwrap_or_else(|error| panic!("changed state-sampler guard contract failed: {error}"));
+}
+
+#[test]
+fn state_sampler_transition_timestamp_mutations() {
+    // `5mzy` changed no production age/staleness guard: the checked sentinel
+    // proves that pre-existing inventory rows were not silently swept into this
+    // landing. The synthetic fixtures below retain coverage of the reusable
+    // validator for the next changed guard as well.
+    assert!(PROPOSAL_CHANGED_AGE_STALENESS_GUARDS.is_empty());
+    validate_proposal_changed_guard_allowlist(AUDIT)
+        .unwrap_or_else(|error| panic!("changed state-sampler guard contract failed: {error}"));
+
+    assert_eq!(
+        validate_transit_verdict_evidence(TransitVerdictEvidence::AuthoritativeTerminal),
+        TransitVerdictPermission::TerminalOrDestructive
+    );
+    assert_eq!(
+        validate_transit_verdict_evidence(TransitVerdictEvidence::StateEntryTime {
+            advances_on_every_relevant_transition: true,
+            older_than_documented_bound: true,
+        }),
+        TransitVerdictPermission::TerminalOrDestructive
+    );
+    assert_eq!(
+        validate_transit_verdict_evidence(TransitVerdictEvidence::ExactOwnerAbsence(
+            ExactOwnerEvidence::Absent,
+        )),
+        TransitVerdictPermission::TerminalOrDestructive
+    );
+
+    let unsafe_mutations = [
+        // A creation clock can be old, but it never proves entry into the
+        // current transit-capable state.
+        TransitVerdictEvidence::CreationTime {
+            older_than_documented_bound: true,
+        },
+        // The time field must advance on every transition relevant to this
+        // verdict, not merely exist on the record.
+        TransitVerdictEvidence::StateEntryTime {
+            advances_on_every_relevant_transition: false,
+            older_than_documented_bound: true,
+        },
+        // Unknown or failed exact-owner observations cannot convict.
+        TransitVerdictEvidence::ExactOwnerAbsence(ExactOwnerEvidence::Unknown),
+        TransitVerdictEvidence::ExactOwnerAbsence(ExactOwnerEvidence::ReadError),
+        TransitVerdictEvidence::ExactOwnerAbsence(ExactOwnerEvidence::Present),
+        // Any other evidence-acquisition error is equally fail-closed.
+        TransitVerdictEvidence::EvidenceReadError,
+    ];
+    for mutation in unsafe_mutations {
+        assert_eq!(
+            validate_transit_verdict_evidence(mutation),
+            TransitVerdictPermission::Preserve,
+            "mutation {mutation:?} must not authorize a terminal/destructive verdict"
+        );
+    }
 }
 
 #[test]
