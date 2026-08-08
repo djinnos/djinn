@@ -30,6 +30,18 @@ describe("sseEventContract", () => {
       kind: "dispatch",
       eventType: "proposal_feedback_created",
     });
+    expect(resolveServerSSEEventName("proposal_feedback.withdrawn")).toEqual({
+      kind: "dispatch",
+      eventType: "proposal_feedback_withdrawn",
+    });
+    expect(resolveServerSSEEventName("proposal_feedback_refinement.disposition_updated")).toEqual({
+      kind: "dispatch",
+      eventType: "proposal_feedback_refinement_disposition_updated",
+    });
+    expect(resolveServerSSEEventName("proposal_feedback_refinement.disposition_rejected")).toEqual({
+      kind: "dispatch",
+      eventType: "proposal_feedback_refinement_disposition_rejected",
+    });
     expect(resolveServerSSEEventName("proposal.created")).toEqual({
       kind: "dispatch",
       eventType: "proposal_created",

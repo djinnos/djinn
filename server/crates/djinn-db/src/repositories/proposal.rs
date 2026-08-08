@@ -1541,6 +1541,12 @@ impl ProposalRepository {
         let injection:ProposalFeedbackRefinementInjection=sqlx::query_as("UPDATE proposal_feedback_refinement_injections SET state=$1,accepted_disposition=$2,accepted_revision_seq=$3,accepted_reason=$4,accepted_at=to_char(transaction_timestamp() AT TIME ZONE 'utc','YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'),accepted_by_user_id=$5 WHERE id=$6 RETURNING id,proposal_id,root_feedback_id,generation,state,cutoff_at,cutoff_feedback_id,round,debate_entry_id,accepted_disposition,accepted_revision_seq,accepted_reason,accepted_at,accepted_by_user_id,created_at,updated_at").bind(state).bind(disposition).bind(revision).bind(&reason).bind(djinn_core::auth_context::current_user_id()).bind(&input.injection_id).fetch_one(&mut *tx).await?;
         let debate:ProposalDebateTrail=sqlx::query_as("UPDATE proposal_debate_trail SET resolved_at=to_char(transaction_timestamp() AT TIME ZONE 'utc','YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'),resolved_by_user_id=$1,reopened_at=NULL,reopened_by_user_id=NULL WHERE id=$2 RETURNING id,proposal_id,kind,body,blocking,agent_role,author_kind,author_user_id,author_model,source_task_id,against_revision_seq,round,body_metadata::text AS body_metadata,resolved_at,resolved_by_user_id,reopened_at,reopened_by_user_id,created_at,updated_at").bind(djinn_core::auth_context::current_user_id()).bind(&input.debate_entry_id).fetch_one(&mut *tx).await?;
         tx.commit().await?;
+        self.events.send(
+            DjinnEventEnvelope::proposal_feedback_refinement_disposition_updated(
+                &injection.proposal_id,
+                &injection.id,
+            ),
+        );
         Ok(FeedbackRefinementDispositionResult {
             injection,
             debate_entry: debate,
@@ -1654,6 +1660,12 @@ impl ProposalRepository {
                 &input.proposal_id,
                 &verdict_entry,
             ));
+        self.events.send(
+            DjinnEventEnvelope::proposal_feedback_refinement_disposition_rejected(
+                &injection.proposal_id,
+                &injection.id,
+            ),
+        );
         Ok(FeedbackRefinementRejectionResult {
             debate_entry: debate,
             verdict_entry,
