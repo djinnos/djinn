@@ -20690,6 +20690,107 @@
     "concurrent_safe": false
   },
   {
+    "name": "proposal_refinement_resolve_evidence",
+    "description": "Resolve typed evidence using an applicable validation result and an existing committed folding revision. Only the active Judge may resolve evidence.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "required": [
+        "finding_id",
+        "validation_result_id",
+        "folding_revision",
+        "rationale"
+      ],
+      "type": "object",
+      "properties": {
+        "finding_id": {
+          "type": "string"
+        },
+        "validation_result_id": {
+          "type": "string"
+        },
+        "folding_revision": {
+          "type": "integer",
+          "format": "int32"
+        },
+        "rationale": {
+          "type": "string"
+        }
+      }
+    },
+    "outputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "required": [
+        "accepted"
+      ],
+      "type": "object",
+      "properties": {
+        "accepted": {
+          "type": "boolean"
+        },
+        "finding_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "disposition_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "disposition": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "lifecycle": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "folding_revision": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int32"
+        },
+        "validation_result_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "outcome": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "conflict_code": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "readOnly": false,
+    "destructive": true,
+    "idempotent": false,
+    "openWorld": false,
+    "concurrent_safe": false
+  },
+  {
     "name": "proposal_refinement_retry_evidence",
     "description": "Retry a failed typed evidence finding. Only the active Advocate or Judge may reserve a retry for the cited latest failed transition.",
     "inputSchema": {
@@ -21509,6 +21610,107 @@
           ]
         },
         "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "readOnly": false,
+    "destructive": true,
+    "idempotent": false,
+    "openWorld": false,
+    "concurrent_safe": false
+  },
+  {
+    "name": "proposal_refinement_withdraw_evidence",
+    "description": "Withdraw typed evidence with a non-empty rationale and explicit non-load-bearing assertion. Only the active Judge may withdraw evidence.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "required": [
+        "finding_id",
+        "folding_revision",
+        "rationale",
+        "withdrawal_is_non_load_bearing"
+      ],
+      "type": "object",
+      "properties": {
+        "finding_id": {
+          "type": "string"
+        },
+        "folding_revision": {
+          "type": "integer",
+          "format": "int32"
+        },
+        "rationale": {
+          "type": "string"
+        },
+        "withdrawal_is_non_load_bearing": {
+          "type": "boolean"
+        }
+      }
+    },
+    "outputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "required": [
+        "accepted"
+      ],
+      "type": "object",
+      "properties": {
+        "accepted": {
+          "type": "boolean"
+        },
+        "finding_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "disposition_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "disposition": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "lifecycle": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "folding_revision": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int32"
+        },
+        "validation_result_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "outcome": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "conflict_code": {
           "type": [
             "string",
             "null"

@@ -1326,6 +1326,20 @@ pub struct EvidenceRetryResponse {
     pub conflict_code: Option<String>,
 }
 
+#[derive(Serialize, Deserialize, Clone, schemars::JsonSchema)]
+pub struct EvidenceDispositionResponse {
+    pub accepted: bool,
+    pub finding_id: Option<String>,
+    pub disposition_id: Option<String>,
+    pub disposition: Option<String>,
+    pub lifecycle: Option<String>,
+    pub folding_revision: Option<i32>,
+    pub validation_result_id: Option<String>,
+    pub outcome: Option<String>,
+    pub error: Option<String>,
+    pub conflict_code: Option<String>,
+}
+
 #[cfg(test)]
 mod lint_response_compat_tests {
     use super::{ProposalRevisionModel, ProposalShowResponse};

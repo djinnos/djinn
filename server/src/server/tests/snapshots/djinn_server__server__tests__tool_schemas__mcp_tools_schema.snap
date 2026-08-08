@@ -20562,6 +20562,106 @@ expression: signatures
     }
   },
   {
+    "name": "proposal_refinement_resolve_evidence",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "finding_id": {
+          "type": "string"
+        },
+        "folding_revision": {
+          "format": "int32",
+          "type": "integer"
+        },
+        "rationale": {
+          "type": "string"
+        },
+        "validation_result_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "finding_id",
+        "validation_result_id",
+        "folding_revision",
+        "rationale"
+      ],
+      "type": "object"
+    },
+    "output_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "accepted": {
+          "type": "boolean"
+        },
+        "conflict_code": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "disposition": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "disposition_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "finding_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "folding_revision": {
+          "format": "int32",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "lifecycle": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "outcome": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "validation_result_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "accepted"
+      ],
+      "type": "object"
+    }
+  },
+  {
     "name": "proposal_refinement_retry_evidence",
     "read_only": false,
     "destructive": true,
@@ -21386,6 +21486,106 @@ expression: signatures
       },
       "required": [
         "stopped"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "proposal_refinement_withdraw_evidence",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "finding_id": {
+          "type": "string"
+        },
+        "folding_revision": {
+          "format": "int32",
+          "type": "integer"
+        },
+        "rationale": {
+          "type": "string"
+        },
+        "withdrawal_is_non_load_bearing": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "finding_id",
+        "folding_revision",
+        "rationale",
+        "withdrawal_is_non_load_bearing"
+      ],
+      "type": "object"
+    },
+    "output_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "accepted": {
+          "type": "boolean"
+        },
+        "conflict_code": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "disposition": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "disposition_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "finding_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "folding_revision": {
+          "format": "int32",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "lifecycle": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "outcome": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "validation_result_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "accepted"
       ],
       "type": "object"
     }
