@@ -121,13 +121,28 @@ async fn typed_evidence_retry_fixture_covers_success_and_rejection_boundaries() 
             assert_eq!(after.planned_checks.len(), before.planned_checks.len() + 1);
             assert_eq!(after.prior_task_status, "closed");
             assert_eq!(after.retry_idempotency_rows.len(), 1);
-            assert!(after.routing.iter().any(|(_, role)| role == "architect"));
+
+            let retry_task_id = &after.attempts.last().unwrap().2;
+            let retry_task = after
+                .tasks
+                .iter()
+                .find(|(id, _, _, _, _)| id == retry_task_id)
+                .expect("new attempt must reference its persisted retry task");
+            assert_eq!(retry_task.1, "open");
+            assert_eq!(retry_task.2, "spike");
+            assert_eq!(retry_task.3, "architect");
+            assert_eq!(
+                retry_task.4,
+                serde_json::json!(["refinement-evidence", "read-only"])
+            );
             assert!(
                 after
-                    .labels
+                    .routing
                     .iter()
-                    .any(|(_, labels)| labels.to_string().contains("read-only"))
+                    .any(|(id, role)| id == retry_task_id && role == "architect")
             );
+            assert!(after.labels.iter().any(|(id, labels)| id == retry_task_id
+                && labels == &serde_json::json!(["refinement-evidence", "read-only"])));
         } else {
             assert_eq!(before, after, "rejected retry must be immutable");
         }
