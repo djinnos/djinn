@@ -263,22 +263,54 @@ async fn try_load_or_refresh_copilot(
 }
 
 /// Attempt a host-side silent OAuth token refresh after a mid-run 401.
+///
+/// `owner` is the credential owner (the task creator) and MUST be passed
+/// explicitly. This runs from the slot's terminal-report handling, *outside*
+/// the `SESSION_USER_ID.scope(created_by_user_id, …)` that wraps credential
+/// resolution at dispatch, so the ambient task-local is `None` here. Without an
+/// explicit owner the underlying `get_decrypted` resolves only the org-shared
+/// (`owner_user_id IS NULL`) row: a user-owned OAuth token reads as missing,
+/// this returns `false`, and the caller marks a perfectly live credential
+/// revoked ("owner must reconnect") — while its own `mark_revoked` *does* take
+/// the owner and so revokes the very row this lookup could not see.
+/// `djinn_provider::oauth::keepalive` carries the same hazard and the same fix.
+///
 /// Returns `true` when the model is OAuth-backed and the token is now live.
 /// Returns `false` for non-OAuth providers and for a refresh that itself fails.
-pub async fn refresh_oauth_credential_after_401(model_id: &str, app_state: &AgentContext) -> bool {
+pub async fn refresh_oauth_credential_after_401(
+    model_id: &str,
+    app_state: &AgentContext,
+    owner: Option<&str>,
+) -> bool {
+    let credential_repo =
+        CredentialRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+    refresh_oauth_credential_for_owner(model_id, &credential_repo, owner).await
+}
+
+/// Repository-level body of [`refresh_oauth_credential_after_401`], split out
+/// so the owner scoping is provable without constructing an [`AgentContext`].
+async fn refresh_oauth_credential_for_owner(
+    model_id: &str,
+    credential_repo: &CredentialRepository,
+    owner: Option<&str>,
+) -> bool {
     let Ok((provider_id, _model_name)) = parse_model_id(model_id) else {
         return false;
     };
     let effective_id = effective_oauth_provider_id(&provider_id);
-    let credential_repo =
-        CredentialRepository::new(app_state.db.clone(), app_state.event_bus.clone());
-    match effective_id {
-        "chatgpt_codex" => try_load_or_refresh_codex(&credential_repo).await.is_some(),
-        "githubcopilot" => try_load_or_refresh_copilot(&credential_repo)
-            .await
-            .is_some(),
-        _ => false,
-    }
+    let refresh = async {
+        match effective_id {
+            "chatgpt_codex" => try_load_or_refresh_codex(credential_repo).await.is_some(),
+            "githubcopilot" => try_load_or_refresh_copilot(credential_repo).await.is_some(),
+            _ => false,
+        }
+    };
+    // Scope the write-back as well as the load: a refresh saves through
+    // `CredentialRepository::set`, which reads the same ambient owner, so an
+    // unscoped save would rewrite a user-private token as the org-shared row.
+    djinn_core::auth_context::SESSION_USER_ID
+        .scope(owner.map(str::to_string), refresh)
+        .await
 }
 
 pub async fn load_provider_credential(
@@ -736,5 +768,65 @@ mod tests {
             provider.is_some(),
             "API-key provider must be created for Anthropic reasoning model"
         );
+    }
+
+    /// The post-401 silent refresh runs from the slot's terminal-report
+    /// handling, where no `SESSION_USER_ID` scope is in effect — the only scope
+    /// on the dispatch path wraps credential *resolution* and is long gone by
+    /// then. Before the owner was threaded through, the lookup therefore
+    /// resolved only the org-shared (`owner_user_id IS NULL`) row, a user-owned
+    /// Codex token read as missing, and the caller marked a live credential
+    /// revoked ("owner must reconnect") — using an owner it *did* have.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn post_401_refresh_sees_a_user_owned_codex_token_with_no_ambient_scope() {
+        use djinn_core::events::EventBus;
+        use djinn_db::{Database, UserRepository};
+
+        let db = Database::open_in_memory().unwrap();
+        db.ensure_initialized().await.unwrap();
+        let uid = UserRepository::new(db.clone())
+            .upsert_from_github(9_401, "fern-401", None, None)
+            .await
+            .unwrap()
+            .id;
+        let repo = CredentialRepository::new(db.clone(), EventBus::noop());
+        // `expires_at` far in the future so `is_expired()` is false and the
+        // assertion never depends on a live token exchange.
+        let tokens = serde_json::json!({
+            "access_token": "at",
+            "refresh_token": "rt",
+            "id_token": Value::Null,
+            "expires_at": 4_102_444_800_i64,
+            "account_id": Value::Null,
+        })
+        .to_string();
+        repo.set_with_owner(
+            "chatgpt_codex",
+            crate::oauth::codex::CODEX_OAUTH_DB_KEY,
+            &tokens,
+            Some(&uid),
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            djinn_core::auth_context::current_user_id().is_none(),
+            "the test must run unscoped to reproduce the terminal-report context"
+        );
+        assert!(
+            refresh_oauth_credential_for_owner("openai/gpt-5.6-sol", &repo, Some(&uid)).await,
+            "a live user-owned codex token must refresh silently — `false` here is what \
+             makes the supervisor mark the credential revoked"
+        );
+
+        // Same call without the owner sees only the org-shared row: the exact
+        // pre-fix behaviour. Skipped when a legacy filesystem token cache
+        // exists, since `load_from_db` falls back to (and migrates) it.
+        if !crate::oauth::codex::CodexTokens::cache_path().exists() {
+            assert!(
+                !refresh_oauth_credential_for_owner("openai/gpt-5.6-sol", &repo, None).await,
+                "an owner-less lookup must not resolve another scope's token"
+            );
+        }
     }
 }
