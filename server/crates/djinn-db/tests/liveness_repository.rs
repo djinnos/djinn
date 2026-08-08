@@ -19,7 +19,8 @@ async fn seed_full_fixture(db: &Database) -> (String, String, String, String) {
     db.ensure_initialized().await.unwrap();
 
     let project_id = uuid::Uuid::now_v7().to_string();
-    seed_project(db, &project_id, "liveness-test").await;
+    let project_name = format!("liveness-test-{project_id}");
+    seed_project(db, &project_id, &project_name).await;
 
     let task_id = seed_task_row(
         db,
