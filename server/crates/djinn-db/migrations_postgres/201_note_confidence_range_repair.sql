@@ -1,0 +1,50 @@
+-- Migration 201: return every `notes.confidence` to the epistemic range
+-- [CONFIDENCE_FLOOR, CONFIDENCE_CEILING] = [0.025, 0.975] (proposal 9xih).
+--
+-- WHY THIS IS NEEDED AFTER 197.
+--
+-- Migration 197 normalized the column default and the exactly-1.0 rows to the
+-- ceiling, on the premise that `notes.confidence` is bounded above by
+-- `CONFIDENCE_CEILING`. That premise was only enforced by `set_confidence`
+-- (which clamps) and `update_confidence` (which goes through `bayesian_update`,
+-- which clamps). A third writer — `NoteRepository::mutate_with_revision` — bound
+-- the caller's value straight into the UPDATE with no range check, and the
+-- extraction duplicate-confirmation path re-derived the Bayesian posterior
+-- inline instead of calling `bayesian_update`, so it skipped the clamp. Repeated
+-- duplicate confirmations therefore walked notes ABOVE the ceiling, asymptotically
+-- toward 1.0.
+--
+-- That is not a cosmetic overshoot. It reintroduces exactly the hazard 197 was
+-- written to remove: `update_confidence` clamps to the ceiling, so applying the
+-- POSITIVE `USER_CONFIRM` signal to an above-ceiling note LOWERS it to 0.975 —
+-- below every untouched above-ceiling peer in confidence ordering. Confirming a
+-- note demotes it.
+--
+-- The code-side fixes land in the same change: the duplicate boost now calls
+-- `bayesian_update`, and `mutate_with_revision` rejects any desired state whose
+-- confidence falls outside the range. This file repairs the rows those writers
+-- already produced, so the invariant holds over stored data and not merely over
+-- future writes.
+--
+-- DEPLOYMENT-NEUTRAL BY CONSTRUCTION. The statements below are predicates over
+-- the whole table. No project id, note id, or "our data looks like X" assumption
+-- appears, so this is correct for any operator's database — including a
+-- brand-new one where every UPDATE matches zero rows.
+--
+-- IDEMPOTENT. After the first pass every row satisfies the range, so the WHERE
+-- clauses match nothing on a re-run and the file leaves the database in the
+-- identical state.
+
+-- Above-ceiling rows come back to the ceiling. This is the only defensible
+-- target: the pre-clamp posterior is not recoverable (the number of duplicate
+-- confirmations that produced it is not stored on the row), and every one of
+-- these values was, by the ceiling invariant, meant to be 0.975 all along.
+UPDATE notes SET confidence = 0.975 WHERE confidence > 0.975;
+
+-- Below-floor rows come up to the floor, for symmetry and for the same reason:
+-- the range is closed at both ends, `bayesian_update` clamps at both ends, and
+-- a stored value outside it cannot be the posterior of any signal. In practice
+-- this is the `0.0` written by the memory-enrichment entity/claim writer, which
+-- now writes `CONFIDENCE_FLOOR`. Both values sit far below `STALE_CITATION`
+-- (0.3), so injection eligibility and archival lifecycle are unchanged.
+UPDATE notes SET confidence = 0.025 WHERE confidence < 0.025;
