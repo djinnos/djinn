@@ -3981,7 +3981,7 @@ impl ProposalRepository {
             None,
         )
         .await?;
-        sqlx::query("INSERT INTO tasks (id,project_id,short_id,title,description,design,issue_type,priority,owner,status,labels,acceptance_criteria,created_by_user_id,agent_type) VALUES ($1,$2,$3,'Evidence retry spike','Read-only retry of failed typed evidence.','', 'spike',0,'','open',$4,'[]'::jsonb,$5,'architect')").bind(&task_id).bind(&project_id).bind(format!("e{}", &task_id[..7])).bind(serde_json::json!(["refinement-evidence", "read-only"])).bind(&created_by_user_id).execute(&mut *tx).await?;
+        sqlx::query("INSERT INTO tasks (id,project_id,short_id,title,description,design,issue_type,priority,owner,status,labels,acceptance_criteria,created_by_user_id,agent_type) VALUES ($1,$2,$3,'Evidence retry spike','Read-only retry of failed typed evidence.','', 'spike',0,'','open',$4,'[]'::jsonb,$5,'architect')").bind(&task_id).bind(&project_id).bind(format!("e{}", &task_id[task_id.len() - 7..])).bind(serde_json::json!(["refinement-evidence", "read-only"])).bind(&created_by_user_id).execute(&mut *tx).await?;
         let allocation = TypedEvidenceRepository::allocate_retry_in_transaction(
             &mut tx,
             AllocateTypedEvidenceRetryInput {
