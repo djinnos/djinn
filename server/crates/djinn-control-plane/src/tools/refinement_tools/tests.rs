@@ -27,6 +27,7 @@ use std::sync::Arc;
 
 mod tests_part1;
 mod tests_part10;
+mod tests_part11;
 mod tests_part2;
 mod tests_part3;
 mod tests_part4;
