@@ -6,6 +6,27 @@
 //! `session_recovery.rs` behavior — it only produces importable types and
 //! verdicts for later consumer epics.
 //!
+//! # No-transit-state-conviction contract
+//!
+//! A sampler may convict or destructively act on a transit-capable state only
+//! with authoritative terminal state, an advancing state-entry timestamp older
+//! than a justified bound, or positive evidence that the exact owner is absent.
+//! Unknown or failed evidence acquisition preserves state; creation-only
+//! timestamps are invalid.
+//!
+//! **Reusable safe-mutation/test pattern.** Before mutation, identify the exact
+//! owner and read the authoritative terminal state, or read an advancing
+//! timestamp for entry into the currently sampled state and compare it with the
+//! documented bound, or obtain positive exact-owner absence evidence. Treat
+//! every unavailable, ambiguous, stale, error, `Unknown`, or `NotApplicable`
+//! result as preserve-state unless it is itself authoritative terminal evidence.
+//! Tests must drive each evidence-acquisition failure and ambiguous branch,
+//! assert no destructive action occurs, and separately prove that the
+//! authorized terminal, aged advancing-transition, and exact-owner-absence
+//! branches may mutate the addressed owner only. A creation timestamp may
+//! supply context or a lower bound, but never the state-entry clock that
+//! authorizes conviction.
+//!
 //! # Precedence invariants
 //!
 //! 1. Terminal task state produces a noop/idempotent outcome and wins over
