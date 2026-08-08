@@ -1038,7 +1038,7 @@ mod body_excerpt_tests {
             err.contains("invalid field: \"unknown_field\""),
             "err: {err}"
         );
-        assert!(err.contains("accepted: proposal, targets, feedback, signoffs, revisions, debate, epics, gate_status"), "err: {err}");
+        assert!(err.contains("accepted: proposal, targets, feedback, feedback_refinements, signoffs, revisions, debate, epics, gate_status"), "err: {err}");
     }
 
     /// Invalid `revision_bodies` returns an error naming the invalid value and accepted values.
