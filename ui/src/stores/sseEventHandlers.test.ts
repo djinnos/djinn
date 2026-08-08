@@ -589,17 +589,21 @@ describe('sseEventHandlers', () => {
     cleanup();
   });
 
-  it('proposal_feedback.created invalidates ["proposals"] to refresh open detail views', () => {
+  it('feedback lifecycle events invalidate ["proposals"] to refresh open detail views', () => {
     const cleanup = initSSEEventHandlers();
 
-    sseStore.getState().emit({
-      type: 'proposal_feedback_created',
-      data: {
-        entity_type: 'proposal_feedback',
-        action: 'created',
-        payload: { proposal_id: 'prop-1', body: 'Looks good', author: 'reviewer-1' },
-      },
-      timestamp: 1,
+    const lifecycleEvents = [
+      ['proposal_feedback_created', 'proposal_feedback', 'created'],
+      ['proposal_feedback_withdrawn', 'proposal_feedback', 'withdrawn'],
+      ['proposal_feedback_refinement_disposition_updated', 'proposal_feedback_refinement', 'disposition_updated'],
+      ['proposal_feedback_refinement_disposition_rejected', 'proposal_feedback_refinement', 'disposition_rejected'],
+    ] as const;
+    lifecycleEvents.forEach(([type, entity_type, action], timestamp) => {
+      sseStore.getState().emit({
+        type,
+        data: { entity_type, action, payload: { proposal_id: 'prop-1', feedback_id: 'feedback-1', injection_id: 'injection-1' } },
+        timestamp,
+      });
     });
 
     vi.advanceTimersByTime(SSE_QUERY_DEBOUNCE_MS);
@@ -607,6 +611,15 @@ describe('sseEventHandlers', () => {
     expect(queryClient.invalidateQueries).toHaveBeenCalledWith({ queryKey: ['proposals'] });
 
     cleanup();
+
+    vi.clearAllMocks();
+    sseStore.getState().emit({
+      type: 'proposal_feedback_withdrawn',
+      data: { entity_type: 'proposal_feedback', action: 'withdrawn', payload: { proposal_id: 'prop-1' } },
+      timestamp: 5,
+    });
+    vi.advanceTimersByTime(SSE_QUERY_DEBOUNCE_MS);
+    expect(queryClient.invalidateQueries).not.toHaveBeenCalled();
   });
 
   it('contract resolves proposal.updated as dispatch → proposal_updated and guards debate-trail events are absent', () => {

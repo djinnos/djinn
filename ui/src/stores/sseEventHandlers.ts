@@ -347,6 +347,9 @@ export function initSSEEventHandlers(): () => void {
     proposalUpdatedUnsub?.();
     proposalDeletedUnsub?.();
     proposalFeedbackUnsub?.();
+    proposalFeedbackWithdrawnUnsub?.();
+    proposalFeedbackRefinementDispositionUpdatedUnsub?.();
+    proposalFeedbackRefinementDispositionRejectedUnsub?.();
     dispatchPauseChangedUnsub?.();
     projectChangedUnsub?.();
     sessionDispatchedUnsub?.();
@@ -371,6 +374,9 @@ export function cleanupSSEEventHandlers(): void {
   proposalUpdatedUnsub?.();
   proposalDeletedUnsub?.();
   proposalFeedbackUnsub?.();
+  proposalFeedbackWithdrawnUnsub?.();
+  proposalFeedbackRefinementDispositionUpdatedUnsub?.();
+  proposalFeedbackRefinementDispositionRejectedUnsub?.();
   dispatchPauseChangedUnsub?.();
 
   taskCreatedUnsub = null;
@@ -383,6 +389,9 @@ export function cleanupSSEEventHandlers(): void {
   proposalUpdatedUnsub = null;
   proposalDeletedUnsub = null;
   proposalFeedbackUnsub = null;
+  proposalFeedbackWithdrawnUnsub = null;
+  proposalFeedbackRefinementDispositionUpdatedUnsub = null;
+  proposalFeedbackRefinementDispositionRejectedUnsub = null;
   dispatchPauseChangedUnsub = null;
   flushDebouncedInvalidations();
 }
