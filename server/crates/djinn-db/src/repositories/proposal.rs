@@ -4038,7 +4038,9 @@ impl ProposalRepository {
         .ok_or_else(|| Error::InvalidData("evidence_finding_not_found".into()))?;
         let judge_task_id: String = sqlx::query_scalar("SELECT t.id FROM tasks t JOIN refinement_dispatch_intents i ON i.id=t.refinement_intent_id JOIN refinement_runs r ON r.id=i.run_id WHERE r.proposal_id=$1 AND r.state='running' AND i.state='materialized' AND i.task_id=t.id AND t.status IN ('open','in_progress') AND t.agent_type='judge' AND t.refinement_run_id=r.id AND t.refinement_generation=r.generation AND t.refinement_round=i.round AND t.refinement_phase=i.phase AND t.refinement_role=i.role AND t.created_by_user_id=$2 LIMIT 1 FOR UPDATE OF t,i,r").bind(&proposal_id).bind(&input.caller_user_id).fetch_optional(&mut *tx).await?.ok_or_else(|| Error::InvalidTransition("disposition_unauthorized_active_judge_required".into()))?;
         let outcome = if input.disposition == TribunalEvidenceLifecycle::Resolved {
-            let validation_id = input.validation_result_id.as_deref().ok_or_else(|| Error::InvalidData("resolution_requires_validation_result".into()))?;
+            let validation_id = input.validation_result_id.as_deref().ok_or_else(|| {
+                Error::InvalidData("resolution_requires_validation_result".into())
+            })?;
             let outcome: String = sqlx::query_scalar("SELECT v.outcome FROM typed_evidence_validation_results v JOIN typed_evidence_attempts a ON a.id=v.attempt_id WHERE v.id=$1 AND a.finding_id=$2 FOR UPDATE").bind(validation_id).bind(&input.finding_id).fetch_optional(&mut *tx).await?.ok_or_else(|| Error::InvalidData("resolution_requires_applicable_validation_result".into()))?;
             match outcome.as_str() {
                 "resolved" => TribunalEvidenceOutcome::Resolved,

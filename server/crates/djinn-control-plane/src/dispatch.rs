@@ -62,9 +62,10 @@ use crate::tools::provider_tools::{
 };
 use crate::tools::refinement_tools::{
     ProposalRefinementDemandEvidenceParams, ProposalRefinementDemandRoundParams,
-    ProposalRefinementResolveEvidenceParams, ProposalRefinementResolveParams, ProposalRefinementRetryEvidenceParams, ProposalRefinementWithdrawEvidenceParams,
-    ProposalRefinementStartParams, ProposalRefinementStatusParams, ProposalRefinementStopParams,
-    ProposalVerdictOverrideParams,
+    ProposalRefinementResolveEvidenceParams, ProposalRefinementResolveParams,
+    ProposalRefinementRetryEvidenceParams, ProposalRefinementStartParams,
+    ProposalRefinementStatusParams, ProposalRefinementStopParams,
+    ProposalRefinementWithdrawEvidenceParams, ProposalVerdictOverrideParams,
 };
 use crate::tools::service_tools::ServicePresetListParams;
 use crate::tools::session_tools::{
@@ -623,8 +624,24 @@ impl DjinnMcpServer {
                 >(name, args)?))
                     .await,
             ),
-            "proposal_refinement_resolve_evidence" => map_json(name, self.proposal_refinement_resolve_evidence(Parameters(decode_args::<ProposalRefinementResolveEvidenceParams>(name, args)?)).await),
-            "proposal_refinement_withdraw_evidence" => map_json(name, self.proposal_refinement_withdraw_evidence(Parameters(decode_args::<ProposalRefinementWithdrawEvidenceParams>(name, args)?)).await),
+            "proposal_refinement_resolve_evidence" => map_json(
+                name,
+                self.proposal_refinement_resolve_evidence(Parameters(decode_args::<
+                    ProposalRefinementResolveEvidenceParams,
+                >(
+                    name, args
+                )?))
+                .await,
+            ),
+            "proposal_refinement_withdraw_evidence" => map_json(
+                name,
+                self.proposal_refinement_withdraw_evidence(Parameters(decode_args::<
+                    ProposalRefinementWithdrawEvidenceParams,
+                >(
+                    name, args
+                )?))
+                .await,
+            ),
             "model_health" => map_json(
                 name,
                 self.model_health(Parameters(decode_args::<ModelHealthInput>(name, args)?))
