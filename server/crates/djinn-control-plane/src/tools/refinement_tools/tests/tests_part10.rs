@@ -173,6 +173,194 @@ async fn disposition_call(
         .await
 }
 
+// Fold through the public proposal handler; fixture SQL is not folding authority.
+async fn disposition_folding_revision(
+    server: &DjinnMcpServer,
+    db: &Database,
+    proposal: &djinn_core::models::Proposal,
+    user_id: &str,
+) -> i32 {
+    let response = disposition_call(
+        server,
+        user_id,
+        "proposal_update",
+        serde_json::json!({
+            "id": proposal.id,
+            "body": format!("{}\n\nAdvocate committed evidence fold.", proposal.body),
+        }),
+    )
+    .await;
+    assert!(response["error"].is_null(), "fold rejected: {response}");
+    ProposalRepository::new(db.clone(), EventBus::noop())
+        .revisions(&proposal.id)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|revision| revision.event_kind == "spec_revision")
+        .map(|revision| revision.seq)
+        .max()
+        .expect("public fold committed a revision")
+}
+
+fn disposition_args(
+    tool: &str,
+    fixture: &djinn_db::test_support::TypedEvidenceDispositionFixtureForTest,
+    revision: i32,
+) -> serde_json::Value {
+    let mut args = serde_json::json!({
+        "finding_id": fixture.finding_id,
+        "folding_revision": revision,
+        "rationale": "Terminal evidence decision is recorded with a rationale.",
+    });
+    if tool.ends_with("resolve_evidence") {
+        args["validation_result_id"] = serde_json::json!(fixture.validation_result_id);
+    } else {
+        args["withdrawal_is_non_load_bearing"] = serde_json::json!(true);
+    }
+    args
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn disposition_dispatch_successes_return_machine_fields_and_clear_legacy() {
+    for tool in [
+        "proposal_refinement_resolve_evidence",
+        "proposal_refinement_withdraw_evidence",
+    ] {
+        let (server, db, proposal, fixture) = disposition_fixture().await;
+        let revision =
+            disposition_folding_revision(&server, &db, &proposal, &fixture.caller_user_id).await;
+        let before = disposition_snapshot(&db, &proposal.id).await;
+        let response = disposition_call(
+            &server,
+            &fixture.caller_user_id,
+            tool,
+            disposition_args(tool, &fixture, revision),
+        )
+        .await;
+        let expected = if tool.ends_with("resolve_evidence") {
+            "resolved"
+        } else {
+            "withdrawn"
+        };
+        assert_eq!(response["accepted"], true, "{response}");
+        assert_eq!(response["finding_id"], fixture.finding_id);
+        assert!(response["disposition_id"].as_str().is_some());
+        assert_eq!(response["disposition"], expected);
+        assert_eq!(response["lifecycle"], expected);
+        assert_eq!(response["folding_revision"], revision);
+        assert_eq!(
+            response["outcome"],
+            if expected == "resolved" {
+                "resolved"
+            } else {
+                "unresolved"
+            }
+        );
+        assert!(response["error"].is_null() && response["conflict_code"].is_null());
+        let after = disposition_snapshot(&db, &proposal.id).await;
+        assert_eq!(after.dispositions.len(), before.dispositions.len() + 1);
+        assert_eq!(after.transitions.len(), before.transitions.len() + 1);
+        assert_eq!(after.legacy_link_and_claim, (None, None));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn disposition_dispatch_rejections_and_decode_failures_are_exactly_pure() {
+    for (tool, mutation, code) in [
+        (
+            "proposal_refinement_resolve_evidence",
+            "uncommitted",
+            "committed_folding_revision_required",
+        ),
+        (
+            "proposal_refinement_resolve_evidence",
+            "inapplicable",
+            "validation_result_inapplicable",
+        ),
+        (
+            "proposal_refinement_withdraw_evidence",
+            "empty",
+            "rationale_required",
+        ),
+        (
+            "proposal_refinement_withdraw_evidence",
+            "false",
+            "non_load_bearing_assertion_required",
+        ),
+    ] {
+        let (server, db, proposal, fixture) = disposition_fixture().await;
+        let revision =
+            disposition_folding_revision(&server, &db, &proposal, &fixture.caller_user_id).await;
+        let before = disposition_snapshot(&db, &proposal.id).await;
+        let mut args = disposition_args(tool, &fixture, revision);
+        match mutation {
+            "uncommitted" => args["folding_revision"] = serde_json::json!(revision + 100),
+            "inapplicable" => {
+                args["validation_result_id"] = serde_json::json!(uuid::Uuid::now_v7().to_string())
+            }
+            "empty" => args["rationale"] = serde_json::json!(""),
+            "false" => args["withdrawal_is_non_load_bearing"] = serde_json::json!(false),
+            _ => unreachable!(),
+        }
+        let response = disposition_call(&server, &fixture.caller_user_id, tool, args).await;
+        assert_eq!(response["accepted"], false, "{mutation}: {response}");
+        assert_eq!(response["conflict_code"], code, "{mutation}: {response}");
+        assert_eq!(
+            disposition_snapshot(&db, &proposal.id).await,
+            before,
+            "{mutation} mutated state"
+        );
+    }
+    for tool in [
+        "proposal_refinement_resolve_evidence",
+        "proposal_refinement_withdraw_evidence",
+    ] {
+        let (server, db, proposal, fixture) = disposition_fixture().await;
+        let before = disposition_snapshot(&db, &proposal.id).await;
+        let result = server
+            .dispatch_tool(tool, serde_json::json!({"finding_id": fixture.finding_id}))
+            .await;
+        assert!(result.is_err(), "required field omission must fail decode");
+        assert_eq!(disposition_snapshot(&db, &proposal.id).await, before);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn disposition_unauthorized_and_duplicate_terminal_calls_preserve_snapshot() {
+    let (server, db, proposal, fixture) = disposition_fixture().await;
+    let revision =
+        disposition_folding_revision(&server, &db, &proposal, &fixture.caller_user_id).await;
+    let before = disposition_snapshot(&db, &proposal.id).await;
+    let denied = disposition_call(
+        &server,
+        &uuid::Uuid::now_v7().to_string(),
+        "proposal_refinement_resolve_evidence",
+        disposition_args("proposal_refinement_resolve_evidence", &fixture, revision),
+    )
+    .await;
+    assert_eq!(denied["conflict_code"], "unauthorized");
+    assert_eq!(disposition_snapshot(&db, &proposal.id).await, before);
+    let accepted = disposition_call(
+        &server,
+        &fixture.caller_user_id,
+        "proposal_refinement_resolve_evidence",
+        disposition_args("proposal_refinement_resolve_evidence", &fixture, revision),
+    )
+    .await;
+    assert_eq!(accepted["accepted"], true);
+    let terminal = disposition_snapshot(&db, &proposal.id).await;
+    let duplicate = disposition_call(
+        &server,
+        &fixture.caller_user_id,
+        "proposal_refinement_resolve_evidence",
+        disposition_args("proposal_refinement_resolve_evidence", &fixture, revision),
+    )
+    .await;
+    assert_eq!(duplicate["accepted"], false);
+    assert_eq!(duplicate["conflict_code"], "invalid_lifecycle");
+    assert_eq!(disposition_snapshot(&db, &proposal.id).await, terminal);
+}
+
 fn assert_retry_allocation(
     before: &djinn_db::test_support::TypedEvidenceRetrySnapshotForTest,
     after: &djinn_db::test_support::TypedEvidenceRetrySnapshotForTest,
