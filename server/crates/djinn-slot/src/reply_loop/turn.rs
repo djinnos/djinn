@@ -2278,6 +2278,8 @@ mod tests {
     use super::super::error_handling::ReplyLoopCancelled;
     use super::super::model_turn_admission::ModelTurnAdmissionTestHooks;
     use super::*;
+    #[path = "turn/tests/turn_watchdog_tests.rs"]
+    mod watchdog_tests;
     use djinn_db::test_support::{
         model_turn_accounting_fixture, model_turn_decision_count_fixture,
         model_turn_lease_lifecycle_fixture, model_turn_terminal_fixture,

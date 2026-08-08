@@ -260,19 +260,23 @@ impl CoveredAttemptTerminalGuard {
             let mut ticks = tokio::time::interval(Duration::from_secs(20));
             ticks.tick().await;
             let mut last_success = tokio::time::Instant::now();
+            coordinator.watchdog_started();
             loop {
                 tokio::select! {
                     _ = stop.cancelled() => return,
                     _ = ticks.tick() => { let deadline = last_success + Duration::from_secs(40); tokio::select! {
                         biased;
                         _ = stop.cancelled() => return,
-                        _ = tokio::time::sleep_until(deadline) => { abort.abort(); fired.cancel(); return; },
-                        result = coordinator.heartbeat(&identity) => if matches!(result, Ok(djinn_db::ModelTurnLeaseMutationOutcome::Applied | djinn_db::ModelTurnLeaseMutationOutcome::Idempotent)) { last_success = tokio::time::Instant::now(); },
+                        _ = tokio::time::sleep_until(deadline) => { coordinator.watchdog_deadline_reached().await; abort.abort(); fired.cancel(); return; },
+                        result = coordinator.heartbeat(&identity) => if matches!(result, Ok(djinn_db::ModelTurnLeaseMutationOutcome::Applied | djinn_db::ModelTurnLeaseMutationOutcome::Idempotent)) { last_success = tokio::time::Instant::now(); coordinator.watchdog_heartbeat_committed(); },
                     }}
                 }
             }
         }));
     }
+
+    #[cfg(test)]
+    pub(super) fn watchdog_abort_signal(&self) -> tokio_util::sync::CancellationToken { self.watchdog_aborted.clone() }
 
     async fn next_event(&mut self) -> Option<anyhow::Result<StreamEvent>> {
         loop {

@@ -194,6 +194,12 @@ pub(super) struct ModelTurnAdmissionTestHooks {
     /// Counts watchdog-owned commits independently of provider stream activity.
     pub heartbeats: AtomicUsize,
     pub fail_heartbeat: std::sync::atomic::AtomicBool,
+    pub watchdog_started: TestNotify,
+    pub heartbeat_finished: TestNotify,
+    pub heartbeat_committed: TestNotify,
+    pub block_watchdog_deadline: std::sync::atomic::AtomicBool,
+    pub watchdog_deadline_reached: TestNotify,
+    pub watchdog_deadline_release: TestNotify,
     pub reconciliations: std::sync::Mutex<Vec<ModelTurnLeaseIdentity>>,
     pub reconcile_reached: TestNotify,
     pub reconcile_release: TestNotify,
@@ -208,6 +214,12 @@ impl Default for ModelTurnAdmissionTestHooks {
             fail_mark_active: std::sync::atomic::AtomicBool::new(false),
             heartbeats: AtomicUsize::new(0),
             fail_heartbeat: std::sync::atomic::AtomicBool::new(false),
+            watchdog_started: TestNotify::new(),
+            heartbeat_finished: TestNotify::new(),
+            heartbeat_committed: TestNotify::new(),
+            block_watchdog_deadline: std::sync::atomic::AtomicBool::new(false),
+            watchdog_deadline_reached: TestNotify::new(),
+            watchdog_deadline_release: TestNotify::new(),
             reconciliations: std::sync::Mutex::new(Vec::new()),
             reconcile_reached: TestNotify::new(),
             reconcile_release: TestNotify::new(),
@@ -430,13 +442,19 @@ impl ModelTurnAdmissionCoordinator {
         if let Some(hooks) = &self.test_hooks {
             hooks.heartbeats.fetch_add(1, Ordering::AcqRel);
             if hooks.fail_heartbeat.load(Ordering::Acquire) {
+                hooks.heartbeat_finished.notify_waiters();
                 return Err(djinn_db::Error::Internal(
                     "injected heartbeat database failure".into(),
                 ));
             }
         }
-        self.repository.heartbeat(identity).await
+        let result = self.repository.heartbeat(identity).await;
+        #[cfg(test)] if let Some(hooks) = &self.test_hooks { hooks.heartbeat_finished.notify_waiters(); }
+        result
     }
+    pub(crate) fn watchdog_started(&self) { #[cfg(test)] if let Some(hooks) = &self.test_hooks { hooks.watchdog_started.notify_waiters(); } }
+    pub(crate) fn watchdog_heartbeat_committed(&self) { #[cfg(test)] if let Some(hooks) = &self.test_hooks { hooks.heartbeat_committed.notify_waiters(); } }
+    pub(crate) async fn watchdog_deadline_reached(&self) { #[cfg(test)] if let Some(hooks) = &self.test_hooks { hooks.watchdog_deadline_reached.notify_waiters(); if hooks.block_watchdog_deadline.load(Ordering::Acquire) { hooks.watchdog_deadline_release.notified().await; } } }
 }
 
 fn request_fingerprint(request_id: &str) -> String {
