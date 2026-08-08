@@ -291,7 +291,7 @@ pub use repositories::{
         ProjectWorkspaceGraphRepository, ProjectWorkspaceGraphUpsert,
     },
     proposal::{
-        ActiveEvidenceAuthorityTask, AtomicEvidenceDemandInput, AtomicEvidenceRetryInput,
+        ActiveEvidenceAuthorityTask, AtomicEvidenceDemandInput, AtomicEvidenceDispositionInput, AtomicEvidenceDispositionResult, AtomicEvidenceRetryInput,
         AtomicEvidenceRetryResult, AwaitingReviewPark, FeedbackRefinementDisposition,
         FeedbackRefinementDispositionInput, FeedbackRefinementRejectionInput,
         FeedbackRefinementRejectionResult, NeedsEvidenceCapStatus, NeedsEvidenceClaimLink,

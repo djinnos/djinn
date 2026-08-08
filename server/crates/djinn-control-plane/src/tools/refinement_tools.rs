@@ -15,7 +15,7 @@ use serde::Deserialize;
 
 use crate::server::DjinnMcpServer;
 use crate::tools::proposal_ops::{
-    DemandRoundResponse, EvidenceRetryResponse, NeedsEvidenceDemandResponse,
+    DemandRoundResponse, EvidenceDispositionResponse, EvidenceRetryResponse, NeedsEvidenceDemandResponse,
     NeedsEvidenceDemandResult, ProposalRefinementStartResponse, ProposalRefinementStatusModel,
     ProposalRefinementStatusResponse, ProposalRefinementStopResponse, VerdictOverrideResponse,
 };
@@ -24,9 +24,9 @@ use crate::tools::refinement_helpers::validate_demand_evidence;
 pub use crate::tools::refinement_helpers::{
     ProposalRefinementDemandEvidenceParams, build_refinement_status,
 };
-use djinn_core::models::NeedsEvidenceClaim;
+use djinn_core::models::{NeedsEvidenceClaim, TribunalEvidenceLifecycle};
 use djinn_db::{
-    AdmitRefinementRunRequest, AtomicEvidenceRetryInput, DispatchTypedEvidenceRetryInput,
+    AdmitRefinementRunRequest, AtomicEvidenceDispositionInput, AtomicEvidenceRetryInput, DispatchTypedEvidenceRetryInput,
     ProposalRepository, RefinementAdmissionError, RefinementAdmissionOutcome,
     RefinementAdmissionSource, TaskRepository, TypedEvidenceRepository,
 };
@@ -293,6 +293,9 @@ pub struct ProposalRefinementRetryEvidenceParams {
     /// The exact latest failed transition being retried.
     pub failed_transition_id: String,
 }
+
+#[derive(Deserialize, schemars::JsonSchema)] pub struct ProposalRefinementResolveEvidenceParams { pub finding_id:String, pub validation_result_id:String, pub folding_revision:i32, pub rationale:String }
+#[derive(Deserialize, schemars::JsonSchema)] pub struct ProposalRefinementWithdrawEvidenceParams { pub finding_id:String, pub folding_revision:i32, pub rationale:String, pub withdrawal_is_non_load_bearing:bool }
 
 fn err_retry_evidence(error: impl Into<String>, code: Option<&str>) -> EvidenceRetryResponse {
     EvidenceRetryResponse {
@@ -1204,6 +1207,10 @@ mod feedback_capture_contract_tests {
         assert!(!feedback_capture_contract_required(true, true, true));
         assert!(feedback_capture_contract_required(true, true, false));
     }
+    #[tool(description = "Resolve typed evidence; active Judge only.")] pub async fn proposal_refinement_resolve_evidence(&self, Parameters(p): Parameters<ProposalRefinementResolveEvidenceParams>) -> Json<EvidenceDispositionResponse> { self.disposition(p.finding_id,Some(p.validation_result_id),p.folding_revision,p.rationale,TribunalEvidenceLifecycle::Resolved,false).await }
+    #[tool(description = "Withdraw typed evidence; active Judge only.")] pub async fn proposal_refinement_withdraw_evidence(&self, Parameters(p): Parameters<ProposalRefinementWithdrawEvidenceParams>) -> Json<EvidenceDispositionResponse> { self.disposition(p.finding_id,None,p.folding_revision,p.rationale,TribunalEvidenceLifecycle::Withdrawn,p.withdrawal_is_non_load_bearing).await }
+    async fn disposition(&self,finding_id:String,validation_result_id:Option<String>,folding_revision:i32,rationale:String,disposition:TribunalEvidenceLifecycle,withdrawal_is_non_load_bearing:bool)->Json<EvidenceDispositionResponse>{ let Some(caller_user_id)=djinn_core::auth_context::current_user_id() else{return Json(EvidenceDispositionResponse{accepted:false,finding_id:None,disposition_id:None,disposition:None,lifecycle:None,folding_revision:None,validation_result_id:None,outcome:None,error:Some("disposition_unauthorized_active_judge_required".into()),conflict_code:Some("unauthorized".into())})}; let repo=ProposalRepository::new(self.state.db().clone(),self.state.event_bus()); match repo.dispose_evidence_atomically(AtomicEvidenceDispositionInput{finding_id,validation_result_id,folding_revision,disposition,rationale,withdrawal_is_non_load_bearing,caller_user_id}).await {Ok(v)=>{let d=v.projection.disposition;Json(EvidenceDispositionResponse{accepted:true,finding_id:Some(d.finding_id),disposition_id:Some(d.id),disposition:Some(d.disposition.as_str().into()),lifecycle:Some(v.projection.finding_lifecycle.as_str().into()),folding_revision:Some(d.folding_revision),validation_result_id:d.validation_result_id,outcome:Some("unresolved".into()),error:None,conflict_code:None})},Err(e)=>Json(EvidenceDispositionResponse{accepted:false,finding_id:None,disposition_id:None,disposition:None,lifecycle:None,folding_revision:None,validation_result_id:None,outcome:None,error:Some(e.to_string()),conflict_code:Some("rejected".into())})}}
+
 }
 
 #[cfg(test)]
