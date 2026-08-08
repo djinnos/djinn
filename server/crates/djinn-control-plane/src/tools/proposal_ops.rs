@@ -452,6 +452,9 @@ pub struct ProposalShowResponse {
     pub targets: Option<Vec<ProposalTargetModel>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub feedback: Option<Vec<ProposalFeedbackModel>>,
+    /// Canonical lifecycle projection. Optional for backward compatibility.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feedback_refinements: Option<Vec<ProposalFeedbackRefinementModel>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub revisions: Option<Vec<ProposalRevisionModel>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -580,6 +583,50 @@ pub struct ProposalFeedbackSourceRowModel {
     pub body: String,
     pub severity: String,
     pub created_at: String,
+}
+
+impl From<djinn_core::models::ProposalFeedbackRefinementSource> for ProposalFeedbackSourceRowModel {
+    fn from(s: djinn_core::models::ProposalFeedbackRefinementSource) -> Self {
+        Self {
+            source_feedback_id: s.source_feedback_id,
+            source_ordinal: s.source_ordinal,
+            source_parent_id: s.source_parent_id,
+            author_kind: s.source_author_kind,
+            author_user_id: s.source_author_user_id,
+            author_model: s.source_author_model,
+            body: s.source_body,
+            severity: s.source_severity,
+            created_at: s.source_created_at,
+        }
+    }
+}
+
+/// One canonical root-scoped feedback-refinement lifecycle generation.
+#[derive(Serialize, Deserialize, Clone, schemars::JsonSchema)]
+pub struct ProposalFeedbackRefinementModel {
+    pub root_feedback_id: String,
+    pub generation: i32,
+    /// `queued`, `injected`, `accepted`, `wont_fix`, or `withdrawn_by_author`.
+    pub state: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub debate_entry_id: Option<String>,
+    pub round: i32,
+    #[serde(default)]
+    pub source_rows: Vec<ProposalFeedbackSourceRowModel>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub accepted_disposition: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub accepted_revision_seq: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub accepted_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub accepted_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub accepted_by_user_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub withdrawn_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub withdrawn_by_user_id: Option<String>,
 }
 
 /// A memory note linked to a proposal via its graduated epics/tasks.
@@ -969,6 +1016,7 @@ pub const SHOW_FIELDS_ACCEPTED: &[&str] = &[
     "proposal",
     "targets",
     "feedback",
+    "feedback_refinements",
     "signoffs",
     "revisions",
     "debate",
