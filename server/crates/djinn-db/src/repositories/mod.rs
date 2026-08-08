@@ -45,6 +45,7 @@ pub mod project_workspace_graph;
 pub mod proposal;
 pub mod proposal_integrity;
 pub mod readiness;
+pub mod refinement_feedback_handoff_observation;
 pub mod refinement_run;
 mod refinement_run_lifecycle;
 pub mod repo_graph_cache;

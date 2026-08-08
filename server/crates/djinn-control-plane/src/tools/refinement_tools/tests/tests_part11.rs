@@ -47,25 +47,17 @@ async fn post_cutoff_feedback_auto_resume_handoff_captures_the_live_cohort_once(
         .unwrap();
     assert!(first["error"].is_null(), "{first}");
     let first_id = first["feedback"]["id"].as_str().unwrap().to_owned();
-    let (run_id, intent_id, generation): (String, String, i32) = sqlx::query_as(
-        "SELECT r.id, i.id, r.generation FROM refinement_runs r \
-         JOIN refinement_dispatch_intents i ON i.run_id=r.id \
-         WHERE r.proposal_id=$1 AND r.state='running' AND i.state='pending'",
-    )
-    .bind(&proposal.id)
-    .fetch_one(db.pool())
-    .await
-    .unwrap();
+    let active = repo
+        .load_feedback_refinement_active_boundary(&proposal.id, &first_id)
+        .await
+        .unwrap()
+        .expect("A's feedback admission remains live");
+    let run_id = active.run_id;
+    let intent_id = active.intent_id;
+    let generation = active.generation;
     assert_eq!(generation, 1);
     assert_eq!(
-        sqlx::query_scalar::<_, i64>(
-            "SELECT count(*) FROM proposal_feedback_refinement_sources WHERE source_feedback_id=$1",
-        )
-        .bind(&first_id)
-        .fetch_one(db.pool())
-        .await
-        .unwrap(),
-        1,
+        active.source_captures, 1,
         "A must be immutable before B is permitted to commit",
     );
 
@@ -85,28 +77,20 @@ async fn post_cutoff_feedback_auto_resume_handoff_captures_the_live_cohort_once(
         .unwrap();
     assert!(second["error"].is_null(), "{second}");
     let second_id = second["feedback"]["id"].as_str().unwrap().to_owned();
-    let (pending_members, pending_owners): (i64, i64) = sqlx::query_as(
-        "SELECT count(*), count(*) FILTER (WHERE cohort_owner) \
-         FROM pending_feedback_refinement_handoffs WHERE proposal_id=$1 AND state='pending'",
-    )
-    .bind(&proposal.id)
-    .fetch_one(db.pool())
-    .await
-    .unwrap();
-    assert_eq!(pending_members, 1, "B must remain pending while A is live");
+    let pending_state = repo
+        .load_pending_feedback_refinement_state(&proposal.id, &second_id)
+        .await
+        .unwrap();
     assert_eq!(
-        pending_owners, 1,
+        pending_state.pending_members, 1,
+        "B must remain pending while A is live"
+    );
+    assert_eq!(
+        pending_state.pending_owners, 1,
         "B's pending cohort has one elected owner"
     );
     assert_eq!(
-        sqlx::query_scalar::<_, i64>(
-            "SELECT count(*) FROM proposal_feedback_refinement_sources WHERE source_feedback_id=$1",
-        )
-        .bind(&second_id)
-        .fetch_one(db.pool())
-        .await
-        .unwrap(),
-        0,
+        pending_state.source_captures, 0,
         "B must not leak into A's already immutable capture",
     );
 
@@ -204,84 +188,55 @@ async fn post_cutoff_feedback_auto_resume_handoff_captures_the_live_cohort_once(
         "replaying lifecycle handoff must not create another successor"
     );
 
-    let (
-        runs,
-        running,
-        intents,
-        objections,
-        injections,
-        immutable_generations,
-        immutable_sources,
-        pending,
-        owners,
-    ): (i64, i64, i64, i64, i64, i64, i64, i64, i64) = sqlx::query_as(
-        "SELECT \
-           (SELECT count(*) FROM refinement_runs WHERE proposal_id=$1), \
-           (SELECT count(*) FROM refinement_runs WHERE proposal_id=$1 AND state='running'), \
-           (SELECT count(*) FROM refinement_dispatch_intents i JOIN refinement_runs r ON r.id=i.run_id WHERE r.proposal_id=$1), \
-           (SELECT count(*) FROM proposal_debate_trail WHERE proposal_id=$1 AND kind='human_feedback'), \
-           (SELECT count(*) FROM proposal_feedback_refinement_injections WHERE proposal_id=$1), \
-           (SELECT count(DISTINCT (root_feedback_id, generation)) FROM proposal_feedback_refinement_injections WHERE proposal_id=$1), \
-           (SELECT count(*) FROM proposal_feedback_refinement_sources WHERE source_feedback_id IN ($2,$3)), \
-           (SELECT count(*) FROM pending_feedback_refinement_handoffs WHERE proposal_id=$1 AND state='pending'), \
-           (SELECT count(*) FROM pending_feedback_refinement_handoffs WHERE proposal_id=$1 AND state='pending' AND cohort_owner)",
-    )
-    .bind(&proposal.id)
-    .bind(&first_id)
-    .bind(&second_id)
-    .fetch_one(db.pool())
-    .await
-    .unwrap();
-    assert_eq!(runs, 2, "A may produce only one successor generation");
-    assert_eq!(running, 1, "only B's successor run remains live");
+    let lifecycle = repo
+        .load_feedback_refinement_lifecycle_state(&proposal.id, &first_id, &second_id)
+        .await
+        .unwrap();
     assert_eq!(
-        intents, 2,
+        lifecycle.runs, 2,
+        "A may produce only one successor generation"
+    );
+    assert_eq!(lifecycle.running, 1, "only B's successor run remains live");
+    assert_eq!(
+        lifecycle.intents, 2,
         "replays must not duplicate initial dispatch intents"
     );
     assert_eq!(
-        objections, 2,
+        lifecycle.objections, 2,
         "each feedback root has one human-feedback objection"
     );
     assert_eq!(
-        injections, 2,
+        lifecycle.injections, 2,
         "the schedule has no queued or empty immutable injection generation"
     );
     assert_eq!(
-        immutable_generations, 2,
+        lifecycle.immutable_generations, 2,
         "A and B are the schedule's only immutable feedback generations"
     );
     assert_eq!(
-        immutable_sources, 2,
+        lifecycle.immutable_sources, 2,
         "A and B source rows are each captured once"
     );
     assert_eq!(
-        pending, 0,
+        lifecycle.pending, 0,
         "the lifecycle handoff drains the pending cohort"
     );
-    assert_eq!(owners, 0, "no pending cohort owner survives the drain");
-
-    let (admitted, admitted_owners, b_successor_generation): (i64, i64, i32) = sqlx::query_as(
-        "SELECT \
-           (SELECT count(*) FROM pending_feedback_refinement_handoffs WHERE proposal_id=$1 AND state='admitted'), \
-           (SELECT count(*) FROM pending_feedback_refinement_handoffs WHERE proposal_id=$1 AND state='admitted' AND cohort_owner), \
-           (SELECT r.generation FROM proposal_feedback_refinement_sources s \
-             JOIN proposal_feedback_refinement_injections x ON x.id=s.injection_id \
-             JOIN pending_feedback_refinement_handoffs h ON h.boundary_feedback_id=s.source_feedback_id \
-             JOIN refinement_runs r ON r.id=h.successor_run_id \
-             WHERE s.source_feedback_id=$2)",
-    )
-    .bind(&proposal.id)
-    .bind(&second_id)
-    .fetch_one(db.pool())
-    .await
-    .unwrap();
     assert_eq!(
-        admitted, 2,
+        lifecycle.pending_owners, 0,
+        "no pending cohort owner survives the drain"
+    );
+
+    let admitted_state = repo
+        .load_feedback_refinement_admitted_state(&proposal.id, &second_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        admitted_state.admitted, 2,
         "A and B boundaries have exactly one admitted owner"
     );
     assert!(
-        admitted_owners <= 1,
+        admitted_state.admitted_owners <= 1,
         "each admitted/captured cohort has at most one durable owner"
     );
-    assert_eq!(b_successor_generation, generation + 1);
+    assert_eq!(admitted_state.successor_generation, Some(generation + 1));
 }
