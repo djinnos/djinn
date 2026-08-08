@@ -96,7 +96,7 @@ fn follow_up_id(verdict: &str) -> Option<&str> {
     Some(&suffix[..end])
 }
 
-fn audit_rows<'a>(document: &'a str) -> Result<Vec<Vec<&'a str>>, String> {
+fn audit_rows(document: &str) -> Result<Vec<Vec<&str>>, String> {
     let inventory = document
         .split_once("## Inventory\n")
         .ok_or_else(|| "missing `## Inventory` heading".to_owned())?
