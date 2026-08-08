@@ -201,6 +201,20 @@ impl DjinnEventEnvelope {
         }
     }
 
+    /// Lifecycle notifications carry only stable identities; detail consumers
+    /// refetch the canonical proposal projection.
+    pub fn proposal_feedback_withdrawn(proposal_id: &str, feedback_id: &str) -> Self {
+        Self { entity_type: "proposal_feedback", action: "withdrawn", payload: serde_json::json!({"proposal_id": proposal_id, "feedback_id": feedback_id}), id: Some(feedback_id.to_owned()), project_id: None, from_sync: false }
+    }
+
+    pub fn proposal_feedback_refinement_disposition_updated(proposal_id: &str, injection_id: &str) -> Self {
+        Self { entity_type: "proposal_feedback_refinement", action: "disposition_updated", payload: serde_json::json!({"proposal_id": proposal_id, "injection_id": injection_id}), id: Some(injection_id.to_owned()), project_id: None, from_sync: false }
+    }
+
+    pub fn proposal_feedback_refinement_disposition_rejected(proposal_id: &str, injection_id: &str) -> Self {
+        Self { entity_type: "proposal_feedback_refinement", action: "disposition_rejected", payload: serde_json::json!({"proposal_id": proposal_id, "injection_id": injection_id}), id: Some(injection_id.to_owned()), project_id: None, from_sync: false }
+    }
+
     /// A debate-trail entry was appended to a proposal.
     pub fn proposal_debate_trail_created(proposal_id: &str, entry: &ProposalDebateTrail) -> Self {
         Self {

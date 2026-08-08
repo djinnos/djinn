@@ -1356,6 +1356,10 @@ impl ProposalRepository {
             });
         }
         tx.commit().await?;
+        self.events.send(DjinnEventEnvelope::proposal_feedback_withdrawn(
+            &feedback.proposal_id,
+            &feedback.id,
+        ));
         Ok((feedback, results))
     }
 
