@@ -3255,6 +3255,138 @@ async fn an_enabled_gate_never_permits_a_rollback() {
     assert!(latest.permits_rollback);
 }
 
+/// The six counts a rollback report stores, in the order the table declares
+/// them.
+const ROLLBACK_COUNT_LABELS: [&str; 6] = [
+    "reserved_rows",
+    "calling_rows",
+    "open_tier2_leases",
+    "unapplied_lead_results",
+    "registered_provider_futures",
+    "current_failed_identities",
+];
+
+/// Insert one rollback report **directly**, bypassing the writer that computes
+/// the verdict, so the database's own refusal is what is under test.
+async fn insert_rollback_report(
+    db: &Database,
+    gate_state: &str,
+    counts: [i64; 6],
+    permits_rollback: bool,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO ci_route_rollback_reports (
+             id, gate_state, reserved_rows, calling_rows, open_tier2_leases,
+             unapplied_lead_results, registered_provider_futures,
+             current_failed_identities, permits_rollback, recorded_by_incarnation
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'inc-verdict-check')",
+    )
+    .bind(uuid::Uuid::now_v7().to_string())
+    .bind(gate_state)
+    .bind(counts[0])
+    .bind(counts[1])
+    .bind(counts[2])
+    .bind(counts[3])
+    .bind(counts[4])
+    .bind(counts[5])
+    .bind(permits_rollback)
+    .execute(db.pool())
+    .await
+    .map(|_| ())
+}
+
+#[track_caller]
+fn assert_verdict_check_refused(result: &Result<(), sqlx::Error>, what: &str) {
+    let error = match result {
+        Ok(()) => panic!(
+            "{what}: the database accepted a rollback report whose stored verdict \
+             disagrees with its own counts — the report an operator points at can \
+             now say `permits_rollback` over a live route"
+        ),
+        Err(error) => error,
+    };
+    let constraint = error
+        .as_database_error()
+        .and_then(sqlx::error::DatabaseError::constraint);
+    assert_eq!(
+        constraint,
+        Some("ci_route_rollback_reports_verdict_check"),
+        "{what}: refused, but by something other than the verdict CHECK: {error}",
+    );
+}
+
+/// The verdict is enforced by the **database**, not only by the code that
+/// computes it.
+///
+/// # Why this is not covered by the writer's own fixtures
+///
+/// `record_rollback_quiescence_report` derives `permits_rollback` from the six
+/// counts and then stores both, so every test that goes through it necessarily
+/// agrees with itself. The CHECK exists for the case where something else
+/// writes the row — a repair script, a backfill, a future writer that computes
+/// the verdict from five of the six counts — and until now the only thing
+/// standing behind it was `migrations_immutable`'s file-hash pin. A later
+/// migration issuing `ALTER TABLE … DROP CONSTRAINT` changes no hashed file and
+/// would have gone unnoticed, and the constraint is precisely what stops a
+/// green report being persisted over a live `calling` row.
+///
+/// Migration 195 is merged and immutable; this tests it as it stands.
+///
+/// NAMED FAILING MUTATIONS. Add a migration that drops
+/// `ci_route_rollback_reports_verdict_check`, or weakens it from an equality to
+/// an implication (`permits_rollback = false OR (…)`): the first six cases and
+/// the `enabled` case still fail on `Ok(())`, and the "clean counts, `false`
+/// verdict" case is the one that specifically kills the implication form.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_verdict_check_refuses_a_report_that_disagrees_with_its_counts() {
+    let f = fixture().await;
+    const CLEAN: [i64; 6] = [0; 6];
+
+    // Vacuity: the honest rows this constraint is shaped around are accepted,
+    // so the refusals below are about the disagreement and not about the
+    // statement being malformed.
+    insert_rollback_report(&f.db, "quiescing", CLEAN, true)
+        .await
+        .expect("a clean drain with a `true` verdict is the row the gate exists to produce");
+    insert_rollback_report(&f.db, "quiescing", [1, 0, 0, 0, 0, 0], false)
+        .await
+        .expect("and a blocked drain with a `false` verdict is equally legal");
+
+    // Each count, one at a time: a `true` verdict over a non-zero count is the
+    // green report that would authorize stranding whatever that count names.
+    for (index, label) in ROLLBACK_COUNT_LABELS.iter().enumerate() {
+        let mut counts = CLEAN;
+        counts[index] = 1;
+        let result = insert_rollback_report(&f.db, "quiescing", counts, true).await;
+        assert_verdict_check_refused(&result, &format!("a `true` verdict over 1 {label}"));
+    }
+
+    // The gate posture is part of the same function: routes are still being
+    // admitted, so the counts are a snapshot of a moving target.
+    let enabled = insert_rollback_report(&f.db, "enabled", CLEAN, true).await;
+    assert_verdict_check_refused(
+        &enabled,
+        "a `true` verdict taken while the gate is `enabled`",
+    );
+
+    // And it is an EQUALITY, not an implication. A `false` verdict over clean
+    // counts is just as refused — otherwise a writer could weaken the
+    // constraint to a one-way check and the stored verdict would stop being a
+    // function of the row at all.
+    let understated = insert_rollback_report(&f.db, "quiescing", CLEAN, false).await;
+    assert_verdict_check_refused(&understated, "a `false` verdict over clean counts");
+
+    // Only the two honest rows survived.
+    let stored: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM ci_route_rollback_reports")
+        .fetch_one(f.db.pool())
+        .await
+        .unwrap();
+    assert_eq!(
+        stored, 2,
+        "every refused insert must have been refused, not merely reported"
+    );
+}
+
 /// The evidence-advance high-watermark: a routed identity that is still the
 /// current failed evidence for its lane blocks a rollback, and a superseded or
 /// passed one does not.

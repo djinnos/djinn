@@ -92,6 +92,19 @@ struct FakeState {
     /// Every `(owner, repo, run_id)` triple `rerun_failed_jobs` was asked for,
     /// so a fixture can prove *which* run was re-run, not just how many.
     reran: Vec<(String, String, u64)>,
+    /// The scope a fixture wants sampled from *inside* a provider mutation.
+    ///
+    /// This is the seam that makes the scope's **use** observable rather than
+    /// its identity. `the_actor_admits_into_the_leaders_provider_action_scope`
+    /// proves the actor holds the leader's object; nothing proved that the
+    /// object reaches the executor, so `drive_lane` could hand the executor a
+    /// fresh `ProviderActionScope::new()` with the whole suite green. Reading
+    /// `in_flight()` off the leader's own handle at the instant the provider
+    /// mutation is running answers both that question and "is the guard still
+    /// held across the call" with one number.
+    scope_probe: Option<ProviderActionScope>,
+    /// `scope_probe.in_flight()` as observed on entry to each mutation.
+    in_flight_during_mutations: Vec<usize>,
 }
 
 #[derive(Clone, Default)]
@@ -106,6 +119,13 @@ struct FakeProvider {
     /// follow it. Nothing in the fixture chooses the sequences — the ledger
     /// assigns them, and the fixture reads them back.
     hold_enumeration: Option<Arc<tokio::sync::Notify>>,
+    /// When set, `rerun_failed_jobs` / `enable_auto_merge` park here until they
+    /// are notified — *after* recording the call, so the recorded count is the
+    /// fixture's "the mutation is now in flight" signal.
+    ///
+    /// The window this opens is the one leadership's drain has to refuse to
+    /// finish inside.
+    hold_mutation: Option<Arc<tokio::sync::Notify>>,
 }
 
 impl FakeProvider {
@@ -128,8 +148,46 @@ impl FakeProvider {
         let me = Self {
             state: Arc::default(),
             hold_enumeration: Some(gate.clone()),
+            hold_mutation: None,
         };
         (me, gate)
+    }
+
+    /// A provider whose *mutation* parks until the returned handle is notified.
+    /// See [`FakeProvider::hold_mutation`].
+    fn parked_mutation() -> (Self, Arc<tokio::sync::Notify>) {
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let me = Self {
+            state: Arc::default(),
+            hold_enumeration: None,
+            hold_mutation: Some(gate.clone()),
+        };
+        (me, gate)
+    }
+
+    /// Sample `scope.in_flight()` on entry to every provider mutation.
+    fn probe_scope(&self, scope: ProviderActionScope) {
+        self.state.lock().expect("fake provider mutex").scope_probe = Some(scope);
+    }
+
+    /// What the probed scope reported while each mutation was running.
+    fn in_flight_during_mutations(&self) -> Vec<usize> {
+        self.state
+            .lock()
+            .expect("fake provider mutex")
+            .in_flight_during_mutations
+            .clone()
+    }
+
+    /// Park inside a provider mutation, if this fixture asked for that.
+    ///
+    /// Split out of the two mutation methods so neither holds the fake's mutex
+    /// across the await — a parked mutation that held it would deadlock every
+    /// counter read the fixture takes while it waits.
+    async fn park_in_mutation(&self) {
+        if let Some(gate) = &self.hold_mutation {
+            gate.notified().await;
+        }
     }
 
     fn failing_mutations() -> Self {
@@ -176,6 +234,19 @@ impl FakeProvider {
     }
 }
 
+/// Sample the probed scope, if a fixture asked for one.
+///
+/// Called with the fake's own mutex held and the provider mutation *not yet
+/// returned*, which is the only instant at which "the executor is inside the
+/// call" and "the guard is still held" are both observable.
+fn record_scope_probe(state: &mut FakeState) {
+    let Some(scope) = state.scope_probe.clone() else {
+        return;
+    };
+    let in_flight = scope.in_flight();
+    state.in_flight_during_mutations.push(in_flight);
+}
+
 fn api_error(method: &'static str) -> GitHubApiError {
     GitHubApiError::http(
         method,
@@ -193,12 +264,17 @@ impl CiRouteProvider for FakeProvider {
         repo: &str,
         run_id: u64,
     ) -> Result<(), GitHubApiError> {
-        let mut state = self.state.lock().expect("fake provider mutex");
-        state.calls.rerun_failed_jobs += 1;
-        state
-            .reran
-            .push((owner.to_owned(), repo.to_owned(), run_id));
-        if state.fail_mutations {
+        let failed = {
+            let mut state = self.state.lock().expect("fake provider mutex");
+            state.calls.rerun_failed_jobs += 1;
+            state
+                .reran
+                .push((owner.to_owned(), repo.to_owned(), run_id));
+            record_scope_probe(&mut state);
+            state.fail_mutations
+        };
+        self.park_in_mutation().await;
+        if failed {
             return Err(api_error("rerun_failed_jobs"));
         }
         Ok(())
@@ -213,9 +289,14 @@ impl CiRouteProvider for FakeProvider {
         _node_id: &str,
         _commit_headline: &str,
     ) -> Result<serde_json::Value, GitHubApiError> {
-        let mut state = self.state.lock().expect("fake provider mutex");
-        state.calls.enable_auto_merge += 1;
-        if state.fail_mutations {
+        let failed = {
+            let mut state = self.state.lock().expect("fake provider mutex");
+            state.calls.enable_auto_merge += 1;
+            record_scope_probe(&mut state);
+            state.fail_mutations
+        };
+        self.park_in_mutation().await;
+        if failed {
             return Err(api_error("enable_auto_merge"));
         }
         Ok(serde_json::json!({}))
@@ -3250,6 +3331,265 @@ async fn the_actor_admits_into_the_leaders_provider_action_scope() {
     );
 }
 
+/// Block until the fake provider has recorded `want` provider mutations.
+///
+/// The wait is on the seam's own counter, which is incremented *before* the
+/// mutation parks — so reaching it means the executor is genuinely inside the
+/// call, not that a sleep was probably long enough.
+async fn wait_for_mutations(provider: &FakeProvider, want: usize) {
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    while provider.calls().mutations() < want {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the lane never reached its provider mutation, so nothing below is under test"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+/// The lane's provider call runs **inside the leader's scope**, and leadership
+/// cannot finish draining while it does.
+///
+/// # The gap this closes
+///
+/// [`the_actor_admits_into_the_leaders_provider_action_scope`] proves the actor
+/// *holds* the leader's object. It proves nothing about what the actor does
+/// with it, and the object was pinned at nothing downstream:
+/// `ci_lane_routing::drive_lane` opens with
+/// `let scope = self.provider_action_scope.clone();` and hands that clone to
+/// every `execute_route`. Replace it with `ProviderActionScope::new()` and each
+/// `rerun_failed_jobs` future is admitted into a registry leadership never
+/// waits on and `close_admission()` never reaches — with the whole acceptance
+/// list green, because every other fixture either drives `execute_route` with a
+/// scope it built itself or reads the actor's scope back off the actor.
+///
+/// Separately, `execute_route`'s `drop(admitted)` sits *after* the provider
+/// call for one reason: leadership's join is only a quiescence proof if the
+/// guard outlives the call. Move that drop above the call and
+/// `wait_until_drained` returns, `provider_actions_drained_at` is stamped, and
+/// the advisory lock is released while `rerun_failed_jobs` is still in flight —
+/// so the next incarnation legally recovers a `calling` row whose call is still
+/// running.
+///
+/// **One number kills both.** `in_flight()`, read off the *leader's* handle
+/// from inside the parked mutation, is `1` only if the scope the executor
+/// admitted into is the leader's *and* the guard is still held. A private scope
+/// reports `0`; an early `drop(admitted)` reports `0`.
+///
+/// The drain half is then driven for real rather than argued: the production
+/// `quiesce_provider_actions` runs against the same leader scope while the
+/// mutation is parked, and the fixture samples the ledger throughout.
+/// `the_drain_stamp_is_withheld_until_the_last_provider_future_is_joined`
+/// asserts the same withholding but admits its own stand-in guard into its own
+/// scope, so it stays green under both mutations above; this one does not,
+/// because the guard it waits on is the one the production lane took.
+///
+/// NAMED FAILING MUTATIONS.
+/// (a) `let scope = self.provider_action_scope.clone();` →
+///     `ProviderActionScope::new()` in `drive_lane`: the in-flight assertion
+///     reads 0, and the drain stamps within a millisecond of being spawned, so
+///     the first sample fails too.
+/// (b) Hoist `drop(admitted)` above the `match admitted.kind()` provider call
+///     in `execute_route`: identical readings, for the other reason.
+/// (c) Pass the scope by value into `execute_route` and drop it early: same.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_lane_holds_the_leaders_scope_open_across_its_provider_call() {
+    let h = lane_harness().await;
+    let scope = h.actor.provider_action_scope.clone();
+    let incarnation = h.actor.coordinator_incarnation_id.clone();
+    djinn_db::CoordinatorIncarnationRepository::new(h.db.clone())
+        .register(&incarnation)
+        .await
+        .expect("register the coordinator incarnation the drain stamps");
+
+    let (parked, release) = FakeProvider::parked_mutation();
+    parked.set_check_runs(vec![inconclusive_check("Quality Gate / test", 77)]);
+    parked.probe_scope(scope.clone());
+
+    // Vacuity: the reading below is caused by the lane, not by the setup.
+    assert_eq!(scope.in_flight(), 0, "the leader's scope starts empty");
+    assert!(drain_stamp_in(&h.db, &incarnation).await.is_none());
+
+    // Leadership's half, spawned up front but held until the lane's own call is
+    // genuinely in flight: closing admission any earlier would make the route a
+    // *refusal* rather than something the drain has to join.
+    let drain = tokio::spawn({
+        let scope = scope.clone();
+        let db = h.db.clone();
+        let incarnation = incarnation.clone();
+        let parked = parked.clone();
+        async move {
+            wait_for_mutations(&parked, 1).await;
+            let incarnations = djinn_db::CoordinatorIncarnationRepository::new(db);
+            quiesce_provider_actions(
+                &scope,
+                &incarnations,
+                &incarnation,
+                PROVIDER_ACTION_DRAIN_TIMEOUT,
+            )
+            .await
+        }
+    });
+
+    let lane = poll_pr_head(&h, &parked, None);
+    let observer = async {
+        wait_for_mutations(&parked, 1).await;
+
+        // ── The scope's USE, not its identity ───────────────────────────────
+        assert_eq!(
+            scope.in_flight(),
+            1,
+            "the lane's provider call must be inside the LEADER's scope and must \
+             still hold its guard; a scope built inside `drive_lane`, or a \
+             `drop(admitted)` hoisted above the call, both read 0 here",
+        );
+
+        // ── …and leadership's drain must not finish inside that window ──────
+        wait_until_admission_closed(&scope).await;
+
+        for sample in 0..DRAIN_SAMPLES {
+            tokio::time::sleep(DRAIN_POLL).await;
+            assert!(
+                drain_stamp_in(&h.db, &incarnation).await.is_none(),
+                "sample {sample}: `provider_actions_drained_at` was stamped while the \
+                 lane's own `rerun_failed_jobs` was still running; a new incarnation \
+                 reading that stamp recovers a charged `calling` row whose call is live",
+            );
+            assert!(
+                !scope.is_drained(),
+                "sample {sample}: leadership releases the advisory lock on this flag",
+            );
+        }
+
+        // Vacuity: the window above really spanned a live call and an unfinished
+        // drain, rather than a scope that had quietly emptied.
+        assert_eq!(scope.in_flight(), 1, "the lane's guard must still be held");
+        assert!(
+            !drain.is_finished(),
+            "the drain must still be inside its join"
+        );
+        assert_eq!(
+            parked.calls().rerun_failed_jobs,
+            1,
+            "and the mutation must still be exactly the one parked call",
+        );
+
+        release.notify_one();
+    };
+    let (disposition, ()) = tokio::join!(lane, observer);
+
+    let outcome = tokio::time::timeout(PATIENCE, drain)
+        .await
+        .expect("the drain must finish once the lane's call returns")
+        .expect("the drain task must not panic");
+    assert_eq!(outcome, CiDrainOutcome::Stamped);
+    assert!(
+        drain_stamp_in(&h.db, &incarnation).await.is_some(),
+        "and a joined drain must stamp, or no handoff could ever happen",
+    );
+
+    assert_eq!(
+        parked.in_flight_during_mutations(),
+        vec![1],
+        "exactly one mutation ran, and the leader's scope counted it while it ran",
+    );
+    assert_eq!(
+        parked.reran(),
+        vec![("acme".to_owned(), "widgets".to_owned(), 77)],
+        "vacuity: the call was the Tier-1 re-run for the run the evidence names",
+    );
+    assert!(disposition.is_routed());
+    assert_eq!(scope.in_flight(), 0, "and the guard was released, once");
+}
+
+/// A **closed** leader scope stops the lane's provider call.
+///
+/// The other half of the same pin, and the one that does not depend on
+/// observing a running call: `close_admission()` is what leadership calls
+/// first, and it can only reach the lane's route if the lane consults the
+/// leader's scope. `refused_total` is incremented by
+/// `ProviderActionScope::admit` on the object that refused, so a non-zero
+/// reading on the *leader's* handle is direct evidence of which scope the
+/// executor asked.
+///
+/// The route row is asserted `reserved`, not merely absent-of-effects: that is
+/// the vacuity guard proving the route reached the admission gate at all rather
+/// than being declined earlier for some unrelated reason — and it is also the
+/// contract, since a refusal must leave the row recoverable rather than
+/// charged.
+///
+/// NAMED FAILING MUTATIONS. Both mutations in
+/// [`the_lane_holds_the_leaders_scope_open_across_its_provider_call`]'s (a)
+/// class: a private scope in `drive_lane` is open, so it admits, the provider
+/// is called, the row terminalizes `retriggered`, a slot is charged, and
+/// `refused_total` on the leader's scope stays 0. Four assertions fail.
+#[tokio::test]
+async fn a_closed_leader_scope_refuses_the_lanes_provider_call() {
+    let h = lane_harness().await;
+    let scope = h.actor.provider_action_scope.clone();
+    let provider = FakeProvider::default();
+    provider.set_check_runs(vec![inconclusive_check("Quality Gate / test", 77)]);
+    provider.probe_scope(scope.clone());
+
+    scope.close_admission();
+    assert_eq!(
+        scope.counts().refused_total,
+        0,
+        "vacuity: nothing has been refused before the lane runs",
+    );
+
+    let disposition = poll_pr_head(&h, &provider, None).await;
+    assert!(
+        disposition.is_routed(),
+        "a refused admission still owns the evidence: the row is reserved and \
+         recoverable, and the legacy remediation path must stay withheld",
+    );
+
+    assert_eq!(
+        scope.counts().refused_total,
+        1,
+        "the lane must have asked the LEADER's scope for admission; a scope built \
+         inside `drive_lane` would be open, would admit, and would call GitHub \
+         after leadership declared the drain",
+    );
+    assert_eq!(
+        provider.calls().mutations(),
+        0,
+        "a closed scope performs no provider mutation",
+    );
+    assert!(provider.in_flight_during_mutations().is_empty());
+    assert_eq!(
+        charged_budget_counters(&h.db).await,
+        0,
+        "and an unadmitted route consumes no Tier-1 charge",
+    );
+
+    // Vacuity: the route really got as far as the admission gate.
+    let subject = CiRouteSubject::task(h.task_id.clone());
+    let identity = CiEvidenceIdentity {
+        lane: CiLane::PrHead,
+        pr_number: PR,
+        pr_head_sha: HEAD.to_owned(),
+        run_id: Some(77),
+        run_head_sha: HEAD.to_owned(),
+        dequeue_id: None,
+    };
+    let row = CiRouteAttemptRepository::new(h.db.clone())
+        .get(
+            &subject,
+            &provider_action_key(&subject, &identity, CiAction::RerunRun),
+        )
+        .await
+        .expect("route read")
+        .expect("the Tier-1 route reserved its row before admission was asked");
+    assert_eq!(
+        row.action_phase,
+        CiActionPhase::Reserved,
+        "a refusal leaves the row recoverable rather than charged and `calling`",
+    );
+    assert_eq!(row.terminal_outcome, None);
+}
+
 // ===========================================================================
 // The complete-empty compatibility paths
 // ===========================================================================
@@ -4018,6 +4358,104 @@ async fn an_unattributable_blocking_check_takes_one_run_absent_route() {
             .expect("route read")
             .is_none(),
         "and nothing is findable at the fabricated sentinel key",
+    );
+}
+
+/// Unusable execution-timestamp evidence takes **one run-absent route**, end to
+/// end, whichever of the two layers catches it.
+///
+/// # What this pins that the fixture above does not
+///
+/// The fixture above reaches the run-absent identity through
+/// `RunAttributionUnavailable` — a check belonging to no Actions run at all. AC5
+/// puts a second, quite different reason on the same side: "a
+/// `blocking_evidence_completeness` timestamp reason". Here the check *is*
+/// attributable (`run_id: Some(4242)`), terminal and causal; only its completion
+/// timestamp is missing. AC14 requires it to route "under the same nullable-run
+/// identity", so that every irrecoverable reason on one head shares **one**
+/// diagnose-only route rather than opening a second head-scoped lease.
+///
+/// # Why this is a contract witness and not a line witness
+///
+/// The collapse is implemented twice on purpose, and `capture_pr_head_evidence`
+/// says so: the lane fails closed on `blocking_evidence_completeness` before it
+/// fans out, and `CiCapture::prove_complete` re-checks the same predicate per
+/// run behind `drive_one`'s own `run_absent_if_required`. That is deliberate
+/// defence in depth, so **either layer alone satisfies this fixture** — which
+/// also means each is individually deletable with the whole list green, and
+/// that is a property of the duplication rather than a hole. Removing *both* is
+/// what breaks the observable contract, and that is what this fails on.
+///
+/// NAMED FAILING MUTATION (both are required, and neither alone suffices):
+/// delete `if let Some(reason) = blocking_evidence_completeness(blocking)` from
+/// `capture_pr_head_evidence` **and** replace `drive_one`'s
+/// `run_absent_if_required(…)` with `run.identity.clone()`. The route is then
+/// keyed on run 4242, the run-absent lookup finds nothing, and Tier 1 would
+/// re-run a workflow whose own evidence contradicts its conclusion.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unusable_timestamp_evidence_takes_one_run_absent_route() {
+    let h = lane_harness().await;
+    let provider = FakeProvider::default();
+
+    // Attributable to run 4242 and hard-failing, but with no completion
+    // timestamp — `blocking_evidence_completeness`'s irrecoverable case.
+    let mut unusable = causal_check("Quality Gate / test", 4242);
+    unusable.completed_at = None;
+    provider.set_check_runs(vec![unusable]);
+
+    let disposition = poll_pr_head(&h, &provider, None).await;
+    assert!(disposition.is_routed());
+    assert_eq!(
+        provider.calls().mutations(),
+        0,
+        "an irrecoverably incomplete capture authorizes no provider mutation",
+    );
+
+    let subject = CiRouteSubject::task(h.task_id.clone());
+    let run_named = CiEvidenceIdentity {
+        lane: CiLane::PrHead,
+        pr_number: PR,
+        pr_head_sha: HEAD.to_owned(),
+        run_id: Some(4242),
+        run_head_sha: HEAD.to_owned(),
+        dequeue_id: None,
+    };
+    let run_absent = CiEvidenceIdentity {
+        run_id: None,
+        ..run_named.clone()
+    };
+
+    // Vacuity: exactly one route exists, so "found at the run-absent key" is not
+    // one of two rows.
+    assert_eq!(
+        djinn_db::test_support::ci_route_row_count_for_test(&h.db, &h.task_id).await,
+        1,
+        "one head, one diagnose-only route — not one per irrecoverable reason",
+    );
+    assert!(
+        route_exists(&h, &run_absent, CiAction::AskLead).await,
+        "the per-run capture must collapse onto the run-absent identity, or a \
+         second head-scoped lease is contended for the same PR head",
+    );
+    assert!(
+        !route_exists(&h, &run_named, CiAction::AskLead).await,
+        "and nothing may be keyed on the run whose evidence was never usable",
+    );
+
+    let routes = CiRouteAttemptRepository::new(h.db.clone());
+    let row = routes
+        .get(
+            &subject,
+            &provider_action_key(&subject, &run_absent, CiAction::AskLead),
+        )
+        .await
+        .expect("route read")
+        .expect("the run-absent route row");
+    assert_eq!(row.identity.run_id, None);
+    assert_eq!(
+        row.identity.run_head_sha, HEAD,
+        "and the run head is normalised to the observed PR head, or the row \
+         would still be distinct from its run-absent sibling",
     );
 }
 
@@ -4803,6 +5241,149 @@ async fn delayed_incomplete_after_newer_complete_is_noop() {
         complete.calls().mutations(),
         0,
         "and none from the complete poll either",
+    );
+}
+
+/// A delayed poll carrying **complete causal** evidence, overtaken by a newer
+/// complete one, routes nothing.
+///
+/// # Why the fixture above does not cover this
+///
+/// [`delayed_incomplete_after_newer_complete_is_noop`] drives the real lane,
+/// but it gives poll A *recoverably incomplete* evidence — which classifies to
+/// `Held` whatever the ledger says. So its negative-space assertions read zero
+/// either way, and the early return they are supposed to be witnessing can be
+/// deleted with every one of them still green:
+///
+/// ```text
+/// if let Some(absorbed) = self.settle_hold(..).await { return absorbed; }
+/// ```
+///
+/// Without that line in `apply_and_drive`, a `Superseded`, `IdentityAdvanced`,
+/// `Escalated` or `LedgerUnavailable` observation falls straight through to
+/// `drive_lane` — so a stale-head or already-adjudicated poll routes, charges,
+/// and calls the provider on evidence the ordering contract has already ruled
+/// out. Poll A here carries evidence that *does* route, so the negative space
+/// is zero only because the absorption happened.
+///
+/// The control at the end is the vacuity guard, and it is the part that makes
+/// the zeros mean something: the identical evidence, applied authoritatively,
+/// opens exactly one route, one lease and one Lead session. If `causal_check`
+/// ever stopped being causal — or the lane stopped reaching Tier 2 — the
+/// control fails rather than the fixture silently asserting an empty negative
+/// space for an unrelated reason.
+///
+/// NAMED FAILING MUTATIONS.
+/// (a) Delete the `settle_hold` early return from `apply_and_drive`: A's
+///     superseded observation drives the lane, and `route_rows`,
+///     `tier2_leases` and `lead_sessions` all read 1 instead of 0.
+/// (b) Weaken it to `if matches!(absorbed, CiLaneDisposition::Routed) {}` — i.e.
+///     compute the absorption and discard it: identical failure.
+/// (c) Make `apply_poll` stop comparing against `last_applied_poll_sequence`:
+///     A applies rather than being superseded, so the
+///     `superseded_observation` assertion fails first and the route assertions
+///     follow.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn delayed_causal_poll_after_a_newer_complete_one_routes_nothing() {
+    let h = lane_harness().await;
+    let identity = pr_head_hold_identity(&h.task_id);
+    let holds = h.actor.ci_holds();
+    let baseline = hold_negative_space(&h, &FakeProvider::default()).await;
+
+    // Poll A: authoritatively COMPLETE and causal — evidence that routes.
+    let (parked, release_a) = FakeProvider::parked_enumeration();
+    parked.set_check_runs(vec![causal_check("Quality Gate / test", 4141)]);
+
+    // Poll B: complete and empty. It applies first and advances the watermark.
+    let complete = FakeProvider::default();
+
+    let a = poll_pr_head(&h, &parked, None);
+    let b = async {
+        let reserved_by_a = wait_for_reservations(&holds, &identity, 1).await;
+        assert_eq!(
+            reserved_by_a.next_poll_sequence, 1,
+            "A reserved first, and the ledger says so",
+        );
+        assert_eq!(reserved_by_a.last_applied_poll_sequence, 0);
+
+        let disposition = poll_pr_head(&h, &complete, None).await;
+        let after_b = holds
+            .get(&identity)
+            .await
+            .expect("streak read")
+            .expect("streak exists");
+        assert_eq!(
+            after_b.last_applied_poll_sequence, 2,
+            "B applied above A's reserved sequence, read from the ledger",
+        );
+
+        release_a.notify_one();
+        disposition
+    };
+    let (disposition_a, disposition_b) = tokio::join!(a, b);
+
+    assert_eq!(
+        disposition_b.complete_empty(),
+        Some(CiCompleteEmptyRoute::PrHeadProceed),
+        "B is the authoritative, complete observation",
+    );
+    assert!(
+        disposition_a.is_routed(),
+        "A is absorbed by the ledger, and must NOT fall through to legacy \
+         remediation either",
+    );
+    assert_eq!(disposition_a.complete_empty(), None);
+
+    // Vacuity, ledger side: A was genuinely SUPERSEDED — not held, not applied.
+    // That is the disposition the early return has to translate into "stop".
+    assert_eq!(
+        observations_marked(&h.db, "superseded_observation").await,
+        1,
+        "A's observation must be recorded superseded, or this fixture is \
+         witnessing some other absorption",
+    );
+    assert_eq!(observations_marked(&h.db, "applied_incomplete").await, 0);
+    assert_eq!(observations_marked(&h.db, "applied_complete").await, 1);
+
+    // ── The negative space: a superseded poll routes nothing ────────────────
+    let space = hold_negative_space(&h, &parked).await;
+    assert_eq!(
+        space.route_rows, 0,
+        "a superseded observation must not open a route row",
+    );
+    assert_eq!(space.tier2_leases, 0, "nor a Tier-2 lease");
+    assert_eq!(space.lead_sessions, 0, "nor a Lead adjudication");
+    assert_eq!(space.tier1_charges, 0, "nor consume a Tier-1 charge");
+    assert_eq!(space.provider_mutations, 0, "nor call the provider");
+    assert_eq!(
+        space.worker_attempts, baseline.worker_attempts,
+        "nor dispatch a worker",
+    );
+    assert_eq!(
+        space.task_status, baseline.task_status,
+        "nor move the board out from under the head that is actually current",
+    );
+
+    // ── Vacuity, evidence side: the SAME evidence, applied, DOES route ──────
+    //
+    // Without this the zeros above would be satisfied by evidence that could
+    // never have routed at all, which is exactly how the incomplete-evidence
+    // fixture next door came to assert nothing.
+    let control = FakeProvider::default();
+    control.set_check_runs(vec![causal_check("Quality Gate / test", 4141)]);
+    let disposition_c = poll_pr_head(&h, &control, None).await;
+    assert!(disposition_c.is_routed());
+
+    let routed = hold_negative_space(&h, &control).await;
+    assert_eq!(
+        routed.route_rows, 1,
+        "the evidence poll A carried is route-creating when it is authoritative",
+    );
+    assert_eq!(routed.tier2_leases, 1, "and it opens one adjudication");
+    assert_eq!(routed.lead_sessions, 1, "which becomes one Lead session");
+    assert_eq!(
+        routed.provider_mutations, 0,
+        "a complete causal failure adjudicates rather than re-running",
     );
 }
 
@@ -6420,6 +7001,101 @@ async fn close_ci_routes_on_success_terminalizes_the_route_and_unblocks_rollback
             "the stored verdict must agree with the function it is checked against",
         );
     }
+}
+
+/// The rollback report attests the **leader's live provider futures**, and one
+/// of them alone blocks the rollback.
+///
+/// # The one count no query can replace
+///
+/// Five of the six counts in `ci_route_rollback_reports` come out of the route
+/// table. `registered_provider_futures` does not: it is read from this
+/// process's `ProviderActionScope`, and it is the difference between "a call
+/// episode was claimed" (a `calling` row) and "a future is still talking to
+/// GitHub". Because the database CHECK is a function of the *stored* values,
+/// storing zero satisfies the constraint — so
+/// `registered_provider_futures = scope.in_flight()` in
+/// `record_ci_rollback_quiescence_report` could be pinned to `0` and every
+/// existing fixture would stay green, since none of them holds a guard while
+/// taking a report. A rollback would then read "clean" with a live
+/// `rerun_failed_jobs` in flight, which is the one thing the gate exists to
+/// prevent.
+///
+/// Every database-derived count is asserted zero in the blocked half, so the
+/// live future is provably the *only* thing blocking; and the clean report
+/// taken first is the vacuity guard proving the verdict was reachable at all.
+///
+/// NAMED FAILING MUTATIONS.
+/// (a) `registered_provider_futures = 0` (or any constant): the count assertion
+///     fails, and `permits_rollback` reads true with a guard held.
+/// (b) Read a fresh `ProviderActionScope::new().in_flight()` instead of
+///     `self.provider_action_scope`: identical failure.
+/// (c) Take the scope reading *after* the repository counts and let a guard
+///     drop in between — not expressible here, but the ordering comment on the
+///     read is what (a) and (b) protect.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_rollback_report_counts_the_leaders_live_provider_futures() {
+    let db = Database::open_in_memory().expect("ephemeral test database");
+    let leader = ProviderActionScope::new();
+    let mut actor = crate::actor::actor_with_test_db_and_scope(db.clone(), leader.clone());
+    // The gate posture a drain is actually taken under. `enabled` can never
+    // permit a rollback, so it would make every assertion below vacuous.
+    actor.test_ci_routing_gate = Some(CiRoutingGate::Quiescing);
+
+    // ── Vacuity: with an empty scope this drain is clean ────────────────────
+    let clean = actor
+        .record_ci_rollback_quiescence_report()
+        .await
+        .expect("quiescence report");
+    assert_eq!(clean.registered_provider_futures, 0);
+    assert!(
+        clean.permits_rollback,
+        "the verdict must be reachable, or the blocked half proves nothing: {:?}",
+        clean.blocking_reasons(),
+    );
+
+    // ── One live provider future — the state a rollback would strand ────────
+    let live = leader.admit().expect("an open scope admits");
+
+    let blocked = actor
+        .record_ci_rollback_quiescence_report()
+        .await
+        .expect("quiescence report");
+    assert_eq!(
+        blocked.registered_provider_futures, 1,
+        "the report must attest the LEADER's in-flight count; it is the only one \
+         of the six the database cannot derive",
+    );
+    assert!(
+        !blocked.permits_rollback,
+        "and a live provider future alone blocks a binary rollback",
+    );
+    assert!(
+        !blocked.recomputed_verdict(),
+        "the stored verdict and the function it is checked against must agree",
+    );
+
+    // Every count the DATABASE can answer is still zero, so the future really is
+    // the only blocker rather than one of several.
+    assert_eq!(blocked.reserved_rows, 0);
+    assert_eq!(blocked.calling_rows, 0);
+    assert_eq!(blocked.open_tier2_leases, 0);
+    assert_eq!(blocked.unapplied_lead_results, 0);
+    assert_eq!(blocked.current_failed_identities, 0);
+    assert_eq!(
+        blocked.blocking_reasons(),
+        vec!["1 registered provider-action futures".to_owned()],
+        "and the operator is told which one",
+    );
+
+    // ── The future returns; only now is the drain clean again ───────────────
+    drop(live);
+    let after = actor
+        .record_ci_rollback_quiescence_report()
+        .await
+        .expect("quiescence report");
+    assert_eq!(after.registered_provider_futures, 0);
+    assert!(after.permits_rollback, "{:?}", after.blocking_reasons());
 }
 
 /// Both production call sites of `close_ci_routes_on_success` still exist, in
