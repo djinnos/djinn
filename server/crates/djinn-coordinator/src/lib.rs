@@ -221,6 +221,8 @@ mod resize_authorization_tests;
 #[cfg(test)]
 mod resize_lift_tests;
 #[cfg(test)]
+mod state_sampler_audit_tests;
+#[cfg(test)]
 pub(crate) mod test_helpers;
 #[cfg(test)]
 mod tests;
