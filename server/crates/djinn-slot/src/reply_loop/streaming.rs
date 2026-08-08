@@ -276,7 +276,9 @@ impl CoveredAttemptTerminalGuard {
     }
 
     #[cfg(test)]
-    pub(super) fn watchdog_abort_signal(&self) -> tokio_util::sync::CancellationToken { self.watchdog_aborted.clone() }
+    pub(super) fn watchdog_abort_signal(&self) -> tokio_util::sync::CancellationToken {
+        self.watchdog_aborted.clone()
+    }
 
     async fn next_event(&mut self) -> Option<anyhow::Result<StreamEvent>> {
         loop {

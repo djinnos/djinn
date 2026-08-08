@@ -450,9 +450,15 @@ impl ModelTurnAdmissionCoordinator {
         #[cfg(test)]
         if let Some(hooks) = &self.test_hooks {
             hooks.heartbeats.fetch_add(1, Ordering::AcqRel);
-            hooks.heartbeat_identities.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(identity.clone());
+            hooks
+                .heartbeat_identities
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(identity.clone());
             hooks.heartbeat_reached.notify_waiters();
-            if hooks.block_heartbeat.load(Ordering::Acquire) { hooks.heartbeat_release.notified().await; }
+            if hooks.block_heartbeat.load(Ordering::Acquire) {
+                hooks.heartbeat_release.notified().await;
+            }
             if hooks.fail_heartbeat.load(Ordering::Acquire) {
                 hooks.heartbeat_finished.notify_waiters();
                 return Err(djinn_db::Error::Internal(
@@ -461,12 +467,33 @@ impl ModelTurnAdmissionCoordinator {
             }
         }
         let result = self.repository.heartbeat(identity).await;
-        #[cfg(test)] if let Some(hooks) = &self.test_hooks { hooks.heartbeat_finished.notify_waiters(); }
+        #[cfg(test)]
+        if let Some(hooks) = &self.test_hooks {
+            hooks.heartbeat_finished.notify_waiters();
+        }
         result
     }
-    pub(crate) fn watchdog_started(&self) { #[cfg(test)] if let Some(hooks) = &self.test_hooks { hooks.watchdog_started.notify_waiters(); } }
-    pub(crate) fn watchdog_heartbeat_committed(&self) { #[cfg(test)] if let Some(hooks) = &self.test_hooks { hooks.heartbeat_committed.notify_waiters(); } }
-    pub(crate) async fn watchdog_deadline_reached(&self) { #[cfg(test)] if let Some(hooks) = &self.test_hooks { hooks.watchdog_deadline_reached.notify_waiters(); if hooks.block_watchdog_deadline.load(Ordering::Acquire) { hooks.watchdog_deadline_release.notified().await; } } }
+    pub(crate) fn watchdog_started(&self) {
+        #[cfg(test)]
+        if let Some(hooks) = &self.test_hooks {
+            hooks.watchdog_started.notify_waiters();
+        }
+    }
+    pub(crate) fn watchdog_heartbeat_committed(&self) {
+        #[cfg(test)]
+        if let Some(hooks) = &self.test_hooks {
+            hooks.heartbeat_committed.notify_waiters();
+        }
+    }
+    pub(crate) async fn watchdog_deadline_reached(&self) {
+        #[cfg(test)]
+        if let Some(hooks) = &self.test_hooks {
+            hooks.watchdog_deadline_reached.notify_waiters();
+            if hooks.block_watchdog_deadline.load(Ordering::Acquire) {
+                hooks.watchdog_deadline_release.notified().await;
+            }
+        }
+    }
 }
 
 fn request_fingerprint(request_id: &str) -> String {

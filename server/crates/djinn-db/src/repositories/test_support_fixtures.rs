@@ -115,6 +115,20 @@ pub async fn model_turn_lease_lifecycle_fixture(db: &Database, lease_id: &str) -
         .unwrap()
 }
 
+/// Snapshot one lease's fenced heartbeat state for watchdog regression tests.
+pub async fn model_turn_lease_heartbeat_snapshot_fixture(
+    db: &Database,
+    lease_id: &str,
+) -> (i64, Option<String>) {
+    sqlx::query_as(
+        "SELECT generation, heartbeat_at::text FROM model_turn_leases WHERE lease_id = $1::uuid",
+    )
+    .bind(lease_id)
+    .fetch_one(db.pool())
+    .await
+    .unwrap()
+}
+
 pub async fn model_turn_request_lifecycle_fixture(db: &Database, request_id: &str) -> String {
     sqlx::query_scalar("SELECT lifecycle FROM model_turn_leases WHERE request_id = $1")
         .bind(request_id)
