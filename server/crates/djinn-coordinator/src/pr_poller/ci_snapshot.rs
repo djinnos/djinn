@@ -180,10 +180,10 @@ impl CoordinatorActor {
         let mut primary_check_id: Option<u64> = None;
         let mut failure_fingerprint: Option<String> = None;
 
-        // ── Completeness gate (proposal `nafu`; NOT behind the routing flag) ──
+        // ── Completeness gate (proposal `nafu`; NOT part of the route layer) ──
         //
         // This corrects the *existing* merge gate, so it applies to every
-        // binary regardless of `ci_evidence_routing`. An enumeration the
+        // snapshot whether or not the evidence was ever routed. An enumeration the
         // provider could not finish is a prefix, and a prefix whose fetched
         // members all passed classifies below as `Passing` — a green merge
         // verdict for a set that may contain the one causal failure nobody saw.
