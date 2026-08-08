@@ -314,6 +314,10 @@ pub use repositories::{
         ReadinessRunEventRow, ReadinessRunRow, RetryReadinessAreaAttempt, readiness_area_score,
         readiness_project_score, readiness_score_band, readiness_severity_weight,
     },
+    refinement_feedback_handoff_observation::{
+        FeedbackRefinementActiveBoundary, FeedbackRefinementAdmittedState,
+        FeedbackRefinementLifecycleState, PendingFeedbackRefinementState,
+    },
     refinement_run::{
         AcknowledgeRefinementTaskMaterializationRequest, ActiveRefinementRun,
         AdmitRefinementRunRequest, ClaimRefinementIntentRequest, CompleteRefinementIntentRequest,
