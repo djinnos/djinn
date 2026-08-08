@@ -20690,6 +20690,94 @@
     "concurrent_safe": false
   },
   {
+    "name": "proposal_refinement_retry_evidence",
+    "description": "Retry a failed typed evidence finding. Only the active Advocate or Judge may reserve a retry for the cited latest failed transition.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "required": [
+        "finding_id",
+        "failed_transition_id"
+      ],
+      "type": "object",
+      "properties": {
+        "finding_id": {
+          "description": "Typed finding whose latest lifecycle transition failed.",
+          "type": "string"
+        },
+        "failed_transition_id": {
+          "description": "The exact latest failed transition being retried.",
+          "type": "string"
+        }
+      }
+    },
+    "outputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "required": [
+        "accepted"
+      ],
+      "properties": {
+        "accepted": {
+          "type": "boolean"
+        },
+        "finding_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "attempt_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "spike_task_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sequence": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int32"
+        },
+        "lifecycle": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "replayed": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "conflict_code": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "readOnly": false,
+    "destructive": true,
+    "idempotent": false,
+    "openWorld": false,
+    "concurrent_safe": false
+  },
+  {
     "name": "proposal_refinement_start",
     "description": "Start proposal refinement for the given proposal. Validates the proposal exists and is in draft or in_review state. Records a refinement_start lifecycle event and delegates to the coordinator to initialize the runtime refinement loop. The autonomous tribunal revises the spec in place and parks for a single human accept/reject when the judge converges. Returns the initial refinement status. Same-model fallback is used when diverse models are unavailable.",
     "inputSchema": {

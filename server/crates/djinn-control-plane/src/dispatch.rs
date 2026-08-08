@@ -62,8 +62,9 @@ use crate::tools::provider_tools::{
 };
 use crate::tools::refinement_tools::{
     ProposalRefinementDemandEvidenceParams, ProposalRefinementDemandRoundParams,
-    ProposalRefinementResolveParams, ProposalRefinementStartParams, ProposalRefinementStatusParams,
-    ProposalRefinementStopParams, ProposalVerdictOverrideParams,
+    ProposalRefinementResolveParams, ProposalRefinementRetryEvidenceParams,
+    ProposalRefinementStartParams, ProposalRefinementStatusParams, ProposalRefinementStopParams,
+    ProposalVerdictOverrideParams,
 };
 use crate::tools::service_tools::ServicePresetListParams;
 use crate::tools::session_tools::{
@@ -612,6 +613,13 @@ impl DjinnMcpServer {
                 name,
                 self.proposal_refinement_demand_evidence(Parameters(decode_args::<
                     ProposalRefinementDemandEvidenceParams,
+                >(name, args)?))
+                    .await,
+            ),
+            "proposal_refinement_retry_evidence" => map_json(
+                name,
+                self.proposal_refinement_retry_evidence(Parameters(decode_args::<
+                    ProposalRefinementRetryEvidenceParams,
                 >(name, args)?))
                     .await,
             ),

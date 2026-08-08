@@ -20562,6 +20562,93 @@ expression: signatures
     }
   },
   {
+    "name": "proposal_refinement_retry_evidence",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "failed_transition_id": {
+          "description": "The exact latest failed transition being retried.",
+          "type": "string"
+        },
+        "finding_id": {
+          "description": "Typed finding whose latest lifecycle transition failed.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "finding_id",
+        "failed_transition_id"
+      ],
+      "type": "object"
+    },
+    "output_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "accepted": {
+          "type": "boolean"
+        },
+        "attempt_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "conflict_code": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "finding_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "lifecycle": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "replayed": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "sequence": {
+          "format": "int32",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "spike_task_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "accepted"
+      ],
+      "type": "object"
+    }
+  },
+  {
     "name": "proposal_refinement_start",
     "read_only": false,
     "destructive": true,
