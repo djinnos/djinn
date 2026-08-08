@@ -14,6 +14,7 @@ import type {
   ProposalDebateTrailRow,
   ProposalEpic,
   ProposalFeedback,
+  ProposalFeedbackRefinement,
   ProposalGateStatus,
   ProposalLintResult,
   ProposalRefinementStatus,
@@ -62,6 +63,8 @@ export interface ProposalDetail {
   latest_lint?: ProposalLintResult | null;
   targets: ProposalTarget[];
   feedback: ProposalFeedback[];
+  /** Canonical feedback-refinement root/generation lifecycle. */
+  feedback_refinements: ProposalFeedbackRefinement[];
   /**
    * Chronological proposal history rows. Spec-revision fields remain present;
    * status-history metadata is optional for non-spec lifecycle events.
@@ -88,6 +91,7 @@ export function proposalDetailQueryOptions(id: string | null) {
         latest_lint: res.latest_lint as ProposalLintResult | null | undefined,
         targets: (res.targets ?? []) as ProposalTarget[],
         feedback: (res.feedback ?? []) as ProposalFeedback[],
+        feedback_refinements: (res.feedback_refinements ?? []) as ProposalFeedbackRefinement[],
         revisions: (res.revisions ?? []) as ProposalHistoryEntry[],
         signoffs: (res.signoffs ?? []) as ProposalSignoff[],
         epics: (res.epics ?? []) as ProposalEpic[],

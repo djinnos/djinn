@@ -10131,7 +10131,7 @@ export namespace ProposalShowInputSchema {
   export interface ProposalShowInput {
   /**
    * Select which top-level sections to include in the response.
-   * Accepted values: `proposal`, `targets`, `feedback`, `signoffs`,
+   * Accepted values: `proposal`, `targets`, `feedback`, `feedback_refinements`, `signoffs`,
    * `revisions`, `debate`, `epics`, `gate_status`.
    * Default: all fields selected. Invalid values return a validation error.
    */
@@ -10180,6 +10180,10 @@ export namespace ProposalShowOutputSchema {
   epics?: ProposalEpicModel[]
   error?: string
   feedback?: ProposalFeedbackModel[]
+  /**
+   * Canonical lifecycle projection. Optional for backward compatibility.
+   */
+  feedback_refinements?: ProposalFeedbackRefinementModel[]
   /**
    * Composed gate status: deterministic DoR + tribunal conditions.
    * Always present on a successful `proposal_show` response.
@@ -10328,6 +10332,28 @@ export namespace ProposalShowOutputSchema {
    */
   severity: string
   updated_at: string
+  withdrawn_at?: string
+  withdrawn_by_user_id?: string
+  [k: string]: any
+  }
+  /**
+   * One canonical root-scoped feedback-refinement lifecycle generation.
+   */
+  export interface ProposalFeedbackRefinementModel {
+  accepted_at?: string
+  accepted_by_user_id?: string
+  accepted_disposition?: string
+  accepted_reason?: string
+  accepted_revision_seq?: number
+  debate_entry_id?: string
+  generation: number
+  root_feedback_id: string
+  round: number
+  source_rows?: ProposalFeedbackSourceRowModel[]
+  /**
+   * `queued`, `injected`, `accepted`, `wont_fix`, or `withdrawn_by_author`.
+   */
+  state: string
   withdrawn_at?: string
   withdrawn_by_user_id?: string
   [k: string]: any
