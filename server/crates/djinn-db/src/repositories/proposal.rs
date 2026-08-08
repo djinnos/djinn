@@ -1372,6 +1372,11 @@ impl ProposalRepository {
             });
         }
         tx.commit().await?;
+        self.events
+            .send(DjinnEventEnvelope::proposal_feedback_withdrawn(
+                &feedback.proposal_id,
+                &feedback.id,
+            ));
         Ok((feedback, results))
     }
 
@@ -1553,6 +1558,12 @@ impl ProposalRepository {
         let injection:ProposalFeedbackRefinementInjection=sqlx::query_as("UPDATE proposal_feedback_refinement_injections SET state=$1,accepted_disposition=$2,accepted_revision_seq=$3,accepted_reason=$4,accepted_at=to_char(transaction_timestamp() AT TIME ZONE 'utc','YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'),accepted_by_user_id=$5 WHERE id=$6 RETURNING id,proposal_id,root_feedback_id,generation,state,cutoff_at,cutoff_feedback_id,round,debate_entry_id,accepted_disposition,accepted_revision_seq,accepted_reason,accepted_at,accepted_by_user_id,created_at,updated_at").bind(state).bind(disposition).bind(revision).bind(&reason).bind(djinn_core::auth_context::current_user_id()).bind(&input.injection_id).fetch_one(&mut *tx).await?;
         let debate:ProposalDebateTrail=sqlx::query_as("UPDATE proposal_debate_trail SET resolved_at=to_char(transaction_timestamp() AT TIME ZONE 'utc','YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'),resolved_by_user_id=$1,reopened_at=NULL,reopened_by_user_id=NULL WHERE id=$2 RETURNING id,proposal_id,kind,body,blocking,agent_role,author_kind,author_user_id,author_model,source_task_id,against_revision_seq,round,body_metadata::text AS body_metadata,resolved_at,resolved_by_user_id,reopened_at,reopened_by_user_id,created_at,updated_at").bind(djinn_core::auth_context::current_user_id()).bind(&input.debate_entry_id).fetch_one(&mut *tx).await?;
         tx.commit().await?;
+        self.events.send(
+            DjinnEventEnvelope::proposal_feedback_refinement_disposition_updated(
+                &injection.proposal_id,
+                &injection.id,
+            ),
+        );
         Ok(FeedbackRefinementDispositionResult {
             injection,
             debate_entry: debate,
@@ -1666,6 +1677,12 @@ impl ProposalRepository {
                 &input.proposal_id,
                 &verdict_entry,
             ));
+        self.events.send(
+            DjinnEventEnvelope::proposal_feedback_refinement_disposition_rejected(
+                &injection.proposal_id,
+                &injection.id,
+            ),
+        );
         Ok(FeedbackRefinementRejectionResult {
             debate_entry: debate,
             verdict_entry,
@@ -5830,6 +5847,37 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn feedback_disposition_rejection_emits_lifecycle_event_after_commit() {
+        let db = test_db();
+        let (proposal, capture, disposition, _) = feedback_accept_reject_fixture(&db).await;
+        let (bus, events) = capturing_bus();
+        let repo = ProposalRepository::new(db, bus);
+
+        repo.reject_feedback_refinement_disposition(FeedbackRefinementRejectionInput {
+            proposal_id: proposal.id.clone(),
+            injection_id: capture.injection.id.clone(),
+            root_feedback_id: capture.injection.root_feedback_id.clone(),
+            generation: capture.injection.generation,
+            debate_entry_id: capture.debate_entry.id.clone(),
+            disposition_entry_id: disposition.id,
+            reason: "needs a replacement".into(),
+        })
+        .await
+        .unwrap();
+
+        let events = events.lock().unwrap();
+        let lifecycle = events
+            .iter()
+            .find(|event| {
+                event.entity_type() == "proposal_feedback_refinement"
+                    && event.action() == "disposition_rejected"
+            })
+            .expect("committed rejection publishes lifecycle event");
+        assert_eq!(lifecycle.id.as_deref(), Some(capture.injection.id.as_str()));
+        assert_eq!(lifecycle.payload()["proposal_id"], proposal.id);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn create_defaults_and_short_id() {
         let (bus, captured) = capturing_bus();
         let repo = ProposalRepository::new(test_db(), bus);
@@ -6552,7 +6600,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn feedback_disposition_and_withdrawal_target_exact_captured_generation() {
         let db = test_db();
-        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let (bus, event_capture) = capturing_bus();
+        let repo = ProposalRepository::new(db.clone(), bus);
         let proposal = repo
             .create(create_input("Disposition exact generation"))
             .await
@@ -6592,6 +6641,7 @@ mod tests {
                 reason: "not feasible".into(),
             },
         };
+        event_capture.lock().unwrap().clear();
         let first = repo
             .dispose_feedback_refinement_generation(input.clone())
             .await
@@ -6637,6 +6687,15 @@ mod tests {
                 .await
                 .is_err()
         );
+        {
+            let events = event_capture.lock().unwrap();
+            assert_eq!(events.len(), 1, "replays and failures do not publish");
+            assert_eq!(events[0].entity_type(), "proposal_feedback_refinement");
+            assert_eq!(events[0].action(), "disposition_updated");
+            assert_eq!(events[0].id.as_deref(), Some(capture.injection.id.as_str()));
+            assert_eq!(events[0].payload()["proposal_id"], proposal.id);
+        }
+        event_capture.lock().unwrap().clear();
 
         let withdrawn = repo
             .capture_feedback_refinement_boundary(&proposal.id)
@@ -6689,6 +6748,7 @@ mod tests {
             .find(|c| c.injection.generation > withdrawn.injection.generation)
             .unwrap();
         let before: String = sqlx::query_scalar("SELECT source_body FROM proposal_feedback_refinement_sources WHERE injection_id=$1 AND source_feedback_id=$2").bind(&generation.injection.id).bind(&blocking.id).fetch_one(db.pool()).await.unwrap();
+        event_capture.lock().unwrap().clear();
         let partial = repo
             .withdraw_feedback_with_refinement_derivation(&blocking.id, "author")
             .await
@@ -6715,12 +6775,38 @@ mod tests {
         );
         let after: String = sqlx::query_scalar("SELECT source_body FROM proposal_feedback_refinement_sources WHERE injection_id=$1 AND source_feedback_id=$2").bind(&generation.injection.id).bind(&blocking.id).fetch_one(db.pool()).await.unwrap();
         assert_eq!(before, after);
+        {
+            let events = event_capture.lock().unwrap();
+            assert_eq!(events.len(), 3);
+            for (event, feedback_id) in events.iter().zip([
+                blocking.id.as_str(),
+                advisory.id.as_str(),
+                blocking_two.id.as_str(),
+            ]) {
+                assert_eq!(event.entity_type(), "proposal_feedback");
+                assert_eq!(event.action(), "withdrawn");
+                assert_eq!(event.id.as_deref(), Some(feedback_id));
+                assert_eq!(event.payload()["proposal_id"], proposal.id);
+                assert_eq!(event.payload()["feedback_id"], feedback_id);
+            }
+        }
+        event_capture.lock().unwrap().clear();
+        assert!(
+            repo.withdraw_feedback_with_refinement_derivation("missing-feedback", "author")
+                .await
+                .is_err()
+        );
+        assert!(
+            event_capture.lock().unwrap().is_empty(),
+            "failed withdrawal must not publish"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn feedback_fixed_disposition_is_idempotent_and_isolates_later_generation() {
         let db = test_db();
-        let repo = ProposalRepository::new(db, EventBus::noop());
+        let (bus, event_capture) = capturing_bus();
+        let repo = ProposalRepository::new(db, bus);
         let proposal = repo
             .create(create_input("Fixed generation isolation"))
             .await
@@ -6769,6 +6855,7 @@ mod tests {
             debate_entry_id: first.debate_entry.id.clone(),
             disposition: FeedbackRefinementDisposition::FixedRevision { revision_seq: 7 },
         };
+        event_capture.lock().unwrap().clear();
         let result = repo
             .dispose_feedback_refinement_generation(fixed.clone())
             .await
@@ -6821,12 +6908,19 @@ mod tests {
                 .await
                 .is_err()
         );
+        let events = event_capture.lock().unwrap();
+        assert_eq!(events.len(), 1, "replays and failures do not publish");
+        assert_eq!(events[0].entity_type(), "proposal_feedback_refinement");
+        assert_eq!(events[0].action(), "disposition_updated");
+        assert_eq!(events[0].id.as_deref(), Some(first.injection.id.as_str()));
+        assert_eq!(events[0].payload()["proposal_id"], proposal.id);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn feedback_disposition_rejects_link_mismatches_and_rolls_back_source_write() {
         let db = test_db();
-        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let (bus, event_capture) = capturing_bus();
+        let repo = ProposalRepository::new(db.clone(), bus);
         let proposal = repo
             .create(create_input("Disposition rollback"))
             .await
@@ -6886,6 +6980,7 @@ mod tests {
                 reason: "documented reason".into(),
             },
         };
+        event_capture.lock().unwrap().clear();
         for invalid in [
             FeedbackRefinementDispositionInput {
                 proposal_id: other_proposal.id.clone(),
@@ -6961,6 +7056,10 @@ mod tests {
             .await
             .unwrap()
             .is_none()
+        );
+        assert!(
+            event_capture.lock().unwrap().is_empty(),
+            "failed and rolled-back dispositions must not publish lifecycle events"
         );
         sqlx::query("DROP TRIGGER reject_feedback_disposition_for_test ON proposal_feedback_refinement_injections")
             .execute(db.pool())
