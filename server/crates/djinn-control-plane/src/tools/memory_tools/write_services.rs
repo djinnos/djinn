@@ -1,3 +1,4 @@
+use djinn_db::repositories::note::CONFIDENCE_CEILING;
 use djinn_db::{
     NoteRepository, NoteRevisionCreateState, NoteRevisionDesiredState, NoteRevisionEventKind,
     NoteRevisionMutation, NoteRevisionReason, NoteRevisionUpdateState,
@@ -131,7 +132,23 @@ pub(super) async fn create_note(
                 tags: tags_json.to_owned(),
                 retrieval_anchor: params.retrieval_anchor.clone(),
                 scope_paths: scope_paths_json,
-                confidence: 0.5,
+                // An authored note is an assertion its author believes, so it
+                // starts at the top of the epistemic range. `CONFIDENCE_CEILING`
+                // rather than `1.0`: `bayesian_update` has no effect on a prior
+                // of exactly 1.0, so a note created there is unfalsifiable —
+                // `CONTRADICTION` cannot move it and `USER_CONFIRM` can only
+                // clamp it downward.
+                //
+                // This must stay equal to the `notes.confidence` column
+                // default. The column default is dead code on this path (the
+                // revision mutation binds `confidence` explicitly), so the two
+                // are pinned together by
+                // `memory_write_creates_notes_at_the_confidence_ceiling`.
+                //
+                // Session-extracted notes deliberately start lower (0.5, see
+                // `djinn-slot/src/llm_extraction.rs`): those are machine
+                // proposals, not authored assertions.
+                confidence: CONFIDENCE_CEILING,
             }),
             attribution,
             provenance,
