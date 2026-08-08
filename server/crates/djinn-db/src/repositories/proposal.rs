@@ -4071,6 +4071,13 @@ impl ProposalRepository {
         input: AtomicEvidenceDispositionInput,
     ) -> Result<AtomicEvidenceDispositionResult> {
         self.db.ensure_initialized().await?;
+        if input.disposition == TribunalEvidenceLifecycle::Withdrawn
+            && input.rationale.trim().is_empty()
+        {
+            return Err(Error::InvalidData(
+                "withdrawal rationale must not be empty".into(),
+            ));
+        }
         let mut tx = self.db.pool().begin().await?;
         let proposal_id: String = sqlx::query_scalar(
             "SELECT proposal_id FROM typed_evidence_findings WHERE id=$1 FOR UPDATE",

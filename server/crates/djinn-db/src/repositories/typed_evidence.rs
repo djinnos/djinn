@@ -1285,6 +1285,17 @@ impl TypedEvidenceRepository {
             ));
         }
         let state = parse(&row.get::<String, _>("lifecycle"))?;
+        let latest_transition: Option<String> = sqlx::query_scalar(
+            "SELECT to_lifecycle FROM typed_evidence_transitions WHERE finding_id=$1 ORDER BY ordinal DESC LIMIT 1",
+        )
+        .bind(&input.finding_id)
+        .fetch_optional(&mut **tx)
+        .await?;
+        if latest_transition.as_deref() != Some(state.as_str()) {
+            return Err(Error::InvalidTransition(
+                "legacy_typed_parity_mismatch".into(),
+            ));
+        }
         let ordinal: i32 = sqlx::query_scalar(
             "SELECT COALESCE(MAX(ordinal),0)+1 FROM typed_evidence_transitions WHERE finding_id=$1",
         )
