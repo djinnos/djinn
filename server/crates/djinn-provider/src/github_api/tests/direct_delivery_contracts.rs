@@ -257,6 +257,6 @@ async fn close_attempt_pr_comments_with_stop_reason_then_closes() {
     let attempt: PullRequest = serde_json::from_value(pr(12, NEW)).unwrap();
     assert!(
         matches!(client(&server).close_attempt_draft_pr("djinnos", "server", &attempt, "replaced").await,
-        CloseAttemptDraftPrResult::Closed(closed) if closed.number == 12)
+        CloseAttemptDraftPrResult::Closed(closed) if closed.as_ref().number == 12)
     );
 }

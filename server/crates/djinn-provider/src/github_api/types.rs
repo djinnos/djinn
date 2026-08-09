@@ -63,7 +63,7 @@ pub enum AttemptDraftPrResult {
 /// Result of recording a stop reason and closing a draft attempt PR.
 #[derive(Debug)]
 pub enum CloseAttemptDraftPrResult {
-    Closed(PullRequest),
+    Closed(Box<PullRequest>),
     ProposalPrIdentityMismatch,
     ProviderFailure(crate::github_api::GitHubApiError),
 }

@@ -167,7 +167,7 @@ impl GitHubApiClient {
             );
         }
         match self.close_pull_request(owner, repo, pr.number).await {
-            Ok(pr) => CloseAttemptDraftPrResult::Closed(pr),
+            Ok(pr) => CloseAttemptDraftPrResult::Closed(Box::new(pr)),
             Err(error) => CloseAttemptDraftPrResult::ProviderFailure(
                 error.downcast::<GitHubApiError>().unwrap_or_else(|e| {
                     GitHubApiError::transport(
