@@ -172,6 +172,11 @@ impl TaskRepository {
         if current.state == target
             && final_transition(&mut tx, &input.identity).await?.as_deref()
                 == Some(&input.transition_id)
+            // A terminal conflict's reason is an immutable finalization fact,
+            // not merely diagnostic text. Reusing its transition id with a
+            // different reason must not acknowledge another command.
+            && (target != TaskDeliveryState::Conflict
+                || current.conflict_reason == input.conflict_reason)
         {
             tx.commit().await?;
             return Ok(DeliveryTransitionResult::Replayed(current));

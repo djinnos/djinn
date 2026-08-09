@@ -147,6 +147,31 @@ async fn conflict_requires_applying_and_rework_replay_and_races_are_serialized()
     .await
     .unwrap();
     assert!(matches!(
+        repo.finalize_delivery_conflict(&DeliveryFinalizeInput {
+            identity: id(1),
+            transition_id: "conflict-1".into(),
+            conflict_reason: Some("x".into()),
+        })
+        .await
+        .unwrap(),
+        DeliveryTransitionResult::Replayed(_)
+    ));
+    assert!(matches!(
+        repo.finalize_delivery_conflict(&DeliveryFinalizeInput {
+            identity: id(1),
+            transition_id: "conflict-1".into(),
+            conflict_reason: Some("different conflict".into()),
+        })
+        .await
+        .unwrap(),
+        DeliveryTransitionResult::Stale { .. }
+    ));
+    let conflict = repo.get_delivery(&id(1)).await.unwrap().unwrap();
+    assert_eq!(
+        (conflict.state, conflict.conflict_reason.as_deref()),
+        (TaskDeliveryState::Conflict, Some("x"))
+    );
+    assert!(matches!(
         repo.rework_delivery(&rework("rework", "candidate-2"))
             .await
             .unwrap(),
