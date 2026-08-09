@@ -63,8 +63,8 @@ pub use task_attempt::{
 };
 pub use task_delivery::{
     DirectDeliveryCapability, DirectDeliveryCapabilityRecord, DirectDeliveryEpoch,
-    DirectDeliveryEpochState, DirectDeliveryLease, ReworkDelivery, TaskDelivery,
-    TaskDeliveryIdentity, TaskDeliveryState, TaskIntegrated,
+    DirectDeliveryEpochState, DirectDeliveryLease, MappedHeadRetryDelivery, ReworkDelivery,
+    TaskDelivery, TaskDeliveryIdentity, TaskDeliveryState, TaskIntegrated,
 };
 pub use task_run::{TaskRunRecord, TaskRunStatus, TaskRunTrigger};
 pub use task_run_outcome::TaskRunOutcomeFact;

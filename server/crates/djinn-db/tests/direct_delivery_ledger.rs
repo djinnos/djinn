@@ -2,11 +2,12 @@
 
 use djinn_core::events::EventBus;
 use djinn_core::models::{
-    ReworkDelivery, TaskDeliveryIdentity, TaskDeliveryState, TaskIntegrated, TransitionAction,
+    MappedHeadRetryDelivery, ReworkDelivery, TaskDeliveryIdentity, TaskDeliveryState,
+    TaskIntegrated, TransitionAction,
 };
 use djinn_db::{
-    Database, DeliveryFinalizeInput, DeliveryPrepareInput, DeliveryReworkInput,
-    DeliveryTransitionResult, TaskIntegrationResult, TaskRepository,
+    Database, DeliveryFinalizeInput, DeliveryMappedHeadRetryInput, DeliveryPrepareInput,
+    DeliveryReworkInput, DeliveryTransitionResult, TaskIntegrationResult, TaskRepository,
 };
 
 async fn fixture() -> (Database, TaskRepository) {
@@ -487,5 +488,210 @@ async fn dependent_releases_only_after_corrected_generation_integrates() {
         .unwrap()
         .status,
         "in_progress"
+    );
+}
+
+/// A mapped head is a candidate already represented in the attempt ledger.
+async fn seed_mapped_parent(db: &Database, repo: &TaskRepository) {
+    seed_task(db, "mapped-task").await;
+    repo.prepare_delivery(&prepare_for(
+        "mapped-task",
+        1,
+        "mapped-source",
+        "mapped-parent",
+    ))
+    .await
+    .unwrap();
+}
+
+fn mapped_head_retry(
+    transition_id: &str,
+    source_sha: &str,
+    selected_parent_sha: &str,
+    candidate_sha: &str,
+) -> DeliveryMappedHeadRetryInput {
+    DeliveryMappedHeadRetryInput {
+        retry: MappedHeadRetryDelivery::new(transition_id, "attempt", "task", 1, 2).unwrap(),
+        source_sha: source_sha.into(),
+        patch_digest: "patch-1".into(),
+        selected_parent_sha: selected_parent_sha.into(),
+        candidate_sha: candidate_sha.into(),
+    }
+}
+
+#[tokio::test]
+async fn mapped_head_retry_supersedes_prepared_with_exact_replay_and_immutable_history() {
+    let (db, repo) = fixture().await;
+    seed_mapped_parent(&db, &repo).await;
+    repo.prepare_delivery(&prepare(1, "source-1", "candidate-1"))
+        .await
+        .unwrap();
+    let retry = mapped_head_retry(
+        "supersede-prepared",
+        "source-1",
+        "mapped-parent",
+        "candidate-2",
+    );
+    assert!(matches!(
+        repo.retry_delivery_from_mapped_head(&retry).await.unwrap(),
+        DeliveryTransitionResult::Applied(_)
+    ));
+    assert!(matches!(
+        repo.retry_delivery_from_mapped_head(&retry).await.unwrap(),
+        DeliveryTransitionResult::Replayed(_)
+    ));
+    let old = repo.get_delivery(&id(1)).await.unwrap().unwrap();
+    let new = repo.get_delivery(&id(2)).await.unwrap().unwrap();
+    assert_eq!(
+        (
+            old.state,
+            old.candidate_sha.as_str(),
+            old.source_sha.as_str(),
+            old.patch_digest.as_str(),
+            old.supersede_transition_id.as_deref(),
+        ),
+        (
+            TaskDeliveryState::Superseded,
+            "candidate-1",
+            "source-1",
+            "patch-1",
+            Some("supersede-prepared"),
+        )
+    );
+    assert_eq!(
+        (
+            new.state,
+            new.source_sha.as_str(),
+            new.patch_digest.as_str(),
+            new.selected_parent_sha.as_str(),
+            new.candidate_sha.as_str(),
+        ),
+        (
+            TaskDeliveryState::Prepared,
+            "source-1",
+            "patch-1",
+            "mapped-parent",
+            "candidate-2",
+        )
+    );
+    let mut mismatched_replay = retry.clone();
+    mismatched_replay.candidate_sha = "different-candidate".into();
+    assert!(
+        repo.retry_delivery_from_mapped_head(&mismatched_replay)
+            .await
+            .is_err()
+    );
+    assert_eq!(repo.get_delivery(&id(1)).await.unwrap().unwrap(), old);
+    assert_eq!(repo.get_delivery(&id(2)).await.unwrap().unwrap(), new);
+
+    // The partial unique index permits no second live generation.
+    assert!(sqlx::query("INSERT INTO task_deliveries (build_attempt_id, task_id, delivery_generation, state, candidate_sha, base_sha, source_sha, patch_digest, selected_parent_sha, prepare_transition_id) VALUES ('attempt', 'task', 3, 'prepared', 'candidate-3', 'mapped-parent', 'source-1', 'patch-1', 'mapped-parent', 'unexpected-live')")
+        .execute(db.pool())
+        .await
+        .is_err());
+}
+
+#[tokio::test]
+async fn mapped_head_retry_supersedes_applying_generation() {
+    let (db, repo) = fixture().await;
+    seed_mapped_parent(&db, &repo).await;
+    repo.prepare_delivery(&prepare(1, "source-1", "candidate-1"))
+        .await
+        .unwrap();
+    begin_applying(&repo, id(1)).await;
+    assert!(matches!(
+        repo.retry_delivery_from_mapped_head(&mapped_head_retry(
+            "supersede-applying",
+            "source-1",
+            "mapped-parent",
+            "candidate-2",
+        ))
+        .await
+        .unwrap(),
+        DeliveryTransitionResult::Applied(_)
+    ));
+    assert_eq!(
+        repo.get_delivery(&id(1)).await.unwrap().unwrap().state,
+        TaskDeliveryState::Superseded
+    );
+    assert_eq!(
+        repo.get_delivery(&id(2)).await.unwrap().unwrap().state,
+        TaskDeliveryState::Prepared
+    );
+}
+
+#[tokio::test]
+async fn mapped_head_retry_refuses_unmapped_or_changed_source_without_mutation() {
+    let (db, repo) = fixture().await;
+    seed_mapped_parent(&db, &repo).await;
+    repo.prepare_delivery(&prepare(1, "source-1", "candidate-1"))
+        .await
+        .unwrap();
+    for retry in [
+        mapped_head_retry("unmapped", "source-1", "unmapped-parent", "candidate-2"),
+        mapped_head_retry("changed-source", "source-2", "mapped-parent", "candidate-2"),
+    ] {
+        assert!(matches!(
+            repo.retry_delivery_from_mapped_head(&retry).await.unwrap(),
+            DeliveryTransitionResult::Stale { .. }
+        ));
+    }
+    assert_eq!(
+        repo.get_delivery(&id(1)).await.unwrap().unwrap().state,
+        TaskDeliveryState::Prepared
+    );
+    assert!(repo.get_delivery(&id(2)).await.unwrap().is_none());
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM task_deliveries WHERE build_attempt_id = 'attempt' AND task_id = 'task'"
+        )
+        .fetch_one(db.pool())
+        .await
+        .unwrap(),
+        1
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_mapped_head_generation_cas_has_exactly_one_winner() {
+    let (db, repo) = fixture().await;
+    seed_mapped_parent(&db, &repo).await;
+    repo.prepare_delivery(&prepare(1, "source-1", "candidate-1"))
+        .await
+        .unwrap();
+    let left = mapped_head_retry("race-left", "source-1", "mapped-parent", "candidate-left");
+    let right = mapped_head_retry("race-right", "source-1", "mapped-parent", "candidate-right");
+    let (left, right) = tokio::join!(
+        repo.retry_delivery_from_mapped_head(&left),
+        repo.retry_delivery_from_mapped_head(&right)
+    );
+    let results = [left.unwrap(), right.unwrap()];
+    assert_eq!(
+        results
+            .iter()
+            .filter(|result| matches!(result, DeliveryTransitionResult::Applied(_)))
+            .count(),
+        1
+    );
+    assert_eq!(
+        results
+            .iter()
+            .filter(|result| matches!(result, DeliveryTransitionResult::Stale { .. }))
+            .count(),
+        1
+    );
+    let new = repo.get_delivery(&id(2)).await.unwrap().unwrap();
+    assert!(matches!(
+        new.candidate_sha.as_str(),
+        "candidate-left" | "candidate-right"
+    ));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM task_deliveries WHERE build_attempt_id = 'attempt' AND task_id = 'task' AND state IN ('prepared', 'applying')"
+        )
+        .fetch_one(db.pool())
+        .await
+        .unwrap(),
+        1
     );
 }
