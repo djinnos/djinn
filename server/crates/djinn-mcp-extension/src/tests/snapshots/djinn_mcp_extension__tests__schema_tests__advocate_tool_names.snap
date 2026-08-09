@@ -34,5 +34,6 @@ expression: names
   "proposal_block_patch",
   "get_block_catalog",
   "proposal_blocks",
+  "proposal_refinement_retry_evidence",
   "submit_work"
 ]
