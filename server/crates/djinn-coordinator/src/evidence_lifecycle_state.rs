@@ -142,8 +142,12 @@ pub(super) fn derive_evidence_lifecycle_state(
         Some(TribunalEvidenceLifecycle::Resolved | TribunalEvidenceLifecycle::Withdrawn) => {}
         // Compatibility-only unit fixture support. Production snapshots never
         // populate revision inference, so this cannot promote task closure.
-        None if snapshot.has_evidence_failed_event => return EvidenceLifecycleState::EvidenceFailed,
-        None if snapshot.has_evidence_received_event => return EvidenceLifecycleState::EvidenceReady,
+        None if snapshot.has_evidence_failed_event => {
+            return EvidenceLifecycleState::EvidenceFailed;
+        }
+        None if snapshot.has_evidence_received_event => {
+            return EvidenceLifecycleState::EvidenceReady;
+        }
         None => {}
     }
 
@@ -203,11 +207,15 @@ impl CoordinatorActor {
         {
             Ok(TypedEvidenceLifecycleProjection::Valid(finding)) => (Some(finding.lifecycle), true),
             Ok(TypedEvidenceLifecycleProjection::Absent)
-                if proposal.linked_spike_task_id.is_none() && proposal.needs_evidence_claim.is_none() =>
+                if proposal.linked_spike_task_id.is_none()
+                    && proposal.needs_evidence_claim.is_none() =>
             {
                 (None, true)
             }
-            Ok(TypedEvidenceLifecycleProjection::Absent | TypedEvidenceLifecycleProjection::Invalid)
+            Ok(
+                TypedEvidenceLifecycleProjection::Absent
+                | TypedEvidenceLifecycleProjection::Invalid,
+            )
             | Err(_) => (None, false),
         };
 
@@ -568,12 +576,18 @@ mod tests {
 
     #[test]
     fn typed_demanded_and_spike_active_are_parked_without_task_inference() {
-        for lifecycle in [TribunalEvidenceLifecycle::Demanded, TribunalEvidenceLifecycle::SpikeActive] {
+        for lifecycle in [
+            TribunalEvidenceLifecycle::Demanded,
+            TribunalEvidenceLifecycle::SpikeActive,
+        ] {
             let mut snap = base_snapshot();
             snap.typed_lifecycle = Some(lifecycle);
             snap.linked_spike_task_id = Some("closed-spike".into());
             snap.spike_task_status = Some("closed".into());
-            assert_eq!(derive_evidence_lifecycle_state(&snap), EvidenceLifecycleState::AwaitingEvidence);
+            assert_eq!(
+                derive_evidence_lifecycle_state(&snap),
+                EvidenceLifecycleState::AwaitingEvidence
+            );
         }
     }
 
@@ -581,17 +595,26 @@ mod tests {
     fn typed_failed_and_invalid_authority_fail_closed() {
         let mut failed = base_snapshot();
         failed.typed_lifecycle = Some(TribunalEvidenceLifecycle::Failed);
-        assert_eq!(derive_evidence_lifecycle_state(&failed), EvidenceLifecycleState::EvidenceFailed);
+        assert_eq!(
+            derive_evidence_lifecycle_state(&failed),
+            EvidenceLifecycleState::EvidenceFailed
+        );
         let mut invalid = base_snapshot();
         invalid.typed_authority_valid = false;
-        assert_eq!(derive_evidence_lifecycle_state(&invalid), EvidenceLifecycleState::AwaitingEvidence);
+        assert_eq!(
+            derive_evidence_lifecycle_state(&invalid),
+            EvidenceLifecycleState::AwaitingEvidence
+        );
     }
 
     #[test]
     fn typed_received_is_resumable_but_remains_a_typed_finding() {
         let mut snap = base_snapshot();
         snap.typed_lifecycle = Some(TribunalEvidenceLifecycle::EvidenceReceived);
-        assert_eq!(derive_evidence_lifecycle_state(&snap), EvidenceLifecycleState::EvidenceReady);
+        assert_eq!(
+            derive_evidence_lifecycle_state(&snap),
+            EvidenceLifecycleState::EvidenceReady
+        );
     }
 
     // ── Precedence matrix ────────────────────────────────────────────
