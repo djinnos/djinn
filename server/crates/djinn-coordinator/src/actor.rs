@@ -322,6 +322,8 @@ pub(super) struct CoordinatorActor {
     /// `None` off-server (no kube client, hence no task-run Jobs to observe)
     /// and in tests unless a fake is injected.
     pub(super) workload_inventory: Option<Arc<dyn djinn_k8s::WorkloadInventory>>,
+    /// Exact immutable snapshot captured before Stage A mutates session rows.
+    pub(super) startup_census: Option<crate::startup_census::StartupCensus>,
     /// Shared bare-mirror manager used by `process_approved_tasks` to build
     /// an `AgentContext` whose direct-push fallback can clone ephemeral
     /// workspaces. `None` in tests.
@@ -661,6 +663,7 @@ impl CoordinatorActor {
             provider_action_scope,
             lsp,
             graph_warmer,
+            startup_census,
             consolidation_runner,
             mirror,
             runtime_ops,
@@ -802,6 +805,7 @@ impl CoordinatorActor {
             last_proposal_review_sweep: SystemClock::new().now_instant(),
             last_graph_refresh: SystemClock::new().now_instant(),
             workload_inventory: workload_inventory_from_warmer(graph_warmer.as_ref()),
+            startup_census,
             graph_warmer,
             mirror,
             runtime_ops,
