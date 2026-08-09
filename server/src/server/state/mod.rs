@@ -169,6 +169,19 @@ impl StartupReconnectabilityMeasurement {
     }
 }
 
+/// Closed Stage A identity gate. Invalid identities and identities omitted
+/// from the immutable non-terminal ledger census fail closed.
+pub(crate) fn stage_a_identity_is_destructive(
+    task_run_id: Option<&str>,
+    positive_gone: &HashSet<&str>,
+    connected: bool,
+) -> bool {
+    let Some(task_run_id) = task_run_id.map(str::trim).filter(|id| !id.is_empty()) else {
+        return false;
+    };
+    !connected && positive_gone.contains(task_run_id)
+}
+
 /// Build a `QdrantConfig` from `QDRANT_URL` (and friends), falling back to
 /// the library default (`http://127.0.0.1:6334`, no API key, collection
 /// `notes`). Centralized so the per-call `note_vector_store()` and the
@@ -2546,17 +2559,15 @@ impl AppState {
             match repo.list_active().await {
                 Ok(sessions) => {
                     for session in sessions {
-                        let Some(run_id) = session
-                            .task_run_id
-                            .as_deref()
-                            .map(str::trim)
-                            .filter(|id| !id.is_empty())
-                        else {
-                            continue;
+                        let connected = match session.task_run_id.as_deref() {
+                            Some(run_id) => self.rpc_registry().is_connected(run_id.trim()).await,
+                            None => false,
                         };
-                        // A connected RPC is preservation evidence; disconnection is never absence proof.
-                        if gone.contains(run_id) && !self.rpc_registry().is_connected(run_id).await
-                        {
+                        if stage_a_identity_is_destructive(
+                            session.task_run_id.as_deref(),
+                            &gone,
+                            connected,
+                        ) {
                             session_ids.insert(session.id);
                         }
                     }
