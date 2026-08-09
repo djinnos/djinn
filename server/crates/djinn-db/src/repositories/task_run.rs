@@ -321,6 +321,26 @@ impl TaskRunRepository {
         .await?)
     }
 
+    /// Read the durable rows that may own a task-run Job during startup.
+    ///
+    /// This is intentionally a read seam rather than a new column: startup
+    /// recovery snapshots the existing `starting`/`running` ledger before any
+    /// lifecycle mutation.
+    pub async fn list_startup_live(&self) -> Result<Vec<TaskRunRecord>> {
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_as!(
+            TaskRunRecord,
+            r#"SELECT id, project_id, task_id, trigger_type,
+                status AS "status!", started_at, ended_at,
+                workspace_path, mirror_ref, dispatch_group_id
+             FROM task_runs
+             WHERE status IN ('starting', 'running') AND ended_at IS NULL
+             ORDER BY started_at ASC"#,
+        )
+        .fetch_all(self.db.pool())
+        .await?)
+    }
+
     /// Flip the most-recent `running` row for `task_id` to `terminal_status`,
     /// stamping `ended_at`. No-op if no such row exists.
     ///
