@@ -3007,17 +3007,16 @@ pub(super) async fn reap_stale_task_runs_for_startup_with_census(
     db: &djinn_db::Database,
     census: &crate::startup_census::StartupCensus,
 ) {
-    use crate::startup_census::TaskRunWitness;
     use djinn_core::models::TaskRunStatus;
 
     let repo = djinn_db::TaskRunRepository::new(db.clone());
     let outcomes =
         djinn_db::repositories::task_run_outcome::TaskRunOutcomeRepository::new(db.clone());
     for run in census.runs() {
-        if !matches!(run.witness, TaskRunWitness::Gone(_)) {
+        if !startup_task_run_mutation_authorized(run) {
             tracing::info!(
                 stage = "startup_stage_b",
-                reason = if matches!(run.witness, TaskRunWitness::Unknown) { "unknown" } else { "preserved" },
+                reason = if matches!(run.witness, crate::startup_census::TaskRunWitness::Unknown) { "unknown" } else { "preserved" },
                 task_id = %run.task_id,
                 task_run_id = %run.task_run_id,
                 "startup task-run reaper deferred census candidate"
@@ -3049,6 +3048,34 @@ pub(super) async fn reap_stale_task_runs_for_startup_with_census(
             }
         }
     }
+}
+
+/// Decide whether immutable per-run evidence authorizes Stage B. A durable
+/// `starting` row with a missing Job can still be between ledger commit and
+/// CREATE, so authoritative absence cannot reap it. This never consults the
+/// startup age threshold or mutable repository state.
+fn startup_task_run_mutation_authorized(
+    run: &crate::startup_census::CensusTaskRun,
+) -> bool {
+    use crate::startup_census::{DurableRunState, GoneProvenance, TaskRunWitness};
+
+    matches!(
+        (run.durable_state, run.witness),
+        (_, TaskRunWitness::Gone(GoneProvenance::TerminalPresent))
+            | (DurableRunState::Running, TaskRunWitness::Gone(GoneProvenance::AuthoritativelyAbsent))
+    )
+}
+
+/// Stage C may classify an attempt only when the immutable reduction proves
+/// every relevant pre-mutation task run was destructively gone. A missing
+/// projection is unknown, including a configured but unavailable census.
+fn startup_attempt_classification_authorized(
+    projection: Option<crate::startup_census::TaskCensusProjection>,
+) -> bool {
+    matches!(
+        projection,
+        Some(crate::startup_census::TaskCensusProjection::DestructivelyGone)
+    )
 }
 
 async fn reap_stale_task_runs_with_threshold(
@@ -3288,16 +3315,19 @@ async fn reap_orphaned_pending_attempts_core(
     for orphan in &orphans {
         if let Some(census) = startup_census {
             use crate::startup_census::TaskCensusProjection;
-            match census.task_projection(&orphan.task_id) {
-                Some(TaskCensusProjection::DestructivelyGone) | None => {}
-                Some(TaskCensusProjection::Unknown) => {
-                    tracing::info!(stage = "startup_stage_c", reason = "unknown", task_id = %orphan.task_id, attempt_id = %orphan.id, "startup pending-attempt reaper deferred unknown census evidence");
-                    continue;
+            let projection = census.task_projection(&orphan.task_id);
+            if !startup_attempt_classification_authorized(projection) {
+                match projection {
+                    Some(TaskCensusProjection::Unknown) | None => {
+                        tracing::info!(stage = "startup_stage_c", reason = "unknown", task_id = %orphan.task_id, attempt_id = %orphan.id, "startup pending-attempt reaper deferred unknown census evidence");
+                    }
+                    Some(TaskCensusProjection::Live)
+                    | Some(TaskCensusProjection::CreationTransit) => {
+                        tracing::info!(stage = "startup_stage_c", reason = "preserved", task_id = %orphan.task_id, attempt_id = %orphan.id, "startup pending-attempt reaper preserved census-live task");
+                    }
+                    Some(TaskCensusProjection::DestructivelyGone) => unreachable!("authorized above"),
                 }
-                Some(TaskCensusProjection::Live) | Some(TaskCensusProjection::CreationTransit) => {
-                    tracing::info!(stage = "startup_stage_c", reason = "preserved", task_id = %orphan.task_id, attempt_id = %orphan.id, "startup pending-attempt reaper preserved census-live task");
-                    continue;
-                }
+                continue;
             }
         }
         // Skip if this row's non-NULL group was already batch-terminalized.
@@ -4619,5 +4649,69 @@ mod warm_base_unrecognized_sweep_tests {
             stale.exists(),
             "a tree written three days ago is inside the shipped idle threshold"
         );
+    }
+}
+
+
+#[cfg(test)]
+mod startup_census_reaper_gate_tests {
+    use super::*;
+    use crate::startup_census::{
+        CensusTaskRun, DurableRunState, GoneProvenance, TaskCensusProjection, TaskRunWitness,
+    };
+
+    fn run(state: DurableRunState, witness: TaskRunWitness) -> CensusTaskRun {
+        CensusTaskRun {
+            task_id: "task".to_owned(),
+            task_run_id: "run".to_owned(),
+            durable_state: state,
+            witness,
+        }
+    }
+
+    #[test]
+    fn stage_b_fences_authoritatively_absent_starting_create_transit() {
+        assert!(!startup_task_run_mutation_authorized(&run(
+            DurableRunState::Starting,
+            TaskRunWitness::Gone(GoneProvenance::AuthoritativelyAbsent),
+        )));
+        assert!(startup_task_run_mutation_authorized(&run(
+            DurableRunState::Starting,
+            TaskRunWitness::Gone(GoneProvenance::TerminalPresent),
+        )));
+        assert!(startup_task_run_mutation_authorized(&run(
+            DurableRunState::Running,
+            TaskRunWitness::Gone(GoneProvenance::AuthoritativelyAbsent),
+        )));
+    }
+
+    #[test]
+    fn stage_b_preserves_live_and_unknown_evidence() {
+        assert!(!startup_task_run_mutation_authorized(&run(
+            DurableRunState::Running,
+            TaskRunWitness::Live,
+        )));
+        assert!(!startup_task_run_mutation_authorized(&run(
+            DurableRunState::Running,
+            TaskRunWitness::Unknown,
+        )));
+    }
+
+    #[test]
+    fn stage_c_admits_only_positive_all_gone_projection() {
+        for projection in [
+            None,
+            Some(TaskCensusProjection::Live),
+            Some(TaskCensusProjection::CreationTransit),
+            Some(TaskCensusProjection::Unknown),
+        ] {
+            assert!(
+                !startup_attempt_classification_authorized(projection),
+                "{projection:?} must fail closed"
+            );
+        }
+        assert!(startup_attempt_classification_authorized(Some(
+            TaskCensusProjection::DestructivelyGone,
+        )));
     }
 }
