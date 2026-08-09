@@ -1,5 +1,7 @@
 // djinn:allow-oversize — reply loop orchestration remains intentionally co-located
 // while rrdr budget wind-down hooks land; split-out is a separate refactor.
+#[cfg(any(test, feature = "test-support"))]
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -76,26 +78,88 @@ pub struct ReplyLoopBoundaryEvent {
 pub type ReplyLoopBoundaryObserver = Arc<dyn Fn(ReplyLoopBoundaryEvent) + Send + Sync>;
 
 #[cfg(any(test, feature = "test-support"))]
-static REPLY_LOOP_BOUNDARY_OBSERVER: OnceLock<Mutex<Option<ReplyLoopBoundaryObserver>>> =
-    OnceLock::new();
+struct ReplyLoopBoundaryObservers {
+    global: Option<ReplyLoopBoundaryObserver>,
+    by_session: HashMap<String, ReplyLoopBoundaryObserver>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+static REPLY_LOOP_BOUNDARY_OBSERVER: OnceLock<Mutex<ReplyLoopBoundaryObservers>> = OnceLock::new();
+
+#[cfg(any(test, feature = "test-support"))]
+fn reply_loop_boundary_observers() -> &'static Mutex<ReplyLoopBoundaryObservers> {
+    REPLY_LOOP_BOUNDARY_OBSERVER.get_or_init(|| {
+        Mutex::new(ReplyLoopBoundaryObservers {
+            global: None,
+            by_session: HashMap::new(),
+        })
+    })
+}
+
+/// A session-scoped test observer registration.
+///
+/// Unlike the legacy global hook, this remains installed while unrelated
+/// tests replace the global observer. Dropping it removes only this session's
+/// observation and is safe during panic unwinding.
+#[cfg(any(test, feature = "test-support"))]
+pub struct ReplyLoopBoundaryObserverRegistration {
+    session_id: String,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl Drop for ReplyLoopBoundaryObserverRegistration {
+    fn drop(&mut self) {
+        reply_loop_boundary_observers()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .by_session
+            .remove(&self.session_id);
+    }
+}
 
 #[cfg(any(test, feature = "test-support"))]
 pub fn set_reply_loop_boundary_observer(observer: Option<ReplyLoopBoundaryObserver>) {
-    *REPLY_LOOP_BOUNDARY_OBSERVER
-        .get_or_init(|| Mutex::new(None))
+    reply_loop_boundary_observers()
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = observer;
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .global = observer;
+}
+
+/// Registers a test observer that receives boundaries only for `session_id`.
+///
+/// This is independent of the legacy global hook, so parallel reply-loop tests
+/// cannot replace or clear the observer for a running session.
+#[cfg(any(test, feature = "test-support"))]
+pub fn register_reply_loop_boundary_observer(
+    session_id: String,
+    observer: ReplyLoopBoundaryObserver,
+) -> ReplyLoopBoundaryObserverRegistration {
+    reply_loop_boundary_observers()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .by_session
+        .insert(session_id.clone(), observer);
+    ReplyLoopBoundaryObserverRegistration { session_id }
 }
 
 #[cfg(any(test, feature = "test-support"))]
 fn observe_reply_loop_boundary(event: &'static str, session_id: &str) {
-    if let Some(observer) = REPLY_LOOP_BOUNDARY_OBSERVER
-        .get_or_init(|| Mutex::new(None))
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .as_ref()
-        .cloned()
-    {
+    let (global, session_observer) = {
+        let observers = reply_loop_boundary_observers()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        (
+            observers.global.clone(),
+            observers.by_session.get(session_id).cloned(),
+        )
+    };
+    if let Some(observer) = global {
+        observer(ReplyLoopBoundaryEvent {
+            name: event,
+            session_id: session_id.to_owned(),
+        });
+    }
+    if let Some(observer) = session_observer {
         observer(ReplyLoopBoundaryEvent {
             name: event,
             session_id: session_id.to_owned(),
@@ -1408,7 +1472,9 @@ pub async fn run_reply_loop(
                     .and_then(|observation| observation.retry_after_deadline_monotonic_ms);
                 let delay = covered_retry_delay(
                     deadline,
-                    covered_attempt_started.expect("covered outcome has an attempt origin"),
+                    covered_attempt_started.ok_or_else(|| {
+                        anyhow::anyhow!("covered retry outcome is missing its attempt origin")
+                    })?,
                     slot_ctx.clock.now_instant(),
                     session_id,
                     covered_attempt_ordinal,

@@ -377,9 +377,7 @@ async fn settle_covered_attempt(
     coordinator: ModelTurnAdmissionCoordinator,
     identity: Option<ModelTurnLeaseIdentity>,
 ) -> Option<ProviderOutcomeV1> {
-    let Some(mut attempt) = attempt.lock().await.take() else {
-        return None;
-    };
+    let mut attempt = attempt.lock().await.take()?;
     let outcome: ProviderOutcomeV1 = attempt.outcome().await;
     if let Some(identity) = identity
         && let Err(error) = coordinator.reconcile(identity, &outcome).await

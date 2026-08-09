@@ -1,7 +1,7 @@
 //! Production-boundary evidence for covered B1 retry ownership.
 
 use super::*;
-use crate::reply_loop::turn::set_reply_loop_boundary_observer;
+use crate::reply_loop::turn::register_reply_loop_boundary_observer;
 use djinn_db::test_support::{
     model_turn_accounting_fixture, model_turn_launch_identities_fixture,
     model_turn_terminal_fixture, seed_model_turn_admission_fixture,
@@ -175,8 +175,8 @@ async fn covered_retry_reconciles_old_lease_before_fresh_preparation_and_launch(
     let supervisor_cancel = CancellationToken::new();
     let slot_ctx = crate::test_helpers::agent_context_from_db(db.clone(), session_cancel.clone());
     let provider = ScriptedCoveredB1Provider::new();
-    // The observer is process-global, so this invocation needs a unique stable
-    // identity before filtering observer notifications.
+    // This scoped observer is bound to a unique identity, so parallel
+    // reply-loop tests cannot replace it or contribute boundaries.
     let session_id = format!("covered-retry-session-{}", uuid::Uuid::now_v7());
     let events = Arc::new(Mutex::new(Vec::new()));
     let settled = Arc::new(tokio::sync::Notify::new());
@@ -184,22 +184,18 @@ async fn covered_retry_reconciles_old_lease_before_fresh_preparation_and_launch(
     let observed = Arc::clone(&events);
     let settled_observer = Arc::clone(&settled);
     let waited_observer = Arc::clone(&waited);
-    let observed_session_id = session_id.clone();
-    set_reply_loop_boundary_observer(Some(Arc::new(move |event| {
-        // The observer hook is process-global because it is test-only. Filter
-        // its events by this loop's stable session identity so concurrently
-        // executing reply-loop tests cannot be mistaken for replacement work.
-        if event.session_id != observed_session_id {
-            return;
-        }
-        observed.lock().expect("observer").push(event.name);
-        if event.name == "covered_attempt_settled" {
-            settled_observer.notify_waiters();
-        }
-        if event.name == "covered_retry_wait" {
-            waited_observer.notify_waiters();
-        }
-    })));
+    let _boundary_observer = register_reply_loop_boundary_observer(
+        session_id.clone(),
+        Arc::new(move |event| {
+            observed.lock().expect("observer").push(event.name);
+            if event.name == "covered_attempt_settled" {
+                settled_observer.notify_waiters();
+            }
+            if event.name == "covered_retry_wait" {
+                waited_observer.notify_waiters();
+            }
+        }),
+    );
     let first_launch = provider.launched[0].notified();
     let second_launch = provider.launched[1].notified();
     let settlement = settled.notified();
@@ -255,7 +251,6 @@ async fn covered_retry_reconciles_old_lease_before_fresh_preparation_and_launch(
     tokio::select! { _ = &mut retry_wait => {}, result = &mut run => panic!("retry wait missing: {:?}", result.0) }
     tokio::select! { _ = &mut second_launch => {}, result = &mut run => panic!("replacement B1 launch missing: {:?}", result.0) }
     let (result, _output, ..) = run.await;
-    set_reply_loop_boundary_observer(None);
     result.expect("replacement completes reply loop");
     assert_eq!(provider.launches.load(Ordering::SeqCst), 2);
 
