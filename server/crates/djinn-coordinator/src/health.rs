@@ -2995,11 +2995,88 @@ async fn reap_stale_task_runs(db: &djinn_db::Database) {
     reap_stale_task_runs_with_threshold(db, STALE_TASK_RUN_THRESHOLD_SECS, "periodic").await;
 }
 
-/// Startup variant: aggressive (~10s threshold) because any `running` row
-/// older than that at boot is from a prior process whose workers can no
-/// longer reach us.
+/// Legacy startup variant retained only for an unconfigured inventory.
 pub(super) async fn reap_stale_task_runs_for_startup(db: &djinn_db::Database) {
     reap_stale_task_runs_with_threshold(db, STARTUP_TASK_RUN_THRESHOLD_SECS, "startup").await;
+}
+
+/// Configured startup may interrupt only task-runs whose pre-mutation census
+/// evidence is destructively gone. The startup threshold never authorizes this
+/// mutation.
+pub(super) async fn reap_stale_task_runs_for_startup_with_census(
+    db: &djinn_db::Database,
+    census: &crate::startup_census::StartupCensus,
+) {
+    use djinn_core::models::TaskRunStatus;
+
+    let repo = djinn_db::TaskRunRepository::new(db.clone());
+    let outcomes =
+        djinn_db::repositories::task_run_outcome::TaskRunOutcomeRepository::new(db.clone());
+    for run in census.runs() {
+        if !startup_task_run_mutation_authorized(run) {
+            tracing::info!(
+                stage = "startup_stage_b",
+                reason = if matches!(run.witness, crate::startup_census::TaskRunWitness::Unknown) { "unknown" } else { "preserved" },
+                task_id = %run.task_id,
+                task_run_id = %run.task_run_id,
+                "startup task-run reaper deferred census candidate"
+            );
+            continue;
+        }
+        match repo
+            .accept_terminal_status(&run.task_run_id, TaskRunStatus::Interrupted)
+            .await
+        {
+            Ok(djinn_db::repositories::task_run::TerminalStatusAcceptance::Accepted) => {
+                if let Err(error) = outcomes
+                    .record_parked_reason(&run.task_run_id, "orphaned")
+                    .await
+                {
+                    tracing::warn!(task_run_id = %run.task_run_id, %error, "failed to record census-authorized startup parked reason");
+                }
+                tracing::warn!(
+                    stage = "startup_stage_b",
+                    task_id = %run.task_id,
+                    task_run_id = %run.task_run_id,
+                    provenance = ?run.witness,
+                    "reaped census-authorized startup task run"
+                );
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(task_run_id = %run.task_run_id, %error, "census-authorized startup task-run reap failed")
+            }
+        }
+    }
+}
+
+/// Decide whether immutable per-run evidence authorizes Stage B. A durable
+/// `starting` row with a missing Job can still be between ledger commit and
+/// CREATE, so authoritative absence cannot reap it. This never consults the
+/// startup age threshold or mutable repository state.
+fn startup_task_run_mutation_authorized(run: &crate::startup_census::CensusTaskRun) -> bool {
+    use crate::startup_census::{DurableRunState, GoneProvenance, TaskRunWitness};
+
+    matches!(
+        (run.durable_state, run.witness),
+        (_, TaskRunWitness::Gone(GoneProvenance::TerminalPresent))
+            | (
+                DurableRunState::Running,
+                TaskRunWitness::Gone(GoneProvenance::AuthoritativelyAbsent)
+            )
+    )
+}
+
+/// Stage C may classify an attempt only when the immutable reduction proves
+/// every relevant pre-mutation task run was destructively gone. A missing
+/// projection is unknown, including a configured but unavailable census.
+fn startup_attempt_classification_authorized(
+    projection: Option<crate::startup_census::TaskCensusProjection>,
+) -> bool {
+    matches!(
+        projection,
+        Some(crate::startup_census::TaskCensusProjection::DestructivelyGone)
+    )
 }
 
 async fn reap_stale_task_runs_with_threshold(
@@ -3093,6 +3170,27 @@ pub(super) async fn reap_orphaned_pending_attempts_for_startup(
             lease_threshold_secs: ORPHANED_PENDING_ATTEMPT_THRESHOLD_SECS,
             reason: "startup",
             startup_incarnation_id: Some(current_incarnation_id),
+            startup_census: None,
+        },
+    )
+    .await;
+}
+
+/// Configured startup uses the immutable census for liveness gating and a
+/// pending-only candidate query, never post-Stage-B task-run/session inference.
+pub(super) async fn reap_orphaned_pending_attempts_for_startup_with_census(
+    db: &djinn_db::Database,
+    current_incarnation_id: &str,
+    census: &crate::startup_census::StartupCensus,
+) {
+    reap_orphaned_pending_attempts_core(
+        db,
+        OrphanReapParams {
+            age_threshold_secs: STARTUP_ORPHANED_PENDING_ATTEMPT_AGE_THRESHOLD_SECS,
+            lease_threshold_secs: ORPHANED_PENDING_ATTEMPT_THRESHOLD_SECS,
+            reason: "startup",
+            startup_incarnation_id: Some(current_incarnation_id),
+            startup_census: Some(census),
         },
     )
     .await;
@@ -3113,6 +3211,7 @@ pub(super) async fn reap_orphaned_pending_attempts_with_threshold(
             lease_threshold_secs: threshold_secs,
             reason,
             startup_incarnation_id: None,
+            startup_census: None,
         },
     )
     .await;
@@ -3128,6 +3227,7 @@ struct OrphanReapParams<'a> {
     lease_threshold_secs: i64,
     reason: &'static str,
     startup_incarnation_id: Option<&'a str>,
+    startup_census: Option<&'a crate::startup_census::StartupCensus>,
 }
 
 async fn reap_orphaned_pending_attempts_core(
@@ -3139,6 +3239,7 @@ async fn reap_orphaned_pending_attempts_core(
         lease_threshold_secs,
         reason,
         startup_incarnation_id,
+        startup_census,
     } = params;
 
     let format = time::macros::format_description!(
@@ -3168,7 +3269,11 @@ async fn reap_orphaned_pending_attempts_core(
 
     let repo = djinn_db::TaskAttemptRepository::new(db.clone());
     let incarnation_repo = djinn_db::CoordinatorIncarnationRepository::new(db.clone());
-    let orphans = match repo.list_orphaned_pending(&age_threshold_iso).await {
+    let orphans = match if startup_census.is_some() {
+        repo.list_pending_before(&age_threshold_iso).await
+    } else {
+        repo.list_orphaned_pending(&age_threshold_iso).await
+    } {
         Ok(rows) => rows,
         Err(e) => {
             tracing::warn!(
@@ -3209,6 +3314,25 @@ async fn reap_orphaned_pending_attempts_core(
     let mut terminalized_groups: std::collections::HashSet<String> =
         std::collections::HashSet::new();
     for orphan in &orphans {
+        if let Some(census) = startup_census {
+            use crate::startup_census::TaskCensusProjection;
+            let projection = census.task_projection(&orphan.task_id);
+            if !startup_attempt_classification_authorized(projection) {
+                match projection {
+                    Some(TaskCensusProjection::Unknown) | None => {
+                        tracing::info!(stage = "startup_stage_c", reason = "unknown", task_id = %orphan.task_id, attempt_id = %orphan.id, "startup pending-attempt reaper deferred unknown census evidence");
+                    }
+                    Some(TaskCensusProjection::Live)
+                    | Some(TaskCensusProjection::CreationTransit) => {
+                        tracing::info!(stage = "startup_stage_c", reason = "preserved", task_id = %orphan.task_id, attempt_id = %orphan.id, "startup pending-attempt reaper preserved census-live task");
+                    }
+                    Some(TaskCensusProjection::DestructivelyGone) => {
+                        unreachable!("authorized above")
+                    }
+                }
+                continue;
+            }
+        }
         // Skip if this row's non-NULL group was already batch-terminalized.
         if let Some(gid) = &orphan.dispatch_group_id
             && terminalized_groups.contains(gid)
@@ -3317,6 +3441,13 @@ async fn reap_orphaned_pending_attempts_core(
                 }
             }
         }
+    }
+
+    // A configured startup must not reconstruct liveness from post-Stage-B rows.
+    // Submitted cleanup remains the periodic/legacy behavior until it has its own
+    // census projection; fail closed rather than issue the legacy liveness query.
+    if startup_census.is_some() {
+        return;
     }
 
     // Also finalize orphaned `submitted` attempts the PR poller can never own.
@@ -4521,5 +4652,68 @@ mod warm_base_unrecognized_sweep_tests {
             stale.exists(),
             "a tree written three days ago is inside the shipped idle threshold"
         );
+    }
+}
+
+#[cfg(test)]
+mod startup_census_reaper_gate_tests {
+    use super::*;
+    use crate::startup_census::{
+        CensusTaskRun, DurableRunState, GoneProvenance, TaskCensusProjection, TaskRunWitness,
+    };
+
+    fn run(state: DurableRunState, witness: TaskRunWitness) -> CensusTaskRun {
+        CensusTaskRun {
+            task_id: "task".to_owned(),
+            task_run_id: "run".to_owned(),
+            durable_state: state,
+            witness,
+        }
+    }
+
+    #[test]
+    fn stage_b_fences_authoritatively_absent_starting_create_transit() {
+        assert!(!startup_task_run_mutation_authorized(&run(
+            DurableRunState::Starting,
+            TaskRunWitness::Gone(GoneProvenance::AuthoritativelyAbsent),
+        )));
+        assert!(startup_task_run_mutation_authorized(&run(
+            DurableRunState::Starting,
+            TaskRunWitness::Gone(GoneProvenance::TerminalPresent),
+        )));
+        assert!(startup_task_run_mutation_authorized(&run(
+            DurableRunState::Running,
+            TaskRunWitness::Gone(GoneProvenance::AuthoritativelyAbsent),
+        )));
+    }
+
+    #[test]
+    fn stage_b_preserves_live_and_unknown_evidence() {
+        assert!(!startup_task_run_mutation_authorized(&run(
+            DurableRunState::Running,
+            TaskRunWitness::Live,
+        )));
+        assert!(!startup_task_run_mutation_authorized(&run(
+            DurableRunState::Running,
+            TaskRunWitness::Unknown,
+        )));
+    }
+
+    #[test]
+    fn stage_c_admits_only_positive_all_gone_projection() {
+        for projection in [
+            None,
+            Some(TaskCensusProjection::Live),
+            Some(TaskCensusProjection::CreationTransit),
+            Some(TaskCensusProjection::Unknown),
+        ] {
+            assert!(
+                !startup_attempt_classification_authorized(projection),
+                "{projection:?} must fail closed"
+            );
+        }
+        assert!(startup_attempt_classification_authorized(Some(
+            TaskCensusProjection::DestructivelyGone,
+        )));
     }
 }
