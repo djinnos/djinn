@@ -6,13 +6,423 @@
 //! sessions and their connected-worker status **before** the startup
 //! blanket-interruption mutation runs.
 
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use crate::events::EventBus;
 use crate::server::AppState;
+use crate::server::state::stage_a_identity_is_destructive;
+use djinn_coordinator::startup_census::{GoneProvenance, StartupCensus, TaskRunWitness};
 use djinn_db::repositories::session::CreateSessionParams;
-use djinn_db::{Database, SessionRepository, TaskRepository, TaskRunRepository};
+use djinn_db::{
+    CreateTaskAttemptParams, Database, SessionRepository, TaskAttemptRepository, TaskRepository,
+    TaskRunRepository,
+};
+use djinn_k8s::{
+    ObjectPresence, UidGetResult, WorkloadInventory, WorkloadObjectKind, WorkloadRecord,
+};
 use djinn_supervisor::ConnectionRegistry;
+
+/// The configured-inventory fixture is consumed only by census acquisition.
+/// Stage A receives the immutable result, so it has no opportunity to relist.
+struct MatrixInventory {
+    listed: Vec<WorkloadRecord>,
+    presence: HashMap<String, ObjectPresence>,
+}
+
+/// The configured Stage A identity table is exact: only disconnected,
+/// non-terminal starting/running rows with positive Gone evidence transition.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn startup_stage_a_identity_matrix_uses_only_positive_gone_evidence() {
+    let db = create_test_db();
+    let events = test_events();
+    let live = "matrix-live-running";
+    let project_id = seed_running_session_with_task_run(&db, &events, live).await;
+    let task_id = TaskRunRepository::new(db.clone())
+        .get(live)
+        .await
+        .expect("read seed run")
+        .expect("seed run exists")
+        .task_id;
+    let absent_starting = "matrix-absent-starting";
+    let absent_running = "matrix-absent-running";
+    let terminal_starting = "matrix-terminal-starting";
+    let terminal_running = "matrix-terminal-running";
+    let unknown = "matrix-unknown-running";
+    let connected_gone = "matrix-connected-gone";
+    let completed = "matrix-ledger-completed";
+    let failed = "matrix-ledger-failed";
+    let future = "matrix-ledger-future";
+    let absent_starting_session = seed_session_for_run(
+        &db,
+        &events,
+        &project_id,
+        &task_id,
+        absent_starting,
+        "starting",
+    )
+    .await;
+    let absent_running_session = seed_session_for_run(
+        &db,
+        &events,
+        &project_id,
+        &task_id,
+        absent_running,
+        "running",
+    )
+    .await;
+    let terminal_starting_session = seed_session_for_run(
+        &db,
+        &events,
+        &project_id,
+        &task_id,
+        terminal_starting,
+        "starting",
+    )
+    .await;
+    let terminal_running_session = seed_session_for_run(
+        &db,
+        &events,
+        &project_id,
+        &task_id,
+        terminal_running,
+        "running",
+    )
+    .await;
+    let unknown_session =
+        seed_session_for_run(&db, &events, &project_id, &task_id, unknown, "running").await;
+    let connected_session = seed_session_for_run(
+        &db,
+        &events,
+        &project_id,
+        &task_id,
+        connected_gone,
+        "running",
+    )
+    .await;
+    let completed_session =
+        seed_session_for_run(&db, &events, &project_id, &task_id, completed, "completed").await;
+    let failed_session =
+        seed_session_for_run(&db, &events, &project_id, &task_id, failed, "failed").await;
+    let future_session =
+        seed_session_for_run(&db, &events, &project_id, &task_id, future, "future_status").await;
+    let null_session = SessionRepository::new(db.clone(), events.clone())
+        .create(CreateSessionParams {
+            project_id: &project_id,
+            task_id: Some(&task_id),
+            model: "openai/gpt-5.5",
+            agent_type: "worker",
+            metadata_json: None,
+            task_run_id: None,
+            pricing: None,
+            cost_basis: None,
+        })
+        .await
+        .expect("create null-identity session")
+        .id;
+
+    let mut presence = HashMap::new();
+    for run_id in [absent_starting, absent_running, connected_gone] {
+        presence.insert(djinn_k8s::taskrun_job_name(run_id), ObjectPresence::Absent);
+    }
+    presence.insert(
+        djinn_k8s::taskrun_job_name(unknown),
+        ObjectPresence::Uncertain,
+    );
+    let census = StartupCensus::acquire(
+        db.clone(),
+        Some(Arc::new(MatrixInventory {
+            listed: vec![
+                job(live, false),
+                job(terminal_starting, true),
+                job(terminal_running, true),
+            ],
+            presence,
+        })),
+    )
+    .await
+    .expect("acquire configured startup census");
+    assert!(
+        census
+            .runs()
+            .iter()
+            .any(|run| run.task_run_id == live && run.witness == TaskRunWitness::Live)
+    );
+    assert!(
+        census
+            .runs()
+            .iter()
+            .any(|run| run.task_run_id == unknown && run.witness == TaskRunWitness::Unknown)
+    );
+    assert_eq!(
+        census
+            .runs()
+            .iter()
+            .filter(|run| matches!(
+                run.witness,
+                TaskRunWitness::Gone(GoneProvenance::AuthoritativelyAbsent)
+            ))
+            .count(),
+        3
+    );
+    assert_eq!(
+        census
+            .runs()
+            .iter()
+            .filter(|run| matches!(
+                run.witness,
+                TaskRunWitness::Gone(GoneProvenance::TerminalPresent)
+            ))
+            .count(),
+        2
+    );
+    let gone_ids = census
+        .runs()
+        .iter()
+        .filter(|run| matches!(run.witness, TaskRunWitness::Gone(_)))
+        .map(|run| run.task_run_id.as_str())
+        .collect();
+    assert!(!stage_a_identity_is_destructive(
+        Some("   "),
+        &gone_ids,
+        false
+    ));
+    assert!(!stage_a_identity_is_destructive(
+        Some("matrix-missing-ledger-row"),
+        &gone_ids,
+        false
+    ));
+    for invalid_ledger_identity in [completed, failed, future] {
+        assert!(!stage_a_identity_is_destructive(
+            Some(invalid_ledger_identity),
+            &gone_ids,
+            false
+        ));
+    }
+
+    let state = AppState::new(db.clone(), tokio_util::sync::CancellationToken::new());
+    state
+        .rpc_registry()
+        .register_connected_for_test(connected_gone)
+        .await;
+    state
+        .interrupt_stale_sessions_on_startup_with_census(&census)
+        .await;
+    let repo = SessionRepository::new(db, events);
+    for id in [
+        absent_starting_session,
+        absent_running_session,
+        terminal_starting_session,
+        terminal_running_session,
+    ] {
+        assert_eq!(
+            repo.get(&id)
+                .await
+                .expect("read interrupted session")
+                .expect("session exists")
+                .status,
+            "interrupted"
+        );
+    }
+    for id in [
+        connected_session,
+        unknown_session,
+        null_session,
+        completed_session,
+        failed_session,
+        future_session,
+    ] {
+        assert_eq!(
+            repo.get(&id)
+                .await
+                .expect("read preserved session")
+                .expect("session exists")
+                .status,
+            "running"
+        );
+    }
+    assert_eq!(
+        repo.list_active()
+            .await
+            .expect("list remaining sessions")
+            .len(),
+        7,
+        "exactly four of eleven matrix sessions transition; seven fail closed"
+    );
+}
+
+struct UnavailableInventory;
+
+#[async_trait::async_trait]
+impl WorkloadInventory for UnavailableInventory {
+    async fn list(&self) -> Result<Vec<WorkloadRecord>, String> {
+        Err("unavailable".into())
+    }
+    async fn get_uid(&self, _: WorkloadObjectKind, _: &str, _: &str) -> UidGetResult {
+        UidGetResult::Uncertain
+    }
+    async fn presence(&self, _: WorkloadObjectKind, _: &str) -> ObjectPresence {
+        ObjectPresence::Uncertain
+    }
+}
+
+async fn seed_startup_rows(db: &Database, events: &EventBus, run_id: &str) -> (String, String) {
+    seed_running_session_with_task_run(db, events, run_id).await;
+    let run = TaskRunRepository::new(db.clone())
+        .get(run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let session = SessionRepository::new(db.clone(), events.clone())
+        .list_active()
+        .await
+        .unwrap()[0]
+        .id
+        .clone();
+    let attempt = format!("attempt-{run_id}");
+    let dispatch_key = format!("dispatch-{run_id}");
+    TaskAttemptRepository::new(db.clone())
+        .create_or_get_pending(CreateTaskAttemptParams {
+            id: &attempt,
+            task_id: &run.task_id,
+            role: "worker",
+            dispatch_key: &dispatch_key,
+            session_id: None,
+            attempt_seq: None,
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
+        })
+        .await
+        .unwrap();
+    (session, attempt)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn startup_reaper_not_configured_is_legacy() {
+    let events = test_events();
+    let legacy_db = create_test_db();
+    let (legacy_session, legacy_attempt) =
+        seed_startup_rows(&legacy_db, &events, "legacy-startup-run").await;
+    let legacy = StartupCensus::acquire(legacy_db.clone(), None)
+        .await
+        .unwrap();
+    let unavailable_db = create_test_db();
+    let (unavailable_session, unavailable_attempt) =
+        seed_startup_rows(&unavailable_db, &events, "unavailable-startup-run").await;
+    let unavailable =
+        StartupCensus::acquire(unavailable_db.clone(), Some(Arc::new(UnavailableInventory)))
+            .await
+            .unwrap();
+    tokio::time::sleep(std::time::Duration::from_secs(11)).await;
+
+    let state = AppState::new(
+        legacy_db.clone(),
+        tokio_util::sync::CancellationToken::new(),
+    );
+    state
+        .interrupt_stale_sessions_on_startup_with_census(&legacy)
+        .await;
+    djinn_coordinator::complete_startup_reaper_phase(&legacy_db, "new-incarnation", Some(&legacy))
+        .await;
+    assert_eq!(
+        SessionRepository::new(legacy_db.clone(), events.clone())
+            .get(&legacy_session)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        "interrupted"
+    );
+    assert_eq!(
+        TaskRunRepository::new(legacy_db.clone())
+            .get("legacy-startup-run")
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        "interrupted"
+    );
+    assert_eq!(
+        TaskAttemptRepository::new(legacy_db)
+            .get(&legacy_attempt)
+            .await
+            .unwrap()
+            .unwrap()
+            .outcome,
+        "interrupted"
+    );
+
+    let state = AppState::new(
+        unavailable_db.clone(),
+        tokio_util::sync::CancellationToken::new(),
+    );
+    state
+        .interrupt_stale_sessions_on_startup_with_census(&unavailable)
+        .await;
+    djinn_coordinator::complete_startup_reaper_phase(
+        &unavailable_db,
+        "new-incarnation",
+        Some(&unavailable),
+    )
+    .await;
+    assert_eq!(
+        SessionRepository::new(unavailable_db.clone(), events)
+            .get(&unavailable_session)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        "running"
+    );
+    assert_eq!(
+        TaskRunRepository::new(unavailable_db.clone())
+            .get("unavailable-startup-run")
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        "running"
+    );
+    assert_eq!(
+        TaskAttemptRepository::new(unavailable_db)
+            .get(&unavailable_attempt)
+            .await
+            .unwrap()
+            .unwrap()
+            .outcome,
+        "pending"
+    );
+}
+
+#[async_trait::async_trait]
+impl WorkloadInventory for MatrixInventory {
+    async fn list(&self) -> Result<Vec<WorkloadRecord>, String> {
+        Ok(self.listed.clone())
+    }
+
+    async fn get_uid(&self, _: WorkloadObjectKind, _: &str, _: &str) -> UidGetResult {
+        UidGetResult::Uncertain
+    }
+
+    async fn presence(&self, _: WorkloadObjectKind, name: &str) -> ObjectPresence {
+        self.presence
+            .get(name)
+            .cloned()
+            .unwrap_or(ObjectPresence::Uncertain)
+    }
+}
+
+fn job(run_id: &str, terminal: bool) -> WorkloadRecord {
+    WorkloadRecord {
+        kind: WorkloadObjectKind::Job,
+        name: djinn_k8s::taskrun_job_name(run_id),
+        uid: None,
+        labels: BTreeMap::new(),
+        terminal,
+        images: Vec::new(),
+        commands: Vec::new(),
+    }
+}
 
 fn create_test_db() -> Database {
     Database::open_in_memory().expect("open in-memory test database")
@@ -95,6 +505,43 @@ async fn seed_running_session_with_task_run(
         .expect("create test session");
 
     project.id
+}
+
+async fn seed_session_for_run(
+    db: &Database,
+    events: &EventBus,
+    project_id: &str,
+    task_id: &str,
+    task_run_id: &str,
+    status: &str,
+) -> String {
+    TaskRunRepository::new(db.clone())
+        .create(djinn_db::CreateTaskRunParams {
+            id: task_run_id,
+            project_id,
+            task_id,
+            trigger_type: "manual",
+            status: Some(status),
+            workspace_path: None,
+            mirror_ref: None,
+            dispatch_group_id: None,
+        })
+        .await
+        .expect("create matrix task run");
+    SessionRepository::new(db.clone(), events.clone())
+        .create(CreateSessionParams {
+            project_id,
+            task_id: Some(task_id),
+            model: "openai/gpt-5.5",
+            agent_type: "worker",
+            metadata_json: None,
+            task_run_id: Some(task_run_id),
+            pricing: None,
+            cost_basis: None,
+        })
+        .await
+        .expect("create matrix session")
+        .id
 }
 
 /// A deterministic test that creates one running session with a `task_run_id`

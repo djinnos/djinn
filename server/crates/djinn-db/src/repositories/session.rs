@@ -546,6 +546,62 @@ impl SessionRepository {
         Ok(result.rows_affected())
     }
 
+    /// Mark only the specified currently-running sessions as interrupted.
+    ///
+    /// Startup recovery selects session ids only after its pre-mutation census
+    /// positively identifies their linked task runs as gone. This keeps NULL and
+    /// malformed task-run identities fail-closed.
+    pub async fn interrupt_running_session_ids(
+        &self,
+        session_ids: &std::collections::HashSet<String>,
+    ) -> Result<u64> {
+        if session_ids.is_empty() {
+            return Ok(0);
+        }
+
+        self.db.ensure_initialized().await?;
+        let session_ids: Vec<String> = session_ids.iter().cloned().collect();
+        let interrupted_sessions = sqlx::query_as::<_, SessionRecord>(
+            r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
+                status, tokens_in, tokens_out,
+                cache_read_tokens, cache_write_tokens, task_run_id, title,
+                parked_reason,
+                failure_cause,
+                cost_usd, input_price_per_million_snapshot,
+                output_price_per_million_snapshot,
+                cache_read_price_per_million_snapshot,
+                cache_write_price_per_million_snapshot,
+                cost_basis,
+                billing_source
+             FROM sessions
+             WHERE status = 'running' AND id = ANY($1)"#,
+        )
+        .bind(&session_ids)
+        .fetch_all(self.db.pool())
+        .await?;
+
+        if interrupted_sessions.is_empty() {
+            return Ok(0);
+        }
+
+        let result = sqlx::query(
+            r#"UPDATE sessions
+             SET status = 'interrupted',
+                 ended_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+                 failure_cause = 'infrastructure'
+             WHERE status = 'running' AND id = ANY($1)"#,
+        )
+        .bind(&session_ids)
+        .execute(self.db.pool())
+        .await?;
+
+        for session in interrupted_sessions {
+            let _ = self.fetch_and_emit_update(&session.id).await?;
+        }
+
+        Ok(result.rows_affected())
+    }
+
     /// Mark all `running` sessions for a specific task as `interrupted`.
     /// Used by stuck-task recovery to clean up orphaned session records.
     pub async fn interrupt_running_for_task(&self, task_id: &str) -> Result<u64> {
