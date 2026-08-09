@@ -94,7 +94,7 @@ pub async fn build_direct_delivery_candidate(
 
     let scratch = ScratchFiles::new()?;
     std::fs::write(&scratch.patch, &normalized_patch)?;
-    std::fs::write(&scratch.message, commit_message(input))?;
+    std::fs::write(&scratch.message, commit_message(input, &normalized_patch_digest))?;
     let index_env = vec![("GIT_INDEX_FILE".into(), scratch.index.display().to_string())];
 
     run_git_command_in_with_env(
@@ -196,14 +196,21 @@ fn normalize_patch(patch: &str) -> String {
     if patch.ends_with('\n') { patch } else { format!("{patch}\n") }
 }
 
-fn commit_message(input: &DirectDeliveryInput) -> String {
+/// Produce the complete, deterministic commit message.
+///
+/// The normalized patch digest is deliberately part of the commit object rather
+/// than only returned as inspection data. Two distinct valid patch encodings
+/// may produce the same tree; binding their digest here keeps their candidates
+/// distinct for ledger identity and replay.
+fn commit_message(input: &DirectDeliveryInput, normalized_patch_digest: &str) -> String {
     format!(
-        "{}\n\nDjinn-Delivery-Attempt: {}\nDjinn-Delivery-Task: {}\nDjinn-Delivery-Generation: {}\nDjinn-Source: {}\n",
+        "{}\n\nDjinn-Delivery-Attempt: {}\nDjinn-Delivery-Task: {}\nDjinn-Delivery-Generation: {}\nDjinn-Source: {}\nDjinn-Normalized-Patch-Digest: {}\n",
         input.message.trim_end(),
         input.identity.build_attempt_id,
         input.identity.task_id,
         input.identity.delivery_generation,
         input.source_sha,
+        normalized_patch_digest,
     )
 }
 
@@ -323,6 +330,24 @@ mod tests {
         assert_ne!(first.candidate_sha, clean(fixture.path(), &changed_source).await.candidate_sha);
         assert_ne!(first.candidate_sha, clean(fixture.path(), &changed_patch).await.candidate_sha);
         assert_ne!(first.normalized_patch_digest, clean(fixture.path(), &changed_patch).await.normalized_patch_digest);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn normalized_patch_encoding_changes_candidate_when_tree_is_unchanged() {
+        let fixture = init_repo_with_main_commit();
+        let parent = sha(fixture.path(), "main");
+        let with_index_metadata = input(parent.clone(), parent);
+        let mut without_index_metadata = with_index_metadata.clone();
+        without_index_metadata.normalized_patch = without_index_metadata
+            .normalized_patch
+            .replace("index ce01362..94954ab 100644\n", "");
+
+        let indexed_candidate = clean(fixture.path(), &with_index_metadata).await;
+        let metadata_free_candidate = clean(fixture.path(), &without_index_metadata).await;
+
+        assert_eq!(indexed_candidate.tree_sha, metadata_free_candidate.tree_sha);
+        assert_ne!(indexed_candidate.normalized_patch_digest, metadata_free_candidate.normalized_patch_digest);
+        assert_ne!(indexed_candidate.candidate_sha, metadata_free_candidate.candidate_sha);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
