@@ -44,6 +44,10 @@ pub fn tool_submit_work() -> RmcpTool {
                             {"type": "object", "additionalProperties": false, "required": ["kind", "invocation"], "properties": {"kind": {"type": "string", "const": "command"}, "invocation": {"type": "object", "additionalProperties": false, "required": ["invocation_id"], "properties": {"invocation_id": {"type": "string"}}}}}
                         ]}}}}
                     }
+                },
+                "tribunal_evidence_return_v1": {
+                    "type": "object",
+                    "description": "Raw canonical TribunalEvidenceReturnV1 for the exact linked typed-evidence spike. Supply the V1 payload unchanged; malformed payloads are deliberately delivered for durable validation failure handling."
                 }
             },
             "additionalProperties": false

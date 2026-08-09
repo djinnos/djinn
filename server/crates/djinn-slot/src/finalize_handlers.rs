@@ -6,7 +6,7 @@ use djinn_db::repositories::task_rejected_submission_integrity::{
     RecordTaskRejectedSubmissionParams, TaskRejectedSubmissionIntegrityRepository,
 };
 use djinn_db::repositories::task_run::TaskRunRepository;
-use djinn_db::{EvidenceRepository, ProposalRepository, TaskRepository};
+use djinn_db::{EvidenceRepository, ProposalRepository, TaskRepository, TypedEvidenceRepository};
 
 /// Process the structured finalize tool payload captured by the reply loop (ADR-036).
 ///
@@ -127,6 +127,38 @@ pub async fn handle_submit_work(
             return false;
         }
     };
+    // A typed return is an additive delivery channel, not an interpretation of
+    // ordinary completion prose. Bind it to the task authenticated by the slot
+    // boundary, never to `task_id` or `spike_task_id` supplied by the agent.
+    // Keep the raw JSON intact so malformed returns can be validated and
+    // terminally failed by the coordinator's typed repository ingress.
+    if let Some(raw_return) = &work.tribunal_evidence_return_v1 {
+        let typed_evidence = TypedEvidenceRepository::new(app_state.db.clone());
+        match typed_evidence.has_active_attempt_for_task(task_id).await {
+            Ok(true) => {
+                let raw_payload = raw_return.to_string();
+                let repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+                if let Err(error) = repo
+                    .log_activity(
+                        Some(task_id),
+                        "agent-supervisor",
+                        "worker",
+                        "tribunal_evidence_return_v1",
+                        &raw_payload,
+                    )
+                    .await
+                {
+                    tracing::warn!(task_id = %task_id, error = %error, "finalize_handlers: failed to log typed evidence return");
+                    return false;
+                }
+            }
+            Ok(false) => {}
+            Err(error) => {
+                tracing::warn!(task_id = %task_id, error = %error, "finalize_handlers: failed typed evidence delivery fence lookup");
+                return false;
+            }
+        }
+    }
     let proposals = ProposalRepository::new(app_state.db.clone(), app_state.event_bus.clone());
     let linked = match proposals.find_by_linked_spike(task_id).await {
         Ok(linked) => linked,
