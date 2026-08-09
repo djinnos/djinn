@@ -409,8 +409,8 @@ pub use repositories::{
         TribunalEvidenceReturnGapV1, TribunalEvidenceReturnResultV1, TribunalEvidenceReturnV1,
         TypedEvidenceAttemptAllocation, TypedEvidenceBackfillReport,
         TypedEvidenceDispositionProjection, TypedEvidenceFindingProjection,
-        TypedEvidenceRepository, TypedEvidenceRetryDispatchErrorInput, legacy_demand_hash,
-        normalized_demand_hash,
+        TypedEvidenceLifecycleProjection, TypedEvidenceRepository,
+        TypedEvidenceRetryDispatchErrorInput, legacy_demand_hash, normalized_demand_hash,
     },
     usage_analytics::{
         EntityBreakdownRow, GroupDimension, ModelEffectivenessRow, ProjectModelMatrixRow,

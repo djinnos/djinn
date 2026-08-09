@@ -196,6 +196,15 @@ pub struct LegacyEvidenceParityProjection {
     pub spike_task_id: Option<String>,
 }
 
+/// Coordinator-facing lifecycle authority. The repository owns the typed read
+/// and the mixed-version fence so consumers cannot recreate parity rules.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TypedEvidenceLifecycleProjection {
+    Absent,
+    Valid(Box<TribunalEvidenceFinding>),
+    Invalid,
+}
+
 /// Summary of a re-runnable legacy migration. Rows that cannot be represented
 /// (notably malformed claims) are skipped rather than guessed.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -381,6 +390,57 @@ impl TypedEvidenceRepository {
         let result = Self::dual_read_legacy_parity_in_transaction(&mut tx, proposal_id).await?;
         tx.commit().await?;
         Ok(result)
+    }
+
+    /// Project the single live finding for coordinator dispatch. Ambiguous or
+    /// legacy-mismatched authority is invalid rather than inferred from tasks.
+    pub async fn coordinator_lifecycle_projection(
+        &self,
+        proposal_id: &str,
+    ) -> Result<TypedEvidenceLifecycleProjection> {
+        let rows = sqlx::query("SELECT id,proposal_id,demand_hash,lifecycle,claim,demanded_revision_seq,created_by_task_id,created_at,updated_at FROM typed_evidence_findings WHERE proposal_id=$1 AND lifecycle IN ('demanded','spike_active','evidence_received','failed')")
+            .bind(proposal_id).fetch_all(self.db.pool()).await?;
+        if rows.is_empty() {
+            return Ok(TypedEvidenceLifecycleProjection::Absent);
+        }
+        if rows.len() != 1 {
+            return Ok(TypedEvidenceLifecycleProjection::Invalid);
+        }
+        let finding = finding(&rows[0])?;
+        match finding.lifecycle {
+            TribunalEvidenceLifecycle::Demanded | TribunalEvidenceLifecycle::SpikeActive => {
+                match self.dual_read_legacy_parity(proposal_id).await? {
+                    Some(parity) if parity.finding.id == finding.id => {
+                        Ok(TypedEvidenceLifecycleProjection::Valid(Box::new(finding)))
+                    }
+                    _ => Ok(TypedEvidenceLifecycleProjection::Invalid),
+                }
+            }
+            TribunalEvidenceLifecycle::EvidenceReceived | TribunalEvidenceLifecycle::Failed => {
+                let legacy = sqlx::query(
+                    "SELECT linked_spike_task_id,needs_evidence_claim FROM proposals WHERE id=$1",
+                )
+                .bind(proposal_id)
+                .fetch_optional(self.db.pool())
+                .await?;
+                match legacy {
+                    Some(row)
+                        if row
+                            .get::<Option<String>, _>("linked_spike_task_id")
+                            .is_none()
+                            && row
+                                .get::<Option<String>, _>("needs_evidence_claim")
+                                .is_none() =>
+                    {
+                        Ok(TypedEvidenceLifecycleProjection::Valid(Box::new(finding)))
+                    }
+                    _ => Ok(TypedEvidenceLifecycleProjection::Invalid),
+                }
+            }
+            TribunalEvidenceLifecycle::Resolved | TribunalEvidenceLifecycle::Withdrawn => {
+                Ok(TypedEvidenceLifecycleProjection::Absent)
+            }
+        }
     }
 
     pub async fn dual_read_legacy_parity_in_transaction(

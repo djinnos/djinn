@@ -1798,3 +1798,21 @@ fn captured_human_feedback_is_not_in_adversary_context() {
         assert!(context.contains("pending_disposition=true"));
     }
 }
+
+/// Typed evidence receipt resumes only the Advocate folding phase. It is not a
+/// disposition, so stale Adversary/Judge work cannot bypass the typed finding
+/// gate in either the durable or legacy dispatcher.
+#[test]
+fn evidence_received_allows_only_advocate_folding_phase() {
+    use super::super::refinement::RefinementPhase;
+
+    assert!(super::evidence_receipt_allows_phase(
+        RefinementPhase::AdvocateRevision
+    ));
+    assert!(!super::evidence_receipt_allows_phase(
+        RefinementPhase::AdversaryAttack
+    ));
+    assert!(!super::evidence_receipt_allows_phase(
+        RefinementPhase::JudgeAdjudication
+    ));
+}

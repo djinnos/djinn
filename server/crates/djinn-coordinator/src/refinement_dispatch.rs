@@ -121,6 +121,12 @@ fn refinement_phase_for_intent(
     }
 }
 
+/// A received evidence return remains an unresolved typed finding. It may only
+/// resume the Advocate fold that incorporates that return into the proposal.
+fn evidence_receipt_allows_phase(phase: RefinementPhase) -> bool {
+    phase == RefinementPhase::AdvocateRevision
+}
+
 /// Why the administrative / terminal gates forbid **new** durable refinement
 /// dispatch on this tick.
 ///
@@ -141,6 +147,9 @@ enum DurableDispatchBlock {
     /// The proposal row could not be read, so no gate state is known. Fail
     /// closed, exactly as the legacy path does.
     ProposalUnreadable,
+    /// Typed evidence is demanded, active, failed, or invalid; do not create
+    /// another tribunal task until the authoritative finding changes.
+    EvidenceBlocked,
 }
 
 impl DurableDispatchBlock {
@@ -149,6 +158,7 @@ impl DurableDispatchBlock {
             Self::PausedOrFrozen => "paused_or_frozen",
             Self::Terminal => "terminal",
             Self::ProposalUnreadable => "proposal_unreadable",
+            Self::EvidenceBlocked => "typed_evidence_blocked",
         }
     }
 }
@@ -278,15 +288,15 @@ impl CoordinatorActor {
             if intents.is_empty() {
                 continue;
             }
-            // Operator-control parity with the legacy phase dispatcher, read
-            // once per run rather than once per intent. Consulted only at the
-            // points that would create or enqueue role work — never before the
-            // recovery arm below, which merely re-registers an already-running
-            // role so its outcome is still processed while the gate holds.
-            let dispatch_block = self
-                .durable_refinement_dispatch_block(&run.proposal_id)
-                .await;
             for intent in intents {
+                // Consult the lifecycle before creating or enqueueing role
+                // work. Receipt is proposal-wide but its exception is phase
+                // specific: it resumes only the Advocate folding intent.
+                // Keep the already-started recovery arm below ungated so a
+                // role outcome is never stranded after a gate engages.
+                let dispatch_block = self
+                    .durable_refinement_dispatch_block(&run.proposal_id, intent.phase)
+                    .await;
                 if matches!(
                     intent.state,
                     djinn_core::refinement_liveness::RefinementIntentState::Materialized
@@ -640,6 +650,7 @@ impl CoordinatorActor {
     async fn durable_refinement_dispatch_block(
         &self,
         proposal_id: &str,
+        phase: djinn_core::refinement_liveness::RefinementPhase,
     ) -> Option<DurableDispatchBlock> {
         let Some(proposal) =
             poll_stack::boxed(|| self.load_proposal_for_lifecycle(proposal_id)).await
@@ -672,17 +683,18 @@ impl CoordinatorActor {
                 );
                 Some(DurableDispatchBlock::Terminal)
             }
-            // The evidence-cycle states are deliberately NOT gated here. The
-            // durable ledger parks an evidence demand as a run-level
-            // `RefinementParkKind::AwaitingEvidence` (which removes the run
-            // from `load_active_refinement_runs`), so it owns that pause
-            // already; layering the derived evidence states on top would be a
-            // new policy for durable runs rather than the operator-control
-            // parity this gate is for.
-            EvidenceLifecycleState::Active
-            | EvidenceLifecycleState::EvidenceReady
+            EvidenceLifecycleState::Active => None,
+            // Receipt is not a structural disposition. Only the Advocate fold
+            // may incorporate the finding; stale Judge and Adversary intents
+            // remain parked until a later authoritative transition.
+            EvidenceLifecycleState::EvidenceReady
+                if evidence_receipt_allows_phase(refinement_phase_for_intent(phase)) =>
+            {
+                None
+            }
+            EvidenceLifecycleState::EvidenceReady
             | EvidenceLifecycleState::AwaitingEvidence
-            | EvidenceLifecycleState::EvidenceFailed => None,
+            | EvidenceLifecycleState::EvidenceFailed => Some(DurableDispatchBlock::EvidenceBlocked),
         }
     }
 
@@ -1332,10 +1344,18 @@ impl CoordinatorActor {
             let lifecycle_state =
                 poll_stack::boxed(|| self.derive_proposal_evidence_lifecycle(proposal)).await;
             match lifecycle_state {
-                EvidenceLifecycleState::Active | EvidenceLifecycleState::EvidenceReady => {
-                    // Proceed to dispatch — either normal refinement or
-                    // evidence findings are available and dispatch is not
-                    // paused/frozen.
+                EvidenceLifecycleState::Active => {}
+                // Evidence receipt is deliberately not a finding resolution.
+                // It permits only the Advocate fold which can incorporate it.
+                EvidenceLifecycleState::EvidenceReady if evidence_receipt_allows_phase(phase) => {}
+                EvidenceLifecycleState::EvidenceReady => {
+                    tracing::info!(
+                        proposal_id = %proposal_id,
+                        phase = ?phase,
+                        lifecycle_state = "evidence_received",
+                        "Refinement dispatch skipped: received evidence may resume only the Advocate folding phase"
+                    );
+                    return;
                 }
                 EvidenceLifecycleState::AwaitingEvidence => {
                     tracing::info!(
