@@ -170,10 +170,22 @@ impl GitHubApiClient {
                 let status = response.status();
                 let body = response.text().await.unwrap_or_default();
                 match self.observe_exact_ref(owner, repo, ref_name).await {
-                    ExactRefObservation::Found { sha } => {
+                    // A failed conditional write is stale only when the
+                    // follow-up observation proves another writer moved (or
+                    // removed) the ref. Do not mask a 403 while the ref is
+                    // still at the expected old SHA.
+                    ExactRefObservation::Found { sha } if sha != expected_old_sha => {
                         ExpectedOldShaRefUpdateResult::StaleObservedHead {
                             observed_sha: Some(sha),
                         }
+                    }
+                    ExactRefObservation::Found { .. } => {
+                        ExpectedOldShaRefUpdateResult::ProviderFailure(GitHubApiError::http(
+                            "update_ref_expected_old_sha",
+                            path,
+                            status,
+                            body,
+                        ))
                     }
                     ExactRefObservation::NotFound => {
                         ExpectedOldShaRefUpdateResult::StaleObservedHead { observed_sha: None }

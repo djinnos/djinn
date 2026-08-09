@@ -57,25 +57,84 @@ impl GitHubApiClient {
                 }
             };
         }
-        match self
-            .create_pull_request(
-                owner,
-                repo,
-                CreatePrParams {
-                    title: params.title.clone(),
-                    body: params.body.clone(),
-                    head: params.head.clone(),
-                    base: "main".into(),
-                    maintainer_can_modify: Some(false),
-                    draft: Some(true),
+        // Do not delegate this POST to `create_pull_request`: its legacy 422
+        // recovery deliberately adopts the first listed PR. Attempt identity
+        // requires inspecting the complete race candidate set before adoption.
+        let path = format!("/repos/{owner}/{repo}/pulls");
+        let url = format!("{}{}", self.base_url, path);
+        let body = match serde_json::to_value(CreatePrParams {
+            title: params.title.clone(),
+            body: params.body.clone(),
+            head: params.head.clone(),
+            base: "main".into(),
+            maintainer_can_modify: Some(false),
+            draft: Some(true),
+        }) {
+            Ok(body) => body,
+            Err(error) => {
+                return AttemptDraftPrResult::ProviderFailure(GitHubApiError::transport(
+                    "create_or_adopt_attempt_draft_pr",
+                    path,
+                    error.to_string(),
+                ));
+            }
+        };
+        let response = self
+            .send_with_retry(|token| {
+                let url = url.clone();
+                let body = body.clone();
+                let http = self.http.clone();
+                async move {
+                    handle_rate_limit(
+                        http.post(&url)
+                            .bearer_auth(&token)
+                            .header("Accept", "application/vnd.github+json")
+                            .header("X-GitHub-Api-Version", "2022-11-28")
+                            .json(&body)
+                            .send()
+                            .await?,
+                    )
+                    .await
+                }
+            })
+            .await;
+        let response = match response {
+            Ok(response) => response,
+            Err(error) => return AttemptDraftPrResult::ProviderFailure(error),
+        };
+        if response.status().is_success() {
+            return match response.json::<PullRequest>().await {
+                Ok(pr) if exact(&pr) => AttemptDraftPrResult::Created(pr),
+                Ok(pr) => AttemptDraftPrResult::ProposalPrIdentityMismatch {
+                    candidates: vec![pr],
                 },
-            )
-            .await
+                Err(error) => AttemptDraftPrResult::ProviderFailure(GitHubApiError::transport(
+                    "create_or_adopt_attempt_draft_pr",
+                    path,
+                    error.to_string(),
+                )),
+            };
+        }
+        let status = response.status();
+        let response_body = response.text().await.unwrap_or_default();
+        if status != reqwest::StatusCode::UNPROCESSABLE_ENTITY
+            || !response_body.contains("already exists")
         {
-            Ok(pr) if exact(&pr) => AttemptDraftPrResult::Created(pr),
-            Ok(pr) => AttemptDraftPrResult::ProposalPrIdentityMismatch {
-                candidates: vec![pr],
-            },
+            return AttemptDraftPrResult::ProviderFailure(github_pr_write_error(
+                "POST",
+                &path,
+                Some(status),
+                &response_body,
+                "create_or_adopt_attempt_draft_pr",
+            ));
+        }
+        match self.list_pulls_by_head(owner, repo, &head_filter).await {
+            Ok(candidates) if candidates.len() == 1 && exact(&candidates[0]) => {
+                AttemptDraftPrResult::AdoptedExact(
+                    candidates.into_iter().next().expect("one exact candidate"),
+                )
+            }
+            Ok(candidates) => AttemptDraftPrResult::ProposalPrIdentityMismatch { candidates },
             Err(error) => AttemptDraftPrResult::ProviderFailure(error),
         }
     }
