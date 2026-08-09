@@ -25,5 +25,8 @@ expression: section
 - `proposal_debate_resolve(id, reason?, verdict?)`
 - `proposal_debate_append(against_revision_seq, agent_role, body, kind, proposal_id, round, blocking?)`
 - `proposal_refinement_demand_evidence(against_revision_seq, expected_findings, insufficient_in_session_research, load_bearing_category, proposal_id, question, round, spec_unknown_anchor, target_subsystem)`
+- `proposal_refinement_retry_evidence(failed_transition_id, finding_id)`
+- `proposal_refinement_resolve_evidence(finding_id, folding_revision, rationale, validation_result_id)`
+- `proposal_refinement_withdraw_evidence(finding_id, folding_revision, rationale, withdrawal_is_non_load_bearing)`
 - `task_comment_add(body, id)`
 - `submit_decision(decision, task_id, created_tasks?, diagnostic_reason?, directive?, evidence?, exclude_models?, park_dossier?, rationale?, verification_command?)`
