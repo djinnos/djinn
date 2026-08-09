@@ -23,6 +23,9 @@ use djinn_coordinator::build_lease::BuildLeaseService;
 use djinn_coordinator::build_lease_reclaim::{BuildLeaseReclaimReport, BuildLeaseReclaimer};
 use djinn_coordinator::graph_warm_lease::BuildLeaseGraphWarmAdapter;
 use djinn_coordinator::run_dir_observe::{RunDirObserveSeams, arm_disk_observation};
+use djinn_coordinator::startup_census::{
+    GoneProvenance, InventoryAvailability, StartupCensus, TaskRunWitness,
+};
 use djinn_core::clock::{Clock, SystemClock as SystemClockTrait};
 use djinn_core::models::KnowledgeInjectionConfig;
 use djinn_db::{
@@ -164,6 +167,19 @@ impl StartupReconnectabilityMeasurement {
     pub(crate) fn reconnectable_task_run_ids(&self) -> &HashSet<String> {
         &self.reconnectable_task_run_ids
     }
+}
+
+/// Closed Stage A identity gate. Invalid identities and identities omitted
+/// from the immutable non-terminal ledger census fail closed.
+pub(crate) fn stage_a_identity_is_destructive(
+    task_run_id: Option<&str>,
+    positive_gone: &HashSet<&str>,
+    connected: bool,
+) -> bool {
+    let Some(task_run_id) = task_run_id.map(str::trim).filter(|id| !id.is_empty()) else {
+        return false;
+    };
+    !connected && positive_gone.contains(task_run_id)
 }
 
 /// Build a `QdrantConfig` from `QDRANT_URL` (and friends), falling back to
@@ -1918,6 +1934,10 @@ impl AppState {
 
     /// Spawn long-running agent actors once and keep their handles in AppState.
     pub async fn initialize_agents(&self) {
+        self.initialize_agents_with_startup_census(None).await;
+    }
+
+    async fn initialize_agents_with_startup_census(&self, startup_census: Option<StartupCensus>) {
         if self.pool().await.is_some() {
             return;
         }
@@ -1955,6 +1975,10 @@ impl AppState {
         .with_mirror(self.inner.mirror.clone())
         .with_runtime_ops(Arc::new(self.clone()))
         .with_rpc_registry(self.inner.rpc_registry.clone());
+        let deps = match startup_census {
+            Some(census) => deps.with_startup_census(census),
+            None => deps,
+        };
         let coordinator = djinn_agent::actors::coordinator::spawn_coordinator(deps);
 
         *self.inner.pool.lock().await = Some(pool.clone());
@@ -2190,16 +2214,23 @@ impl AppState {
             std::process::exit(1);
         }
 
-        // Finalize any sessions left in `running` from a previous leader. Safe
-        // now (and only now): we hold the lock, so the previous leader is gone
-        // and any `running` row is genuinely orphaned.
-        //
-        // This intentionally runs before spawning the coordinator: the
-        // coordinator's startup task-run Job backstop immediately reconciles K8s
-        // Jobs against these interrupted rows, so boot cleanup does not have to
-        // wait for the long periodic stale-resource sweep. The backstop remains
-        // idempotent if this ordering changes and observes a still-running row.
-        self.interrupt_stale_sessions_on_startup().await;
+        // Acquire the only startup census before any Stage A/B/C lifecycle
+        // mutation. Stage A borrows it; ownership moves into coordinator startup.
+        let inventory = self
+            .graph_warmer()
+            .await
+            .as_any()
+            .downcast_ref::<K8sGraphWarmer>()
+            .and_then(K8sGraphWarmer::workload_inventory);
+        let startup_census = match StartupCensus::acquire(self.db().clone(), inventory).await {
+            Ok(census) => census,
+            Err(error) => {
+                tracing::error!(%error, "startup census acquisition failed; deferring lifecycle reapers");
+                return;
+            }
+        };
+        self.interrupt_stale_sessions_on_startup_with_census(&startup_census)
+            .await;
 
         // Best-effort backfill of pricing snapshot columns for pre-existing
         // sessions that were created before snapshot capture was added.  Uses
@@ -2209,7 +2240,8 @@ impl AppState {
         self.backfill_session_pricing_on_startup().await;
 
         // Coordinator + slot pool (the dispatch engine) + runtime settings.
-        self.initialize_agents().await;
+        self.initialize_agents_with_startup_census(Some(startup_census))
+            .await;
 
         // One-shot backfill of pre-existing blobless mirrors to full mirrors.
         // Idempotent + serialized per-project by the mirror lock.
@@ -2460,51 +2492,92 @@ impl AppState {
     /// The test build uses `pub(crate)` visibility so the same logic can be
     /// exercised from crate-internal tests without requiring the public API to
     /// expose the startup interruption seam.
-    #[cfg(not(test))]
-    async fn interrupt_stale_sessions_on_startup(&self) {
-        self.interrupt_stale_sessions_on_startup_impl().await
-    }
-
     #[cfg(test)]
     pub(crate) async fn interrupt_stale_sessions_on_startup(&self) {
         self.interrupt_stale_sessions_on_startup_impl().await
     }
 
-    /// Shared implementation for [`Self::interrupt_stale_sessions_on_startup`].
+    /// Shared legacy implementation when inventory is not configured.
+    #[cfg(test)]
     async fn interrupt_stale_sessions_on_startup_impl(&self) {
+        let census = StartupCensus::acquire(self.db().clone(), None)
+            .await
+            .expect("legacy startup census ledger read");
+        self.interrupt_stale_sessions_on_startup_with_census(&census)
+            .await;
+    }
+
+    /// Stage A: only positive destructive census evidence authorizes mutation.
+    #[cfg(not(test))]
+    async fn interrupt_stale_sessions_on_startup_with_census(&self, census: &StartupCensus) {
+        self.interrupt_stale_sessions_on_startup_with_census_impl(census)
+            .await;
+    }
+
+    /// Crate-visible only so the startup identity matrix drives the configured
+    /// Stage A path rather than the `NotConfigured` compatibility path.
+    #[cfg(test)]
+    pub(crate) async fn interrupt_stale_sessions_on_startup_with_census(
+        &self,
+        census: &StartupCensus,
+    ) {
+        self.interrupt_stale_sessions_on_startup_with_census_impl(census)
+            .await;
+    }
+
+    async fn interrupt_stale_sessions_on_startup_with_census_impl(&self, census: &StartupCensus) {
         use djinn_db::SessionRepository;
         let repo = SessionRepository::new(self.db().clone(), self.event_bus());
-
-        // ── Measurement (proposal phif AC 7/8) ─────────────────────────────
-        // Observe reconnectability *before* the selective/blanket interruption
-        // mutation so the structured event reflects the pre-mutation state.
-        let measurement = self.measure_startup_reconnectability(&repo).await;
-
-        tracing::info!(
-            target: "djinn_startup_running_session_reconnectability",
-            running_sessions = measurement.running_sessions,
-            connected_or_reconnectable_sessions = measurement.connected_or_reconnectable_sessions,
-            grace_window_ms = measurement.grace_window_ms,
-            startup_instance_id = %measurement.startup_instance_id,
-            "startup reconnectability measurement"
-        );
-
-        // ── Mutation (proposal phif AC 8) ─────────────────────────────────────
-        // Use the exact reconnectable identity set to preserve reconnectable
-        // running sessions while still interrupting stale ones (NULL task_run_id
-        // and disconnected identities are not preserved).
-        let reconnectable_ids = measurement.reconnectable_task_run_ids();
-        let result = if reconnectable_ids.is_empty() {
-            repo.interrupt_all_running().await
+        let result = if census.availability() == InventoryAvailability::NotConfigured {
+            // Configuration absence intentionally retains the pre-census table.
+            let measurement = self.measure_startup_reconnectability(&repo).await;
+            let ids = measurement.reconnectable_task_run_ids();
+            if ids.is_empty() {
+                repo.interrupt_all_running().await
+            } else {
+                repo.interrupt_running_except_task_run_ids(ids).await
+            }
         } else {
-            repo.interrupt_running_except_task_run_ids(reconnectable_ids)
-                .await
+            let gone: HashSet<&str> = census
+                .runs()
+                .iter()
+                .filter_map(|run| {
+                    matches!(
+                        run.witness,
+                        TaskRunWitness::Gone(
+                            GoneProvenance::AuthoritativelyAbsent | GoneProvenance::TerminalPresent
+                        )
+                    )
+                    .then_some(run.task_run_id.as_str())
+                })
+                .collect();
+            let mut session_ids = HashSet::new();
+            match repo.list_active().await {
+                Ok(sessions) => {
+                    for session in sessions {
+                        let connected = match session.task_run_id.as_deref() {
+                            Some(run_id) => self.rpc_registry().is_connected(run_id.trim()).await,
+                            None => false,
+                        };
+                        if stage_a_identity_is_destructive(
+                            session.task_run_id.as_deref(),
+                            &gone,
+                            connected,
+                        ) {
+                            session_ids.insert(session.id);
+                        }
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "Stage A could not enumerate sessions; deferring");
+                }
+            }
+            repo.interrupt_running_session_ids(&session_ids).await
         };
-
         match result {
             Ok(0) => {}
-            Ok(n) => tracing::info!(count = n, "interrupted stale sessions from previous run"),
-            Err(e) => tracing::warn!(error = %e, "failed to interrupt stale sessions"),
+            Ok(count) => tracing::info!(count, "interrupted census-confirmed stale sessions"),
+            Err(error) => tracing::warn!(%error, "failed to interrupt stale sessions"),
         }
     }
 

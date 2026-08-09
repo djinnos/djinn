@@ -76,6 +76,14 @@ impl CoordinatorDeps {
         self
     }
 
+    pub fn with_startup_census(
+        mut self,
+        census: djinn_coordinator::startup_census::StartupCensus,
+    ) -> Self {
+        self.inner = self.inner.with_startup_census(census);
+        self
+    }
+
     pub fn with_mirror(mut self, mirror: std::sync::Arc<djinn_workspace::MirrorManager>) -> Self {
         self.inner = self.inner.with_mirror(mirror);
         self

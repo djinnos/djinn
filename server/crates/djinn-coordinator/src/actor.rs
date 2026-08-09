@@ -52,6 +52,30 @@ where
     StartupLegacySettingsImportsComplete
 }
 
+/// Complete the finite lifecycle-reaper phase before normal actor admission.
+/// Only explicit inventory absence selects the pinned legacy transition table;
+/// configured but unavailable evidence fails closed.
+pub async fn complete_startup_reaper_phase(
+    db: &Database,
+    coordinator_incarnation_id: &str,
+    census: Option<&crate::startup_census::StartupCensus>,
+) {
+    use crate::startup_census::InventoryAvailability;
+
+    if matches!(
+        census.map(crate::startup_census::StartupCensus::availability),
+        None | Some(InventoryAvailability::NotConfigured)
+    ) {
+        health::reap_stale_task_runs_for_startup(db).await;
+        health::reap_orphaned_pending_attempts_for_startup(db, coordinator_incarnation_id).await;
+    } else {
+        tracing::info!(
+            reason = "unknown",
+            "configured startup census deferred coordinator lifecycle reapers"
+        );
+    }
+}
+
 // ─── Actor (≤20 fields — AGENT-11) ───────────────────────────────────────────
 
 /// Where a [`CoordinatorActor`] keeps its doctor checks.
@@ -322,6 +346,8 @@ pub(super) struct CoordinatorActor {
     /// `None` off-server (no kube client, hence no task-run Jobs to observe)
     /// and in tests unless a fake is injected.
     pub(super) workload_inventory: Option<Arc<dyn djinn_k8s::WorkloadInventory>>,
+    /// Exact immutable snapshot captured before Stage A mutates session rows.
+    pub(super) startup_census: Option<crate::startup_census::StartupCensus>,
     /// Shared bare-mirror manager used by `process_approved_tasks` to build
     /// an `AgentContext` whose direct-push fallback can clone ephemeral
     /// workspaces. `None` in tests.
@@ -661,6 +687,7 @@ impl CoordinatorActor {
             provider_action_scope,
             lsp,
             graph_warmer,
+            startup_census,
             consolidation_runner,
             mirror,
             runtime_ops,
@@ -802,6 +829,7 @@ impl CoordinatorActor {
             last_proposal_review_sweep: SystemClock::new().now_instant(),
             last_graph_refresh: SystemClock::new().now_instant(),
             workload_inventory: workload_inventory_from_warmer(graph_warmer.as_ref()),
+            startup_census,
             graph_warmer,
             mirror,
             runtime_ops,
@@ -1220,19 +1248,14 @@ impl CoordinatorActor {
             );
         }
 
-        // Startup reap: any `task_runs` row still marked `running` from before
-        // this process started is, by definition, orphaned — the worker Pod
-        // that owned it can no longer flush a terminal RPC to us. Run the
-        // same sweep the 15-min tick uses so the dev UI / queries don't show
-        // weeks-old stale rows after every restart.
-        poll_stack::boxed(|| health::reap_stale_task_runs_for_startup(&self.db)).await;
-        // Reap pending task_attempts orphaned while this coordinator was down
-        // (or wedged from before the reaper existed) so the respawn guard
-        // unblocks those (task, role) pairs immediately after a deploy.
+        // Finite Stage B/C recovery completes before normal actor admission.
+        // It consumes the immutable pre-mutation census handed in by the server;
+        // explicit NotConfigured retains the historical transition table.
         poll_stack::boxed(|| {
-            health::reap_orphaned_pending_attempts_for_startup(
+            complete_startup_reaper_phase(
                 &self.db,
                 &self.coordinator_incarnation_id,
+                self.startup_census.as_ref(),
             )
         })
         .await;
