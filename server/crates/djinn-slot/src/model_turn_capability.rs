@@ -20,13 +20,18 @@ impl SlotLiveIdentity {
         if pod_uid.is_empty() {
             return None;
         }
-        let deployment_revision = std::env::var("DJINN_DEPLOYMENT_REVISION")
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_owned());
+        // The Job renderer supplies the exact image reference it put on this
+        // worker container (normally a digest-pinned pull ref). A package
+        // version is deliberately not a fallback: rebuilt artifacts can retain
+        // it and would collapse distinct live deployment revisions in B2.
+        let deployment_revision = std::env::var("DJINN_DEPLOYMENT_REVISION").ok()?;
+        let deployment_revision = deployment_revision.trim();
+        if deployment_revision.is_empty() {
+            return None;
+        }
         Some(Self {
             pod_uid: pod_uid.to_owned(),
-            deployment_revision,
+            deployment_revision: deployment_revision.to_owned(),
         })
     }
 }
