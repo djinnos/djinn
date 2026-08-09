@@ -950,6 +950,28 @@ impl TaskAttemptRepository {
         .await?)
     }
 
+    /// List old pending attempts without deriving task-run or session liveness.
+    /// Configured startup already captured liveness in its immutable census,
+    /// before any lifecycle mutation, so it must not use `list_orphaned_pending`.
+    pub async fn list_pending_before(
+        &self,
+        created_before_iso: &str,
+    ) -> Result<Vec<OrphanedPendingAttempt>> {
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_as!(
+            OrphanedPendingAttempt,
+            r#"SELECT ta.id AS "id!", ta.task_id AS "task_id!", ta.role AS "role!",
+                ta.dispatch_key AS "dispatch_key!", ta.created_at AS "created_at!",
+                ta.dispatch_owner_incarnation_id, ta.dispatch_group_id
+             FROM task_attempts ta
+             WHERE ta.outcome = 'pending' AND ta.created_at < $1
+             ORDER BY ta.created_at ASC"#,
+            created_before_iso
+        )
+        .fetch_all(self.db.pool())
+        .await?)
+    }
+
     /// List `submitted` attempt rows that look orphaned AND that the PR poller
     /// can never own: created before `created_before_iso`, with no live
     /// (`starting`/`running`) `task_run` and no `running` session, and whose

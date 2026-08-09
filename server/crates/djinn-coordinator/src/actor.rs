@@ -66,13 +66,17 @@ pub async fn complete_startup_reaper_phase(
         census.map(crate::startup_census::StartupCensus::availability),
         None | Some(InventoryAvailability::NotConfigured)
     ) {
+        // Explicitly unconfigured inventory retains the historical transition table.
         health::reap_stale_task_runs_for_startup(db).await;
         health::reap_orphaned_pending_attempts_for_startup(db, coordinator_incarnation_id).await;
-    } else {
-        tracing::info!(
-            reason = "unknown",
-            "configured startup census deferred coordinator lifecycle reapers"
-        );
+    } else if let Some(census) = census {
+        health::reap_stale_task_runs_for_startup_with_census(db, census).await;
+        health::reap_orphaned_pending_attempts_for_startup_with_census(
+            db,
+            coordinator_incarnation_id,
+            census,
+        )
+        .await;
     }
 }
 
