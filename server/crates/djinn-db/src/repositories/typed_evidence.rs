@@ -268,6 +268,42 @@ impl TypedEvidenceRepository {
         Ok(active)
     }
 
+    /// Materialize the minimal typed-evidence authority needed by cross-crate
+    /// finalize tests without exposing raw typed-evidence table writes there.
+    ///
+    /// **Not for production use.** The fixture is committed atomically so a
+    /// failed insert cannot leave a partial proposal/finding/attempt chain.
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn materialize_active_attempt_for_test(
+        &self,
+        proposal_id: &str,
+        finding_id: &str,
+        attempt_id: &str,
+        spike_task_id: &str,
+    ) -> Result<()> {
+        let mut tx = self.db.pool().begin().await?;
+        sqlx::query("INSERT INTO proposals (id,short_id,title,body,body_format,acceptance_criteria,status,latest_revision_seq) VALUES ($1,$2,'typed return','','markdown','[]','draft',1)")
+            .bind(proposal_id)
+            .bind(proposal_id.replace('-', ""))
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("INSERT INTO typed_evidence_findings (id,proposal_id,demand_hash,lifecycle,claim,demanded_revision_seq,created_by_task_id) VALUES ($1,$2,$3,'spike_active','{}',1,$4)")
+            .bind(finding_id)
+            .bind(proposal_id)
+            .bind(format!("demand-{finding_id}"))
+            .bind(spike_task_id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("INSERT INTO typed_evidence_attempts (id,finding_id,sequence,spike_task_id) VALUES ($1,$2,1,$3)")
+            .bind(attempt_id)
+            .bind(finding_id)
+            .bind(spike_task_id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
     pub async fn planned_checks_for_attempt_in_transaction(
         tx: &mut Transaction<'_, Postgres>,
         attempt_id: &str,

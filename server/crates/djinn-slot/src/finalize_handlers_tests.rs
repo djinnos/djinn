@@ -10,7 +10,7 @@ use djinn_control_plane::tools::evidence_plan::{
 use djinn_core::models::NeedsEvidenceClaim;
 use djinn_db::{
     CreateTaskAttemptParams, EvidenceRepository, ProposalCreateInput, ProposalRepository,
-    SessionRepository, TaskAttemptRepository, TaskRepository,
+    SessionRepository, TaskAttemptRepository, TaskRepository, TypedEvidenceRepository,
     repositories::session::CreateSessionParams,
     test_support::{
         reject_evidence_findings_debates_for_test, reject_evidence_projection_inserts_for_test,
@@ -407,25 +407,8 @@ async fn typed_evidence_submit_work_logs_raw_returns_for_authenticated_spike_onl
     let proposal_id = uuid::Uuid::now_v7().to_string();
     let finding_id = uuid::Uuid::now_v7().to_string();
     let attempt_id = uuid::Uuid::now_v7().to_string();
-    sqlx::query("INSERT INTO proposals (id,short_id,title,body,body_format,acceptance_criteria,status,latest_revision_seq) VALUES ($1,$2,'typed return','','markdown','[]','draft',1)")
-        .bind(&proposal_id)
-        .bind(proposal_id.replace('-', ""))
-        .execute(db.pool())
-        .await
-        .unwrap();
-    sqlx::query("INSERT INTO typed_evidence_findings (id,proposal_id,demand_hash,lifecycle,claim,demanded_revision_seq,created_by_task_id) VALUES ($1,$2,$3,'spike_active','{}',1,$4)")
-        .bind(&finding_id)
-        .bind(&proposal_id)
-        .bind(format!("demand-{finding_id}"))
-        .bind(&task.id)
-        .execute(db.pool())
-        .await
-        .unwrap();
-    sqlx::query("INSERT INTO typed_evidence_attempts (id,finding_id,sequence,spike_task_id) VALUES ($1,$2,1,$3)")
-        .bind(&attempt_id)
-        .bind(&finding_id)
-        .bind(&task.id)
-        .execute(db.pool())
+    TypedEvidenceRepository::new(db.clone())
+        .materialize_active_attempt_for_test(&proposal_id, &finding_id, &attempt_id, &task.id)
         .await
         .unwrap();
 
