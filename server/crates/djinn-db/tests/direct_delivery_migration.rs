@@ -184,8 +184,10 @@ async fn migration_203_reports_every_ambiguous_open_task_and_rolls_back() {
 
         let mut transaction = conn.begin().await.expect("start migration transaction");
         let migration = migration_203_sql();
-        let error = sqlx::query(&migration)
-            .execute(&mut *transaction)
+        // Raw SQL is required: this migration contains a DO block and several
+        // statements, which PostgreSQL cannot execute as one prepared query.
+        let error = transaction
+            .execute(migration.as_str())
             .await
             .expect_err("ambiguous owners reject migration");
         let report = error.to_string();
