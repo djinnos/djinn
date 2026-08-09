@@ -3054,15 +3054,16 @@ pub(super) async fn reap_stale_task_runs_for_startup_with_census(
 /// `starting` row with a missing Job can still be between ledger commit and
 /// CREATE, so authoritative absence cannot reap it. This never consults the
 /// startup age threshold or mutable repository state.
-fn startup_task_run_mutation_authorized(
-    run: &crate::startup_census::CensusTaskRun,
-) -> bool {
+fn startup_task_run_mutation_authorized(run: &crate::startup_census::CensusTaskRun) -> bool {
     use crate::startup_census::{DurableRunState, GoneProvenance, TaskRunWitness};
 
     matches!(
         (run.durable_state, run.witness),
         (_, TaskRunWitness::Gone(GoneProvenance::TerminalPresent))
-            | (DurableRunState::Running, TaskRunWitness::Gone(GoneProvenance::AuthoritativelyAbsent))
+            | (
+                DurableRunState::Running,
+                TaskRunWitness::Gone(GoneProvenance::AuthoritativelyAbsent)
+            )
     )
 }
 
@@ -3325,7 +3326,9 @@ async fn reap_orphaned_pending_attempts_core(
                     | Some(TaskCensusProjection::CreationTransit) => {
                         tracing::info!(stage = "startup_stage_c", reason = "preserved", task_id = %orphan.task_id, attempt_id = %orphan.id, "startup pending-attempt reaper preserved census-live task");
                     }
-                    Some(TaskCensusProjection::DestructivelyGone) => unreachable!("authorized above"),
+                    Some(TaskCensusProjection::DestructivelyGone) => {
+                        unreachable!("authorized above")
+                    }
                 }
                 continue;
             }
@@ -4651,7 +4654,6 @@ mod warm_base_unrecognized_sweep_tests {
         );
     }
 }
-
 
 #[cfg(test)]
 mod startup_census_reaper_gate_tests {

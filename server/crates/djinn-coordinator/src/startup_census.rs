@@ -226,7 +226,9 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use djinn_core::events::EventBus;
-    use djinn_db::{CreateTaskRunParams, TaskRepository};
+    use djinn_db::{
+        CreateTaskAttemptParams, CreateTaskRunParams, TaskAttemptRepository, TaskRepository,
+    };
     use djinn_k8s::UidGetResult;
 
     /// Controllable namespace inventory that records the concrete acquisition
@@ -322,6 +324,26 @@ mod tests {
             .await
             .expect("create running task-run fixture");
         (db, task.id, run_id)
+    }
+
+    async fn seed_old_pending_attempt(db: &Database, task_id: &str) -> String {
+        let attempt_id = uuid::Uuid::now_v7().to_string();
+        TaskAttemptRepository::new(db.clone())
+            .create_or_get_pending(CreateTaskAttemptParams {
+                id: &attempt_id,
+                task_id,
+                role: "worker",
+                dispatch_key: &format!("{task_id}:worker:{attempt_id}"),
+                session_id: None,
+                attempt_seq: None,
+                dispatch_owner_incarnation_id: None,
+                dispatch_group_id: None,
+            })
+            .await
+            .expect("create pending attempt fixture");
+        djinn_db::test_support::backdate_task_attempt_created_at(db, &attempt_id, "30 seconds")
+            .await;
+        attempt_id
     }
 
     #[tokio::test]
@@ -425,6 +447,78 @@ mod tests {
         assert_eq!(
             project_tasks(&runs).get("task"),
             Some(&TaskCensusProjection::Unknown)
+        );
+    }
+
+    #[test]
+    fn projection_preserves_live_and_creation_transit_over_destructive_evidence() {
+        let gone = CensusTaskRun {
+            task_id: "task".into(),
+            task_run_id: "gone".into(),
+            durable_state: DurableRunState::Running,
+            witness: TaskRunWitness::Gone(GoneProvenance::TerminalPresent),
+        };
+        let live = CensusTaskRun {
+            task_id: "task".into(),
+            task_run_id: "live".into(),
+            durable_state: DurableRunState::Running,
+            witness: TaskRunWitness::Live,
+        };
+        let transit = CensusTaskRun {
+            task_id: "task".into(),
+            task_run_id: "starting".into(),
+            durable_state: DurableRunState::Starting,
+            witness: TaskRunWitness::Gone(GoneProvenance::AuthoritativelyAbsent),
+        };
+        assert_eq!(
+            project_tasks(&[gone.clone(), live]).get("task"),
+            Some(&TaskCensusProjection::Live)
+        );
+        assert_eq!(
+            project_tasks(&[gone, transit]).get("task"),
+            Some(&TaskCensusProjection::CreationTransit)
+        );
+    }
+
+    #[tokio::test]
+    async fn configured_reapers_consume_the_acquired_census_without_inventory_calls() {
+        let (db, task_id, run_id) = seed_running_run().await;
+        let attempt_id = seed_old_pending_attempt(&db, &task_id).await;
+        let inventory = Arc::new(CountingInventory::listed_empty(ObjectPresence::Absent));
+        let census = StartupCensus::acquire(db.clone(), Some(inventory.clone()))
+            .await
+            .expect("acquire startup census");
+        let list_calls = inventory.list_calls.load(Ordering::SeqCst);
+        let presence_calls = inventory.presence_calls.load(Ordering::SeqCst);
+        crate::health::reap_stale_task_runs_for_startup_with_census(&db, &census).await;
+        crate::health::reap_orphaned_pending_attempts_for_startup_with_census(
+            &db,
+            &uuid::Uuid::now_v7().to_string(),
+            &census,
+        )
+        .await;
+        assert_eq!(inventory.list_calls.load(Ordering::SeqCst), list_calls);
+        assert_eq!(
+            inventory.presence_calls.load(Ordering::SeqCst),
+            presence_calls
+        );
+        assert_eq!(
+            TaskRunRepository::new(db.clone())
+                .get(&run_id)
+                .await
+                .expect("read task run")
+                .expect("task run exists")
+                .status,
+            "interrupted"
+        );
+        assert_eq!(
+            TaskAttemptRepository::new(db.clone())
+                .get(&attempt_id)
+                .await
+                .expect("read attempt")
+                .expect("attempt exists")
+                .outcome,
+            "interrupted"
         );
     }
 }
