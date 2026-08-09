@@ -170,7 +170,17 @@ impl LlmProvider for ScriptedCoveredB1Provider {
             .push(context);
         self.launched[ordinal].notify_waiters();
         let (tx, rx) = tokio::sync::oneshot::channel();
-        let (frames, outcome) = if ordinal == 0 && !self.pending_first_stream {
+        let (frames, outcome) = if ordinal == 0 && self.pending_first_stream {
+            // Keep the watchdog attempt's real provider read pending until
+            // the production watchdog aborts B1. A completed frame here
+            // would let the parser finish before it can set
+            // `StreamTurnState::watchdog_aborted`.
+            (
+                Box::pin(futures::stream::pending::<anyhow::Result<SseFrame>>())
+                    as Pin<Box<dyn futures::Stream<Item = anyhow::Result<SseFrame>> + Send>>,
+                terminal(ProviderAttemptTerminalV1::Aborted, None),
+            )
+        } else if ordinal == 0 {
             (
                 Box::pin(futures::stream::empty())
                     as Pin<Box<dyn futures::Stream<Item = anyhow::Result<SseFrame>> + Send>>,
@@ -635,7 +645,9 @@ async fn watchdog_aborted_b1_terminal_does_not_replace_in_real_reply_loop() {
             .to_string()
             .contains("watchdog aborted")
     );
-    assert_eq!(hooks.heartbeats.load(Ordering::Acquire), 1);
+    // The watchdog's initial interval tick and the explicit 20-second tick
+    // both attempt their failed heartbeat before its 40-second deadline wins.
+    assert_eq!(hooks.heartbeats.load(Ordering::Acquire), 2);
     assert!(
         provider
             .first_abort
