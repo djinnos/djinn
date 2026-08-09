@@ -61,6 +61,8 @@ pub mod ci_reproduction;
 pub mod context;
 pub mod disk_admission;
 pub mod dispatch_pause;
+/// Crash-convergent direct append engine, unreachable while its epoch is off.
+pub mod direct_delivery;
 pub mod doctor;
 pub mod environment;
 pub mod events;
