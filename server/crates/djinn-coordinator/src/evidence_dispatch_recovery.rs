@@ -2,7 +2,8 @@
 
 use super::actor::CoordinatorActor;
 use djinn_db::{
-    DispatchTypedEvidenceRetryInput, TaskRepository, TypedEvidenceRepository,
+    DispatchTypedEvidenceDemandInput, DispatchTypedEvidenceRetryInput, TaskRepository,
+    TypedEvidenceDemandDispatchErrorInput, TypedEvidenceRepository,
     TypedEvidenceRetryDispatchErrorInput,
 };
 
@@ -79,10 +80,23 @@ impl CoordinatorActor {
                     }
                 }
                 Ok(()) => {
-                    // Initial demand allocations from older writers are already
-                    // active; a demanded initial allocation is intentionally
-                    // retained until the demand activation primitive is present.
-                    tracing::warn!(finding_id=%allocation.finding_id, "demanded non-retry evidence allocation lacks activation primitive");
+                    let Ok(mut tx) = self.db.pool().begin().await else {
+                        continue;
+                    };
+                    let result = TypedEvidenceRepository::dispatch_demand_success_in_transaction(
+                        &mut tx,
+                        DispatchTypedEvidenceDemandInput {
+                            finding_id: allocation.finding_id.clone(),
+                            attempt_id: allocation.attempt_id.clone(),
+                            spike_task_id: allocation.spike_task_id.clone(),
+                            transition_id: uuid::Uuid::now_v7().to_string(),
+                            actor_task_id: None,
+                        },
+                    )
+                    .await;
+                    if result.is_ok() {
+                        let _ = tx.commit().await;
+                    }
                 }
                 Err(error) => {
                     self.append_evidence_enqueue_error(&typed, &allocation, error.to_string())
@@ -101,6 +115,15 @@ impl CoordinatorActor {
         if allocation.is_retry {
             let _ = typed
                 .append_retry_dispatch_error(TypedEvidenceRetryDispatchErrorInput {
+                    finding_id: allocation.finding_id.clone(),
+                    attempt_id: allocation.attempt_id.clone(),
+                    spike_task_id: allocation.spike_task_id.clone(),
+                    error,
+                })
+                .await;
+        } else {
+            let _ = typed
+                .append_demand_dispatch_error(TypedEvidenceDemandDispatchErrorInput {
                     finding_id: allocation.finding_id.clone(),
                     attempt_id: allocation.attempt_id.clone(),
                     spike_task_id: allocation.spike_task_id.clone(),

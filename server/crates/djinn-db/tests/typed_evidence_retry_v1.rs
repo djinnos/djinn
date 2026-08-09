@@ -1,7 +1,9 @@
 use djinn_core::models::TribunalEvidenceAnchorMethod;
 use djinn_db::{
-    AllocateTypedEvidenceRetryInput, Database, DispatchTypedEvidenceRetryInput,
-    PlannedTypedEvidenceCheckInput, TypedEvidenceRepository, TypedEvidenceRetryDispatchErrorInput,
+    AllocateTypedEvidenceRetryInput, Database, DispatchTypedEvidenceDemandInput,
+    DispatchTypedEvidenceRetryInput, PlannedTypedEvidenceCheckInput,
+    TypedEvidenceDemandDispatchErrorInput, TypedEvidenceRepository,
+    TypedEvidenceRetryDispatchErrorInput,
 };
 use sha2::{Digest, Sha256};
 
@@ -313,5 +315,169 @@ async fn typed_evidence_retry_v1() {
     assert_eq!(
         failed_attempt_snapshot(&db, &finding, &old_attempt).await,
         failed_snapshot
+    );
+}
+
+#[tokio::test]
+async fn demanded_initial_dispatch_error_history_preserves_exact_identity() {
+    let db = Database::open_in_memory().unwrap();
+    db.ensure_initialized().await.unwrap();
+    let project = uuid::Uuid::now_v7().to_string();
+    let user = uuid::Uuid::now_v7().to_string();
+    sqlx::query("INSERT INTO projects (id,name,github_owner,github_repo) VALUES ($1,$2,'o',$3)")
+        .bind(&project)
+        .bind(format!("p{project}"))
+        .bind(format!("r{project}"))
+        .execute(db.pool())
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO users (id,github_id,github_login) VALUES ($1,1,$2)")
+        .bind(&user)
+        .bind(format!("u{user}"))
+        .execute(db.pool())
+        .await
+        .unwrap();
+    let spike_task = task(&db, &project, &user, true).await;
+    let proposal = uuid::Uuid::now_v7().to_string();
+    sqlx::query("INSERT INTO proposals (id,short_id,title,body,body_format,acceptance_criteria,status,latest_revision_seq) VALUES ($1,$2,'x','','markdown','[]','draft',1)")
+        .bind(&proposal)
+        .bind(proposal.replace('-', ""))
+        .execute(db.pool())
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE proposals SET linked_spike_task_id=$1, needs_evidence_claim='{}' WHERE id=$2",
+    )
+    .bind(&spike_task)
+    .bind(&proposal)
+    .execute(db.pool())
+    .await
+    .unwrap();
+    let finding = uuid::Uuid::now_v7().to_string();
+    let attempt = uuid::Uuid::now_v7().to_string();
+    sqlx::query("INSERT INTO typed_evidence_findings (id,proposal_id,demand_hash,lifecycle,claim,demanded_revision_seq,created_by_task_id) VALUES ($1,$2,$3,'demanded','{}',1,$4)")
+        .bind(&finding)
+        .bind(&proposal)
+        .bind(format!("h{finding}"))
+        .bind(&spike_task)
+        .execute(db.pool())
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO typed_evidence_attempts (id,finding_id,sequence,spike_task_id) VALUES ($1,$2,1,$3)")
+        .bind(&attempt)
+        .bind(&finding)
+        .bind(&spike_task)
+        .execute(db.pool())
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO typed_evidence_transitions (id,finding_id,ordinal,from_lifecycle,to_lifecycle,metadata) VALUES ($1,$2,1,NULL,'demanded','{}')")
+        .bind(uuid::Uuid::now_v7().to_string())
+        .bind(&finding)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+    let repo = TypedEvidenceRepository::new(db.clone());
+    for error in ["pool unavailable", "pool unavailable after restart"] {
+        repo.append_demand_dispatch_error(TypedEvidenceDemandDispatchErrorInput {
+            finding_id: finding.clone(),
+            attempt_id: attempt.clone(),
+            spike_task_id: spike_task.clone(),
+            error: error.into(),
+        })
+        .await
+        .unwrap();
+    }
+    assert_eq!(repo.demanded_dispatches().await.unwrap().len(), 1);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM typed_evidence_retry_dispatch_errors WHERE finding_id=$1"
+        )
+        .bind(&finding)
+        .fetch_one(db.pool())
+        .await
+        .unwrap(),
+        2
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT lifecycle FROM typed_evidence_findings WHERE id=$1"
+        )
+        .bind(&finding)
+        .fetch_one(db.pool())
+        .await
+        .unwrap(),
+        "demanded"
+    );
+
+    let mut tx = db.pool().begin().await.unwrap();
+    TypedEvidenceRepository::dispatch_demand_success_in_transaction(
+        &mut tx,
+        DispatchTypedEvidenceDemandInput {
+            finding_id: finding.clone(),
+            attempt_id: attempt.clone(),
+            spike_task_id: spike_task.clone(),
+            transition_id: uuid::Uuid::now_v7().to_string(),
+            actor_task_id: None,
+        },
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT lifecycle FROM typed_evidence_findings WHERE id=$1"
+        )
+        .bind(&finding)
+        .fetch_one(db.pool())
+        .await
+        .unwrap(),
+        "spike_active"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT linked_spike_task_id FROM proposals WHERE id=$1")
+            .bind(&proposal)
+            .fetch_one(db.pool())
+            .await
+            .unwrap(),
+        spike_task
+    );
+    assert_eq!(sqlx::query_scalar::<_, i64>("SELECT count(*) FROM typed_evidence_attempts WHERE finding_id=$1 AND id=$2 AND spike_task_id=$3")
+        .bind(&finding).bind(&attempt).bind(&spike_task).fetch_one(db.pool()).await.unwrap(), 1);
+    assert!(
+        repo.append_demand_dispatch_error(TypedEvidenceDemandDispatchErrorInput {
+            finding_id: finding.clone(),
+            attempt_id: attempt.clone(),
+            spike_task_id: spike_task.clone(),
+            error: "stale".into(),
+        })
+        .await
+        .is_err()
+    );
+    let mut duplicate = db.pool().begin().await.unwrap();
+    assert!(
+        TypedEvidenceRepository::dispatch_demand_success_in_transaction(
+            &mut duplicate,
+            DispatchTypedEvidenceDemandInput {
+                finding_id: finding.clone(),
+                attempt_id: attempt.clone(),
+                spike_task_id: spike_task.clone(),
+                transition_id: uuid::Uuid::now_v7().to_string(),
+                actor_task_id: None,
+            }
+        )
+        .await
+        .is_err()
+    );
+    duplicate.rollback().await.unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM typed_evidence_transitions WHERE finding_id=$1"
+        )
+        .bind(&finding)
+        .fetch_one(db.pool())
+        .await
+        .unwrap(),
+        2
     );
 }

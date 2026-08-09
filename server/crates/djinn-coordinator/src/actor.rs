@@ -2070,6 +2070,12 @@ impl CoordinatorActor {
                 else {
                     return;
                 };
+                // Atomic demand/retry allocation commits its task before this
+                // event. Re-drive the repository-owned allocation from the
+                // concrete delivery; duplicates remain idempotent.
+                if task.issue_type == "spike" && task.status != "closed" {
+                    poll_stack::boxed(|| self.redrive_demanded_evidence_dispatches()).await;
+                }
                 if task.status == "closed" {
                     // Terminalize the live attempt when a task closes via a
                     // force-close path. Best-effort; does not block the event.
