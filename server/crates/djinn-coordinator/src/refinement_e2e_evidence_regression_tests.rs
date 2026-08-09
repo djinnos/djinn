@@ -33,13 +33,13 @@ use crate::refinement_dispatch::refinement_cap_tests::{
     spawn_test_pool,
 };
 use djinn_core::events::{DjinnEventEnvelope, EventBus};
-use djinn_core::models::NeedsEvidenceClaim;
+use djinn_core::models::{NeedsEvidenceClaim, TribunalEvidenceLifecycle};
 use djinn_db::repositories::proposal::TerminalLinkedEvidenceSpikeOutcome;
 use djinn_db::repositories::test_support::{UsageTestSessionSeed, seed_session_row_with_id};
 use djinn_db::{
     EffectiveCreatorProvenance, EvidenceRepository, InsertEvidenceFinalizedProjection,
     InsertEvidencePlan, InsertEvidencePlanCheck, ProposalDebateTrailCreateInput,
-    ProposalRepository, TaskRepository,
+    ProposalRepository, TaskRepository, TypedEvidenceLifecycleProjection, TypedEvidenceRepository,
 };
 use serde::Deserialize;
 
@@ -324,7 +324,7 @@ async fn open_linked_spike_parks_normal_and_redispatch_paths() {
 // ── AC#2: valid evidence completion clears link and resumes Advocate ─────────
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn valid_evidence_completion_clears_link_and_resumes_advocate_with_findings() {
+async fn valid_evidence_completion_resumes_only_advocate_and_leaves_typed_finding_unresolved() {
     let db = crate::test_helpers::create_test_db();
     let fixture = seed_refinement_fixture(&db).await;
     let (events_tx, _events_rx) = tokio::sync::broadcast::channel::<DjinnEventEnvelope>(256);
@@ -404,6 +404,60 @@ async fn valid_evidence_completion_clears_link_and_resumes_advocate_with_finding
         advocate_task
             .description
             .contains("FINDINGS-ANSWER-E2E valid")
+    );
+
+    // Evidence receipt is deliberately not a structural disposition. Exercise
+    // the real legacy dispatcher with stale non-Advocate phases to prove it
+    // does not materialize either role while the typed finding remains live.
+    let refinement_tasks_before_stale_dispatch = task_repo
+        .list_by_project(&fixture.project_id)
+        .await
+        .expect("list refinement tasks after Advocate resume")
+        .into_iter()
+        .filter(|task| task.issue_type == "refinement")
+        .count();
+    for stale_phase in [
+        RefinementPhase::AdversaryAttack,
+        RefinementPhase::JudgeAdjudication,
+    ] {
+        actor
+            .active_refinements
+            .get_mut(&fixture.proposal_id)
+            .expect("legacy refinement state remains available")
+            .phase = stale_phase;
+        actor
+            .dispatch_next_refinement_phase(&fixture.proposal_id)
+            .await;
+    }
+    let refinement_tasks_after_stale_dispatch = task_repo
+        .list_by_project(&fixture.project_id)
+        .await
+        .expect("list refinement tasks after blocked stale phases")
+        .into_iter()
+        .filter(|task| task.issue_type == "refinement")
+        .count();
+    assert_eq!(
+        refinement_tasks_after_stale_dispatch, refinement_tasks_before_stale_dispatch,
+        "received evidence must not dispatch stale Adversary or Judge phases"
+    );
+
+    // Re-read the authoritative projection after actual Advocate dispatch and
+    // stale-phase rejection. It must still be evidence_received, rather than
+    // silently promoted to a structural resolution by coordinator resume.
+    let projection = TypedEvidenceRepository::new(db.clone())
+        .coordinator_lifecycle_projection(&fixture.proposal_id)
+        .await
+        .expect("read typed evidence after Advocate resume");
+    let TypedEvidenceLifecycleProjection::Valid(finding) = projection else {
+        panic!("typed evidence must remain a valid live finding after resume");
+    };
+    assert_eq!(
+        finding.lifecycle,
+        TribunalEvidenceLifecycle::EvidenceReceived
+    );
+    assert!(
+        !finding.lifecycle.is_terminal(),
+        "Advocate folding must not resolve or withdraw the typed finding"
     );
 }
 
