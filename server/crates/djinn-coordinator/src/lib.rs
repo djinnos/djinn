@@ -43,7 +43,7 @@ use djinn_provider::catalog::CatalogService;
 use djinn_slot::{PoolError, SlotPoolHandle};
 
 // Re-export internal types for sibling submodules that use `use super::*;`.
-use actor::CoordinatorActor;
+pub use actor::CoordinatorActor;
 pub use actor::complete_startup_reaper_phase;
 use types::*;
 
@@ -228,8 +228,8 @@ mod resize_authorization_tests;
 mod resize_lift_tests;
 #[cfg(test)]
 mod state_sampler_audit_tests;
-#[cfg(test)]
-pub(crate) mod test_helpers;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_helpers;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]

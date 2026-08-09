@@ -12,7 +12,7 @@ use djinn_db::repositories::task_arbitration::{
 use djinn_db::repositories::task_attempt::TaskAttemptRepository;
 
 #[derive(Clone, Copy)]
-pub(crate) struct DispatchStrikeDecision {
+pub struct DispatchStrikeDecision {
     pub exempted: bool,
     pub decision: &'static str,
     pub source: &'static str,
@@ -21,11 +21,11 @@ pub(crate) struct DispatchStrikeDecision {
     /// Consumed by the trigger-B gate
     /// ([`should_route_cycling_intervention`]), which must not treat a
     /// cancelled session as "the run finished and the task didn't move".
-    pub prior_session: PriorSessionDisposition,
+    pub(crate) prior_session: PriorSessionDisposition,
 }
 
 impl CoordinatorActor {
-    pub(crate) async fn latest_attempt_strike_decision(
+    pub async fn latest_attempt_strike_decision(
         &self,
         task_id: &str,
         role: &str,

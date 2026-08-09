@@ -115,6 +115,7 @@ tikv-jemallocator = { version = "0.6", features = ["unprefixed_malloc_on_support
 tikv-jemalloc-ctl = { version = "0.6", features = ["stats"] }
 
 [dev-dependencies]
+djinn-coordinator = { path = "crates/djinn-coordinator", features = ["test-support"] }
 djinn-control-plane = { path = "crates/djinn-control-plane", features = ["test-support"] }
 # The dispatch-seam reachability test drives a real stored `Pod` so the birth
 # downsize runs through the real `PodResizeClient` and the real

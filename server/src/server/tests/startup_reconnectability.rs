@@ -496,6 +496,35 @@ async fn startup_reaper_still_reaps_absent_running_job() {
         evidence["owner_classification"],
         "restart_orphan_null_owner"
     );
+    // Exercise the actual retry policy against the exact row Stage C just
+    // terminalized, rather than reconstructing similar JSON in a unit test.
+    let (actor, cancel) = djinn_coordinator::test_helpers::make_coordinator_actor_cancellable(
+        &fixture.db,
+        &tokio::sync::broadcast::channel(8).0,
+    );
+    let task_id = TaskRunRepository::new(fixture.db.clone())
+        .get(run_id)
+        .await
+        .expect("read reaped task run")
+        .expect("reaped task run exists")
+        .task_id;
+    let decision = actor
+        .latest_attempt_strike_decision(&task_id, "worker")
+        .await
+        .expect("reaper-produced attempt has a strike decision");
+    assert!(
+        decision.exempted,
+        "startup restart orphan must be strike-exempt"
+    );
+    assert_eq!(
+        decision.decision,
+        djinn_telemetry::dispatch::STRIKE_DECISION_EXEMPTED
+    );
+    assert_eq!(
+        decision.source,
+        djinn_telemetry::dispatch::STRIKE_SOURCE_ENVIRONMENTAL_RESTART_ORPHAN
+    );
+    cancel.cancel();
     assert_eq!(fixture.inventory.list_calls.load(Ordering::SeqCst), 1);
     assert_eq!(fixture.inventory.presence_calls.load(Ordering::SeqCst), 1);
 }
