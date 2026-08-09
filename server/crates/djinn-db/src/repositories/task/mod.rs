@@ -19,6 +19,7 @@ mod board_health_dispatch_gate;
 mod board_health_kueue_admission;
 mod board_health_stalled_epics;
 mod ci;
+mod delivery;
 mod generation;
 mod parent_disposition;
 mod queries;
@@ -41,6 +42,10 @@ pub use adjudication_close::{
     SOURCE_CHANGED, SOURCE_UNCHANGED, TERMINAL_CLOSE_REASON_CLASS,
     apply_adjudication_child_close_tx, is_adjudication_child, planner_escalation_count_tx,
     record_adjudication_source_snapshot,
+};
+pub use delivery::{
+    DeliveryFinalizeInput, DeliveryPrepareInput, DeliveryReworkInput, DeliveryTransitionResult,
+    TaskIntegrationResult,
 };
 pub use parent_disposition::{
     ChildDisposition, DispositionCounts, DispositionFinding, DispositionPlan, DispositionScope,
