@@ -129,6 +129,10 @@ pub struct ProposalBuildAttempt {
     /// Current exact branch head, if publication has completed.
     pub branch_head_sha: Option<String>,
     pub branch_name: String,
+    /// Exact draft proposal PR identity. Written once and retained after
+    /// retirement so a later attempt cannot adopt a historical PR.
+    pub proposal_pr_number: Option<i64>,
+    pub proposal_pr_url: Option<String>,
     pub park_reason: Option<DirectDeliveryParkReason>,
     pub created_at: String,
     pub activated_at: Option<String>,

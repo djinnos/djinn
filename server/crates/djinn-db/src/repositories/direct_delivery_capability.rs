@@ -6,12 +6,13 @@ use serde::{Deserialize, Serialize};
 use crate::database::Database;
 use crate::error::DbResult;
 
-const REQUIRED_RELATIONS: [&str; 5] = [
+const REQUIRED_RELATIONS: [&str; 6] = [
     "proposal_build_attempts",
     "direct_delivery_epochs",
     "direct_delivery_process_capabilities",
     "task_deliveries",
     "direct_delivery_leases",
+    "proposal_build_attempt_leases",
 ];
 
 /// Every result is non-authorizing except `SupportedActive`, which a later
