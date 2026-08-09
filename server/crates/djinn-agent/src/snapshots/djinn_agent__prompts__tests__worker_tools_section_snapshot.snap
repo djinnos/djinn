@@ -27,4 +27,4 @@ expression: section
 - `memory_write(content, reason, title, type, status?, tags?)`
 - `memory_edit(content, identifier, operation, reason, find_text?, section?, type?)`
 - `request_planner(id, reason)`
-- `submit_work(commit_title, summary, task_id, evidence_completion?, files_changed?, remaining_concerns?)`
+- `submit_work(commit_title, summary, task_id, evidence_completion?, files_changed?, remaining_concerns?, tribunal_evidence_return_v1?)`

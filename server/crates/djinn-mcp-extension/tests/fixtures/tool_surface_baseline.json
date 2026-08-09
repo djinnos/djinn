@@ -2978,8 +2978,8 @@
           "type": "string"
         },
         "tribunal_evidence_return_v1": {
-          "type": "object",
-          "description": "Raw canonical TribunalEvidenceReturnV1 for the exact linked typed-evidence spike. Supply the V1 payload unchanged; malformed payloads are deliberately delivered for durable validation failure handling."
+          "description": "Raw canonical TribunalEvidenceReturnV1 for the exact linked typed-evidence spike. Supply the V1 payload unchanged; malformed payloads are deliberately delivered for durable validation failure handling.",
+          "type": "object"
         }
       },
       "required": [
