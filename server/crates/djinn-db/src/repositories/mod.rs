@@ -44,6 +44,7 @@ pub mod project_live_state_migration;
 pub mod project_workspace_coverage;
 pub mod project_workspace_graph;
 pub mod proposal;
+pub mod proposal_build_attempt;
 pub mod proposal_integrity;
 pub mod readiness;
 pub mod refinement_feedback_handoff_observation;

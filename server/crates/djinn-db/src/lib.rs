@@ -310,6 +310,15 @@ pub use repositories::{
         ProposalListResult, ProposalListSummaryRow, ProposalMemoryRef, ProposalRef,
         ProposalRepository, ProposalUpdateInput,
     },
+    proposal_build_attempt::{
+        AcquireProposalBuildAttemptLeaseInput, AcquireProposalBuildAttemptLeaseResult,
+        ActivateProposalBuildAttemptInput, ActivateProposalBuildAttemptResult,
+        PersistAttemptPrIdentityInput, PersistAttemptPrIdentityResult, ProposalBuildAttemptLease,
+        ProposalBuildAttemptRepository, ReconcileAttemptBranchHeadInput,
+        ReconcileAttemptBranchHeadResult, ReserveProposalBuildAttemptInput,
+        ReserveProposalBuildAttemptResult, ResolveTaskActiveAttemptResult,
+        RetireProposalBuildAttemptInput, RetireProposalBuildAttemptResult, TaskActiveBuildAttempt,
+    },
     proposal_integrity::{
         LintMaterializationOutcome, MAX_PROPOSAL_INTEGRITY_PAGE_SIZE, ProposalIntegrityHead,
         ProposalIntegrityHeadPage, ProposalIntegrityRepository,
