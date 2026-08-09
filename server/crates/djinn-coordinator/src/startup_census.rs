@@ -137,9 +137,15 @@ impl StartupCensus {
         })
     }
 
-    pub fn availability(&self) -> InventoryAvailability { self.availability }
-    pub fn listing(&self) -> &ClusterJobListing { &self.listing }
-    pub fn runs(&self) -> &[CensusTaskRun] { &self.runs }
+    pub fn availability(&self) -> InventoryAvailability {
+        self.availability
+    }
+    pub fn listing(&self) -> &ClusterJobListing {
+        &self.listing
+    }
+    pub fn runs(&self) -> &[CensusTaskRun] {
+        &self.runs
+    }
     pub fn task_projection(&self, task_id: &str) -> Option<TaskCensusProjection> {
         self.task_projections.get(task_id).copied()
     }
@@ -169,7 +175,9 @@ async fn witness_for_run(
             TaskRunWitness::Live
         };
     }
-    let Some(inventory) = inventory else { return TaskRunWitness::Unknown; };
+    let Some(inventory) = inventory else {
+        return TaskRunWitness::Unknown;
+    };
     match inventory.presence(WorkloadObjectKind::Job, &job_name).await {
         ObjectPresence::Absent => TaskRunWitness::Gone(GoneProvenance::AuthoritativelyAbsent),
         ObjectPresence::Present { .. } => TaskRunWitness::Live,
@@ -214,6 +222,175 @@ fn combine_projection(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use djinn_core::events::EventBus;
+    use djinn_db::{CreateTaskRunParams, TaskRepository};
+    use djinn_k8s::UidGetResult;
+
+    /// Controllable namespace inventory that records the concrete acquisition
+    /// calls. These tests deliberately enter through `StartupCensus::acquire`.
+    struct CountingInventory {
+        list_result: Result<Vec<djinn_k8s::WorkloadRecord>, String>,
+        presence_result: ObjectPresence,
+        list_calls: AtomicUsize,
+        presence_calls: AtomicUsize,
+        presence_names: Mutex<Vec<String>>,
+    }
+
+    impl CountingInventory {
+        fn listed_empty(presence_result: ObjectPresence) -> Self {
+            Self {
+                list_result: Ok(Vec::new()),
+                presence_result,
+                list_calls: AtomicUsize::new(0),
+                presence_calls: AtomicUsize::new(0),
+                presence_names: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn list_fails() -> Self {
+            Self {
+                list_result: Err("apiserver unavailable".to_owned()),
+                presence_result: ObjectPresence::Absent,
+                list_calls: AtomicUsize::new(0),
+                presence_calls: AtomicUsize::new(0),
+                presence_names: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl WorkloadInventory for CountingInventory {
+        async fn list(&self) -> Result<Vec<djinn_k8s::WorkloadRecord>, String> {
+            self.list_calls.fetch_add(1, Ordering::SeqCst);
+            self.list_result.clone()
+        }
+
+        async fn get_uid(
+            &self,
+            _kind: WorkloadObjectKind,
+            _name: &str,
+            _uid: &str,
+        ) -> UidGetResult {
+            UidGetResult::Uncertain
+        }
+
+        async fn presence(&self, _kind: WorkloadObjectKind, name: &str) -> ObjectPresence {
+            self.presence_calls.fetch_add(1, Ordering::SeqCst);
+            self.presence_names
+                .lock()
+                .expect("presence names mutex")
+                .push(name.to_owned());
+            self.presence_result.clone()
+        }
+    }
+
+    /// Use a real task-run repository row: acquisition must read the durable
+    /// startup ledger, not merely accept an in-memory `CensusTaskRun` fixture.
+    async fn seed_running_run() -> (Database, String, String) {
+        let db = crate::test_helpers::create_test_db();
+        let project = crate::test_helpers::create_test_project(&db).await;
+        let task = TaskRepository::new(db.clone(), EventBus::noop())
+            .create_fixture_in_project(
+                &project.id,
+                None,
+                "startup census acquisition",
+                "",
+                "",
+                "task",
+                0,
+                "",
+                Some("open"),
+                None,
+            )
+            .await
+            .expect("create task fixture");
+        let run_id = uuid::Uuid::now_v7().to_string();
+        TaskRunRepository::new(db.clone())
+            .create(CreateTaskRunParams {
+                id: &run_id,
+                project_id: &project.id,
+                task_id: &task.id,
+                trigger_type: "manual",
+                status: Some("running"),
+                workspace_path: None,
+                mirror_ref: None,
+                dispatch_group_id: None,
+            })
+            .await
+            .expect("create running task-run fixture");
+        (db, task.id, run_id)
+    }
+
+    #[tokio::test]
+    async fn acquisition_confirms_omitted_run_absent_once() {
+        let (db, task_id, run_id) = seed_running_run().await;
+        let inventory = Arc::new(CountingInventory::listed_empty(ObjectPresence::Absent));
+
+        let census = StartupCensus::acquire(db, Some(inventory.clone()))
+            .await
+            .expect("acquire startup census");
+
+        assert_eq!(inventory.list_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(inventory.presence_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            inventory
+                .presence_names
+                .lock()
+                .expect("presence names mutex")
+                .as_slice(),
+            [djinn_k8s::taskrun_job_name(&run_id)]
+        );
+        assert_eq!(census.availability(), InventoryAvailability::Available);
+        assert_eq!(
+            census.runs()[0].witness,
+            TaskRunWitness::Gone(GoneProvenance::AuthoritativelyAbsent)
+        );
+        assert_eq!(
+            census.task_projection(&task_id),
+            Some(TaskCensusProjection::DestructivelyGone)
+        );
+    }
+
+    #[tokio::test]
+    async fn acquisition_list_failure_is_unknown_without_get() {
+        let (db, task_id, _) = seed_running_run().await;
+        let inventory = Arc::new(CountingInventory::list_fails());
+
+        let census = StartupCensus::acquire(db, Some(inventory.clone()))
+            .await
+            .expect("acquire startup census");
+
+        assert_eq!(inventory.list_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(inventory.presence_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(census.availability(), InventoryAvailability::Unavailable);
+        assert_eq!(census.runs()[0].witness, TaskRunWitness::Unknown);
+        assert_eq!(
+            census.task_projection(&task_id),
+            Some(TaskCensusProjection::Unknown)
+        );
+    }
+
+    #[tokio::test]
+    async fn acquisition_uncertain_get_is_unknown_after_one_list() {
+        let (db, task_id, _) = seed_running_run().await;
+        let inventory = Arc::new(CountingInventory::listed_empty(ObjectPresence::Uncertain));
+
+        let census = StartupCensus::acquire(db, Some(inventory.clone()))
+            .await
+            .expect("acquire startup census");
+
+        assert_eq!(inventory.list_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(inventory.presence_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(census.availability(), InventoryAvailability::Available);
+        assert_eq!(census.runs()[0].witness, TaskRunWitness::Unknown);
+        assert_eq!(
+            census.task_projection(&task_id),
+            Some(TaskCensusProjection::Unknown)
+        );
+    }
 
     #[test]
     fn projection_fences_starting_authoritative_absence() {
@@ -223,15 +400,31 @@ mod tests {
             durable_state: DurableRunState::Starting,
             witness: TaskRunWitness::Gone(GoneProvenance::AuthoritativelyAbsent),
         }];
-        assert_eq!(project_tasks(&runs).get("task"), Some(&TaskCensusProjection::CreationTransit));
+        assert_eq!(
+            project_tasks(&runs).get("task"),
+            Some(&TaskCensusProjection::CreationTransit)
+        );
     }
 
     #[test]
     fn projection_preserves_unknown_over_destructive_evidence() {
         let runs = vec![
-            CensusTaskRun { task_id: "task".into(), task_run_id: "gone".into(), durable_state: DurableRunState::Running, witness: TaskRunWitness::Gone(GoneProvenance::TerminalPresent) },
-            CensusTaskRun { task_id: "task".into(), task_run_id: "unknown".into(), durable_state: DurableRunState::Running, witness: TaskRunWitness::Unknown },
+            CensusTaskRun {
+                task_id: "task".into(),
+                task_run_id: "gone".into(),
+                durable_state: DurableRunState::Running,
+                witness: TaskRunWitness::Gone(GoneProvenance::TerminalPresent),
+            },
+            CensusTaskRun {
+                task_id: "task".into(),
+                task_run_id: "unknown".into(),
+                durable_state: DurableRunState::Running,
+                witness: TaskRunWitness::Unknown,
+            },
         ];
-        assert_eq!(project_tasks(&runs).get("task"), Some(&TaskCensusProjection::Unknown));
+        assert_eq!(
+            project_tasks(&runs).get("task"),
+            Some(&TaskCensusProjection::Unknown)
+        );
     }
 }
