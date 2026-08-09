@@ -211,19 +211,9 @@ impl ClusterWitness {
     }
 }
 
-/// One scan pass's authoritative view of the Kubernetes objects in the
-/// namespace, taken once and reused for every candidate in that pass.
-pub(crate) enum ClusterJobListing {
-    /// Object name → whether it has reached a terminal condition. Built from a
-    /// LIST that succeeded, so an object missing from it is a candidate for the
-    /// independent absence GET.
-    Listed(std::collections::HashMap<String, bool>),
-    /// The LIST failed or timed out. Nothing in this pass may be reaped on an
-    /// absence proof.
-    Unavailable,
-    /// No inventory is wired: this deployment runs no task-run Jobs.
-    NotConfigured,
-}
+// Compatibility import: periodic session recovery keeps its existing witness
+// decisions while startup recovery consumes this shared listing model.
+pub(crate) use crate::startup_census::ClusterJobListing;
 
 impl CoordinatorActor {
     pub(crate) async fn teardown_zombie_taskrun_job(

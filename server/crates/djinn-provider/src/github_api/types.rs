@@ -17,6 +17,57 @@ pub struct CreatePrParams {
     pub draft: Option<bool>,
 }
 
+/// Exact ref observation for deterministic direct-delivery reconciliation.
+#[derive(Debug)]
+pub enum ExactRefObservation {
+    Found { sha: String },
+    NotFound,
+    ProviderFailure(crate::github_api::GitHubApiError),
+}
+
+/// Result of creating a ref only when it was expected to be absent.
+#[derive(Debug)]
+pub enum ExpectedAbsentRefResult {
+    Created,
+    AdoptedExact { sha: String },
+    BranchIdentityMismatch { observed_sha: String },
+    ProviderFailure(crate::github_api::GitHubApiError),
+}
+
+/// Result of a non-force ref update guarded by the expected current SHA.
+#[derive(Debug)]
+pub enum ExpectedOldShaRefUpdateResult {
+    Updated { sha: String },
+    StaleObservedHead { observed_sha: Option<String> },
+    ProviderFailure(crate::github_api::GitHubApiError),
+}
+
+/// Parameters for the single draft PR belonging to one build attempt.
+#[derive(Debug, Clone)]
+pub struct CreateAttemptDraftPrParams {
+    pub title: String,
+    pub body: String,
+    pub head: String,
+    pub expected_head_sha: String,
+}
+
+/// Create/adopt result for an attempt draft PR, preserving identity failure.
+#[derive(Debug)]
+pub enum AttemptDraftPrResult {
+    Created(PullRequest),
+    AdoptedExact(PullRequest),
+    ProposalPrIdentityMismatch { candidates: Vec<PullRequest> },
+    ProviderFailure(crate::github_api::GitHubApiError),
+}
+
+/// Result of recording a stop reason and closing a draft attempt PR.
+#[derive(Debug)]
+pub enum CloseAttemptDraftPrResult {
+    Closed(Box<PullRequest>),
+    ProposalPrIdentityMismatch,
+    ProviderFailure(crate::github_api::GitHubApiError),
+}
+
 /// Merge method for auto-merge.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

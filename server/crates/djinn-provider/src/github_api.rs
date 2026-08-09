@@ -50,12 +50,14 @@ pub use error::{GitHubApiError, GitHubErrorSource};
 pub use refresh::{DbBackedRefresher, NoRefresh, UserTokenRefresh};
 pub use transport::UserTokenExpired;
 pub use types::{
-    ActionsArtifact, ActionsJob, ActionsJobStep, AutoMergeRequest, CheckAnnotation, CheckRun,
-    CheckRunOutput, CheckRunsResponse, CheckSetCompleteness, CheckSetIncompleteReason,
-    CheckSetRecoverability, CiFailureContextBundle, CiFailureContextRequest, CiSetupStep,
-    CreatePrParams, DequeueEvent, DownloadedArtifact, GitHubUser, MergeMethod, MergeQueueEntry,
-    MergeQueueEntryState, PrFile, PrMergeQueueState, PrRef, PrReview, PrReviewFeedback, PrState,
-    PullRequest, RepoMergeConfig, ReproductionJob, ReproductionSetupStep, ReproductionStep,
+    ActionsArtifact, ActionsJob, ActionsJobStep, AttemptDraftPrResult, AutoMergeRequest,
+    CheckAnnotation, CheckRun, CheckRunOutput, CheckRunsResponse, CheckSetCompleteness,
+    CheckSetIncompleteReason, CheckSetRecoverability, CiFailureContextBundle,
+    CiFailureContextRequest, CiSetupStep, CloseAttemptDraftPrResult, CreateAttemptDraftPrParams,
+    CreatePrParams, DequeueEvent, DownloadedArtifact, ExactRefObservation, ExpectedAbsentRefResult,
+    ExpectedOldShaRefUpdateResult, GitHubUser, MergeMethod, MergeQueueEntry, MergeQueueEntryState,
+    PrFile, PrMergeQueueState, PrRef, PrReview, PrReviewFeedback, PrState, PullRequest,
+    RepoMergeConfig, ReproductionJob, ReproductionSetupStep, ReproductionStep,
     RequiredCheckReproduction, RequiredCheckReproductionContext, RequiredCheckUnreproducible,
     RequiredCheckUnreproducibleReason, ReviewComment, RunArtifactsPage, WorkflowRun,
 };
