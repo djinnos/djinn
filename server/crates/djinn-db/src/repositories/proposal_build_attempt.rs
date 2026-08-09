@@ -600,6 +600,30 @@ impl ProposalBuildAttemptRepository {
         Ok(RetireProposalBuildAttemptResult::Retired(row.try_into()?))
     }
 
+    /// Persist the first terminal orchestration observation without mutating
+    /// branch, PR, or retirement identity.
+    pub async fn park(
+        &self,
+        build_attempt_id: &str,
+        reason: DirectDeliveryParkReason,
+    ) -> DbResult<ProposalBuildAttempt> {
+        self.require_capability(false).await?;
+        require_nonblank("build_attempt_id", build_attempt_id)?;
+        let mut tx = self.db.pool().begin().await?;
+        let Some(current) = fetch_attempt(&mut tx, build_attempt_id, true).await? else {
+            return Err(DbError::InvalidData(
+                "unknown proposal build attempt".into(),
+            ));
+        };
+        if current.lifecycle == ProposalBuildAttemptLifecycle::Retired {
+            tx.commit().await?;
+            return Ok(current);
+        }
+        let parked = park_tx(&mut tx, build_attempt_id, reason).await?;
+        tx.commit().await?;
+        Ok(parked)
+    }
+
     /// Canonical task ownership route: `tasks.epic_id -> epics.proposal_id`.
     /// The breakdown fallback is intentionally joined only when `epic_id IS
     /// NULL`, so it can resolve exactly that otherwise-epic-less task and no
