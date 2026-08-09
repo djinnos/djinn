@@ -67,7 +67,13 @@ use djinn_db::{CompactionTrigger, SessionCompactionBoundaryRepository};
 /// never reach the slot hand-off. The hook observes existing boundaries only;
 /// it cannot alter admission or launch behavior.
 #[cfg(any(test, feature = "test-support"))]
-pub type ReplyLoopBoundaryObserver = Arc<dyn Fn(&'static str) + Send + Sync>;
+pub struct ReplyLoopBoundaryEvent {
+    pub name: &'static str,
+    pub session_id: String,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub type ReplyLoopBoundaryObserver = Arc<dyn Fn(ReplyLoopBoundaryEvent) + Send + Sync>;
 
 #[cfg(any(test, feature = "test-support"))]
 static REPLY_LOOP_BOUNDARY_OBSERVER: OnceLock<Mutex<Option<ReplyLoopBoundaryObserver>>> =
@@ -82,7 +88,7 @@ pub fn set_reply_loop_boundary_observer(observer: Option<ReplyLoopBoundaryObserv
 }
 
 #[cfg(any(test, feature = "test-support"))]
-fn observe_reply_loop_boundary(event: &'static str) {
+fn observe_reply_loop_boundary(event: &'static str, session_id: &str) {
     if let Some(observer) = REPLY_LOOP_BOUNDARY_OBSERVER
         .get_or_init(|| Mutex::new(None))
         .lock()
@@ -90,12 +96,15 @@ fn observe_reply_loop_boundary(event: &'static str) {
         .as_ref()
         .cloned()
     {
-        observer(event);
+        observer(ReplyLoopBoundaryEvent {
+            name: event,
+            session_id: session_id.to_owned(),
+        });
     }
 }
 
 #[cfg(not(any(test, feature = "test-support")))]
-fn observe_reply_loop_boundary(_event: &'static str) {}
+fn observe_reply_loop_boundary(_event: &'static str, _session_id: &str) {}
 
 /// Typed admission decision returned through the reply-loop error seam.
 ///
@@ -1124,7 +1133,7 @@ pub async fn run_reply_loop(
             // provider-agnostic conversation — covers all wire formats without
             // mutating stored history.
             let request_conversation = conversation.with_synthesized_tool_results();
-            observe_reply_loop_boundary("reply_loop_handoff");
+            observe_reply_loop_boundary("reply_loop_handoff", session_id);
             // The coordinator selected this model before handing the turn to the
             // slot, but it can be demoted while this reply loop is still alive.
             // Recheck the existing breaker at the actual attempt boundary,
@@ -1166,7 +1175,7 @@ pub async fn run_reply_loop(
                 let owner_pod_uid = slot_ctx.live_identity.as_ref().and_then(|identity| {
                     matches!(report_for_route(identity, provider.name(), model_id, Some(&plan)).coverage, ModelTurnCapabilityCoverageV2::Covered).then(|| identity.pod_uid.clone())
                 });
-                observe_reply_loop_boundary("model_turn_prepare");
+                observe_reply_loop_boundary("model_turn_prepare", session_id);
                 let coordinator = ModelTurnAdmissionCoordinator::new(
                     djinn_db::ModelTurnAdmissionRepository::new(slot_ctx.db.clone()),
                 );
@@ -1197,8 +1206,8 @@ pub async fn run_reply_loop(
                 let guard = launch_prepared_covered_attempt_with_lease(
                     preparation,
                     || {
-                        observe_reply_loop_boundary("covered_provider_launch");
-                        observe_reply_loop_boundary("model_turn_launch");
+                        observe_reply_loop_boundary("covered_provider_launch", session_id);
+                        observe_reply_loop_boundary("model_turn_launch", session_id);
                         let normalizer = Arc::new(Mutex::new(ProviderApiKeyNormalizerV1::new(policy)));
                         let receipt_clock = Arc::clone(&slot_ctx.clock);
                         let started = receipt_clock.now_instant();
@@ -1221,7 +1230,7 @@ pub async fn run_reply_loop(
                 Ok((None, Some(guard)))
             } else {
                 // Explicit uncovered compatibility path: no B2 claim was made.
-                observe_reply_loop_boundary("uncovered_provider_launch");
+                observe_reply_loop_boundary("uncovered_provider_launch", session_id);
                 provider.stream(request_conversation.as_ref(), tools, tool_choice).await.map(|stream| (Some(stream), None))
             };
             let (stream, mut covered_attempt) = match stream_result {
@@ -1392,7 +1401,7 @@ pub async fn run_reply_loop(
                 cancel.is_cancelled(),
                 global_cancel.is_cancelled(),
             ) {
-                observe_reply_loop_boundary("covered_attempt_settled");
+                observe_reply_loop_boundary("covered_attempt_settled", session_id);
                 let deadline = covered_outcome
                     .as_ref()
                     .and_then(|outcome| outcome.observation.as_ref())
@@ -1404,7 +1413,7 @@ pub async fn run_reply_loop(
                     session_id,
                     covered_attempt_ordinal,
                 );
-                observe_reply_loop_boundary("covered_retry_wait");
+                observe_reply_loop_boundary("covered_retry_wait", session_id);
                 tokio::select! {
                     biased;
                     _ = cancel.cancelled() => return Err(anyhow::Error::new(super::error_handling::ReplyLoopCancelled::session())),

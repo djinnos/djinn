@@ -181,11 +181,17 @@ async fn covered_retry_reconciles_old_lease_before_fresh_preparation_and_launch(
     let settled_observer = Arc::clone(&settled);
     let waited_observer = Arc::clone(&waited);
     set_reply_loop_boundary_observer(Some(Arc::new(move |event| {
-        observed.lock().expect("observer").push(event);
-        if event == "covered_attempt_settled" {
+        // The observer hook is process-global because it is test-only. Filter
+        // its events by this loop's stable session identity so concurrently
+        // executing reply-loop tests cannot be mistaken for replacement work.
+        if event.session_id != "covered-retry-session" {
+            return;
+        }
+        observed.lock().expect("observer").push(event.name);
+        if event.name == "covered_attempt_settled" {
             settled_observer.notify_waiters();
         }
-        if event == "covered_retry_wait" {
+        if event.name == "covered_retry_wait" {
             waited_observer.notify_waiters();
         }
     })));
