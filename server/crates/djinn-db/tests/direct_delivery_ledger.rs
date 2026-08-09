@@ -1,7 +1,9 @@
 //! Repository-level ledger replay, interleaving, and rollback contracts.
 
 use djinn_core::events::EventBus;
-use djinn_core::models::{ReworkDelivery, TaskDeliveryIdentity, TaskDeliveryState, TaskIntegrated};
+use djinn_core::models::{
+    ReworkDelivery, TaskDeliveryIdentity, TaskDeliveryState, TaskIntegrated, TransitionAction,
+};
 use djinn_db::{
     Database, DeliveryFinalizeInput, DeliveryPrepareInput, DeliveryReworkInput,
     DeliveryTransitionResult, TaskIntegrationResult, TaskRepository,
@@ -23,8 +25,54 @@ async fn fixture() -> (Database, TaskRepository) {
     (db.clone(), TaskRepository::new(db, EventBus::noop()))
 }
 
+fn prepare_for(
+    task_id: &str,
+    generation: i64,
+    source: &str,
+    candidate: &str,
+) -> DeliveryPrepareInput {
+    DeliveryPrepareInput {
+        identity: id_for(task_id, generation),
+        transition_id: format!("prepare-{task_id}-{generation}"),
+        source_sha: source.into(),
+        patch_digest: format!("patch-{task_id}-{generation}"),
+        selected_parent_sha: "parent".into(),
+        candidate_sha: candidate.into(),
+    }
+}
+
+async fn begin_applying(repo: &TaskRepository, identity: TaskDeliveryIdentity) {
+    repo.begin_delivery_apply(&DeliveryFinalizeInput {
+        identity,
+        transition_id: "apply".into(),
+        conflict_reason: None,
+    })
+    .await
+    .unwrap();
+}
+
 fn id(generation: i64) -> TaskDeliveryIdentity {
     TaskDeliveryIdentity::new("attempt", "task", generation).unwrap()
+}
+
+fn id_for(task_id: &str, generation: i64) -> TaskDeliveryIdentity {
+    TaskDeliveryIdentity::new("attempt", task_id, generation).unwrap()
+}
+
+async fn seed_task(db: &Database, task_id: &str) {
+    sqlx::query("INSERT INTO tasks (id, project_id, short_id, title, description, design, labels, acceptance_criteria, memory_refs, created_by_user_id) VALUES ($1, 'p', $1, $1, '', '', '[]', '[\"criterion\"]', '[]', 'u')")
+        .bind(task_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+}
+
+async fn approve(db: &Database, task_id: &str) {
+    sqlx::query("UPDATE tasks SET status = 'approved' WHERE id = $1")
+        .bind(task_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
 }
 
 fn prepare(generation: i64, source: &str, candidate: &str) -> DeliveryPrepareInput {
@@ -220,4 +268,199 @@ async fn integration_head_cas_late_failure_rollback_and_exact_replay() {
         repo.task_integrated(&fabricated).await.unwrap(),
         TaskIntegrationResult::Stale { delivery: None, .. }
     ));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_same_parent_integrations_advance_only_one_attempt_head() {
+    let (db, repo) = fixture().await;
+    seed_task(&db, "task-a").await;
+    seed_task(&db, "task-b").await;
+    for (task, source, candidate) in [
+        ("task-a", "source-a", "candidate-a"),
+        ("task-b", "source-b", "candidate-b"),
+    ] {
+        repo.prepare_delivery(&prepare_for(task, 1, source, candidate))
+            .await
+            .unwrap();
+        begin_applying(&repo, id_for(task, 1)).await;
+        approve(&db, task).await;
+    }
+    let left = TaskIntegrated::new(
+        id_for("task-a", 1),
+        "candidate-a",
+        "candidate-a",
+        "candidate-a",
+    )
+    .unwrap();
+    let right = TaskIntegrated::new(
+        id_for("task-b", 1),
+        "candidate-b",
+        "candidate-b",
+        "candidate-b",
+    )
+    .unwrap();
+    let (left, right) = tokio::join!(repo.task_integrated(&left), repo.task_integrated(&right));
+    let results = [left.unwrap(), right.unwrap()];
+    assert_eq!(
+        results
+            .iter()
+            .filter(|r| matches!(r, TaskIntegrationResult::Integrated(_)))
+            .count(),
+        1
+    );
+    assert_eq!(
+        results
+            .iter()
+            .filter(|r| matches!(r, TaskIntegrationResult::Stale { .. }))
+            .count(),
+        1
+    );
+    let a_won = matches!(&results[0], TaskIntegrationResult::Integrated(_));
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT branch_head_sha FROM proposal_build_attempts WHERE id = 'attempt'"
+        )
+        .fetch_one(db.pool())
+        .await
+        .unwrap(),
+        if a_won { "candidate-a" } else { "candidate-b" }
+    );
+    for (task, candidate, won) in [
+        ("task-a", "candidate-a", a_won),
+        ("task-b", "candidate-b", !a_won),
+    ] {
+        assert_eq!(
+            repo.get_delivery(&id_for(task, 1))
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            if won {
+                TaskDeliveryState::Applied
+            } else {
+                TaskDeliveryState::Applying
+            }
+        );
+        let task = repo.get(task).await.unwrap().unwrap();
+        assert_eq!(task.status, if won { "closed" } else { "approved" });
+        assert_eq!(task.merge_commit_sha.as_deref(), won.then_some(candidate));
+    }
+}
+
+#[tokio::test]
+async fn conflict_generation_is_not_integrable_and_remains_immutable() {
+    let (db, repo) = fixture().await;
+    make_conflict(&repo).await;
+    approve(&db, "task").await;
+    let conflict = TaskIntegrated::new(id(1), "candidate-1", "candidate-1", "candidate-1").unwrap();
+    assert!(matches!(
+        repo.task_integrated(&conflict).await.unwrap(),
+        TaskIntegrationResult::Stale { .. }
+    ));
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT branch_head_sha FROM proposal_build_attempts WHERE id = 'attempt'"
+        )
+        .fetch_one(db.pool())
+        .await
+        .unwrap(),
+        "parent"
+    );
+    let task = repo.get("task").await.unwrap().unwrap();
+    assert_eq!(
+        (task.status.as_str(), task.merge_commit_sha),
+        ("approved", None)
+    );
+    let row = repo.get_delivery(&id(1)).await.unwrap().unwrap();
+    assert_eq!(
+        (row.state, row.candidate_sha.as_str()),
+        (TaskDeliveryState::Conflict, "candidate-1")
+    );
+}
+
+#[tokio::test]
+async fn dependent_releases_only_after_corrected_generation_integrates() {
+    let (db, repo) = fixture().await;
+    seed_task(&db, "dependent").await;
+    repo.add_blocker("dependent", "task").await.unwrap();
+    make_conflict(&repo).await;
+    approve(&db, "task").await;
+    let conflict = TaskIntegrated::new(id(1), "candidate-1", "candidate-1", "candidate-1").unwrap();
+    assert!(matches!(
+        repo.task_integrated(&conflict).await.unwrap(),
+        TaskIntegrationResult::Stale { .. }
+    ));
+    assert!(
+        repo.transition(
+            "dependent",
+            TransitionAction::Start,
+            "",
+            "system",
+            None,
+            None
+        )
+        .await
+        .is_err()
+    );
+    let corrected = DeliveryReworkInput {
+        rework: ReworkDelivery::new("corrected", "attempt", "task", 1, 2).unwrap(),
+        source_sha: "source-2".into(),
+        patch_digest: "patch-2".into(),
+        selected_parent_sha: "parent".into(),
+        candidate_sha: "candidate-2".into(),
+    };
+    assert!(matches!(
+        repo.rework_delivery(&corrected).await.unwrap(),
+        DeliveryTransitionResult::Applied(_)
+    ));
+    assert_eq!(
+        repo.get_delivery(&id(2)).await.unwrap().unwrap().state,
+        TaskDeliveryState::Prepared
+    );
+    assert!(
+        repo.transition(
+            "dependent",
+            TransitionAction::Start,
+            "",
+            "system",
+            None,
+            None
+        )
+        .await
+        .is_err()
+    );
+    begin_applying(&repo, id(2)).await;
+    let integrated =
+        TaskIntegrated::new(id(2), "candidate-2", "candidate-2", "candidate-2").unwrap();
+    assert!(matches!(
+        repo.task_integrated(&integrated).await.unwrap(),
+        TaskIntegrationResult::Integrated(_)
+    ));
+    let blocker = repo.get("task").await.unwrap().unwrap();
+    assert_eq!(
+        (blocker.status.as_str(), blocker.merge_commit_sha.as_deref()),
+        ("closed", Some("candidate-2"))
+    );
+    assert_eq!(
+        repo.get_delivery(&id(1)).await.unwrap().unwrap().state,
+        TaskDeliveryState::Conflict
+    );
+    assert_eq!(
+        repo.get_delivery(&id(2)).await.unwrap().unwrap().state,
+        TaskDeliveryState::Applied
+    );
+    assert_eq!(
+        repo.transition(
+            "dependent",
+            TransitionAction::Start,
+            "",
+            "system",
+            None,
+            None
+        )
+        .await
+        .unwrap()
+        .status,
+        "in_progress"
+    );
 }
