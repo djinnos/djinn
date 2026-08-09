@@ -39,6 +39,7 @@ use std::time::{Duration, Instant, SystemTime};
 use tokio_util::sync::CancellationToken;
 
 mod anthropic_replay;
+mod covered_retry_boundary;
 
 /// Pre-scripted response: text (optional) + tool calls + token counts.
 /// When `_error` is set, `MockProvider::stream()` returns the error immediately
