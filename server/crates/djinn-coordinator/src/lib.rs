@@ -44,6 +44,7 @@ use djinn_slot::{PoolError, SlotPoolHandle};
 
 // Re-export internal types for sibling submodules that use `use super::*;`.
 use actor::CoordinatorActor;
+pub use actor::complete_startup_reaper_phase;
 use types::*;
 
 pub mod audit_sampler;
