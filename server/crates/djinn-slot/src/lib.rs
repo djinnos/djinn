@@ -48,6 +48,7 @@ pub mod helpers;
 pub mod lifecycle;
 pub mod llm_extraction;
 pub mod memory_enrichment;
+pub mod model_turn_capability;
 pub mod pool;
 pub mod reply_loop;
 pub mod session_extraction;
