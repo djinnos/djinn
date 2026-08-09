@@ -263,6 +263,11 @@ pub struct TaskDelivery {
     pub state: TaskDeliveryState,
     /// The deterministic candidate commit generated for this exact identity.
     pub candidate_sha: String,
+    /// Immutable source revision and normalized patch identity used to prepare it.
+    pub source_sha: String,
+    pub patch_digest: String,
+    pub selected_parent_sha: String,
+    pub prepare_transition_id: String,
     pub base_sha: String,
     pub applied_at: Option<String>,
     pub conflict_reason: Option<String>,
