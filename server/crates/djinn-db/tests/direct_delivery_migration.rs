@@ -47,7 +47,7 @@ async fn seed_probe_state(db: &Database) {
         .execute(db.pool()).await.expect("seed probe proposal");
     sqlx::query("INSERT INTO proposal_build_attempts (id, proposal_id, short_id, lifecycle, base_sha, branch_name) VALUES ('probe-attempt', 'probe-proposal', 'probe-attempt', 'reserved', 'base', 'proposal/probe/attempt')")
         .execute(db.pool()).await.expect("seed probe attempt");
-    sqlx::query("INSERT INTO task_deliveries (build_attempt_id, task_id, delivery_generation, state, candidate_sha, base_sha) VALUES ('probe-attempt', 'probe-task', 1, 'prepared', 'candidate', 'base')")
+    sqlx::query("INSERT INTO task_deliveries (build_attempt_id, task_id, delivery_generation, state, candidate_sha, base_sha, source_sha, patch_digest, selected_parent_sha, prepare_transition_id) VALUES ('probe-attempt', 'probe-task', 1, 'prepared', 'candidate', 'base', 'source', 'patch', 'base', 'probe-prepare')")
         .execute(db.pool()).await.expect("seed probe delivery");
 }
 
