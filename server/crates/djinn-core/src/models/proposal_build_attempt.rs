@@ -147,7 +147,10 @@ mod tests {
             serde_json::to_string(&value).unwrap(),
             format!("\"{wire}\"")
         );
-        assert_eq!(serde_json::from_str::<T>(&format!("\"{wire}\"")), Ok(value));
+        assert_eq!(
+            serde_json::from_str::<T>(&format!("\"{wire}\"")).unwrap(),
+            value
+        );
     }
 
     #[test]

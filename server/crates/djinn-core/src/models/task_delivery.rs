@@ -302,6 +302,12 @@ impl TaskIntegrated {
                 "task integration requires observation of the exact delivery candidate".into(),
             ));
         }
+        if candidate_sha != merge_commit_sha {
+            return Err(Error::InvalidTransition(
+                "task integration requires the merge commit to be the exact delivery candidate"
+                    .into(),
+            ));
+        }
         Ok(Self {
             identity,
             candidate_sha,
@@ -378,7 +384,10 @@ mod tests {
             serde_json::to_string(&value).unwrap(),
             format!("\"{wire}\"")
         );
-        assert_eq!(serde_json::from_str::<T>(&format!("\"{wire}\"")), Ok(value));
+        assert_eq!(
+            serde_json::from_str::<T>(&format!("\"{wire}\"")).unwrap(),
+            value
+        );
     }
 
     #[test]
@@ -412,8 +421,11 @@ mod tests {
     #[test]
     fn task_integrated_requires_exact_positive_candidate_identity() {
         let identity = TaskDeliveryIdentity::new("attempt", "task", 1).unwrap();
-        assert!(TaskIntegrated::new(identity.clone(), "candidate", "candidate", "merge").is_ok());
-        assert!(TaskIntegrated::new(identity.clone(), "candidate", "other", "merge").is_err());
+        assert!(
+            TaskIntegrated::new(identity.clone(), "candidate", "candidate", "candidate").is_ok()
+        );
+        assert!(TaskIntegrated::new(identity.clone(), "candidate", "other", "candidate").is_err());
+        assert!(TaskIntegrated::new(identity.clone(), "candidate", "candidate", "merge").is_err());
         assert!(TaskIntegrated::new(identity, "candidate", "candidate", " ").is_err());
         assert!(TaskDeliveryIdentity::new("attempt", "task", 0).is_err());
     }
