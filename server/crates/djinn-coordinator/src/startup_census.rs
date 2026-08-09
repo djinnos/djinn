@@ -226,7 +226,9 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use djinn_core::events::EventBus;
-    use djinn_db::{CreateTaskRunParams, TaskRepository};
+    use djinn_db::{
+        CreateTaskAttemptParams, CreateTaskRunParams, TaskAttemptRepository, TaskRepository,
+    };
     use djinn_k8s::UidGetResult;
 
     /// Controllable namespace inventory that records the concrete acquisition
@@ -322,6 +324,82 @@ mod tests {
             .await
             .expect("create running task-run fixture");
         (db, task.id, run_id)
+    }
+
+    async fn seed_old_pending_attempt(db: &Database, task_id: &str) -> String {
+        let attempt_id = uuid::Uuid::now_v7().to_string();
+        TaskAttemptRepository::new(db.clone())
+            .create_or_get_pending(CreateTaskAttemptParams {
+                id: &attempt_id,
+                task_id,
+                role: "worker",
+                dispatch_key: &format!("{task_id}:worker:{attempt_id}"),
+                session_id: None,
+                attempt_seq: None,
+                dispatch_owner_incarnation_id: None,
+                dispatch_group_id: None,
+            })
+            .await
+            .expect("create pending attempt fixture");
+        djinn_db::test_support::backdate_task_attempt_created_at(db, &attempt_id, "30 seconds")
+            .await;
+        attempt_id
+    }
+
+    async fn seed_task(db: &Database, project_id: &str, title: &str) -> String {
+        TaskRepository::new(db.clone(), EventBus::noop())
+            .create_fixture_in_project(
+                project_id,
+                None,
+                title,
+                "",
+                "",
+                "task",
+                0,
+                "",
+                Some("open"),
+                None,
+            )
+            .await
+            .expect("create task fixture")
+            .id
+    }
+
+    async fn seed_run(db: &Database, project_id: &str, task_id: &str, status: &str) -> String {
+        let run_id = uuid::Uuid::now_v7().to_string();
+        TaskRunRepository::new(db.clone())
+            .create(CreateTaskRunParams {
+                id: &run_id,
+                project_id,
+                task_id,
+                trigger_type: "manual",
+                status: Some(status),
+                workspace_path: None,
+                mirror_ref: None,
+                dispatch_group_id: None,
+            })
+            .await
+            .expect("create task-run fixture");
+        run_id
+    }
+
+    fn census_from_runs(runs: Vec<CensusTaskRun>) -> StartupCensus {
+        let task_projections = project_tasks(&runs);
+        StartupCensus {
+            availability: InventoryAvailability::Available,
+            listing: ClusterJobListing::Listed(HashMap::new()),
+            runs,
+            task_projections,
+        }
+    }
+
+    async fn attempt_outcome(db: &Database, attempt_id: &str) -> String {
+        TaskAttemptRepository::new(db.clone())
+            .get(attempt_id)
+            .await
+            .expect("read attempt")
+            .expect("attempt exists")
+            .outcome
     }
 
     #[tokio::test]
@@ -425,6 +503,200 @@ mod tests {
         assert_eq!(
             project_tasks(&runs).get("task"),
             Some(&TaskCensusProjection::Unknown)
+        );
+    }
+
+    #[test]
+    fn projection_preserves_live_and_creation_transit_over_destructive_evidence() {
+        let gone = CensusTaskRun {
+            task_id: "task".into(),
+            task_run_id: "gone".into(),
+            durable_state: DurableRunState::Running,
+            witness: TaskRunWitness::Gone(GoneProvenance::TerminalPresent),
+        };
+        let live = CensusTaskRun {
+            task_id: "task".into(),
+            task_run_id: "live".into(),
+            durable_state: DurableRunState::Running,
+            witness: TaskRunWitness::Live,
+        };
+        let transit = CensusTaskRun {
+            task_id: "task".into(),
+            task_run_id: "starting".into(),
+            durable_state: DurableRunState::Starting,
+            witness: TaskRunWitness::Gone(GoneProvenance::AuthoritativelyAbsent),
+        };
+        assert_eq!(
+            project_tasks(&[gone.clone(), live]).get("task"),
+            Some(&TaskCensusProjection::Live)
+        );
+        assert_eq!(
+            project_tasks(&[gone, transit]).get("task"),
+            Some(&TaskCensusProjection::CreationTransit)
+        );
+    }
+
+    /// Database-backed Stage C matrix using real task/run/attempt identities and
+    /// unreduced mixed-run census evidence, rather than an authorization helper.
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn startup_stage_c_task_projection() {
+        let db = crate::test_helpers::create_test_db();
+        let project = crate::test_helpers::create_test_project(&db).await;
+        let live_task = seed_task(&db, &project.id, "stage c gone plus live").await;
+        let transit_task = seed_task(&db, &project.id, "stage c gone plus transit").await;
+        let unknown_task = seed_task(&db, &project.id, "stage c gone plus unknown").await;
+        let all_gone_task = seed_task(&db, &project.id, "stage c all gone").await;
+
+        let live_attempt = seed_old_pending_attempt(&db, &live_task).await;
+        let transit_attempt = seed_old_pending_attempt(&db, &transit_task).await;
+        let unknown_attempt = seed_old_pending_attempt(&db, &unknown_task).await;
+        let all_gone_attempt = seed_old_pending_attempt(&db, &all_gone_task).await;
+
+        let runs = vec![
+            CensusTaskRun {
+                task_id: live_task.clone(),
+                task_run_id: seed_run(&db, &project.id, &live_task, "running").await,
+                durable_state: DurableRunState::Running,
+                witness: TaskRunWitness::Gone(GoneProvenance::TerminalPresent),
+            },
+            CensusTaskRun {
+                task_id: live_task.clone(),
+                task_run_id: seed_run(&db, &project.id, &live_task, "running").await,
+                durable_state: DurableRunState::Running,
+                witness: TaskRunWitness::Live,
+            },
+            CensusTaskRun {
+                task_id: transit_task.clone(),
+                task_run_id: seed_run(&db, &project.id, &transit_task, "running").await,
+                durable_state: DurableRunState::Running,
+                witness: TaskRunWitness::Gone(GoneProvenance::TerminalPresent),
+            },
+            CensusTaskRun {
+                task_id: transit_task.clone(),
+                task_run_id: seed_run(&db, &project.id, &transit_task, "starting").await,
+                durable_state: DurableRunState::Starting,
+                witness: TaskRunWitness::Gone(GoneProvenance::AuthoritativelyAbsent),
+            },
+            CensusTaskRun {
+                task_id: unknown_task.clone(),
+                task_run_id: seed_run(&db, &project.id, &unknown_task, "running").await,
+                durable_state: DurableRunState::Running,
+                witness: TaskRunWitness::Gone(GoneProvenance::AuthoritativelyAbsent),
+            },
+            CensusTaskRun {
+                task_id: unknown_task.clone(),
+                task_run_id: seed_run(&db, &project.id, &unknown_task, "running").await,
+                durable_state: DurableRunState::Running,
+                witness: TaskRunWitness::Unknown,
+            },
+            CensusTaskRun {
+                task_id: all_gone_task.clone(),
+                task_run_id: seed_run(&db, &project.id, &all_gone_task, "running").await,
+                durable_state: DurableRunState::Running,
+                witness: TaskRunWitness::Gone(GoneProvenance::AuthoritativelyAbsent),
+            },
+            CensusTaskRun {
+                task_id: all_gone_task.clone(),
+                task_run_id: seed_run(&db, &project.id, &all_gone_task, "starting").await,
+                durable_state: DurableRunState::Starting,
+                witness: TaskRunWitness::Gone(GoneProvenance::TerminalPresent),
+            },
+        ];
+
+        let census = census_from_runs(runs);
+        assert_eq!(
+            census.task_projection(&live_task),
+            Some(TaskCensusProjection::Live)
+        );
+        assert_eq!(
+            census.task_projection(&transit_task),
+            Some(TaskCensusProjection::CreationTransit)
+        );
+        assert_eq!(
+            census.task_projection(&unknown_task),
+            Some(TaskCensusProjection::Unknown)
+        );
+        assert_eq!(
+            census.task_projection(&all_gone_task),
+            Some(TaskCensusProjection::DestructivelyGone)
+        );
+
+        crate::health::reap_orphaned_pending_attempts_for_startup_with_census(
+            &db,
+            &uuid::Uuid::now_v7().to_string(),
+            &census,
+        )
+        .await;
+
+        assert_eq!(attempt_outcome(&db, &live_attempt).await, "pending");
+        assert_eq!(attempt_outcome(&db, &transit_attempt).await, "pending");
+        assert_eq!(attempt_outcome(&db, &unknown_attempt).await, "pending");
+        assert_eq!(attempt_outcome(&db, &all_gone_attempt).await, "interrupted");
+        assert!(logs_contain("stage=\"startup_stage_c\""));
+        assert!(logs_contain("reason=\"unknown\""));
+        assert!(logs_contain(&unknown_task));
+    }
+
+    #[tokio::test]
+    async fn configured_reapers_consume_the_acquired_census_without_inventory_calls() {
+        let (db, task_id, run_id) = seed_running_run().await;
+        let attempt_id = seed_old_pending_attempt(&db, &task_id).await;
+        let inventory = Arc::new(CountingInventory::listed_empty(ObjectPresence::Absent));
+        let census = StartupCensus::acquire(db.clone(), Some(inventory.clone()))
+            .await
+            .expect("acquire startup census");
+        let list_calls = inventory.list_calls.load(Ordering::SeqCst);
+        let presence_calls = inventory.presence_calls.load(Ordering::SeqCst);
+        crate::health::reap_stale_task_runs_for_startup_with_census(&db, &census).await;
+
+        // This live run did not exist when the census was acquired. Switching
+        // Stage C back to `list_orphaned_pending` would suppress the attempt by
+        // re-reading this post-census task-run state.
+        let project_id = TaskRunRepository::new(db.clone())
+            .get(&run_id)
+            .await
+            .expect("read census run")
+            .expect("census run exists")
+            .project_id;
+        let post_census_run = seed_run(&db, &project_id, &task_id, "running").await;
+        crate::health::reap_orphaned_pending_attempts_for_startup_with_census(
+            &db,
+            &uuid::Uuid::now_v7().to_string(),
+            &census,
+        )
+        .await;
+        assert_eq!(inventory.list_calls.load(Ordering::SeqCst), list_calls);
+        assert_eq!(
+            inventory.presence_calls.load(Ordering::SeqCst),
+            presence_calls
+        );
+        assert_eq!(
+            TaskRunRepository::new(db.clone())
+                .get(&run_id)
+                .await
+                .expect("read task run")
+                .expect("task run exists")
+                .status,
+            "interrupted"
+        );
+        assert_eq!(
+            TaskRunRepository::new(db.clone())
+                .get(&post_census_run)
+                .await
+                .expect("read post-census run")
+                .expect("post-census run exists")
+                .status,
+            "running"
+        );
+        assert_eq!(
+            TaskAttemptRepository::new(db.clone())
+                .get(&attempt_id)
+                .await
+                .expect("read attempt")
+                .expect("attempt exists")
+                .outcome,
+            "interrupted"
         );
     }
 }
