@@ -23,6 +23,7 @@ use djinn_coordinator::build_lease::BuildLeaseService;
 use djinn_coordinator::build_lease_reclaim::{BuildLeaseReclaimReport, BuildLeaseReclaimer};
 use djinn_coordinator::graph_warm_lease::BuildLeaseGraphWarmAdapter;
 use djinn_coordinator::run_dir_observe::{RunDirObserveSeams, arm_disk_observation};
+use djinn_coordinator::startup_census::{InventoryAvailability, StartupCensus, TaskRunWitness};
 use djinn_core::clock::{Clock, SystemClock as SystemClockTrait};
 use djinn_core::models::KnowledgeInjectionConfig;
 use djinn_db::{

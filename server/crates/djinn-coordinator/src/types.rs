@@ -4,6 +4,7 @@ use std::time::{Duration, Instant as StdInstant};
 
 use super::consolidation::ConsolidationRunner;
 use crate::roles::RoleRegistry;
+use crate::startup_census::StartupCensus;
 use djinn_control_plane::bridge::RuntimeOps;
 use djinn_core::events::DjinnEventEnvelope;
 use djinn_core::models::ModelLane;
