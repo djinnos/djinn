@@ -1,7 +1,10 @@
 //! Production-boundary evidence for covered B1 retry ownership.
 
 use super::*;
-use crate::reply_loop::turn::register_reply_loop_boundary_observer;
+use crate::reply_loop::model_turn_admission::ModelTurnAdmissionTestHooks;
+use crate::reply_loop::turn::{
+    register_reply_loop_admission_test_hooks, register_reply_loop_boundary_observer,
+};
 use djinn_db::test_support::{
     model_turn_accounting_fixture, model_turn_decision_count_fixture,
     model_turn_launch_identities_fixture, model_turn_terminal_fixture,
@@ -86,6 +89,8 @@ struct ScriptedCoveredB1Provider {
     launch_contexts: Mutex<Vec<ProviderAttemptContextV1>>,
     first_terminal: ProviderAttemptTerminalV1,
     first_retry_deadline: Option<u64>,
+    pending_first_stream: bool,
+    first_abort: Mutex<Option<ProviderAttemptAbortHandleV1>>,
 }
 impl ScriptedCoveredB1Provider {
     fn new() -> Self {
@@ -109,7 +114,15 @@ impl ScriptedCoveredB1Provider {
             launch_contexts: Mutex::new(Vec::new()),
             first_terminal,
             first_retry_deadline,
+            pending_first_stream: false,
+            first_abort: Mutex::new(None),
         }
+    }
+
+    fn watchdog_pending() -> Self {
+        let mut provider = Self::with_first_terminal(ProviderAttemptTerminalV1::Aborted);
+        provider.pending_first_stream = true;
+        provider
     }
 }
 impl LlmProvider for ScriptedCoveredB1Provider {
@@ -157,7 +170,7 @@ impl LlmProvider for ScriptedCoveredB1Provider {
             .push(context);
         self.launched[ordinal].notify_waiters();
         let (tx, rx) = tokio::sync::oneshot::channel();
-        let (frames, outcome) = if ordinal == 0 {
+        let (frames, outcome) = if ordinal == 0 && !self.pending_first_stream {
             (
                 Box::pin(futures::stream::empty())
                     as Pin<Box<dyn futures::Stream<Item = anyhow::Result<SseFrame>> + Send>>,
@@ -172,12 +185,19 @@ impl LlmProvider for ScriptedCoveredB1Provider {
                 terminal(ProviderAttemptTerminalV1::Completed, None),
             )
         };
-        tx.send(outcome).expect("one B1 terminal");
-        Ok(ProviderSseAttemptV1::for_test(
-            frames,
-            ProviderAttemptAbortHandleV1::new(),
-            rx,
-        ))
+        let abort = ProviderAttemptAbortHandleV1::new();
+        if ordinal == 0 && self.pending_first_stream {
+            *self.first_abort.lock().expect("first abort") = Some(abort.clone());
+            let cancellation = abort.cancellation_token();
+            tokio::spawn(async move {
+                cancellation.cancelled().await;
+                tx.send(terminal(ProviderAttemptTerminalV1::Aborted, None))
+                    .expect("watchdog B1 terminal");
+            });
+        } else {
+            tx.send(outcome).expect("one B1 terminal");
+        }
+        Ok(ProviderSseAttemptV1::for_test(frames, abort, rx))
     }
     fn sse_frame_parser_v1(&self) -> Option<Box<dyn ProviderSseFrameParserV1>> {
         Some(Box::new(CoveredParser))
@@ -545,6 +565,112 @@ async fn non_retryable_b1_rejection_does_not_replace_in_real_reply_loop() {
 
 #[tokio::test]
 async fn watchdog_aborted_b1_terminal_does_not_replace_in_real_reply_loop() {
-    terminal_covered_attempt_does_not_replace(ProviderAttemptTerminalV1::Aborted, "cancelled")
-        .await;
+    let db = Database::ephemeral().await.expect("database");
+    let pool = seed_model_turn_admission_fixture(&db, "enforce", "supported", 2).await;
+    let session_cancel = CancellationToken::new();
+    let supervisor_cancel = CancellationToken::new();
+    let slot_ctx = crate::test_helpers::agent_context_from_db(db.clone(), session_cancel.clone());
+    let provider = ScriptedCoveredB1Provider::watchdog_pending();
+    let session_id = format!("covered-watchdog-{}", uuid::Uuid::now_v7());
+    let hooks = Arc::new(ModelTurnAdmissionTestHooks::default());
+    hooks.fail_heartbeat.store(true, Ordering::Release);
+    hooks.block_watchdog_deadline.store(true, Ordering::Release);
+    let _hooks = register_reply_loop_admission_test_hooks(session_id.clone(), Arc::clone(&hooks));
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let observed = Arc::clone(&events);
+    let _observer = register_reply_loop_boundary_observer(
+        session_id.clone(),
+        Arc::new(move |event| observed.lock().expect("observer").push(event.name)),
+    );
+    let started = hooks.watchdog_started.notified();
+    tokio::pin!(started);
+    let mut conversation = Conversation::new();
+    conversation.push(Message::user("watchdog abort must suppress replacement"));
+    let compaction_cs = crate::reply_loop::CompactionCriticalSection::new();
+    let run = run_reply_loop(
+        ReplyLoopContext {
+            provider: &provider,
+            credential_record_id: "credential-slot",
+            tools: &[],
+            task_id: "covered-watchdog",
+            task_short_id: "covered-watchdog",
+            session_id: &session_id,
+            project_path: "/workspace",
+            worktree_path: std::path::Path::new("/workspace"),
+            role_name: "worker",
+            finalize_tool_names: &[],
+            context_window: 10_000,
+            model_id: "model",
+            cancel: &session_cancel,
+            global_cancel: &supervisor_cancel,
+            ctx: &slot_ctx,
+            active_skill_names: &[],
+            active_mcp_server_names: &[],
+            max_turns_override: Some(2),
+            compaction_cs: &compaction_cs,
+            session_budget: None,
+        },
+        &mut conversation,
+        false,
+    );
+    tokio::pin!(run);
+    tokio::select! { _ = &mut started => {}, result = &mut run => panic!("watchdog did not start: {:?}", result.0) }
+    tokio::time::pause();
+    let heartbeat = hooks.heartbeat_finished.notified();
+    tokio::pin!(heartbeat);
+    tokio::time::advance(std::time::Duration::from_secs(20)).await;
+    heartbeat.await;
+    let deadline = hooks.watchdog_deadline_reached.notified();
+    tokio::pin!(deadline);
+    tokio::time::advance(std::time::Duration::from_secs(20)).await;
+    deadline.await;
+    // Resume before terminal reconciliation, then let the production watchdog
+    // fire its abort after this test has observed the deadline seam.
+    tokio::time::resume();
+    hooks.watchdog_deadline_release.notify_waiters();
+    let (result, ..) = run.await;
+    assert!(
+        result
+            .expect_err("watchdog abort must terminate loop")
+            .to_string()
+            .contains("watchdog aborted")
+    );
+    assert_eq!(hooks.heartbeats.load(Ordering::Acquire), 1);
+    assert!(
+        provider
+            .first_abort
+            .lock()
+            .expect("first abort")
+            .as_ref()
+            .expect("B1 abort")
+            .is_aborted()
+    );
+    assert_eq!(provider.plans.load(Ordering::SeqCst), 1);
+    assert_eq!(provider.launches.load(Ordering::SeqCst), 1);
+    let leases = model_turn_launch_identities_fixture(&db).await;
+    assert_eq!(leases.len(), 1);
+    assert_eq!(
+        model_turn_terminal_fixture(&db, &leases[0].0, leases[0].1, &leases[0].2)
+            .await
+            .0,
+        "cancelled"
+    );
+    assert_eq!(model_turn_decision_count_fixture(&db, pool).await, 0);
+    assert_eq!(model_turn_accounting_fixture(&db, pool).await, (0, 1, 1));
+    let events = events.lock().expect("observer");
+    assert!(!events.iter().any(|event| *event == "covered_retry_wait"));
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| **event == "model_turn_prepare")
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| **event == "model_turn_launch")
+            .count(),
+        1
+    );
 }
