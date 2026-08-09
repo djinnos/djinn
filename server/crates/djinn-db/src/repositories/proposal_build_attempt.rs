@@ -426,6 +426,23 @@ impl ProposalBuildAttemptRepository {
             tx.commit().await?;
             return Ok(ReconcileAttemptBranchHeadResult::Stale { current });
         }
+        // The first observation must prove that expected-absent ref creation
+        // started at the exact base recorded at reservation. Otherwise a
+        // pre-existing ref was adopted, so retain the absent local identity and
+        // park instead of installing its head.
+        if current.branch_head_sha.is_none() && input.observed_branch_head_sha != current.base_sha {
+            let attempt = park_tx(
+                &mut tx,
+                &current.id,
+                DirectDeliveryParkReason::BranchIdentityMismatch,
+            )
+            .await?;
+            tx.commit().await?;
+            return Ok(ReconcileAttemptBranchHeadResult::Parked {
+                attempt,
+                reason: DirectDeliveryParkReason::BranchIdentityMismatch,
+            });
+        }
         // An already-published branch is immutable from this repository's point
         // of view. A different observed head is evidence, not permission to
         // overwrite its identity.
