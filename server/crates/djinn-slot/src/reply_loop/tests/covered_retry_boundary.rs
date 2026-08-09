@@ -184,7 +184,7 @@ impl LlmProvider for ScriptedCoveredB1Provider {
             (
                 Box::pin(futures::stream::empty())
                     as Pin<Box<dyn futures::Stream<Item = anyhow::Result<SseFrame>> + Send>>,
-                terminal(self.first_terminal.clone(), self.first_retry_deadline),
+                terminal(self.first_terminal, self.first_retry_deadline),
             )
         } else {
             (
@@ -543,7 +543,7 @@ async fn terminal_covered_attempt_does_not_replace(
     assert_eq!(model_turn_accounting_fixture(&db, pool).await, (0, 1, 1));
     let events = events.lock().expect("observer");
     assert!(
-        !events.iter().any(|event| *event == "covered_retry_wait"),
+        !events.contains(&"covered_retry_wait"),
         "terminal state must not enter the replacement wait"
     );
     assert_eq!(
@@ -670,7 +670,7 @@ async fn watchdog_aborted_b1_terminal_does_not_replace_in_real_reply_loop() {
     assert_eq!(model_turn_decision_count_fixture(&db, pool).await, 0);
     assert_eq!(model_turn_accounting_fixture(&db, pool).await, (0, 1, 1));
     let events = events.lock().expect("observer");
-    assert!(!events.iter().any(|event| *event == "covered_retry_wait"));
+    assert!(!events.contains(&"covered_retry_wait"));
     assert_eq!(
         events
             .iter()
