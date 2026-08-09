@@ -11,6 +11,7 @@ use std::sync::OnceLock;
 use crate::finalize_types::SubmitWork;
 use crate::helpers::{runtime_env_diagnostics, runtime_fs_diagnostics};
 use crate::host::{PreCompactionToolResult, SlotContext};
+use crate::model_turn_capability::{ModelTurnCapabilityCoverageV2, report_for_route};
 use crate::output_parser::ParsedAgentOutput;
 use djinn_compaction::{
     COMPACTION_SUMMARY_END_MARKER, CompactionContext, CompactionOutcome,
@@ -1089,12 +1090,23 @@ pub async fn run_reply_loop(
             // fence before this code reaches the network launch below. An
             // adapter that cannot construct a plan remains explicitly on the
             // uncovered compatibility path rather than claiming enforcement.
-            let stream_result = if let Ok(plan) = provider.provider_attempt_plan_v1(
+            let planned_attempt = provider.provider_attempt_plan_v1(
                 credential_record_id,
                 request_conversation.as_ref(),
                 tools,
                 tool_choice,
-            ) {
+            );
+            if let Some(identity) = slot_ctx.live_identity.as_ref() {
+                let report = report_for_route(identity, provider.name(), model_id, planned_attempt.as_ref().ok());
+                if let Some(reporter) = slot_ctx.model_turn_capability_reporter.as_ref() {
+                    reporter.emit(&report);
+                }
+                tracing::info!(slot_pod_uid = %report.slot_pod_uid, deployment_revision = %report.deployment_revision, provider = %report.provider, model_scope = %report.model_scope, coverage = ?report.coverage, "model-turn B2 capability report emitted");
+            }
+            let stream_result = if let Ok(plan) = planned_attempt {
+                let owner_pod_uid = slot_ctx.live_identity.as_ref().and_then(|identity| {
+                    matches!(report_for_route(identity, provider.name(), model_id, Some(&plan)).coverage, ModelTurnCapabilityCoverageV2::Covered).then(|| identity.pod_uid.clone())
+                });
                 observe_reply_loop_boundary("model_turn_prepare");
                 let coordinator = ModelTurnAdmissionCoordinator::new(
                     djinn_db::ModelTurnAdmissionRepository::new(slot_ctx.db.clone()),
@@ -1105,7 +1117,7 @@ pub async fn run_reply_loop(
                         ModelTurnAdmissionRequest {
                             credential_id: credential_record_id.to_owned(),
                             request_id: format!("{session_id}:{turns}"),
-                            owner_pod_uid: None,
+                            owner_pod_uid,
                             // Phase A rejects non-positive generations for both
                             // shadow decisions and enforced leases. The first
                             // slot-owned attempt generation is therefore one.
