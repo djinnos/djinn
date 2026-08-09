@@ -85,6 +85,7 @@ struct ScriptedCoveredB1Provider {
     launched: [tokio::sync::Notify; 2],
     launch_contexts: Mutex<Vec<ProviderAttemptContextV1>>,
     first_terminal: ProviderAttemptTerminalV1,
+    first_retry_deadline: Option<u64>,
 }
 impl ScriptedCoveredB1Provider {
     fn new() -> Self {
@@ -94,12 +95,20 @@ impl ScriptedCoveredB1Provider {
     }
 
     fn with_first_terminal(first_terminal: ProviderAttemptTerminalV1) -> Self {
+        Self::with_first_terminal_and_deadline(first_terminal, Some(0))
+    }
+
+    fn with_first_terminal_and_deadline(
+        first_terminal: ProviderAttemptTerminalV1,
+        first_retry_deadline: Option<u64>,
+    ) -> Self {
         Self {
             plans: AtomicUsize::new(0),
             launches: AtomicUsize::new(0),
             launched: [tokio::sync::Notify::new(), tokio::sync::Notify::new()],
             launch_contexts: Mutex::new(Vec::new()),
             first_terminal,
+            first_retry_deadline,
         }
     }
 }
@@ -152,7 +161,7 @@ impl LlmProvider for ScriptedCoveredB1Provider {
             (
                 Box::pin(futures::stream::empty())
                     as Pin<Box<dyn futures::Stream<Item = anyhow::Result<SseFrame>> + Send>>,
-                terminal(self.first_terminal.clone(), Some(0)),
+                terminal(self.first_terminal.clone(), self.first_retry_deadline),
             )
         } else {
             (
@@ -322,7 +331,12 @@ async fn cancellation_at_covered_retry_wait_returns(
     let session_cancel = CancellationToken::new();
     let supervisor_cancel = CancellationToken::new();
     let slot_ctx = crate::test_helpers::agent_context_from_db(db.clone(), session_cancel.clone());
-    let provider = ScriptedCoveredB1Provider::new();
+    // Keep the retry deadline in the future independently of the bounded
+    // deterministic jitter so observer delivery cannot race replacement setup.
+    let provider = ScriptedCoveredB1Provider::with_first_terminal_and_deadline(
+        ProviderAttemptTerminalV1::Failed(ProviderAttemptLossV1::Transport),
+        Some(60_000),
+    );
     let session_id = format!("covered-retry-cancel-{}", uuid::Uuid::now_v7());
     let events = Arc::new(Mutex::new(Vec::new()));
     let waited = Arc::new(tokio::sync::Notify::new());
@@ -398,8 +412,12 @@ async fn cancellation_at_covered_retry_wait_returns(
             .0,
         "failed"
     );
-    assert_eq!(model_turn_decision_count_fixture(&db, pool).await, 1);
-    assert_eq!(model_turn_accounting_fixture(&db, pool).await, (0, 0, 1));
+    assert_eq!(
+        model_turn_decision_count_fixture(&db, pool).await,
+        0,
+        "settlement removes the first decision and cancellation cannot create a replacement"
+    );
+    assert_eq!(model_turn_accounting_fixture(&db, pool).await, (0, 1, 1));
     let events = events.lock().expect("observer");
     assert_eq!(
         events
@@ -425,5 +443,108 @@ async fn session_cancellation_at_covered_retry_wait_prevents_replacement() {
 #[tokio::test]
 async fn supervisor_shutdown_at_covered_retry_wait_prevents_replacement() {
     cancellation_at_covered_retry_wait_returns(false, ReplyLoopCancelled::supervisor_shutdown())
+        .await;
+}
+
+async fn terminal_covered_attempt_does_not_replace(
+    first_terminal: ProviderAttemptTerminalV1,
+    expected_lifecycle: &str,
+) {
+    let db = Database::ephemeral().await.expect("database");
+    let pool = seed_model_turn_admission_fixture(&db, "enforce", "supported", 2).await;
+    let session_cancel = CancellationToken::new();
+    let supervisor_cancel = CancellationToken::new();
+    let slot_ctx = crate::test_helpers::agent_context_from_db(db.clone(), session_cancel.clone());
+    let provider = ScriptedCoveredB1Provider::with_first_terminal(first_terminal);
+    let session_id = format!("covered-terminal-{}", uuid::Uuid::now_v7());
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let observed = Arc::clone(&events);
+    let _observer = register_reply_loop_boundary_observer(
+        session_id.clone(),
+        Arc::new(move |event| observed.lock().expect("observer").push(event.name)),
+    );
+    let mut conversation = Conversation::new();
+    conversation.push(Message::user("terminal B1 must not replace"));
+    let compaction_cs = crate::reply_loop::CompactionCriticalSection::new();
+    let (result, ..) = run_reply_loop(
+        ReplyLoopContext {
+            provider: &provider,
+            credential_record_id: "credential-slot",
+            tools: &[],
+            task_id: "covered-terminal",
+            task_short_id: "covered-terminal",
+            session_id: &session_id,
+            project_path: "/workspace",
+            worktree_path: std::path::Path::new("/workspace"),
+            role_name: "worker",
+            finalize_tool_names: &[],
+            context_window: 10_000,
+            model_id: "model",
+            cancel: &session_cancel,
+            global_cancel: &supervisor_cancel,
+            ctx: &slot_ctx,
+            active_skill_names: &[],
+            active_mcp_server_names: &[],
+            max_turns_override: Some(2),
+            compaction_cs: &compaction_cs,
+            session_budget: None,
+        },
+        &mut conversation,
+        false,
+    )
+    .await;
+    result.expect_err("terminal B1 state must terminate the real reply loop");
+
+    assert_eq!(provider.plans.load(Ordering::SeqCst), 1);
+    assert_eq!(provider.launches.load(Ordering::SeqCst), 1);
+    let leases = model_turn_launch_identities_fixture(&db).await;
+    assert_eq!(leases.len(), 1);
+    assert_eq!(
+        model_turn_terminal_fixture(&db, &leases[0].0, leases[0].1, &leases[0].2)
+            .await
+            .0,
+        expected_lifecycle
+    );
+    assert_eq!(
+        model_turn_decision_count_fixture(&db, pool).await,
+        0,
+        "terminal settlement must leave no replacement decision"
+    );
+    assert_eq!(model_turn_accounting_fixture(&db, pool).await, (0, 1, 1));
+    let events = events.lock().expect("observer");
+    assert!(
+        !events.iter().any(|event| *event == "covered_retry_wait"),
+        "terminal state must not enter the replacement wait"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| **event == "model_turn_prepare")
+            .count(),
+        1,
+        "terminal state must not prepare a replacement"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| **event == "model_turn_launch")
+            .count(),
+        1,
+        "terminal state must not launch a replacement"
+    );
+}
+
+#[tokio::test]
+async fn non_retryable_b1_rejection_does_not_replace_in_real_reply_loop() {
+    terminal_covered_attempt_does_not_replace(
+        ProviderAttemptTerminalV1::Failed(ProviderAttemptLossV1::ProviderRejected),
+        "failed",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn watchdog_aborted_b1_terminal_does_not_replace_in_real_reply_loop() {
+    terminal_covered_attempt_does_not_replace(ProviderAttemptTerminalV1::Aborted, "cancelled")
         .await;
 }
