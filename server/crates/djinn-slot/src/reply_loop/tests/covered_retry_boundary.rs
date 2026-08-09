@@ -3,7 +3,8 @@
 use super::*;
 use crate::reply_loop::turn::set_reply_loop_boundary_observer;
 use djinn_db::test_support::{
-    model_turn_accounting_fixture, model_turn_terminal_fixture, seed_model_turn_admission_fixture,
+    model_turn_accounting_fixture, model_turn_launch_identities_fixture,
+    model_turn_terminal_fixture, seed_model_turn_admission_fixture,
 };
 use djinn_db::{Database, ModelTurnBucketDebit, ModelTurnBucketKind};
 use djinn_provider::provider::client::{ProviderAttemptContextV1, ProviderSseAttemptV1, SseFrame};
@@ -174,17 +175,21 @@ async fn covered_retry_reconciles_old_lease_before_fresh_preparation_and_launch(
     let supervisor_cancel = CancellationToken::new();
     let slot_ctx = crate::test_helpers::agent_context_from_db(db.clone(), session_cancel.clone());
     let provider = ScriptedCoveredB1Provider::new();
+    // The observer is process-global, so this invocation needs a unique stable
+    // identity before filtering observer notifications.
+    let session_id = format!("covered-retry-session-{}", uuid::Uuid::now_v7());
     let events = Arc::new(Mutex::new(Vec::new()));
     let settled = Arc::new(tokio::sync::Notify::new());
     let waited = Arc::new(tokio::sync::Notify::new());
     let observed = Arc::clone(&events);
     let settled_observer = Arc::clone(&settled);
     let waited_observer = Arc::clone(&waited);
+    let observed_session_id = session_id.clone();
     set_reply_loop_boundary_observer(Some(Arc::new(move |event| {
         // The observer hook is process-global because it is test-only. Filter
         // its events by this loop's stable session identity so concurrently
         // executing reply-loop tests cannot be mistaken for replacement work.
-        if event.session_id != "covered-retry-session" {
+        if event.session_id != observed_session_id {
             return;
         }
         observed.lock().expect("observer").push(event.name);
@@ -210,7 +215,7 @@ async fn covered_retry_reconciles_old_lease_before_fresh_preparation_and_launch(
             tools: &[],
             task_id: "covered-retry-task",
             task_short_id: "covered-retry",
-            session_id: "covered-retry-session",
+            session_id: &session_id,
             project_path: "/workspace",
             worktree_path: std::path::Path::new("/workspace"),
             role_name: "worker",
@@ -233,9 +238,12 @@ async fn covered_retry_reconciles_old_lease_before_fresh_preparation_and_launch(
     tokio::select! { _ = &mut first_launch => {}, result = &mut run => panic!("first B1 launch missing: {:?}", result.0) }
     tokio::select! { _ = &mut settlement => {}, result = &mut run => panic!("old attempt did not settle: {:?}", result.0) }
 
-    let old_request = "covered-retry-session:covered:1";
-    let old: (String, i64, String) = sqlx::query_as("SELECT lease_id::text, generation, request_id FROM model_turn_leases WHERE request_id = $1")
-        .bind(old_request).fetch_one(db.pool()).await.expect("old persisted lease");
+    let old_request = format!("{session_id}:covered:1");
+    let old = model_turn_launch_identities_fixture(&db)
+        .await
+        .into_iter()
+        .find(|(_, _, request_id)| request_id == &old_request)
+        .expect("old persisted lease");
     assert_eq!(old.1, 1);
     assert_eq!(old.2, old_request);
     assert_eq!(
@@ -251,15 +259,10 @@ async fn covered_retry_reconciles_old_lease_before_fresh_preparation_and_launch(
     result.expect("replacement completes reply loop");
     assert_eq!(provider.launches.load(Ordering::SeqCst), 2);
 
-    let leases: Vec<(String, i64, String)> = sqlx::query_as(
-        "SELECT lease_id::text, generation, request_id FROM model_turn_leases ORDER BY generation",
-    )
-    .fetch_all(db.pool())
-    .await
-    .expect("both lifecycle records");
+    let leases = model_turn_launch_identities_fixture(&db).await;
     assert_eq!(leases.len(), 2);
     assert_eq!(leases[0], old);
-    assert_eq!(leases[1].2, "covered-retry-session:covered:2");
+    assert_eq!(leases[1].2, format!("{session_id}:covered:2"));
     assert_ne!(leases[0].0, leases[1].0);
     assert!(leases[1].1 > leases[0].1);
     let launch_contexts = provider
