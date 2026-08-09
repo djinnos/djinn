@@ -146,6 +146,9 @@ mod actor;
 mod consolidation;
 pub mod dispatch;
 mod evidence;
+mod evidence_dispatch_recovery;
+#[cfg(test)]
+mod evidence_dispatch_recovery_tests;
 mod evidence_lifecycle_state;
 pub mod handle;
 mod health;
