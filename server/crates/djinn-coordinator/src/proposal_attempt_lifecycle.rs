@@ -328,10 +328,10 @@ mod tests {
     use djinn_core::events::EventBus;
     use djinn_core::models::ProposalBuildAttemptLifecycle;
     use djinn_db::{
-        Database, ProposalCreateInput, ProposalRepository, ReserveProposalBuildAttemptInput,
+        Database, ProposalBuildAttemptRepository, ProposalCreateInput, ProposalRepository,
+        ReserveProposalBuildAttemptInput, test_support::activate_direct_delivery_epoch_for_test,
     };
     use djinn_provider::github_api::GitHubApiClient;
-    use sqlx::Row;
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
         matchers::{method, path, query_param},
@@ -346,8 +346,7 @@ mod tests {
     }
     async fn db_and_proposal() -> (Database, ProposalRepository, djinn_core::models::Proposal) {
         let db = Database::open_in_memory().expect("ephemeral database");
-        sqlx::query("UPDATE direct_delivery_epochs SET state = 'active', generation = 1 WHERE name = 'direct_delivery_v1'")
-            .execute(db.pool()).await.expect("enable direct delivery");
+        activate_direct_delivery_epoch_for_test(&db).await;
         // Keep this repository (and its cloned test-db handle) alive for the
         // test. Dropping the last template-clone owner deletes the database.
         let proposals = ProposalRepository::new(db.clone(), EventBus::noop());
@@ -445,15 +444,12 @@ mod tests {
         assert!(
             matches!(service(db.clone(), &first_server).stop(first.clone(), "regraduated").await.expect("stop"), AttemptLifecycleOutcome::Retired(ref value) if value.lifecycle == ProposalBuildAttemptLifecycle::Retired)
         );
-        let row = sqlx::query(
-            "SELECT count(*), max(lifecycle) FROM proposal_build_attempts WHERE id = $1",
-        )
-        .bind(&first.id)
-        .fetch_one(db.pool())
-        .await
-        .expect("retained row");
-        assert_eq!(row.get::<i64, _>(0), 1);
-        assert_eq!(row.get::<String, _>(1), "retired");
+        let retained = ProposalBuildAttemptRepository::new(db.clone())
+            .get(&first.id)
+            .await
+            .expect("load retained attempt")
+            .expect("retained attempt");
+        assert_eq!(retained.lifecycle, ProposalBuildAttemptLifecycle::Retired);
         let second_branch = format!("proposal/{}/a2", proposal.short_id);
         let second_server = MockServer::start().await;
         mount_start(&second_server, &second_branch, 2).await;

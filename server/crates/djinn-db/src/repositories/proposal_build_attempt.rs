@@ -247,6 +247,19 @@ impl ProposalBuildAttemptRepository {
         Self { db }
     }
 
+    /// Load one retained attempt by its durable identity.
+    pub async fn get(&self, build_attempt_id: &str) -> DbResult<Option<ProposalBuildAttempt>> {
+        self.require_capability(true).await?;
+        require_nonblank("build_attempt_id", build_attempt_id)?;
+        let row = sqlx::query_as::<_, AttemptRow>(&format!(
+            "SELECT {ATTEMPT_COLUMNS} FROM proposal_build_attempts WHERE id = $1"
+        ))
+        .bind(build_attempt_id)
+        .fetch_optional(self.db.pool())
+        .await?;
+        row.map(TryInto::try_into).transpose()
+    }
+
     pub async fn reserve(
         &self,
         input: &ReserveProposalBuildAttemptInput,
