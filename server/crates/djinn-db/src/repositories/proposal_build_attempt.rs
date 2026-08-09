@@ -384,16 +384,15 @@ impl ProposalBuildAttemptRepository {
             return Ok(AcquireProposalBuildAttemptLeaseResult::Stale { current: None });
         }
         let current = fetch_attempt_lease(&mut tx, &input.build_attempt_id).await?;
-        if let Some(ref lease) = current {
-            if lease.owner_incarnation_id == input.owner_incarnation_id
-                && lease.generation == acquired_generation
-                && lease.expires_at == normalized_expires_at
-            {
-                tx.commit().await?;
-                return Ok(AcquireProposalBuildAttemptLeaseResult::Replayed(
-                    lease.clone(),
-                ));
-            }
+        if let Some(ref lease) = current
+            && lease.owner_incarnation_id == input.owner_incarnation_id
+            && lease.generation == acquired_generation
+            && lease.expires_at == normalized_expires_at
+        {
+            tx.commit().await?;
+            return Ok(AcquireProposalBuildAttemptLeaseResult::Replayed(
+                lease.clone(),
+            ));
         }
         let acquired = match current {
             None if input.expected_generation == 0 => sqlx::query_as::<_, AttemptLeaseRow>(
