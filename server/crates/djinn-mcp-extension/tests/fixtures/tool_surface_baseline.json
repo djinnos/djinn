@@ -2241,6 +2241,104 @@
     "readOnly": false
   },
   {
+    "concurrent_safe": false,
+    "description": "Resolve typed evidence using an applicable validation result and an existing committed folding revision. Only the active Judge may resolve evidence.",
+    "destructive": false,
+    "idempotent": false,
+    "inputSchema": {
+      "properties": {
+        "finding_id": {
+          "description": "Typed evidence finding id to resolve.",
+          "type": "string"
+        },
+        "folding_revision": {
+          "description": "Existing committed proposal revision that folds the evidence.",
+          "type": "integer"
+        },
+        "rationale": {
+          "description": "Non-empty Judge rationale for resolution.",
+          "type": "string"
+        },
+        "validation_result_id": {
+          "description": "Applicable typed validation result id.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "finding_id",
+        "validation_result_id",
+        "folding_revision",
+        "rationale"
+      ],
+      "type": "object"
+    },
+    "name": "proposal_refinement_resolve_evidence",
+    "openWorld": false,
+    "readOnly": false
+  },
+  {
+    "concurrent_safe": false,
+    "description": "Retry a failed typed evidence finding using its durable finding_id and exact latest failed_transition_id. Only an authorized Advocate or Judge may retry a finding in failed lifecycle state.",
+    "destructive": false,
+    "idempotent": true,
+    "inputSchema": {
+      "properties": {
+        "failed_transition_id": {
+          "description": "Exact latest failed lifecycle transition id to retry.",
+          "type": "string"
+        },
+        "finding_id": {
+          "description": "Typed evidence finding id returned by demand or prior retry.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "finding_id",
+        "failed_transition_id"
+      ],
+      "type": "object"
+    },
+    "name": "proposal_refinement_retry_evidence",
+    "openWorld": false,
+    "readOnly": false
+  },
+  {
+    "concurrent_safe": false,
+    "description": "Withdraw typed evidence only with a non-empty rationale and explicit non-load-bearing assertion. Only the active Judge may withdraw evidence.",
+    "destructive": false,
+    "idempotent": false,
+    "inputSchema": {
+      "properties": {
+        "finding_id": {
+          "description": "Typed evidence finding id to withdraw.",
+          "type": "string"
+        },
+        "folding_revision": {
+          "description": "Existing committed proposal revision at withdrawal.",
+          "type": "integer"
+        },
+        "rationale": {
+          "description": "Non-empty Judge rationale explaining the withdrawal.",
+          "type": "string"
+        },
+        "withdrawal_is_non_load_bearing": {
+          "description": "Must be true; typed non-load-bearing assertion.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "finding_id",
+        "folding_revision",
+        "rationale",
+        "withdrawal_is_non_load_bearing"
+      ],
+      "type": "object"
+    },
+    "name": "proposal_refinement_withdraw_evidence",
+    "openWorld": false,
+    "readOnly": false
+  },
+  {
     "concurrent_safe": true,
     "description": "Show a proposal's full detail by UUID or short_id. Use `fields` to select sections (proposal, targets, feedback, signoffs, revisions, debate, epics, gate_status; default: all) and `revision_bodies` to control verbosity (excerpt/full/omit).",
     "destructive": false,

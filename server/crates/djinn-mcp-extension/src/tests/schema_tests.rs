@@ -139,7 +139,8 @@ fn expected_safety_tuple(name: &str) -> Option<(bool, bool, bool, bool)> {
         // Changes no bytes, and re-running it with the same `executable`
         // argument is a no-op — idempotent, not destructive.
         | "set_file_mode"
-        | "proposal_debate_resolve" => Some(idempotent_mutation),
+        | "proposal_debate_resolve"
+        | "proposal_refinement_retry_evidence" => Some(idempotent_mutation),
         "task_create"
         | "epic_create"
         | "task_transition"
@@ -156,6 +157,8 @@ fn expected_safety_tuple(name: &str) -> Option<(bool, bool, bool, bool)> {
         | "proposal_feedback_disposition"
         | "proposal_feedback_withdraw"
         | "proposal_refinement_demand_evidence"
+        | "proposal_refinement_resolve_evidence"
+        | "proposal_refinement_withdraw_evidence"
         | "submit_work"
         | "submit_review"
         | "submit_decision"

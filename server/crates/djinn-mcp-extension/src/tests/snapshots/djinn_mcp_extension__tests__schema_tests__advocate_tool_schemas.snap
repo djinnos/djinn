@@ -1141,6 +1141,32 @@ expression: tool_schemas_advocate()
     "concurrent_safe": true
   },
   {
+    "name": "proposal_refinement_retry_evidence",
+    "description": "Retry a failed typed evidence finding using its durable finding_id and exact latest failed_transition_id. Only an authorized Advocate or Judge may retry a finding in failed lifecycle state.",
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "finding_id",
+        "failed_transition_id"
+      ],
+      "properties": {
+        "finding_id": {
+          "type": "string",
+          "description": "Typed evidence finding id returned by demand or prior retry."
+        },
+        "failed_transition_id": {
+          "type": "string",
+          "description": "Exact latest failed lifecycle transition id to retry."
+        }
+      }
+    },
+    "readOnly": false,
+    "destructive": false,
+    "idempotent": true,
+    "openWorld": false,
+    "concurrent_safe": false
+  },
+  {
     "name": "submit_work",
     "description": "Signal that the worker has finished implementing the task. Provide a summary of changes made and list of files modified. Your session ends after this call.",
     "inputSchema": {

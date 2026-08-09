@@ -490,6 +490,52 @@ pub fn tool_proposal_refinement_demand_evidence() -> RmcpTool {
     )
 }
 
+pub fn tool_proposal_refinement_retry_evidence() -> RmcpTool {
+    RmcpTool::new(
+        "proposal_refinement_retry_evidence".to_string(),
+        "Retry a failed typed evidence finding using its durable finding_id and exact latest failed_transition_id. Only an authorized Advocate or Judge may retry a finding in failed lifecycle state.".to_string(),
+        object!({
+            "type": "object", "required": ["finding_id", "failed_transition_id"],
+            "properties": {
+                "finding_id": {"type": "string", "description": "Typed evidence finding id returned by demand or prior retry."},
+                "failed_transition_id": {"type": "string", "description": "Exact latest failed lifecycle transition id to retry."}
+            }
+        }),
+    )
+}
+
+pub fn tool_proposal_refinement_resolve_evidence() -> RmcpTool {
+    RmcpTool::new(
+        "proposal_refinement_resolve_evidence".to_string(),
+        "Resolve typed evidence using an applicable validation result and an existing committed folding revision. Only the active Judge may resolve evidence.".to_string(),
+        object!({
+            "type": "object", "required": ["finding_id", "validation_result_id", "folding_revision", "rationale"],
+            "properties": {
+                "finding_id": {"type": "string", "description": "Typed evidence finding id to resolve."},
+                "validation_result_id": {"type": "string", "description": "Applicable typed validation result id."},
+                "folding_revision": {"type": "integer", "description": "Existing committed proposal revision that folds the evidence."},
+                "rationale": {"type": "string", "description": "Non-empty Judge rationale for resolution."}
+            }
+        }),
+    )
+}
+
+pub fn tool_proposal_refinement_withdraw_evidence() -> RmcpTool {
+    RmcpTool::new(
+        "proposal_refinement_withdraw_evidence".to_string(),
+        "Withdraw typed evidence only with a non-empty rationale and explicit non-load-bearing assertion. Only the active Judge may withdraw evidence.".to_string(),
+        object!({
+            "type": "object", "required": ["finding_id", "folding_revision", "rationale", "withdrawal_is_non_load_bearing"],
+            "properties": {
+                "finding_id": {"type": "string", "description": "Typed evidence finding id to withdraw."},
+                "folding_revision": {"type": "integer", "description": "Existing committed proposal revision at withdrawal."},
+                "rationale": {"type": "string", "description": "Non-empty Judge rationale explaining the withdrawal."},
+                "withdrawal_is_non_load_bearing": {"type": "boolean", "description": "Must be true; typed non-load-bearing assertion."}
+            }
+        }),
+    )
+}
+
 pub fn tool_proposal_complete() -> RmcpTool {
     RmcpTool::new(
         "proposal_complete".to_string(),
