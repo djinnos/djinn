@@ -4,7 +4,10 @@
 //! moves a ref, invokes a remote, or uses the repository's normal index.  The
 //! caller supplies every value that influences the commit object.
 
-use std::{path::Path, sync::atomic::{AtomicU64, Ordering}};
+use std::{
+    path::Path,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 use djinn_core::models::TaskDeliveryIdentity;
 use sha2::{Digest, Sha256};
@@ -56,8 +59,13 @@ pub struct DirectDeliveryCandidate {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DirectDeliveryBuild {
     Clean(DirectDeliveryCandidate),
-    Conflict { normalized_patch_digest: String, reason: String },
-    InvalidSource { reason: String },
+    Conflict {
+        normalized_patch_digest: String,
+        reason: String,
+    },
+    InvalidSource {
+        reason: String,
+    },
 }
 
 /// Construct one commit with exactly `selected_parent_sha` as its only parent.
@@ -81,7 +89,11 @@ pub async fn build_direct_delivery_candidate(
     for (label, sha) in [("selected_parent_sha", &input.selected_parent_sha)] {
         let outcome = run_git_command_in_with_env_allow_failure(
             repository,
-            vec!["rev-parse".into(), "--verify".into(), format!("{sha}^{{commit}}")],
+            vec![
+                "rev-parse".into(),
+                "--verify".into(),
+                format!("{sha}^{{commit}}"),
+            ],
             Vec::new(),
         )
         .await?;
@@ -94,7 +106,10 @@ pub async fn build_direct_delivery_candidate(
 
     let scratch = ScratchFiles::new()?;
     std::fs::write(&scratch.patch, &normalized_patch)?;
-    std::fs::write(&scratch.message, commit_message(input, &normalized_patch_digest))?;
+    std::fs::write(
+        &scratch.message,
+        commit_message(input, &normalized_patch_digest),
+    )?;
     let index_env = vec![("GIT_INDEX_FILE".into(), scratch.index.display().to_string())];
 
     run_git_command_in_with_env(
@@ -127,15 +142,11 @@ pub async fn build_direct_delivery_candidate(
         });
     }
 
-    let tree_sha = run_git_command_in_with_env(
-        repository,
-        vec!["write-tree".into()],
-        index_env,
-    )
-    .await?
-    .stdout
-    .trim()
-    .to_string();
+    let tree_sha = run_git_command_in_with_env(repository, vec!["write-tree".into()], index_env)
+        .await?
+        .stdout
+        .trim()
+        .to_string();
     let mut commit_env = signature_env("AUTHOR", &input.author);
     commit_env.extend(signature_env("COMMITTER", &input.committer));
     let candidate_sha = run_git_command_in_with_env(
@@ -164,7 +175,10 @@ pub async fn build_direct_delivery_candidate(
 }
 
 fn validate_input(input: &DirectDeliveryInput, normalized_patch: &str) -> Result<(), String> {
-    input.identity.validate().map_err(|error| error.to_string())?;
+    input
+        .identity
+        .validate()
+        .map_err(|error| error.to_string())?;
     for (label, value) in [
         ("selected_parent_sha", input.selected_parent_sha.as_str()),
         ("source_sha", input.source_sha.as_str()),
@@ -182,18 +196,27 @@ fn validate_input(input: &DirectDeliveryInput, normalized_patch: &str) -> Result
         }
     }
     if !is_hex_sha(&input.selected_parent_sha) || !is_hex_sha(&input.source_sha) {
-        return Err("selected_parent_sha and source_sha must be 40 or 64 lowercase hex characters".into());
+        return Err(
+            "selected_parent_sha and source_sha must be 40 or 64 lowercase hex characters".into(),
+        );
     }
     Ok(())
 }
 
 fn is_hex_sha(value: &str) -> bool {
-    matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    matches!(value.len(), 40 | 64)
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
 }
 
 fn normalize_patch(patch: &str) -> String {
     let patch = patch.replace("\r\n", "\n").replace('\r', "\n");
-    if patch.ends_with('\n') { patch } else { format!("{patch}\n") }
+    if patch.ends_with('\n') {
+        patch
+    } else {
+        format!("{patch}\n")
+    }
 }
 
 /// Produce the complete, deterministic commit message.
@@ -229,15 +252,24 @@ fn sha256_hex(value: &str) -> String {
 }
 
 fn command_reason(stderr: &str, stdout: &str) -> String {
-    let text = if stderr.trim().is_empty() { stdout } else { stderr };
+    let text = if stderr.trim().is_empty() {
+        stdout
+    } else {
+        stderr
+    };
     text.trim().to_string()
 }
 
 fn looks_like_invalid_patch(reason: &str) -> bool {
     let reason = reason.to_ascii_lowercase();
-    ["corrupt patch", "unrecognized input", "no valid patches", "patch fragment without header"]
-        .iter()
-        .any(|needle| reason.contains(needle))
+    [
+        "corrupt patch",
+        "unrecognized input",
+        "no valid patches",
+        "patch fragment without header",
+    ]
+    .iter()
+    .any(|needle| reason.contains(needle))
 }
 
 struct ScratchFiles {
@@ -249,9 +281,16 @@ struct ScratchFiles {
 impl ScratchFiles {
     fn new() -> Result<Self, std::io::Error> {
         let sequence = SCRATCH_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-        let root = std::env::temp_dir().join(format!("djinn-direct-delivery-{}-{sequence}", std::process::id()));
+        let root = std::env::temp_dir().join(format!(
+            "djinn-direct-delivery-{}-{sequence}",
+            std::process::id()
+        ));
         std::fs::create_dir_all(&root)?;
-        Ok(Self { index: root.join("index"), patch: root.join("patch"), message: root.join("message") })
+        Ok(Self {
+            index: root.join("index"),
+            patch: root.join("patch"),
+            message: root.join("message"),
+        })
     }
 }
 
@@ -269,7 +308,10 @@ mod tests {
     use crate::test_support::{git, init_repo_with_main_commit, write_and_commit};
 
     fn sha(repo: &Path, revision: &str) -> String {
-        String::from_utf8(git(repo, ["rev-parse", revision]).stdout).unwrap().trim().into()
+        String::from_utf8(git(repo, ["rev-parse", revision]).stdout)
+            .unwrap()
+            .trim()
+            .into()
     }
 
     fn input(parent: String, source: String) -> DirectDeliveryInput {
@@ -300,18 +342,30 @@ mod tests {
         let second = tempfile::tempdir().unwrap();
         git(
             second.path(),
-            [
-                "clone",
-                "--no-local",
-                first.path().to_str().unwrap(),
-                ".",
-            ],
+            ["clone", "--no-local", first.path().to_str().unwrap(), "."],
         );
         let replay = clean(second.path(), &input(parent.clone(), source)).await;
         assert_eq!(candidate.candidate_sha, replay.candidate_sha);
-        assert_eq!(candidate.normalized_patch_digest, replay.normalized_patch_digest);
-        assert_eq!(sha(first.path(), &format!("{}^", candidate.candidate_sha)), parent);
-        assert_eq!(git(first.path(), ["rev-list", "--count", &format!("{}^..{}", candidate.candidate_sha, candidate.candidate_sha)]).stdout, b"1\n");
+        assert_eq!(
+            candidate.normalized_patch_digest,
+            replay.normalized_patch_digest
+        );
+        assert_eq!(
+            sha(first.path(), &format!("{}^", candidate.candidate_sha)),
+            parent
+        );
+        assert_eq!(
+            git(
+                first.path(),
+                [
+                    "rev-list",
+                    "--count",
+                    &format!("{}^..{}", candidate.candidate_sha, candidate.candidate_sha)
+                ]
+            )
+            .stdout,
+            b"1\n"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -321,15 +375,38 @@ mod tests {
         let base = input(parent.clone(), parent.clone());
         let first = clean(fixture.path(), &base).await;
         write_and_commit(fixture.path(), "other.txt", "other\n", "other");
-        let changed_parent = clean(fixture.path(), &input(sha(fixture.path(), "HEAD"), parent.clone())).await;
-        let mut changed_generation = base.clone(); changed_generation.identity.delivery_generation = 2;
-        let mut changed_source = base.clone(); changed_source.source_sha = sha(fixture.path(), "HEAD");
-        let mut changed_patch = base.clone(); changed_patch.normalized_patch = base.normalized_patch.replace("delivered", "altered");
+        let changed_parent = clean(
+            fixture.path(),
+            &input(sha(fixture.path(), "HEAD"), parent.clone()),
+        )
+        .await;
+        let mut changed_generation = base.clone();
+        changed_generation.identity.delivery_generation = 2;
+        let mut changed_source = base.clone();
+        changed_source.source_sha = sha(fixture.path(), "HEAD");
+        let mut changed_patch = base.clone();
+        changed_patch.normalized_patch = base.normalized_patch.replace("delivered", "altered");
         assert_ne!(first.candidate_sha, changed_parent.candidate_sha);
-        assert_ne!(first.candidate_sha, clean(fixture.path(), &changed_generation).await.candidate_sha);
-        assert_ne!(first.candidate_sha, clean(fixture.path(), &changed_source).await.candidate_sha);
-        assert_ne!(first.candidate_sha, clean(fixture.path(), &changed_patch).await.candidate_sha);
-        assert_ne!(first.normalized_patch_digest, clean(fixture.path(), &changed_patch).await.normalized_patch_digest);
+        assert_ne!(
+            first.candidate_sha,
+            clean(fixture.path(), &changed_generation)
+                .await
+                .candidate_sha
+        );
+        assert_ne!(
+            first.candidate_sha,
+            clean(fixture.path(), &changed_source).await.candidate_sha
+        );
+        assert_ne!(
+            first.candidate_sha,
+            clean(fixture.path(), &changed_patch).await.candidate_sha
+        );
+        assert_ne!(
+            first.normalized_patch_digest,
+            clean(fixture.path(), &changed_patch)
+                .await
+                .normalized_patch_digest
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -346,8 +423,14 @@ mod tests {
         let metadata_free_candidate = clean(fixture.path(), &without_index_metadata).await;
 
         assert_eq!(indexed_candidate.tree_sha, metadata_free_candidate.tree_sha);
-        assert_ne!(indexed_candidate.normalized_patch_digest, metadata_free_candidate.normalized_patch_digest);
-        assert_ne!(indexed_candidate.candidate_sha, metadata_free_candidate.candidate_sha);
+        assert_ne!(
+            indexed_candidate.normalized_patch_digest,
+            metadata_free_candidate.normalized_patch_digest
+        );
+        assert_ne!(
+            indexed_candidate.candidate_sha,
+            metadata_free_candidate.candidate_sha
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -356,8 +439,12 @@ mod tests {
         let parent = sha(fixture.path(), "main");
         let before_ref = parent.clone();
         let mut conflicting = input(parent.clone(), parent);
-        conflicting.normalized_patch = conflicting.normalized_patch.replace("-hello", "-not-present");
-        let result = build_direct_delivery_candidate(fixture.path(), &conflicting).await.unwrap();
+        conflicting.normalized_patch = conflicting
+            .normalized_patch
+            .replace("-hello", "-not-present");
+        let result = build_direct_delivery_candidate(fixture.path(), &conflicting)
+            .await
+            .unwrap();
         assert!(matches!(result, DirectDeliveryBuild::Conflict { .. }));
         assert_eq!(sha(fixture.path(), "main"), before_ref);
         assert!(git(fixture.path(), ["remote"]).stdout.is_empty());
@@ -368,6 +455,11 @@ mod tests {
         let fixture = init_repo_with_main_commit();
         let mut malformed = input(sha(fixture.path(), "main"), sha(fixture.path(), "main"));
         malformed.source_sha = "not-a-sha".into();
-        assert!(matches!(build_direct_delivery_candidate(fixture.path(), &malformed).await.unwrap(), DirectDeliveryBuild::InvalidSource { .. }));
+        assert!(matches!(
+            build_direct_delivery_candidate(fixture.path(), &malformed)
+                .await
+                .unwrap(),
+            DirectDeliveryBuild::InvalidSource { .. }
+        ));
     }
 }
