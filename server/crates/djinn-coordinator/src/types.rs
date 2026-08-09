@@ -4,6 +4,7 @@ use std::time::{Duration, Instant as StdInstant};
 
 use super::consolidation::ConsolidationRunner;
 use crate::roles::RoleRegistry;
+use crate::startup_census::StartupCensus;
 use djinn_control_plane::bridge::RuntimeOps;
 use djinn_core::events::DjinnEventEnvelope;
 use djinn_core::models::ModelLane;
@@ -137,6 +138,9 @@ pub struct CoordinatorDeps {
     /// and off-server contexts leave this `None`, which makes the proactive
     /// refresh tick branch a no-op.
     pub graph_warmer: Option<Arc<dyn GraphWarmerService>>,
+    /// Immutable pre-mutation startup evidence transferred by the server.
+    /// Optional preserves existing non-server constructor compatibility.
+    pub startup_census: Option<StartupCensus>,
     pub(super) consolidation_runner: Option<Arc<dyn ConsolidationRunner>>,
     /// Shared bare-mirror manager. Threaded into the synthesized `AgentContext`
     /// built inside `process_approved_tasks` so the direct-push merge fallback
@@ -193,6 +197,7 @@ impl CoordinatorDeps {
             background_work_tracker,
             lsp,
             graph_warmer: None,
+            startup_census: None,
             consolidation_runner: None,
             mirror: None,
             runtime_ops: None,
@@ -218,6 +223,12 @@ impl CoordinatorDeps {
     /// off-server contexts that omit this leave the tick as a no-op.
     pub fn with_graph_warmer(mut self, warmer: Arc<dyn GraphWarmerService>) -> Self {
         self.graph_warmer = Some(warmer);
+        self
+    }
+
+    /// Transfer the one census captured before Stage A into coordinator startup.
+    pub fn with_startup_census(mut self, census: StartupCensus) -> Self {
+        self.startup_census = Some(census);
         self
     }
 

@@ -475,6 +475,7 @@ fn coordinator_actor_for_tests(
         last_proposal_review_sweep: StdInstant::now(),
         last_graph_refresh: StdInstant::now(),
         workload_inventory: None,
+        startup_census: None,
         graph_warmer: None,
         mirror: None,
         runtime_ops: None,
