@@ -8,8 +8,9 @@ use crate::github_api::types::{
     RequiredStatusChecksResponse,
 };
 use crate::github_api::{
-    AutoMergeRequest, CheckRun, CheckRunsResponse, CreatePrParams, DequeueEvent, GitHubApiClient,
-    MergeMethod, MergeQueueEntry, MergeQueueEntryState, PrMergeQueueState, PullRequest,
+    AttemptDraftPrResult, AutoMergeRequest, CheckRun, CheckRunsResponse, CloseAttemptDraftPrResult,
+    CreateAttemptDraftPrParams, CreatePrParams, DequeueEvent, GitHubApiClient, MergeMethod,
+    MergeQueueEntry, MergeQueueEntryState, PrMergeQueueState, PrState, PullRequest,
 };
 
 fn github_pr_write_error(
@@ -28,6 +29,157 @@ fn github_pr_write_error(
 }
 
 impl GitHubApiClient {
+    /// Create or adopt exactly one draft attempt PR with an exact `main` identity.
+    pub async fn create_or_adopt_attempt_draft_pr(
+        &self,
+        owner: &str,
+        repo: &str,
+        params: CreateAttemptDraftPrParams,
+    ) -> AttemptDraftPrResult {
+        let head_filter = format!("{owner}:{}", params.head);
+        let existing = match self.list_pulls_by_head(owner, repo, &head_filter).await {
+            Ok(prs) => prs,
+            Err(error) => return AttemptDraftPrResult::ProviderFailure(error),
+        };
+        let exact = |pr: &PullRequest| {
+            pr.head.ref_name == params.head
+                && pr.head.sha == params.expected_head_sha
+                && pr.base.ref_name == "main"
+                && pr.draft == Some(true)
+                && pr.state == PrState::Open
+        };
+        if !existing.is_empty() {
+            return if existing.len() == 1 && exact(&existing[0]) {
+                AttemptDraftPrResult::AdoptedExact(existing.into_iter().next().expect("one PR"))
+            } else {
+                AttemptDraftPrResult::ProposalPrIdentityMismatch {
+                    candidates: existing,
+                }
+            };
+        }
+        // Do not delegate this POST to `create_pull_request`: its legacy 422
+        // recovery deliberately adopts the first listed PR. Attempt identity
+        // requires inspecting the complete race candidate set before adoption.
+        let path = format!("/repos/{owner}/{repo}/pulls");
+        let url = format!("{}{}", self.base_url, path);
+        let body = match serde_json::to_value(CreatePrParams {
+            title: params.title.clone(),
+            body: params.body.clone(),
+            head: params.head.clone(),
+            base: "main".into(),
+            maintainer_can_modify: Some(false),
+            draft: Some(true),
+        }) {
+            Ok(body) => body,
+            Err(error) => {
+                return AttemptDraftPrResult::ProviderFailure(GitHubApiError::transport(
+                    "create_or_adopt_attempt_draft_pr",
+                    path,
+                    error.to_string(),
+                ));
+            }
+        };
+        let response = self
+            .send_with_retry(|token| {
+                let url = url.clone();
+                let body = body.clone();
+                let http = self.http.clone();
+                async move {
+                    handle_rate_limit(
+                        http.post(&url)
+                            .bearer_auth(&token)
+                            .header("Accept", "application/vnd.github+json")
+                            .header("X-GitHub-Api-Version", "2022-11-28")
+                            .json(&body)
+                            .send()
+                            .await?,
+                    )
+                    .await
+                }
+            })
+            .await;
+        let response = match response {
+            Ok(response) => response,
+            Err(error) => return AttemptDraftPrResult::ProviderFailure(error),
+        };
+        if response.status().is_success() {
+            return match response.json::<PullRequest>().await {
+                Ok(pr) if exact(&pr) => AttemptDraftPrResult::Created(pr),
+                Ok(pr) => AttemptDraftPrResult::ProposalPrIdentityMismatch {
+                    candidates: vec![pr],
+                },
+                Err(error) => AttemptDraftPrResult::ProviderFailure(GitHubApiError::transport(
+                    "create_or_adopt_attempt_draft_pr",
+                    path,
+                    error.to_string(),
+                )),
+            };
+        }
+        let status = response.status();
+        let response_body = response.text().await.unwrap_or_default();
+        if status != reqwest::StatusCode::UNPROCESSABLE_ENTITY
+            || !response_body.contains("already exists")
+        {
+            return AttemptDraftPrResult::ProviderFailure(github_pr_write_error(
+                "POST",
+                &path,
+                Some(status),
+                &response_body,
+                "create_or_adopt_attempt_draft_pr",
+            ));
+        }
+        match self.list_pulls_by_head(owner, repo, &head_filter).await {
+            Ok(candidates) if candidates.len() == 1 && exact(&candidates[0]) => {
+                AttemptDraftPrResult::AdoptedExact(
+                    candidates.into_iter().next().expect("one exact candidate"),
+                )
+            }
+            Ok(candidates) => AttemptDraftPrResult::ProposalPrIdentityMismatch { candidates },
+            Err(error) => AttemptDraftPrResult::ProviderFailure(error),
+        }
+    }
+
+    /// Record a stop reason through the issues-comment API, then close an
+    /// unmerged draft PR.  Other PR identities are never mutated.
+    pub async fn close_attempt_draft_pr(
+        &self,
+        owner: &str,
+        repo: &str,
+        pr: &PullRequest,
+        build_attempt_stopped: &str,
+    ) -> CloseAttemptDraftPrResult {
+        if pr.state != PrState::Open || pr.merged == Some(true) || pr.draft != Some(true) {
+            return CloseAttemptDraftPrResult::ProposalPrIdentityMismatch;
+        }
+        let reason = format!("build_attempt_stopped: {build_attempt_stopped}");
+        if let Err(error) = self
+            .create_pr_comment(owner, repo, pr.number, &reason)
+            .await
+        {
+            return CloseAttemptDraftPrResult::ProviderFailure(
+                error.downcast::<GitHubApiError>().unwrap_or_else(|e| {
+                    GitHubApiError::transport(
+                        "close_attempt_draft_pr",
+                        format!("/repos/{owner}/{repo}/pulls/{}", pr.number),
+                        e.to_string(),
+                    )
+                }),
+            );
+        }
+        match self.close_pull_request(owner, repo, pr.number).await {
+            Ok(pr) => CloseAttemptDraftPrResult::Closed(Box::new(pr)),
+            Err(error) => CloseAttemptDraftPrResult::ProviderFailure(
+                error.downcast::<GitHubApiError>().unwrap_or_else(|e| {
+                    GitHubApiError::transport(
+                        "close_attempt_draft_pr",
+                        format!("/repos/{owner}/{repo}/pulls/{}", pr.number),
+                        e.to_string(),
+                    )
+                }),
+            ),
+        }
+    }
+
     /// Create a pull request.
     ///
     /// `owner` and `repo` identify the repository. Returns the created PR.

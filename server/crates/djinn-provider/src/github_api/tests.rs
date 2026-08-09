@@ -15,6 +15,7 @@ mod check_runs_completeness;
 mod checks;
 mod contents;
 mod create_pull_request;
+mod direct_delivery_contracts;
 mod error;
 mod pull_requests;
 mod reviews;
