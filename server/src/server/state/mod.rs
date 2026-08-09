@@ -2559,12 +2559,26 @@ impl AppState {
                             Some(run_id) => self.rpc_registry().is_connected(run_id.trim()).await,
                             None => false,
                         };
+                        let unknown = session.task_run_id.as_deref().is_some_and(|run_id| {
+                            census.runs().iter().any(|run| {
+                                run.task_run_id == run_id.trim()
+                                    && matches!(run.witness, TaskRunWitness::Unknown)
+                            })
+                        });
                         if stage_a_identity_is_destructive(
                             session.task_run_id.as_deref(),
                             &gone,
                             connected,
                         ) {
                             session_ids.insert(session.id);
+                        } else if unknown {
+                            tracing::info!(
+                                stage = "startup_stage_a",
+                                reason = "unknown",
+                                session_id = %session.id,
+                                task_run_id = ?session.task_run_id,
+                                "startup session reaper deferred unknown census evidence"
+                            );
                         }
                     }
                 }

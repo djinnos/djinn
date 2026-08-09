@@ -1852,6 +1852,7 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "tracing-test",
  "uuid",
  "workspace-hack",
 ]

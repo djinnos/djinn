@@ -479,11 +479,22 @@ async fn startup_reaper_still_reaps_absent_running_job() {
         .await
         .unwrap()
         .unwrap();
-    assert!(
+    let evidence: serde_json::Value = serde_json::from_str(
         attempt
             .summary_json
-            .unwrap_or_default()
-            .contains("environmental_restart_orphan")
+            .as_deref()
+            .expect("startup reap records durable environmental evidence"),
+    )
+    .expect("startup environmental evidence is structured JSON");
+    assert_eq!(evidence["failure_class"], "environmental_restart_orphan");
+    assert_eq!(evidence["reason"], "startup");
+    assert!(
+        evidence["boot_incarnation_id"].is_string(),
+        "restart-orphan evidence must identify the boot that proved absence"
+    );
+    assert_eq!(
+        evidence["owner_classification"],
+        "restart_orphan_null_owner"
     );
     assert_eq!(fixture.inventory.list_calls.load(Ordering::SeqCst), 1);
     assert_eq!(fixture.inventory.presence_calls.load(Ordering::SeqCst), 1);
@@ -517,9 +528,33 @@ async fn startup_reaper_still_reaps_terminal_job() {
         assert_eq!(fixture.inventory.list_calls.load(Ordering::SeqCst), 1);
         assert_eq!(fixture.inventory.presence_calls.load(Ordering::SeqCst), 0);
     }
+
+    // The present, non-terminal starting control is otherwise identical to the
+    // terminal-starting case and proves terminal provenance—not mere presence—
+    // authorizes all three startup stages.
+    let run_id = "startup-live-starting";
+    let fixture = FullStartupFixture::seeded_with_status(
+        run_id,
+        "starting",
+        CountingInventory::listed(vec![job(run_id, false)], HashMap::new()),
+    )
+    .await;
+    let census = fixture.run(true).await;
+    assert!(
+        census
+            .runs()
+            .iter()
+            .any(|run| run.task_run_id == run_id && run.witness == TaskRunWitness::Live)
+    );
+    assert_eq!(
+        fixture.durable_statuses().await,
+        ("running".into(), "starting".into(), "pending".into()),
+        "a present non-terminal starting Job must produce 0/0/0 transitions"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tracing_test::traced_test]
 async fn startup_reaper_fails_closed_on_unknown() {
     for (run_id, inventory) in [
         ("startup-list-unavailable", CountingInventory::unavailable()),
@@ -541,6 +576,12 @@ async fn startup_reaper_fails_closed_on_unknown() {
             ("running".into(), "running".into(), "pending".into())
         );
         assert_eq!(fixture.inventory.list_calls.load(Ordering::SeqCst), 1);
+    }
+    for stage in ["startup_stage_a", "startup_stage_b", "startup_stage_c"] {
+        assert!(
+            logs_contain(&format!("stage=\"{stage}\"")) && logs_contain("reason=\"unknown\""),
+            "{stage} must emit a structured reason=unknown startup deferral"
+        );
     }
 }
 
