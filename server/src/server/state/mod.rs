@@ -2499,7 +2499,24 @@ impl AppState {
     }
 
     /// Stage A: only positive destructive census evidence authorizes mutation.
+    #[cfg(not(test))]
     async fn interrupt_stale_sessions_on_startup_with_census(&self, census: &StartupCensus) {
+        self.interrupt_stale_sessions_on_startup_with_census_impl(census)
+            .await;
+    }
+
+    /// Crate-visible only so the startup identity matrix drives the configured
+    /// Stage A path rather than the `NotConfigured` compatibility path.
+    #[cfg(test)]
+    pub(crate) async fn interrupt_stale_sessions_on_startup_with_census(
+        &self,
+        census: &StartupCensus,
+    ) {
+        self.interrupt_stale_sessions_on_startup_with_census_impl(census)
+            .await;
+    }
+
+    async fn interrupt_stale_sessions_on_startup_with_census_impl(&self, census: &StartupCensus) {
         use djinn_db::SessionRepository;
         let repo = SessionRepository::new(self.db().clone(), self.event_bus());
         let result = if census.availability() == InventoryAvailability::NotConfigured {
