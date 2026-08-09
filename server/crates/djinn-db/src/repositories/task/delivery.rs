@@ -20,6 +20,23 @@ pub struct DeliveryPrepareInput {
     pub selected_parent_sha: String,
     pub candidate_sha: String,
 }
+fn validate_task_integration(input: &TaskIntegrated) -> Result<()> {
+    input.identity.validate()?;
+    nonblank("candidate_sha", &input.candidate_sha)?;
+    nonblank(
+        "observed_applied_candidate_sha",
+        &input.observed_applied_candidate_sha,
+    )?;
+    nonblank("merge_commit_sha", &input.merge_commit_sha)?;
+    if input.candidate_sha != input.observed_applied_candidate_sha
+        || input.candidate_sha != input.merge_commit_sha
+    {
+        return Err(Error::InvalidTransition(
+            "task integration requires the exact observed delivery candidate".into(),
+        ));
+    }
+    Ok(())
+}
 
 fn same_rework_preparation(
     row: &TaskDelivery,
@@ -57,7 +74,7 @@ pub enum DeliveryTransitionResult {
     Stale { current: Option<TaskDelivery> },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum TaskIntegrationResult {
     Integrated(Task),
     Replayed(Task),
@@ -244,7 +261,7 @@ impl TaskRepository {
     }
 
     pub async fn task_integrated(&self, input: &TaskIntegrated) -> Result<TaskIntegrationResult> {
-        input.identity.validate()?;
+        validate_task_integration(input)?;
         self.require_direct_delivery_active().await?;
         let mut tx = self.db.pool().begin().await?;
         lock_attempt_and_task(&mut tx, &input.identity).await?;
@@ -254,6 +271,12 @@ impl TaskRepository {
             .await?;
         if task.status == "closed"
             && task.merge_commit_sha.as_deref() == Some(&input.merge_commit_sha)
+            && delivery.as_ref().is_some_and(|row| {
+                row.state == TaskDeliveryState::Applied
+                    && row.candidate_sha == input.candidate_sha
+                    && input.candidate_sha == input.observed_applied_candidate_sha
+                    && input.candidate_sha == input.merge_commit_sha
+            })
         {
             tx.commit().await?;
             return Ok(TaskIntegrationResult::Replayed(task));
@@ -303,7 +326,7 @@ impl TaskRepository {
                 task_status: Some(task.status),
             });
         }
-        sqlx::query("INSERT INTO activity_log (id,task_id,actor_id,actor_role,event_type,payload) VALUES ($1,$2,'system','system','status_changed',$3)").bind(uuid::Uuid::now_v7().to_string()).bind(&input.identity.task_id).bind(serde_json::json!({"from_status":"approved","to_status":"closed","reason":"direct_delivery_integrated"}).to_string()).execute(&mut *tx).await?;
+        sqlx::query("INSERT INTO activity_log (id,task_id,actor_id,actor_role,event_type,payload) VALUES ($1,$2,'system','system','status_changed',$3::jsonb)").bind(uuid::Uuid::now_v7().to_string()).bind(&input.identity.task_id).bind(serde_json::json!({"from_status":"approved","to_status":"closed","reason":"direct_delivery_integrated"}).to_string()).execute(&mut *tx).await?;
         let task: Task = task_select_where_id!(&input.identity.task_id)
             .fetch_one(&mut *tx)
             .await?;
