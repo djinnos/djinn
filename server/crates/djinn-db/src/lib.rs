@@ -399,9 +399,11 @@ pub use repositories::{
     task::TaskRepository,
     task::{
         ActivityQuery, BlockerRef, BoardHealthMismatchCandidate, ChildDisposition, CountQuery,
-        CreateTaskInProjectParams, CreateTaskParams, DispositionCounts, DispositionFinding,
+        CreateTaskInProjectParams, CreateTaskParams, DeliveryFinalizeInput, DeliveryPrepareInput,
+        DeliveryReworkInput, DeliveryTransitionResult, DispositionCounts, DispositionFinding,
         DispositionPlan, DispositionScope, EffectiveCreatorProvenance, ListQuery, ListResult,
-        ReadyQuery, UpdateTaskParams, evaluate_board_health_mismatch_candidate,
+        ReadyQuery, TaskIntegrationResult, UpdateTaskParams,
+        evaluate_board_health_mismatch_candidate,
     },
     task_arbitration::{
         ArbitrationState, CreateArbitrationParams, TaskArbitrationRecord,
