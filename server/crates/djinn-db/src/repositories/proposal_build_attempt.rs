@@ -360,7 +360,20 @@ impl ProposalBuildAttemptRepository {
                 "expected_generation must not be negative".into(),
             ));
         }
+        // A request presents the generation it observed; acquisition persists
+        // its successor. Derive it once without risking a SQL-side overflow.
+        let acquired_generation = input.expected_generation.checked_add(1).ok_or_else(|| {
+            DbError::InvalidData("expected_generation cannot be incremented".into())
+        })?;
         let mut tx = self.db.pool().begin().await?;
+        // Lease rows use this canonical UTC/millisecond representation. Normalize
+        // the request with PostgreSQL before comparing it for crash-retry replay.
+        let normalized_expires_at: String = sqlx::query_scalar(
+            "SELECT to_char($1::timestamptz AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"')",
+        )
+        .bind(&input.expires_at)
+        .fetch_one(&mut *tx)
+        .await?;
         let Some(attempt) = fetch_attempt(&mut tx, &input.build_attempt_id, true).await? else {
             return Err(DbError::InvalidData(
                 "unknown proposal build attempt".into(),
@@ -373,8 +386,8 @@ impl ProposalBuildAttemptRepository {
         let current = fetch_attempt_lease(&mut tx, &input.build_attempt_id).await?;
         if let Some(ref lease) = current {
             if lease.owner_incarnation_id == input.owner_incarnation_id
-                && lease.generation == input.expected_generation
-                && lease.expires_at == input.expires_at
+                && lease.generation == acquired_generation
+                && lease.expires_at == normalized_expires_at
             {
                 tx.commit().await?;
                 return Ok(AcquireProposalBuildAttemptLeaseResult::Replayed(
@@ -384,11 +397,11 @@ impl ProposalBuildAttemptRepository {
         }
         let acquired = match current {
             None if input.expected_generation == 0 => sqlx::query_as::<_, AttemptLeaseRow>(
-                "INSERT INTO proposal_build_attempt_leases (build_attempt_id, owner_incarnation_id, generation, expires_at) VALUES ($1, $2, 1, $3::timestamptz) RETURNING build_attempt_id, owner_incarnation_id, generation, to_char(expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS expires_at",
-            ).bind(&input.build_attempt_id).bind(&input.owner_incarnation_id).bind(&input.expires_at).fetch_optional(&mut *tx).await?,
+                "INSERT INTO proposal_build_attempt_leases (build_attempt_id, owner_incarnation_id, generation, expires_at) VALUES ($1, $2, $3, $4::timestamptz) RETURNING build_attempt_id, owner_incarnation_id, generation, to_char(expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS expires_at",
+            ).bind(&input.build_attempt_id).bind(&input.owner_incarnation_id).bind(acquired_generation).bind(&normalized_expires_at).fetch_optional(&mut *tx).await?,
             Some(lease) if lease.generation == input.expected_generation => sqlx::query_as::<_, AttemptLeaseRow>(
-                "UPDATE proposal_build_attempt_leases SET owner_incarnation_id = $1, generation = generation + 1, expires_at = $2::timestamptz WHERE build_attempt_id = $3 AND generation = $4 AND expires_at <= now() RETURNING build_attempt_id, owner_incarnation_id, generation, to_char(expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS expires_at",
-            ).bind(&input.owner_incarnation_id).bind(&input.expires_at).bind(&input.build_attempt_id).bind(lease.generation).fetch_optional(&mut *tx).await?,
+                "UPDATE proposal_build_attempt_leases SET owner_incarnation_id = $1, generation = $2, expires_at = $3::timestamptz WHERE build_attempt_id = $4 AND generation = $5 AND expires_at <= now() RETURNING build_attempt_id, owner_incarnation_id, generation, to_char(expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS expires_at",
+            ).bind(&input.owner_incarnation_id).bind(acquired_generation).bind(&normalized_expires_at).bind(&input.build_attempt_id).bind(lease.generation).fetch_optional(&mut *tx).await?,
             _ => None,
         };
         let result = match acquired {

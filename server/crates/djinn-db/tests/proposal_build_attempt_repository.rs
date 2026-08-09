@@ -94,16 +94,19 @@ async fn lifecycle_cas_replay_regraduation_and_retirement_are_immutable() {
         .unwrap(),
         ActivateProposalBuildAttemptResult::Stale { .. }
     ));
+    let initial_lease = AcquireProposalBuildAttemptLeaseInput {
+        build_attempt_id: "a1".into(),
+        owner_incarnation_id: "one".into(),
+        expected_generation: 0,
+        expires_at: "2099-01-01T00:00:00.000Z".into(),
+    };
     assert!(matches!(
-        repo.acquire_lease(&AcquireProposalBuildAttemptLeaseInput {
-            build_attempt_id: "a1".into(),
-            owner_incarnation_id: "one".into(),
-            expected_generation: 0,
-            expires_at: "2099-01-01T00:00:00.000Z".into()
-        })
-        .await
-        .unwrap(),
+        repo.acquire_lease(&initial_lease).await.unwrap(),
         AcquireProposalBuildAttemptLeaseResult::Acquired(_)
+    ));
+    assert!(matches!(
+        repo.acquire_lease(&initial_lease).await.unwrap(),
+        AcquireProposalBuildAttemptLeaseResult::Replayed(ref lease) if lease.generation == 1
     ));
     assert!(matches!(
         repo.acquire_lease(&AcquireProposalBuildAttemptLeaseInput {
@@ -116,6 +119,39 @@ async fn lifecycle_cas_replay_regraduation_and_retirement_are_immutable() {
         .unwrap(),
         AcquireProposalBuildAttemptLeaseResult::Stale { .. }
     ));
+    sqlx::query(
+        "UPDATE proposal_build_attempt_leases SET expires_at = '2000-01-01T00:00:00.000Z' WHERE build_attempt_id = 'a1'",
+    )
+    .execute(db.pool())
+    .await
+    .unwrap();
+    let takeover_lease = AcquireProposalBuildAttemptLeaseInput {
+        build_attempt_id: "a1".into(),
+        owner_incarnation_id: "three".into(),
+        expected_generation: 1,
+        expires_at: "2099-02-01T00:00:00.000Z".into(),
+    };
+    assert!(matches!(
+        repo.acquire_lease(&takeover_lease).await.unwrap(),
+        AcquireProposalBuildAttemptLeaseResult::Acquired(ref lease) if lease.generation == 2
+    ));
+    let lease_before_retry: (String, i64, String) = sqlx::query_as(
+        "SELECT owner_incarnation_id, generation, to_char(expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') FROM proposal_build_attempt_leases WHERE build_attempt_id = 'a1'",
+    )
+    .fetch_one(db.pool())
+    .await
+    .unwrap();
+    assert!(matches!(
+        repo.acquire_lease(&takeover_lease).await.unwrap(),
+        AcquireProposalBuildAttemptLeaseResult::Replayed(ref lease) if lease.generation == 2
+    ));
+    let lease_after_retry: (String, i64, String) = sqlx::query_as(
+        "SELECT owner_incarnation_id, generation, to_char(expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') FROM proposal_build_attempt_leases WHERE build_attempt_id = 'a1'",
+    )
+    .fetch_one(db.pool())
+    .await
+    .unwrap();
+    assert_eq!(lease_after_retry, lease_before_retry);
     repo.persist_pr_identity(&PersistAttemptPrIdentityInput {
         build_attempt_id: "a1".into(),
         proposal_pr_number: 7,
