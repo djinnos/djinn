@@ -343,7 +343,7 @@ mod tests {
     fn terminal_takes_precedence_over_evidence_ready() {
         let mut snap = base_snapshot();
         snap.proposal_status = "archived".to_string();
-        snap.has_evidence_received_event = true;
+        snap.typed_lifecycle = Some(TribunalEvidenceLifecycle::EvidenceReceived);
         assert_eq!(
             derive_evidence_lifecycle_state(&snap),
             EvidenceLifecycleState::Terminal
@@ -387,7 +387,7 @@ mod tests {
     fn paused_or_frozen_takes_precedence_over_evidence_ready() {
         let mut snap = base_snapshot();
         snap.build_frozen = true;
-        snap.has_evidence_received_event = true;
+        snap.typed_lifecycle = Some(TribunalEvidenceLifecycle::EvidenceReceived);
         // Would be EvidenceReady without the freeze.
         assert_eq!(
             derive_evidence_lifecycle_state(&snap),
@@ -404,7 +404,7 @@ mod tests {
         // visible once the pause clears.
         let mut snap = base_snapshot();
         snap.dispatch_paused = true;
-        snap.has_evidence_failed_event = true;
+        snap.typed_lifecycle = Some(TribunalEvidenceLifecycle::Failed);
         // PausedOrFrozen wins over EvidenceFailed.
         assert_eq!(
             derive_evidence_lifecycle_state(&snap),
@@ -420,6 +420,7 @@ mod tests {
         snap.linked_spike_task_id = Some("spike-task-1".to_string());
         snap.needs_evidence_claim = Some(r#"{"question":"Is X feasible?"}"#.to_string());
         snap.spike_task_status = Some("open".to_string());
+        snap.typed_lifecycle = Some(TribunalEvidenceLifecycle::SpikeActive);
         assert_eq!(
             derive_evidence_lifecycle_state(&snap),
             EvidenceLifecycleState::AwaitingEvidence
@@ -432,6 +433,7 @@ mod tests {
         snap.linked_spike_task_id = Some("spike-task-2".to_string());
         snap.needs_evidence_claim = Some(r#"{"question":"Is Y feasible?"}"#.to_string());
         snap.spike_task_status = Some("in_progress".to_string());
+        snap.typed_lifecycle = Some(TribunalEvidenceLifecycle::SpikeActive);
         assert_eq!(
             derive_evidence_lifecycle_state(&snap),
             EvidenceLifecycleState::AwaitingEvidence
@@ -440,12 +442,13 @@ mod tests {
 
     #[test]
     fn awaiting_evidence_when_spike_linked_but_task_deleted() {
-        // Spike task was hard-deleted.  We stay in AwaitingEvidence so
-        // the re-drive path can detect the orphan and escalate.
+        // A deleted task makes typed/legacy parity invalid, so fail closed
+        // rather than inferring lifecycle from the missing task.
         let mut snap = base_snapshot();
         snap.linked_spike_task_id = Some("spike-task-deleted".to_string());
         snap.needs_evidence_claim = Some(r#"{"question":"Is Z feasible?"}"#.to_string());
         snap.spike_task_status = None; // task row gone
+        snap.typed_authority_valid = false;
         assert_eq!(
             derive_evidence_lifecycle_state(&snap),
             EvidenceLifecycleState::AwaitingEvidence
@@ -454,8 +457,8 @@ mod tests {
 
     #[test]
     fn awaiting_evidence_when_spike_closed_but_no_lifecycle_event() {
-        // Spike closed but the completion processor hasn't written a
-        // lifecycle event yet.  Stay parked so re-drive picks it up.
+        // Task closure is not evidence receipt. The typed demand remains
+        // authoritative until repository validation records a transition.
         let mut snap = base_snapshot();
         snap.linked_spike_task_id = Some("spike-task-3".to_string());
         snap.needs_evidence_claim = Some(r#"{"question":"Is W feasible?"}"#.to_string());
@@ -464,6 +467,7 @@ mod tests {
         // No lifecycle events yet.
         snap.has_evidence_received_event = false;
         snap.has_evidence_failed_event = false;
+        snap.typed_lifecycle = Some(TribunalEvidenceLifecycle::Demanded);
         assert_eq!(
             derive_evidence_lifecycle_state(&snap),
             EvidenceLifecycleState::AwaitingEvidence
@@ -473,12 +477,12 @@ mod tests {
     // ── EvidenceFailed ───────────────────────────────────────────────
 
     #[test]
-    fn evidence_failed_when_lifecycle_event_present_with_linked_closed_spike() {
+    fn evidence_failed_when_typed_repository_projects_failed_with_linked_closed_spike() {
         let mut snap = base_snapshot();
         snap.linked_spike_task_id = Some("spike-task-4".to_string());
         snap.spike_task_status = Some("closed".to_string());
         snap.spike_task_close_reason = Some("force_closed".to_string());
-        snap.has_evidence_failed_event = true;
+        snap.typed_lifecycle = Some(TribunalEvidenceLifecycle::Failed);
         assert_eq!(
             derive_evidence_lifecycle_state(&snap),
             EvidenceLifecycleState::EvidenceFailed
@@ -653,29 +657,30 @@ mod tests {
             EvidenceLifecycleState::PausedOrFrozen
         );
 
-        // AwaitingEvidence overrides EvidenceFailed/Ready.
+        // Typed demand is authoritative despite stale rollout events.
         let mut snap = base_snapshot();
         snap.linked_spike_task_id = Some("s".to_string());
         snap.spike_task_status = Some("open".to_string());
         snap.has_evidence_failed_event = true;
         snap.has_evidence_received_event = true;
+        snap.typed_lifecycle = Some(TribunalEvidenceLifecycle::Demanded);
         assert_eq!(
             derive_evidence_lifecycle_state(&snap),
             EvidenceLifecycleState::AwaitingEvidence
         );
 
-        // EvidenceFailed overrides EvidenceReady.
+        // Typed failure is authoritative despite a stale received event.
         let mut snap = base_snapshot();
-        snap.has_evidence_failed_event = true;
         snap.has_evidence_received_event = true;
+        snap.typed_lifecycle = Some(TribunalEvidenceLifecycle::Failed);
         assert_eq!(
             derive_evidence_lifecycle_state(&snap),
             EvidenceLifecycleState::EvidenceFailed
         );
 
-        // EvidenceReady overrides Active.
+        // Typed evidence receipt makes Advocate folding resumable.
         let mut snap = base_snapshot();
-        snap.has_evidence_received_event = true;
+        snap.typed_lifecycle = Some(TribunalEvidenceLifecycle::EvidenceReceived);
         assert_eq!(
             derive_evidence_lifecycle_state(&snap),
             EvidenceLifecycleState::EvidenceReady
@@ -735,10 +740,11 @@ mod tests {
     }
 
     #[test]
-    fn linked_spike_with_unknown_status_treated_as_open() {
+    fn linked_spike_with_unknown_legacy_status_uses_typed_authority() {
         let mut snap = base_snapshot();
         snap.linked_spike_task_id = Some("spike-unknown".to_string());
         snap.spike_task_status = Some("in_review".to_string());
+        snap.typed_lifecycle = Some(TribunalEvidenceLifecycle::SpikeActive);
         assert_eq!(
             derive_evidence_lifecycle_state(&snap),
             EvidenceLifecycleState::AwaitingEvidence
