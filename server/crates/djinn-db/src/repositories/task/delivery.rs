@@ -4,7 +4,8 @@
 use std::str::FromStr;
 
 use djinn_core::models::{
-    ReworkDelivery, TaskDelivery, TaskDeliveryIdentity, TaskDeliveryState, TaskIntegrated,
+    MappedHeadRetryDelivery, ReworkDelivery, TaskDelivery, TaskDeliveryIdentity, TaskDeliveryState,
+    TaskIntegrated,
 };
 use serde::{Deserialize, Serialize};
 use sqlx::{Postgres, Transaction};
@@ -15,6 +16,36 @@ use super::*;
 pub struct DeliveryPrepareInput {
     pub identity: TaskDeliveryIdentity,
     pub transition_id: String,
+    pub source_sha: String,
+    pub patch_digest: String,
+    pub selected_parent_sha: String,
+    pub candidate_sha: String,
+}
+fn validate_mapped_head_retry(input: &DeliveryMappedHeadRetryInput) -> Result<()> {
+    let r = &input.retry;
+    MappedHeadRetryDelivery::new(
+        &r.transition_id,
+        &r.build_attempt_id,
+        &r.task_id,
+        r.expected_generation,
+        r.delivery_generation,
+    )?;
+    nonblank("source_sha", &input.source_sha)?;
+    nonblank("patch_digest", &input.patch_digest)?;
+    nonblank("selected_parent_sha", &input.selected_parent_sha)?;
+    nonblank("candidate_sha", &input.candidate_sha)
+}
+async fn delivery_by_supersede_transition_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    id: &TaskDeliveryIdentity,
+    transition: &str,
+) -> Result<Option<TaskDelivery>> {
+    sqlx::query_as::<_, DeliveryRow>(&format!("SELECT {COLS} FROM task_deliveries WHERE build_attempt_id=$1 AND task_id=$2 AND supersede_transition_id=$3 FOR UPDATE")).bind(&id.build_attempt_id).bind(&id.task_id).bind(transition).fetch_optional(&mut **tx).await?.map(DeliveryRow::into_delivery).transpose()
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeliveryMappedHeadRetryInput {
+    pub retry: MappedHeadRetryDelivery,
     pub source_sha: String,
     pub patch_digest: String,
     pub selected_parent_sha: String,
@@ -197,7 +228,7 @@ impl TaskRepository {
             TaskDeliveryState::Applying => sqlx::query_as::<_, DeliveryRow>(&format!("UPDATE task_deliveries SET state='applying', applying_transition_id=$1 WHERE build_attempt_id=$2 AND task_id=$3 AND delivery_generation=$4 AND state='prepared' RETURNING {COLS}")).bind(&input.transition_id).bind(&input.identity.build_attempt_id).bind(&input.identity.task_id).bind(input.identity.delivery_generation).fetch_optional(&mut *tx).await?,
             TaskDeliveryState::Applied => sqlx::query_as::<_, DeliveryRow>(&format!("UPDATE task_deliveries SET state='applied', applied_at=now(), finalization_transition_id=$1 WHERE build_attempt_id=$2 AND task_id=$3 AND delivery_generation=$4 AND state='applying' RETURNING {COLS}")).bind(&input.transition_id).bind(&input.identity.build_attempt_id).bind(&input.identity.task_id).bind(input.identity.delivery_generation).fetch_optional(&mut *tx).await?,
             TaskDeliveryState::Conflict => sqlx::query_as::<_, DeliveryRow>(&format!("UPDATE task_deliveries SET state='conflict', conflict_reason=$1, finalization_transition_id=$2 WHERE build_attempt_id=$3 AND task_id=$4 AND delivery_generation=$5 AND state='applying' RETURNING {COLS}")).bind(input.conflict_reason.as_deref()).bind(&input.transition_id).bind(&input.identity.build_attempt_id).bind(&input.identity.task_id).bind(input.identity.delivery_generation).fetch_optional(&mut *tx).await?,
-            TaskDeliveryState::Prepared => None,
+            TaskDeliveryState::Prepared | TaskDeliveryState::Superseded => None,
         };
         let result = match row {
             Some(row) => DeliveryTransitionResult::Applied(row.into_delivery()?),
@@ -264,6 +295,84 @@ impl TaskRepository {
         let row = row.into_delivery()?;
         tx.commit().await?;
         Ok(DeliveryTransitionResult::Applied(row))
+    }
+
+    pub async fn retry_delivery_from_mapped_head(
+        &self,
+        input: &DeliveryMappedHeadRetryInput,
+    ) -> Result<DeliveryTransitionResult> {
+        validate_mapped_head_retry(input)?;
+        self.require_direct_delivery_active().await?;
+        let old_id = TaskDeliveryIdentity::new(
+            &input.retry.build_attempt_id,
+            &input.retry.task_id,
+            input.retry.expected_generation,
+        )?;
+        let new_id = TaskDeliveryIdentity::new(
+            &input.retry.build_attempt_id,
+            &input.retry.task_id,
+            input.retry.delivery_generation,
+        )?;
+        let mut tx = self.db.pool().begin().await?;
+        lock_attempt_and_task(&mut tx, &old_id).await?;
+        if let Some(old) =
+            delivery_by_supersede_transition_tx(&mut tx, &old_id, &input.retry.transition_id)
+                .await?
+        {
+            let new = delivery_tx(&mut tx, &new_id).await?;
+            if old.identity == old_id
+                && old.state == TaskDeliveryState::Superseded
+                && old.supersede_transition_id.as_deref() == Some(&input.retry.transition_id)
+                && old.source_sha == input.source_sha
+                && old.patch_digest == input.patch_digest
+                && new.is_some_and(|row| {
+                    row.identity == new_id
+                        && row.prepare_transition_id == input.retry.transition_id
+                        && row.source_sha == input.source_sha
+                        && row.patch_digest == input.patch_digest
+                        && row.selected_parent_sha == input.selected_parent_sha
+                        && row.candidate_sha == input.candidate_sha
+                })
+            {
+                tx.commit().await?;
+                return Ok(DeliveryTransitionResult::Replayed(old));
+            }
+            return Err(Error::InvalidTransition(
+                "reused mapped-head retry transition_id has different immutable command facts"
+                    .into(),
+            ));
+        }
+        let Some(old) = delivery_tx(&mut tx, &old_id).await? else {
+            return Ok(DeliveryTransitionResult::Stale { current: None });
+        };
+        let latest: Option<i64> = sqlx::query_scalar("SELECT max(delivery_generation) FROM task_deliveries WHERE build_attempt_id=$1 AND task_id=$2").bind(&old_id.build_attempt_id).bind(&old_id.task_id).fetch_one(&mut *tx).await?;
+        let mapped: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM task_deliveries WHERE build_attempt_id=$1 AND candidate_sha=$2)").bind(&old_id.build_attempt_id).bind(&input.selected_parent_sha).fetch_one(&mut *tx).await?;
+        if !matches!(
+            old.state,
+            TaskDeliveryState::Prepared | TaskDeliveryState::Applying
+        ) || latest != Some(old_id.delivery_generation)
+            || !mapped
+            || old.source_sha != input.source_sha
+            || old.patch_digest != input.patch_digest
+        {
+            tx.commit().await?;
+            return Ok(DeliveryTransitionResult::Stale { current: Some(old) });
+        }
+        if let Some(current) = delivery_tx(&mut tx, &new_id).await? {
+            tx.commit().await?;
+            return Ok(DeliveryTransitionResult::Stale {
+                current: Some(current),
+            });
+        }
+        let old = sqlx::query_as::<_, DeliveryRow>(&format!("UPDATE task_deliveries SET state='superseded', supersede_transition_id=$1 WHERE build_attempt_id=$2 AND task_id=$3 AND delivery_generation=$4 AND state IN ('prepared','applying') RETURNING {COLS}")).bind(&input.retry.transition_id).bind(&old_id.build_attempt_id).bind(&old_id.task_id).bind(old_id.delivery_generation).fetch_optional(&mut *tx).await?;
+        let Some(old) = old else {
+            return Ok(DeliveryTransitionResult::Stale {
+                current: delivery_tx(&mut tx, &old_id).await?,
+            });
+        };
+        sqlx::query("INSERT INTO task_deliveries (build_attempt_id,task_id,delivery_generation,state,candidate_sha,base_sha,source_sha,patch_digest,selected_parent_sha,prepare_transition_id) VALUES ($1,$2,$3,'prepared',$4,$5,$6,$7,$8,$9)").bind(&new_id.build_attempt_id).bind(&new_id.task_id).bind(new_id.delivery_generation).bind(&input.candidate_sha).bind(&input.selected_parent_sha).bind(&input.source_sha).bind(&input.patch_digest).bind(&input.selected_parent_sha).bind(&input.retry.transition_id).execute(&mut *tx).await?;
+        tx.commit().await?;
+        Ok(DeliveryTransitionResult::Applied(old.into_delivery()?))
     }
 
     pub async fn task_integrated(&self, input: &TaskIntegrated) -> Result<TaskIntegrationResult> {
@@ -387,6 +496,7 @@ struct DeliveryRow {
     prepare_transition_id: String,
     applied_at: Option<String>,
     conflict_reason: Option<String>,
+    supersede_transition_id: Option<String>,
     created_at: String,
 }
 impl DeliveryRow {
@@ -406,11 +516,12 @@ impl DeliveryRow {
             base_sha: self.base_sha,
             applied_at: self.applied_at,
             conflict_reason: self.conflict_reason,
+            supersede_transition_id: self.supersede_transition_id,
             created_at: self.created_at,
         })
     }
 }
-const COLS: &str = "build_attempt_id,task_id,delivery_generation,state,candidate_sha,base_sha,source_sha,patch_digest,selected_parent_sha,prepare_transition_id,to_char(applied_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS applied_at,conflict_reason,to_char(created_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS created_at";
+const COLS: &str = "build_attempt_id,task_id,delivery_generation,state,candidate_sha,base_sha,source_sha,patch_digest,selected_parent_sha,prepare_transition_id,to_char(applied_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS applied_at,conflict_reason,supersede_transition_id,to_char(created_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS created_at";
 async fn lock_attempt_and_task(
     tx: &mut Transaction<'_, Postgres>,
     id: &TaskDeliveryIdentity,
@@ -499,6 +610,7 @@ mod tests {
             base_sha: "parent".into(),
             applied_at: None,
             conflict_reason: None,
+            supersede_transition_id: None,
             created_at: "now".into(),
         }
     }

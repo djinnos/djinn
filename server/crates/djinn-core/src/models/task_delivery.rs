@@ -17,6 +17,47 @@ pub enum DirectDeliveryEpochState {
     Active,
 }
 
+/// CAS identity for retrying a clean candidate after its expected-old ref update
+/// lost to a ledger-mapped first-parent head. Source facts must stay unchanged.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MappedHeadRetryDelivery {
+    pub transition_id: String,
+    pub build_attempt_id: String,
+    pub task_id: String,
+    pub expected_generation: i64,
+    pub delivery_generation: i64,
+}
+
+impl MappedHeadRetryDelivery {
+    pub fn new(
+        transition_id: impl Into<String>,
+        build_attempt_id: impl Into<String>,
+        task_id: impl Into<String>,
+        expected_generation: i64,
+        delivery_generation: i64,
+    ) -> Result<Self> {
+        let result = Self {
+            transition_id: transition_id.into(),
+            build_attempt_id: build_attempt_id.into(),
+            task_id: task_id.into(),
+            expected_generation,
+            delivery_generation,
+        };
+        require_nonblank("transition_id", &result.transition_id)?;
+        require_nonblank("build_attempt_id", &result.build_attempt_id)?;
+        require_nonblank("task_id", &result.task_id)?;
+        require_positive("expected_generation", result.expected_generation)?;
+        require_positive("delivery_generation", result.delivery_generation)?;
+        if result.delivery_generation != result.expected_generation + 1 {
+            return Err(Error::InvalidTransition(
+                "mapped-head retry delivery_generation must be exactly expected_generation + 1"
+                    .into(),
+            ));
+        }
+        Ok(result)
+    }
+}
+
 impl DirectDeliveryEpochState {
     pub const ALL: [Self; 2] = [Self::Disabled, Self::Active];
 
@@ -209,14 +250,16 @@ pub enum TaskDeliveryState {
     Applying,
     Applied,
     Conflict,
+    Superseded,
 }
 
 impl TaskDeliveryState {
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 5] = [
         Self::Prepared,
         Self::Applying,
         Self::Applied,
         Self::Conflict,
+        Self::Superseded,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -225,13 +268,14 @@ impl TaskDeliveryState {
             Self::Applying => "applying",
             Self::Applied => "applied",
             Self::Conflict => "conflict",
+            Self::Superseded => "superseded",
         }
     }
 
-    /// Conflict rows are historical facts. Rework creates a new generation;
-    /// callers must never mutate a conflict row back into an applying state.
+    /// Terminal rows are historical facts. Retry creates a new generation;
+    /// callers must never mutate a terminal row back into an applying state.
     pub const fn is_immutable(self) -> bool {
-        matches!(self, Self::Conflict | Self::Applied)
+        matches!(self, Self::Conflict | Self::Applied | Self::Superseded)
     }
 }
 
@@ -250,6 +294,7 @@ impl FromStr for TaskDeliveryState {
             "applying" => Ok(Self::Applying),
             "applied" => Ok(Self::Applied),
             "conflict" => Ok(Self::Conflict),
+            "superseded" => Ok(Self::Superseded),
             other => Err(format!("unknown task delivery state: {other}")),
         }
     }
@@ -271,6 +316,7 @@ pub struct TaskDelivery {
     pub base_sha: String,
     pub applied_at: Option<String>,
     pub conflict_reason: Option<String>,
+    pub supersede_transition_id: Option<String>,
     pub created_at: String,
 }
 
