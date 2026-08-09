@@ -9,6 +9,18 @@ use sqlx::{Connection, Executor};
 const DIRECT_DELIVERY_MIGRATION_VERSION: i64 = 203;
 const MIGRATION_OPERATOR_ID: &str = "00000000-0000-7000-8000-000000000203";
 
+async fn initialized_ephemeral_database() -> Database {
+    let db = Database::ephemeral()
+        .await
+        .expect("create ephemeral database");
+    // `Database::ephemeral` is intentionally lazy: repository methods initialize
+    // it themselves, but these compatibility fixtures issue raw SQL first.
+    db.ensure_initialized()
+        .await
+        .expect("initialize ephemeral database");
+    db
+}
+
 async fn delivery_state_counts(pool: &sqlx::PgPool) -> (i64, i64, i64) {
     sqlx::query_as(
         "SELECT (SELECT count(*) FROM tasks), (SELECT count(*) FROM proposal_build_attempts), (SELECT count(*) FROM task_deliveries)",
@@ -21,11 +33,15 @@ async fn delivery_state_counts(pool: &sqlx::PgPool) -> (i64, i64, i64) {
 /// Put a legacy task plus inert direct rows in the fixture so a failed probe
 /// has meaningful task, attempt, and ledger state that it must preserve.
 async fn seed_probe_state(db: &Database) {
-    sqlx::query("INSERT INTO projects (id, name) VALUES ('probe-project', 'probe-project')")
+    sqlx::query("INSERT INTO users (id, github_id, github_login) VALUES ('probe-user', 9000000204, 'probe-user')")
+        .execute(db.pool())
+        .await
+        .expect("seed probe user");
+    sqlx::query("INSERT INTO projects (id, name, github_owner, github_repo) VALUES ('probe-project', 'probe-project', 'probe-owner', 'probe-repo')")
         .execute(db.pool())
         .await
         .expect("seed probe project");
-    sqlx::query("INSERT INTO tasks (id, project_id, short_id, title, description, design, labels, acceptance_criteria, memory_refs) VALUES ('probe-task', 'probe-project', 'probe-task', 'task', '', '', '[]', '[]', '[]')")
+    sqlx::query("INSERT INTO tasks (id, project_id, short_id, title, description, design, labels, acceptance_criteria, memory_refs, created_by_user_id) VALUES ('probe-task', 'probe-project', 'probe-task', 'task', '', '', '[]', '[]', '[]', 'probe-user')")
         .execute(db.pool()).await.expect("seed probe task");
     sqlx::query("INSERT INTO proposals (id, short_id, title) VALUES ('probe-proposal', 'probe-proposal', 'proposal')")
         .execute(db.pool()).await.expect("seed probe proposal");
@@ -37,12 +53,14 @@ async fn seed_probe_state(db: &Database) {
 
 #[tokio::test]
 async fn disabled_epoch_preserves_legacy_task_pr_delivery_and_probe_is_read_only() {
-    let db = Database::ephemeral().await.unwrap();
-    sqlx::query("INSERT INTO projects (id, name) VALUES ('direct-delivery-project', 'direct-delivery-project')")
+    let db = initialized_ephemeral_database().await;
+    sqlx::query("INSERT INTO users (id, github_id, github_login) VALUES ('legacy-delivery-user', 9000000205, 'legacy-delivery-user')")
+        .execute(db.pool()).await.unwrap();
+    sqlx::query("INSERT INTO projects (id, name, github_owner, github_repo) VALUES ('direct-delivery-project', 'direct-delivery-project', 'legacy-owner', 'legacy-repo')")
         .execute(db.pool()).await.unwrap();
     sqlx::query(
-        "INSERT INTO tasks (id, project_id, short_id, title, description, design, labels, acceptance_criteria, memory_refs, pr_url) \
-         VALUES ('legacy-delivery-task', 'direct-delivery-project', 'legacy-delivery', 'title', 'description', 'design', '[]', '[]', '[]', 'https://example.test/legacy/pr/7')",
+        "INSERT INTO tasks (id, project_id, short_id, title, description, design, labels, acceptance_criteria, memory_refs, pr_url, created_by_user_id) \
+         VALUES ('legacy-delivery-task', 'direct-delivery-project', 'legacy-delivery', 'title', 'description', 'design', '[]', '[]', '[]', 'https://example.test/legacy/pr/7', 'legacy-delivery-user')",
     ).execute(db.pool()).await.unwrap();
     let before = delivery_state_counts(db.pool()).await;
 
@@ -66,7 +84,7 @@ async fn disabled_epoch_preserves_legacy_task_pr_delivery_and_probe_is_read_only
 
 #[tokio::test]
 async fn failing_capability_probes_are_read_only() {
-    let missing = Database::ephemeral().await.unwrap();
+    let missing = initialized_ephemeral_database().await;
     seed_probe_state(&missing).await;
     sqlx::query("DROP TABLE direct_delivery_leases")
         .execute(missing.pool())
@@ -84,7 +102,7 @@ async fn failing_capability_probes_are_read_only() {
         "missing-schema probe must not mutate state"
     );
 
-    let absent = Database::ephemeral().await.unwrap();
+    let absent = initialized_ephemeral_database().await;
     seed_probe_state(&absent).await;
     sqlx::query("DELETE FROM direct_delivery_epochs")
         .execute(absent.pool())
@@ -104,7 +122,7 @@ async fn failing_capability_probes_are_read_only() {
         "missing-epoch probe must not mutate state"
     );
 
-    let unknown = Database::ephemeral().await.unwrap();
+    let unknown = initialized_ephemeral_database().await;
     seed_probe_state(&unknown).await;
     sqlx::query(
         "ALTER TABLE direct_delivery_epochs DROP CONSTRAINT direct_delivery_epochs_state_check",
