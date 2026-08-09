@@ -7,6 +7,7 @@ pub mod git_settings;
 pub mod org_ai_policy;
 pub mod project;
 pub mod proposal;
+pub mod proposal_build_attempt;
 pub mod provider;
 pub mod rejected_submission_integrity;
 pub mod session;
@@ -14,6 +15,7 @@ pub mod session_message;
 pub mod settings;
 pub mod task;
 pub mod task_attempt;
+pub mod task_delivery;
 pub mod task_run;
 pub mod task_run_outcome;
 pub mod typed_evidence;
@@ -35,6 +37,9 @@ pub use proposal::{
     ProposalFeedbackRefinementInjection, ProposalFeedbackRefinementSource, ProposalRevision,
     ProposalSignoff, ProposalTarget,
 };
+pub use proposal_build_attempt::{
+    DirectDeliveryParkReason, ProposalBuildAttempt, ProposalBuildAttemptLifecycle,
+};
 pub use provider::{CustomProvider, Model, Pricing, Provider, SeedModel};
 pub use rejected_submission_integrity::{
     RejectedVerdictKind, TaskRejectedSubmissionIntegrityRecord,
@@ -55,6 +60,11 @@ pub use task_attempt::{
     GuardDecision, GuardReason, LogTailMeta, TASK_ATTEMPT_DISPATCH_KEY_MAX_LEN,
     TASK_ATTEMPT_LOG_TAIL_MAX_LEN, TASK_ATTEMPT_SUMMARY_MAX_LEN, TaskAttempt,
     TaskAttemptHistoryRow, TaskAttemptLedgerRow, TaskAttemptOutcome, TaskAttemptPromptSummary,
+};
+pub use task_delivery::{
+    DirectDeliveryCapability, DirectDeliveryCapabilityRecord, DirectDeliveryEpoch,
+    DirectDeliveryEpochState, DirectDeliveryLease, ReworkDelivery, TaskDelivery,
+    TaskDeliveryIdentity, TaskDeliveryState, TaskIntegrated,
 };
 pub use task_run::{TaskRunRecord, TaskRunStatus, TaskRunTrigger};
 pub use task_run_outcome::TaskRunOutcomeFact;
