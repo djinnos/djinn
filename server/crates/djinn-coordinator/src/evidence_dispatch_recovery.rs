@@ -8,6 +8,84 @@ use djinn_db::{
 };
 use djinn_slot::PoolError;
 
+#[cfg(test)]
+#[derive(Clone, Debug)]
+pub(super) enum EvidenceDispatchTestOutcome {
+    Accepted,
+    EnqueueFailed,
+    AlreadyActive,
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct EvidenceDispatchTestScript {
+    outcomes: std::collections::VecDeque<EvidenceDispatchTestOutcome>,
+    fail_activation_once: bool,
+    dispatches: usize,
+}
+
+#[cfg(test)]
+static EVIDENCE_DISPATCH_TEST_SCRIPTS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, EvidenceDispatchTestScript>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+#[cfg(test)]
+pub(super) fn set_evidence_dispatch_test_script(
+    task_id: &str,
+    outcomes: impl IntoIterator<Item = EvidenceDispatchTestOutcome>,
+    fail_activation_once: bool,
+) {
+    EVIDENCE_DISPATCH_TEST_SCRIPTS
+        .lock()
+        .expect("evidence dispatch test seam lock")
+        .insert(
+            task_id.to_owned(),
+            EvidenceDispatchTestScript {
+                outcomes: outcomes.into_iter().collect(),
+                fail_activation_once,
+                dispatches: 0,
+            },
+        );
+}
+
+#[cfg(test)]
+pub(super) fn evidence_dispatch_test_count(task_id: &str) -> usize {
+    EVIDENCE_DISPATCH_TEST_SCRIPTS
+        .lock()
+        .expect("evidence dispatch test seam lock")
+        .get(task_id)
+        .map(|script| script.dispatches)
+        .unwrap_or_default()
+}
+
+#[cfg(test)]
+fn scripted_dispatch(task_id: &str) -> Option<Result<(), PoolError>> {
+    let mut scripts = EVIDENCE_DISPATCH_TEST_SCRIPTS
+        .lock()
+        .expect("evidence dispatch test seam lock");
+    let script = scripts.get_mut(task_id)?;
+    script.dispatches += 1;
+    Some(match script.outcomes.pop_front() {
+        Some(EvidenceDispatchTestOutcome::Accepted) => Ok(()),
+        Some(EvidenceDispatchTestOutcome::EnqueueFailed) => Err(PoolError::ActorDead),
+        Some(EvidenceDispatchTestOutcome::AlreadyActive) => Err(PoolError::SessionAlreadyActive {
+            task_id: task_id.to_owned(),
+        }),
+        None => panic!("evidence dispatch test script exhausted for {task_id}"),
+    })
+}
+
+#[cfg(test)]
+fn fail_scripted_activation(task_id: &str) -> bool {
+    let mut scripts = EVIDENCE_DISPATCH_TEST_SCRIPTS
+        .lock()
+        .expect("evidence dispatch test seam lock");
+    let Some(script) = scripts.get_mut(task_id) else {
+        return false;
+    };
+    std::mem::take(&mut script.fail_activation_once)
+}
+
 impl CoordinatorActor {
     /// Re-enqueue every exact typed attempt that remains `demanded`.
     ///
@@ -60,7 +138,14 @@ impl CoordinatorActor {
                 .await;
                 continue;
             };
-            match self.pool.dispatch(&task.id, &project_path, model_id).await {
+            #[cfg(test)]
+            let dispatch = match scripted_dispatch(&task.id) {
+                Some(result) => result,
+                None => self.pool.dispatch(&task.id, &project_path, model_id).await,
+            };
+            #[cfg(not(test))]
+            let dispatch = self.pool.dispatch(&task.id, &project_path, model_id).await;
+            match dispatch {
                 Ok(()) => self.activate_evidence_dispatch(&allocation).await,
                 // A previous delivery can reach the pool but lose its database
                 // commit. The pool's exact-task active result is therefore an
@@ -84,6 +169,11 @@ impl CoordinatorActor {
         &self,
         allocation: &djinn_db::DemandedTypedEvidenceDispatch,
     ) {
+        #[cfg(test)]
+        if fail_scripted_activation(&allocation.spike_task_id) {
+            tracing::warn!(finding_id=%allocation.finding_id, attempt_id=%allocation.attempt_id, "injected accepted evidence activation failure");
+            return;
+        }
         let mut tx = match self.db.pool().begin().await {
             Ok(tx) => tx,
             Err(error) => {
