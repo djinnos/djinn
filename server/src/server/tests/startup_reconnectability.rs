@@ -8,6 +8,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::events::EventBus;
 use crate::server::AppState;
@@ -28,6 +29,55 @@ use djinn_supervisor::ConnectionRegistry;
 struct MatrixInventory {
     listed: Vec<WorkloadRecord>,
     presence: HashMap<String, ObjectPresence>,
+}
+
+/// Server-level inventory fixture. It records census acquisition calls so the
+/// following Stage A/B/C handoff can prove it consumed immutable evidence.
+struct CountingInventory {
+    listed: Result<Vec<WorkloadRecord>, String>,
+    presence: HashMap<String, ObjectPresence>,
+    list_calls: AtomicUsize,
+    presence_calls: AtomicUsize,
+}
+
+impl CountingInventory {
+    fn listed(records: Vec<WorkloadRecord>, presence: HashMap<String, ObjectPresence>) -> Self {
+        Self {
+            listed: Ok(records),
+            presence,
+            list_calls: AtomicUsize::new(0),
+            presence_calls: AtomicUsize::new(0),
+        }
+    }
+
+    fn unavailable() -> Self {
+        Self {
+            listed: Err("apiserver unavailable".to_owned()),
+            presence: HashMap::new(),
+            list_calls: AtomicUsize::new(0),
+            presence_calls: AtomicUsize::new(0),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl WorkloadInventory for CountingInventory {
+    async fn list(&self) -> Result<Vec<WorkloadRecord>, String> {
+        self.list_calls.fetch_add(1, Ordering::SeqCst);
+        self.listed.clone()
+    }
+
+    async fn get_uid(&self, _: WorkloadObjectKind, _: &str, _: &str) -> UidGetResult {
+        UidGetResult::Uncertain
+    }
+
+    async fn presence(&self, _: WorkloadObjectKind, name: &str) -> ObjectPresence {
+        self.presence_calls.fetch_add(1, Ordering::SeqCst);
+        self.presence
+            .get(name)
+            .cloned()
+            .unwrap_or(ObjectPresence::Uncertain)
+    }
 }
 
 /// The configured Stage A identity table is exact: only disconnected,
@@ -267,7 +317,16 @@ impl WorkloadInventory for UnavailableInventory {
 }
 
 async fn seed_startup_rows(db: &Database, events: &EventBus, run_id: &str) -> (String, String) {
-    seed_running_session_with_task_run(db, events, run_id).await;
+    seed_startup_rows_with_status(db, events, run_id, "running").await
+}
+
+async fn seed_startup_rows_with_status(
+    db: &Database,
+    events: &EventBus,
+    run_id: &str,
+    status: &str,
+) -> (String, String) {
+    seed_session_with_task_run_status(db, events, run_id, status).await;
     let run = TaskRunRepository::new(db.clone())
         .get(run_id)
         .await
@@ -295,6 +354,194 @@ async fn seed_startup_rows(db: &Database, events: &EventBus, run_id: &str) -> (S
         .await
         .unwrap();
     (session, attempt)
+}
+
+/// A complete server-owned startup lifecycle fixture.  Its `run` method is
+/// deliberately the only place these regressions invoke the reapers: census
+/// capture happens first, Stage A consumes that immutable value, and then the
+/// coordinator's production Stage B/C handoff consumes the same value.
+struct FullStartupFixture {
+    db: Database,
+    events: EventBus,
+    run_id: String,
+    session_id: String,
+    attempt_id: String,
+    inventory: Arc<CountingInventory>,
+}
+
+impl FullStartupFixture {
+    async fn seeded(run_id: &str, inventory: CountingInventory) -> Self {
+        Self::seeded_with_status(run_id, "running", inventory).await
+    }
+
+    async fn seeded_with_status(run_id: &str, status: &str, inventory: CountingInventory) -> Self {
+        let db = create_test_db();
+        let events = test_events();
+        let (session_id, attempt_id) =
+            seed_startup_rows_with_status(&db, &events, run_id, status).await;
+        Self {
+            db,
+            events,
+            run_id: run_id.to_owned(),
+            session_id,
+            attempt_id,
+            inventory: Arc::new(inventory),
+        }
+    }
+
+    async fn run(&self, age_attempt: bool) -> StartupCensus {
+        let census = StartupCensus::acquire(self.db.clone(), Some(self.inventory.clone()))
+            .await
+            .expect("capture startup census before every lifecycle mutation");
+        let state = AppState::new(self.db.clone(), tokio_util::sync::CancellationToken::new());
+        state
+            .interrupt_stale_sessions_on_startup_with_census(&census)
+            .await;
+        if age_attempt {
+            tokio::time::sleep(std::time::Duration::from_secs(11)).await;
+        }
+        djinn_coordinator::complete_startup_reaper_phase(
+            &self.db,
+            "startup-census-fixture-incarnation",
+            Some(&census),
+        )
+        .await;
+        census
+    }
+
+    async fn durable_statuses(&self) -> (String, String, String) {
+        let session = SessionRepository::new(self.db.clone(), self.events.clone())
+            .get(&self.session_id)
+            .await
+            .expect("read fixture session")
+            .expect("fixture session exists");
+        let run = TaskRunRepository::new(self.db.clone())
+            .get(&self.run_id)
+            .await
+            .expect("read fixture task run")
+            .expect("fixture task run exists");
+        let attempt = TaskAttemptRepository::new(self.db.clone())
+            .get(&self.attempt_id)
+            .await
+            .expect("read fixture attempt")
+            .expect("fixture attempt exists");
+        (session.status, run.status, attempt.outcome)
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn startup_reaper_preserves_live_pods() {
+    let run_id = "startup-live-pod";
+    let fixture = FullStartupFixture::seeded(
+        run_id,
+        CountingInventory::listed(vec![job(run_id, false)], HashMap::new()),
+    )
+    .await;
+
+    let census = fixture.run(false).await;
+
+    assert!(
+        census
+            .runs()
+            .iter()
+            .any(|run| run.task_run_id == run_id && run.witness == TaskRunWitness::Live)
+    );
+    assert_eq!(
+        fixture.durable_statuses().await,
+        ("running".into(), "running".into(), "pending".into())
+    );
+    assert_eq!(fixture.inventory.list_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.inventory.presence_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn startup_reaper_still_reaps_absent_running_job() {
+    let run_id = "startup-absent-running";
+    let mut presence = HashMap::new();
+    presence.insert(djinn_k8s::taskrun_job_name(run_id), ObjectPresence::Absent);
+    let fixture =
+        FullStartupFixture::seeded(run_id, CountingInventory::listed(vec![], presence)).await;
+
+    let census = fixture.run(true).await;
+
+    assert!(census.runs().iter().any(|run| run.task_run_id == run_id
+        && run.witness == TaskRunWitness::Gone(GoneProvenance::AuthoritativelyAbsent)));
+    assert_eq!(
+        fixture.durable_statuses().await,
+        (
+            "interrupted".into(),
+            "interrupted".into(),
+            "interrupted".into()
+        )
+    );
+    let attempt = TaskAttemptRepository::new(fixture.db.clone())
+        .get(&fixture.attempt_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        attempt
+            .summary_json
+            .unwrap_or_default()
+            .contains("environmental_restart_orphan")
+    );
+    assert_eq!(fixture.inventory.list_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.inventory.presence_calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn startup_reaper_still_reaps_terminal_job() {
+    for (run_id, status) in [
+        ("startup-terminal-starting", "starting"),
+        ("startup-terminal-running", "running"),
+    ] {
+        let fixture = FullStartupFixture::seeded_with_status(
+            run_id,
+            status,
+            CountingInventory::listed(vec![job(run_id, true)], HashMap::new()),
+        )
+        .await;
+        let census = fixture.run(true).await;
+
+        assert!(census.runs().iter().any(|run| run.task_run_id == run_id
+            && run.witness == TaskRunWitness::Gone(GoneProvenance::TerminalPresent)));
+        assert_eq!(
+            fixture.durable_statuses().await,
+            (
+                "interrupted".into(),
+                "interrupted".into(),
+                "interrupted".into()
+            ),
+            "terminal Job must reap the {status} fixture"
+        );
+        assert_eq!(fixture.inventory.list_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(fixture.inventory.presence_calls.load(Ordering::SeqCst), 0);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn startup_reaper_fails_closed_on_unknown() {
+    for (run_id, inventory) in [
+        ("startup-list-unavailable", CountingInventory::unavailable()),
+        (
+            "startup-get-uncertain",
+            CountingInventory::listed(vec![], HashMap::new()),
+        ),
+    ] {
+        let fixture = FullStartupFixture::seeded(run_id, inventory).await;
+        let census = fixture.run(false).await;
+        assert!(
+            census
+                .runs()
+                .iter()
+                .any(|run| run.task_run_id == run_id && run.witness == TaskRunWitness::Unknown)
+        );
+        assert_eq!(
+            fixture.durable_statuses().await,
+            ("running".into(), "running".into(), "pending".into())
+        );
+        assert_eq!(fixture.inventory.list_calls.load(Ordering::SeqCst), 1);
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -439,6 +686,15 @@ async fn seed_running_session_with_task_run(
     events: &EventBus,
     task_run_id: &str,
 ) -> String {
+    seed_session_with_task_run_status(db, events, task_run_id, "running").await
+}
+
+async fn seed_session_with_task_run_status(
+    db: &Database,
+    events: &EventBus,
+    task_run_id: &str,
+    status: &str,
+) -> String {
     use djinn_db::{EpicCreateInput, EpicRepository, ProjectRepository};
 
     let project_repo = ProjectRepository::new(db.clone(), events.clone());
@@ -480,7 +736,7 @@ async fn seed_running_session_with_task_run(
             project_id: &project.id,
             task_id: &task.id,
             trigger_type: "manual",
-            status: Some("running"),
+            status: Some(status),
             workspace_path: None,
             mirror_ref: None,
             dispatch_group_id: None,
