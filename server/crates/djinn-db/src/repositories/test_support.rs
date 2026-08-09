@@ -6,9 +6,11 @@ use tokio::sync::broadcast;
 
 use crate::database::Database;
 
+mod evidence_dispatch_recovery;
 mod refinement_read_only;
 mod test_support_retry;
 
+pub use evidence_dispatch_recovery::*;
 pub use refinement_read_only::*;
 pub use test_support_retry::*;
 
