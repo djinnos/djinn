@@ -2492,17 +2492,13 @@ impl AppState {
     /// The test build uses `pub(crate)` visibility so the same logic can be
     /// exercised from crate-internal tests without requiring the public API to
     /// expose the startup interruption seam.
-    #[cfg(not(test))]
-    async fn interrupt_stale_sessions_on_startup(&self) {
-        self.interrupt_stale_sessions_on_startup_impl().await
-    }
-
     #[cfg(test)]
     pub(crate) async fn interrupt_stale_sessions_on_startup(&self) {
         self.interrupt_stale_sessions_on_startup_impl().await
     }
 
     /// Shared legacy implementation when inventory is not configured.
+    #[cfg(test)]
     async fn interrupt_stale_sessions_on_startup_impl(&self) {
         let census = StartupCensus::acquire(self.db().clone(), None)
             .await
