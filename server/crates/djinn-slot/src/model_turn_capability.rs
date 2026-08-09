@@ -65,16 +65,19 @@ pub fn report_for_route(
     model_scope: &str,
     plan: Option<&ProviderAttemptPlanV1>,
 ) -> ModelTurnCapabilityReportV2 {
-    let coverage = plan
+    let route_is_covered = plan
         .filter(|plan| plan.scope.provider_id == provider && plan.scope.model_id == model_scope)
         .is_some_and(|plan| {
             matches!(plan.coverage,
             ProviderAttemptRouteCoverageV1::Covered { capabilities, .. }
                 if capabilities.hidden_retries == ProviderHiddenRetryCapabilityV1::Disabled
                     && capabilities.abort == ProviderAbortCapabilityV1::Supported)
-        })
-        .then_some(ModelTurnCapabilityCoverageV2::Covered)
-        .unwrap_or(ModelTurnCapabilityCoverageV2::Uncovered);
+        });
+    let coverage = if route_is_covered {
+        ModelTurnCapabilityCoverageV2::Covered
+    } else {
+        ModelTurnCapabilityCoverageV2::Uncovered
+    };
     ModelTurnCapabilityReportV2 {
         slot_pod_uid: identity.pod_uid.clone(),
         deployment_revision: identity.deployment_revision.clone(),
