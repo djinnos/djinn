@@ -47,4 +47,4 @@ expression: section
 - `task_archive_activity(id)`
 - `task_reset_counters(id)`
 - `task_kill_session(id)`
-- `submit_work(commit_title, summary, task_id, evidence_completion?, files_changed?, remaining_concerns?)`
+- `submit_work(commit_title, summary, task_id, evidence_completion?, files_changed?, remaining_concerns?, tribunal_evidence_return_v1?)`

@@ -204,10 +204,30 @@ pub enum ProviderAttemptTerminalV1 {
     Aborted,
 }
 
+impl ProviderAttemptTerminalV1 {
+    /// B1 owns loss classification; consumers must not reinterpret provider
+    /// frames or transport errors after the attempt has settled.
+    pub fn retryable(self) -> bool {
+        matches!(
+            self,
+            Self::Failed(
+                ProviderAttemptLossV1::Transport
+                    | ProviderAttemptLossV1::UpstreamFailure
+                    | ProviderAttemptLossV1::RateLimited
+                    | ProviderAttemptLossV1::EmptyTurn
+                    | ProviderAttemptLossV1::CodexEmptyTurn
+            )
+        )
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderAttemptLossV1 {
     Transport,
+    /// An initial HTTP 5xx response, distinct from a non-retryable rejection.
+    /// The reply-loop boundary, never the provider client, owns its replacement.
+    UpstreamFailure,
     ProviderRejected,
     RateLimited,
     PolicyMismatch,
@@ -801,6 +821,21 @@ fn output_reservation(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn provider_rejections_are_not_retryable_b1_losses() {
+        assert!(ProviderAttemptTerminalV1::Failed(ProviderAttemptLossV1::Transport).retryable());
+        assert!(
+            ProviderAttemptTerminalV1::Failed(ProviderAttemptLossV1::UpstreamFailure).retryable()
+        );
+        assert!(ProviderAttemptTerminalV1::Failed(ProviderAttemptLossV1::RateLimited).retryable());
+        assert!(
+            !ProviderAttemptTerminalV1::Failed(ProviderAttemptLossV1::ProviderRejected).retryable(),
+            "authentication, invalid-request, context-overflow, and invalid-output reporters \
+             must not schedule a replacement"
+        );
+        assert!(!ProviderAttemptTerminalV1::Aborted.retryable());
+    }
 
     fn scope() -> ProviderAttemptScopeV1 {
         ProviderAttemptScopeV1 {

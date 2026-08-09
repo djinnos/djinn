@@ -1,6 +1,7 @@
 use anyhow::anyhow;
 use async_stream::stream;
 use djinn_core::clock::{Clock, SystemClock as SystemClockTrait};
+use djinn_db::ModelTurnLeaseIdentity;
 use futures::{Stream, StreamExt};
 use reqwest::header::HeaderMap;
 use std::pin::Pin;
@@ -57,6 +58,9 @@ pub struct ProviderAttemptContextV1 {
     pub request_sequence: u64,
     pub route_policy: ProviderAdmissionPolicyV1,
     pub normalizer: Arc<Mutex<ProviderApiKeyNormalizerV1>>,
+    /// Exact lifecycle identity already committed at the covered dispatch fence.
+    /// It is absent only for explicitly shadow/uncovered-compatible launches.
+    pub launch_identity: Option<ModelTurnLeaseIdentity>,
     receipt_clock: Arc<dyn Fn() -> ProviderReceiptTimeV1 + Send + Sync>,
 }
 
@@ -71,8 +75,15 @@ impl ProviderAttemptContextV1 {
             request_sequence,
             route_policy,
             normalizer,
+            launch_identity: None,
             receipt_clock: Arc::new(receipt_clock),
         }
+    }
+
+    #[must_use]
+    pub fn with_launch_identity(mut self, identity: Option<ModelTurnLeaseIdentity>) -> Self {
+        self.launch_identity = identity;
+        self
     }
 
     fn receipt(&self) -> ProviderReceiptTimeV1 {
@@ -484,6 +495,10 @@ impl ApiClient {
                     terminal = ProviderAttemptTerminalV1::Failed(
                         if is_rate_limit_status(response.status()) {
                             ProviderAttemptLossV1::RateLimited
+                        } else if response.status().is_server_error() {
+                            // Preserve retry eligibility without conflating a
+                            // transient 5xx with authentication/input rejection.
+                            ProviderAttemptLossV1::UpstreamFailure
                         } else {
                             ProviderAttemptLossV1::ProviderRejected
                         },
