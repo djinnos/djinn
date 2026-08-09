@@ -189,7 +189,7 @@ pub struct ModelTurnAdmissionCoordinator {
 }
 
 #[cfg(test)]
-pub(super) struct ModelTurnAdmissionTestHooks {
+pub(crate) struct ModelTurnAdmissionTestHooks {
     pub fail_mark_active: std::sync::atomic::AtomicBool,
     /// Counts watchdog-owned commits independently of provider stream activity.
     pub heartbeats: AtomicUsize,

@@ -1,10 +1,14 @@
 //! Production-boundary evidence for covered B1 retry ownership.
 
 use super::*;
-use crate::reply_loop::turn::register_reply_loop_boundary_observer;
+use crate::reply_loop::model_turn_admission::ModelTurnAdmissionTestHooks;
+use crate::reply_loop::turn::{
+    register_reply_loop_admission_test_hooks, register_reply_loop_boundary_observer,
+};
 use djinn_db::test_support::{
-    model_turn_accounting_fixture, model_turn_launch_identities_fixture,
-    model_turn_terminal_fixture, seed_model_turn_admission_fixture,
+    model_turn_accounting_fixture, model_turn_decision_count_fixture,
+    model_turn_launch_identities_fixture, model_turn_terminal_fixture,
+    seed_model_turn_admission_fixture,
 };
 use djinn_db::{Database, ModelTurnBucketDebit, ModelTurnBucketKind};
 use djinn_provider::provider::client::{ProviderAttemptContextV1, ProviderSseAttemptV1, SseFrame};
@@ -79,17 +83,46 @@ impl ProviderSseFrameParserV1 for CoveredParser {
 
 /// `stream` panics: this fixture can only pass through covered B1 operations.
 struct ScriptedCoveredB1Provider {
+    plans: AtomicUsize,
     launches: AtomicUsize,
     launched: [tokio::sync::Notify; 2],
     launch_contexts: Mutex<Vec<ProviderAttemptContextV1>>,
+    first_terminal: ProviderAttemptTerminalV1,
+    first_retry_deadline: Option<u64>,
+    pending_first_stream: bool,
+    first_abort: Mutex<Option<ProviderAttemptAbortHandleV1>>,
 }
 impl ScriptedCoveredB1Provider {
     fn new() -> Self {
+        Self::with_first_terminal(ProviderAttemptTerminalV1::Failed(
+            ProviderAttemptLossV1::Transport,
+        ))
+    }
+
+    fn with_first_terminal(first_terminal: ProviderAttemptTerminalV1) -> Self {
+        Self::with_first_terminal_and_deadline(first_terminal, Some(0))
+    }
+
+    fn with_first_terminal_and_deadline(
+        first_terminal: ProviderAttemptTerminalV1,
+        first_retry_deadline: Option<u64>,
+    ) -> Self {
         Self {
+            plans: AtomicUsize::new(0),
             launches: AtomicUsize::new(0),
             launched: [tokio::sync::Notify::new(), tokio::sync::Notify::new()],
             launch_contexts: Mutex::new(Vec::new()),
+            first_terminal,
+            first_retry_deadline,
+            pending_first_stream: false,
+            first_abort: Mutex::new(None),
         }
+    }
+
+    fn watchdog_pending() -> Self {
+        let mut provider = Self::with_first_terminal(ProviderAttemptTerminalV1::Aborted);
+        provider.pending_first_stream = true;
+        provider
     }
 }
 impl LlmProvider for ScriptedCoveredB1Provider {
@@ -120,6 +153,7 @@ impl LlmProvider for ScriptedCoveredB1Provider {
         _: &[serde_json::Value],
         _: Option<ToolChoice>,
     ) -> Result<ProviderAttemptPlanV1, ProviderAttemptRouteCoverageV1> {
+        self.plans.fetch_add(1, Ordering::SeqCst);
         Ok(covered_plan())
     }
     fn start_sse_attempt_v1(
@@ -136,14 +170,21 @@ impl LlmProvider for ScriptedCoveredB1Provider {
             .push(context);
         self.launched[ordinal].notify_waiters();
         let (tx, rx) = tokio::sync::oneshot::channel();
-        let (frames, outcome) = if ordinal == 0 {
+        let (frames, outcome) = if ordinal == 0 && self.pending_first_stream {
+            // Keep the watchdog attempt's real provider read pending until
+            // the production watchdog aborts B1. A completed frame here
+            // would let the parser finish before it can set
+            // `StreamTurnState::watchdog_aborted`.
+            (
+                Box::pin(futures::stream::pending::<anyhow::Result<SseFrame>>())
+                    as Pin<Box<dyn futures::Stream<Item = anyhow::Result<SseFrame>> + Send>>,
+                terminal(ProviderAttemptTerminalV1::Aborted, None),
+            )
+        } else if ordinal == 0 {
             (
                 Box::pin(futures::stream::empty())
                     as Pin<Box<dyn futures::Stream<Item = anyhow::Result<SseFrame>> + Send>>,
-                terminal(
-                    ProviderAttemptTerminalV1::Failed(ProviderAttemptLossV1::Transport),
-                    Some(0),
-                ),
+                terminal(self.first_terminal, self.first_retry_deadline),
             )
         } else {
             (
@@ -154,12 +195,19 @@ impl LlmProvider for ScriptedCoveredB1Provider {
                 terminal(ProviderAttemptTerminalV1::Completed, None),
             )
         };
-        tx.send(outcome).expect("one B1 terminal");
-        Ok(ProviderSseAttemptV1::for_test(
-            frames,
-            ProviderAttemptAbortHandleV1::new(),
-            rx,
-        ))
+        let abort = ProviderAttemptAbortHandleV1::new();
+        if ordinal == 0 && self.pending_first_stream {
+            *self.first_abort.lock().expect("first abort") = Some(abort.clone());
+            let cancellation = abort.cancellation_token();
+            tokio::spawn(async move {
+                cancellation.cancelled().await;
+                tx.send(terminal(ProviderAttemptTerminalV1::Aborted, None))
+                    .expect("watchdog B1 terminal");
+            });
+        } else {
+            tx.send(outcome).expect("one B1 terminal");
+        }
+        Ok(ProviderSseAttemptV1::for_test(frames, abort, rx))
     }
     fn sse_frame_parser_v1(&self) -> Option<Box<dyn ProviderSseFrameParserV1>> {
         Some(Box::new(CoveredParser))
@@ -301,5 +349,340 @@ async fn covered_retry_reconciles_old_lease_before_fresh_preparation_and_launch(
         .0;
     assert!(
         settled_at < wait_at && wait_at < second_prepare && second_prepare < second_launch_event
+    );
+}
+
+async fn cancellation_at_covered_retry_wait_returns(
+    cancel_session: bool,
+    expected: ReplyLoopCancelled,
+) {
+    let db = Database::ephemeral().await.expect("database");
+    let pool = seed_model_turn_admission_fixture(&db, "enforce", "supported", 2).await;
+    let session_cancel = CancellationToken::new();
+    let supervisor_cancel = CancellationToken::new();
+    let slot_ctx = crate::test_helpers::agent_context_from_db(db.clone(), session_cancel.clone());
+    // Keep the retry deadline in the future independently of the bounded
+    // deterministic jitter so observer delivery cannot race replacement setup.
+    let provider = ScriptedCoveredB1Provider::with_first_terminal_and_deadline(
+        ProviderAttemptTerminalV1::Failed(ProviderAttemptLossV1::Transport),
+        Some(60_000),
+    );
+    let session_id = format!("covered-retry-cancel-{}", uuid::Uuid::now_v7());
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let waited = Arc::new(tokio::sync::Notify::new());
+    let observed = Arc::clone(&events);
+    let waited_observer = Arc::clone(&waited);
+    let _observer = register_reply_loop_boundary_observer(
+        session_id.clone(),
+        Arc::new(move |event| {
+            observed.lock().expect("observer").push(event.name);
+            if event.name == "covered_retry_wait" {
+                waited_observer.notify_waiters();
+            }
+        }),
+    );
+    let retry_wait = waited.notified();
+    tokio::pin!(retry_wait);
+    let mut conversation = Conversation::new();
+    conversation.push(Message::user("cancel only after the settled retry"));
+    let compaction_cs = crate::reply_loop::CompactionCriticalSection::new();
+    let run = run_reply_loop(
+        ReplyLoopContext {
+            provider: &provider,
+            credential_record_id: "credential-slot",
+            tools: &[],
+            task_id: "covered-retry-cancel",
+            task_short_id: "covered-retry-cancel",
+            session_id: &session_id,
+            project_path: "/workspace",
+            worktree_path: std::path::Path::new("/workspace"),
+            role_name: "worker",
+            finalize_tool_names: &[],
+            context_window: 10_000,
+            model_id: "model",
+            cancel: &session_cancel,
+            global_cancel: &supervisor_cancel,
+            ctx: &slot_ctx,
+            active_skill_names: &[],
+            active_mcp_server_names: &[],
+            max_turns_override: Some(2),
+            compaction_cs: &compaction_cs,
+            session_budget: None,
+        },
+        &mut conversation,
+        false,
+    );
+    tokio::pin!(run);
+    tokio::select! { _ = &mut retry_wait => {}, result = &mut run => panic!("covered retry wait missing: {:?}", result.0) }
+    if cancel_session {
+        session_cancel.cancel();
+    } else {
+        supervisor_cancel.cancel();
+    }
+    let (result, ..) = run.await;
+    assert_eq!(
+        result
+            .expect_err("cancellation at retry wait must stop replacement")
+            .downcast_ref::<ReplyLoopCancelled>(),
+        Some(&expected)
+    );
+    if cancel_session {
+        session_cancel.cancel();
+    } else {
+        supervisor_cancel.cancel();
+    }
+    tokio::task::yield_now().await;
+    assert_eq!(provider.launches.load(Ordering::SeqCst), 1);
+    assert_eq!(provider.plans.load(Ordering::SeqCst), 1);
+    let leases = model_turn_launch_identities_fixture(&db).await;
+    assert_eq!(leases.len(), 1);
+    assert_eq!(
+        model_turn_terminal_fixture(&db, &leases[0].0, leases[0].1, &leases[0].2)
+            .await
+            .0,
+        "failed"
+    );
+    assert_eq!(
+        model_turn_decision_count_fixture(&db, pool).await,
+        0,
+        "settlement removes the first decision and cancellation cannot create a replacement"
+    );
+    assert_eq!(model_turn_accounting_fixture(&db, pool).await, (0, 1, 1));
+    let events = events.lock().expect("observer");
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| **event == "model_turn_prepare")
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| **event == "model_turn_launch")
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn session_cancellation_at_covered_retry_wait_prevents_replacement() {
+    cancellation_at_covered_retry_wait_returns(true, ReplyLoopCancelled::session()).await;
+}
+
+#[tokio::test]
+async fn supervisor_shutdown_at_covered_retry_wait_prevents_replacement() {
+    cancellation_at_covered_retry_wait_returns(false, ReplyLoopCancelled::supervisor_shutdown())
+        .await;
+}
+
+async fn terminal_covered_attempt_does_not_replace(
+    first_terminal: ProviderAttemptTerminalV1,
+    expected_lifecycle: &str,
+) {
+    let db = Database::ephemeral().await.expect("database");
+    let pool = seed_model_turn_admission_fixture(&db, "enforce", "supported", 2).await;
+    let session_cancel = CancellationToken::new();
+    let supervisor_cancel = CancellationToken::new();
+    let slot_ctx = crate::test_helpers::agent_context_from_db(db.clone(), session_cancel.clone());
+    let provider = ScriptedCoveredB1Provider::with_first_terminal(first_terminal);
+    let session_id = format!("covered-terminal-{}", uuid::Uuid::now_v7());
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let observed = Arc::clone(&events);
+    let _observer = register_reply_loop_boundary_observer(
+        session_id.clone(),
+        Arc::new(move |event| observed.lock().expect("observer").push(event.name)),
+    );
+    let mut conversation = Conversation::new();
+    conversation.push(Message::user("terminal B1 must not replace"));
+    let compaction_cs = crate::reply_loop::CompactionCriticalSection::new();
+    let (result, ..) = run_reply_loop(
+        ReplyLoopContext {
+            provider: &provider,
+            credential_record_id: "credential-slot",
+            tools: &[],
+            task_id: "covered-terminal",
+            task_short_id: "covered-terminal",
+            session_id: &session_id,
+            project_path: "/workspace",
+            worktree_path: std::path::Path::new("/workspace"),
+            role_name: "worker",
+            finalize_tool_names: &[],
+            context_window: 10_000,
+            model_id: "model",
+            cancel: &session_cancel,
+            global_cancel: &supervisor_cancel,
+            ctx: &slot_ctx,
+            active_skill_names: &[],
+            active_mcp_server_names: &[],
+            max_turns_override: Some(2),
+            compaction_cs: &compaction_cs,
+            session_budget: None,
+        },
+        &mut conversation,
+        false,
+    )
+    .await;
+    result.expect_err("terminal B1 state must terminate the real reply loop");
+
+    assert_eq!(provider.plans.load(Ordering::SeqCst), 1);
+    assert_eq!(provider.launches.load(Ordering::SeqCst), 1);
+    let leases = model_turn_launch_identities_fixture(&db).await;
+    assert_eq!(leases.len(), 1);
+    assert_eq!(
+        model_turn_terminal_fixture(&db, &leases[0].0, leases[0].1, &leases[0].2)
+            .await
+            .0,
+        expected_lifecycle
+    );
+    assert_eq!(
+        model_turn_decision_count_fixture(&db, pool).await,
+        0,
+        "terminal settlement must leave no replacement decision"
+    );
+    assert_eq!(model_turn_accounting_fixture(&db, pool).await, (0, 1, 1));
+    let events = events.lock().expect("observer");
+    assert!(
+        !events.contains(&"covered_retry_wait"),
+        "terminal state must not enter the replacement wait"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| **event == "model_turn_prepare")
+            .count(),
+        1,
+        "terminal state must not prepare a replacement"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| **event == "model_turn_launch")
+            .count(),
+        1,
+        "terminal state must not launch a replacement"
+    );
+}
+
+#[tokio::test]
+async fn non_retryable_b1_rejection_does_not_replace_in_real_reply_loop() {
+    terminal_covered_attempt_does_not_replace(
+        ProviderAttemptTerminalV1::Failed(ProviderAttemptLossV1::ProviderRejected),
+        "failed",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn watchdog_aborted_b1_terminal_does_not_replace_in_real_reply_loop() {
+    let db = Database::ephemeral().await.expect("database");
+    let pool = seed_model_turn_admission_fixture(&db, "enforce", "supported", 2).await;
+    let session_cancel = CancellationToken::new();
+    let supervisor_cancel = CancellationToken::new();
+    let slot_ctx = crate::test_helpers::agent_context_from_db(db.clone(), session_cancel.clone());
+    let provider = ScriptedCoveredB1Provider::watchdog_pending();
+    let session_id = format!("covered-watchdog-{}", uuid::Uuid::now_v7());
+    let hooks = Arc::new(ModelTurnAdmissionTestHooks::default());
+    hooks.fail_heartbeat.store(true, Ordering::Release);
+    hooks.block_watchdog_deadline.store(true, Ordering::Release);
+    let _hooks = register_reply_loop_admission_test_hooks(session_id.clone(), Arc::clone(&hooks));
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let observed = Arc::clone(&events);
+    let _observer = register_reply_loop_boundary_observer(
+        session_id.clone(),
+        Arc::new(move |event| observed.lock().expect("observer").push(event.name)),
+    );
+    let started = hooks.watchdog_started.notified();
+    tokio::pin!(started);
+    let mut conversation = Conversation::new();
+    conversation.push(Message::user("watchdog abort must suppress replacement"));
+    let compaction_cs = crate::reply_loop::CompactionCriticalSection::new();
+    let run = run_reply_loop(
+        ReplyLoopContext {
+            provider: &provider,
+            credential_record_id: "credential-slot",
+            tools: &[],
+            task_id: "covered-watchdog",
+            task_short_id: "covered-watchdog",
+            session_id: &session_id,
+            project_path: "/workspace",
+            worktree_path: std::path::Path::new("/workspace"),
+            role_name: "worker",
+            finalize_tool_names: &[],
+            context_window: 10_000,
+            model_id: "model",
+            cancel: &session_cancel,
+            global_cancel: &supervisor_cancel,
+            ctx: &slot_ctx,
+            active_skill_names: &[],
+            active_mcp_server_names: &[],
+            max_turns_override: Some(2),
+            compaction_cs: &compaction_cs,
+            session_budget: None,
+        },
+        &mut conversation,
+        false,
+    );
+    tokio::pin!(run);
+    tokio::select! { _ = &mut started => {}, result = &mut run => panic!("watchdog did not start: {:?}", result.0) }
+    tokio::time::pause();
+    let heartbeat = hooks.heartbeat_finished.notified();
+    tokio::pin!(heartbeat);
+    tokio::time::advance(std::time::Duration::from_secs(20)).await;
+    heartbeat.await;
+    let deadline = hooks.watchdog_deadline_reached.notified();
+    tokio::pin!(deadline);
+    tokio::time::advance(std::time::Duration::from_secs(20)).await;
+    deadline.await;
+    // Resume before terminal reconciliation, then let the production watchdog
+    // fire its abort after this test has observed the deadline seam.
+    tokio::time::resume();
+    hooks.watchdog_deadline_release.notify_waiters();
+    let (result, ..) = run.await;
+    assert!(
+        result
+            .expect_err("watchdog abort must terminate loop")
+            .to_string()
+            .contains("watchdog aborted")
+    );
+    // The watchdog's initial interval tick and the explicit 20-second tick
+    // both attempt their failed heartbeat before its 40-second deadline wins.
+    assert_eq!(hooks.heartbeats.load(Ordering::Acquire), 2);
+    assert!(
+        provider
+            .first_abort
+            .lock()
+            .expect("first abort")
+            .as_ref()
+            .expect("B1 abort")
+            .is_aborted()
+    );
+    assert_eq!(provider.plans.load(Ordering::SeqCst), 1);
+    assert_eq!(provider.launches.load(Ordering::SeqCst), 1);
+    let leases = model_turn_launch_identities_fixture(&db).await;
+    assert_eq!(leases.len(), 1);
+    assert_eq!(
+        model_turn_terminal_fixture(&db, &leases[0].0, leases[0].1, &leases[0].2)
+            .await
+            .0,
+        "cancelled"
+    );
+    assert_eq!(model_turn_decision_count_fixture(&db, pool).await, 0);
+    assert_eq!(model_turn_accounting_fixture(&db, pool).await, (0, 1, 1));
+    let events = events.lock().expect("observer");
+    assert!(!events.contains(&"covered_retry_wait"));
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| **event == "model_turn_prepare")
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| **event == "model_turn_launch")
+            .count(),
+        1
     );
 }
