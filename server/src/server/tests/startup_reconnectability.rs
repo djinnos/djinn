@@ -7,7 +7,9 @@
 //! blanket-interruption mutation runs.
 
 use std::collections::{BTreeMap, HashMap};
+use std::io::Write;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::events::EventBus;
@@ -23,6 +25,38 @@ use djinn_k8s::{
     ObjectPresence, UidGetResult, WorkloadInventory, WorkloadObjectKind, WorkloadRecord,
 };
 use djinn_supervisor::ConnectionRegistry;
+use tracing::instrument::WithSubscriber;
+
+#[derive(Clone, Default)]
+struct TraceBuffer(Arc<Mutex<Vec<u8>>>);
+
+struct TraceBufferWriter(TraceBuffer);
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for TraceBuffer {
+    type Writer = TraceBufferWriter;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        TraceBufferWriter(self.clone())
+    }
+}
+
+impl Write for TraceBufferWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.0.lock().expect("trace buffer lock").extend(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl TraceBuffer {
+    fn contents(&self) -> String {
+        String::from_utf8(self.0.lock().expect("trace buffer lock").clone())
+            .expect("structured tracing is UTF-8")
+    }
+}
 
 /// The configured-inventory fixture is consumed only by census acquisition.
 /// Stage A receives the immutable result, so it has no opportunity to relist.
@@ -583,32 +617,52 @@ async fn startup_reaper_still_reaps_terminal_job() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[tracing_test::traced_test]
 async fn startup_reaper_fails_closed_on_unknown() {
-    for (run_id, inventory) in [
-        ("startup-list-unavailable", CountingInventory::unavailable()),
-        (
-            "startup-get-uncertain",
-            CountingInventory::listed(vec![], HashMap::new()),
-        ),
-    ] {
-        let fixture = FullStartupFixture::seeded(run_id, inventory).await;
-        let census = fixture.run(false).await;
-        assert!(
-            census
-                .runs()
-                .iter()
-                .any(|run| run.task_run_id == run_id && run.witness == TaskRunWitness::Unknown)
-        );
-        assert_eq!(
-            fixture.durable_statuses().await,
-            ("running".into(), "running".into(), "pending".into())
-        );
-        assert_eq!(fixture.inventory.list_calls.load(Ordering::SeqCst), 1);
+    let traces = TraceBuffer::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .without_time()
+        .with_writer(traces.clone())
+        .finish();
+
+    async {
+        // A dependency callsite may have been cached as disabled by another
+        // concurrently-running test's crate-scoped subscriber. Re-evaluate it
+        // while this future's all-crate collector is the active dispatch.
+        tracing::callsite::rebuild_interest_cache();
+        for (run_id, inventory) in [
+            ("startup-list-unavailable", CountingInventory::unavailable()),
+            (
+                "startup-get-uncertain",
+                CountingInventory::listed(vec![], HashMap::new()),
+            ),
+        ] {
+            let fixture = FullStartupFixture::seeded(run_id, inventory).await;
+            // Stage C intentionally considers only aged pending attempts. Age this
+            // linked row so the full sequence reaches its fail-closed projection.
+            let census = fixture.run(true).await;
+            assert!(
+                census
+                    .runs()
+                    .iter()
+                    .any(|run| run.task_run_id == run_id && run.witness == TaskRunWitness::Unknown)
+            );
+            assert_eq!(
+                fixture.durable_statuses().await,
+                ("running".into(), "running".into(), "pending".into())
+            );
+            assert_eq!(fixture.inventory.list_calls.load(Ordering::SeqCst), 1);
+        }
     }
+    .with_subscriber(subscriber)
+    .await;
+
+    let logs = traces.contents();
     for stage in ["startup_stage_a", "startup_stage_b", "startup_stage_c"] {
         assert!(
-            logs_contain(&format!("stage=\"{stage}\"")) && logs_contain("reason=\"unknown\""),
+            logs.lines().any(|line| {
+                line.contains(&format!("stage=\"{stage}\"")) && line.contains("reason=\"unknown\"")
+            }),
             "{stage} must emit a structured reason=unknown startup deferral"
         );
     }
@@ -829,6 +883,16 @@ async fn seed_session_with_task_run_status(
         })
         .await
         .expect("create test session");
+
+    // Session creation represents a connected worker and promotes a linked
+    // dispatch row to `running`. Starting-state startup fixtures model the
+    // earlier durable-commit/CREATE window, so restore that requested state.
+    if status == "starting" {
+        TaskRunRepository::new(db.clone())
+            .update_status(task_run_id, djinn_core::models::TaskRunStatus::Starting)
+            .await
+            .expect("restore requested starting task-run fixture state");
+    }
 
     project.id
 }
