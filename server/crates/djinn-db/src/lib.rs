@@ -30,6 +30,7 @@ pub mod test_support {
         AtomicEvidenceDemandCountsForTest, HousekeepingFixture, HousekeepingFixtureExpectedCounts,
         HousekeepingFixtureProject, RefinementLifecycleAuditRowForTest, RefinementRunAuditForTest,
         RefinementRunReadOnlySnapshotForTest, StructuredEvidenceHandoffCountsForTest,
+        TypedEvidenceDispositionFixtureForTest, TypedEvidenceDispositionSnapshotForTest,
         TypedEvidenceRetryAuthorityForTest, TypedEvidenceRetryFixtureForTest,
         TypedEvidenceRetryScenarioForTest, TypedEvidenceRetrySnapshotForTest, UsageTestSessionSeed,
         UsageTestTaskSeed, activity_row_count_for_test, add_blocker_edge,
@@ -51,11 +52,18 @@ pub mod test_support {
         liveness_evidence_for_task_for_test, make_coordinator_incarnation_error_after_first_read,
         make_coordinator_incarnation_vanish_after_first_read, make_project,
         make_refinement_run_phantom_for_test, materialize_judge_authority_for_test,
+        materialize_typed_evidence_disposition_fixture_for_test,
         materialize_typed_evidence_retry_fixture_for_test, model_turn_accounting_fixture,
         model_turn_decision_count_fixture, model_turn_decision_fixture,
+<<<<<<< HEAD
         model_turn_lease_heartbeat_snapshot_fixture, model_turn_lease_lifecycle_fixture,
         model_turn_request_lifecycle_fixture, model_turn_terminal_fixture,
         nullify_note_confidence_for_test, override_debate_trail_body_metadata,
+=======
+        model_turn_lease_lifecycle_fixture, model_turn_request_lifecycle_fixture,
+        model_turn_terminal_fixture, nullify_note_confidence_for_test,
+        override_debate_trail_body_metadata, pending_feedback_disposition_counts_for_test,
+>>>>>>> origin/main
         proposal_lint_revision_id_for_test, queue_feedback_refinement_generation_for_test,
         refinement_run_audit_for_test, refinement_run_read_only_snapshot_for_test,
         reject_atomic_demand_debate_inserts_for_test, reject_ci_route_attempt_updates_for_test,
@@ -66,11 +74,22 @@ pub mod test_support {
         replace_legacy_proposal_head_for_test, seed_board_health_mismatch_candidate,
         seed_chat_session_row, seed_legacy_launcher_authority_for_test,
         seed_model_turn_admission_fixture, seed_project, seed_readiness_detail_projection_for_test,
+<<<<<<< HEAD
         seed_session_row, seed_session_row_with_id, seed_task_row,
         seed_workspace_coverage_for_test, set_model_turn_capability_fixture,
         set_task_short_id_for_test, structured_evidence_handoff_counts_for_test,
         switch_to_adversary_authority_for_test, task_attempt_count_for_test,
         task_row_count_for_test, task_status_for_test, typed_evidence_retry_snapshot_for_test,
+=======
+        seed_session_row, seed_session_row_with_id, seed_stale_typed_evidence_disposition_for_test,
+        seed_task_row, seed_workspace_coverage_for_test, set_model_turn_capability_fixture,
+        set_proposal_author_for_test, set_task_short_id_for_test,
+        set_typed_evidence_disposition_lifecycle_for_test,
+        structured_evidence_handoff_counts_for_test, switch_to_adversary_authority_for_test,
+        switch_to_advocate_authority_for_test, switch_to_judge_authority_for_test,
+        task_attempt_count_for_test, task_row_count_for_test, task_status_for_test,
+        typed_evidence_disposition_snapshot_for_test, typed_evidence_retry_snapshot_for_test,
+>>>>>>> origin/main
     };
 }
 

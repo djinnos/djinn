@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use super::*;
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn watchdog_uses_paused_time_for_twenty_second_commits_and_forty_second_abort() {
     use djinn_provider::{ProviderAttemptAbortResultV1, ProviderOutcomeV1};
 
@@ -25,6 +25,9 @@ async fn watchdog_uses_paused_time_for_twenty_second_commits_and_forty_second_ab
         ModelTurnPreparation::Permit(permit) => permit.lease.clone().expect("lease"),
         other => panic!("expected permit, got {other:?}"),
     };
+    // Pool acquisition during fixture setup requires real Tokio time; pause
+    // only for the deterministic watchdog chronology below.
+    tokio::time::pause();
     let abort = ProviderAttemptAbortHandleV1::new();
     let observed_abort = abort.clone();
     let (outcome_tx, outcome_rx) = tokio::sync::oneshot::channel();
@@ -169,6 +172,7 @@ async fn watchdog_uses_paused_time_for_twenty_second_commits_and_forty_second_ab
             token_emission: Default::default(),
         })
         .expect("outcome");
+    tokio::time::resume();
     guard.finish(false).await;
 }
 
@@ -179,7 +183,7 @@ enum DeadlineRace {
     Supervisor,
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn watchdog_deadline_races_use_production_stream_cancellation_owners() {
     for case in [
         DeadlineRace::Provider,
@@ -213,6 +217,9 @@ async fn run_deadline_race(case: DeadlineRace) {
         ModelTurnPreparation::Permit(p) => p.lease.clone().expect("lease"),
         other => panic!("{other:?}"),
     };
+    // Keep durable fixture work on real time; only the watchdog race needs a
+    // paused clock.
+    tokio::time::pause();
     let (frame_tx, frame_rx) = futures::channel::mpsc::unbounded();
     let (outcome_tx, outcome_rx) = tokio::sync::oneshot::channel();
     let mut outcome_tx = Some(outcome_tx);
@@ -330,6 +337,8 @@ async fn run_deadline_race(case: DeadlineRace) {
             DeadlineRace::Supervisor => Some(ReplyLoopCancelled::supervisor_shutdown()),
         }
     );
+    // Repository settlement is outside the deterministic deadline chronology.
+    tokio::time::resume();
     if !completed {
         outcome_tx
             .take()
@@ -356,7 +365,7 @@ async fn run_deadline_race(case: DeadlineRace) {
     );
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn stale_watchdog_heartbeat_leaves_replacement_generation_unchanged() {
     use djinn_provider::{ProviderAttemptAbortResultV1, ProviderOutcomeV1};
 
@@ -388,6 +397,9 @@ async fn stale_watchdog_heartbeat_leaves_replacement_generation_unchanged() {
         generation: live.generation - 1,
         ..live.clone()
     };
+    // The replacement fixture is fully persisted before the watchdog-only
+    // timeline switches to paused time.
+    tokio::time::pause();
     let (outcome_tx, outcome_rx) = tokio::sync::oneshot::channel();
     let guard = CoveredAttemptTerminalGuard::new(
         djinn_provider::provider::client::ProviderSseAttemptV1::for_test(
@@ -429,6 +441,7 @@ async fn stale_watchdog_heartbeat_leaves_replacement_generation_unchanged() {
         "active"
     );
     assert_eq!(model_turn_accounting_fixture(&db, pool).await, (1, 1, 0));
+    tokio::time::resume();
     outcome_tx
         .send(ProviderOutcomeV1 {
             terminal: djinn_provider::ProviderAttemptTerminalV1::Aborted,
