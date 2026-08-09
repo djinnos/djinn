@@ -33,6 +33,25 @@ pub struct ReserveProposalBuildAttemptInput {
     pub observed_base_sha: String,
 }
 
+#[derive(FromRow)]
+struct AttemptLeaseRow {
+    build_attempt_id: String,
+    owner_incarnation_id: String,
+    generation: i64,
+    expires_at: String,
+}
+
+impl From<AttemptLeaseRow> for ProposalBuildAttemptLease {
+    fn from(row: AttemptLeaseRow) -> Self {
+        Self {
+            build_attempt_id: row.build_attempt_id,
+            owner_incarnation_id: row.owner_incarnation_id,
+            generation: row.generation,
+            expires_at: row.expires_at,
+        }
+    }
+}
+
 impl ReserveProposalBuildAttemptInput {
     #[must_use]
     pub fn branch_name(&self) -> String {
@@ -63,6 +82,34 @@ pub enum ActivateProposalBuildAttemptResult {
     Activated(ProposalBuildAttempt),
     Replayed(ProposalBuildAttempt),
     Stale { current: ProposalBuildAttempt },
+}
+
+/// Persisted fencing lease for one build attempt.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProposalBuildAttemptLease {
+    pub build_attempt_id: String,
+    pub owner_incarnation_id: String,
+    pub generation: i64,
+    pub expires_at: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AcquireProposalBuildAttemptLeaseInput {
+    pub build_attempt_id: String,
+    pub owner_incarnation_id: String,
+    /// Zero creates the first lease; takeover presents the observed token.
+    pub expected_generation: i64,
+    /// RFC3339 timestamp interpreted by PostgreSQL.
+    pub expires_at: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AcquireProposalBuildAttemptLeaseResult {
+    Acquired(ProposalBuildAttemptLease),
+    Replayed(ProposalBuildAttemptLease),
+    Stale {
+        current: Option<ProposalBuildAttemptLease>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -265,7 +312,10 @@ impl ProposalBuildAttemptRepository {
             tx.commit().await?;
             return Ok(ActivateProposalBuildAttemptResult::Replayed(current));
         }
-        if current.lifecycle != input.expected_lifecycle
+        // `expected_lifecycle` remains in the wire shape so stale callers get
+        // a typed result, but activation itself is only reserved -> active.
+        if input.expected_lifecycle != ProposalBuildAttemptLifecycle::Reserved
+            || current.lifecycle != ProposalBuildAttemptLifecycle::Reserved
             || current.branch_head_sha != input.expected_branch_head_sha
         {
             tx.commit().await?;
@@ -273,12 +323,11 @@ impl ProposalBuildAttemptRepository {
         }
         let row = sqlx::query_as::<_, AttemptRow>(&format!(
             "UPDATE proposal_build_attempts SET lifecycle = 'active', branch_head_sha = $1, activated_at = now() \
-             WHERE id = $2 AND lifecycle = $3 AND branch_head_sha IS NOT DISTINCT FROM $4 \
+             WHERE id = $2 AND lifecycle = 'reserved' AND branch_head_sha IS NOT DISTINCT FROM $3 \
              RETURNING {ATTEMPT_COLUMNS}"
         ))
         .bind(&input.branch_head_sha)
         .bind(&input.build_attempt_id)
-        .bind(input.expected_lifecycle.as_str())
         .bind(&input.expected_branch_head_sha)
         .fetch_optional(&mut *tx)
         .await?;
@@ -290,6 +339,62 @@ impl ProposalBuildAttemptRepository {
                     .ok_or_else(|| {
                         DbError::InvalidData("proposal build attempt disappeared".into())
                     })?,
+            },
+        };
+        tx.commit().await?;
+        Ok(result)
+    }
+
+    /// Acquire an attempt-wide fencing lease. A different owner can take over
+    /// only an expired lease with the exact generation it observed.
+    pub async fn acquire_lease(
+        &self,
+        input: &AcquireProposalBuildAttemptLeaseInput,
+    ) -> DbResult<AcquireProposalBuildAttemptLeaseResult> {
+        self.require_capability(false).await?;
+        require_nonblank("build_attempt_id", &input.build_attempt_id)?;
+        require_nonblank("owner_incarnation_id", &input.owner_incarnation_id)?;
+        require_nonblank("expires_at", &input.expires_at)?;
+        if input.expected_generation < 0 {
+            return Err(DbError::InvalidData(
+                "expected_generation must not be negative".into(),
+            ));
+        }
+        let mut tx = self.db.pool().begin().await?;
+        let Some(attempt) = fetch_attempt(&mut tx, &input.build_attempt_id, true).await? else {
+            return Err(DbError::InvalidData(
+                "unknown proposal build attempt".into(),
+            ));
+        };
+        if attempt.lifecycle == ProposalBuildAttemptLifecycle::Retired {
+            tx.commit().await?;
+            return Ok(AcquireProposalBuildAttemptLeaseResult::Stale { current: None });
+        }
+        let current = fetch_attempt_lease(&mut tx, &input.build_attempt_id).await?;
+        if let Some(ref lease) = current {
+            if lease.owner_incarnation_id == input.owner_incarnation_id
+                && lease.generation == input.expected_generation
+                && lease.expires_at == input.expires_at
+            {
+                tx.commit().await?;
+                return Ok(AcquireProposalBuildAttemptLeaseResult::Replayed(
+                    lease.clone(),
+                ));
+            }
+        }
+        let acquired = match current {
+            None if input.expected_generation == 0 => sqlx::query_as::<_, AttemptLeaseRow>(
+                "INSERT INTO proposal_build_attempt_leases (build_attempt_id, owner_incarnation_id, generation, expires_at) VALUES ($1, $2, 1, $3::timestamptz) RETURNING build_attempt_id, owner_incarnation_id, generation, to_char(expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS expires_at",
+            ).bind(&input.build_attempt_id).bind(&input.owner_incarnation_id).bind(&input.expires_at).fetch_optional(&mut *tx).await?,
+            Some(lease) if lease.generation == input.expected_generation => sqlx::query_as::<_, AttemptLeaseRow>(
+                "UPDATE proposal_build_attempt_leases SET owner_incarnation_id = $1, generation = generation + 1, expires_at = $2::timestamptz WHERE build_attempt_id = $3 AND generation = $4 AND expires_at <= now() RETURNING build_attempt_id, owner_incarnation_id, generation, to_char(expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS expires_at",
+            ).bind(&input.owner_incarnation_id).bind(&input.expires_at).bind(&input.build_attempt_id).bind(lease.generation).fetch_optional(&mut *tx).await?,
+            _ => None,
+        };
+        let result = match acquired {
+            Some(lease) => AcquireProposalBuildAttemptLeaseResult::Acquired(lease.into()),
+            None => AcquireProposalBuildAttemptLeaseResult::Stale {
+                current: fetch_attempt_lease(&mut tx, &input.build_attempt_id).await?,
             },
         };
         tx.commit().await?;
@@ -317,6 +422,10 @@ impl ProposalBuildAttemptRepository {
             tx.commit().await?;
             return Ok(ReconcileAttemptBranchHeadResult::Stale { current });
         }
+        if current.lifecycle == ProposalBuildAttemptLifecycle::Retired {
+            tx.commit().await?;
+            return Ok(ReconcileAttemptBranchHeadResult::Stale { current });
+        }
         // An already-published branch is immutable from this repository's point
         // of view. A different observed head is evidence, not permission to
         // overwrite its identity.
@@ -335,7 +444,7 @@ impl ProposalBuildAttemptRepository {
         }
         let row = sqlx::query_as::<_, AttemptRow>(&format!(
             "UPDATE proposal_build_attempts SET branch_head_sha = $1 \
-             WHERE id = $2 AND branch_head_sha IS NOT DISTINCT FROM $3 RETURNING {ATTEMPT_COLUMNS}"
+             WHERE id = $2 AND lifecycle <> 'retired' AND branch_head_sha IS NOT DISTINCT FROM $3 RETURNING {ATTEMPT_COLUMNS}"
         ))
         .bind(&input.observed_branch_head_sha)
         .bind(&input.build_attempt_id)
@@ -387,6 +496,13 @@ impl ProposalBuildAttemptRepository {
             tx.commit().await?;
             return Ok(PersistAttemptPrIdentityResult::Replayed(current));
         }
+        if current.lifecycle == ProposalBuildAttemptLifecycle::Retired {
+            tx.commit().await?;
+            return Ok(PersistAttemptPrIdentityResult::Parked {
+                attempt: current,
+                reason: DirectDeliveryParkReason::ProposalPrIdentityMismatch,
+            });
+        }
         if number.is_some() || url.is_some() {
             let attempt = park_tx(
                 &mut tx,
@@ -402,7 +518,7 @@ impl ProposalBuildAttemptRepository {
         }
         let row = sqlx::query_as::<_, AttemptRow>(&format!(
             "UPDATE proposal_build_attempts SET proposal_pr_number = $1, proposal_pr_url = $2 \
-             WHERE id = $3 AND proposal_pr_number IS NULL AND proposal_pr_url IS NULL RETURNING {ATTEMPT_COLUMNS}"
+             WHERE id = $3 AND lifecycle <> 'retired' AND proposal_pr_number IS NULL AND proposal_pr_url IS NULL RETURNING {ATTEMPT_COLUMNS}"
         ))
         .bind(input.proposal_pr_number)
         .bind(&input.proposal_pr_url)
@@ -580,6 +696,21 @@ async fn fetch_attempt(
     row.map(TryInto::try_into).transpose()
 }
 
+async fn fetch_attempt_lease(
+    tx: &mut Transaction<'_, Postgres>,
+    build_attempt_id: &str,
+) -> DbResult<Option<ProposalBuildAttemptLease>> {
+    let row = sqlx::query_as::<_, AttemptLeaseRow>(
+        "SELECT build_attempt_id, owner_incarnation_id, generation, \
+         to_char(expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS expires_at \
+         FROM proposal_build_attempt_leases WHERE build_attempt_id = $1 FOR UPDATE",
+    )
+    .bind(build_attempt_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    Ok(row.map(Into::into))
+}
+
 async fn fetch_attempt_by_proposal_short(
     tx: &mut Transaction<'_, Postgres>,
     input: &ReserveProposalBuildAttemptInput,
@@ -630,7 +761,7 @@ async fn park_tx(
     reason: DirectDeliveryParkReason,
 ) -> DbResult<ProposalBuildAttempt> {
     let row = sqlx::query_as::<_, AttemptRow>(&format!(
-        "UPDATE proposal_build_attempts SET park_reason = COALESCE(park_reason, $1) WHERE id = $2 RETURNING {ATTEMPT_COLUMNS}"
+        "UPDATE proposal_build_attempts SET park_reason = COALESCE(park_reason, $1) WHERE id = $2 AND lifecycle <> 'retired' RETURNING {ATTEMPT_COLUMNS}"
     ))
     .bind(reason.as_str())
     .bind(build_attempt_id)

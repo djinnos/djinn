@@ -311,8 +311,9 @@ pub use repositories::{
         ProposalRepository, ProposalUpdateInput,
     },
     proposal_build_attempt::{
+        AcquireProposalBuildAttemptLeaseInput, AcquireProposalBuildAttemptLeaseResult,
         ActivateProposalBuildAttemptInput, ActivateProposalBuildAttemptResult,
-        PersistAttemptPrIdentityInput, PersistAttemptPrIdentityResult,
+        PersistAttemptPrIdentityInput, PersistAttemptPrIdentityResult, ProposalBuildAttemptLease,
         ProposalBuildAttemptRepository, ReconcileAttemptBranchHeadInput,
         ReconcileAttemptBranchHeadResult, ReserveProposalBuildAttemptInput,
         ReserveProposalBuildAttemptResult, ResolveTaskActiveAttemptResult,
