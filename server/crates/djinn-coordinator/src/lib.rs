@@ -73,6 +73,8 @@ pub mod graph_warm_lease;
 /// the engine behind the `djinn-server epoch` CLI.
 pub mod invocation_lease_control;
 pub mod output_stash;
+/// Default-disabled branch and draft-PR lifecycle for direct build attempts.
+pub mod proposal_attempt_lifecycle;
 
 /// Terminalize the worker's in-flight attempt (and record a durable `reopened`
 /// marker) for a supervisor-driven rework reopen that the PR poller's

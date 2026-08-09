@@ -247,6 +247,19 @@ impl ProposalBuildAttemptRepository {
         Self { db }
     }
 
+    /// Load one retained attempt by its durable identity.
+    pub async fn get(&self, build_attempt_id: &str) -> DbResult<Option<ProposalBuildAttempt>> {
+        self.require_capability(true).await?;
+        require_nonblank("build_attempt_id", build_attempt_id)?;
+        let row = sqlx::query_as::<_, AttemptRow>(&format!(
+            "SELECT {ATTEMPT_COLUMNS} FROM proposal_build_attempts WHERE id = $1"
+        ))
+        .bind(build_attempt_id)
+        .fetch_optional(self.db.pool())
+        .await?;
+        row.map(TryInto::try_into).transpose()
+    }
+
     pub async fn reserve(
         &self,
         input: &ReserveProposalBuildAttemptInput,
@@ -598,6 +611,30 @@ impl ProposalBuildAttemptRepository {
         .await?;
         tx.commit().await?;
         Ok(RetireProposalBuildAttemptResult::Retired(row.try_into()?))
+    }
+
+    /// Persist the first terminal orchestration observation without mutating
+    /// branch, PR, or retirement identity.
+    pub async fn park(
+        &self,
+        build_attempt_id: &str,
+        reason: DirectDeliveryParkReason,
+    ) -> DbResult<ProposalBuildAttempt> {
+        self.require_capability(false).await?;
+        require_nonblank("build_attempt_id", build_attempt_id)?;
+        let mut tx = self.db.pool().begin().await?;
+        let Some(current) = fetch_attempt(&mut tx, build_attempt_id, true).await? else {
+            return Err(DbError::InvalidData(
+                "unknown proposal build attempt".into(),
+            ));
+        };
+        if current.lifecycle == ProposalBuildAttemptLifecycle::Retired {
+            tx.commit().await?;
+            return Ok(current);
+        }
+        let parked = park_tx(&mut tx, build_attempt_id, reason).await?;
+        tx.commit().await?;
+        Ok(parked)
     }
 
     /// Canonical task ownership route: `tasks.epic_id -> epics.proposal_id`.
