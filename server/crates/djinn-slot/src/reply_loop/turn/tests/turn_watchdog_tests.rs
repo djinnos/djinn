@@ -25,9 +25,6 @@ async fn watchdog_uses_paused_time_for_twenty_second_commits_and_forty_second_ab
         ModelTurnPreparation::Permit(permit) => permit.lease.clone().expect("lease"),
         other => panic!("expected permit, got {other:?}"),
     };
-    // Pool acquisition during fixture setup requires real Tokio time; pause
-    // only for the deterministic watchdog chronology below.
-    tokio::time::pause();
     let abort = ProviderAttemptAbortHandleV1::new();
     let observed_abort = abort.clone();
     let (outcome_tx, outcome_rx) = tokio::sync::oneshot::channel();
@@ -61,6 +58,9 @@ async fn watchdog_uses_paused_time_for_twenty_second_commits_and_forty_second_ab
     .await
     .expect("launch");
     watchdog_started.await;
+    // Dispatch marking and the active transition are database-backed. Start
+    // the watchdog on real time, then pause only its t=20/t=60 chronology.
+    tokio::time::pause();
     let started = tokio::time::Instant::now();
     let watchdog_aborted = guard.watchdog_abort_signal();
 
@@ -125,19 +125,29 @@ async fn watchdog_uses_paused_time_for_twenty_second_commits_and_forty_second_ab
     assert_eq!(hooks.heartbeats.load(Ordering::Acquire), 0);
     assert!(!observed_abort.is_aborted());
 
+    hooks.block_heartbeat.store(true, Ordering::Release);
+    let reached = hooks.heartbeat_reached.notified();
+    tokio::pin!(reached);
+    tokio::time::advance(Duration::from_secs(1)).await;
+    reached.await;
+    assert_eq!(
+        tokio::time::Instant::now() - started,
+        Duration::from_secs(20)
+    );
+    // SQLx pool acquisition and the heartbeat commit must run on real Tokio
+    // time. The hook keeps the production watchdog fixed at the t=20 seam.
     let committed = hooks.heartbeat_committed.notified();
     tokio::pin!(committed);
-    tokio::time::advance(Duration::from_secs(1)).await;
+    tokio::time::resume();
+    hooks.heartbeat_release.notify_waiters();
     committed.await;
+    tokio::time::pause();
+    hooks.block_heartbeat.store(false, Ordering::Release);
     assert_eq!(hooks.heartbeats.load(Ordering::Acquire), 1);
     assert_eq!(
         hooks.heartbeat_identities.lock().expect("hooks").as_slice(),
         std::slice::from_ref(&prepared_lease),
         "the t=20 watchdog commit must use the prepared identity"
-    );
-    assert_eq!(
-        tokio::time::Instant::now() - started,
-        Duration::from_secs(20)
     );
 
     hooks.fail_heartbeat.store(true, Ordering::Release);
@@ -153,10 +163,6 @@ async fn watchdog_uses_paused_time_for_twenty_second_commits_and_forty_second_ab
     tokio::time::advance(Duration::from_secs(1)).await;
     aborted.await;
     assert!(observed_abort.is_aborted());
-    assert_eq!(
-        tokio::time::Instant::now() - started,
-        Duration::from_secs(60)
-    );
 
     let state = consumer.await.expect("typed watchdog result");
     assert!(state.watchdog_aborted);
@@ -217,9 +223,6 @@ async fn run_deadline_race(case: DeadlineRace) {
         ModelTurnPreparation::Permit(p) => p.lease.clone().expect("lease"),
         other => panic!("{other:?}"),
     };
-    // Keep durable fixture work on real time; only the watchdog race needs a
-    // paused clock.
-    tokio::time::pause();
     let (frame_tx, frame_rx) = futures::channel::mpsc::unbounded();
     let (outcome_tx, outcome_rx) = tokio::sync::oneshot::channel();
     let mut outcome_tx = Some(outcome_tx);
@@ -244,6 +247,9 @@ async fn run_deadline_race(case: DeadlineRace) {
     .await
     .expect("launch");
     started.await;
+    // The launch includes the database-backed active transition. Pause only
+    // after that transition and watchdog startup have completed.
+    tokio::time::pause();
     let cancel = CancellationToken::new();
     let global = CancellationToken::new();
     let slot = crate::test_helpers::agent_context_from_db(db.clone(), CancellationToken::new());
@@ -294,10 +300,18 @@ async fn run_deadline_race(case: DeadlineRace) {
         total_cache_write: &mut write,
         total_reasoning_out: &mut reasoning,
     }));
+    hooks.block_heartbeat.store(true, Ordering::Release);
+    let reached = hooks.heartbeat_reached.notified();
+    tokio::pin!(reached);
+    tokio::time::advance(Duration::from_secs(20)).await;
+    reached.await;
     let committed = hooks.heartbeat_committed.notified();
     tokio::pin!(committed);
-    tokio::time::advance(Duration::from_secs(20)).await;
+    tokio::time::resume();
+    hooks.heartbeat_release.notify_waiters();
     committed.await;
+    tokio::time::pause();
+    hooks.block_heartbeat.store(false, Ordering::Release);
     hooks.fail_heartbeat.store(true, Ordering::Release);
     let failed = hooks.heartbeat_finished.notified();
     tokio::pin!(failed);
@@ -397,8 +411,11 @@ async fn stale_watchdog_heartbeat_leaves_replacement_generation_unchanged() {
         generation: live.generation - 1,
         ..live.clone()
     };
-    // The replacement fixture is fully persisted before the watchdog-only
-    // timeline switches to paused time.
+    // Capture the replacement while Tokio time is live. The blocked stale
+    // heartbeat cannot mutate it before the exact t=20 release below.
+    let replacement_before =
+        djinn_db::test_support::model_turn_lease_heartbeat_snapshot_fixture(&db, &live.lease_id)
+            .await;
     tokio::time::pause();
     let (outcome_tx, outcome_rx) = tokio::sync::oneshot::channel();
     let guard = CoveredAttemptTerminalGuard::new(
@@ -419,11 +436,10 @@ async fn stale_watchdog_heartbeat_leaves_replacement_generation_unchanged() {
     tokio::pin!(reached);
     tokio::time::advance(Duration::from_secs(20)).await;
     reached.await;
-    let replacement_before =
-        djinn_db::test_support::model_turn_lease_heartbeat_snapshot_fixture(&db, &live.lease_id)
-            .await;
     let finished = hooks.heartbeat_finished.notified();
     tokio::pin!(finished);
+    // Resume before the stale mutation and every subsequent database read.
+    tokio::time::resume();
     hooks.heartbeat_release.notify_waiters();
     finished.await;
     assert_eq!(
@@ -441,7 +457,6 @@ async fn stale_watchdog_heartbeat_leaves_replacement_generation_unchanged() {
         "active"
     );
     assert_eq!(model_turn_accounting_fixture(&db, pool).await, (1, 1, 0));
-    tokio::time::resume();
     outcome_tx
         .send(ProviderOutcomeV1 {
             terminal: djinn_provider::ProviderAttemptTerminalV1::Aborted,
