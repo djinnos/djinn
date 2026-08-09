@@ -141,6 +141,9 @@ enum DurableDispatchBlock {
     /// The proposal row could not be read, so no gate state is known. Fail
     /// closed, exactly as the legacy path does.
     ProposalUnreadable,
+    /// Typed evidence is demanded, active, failed, or invalid; do not create
+    /// another tribunal task until the authoritative finding changes.
+    EvidenceBlocked,
 }
 
 impl DurableDispatchBlock {
@@ -149,6 +152,7 @@ impl DurableDispatchBlock {
             Self::PausedOrFrozen => "paused_or_frozen",
             Self::Terminal => "terminal",
             Self::ProposalUnreadable => "proposal_unreadable",
+            Self::EvidenceBlocked => "typed_evidence_blocked",
         }
     }
 }
@@ -672,17 +676,12 @@ impl CoordinatorActor {
                 );
                 Some(DurableDispatchBlock::Terminal)
             }
-            // The evidence-cycle states are deliberately NOT gated here. The
-            // durable ledger parks an evidence demand as a run-level
-            // `RefinementParkKind::AwaitingEvidence` (which removes the run
-            // from `load_active_refinement_runs`), so it owns that pause
-            // already; layering the derived evidence states on top would be a
-            // new policy for durable runs rather than the operator-control
-            // parity this gate is for.
-            EvidenceLifecycleState::Active
-            | EvidenceLifecycleState::EvidenceReady
-            | EvidenceLifecycleState::AwaitingEvidence
-            | EvidenceLifecycleState::EvidenceFailed => None,
+            // Receipt permits only the Advocate fold/resume path. Demanded,
+            // active, failed, and invalid projections remain fail-closed.
+            EvidenceLifecycleState::Active | EvidenceLifecycleState::EvidenceReady => None,
+            EvidenceLifecycleState::AwaitingEvidence | EvidenceLifecycleState::EvidenceFailed => {
+                Some(DurableDispatchBlock::EvidenceBlocked)
+            }
         }
     }
 

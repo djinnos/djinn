@@ -14,7 +14,8 @@
 // administrative dispatch pause or proposal build freeze prevents automatic
 // resume.
 
-use djinn_core::models::Proposal;
+use djinn_core::models::{Proposal, TribunalEvidenceLifecycle};
+use djinn_db::{TypedEvidenceLifecycleProjection, TypedEvidenceRepository};
 
 use crate::actor::CoordinatorActor;
 
@@ -95,6 +96,11 @@ pub(super) struct EvidenceLifecycleSnapshot {
     /// Whether a `refinement_evidence_failed` lifecycle event exists for
     /// the most recent evidence cycle.
     pub has_evidence_failed_event: bool,
+    /// Lifecycle projected by `TypedEvidenceRepository`; legacy task/event
+    /// fields above are compatibility inputs only and cannot promote receipt.
+    pub typed_lifecycle: Option<TribunalEvidenceLifecycle>,
+    /// False for absent, ambiguous, mismatched, or unreadable typed authority.
+    pub typed_authority_valid: bool,
 }
 
 // ── Pure derivation function ────────────────────────────────────────────────
@@ -118,44 +124,27 @@ pub(super) fn derive_evidence_lifecycle_state(
         return EvidenceLifecycleState::PausedOrFrozen;
     }
 
-    // 3. AwaitingEvidence — linked spike is still open (running).
-    if snapshot.linked_spike_task_id.is_some() {
-        // Determine whether the spike task row is open.
-        let spike_is_open = match snapshot.spike_task_status.as_deref() {
-            // Explicit closed status → spike is done.
-            Some("closed") => false,
-            // Missing task row (hard-deleted) → treat as closed.
-            None => false,
-            // Any other status (open, in_progress, …) → still running.
-            Some(_) => true,
-        };
-
-        if spike_is_open {
-            return EvidenceLifecycleState::AwaitingEvidence;
-        }
-
-        // Spike is linked but the task is closed.  Check lifecycle events
-        // to distinguish EvidenceFailed from EvidenceReady.
-        if snapshot.has_evidence_failed_event {
-            return EvidenceLifecycleState::EvidenceFailed;
-        }
-        if snapshot.has_evidence_received_event {
-            return EvidenceLifecycleState::EvidenceReady;
-        }
-
-        // Spike closed but no lifecycle event recorded yet — the
-        // completion processor hasn't run.  Stay in AwaitingEvidence so
-        // the re-drive path picks it up.
+    // 3. Typed repository authority is the only lifecycle authority. A bad
+    // projection is parked: terminal legacy task closure never becomes receipt.
+    if !snapshot.typed_authority_valid {
         return EvidenceLifecycleState::AwaitingEvidence;
     }
-
-    // 4. No linked spike — evidence cycle may have already been processed.
-    //    Check lifecycle events for the most recent cycle.
-    if snapshot.has_evidence_failed_event {
-        return EvidenceLifecycleState::EvidenceFailed;
-    }
-    if snapshot.has_evidence_received_event {
-        return EvidenceLifecycleState::EvidenceReady;
+    match snapshot.typed_lifecycle {
+        Some(TribunalEvidenceLifecycle::Demanded | TribunalEvidenceLifecycle::SpikeActive) => {
+            return EvidenceLifecycleState::AwaitingEvidence;
+        }
+        Some(TribunalEvidenceLifecycle::EvidenceReceived) => {
+            return EvidenceLifecycleState::EvidenceReady;
+        }
+        Some(TribunalEvidenceLifecycle::Failed) => {
+            return EvidenceLifecycleState::EvidenceFailed;
+        }
+        Some(TribunalEvidenceLifecycle::Resolved | TribunalEvidenceLifecycle::Withdrawn) => {}
+        // Compatibility-only unit fixture support. Production snapshots never
+        // populate revision inference, so this cannot promote task closure.
+        None if snapshot.has_evidence_failed_event => return EvidenceLifecycleState::EvidenceFailed,
+        None if snapshot.has_evidence_received_event => return EvidenceLifecycleState::EvidenceReady,
+        None => {}
     }
 
     // 5. Active — normal refinement, no evidence demand.
@@ -207,75 +196,20 @@ impl CoordinatorActor {
     ) -> EvidenceLifecycleSnapshot {
         let dispatch_paused = self.refinement_dispatch_paused(&proposal.id).await;
 
-        let mut spike_task_status: Option<String> = None;
-        let mut spike_task_close_reason: Option<String> = None;
-        let mut has_evidence_received_event = false;
-        let mut has_evidence_failed_event = false;
-
-        if proposal.linked_spike_task_id.is_some() {
-            // Look up the spike task row to determine open/closed status.
-            let event_bus = crate::events::event_bus_for(&self.events_tx);
-            let task_repo = djinn_db::TaskRepository::new(self.db.clone(), event_bus);
-
-            if let Some(ref spike_id) = proposal.linked_spike_task_id {
-                match task_repo.get(spike_id).await {
-                    Ok(Some(task)) => {
-                        spike_task_status = Some(task.status.clone());
-                        spike_task_close_reason = task.close_reason.clone();
-                    }
-                    Ok(None) => {
-                        // Task was hard-deleted — leave status as None.
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            proposal_id = %proposal.id,
-                            spike_task_id = %spike_id,
-                            error = %e,
-                            "Failed to read spike task for evidence lifecycle; \
-                             assuming open"
-                        );
-                        // Fail open: assume the spike is still running so
-                        // we don't accidentally resume.
-                        spike_task_status = Some("open".to_string());
-                    }
-                }
+        let typed = TypedEvidenceRepository::new(self.db.clone());
+        let (typed_lifecycle, typed_authority_valid) = match typed
+            .coordinator_lifecycle_projection(&proposal.id)
+            .await
+        {
+            Ok(TypedEvidenceLifecycleProjection::Valid(finding)) => (Some(finding.lifecycle), true),
+            Ok(TypedEvidenceLifecycleProjection::Absent)
+                if proposal.linked_spike_task_id.is_none() && proposal.needs_evidence_claim.is_none() =>
+            {
+                (None, true)
             }
-        }
-
-        // Check for evidence lifecycle events even after the link/claim has
-        // been cleared: a successful in-process receipt clears the durable
-        // evidence block before the next Advocate dispatch, but the latest
-        // `refinement_evidence_received` event must still derive EvidenceReady.
-        let event_bus = crate::events::event_bus_for(&self.events_tx);
-        let proposal_repo = djinn_db::ProposalRepository::new(self.db.clone(), event_bus);
-
-        match proposal_repo.revisions(&proposal.id).await {
-            Ok(revisions) => {
-                // Walk revisions in reverse to find the latest evidence
-                // lifecycle event.
-                for rev in revisions.iter().rev() {
-                    match rev.event_kind.as_str() {
-                        "refinement_evidence_received" => {
-                            has_evidence_received_event = true;
-                            break;
-                        }
-                        "refinement_evidence_failed" => {
-                            has_evidence_failed_event = true;
-                            break;
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            Err(e) => {
-                tracing::warn!(
-                    proposal_id = %proposal.id,
-                    error = %e,
-                    "Failed to read revisions for evidence lifecycle; \
-                     assuming no evidence events"
-                );
-            }
-        }
+            Ok(TypedEvidenceLifecycleProjection::Absent | TypedEvidenceLifecycleProjection::Invalid)
+            | Err(_) => (None, false),
+        };
 
         EvidenceLifecycleSnapshot {
             proposal_status: proposal.status.clone(),
@@ -283,10 +217,13 @@ impl CoordinatorActor {
             dispatch_paused,
             linked_spike_task_id: proposal.linked_spike_task_id.clone(),
             needs_evidence_claim: proposal.needs_evidence_claim.clone(),
-            spike_task_status,
-            spike_task_close_reason,
-            has_evidence_received_event,
-            has_evidence_failed_event,
+            // Legacy inputs remain available for rollout parity only.
+            spike_task_status: None,
+            spike_task_close_reason: None,
+            has_evidence_received_event: false,
+            has_evidence_failed_event: false,
+            typed_lifecycle,
+            typed_authority_valid,
         }
     }
 }
@@ -310,6 +247,8 @@ mod tests {
             spike_task_close_reason: None,
             has_evidence_received_event: false,
             has_evidence_failed_event: false,
+            typed_lifecycle: None,
+            typed_authority_valid: true,
         }
     }
 
@@ -625,6 +564,34 @@ mod tests {
             derive_evidence_lifecycle_state(&snap),
             EvidenceLifecycleState::EvidenceFailed
         );
+    }
+
+    #[test]
+    fn typed_demanded_and_spike_active_are_parked_without_task_inference() {
+        for lifecycle in [TribunalEvidenceLifecycle::Demanded, TribunalEvidenceLifecycle::SpikeActive] {
+            let mut snap = base_snapshot();
+            snap.typed_lifecycle = Some(lifecycle);
+            snap.linked_spike_task_id = Some("closed-spike".into());
+            snap.spike_task_status = Some("closed".into());
+            assert_eq!(derive_evidence_lifecycle_state(&snap), EvidenceLifecycleState::AwaitingEvidence);
+        }
+    }
+
+    #[test]
+    fn typed_failed_and_invalid_authority_fail_closed() {
+        let mut failed = base_snapshot();
+        failed.typed_lifecycle = Some(TribunalEvidenceLifecycle::Failed);
+        assert_eq!(derive_evidence_lifecycle_state(&failed), EvidenceLifecycleState::EvidenceFailed);
+        let mut invalid = base_snapshot();
+        invalid.typed_authority_valid = false;
+        assert_eq!(derive_evidence_lifecycle_state(&invalid), EvidenceLifecycleState::AwaitingEvidence);
+    }
+
+    #[test]
+    fn typed_received_is_resumable_but_remains_a_typed_finding() {
+        let mut snap = base_snapshot();
+        snap.typed_lifecycle = Some(TribunalEvidenceLifecycle::EvidenceReceived);
+        assert_eq!(derive_evidence_lifecycle_state(&snap), EvidenceLifecycleState::EvidenceReady);
     }
 
     // ── Precedence matrix ────────────────────────────────────────────
