@@ -132,6 +132,8 @@ pub mod roles;
 /// probe.
 pub mod run_dir_observe;
 pub mod run_dir_reconcile;
+/// Immutable pre-mutation cluster evidence shared by startup recovery stages.
+pub mod startup_census;
 pub mod supervisor_impl;
 pub mod task_merge;
 pub(crate) mod tripwires;
